@@ -14,5 +14,9 @@ class DuplicateEventError(LedgerMutationError):
     """Raised when an event identifier is already present."""
 
 
+class LedgerCursorError(DriftError):
+    """Raised when a ledger query cursor is invalid or cannot be resolved."""
+
+
 class CanonicalSerializationError(DriftError):
     """Raised when a value cannot be represented canonically."""
