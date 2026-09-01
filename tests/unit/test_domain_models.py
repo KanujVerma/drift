@@ -159,7 +159,7 @@ def valid_evidence(**changes: object) -> EvidenceRecord:
     return EvidenceRecord.model_validate(values)
 
 
-def test_approved_field_matrix_is_present() -> None:
+def test_hypothesis_retains_the_approved_provenance_field_matrix() -> None:
     assert {
         "hypothesis_id", "created_at", "title", "statement", "mechanism",
         "expected_direction", "universe", "horizon", "falsification_criteria",
@@ -345,6 +345,15 @@ def test_completed_run_requires_completion_artifact_and_matching_hashes() -> Non
         valid_run(
             status=ExperimentRunStatus.COMPLETED,
             completed_at=NOW + timedelta(seconds=1),
+        )
+
+
+def test_experiment_run_rejects_completion_before_start() -> None:
+    with pytest.raises(ValidationError, match="completion time cannot precede"):
+        valid_run(
+            status=ExperimentRunStatus.COMPLETED,
+            completed_at=NOW - timedelta(microseconds=1),
+            artifact_references=(valid_artifact_reference(),),
         )
 
 
