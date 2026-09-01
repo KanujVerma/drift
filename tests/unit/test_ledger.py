@@ -1,6 +1,7 @@
 import sqlite3
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from threading import Event, Thread
 from uuid import uuid7
 
 import pytest
@@ -290,6 +291,105 @@ def test_verify_chain_detects_noncontiguous_sequence(tmp_path: Path) -> None:
         ledger.verify_chain()
 
 
+def test_verify_chain_reads_events_and_checkpoints_from_one_snapshot(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "ledger.db"
+    start_append = Event()
+    append_finished = Event()
+    writer_errors: list[BaseException] = []
+    ledger = _SnapshotProbeLedger(path, start_append, append_finished)
+    ledger.append(valid_event_input(deduplication_key="first"))
+    writer = SQLiteLedger(path)
+
+    def append_concurrently() -> None:
+        start_append.wait()
+        try:
+            writer.append(valid_event_input(deduplication_key="second"))
+        except BaseException as error:
+            writer_errors.append(error)
+        finally:
+            append_finished.set()
+
+    thread = Thread(target=append_concurrently)
+    thread.start()
+    ledger.enable_snapshot_probe()
+
+    try:
+        ledger.verify_chain()
+    finally:
+        start_append.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert writer_errors == []
+    assert len(ledger.events()) == 2
+
+
+@pytest.mark.parametrize(
+    ("column", "noncanonical_value"),
+    [
+        ("timestamp", "2026-09-01T12:00:00.000000+00:00"),
+        ("payload_json", '{"result": "accepted"}'),
+        ("event_type", " evidence.recorded "),
+    ],
+)
+def test_verify_chain_rejects_equivalent_noncanonical_storage(
+    tmp_path: Path, column: str, noncanonical_value: str
+) -> None:
+    path = tmp_path / "ledger.db"
+    ledger = SQLiteLedger(path)
+    event = ledger.append(valid_event_input())
+    with sqlite3.connect(path) as connection:
+        connection.execute("DROP TRIGGER audit_events_no_update")
+        connection.execute(
+            f"UPDATE audit_events SET {column} = ? WHERE event_id = ?",
+            (noncanonical_value, str(event.event_id)),
+        )
+
+    with pytest.raises(LedgerIntegrityError, match=rf"noncanonical stored {column}"):
+        ledger.verify_chain()
+
+
 def test_audit_event_draft_has_no_hash_fields() -> None:
     assert "previous_event_hash" not in AuditEventDraft.model_fields
     assert "event_hash" not in AuditEventDraft.model_fields
+
+
+class _SnapshotProbeLedger(SQLiteLedger):
+    """Inject one real append between verification's two history reads."""
+
+    def __init__(self, path: Path, start_append: Event, append_finished: Event) -> None:
+        self._snapshot_probe_enabled = False
+        self._snapshot_probe_fired = False
+        self._start_append = start_append
+        self._append_finished = append_finished
+        super().__init__(path)
+
+    def enable_snapshot_probe(self) -> None:
+        self._snapshot_probe_enabled = True
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = super()._connect()
+        if not self._snapshot_probe_enabled:
+            return connection
+
+        def authorize(
+            action: int,
+            table: str | None,
+            _column: str | None,
+            _database: str | None,
+            _trigger: str | None,
+        ) -> int:
+            if (
+                action == sqlite3.SQLITE_READ
+                and table == "audit_event_checkpoints"
+                and not self._snapshot_probe_fired
+            ):
+                self._snapshot_probe_fired = True
+                self._start_append.set()
+                if not connection.in_transaction:
+                    self._append_finished.wait(timeout=5)
+            return sqlite3.SQLITE_OK
+
+        connection.set_authorizer(authorize)
+        return connection

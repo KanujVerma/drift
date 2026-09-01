@@ -75,6 +75,19 @@ schema_version,
 event_hash
 """
 
+_EVENT_STORAGE_FIELDS = (
+    "event_id",
+    "event_type",
+    "timestamp",
+    "entity_type",
+    "entity_id",
+    "payload_json",
+    "previous_event_hash",
+    "deduplication_key",
+    "schema_version",
+    "event_hash",
+)
+
 
 class SQLiteLedger:
     """A transactional, append-only SQLite audit ledger."""
@@ -177,7 +190,9 @@ class SQLiteLedger:
 
     def verify_chain(self) -> None:
         """Verify sequence, chain links, hashes, and append checkpoints."""
-        with self._connect() as connection:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN")
             event_rows = connection.execute(
                 f"SELECT sequence, {_EVENT_COLUMNS} FROM audit_events ORDER BY sequence"
             ).fetchall()
@@ -185,7 +200,19 @@ class SQLiteLedger:
                 "SELECT sequence, event_hash FROM audit_event_checkpoints "
                 "ORDER BY sequence"
             ).fetchall()
+            self._verify_rows(event_rows, checkpoint_rows)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
+    def _verify_rows(
+        self,
+        event_rows: list[sqlite3.Row],
+        checkpoint_rows: list[sqlite3.Row],
+    ) -> None:
         if len(event_rows) != len(checkpoint_rows):
             message = (
                 "event and checkpoint count mismatch: "
@@ -216,7 +243,8 @@ class SQLiteLedger:
             except (TypeError, ValueError) as error:
                 message = f"event sequence {expected_sequence} is malformed"
                 raise LedgerIntegrityError(message) from error
-            checkpoint_hash = str(checkpoint_row[1])
+            _verify_canonical_storage(event_row, event, expected_sequence, offset=1)
+            checkpoint_hash = checkpoint_row[1]
             if checkpoint_hash != event.event_hash:
                 message = f"checkpoint hash mismatch at sequence {expected_sequence}"
                 raise LedgerIntegrityError(message)
@@ -278,6 +306,25 @@ def _row_to_event(row: sqlite3.Row, *, offset: int = 0) -> AuditEvent:
             "event_hash": str(row[offset + 9]),
         }
     )
+
+
+def _verify_canonical_storage(
+    row: sqlite3.Row,
+    event: AuditEvent,
+    sequence: int,
+    *,
+    offset: int = 0,
+) -> None:
+    stored_values = tuple(
+        row[offset + index] for index in range(len(_EVENT_STORAGE_FIELDS))
+    )
+    canonical_values = _event_parameters(event)
+    for field, stored, canonical in zip(
+        _EVENT_STORAGE_FIELDS, stored_values, canonical_values, strict=True
+    ):
+        if stored != canonical:
+            message = f"noncanonical stored {field} at sequence {sequence}"
+            raise LedgerIntegrityError(message)
 
 
 def _timestamp_text(value: datetime) -> str:
