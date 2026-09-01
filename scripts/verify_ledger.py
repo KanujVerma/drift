@@ -2,12 +2,13 @@
 """Verify a local Drift SQLite ledger and report its event count."""
 
 import argparse
+import sqlite3
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
 from drift.config.settings import LedgerSettings
-from drift.errors import LedgerIntegrityError
+from drift.errors import DriftError, LedgerIntegrityError
 from drift.ledger.replay import replay_events
 from drift.ledger.sqlite import SQLiteLedger
 
@@ -31,11 +32,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not settings.ledger_path.is_file():
         print(f"Ledger not found: {settings.ledger_path}", file=sys.stderr)
         return 2
-    ledger = SQLiteLedger(settings.ledger_path)
     try:
+        ledger = SQLiteLedger(settings.ledger_path)
         events = replay_events(ledger)
     except LedgerIntegrityError as error:
         print(f"Ledger integrity check failed: {error}", file=sys.stderr)
+        return 1
+    except (DriftError, sqlite3.Error, OSError) as error:
+        print(f"Ledger database error: {error}", file=sys.stderr)
         return 1
     print(f"Ledger verified: {settings.ledger_path} ({len(events)} events)")
     return 0

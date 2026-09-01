@@ -73,6 +73,24 @@ def test_verify_script_rejects_a_missing_database_without_creating_it(
     assert not path.exists()
 
 
+@pytest.mark.parametrize("script", [INIT_SCRIPT, VERIFY_SCRIPT])
+def test_scripts_report_corrupt_database_without_traceback_or_file_changes(
+    tmp_path: Path, script: Path
+) -> None:
+    path = tmp_path / "ledger.db"
+    original = b"this is not a SQLite database\n"
+    path.write_bytes(original)
+
+    result = _run_script(script, str(path))
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert len(result.stderr.strip().splitlines()) == 1
+    assert "database" in result.stderr.lower()
+    assert "traceback" not in result.stderr.lower()
+    assert path.read_bytes() == original
+
+
 def test_verify_script_returns_nonzero_for_integrity_failure(tmp_path: Path) -> None:
     path = tmp_path / "ledger.db"
     initialized = _run_script(INIT_SCRIPT, str(path))

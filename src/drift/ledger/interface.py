@@ -55,3 +55,7 @@ class Ledger(Protocol):
     def verify_chain(self) -> None:
         """Raise when stored event or checkpoint history is inconsistent."""
         ...
+
+    def verified_events(self) -> tuple[AuditEvent, ...]:
+        """Verify and return one immutable event-history snapshot."""
+        ...

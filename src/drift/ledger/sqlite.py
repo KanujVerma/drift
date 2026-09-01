@@ -190,6 +190,10 @@ class SQLiteLedger:
 
     def verify_chain(self) -> None:
         """Verify sequence, chain links, hashes, and append checkpoints."""
+        self.verified_events()
+
+    def verified_events(self) -> tuple[AuditEvent, ...]:
+        """Verify and return events from one explicit read transaction."""
         connection = self._connect()
         try:
             connection.execute("BEGIN")
@@ -201,7 +205,9 @@ class SQLiteLedger:
                 "ORDER BY sequence"
             ).fetchall()
             self._verify_rows(event_rows, checkpoint_rows)
+            events = tuple(_row_to_event(row, offset=1) for row in event_rows)
             connection.commit()
+            return events
         except Exception:
             connection.rollback()
             raise
