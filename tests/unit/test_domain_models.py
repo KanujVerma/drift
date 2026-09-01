@@ -161,43 +161,96 @@ def valid_evidence(**changes: object) -> EvidenceRecord:
 
 def test_hypothesis_retains_the_approved_provenance_field_matrix() -> None:
     assert {
-        "hypothesis_id", "created_at", "title", "statement", "mechanism",
-        "expected_direction", "universe", "horizon", "falsification_criteria",
-        "parent_hypothesis_ids", "author_type", "author_version", "tags",
+        "hypothesis_id",
+        "created_at",
+        "title",
+        "statement",
+        "mechanism",
+        "expected_direction",
+        "universe",
+        "horizon",
+        "falsification_criteria",
+        "parent_hypothesis_ids",
+        "author_type",
+        "author_version",
+        "tags",
     } <= set(Hypothesis.model_fields)
     assert {
-        "dataset_id", "dataset_version", "schema_version", "content_hash",
-        "created_at", "source", "temporal_coverage", "point_in_time_policy",
-        "corporate_action_policy", "availability_timestamp_policy",
+        "dataset_id",
+        "dataset_version",
+        "schema_version",
+        "content_hash",
+        "created_at",
+        "source",
+        "temporal_coverage",
+        "point_in_time_policy",
+        "corporate_action_policy",
+        "availability_timestamp_policy",
         "manifest_reference",
     } <= set(DatasetReference.model_fields)
     assert {
-        "strategy_id", "strategy_version", "code_hash", "created_at",
-        "parent_strategy_version", "hypothesis_ids", "artifact_reference", "status",
+        "strategy_id",
+        "strategy_version",
+        "code_hash",
+        "created_at",
+        "parent_strategy_version",
+        "hypothesis_ids",
+        "artifact_reference",
+        "status",
     } <= set(StrategyArtifact.model_fields)
     assert {
-        "experiment_id", "hypothesis_ids", "strategy_reference", "dataset_reference",
-        "parameters", "benchmark", "evaluation_protocol", "cost_assumptions",
-        "preregistered_metrics", "parent_experiment_ids", "created_at",
+        "experiment_id",
+        "hypothesis_ids",
+        "strategy_reference",
+        "dataset_reference",
+        "parameters",
+        "benchmark",
+        "evaluation_protocol",
+        "cost_assumptions",
+        "preregistered_metrics",
+        "parent_experiment_ids",
+        "created_at",
     } <= set(ExperimentSpecification.model_fields)
     assert {
-        "run_id", "experiment_id", "started_at", "completed_at", "code_hash",
-        "environment_hash", "dataset_hash", "parameters_hash", "status", "metrics",
-        "artifact_references", "error_details",
+        "run_id",
+        "experiment_id",
+        "started_at",
+        "completed_at",
+        "code_hash",
+        "environment_hash",
+        "dataset_hash",
+        "parameters_hash",
+        "status",
+        "metrics",
+        "artifact_references",
+        "error_details",
     } <= set(ExperimentRun.model_fields)
     assert {
-        "evidence_id", "created_at", "claim", "evidence_type",
-        "supporting_run_ids", "contradicting_run_ids", "confidence_state", "scope",
-        "supersedes", "status",
+        "evidence_id",
+        "created_at",
+        "claim",
+        "evidence_type",
+        "supporting_run_ids",
+        "contradicting_run_ids",
+        "confidence_state",
+        "scope",
+        "supersedes",
+        "status",
     } <= set(EvidenceRecord.model_fields)
 
 
 def test_status_enums_match_the_approved_values() -> None:
     assert {status.value for status in StrategyArtifactStatus} == {
-        "research", "challenger", "approved", "retired",
+        "research",
+        "challenger",
+        "approved",
+        "retired",
     }
     assert {status.value for status in EvidenceStatus} == {
-        "tentative", "supported", "contradicted", "deprecated",
+        "tentative",
+        "supported",
+        "contradicted",
+        "deprecated",
     }
 
 
@@ -267,8 +320,9 @@ def test_dataset_and_run_preserve_explicit_versions_hashes_and_references() -> N
     )
 
 
-def test_strategy_artifact_retains_explicit_version_hash_and_hypothesis_lineage(
-) -> None:
+def test_strategy_artifact_retains_explicit_version_hash_and_hypothesis_lineage() -> (
+    None
+):
     artifact = valid_strategy_artifact(parent_strategy_version="0.9.0")
     assert artifact.strategy_version == "1.0.0"
     assert artifact.code_hash == HASH
@@ -281,8 +335,7 @@ def test_strategy_artifact_retains_explicit_version_hash_and_hypothesis_lineage(
         )
 
 
-def test_experiment_specification_preserves_plural_lineage_and_rejects_self_parent(
-) -> None:
+def test_experiment_specification_keeps_lineage_and_rejects_self_parent() -> None:
     hypothesis_ids = (uuid7(), uuid7())
     specification = valid_specification(hypothesis_ids=hypothesis_ids)
     assert specification.hypothesis_ids == hypothesis_ids

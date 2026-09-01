@@ -280,9 +280,14 @@ def test_database_rejects_updates_and_deletes(tmp_path: Path) -> None:
     event = ledger.append(valid_event_input())
     with sqlite3.connect(path) as connection:
         with pytest.raises(sqlite3.IntegrityError, match="append-only"):
-            connection.execute("UPDATE audit_events SET payload_json = '{}' WHERE event_id = ?", (str(event.event_id),))
+            connection.execute(
+                "UPDATE audit_events SET payload_json = '{}' WHERE event_id = ?",
+                (str(event.event_id),),
+            )
         with pytest.raises(sqlite3.IntegrityError, match="append-only"):
-            connection.execute("DELETE FROM audit_events WHERE event_id = ?", (str(event.event_id),))
+            connection.execute(
+                "DELETE FROM audit_events WHERE event_id = ?", (str(event.event_id),)
+            )
 ```
 
 - [ ] **Step 2: Run tests and confirm the ledger is missing**
@@ -330,8 +335,12 @@ def test_same_ledger_replays_identically(tmp_path: Path) -> None:
     assert replay_events(ledger) == replay_events(ledger)
 
 
-@pytest.mark.parametrize("mutation", ["payload", "delete", "event_hash", "previous_hash", "sequence"])
-def test_verify_chain_detects_direct_database_tampering(tmp_path: Path, mutation: str) -> None:
+@pytest.mark.parametrize(
+    "mutation", ["payload", "delete", "event_hash", "previous_hash", "sequence"]
+)
+def test_verify_chain_detects_direct_database_tampering(
+    tmp_path: Path, mutation: str
+) -> None:
     path = tmp_path / "ledger.db"
     ledger = populated_ledger(path)
     mutate_with_triggers_temporarily_removed(path, mutation)
@@ -341,8 +350,18 @@ def test_verify_chain_detects_direct_database_tampering(tmp_path: Path, mutation
 
 def test_init_and_verify_scripts_operate_on_requested_path(tmp_path: Path) -> None:
     path = tmp_path / "ledger.db"
-    initialized = subprocess.run([sys.executable, "scripts/init_local_db.py", str(path)], check=False, capture_output=True, text=True)
-    verified = subprocess.run([sys.executable, "scripts/verify_ledger.py", str(path)], check=False, capture_output=True, text=True)
+    initialized = subprocess.run(
+        [sys.executable, "scripts/init_local_db.py", str(path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    verified = subprocess.run(
+        [sys.executable, "scripts/verify_ledger.py", str(path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
     assert initialized.returncode == 0
     assert verified.returncode == 0
 ```
