@@ -12,3 +12,7 @@ class LedgerMutationError(DriftError):
 
 class DuplicateEventError(LedgerMutationError):
     """Raised when an event identifier is already present."""
+
+
+class CanonicalSerializationError(DriftError):
+    """Raised when a value cannot be represented canonically."""
