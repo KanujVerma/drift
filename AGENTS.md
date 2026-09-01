@@ -31,6 +31,9 @@ only as immutable research provenance. They must not grow execution behavior.
   verified snapshot.
 - Reject noncanonical raw database storage, even when it parses to an
   equivalent logical object.
+- Never use future data in research evaluation. Dataset and experiment access
+  must preserve explicit point-in-time semantics, including what information
+  was actually available at each observation time.
 - Describe the ledger accurately as tamper-evident, not tamper-proof against a
   privileged coordinated rewrite.
 

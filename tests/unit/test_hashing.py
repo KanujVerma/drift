@@ -72,6 +72,23 @@ def test_builder_sets_computed_hash() -> None:
     assert event.model_dump(exclude={"event_hash"}) == unsigned.model_dump()
 
 
+def test_signed_event_hashing_uses_only_unsigned_fields() -> None:
+    event = build_audit_event(valid_unsigned_event())
+
+    assert compute_event_hash(event) == event.event_hash
+
+
+def test_signed_event_payload_is_nested_immutable_and_detached_from_input() -> None:
+    payload = {"result": {"accepted": [True]}}
+    event = build_audit_event(valid_unsigned_event(payload=payload))
+
+    payload["result"]["accepted"].append(False)
+
+    assert event.payload == {"result": {"accepted": (True,)}}
+    with pytest.raises(TypeError):
+        event.payload["result"] = "changed"  # type: ignore[index]
+
+
 def test_signed_and_previous_hashes_must_be_lowercase_sha256() -> None:
     with pytest.raises(ValidationError):
         valid_unsigned_event(previous_event_hash="A" * 64)

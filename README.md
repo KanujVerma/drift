@@ -1,13 +1,33 @@
 # Drift
 
-Drift M0 is an auditable research evidence kernel. It records structured
-research metadata and a hash-chained audit history so later work can evaluate
-hypotheses without losing failed trials or provenance.
+Drift is an evidence-driven, self-improving quantitative research and trading
+system. Its current M0 scope is an auditable research evidence kernel. M0
+records structured research metadata and a hash-chained audit history so later
+work can evaluate hypotheses without losing failed trials or provenance.
 
 M0 is not a trading system. It has no broker, market-data, backtesting,
 strategy-execution, agent, network, order-management, portfolio-management,
 production configuration, or production-credential capability. `StrategyArtifact`
 is compact provenance metadata, not executable strategy code.
+
+## Core philosophy
+
+The goal is not to make an AI trade frequently. The goal is to build a system
+capable of discovering whether it has repeatable predictive or
+portfolio-management value without fooling itself. Research outputs remain
+untrusted until a future, explicit promotion process approves them.
+
+## Long-term architecture
+
+Future milestones may extend the evidence kernel through this controlled flow:
+
+```text
+research -> experiments -> evidence -> challengers -> gated promotion
+-> production strategy -> deterministic risk/execution
+```
+
+M0 implements only the research evidence foundation. It does not implement any
+later stage in that flow.
 
 ## Install and verify
 

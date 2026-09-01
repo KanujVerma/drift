@@ -215,6 +215,34 @@ def test_every_event_has_an_ordered_hash_checkpoint(tmp_path: Path) -> None:
     assert checkpoints == [(1, first.event_hash), (2, second.event_hash)]
 
 
+def test_checkpoint_insert_failure_rolls_back_event_and_checkpoint(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "ledger.db"
+    ledger = SQLiteLedger(path)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER inject_checkpoint_insert_failure
+            BEFORE INSERT ON audit_event_checkpoints
+            BEGIN
+                SELECT RAISE(ABORT, 'injected checkpoint failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="injected checkpoint failure"):
+        ledger.append(valid_event_input())
+
+    with sqlite3.connect(path) as connection:
+        event_count = connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()
+        checkpoint_count = connection.execute(
+            "SELECT COUNT(*) FROM audit_event_checkpoints"
+        ).fetchone()
+    assert event_count == (0,)
+    assert checkpoint_count == (0,)
+
+
 def test_database_rejects_checkpoint_updates_and_deletes(tmp_path: Path) -> None:
     path = tmp_path / "ledger.db"
     ledger = SQLiteLedger(path)
@@ -251,6 +279,7 @@ def test_verify_chain_detects_final_event_deletion_via_checkpoint(
         connection.execute(
             "DELETE FROM audit_events WHERE event_id = ?", (str(final.event_id),)
         )
+    SQLiteLedger(path)
 
     with pytest.raises(LedgerIntegrityError, match="checkpoint count"):
         ledger.verify_chain()
@@ -273,6 +302,7 @@ def test_verify_chain_detects_checkpoint_tampering(
                 "UPDATE audit_event_checkpoints SET event_hash = ? WHERE sequence = 1",
                 ("f" * 64,),
             )
+    SQLiteLedger(path)
 
     with pytest.raises(LedgerIntegrityError, match="checkpoint"):
         ledger.verify_chain()
@@ -286,6 +316,7 @@ def test_verify_chain_detects_noncontiguous_sequence(tmp_path: Path) -> None:
     with sqlite3.connect(path) as connection:
         connection.execute("DROP TRIGGER audit_events_no_update")
         connection.execute("UPDATE audit_events SET sequence = 3 WHERE sequence = 2")
+    SQLiteLedger(path)
 
     with pytest.raises(LedgerIntegrityError, match="sequence"):
         ledger.verify_chain()
@@ -345,6 +376,7 @@ def test_verify_chain_rejects_equivalent_noncanonical_storage(
             f"UPDATE audit_events SET {column} = ? WHERE event_id = ?",
             (noncanonical_value, str(event.event_id)),
         )
+    SQLiteLedger(path)
 
     with pytest.raises(LedgerIntegrityError, match=rf"noncanonical stored {column}"):
         ledger.verify_chain()
@@ -362,6 +394,7 @@ def test_verify_chain_rejects_uppercase_event_id_storage(tmp_path: Path) -> None
             "UPDATE audit_events SET event_id = ? WHERE event_id = ?",
             (uppercase_event_id, str(event_id)),
         )
+    SQLiteLedger(path)
 
     assert event_id.version == 7
     assert uppercase_event_id != str(event_id)
@@ -372,6 +405,34 @@ def test_verify_chain_rejects_uppercase_event_id_storage(tmp_path: Path) -> None
 def test_audit_event_draft_has_no_hash_fields() -> None:
     assert "previous_event_hash" not in AuditEventDraft.model_fields
     assert "event_hash" not in AuditEventDraft.model_fields
+
+
+def test_ledger_closes_every_connection_it_opens(tmp_path: Path) -> None:
+    ledger = _ConnectionProbeLedger(tmp_path / "ledger.db")
+    event = ledger.append(valid_event_input())
+
+    assert ledger.get(event.event_id) == event
+    assert ledger.events() == (event,)
+    assert ledger.events_for_entity(event.entity_type, event.entity_id) == (event,)
+    assert ledger.events_after(event.event_id) == ()
+    ledger.verify_chain()
+
+    for connection in ledger.opened_connections:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+            connection.execute("SELECT 1")
+
+
+class _ConnectionProbeLedger(SQLiteLedger):
+    """Retain connection handles so deterministic closure can be asserted."""
+
+    def __init__(self, path: Path) -> None:
+        self.opened_connections: list[sqlite3.Connection] = []
+        super().__init__(path)
+
+    def _connect(self, *, read_only: bool | None = None) -> sqlite3.Connection:
+        connection = super()._connect(read_only=read_only)
+        self.opened_connections.append(connection)
+        return connection
 
 
 class _SnapshotProbeLedger(SQLiteLedger):
@@ -387,8 +448,8 @@ class _SnapshotProbeLedger(SQLiteLedger):
     def enable_snapshot_probe(self) -> None:
         self._snapshot_probe_enabled = True
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = super()._connect()
+    def _connect(self, *, read_only: bool | None = None) -> sqlite3.Connection:
+        connection = super()._connect(read_only=read_only)
         if not self._snapshot_probe_enabled:
             return connection
 

@@ -1,6 +1,7 @@
 import sqlite3
 import subprocess
 import sys
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -73,6 +74,57 @@ def test_verify_script_rejects_a_missing_database_without_creating_it(
     assert not path.exists()
 
 
+@pytest.mark.parametrize("database_kind", ["zero-byte", "unrelated"])
+def test_verify_script_rejects_non_ledgers_without_changing_bytes(
+    tmp_path: Path, database_kind: str
+) -> None:
+    path = tmp_path / "not-a-ledger.db"
+    if database_kind == "zero-byte":
+        path.touch()
+    else:
+        with closing(sqlite3.connect(path)) as connection:
+            connection.execute("CREATE TABLE unrelated (value TEXT NOT NULL)")
+            connection.commit()
+    original = path.read_bytes()
+
+    verified = _run_script(VERIFY_SCRIPT, str(path))
+
+    assert verified.returncode != 0
+    assert "integrity" in verified.stderr.lower()
+    assert "traceback" not in verified.stderr.lower()
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("damage", ["missing", "redefined"])
+def test_verify_script_rejects_damaged_append_only_trigger_without_changing_bytes(
+    tmp_path: Path, damage: str
+) -> None:
+    path = tmp_path / "ledger.db"
+    initialized = _run_script(INIT_SCRIPT, str(path))
+    assert initialized.returncode == 0, initialized.stderr
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("DROP TRIGGER audit_events_no_update")
+        if damage == "redefined":
+            connection.execute(
+                """
+                CREATE TRIGGER audit_events_no_update
+                BEFORE UPDATE ON audit_events
+                BEGIN
+                    SELECT RAISE(IGNORE);
+                END
+                """
+            )
+        connection.commit()
+    original = path.read_bytes()
+
+    verified = _run_script(VERIFY_SCRIPT, str(path))
+
+    assert verified.returncode != 0
+    assert "integrity" in verified.stderr.lower()
+    assert "traceback" not in verified.stderr.lower()
+    assert path.read_bytes() == original
+
+
 @pytest.mark.parametrize("script", [INIT_SCRIPT, VERIFY_SCRIPT])
 def test_scripts_report_corrupt_database_without_traceback_or_file_changes(
     tmp_path: Path, script: Path
@@ -95,11 +147,12 @@ def test_verify_script_returns_nonzero_for_integrity_failure(tmp_path: Path) -> 
     path = tmp_path / "ledger.db"
     initialized = _run_script(INIT_SCRIPT, str(path))
     assert initialized.returncode == 0, initialized.stderr
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection:
         connection.execute(
             "INSERT INTO audit_event_checkpoints (sequence, event_hash) VALUES (?, ?)",
             (1, "f" * 64),
         )
+        connection.commit()
 
     verified = _run_script(VERIFY_SCRIPT, str(path))
 

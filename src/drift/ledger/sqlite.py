@@ -2,9 +2,11 @@
 
 import json
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Self
 from uuid import UUID
 
 from drift.domain.events import AuditEvent, UnsignedAuditEvent
@@ -17,8 +19,8 @@ from drift.ledger.hashing import GENESIS_HASH, build_audit_event, compute_event_
 from drift.ledger.interface import AuditEventDraft
 from drift.serialization.canonical import canonical_json
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS audit_events (
+_AUDIT_EVENTS_TABLE = """
+CREATE TABLE audit_events (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     event_id TEXT NOT NULL UNIQUE,
     event_type TEXT NOT NULL,
@@ -30,37 +32,86 @@ CREATE TABLE IF NOT EXISTS audit_events (
     deduplication_key TEXT UNIQUE,
     schema_version TEXT NOT NULL,
     event_hash TEXT NOT NULL
-);
+)
+"""
 
-CREATE TABLE IF NOT EXISTS audit_event_checkpoints (
+_AUDIT_EVENT_CHECKPOINTS_TABLE = """
+CREATE TABLE audit_event_checkpoints (
     sequence INTEGER PRIMARY KEY,
     event_hash TEXT NOT NULL
-);
+)
+"""
 
-CREATE TRIGGER IF NOT EXISTS audit_events_no_update
+_AUDIT_EVENTS_NO_UPDATE_TRIGGER = """
+CREATE TRIGGER audit_events_no_update
 BEFORE UPDATE ON audit_events
 BEGIN
     SELECT RAISE(ABORT, 'audit_events is append-only');
-END;
+END
+"""
 
-CREATE TRIGGER IF NOT EXISTS audit_events_no_delete
+_AUDIT_EVENTS_NO_DELETE_TRIGGER = """
+CREATE TRIGGER audit_events_no_delete
 BEFORE DELETE ON audit_events
 BEGIN
     SELECT RAISE(ABORT, 'audit_events is append-only');
-END;
+END
+"""
 
-CREATE TRIGGER IF NOT EXISTS audit_event_checkpoints_no_update
+_AUDIT_EVENT_CHECKPOINTS_NO_UPDATE_TRIGGER = """
+CREATE TRIGGER audit_event_checkpoints_no_update
 BEFORE UPDATE ON audit_event_checkpoints
 BEGIN
     SELECT RAISE(ABORT, 'audit_event_checkpoints is append-only');
-END;
+END
+"""
 
-CREATE TRIGGER IF NOT EXISTS audit_event_checkpoints_no_delete
+_AUDIT_EVENT_CHECKPOINTS_NO_DELETE_TRIGGER = """
+CREATE TRIGGER audit_event_checkpoints_no_delete
 BEFORE DELETE ON audit_event_checkpoints
 BEGIN
     SELECT RAISE(ABORT, 'audit_event_checkpoints is append-only');
-END;
+END
 """
+
+_REQUIRED_SCHEMA_OBJECTS = {
+    ("table", "audit_events"): ("audit_events", _AUDIT_EVENTS_TABLE),
+    ("table", "audit_event_checkpoints"): (
+        "audit_event_checkpoints",
+        _AUDIT_EVENT_CHECKPOINTS_TABLE,
+    ),
+    ("trigger", "audit_events_no_update"): (
+        "audit_events",
+        _AUDIT_EVENTS_NO_UPDATE_TRIGGER,
+    ),
+    ("trigger", "audit_events_no_delete"): (
+        "audit_events",
+        _AUDIT_EVENTS_NO_DELETE_TRIGGER,
+    ),
+    ("trigger", "audit_event_checkpoints_no_update"): (
+        "audit_event_checkpoints",
+        _AUDIT_EVENT_CHECKPOINTS_NO_UPDATE_TRIGGER,
+    ),
+    ("trigger", "audit_event_checkpoints_no_delete"): (
+        "audit_event_checkpoints",
+        _AUDIT_EVENT_CHECKPOINTS_NO_DELETE_TRIGGER,
+    ),
+}
+
+_SCHEMA = (
+    ";\n\n".join(
+        statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1).replace(
+            "CREATE TRIGGER ", "CREATE TRIGGER IF NOT EXISTS ", 1
+        )
+        for _, statement in _REQUIRED_SCHEMA_OBJECTS.values()
+    )
+    + ";"
+)
+
+_REQUIRED_UNIQUE_INDEXES = {
+    (("event_id",), True, "u", False),
+    (("deduplication_key",), True, "u", False),
+}
 
 _EVENT_COLUMNS = """
 event_id,
@@ -94,57 +145,66 @@ class SQLiteLedger:
 
     def __init__(self, path: Path) -> None:
         self._path = path
-        with self._connect() as connection:
+        self._read_only = False
+        with self._connection() as connection:
             connection.executescript(_SCHEMA)
+
+    @classmethod
+    def open_existing(cls, path: Path) -> Self:
+        """Open an existing ledger without creating or repairing schema objects."""
+        ledger = cls.__new__(cls)
+        ledger._path = path
+        ledger._read_only = True
+        return ledger
 
     def append(self, draft: AuditEventDraft) -> AuditEvent:
         """Assign chain hashes and atomically append an event and checkpoint."""
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            head = connection.execute(
-                "SELECT event_hash FROM audit_events ORDER BY sequence DESC LIMIT 1"
-            ).fetchone()
-            previous_hash = GENESIS_HASH if head is None else str(head[0])
-            unsigned = UnsignedAuditEvent.model_validate(
-                {
-                    **draft.model_dump(mode="python"),
-                    "previous_event_hash": previous_hash,
-                }
-            )
-            event = build_audit_event(unsigned)
-            cursor = connection.execute(
-                f"""
-                INSERT INTO audit_events ({_EVENT_COLUMNS})
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                _event_parameters(event),
-            )
-            sequence = cursor.lastrowid
-            if sequence is None:
-                raise LedgerIntegrityError("SQLite did not assign an event sequence")
-            connection.execute(
-                "INSERT INTO audit_event_checkpoints (sequence, event_hash) "
-                "VALUES (?, ?)",
-                (sequence, event.event_hash),
-            )
-            connection.commit()
-            return event
-        except sqlite3.IntegrityError as error:
-            connection.rollback()
-            if _is_duplicate_event(error):
-                message = "event ID or deduplication key already exists"
-                raise DuplicateEventError(message) from error
-            raise
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                head = connection.execute(
+                    "SELECT event_hash FROM audit_events ORDER BY sequence DESC LIMIT 1"
+                ).fetchone()
+                previous_hash = GENESIS_HASH if head is None else str(head[0])
+                unsigned = UnsignedAuditEvent.model_validate(
+                    {
+                        **draft.model_dump(mode="python"),
+                        "previous_event_hash": previous_hash,
+                    }
+                )
+                event = build_audit_event(unsigned)
+                cursor = connection.execute(
+                    f"""
+                    INSERT INTO audit_events ({_EVENT_COLUMNS})
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    _event_parameters(event),
+                )
+                sequence = cursor.lastrowid
+                if sequence is None:
+                    raise LedgerIntegrityError(
+                        "SQLite did not assign an event sequence"
+                    )
+                connection.execute(
+                    "INSERT INTO audit_event_checkpoints (sequence, event_hash) "
+                    "VALUES (?, ?)",
+                    (sequence, event.event_hash),
+                )
+                connection.commit()
+                return event
+            except sqlite3.IntegrityError as error:
+                connection.rollback()
+                if _is_duplicate_event(error):
+                    message = "event ID or deduplication key already exists"
+                    raise DuplicateEventError(message) from error
+                raise
+            except Exception:
+                connection.rollback()
+                raise
 
     def get(self, event_id: UUID) -> AuditEvent | None:
         """Return one event by identifier, or ``None`` when absent."""
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 f"SELECT {_EVENT_COLUMNS} FROM audit_events WHERE event_id = ?",
                 (str(event_id),),
@@ -167,7 +227,7 @@ class SQLiteLedger:
     def events_after(self, cursor: UUID | datetime) -> tuple[AuditEvent, ...]:
         """Return events strictly after an event sequence or normalized time."""
         if isinstance(cursor, UUID):
-            with self._connect() as connection:
+            with self._connection() as connection:
                 row = connection.execute(
                     "SELECT sequence FROM audit_events WHERE event_id = ?",
                     (str(cursor),),
@@ -194,25 +254,25 @@ class SQLiteLedger:
 
     def verified_events(self) -> tuple[AuditEvent, ...]:
         """Verify and return events from one explicit read transaction."""
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN")
-            event_rows = connection.execute(
-                f"SELECT sequence, {_EVENT_COLUMNS} FROM audit_events ORDER BY sequence"
-            ).fetchall()
-            checkpoint_rows = connection.execute(
-                "SELECT sequence, event_hash FROM audit_event_checkpoints "
-                "ORDER BY sequence"
-            ).fetchall()
-            self._verify_rows(event_rows, checkpoint_rows)
-            events = tuple(_row_to_event(row, offset=1) for row in event_rows)
-            connection.commit()
-            return events
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
+        with self._connection(read_only=True) as connection:
+            try:
+                connection.execute("BEGIN")
+                _verify_required_schema(connection)
+                event_rows = connection.execute(
+                    f"SELECT sequence, {_EVENT_COLUMNS} "
+                    "FROM audit_events ORDER BY sequence"
+                ).fetchall()
+                checkpoint_rows = connection.execute(
+                    "SELECT sequence, event_hash FROM audit_event_checkpoints "
+                    "ORDER BY sequence"
+                ).fetchall()
+                self._verify_rows(event_rows, checkpoint_rows)
+                events = tuple(_row_to_event(row, offset=1) for row in event_rows)
+                connection.commit()
+                return events
+            except Exception:
+                connection.rollback()
+                raise
 
     def _verify_rows(
         self,
@@ -264,22 +324,82 @@ class SQLiteLedger:
                 raise LedgerIntegrityError(message)
             previous_hash = event.event_hash
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self._path, isolation_level=None)
+    def _connect(self, *, read_only: bool | None = None) -> sqlite3.Connection:
+        use_read_only = self._read_only if read_only is None else read_only
+        if use_read_only:
+            connection = sqlite3.connect(
+                f"{self._path.resolve().as_uri()}?mode=ro",
+                isolation_level=None,
+                uri=True,
+            )
+        else:
+            connection = sqlite3.connect(self._path, isolation_level=None)
         connection.row_factory = sqlite3.Row
         return connection
+
+    @contextmanager
+    def _connection(
+        self, *, read_only: bool | None = None
+    ) -> Iterator[sqlite3.Connection]:
+        connection = self._connect(read_only=read_only)
+        try:
+            yield connection
+        finally:
+            connection.close()
 
     def _query_events(
         self,
         clause: str,
         parameters: Iterable[str | int] = (),
     ) -> tuple[AuditEvent, ...]:
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 f"SELECT {_EVENT_COLUMNS} FROM audit_events {clause}",
                 tuple(parameters),
             ).fetchall()
         return tuple(_row_to_event(row) for row in rows)
+
+
+def _verify_required_schema(connection: sqlite3.Connection) -> None:
+    required_names = tuple(name for _, name in _REQUIRED_SCHEMA_OBJECTS)
+    placeholders = ", ".join("?" for _ in required_names)
+    rows = connection.execute(
+        "SELECT type, name, tbl_name, sql FROM sqlite_schema "
+        f"WHERE name IN ({placeholders})",
+        required_names,
+    ).fetchall()
+    actual_objects = {
+        (str(row[0]), str(row[1])): (str(row[2]), _normalize_schema_sql(str(row[3])))
+        for row in rows
+    }
+    for identity, (table_name, definition) in _REQUIRED_SCHEMA_OBJECTS.items():
+        expected = (table_name, _normalize_schema_sql(definition))
+        if actual_objects.get(identity) != expected:
+            object_type, object_name = identity
+            message = (
+                "required ledger schema object is missing or damaged: "
+                f"{object_type} {object_name}"
+            )
+            raise LedgerIntegrityError(message)
+
+    actual_indexes: set[tuple[tuple[str, ...], bool, str, bool]] = set()
+    for row in connection.execute("PRAGMA index_list('audit_events')"):
+        index_name = str(row[1])
+        columns = tuple(
+            str(column[2])
+            for column in connection.execute(
+                "SELECT seqno, cid, name FROM pragma_index_info(?) ORDER BY seqno",
+                (index_name,),
+            )
+        )
+        actual_indexes.add((columns, bool(row[2]), str(row[3]), bool(row[4])))
+    if not _REQUIRED_UNIQUE_INDEXES.issubset(actual_indexes):
+        message = "required ledger unique indexes are missing or damaged"
+        raise LedgerIntegrityError(message)
+
+
+def _normalize_schema_sql(value: str) -> str:
+    return " ".join(value.removesuffix(";").split())
 
 
 def _event_parameters(event: AuditEvent) -> tuple[object, ...]:

@@ -40,6 +40,9 @@ class StrategyArtifact(FrozenModel):
 
     @model_validator(mode="after")
     def validate_hypothesis_ids(self) -> StrategyArtifact:
+        if self.parent_strategy_version == self.strategy_version:
+            msg = "a strategy version cannot be its own parent"
+            raise ValueError(msg)
         if not self.hypothesis_ids:
             msg = "strategy hypothesis references must not be empty"
             raise ValueError(msg)

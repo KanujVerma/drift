@@ -159,84 +159,138 @@ def valid_evidence(**changes: object) -> EvidenceRecord:
     return EvidenceRecord.model_validate(values)
 
 
-def test_hypothesis_retains_the_approved_provenance_field_matrix() -> None:
-    assert {
-        "hypothesis_id",
-        "created_at",
-        "title",
-        "statement",
-        "mechanism",
-        "expected_direction",
-        "universe",
-        "horizon",
-        "falsification_criteria",
-        "parent_hypothesis_ids",
-        "author_type",
-        "author_version",
-        "tags",
-    } <= set(Hypothesis.model_fields)
-    assert {
-        "dataset_id",
-        "dataset_version",
-        "schema_version",
-        "content_hash",
-        "created_at",
-        "source",
-        "temporal_coverage",
-        "point_in_time_policy",
-        "corporate_action_policy",
-        "availability_timestamp_policy",
-        "manifest_reference",
-    } <= set(DatasetReference.model_fields)
-    assert {
-        "strategy_id",
-        "strategy_version",
-        "code_hash",
-        "created_at",
-        "parent_strategy_version",
-        "hypothesis_ids",
-        "artifact_reference",
-        "status",
-    } <= set(StrategyArtifact.model_fields)
-    assert {
-        "experiment_id",
-        "hypothesis_ids",
-        "strategy_reference",
-        "dataset_reference",
-        "parameters",
-        "benchmark",
-        "evaluation_protocol",
-        "cost_assumptions",
-        "preregistered_metrics",
-        "parent_experiment_ids",
-        "created_at",
-    } <= set(ExperimentSpecification.model_fields)
-    assert {
-        "run_id",
-        "experiment_id",
-        "started_at",
-        "completed_at",
-        "code_hash",
-        "environment_hash",
-        "dataset_hash",
-        "parameters_hash",
-        "status",
-        "metrics",
-        "artifact_references",
-        "error_details",
-    } <= set(ExperimentRun.model_fields)
-    assert {
-        "evidence_id",
-        "created_at",
-        "claim",
-        "evidence_type",
-        "supporting_run_ids",
-        "contradicting_run_ids",
-        "confidence_state",
-        "scope",
-        "supersedes",
-        "status",
-    } <= set(EvidenceRecord.model_fields)
+@pytest.mark.parametrize(
+    ("model", "field_requiredness"),
+    [
+        (
+            Hypothesis,
+            {
+                "hypothesis_id": True,
+                "created_at": True,
+                "title": True,
+                "statement": True,
+                "mechanism": True,
+                "expected_direction": True,
+                "universe": True,
+                "horizon": True,
+                "falsification_criteria": True,
+                "parent_hypothesis_ids": False,
+                "author_type": True,
+                "author_version": True,
+                "tags": False,
+            },
+        ),
+        (
+            DatasetReference,
+            {
+                "dataset_id": True,
+                "dataset_version": True,
+                "schema_version": True,
+                "content_hash": True,
+                "created_at": True,
+                "source": True,
+                "temporal_coverage": True,
+                "point_in_time_policy": True,
+                "corporate_action_policy": True,
+                "availability_timestamp_policy": True,
+                "manifest_reference": True,
+            },
+        ),
+        (
+            StrategyArtifact,
+            {
+                "strategy_id": True,
+                "strategy_version": True,
+                "code_hash": True,
+                "created_at": True,
+                "parent_strategy_version": False,
+                "hypothesis_ids": True,
+                "artifact_reference": True,
+                "status": True,
+            },
+        ),
+        (
+            ExperimentSpecification,
+            {
+                "experiment_id": True,
+                "hypothesis_ids": True,
+                "strategy_reference": True,
+                "dataset_reference": True,
+                "parameters": True,
+                "benchmark": True,
+                "evaluation_protocol": True,
+                "cost_assumptions": True,
+                "preregistered_metrics": True,
+                "parent_experiment_ids": False,
+                "created_at": True,
+            },
+        ),
+        (
+            ExperimentRun,
+            {
+                "run_id": True,
+                "experiment_id": True,
+                "started_at": True,
+                "completed_at": False,
+                "code_hash": True,
+                "environment_hash": True,
+                "dataset_hash": True,
+                "parameters_hash": True,
+                "status": True,
+                "metrics": False,
+                "artifact_references": False,
+                "error_details": False,
+            },
+        ),
+        (
+            EvidenceRecord,
+            {
+                "evidence_id": True,
+                "created_at": True,
+                "claim": True,
+                "evidence_type": True,
+                "supporting_run_ids": False,
+                "contradicting_run_ids": False,
+                "confidence_state": True,
+                "scope": True,
+                "supersedes": False,
+                "status": True,
+            },
+        ),
+    ],
+)
+def test_approved_domain_models_have_exact_fields_and_requiredness(
+    model: type[Hypothesis]
+    | type[DatasetReference]
+    | type[StrategyArtifact]
+    | type[ExperimentSpecification]
+    | type[ExperimentRun]
+    | type[EvidenceRecord],
+    field_requiredness: dict[str, bool],
+) -> None:
+    assert set(model.model_fields) == set(field_requiredness)
+    for field_name, is_required in field_requiredness.items():
+        assert model.model_fields[field_name].is_required() is is_required
+
+
+@pytest.mark.parametrize(
+    ("model", "instance", "invalid_status"),
+    [
+        (StrategyArtifact, valid_strategy_artifact(), "unreviewed"),
+        (EvidenceRecord, valid_evidence(), "inconclusive"),
+        (ExperimentRun, valid_run(), "unknown"),
+    ],
+)
+def test_domain_models_reject_invalid_raw_status_strings(
+    model: type[StrategyArtifact] | type[EvidenceRecord] | type[ExperimentRun],
+    instance: StrategyArtifact | EvidenceRecord | ExperimentRun,
+    invalid_status: str,
+) -> None:
+    values = instance.model_dump(mode="python")
+    values["status"] = invalid_status
+
+    with pytest.raises(ValidationError):
+        model.model_validate(values)
 
 
 def test_status_enums_match_the_approved_values() -> None:
@@ -332,6 +386,14 @@ def test_strategy_artifact_retains_explicit_version_hash_and_hypothesis_lineage(
     with pytest.raises(ValidationError):
         valid_strategy_artifact(
             hypothesis_ids=(parent_hypothesis_id, parent_hypothesis_id)
+        )
+
+
+def test_strategy_artifact_rejects_its_own_version_as_parent() -> None:
+    with pytest.raises(ValidationError, match="cannot be its own parent"):
+        valid_strategy_artifact(
+            strategy_version="1.0.0",
+            parent_strategy_version="1.0.0",
         )
 
 

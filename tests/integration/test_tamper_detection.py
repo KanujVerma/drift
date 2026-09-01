@@ -75,6 +75,7 @@ def _tamper(path: Path, mutation: str) -> None:
             )
         else:
             raise AssertionError(f"unsupported test mutation: {mutation}")
+    SQLiteLedger(path)
 
 
 @pytest.mark.parametrize(

@@ -69,6 +69,31 @@ def test_lists_and_tuples_are_normalized_as_json_arrays() -> None:
     assert canonical_json(value) == b'{"list":[1,"two"],"tuple":["alpha",null]}'
 
 
+def test_bool_and_int_have_distinct_canonical_representations() -> None:
+    assert canonical_json(True) == b"true"
+    assert canonical_json(1) == b"1"
+    assert content_hash(True) != content_hash(1)
+
+
+def test_canonicalization_does_not_mutate_caller_input() -> None:
+    items = [3, 1]
+    value = {"nested": {"items": items}, "flag": True}
+
+    normalized = canonical_data(value)
+
+    assert normalized == {"flag": True, "nested": {"items": [3, 1]}}
+    assert value == {"nested": {"items": [3, 1]}, "flag": True}
+    assert normalized is not value
+    items.append(2)
+    assert normalized == {"flag": True, "nested": {"items": [3, 1]}}
+
+
+@pytest.mark.parametrize("value", [iter([1, 2]), range(2)])
+def test_unsupported_general_iterables_are_rejected(value: object) -> None:
+    with pytest.raises(CanonicalSerializationError, match="unsupported type"):
+        canonical_json(value)
+
+
 @pytest.mark.parametrize(
     "value",
     [

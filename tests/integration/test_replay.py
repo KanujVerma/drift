@@ -51,6 +51,7 @@ def test_replay_verifies_integrity_before_returning_events(tmp_path: Path) -> No
             "UPDATE audit_events SET payload_json = ? WHERE sequence = 1",
             ('{"result":999}',),
         )
+    SQLiteLedger(path)
 
     with pytest.raises(LedgerIntegrityError):
         replay_events(ledger)

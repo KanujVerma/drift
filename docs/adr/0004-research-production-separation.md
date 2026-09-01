@@ -11,11 +11,14 @@ must not inherit the authority to affect a production environment.
 
 ## Decision
 
-M0 is a research-only zone. It stores compact provenance and artifact
-references, but has no production credentials, execution interface, broker
-connection, portfolio state, deployment configuration, or write path to any
-production system. A future promotion process may consume hashed research
-evidence only through a separately designed control plane.
+The long-term trust model has three explicitly separate zones: Research
+Sandbox, Promotion Control Plane, and Production / Execution. M0 implements
+foundations for the Research Sandbox only. It stores compact provenance and
+artifact references, but has no production credentials, execution interface,
+broker connection, portfolio state, deployment configuration, or write path to
+any production system. A future Promotion Control Plane may consume hashed
+research evidence, but the Research Sandbox must never receive authority over
+Production / Execution.
 
 ## Consequences
 

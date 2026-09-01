@@ -6,9 +6,13 @@ Accepted for M0.
 
 ## Context
 
-Research history must make revisions and failed trials visible. Application
-conventions alone cannot prevent a later SQL update or delete from erasing that
-history.
+Research history must make revisions and failed trials visible. Failed trials
+matter because repeated searches create a multiple-testing problem: selective
+retention can make chance results look repeatable. The full search history,
+including abandoned trials and prior backtest attempts in future milestones,
+is necessary to interpret results and reproduce how a claim was reached.
+Application conventions alone cannot prevent a later SQL update or delete from
+erasing that history.
 
 ## Decision
 

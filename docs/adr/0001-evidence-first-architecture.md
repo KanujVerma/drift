@@ -14,7 +14,9 @@ when a conclusion changed or what evidence was available at the time.
 
 M0 stores frozen, validated research objects and records state changes as
 canonical, hash-chained audit events. The ledger orders events with a database
-sequence and verifies its own stored representation before replay.
+sequence and verifies its own stored representation before replay. Generated
+narratives are not facts. Any narrative claim must remain untrusted unless it
+traces to validated experiments, evidence records, and retained provenance.
 
 ## Consequences
 

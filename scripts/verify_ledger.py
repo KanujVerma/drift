@@ -33,7 +33,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Ledger not found: {settings.ledger_path}", file=sys.stderr)
         return 2
     try:
-        ledger = SQLiteLedger(settings.ledger_path)
+        ledger = SQLiteLedger.open_existing(settings.ledger_path)
         events = replay_events(ledger)
     except LedgerIntegrityError as error:
         print(f"Ledger integrity check failed: {error}", file=sys.stderr)
