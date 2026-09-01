@@ -2,33 +2,48 @@
 
 from enum import StrEnum
 
+from pydantic import model_validator
+
+from drift.domain.artifacts import ArtifactReference
 from drift.domain.common import UUID7, FrozenModel, NonBlankStr, SHA256Hash, UTCDateTime
 
 
-class StrategyArtifactKind(StrEnum):
-    """The immutable form of a captured strategy artifact."""
+class StrategyArtifactStatus(StrEnum):
+    """The review state recorded for a research strategy artifact."""
 
-    SOURCE = "source"
-    CONFIGURATION = "configuration"
-    DOCUMENTATION = "documentation"
+    RESEARCH = "research"
+    CHALLENGER = "challenger"
+    APPROVED = "approved"
+    RETIRED = "retired"
 
 
 class StrategyReference(FrozenModel):
-    """Versioned metadata identifying a research strategy."""
+    """A versioned, content-addressed strategy reference for an experiment."""
 
     strategy_id: UUID7
-    name: NonBlankStr
-    version: NonBlankStr
-    description: NonBlankStr
-    created_at: UTCDateTime
+    strategy_version: NonBlankStr
+    code_hash: SHA256Hash
+    artifact_reference: ArtifactReference
 
 
 class StrategyArtifact(FrozenModel):
-    """A content-addressed artifact associated with a strategy reference."""
+    """Candidate strategy provenance, without implementation behavior."""
 
-    artifact_id: UUID7
     strategy_id: UUID7
-    kind: StrategyArtifactKind
-    content_hash: SHA256Hash
-    location: NonBlankStr
+    strategy_version: NonBlankStr
+    code_hash: SHA256Hash
     created_at: UTCDateTime
+    parent_strategy_version: NonBlankStr | None = None
+    hypothesis_ids: tuple[UUID7, ...]
+    artifact_reference: ArtifactReference
+    status: StrategyArtifactStatus
+
+    @model_validator(mode="after")
+    def validate_hypothesis_ids(self) -> StrategyArtifact:
+        if not self.hypothesis_ids:
+            msg = "strategy hypothesis references must not be empty"
+            raise ValueError(msg)
+        if len(set(self.hypothesis_ids)) != len(self.hypothesis_ids):
+            msg = "strategy hypothesis references must be unique"
+            raise ValueError(msg)
+        return self

@@ -1,6 +1,7 @@
 """Shared validation primitives for immutable research domain models."""
 
 from collections.abc import Mapping
+from copy import deepcopy
 from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Annotated, Any, Self
@@ -106,8 +107,12 @@ class FrozenModel(BaseModel):
         update: Mapping[str, Any] | None = None,
         deep: bool = False,
     ) -> Self:
-        """Copy through validation so updates retain immutable field semantics."""
+        """Copy through validation while preserving normal shallow-copy semantics."""
+        if update is None and not deep:
+            return super().model_copy()
         values = self.model_dump(mode="python")
+        if deep:
+            values = deepcopy(values)
         if update is not None:
             values.update(update)
         return type(self).model_validate(values)

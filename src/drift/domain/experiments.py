@@ -4,11 +4,13 @@ from enum import StrEnum
 
 from pydantic import Field, model_validator
 
+from drift.domain.artifacts import ArtifactReference
 from drift.domain.common import (
     UUID7,
     FrozenModel,
     ImmutableJSON,
     NonBlankStr,
+    SHA256Hash,
     UTCDateTime,
     _freeze_json,
 )
@@ -29,25 +31,37 @@ class ExperimentRunStatus(StrEnum):
 class ExperimentSpecification(FrozenModel):
     """Pre-run, immutable definition of a research experiment."""
 
-    specification_id: UUID7
-    hypothesis_id: UUID7
-    dataset_references: tuple[DatasetReference, ...]
+    experiment_id: UUID7
+    hypothesis_ids: tuple[UUID7, ...]
     strategy_reference: StrategyReference
+    dataset_reference: DatasetReference
     parameters: ImmutableJSON
+    benchmark: NonBlankStr
     evaluation_protocol: ImmutableJSON
     cost_assumptions: ImmutableJSON
+    preregistered_metrics: tuple[NonBlankStr, ...]
+    parent_experiment_ids: tuple[UUID7, ...] = ()
     created_at: UTCDateTime
 
     @model_validator(mode="after")
-    def validate_dataset_references(self) -> ExperimentSpecification:
-        if not self.dataset_references:
-            msg = "experiment dataset references must not be empty"
+    def validate_lineage(self) -> ExperimentSpecification:
+        if not self.hypothesis_ids:
+            msg = "experiment hypothesis references must not be empty"
             raise ValueError(msg)
-        dataset_ids = tuple(
-            reference.dataset_id for reference in self.dataset_references
-        )
-        if len(set(dataset_ids)) != len(dataset_ids):
-            msg = "experiment dataset references must be unique"
+        if len(set(self.hypothesis_ids)) != len(self.hypothesis_ids):
+            msg = "experiment hypothesis references must be unique"
+            raise ValueError(msg)
+        if not self.preregistered_metrics:
+            msg = "preregistered metrics must not be empty"
+            raise ValueError(msg)
+        if len(set(self.preregistered_metrics)) != len(self.preregistered_metrics):
+            msg = "preregistered metrics must be unique"
+            raise ValueError(msg)
+        if self.experiment_id in self.parent_experiment_ids:
+            msg = "an experiment cannot reference itself as a parent"
+            raise ValueError(msg)
+        if len(set(self.parent_experiment_ids)) != len(self.parent_experiment_ids):
+            msg = "parent experiment references must be unique"
             raise ValueError(msg)
         return self
 
@@ -56,11 +70,15 @@ class ExperimentRun(FrozenModel):
     """Immutable observed state for one execution of a specification."""
 
     run_id: UUID7
-    specification_id: UUID7
-    status: ExperimentRunStatus
+    experiment_id: UUID7
     started_at: UTCDateTime
-    parameters: ImmutableJSON = Field(default_factory=lambda: _freeze_json({}))
+    code_hash: SHA256Hash
+    environment_hash: SHA256Hash
+    dataset_hash: SHA256Hash
+    parameters_hash: SHA256Hash
+    status: ExperimentRunStatus
     metrics: ImmutableJSON = Field(default_factory=lambda: _freeze_json({}))
+    artifact_references: tuple[ArtifactReference, ...] = ()
     completed_at: UTCDateTime | None = None
     error_details: NonBlankStr | None = None
 
@@ -88,5 +106,17 @@ class ExperimentRun(FrozenModel):
             and self.error_details is not None
         ):
             msg = "only failed experiment runs may include error details"
+            raise ValueError(msg)
+        artifact_ids = tuple(
+            reference.artifact_id for reference in self.artifact_references
+        )
+        if len(set(artifact_ids)) != len(artifact_ids):
+            msg = "experiment run artifact references must be unique"
+            raise ValueError(msg)
+        if (
+            self.status is ExperimentRunStatus.COMPLETED
+            and not self.artifact_references
+        ):
+            msg = "completed experiment runs require artifact references"
             raise ValueError(msg)
         return self
