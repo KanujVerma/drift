@@ -2,7 +2,7 @@ import sqlite3
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event, Thread
-from uuid import uuid7
+from uuid import UUID, uuid7
 
 import pytest
 
@@ -347,6 +347,25 @@ def test_verify_chain_rejects_equivalent_noncanonical_storage(
         )
 
     with pytest.raises(LedgerIntegrityError, match=rf"noncanonical stored {column}"):
+        ledger.verify_chain()
+
+
+def test_verify_chain_rejects_uppercase_event_id_storage(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.db"
+    event_id = UUID("01941f29-7c00-7abc-8def-123456789abc")
+    uppercase_event_id = str(event_id).upper()
+    ledger = SQLiteLedger(path)
+    ledger.append(valid_event_input(event_id=event_id))
+    with sqlite3.connect(path) as connection:
+        connection.execute("DROP TRIGGER audit_events_no_update")
+        connection.execute(
+            "UPDATE audit_events SET event_id = ? WHERE event_id = ?",
+            (uppercase_event_id, str(event_id)),
+        )
+
+    assert event_id.version == 7
+    assert uppercase_event_id != str(event_id)
+    with pytest.raises(LedgerIntegrityError, match="noncanonical stored event_id"):
         ledger.verify_chain()
 
 
