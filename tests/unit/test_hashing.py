@@ -16,7 +16,7 @@ def valid_unsigned_event(**changes: object) -> UnsignedAuditEvent:
     values: dict[str, object] = {
         "event_id": uuid7(),
         "event_type": "evidence.recorded",
-        "occurred_at": NOW,
+        "timestamp": NOW,
         "entity_type": "evidence",
         "entity_id": uuid7(),
         "payload": {"result": "accepted"},
@@ -39,7 +39,7 @@ def test_each_unsigned_event_field_changes_event_hash() -> None:
     replacements: dict[str, object] = {
         "event_id": uuid7(),
         "event_type": "evidence.superseded",
-        "occurred_at": datetime(2026, 9, 1, 13, tzinfo=UTC),
+        "timestamp": datetime(2026, 9, 1, 13, tzinfo=UTC),
         "entity_type": "hypothesis",
         "entity_id": uuid7(),
         "payload": {"result": "rejected"},

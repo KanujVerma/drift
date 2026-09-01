@@ -15,7 +15,7 @@ class UnsignedAuditEvent(FrozenModel):
 
     event_id: UUID7
     event_type: NonBlankStr
-    occurred_at: UTCDateTime
+    timestamp: UTCDateTime
     entity_type: NonBlankStr
     entity_id: UUID7
     payload: ImmutableJSON
