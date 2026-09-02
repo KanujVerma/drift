@@ -2,7 +2,7 @@
 
 from enum import StrEnum
 from typing import Annotated, Literal, Self
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 from pydantic import Field, field_validator, model_validator
 
@@ -16,6 +16,26 @@ from drift.domain.common import (
 )
 from drift.domain.datasets import TemporalCoverage
 from drift.domain.temporal import AvailabilityChannelV1
+
+_CREDENTIAL_QUERY_NAMES = frozenset(
+    {
+        "apikey",
+        "key",
+        "token",
+        "accesstoken",
+        "authtoken",
+        "signature",
+        "sig",
+        "signed",
+        "signedurl",
+        "credential",
+        "credentials",
+        "xamzsignature",
+        "xamzcredential",
+        "xgoogsignature",
+        "xgoogcredential",
+    }
+)
 
 
 class DatasetKind(StrEnum):
@@ -68,6 +88,12 @@ class SourceDescriptorV1(FrozenModel):
         """Prevent source credentials from becoming immutable provenance."""
         location = urlsplit(evidence_reference.location)
         if location.username is not None or location.password is not None:
+            msg = "source evidence locator must not contain credentials"
+            raise ValueError(msg)
+        if any(
+            _normalized_query_name(name) in _CREDENTIAL_QUERY_NAMES
+            for name, _ in parse_qsl(location.query, keep_blank_values=True)
+        ):
             msg = "source evidence locator must not contain credentials"
             raise ValueError(msg)
         return evidence_reference
@@ -149,6 +175,18 @@ class PartitionDescriptorV1(FrozenModel):
     row_count: Annotated[int, Field(ge=0)]
     schema_hash: SHA256Hash
     coverage: TemporalCoverage
+
+    @field_validator("artifact")
+    @classmethod
+    def require_stable_content_uri(
+        cls, artifact: ArtifactReference
+    ) -> ArtifactReference:
+        """Bind the partition locator exactly to its retained content digest."""
+        expected_location = f"drift+sha256://{artifact.content_hash}"
+        if artifact.location != expected_location:
+            msg = "partition artifact must use a stable content URI bound to its hash"
+            raise ValueError(msg)
+        return artifact
 
 
 class RecordTemporalContractV1(FrozenModel):
@@ -314,3 +352,8 @@ class DatasetManifestV1(FrozenModel):
             msg = "lineage output schema hash must match manifest schema hash"
             raise ValueError(msg)
         return self
+
+
+def _normalized_query_name(name: str) -> str:
+    """Normalize common query-name spellings before credential screening."""
+    return name.casefold().replace("-", "").replace("_", "")

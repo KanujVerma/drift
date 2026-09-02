@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 from typing import Any, cast
-from uuid import uuid7
+from uuid import UUID, uuid7
 
 import pytest
 from pydantic import ValidationError
@@ -38,16 +38,24 @@ HASH_A = "a" * 64
 HASH_B = "b" * 64
 HASH_C = "c" * 64
 NOW = datetime(2026, 9, 1, 12, tzinfo=UTC)
+FIXED_DATASET_ID = UUID("019b8240-0000-7000-8000-000000000001")
+FIXED_PARTITION_ID = UUID("019b8240-0000-7000-8000-000000000002")
+FIXED_SOURCE_ARTIFACT_ID = UUID("019b8240-0000-7000-8000-000000000003")
+FIXED_ACQUISITION_ARTIFACT_ID = UUID("019b8240-0000-7000-8000-000000000004")
+FIXED_LICENSE_ARTIFACT_ID = UUID("019b8240-0000-7000-8000-000000000005")
 PUBLIC = AvailabilityChannelV1(kind=ChannelKind.PUBLIC, identifier="source")
 VENDOR = AvailabilityChannelV1(kind=ChannelKind.VENDOR, identifier="vendor")
 
 
 def artifact(
-    content_hash_value: str = HASH_A, *, location: str = "evidence/reference.json"
+    content_hash_value: str = HASH_A,
+    *,
+    location: str = "evidence/reference.json",
+    artifact_id: UUID | None = None,
 ) -> ArtifactReference:
     """Build a valid retained artifact reference."""
     return ArtifactReference(
-        artifact_id=uuid7(),
+        artifact_id=artifact_id or uuid7(),
         kind=ArtifactKind.OTHER,
         content_hash=content_hash_value,
         location=location,
@@ -182,7 +190,10 @@ def partition(
     values: dict[str, object] = {
         "partition_id": uuid7(),
         "partition_key": partition_key,
-        "artifact": artifact(content_hash_value),
+        "artifact": artifact(
+            content_hash_value,
+            location=f"drift+sha256://{content_hash_value}",
+        ),
         "byte_size": 1,
         "media_type": "application/json",
         "format_version": "1",
@@ -466,6 +477,61 @@ def test_source_evidence_locator_rejects_credentials() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "location",
+    (
+        "https://example.test/evidence?api_key=secret",
+        "https://example.test/evidence?token=secret",
+        "https://example.test/evidence?signature=secret",
+        "https://example.test/evidence?signed=true",
+        "https://example.test/evidence?X-Amz-Credential=credential",
+    ),
+)
+def test_source_evidence_locator_rejects_credential_query_parameters(
+    location: str,
+) -> None:
+    """Credential and signed URL query fields cannot enter immutable provenance."""
+    with pytest.raises(ValidationError, match="credentials"):
+        SourceDescriptorV1(
+            source_id="source-1",
+            publisher="Example Publisher",
+            product="Example Product",
+            evidence_reference=artifact(location=location),
+        )
+
+
+def test_source_evidence_locator_allows_credential_free_reference() -> None:
+    """A retained public source reference remains valid without credential data."""
+    source = SourceDescriptorV1(
+        source_id="source-1",
+        publisher="Example Publisher",
+        product="Example Product",
+        evidence_reference=artifact(location="https://example.test/evidence?id=123"),
+    )
+    assert source.evidence_reference.location == "https://example.test/evidence?id=123"
+
+
+@pytest.mark.parametrize(
+    "location",
+    (
+        "partitions/year=2021.json",
+        "https://example.test/partition.json",
+        "s3://bucket/partition.json",
+        f"drift+sha256://{HASH_B}",
+    ),
+)
+def test_partition_artifact_requires_matching_stable_content_uri(location: str) -> None:
+    """A partition cannot bind its digest to a mutable locator or different digest."""
+    with pytest.raises(ValidationError, match="stable content URI"):
+        partition(artifact=artifact(HASH_A, location=location))
+
+
+def test_partition_artifact_accepts_exact_stable_content_uri() -> None:
+    """A partition retains only a content-addressed artifact locator."""
+    partition_value = partition()
+    assert partition_value.artifact.location == f"drift+sha256://{HASH_A}"
+
+
 def test_license_version_is_optional_provenance() -> None:
     """No legal conclusion is required when a retained version is absent."""
     assert manifest().license.license_version is None
@@ -519,6 +585,58 @@ def test_schema_hash_mutation_table_binds_every_identity_field() -> None:
     reordered = schema(fields=tuple(reversed(FIELDS)))
     assert reordered == baseline
     assert schema_hash(reordered) == schema_hash(baseline)
+
+
+def test_canonical_hashes_match_pinned_literals() -> None:
+    """Fixed schema and manifest inputs produce independently pinned digests."""
+    schema_definition = schema()
+    source = SourceDescriptorV1(
+        source_id="source-1",
+        publisher="Example Publisher",
+        product="Example Product",
+        evidence_reference=artifact(
+            artifact_id=FIXED_SOURCE_ARTIFACT_ID,
+            location="https://example.test/source-evidence?id=1",
+        ),
+    )
+    acquisition = AcquisitionDescriptorV1(
+        acquired_at=NOW,
+        collector_id="collector",
+        collector_version="1",
+        evidence_reference=artifact(
+            HASH_B,
+            artifact_id=FIXED_ACQUISITION_ARTIFACT_ID,
+        ),
+    )
+    license_descriptor = LicenseDescriptorV1(
+        provider_legal_name="Example Provider",
+        license_reference="agreement-1",
+        acquired_at=NOW,
+        terms_evidence_reference=artifact(
+            HASH_C,
+            artifact_id=FIXED_LICENSE_ARTIFACT_ID,
+        ),
+    )
+    partition_value = partition(
+        schema_definition=schema_definition,
+        partition_id=FIXED_PARTITION_ID,
+        artifact=artifact(
+            artifact_id=FIXED_PARTITION_ID,
+            location=f"drift+sha256://{HASH_A}",
+        ),
+    )
+    manifest_value = manifest(
+        dataset_id=FIXED_DATASET_ID,
+        source=source,
+        acquisition=acquisition,
+        license=license_descriptor,
+        schema_definition=schema_definition,
+        partitions=(partition_value,),
+    )
+    assert (schema_hash(schema_definition), manifest_hash(manifest_value)) == (
+        "079ca973b9fbf91cfbcaf6b93a229a73c848821f1c43495e430486f4ac364c4d",
+        "a45ab8ade7ee8e9000cfe84c3877b8ab3830d1f610de7c348ab7384cc6b49fc4",
+    )
 
 
 def test_manifest_hash_mutation_table_binds_every_manifest_descriptor() -> None:
@@ -681,7 +799,10 @@ def test_manifest_hash_mutation_table_binds_partition_fields_and_lineage() -> No
         partition_value.model_copy(
             update={
                 "artifact": partition_value.artifact.model_copy(
-                    update={"content_hash": HASH_B}
+                    update={
+                        "content_hash": HASH_B,
+                        "location": f"drift+sha256://{HASH_B}",
+                    }
                 )
             }
         ),
@@ -736,6 +857,73 @@ def test_manifest_hash_mutation_table_binds_partition_fields_and_lineage() -> No
     for changed_lineage in lineage_mutations:
         changed = derived.model_copy(update={"lineage": changed_lineage})
         assert manifest_hash(changed) != manifest_hash(derived)
+
+
+def test_manifest_identity_table_binds_kind_contract_and_cross_hashes() -> None:
+    """Every remaining manifest identity field is covered independently."""
+    baseline = manifest()
+    alternate_field_id = "alternate_value"
+    temporal_binding_fields = (
+        "logical_key_field_ids",
+        "valid_start_field_id",
+        "valid_end_field_id",
+        "availability_field_id",
+        "revision_id_field_id",
+        "supersedes_field_id",
+        "source_sequence_field_id",
+        "value_field_id",
+        "null_reason_field_id",
+    )
+    for field_name in temporal_binding_fields:
+        value: tuple[str, ...] | str = (
+            (alternate_field_id,)
+            if field_name == "logical_key_field_ids"
+            else alternate_field_id
+        )
+        changed = baseline.model_copy(
+            update={
+                "temporal_contract": baseline.temporal_contract.model_copy(
+                    update={field_name: value}
+                )
+            }
+        )
+        assert manifest_body(changed) != manifest_body(baseline)
+        assert manifest_hash(changed) != manifest_hash(baseline)
+
+    changed_kind = DatasetManifestV1.model_construct(
+        **{**baseline.__dict__, "dataset_kind": DatasetKind.DERIVED_FACTS}
+    )
+    assert manifest_body(changed_kind) != manifest_body(baseline)
+    assert manifest_hash(changed_kind) != manifest_hash(baseline)
+
+    changed_partition = PartitionDescriptorV1.model_construct(
+        **{**baseline.partitions[0].__dict__, "schema_hash": HASH_B}
+    )
+    changed_partition_manifest = DatasetManifestV1.model_construct(
+        **{**baseline.__dict__, "partitions": (changed_partition,)}
+    )
+    assert manifest_body(changed_partition_manifest) != manifest_body(baseline)
+    assert manifest_hash(changed_partition_manifest) != manifest_hash(baseline)
+    with pytest.raises(ValidationError, match="partition schema hash"):
+        baseline.model_copy(update={"partitions": (changed_partition,)})
+
+    derived = baseline.model_copy(
+        update={
+            "dataset_kind": DatasetKind.DERIVED_FACTS,
+            "lineage": lineage(
+                output_schema_hash=baseline.schema_definition.schema_hash
+            ),
+        }
+    )
+    assert derived.lineage is not None
+    changed_lineage = derived.lineage.model_copy(update={"output_schema_hash": HASH_B})
+    changed_lineage_manifest = DatasetManifestV1.model_construct(
+        **{**derived.__dict__, "lineage": changed_lineage}
+    )
+    assert manifest_body(changed_lineage_manifest) != manifest_body(derived)
+    assert manifest_hash(changed_lineage_manifest) != manifest_hash(derived)
+    with pytest.raises(ValidationError, match="output schema hash"):
+        derived.model_copy(update={"lineage": changed_lineage})
 
 
 def test_record_contract_declares_only_record_granularity() -> None:
