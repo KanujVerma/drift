@@ -1,8 +1,18 @@
-# Drift M1 Point-in-Time Data Implementation Plan
+# Drift M1 Point-in-Time Data Superseded Research Plan
 
-**Status:** Planned and not started. Every checkbox is intentionally unchecked.
+**Status:** Superseded on 2026-09-01. This file is retained as research history and is not executable.
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+**Active M1a plan:** `docs/superpowers/plans/2026-09-01-m1a-temporal-provenance.md`
+
+**Deferred M1b boundary:** `docs/superpowers/plans/2026-09-01-m1b-historical-market-semantics.md`
+
+The mixed task sequence below predates the M1a-only implementation ruling. Its
+unchecked execution state has been neutralized so Resume must not treat it as an
+active plan. The umbrella design remains canonical research context; the two
+documents above govern current plan state.
+
+> **Research history only:** Do not execute this task sequence. Use the active
+> M1a plan linked above; M1b has no approved execution plan.
 
 **Goal:** Add immutable point-in-time dataset contracts and fail-closed validators that bind exact bytes to channel-scoped temporal evidence, then add the minimum historical equity identity, universe, corporate-action, and session semantics required to prevent common leakage.
 
@@ -61,7 +71,7 @@
 - Consumes: `FrozenModel`, `NonBlankStr`, and `UTCDateTime` from `drift.domain.common`.
 - Produces: `ValidPeriodV1`, `ChannelKind`, `AvailabilityStatus`, `AvailabilityBasis`, `AvailabilityChannelV1`, `AvailabilityEvidenceV1`, and `definitely_available(evidence, channel, cutoff) -> bool`.
 
-- [ ] **Step 1: Write failing exact, bounded, channel, and unknown tests**
+- [superseded] **Step 1: Write failing exact, bounded, channel, and unknown tests**
 
 ```python
 def test_bounded_evidence_fails_inside_window_and_passes_after_upper_bound() -> None:
@@ -84,13 +94,13 @@ def test_evidence_from_another_channel_does_not_pass() -> None:
     )
 ```
 
-- [ ] **Step 2: Run the tests and confirm the module is missing**
+- [superseded] **Step 2: Run the tests and confirm the module is missing**
 
 Run: `uv run pytest tests/unit/test_temporal.py -v`
 
 Expected: collection fails because `drift.domain.temporal` does not exist.
 
-- [ ] **Step 3: Implement strict temporal models and fail-closed selection**
+- [superseded] **Step 3: Implement strict temporal models and fail-closed selection**
 
 ```python
 class ValidPeriodV1(FrozenModel):
@@ -133,13 +143,13 @@ bounds for `bounded`, a rule hash and bounds for `rule_derived`, and absent boun
 for `unknown`. Require `ValidPeriodV1` to be nonempty and treat it as half-open.
 Validate IANA timezones with `zoneinfo.ZoneInfo` when present.
 
-- [ ] **Step 4: Run temporal tests, lint, and type checks**
+- [superseded] **Step 4: Run temporal tests, lint, and type checks**
 
 Run: `uv run pytest tests/unit/test_temporal.py -v && uv run ruff check src/drift/domain/temporal.py tests/unit/test_temporal.py && uv run mypy src/drift/domain/temporal.py tests/unit/test_temporal.py`
 
 Expected: all commands exit 0.
 
-- [ ] **Step 5: Commit temporal primitives**
+- [superseded] **Step 5: Commit temporal primitives**
 
 ```text
 git add src/drift/domain/temporal.py tests/unit/test_temporal.py
@@ -164,7 +174,7 @@ git commit -m "feat: add point-in-time availability evidence"
   `DatasetManifestV1`, `manifest_body(manifest) -> dict[str, JSONValue]`, and
   `manifest_hash(manifest) -> str`.
 
-- [ ] **Step 1: Write failing manifest validation and hash tests**
+- [superseded] **Step 1: Write failing manifest validation and hash tests**
 
 ```python
 def test_manifest_rejects_duplicate_partition_keys() -> None:
@@ -187,13 +197,13 @@ def test_derived_manifest_requires_complete_lineage() -> None:
         manifest(dataset_kind=DatasetKind.DERIVED, lineage=None)
 ```
 
-- [ ] **Step 2: Run the tests and confirm the models are missing**
+- [superseded] **Step 2: Run the tests and confirm the models are missing**
 
 Run: `uv run pytest tests/unit/test_manifests.py tests/unit/test_manifest_hashing.py -v`
 
 Expected: collection fails on missing manifest types.
 
-- [ ] **Step 3: Implement focused immutable descriptor models**
+- [superseded] **Step 3: Implement focused immutable descriptor models**
 
 ```python
 class PartitionDescriptorV1(FrozenModel):
@@ -348,7 +358,7 @@ market-observation contract, raw source acquisition evidence, derived lineage,
 and no credential-bearing source locator. Do not allow a free-form string or
 JSON policy to satisfy a semantic contract.
 
-- [ ] **Step 4: Implement canonical partition ordering and manifest hashing**
+- [superseded] **Step 4: Implement canonical partition ordering and manifest hashing**
 
 ```python
 def manifest_body(manifest: DatasetManifestV1) -> dict[str, JSONValue]:
@@ -369,13 +379,13 @@ def manifest_hash(manifest: DatasetManifestV1) -> str:
     return content_hash(manifest_body(manifest))
 ```
 
-- [ ] **Step 5: Run the focused tests and full M0 regression suite**
+- [superseded] **Step 5: Run the focused tests and full M0 regression suite**
 
 Run: `uv run pytest tests/unit/test_manifests.py tests/unit/test_manifest_hashing.py tests/unit/test_canonical_serialization.py tests/unit/test_domain_models.py -v`
 
 Expected: all tests pass and existing M0 serialization behavior is unchanged.
 
-- [ ] **Step 6: Commit manifest contracts**
+- [superseded] **Step 6: Commit manifest contracts**
 
 ```text
 git add src/drift/domain/manifests.py src/drift/datasets tests/unit/test_manifests.py tests/unit/test_manifest_hashing.py
@@ -396,7 +406,7 @@ git commit -m "feat: add immutable dataset manifests"
   `read_verified_local_artifact(root, relative_path, expected_hash, limits) -> VerifiedArtifactBytes`,
   and `verify_partition_bytes(partition, verified) -> tuple[str, ...]`.
 
-- [ ] **Step 1: Write failing traversal, symlink, size, and mismatch tests**
+- [superseded] **Step 1: Write failing traversal, symlink, size, and mismatch tests**
 
 ```python
 def test_resolver_rejects_parent_traversal(tmp_path: Path) -> None:
@@ -436,13 +446,13 @@ def test_parsing_uses_verified_bytes_after_same_path_replacement(
     assert verified.data == original
 ```
 
-- [ ] **Step 2: Run the tests and confirm resolver imports fail**
+- [superseded] **Step 2: Run the tests and confirm resolver imports fail**
 
 Run: `uv run pytest tests/unit/test_dataset_resolver.py -v`
 
 Expected: collection fails because the resolver does not exist.
 
-- [ ] **Step 3: Implement confined, regular-file-only byte reads**
+- [superseded] **Step 3: Implement confined, regular-file-only byte reads**
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -489,13 +499,13 @@ CSV, Parquet, archives, or object columns in this task. A future large-file
 adapter must hash and parse the same open descriptor with before/after identity
 checks, or consume an immutable content-addressed object.
 
-- [ ] **Step 4: Run resolver tests and security-focused static checks**
+- [superseded] **Step 4: Run resolver tests and security-focused static checks**
 
 Run: `uv run pytest tests/unit/test_dataset_resolver.py -v && uv run ruff check src/drift/datasets/resolver.py tests/unit/test_dataset_resolver.py && uv run mypy src/drift/datasets/resolver.py tests/unit/test_dataset_resolver.py`
 
 Expected: all commands exit 0.
 
-- [ ] **Step 5: Commit safe resolution**
+- [superseded] **Step 5: Commit safe resolution**
 
 ```text
 git add src/drift/datasets/resolver.py tests/unit/test_dataset_resolver.py tests/fixtures/datasets/files
@@ -517,7 +527,7 @@ git commit -m "feat: verify confined dataset artifacts"
   `validate_revision_chain(versions) -> tuple[ValidationFindingV1, ...]`, and
   `select_fact_version(versions, channel, cutoff) -> FactVersionV1 | None`.
 
-- [ ] **Step 1: Write failing revision and selection tests**
+- [superseded] **Step 1: Write failing revision and selection tests**
 
 ```python
 def test_cutoff_selects_original_before_restatement() -> None:
@@ -552,13 +562,13 @@ def test_unknown_availability_yields_no_version() -> None:
     )
 ```
 
-- [ ] **Step 2: Run the tests and confirm revisions are missing**
+- [superseded] **Step 2: Run the tests and confirm revisions are missing**
 
 Run: `uv run pytest tests/unit/test_revisions.py -v`
 
 Expected: collection fails on missing revision types.
 
-- [ ] **Step 3: Implement immutable versions and deterministic selection**
+- [superseded] **Step 3: Implement immutable versions and deterministic selection**
 
 ```python
 class ValidationFindingV1(FrozenModel):
@@ -622,13 +632,13 @@ Require the same logical key across a chain, unique IDs, an initial root, an
 acyclic single-successor sequence, retained source artifacts, and one evidence
 record per channel.
 
-- [ ] **Step 4: Run revision and temporal tests**
+- [superseded] **Step 4: Run revision and temporal tests**
 
 Run: `uv run pytest tests/unit/test_revisions.py tests/unit/test_temporal.py -v`
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Commit revision semantics**
+- [superseded] **Step 5: Commit revision semantics**
 
 ```text
 git add src/drift/domain/revisions.py src/drift/datasets/validation.py tests/unit/test_revisions.py
@@ -657,7 +667,7 @@ git commit -m "feat: preserve point-in-time fact revisions"
   `build_eligibility_binding(dataset_reference, decision, decision_reference, declared_use, channel, coverage) -> DatasetEligibilityBindingV1`,
   and `verify_bound_dataset_input(bound_input, declared_use, channel, coverage) -> tuple[ValidationFindingV1, ...]`.
 
-- [ ] **Step 1: Write failing fail-closed eligibility and bridge tests**
+- [superseded] **Step 1: Write failing fail-closed eligibility and bridge tests**
 
 ```python
 def test_manifest_only_validation_is_always_exploratory() -> None:
@@ -719,13 +729,13 @@ def test_m0_fixture_serialization_and_event_hashes_are_unchanged() -> None:
     assert compute_event_hash(existing_m0_unsigned_event()) == M0_EVENT_HASH
 ```
 
-- [ ] **Step 2: Run the tests and confirm validation-decision types are missing**
+- [superseded] **Step 2: Run the tests and confirm validation-decision types are missing**
 
 Run: `uv run pytest tests/unit/test_dataset_validation.py tests/integration/test_m1_m0_compatibility.py -v`
 
 Expected: collection fails without the new modules; existing M0 tests still pass.
 
-- [ ] **Step 3: Implement immutable findings and scoped decisions**
+- [superseded] **Step 3: Implement immutable findings and scoped decisions**
 
 ```python
 class DatasetValidationDecisionV1(FrozenModel):
@@ -772,7 +782,7 @@ fact fixtures, verifies their partition byte hash and schema, constructs
 provide its own versioned implementation and cannot reuse the fixture validator
 hash.
 
-- [ ] **Step 4: Implement the additive `DatasetReference` bridge**
+- [superseded] **Step 4: Implement the additive `DatasetReference` bridge**
 
 ```python
 def build_dataset_reference(
@@ -830,13 +840,13 @@ hash/reference, declared use, channel, and coverage to match. The runtime
 dataclass deliberately carries the exact verified byte values, which are not
 serialized into M0 or the manifest.
 
-- [ ] **Step 5: Verify M0 replay and hash compatibility**
+- [superseded] **Step 5: Verify M0 replay and hash compatibility**
 
 Run: `uv run pytest tests/unit/test_dataset_validation.py tests/integration/test_m1_m0_compatibility.py tests/integration/test_replay.py tests/integration/test_tamper_detection.py -v`
 
 Expected: all tests pass; the pinned M0 reference bytes and event hash are exact.
 
-- [ ] **Step 6: Commit validation evidence and bridge**
+- [superseded] **Step 6: Commit validation evidence and bridge**
 
 ```text
 git add src/drift/domain/dataset_validation.py src/drift/datasets tests/unit/test_dataset_validation.py tests/integration/test_m1_m0_compatibility.py
@@ -858,7 +868,7 @@ git commit -m "feat: gate dataset references with validation evidence"
   conventions for `dataset.manifest.recorded`, `dataset.validation.completed`,
   `dataset.eligibility.bound`, and `dataset.superseded`.
 
-- [ ] **Step 1: Add small source-like fixture bytes and expected cutoff table**
+- [superseded] **Step 1: Add small source-like fixture bytes and expected cutoff table**
 
 Create JSON fixtures whose top-level object contains `case_id`, `channel`,
 `cutoffs`, `fact_versions`, and `expected_fact_version_id`. Use fixed UUIDv7
@@ -875,7 +885,7 @@ values, UTC timestamps, and SHA-256 hashes. Include this date-only case:
 }
 ```
 
-- [ ] **Step 2: Write parameterized failing leakage tests**
+- [superseded] **Step 2: Write parameterized failing leakage tests**
 
 ```python
 class CutoffExpectationV1(FrozenModel):
@@ -909,13 +919,13 @@ def test_m1a_fixture_never_selects_a_future_version(case_path: Path) -> None:
         assert selected_id == cutoff.expected
 ```
 
-- [ ] **Step 3: Run the fixtures and fix only contract or fixture defects**
+- [superseded] **Step 3: Run the fixtures and fix only contract or fixture defects**
 
 Run: `uv run pytest tests/integration/test_m1a_leakage.py -v`
 
 Expected: all listed cases pass without adding source-specific production adapters.
 
-- [ ] **Step 4: Write and pass audit integration tests**
+- [superseded] **Step 4: Write and pass audit integration tests**
 
 ```python
 def test_manifest_and_validation_events_replay_without_schema_changes(
@@ -939,13 +949,13 @@ Payloads contain schema version `1`, manifest or decision hashes, and compact
 references. Do not put raw datasets, license prose, credentials, or physical
 paths in SQLite.
 
-- [ ] **Step 5: Run the M1a and complete M0 gates**
+- [superseded] **Step 5: Run the M1a and complete M0 gates**
 
 Run: `uv run pytest && uv run ruff check . && uv run ruff format --check . && uv run mypy src tests && uv build`
 
 Expected: all commands exit 0.
 
-- [ ] **Step 6: Commit M1a adversarial evidence**
+- [superseded] **Step 6: Commit M1a adversarial evidence**
 
 ```text
 git add tests/fixtures/datasets/m1a tests/integration/test_m1a_leakage.py tests/integration/test_m1_dataset_audit.py
@@ -962,14 +972,14 @@ git commit -m "test: prove temporal leakage is rejected"
 - Consumes: the complete M1a diff.
 - Produces: a review record in the implementing task's commentary and a clean, tested M1a checkpoint. It does not mark M1 complete.
 
-- [ ] **Step 1: Review M1a against every spec section through validation eligibility**
+- [superseded] **Step 1: Review M1a against every spec section through validation eligibility**
 
 Confirm exact-byte hashing, storage neutrality, unknown preservation,
 channel-specific evidence, bounded date semantics, revision immutability,
 license/source provenance, derived lineage, M0 compatibility, and hostile-path
 limits each have a direct test.
 
-- [ ] **Step 2: Run explicit scope and compatibility scans**
+- [superseded] **Step 2: Run explicit scope and compatibility scans**
 
 Run: `rg -n "(robinhood|alpaca|place_order|submit_order|api[_-]?key|oauth|langgraph|openai|rd-agent)" src tests pyproject.toml`
 
@@ -980,7 +990,7 @@ Run: `git diff 4587745 -- src/drift/domain/datasets.py src/drift/domain/artifact
 
 Expected: no diff in M0 compatibility-sensitive files.
 
-- [ ] **Step 3: Run the complete gate and checkpoint M1a**
+- [superseded] **Step 3: Run the complete gate and checkpoint M1a**
 
 Run: `uv run pytest && uv run ruff check . && uv run ruff format --check . && uv run mypy src tests && uv build && git status --short`
 
@@ -1005,7 +1015,7 @@ Checkpoint the verified commit, but state that M1b is still required.
   `validate_identifier_mappings(mappings) -> tuple[ValidationFindingV1, ...]`,
   and `validate_security_identity(issuers, securities, listings, mappings) -> tuple[ValidationFindingV1, ...]`.
 
-- [ ] **Step 1: Write failing ticker reuse, rename, overlap, and share-class tests**
+- [superseded] **Step 1: Write failing ticker reuse, rename, overlap, and share-class tests**
 
 ```python
 def test_ticker_reuse_maps_to_distinct_security_ids() -> None:
@@ -1027,13 +1037,13 @@ def test_two_share_classes_never_collapse_to_issuer_identity() -> None:
     assert class_a.security_id != class_b.security_id
 ```
 
-- [ ] **Step 2: Run the tests and confirm identity types are missing**
+- [superseded] **Step 2: Run the tests and confirm identity types are missing**
 
 Run: `uv run pytest tests/unit/test_securities.py -v`
 
 Expected: collection fails on missing identity types.
 
-- [ ] **Step 3: Implement opaque IDs and dated mappings**
+- [superseded] **Step 3: Implement opaque IDs and dated mappings**
 
 ```python
 class IdentifierMappingV1(FrozenModel):
@@ -1052,13 +1062,13 @@ Require listing-scoped ticker mappings to name a venue, prohibit self-inconsiste
 valid intervals, and report overlap for the same type/value/venue unless a later
 explicit ambiguity contract is added. Never infer continuity from equal text.
 
-- [ ] **Step 4: Run identity tests, lint, and mypy**
+- [superseded] **Step 4: Run identity tests, lint, and mypy**
 
 Run: `uv run pytest tests/unit/test_securities.py -v && uv run ruff check src/drift/domain/securities.py src/drift/datasets/market_validation.py tests/unit/test_securities.py && uv run mypy src/drift/domain/securities.py src/drift/datasets/market_validation.py tests/unit/test_securities.py`
 
 Expected: all commands exit 0.
 
-- [ ] **Step 5: Commit identity contracts**
+- [superseded] **Step 5: Commit identity contracts**
 
 ```text
 git add src/drift/domain/securities.py src/drift/datasets/market_validation.py tests/unit/test_securities.py
@@ -1079,7 +1089,7 @@ git commit -m "feat: add stable historical security identity"
   `validate_membership(events, listings) -> tuple[ValidationFindingV1, ...]`,
   and `is_universe_member(events, universe_id, listing_id, listings, channel, cutoff) -> bool`.
 
-- [ ] **Step 1: Write failing current-snapshot and listing-bound tests**
+- [superseded] **Step 1: Write failing current-snapshot and listing-bound tests**
 
 ```python
 def test_june_addition_is_not_member_in_january() -> None:
@@ -1140,13 +1150,13 @@ def test_conflicting_equal_sequence_events_are_rejected() -> None:
     assert "membership_sequence_conflict" in {item.code for item in findings}
 ```
 
-- [ ] **Step 2: Run the tests and confirm universe types are missing**
+- [superseded] **Step 2: Run the tests and confirm universe types are missing**
 
 Run: `uv run pytest tests/unit/test_universes.py -v`
 
 Expected: collection fails on missing universe types.
 
-- [ ] **Step 3: Implement effective membership with availability cutoff**
+- [superseded] **Step 3: Implement effective membership with availability cutoff**
 
 ```python
 class UniverseMembershipV1(FrozenModel):
@@ -1201,13 +1211,13 @@ sequence conflicts rather than using input order. Preserve explicit additions,
 removals, and corrections. Absence from a snapshot is never synthesized into a
 removal.
 
-- [ ] **Step 4: Run universe and identity tests**
+- [superseded] **Step 4: Run universe and identity tests**
 
 Run: `uv run pytest tests/unit/test_universes.py tests/unit/test_securities.py -v`
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Commit universe contracts**
+- [superseded] **Step 5: Commit universe contracts**
 
 ```text
 git add src/drift/domain/universes.py src/drift/datasets/market_validation.py tests/unit/test_universes.py
@@ -1231,7 +1241,7 @@ git commit -m "feat: add historical universe membership"
   `select_action_version(actions, logical_action_key, channel, cutoff) -> CorporateActionEventV1 | None`,
   and `action_known(action, channel, cutoff) -> bool`.
 
-- [ ] **Step 1: Write failing future split, dividend, and delisting tests**
+- [superseded] **Step 1: Write failing future split, dividend, and delisting tests**
 
 ```python
 def test_future_split_is_not_known_at_feature_cutoff() -> None:
@@ -1278,13 +1288,13 @@ def test_action_revision_cycle_is_rejected() -> None:
     assert "action_revision_cycle" in {item.code for item in findings}
 ```
 
-- [ ] **Step 2: Run the tests and confirm action types are missing**
+- [superseded] **Step 2: Run the tests and confirm action types are missing**
 
 Run: `uv run pytest tests/unit/test_corporate_actions.py -v`
 
 Expected: collection fails on missing action models.
 
-- [ ] **Step 3: Implement source events without return calculation**
+- [superseded] **Step 3: Implement source events without return calculation**
 
 ```python
 class CorporateActionEventV1(FrozenModel):
@@ -1366,13 +1376,13 @@ termination chains. If `last_trade_at` is known, require it not to follow
 cutoff resolution for terminations. Do not implement adjustment, position
 conversion, cash posting, total-return, tax, settlement, or imputation.
 
-- [ ] **Step 4: Run action and market validation tests**
+- [superseded] **Step 4: Run action and market validation tests**
 
 Run: `uv run pytest tests/unit/test_corporate_actions.py tests/unit/test_securities.py tests/unit/test_universes.py -v`
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Commit market action contracts**
+- [superseded] **Step 5: Commit market action contracts**
 
 ```text
 git add src/drift/domain/corporate_actions.py src/drift/datasets/market_validation.py tests/unit/test_corporate_actions.py
@@ -1390,7 +1400,7 @@ git commit -m "feat: record point-in-time corporate actions"
 - Consumes: availability evidence and M0 artifact references.
 - Produces: `SessionKind`, `SessionStatus`, `CalendarReferenceV1`, `SessionObservationV1`, and `validate_sessions(reference, sessions) -> tuple[ValidationFindingV1, ...]`.
 
-- [ ] **Step 1: Write failing early-close, DST, and session-label tests**
+- [superseded] **Step 1: Write failing early-close, DST, and session-label tests**
 
 ```python
 def test_early_close_uses_explicit_utc_boundary() -> None:
@@ -1417,13 +1427,13 @@ def test_session_from_another_calendar_hash_is_rejected() -> None:
     assert "calendar_binding_mismatch" in {item.code for item in findings}
 ```
 
-- [ ] **Step 2: Run the tests and confirm calendar types are missing**
+- [superseded] **Step 2: Run the tests and confirm calendar types are missing**
 
 Run: `uv run pytest tests/unit/test_calendars.py -v`
 
 Expected: collection fails on missing calendar models.
 
-- [ ] **Step 3: Implement immutable calendar identity and observed sessions**
+- [superseded] **Step 3: Implement immutable calendar identity and observed sessions**
 
 ```python
 class CalendarReferenceV1(FrozenModel):
@@ -1455,13 +1465,13 @@ boundaries, closed-session null boundaries, duplicate venue/date records, and
 exact calendar ID/version/schedule-hash equality for every session. Do not
 calculate holidays or daylight-saving transitions.
 
-- [ ] **Step 4: Run calendar and temporal tests**
+- [superseded] **Step 4: Run calendar and temporal tests**
 
 Run: `uv run pytest tests/unit/test_calendars.py tests/unit/test_temporal.py -v`
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Commit session contracts**
+- [superseded] **Step 5: Commit session contracts**
 
 ```text
 git add src/drift/domain/calendars.py src/drift/datasets/market_validation.py tests/unit/test_calendars.py
@@ -1496,7 +1506,7 @@ git commit -m "feat: bind datasets to versioned market sessions"
   plus end-to-end fixtures for historical identity, universe, actions,
   delistings, price basis, missing bars, and sessions.
 
-- [ ] **Step 1: Write failing market-record and eligibility tests**
+- [superseded] **Step 1: Write failing market-record and eligibility tests**
 
 ```python
 def test_manifest_raw_claim_cannot_hide_adjusted_record() -> None:
@@ -1547,14 +1557,14 @@ def test_complete_inspected_raw_records_can_be_eligible() -> None:
     )
 ```
 
-- [ ] **Step 2: Run the tests and confirm market-record types are missing**
+- [superseded] **Step 2: Run the tests and confirm market-record types are missing**
 
 Run: `uv run pytest tests/unit/test_market_data.py tests/integration/test_m1_eligibility.py -v`
 
 Expected: collection fails because `drift.domain.market_data` and the complete
 market validator do not exist.
 
-- [ ] **Step 3: Implement parsed raw observations and bound dependency inputs**
+- [superseded] **Step 3: Implement parsed raw observations and bound dependency inputs**
 
 ```python
 class BarIntervalV1(FrozenModel):
@@ -1611,7 +1621,7 @@ requires null values and a reason. `HALTED` and `ZERO_VOLUME` remain distinct
 states. Require positive intervals, internally consistent OHLC values, exact
 calendar ID/version/hash binding, and one channel-scoped availability record.
 
-- [ ] **Step 4: Implement the record-and-event validator**
+- [superseded] **Step 4: Implement the record-and-event validator**
 
 ```python
 def validate_market_dataset(
@@ -1709,7 +1719,7 @@ checks availability for the requested channel, preserves explicit missingness,
 and invokes point-in-time universe and action-chain validation. Every synthetic
 JSON parser consumes only `VerifiedArtifactBytes.data`; none reopens a pathname.
 
-- [ ] **Step 5: Add the complete M1b fixture matrix**
+- [superseded] **Step 5: Add the complete M1b fixture matrix**
 
 Add fixed fixtures for ticker reuse, ticker rename, two share classes, exchange
 migration, June index addition, explicit removal, cash acquisition, stock
@@ -1717,7 +1727,7 @@ acquisition, unknown delisting outcome, evidenced worthlessness, future split,
 cash dividend, spinoff, vendor action correction, fully adjusted history, missing
 bar versus halt, early close, DST boundary, and overnight session.
 
-- [ ] **Step 6: Write and pass parameterized market-leakage tests**
+- [superseded] **Step 6: Write and pass parameterized market-leakage tests**
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -1764,14 +1774,14 @@ creates its eligibility binding, and then constructs `MarketDependencyInputsV1`.
 No expected finding, manifest hash, or dependency record is accepted from an
 unverified path.
 
-- [ ] **Step 7: Run all adversarial and eligibility tests**
+- [superseded] **Step 7: Run all adversarial and eligibility tests**
 
 Run: `uv run pytest tests/unit/test_market_data.py tests/integration/test_m1a_leakage.py tests/integration/test_m1b_market_leakage.py tests/integration/test_m1_eligibility.py -v`
 
 Expected: every future-information, identity, universe, action, adjustment,
 missingness, and session cheat is rejected or explicitly exploratory-only.
 
-- [ ] **Step 8: Commit market validation and M1b adversarial evidence**
+- [superseded] **Step 8: Commit market validation and M1b adversarial evidence**
 
 ```text
 git add src/drift/domain/market_data.py src/drift/datasets/validation.py src/drift/datasets/market_validation.py tests/unit/test_market_data.py tests/fixtures/datasets/m1b tests/integration/test_m1b_market_leakage.py tests/integration/test_m1_eligibility.py
@@ -1793,7 +1803,7 @@ git commit -m "test: reject historical market data leakage"
 - Produces: accurate user and architecture documentation, explicit non-capabilities,
   final compatibility evidence, and a clean Checkpoint.
 
-- [ ] **Step 1: Write documentation tests before changing status text**
+- [superseded] **Step 1: Write documentation tests before changing status text**
 
 ```python
 def test_roadmap_does_not_claim_trading_or_backtesting_capability() -> None:
@@ -1803,14 +1813,14 @@ def test_roadmap_does_not_claim_trading_or_backtesting_capability() -> None:
     assert "does not place orders" in roadmap
 ```
 
-- [ ] **Step 2: Document only implemented contracts and limitations**
+- [superseded] **Step 2: Document only implemented contracts and limitations**
 
 Update the repository map, M1 boundary, validation-decision meaning, M0 bridge,
 offline fixture workflow, complete verification commands, and non-goals. Preserve
 the distinction between a structurally validated manifest and channel/use-scoped
 historical eligibility. Do not claim a real vendor dataset has been verified.
 
-- [ ] **Step 3: Run plan self-review and placeholder scans**
+- [superseded] **Step 3: Run plan self-review and placeholder scans**
 
 Run: `rg -n "T[B]D|T[O]DO|implement la[t]er|fill i[n]|appropriate error handlin[g]|similar to Tas[k]" docs/superpowers/plans/2026-09-01-m1-point-in-time-data.md`
 
@@ -1821,7 +1831,7 @@ Run: `rg -n $'\xE2\x80\x94' .`
 
 Expected: no U+2014 match.
 
-- [ ] **Step 4: Run compatibility, forbidden-capability, and full quality gates**
+- [superseded] **Step 4: Run compatibility, forbidden-capability, and full quality gates**
 
 Run: `git diff 4587745 -- src/drift/domain/datasets.py src/drift/domain/artifacts.py src/drift/domain/experiments.py src/drift/domain/events.py src/drift/serialization/canonical.py`
 
@@ -1836,7 +1846,7 @@ Run: `uv run pytest && uv run ruff check . && uv run ruff format --check . && uv
 
 Expected: all tests pass; lint, formatting, typing, and build exit 0.
 
-- [ ] **Step 5: Perform a fresh adversarial review**
+- [superseded] **Step 5: Perform a fresh adversarial review**
 
 Attempt each cheat from the design: future fundamentals, current universe,
 revised macro history, future action knowledge, ticker collision, post-event
@@ -1844,7 +1854,7 @@ news, unavailable forward fill, adjusted-price leakage, channel mismatch, and
 same-path byte substitution. Record a failing test for any newly successful
 cheat and fix the smallest contract or validator that closes it.
 
-- [ ] **Step 6: Commit documentation and close the historical plan**
+- [superseded] **Step 6: Commit documentation and close the historical plan**
 
 After every preceding checkbox is truthfully complete, change the plan status to
 completed, record implementation commit hashes, and mark checkboxes complete.
@@ -1854,7 +1864,7 @@ git add README.md docs src tests
 git commit -m "docs: complete point-in-time data milestone"
 ```
 
-- [ ] **Step 7: Run Checkpoint**
+- [superseded] **Step 7: Run Checkpoint**
 
 Verify branch, HEAD, complete gate output, clean Git status, scope exclusions,
 M0 replay compatibility, and both M1 submilestones. Do not create a Session
