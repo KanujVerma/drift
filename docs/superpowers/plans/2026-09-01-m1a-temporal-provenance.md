@@ -36,6 +36,9 @@ These rulings narrow details in the umbrella design without discarding its resea
 2. M1a implements no dataset- or partition-level availability default. There is no real uniform source contract to justify one yet. A later adapter may propose defaults only with source evidence and a separate design review.
 3. M1a creates no durable dataset-wide `historical_evaluation_eligible` label, promotion binding, or permission artifact. It records immutable validation facts and returns `eligible`, `ineligible`, or `indeterminate` for a specific channel, policy, and cutoff. A later evaluator decides what evidence its use requires.
 4. Tests are deterministic pytest tables. Hypothesis is not justified because the closed shape, cutoff, channel, policy, and revision cases can be enumerated directly without expanding the dependency surface.
+5. Query results are immutable evidence objects, not transient booleans. Their canonical identity binds the normalized cutoff, requested channel, policy ID and hash, evaluated evidence, every considered fact version, and the selected version when one exists.
+6. M1a supports one rule-derived availability operation: `conservative-upper-bound-v1`. The implementation derives an exact conservative instant from retained raw bounded evidence, preserves its source label and precision, and recomputes the derivation during validation and evaluation. Callers cannot supply trusted derived bounds.
+7. Schema fields and manifest partitions are canonically ordered during model construction. Schema and manifest hash preimages are explicit and every identity-bearing mutation must change canonical bytes and hashes.
 
 The first ruling follows the evidence distinction already captured in the umbrella design. ALFRED real-time periods establish that vintages and intervals matter, Qlib establishes selection by revision availability rather than latest value, and the SEC warning that it does not record first-public time shows why rule provenance cannot manufacture an exact observed timestamp. The second and third rulings prevent coarse metadata from becoming false point-in-time confidence.
 
@@ -52,7 +55,7 @@ The first ruling follows the evidence distinction already captured in the umbrel
 | `src/drift/datasets/resolver.py` | Confined local fixture resolver that returns verified bytes |
 | `src/drift/datasets/validation.py` | Manifest, lineage, revision, and synthetic-record validation |
 | `src/drift/datasets/references.py` | Additive provenance-only bridge to existing `DatasetReference` |
-| `src/drift/datasets/events.py` | Compact audit-event factories for manifest and validation evidence |
+| `src/drift/datasets/events.py` | Compact audit-event draft factories for manifest and validation evidence |
 | `tests/fixtures/datasets/m1a/*.json` | Small adversarial fact-version fixture bytes |
 | `tests/unit/test_temporal.py` | Deterministic availability shape, policy, channel, and cutoff table |
 | `tests/unit/test_manifests.py` | Manifest strictness, lineage, ordering, and hash tests |
@@ -73,7 +76,7 @@ The first ruling follows the evidence distinction already captured in the umbrel
 
 **Interfaces:**
 - Consumes: `ArtifactReference`, `FrozenModel`, `NonBlankStr`, `SHA256Hash`, `UTCDateTime`, and existing `content_hash`.
-- Produces: `ValidPeriodV1`, `ChannelKind`, `AvailabilityShape`, `AvailabilityBasis`, `SourcePrecision`, `CutoffEligibility`, `AvailabilityChannelV1`, `RuleDerivationV1`, `AvailabilityEvidenceV1`, `AvailabilityPolicyV1`, `CutoffEligibilityResultV1`, and `evaluate_availability(evidence, channel, policy, cutoff) -> CutoffEligibilityResultV1`.
+- Produces: `ValidPeriodV1`, `ChannelKind`, `AvailabilityShape`, `AvailabilityBasis`, `SourcePrecision`, `CutoffEligibility`, `AvailabilityChannelV1`, `RuleDerivationV1`, `AvailabilityEvidenceV1`, `AvailabilityPolicyV1`, `CutoffEligibilityResultV1`, `derive_conservative_upper_bound(raw_evidence, rule_reference) -> AvailabilityEvidenceV1`, and `evaluate_availability(evidence, channel, policy, cutoff, retained_evidence) -> CutoffEligibilityResultV1`.
 
 - [ ] **Step 1: Write the deterministic failing availability table**
 
@@ -87,8 +90,8 @@ The first ruling follows the evidence distinction already captured in the umbrel
         ("bounded", utc(2022, 5, 6, 0), PUBLIC, STRICT, CutoffEligibility.ELIGIBLE),
         ("unknown", utc(2030, 1, 1), PUBLIC, STRICT, CutoffEligibility.INDETERMINATE),
         ("exact", utc(2022, 5, 6), VENDOR, STRICT, CutoffEligibility.INDETERMINATE),
-        ("rule_exact", utc(2022, 5, 6), PUBLIC, STRICT, CutoffEligibility.INELIGIBLE),
-        ("rule_exact", utc(2022, 5, 6), PUBLIC, RULE_ALLOWED, CutoffEligibility.ELIGIBLE),
+        ("derived_upper", utc(2022, 5, 6), PUBLIC, STRICT, CutoffEligibility.INELIGIBLE),
+        ("derived_upper", utc(2022, 5, 6), PUBLIC, RULE_ALLOWED, CutoffEligibility.ELIGIBLE),
     ),
 )
 def test_cutoff_eligibility_table(
@@ -98,11 +101,41 @@ def test_cutoff_eligibility_table(
     policy: AvailabilityPolicyV1,
     expected: CutoffEligibility,
 ) -> None:
-    result = evaluate_availability(EVIDENCE[case], requested_channel, policy, cutoff)
+    result = evaluate_availability(
+        EVIDENCE[case], requested_channel, policy, cutoff, RAW_EVIDENCE_BY_HASH
+    )
     assert result.classification is expected
 ```
 
-Add separate validation cases for a naive cutoff, reversed bounds, equal bounded bounds, exact unequal bounds, unknown with bounds, date precision without an IANA timezone, rule basis without rule metadata, non-rule basis with rule metadata, empty rule inputs, and duplicate policy rule hashes.
+Add separate validation cases for a naive cutoff, reversed bounds, equal bounded bounds, exact unequal bounds, unknown with bounds, missing source labels, date precision without an IANA timezone, non-rule date/minute/session evidence marked exact, unknown shape with non-unknown precision, rule basis without rule metadata, non-rule basis with rule metadata, caller-supplied derived bounds, missing retained raw evidence, raw evidence hash mismatch, unapproved rule, and duplicate policy rule hashes.
+
+Add behavioral identity tests, not field-presence assertions:
+
+```python
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("cutoff", utc(2022, 5, 6, 0, 1)),
+        ("channel", VENDOR),
+        ("policy", RULE_ALLOWED),
+        ("evidence", EVIDENCE["bounded"]),
+    ),
+)
+def test_cutoff_result_hash_changes_for_every_query_input_mutation(
+    field: str,
+    value: object,
+) -> None:
+    arguments = {
+        "evidence": EVIDENCE["exact"],
+        "channel": PUBLIC,
+        "policy": STRICT,
+        "cutoff": utc(2022, 5, 6),
+        "retained_evidence": RAW_EVIDENCE_BY_HASH,
+    }
+    result = evaluate_availability(**arguments)
+    changed = evaluate_availability(**{**arguments, field: value})
+    assert content_hash(changed) != content_hash(result)
+```
 
 - [ ] **Step 2: Run the test and verify the module is absent**
 
@@ -154,9 +187,9 @@ class AvailabilityChannelV1(FrozenModel):
 
 
 class RuleDerivationV1(FrozenModel):
-    rule_hash: SHA256Hash
-    rule_version: NonBlankStr
-    input_hashes: tuple[SHA256Hash, ...]
+    rule_reference: ArtifactReference
+    rule_version: Literal["1"] = "1"
+    input_evidence_hash: SHA256Hash
 
 
 class AvailabilityEvidenceV1(FrozenModel):
@@ -165,6 +198,7 @@ class AvailabilityEvidenceV1(FrozenModel):
     lower_bound: UTCDateTime | None = None
     upper_bound: UTCDateTime | None = None
     precision: SourcePrecision
+    source_time_label: NonBlankStr | None = None
     source_timezone: NonBlankStr | None = None
     basis: AvailabilityBasis
     evidence_reference: ArtifactReference | None = None
@@ -179,41 +213,153 @@ class AvailabilityPolicyV1(FrozenModel):
 class CutoffEligibilityResultV1(FrozenModel):
     classification: CutoffEligibility
     reason: NonBlankStr
+    cutoff: UTCDateTime
+    requested_channel: AvailabilityChannelV1
+    policy: AvailabilityPolicyV1
+    policy_id: NonBlankStr
+    policy_hash: SHA256Hash
+    evidence: AvailabilityEvidenceV1
     evidence_hash: SHA256Hash
+    derivation_input_evidence_hash: SHA256Hash | None = None
 ```
 
-Use a model validator with these exact invariants: exact requires two equal bounds; bounded requires two bounds with `lower_bound < upper_bound`; unknown requires neither bound; date and session precision require a valid `zoneinfo.ZoneInfo`; rule-derived basis requires nonempty, unique input hashes and `RuleDerivationV1`; every other basis forbids it. `ValidPeriodV1` is nonempty and half-open. `AvailabilityPolicyV1` contains `policy_id` and unique `permitted_rule_hashes`; it contains no timestamp default.
+Use this explicit compatibility matrix:
+
+| Shape | Precision | Permitted basis | Mechanical requirement |
+|---|---|---|---|
+| `exact` | `second` | non-rule source, vendor, or ingest | Equal bounds and retained timestamp label |
+| `bounded` | `second`, `minute`, `date`, `interval`, or `session` | non-rule source, vendor, or ingest | Ordered bounds and retained source label |
+| `exact` | retained raw bounded precision | `rule_derived` only | Constructed only by `conservative-upper-bound-v1` |
+| `unknown` | `unknown` | non-rule source, vendor, or ingest | No bounds; optional unparsed source label retained |
+
+Any combination not listed is invalid. In particular, non-rule `date`, `minute`, or `session` evidence cannot be exact, and unknown precision cannot accompany an exact or bounded shape. Date precision requires an IANA timezone and an ISO date label. Convert local midnight at that label and the next local date to UTC, including daylight-saving changes, and require those exact values as the bounds. Minute precision similarly requires an ISO local-minute label and the exact one-minute local window. Session precision remains bounded and requires a source label plus evidence artifact; M1a does not infer session bounds. This makes a date-to-midnight exact timestamp unconstructable while retaining the raw label, precision, and timezone.
+
+```python
+def expected_source_window(
+    source_time_label: str,
+    precision: SourcePrecision,
+    source_timezone: str,
+) -> tuple[datetime, datetime]:
+    timezone = ZoneInfo(source_timezone)
+    if precision is SourcePrecision.DATE:
+        local_date = date.fromisoformat(source_time_label)
+        lower = datetime.combine(local_date, time.min, timezone)
+        upper = datetime.combine(local_date + timedelta(days=1), time.min, timezone)
+    elif precision is SourcePrecision.MINUTE:
+        naive = datetime.strptime(source_time_label, "%Y-%m-%dT%H:%M")
+        first = naive.replace(tzinfo=timezone, fold=0)
+        second = naive.replace(tzinfo=timezone, fold=1)
+        if first.utcoffset() != second.utcoffset():
+            raise ValueError("ambiguous or nonexistent local minute stays unknown")
+        if first.astimezone(UTC).astimezone(timezone).replace(tzinfo=None) != naive:
+            raise ValueError("ambiguous or nonexistent local minute stays unknown")
+        lower = first
+        upper = lower + timedelta(minutes=1)
+    else:
+        raise ValueError("only date and minute labels define mechanical windows")
+    return lower.astimezone(UTC), upper.astimezone(UTC)
+```
+
+For raw date or minute evidence, the model validator calls this function and requires exact bound equality. Invalid labels, nonexistent or ambiguous local minutes, and mismatched bounds fail validation. Ambiguous local-minute labels require an offset-bearing second-precision source label or remain unknown; M1a never guesses a `fold` value.
+
+`ValidPeriodV1` is nonempty and half-open. `AvailabilityPolicyV1` contains `policy_id` and unique `permitted_rule_hashes`; it contains no timestamp default.
 
 - [ ] **Step 4: Implement tri-state cutoff evaluation**
 
 ```python
+CONSERVATIVE_UPPER_BOUND_RULE_SPEC = {
+    "rule_id": "conservative-upper-bound",
+    "version": "1",
+    "algorithm": "derived exact availability equals retained bounded upper bound",
+}
+CONSERVATIVE_UPPER_BOUND_RULE_HASH = content_hash(
+    CONSERVATIVE_UPPER_BOUND_RULE_SPEC
+)
+
+
+def derive_conservative_upper_bound(
+    raw_evidence: AvailabilityEvidenceV1,
+    rule_reference: ArtifactReference,
+) -> AvailabilityEvidenceV1:
+    if raw_evidence.shape is not AvailabilityShape.BOUNDED:
+        raise ValueError("conservative upper-bound rule requires bounded evidence")
+    if raw_evidence.basis is AvailabilityBasis.RULE_DERIVED:
+        raise ValueError("rule input must be retained raw evidence")
+    if rule_reference.content_hash != CONSERVATIVE_UPPER_BOUND_RULE_HASH:
+        raise ValueError("rule artifact does not match conservative-upper-bound-v1")
+    assert raw_evidence.upper_bound is not None
+    return AvailabilityEvidenceV1(
+        channel=raw_evidence.channel,
+        shape=AvailabilityShape.EXACT,
+        lower_bound=raw_evidence.upper_bound,
+        upper_bound=raw_evidence.upper_bound,
+        precision=raw_evidence.precision,
+        source_time_label=raw_evidence.source_time_label,
+        source_timezone=raw_evidence.source_timezone,
+        basis=AvailabilityBasis.RULE_DERIVED,
+        evidence_reference=raw_evidence.evidence_reference,
+        rule_derivation=RuleDerivationV1(
+            rule_reference=rule_reference,
+            input_evidence_hash=content_hash(raw_evidence),
+        ),
+    )
+
+
 def evaluate_availability(
     evidence: AvailabilityEvidenceV1,
     channel: AvailabilityChannelV1,
     policy: AvailabilityPolicyV1,
     cutoff: datetime,
+    retained_evidence: Mapping[SHA256Hash, AvailabilityEvidenceV1],
 ) -> CutoffEligibilityResultV1:
     cutoff_utc = _normalize_utc(cutoff)
     digest = content_hash(evidence)
+    policy_digest = content_hash(policy)
+    common = {
+        "cutoff": cutoff_utc,
+        "requested_channel": channel,
+        "policy": policy,
+        "policy_id": policy.policy_id,
+        "policy_hash": policy_digest,
+        "evidence": evidence,
+        "evidence_hash": digest,
+    }
     if evidence.channel != channel:
         return CutoffEligibilityResultV1(
             classification=CutoffEligibility.INDETERMINATE,
             reason="no_evidence_for_requested_channel",
-            evidence_hash=digest,
+            **common,
         )
     if evidence.shape is AvailabilityShape.UNKNOWN:
         return CutoffEligibilityResultV1(
             classification=CutoffEligibility.INDETERMINATE,
             reason="availability_unknown",
-            evidence_hash=digest,
+            **common,
         )
     if evidence.basis is AvailabilityBasis.RULE_DERIVED:
         assert evidence.rule_derivation is not None
-        if evidence.rule_derivation.rule_hash not in policy.permitted_rule_hashes:
+        derivation = evidence.rule_derivation
+        raw = retained_evidence.get(derivation.input_evidence_hash)
+        if raw is None or content_hash(raw) != derivation.input_evidence_hash:
+            return CutoffEligibilityResultV1(
+                classification=CutoffEligibility.INDETERMINATE,
+                reason="rule_input_evidence_unavailable",
+                derivation_input_evidence_hash=derivation.input_evidence_hash,
+                **common,
+            )
+        if derive_conservative_upper_bound(raw, derivation.rule_reference) != evidence:
+            return CutoffEligibilityResultV1(
+                classification=CutoffEligibility.INDETERMINATE,
+                reason="rule_derivation_not_reproducible",
+                derivation_input_evidence_hash=derivation.input_evidence_hash,
+                **common,
+            )
+        if derivation.rule_reference.content_hash not in policy.permitted_rule_hashes:
             return CutoffEligibilityResultV1(
                 classification=CutoffEligibility.INELIGIBLE,
                 reason="rule_not_permitted_by_policy",
-                evidence_hash=digest,
+                derivation_input_evidence_hash=derivation.input_evidence_hash,
+                **common,
             )
     assert evidence.lower_bound is not None and evidence.upper_bound is not None
     if evidence.upper_bound <= cutoff_utc:
@@ -228,9 +374,16 @@ def evaluate_availability(
     return CutoffEligibilityResultV1(
         classification=classification,
         reason=reason,
-        evidence_hash=digest,
+        derivation_input_evidence_hash=(
+            None
+            if evidence.rule_derivation is None
+            else evidence.rule_derivation.input_evidence_hash
+        ),
+        **common,
     )
 ```
+
+Add a result validator requiring `policy_id == policy.policy_id`, `policy_hash == content_hash(policy)`, `evidence_hash == content_hash(evidence)`, and a derivation input hash exactly when the evaluated evidence is rule-derived. UTC normalization is enforced by `UTCDateTime`. This makes copied or internally inconsistent query results invalid, while the behavioral tests prove that changing any real query input changes canonical result identity.
 
 - [ ] **Step 5: Run temporal tests, lint, and type checks**
 
@@ -255,7 +408,7 @@ git commit -m "feat: add point-in-time availability evidence"
 
 **Interfaces:**
 - Consumes: M0 `ArtifactReference`, `TemporalCoverage`, common validated types, Task 1 `AvailabilityChannelV1`, and canonical serialization functions.
-- Produces: `DatasetKind`, `LogicalType`, `EvidenceGranularity`, `DeterminismClaim`, `SourceDescriptorV1`, `AcquisitionDescriptorV1`, `LicenseDescriptorV1`, `FieldDescriptorV1`, `SchemaDescriptorV1`, `PartitionDescriptorV1`, `RecordTemporalContractV1`, `LineageDescriptorV1`, `DatasetManifestV1`, `manifest_body(manifest) -> dict[str, JSONValue]`, `manifest_hash(manifest) -> str`, and `derived_temporal_coverage(partitions) -> TemporalCoverage`.
+- Produces: `DatasetKind`, `LogicalType`, `EvidenceGranularity`, `DeterminismClaim`, `SourceDescriptorV1`, `AcquisitionDescriptorV1`, `LicenseDescriptorV1`, `FieldDescriptorV1`, `SchemaDescriptorV1`, `PartitionDescriptorV1`, `RecordTemporalContractV1`, `LineageDescriptorV1`, `DatasetManifestV1`, `schema_body(schema) -> dict[str, JSONValue]`, `schema_hash(schema) -> str`, `manifest_body(manifest) -> dict[str, JSONValue]`, `manifest_hash(manifest) -> str`, and `derived_temporal_coverage(partitions) -> TemporalCoverage`.
 
 - [ ] **Step 1: Write failing manifest and canonical hash tests**
 
@@ -284,12 +437,22 @@ def test_manifest_hash_sorts_partitions_by_key_and_content_hash() -> None:
     )
 
 
+def test_equivalent_input_orders_have_equal_models_bytes_and_hashes() -> None:
+    left = manifest(fields=(FIELD_B, FIELD_A), partitions=(PARTITION_B, PARTITION_A))
+    right = manifest(fields=(FIELD_A, FIELD_B), partitions=(PARTITION_A, PARTITION_B))
+    assert left == right
+    assert canonical_json(left) == canonical_json(right)
+    assert manifest_hash(left) == manifest_hash(right)
+
+
 def test_no_availability_default_exists_on_manifest_or_partition() -> None:
     assert "availability" not in DatasetManifestV1.model_fields
     assert "availability" not in PartitionDescriptorV1.model_fields
 ```
 
-Also test duplicate field IDs/names, duplicate partition IDs/keys, schema-hash mismatch, reversed coverage, raw data with lineage, derived data without lineage, duplicate lineage inputs, mismatched lineage output schema, naive acquisition/creation/execution times, source locators containing credentials, and unknown license rights remaining representable.
+Also test duplicate field IDs/names, duplicate partition IDs/keys, schema-hash mismatch, reversed coverage, raw data with lineage, derived data without lineage, duplicate lineage inputs, mismatched lineage output schema, naive acquisition/creation/execution times, source locators containing credentials, and an absent optional license version.
+
+Use deterministic mutation tables to prove every identity-bearing field changes its preimage and digest. The schema table mutates version, each field ID/name/type/nullability/unit, field membership, and order-normalized content. The manifest table mutates schema/hash profile versions, dataset ID/version/kind, creation time, every source/acquisition/license field, schema hash or content, every partition field and artifact hash, temporal bindings/channels, and every lineage field. Input ordering alone must not change model equality, canonical bytes, or hashes.
 
 - [ ] **Step 2: Run tests and verify the models are absent**
 
@@ -361,9 +524,27 @@ class DatasetManifestV1(FrozenModel):
     partitions: tuple[PartitionDescriptorV1, ...]
     temporal_contract: RecordTemporalContractV1
     lineage: LineageDescriptorV1 | None = None
+
+    @field_validator("partitions")
+    @classmethod
+    def canonicalize_partitions(
+        cls, partitions: tuple[PartitionDescriptorV1, ...]
+    ) -> tuple[PartitionDescriptorV1, ...]:
+        if not partitions:
+            raise ValueError("manifest partitions must not be empty")
+        if len({item.partition_id for item in partitions}) != len(partitions):
+            raise ValueError("partition IDs must be unique")
+        if len({item.partition_key for item in partitions}) != len(partitions):
+            raise ValueError("partition keys must be unique")
+        return tuple(
+            sorted(
+                partitions,
+                key=lambda item: (item.partition_key, item.artifact.content_hash),
+            )
+        )
 ```
 
-`SourceDescriptorV1` records source ID, publisher, product, optional source version, and a retained evidence reference, never credentials. `AcquisitionDescriptorV1` records `acquired_at`, collector ID/version, and acquisition evidence. `LicenseDescriptorV1` records provider legal name, agreement ID/version, terms reference, acquired time, and closed `allowed`, `restricted`, or `unknown` values for research use, redistribution, derived use, and retention. It is provenance, not a legal rules engine.
+`SourceDescriptorV1` records source ID, publisher, product, optional source version, and a retained evidence reference, never credentials. `AcquisitionDescriptorV1` records `acquired_at`, collector ID/version, and acquisition evidence. `LicenseDescriptorV1` records only the legal source and retained terms evidence. It is provenance, not a legal rules engine.
 
 Use these exact descriptor fields:
 
@@ -383,18 +564,6 @@ class AcquisitionDescriptorV1(FrozenModel):
     evidence_reference: ArtifactReference
 
 
-class LicenseDescriptorV1(FrozenModel):
-    provider_legal_name: NonBlankStr
-    agreement_id: NonBlankStr
-    agreement_version: NonBlankStr | None = None
-    terms_reference: ArtifactReference
-    acquired_at: UTCDateTime
-    research_use: RightsStatus
-    redistribution: RightsStatus
-    derived_use: RightsStatus
-    retention: RightsStatus
-
-
 class FieldDescriptorV1(FrozenModel):
     field_id: NonBlankStr
     name: NonBlankStr
@@ -407,30 +576,61 @@ class SchemaDescriptorV1(FrozenModel):
     schema_version: NonBlankStr
     fields: tuple[FieldDescriptorV1, ...]
     schema_hash: SHA256Hash
+
+    @field_validator("fields")
+    @classmethod
+    def canonicalize_fields(
+        cls, fields: tuple[FieldDescriptorV1, ...]
+    ) -> tuple[FieldDescriptorV1, ...]:
+        if not fields:
+            raise ValueError("schema fields must not be empty")
+        if len({field.field_id for field in fields}) != len(fields):
+            raise ValueError("schema field IDs must be unique")
+        if len({field.name for field in fields}) != len(fields):
+            raise ValueError("schema field names must be unique")
+        return tuple(sorted(fields, key=lambda field: field.field_id))
 ```
 
-`SchemaDescriptorV1` has a version, ordered nonempty `FieldDescriptorV1` tuple, and schema hash. Fields use a small closed logical-type enum and stable IDs. The temporal contract binds only existing field IDs, declares record evidence, and has no default evidence or cutoff policy. Require nonempty, unique declared channels because every record must carry evidence for each channel the dataset claims to support.
+`SchemaDescriptorV1` has a version, nonempty `FieldDescriptorV1` tuple, and schema hash. Fields use a small closed logical-type enum and stable IDs. The temporal contract binds only existing field IDs, declares record evidence, and has no default evidence or cutoff policy. Require nonempty, unique declared channels because every record must carry evidence for each channel the dataset claims to support.
+
+Use these provenance-only license fields:
+
+```python
+class LicenseDescriptorV1(FrozenModel):
+    provider_legal_name: NonBlankStr
+    license_reference: NonBlankStr
+    license_version: NonBlankStr | None = None
+    acquired_at: UTCDateTime
+    terms_evidence_reference: ArtifactReference
+```
+
+Do not encode allowed use, redistribution, derivation, retention, or other legal conclusions in M1a. A later operation that needs rights confirmation must use separately reviewed evidence and policy.
 
 - [ ] **Step 4: Implement canonical ordering and hashing**
 
 ```python
+def schema_body(schema: SchemaDescriptorV1) -> dict[str, JSONValue]:
+    body = canonical_data(schema)
+    assert isinstance(body, dict)
+    del body["schema_hash"]
+    return body
+
+
+def schema_hash(schema: SchemaDescriptorV1) -> str:
+    return content_hash(schema_body(schema))
+
+
 def manifest_body(manifest: DatasetManifestV1) -> dict[str, JSONValue]:
     body = canonical_data(manifest)
     assert isinstance(body, dict)
-    partitions = body["partitions"]
-    assert isinstance(partitions, list)
-    body["partitions"] = sorted(
-        partitions,
-        key=lambda item: canonical_json(
-            [item["partition_key"], item["artifact"]["content_hash"]]
-        ),
-    )
     return body
 
 
 def manifest_hash(manifest: DatasetManifestV1) -> str:
     return content_hash(manifest_body(manifest))
 ```
+
+The schema hash preimage is every schema field except its own stored `schema_hash`. The manifest has no stored manifest hash, so its preimage is every canonical manifest field, including the validated schema hash. Use field validators during model construction to sort schema fields by stable field ID and partitions by `(partition_key, artifact.content_hash)`. Reject duplicates before returning the canonical tuples. Validate the supplied schema hash after ordering. This guarantees equivalent model instances have equal canonical JSON, rather than merely making `manifest_hash` sort a copy.
 
 `derived_temporal_coverage` returns the minimum partition start and maximum partition end using M0's inclusive `TemporalCoverage`. Do not convert it to the half-open fact-validity contract.
 
@@ -455,7 +655,7 @@ git commit -m "feat: add immutable dataset manifests"
 
 **Interfaces:**
 - Consumes: `SHA256Hash` and `PartitionDescriptorV1`.
-- Produces: `ResolverLimits`, `VerifiedArtifactBytes`, `read_verified_local_artifact(root, relative_path, expected_hash, limits) -> VerifiedArtifactBytes`, and `verify_partition_bytes(partition, verified) -> tuple[str, ...]`.
+- Produces: `ResolverLimits`, `VerifiedArtifactBytes`, `read_verified_local_artifact(root, relative_path, expected_hash, limits) -> VerifiedArtifactBytes`, and `verify_partition_bytes(partition, verified) -> None`.
 
 - [ ] **Step 1: Write failing path, file-kind, size, mutation, and mismatch tests**
 
@@ -483,7 +683,7 @@ def test_parser_keeps_verified_bytes_after_path_replacement(tmp_path: Path) -> N
     assert verified.data == original
 ```
 
-Add deterministic cases for NULs, symlink path components, symlink escape, FIFO or other nonregular file, missing file, file above `max_bytes`, declared partition size mismatch, and partition hash mismatch.
+Add deterministic cases for NULs, symlink path components, symlink escape, FIFO or other nonregular file, missing file, file above `max_bytes`, descriptor identity, declared partition size mismatch, and partition hash mismatch. `verify_partition_bytes` returns `None` on success and raises typed `ArtifactIntegrityError` for a size or hash mismatch; it does not return finding strings before the finding model exists.
 
 - [ ] **Step 2: Run the test and verify resolver imports fail**
 
@@ -510,29 +710,47 @@ def read_verified_local_artifact(
     relative = Path(relative_path)
     if "\0" in relative_path or relative.is_absolute() or ".." in relative.parts:
         raise ArtifactResolutionError("artifact path must be confined to its root")
-    root_resolved = root.resolve(strict=True)
-    current = root_resolved
-    for part in relative.parts:
-        current = current / part
-        if current.is_symlink():
-            raise ArtifactResolutionError("artifact path must not contain symlinks")
-    candidate = current.resolve(strict=True)
-    if not candidate.is_relative_to(root_resolved) or not candidate.is_file():
-        raise ArtifactResolutionError("artifact must be a confined regular file")
-    size = candidate.stat().st_size
-    if size > limits.max_bytes:
-        raise ArtifactResolutionError("artifact exceeds configured size limit")
-    with candidate.open("rb") as stream:
-        data = stream.read(limits.max_bytes + 1)
-    if len(data) > limits.max_bytes:
-        raise ArtifactResolutionError("artifact exceeds configured size limit")
-    digest = sha256(data).hexdigest()
-    if digest != expected_hash:
-        raise ArtifactIntegrityError("artifact SHA-256 does not match")
-    return VerifiedArtifactBytes(data=data, byte_size=len(data), content_hash=digest)
+    root_fd = os.open(root.resolve(strict=True), os.O_RDONLY | os.O_DIRECTORY)
+    opened_dirs: list[int] = [root_fd]
+    try:
+        directory_fd = root_fd
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        for part in relative.parts[:-1]:
+            directory_fd = os.open(
+                part,
+                os.O_RDONLY | os.O_DIRECTORY | nofollow,
+                dir_fd=directory_fd,
+            )
+            opened_dirs.append(directory_fd)
+        file_fd = os.open(
+            relative.parts[-1],
+            os.O_RDONLY | nofollow,
+            dir_fd=directory_fd,
+        )
+        try:
+            opened = os.fstat(file_fd)
+            if not stat.S_ISREG(opened.st_mode):
+                raise ArtifactResolutionError("artifact must be a regular file")
+            if opened.st_size > limits.max_bytes:
+                raise ArtifactResolutionError("artifact exceeds configured size limit")
+            with os.fdopen(file_fd, "rb", closefd=False) as stream:
+                data = stream.read(limits.max_bytes + 1)
+            if len(data) > limits.max_bytes:
+                raise ArtifactResolutionError("artifact exceeds configured size limit")
+            digest = sha256(data).hexdigest()
+            if digest != expected_hash:
+                raise ArtifactIntegrityError("artifact SHA-256 does not match")
+            return VerifiedArtifactBytes(
+                data=data, byte_size=len(data), content_hash=digest
+            )
+        finally:
+            os.close(file_fd)
+    finally:
+        for descriptor in reversed(opened_dirs):
+            os.close(descriptor)
 ```
 
-The local fixture resolver is intentionally small. Every parser consumes `VerifiedArtifactBytes.data`; it never reopens a path. A future large-file adapter must hash and parse the same descriptor or use an immutable content-addressed object.
+The local fixture resolver is intentionally small. It opens each directory component with `O_NOFOLLOW` when the platform provides it, opens the file exactly once, checks the opened descriptor with `fstat`, and performs the bounded read and hash through that same descriptor. Every parser consumes `VerifiedArtifactBytes.data`; it never reopens a path. A future large-file adapter must hash and parse the same descriptor or use an immutable content-addressed object.
 
 - [ ] **Step 4: Run resolver tests and static checks**
 
@@ -558,7 +776,7 @@ git commit -m "feat: verify confined dataset artifacts"
 
 **Interfaces:**
 - Consumes: Task 1 temporal contracts, M0 `ArtifactReference`, `ImmutableJSON`, and canonical hashing.
-- Produces: `FindingSeverity`, `ValidationFindingV1`, `DatasetValidationError`, `RevisionKind`, `LogicalFactKeyV1`, `FactVersionV1`, `FactSelectionResultV1`, `fact_version_payload(version) -> dict[str, JSONValue]`, `validate_revision_chain(versions) -> tuple[ValidationFindingV1, ...]`, and `select_fact_version(versions, channel, policy, cutoff) -> FactSelectionResultV1`.
+- Produces: `FindingSeverity`, `ValidationFindingV1`, `DatasetValidationError`, `RevisionKind`, `LogicalFactKeyV1`, `FactVersionV1`, `FactSelectionResultV1`, `fact_version_payload(version) -> dict[str, JSONValue]`, `validate_revision_chain(versions) -> tuple[ValidationFindingV1, ...]`, and `select_fact_version(versions, channel, policy, cutoff, retained_evidence) -> FactSelectionResultV1`.
 
 - [ ] **Step 1: Write the deterministic revision-selection table**
 
@@ -581,13 +799,46 @@ def test_revision_selection_table(
     expected_class: CutoffEligibility,
     expected_value: str | None,
 ) -> None:
-    result = select_fact_version(CHAINS[case], PUBLIC, STRICT, cutoff)
+    result = select_fact_version(
+        CHAINS[case], PUBLIC, STRICT, cutoff, RAW_EVIDENCE_BY_HASH
+    )
     assert result.classification is expected_class
     actual = None if result.selected_version is None else result.selected_version.value
     assert actual == expected_value
 ```
 
 Add validation cases for duplicate version IDs, missing or multiple initial roots, missing predecessor, key mismatch, branching, cycle, decreasing source sequence, duplicate channel evidence, missing source artifact, payload-hash mismatch, withdrawal with a value, nonwithdrawal without a value and null reason, and naive cutoff.
+
+Add this behavioral result-identity test. It changes real query inputs and reruns selection instead of mutating serialized output fields:
+
+```python
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("cutoff", utc(2022, 8, 11)),
+        ("channel", VENDOR),
+        ("policy", RULE_ALLOWED),
+        ("versions", CHAINS["restated_plus_correction"]),
+    ),
+)
+def test_selection_result_hash_changes_for_every_query_input_mutation(
+    field: str,
+    value: object,
+) -> None:
+    arguments = {
+        "versions": CHAINS["restated"],
+        "channel": PUBLIC,
+        "policy": STRICT,
+        "cutoff": utc(2022, 8, 10),
+        "retained_evidence": RAW_EVIDENCE_BY_HASH,
+    }
+    original = select_fact_version(**arguments)
+    changed = select_fact_version(**{**arguments, field: value})
+    assert canonical_json(changed) != canonical_json(original)
+    assert content_hash(changed) != content_hash(original)
+```
+
+Reordering the same input versions without changing their canonical source-sequence order must produce equal canonical result bytes and hashes.
 
 - [ ] **Step 2: Run tests and verify revision types are absent**
 
@@ -623,6 +874,14 @@ class LogicalFactKeyV1(FrozenModel):
 class FactSelectionResultV1(FrozenModel):
     classification: CutoffEligibility
     reason: NonBlankStr
+    cutoff: UTCDateTime
+    requested_channel: AvailabilityChannelV1
+    policy: AvailabilityPolicyV1
+    policy_id: NonBlankStr
+    policy_hash: SHA256Hash
+    considered_versions: tuple[FactVersionV1, ...]
+    considered_version_hashes: tuple[SHA256Hash, ...]
+    selected_version_hash: SHA256Hash | None = None
     selected_version: FactVersionV1 | None = None
 
 
@@ -672,10 +931,22 @@ def select_fact_version(
     channel: AvailabilityChannelV1,
     policy: AvailabilityPolicyV1,
     cutoff: datetime,
+    retained_evidence: Mapping[SHA256Hash, AvailabilityEvidenceV1],
 ) -> FactSelectionResultV1:
     findings = validate_revision_chain(versions)
     if findings:
         raise DatasetValidationError(findings)
+    cutoff_utc = _normalize_utc(cutoff)
+    ordered = tuple(sorted(versions, key=lambda version: version.source_sequence))
+    query_identity = {
+        "cutoff": cutoff_utc,
+        "requested_channel": channel,
+        "policy": policy,
+        "policy_id": policy.policy_id,
+        "policy_hash": content_hash(policy),
+        "considered_versions": ordered,
+        "considered_version_hashes": tuple(content_hash(item) for item in ordered),
+    }
     decisions = tuple(
         (
             version,
@@ -687,7 +958,8 @@ def select_fact_version(
                 ),
                 channel,
                 policy,
-                cutoff,
+                cutoff_utc,
+                retained_evidence,
             ),
         )
         for version in versions
@@ -701,11 +973,15 @@ def select_fact_version(
                 classification=CutoffEligibility.INELIGIBLE,
                 reason="latest_available_version_withdrawn",
                 selected_version=None,
+                selected_version_hash=None,
+                **query_identity,
             )
         return FactSelectionResultV1(
             classification=CutoffEligibility.ELIGIBLE,
             reason="latest_definitely_available_version",
             selected_version=selected,
+            selected_version_hash=content_hash(selected),
+            **query_identity,
         )
     classification = (
         CutoffEligibility.INDETERMINATE
@@ -724,10 +1000,12 @@ def select_fact_version(
             else "no_version_available_by_cutoff"
         ),
         selected_version=None,
+        selected_version_hash=None,
+        **query_identity,
     )
 ```
 
-Before `max`, require that all eligible versions form one predecessor path and source sequence is strictly increasing. A later indeterminate revision does not introduce future data and does not erase an earlier definitely available revision. A malformed or ambiguous chain raises typed validation findings rather than returning a favorable result.
+Validate that `policy_id == policy.policy_id`, `policy_hash == content_hash(policy)`, each considered hash equals the corresponding considered version's full canonical hash, and `selected_version_hash` is present exactly when `selected_version` is present and equals `content_hash(selected_version)`. Require unique considered hashes in source-sequence order and require a selected version to be a member of the considered tuple. Before `max`, require that all eligible versions form one predecessor path and source sequence is strictly increasing. A later indeterminate revision does not introduce future data and does not erase an earlier definitely available revision. A malformed or ambiguous chain raises typed validation findings rather than returning a favorable result.
 
 - [ ] **Step 5: Run revision and temporal tests**
 
@@ -772,6 +1050,27 @@ def test_record_decision_binds_manifest_bytes_and_fact_payloads() -> None:
 
 
 @pytest.mark.parametrize(
+    "context_field",
+    (
+        "decision_id",
+        "validator_version",
+        "validator_implementation_hash",
+        "validation_profile_id",
+        "validation_profile_hash",
+        "checked_at",
+    ),
+)
+def test_decision_hash_binds_every_validation_context_field(
+    context_field: str,
+) -> None:
+    original = validate_synthetic_fact_dataset(MANIFEST, VERIFIED, CONTEXT)
+    changed = validate_synthetic_fact_dataset(
+        MANIFEST, VERIFIED, mutate_context(CONTEXT, context_field)
+    )
+    assert content_hash(changed) != content_hash(original)
+
+
+@pytest.mark.parametrize(
     "mutation",
     ("changed_bytes", "wrong_schema", "missing_record_evidence", "broken_lineage"),
 )
@@ -802,7 +1101,9 @@ class DatasetValidationDecisionV1(FrozenModel):
     decision_id: UUID7
     manifest_hash: SHA256Hash
     validator_version: NonBlankStr
-    validator_hash: SHA256Hash
+    validator_implementation_hash: SHA256Hash
+    validation_profile_id: NonBlankStr
+    validation_profile_hash: SHA256Hash
     checked_at: UTCDateTime
     validation_scope: ValidationScope
     result: ValidationResult
@@ -810,11 +1111,20 @@ class DatasetValidationDecisionV1(FrozenModel):
     validated_record_hashes: tuple[SHA256Hash, ...] = ()
     checked_contracts: tuple[NonBlankStr, ...]
     findings: tuple[ValidationFindingV1, ...]
+
+
+class ValidationRunContextV1(FrozenModel):
+    decision_id: UUID7
+    validator_version: NonBlankStr
+    validator_implementation_hash: SHA256Hash
+    validation_profile_id: NonBlankStr
+    validation_profile_hash: SHA256Hash
+    checked_at: UTCDateTime
 ```
 
-Enforce `PASS` only when there are no error findings, unique sorted artifact and record hashes, and the expected scope fields are present. `MANIFEST_ONLY` has no record hashes. `RECORDS` requires nonempty record hashes and the `record-temporal-v1` checked contract. The decision contains no cutoff, promotion, dataset-wide PIT status, or eligibility permission.
+Copy every `ValidationRunContextV1` field unchanged into `DatasetValidationDecisionV1`; no context field may remain implicit or be regenerated. Enforce `PASS` only when there are no error findings, unique sorted artifact and record hashes, and the expected scope fields are present. `MANIFEST_ONLY` has no record hashes. `RECORDS` requires nonempty record hashes and the `record-temporal-v1` checked contract. The decision contains no cutoff, promotion, dataset-wide PIT status, or eligibility permission.
 
-`parse_synthetic_fact_bytes` accepts only a versioned JSON object with a `fact_versions` array, rejects unknown fields through Pydantic, and parses directly from `VerifiedArtifactBytes.data`. `validate_synthetic_fact_dataset` verifies every partition before parsing, checks manifest schema bindings, record counts, coverage, payload hashes, revision chains, declared-channel evidence, and derived lineage. It never reopens a path and never evaluates a historical cutoff.
+`parse_synthetic_fact_bytes` accepts only a versioned JSON object with a `fact_versions` array, rejects unknown fields through Pydantic, and parses directly from `VerifiedArtifactBytes.data`. `validate_synthetic_fact_dataset` verifies every partition before parsing, checks manifest schema bindings, record counts, coverage, payload hashes, revision chains, declared-channel evidence, source label/precision/bound consistency, recomputable rule derivations against retained raw evidence, and derived lineage. It never reopens a path and never evaluates a historical cutoff.
 
 - [ ] **Step 4: Implement the provenance-only M0 bridge**
 
@@ -848,11 +1158,15 @@ def build_dataset_reference(
 
 Document in the function docstring that this is provenance only. It does not certify a cutoff query or authorize promotion. Do not modify `DatasetReference`, `ExperimentSpecification`, or `ExperimentRun`.
 
-- [ ] **Step 5: Verify M0 replay and exact hashes**
+- [ ] **Step 5: Verify every preexisting persisted source and M0 behavior**
 
-Run: `uv run pytest tests/unit/test_dataset_validation.py tests/integration/test_m1_m0_compatibility.py tests/integration/test_replay.py tests/integration/test_tamper_detection.py -v`
+Run: `git diff --exit-code 1605246 -- $(git ls-tree -r --name-only 1605246 src/drift)`
 
-Expected: all tests pass; pinned M0 bytes and event hashes are unchanged.
+Expected: no diff. The path list comes from the pre-M1 tree, so new M1a files are not mistaken for regressions while every preexisting domain, configuration, error, serialization, and ledger source file is protected.
+
+Run: `uv run pytest tests/unit/test_canonical_serialization.py tests/unit/test_domain_models.py tests/unit/test_hashing.py tests/unit/test_ids.py tests/unit/test_ledger.py tests/unit/test_project_contract.py tests/integration/test_replay.py tests/integration/test_scripts.py tests/integration/test_tamper_detection.py tests/integration/test_m1_m0_compatibility.py -v`
+
+Expected: all preexisting tests plus the pinned M1/M0 compatibility test pass; canonical bytes, hashes, ledger append behavior, replay, and tamper detection remain unchanged.
 
 - [ ] **Step 6: Commit validation evidence and bridge**
 
@@ -870,6 +1184,7 @@ git commit -m "feat: record exact dataset validation evidence"
 - Create: `tests/fixtures/datasets/m1a/macro-vintage.json`
 - Create: `tests/fixtures/datasets/m1a/vendor-delay.json`
 - Create: `tests/fixtures/datasets/m1a/date-only-release.json`
+- Create: `tests/fixtures/datasets/m1a/derived-upper-bound.json`
 - Create: `tests/fixtures/datasets/m1a/bounded-release.json`
 - Create: `tests/fixtures/datasets/m1a/unknown-release.json`
 - Create: `tests/fixtures/datasets/m1a/late-ingest.json`
@@ -879,39 +1194,50 @@ git commit -m "feat: record exact dataset validation evidence"
 
 **Interfaces:**
 - Consumes: Tasks 1 through 5 and existing generic audit-event hashing/ledger APIs.
-- Produces: fixed synthetic fixture bytes, `build_manifest_recorded_event(manifest, manifest_reference, previous_event_hash) -> AuditEvent`, and `build_validation_completed_event(manifest, decision, previous_event_hash) -> AuditEvent`.
+- Produces: fixed synthetic fixture bytes, `build_manifest_recorded_event(manifest, manifest_reference) -> AuditEventDraft`, and `build_validation_completed_event(manifest, decision) -> AuditEventDraft`.
 
 - [ ] **Step 1: Add readable fixtures with pinned expected hashes**
 
-Every fixture uses schema version `1`, fixed UUIDv7 values, explicit record evidence, and UTC bounds. Keep expected fixture SHA-256 values in `test_m1a_leakage.py`, so changed bytes fail before parsing. A date-only release represents the local calendar day as a bounded UTC interval and preserves its IANA timezone and `date` precision. Vendor delay contains separate public and vendor evidence. Late ingestion contains separate public and system evidence. No fixture contains a market identifier, listing, universe, corporate action, bar, or session.
+Every fixture uses schema version `1`, fixed UUIDv7 values, explicit record evidence, raw `source_time_label`, and UTC bounds. Keep expected fixture SHA-256 values in `test_m1a_leakage.py`, so changed bytes fail before parsing. A date-only release represents the local calendar day as a bounded UTC interval and preserves its ISO date label, IANA timezone, and `date` precision. Vendor delay contains separate public and vendor evidence. Late ingestion contains separate public and system evidence.
+
+`derived-upper-bound.json` retains the raw bounded evidence and the immutable rule artifact reference. Its derived evidence is produced by `derive_conservative_upper_bound` during fixture construction, not authored with caller-supplied exact bounds. Parsing and validation recompute the input evidence hash and the derived evidence. Add negative byte fixtures that mutate the raw upper bound, rule artifact hash, input evidence hash, and derived instant independently. No fixture contains a market identifier, listing, universe, corporate action, bar, or session.
 
 - [ ] **Step 2: Write the deterministic adversarial result table**
 
 ```python
 CASES = (
-    ("late-fundamental.json", "public", "2022-04-30T23:59:59Z", "ineligible", None),
-    ("late-fundamental.json", "public", "2022-05-05T20:00:00Z", "eligible", "1.20"),
-    ("restated-fundamental.json", "public", "2022-06-01T00:00:00Z", "eligible", "1.20"),
-    ("restated-fundamental.json", "public", "2022-08-10T00:00:00Z", "eligible", "0.90"),
-    ("macro-vintage.json", "public", "2022-02-01T00:00:00Z", "eligible", "initial"),
-    ("macro-vintage.json", "public", "2022-03-01T00:00:00Z", "eligible", "revised"),
-    ("vendor-delay.json", "public", "2022-05-05T20:00:00Z", "eligible", "released"),
-    ("vendor-delay.json", "vendor", "2022-05-05T20:00:00Z", "ineligible", None),
-    ("date-only-release.json", "public", "2022-05-05T12:00:00Z", "indeterminate", None),
-    ("date-only-release.json", "public", "2022-05-06T04:00:00Z", "eligible", "released"),
-    ("unknown-release.json", "public", "2030-01-01T00:00:00Z", "indeterminate", None),
-    ("late-ingest.json", "system", "2022-05-06T00:00:00Z", "ineligible", None),
-    ("withdrawal.json", "public", "2022-09-01T00:00:00Z", "ineligible", None),
+    ("late-fundamental.json", "public", "strict", "2022-04-30T23:59:59Z", "ineligible", None),
+    ("late-fundamental.json", "public", "strict", "2022-05-05T20:00:00Z", "eligible", "1.20"),
+    ("restated-fundamental.json", "public", "strict", "2022-06-01T00:00:00Z", "eligible", "1.20"),
+    ("restated-fundamental.json", "public", "strict", "2022-08-10T00:00:00Z", "eligible", "0.90"),
+    ("macro-vintage.json", "public", "strict", "2022-02-01T00:00:00Z", "eligible", "initial"),
+    ("macro-vintage.json", "public", "strict", "2022-03-01T00:00:00Z", "eligible", "revised"),
+    ("vendor-delay.json", "public", "strict", "2022-05-05T20:00:00Z", "eligible", "released"),
+    ("vendor-delay.json", "vendor", "strict", "2022-05-05T20:00:00Z", "ineligible", None),
+    ("date-only-release.json", "public", "strict", "2022-05-05T12:00:00Z", "indeterminate", None),
+    ("date-only-release.json", "public", "strict", "2022-05-06T04:00:00Z", "eligible", "released"),
+    ("derived-upper-bound.json", "public", "rule_allowed", "2022-05-06T04:00:00Z", "eligible", "released"),
+    ("unknown-release.json", "public", "strict", "2030-01-01T00:00:00Z", "indeterminate", None),
+    ("late-ingest.json", "system", "strict", "2022-05-06T00:00:00Z", "ineligible", None),
+    ("withdrawal.json", "public", "strict", "2022-09-01T00:00:00Z", "ineligible", None),
 )
 
 
 @pytest.mark.parametrize(
-    ("filename", "channel_id", "cutoff", "expected_class", "expected_value"),
+    (
+        "filename",
+        "channel_id",
+        "policy_id",
+        "cutoff",
+        "expected_class",
+        "expected_value",
+    ),
     CASES,
 )
 def test_adversarial_cutoff_table(
     filename: str,
     channel_id: str,
+    policy_id: str,
     cutoff: str,
     expected_class: str,
     expected_value: str | None,
@@ -921,7 +1247,11 @@ def test_adversarial_cutoff_table(
     )
     versions = parse_synthetic_fact_bytes(verified)
     result = select_fact_version(
-        versions, CHANNELS[channel_id], STRICT, parse_utc(cutoff)
+        versions,
+        CHANNELS[channel_id],
+        POLICIES[policy_id],
+        parse_utc(cutoff),
+        retained_evidence_by_hash(verified),
     )
     assert result.classification.value == expected_class
     actual = None if result.selected_version is None else result.selected_version.value
@@ -936,15 +1266,40 @@ Run: `uv run pytest tests/integration/test_m1a_leakage.py -v`
 
 Expected: all cases pass without adding a provider adapter or market-specific type.
 
-- [ ] **Step 4: Implement compact audit events and replay tests**
+- [ ] **Step 4: Write failing audit-draft integration tests**
+
+```python
+def test_dataset_factories_return_unhashed_drafts_and_ledger_assigns_hashes(
+    tmp_path: Path,
+) -> None:
+    manifest_draft = build_manifest_recorded_event(MANIFEST, MANIFEST_REFERENCE)
+    validation_draft = build_validation_completed_event(MANIFEST, DECISION)
+    assert isinstance(manifest_draft, AuditEventDraft)
+    assert isinstance(validation_draft, AuditEventDraft)
+    assert "previous_event_hash" not in manifest_draft.model_fields
+    assert "event_hash" not in manifest_draft.model_fields
+
+    ledger = SQLiteLedger(tmp_path / "ledger.sqlite3")
+    manifest_event = ledger.append(manifest_draft)
+    validation_event = ledger.append(validation_draft)
+    assert validation_event.previous_event_hash == manifest_event.event_hash
+    ledger.verify_chain()
+```
+
+- [ ] **Step 5: Run audit tests RED**
+
+Run: `uv run pytest tests/integration/test_m1_dataset_audit.py -v`
+
+Expected: FAIL because the draft factories do not exist.
+
+- [ ] **Step 6: Implement compact audit-event draft factories**
 
 ```python
 def build_validation_completed_event(
     manifest: DatasetManifestV1,
     decision: DatasetValidationDecisionV1,
-    previous_event_hash: SHA256Hash,
-) -> AuditEvent:
-    unsigned = UnsignedAuditEvent(
+) -> AuditEventDraft:
+    return AuditEventDraft(
         event_id=decision.decision_id,
         event_type="dataset.validation.completed",
         timestamp=decision.checked_at,
@@ -956,21 +1311,25 @@ def build_validation_completed_event(
             "result": decision.result.value,
             "validation_scope": decision.validation_scope.value,
         },
-        previous_event_hash=previous_event_hash,
         schema_version="1",
     )
-    return build_audit_event(unsigned)
 ```
 
-Create the manifest event with manifest ID, manifest hash, hash profile, and schema version. Test append, chain verification, replay, and tamper detection for both events. Do not store raw bytes, physical paths, license prose, cutoff results, or credentials in SQLite. A per-query result remains a return value, not a durable dataset permission.
+Create the manifest draft with manifest ID, manifest hash, hash profile, and schema version. Factories never accept a predecessor hash and never call `build_audit_event`; only the ledger assigns `previous_event_hash` and `event_hash`. Do not store raw bytes, physical paths, license prose, cutoff results, or credentials in SQLite. A per-query result remains a return value, not a durable dataset permission.
 
-- [ ] **Step 5: Run M1a and complete M0 gates**
+- [ ] **Step 7: Run audit tests GREEN**
+
+Run: `uv run pytest tests/integration/test_m1_dataset_audit.py tests/integration/test_replay.py tests/integration/test_tamper_detection.py -v`
+
+Expected: all tests pass; append assigns the chain hashes and replay/tamper behavior is unchanged.
+
+- [ ] **Step 8: Run M1a and complete M0 gates**
 
 Run: `uv run pytest && uv run ruff check . && uv run ruff format --check . && uv run mypy src tests && uv build`
 
 Expected: all commands exit 0.
 
-- [ ] **Step 6: Commit adversarial evidence**
+- [ ] **Step 9: Commit adversarial evidence**
 
 ```text
 git add src/drift/datasets/events.py tests/fixtures/datasets/m1a tests/integration/test_m1a_leakage.py tests/integration/test_m1_dataset_audit.py
@@ -985,38 +1344,29 @@ git commit -m "test: prove temporal leakage is rejected"
 - Modify: `docs/architecture/roadmap.md`
 - Modify: `docs/superpowers/specs/2026-09-01-m1-point-in-time-data-design.md`
 - Modify: `docs/superpowers/plans/2026-09-01-m1a-temporal-provenance.md`
-- Test: all M0 and M1a tests.
+- Verify: repository contradiction/status audits plus all M0 and M1a tests.
 
 **Interfaces:**
 - Consumes: the complete M1a diff and verification evidence.
 - Produces: accurate repository capability/status text, no M1b claim, and a clean verified M1a checkpoint.
 
-- [ ] **Step 1: Write documentation assertions before changing status text**
-
-```python
-def test_roadmap_marks_m1a_complete_and_m1b_deferred() -> None:
-    roadmap = Path("docs/architecture/roadmap.md").read_text(encoding="utf-8")
-    assert "M1a" in roadmap and "complete" in roadmap.lower()
-    assert "M1b" in roadmap and "deferred" in roadmap.lower()
-
-
-def test_repository_does_not_claim_equity_backtest_readiness() -> None:
-    text = "\n".join(
-        Path(path).read_text(encoding="utf-8")
-        for path in ("README.md", "AGENTS.md", "docs/architecture/roadmap.md")
-    )
-    assert "equity-backtest ready" not in text.lower()
-```
-
-Add these to `tests/unit/test_project_contract.py`. Run the focused test and confirm it fails before documentation changes.
-
-- [ ] **Step 2: Document only implemented capability and limitations**
+- [ ] **Step 1: Document only implemented capability and limitations**
 
 Update the root guidance from "M0 only" to "M0 evidence kernel plus M1a temporal provenance". State that M1a provides exact-byte manifests, explicit channel-scoped evidence, immutable revisions, exact-object validation records, and per-query tri-state cutoff decisions. State that it has no real source, market semantics, evaluator, backtester, or trading capability, and that M1b remains required before historical US-equity evaluation claims.
 
 Mark this plan complete only after the gate passes. Update the umbrella design status to say M1a implemented and M1b deferred without rewriting its research or presenting the M1a implementation rulings as completed M1b design.
 
-- [ ] **Step 3: Run explicit scope, contradiction, and compatibility scans**
+- [ ] **Step 2: Run status and contradiction audits**
+
+Run: `rg -n "M0 research evidence kernel|M0 only|M1a|M1b|equity-backtest ready|equity backtest ready" README.md AGENTS.md docs/architecture docs/superpowers`
+
+Expected: inspect every match. Current status consistently says M0 plus M1a is implemented, M1b is deferred, and Drift is not ready for equity backtesting. Superseded documents are explicitly historical and do not present unchecked work as active.
+
+Run: `rg -n '^- \[ \]' docs/superpowers/plans`
+
+Expected: unchecked steps occur only in this active M1a plan until it is marked complete. The superseded mixed plan and deferred M1b outline have none.
+
+- [ ] **Step 3: Run explicit scope and compatibility scans**
 
 Run: `rg -n "(security_id|listing_id|ticker|universe|corporate.action|split|dividend|delist|exchange.calendar|market.session|tradability)" src tests`
 
@@ -1026,9 +1376,9 @@ Run: `rg -n "(robinhood|alpaca|place_order|submit_order|api[_-]?key|oauth|langgr
 
 Expected: no forbidden capability or dependency was added. Inspect every match.
 
-Run: `git diff 4587745 -- src/drift/domain/datasets.py src/drift/domain/artifacts.py src/drift/domain/experiments.py src/drift/domain/events.py src/drift/serialization/canonical.py`
+Run: `git diff --exit-code 1605246 -- $(git ls-tree -r --name-only 1605246 src/drift)`
 
-Expected: no diff in compatibility-sensitive M0 files.
+Expected: no diff in any preexisting persisted domain, configuration, error, serialization, or ledger source file. New M1a paths are absent from the baseline path list and therefore do not create false regressions.
 
 Run: `rg -n --fixed-strings "$(printf '\342\200\224')" . --glob '!uv.lock' && rg -n 'T[B]D|T[O]DO|implement la[t]er|fill in detail[s]|Similar to Tas[k]|appropriate error handlin[g]' docs/superpowers/plans/2026-09-01-m1a-temporal-provenance.md`
 
@@ -1049,7 +1399,7 @@ If a concrete defect is found, add a failing deterministic regression case, impl
 - [ ] **Step 6: Commit documentation and checkpoint M1a**
 
 ```text
-git add README.md AGENTS.md docs/architecture/roadmap.md docs/superpowers/specs/2026-09-01-m1-point-in-time-data-design.md docs/superpowers/plans/2026-09-01-m1a-temporal-provenance.md tests/unit/test_project_contract.py
+git add README.md AGENTS.md docs/architecture/roadmap.md docs/superpowers/specs/2026-09-01-m1-point-in-time-data-design.md docs/superpowers/plans/2026-09-01-m1a-temporal-provenance.md
 git commit -m "docs: complete M1a temporal provenance"
 ```
 
