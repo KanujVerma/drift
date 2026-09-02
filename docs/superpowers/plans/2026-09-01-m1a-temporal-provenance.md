@@ -109,6 +109,44 @@ def test_cutoff_eligibility_table(
 
 Add separate validation cases for a naive cutoff, reversed bounds, equal bounded bounds, exact unequal bounds, unknown with bounds, missing source labels, date precision without an IANA timezone, non-rule date/minute/session evidence marked exact, unknown shape with non-unknown precision, rule basis without rule metadata, non-rule basis with rule metadata, caller-supplied derived bounds, missing retained raw evidence, raw evidence hash mismatch, unapproved rule, and duplicate policy rule hashes.
 
+```python
+@pytest.mark.parametrize(
+    ("source_time_label", "bound"),
+    (
+        ("2022-05-05T20:00:00", utc(2022, 5, 5, 20)),
+        ("2022-05-05 20:00:00Z", utc(2022, 5, 5, 20)),
+        ("2022-05-05T20:00:00Z", utc(2022, 5, 5, 20, 0, 1)),
+    ),
+)
+def test_exact_second_rejects_malformed_unzoned_or_mismatched_labels(
+    source_time_label: str,
+    bound: datetime,
+) -> None:
+    with pytest.raises(ValidationError, match="offset-bearing ISO second"):
+        exact_source_evidence(source_time_label=source_time_label, bound=bound)
+
+
+def test_exact_second_normalizes_offset_label_to_equal_utc_bounds() -> None:
+    evidence = exact_source_evidence(
+        source_time_label="2022-05-05T16:00:00-04:00",
+        bound=utc(2022, 5, 5, 20),
+    )
+    assert evidence.lower_bound == evidence.upper_bound == utc(2022, 5, 5, 20)
+
+
+def test_rule_derived_channel_mismatch_retains_derivation_input_hash() -> None:
+    evidence = EVIDENCE["derived_upper"]
+    assert evidence.rule_derivation is not None
+    result = evaluate_availability(
+        evidence, VENDOR, RULE_ALLOWED, utc(2022, 5, 6), RAW_EVIDENCE_BY_HASH
+    )
+    assert result.classification is CutoffEligibility.INDETERMINATE
+    assert (
+        result.derivation_input_evidence_hash
+        == evidence.rule_derivation.input_evidence_hash
+    )
+```
+
 Add behavioral identity tests, not field-presence assertions:
 
 ```python
@@ -227,12 +265,29 @@ Use this explicit compatibility matrix:
 
 | Shape | Precision | Permitted basis | Mechanical requirement |
 |---|---|---|---|
-| `exact` | `second` | non-rule source, vendor, or ingest | Equal bounds and retained timestamp label |
+| `exact` | `second` | non-rule source, vendor, or ingest | Offset-bearing ISO second label parses to both equal UTC bounds |
 | `bounded` | `second`, `minute`, `date`, `interval`, or `session` | non-rule source, vendor, or ingest | Ordered bounds and retained source label |
 | `exact` | retained raw bounded precision | `rule_derived` only | Constructed only by `conservative-upper-bound-v1` |
 | `unknown` | `unknown` | non-rule source, vendor, or ingest | No bounds; optional unparsed source label retained |
 
 Any combination not listed is invalid. In particular, non-rule `date`, `minute`, or `session` evidence cannot be exact, and unknown precision cannot accompany an exact or bounded shape. Date precision requires an IANA timezone and an ISO date label. Convert local midnight at that label and the next local date to UTC, including daylight-saving changes, and require those exact values as the bounds. Minute precision similarly requires an ISO local-minute label and the exact one-minute local window. Session precision remains bounded and requires a source label plus evidence artifact; M1a does not infer session bounds. This makes a date-to-midnight exact timestamp unconstructable while retaining the raw label, precision, and timezone.
+
+```python
+_OFFSET_SECOND = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})$"
+)
+
+
+def expected_exact_second(source_time_label: str) -> datetime:
+    if _OFFSET_SECOND.fullmatch(source_time_label) is None:
+        raise ValueError("exact evidence requires an offset-bearing ISO second")
+    parsed = datetime.fromisoformat(source_time_label.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("exact evidence requires an offset-bearing ISO second")
+    return parsed.astimezone(UTC)
+```
+
+For non-rule exact-second evidence, the model validator calls `expected_exact_second` and requires both stored UTC bounds to equal the parsed instant. Fractional seconds, missing offsets, space separators, malformed labels, and label/bound mismatches fail validation.
 
 ```python
 def expected_source_window(
@@ -315,6 +370,11 @@ def evaluate_availability(
     cutoff_utc = _normalize_utc(cutoff)
     digest = content_hash(evidence)
     policy_digest = content_hash(policy)
+    derivation_input_hash = (
+        None
+        if evidence.rule_derivation is None
+        else evidence.rule_derivation.input_evidence_hash
+    )
     common = {
         "cutoff": cutoff_utc,
         "requested_channel": channel,
@@ -323,6 +383,7 @@ def evaluate_availability(
         "policy_hash": policy_digest,
         "evidence": evidence,
         "evidence_hash": digest,
+        "derivation_input_evidence_hash": derivation_input_hash,
     }
     if evidence.channel != channel:
         return CutoffEligibilityResultV1(
@@ -344,21 +405,18 @@ def evaluate_availability(
             return CutoffEligibilityResultV1(
                 classification=CutoffEligibility.INDETERMINATE,
                 reason="rule_input_evidence_unavailable",
-                derivation_input_evidence_hash=derivation.input_evidence_hash,
                 **common,
             )
         if derive_conservative_upper_bound(raw, derivation.rule_reference) != evidence:
             return CutoffEligibilityResultV1(
                 classification=CutoffEligibility.INDETERMINATE,
                 reason="rule_derivation_not_reproducible",
-                derivation_input_evidence_hash=derivation.input_evidence_hash,
                 **common,
             )
         if derivation.rule_reference.content_hash not in policy.permitted_rule_hashes:
             return CutoffEligibilityResultV1(
                 classification=CutoffEligibility.INELIGIBLE,
                 reason="rule_not_permitted_by_policy",
-                derivation_input_evidence_hash=derivation.input_evidence_hash,
                 **common,
             )
     assert evidence.lower_bound is not None and evidence.upper_bound is not None
@@ -374,11 +432,6 @@ def evaluate_availability(
     return CutoffEligibilityResultV1(
         classification=classification,
         reason=reason,
-        derivation_input_evidence_hash=(
-            None
-            if evidence.rule_derivation is None
-            else evidence.rule_derivation.input_evidence_hash
-        ),
         **common,
     )
 ```
@@ -660,7 +713,10 @@ git commit -m "feat: add immutable dataset manifests"
 - [ ] **Step 1: Write failing path, file-kind, size, mutation, and mismatch tests**
 
 ```python
-@pytest.mark.parametrize("relative", ("../secret.json", "/tmp/secret.json", "a/../../b"))
+@pytest.mark.parametrize(
+    "relative",
+    ("", "../secret.json", "/tmp/secret.json", "a/../../b"),
+)
 def test_resolver_rejects_unconfined_paths(tmp_path: Path, relative: str) -> None:
     with pytest.raises(ArtifactResolutionError, match="confined"):
         read_verified_local_artifact(tmp_path, relative, "0" * 64, LIMITS)
@@ -708,7 +764,12 @@ def read_verified_local_artifact(
     limits: ResolverLimits,
 ) -> VerifiedArtifactBytes:
     relative = Path(relative_path)
-    if "\0" in relative_path or relative.is_absolute() or ".." in relative.parts:
+    if (
+        not relative.parts
+        or "\0" in relative_path
+        or relative.is_absolute()
+        or ".." in relative.parts
+    ):
         raise ArtifactResolutionError("artifact path must be confined to its root")
     root_fd = os.open(root.resolve(strict=True), os.O_RDONLY | os.O_DIRECTORY)
     opened_dirs: list[int] = [root_fd]
@@ -750,7 +811,7 @@ def read_verified_local_artifact(
             os.close(descriptor)
 ```
 
-The local fixture resolver is intentionally small. It opens each directory component with `O_NOFOLLOW` when the platform provides it, opens the file exactly once, checks the opened descriptor with `fstat`, and performs the bounded read and hash through that same descriptor. Every parser consumes `VerifiedArtifactBytes.data`; it never reopens a path. A future large-file adapter must hash and parse the same descriptor or use an immutable content-addressed object.
+The empty-parts check occurs before any `relative.parts[-1]` access, so an empty path raises `ArtifactResolutionError` instead of leaking `IndexError`. The local fixture resolver is intentionally small. It opens each directory component with `O_NOFOLLOW` when the platform provides it, opens the file exactly once, checks the opened descriptor with `fstat`, and performs the bounded read and hash through that same descriptor. Every parser consumes `VerifiedArtifactBytes.data`; it never reopens a path. A future large-file adapter must hash and parse the same descriptor or use an immutable content-addressed object.
 
 - [ ] **Step 4: Run resolver tests and static checks**
 
