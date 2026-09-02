@@ -1,14 +1,19 @@
 # Drift
 
 Drift is an evidence-driven, self-improving quantitative research and trading
-system. Its current M0 scope is an auditable research evidence kernel. M0
-records structured research metadata and a hash-chained audit history so later
-work can evaluate hypotheses without losing failed trials or provenance.
+system. Its implemented scope is an M0 research evidence kernel plus M1a
+temporal provenance. M0 records structured research metadata and a hash-chained
+audit history. M1a adds exact-byte dataset manifests, explicit channel-scoped
+availability evidence, immutable fact revisions, exact-object validation
+records, and per-query tri-state cutoff decisions.
 
-M0 is not a trading system. It has no broker, market-data, backtesting,
-strategy-execution, agent, network, order-management, portfolio-management,
-production configuration, or production-credential capability. `StrategyArtifact`
-is compact provenance metadata, not executable strategy code.
+Drift is not a trading system or an equity backtester. M1a uses only synthetic
+fixtures and has no real data source, historical market semantics, evaluator,
+backtester, broker, strategy-execution, agent, network, order-management,
+portfolio-management, production configuration, or production-credential
+capability. M1b remains required before Drift can make historical US-equity
+evaluation claims. `StrategyArtifact` is compact provenance metadata, not
+executable strategy code.
 
 ## Core philosophy
 
@@ -26,8 +31,8 @@ research -> experiments -> evidence -> challengers -> gated promotion
 -> production strategy -> deterministic risk/execution
 ```
 
-M0 implements only the research evidence foundation. It does not implement any
-later stage in that flow.
+M0 and M1a implement only the research and temporal-provenance foundations.
+They do not implement any later stage in that flow.
 
 ## Install and verify
 

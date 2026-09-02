@@ -1,6 +1,11 @@
 # Drift M1 Point-in-Time Data Design
 
-**Status:** Proposed. Design only, M1 remains unimplemented.
+**Status:** M1a implemented and verified. M1b deferred; M1 remains incomplete.
+
+The implementation rulings and completed M1a execution record are in
+`../plans/2026-09-01-m1a-temporal-provenance.md`. This document remains the
+umbrella research and design source. Its M1b research is not an approved
+implementation plan or a claim of implemented historical market semantics.
 
 ## Decision summary
 
@@ -55,8 +60,8 @@ important limits, not reasons to omit the minimum temporal contract.
 - M0 canonical JSON, SHA-256 hashing, immutable audit-event envelopes, SQLite
   append-only storage, and replay are compatibility-sensitive persisted
   contracts.
-- M0 uses Python 3.14 and Pydantic 2. M1 design adds no dependency and changes no
-  runtime file.
+- M0 and M1a use Python 3.14 and Pydantic 2. M1a adds no dependency and preserves
+  M0 persisted model, serialization, event, and ledger contracts.
 
 ### Primary-source and academic evidence
 

@@ -1,13 +1,19 @@
 # Drift
 
-Drift is currently an M0 research evidence kernel, not a trading system.
-Preserve that boundary unless an explicitly approved milestone changes it.
+Drift currently implements an M0 research evidence kernel plus M1a temporal
+provenance, not a trading system or equity backtester. M1a provides exact-byte
+manifests, explicit channel-scoped evidence, immutable revisions, exact-object
+validation records, and per-query tri-state cutoff decisions. Preserve that
+boundary unless an explicitly approved milestone changes it.
 
 ## Current boundary
 
+- M1a uses synthetic fixtures and has no real source, historical market
+  semantics, evaluator, backtester, or trading capability. M1b remains required
+  before historical US-equity evaluation claims.
 - Do not add broker or market-data connections, order placement, trading,
   backtesting, agent orchestration, production configuration, credentials, or
-  network side effects during M0 maintenance.
+  network side effects during M0 or M1a maintenance.
 - `StrategyArtifact` and `StrategyReference` are immutable provenance metadata,
   not executable strategy or promotion behavior.
 

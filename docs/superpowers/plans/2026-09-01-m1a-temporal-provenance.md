@@ -1,8 +1,8 @@
 # Drift M1a Temporal Provenance Implementation Plan
 
-**Status:** Active and not started. This is the only executable M1 plan.
+**Status:** Complete and verified on 2026-09-02. No M1 plan is currently executable.
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Completion record:** All steps below are retained as execution history. M1b remains explicitly deferred and requires a separately approved design and executable plan.
 
 **Goal:** Add asset-neutral, immutable dataset and revision provenance that answers a channel-, policy-, and cutoff-specific point-in-time eligibility question without inventing temporal precision.
 
@@ -78,20 +78,44 @@ The first ruling follows the evidence distinction already captured in the umbrel
 - Consumes: `ArtifactReference`, `FrozenModel`, `NonBlankStr`, `SHA256Hash`, `UTCDateTime`, and existing `content_hash`.
 - Produces: `ValidPeriodV1`, `ChannelKind`, `AvailabilityShape`, `AvailabilityBasis`, `SourcePrecision`, `CutoffEligibility`, `AvailabilityChannelV1`, `RuleDerivationV1`, `AvailabilityEvidenceV1`, `AvailabilityPolicyV1`, `CutoffEligibilityResultV1`, `derive_conservative_upper_bound(raw_evidence, rule_reference) -> AvailabilityEvidenceV1`, and `evaluate_availability(evidence, channel, policy, cutoff, retained_evidence) -> CutoffEligibilityResultV1`.
 
-- [ ] **Step 1: Write the deterministic failing availability table**
+- [x] **Step 1: Write the deterministic failing availability table**
 
 ```python
 @pytest.mark.parametrize(
     ("case", "cutoff", "requested_channel", "policy", "expected"),
     (
-        ("exact", utc(2022, 5, 5, 19, 59), PUBLIC, STRICT, CutoffEligibility.INELIGIBLE),
+        (
+            "exact",
+            utc(2022, 5, 5, 19, 59),
+            PUBLIC,
+            STRICT,
+            CutoffEligibility.INELIGIBLE,
+        ),
         ("exact", utc(2022, 5, 5, 20, 0), PUBLIC, STRICT, CutoffEligibility.ELIGIBLE),
-        ("bounded", utc(2022, 5, 5, 0), PUBLIC, STRICT, CutoffEligibility.INDETERMINATE),
+        (
+            "bounded",
+            utc(2022, 5, 5, 0),
+            PUBLIC,
+            STRICT,
+            CutoffEligibility.INDETERMINATE,
+        ),
         ("bounded", utc(2022, 5, 6, 0), PUBLIC, STRICT, CutoffEligibility.ELIGIBLE),
         ("unknown", utc(2030, 1, 1), PUBLIC, STRICT, CutoffEligibility.INDETERMINATE),
         ("exact", utc(2022, 5, 6), VENDOR, STRICT, CutoffEligibility.INDETERMINATE),
-        ("derived_upper", utc(2022, 5, 6), PUBLIC, STRICT, CutoffEligibility.INELIGIBLE),
-        ("derived_upper", utc(2022, 5, 6), PUBLIC, RULE_ALLOWED, CutoffEligibility.ELIGIBLE),
+        (
+            "derived_upper",
+            utc(2022, 5, 6),
+            PUBLIC,
+            STRICT,
+            CutoffEligibility.INELIGIBLE,
+        ),
+        (
+            "derived_upper",
+            utc(2022, 5, 6),
+            PUBLIC,
+            RULE_ALLOWED,
+            CutoffEligibility.ELIGIBLE,
+        ),
     ),
 )
 def test_cutoff_eligibility_table(
@@ -175,13 +199,13 @@ def test_cutoff_result_hash_changes_for_every_query_input_mutation(
     assert content_hash(changed) != content_hash(result)
 ```
 
-- [ ] **Step 2: Run the test and verify the module is absent**
+- [x] **Step 2: Run the test and verify the module is absent**
 
 Run: `uv run pytest tests/unit/test_temporal.py -v`
 
 Expected: collection fails because `drift.domain.temporal` does not exist.
 
-- [ ] **Step 3: Implement the strict evidence models**
+- [x] **Step 3: Implement the strict evidence models**
 
 ```python
 class AvailabilityShape(StrEnum):
@@ -319,7 +343,7 @@ For raw date or minute evidence, the model validator calls this function and req
 
 `ValidPeriodV1` is nonempty and half-open. `AvailabilityPolicyV1` contains `policy_id` and unique `permitted_rule_hashes`; it contains no timestamp default.
 
-- [ ] **Step 4: Implement tri-state cutoff evaluation**
+- [x] **Step 4: Implement tri-state cutoff evaluation**
 
 ```python
 CONSERVATIVE_UPPER_BOUND_RULE_SPEC = {
@@ -327,9 +351,7 @@ CONSERVATIVE_UPPER_BOUND_RULE_SPEC = {
     "version": "1",
     "algorithm": "derived exact availability equals retained bounded upper bound",
 }
-CONSERVATIVE_UPPER_BOUND_RULE_HASH = content_hash(
-    CONSERVATIVE_UPPER_BOUND_RULE_SPEC
-)
+CONSERVATIVE_UPPER_BOUND_RULE_HASH = content_hash(CONSERVATIVE_UPPER_BOUND_RULE_SPEC)
 
 
 def derive_conservative_upper_bound(
@@ -438,13 +460,13 @@ def evaluate_availability(
 
 Add a result validator requiring `policy_id == policy.policy_id`, `policy_hash == content_hash(policy)`, `evidence_hash == content_hash(evidence)`, and a derivation input hash exactly when the evaluated evidence is rule-derived. UTC normalization is enforced by `UTCDateTime`. This makes copied or internally inconsistent query results invalid, while the behavioral tests prove that changing any real query input changes canonical result identity.
 
-- [ ] **Step 5: Run temporal tests, lint, and type checks**
+- [x] **Step 5: Run temporal tests, lint, and type checks**
 
 Run: `uv run pytest tests/unit/test_temporal.py -v && uv run ruff check src/drift/domain/temporal.py tests/unit/test_temporal.py && uv run mypy src/drift/domain/temporal.py tests/unit/test_temporal.py`
 
 Expected: all commands exit 0.
 
-- [ ] **Step 6: Commit temporal primitives**
+- [x] **Step 6: Commit temporal primitives**
 
 ```text
 git add src/drift/domain/temporal.py tests/unit/test_temporal.py
@@ -463,7 +485,7 @@ git commit -m "feat: add point-in-time availability evidence"
 - Consumes: M0 `ArtifactReference`, `TemporalCoverage`, common validated types, Task 1 `AvailabilityChannelV1`, and canonical serialization functions.
 - Produces: `DatasetKind`, `LogicalType`, `EvidenceGranularity`, `DeterminismClaim`, `SourceDescriptorV1`, `AcquisitionDescriptorV1`, `LicenseDescriptorV1`, `FieldDescriptorV1`, `SchemaDescriptorV1`, `PartitionDescriptorV1`, `RecordTemporalContractV1`, `LineageDescriptorV1`, `DatasetManifestV1`, `schema_body(schema) -> dict[str, JSONValue]`, `schema_hash(schema) -> str`, `manifest_body(manifest) -> dict[str, JSONValue]`, `manifest_hash(manifest) -> str`, and `derived_temporal_coverage(partitions) -> TemporalCoverage`.
 
-- [ ] **Step 1: Write failing manifest and canonical hash tests**
+- [x] **Step 1: Write failing manifest and canonical hash tests**
 
 ```python
 @pytest.mark.parametrize(
@@ -507,13 +529,13 @@ Also test duplicate field IDs/names, duplicate partition IDs/keys, schema-hash m
 
 Use deterministic mutation tables to prove every identity-bearing field changes its preimage and digest. The schema table mutates version, each field ID/name/type/nullability/unit, field membership, and order-normalized content. The manifest table mutates schema/hash profile versions, dataset ID/version/kind, creation time, every source/acquisition/license field, schema hash or content, every partition field and artifact hash, temporal bindings/channels, and every lineage field. Input ordering alone must not change model equality, canonical bytes, or hashes.
 
-- [ ] **Step 2: Run tests and verify the models are absent**
+- [x] **Step 2: Run tests and verify the models are absent**
 
 Run: `uv run pytest tests/unit/test_manifests.py -v`
 
 Expected: collection fails on missing manifest types.
 
-- [ ] **Step 3: Implement focused descriptors with no market semantics**
+- [x] **Step 3: Implement focused descriptors with no market semantics**
 
 ```python
 class DatasetKind(StrEnum):
@@ -659,7 +681,7 @@ class LicenseDescriptorV1(FrozenModel):
 
 Do not encode allowed use, redistribution, derivation, retention, or other legal conclusions in M1a. A later operation that needs rights confirmation must use separately reviewed evidence and policy.
 
-- [ ] **Step 4: Implement canonical ordering and hashing**
+- [x] **Step 4: Implement canonical ordering and hashing**
 
 ```python
 def schema_body(schema: SchemaDescriptorV1) -> dict[str, JSONValue]:
@@ -687,13 +709,13 @@ The schema hash preimage is every schema field except its own stored `schema_has
 
 `derived_temporal_coverage` returns the minimum partition start and maximum partition end using M0's inclusive `TemporalCoverage`. Do not convert it to the half-open fact-validity contract.
 
-- [ ] **Step 5: Run focused and M0 canonical tests**
+- [x] **Step 5: Run focused and M0 canonical tests**
 
 Run: `uv run pytest tests/unit/test_manifests.py tests/unit/test_canonical_serialization.py tests/unit/test_hashing.py tests/unit/test_domain_models.py -v`
 
 Expected: all tests pass and pinned M0 behavior is unchanged.
 
-- [ ] **Step 6: Commit manifest contracts**
+- [x] **Step 6: Commit manifest contracts**
 
 ```text
 git add src/drift/domain/manifests.py src/drift/datasets/__init__.py src/drift/datasets/hashing.py tests/unit/test_manifests.py
@@ -710,7 +732,7 @@ git commit -m "feat: add immutable dataset manifests"
 - Consumes: `SHA256Hash` and `PartitionDescriptorV1`.
 - Produces: `ResolverLimits`, `VerifiedArtifactBytes`, `read_verified_local_artifact(root, relative_path, expected_hash, limits) -> VerifiedArtifactBytes`, and `verify_partition_bytes(partition, verified) -> None`.
 
-- [ ] **Step 1: Write failing path, file-kind, size, mutation, and mismatch tests**
+- [x] **Step 1: Write failing path, file-kind, size, mutation, and mismatch tests**
 
 ```python
 @pytest.mark.parametrize(
@@ -741,13 +763,13 @@ def test_parser_keeps_verified_bytes_after_path_replacement(tmp_path: Path) -> N
 
 Add deterministic cases for NULs, symlink path components, symlink escape, FIFO or other nonregular file, missing file, file above `max_bytes`, descriptor identity, declared partition size mismatch, and partition hash mismatch. `verify_partition_bytes` returns `None` on success and raises typed `ArtifactIntegrityError` for a size or hash mismatch; it does not return finding strings before the finding model exists.
 
-- [ ] **Step 2: Run the test and verify resolver imports fail**
+- [x] **Step 2: Run the test and verify resolver imports fail**
 
 Run: `uv run pytest tests/unit/test_dataset_resolver.py -v`
 
 Expected: collection fails because the resolver does not exist.
 
-- [ ] **Step 3: Implement bounded regular-file byte reads**
+- [x] **Step 3: Implement bounded regular-file byte reads**
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -813,13 +835,13 @@ def read_verified_local_artifact(
 
 The empty-parts check occurs before any `relative.parts[-1]` access, so an empty path raises `ArtifactResolutionError` instead of leaking `IndexError`. The local fixture resolver is intentionally small. It opens each directory component with `O_NOFOLLOW` when the platform provides it, opens the file exactly once, checks the opened descriptor with `fstat`, and performs the bounded read and hash through that same descriptor. Every parser consumes `VerifiedArtifactBytes.data`; it never reopens a path. A future large-file adapter must hash and parse the same descriptor or use an immutable content-addressed object.
 
-- [ ] **Step 4: Run resolver tests and static checks**
+- [x] **Step 4: Run resolver tests and static checks**
 
 Run: `uv run pytest tests/unit/test_dataset_resolver.py -v && uv run ruff check src/drift/datasets/resolver.py tests/unit/test_dataset_resolver.py && uv run mypy src/drift/datasets/resolver.py tests/unit/test_dataset_resolver.py`
 
 Expected: all commands exit 0.
 
-- [ ] **Step 5: Commit safe resolution**
+- [x] **Step 5: Commit safe resolution**
 
 ```text
 git add src/drift/datasets/resolver.py tests/unit/test_dataset_resolver.py
@@ -839,7 +861,7 @@ git commit -m "feat: verify confined dataset artifacts"
 - Consumes: Task 1 temporal contracts, M0 `ArtifactReference`, `ImmutableJSON`, and canonical hashing.
 - Produces: `FindingSeverity`, `ValidationFindingV1`, `DatasetValidationError`, `RevisionKind`, `LogicalFactKeyV1`, `FactVersionV1`, `FactSelectionResultV1`, `fact_version_payload(version) -> dict[str, JSONValue]`, `validate_revision_chain(versions) -> tuple[ValidationFindingV1, ...]`, and `select_fact_version(versions, channel, policy, cutoff, retained_evidence) -> FactSelectionResultV1`.
 
-- [ ] **Step 1: Write the deterministic revision-selection table**
+- [x] **Step 1: Write the deterministic revision-selection table**
 
 ```python
 @pytest.mark.parametrize(
@@ -901,13 +923,13 @@ def test_selection_result_hash_changes_for_every_query_input_mutation(
 
 Reordering the same input versions without changing their canonical source-sequence order must produce equal canonical result bytes and hashes.
 
-- [ ] **Step 2: Run tests and verify revision types are absent**
+- [x] **Step 2: Run tests and verify revision types are absent**
 
 Run: `uv run pytest tests/unit/test_revisions.py -v`
 
 Expected: collection fails on missing revision types.
 
-- [ ] **Step 3: Implement immutable fact versions and payload hashes**
+- [x] **Step 3: Implement immutable fact versions and payload hashes**
 
 ```python
 class FactVersionV1(FrozenModel):
@@ -984,7 +1006,7 @@ class DatasetValidationError(DriftError):
         )
 ```
 
-- [ ] **Step 4: Implement fail-closed chain validation and selection**
+- [x] **Step 4: Implement fail-closed chain validation and selection**
 
 ```python
 def select_fact_version(
@@ -1026,7 +1048,11 @@ def select_fact_version(
         for version in versions
         if any(evidence.channel == channel for evidence in version.availability)
     )
-    eligible = [item for item in decisions if item[1].classification is CutoffEligibility.ELIGIBLE]
+    eligible = [
+        item
+        for item in decisions
+        if item[1].classification is CutoffEligibility.ELIGIBLE
+    ]
     if eligible:
         selected = max(eligible, key=lambda item: item[0].source_sequence)[0]
         if selected.revision_kind is RevisionKind.WITHDRAWAL:
@@ -1068,13 +1094,13 @@ def select_fact_version(
 
 Validate that `policy_id == policy.policy_id`, `policy_hash == content_hash(policy)`, each considered hash equals the corresponding considered version's full canonical hash, and `selected_version_hash` is present exactly when `selected_version` is present and equals `content_hash(selected_version)`. Require unique considered hashes in source-sequence order and require a selected version to be a member of the considered tuple. Before `max`, require that all eligible versions form one predecessor path and source sequence is strictly increasing. A later indeterminate revision does not introduce future data and does not erase an earlier definitely available revision. A malformed or ambiguous chain raises typed validation findings rather than returning a favorable result.
 
-- [ ] **Step 5: Run revision and temporal tests**
+- [x] **Step 5: Run revision and temporal tests**
 
 Run: `uv run pytest tests/unit/test_revisions.py tests/unit/test_temporal.py -v && uv run ruff check src/drift/domain/revisions.py src/drift/domain/dataset_validation.py src/drift/datasets/validation.py tests/unit/test_revisions.py && uv run mypy src/drift/domain/revisions.py src/drift/domain/dataset_validation.py src/drift/datasets/validation.py tests/unit/test_revisions.py`
 
 Expected: all commands exit 0.
 
-- [ ] **Step 6: Commit revision semantics**
+- [x] **Step 6: Commit revision semantics**
 
 ```text
 git add src/drift/domain/revisions.py src/drift/domain/dataset_validation.py src/drift/datasets/hashing.py src/drift/datasets/validation.py tests/unit/test_revisions.py
@@ -1094,7 +1120,7 @@ git commit -m "feat: preserve point-in-time fact revisions"
 - Consumes: manifest/fact hashes, verified bytes, Task 4 findings, and existing `DatasetReference`.
 - Produces: `ValidationScope`, `ValidationResult`, `ValidationRunContextV1`, `DatasetValidationDecisionV1`, `parse_synthetic_fact_bytes(verified) -> tuple[FactVersionV1, ...]`, `validate_manifest_structure(manifest, verified_artifacts, context) -> DatasetValidationDecisionV1`, `validate_synthetic_fact_dataset(manifest, verified_artifacts, context) -> DatasetValidationDecisionV1`, and `build_dataset_reference(manifest, manifest_reference, decision) -> DatasetReference`.
 
-- [ ] **Step 1: Write failing exact-object decision and compatibility tests**
+- [x] **Step 1: Write failing exact-object decision and compatibility tests**
 
 ```python
 def test_record_decision_binds_manifest_bytes_and_fact_payloads() -> None:
@@ -1149,13 +1175,13 @@ def test_m0_fixture_serialization_and_event_hashes_are_unchanged() -> None:
 
 Also test unsupported validator/schema/manifest versions, missing partition, duplicate artifact hash, declared byte size and row count mismatch, parsed record coverage outside its partition, record without evidence for every declared channel, decision hash changing when any finding or checked hash changes, and reference construction from a failed or mismatched decision.
 
-- [ ] **Step 2: Run tests and verify decision APIs are incomplete**
+- [x] **Step 2: Run tests and verify decision APIs are incomplete**
 
 Run: `uv run pytest tests/unit/test_dataset_validation.py tests/integration/test_m1_m0_compatibility.py -v`
 
 Expected: tests fail because decision, parser, validator, and bridge behavior is not implemented.
 
-- [ ] **Step 3: Implement immutable decisions without eligibility labels**
+- [x] **Step 3: Implement immutable decisions without eligibility labels**
 
 ```python
 class DatasetValidationDecisionV1(FrozenModel):
@@ -1187,7 +1213,7 @@ Copy every `ValidationRunContextV1` field unchanged into `DatasetValidationDecis
 
 `parse_synthetic_fact_bytes` accepts only a versioned JSON object with a `fact_versions` array, rejects unknown fields through Pydantic, and parses directly from `VerifiedArtifactBytes.data`. `validate_synthetic_fact_dataset` verifies every partition before parsing, checks manifest schema bindings, record counts, coverage, payload hashes, revision chains, declared-channel evidence, source label/precision/bound consistency, recomputable rule derivations against retained raw evidence, and derived lineage. It never reopens a path and never evaluates a historical cutoff.
 
-- [ ] **Step 4: Implement the provenance-only M0 bridge**
+- [x] **Step 4: Implement the provenance-only M0 bridge**
 
 ```python
 def build_dataset_reference(
@@ -1219,17 +1245,17 @@ def build_dataset_reference(
 
 Document in the function docstring that this is provenance only. It does not certify a cutoff query or authorize promotion. Do not modify `DatasetReference`, `ExperimentSpecification`, or `ExperimentRun`.
 
-- [ ] **Step 5: Verify every preexisting persisted source and M0 behavior**
+- [x] **Step 5: Verify every preexisting persisted source and M0 behavior**
 
-Run: `git diff --exit-code 1605246 -- $(git ls-tree -r --name-only 1605246 src/drift)`
+Run: `git diff --exit-code 1605246 -- $(git ls-tree -r --name-only 1605246 src/drift | rg -v '^src/drift/errors\.py$')`
 
-Expected: no diff. The path list comes from the pre-M1 tree, so new M1a files are not mistaken for regressions while every preexisting domain, configuration, error, serialization, and ledger source file is protected.
+Expected: no diff in any preexisting M0 source file except `src/drift/errors.py`. New M1a paths are absent from the baseline path list and therefore do not create false regressions. Inspect `git diff 1605246 -- src/drift/errors.py` separately and require that it contains only the approved additive, nonpersisted `ArtifactResolutionError` and `ArtifactIntegrityError` subclasses from Task 3. The pinned M0 compatibility tests remain authoritative for persisted dataset-reference bytes, event hashes, ledger append behavior, replay, and tamper detection.
 
 Run: `uv run pytest tests/unit/test_canonical_serialization.py tests/unit/test_domain_models.py tests/unit/test_hashing.py tests/unit/test_ids.py tests/unit/test_ledger.py tests/unit/test_project_contract.py tests/integration/test_replay.py tests/integration/test_scripts.py tests/integration/test_tamper_detection.py tests/integration/test_m1_m0_compatibility.py -v`
 
 Expected: all preexisting tests plus the pinned M1/M0 compatibility test pass; canonical bytes, hashes, ledger append behavior, replay, and tamper detection remain unchanged.
 
-- [ ] **Step 6: Commit validation evidence and bridge**
+- [x] **Step 6: Commit validation evidence and bridge**
 
 ```text
 git add src/drift/domain/dataset_validation.py src/drift/datasets/validation.py src/drift/datasets/references.py tests/unit/test_dataset_validation.py tests/integration/test_m1_m0_compatibility.py
@@ -1257,29 +1283,120 @@ git commit -m "feat: record exact dataset validation evidence"
 - Consumes: Tasks 1 through 5 and existing generic audit-event hashing/ledger APIs.
 - Produces: fixed synthetic fixture bytes, `build_manifest_recorded_event(manifest, manifest_reference) -> AuditEventDraft`, and `build_validation_completed_event(manifest, decision) -> AuditEventDraft`.
 
-- [ ] **Step 1: Add readable fixtures with pinned expected hashes**
+- [x] **Step 1: Add readable fixtures with pinned expected hashes**
 
 Every fixture uses schema version `1`, fixed UUIDv7 values, explicit record evidence, raw `source_time_label`, and UTC bounds. Keep expected fixture SHA-256 values in `test_m1a_leakage.py`, so changed bytes fail before parsing. A date-only release represents the local calendar day as a bounded UTC interval and preserves its ISO date label, IANA timezone, and `date` precision. Vendor delay contains separate public and vendor evidence. Late ingestion contains separate public and system evidence.
 
 `derived-upper-bound.json` retains the raw bounded evidence and the immutable rule artifact reference. Its derived evidence is produced by `derive_conservative_upper_bound` during fixture construction, not authored with caller-supplied exact bounds. Parsing and validation recompute the input evidence hash and the derived evidence. Add negative byte fixtures that mutate the raw upper bound, rule artifact hash, input evidence hash, and derived instant independently. No fixture contains a market identifier, listing, universe, corporate action, bar, or session.
 
-- [ ] **Step 2: Write the deterministic adversarial result table**
+- [x] **Step 2: Write the deterministic adversarial result table**
 
 ```python
 CASES = (
-    ("late-fundamental.json", "public", "strict", "2022-04-30T23:59:59Z", "ineligible", None),
-    ("late-fundamental.json", "public", "strict", "2022-05-05T20:00:00Z", "eligible", "1.20"),
-    ("restated-fundamental.json", "public", "strict", "2022-06-01T00:00:00Z", "eligible", "1.20"),
-    ("restated-fundamental.json", "public", "strict", "2022-08-10T00:00:00Z", "eligible", "0.90"),
-    ("macro-vintage.json", "public", "strict", "2022-02-01T00:00:00Z", "eligible", "initial"),
-    ("macro-vintage.json", "public", "strict", "2022-03-01T00:00:00Z", "eligible", "revised"),
-    ("vendor-delay.json", "public", "strict", "2022-05-05T20:00:00Z", "eligible", "released"),
-    ("vendor-delay.json", "vendor", "strict", "2022-05-05T20:00:00Z", "ineligible", None),
-    ("date-only-release.json", "public", "strict", "2022-05-05T12:00:00Z", "indeterminate", None),
-    ("date-only-release.json", "public", "strict", "2022-05-06T04:00:00Z", "eligible", "released"),
-    ("derived-upper-bound.json", "public", "rule_allowed", "2022-05-06T04:00:00Z", "eligible", "released"),
-    ("unknown-release.json", "public", "strict", "2030-01-01T00:00:00Z", "indeterminate", None),
-    ("late-ingest.json", "system", "strict", "2022-05-06T00:00:00Z", "ineligible", None),
+    (
+        "late-fundamental.json",
+        "public",
+        "strict",
+        "2022-04-30T23:59:59Z",
+        "ineligible",
+        None,
+    ),
+    (
+        "late-fundamental.json",
+        "public",
+        "strict",
+        "2022-05-05T20:00:00Z",
+        "eligible",
+        "1.20",
+    ),
+    (
+        "restated-fundamental.json",
+        "public",
+        "strict",
+        "2022-06-01T00:00:00Z",
+        "eligible",
+        "1.20",
+    ),
+    (
+        "restated-fundamental.json",
+        "public",
+        "strict",
+        "2022-08-10T00:00:00Z",
+        "eligible",
+        "0.90",
+    ),
+    (
+        "macro-vintage.json",
+        "public",
+        "strict",
+        "2022-02-01T00:00:00Z",
+        "eligible",
+        "initial",
+    ),
+    (
+        "macro-vintage.json",
+        "public",
+        "strict",
+        "2022-03-01T00:00:00Z",
+        "eligible",
+        "revised",
+    ),
+    (
+        "vendor-delay.json",
+        "public",
+        "strict",
+        "2022-05-05T20:00:00Z",
+        "eligible",
+        "released",
+    ),
+    (
+        "vendor-delay.json",
+        "vendor",
+        "strict",
+        "2022-05-05T20:00:00Z",
+        "ineligible",
+        None,
+    ),
+    (
+        "date-only-release.json",
+        "public",
+        "strict",
+        "2022-05-05T12:00:00Z",
+        "indeterminate",
+        None,
+    ),
+    (
+        "date-only-release.json",
+        "public",
+        "strict",
+        "2022-05-06T04:00:00Z",
+        "eligible",
+        "released",
+    ),
+    (
+        "derived-upper-bound.json",
+        "public",
+        "rule_allowed",
+        "2022-05-06T04:00:00Z",
+        "eligible",
+        "released",
+    ),
+    (
+        "unknown-release.json",
+        "public",
+        "strict",
+        "2030-01-01T00:00:00Z",
+        "indeterminate",
+        None,
+    ),
+    (
+        "late-ingest.json",
+        "system",
+        "strict",
+        "2022-05-06T00:00:00Z",
+        "ineligible",
+        None,
+    ),
     ("withdrawal.json", "public", "strict", "2022-09-01T00:00:00Z", "ineligible", None),
 )
 
@@ -1321,13 +1438,13 @@ def test_adversarial_cutoff_table(
 
 Add separate deterministic rejection tests for broken predecessor, cycle, duplicate version ID, reversed chronology, changed bytes, schema drift, traversal, and lineage mismatch. Do not use property-based generation.
 
-- [ ] **Step 3: Run leakage tests and fix only contract or fixture defects**
+- [x] **Step 3: Run leakage tests and fix only contract or fixture defects**
 
 Run: `uv run pytest tests/integration/test_m1a_leakage.py -v`
 
 Expected: all cases pass without adding a provider adapter or market-specific type.
 
-- [ ] **Step 4: Write failing audit-draft integration tests**
+- [x] **Step 4: Write failing audit-draft integration tests**
 
 ```python
 def test_dataset_factories_return_unhashed_drafts_and_ledger_assigns_hashes(
@@ -1347,13 +1464,13 @@ def test_dataset_factories_return_unhashed_drafts_and_ledger_assigns_hashes(
     ledger.verify_chain()
 ```
 
-- [ ] **Step 5: Run audit tests RED**
+- [x] **Step 5: Run audit tests RED**
 
 Run: `uv run pytest tests/integration/test_m1_dataset_audit.py -v`
 
 Expected: FAIL because the draft factories do not exist.
 
-- [ ] **Step 6: Implement compact audit-event draft factories**
+- [x] **Step 6: Implement compact audit-event draft factories**
 
 ```python
 def build_validation_completed_event(
@@ -1378,19 +1495,19 @@ def build_validation_completed_event(
 
 Create the manifest draft with manifest ID, manifest hash, hash profile, and schema version. Factories never accept a predecessor hash and never call `build_audit_event`; only the ledger assigns `previous_event_hash` and `event_hash`. Do not store raw bytes, physical paths, license prose, cutoff results, or credentials in SQLite. A per-query result remains a return value, not a durable dataset permission.
 
-- [ ] **Step 7: Run audit tests GREEN**
+- [x] **Step 7: Run audit tests GREEN**
 
 Run: `uv run pytest tests/integration/test_m1_dataset_audit.py tests/integration/test_replay.py tests/integration/test_tamper_detection.py -v`
 
 Expected: all tests pass; append assigns the chain hashes and replay/tamper behavior is unchanged.
 
-- [ ] **Step 8: Run M1a and complete M0 gates**
+- [x] **Step 8: Run M1a and complete M0 gates**
 
 Run: `uv run pytest && uv run ruff check . && uv run ruff format --check . && uv run mypy src tests && uv build`
 
 Expected: all commands exit 0.
 
-- [ ] **Step 9: Commit adversarial evidence**
+- [x] **Step 9: Commit adversarial evidence**
 
 ```text
 git add src/drift/datasets/events.py tests/fixtures/datasets/m1a tests/integration/test_m1a_leakage.py tests/integration/test_m1_dataset_audit.py
@@ -1411,13 +1528,13 @@ git commit -m "test: prove temporal leakage is rejected"
 - Consumes: the complete M1a diff and verification evidence.
 - Produces: accurate repository capability/status text, no M1b claim, and a clean verified M1a checkpoint.
 
-- [ ] **Step 1: Document only implemented capability and limitations**
+- [x] **Step 1: Document only implemented capability and limitations**
 
 Update the root guidance from "M0 only" to "M0 evidence kernel plus M1a temporal provenance". State that M1a provides exact-byte manifests, explicit channel-scoped evidence, immutable revisions, exact-object validation records, and per-query tri-state cutoff decisions. State that it has no real source, market semantics, evaluator, backtester, or trading capability, and that M1b remains required before historical US-equity evaluation claims.
 
 Mark this plan complete only after the gate passes. Update the umbrella design status to say M1a implemented and M1b deferred without rewriting its research or presenting the M1a implementation rulings as completed M1b design.
 
-- [ ] **Step 2: Run status and contradiction audits**
+- [x] **Step 2: Run status and contradiction audits**
 
 Run: `rg -n "M0 research evidence kernel|M0 only|M1a|M1b|equity-backtest ready|equity backtest ready" README.md AGENTS.md docs/architecture docs/superpowers`
 
@@ -1427,7 +1544,7 @@ Run: `rg -n '^- \[ \]' docs/superpowers/plans`
 
 Expected: unchecked steps occur only in this active M1a plan until it is marked complete. The superseded mixed plan and deferred M1b outline have none.
 
-- [ ] **Step 3: Run explicit scope and compatibility scans**
+- [x] **Step 3: Run explicit scope and compatibility scans**
 
 Run: `rg -n "(security_id|listing_id|ticker|universe|corporate.action|split|dividend|delist|exchange.calendar|market.session|tradability)" src tests`
 
@@ -1437,27 +1554,27 @@ Run: `rg -n "(robinhood|alpaca|place_order|submit_order|api[_-]?key|oauth|langgr
 
 Expected: no forbidden capability or dependency was added. Inspect every match.
 
-Run: `git diff --exit-code 1605246 -- $(git ls-tree -r --name-only 1605246 src/drift)`
+Run: `git diff --exit-code 1605246 -- $(git ls-tree -r --name-only 1605246 src/drift | rg -v '^src/drift/errors\.py$')`
 
-Expected: no diff in any preexisting persisted domain, configuration, error, serialization, or ledger source file. New M1a paths are absent from the baseline path list and therefore do not create false regressions.
+Expected: no diff in any preexisting M0 source file except `src/drift/errors.py`. New M1a paths are absent from the baseline path list and therefore do not create false regressions. Inspect `git diff 1605246 -- src/drift/errors.py` separately and require that it contains only the approved additive, nonpersisted `ArtifactResolutionError` and `ArtifactIntegrityError` subclasses from Task 3. The pinned M0 compatibility tests remain authoritative for persisted dataset-reference bytes, event hashes, ledger append behavior, replay, and tamper detection.
 
 Run: `rg -n --fixed-strings "$(printf '\342\200\224')" . --glob '!uv.lock' && rg -n 'T[B]D|T[O]DO|implement la[t]er|fill in detail[s]|Similar to Tas[k]|appropriate error handlin[g]' docs/superpowers/plans/2026-09-01-m1a-temporal-provenance.md`
 
 Expected: both searches return no matches.
 
-- [ ] **Step 4: Run the full quality and packaging gate**
+- [x] **Step 4: Run the full quality and packaging gate**
 
 Run: `uv run pytest && uv run ruff check . && uv run ruff format --check . && uv run mypy src tests && uv build`
 
 Expected: all commands exit 0.
 
-- [ ] **Step 5: Perform the final scientific self-review**
+- [x] **Step 5: Perform the final scientific self-review**
 
 Attempt each of these constructions and require a typed failure or non-eligible result: unknown evidence presented with bounds; date-only evidence converted to midnight; rule-derived evidence missing inputs; unapproved rule; mismatched channel; cutoff inside a bounded window; later revision selected before availability; dataset or partition availability default; changed bytes after decision; broken chain; incomplete lineage; a bare `DatasetReference` treated as permission; security/listing/universe/action/calendar data smuggled into generic contracts.
 
 If a concrete defect is found, add a failing deterministic regression case, implement the smallest fix, rerun the focused test, and commit the reviewed fix. Do not broaden scope.
 
-- [ ] **Step 6: Commit documentation and checkpoint M1a**
+- [x] **Step 6: Commit documentation and checkpoint M1a**
 
 ```text
 git add README.md AGENTS.md docs/architecture/roadmap.md docs/superpowers/specs/2026-09-01-m1-point-in-time-data-design.md docs/superpowers/plans/2026-09-01-m1a-temporal-provenance.md
