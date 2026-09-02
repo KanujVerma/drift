@@ -1,0 +1,42 @@
+{
+  "fact_versions": [
+    {
+      "availability": [
+        {
+          "basis": "source_observed",
+          "channel": {"identifier": "synthetic-public", "kind": "public", "version": "1"},
+          "evidence_reference": {"artifact_id": "019b8240-0000-7000-8000-000000000113", "content_hash": "0000000000000000000000000000000000000000000000000000000000000071", "kind": "other", "location": "evidence:item:113"},
+          "lower_bound": "2022-05-05T20:00:00Z",
+          "precision": "second",
+          "rule_derivation": null,
+          "shape": "exact",
+          "source_time_label": "2022-05-05T20:00:00Z",
+          "source_timezone": null,
+          "upper_bound": "2022-05-05T20:00:00Z"
+        },
+        {
+          "basis": "local_ingest",
+          "channel": {"identifier": "synthetic-system", "kind": "system", "version": "1"},
+          "evidence_reference": {"artifact_id": "019b8240-0000-7000-8000-000000000114", "content_hash": "0000000000000000000000000000000000000000000000000000000000000072", "kind": "other", "location": "evidence:item:114"},
+          "lower_bound": "2022-05-07T00:00:00Z",
+          "precision": "second",
+          "rule_derivation": null,
+          "shape": "exact",
+          "source_time_label": "2022-05-07T00:00:00Z",
+          "source_timezone": null,
+          "upper_bound": "2022-05-07T00:00:00Z"
+        }
+      ],
+      "fact_version_id": "019b8240-0000-7000-8000-000000000012",
+      "logical_key": {"concept": "reported-value", "dimensions": {"synthetic": true}, "entity_key": "late-ingest-entity", "source_id": "synthetic-source", "unit": "unit", "valid_period": {"ended_at": "2022-12-31T23:59:59Z", "started_at": "2022-01-01T00:00:00Z"}},
+      "null_reason": null,
+      "payload_hash": "75d0cc8359126ab171d608e3f22cf418796b02424d66c5e62281ef1ae7ce99dc",
+      "revision_kind": "initial",
+      "source_artifact": {"artifact_id": "019b8240-0000-7000-8000-000000000512", "content_hash": "0000000000000000000000000000000000000000000000000000000000000200", "kind": "other", "location": "source:item:late-ingest:0"},
+      "source_sequence": 0,
+      "supersedes_fact_version_id": null,
+      "value": "released"
+    }
+  ],
+  "schema_version": "1"
+}

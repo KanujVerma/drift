@@ -1,0 +1,55 @@
+{
+  "fact_versions": [
+    {
+      "availability": [
+        {
+          "basis": "source_observed",
+          "channel": {"identifier": "synthetic-public", "kind": "public", "version": "1"},
+          "evidence_reference": {"artifact_id": "019b8240-0000-7000-8000-000000000102", "content_hash": "0000000000000000000000000000000000000000000000000000000000000066", "kind": "other", "location": "evidence:item:102"},
+          "lower_bound": "2022-05-05T20:00:00Z",
+          "precision": "second",
+          "rule_derivation": null,
+          "shape": "exact",
+          "source_time_label": "2022-05-05T20:00:00Z",
+          "source_timezone": null,
+          "upper_bound": "2022-05-05T20:00:00Z"
+        }
+      ],
+      "fact_version_id": "019b8240-0000-7000-8000-000000000002",
+      "logical_key": {"concept": "reported-value", "dimensions": {"synthetic": true}, "entity_key": "restated-fundamental-entity", "source_id": "synthetic-source", "unit": "unit", "valid_period": {"ended_at": "2022-12-31T23:59:59Z", "started_at": "2022-01-01T00:00:00Z"}},
+      "null_reason": null,
+      "payload_hash": "014b96e4e9bd5bddbd9714d3c14e43c5e88e7cd2834a80a7f12fcb1aaeec716a",
+      "revision_kind": "initial",
+      "source_artifact": {"artifact_id": "019b8240-0000-7000-8000-000000000502", "content_hash": "00000000000000000000000000000000000000000000000000000000000001f6", "kind": "other", "location": "source:item:restated-fundamental:0"},
+      "source_sequence": 0,
+      "supersedes_fact_version_id": null,
+      "value": "1.20"
+    },
+    {
+      "availability": [
+        {
+          "basis": "source_observed",
+          "channel": {"identifier": "synthetic-public", "kind": "public", "version": "1"},
+          "evidence_reference": {"artifact_id": "019b8240-0000-7000-8000-000000000103", "content_hash": "0000000000000000000000000000000000000000000000000000000000000067", "kind": "other", "location": "evidence:item:103"},
+          "lower_bound": "2022-08-01T00:00:00Z",
+          "precision": "second",
+          "rule_derivation": null,
+          "shape": "exact",
+          "source_time_label": "2022-08-01T00:00:00Z",
+          "source_timezone": null,
+          "upper_bound": "2022-08-01T00:00:00Z"
+        }
+      ],
+      "fact_version_id": "019b8240-0000-7000-8000-000000000003",
+      "logical_key": {"concept": "reported-value", "dimensions": {"synthetic": true}, "entity_key": "restated-fundamental-entity", "source_id": "synthetic-source", "unit": "unit", "valid_period": {"ended_at": "2022-12-31T23:59:59Z", "started_at": "2022-01-01T00:00:00Z"}},
+      "null_reason": null,
+      "payload_hash": "c47d71308cb926e3d382bf5a38f26435b2add210f949f6dadaeda0a8e617b894",
+      "revision_kind": "restatement",
+      "source_artifact": {"artifact_id": "019b8240-0000-7000-8000-000000000503", "content_hash": "00000000000000000000000000000000000000000000000000000000000001f7", "kind": "other", "location": "source:item:restated-fundamental:1"},
+      "source_sequence": 1,
+      "supersedes_fact_version_id": "019b8240-0000-7000-8000-000000000002",
+      "value": "0.90"
+    }
+  ],
+  "schema_version": "1"
+}
