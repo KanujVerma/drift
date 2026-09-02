@@ -277,6 +277,14 @@ def test_validation_completed_draft_records_only_exact_decision_summary() -> Non
     assert draft.schema_version == "1"
 
 
+def test_validation_completed_draft_rejects_mismatched_manifest() -> None:
+    """A decision for different manifest bytes must not become an audit draft."""
+    mismatched = DECISION.model_copy(update={"manifest_hash": "0" * 64})
+
+    with pytest.raises(DatasetValidationError, match="manifest_hash_mismatch"):
+        build_validation_completed_event(MANIFEST, mismatched)
+
+
 def test_sqlite_payloads_exclude_bytes_paths_license_and_cutoff_permissions(
     tmp_path: Path,
 ) -> None:

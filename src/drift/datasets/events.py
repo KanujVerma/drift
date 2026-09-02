@@ -42,6 +42,8 @@ def build_validation_completed_event(
     decision: DatasetValidationDecisionV1,
 ) -> AuditEventDraft:
     """Build an unhashed compact draft for an exact validation decision."""
+    if decision.manifest_hash != manifest_hash(manifest):
+        raise DatasetValidationError.single("manifest_hash_mismatch")
     return AuditEventDraft(
         event_id=decision.decision_id,
         event_type="dataset.validation.completed",

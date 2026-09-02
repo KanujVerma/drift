@@ -197,6 +197,22 @@ CASES = (
         "released",
     ),
     (
+        "bounded-release.json",
+        "public",
+        "strict",
+        "2022-05-05T20:30:00Z",
+        "indeterminate",
+        None,
+    ),
+    (
+        "bounded-release.json",
+        "public",
+        "strict",
+        "2022-05-05T21:00:00Z",
+        "eligible",
+        "released",
+    ),
+    (
         "unknown-release.json",
         "public",
         "strict",
@@ -408,17 +424,38 @@ def _chain_mutation(document: dict[str, Any], mutation: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "mutation",
-    ("broken_predecessor", "cycle", "duplicate_version_id", "reversed_chronology"),
+    ("mutation", "expected_codes"),
+    (
+        ("broken_predecessor", ("missing_predecessor",)),
+        (
+            "cycle",
+            (
+                "missing_initial_root",
+                "non_increasing_source_sequence",
+                "revision_cycle",
+            ),
+        ),
+        (
+            "duplicate_version_id",
+            (
+                "duplicate_fact_version_id",
+                "non_increasing_source_sequence",
+                "revision_cycle",
+            ),
+        ),
+        ("reversed_chronology", ("non_increasing_source_sequence",)),
+    ),
 )
-def test_malformed_fixture_chains_are_rejected(mutation: str) -> None:
+def test_malformed_fixture_chains_are_rejected(
+    mutation: str, expected_codes: tuple[str, ...]
+) -> None:
     """Removing a revision-chain guard makes one malformed chain selectable."""
     verified = _mutated_verified(
         "restated-fundamental.json",
         lambda document: _chain_mutation(document, mutation),
     )
     versions = parse_synthetic_fact_bytes(verified)
-    with pytest.raises(DatasetValidationError):
+    with pytest.raises(DatasetValidationError) as captured:
         select_fact_version(
             versions,
             CHANNELS["public"],
@@ -426,6 +463,7 @@ def test_malformed_fixture_chains_are_rejected(mutation: str) -> None:
             parse_utc("2022-09-01T00:00:00Z"),
             retained_evidence_by_hash(verified),
         )
+    assert tuple(finding.code for finding in captured.value.findings) == expected_codes
 
 
 def test_changed_bytes_schema_drift_and_traversal_are_rejected(
