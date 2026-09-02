@@ -1,6 +1,7 @@
-"""Canonical preimages and hashes for immutable dataset manifests."""
+"""Canonical preimages and hashes for immutable dataset manifests and facts."""
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from drift.domain.datasets import TemporalCoverage
 from drift.domain.manifests import (
@@ -9,6 +10,9 @@ from drift.domain.manifests import (
     SchemaDescriptorV1,
 )
 from drift.serialization.canonical import JSONValue, canonical_data, content_hash
+
+if TYPE_CHECKING:
+    from drift.domain.revisions import FactVersionV1
 
 
 def schema_body(schema: SchemaDescriptorV1) -> dict[str, JSONValue]:
@@ -34,6 +38,14 @@ def manifest_body(manifest: DatasetManifestV1) -> dict[str, JSONValue]:
 def manifest_hash(manifest: DatasetManifestV1) -> str:
     """Return the canonical immutable manifest digest."""
     return content_hash(manifest_body(manifest))
+
+
+def fact_version_payload(version: FactVersionV1) -> dict[str, JSONValue]:
+    """Return a fact version's self-excluding canonical payload preimage."""
+    payload = canonical_data(version)
+    assert isinstance(payload, dict)
+    del payload["payload_hash"]
+    return payload
 
 
 def derived_temporal_coverage(
