@@ -20,3 +20,11 @@ class LedgerCursorError(DriftError):
 
 class CanonicalSerializationError(DriftError):
     """Raised when a value cannot be represented canonically."""
+
+
+class ArtifactResolutionError(DriftError):
+    """Raised when an artifact cannot be safely resolved."""
+
+
+class ArtifactIntegrityError(DriftError):
+    """Raised when resolved artifact bytes fail an integrity check."""
