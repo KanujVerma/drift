@@ -41,7 +41,7 @@ _SUPPORTED_VALIDATOR_VERSION = "1"
 class _SyntheticFactDocumentV1(FrozenModel):
     """Strict versioned envelope for retained synthetic fact bytes."""
 
-    schema_version: Literal["1"] = "1"
+    schema_version: Literal["1"]
     fact_versions: tuple[FactVersionV1, ...]
 
 
@@ -295,6 +295,10 @@ def _validate_record_set(
 ) -> None:
     chains: dict[str, list[FactVersionV1]] = defaultdict(list)
     evidence: list[AvailabilityEvidenceV1] = []
+    fact_version_ids = tuple(record.fact_version_id for record in records)
+    duplicate_fact_version_id = len(set(fact_version_ids)) != len(fact_version_ids)
+    if duplicate_fact_version_id:
+        findings.append(_finding("duplicate_fact_version_id"))
     for record in records:
         chains[content_hash(record.logical_key)].append(record)
         evidence.extend(record.availability)
@@ -303,7 +307,14 @@ def _validate_record_set(
         ):
             findings.append(_finding("record_payload_hash_mismatch"))
     for versions in chains.values():
-        findings.extend(validate_revision_chain(versions))
+        findings.extend(
+            finding
+            for finding in validate_revision_chain(versions)
+            if not (
+                duplicate_fact_version_id
+                and finding.code == "duplicate_fact_version_id"
+            )
+        )
 
     raw_evidence = {
         content_hash(item): item

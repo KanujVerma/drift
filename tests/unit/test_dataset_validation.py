@@ -527,6 +527,20 @@ def test_validation_rejects_broken_revision_chain_and_source_binding() -> None:
     assert "record_source_mismatch" in {item.code for item in source_decision.findings}
 
 
+def test_validation_rejects_duplicate_fact_id_across_logical_keys() -> None:
+    first = version(suffix=1, entity_key="entity-1")
+    second = version(suffix=1, entity_key="entity-2")
+    assert first.fact_version_id == second.fact_version_id
+    assert first.payload_hash != second.payload_hash
+    verified = verified_document((first, second))
+    current = manifest_for(verified, row_count=2)
+
+    decision = validate_synthetic_fact_dataset(current, (verified,), CONTEXT)
+
+    assert decision.result is ValidationResult.FAIL
+    assert "duplicate_fact_version_id" in {item.code for item in decision.findings}
+
+
 def test_validation_rejects_payload_and_source_time_inconsistency() -> None:
     raw = version().model_dump(mode="python")
     raw["payload_hash"] = HASH_A
@@ -600,6 +614,16 @@ def test_parser_rejects_unknown_fields_and_unsupported_document_version() -> Non
         parse_synthetic_fact_bytes(verified_document((version(),), schema_version="2"))
     with pytest.raises(DatasetValidationError, match="invalid_fact_document"):
         parse_synthetic_fact_bytes(verified_document((version(),), extra={"other": 1}))
+
+
+def test_parser_rejects_missing_document_version() -> None:
+    data = canonical_json({"fact_versions": [version()]})
+    verified = VerifiedArtifactBytes(
+        data=data, byte_size=len(data), content_hash=sha256(data).hexdigest()
+    )
+
+    with pytest.raises(DatasetValidationError, match="invalid_fact_document"):
+        parse_synthetic_fact_bytes(verified)
 
 
 def test_parser_uses_only_verified_data_bytes() -> None:
