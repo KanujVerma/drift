@@ -424,24 +424,38 @@ def test_valid_period_is_nonempty_and_half_open() -> None:
         ValidPeriodV1(started_at=utc(2022, 5, 5), ended_at=utc(2022, 5, 5))
 
 
-def test_derived_evidence_cannot_be_supplied_directly() -> None:
-    """Only the conservative derivation function may construct trusted output."""
-    with pytest.raises(ValidationError, match="conservative-upper-bound"):
-        AvailabilityEvidenceV1(
-            channel=PUBLIC,
-            shape=AvailabilityShape.EXACT,
-            lower_bound=utc(2022, 5, 6),
-            upper_bound=utc(2022, 5, 6),
-            precision=SourcePrecision.DATE,
-            source_time_label="2022-05-05",
-            source_timezone="UTC",
-            basis=AvailabilityBasis.RULE_DERIVED,
-            evidence_reference=RAW_BOUNDED.evidence_reference,
-            rule_derivation=RuleDerivationV1(
-                rule_reference=RULE_REFERENCE,
-                input_evidence_hash=content_hash(RAW_BOUNDED),
-            ),
-        )
+def test_caller_authored_inconsistent_derivation_is_indeterminate() -> None:
+    """A caller cannot make a false derived instant trusted by serializing it."""
+    evidence = AvailabilityEvidenceV1(
+        channel=PUBLIC,
+        shape=AvailabilityShape.EXACT,
+        lower_bound=utc(2022, 5, 5),
+        upper_bound=utc(2022, 5, 5),
+        precision=SourcePrecision.DATE,
+        source_time_label="2022-05-05",
+        source_timezone="UTC",
+        basis=AvailabilityBasis.RULE_DERIVED,
+        evidence_reference=RAW_BOUNDED.evidence_reference,
+        rule_derivation=RuleDerivationV1(
+            rule_reference=RULE_REFERENCE,
+            input_evidence_hash=content_hash(RAW_BOUNDED),
+        ),
+    )
+    result = evaluate_availability(
+        evidence, PUBLIC, RULE_ALLOWED, utc(2022, 5, 6), RAW_EVIDENCE_BY_HASH
+    )
+    assert result.classification is CutoffEligibility.INDETERMINATE
+    assert result.reason == "rule_derivation_not_reproducible"
+
+
+def test_rule_derived_evidence_round_trips_and_replays_against_retained_raw() -> None:
+    """Reloaded derivation provenance must remain evaluable from retained input."""
+    derived = derive_conservative_upper_bound(RAW_BOUNDED, RULE_REFERENCE)
+    reloaded = AvailabilityEvidenceV1.model_validate(derived.model_dump())
+    result = evaluate_availability(
+        reloaded, PUBLIC, RULE_ALLOWED, utc(2022, 5, 6), RAW_EVIDENCE_BY_HASH
+    )
+    assert result.classification is CutoffEligibility.ELIGIBLE
 
 
 def test_evaluation_rejects_naive_cutoff() -> None:

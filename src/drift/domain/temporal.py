@@ -7,7 +7,7 @@ from enum import StrEnum
 from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import PrivateAttr, ValidationInfo, model_validator
+from pydantic import model_validator
 
 from drift.domain.artifacts import ArtifactReference
 from drift.domain.common import (
@@ -24,7 +24,6 @@ _OFFSET_SECOND = re.compile(
 )
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _ISO_MINUTE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$")
-_DERIVATION_CONTEXT_KEY = "conservative_upper_bound_derivation"
 
 
 class AvailabilityShape(StrEnum):
@@ -119,10 +118,9 @@ class AvailabilityEvidenceV1(FrozenModel):
     basis: AvailabilityBasis
     evidence_reference: ArtifactReference | None = None
     rule_derivation: RuleDerivationV1 | None = None
-    _trusted_derivation: bool = PrivateAttr(default=False)
 
     @model_validator(mode="after")
-    def validate_evidence(self, info: ValidationInfo) -> AvailabilityEvidenceV1:
+    def validate_evidence(self) -> AvailabilityEvidenceV1:
         is_rule_derived = self.basis is AvailabilityBasis.RULE_DERIVED
         if self.shape is AvailabilityShape.UNKNOWN:
             self._validate_unknown(is_rule_derived)
@@ -130,7 +128,7 @@ class AvailabilityEvidenceV1(FrozenModel):
 
         self._require_source_label()
         if is_rule_derived:
-            self._validate_rule_derived(info)
+            self._validate_rule_derived()
             return self
 
         if self.rule_derivation is not None:
@@ -161,7 +159,7 @@ class AvailabilityEvidenceV1(FrozenModel):
             msg = "known availability evidence requires a retained source label"
             raise ValueError(msg)
 
-    def _validate_rule_derived(self, info: ValidationInfo) -> None:
+    def _validate_rule_derived(self) -> None:
         if self.shape is not AvailabilityShape.EXACT:
             msg = "rule-derived evidence must be exact"
             raise ValueError(msg)
@@ -184,15 +182,6 @@ class AvailabilityEvidenceV1(FrozenModel):
             != CONSERVATIVE_UPPER_BOUND_RULE_HASH
         ):
             msg = "rule artifact does not match conservative-upper-bound-v1"
-            raise ValueError(msg)
-        constructed_by_rule = info.context is not None and info.context.get(
-            _DERIVATION_CONTEXT_KEY, False
-        )
-        if not constructed_by_rule and not self._trusted_derivation:
-            msg = (
-                "rule-derived evidence must be constructed by "
-                "conservative-upper-bound-v1"
-            )
             raise ValueError(msg)
 
     def _validate_source_exact_second(self) -> None:
@@ -404,11 +393,7 @@ def derive_conservative_upper_bound(
             input_evidence_hash=content_hash(raw_evidence),
         ),
     }
-    derived = AvailabilityEvidenceV1.model_validate(
-        values, context={_DERIVATION_CONTEXT_KEY: True}
-    )
-    object.__setattr__(derived, "_trusted_derivation", True)
-    return derived
+    return AvailabilityEvidenceV1.model_validate(values)
 
 
 def evaluate_availability(
