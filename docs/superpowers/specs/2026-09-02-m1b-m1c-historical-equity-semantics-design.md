@@ -1,8 +1,10 @@
 # Drift M1b and M1c Historical Equity Semantics Design
 
-**Status:** Proposed for review on 2026-09-02. The causal M1b/M1c split is
-approved in principle; the detailed contract remains under review. Design only.
-M1b and M1c remain unimplemented. No implementation plan exists.
+**Status:** Approved as architecture for M1b implementation planning. The causal
+M1b/M1c split is designed; both milestones remain unimplemented. The only active
+M1b plan is
+`docs/superpowers/plans/2026-09-03-m1b-historical-security-identity-universes.md`.
+No executable M1c implementation plan exists.
 
 ## Decision summary
 

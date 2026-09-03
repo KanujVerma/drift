@@ -21,7 +21,8 @@ This file captured the pre-split boundary while M1a was being implemented. The
 canonical umbrella design now assigns identity and universe semantics to M1b and
 market events, observations, sessions, and outcomes to M1c.
 
-Neither milestone may begin until the umbrella specification is reviewed and a
-separate executable implementation plan for that milestone is approved. No such
-plan currently exists. Drift is not ready for equity backtesting, provider
-ingestion, or trading.
+Neither milestone may begin until its separate executable implementation plan is
+approved. The only active M1b plan is
+`docs/superpowers/plans/2026-09-03-m1b-historical-security-identity-universes.md`;
+it is planned and not started. No executable M1c plan exists. Drift is not ready
+for equity backtesting, provider ingestion, or trading.
