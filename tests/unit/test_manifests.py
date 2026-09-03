@@ -163,6 +163,8 @@ def schema(
 def contract(**changes: object) -> RecordTemporalContractV1:
     """Build the required record-level temporal field bindings."""
     values: dict[str, object] = {
+        "contract_version": "1",
+        "evidence_granularity": EvidenceGranularity.RECORD,
         "logical_key_field_ids": ("fact_id",),
         "valid_start_field_id": "valid_start",
         "valid_end_field_id": "valid_end",
@@ -237,6 +239,8 @@ def manifest(
         else (partition(schema_definition=schema_definition),)
     )
     values: dict[str, object] = {
+        "manifest_schema_version": "1",
+        "hash_profile": "drift-canonical-json-sha256-v1",
         "dataset_id": uuid7(),
         "dataset_version": "1",
         "dataset_kind": DatasetKind.SOURCE_FACTS,
@@ -289,6 +293,46 @@ def test_manifest_rejects_invalid_contracts(
     values.update(mutation)
     with pytest.raises(ValidationError, match=message):
         DatasetManifestV1.model_validate(values)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "unsupported"),
+    (
+        ("manifest_schema_version", "2"),
+        ("hash_profile", "alternate-hash-profile"),
+    ),
+)
+def test_manifest_identity_versions_are_required_and_pinned(
+    field_name: str, unsupported: str
+) -> None:
+    """Defaulting an omitted identity field would accept ambiguous serialized data."""
+    values = manifest().model_dump(mode="python")
+    missing = dict(values)
+    missing.pop(field_name)
+    with pytest.raises(ValidationError, match=field_name):
+        DatasetManifestV1.model_validate(missing)
+    with pytest.raises(ValidationError, match=field_name):
+        DatasetManifestV1.model_validate({**values, field_name: unsupported})
+
+
+@pytest.mark.parametrize(
+    ("field_name", "unsupported"),
+    (
+        ("contract_version", "2"),
+        ("evidence_granularity", "field"),
+    ),
+)
+def test_temporal_contract_identity_versions_are_required_and_pinned(
+    field_name: str, unsupported: str
+) -> None:
+    """Omitting a temporal contract identity must not inherit current semantics."""
+    values = contract().model_dump(mode="python")
+    missing = dict(values)
+    missing.pop(field_name)
+    with pytest.raises(ValidationError, match=field_name):
+        RecordTemporalContractV1.model_validate(missing)
+    with pytest.raises(ValidationError, match=field_name):
+        RecordTemporalContractV1.model_validate({**values, field_name: unsupported})
 
 
 def test_manifest_hash_sorts_partitions_by_key_and_content_hash() -> None:

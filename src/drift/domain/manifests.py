@@ -2,7 +2,6 @@
 
 from enum import StrEnum
 from typing import Annotated, Literal, Self
-from urllib.parse import parse_qsl, urlsplit
 
 from pydantic import Field, field_validator, model_validator
 
@@ -15,27 +14,8 @@ from drift.domain.common import (
     UTCDateTime,
 )
 from drift.domain.datasets import TemporalCoverage
-from drift.domain.temporal import AvailabilityChannelV1
-
-_CREDENTIAL_QUERY_NAMES = frozenset(
-    {
-        "apikey",
-        "key",
-        "token",
-        "accesstoken",
-        "authtoken",
-        "signature",
-        "sig",
-        "signed",
-        "signedurl",
-        "credential",
-        "credentials",
-        "xamzsignature",
-        "xamzcredential",
-        "xgoogsignature",
-        "xgoogcredential",
-    }
-)
+from drift.domain.provenance_references import validate_safe_provenance_reference
+from drift.domain.temporal import AvailabilityChannelV1, availability_channel_identity
 
 
 class DatasetKind(StrEnum):
@@ -86,17 +66,7 @@ class SourceDescriptorV1(FrozenModel):
         cls, evidence_reference: ArtifactReference
     ) -> ArtifactReference:
         """Prevent source credentials from becoming immutable provenance."""
-        location = urlsplit(evidence_reference.location)
-        if location.username is not None or location.password is not None:
-            msg = "source evidence locator must not contain credentials"
-            raise ValueError(msg)
-        if any(
-            _normalized_query_name(name) in _CREDENTIAL_QUERY_NAMES
-            for name, _ in parse_qsl(location.query, keep_blank_values=True)
-        ):
-            msg = "source evidence locator must not contain credentials"
-            raise ValueError(msg)
-        return evidence_reference
+        return validate_safe_provenance_reference(evidence_reference)
 
 
 class AcquisitionDescriptorV1(FrozenModel):
@@ -107,6 +77,13 @@ class AcquisitionDescriptorV1(FrozenModel):
     collector_version: NonBlankStr
     evidence_reference: ArtifactReference
 
+    @field_validator("evidence_reference")
+    @classmethod
+    def reject_credential_bearing_locator(
+        cls, evidence_reference: ArtifactReference
+    ) -> ArtifactReference:
+        return validate_safe_provenance_reference(evidence_reference)
+
 
 class LicenseDescriptorV1(FrozenModel):
     """Retained legal-source provenance without operational rights conclusions."""
@@ -116,6 +93,13 @@ class LicenseDescriptorV1(FrozenModel):
     license_version: NonBlankStr | None = None
     acquired_at: UTCDateTime
     terms_evidence_reference: ArtifactReference
+
+    @field_validator("terms_evidence_reference")
+    @classmethod
+    def reject_credential_bearing_locator(
+        cls, terms_evidence_reference: ArtifactReference
+    ) -> ArtifactReference:
+        return validate_safe_provenance_reference(terms_evidence_reference)
 
 
 class FieldDescriptorV1(FrozenModel):
@@ -182,6 +166,7 @@ class PartitionDescriptorV1(FrozenModel):
         cls, artifact: ArtifactReference
     ) -> ArtifactReference:
         """Bind the partition locator exactly to its retained content digest."""
+        validate_safe_provenance_reference(artifact)
         expected_location = f"drift+sha256://{artifact.content_hash}"
         if artifact.location != expected_location:
             msg = "partition artifact must use a stable content URI bound to its hash"
@@ -192,10 +177,8 @@ class PartitionDescriptorV1(FrozenModel):
 class RecordTemporalContractV1(FrozenModel):
     """Schema bindings for record-level fact validity and availability evidence."""
 
-    contract_version: Literal["1"] = "1"
-    evidence_granularity: Literal[EvidenceGranularity.RECORD] = (
-        EvidenceGranularity.RECORD
-    )
+    contract_version: Literal["1"]
+    evidence_granularity: Literal[EvidenceGranularity.RECORD]
     logical_key_field_ids: tuple[NonBlankStr, ...]
     valid_start_field_id: NonBlankStr
     valid_end_field_id: NonBlankStr
@@ -236,11 +219,7 @@ class RecordTemporalContractV1(FrozenModel):
         return tuple(
             sorted(
                 channels,
-                key=lambda channel: (
-                    channel.kind.value,
-                    channel.identifier,
-                    channel.version or "",
-                ),
+                key=availability_channel_identity,
             )
         )
 
@@ -271,6 +250,13 @@ class LineageDescriptorV1(FrozenModel):
     executed_at: UTCDateTime
     determinism: DeterminismClaim
 
+    @field_validator("transformation_reference", "implementation_reference")
+    @classmethod
+    def reject_credential_bearing_locator(
+        cls, reference: ArtifactReference
+    ) -> ArtifactReference:
+        return validate_safe_provenance_reference(reference)
+
     @field_validator("input_manifest_hashes")
     @classmethod
     def canonicalize_input_hashes(
@@ -289,10 +275,8 @@ class LineageDescriptorV1(FrozenModel):
 class DatasetManifestV1(FrozenModel):
     """The complete immutable provenance manifest for one dataset version."""
 
-    manifest_schema_version: Literal["1"] = "1"
-    hash_profile: Literal["drift-canonical-json-sha256-v1"] = (
-        "drift-canonical-json-sha256-v1"
-    )
+    manifest_schema_version: Literal["1"]
+    hash_profile: Literal["drift-canonical-json-sha256-v1"]
     dataset_id: UUID7
     dataset_version: NonBlankStr
     dataset_kind: DatasetKind
@@ -352,8 +336,3 @@ class DatasetManifestV1(FrozenModel):
             msg = "lineage output schema hash must match manifest schema hash"
             raise ValueError(msg)
         return self
-
-
-def _normalized_query_name(name: str) -> str:
-    """Normalize common query-name spellings before credential screening."""
-    return name.casefold().replace("-", "").replace("_", "")

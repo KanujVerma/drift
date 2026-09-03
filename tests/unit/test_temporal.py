@@ -23,7 +23,7 @@ from drift.domain.temporal import (
     derive_conservative_upper_bound,
     evaluate_availability,
 )
-from drift.serialization.canonical import content_hash
+from drift.serialization.canonical import canonical_json, content_hash
 
 HASH = "a" * 64
 
@@ -50,6 +50,7 @@ def artifact_reference(content_hash_value: str = HASH) -> ArtifactReference:
 
 PUBLIC = AvailabilityChannelV1(kind=ChannelKind.PUBLIC, identifier="sec-edgar")
 VENDOR = AvailabilityChannelV1(kind=ChannelKind.VENDOR, identifier="vendor-a")
+SYSTEM = AvailabilityChannelV1(kind=ChannelKind.SYSTEM, identifier="pipeline-a")
 STRICT = AvailabilityPolicyV1(policy_id="strict")
 RULE_REFERENCE = artifact_reference(CONSERVATIVE_UPPER_BOUND_RULE_HASH)
 RULE_ALLOWED = AvailabilityPolicyV1(
@@ -330,7 +331,7 @@ def test_date_and_minute_windows_are_computed_from_source_timezones() -> None:
         ),
         (
             {
-                "channel": PUBLIC,
+                "channel": VENDOR,
                 "shape": AvailabilityShape.EXACT,
                 "lower_bound": utc(2022, 5, 5),
                 "upper_bound": utc(2022, 5, 5),
@@ -343,7 +344,7 @@ def test_date_and_minute_windows_are_computed_from_source_timezones() -> None:
         ),
         (
             {
-                "channel": PUBLIC,
+                "channel": SYSTEM,
                 "shape": AvailabilityShape.EXACT,
                 "lower_bound": utc(2022, 5, 5),
                 "upper_bound": utc(2022, 5, 5),
@@ -386,6 +387,7 @@ def test_date_and_minute_windows_are_computed_from_source_timezones() -> None:
                 "basis": AvailabilityBasis.SOURCE_OBSERVED,
                 "rule_derivation": {
                     "rule_reference": RULE_REFERENCE,
+                    "rule_version": "1",
                     "input_evidence_hash": HASH,
                 },
             },
@@ -399,6 +401,49 @@ def test_evidence_rejects_incompatible_or_incomplete_temporal_claims(
     """Invalid evidence combinations must fail before an eligibility query."""
     with pytest.raises(ValidationError, match=message):
         AvailabilityEvidenceV1.model_validate(values)
+
+
+@pytest.mark.parametrize(
+    ("channel", "basis", "is_compatible"),
+    (
+        (PUBLIC, AvailabilityBasis.SOURCE_OBSERVED, True),
+        (PUBLIC, AvailabilityBasis.VENDOR_DELIVERY, False),
+        (PUBLIC, AvailabilityBasis.LOCAL_INGEST, False),
+        (VENDOR, AvailabilityBasis.SOURCE_OBSERVED, False),
+        (VENDOR, AvailabilityBasis.VENDOR_DELIVERY, True),
+        (VENDOR, AvailabilityBasis.LOCAL_INGEST, False),
+        (SYSTEM, AvailabilityBasis.SOURCE_OBSERVED, False),
+        (SYSTEM, AvailabilityBasis.VENDOR_DELIVERY, False),
+        (SYSTEM, AvailabilityBasis.LOCAL_INGEST, True),
+    ),
+)
+def test_non_rule_evidence_enforces_channel_basis_compatibility(
+    channel: AvailabilityChannelV1,
+    basis: AvailabilityBasis,
+    is_compatible: bool,
+) -> None:
+    """Relabeling a timestamp across channel bases would invent availability."""
+    if is_compatible:
+        evidence = exact_source_evidence(channel=channel, basis=basis)
+        assert evidence.channel == channel
+        assert evidence.basis is basis
+    else:
+        with pytest.raises(ValidationError, match="channel and basis"):
+            exact_source_evidence(channel=channel, basis=basis)
+
+
+def test_rule_derived_evidence_cannot_be_relabelled_to_another_channel() -> None:
+    """A copied derived bound must still replay against its raw evidence channel."""
+    forged = AvailabilityEvidenceV1.model_validate(
+        {**DERIVED_UPPER.model_dump(mode="python"), "channel": VENDOR}
+    )
+
+    result = evaluate_availability(
+        forged, VENDOR, RULE_ALLOWED, utc(2022, 5, 6), RAW_EVIDENCE_BY_HASH
+    )
+
+    assert result.classification is CutoffEligibility.INDETERMINATE
+    assert result.reason == "rule_derivation_not_reproducible"
 
 
 def test_session_evidence_requires_a_retained_artifact() -> None:
@@ -438,6 +483,7 @@ def test_caller_authored_inconsistent_derivation_is_indeterminate() -> None:
         evidence_reference=RAW_BOUNDED.evidence_reference,
         rule_derivation=RuleDerivationV1(
             rule_reference=RULE_REFERENCE,
+            rule_version="1",
             input_evidence_hash=content_hash(RAW_BOUNDED),
         ),
     )
@@ -503,6 +549,22 @@ def test_rule_evaluation_rejects_missing_or_tampered_retained_raw_evidence() -> 
     assert tampered.reason == "rule_input_evidence_unavailable"
 
 
+def test_rule_derivation_version_is_required_and_pinned() -> None:
+    """An omitted rule version must not inherit the reader's current identity."""
+    values = RULE_REFERENCE.model_dump(mode="python")
+    derivation = {
+        "rule_reference": values,
+        "rule_version": "1",
+        "input_evidence_hash": content_hash(RAW_BOUNDED),
+    }
+    missing = dict(derivation)
+    missing.pop("rule_version")
+    with pytest.raises(ValidationError, match="rule_version"):
+        RuleDerivationV1.model_validate(missing)
+    with pytest.raises(ValidationError, match="rule_version"):
+        RuleDerivationV1.model_validate({**derivation, "rule_version": "2"})
+
+
 def test_policy_rejects_duplicate_rule_hashes() -> None:
     """Duplicate policy entries must not create ambiguous approval identity."""
     with pytest.raises(ValidationError, match="unique"):
@@ -513,6 +575,20 @@ def test_policy_rejects_duplicate_rule_hashes() -> None:
                 CONSERVATIVE_UPPER_BOUND_RULE_HASH,
             ),
         )
+
+
+def test_policy_rule_hash_order_is_canonical_identity() -> None:
+    """Treating an approval set as ordered would create two policy identities."""
+    left = AvailabilityPolicyV1(
+        policy_id="two-rules", permitted_rule_hashes=("b" * 64, "a" * 64)
+    )
+    right = AvailabilityPolicyV1(
+        policy_id="two-rules", permitted_rule_hashes=("a" * 64, "b" * 64)
+    )
+
+    assert left == right
+    assert canonical_json(left) == canonical_json(right)
+    assert content_hash(left) == content_hash(right)
 
 
 @pytest.mark.parametrize(

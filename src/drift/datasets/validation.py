@@ -22,11 +22,17 @@ from drift.domain.dataset_validation import (
 from drift.domain.manifests import (
     DatasetKind,
     DatasetManifestV1,
+    EvidenceGranularity,
+    FieldDescriptorV1,
+    LogicalType,
     PartitionDescriptorV1,
+    RecordTemporalContractV1,
+    SchemaDescriptorV1,
 )
 from drift.domain.revisions import FactVersionV1, validate_revision_chain
 from drift.domain.temporal import (
     AvailabilityBasis,
+    AvailabilityChannelV1,
     AvailabilityEvidenceV1,
     derive_conservative_upper_bound,
 )
@@ -36,6 +42,142 @@ from drift.serialization.canonical import content_hash
 _MANIFEST_CONTRACT = "dataset-manifest-v1"
 _RECORD_CONTRACT = "record-temporal-v1"
 _SUPPORTED_VALIDATOR_VERSION = "1"
+_SYNTHETIC_FACT_SCHEMA_HASH_V1 = (
+    "aa0b033243bd749e2312353bf6434a79b34825e2a06af8a709890e2fb2dbfe7c"
+)
+
+_SYNTHETIC_FACT_FIELDS_V1 = (
+    FieldDescriptorV1(
+        field_id="availability",
+        name="availability",
+        logical_type=LogicalType.JSON,
+        nullable=False,
+    ),
+    FieldDescriptorV1(
+        field_id="fact_version_id",
+        name="fact_version_id",
+        logical_type=LogicalType.STRING,
+        nullable=False,
+    ),
+    FieldDescriptorV1(
+        field_id="logical_key.concept",
+        name="logical_key.concept",
+        logical_type=LogicalType.STRING,
+        nullable=False,
+    ),
+    FieldDescriptorV1(
+        field_id="logical_key.dimensions",
+        name="logical_key.dimensions",
+        logical_type=LogicalType.JSON,
+        nullable=False,
+    ),
+    FieldDescriptorV1(
+        field_id="logical_key.entity_key",
+        name="logical_key.entity_key",
+        logical_type=LogicalType.STRING,
+        nullable=False,
+    ),
+    FieldDescriptorV1(
+        field_id="logical_key.source_id",
+        name="logical_key.source_id",
+        logical_type=LogicalType.STRING,
+        nullable=False,
+    ),
+    FieldDescriptorV1(
+        field_id="logical_key.unit",
+        name="logical_key.unit",
+        logical_type=LogicalType.STRING,
+        nullable=False,
+    ),
+    FieldDescriptorV1(
+        field_id="logical_key.valid_period.ended_at",
+        name="logical_key.valid_period.ended_at",
+        logical_type=LogicalType.DATETIME,
+        nullable=False,
+    ),
+    FieldDescriptorV1(
+        field_id="logical_key.valid_period.started_at",
+        name="logical_key.valid_period.started_at",
+        logical_type=LogicalType.DATETIME,
+        nullable=False,
+    ),
+    FieldDescriptorV1(
+        field_id="null_reason",
+        name="null_reason",
+        logical_type=LogicalType.STRING,
+        nullable=True,
+    ),
+    FieldDescriptorV1(
+        field_id="payload_hash",
+        name="payload_hash",
+        logical_type=LogicalType.STRING,
+        nullable=False,
+    ),
+    FieldDescriptorV1(
+        field_id="revision_kind",
+        name="revision_kind",
+        logical_type=LogicalType.STRING,
+        nullable=False,
+    ),
+    FieldDescriptorV1(
+        field_id="source_artifact",
+        name="source_artifact",
+        logical_type=LogicalType.JSON,
+        nullable=False,
+    ),
+    FieldDescriptorV1(
+        field_id="source_sequence",
+        name="source_sequence",
+        logical_type=LogicalType.INTEGER,
+        nullable=False,
+    ),
+    FieldDescriptorV1(
+        field_id="supersedes_fact_version_id",
+        name="supersedes_fact_version_id",
+        logical_type=LogicalType.STRING,
+        nullable=True,
+    ),
+    FieldDescriptorV1(
+        field_id="value",
+        name="value",
+        logical_type=LogicalType.JSON,
+        nullable=True,
+    ),
+)
+
+SYNTHETIC_FACT_SCHEMA_V1 = SchemaDescriptorV1(
+    schema_version="1",
+    fields=_SYNTHETIC_FACT_FIELDS_V1,
+    schema_hash=_SYNTHETIC_FACT_SCHEMA_HASH_V1,
+)
+
+
+def synthetic_fact_temporal_contract_v1(
+    declared_channels: tuple[AvailabilityChannelV1, ...],
+) -> RecordTemporalContractV1:
+    """Return the sole temporal binding for serialized ``FactVersionV1`` data."""
+    return RecordTemporalContractV1(
+        contract_version="1",
+        evidence_granularity=EvidenceGranularity.RECORD,
+        logical_key_field_ids=(
+            "logical_key.source_id",
+            "logical_key.entity_key",
+            "logical_key.concept",
+            "logical_key.valid_period.started_at",
+            "logical_key.valid_period.ended_at",
+            "logical_key.unit",
+            "logical_key.dimensions",
+        ),
+        valid_start_field_id="logical_key.valid_period.started_at",
+        valid_end_field_id="logical_key.valid_period.ended_at",
+        availability_field_id="availability",
+        revision_id_field_id="fact_version_id",
+        supersedes_field_id="supersedes_fact_version_id",
+        source_sequence_field_id="source_sequence",
+        value_field_id="value",
+        null_reason_field_id="null_reason",
+        declared_channels=declared_channels,
+    )
 
 
 class _SyntheticFactDocumentV1(FrozenModel):
@@ -98,6 +240,7 @@ def validate_synthetic_fact_dataset(
 ) -> DatasetValidationDecisionV1:
     """Validate every bound byte partition and record without a cutoff query."""
     findings = list(_manifest_findings(manifest, verified_artifacts, context))
+    _validate_synthetic_bindings(manifest, findings)
     records_by_partition: list[
         tuple[PartitionDescriptorV1, tuple[FactVersionV1, ...]]
     ] = []
@@ -217,6 +360,23 @@ def _validate_schema_bindings(
         for partition in manifest.partitions
     ):
         findings.append(_finding("partition_schema_hash_mismatch"))
+
+
+def _validate_synthetic_bindings(
+    manifest: DatasetManifestV1, findings: list[ValidationFindingV1]
+) -> None:
+    """Require the one concrete schema and role map supported by this parser."""
+    if manifest.schema_definition != SYNTHETIC_FACT_SCHEMA_V1:
+        findings.append(_finding("synthetic_schema_mismatch"))
+    try:
+        expected_contract = synthetic_fact_temporal_contract_v1(
+            manifest.temporal_contract.declared_channels
+        )
+    except ValidationError:
+        findings.append(_finding("synthetic_temporal_contract_mismatch"))
+        return
+    if manifest.temporal_contract != expected_contract:
+        findings.append(_finding("synthetic_temporal_contract_mismatch"))
 
 
 def _validate_lineage(

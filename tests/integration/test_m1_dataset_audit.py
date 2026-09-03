@@ -25,6 +25,7 @@ from drift.domain.manifests import (
     AcquisitionDescriptorV1,
     DatasetKind,
     DatasetManifestV1,
+    EvidenceGranularity,
     FieldDescriptorV1,
     LicenseDescriptorV1,
     LogicalType,
@@ -151,6 +152,8 @@ PARTITION = PartitionDescriptorV1(
     ),
 )
 MANIFEST = DatasetManifestV1(
+    manifest_schema_version="1",
+    hash_profile="drift-canonical-json-sha256-v1",
     dataset_id=uid(300),
     dataset_version="synthetic-1",
     dataset_kind=DatasetKind.SOURCE_FACTS,
@@ -176,6 +179,8 @@ MANIFEST = DatasetManifestV1(
     schema_definition=SCHEMA,
     partitions=(PARTITION,),
     temporal_contract=RecordTemporalContractV1(
+        contract_version="1",
+        evidence_granularity=EvidenceGranularity.RECORD,
         logical_key_field_ids=("fact_id",),
         valid_start_field_id="valid_start",
         valid_end_field_id="valid_end",

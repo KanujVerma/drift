@@ -13,7 +13,9 @@ from drift.datasets.hashing import manifest_hash, schema_hash
 from drift.datasets.references import build_dataset_reference
 from drift.datasets.resolver import VerifiedArtifactBytes
 from drift.datasets.validation import (
+    SYNTHETIC_FACT_SCHEMA_V1,
     parse_synthetic_fact_bytes,
+    synthetic_fact_temporal_contract_v1,
     validate_manifest_structure,
     validate_synthetic_fact_dataset,
 )
@@ -171,9 +173,51 @@ FIELDS = (
         nullable=False,
     ),
     FieldDescriptorV1(
-        field_id="fact_id",
-        name="fact_id",
+        field_id="fact_version_id",
+        name="fact_version_id",
         logical_type=LogicalType.STRING,
+        nullable=False,
+    ),
+    FieldDescriptorV1(
+        field_id="logical_key.concept",
+        name="logical_key.concept",
+        logical_type=LogicalType.STRING,
+        nullable=False,
+    ),
+    FieldDescriptorV1(
+        field_id="logical_key.dimensions",
+        name="logical_key.dimensions",
+        logical_type=LogicalType.JSON,
+        nullable=False,
+    ),
+    FieldDescriptorV1(
+        field_id="logical_key.entity_key",
+        name="logical_key.entity_key",
+        logical_type=LogicalType.STRING,
+        nullable=False,
+    ),
+    FieldDescriptorV1(
+        field_id="logical_key.source_id",
+        name="logical_key.source_id",
+        logical_type=LogicalType.STRING,
+        nullable=False,
+    ),
+    FieldDescriptorV1(
+        field_id="logical_key.unit",
+        name="logical_key.unit",
+        logical_type=LogicalType.STRING,
+        nullable=False,
+    ),
+    FieldDescriptorV1(
+        field_id="logical_key.valid_period.ended_at",
+        name="logical_key.valid_period.ended_at",
+        logical_type=LogicalType.DATETIME,
+        nullable=False,
+    ),
+    FieldDescriptorV1(
+        field_id="logical_key.valid_period.started_at",
+        name="logical_key.valid_period.started_at",
+        logical_type=LogicalType.DATETIME,
         nullable=False,
     ),
     FieldDescriptorV1(
@@ -183,9 +227,21 @@ FIELDS = (
         nullable=True,
     ),
     FieldDescriptorV1(
-        field_id="revision_id",
-        name="revision_id",
+        field_id="payload_hash",
+        name="payload_hash",
         logical_type=LogicalType.STRING,
+        nullable=False,
+    ),
+    FieldDescriptorV1(
+        field_id="revision_kind",
+        name="revision_kind",
+        logical_type=LogicalType.STRING,
+        nullable=False,
+    ),
+    FieldDescriptorV1(
+        field_id="source_artifact",
+        name="source_artifact",
+        logical_type=LogicalType.JSON,
         nullable=False,
     ),
     FieldDescriptorV1(
@@ -195,58 +251,63 @@ FIELDS = (
         nullable=False,
     ),
     FieldDescriptorV1(
-        field_id="supersedes",
-        name="supersedes",
+        field_id="supersedes_fact_version_id",
+        name="supersedes_fact_version_id",
         logical_type=LogicalType.STRING,
         nullable=True,
     ),
     FieldDescriptorV1(
-        field_id="valid_end",
-        name="valid_end",
-        logical_type=LogicalType.DATETIME,
-        nullable=False,
-    ),
-    FieldDescriptorV1(
-        field_id="valid_start",
-        name="valid_start",
-        logical_type=LogicalType.DATETIME,
-        nullable=False,
-    ),
-    FieldDescriptorV1(
         field_id="value",
         name="value",
-        logical_type=LogicalType.DECIMAL,
+        logical_type=LogicalType.JSON,
         nullable=True,
     ),
 )
 
 
-def schema(*, schema_version: str = "1") -> SchemaDescriptorV1:
+def schema(
+    *,
+    schema_version: str = "1",
+    fields: tuple[FieldDescriptorV1, ...] = FIELDS,
+) -> SchemaDescriptorV1:
     provisional = SchemaDescriptorV1.model_construct(
-        schema_version=schema_version, fields=FIELDS, schema_hash=HASH_A
+        schema_version=schema_version, fields=fields, schema_hash=HASH_A
     )
     return SchemaDescriptorV1.model_construct(
         schema_version=schema_version,
-        fields=FIELDS,
+        fields=fields,
         schema_hash=schema_hash(provisional),
     )
 
 
 def contract(
     declared_channels: tuple[AvailabilityChannelV1, ...] = (PUBLIC,),
+    **changes: object,
 ) -> RecordTemporalContractV1:
-    return RecordTemporalContractV1(
-        logical_key_field_ids=("fact_id",),
-        valid_start_field_id="valid_start",
-        valid_end_field_id="valid_end",
-        availability_field_id="availability",
-        revision_id_field_id="revision_id",
-        supersedes_field_id="supersedes",
-        source_sequence_field_id="source_sequence",
-        value_field_id="value",
-        null_reason_field_id="null_reason",
-        declared_channels=declared_channels,
-    )
+    values: dict[str, object] = {
+        "contract_version": "1",
+        "evidence_granularity": "record",
+        "logical_key_field_ids": (
+            "logical_key.source_id",
+            "logical_key.entity_key",
+            "logical_key.concept",
+            "logical_key.valid_period.started_at",
+            "logical_key.valid_period.ended_at",
+            "logical_key.unit",
+            "logical_key.dimensions",
+        ),
+        "valid_start_field_id": "logical_key.valid_period.started_at",
+        "valid_end_field_id": "logical_key.valid_period.ended_at",
+        "availability_field_id": "availability",
+        "revision_id_field_id": "fact_version_id",
+        "supersedes_field_id": "supersedes_fact_version_id",
+        "source_sequence_field_id": "source_sequence",
+        "value_field_id": "value",
+        "null_reason_field_id": "null_reason",
+        "declared_channels": declared_channels,
+    }
+    values.update(changes)
+    return RecordTemporalContractV1.model_validate(values)
 
 
 def manifest_for(
@@ -276,6 +337,8 @@ def manifest_for(
         or TemporalCoverage(started_at=VALID_START, ended_at=VALID_END),
     )
     return DatasetManifestV1(
+        manifest_schema_version="1",
+        hash_profile="drift-canonical-json-sha256-v1",
         dataset_id=uid(300),
         dataset_version="1",
         dataset_kind=DatasetKind.SOURCE_FACTS,
@@ -366,6 +429,147 @@ def test_record_decision_binds_manifest_bytes_and_fact_payloads() -> None:
         not {"pit_eligibility", "cutoff", "promotion", "usage_eligibility"}
         & DatasetValidationDecisionV1.model_fields.keys()
     )
+
+
+def test_pinned_synthetic_schema_describes_the_serialized_fact_format() -> None:
+    """Dropping or renaming a serialized path must change the pinned schema."""
+    assert SYNTHETIC_FACT_SCHEMA_V1.schema_hash == (
+        "aa0b033243bd749e2312353bf6434a79b34825e2a06af8a709890e2fb2dbfe7c"
+    )
+    assert tuple(
+        (field.field_id, field.name, field.logical_type, field.nullable, field.unit)
+        for field in SYNTHETIC_FACT_SCHEMA_V1.fields
+    ) == (
+        ("availability", "availability", LogicalType.JSON, False, None),
+        ("fact_version_id", "fact_version_id", LogicalType.STRING, False, None),
+        ("logical_key.concept", "logical_key.concept", LogicalType.STRING, False, None),
+        (
+            "logical_key.dimensions",
+            "logical_key.dimensions",
+            LogicalType.JSON,
+            False,
+            None,
+        ),
+        (
+            "logical_key.entity_key",
+            "logical_key.entity_key",
+            LogicalType.STRING,
+            False,
+            None,
+        ),
+        (
+            "logical_key.source_id",
+            "logical_key.source_id",
+            LogicalType.STRING,
+            False,
+            None,
+        ),
+        ("logical_key.unit", "logical_key.unit", LogicalType.STRING, False, None),
+        (
+            "logical_key.valid_period.ended_at",
+            "logical_key.valid_period.ended_at",
+            LogicalType.DATETIME,
+            False,
+            None,
+        ),
+        (
+            "logical_key.valid_period.started_at",
+            "logical_key.valid_period.started_at",
+            LogicalType.DATETIME,
+            False,
+            None,
+        ),
+        ("null_reason", "null_reason", LogicalType.STRING, True, None),
+        ("payload_hash", "payload_hash", LogicalType.STRING, False, None),
+        ("revision_kind", "revision_kind", LogicalType.STRING, False, None),
+        ("source_artifact", "source_artifact", LogicalType.JSON, False, None),
+        ("source_sequence", "source_sequence", LogicalType.INTEGER, False, None),
+        (
+            "supersedes_fact_version_id",
+            "supersedes_fact_version_id",
+            LogicalType.STRING,
+            True,
+            None,
+        ),
+        ("value", "value", LogicalType.JSON, True, None),
+    )
+    expected_contract = synthetic_fact_temporal_contract_v1((PUBLIC,))
+    assert expected_contract.logical_key_field_ids == (
+        "logical_key.source_id",
+        "logical_key.entity_key",
+        "logical_key.concept",
+        "logical_key.valid_period.started_at",
+        "logical_key.valid_period.ended_at",
+        "logical_key.unit",
+        "logical_key.dimensions",
+    )
+    assert expected_contract.valid_start_field_id == (
+        "logical_key.valid_period.started_at"
+    )
+    assert expected_contract.valid_end_field_id == "logical_key.valid_period.ended_at"
+    assert expected_contract.availability_field_id == "availability"
+    assert expected_contract.revision_id_field_id == "fact_version_id"
+    assert expected_contract.supersedes_field_id == "supersedes_fact_version_id"
+    assert expected_contract.source_sequence_field_id == "source_sequence"
+    assert expected_contract.value_field_id == "value"
+    assert expected_contract.null_reason_field_id == "null_reason"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_code"),
+    (
+        ("swapped_roles", "synthetic_temporal_contract_mismatch"),
+        ("wrong_logical_type", "synthetic_schema_mismatch"),
+        ("wrong_nullability", "synthetic_schema_mismatch"),
+        ("wrong_unit", "synthetic_schema_mismatch"),
+        ("nonexistent_field_path", "synthetic_schema_mismatch"),
+    ),
+)
+def test_synthetic_validator_requires_exact_schema_and_temporal_roles(
+    mutation: str, expected_code: str
+) -> None:
+    """Trusting declarations without fixed bindings accepts a different format."""
+    current, verified = valid_fixture()
+    if mutation == "swapped_roles":
+        changed_contract = contract(
+            availability_field_id="value", value_field_id="availability"
+        )
+        current = current.model_copy(update={"temporal_contract": changed_contract})
+    else:
+        fields = list(current.schema_definition.fields)
+        target_index = next(
+            index
+            for index, field in enumerate(fields)
+            if field.field_id == "availability"
+        )
+        target = fields[target_index]
+        if mutation == "wrong_logical_type":
+            target = target.model_copy(update={"logical_type": LogicalType.STRING})
+        elif mutation == "wrong_nullability":
+            target = target.model_copy(update={"nullable": True})
+        elif mutation == "wrong_unit":
+            target = target.model_copy(update={"unit": "seconds"})
+        else:
+            target = target.model_copy(update={"field_id": "record.availability"})
+        fields[target_index] = target
+        changed_schema = schema(fields=tuple(fields))
+        partition = current.partitions[0].model_copy(
+            update={"schema_hash": changed_schema.schema_hash}
+        )
+        updates: dict[str, object] = {
+            "schema_definition": changed_schema,
+            "partitions": (partition,),
+        }
+        if mutation == "nonexistent_field_path":
+            updates["temporal_contract"] = contract(
+                availability_field_id="record.availability"
+            )
+        current = current.model_copy(update=updates)
+
+    decision = validate_synthetic_fact_dataset(current, verified, CONTEXT)
+
+    assert decision.result is ValidationResult.FAIL
+    assert expected_code in {finding.code for finding in decision.findings}
 
 
 @pytest.mark.parametrize(
@@ -594,6 +798,7 @@ def test_validation_recomputes_rule_derivation_from_retained_raw_evidence() -> N
         evidence_reference=raw.evidence_reference,
         rule_derivation=RuleDerivationV1(
             rule_reference=rule_reference,
+            rule_version="1",
             input_evidence_hash=content_hash(raw),
         ),
     )

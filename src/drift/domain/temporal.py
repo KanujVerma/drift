@@ -7,7 +7,7 @@ from enum import StrEnum
 from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 
 from drift.domain.artifacts import ArtifactReference
 from drift.domain.common import (
@@ -17,6 +17,7 @@ from drift.domain.common import (
     UTCDateTime,
     _normalize_utc,
 )
+from drift.domain.provenance_references import validate_safe_provenance_reference
 from drift.serialization.canonical import content_hash
 
 _OFFSET_SECOND = re.compile(
@@ -97,12 +98,26 @@ class AvailabilityChannelV1(FrozenModel):
     version: NonBlankStr | None = None
 
 
+def availability_channel_identity(
+    channel: AvailabilityChannelV1,
+) -> tuple[str, str, str]:
+    """Return the canonical identity ordering key for an information channel."""
+    return channel.kind.value, channel.identifier, channel.version or ""
+
+
 class RuleDerivationV1(FrozenModel):
     """Hash-addressed provenance for a rule-derived availability claim."""
 
     rule_reference: ArtifactReference
-    rule_version: Literal["1"] = "1"
+    rule_version: Literal["1"]
     input_evidence_hash: SHA256Hash
+
+    @field_validator("rule_reference")
+    @classmethod
+    def reject_credential_bearing_locator(
+        cls, rule_reference: ArtifactReference
+    ) -> ArtifactReference:
+        return validate_safe_provenance_reference(rule_reference)
 
 
 class AvailabilityEvidenceV1(FrozenModel):
@@ -119,9 +134,20 @@ class AvailabilityEvidenceV1(FrozenModel):
     evidence_reference: ArtifactReference | None = None
     rule_derivation: RuleDerivationV1 | None = None
 
+    @field_validator("evidence_reference")
+    @classmethod
+    def reject_credential_bearing_locator(
+        cls, evidence_reference: ArtifactReference | None
+    ) -> ArtifactReference | None:
+        if evidence_reference is None:
+            return None
+        return validate_safe_provenance_reference(evidence_reference)
+
     @model_validator(mode="after")
     def validate_evidence(self) -> AvailabilityEvidenceV1:
         is_rule_derived = self.basis is AvailabilityBasis.RULE_DERIVED
+        if not is_rule_derived:
+            self._validate_channel_basis()
         if self.shape is AvailabilityShape.UNKNOWN:
             self._validate_unknown(is_rule_derived)
             return self
@@ -139,6 +165,16 @@ class AvailabilityEvidenceV1(FrozenModel):
             return self
         self._validate_raw_bounded()
         return self
+
+    def _validate_channel_basis(self) -> None:
+        expected_basis = {
+            ChannelKind.PUBLIC: AvailabilityBasis.SOURCE_OBSERVED,
+            ChannelKind.VENDOR: AvailabilityBasis.VENDOR_DELIVERY,
+            ChannelKind.SYSTEM: AvailabilityBasis.LOCAL_INGEST,
+        }[self.channel.kind]
+        if self.basis is not expected_basis:
+            msg = "non-rule availability channel and basis must be compatible"
+            raise ValueError(msg)
 
     def _validate_unknown(self, is_rule_derived: bool) -> None:
         if self.precision is not SourcePrecision.UNKNOWN:
@@ -258,12 +294,15 @@ class AvailabilityPolicyV1(FrozenModel):
     policy_id: NonBlankStr
     permitted_rule_hashes: tuple[SHA256Hash, ...] = ()
 
-    @model_validator(mode="after")
-    def validate_rule_hashes(self) -> AvailabilityPolicyV1:
-        if len(set(self.permitted_rule_hashes)) != len(self.permitted_rule_hashes):
+    @field_validator("permitted_rule_hashes")
+    @classmethod
+    def canonicalize_rule_hashes(
+        cls, rule_hashes: tuple[SHA256Hash, ...]
+    ) -> tuple[SHA256Hash, ...]:
+        if len(set(rule_hashes)) != len(rule_hashes):
             msg = "permitted rule hashes must be unique"
             raise ValueError(msg)
-        return self
+        return tuple(sorted(rule_hashes))
 
 
 class CutoffEligibilityResultV1(FrozenModel):
@@ -390,6 +429,7 @@ def derive_conservative_upper_bound(
         "evidence_reference": raw_evidence.evidence_reference,
         "rule_derivation": RuleDerivationV1(
             rule_reference=rule_reference,
+            rule_version="1",
             input_evidence_hash=content_hash(raw_evidence),
         ),
     }

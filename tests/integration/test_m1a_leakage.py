@@ -11,14 +11,15 @@ from uuid import UUID
 
 import pytest
 
-from drift.datasets.hashing import schema_hash
 from drift.datasets.resolver import (
     ResolverLimits,
     VerifiedArtifactBytes,
     read_verified_local_artifact,
 )
 from drift.datasets.validation import (
+    SYNTHETIC_FACT_SCHEMA_V1,
     parse_synthetic_fact_bytes,
+    synthetic_fact_temporal_contract_v1,
     validate_synthetic_fact_dataset,
 )
 from drift.domain.artifacts import ArtifactKind, ArtifactReference
@@ -32,12 +33,8 @@ from drift.domain.manifests import (
     AcquisitionDescriptorV1,
     DatasetKind,
     DatasetManifestV1,
-    FieldDescriptorV1,
     LicenseDescriptorV1,
-    LogicalType,
     PartitionDescriptorV1,
-    RecordTemporalContractV1,
-    SchemaDescriptorV1,
     SourceDescriptorV1,
 )
 from drift.domain.revisions import select_fact_version
@@ -432,6 +429,7 @@ def _chain_mutation(document: dict[str, Any], mutation: str) -> None:
             (
                 "missing_initial_root",
                 "non_increasing_source_sequence",
+                "backward_availability",
                 "revision_cycle",
             ),
         ),
@@ -579,70 +577,6 @@ def _artifact(suffix: int, digest: str, location: str) -> ArtifactReference:
 def _manifest_for(
     verified: VerifiedArtifactBytes, *, row_count: int = 1
 ) -> DatasetManifestV1:
-    fields = (
-        FieldDescriptorV1(
-            field_id="availability",
-            name="availability",
-            logical_type=LogicalType.JSON,
-            nullable=False,
-        ),
-        FieldDescriptorV1(
-            field_id="fact_id",
-            name="fact_id",
-            logical_type=LogicalType.STRING,
-            nullable=False,
-        ),
-        FieldDescriptorV1(
-            field_id="null_reason",
-            name="null_reason",
-            logical_type=LogicalType.STRING,
-            nullable=True,
-        ),
-        FieldDescriptorV1(
-            field_id="revision_id",
-            name="revision_id",
-            logical_type=LogicalType.STRING,
-            nullable=False,
-        ),
-        FieldDescriptorV1(
-            field_id="source_sequence",
-            name="source_sequence",
-            logical_type=LogicalType.INTEGER,
-            nullable=False,
-        ),
-        FieldDescriptorV1(
-            field_id="supersedes",
-            name="supersedes",
-            logical_type=LogicalType.STRING,
-            nullable=True,
-        ),
-        FieldDescriptorV1(
-            field_id="valid_end",
-            name="valid_end",
-            logical_type=LogicalType.DATETIME,
-            nullable=False,
-        ),
-        FieldDescriptorV1(
-            field_id="valid_start",
-            name="valid_start",
-            logical_type=LogicalType.DATETIME,
-            nullable=False,
-        ),
-        FieldDescriptorV1(
-            field_id="value",
-            name="value",
-            logical_type=LogicalType.JSON,
-            nullable=True,
-        ),
-    )
-    provisional = SchemaDescriptorV1.model_construct(
-        schema_version="1", fields=fields, schema_hash="a" * 64
-    )
-    definition = SchemaDescriptorV1(
-        schema_version="1",
-        fields=fields,
-        schema_hash=schema_hash(provisional),
-    )
     partition = PartitionDescriptorV1(
         partition_id=_uid(910),
         partition_key="synthetic=fixture",
@@ -655,13 +589,15 @@ def _manifest_for(
         media_type="application/json",
         format_version="1",
         row_count=row_count,
-        schema_hash=definition.schema_hash,
+        schema_hash=SYNTHETIC_FACT_SCHEMA_V1.schema_hash,
         coverage=TemporalCoverage(
             started_at=parse_utc("2022-01-01T00:00:00Z"),
             ended_at=parse_utc("2022-12-31T23:59:59Z"),
         ),
     )
     return DatasetManifestV1(
+        manifest_schema_version="1",
+        hash_profile="drift-canonical-json-sha256-v1",
         dataset_id=_uid(900),
         dataset_version="fixture-1",
         dataset_kind=DatasetKind.SOURCE_FACTS,
@@ -684,32 +620,16 @@ def _manifest_for(
             acquired_at=parse_utc("2026-09-01T12:00:00Z"),
             terms_evidence_reference=_artifact(914, "c" * 64, "evidence:terms"),
         ),
-        schema_definition=definition,
+        schema_definition=SYNTHETIC_FACT_SCHEMA_V1,
         partitions=(partition,),
-        temporal_contract=RecordTemporalContractV1(
-            logical_key_field_ids=("fact_id",),
-            valid_start_field_id="valid_start",
-            valid_end_field_id="valid_end",
-            availability_field_id="availability",
-            revision_id_field_id="revision_id",
-            supersedes_field_id="supersedes",
-            source_sequence_field_id="source_sequence",
-            value_field_id="value",
-            null_reason_field_id="null_reason",
-            declared_channels=tuple(
-                sorted(
-                    {
-                        evidence.channel
-                        for version in parse_synthetic_fact_bytes(verified)
-                        for evidence in version.availability
-                    },
-                    key=lambda channel: (
-                        channel.kind.value,
-                        channel.identifier,
-                        channel.version or "",
-                    ),
-                )
-            ),
+        temporal_contract=synthetic_fact_temporal_contract_v1(
+            tuple(
+                {
+                    evidence.channel
+                    for version in parse_synthetic_fact_bytes(verified)
+                    for evidence in version.availability
+                }
+            )
         ),
     )
 

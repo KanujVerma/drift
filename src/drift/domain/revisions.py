@@ -25,12 +25,14 @@ from drift.domain.dataset_validation import (
     FindingSeverity,
     ValidationFindingV1,
 )
+from drift.domain.provenance_references import validate_safe_provenance_reference
 from drift.domain.temporal import (
     AvailabilityChannelV1,
     AvailabilityEvidenceV1,
     AvailabilityPolicyV1,
     CutoffEligibility,
     ValidPeriodV1,
+    availability_channel_identity,
     evaluate_availability,
 )
 from drift.serialization.canonical import content_hash
@@ -79,6 +81,32 @@ class FactVersionV1(FrozenModel):
             msg = "source artifact is required"
             raise ValueError(msg)
         return value
+
+    @field_validator("source_artifact")
+    @classmethod
+    def reject_credential_bearing_locator(
+        cls, source_artifact: ArtifactReference
+    ) -> ArtifactReference:
+        return validate_safe_provenance_reference(source_artifact)
+
+    @field_validator("availability")
+    @classmethod
+    def canonicalize_availability(
+        cls, availability: tuple[AvailabilityEvidenceV1, ...]
+    ) -> tuple[AvailabilityEvidenceV1, ...]:
+        if not availability:
+            msg = "fact version requires availability evidence"
+            raise ValueError(msg)
+        channels = tuple(evidence.channel for evidence in availability)
+        if len(channels) != len(set(channels)):
+            msg = "fact version availability channels must be unique"
+            raise ValueError(msg)
+        return tuple(
+            sorted(
+                availability,
+                key=lambda evidence: availability_channel_identity(evidence.channel),
+            )
+        )
 
     @model_validator(mode="after")
     def validate_immutable_fact(self) -> FactVersionV1:
@@ -202,6 +230,8 @@ def validate_revision_chain(
             findings.append(_finding("logical_key_mismatch"))
         if version.source_sequence <= predecessor.source_sequence:
             findings.append(_finding("non_increasing_source_sequence"))
+        if _has_backward_availability(predecessor, version):
+            findings.append(_finding("backward_availability"))
     if any(count > 1 for count in children.values()):
         findings.append(_finding("branching_revision_chain"))
     if _has_cycle(by_id):
@@ -231,31 +261,44 @@ def select_fact_version(
         "considered_versions": ordered,
         "considered_version_hashes": tuple(content_hash(item) for item in ordered),
     }
-    decisions = tuple(
-        (
-            version,
-            evaluate_availability(
-                next(
-                    evidence
-                    for evidence in version.availability
-                    if evidence.channel == channel
-                ),
+    decisions = {}
+    for version in ordered:
+        evidence = next(
+            (item for item in version.availability if item.channel == channel), None
+        )
+        decisions[version.fact_version_id] = (
+            None
+            if evidence is None
+            else evaluate_availability(
+                evidence,
                 channel,
                 policy,
                 cutoff_utc,
                 retained_evidence,
-            ),
+            )
         )
-        for version in ordered
-        if any(evidence.channel == channel for evidence in version.availability)
-    )
-    eligible = tuple(
-        item
-        for item in decisions
-        if item[1].classification is CutoffEligibility.ELIGIBLE
-    )
+
+    causally_available: set[UUID] = set()
+    unresolved_paths: set[UUID] = set()
+    eligible: list[FactVersionV1] = []
+    for version in ordered:
+        decision = decisions[version.fact_version_id]
+        if (
+            decision is None
+            or decision.classification is CutoffEligibility.INDETERMINATE
+        ):
+            unresolved_paths.add(version.fact_version_id)
+            continue
+        if decision.classification is not CutoffEligibility.ELIGIBLE:
+            continue
+        predecessor_id = version.supersedes_fact_version_id
+        if predecessor_id is None or predecessor_id in causally_available:
+            causally_available.add(version.fact_version_id)
+            eligible.append(version)
+        elif predecessor_id in unresolved_paths:
+            unresolved_paths.add(version.fact_version_id)
     if eligible:
-        selected = max(eligible, key=lambda item: item[0].source_sequence)[0]
+        selected = max(eligible, key=lambda item: item.source_sequence)
         if selected.revision_kind is RevisionKind.WITHDRAWAL:
             return FactSelectionResultV1(
                 classification=CutoffEligibility.INELIGIBLE,
@@ -273,11 +316,7 @@ def select_fact_version(
         )
     classification = (
         CutoffEligibility.INDETERMINATE
-        if not decisions
-        or any(
-            decision.classification is CutoffEligibility.INDETERMINATE
-            for _, decision in decisions
-        )
+        if unresolved_paths
         else CutoffEligibility.INELIGIBLE
     )
     return FactSelectionResultV1(
@@ -312,6 +351,27 @@ def _validate_record(
         findings.append(_finding("missing_null_reason"))
     if version.payload_hash != content_hash(fact_version_payload(version)):
         findings.append(_finding("payload_hash_mismatch"))
+
+
+def _has_backward_availability(
+    predecessor: FactVersionV1, successor: FactVersionV1
+) -> bool:
+    """Return whether a shared channel has definitely backward upper bounds."""
+    predecessor_by_channel = {
+        evidence.channel: evidence for evidence in predecessor.availability
+    }
+    return any(
+        predecessor_evidence.upper_bound is not None
+        and successor_evidence.upper_bound is not None
+        and successor_evidence.upper_bound < predecessor_evidence.upper_bound
+        for successor_evidence in successor.availability
+        if (
+            predecessor_evidence := predecessor_by_channel.get(
+                successor_evidence.channel
+            )
+        )
+        is not None
+    )
 
 
 def _has_cycle(by_id: Mapping[UUID, FactVersionV1]) -> bool:

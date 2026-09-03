@@ -4,7 +4,7 @@
 
 **Umbrella design:** `docs/superpowers/specs/2026-09-01-m1-point-in-time-data-design.md`
 
-**Active plan:** `docs/superpowers/plans/2026-09-01-m1a-temporal-provenance.md`
+**Completed M1a execution record:** `docs/superpowers/plans/2026-09-01-m1a-temporal-provenance.md`
 
 ## Purpose
 

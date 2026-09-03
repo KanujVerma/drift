@@ -250,7 +250,7 @@ class AvailabilityChannelV1(FrozenModel):
 
 class RuleDerivationV1(FrozenModel):
     rule_reference: ArtifactReference
-    rule_version: Literal["1"] = "1"
+    rule_version: Literal["1"]
     input_evidence_hash: SHA256Hash
 
 
@@ -377,6 +377,7 @@ def derive_conservative_upper_bound(
         evidence_reference=raw_evidence.evidence_reference,
         rule_derivation=RuleDerivationV1(
             rule_reference=rule_reference,
+            rule_version="1",
             input_evidence_hash=content_hash(raw_evidence),
         ),
     )
@@ -556,10 +557,8 @@ class PartitionDescriptorV1(FrozenModel):
 
 
 class RecordTemporalContractV1(FrozenModel):
-    contract_version: Literal["1"] = "1"
-    evidence_granularity: Literal[EvidenceGranularity.RECORD] = (
-        EvidenceGranularity.RECORD
-    )
+    contract_version: Literal["1"]
+    evidence_granularity: Literal[EvidenceGranularity.RECORD]
     logical_key_field_ids: tuple[NonBlankStr, ...]
     valid_start_field_id: NonBlankStr
     valid_end_field_id: NonBlankStr
@@ -584,10 +583,8 @@ class LineageDescriptorV1(FrozenModel):
 
 
 class DatasetManifestV1(FrozenModel):
-    manifest_schema_version: Literal["1"] = "1"
-    hash_profile: Literal["drift-canonical-json-sha256-v1"] = (
-        "drift-canonical-json-sha256-v1"
-    )
+    manifest_schema_version: Literal["1"]
+    hash_profile: Literal["drift-canonical-json-sha256-v1"]
     dataset_id: UUID7
     dataset_version: NonBlankStr
     dataset_kind: DatasetKind
@@ -1542,7 +1539,9 @@ Expected: inspect every match. Current status consistently says M0 plus M1a is i
 
 Run: `rg -n '^- \[ \]' docs/superpowers/plans`
 
-Expected: unchecked steps occur only in this active M1a plan until it is marked complete. The superseded mixed plan and deferred M1b outline have none.
+Expected during execution: unchecked steps occur only in this M1a execution
+record until it is marked complete. The superseded mixed plan and deferred M1b
+outline have none.
 
 - [x] **Step 3: Run explicit scope and compatibility scans**
 

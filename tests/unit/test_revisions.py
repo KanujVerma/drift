@@ -90,6 +90,11 @@ def exact_evidence(
     available: datetime,
     channel: AvailabilityChannelV1 = PUBLIC,
 ) -> AvailabilityEvidenceV1:
+    basis = (
+        AvailabilityBasis.VENDOR_DELIVERY
+        if channel.kind is ChannelKind.VENDOR
+        else AvailabilityBasis.SOURCE_OBSERVED
+    )
     return AvailabilityEvidenceV1(
         channel=channel,
         shape=AvailabilityShape.EXACT,
@@ -97,7 +102,7 @@ def exact_evidence(
         upper_bound=available,
         precision=SourcePrecision.SECOND,
         source_time_label=available.isoformat().replace("+00:00", "Z"),
-        basis=AvailabilityBasis.SOURCE_OBSERVED,
+        basis=basis,
     )
 
 
@@ -262,6 +267,21 @@ def test_reordered_versions_have_stable_selection_identity() -> None:
     assert content_hash(reordered) == content_hash(selected)
 
 
+def test_fact_availability_order_is_canonical_channel_identity() -> None:
+    """Treating multi-channel evidence as ordered would change fact identity."""
+    public = exact_evidence(utc(2022, 5, 5), PUBLIC)
+    vendor = exact_evidence(utc(2022, 5, 6), VENDOR)
+    left = version(availability=(public, vendor))
+    reversed_values = left.model_dump(mode="python")
+    reversed_values["availability"] = (vendor, public)
+
+    right = FactVersionV1.model_validate(reversed_values)
+
+    assert left == right
+    assert canonical_json(left) == canonical_json(right)
+    assert content_hash(left) == content_hash(right)
+
+
 def test_later_indeterminate_revision_does_not_erase_available_predecessor() -> None:
     """Treating an unknown later revision as an override leaks no future data."""
     result = select_fact_version(
@@ -269,6 +289,154 @@ def test_later_indeterminate_revision_does_not_erase_available_predecessor() -> 
     )
     assert result.classification is CutoffEligibility.ELIGIBLE
     assert result.selected_version == INITIAL
+
+
+def test_successor_is_selected_only_after_exact_predecessor_is_available() -> None:
+    """Skipping causal availability would expose a successor before its history."""
+    predecessor = version(availability=(exact_evidence(utc(2022, 5, 5)),))
+    successor = version(
+        value="revised",
+        revision_kind=RevisionKind.REVISION,
+        supersedes_fact_version_id=predecessor.fact_version_id,
+        source_sequence=1,
+        availability=(exact_evidence(utc(2022, 5, 6)),),
+    )
+
+    before = select_fact_version(
+        (predecessor, successor), PUBLIC, STRICT, utc(2022, 5, 5), {}
+    )
+    after = select_fact_version(
+        (predecessor, successor), PUBLIC, STRICT, utc(2022, 5, 6), {}
+    )
+
+    assert before.selected_version == predecessor
+    assert after.selected_version == successor
+
+
+def test_bounded_overlap_waits_for_predecessor_without_invalidating_chain() -> None:
+    """Selecting inside overlapping bounds would bypass predecessor uncertainty."""
+    predecessor_evidence = AvailabilityEvidenceV1(
+        channel=PUBLIC,
+        shape=AvailabilityShape.BOUNDED,
+        lower_bound=utc(2022, 5, 1),
+        upper_bound=utc(2022, 5, 3),
+        precision=SourcePrecision.INTERVAL,
+        source_time_label="captured between May 1 and May 3",
+        basis=AvailabilityBasis.SOURCE_OBSERVED,
+    )
+    successor_evidence = AvailabilityEvidenceV1(
+        channel=PUBLIC,
+        shape=AvailabilityShape.BOUNDED,
+        lower_bound=utc(2022, 5, 2),
+        upper_bound=utc(2022, 5, 4),
+        precision=SourcePrecision.INTERVAL,
+        source_time_label="captured between May 2 and May 4",
+        basis=AvailabilityBasis.SOURCE_OBSERVED,
+    )
+    predecessor = version(availability=(predecessor_evidence,))
+    successor = version(
+        value="revised",
+        revision_kind=RevisionKind.REVISION,
+        supersedes_fact_version_id=predecessor.fact_version_id,
+        source_sequence=1,
+        availability=(successor_evidence,),
+    )
+
+    assert validate_revision_chain((predecessor, successor)) == ()
+    inside = select_fact_version(
+        (predecessor, successor), PUBLIC, STRICT, utc(2022, 5, 2, 12), {}
+    )
+    predecessor_ready = select_fact_version(
+        (predecessor, successor), PUBLIC, STRICT, utc(2022, 5, 3, 12), {}
+    )
+    successor_ready = select_fact_version(
+        (predecessor, successor), PUBLIC, STRICT, utc(2022, 5, 4), {}
+    )
+
+    assert inside.classification is CutoffEligibility.INDETERMINATE
+    assert predecessor_ready.selected_version == predecessor
+    assert successor_ready.selected_version == successor
+
+
+def test_unknown_or_absent_predecessor_channel_blocks_successor() -> None:
+    """Treating a successor's evidence independently would hide causal uncertainty."""
+    for predecessor_availability in (
+        (unknown_evidence(),),
+        (exact_evidence(utc(2022, 5, 5), VENDOR),),
+    ):
+        predecessor = version(availability=predecessor_availability)
+        successor = version(
+            value="revised",
+            revision_kind=RevisionKind.REVISION,
+            supersedes_fact_version_id=predecessor.fact_version_id,
+            source_sequence=1,
+            availability=(exact_evidence(utc(2022, 5, 6)),),
+        )
+
+        result = select_fact_version(
+            (predecessor, successor), PUBLIC, STRICT, utc(2022, 5, 7), {}
+        )
+
+        assert result.classification is CutoffEligibility.INDETERMINATE
+        assert result.selected_version is None
+
+
+def test_causal_availability_is_scoped_independently_per_channel() -> None:
+    """Using one channel's predecessor decision for another leaks across channels."""
+    predecessor = version(
+        availability=(
+            exact_evidence(utc(2022, 5, 5), PUBLIC),
+            exact_evidence(utc(2022, 5, 7), VENDOR),
+        )
+    )
+    successor = version(
+        value="revised",
+        revision_kind=RevisionKind.REVISION,
+        supersedes_fact_version_id=predecessor.fact_version_id,
+        source_sequence=1,
+        availability=(
+            exact_evidence(utc(2022, 5, 6), PUBLIC),
+            exact_evidence(utc(2022, 5, 8), VENDOR),
+        ),
+    )
+
+    public = select_fact_version(
+        (predecessor, successor), PUBLIC, STRICT, utc(2022, 5, 6), {}
+    )
+    vendor_before_successor = select_fact_version(
+        (predecessor, successor), VENDOR, STRICT, utc(2022, 5, 7), {}
+    )
+    vendor_after_successor = select_fact_version(
+        (predecessor, successor), VENDOR, STRICT, utc(2022, 5, 8), {}
+    )
+
+    assert public.selected_version == successor
+    assert vendor_before_successor.selected_version == predecessor
+    assert vendor_after_successor.selected_version == successor
+
+
+def test_revision_chain_rejects_definitely_backward_channel_availability() -> None:
+    """Removing the chronology guard would admit a causally backward successor."""
+    predecessor = version(
+        availability=(
+            exact_evidence(utc(2022, 5, 5), PUBLIC),
+            exact_evidence(utc(2022, 5, 7), VENDOR),
+        )
+    )
+    successor = version(
+        value="revised",
+        revision_kind=RevisionKind.REVISION,
+        supersedes_fact_version_id=predecessor.fact_version_id,
+        source_sequence=1,
+        availability=(
+            exact_evidence(utc(2022, 5, 4), PUBLIC),
+            exact_evidence(utc(2022, 5, 8), VENDOR),
+        ),
+    )
+
+    assert "backward_availability" in {
+        finding.code for finding in validate_revision_chain((predecessor, successor))
+    }
 
 
 type VersionFactory = Callable[[], tuple[FactVersionV1, ...]]

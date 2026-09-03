@@ -2,17 +2,18 @@
 
 **Status:** Superseded on 2026-09-01. This file is retained as research history and is not executable.
 
-**Active M1a plan:** `docs/superpowers/plans/2026-09-01-m1a-temporal-provenance.md`
+**Completed M1a execution record:** `docs/superpowers/plans/2026-09-01-m1a-temporal-provenance.md`
 
 **Deferred M1b boundary:** `docs/superpowers/plans/2026-09-01-m1b-historical-market-semantics.md`
 
 The mixed task sequence below predates the M1a-only implementation ruling. Its
-unchecked execution state has been neutralized so Resume must not treat it as an
-active plan. The umbrella design remains canonical research context; the two
-documents above govern current plan state.
+unchecked execution state has been neutralized so Resume treats it only as
+history. The umbrella design remains canonical research context; the
+completed M1a record and deferred M1b outline above describe current plan state.
 
-> **Research history only:** Do not execute this task sequence. Use the active
-> M1a plan linked above; M1b has no approved execution plan.
+> **Research history only:** Do not execute this task sequence. Use the completed
+> M1a record linked above only as execution history; M1b has no approved
+> execution plan.
 
 **Goal:** Add immutable point-in-time dataset contracts and fail-closed validators that bind exact bytes to channel-scoped temporal evidence, then add the minimum historical equity identity, universe, corporate-action, and session semantics required to prevent common leakage.
 
