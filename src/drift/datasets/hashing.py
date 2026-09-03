@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from drift.domain.datasets import TemporalCoverage
 from drift.domain.manifests import (
     DatasetManifestV1,
+    DatasetManifestV2,
     PartitionDescriptorV1,
     SchemaDescriptorV1,
 )
@@ -28,14 +29,16 @@ def schema_hash(schema: SchemaDescriptorV1) -> str:
     return content_hash(schema_body(schema))
 
 
-def manifest_body(manifest: DatasetManifestV1) -> dict[str, JSONValue]:
+def manifest_body(
+    manifest: DatasetManifestV1 | DatasetManifestV2,
+) -> dict[str, JSONValue]:
     """Return every canonical manifest field as its hash preimage."""
     body = canonical_data(manifest)
     assert isinstance(body, dict)
     return body
 
 
-def manifest_hash(manifest: DatasetManifestV1) -> str:
+def manifest_hash(manifest: DatasetManifestV1 | DatasetManifestV2) -> str:
     """Return the canonical immutable manifest digest."""
     return content_hash(manifest_body(manifest))
 
@@ -45,6 +48,20 @@ def fact_version_payload(version: FactVersionV1) -> dict[str, JSONValue]:
     payload = canonical_data(version)
     assert isinstance(payload, dict)
     del payload["payload_hash"]
+    return payload
+
+
+def assertion_version_payload(record: object) -> dict[str, JSONValue]:
+    """Return an assertion's canonical payload without its nested self-hash."""
+    payload = canonical_data(record)
+    if not isinstance(payload, dict):
+        msg = "assertion payload must be a canonical object"
+        raise ValueError(msg)
+    revision = payload.get("revision")
+    if not isinstance(revision, dict) or "payload_hash" not in revision:
+        msg = "assertion payload requires revision.payload_hash"
+        raise ValueError(msg)
+    del revision["payload_hash"]
     return payload
 
 

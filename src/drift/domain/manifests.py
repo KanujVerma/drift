@@ -238,6 +238,107 @@ class RecordTemporalContractV1(FrozenModel):
         )
 
 
+class AssertionEffectiveShape(StrEnum):
+    """Whether an assertion carries one boundary or an interval claim."""
+
+    BOUNDARY = "boundary"
+    INTERVAL = "interval"
+
+
+class AssertionTemporalContractV1(FrozenModel):
+    """Schema bindings for correction-capable assertion records."""
+
+    contract_version: Literal["1"]
+    evidence_granularity: Literal[EvidenceGranularity.RECORD]
+    logical_record_id_field_id: NonBlankStr
+    record_version_id_field_id: NonBlankStr
+    revision_kind_field_id: NonBlankStr
+    supersedes_field_id: NonBlankStr
+    source_sequence_field_id: NonBlankStr
+    availability_field_id: NonBlankStr
+    source_artifact_field_id: NonBlankStr
+    payload_hash_field_id: NonBlankStr
+    effective_time_field_id: NonBlankStr
+    effective_shape: AssertionEffectiveShape
+    semantic_state_field_ids: tuple[NonBlankStr, ...]
+    declared_channels: tuple[AvailabilityChannelV1, ...]
+
+    @field_validator("semantic_state_field_ids")
+    @classmethod
+    def canonicalize_state_fields(
+        cls, field_ids: tuple[NonBlankStr, ...]
+    ) -> tuple[NonBlankStr, ...]:
+        if not field_ids:
+            msg = "semantic state field IDs must not be empty"
+            raise ValueError(msg)
+        if len(set(field_ids)) != len(field_ids):
+            msg = "semantic state field IDs must be unique"
+            raise ValueError(msg)
+        return tuple(sorted(field_ids))
+
+    @field_validator("declared_channels")
+    @classmethod
+    def canonicalize_channels(
+        cls, channels: tuple[AvailabilityChannelV1, ...]
+    ) -> tuple[AvailabilityChannelV1, ...]:
+        if not channels:
+            msg = "declared channels must not be empty"
+            raise ValueError(msg)
+        if len(set(channels)) != len(channels):
+            msg = "declared channels must be unique"
+            raise ValueError(msg)
+        return tuple(sorted(channels, key=availability_channel_identity))
+
+    def field_ids(self) -> tuple[NonBlankStr, ...]:
+        """Return every schema field identity bound by this contract."""
+        return (
+            self.logical_record_id_field_id,
+            self.record_version_id_field_id,
+            self.revision_kind_field_id,
+            self.supersedes_field_id,
+            self.source_sequence_field_id,
+            self.availability_field_id,
+            self.source_artifact_field_id,
+            self.payload_hash_field_id,
+            self.effective_time_field_id,
+            *self.semantic_state_field_ids,
+        )
+
+
+class TemporalContractKindV2(StrEnum):
+    """Closed discriminator for contracts accepted by a V2 manifest."""
+
+    RECORD_TEMPORAL_V1 = "record_temporal_v1"
+    ASSERTION_TEMPORAL_V1 = "assertion_temporal_v1"
+
+
+class TemporalContractBindingV2(FrozenModel):
+    """A discriminator bound to the exact temporal contract object."""
+
+    kind: TemporalContractKindV2
+    contract: RecordTemporalContractV1 | AssertionTemporalContractV1
+
+    @model_validator(mode="after")
+    def validate_discriminator(self) -> Self:
+        expected = (
+            TemporalContractKindV2.RECORD_TEMPORAL_V1
+            if isinstance(self.contract, RecordTemporalContractV1)
+            else TemporalContractKindV2.ASSERTION_TEMPORAL_V1
+        )
+        if self.kind is not expected:
+            msg = "temporal contract kind does not match contract type"
+            raise ValueError(msg)
+        return self
+
+
+class DatasetRoleV1(FrozenModel):
+    """Versioned semantic role interpreted by a dataset-specific validator."""
+
+    namespace: Literal["drift"]
+    name: NonBlankStr
+    version: Literal["1"]
+
+
 class LineageDescriptorV1(FrozenModel):
     """Immutable provenance for bytes derived from other manifests."""
 
@@ -321,6 +422,73 @@ class DatasetManifestV1(FrozenModel):
 
         schema_field_ids = {field.field_id for field in self.schema_definition.fields}
         unknown_field_ids = set(self.temporal_contract.field_ids()) - schema_field_ids
+        if unknown_field_ids:
+            msg = "temporal contract field IDs must exist in the schema"
+            raise ValueError(msg)
+
+        if self.dataset_kind is DatasetKind.SOURCE_FACTS:
+            if self.lineage is not None:
+                msg = "source facts must not include lineage"
+                raise ValueError(msg)
+        elif self.lineage is None:
+            msg = "derived facts require lineage"
+            raise ValueError(msg)
+        elif self.lineage.output_schema_hash != schema_hash:
+            msg = "lineage output schema hash must match manifest schema hash"
+            raise ValueError(msg)
+        return self
+
+
+class DatasetManifestV2(FrozenModel):
+    """An additive manifest for role-bound assertion or record datasets."""
+
+    manifest_schema_version: Literal["2"]
+    hash_profile: Literal["drift-canonical-json-sha256-v1"]
+    dataset_id: UUID7
+    dataset_version: NonBlankStr
+    dataset_kind: DatasetKind
+    dataset_role: DatasetRoleV1
+    created_at: UTCDateTime
+    source: SourceDescriptorV1
+    acquisition: AcquisitionDescriptorV1
+    license: LicenseDescriptorV1
+    schema_definition: SchemaDescriptorV1
+    partitions: tuple[PartitionDescriptorV1, ...]
+    temporal_contract: TemporalContractBindingV2
+    lineage: LineageDescriptorV1 | None = None
+
+    @field_validator("partitions")
+    @classmethod
+    def canonicalize_partitions(
+        cls, partitions: tuple[PartitionDescriptorV1, ...]
+    ) -> tuple[PartitionDescriptorV1, ...]:
+        if not partitions:
+            msg = "manifest partitions must not be empty"
+            raise ValueError(msg)
+        if len({item.partition_id for item in partitions}) != len(partitions):
+            msg = "partition IDs must be unique"
+            raise ValueError(msg)
+        if len({item.partition_key for item in partitions}) != len(partitions):
+            msg = "partition keys must be unique"
+            raise ValueError(msg)
+        return tuple(
+            sorted(
+                partitions,
+                key=lambda item: (item.partition_key, item.artifact.content_hash),
+            )
+        )
+
+    @model_validator(mode="after")
+    def validate_contract(self) -> Self:
+        schema_hash = self.schema_definition.schema_hash
+        if any(partition.schema_hash != schema_hash for partition in self.partitions):
+            msg = "partition schema hash must match manifest schema hash"
+            raise ValueError(msg)
+
+        schema_field_ids = {field.field_id for field in self.schema_definition.fields}
+        unknown_field_ids = (
+            set(self.temporal_contract.contract.field_ids()) - schema_field_ids
+        )
         if unknown_field_ids:
             msg = "temporal contract field IDs must exist in the schema"
             raise ValueError(msg)

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** Planned and not started. This is the only active executable M1b plan. It is not authorization to implement M1b until the user approves execution.
+**Status:** Implementation in progress. Task 1 is complete and verified; Task 2 is next. This is the only active executable M1b plan.
 
 **Prerequisite:** Start from `main` with umbrella-design commit `6086a1f` present. M1a is complete at `0385493`.
 
@@ -68,6 +68,9 @@ The SEC treats the first reported listing-exchange transaction as the boundary a
 2. Venue transfer is assigned to lifecycle, but the lifecycle sketch has no related-listing field. Add `related_listing_id`, require it only for `venue_transfer`, and validate old/new listings belong to the same security.
 3. One `DatasetManifestV2` has one schema, role, and temporal contract, so it cannot be the singular container for all identity or universe families. Add a content-addressed `ValidatedDatasetBundleV1` containing exact role/manifest/passing-decision hashes. Individual selection proofs bind one member manifest; experiment definitions and composite results bind the bundle hash.
 4. Absence of a termination record is not proof that no termination occurred. Add a sourced `ListingHistoryCoverageVersionV1` that states whether lifecycle/termination history is complete through a boundary for one listing. Active resolution requires complete coverage through E; partial/unknown coverage is indeterminate. This is lifecycle-event coverage, not M1c market-observation coverage.
+5. A detached `DatasetValidationDecisionV2` contains hashes rather than the manifest objects needed to recompute them. Its internal validator enforces self-consistency; bundle and proof builders compare it with the actual manifest, role, schema, and contract. Copying whole manifests into decisions would duplicate provenance without creating authentication.
+6. Query-carried bundle hashes do not prove membership. `build_cutoff_selection_proof` receives the actual context bundles, recomputes their hashes, and verifies that the selected manifest/decision/role member exists before issuing a proof.
+7. A V2 validation audit event must compare every decision discriminator with the actual manifest before recording it. Manifest, role, schema, temporal-contract kind/version/hash mismatches are rejected; the existing V1 event builders remain unchanged.
 
 No other approved architectural choice is reopened.
 
@@ -301,17 +304,17 @@ Boundary rules are exact: exact claims have equal non-null bounds and `SECOND` p
 - Consumes: M1a availability evaluation, `RevisionKind`, V1 manifest provenance descriptors, validation findings/context, verified bytes, and canonical hashing.
 - Produces: shared interfaces above plus `AssertionTemporalContractV1`, `TemporalContractBindingV2`, `DatasetManifestV2`, `DatasetValidationDecisionV2`, `build_validated_dataset_bundle`, `validate_assertion_chain`, `select_assertion_version`, `decision_reference_from_proof`, `resolve_selected_records`, and V2 event factories.
 
-- [ ] **Step 1: Pin existing V1 compatibility outputs**
+- [x] **Step 1: Pin existing V1 compatibility outputs**
 
 Add exact expected bytes and hashes for a fixed `DatasetManifestV1`, `DatasetValidationDecisionV1`, `FactVersionV1`, and the two existing dataset event drafts, following `test_m1_m0_compatibility.py`.
 
-- [ ] **Step 2: Verify the baseline is green**
+- [x] **Step 2: Verify the baseline is green**
 
 Run: `uv run pytest tests/integration/test_m1b_m1a_compatibility.py -v`
 
 Expected: PASS against `6086a1f`; otherwise stop and reconcile the fixture. Define local `parse_utc` and `boundary_case` helpers with fixed UTC values for the table before adding the parametrized test.
 
-- [ ] **Step 3: Write failing boundary and interval tests**
+- [x] **Step 3: Write failing boundary and interval tests**
 
 ```python
 @pytest.mark.parametrize(
@@ -332,23 +335,23 @@ def test_effective_boundary_is_conservative(case, instant, expected):
 
 Also prove open-ended intervals stay active, unknown ends are indeterminate, malformed windows fail, and credential-bearing locators are rejected.
 
-- [ ] **Step 4: Verify boundary tests are RED**
+- [x] **Step 4: Verify boundary tests are RED**
 
 Run: `uv run pytest tests/unit/test_assertions.py -v`
 
 Expected: collection FAIL because `drift.domain.assertions` does not exist.
 
-- [ ] **Step 5: Implement the shared assertion models and temporal evaluators**
+- [x] **Step 5: Implement the shared assertion models and temporal evaluators**
 
 Implement the interfaces above. Reuse M1a timezone/source-window helpers. Keep boundary claims free of channel and availability basis.
 
-- [ ] **Step 6: Verify boundary tests are GREEN**
+- [x] **Step 6: Verify boundary tests are GREEN**
 
 Run: `uv run pytest tests/unit/test_assertions.py -v`
 
 Expected: PASS for exact, bounded, unknown, open-ended, invalid-window, and safe-reference cases.
 
-- [ ] **Step 7: Write failing V2 contract tests**
+- [x] **Step 7: Write failing V2 contract tests**
 
 Use these exact persisted models:
 
@@ -468,13 +471,13 @@ Role-specific field IDs are exact: assignment adds `identity`, `source_namespace
 
 Reject kind/contract mismatches, duplicate fields/channels, and schema bindings to absent field IDs. `DatasetValidationDecisionV2` adds `decision_schema_version="2"`, `manifest_schema_version`, `dataset_role_hash`, `schema_hash`, `temporal_contract_kind`, `temporal_contract_version`, and `temporal_contract_hash` to V1's exact validation data. Each dataset-specific validator accepts one exact role name and rejects all others.
 
-- [ ] **Step 8: Verify V2 tests are RED**
+- [x] **Step 8: Verify V2 tests are RED**
 
 Run: `uv run pytest tests/unit/test_manifest_v2.py tests/unit/test_dataset_validation_v2.py -v`
 
 Expected: FAIL because V2 models are absent.
 
-- [ ] **Step 9: Implement additive V2 models, validation, hashing, and events**
+- [x] **Step 9: Implement additive V2 models, validation, hashing, and events**
 
 Do not refactor V1 into a shared base. Add separate `validate_manifest_v2_structure`, `build_manifest_v2_recorded_event`, and `build_validation_v2_completed_event`. V2 event payloads include manifest, temporal-contract, and decision schema discriminators and reject V1 decisions. Add:
 
@@ -489,7 +492,7 @@ def build_validated_dataset_bundle(
 
 Test rejection of a failed, mismatched, duplicate-role, or duplicate-manifest member.
 
-- [ ] **Step 10: Write failing causal-chain and capability tests**
+- [x] **Step 10: Write failing causal-chain and capability tests**
 
 Test duplicate IDs, roots, missing predecessors, branching, cycles, logical-record mismatch, sequence, and backward availability. A source correction first observed locally is `INITIAL` with partial/unknown history, never complete. Define local `proof_with` to build a fully hash-consistent proof from explicit considered/selected tuples, then add:
 
@@ -502,7 +505,7 @@ def test_decision_reference_cannot_resolve_considered_or_future_records():
         resolve_selected_records(reference, {OLD: b"old", FUTURE: b"future"})
 ```
 
-- [ ] **Step 11: Implement causal selection and selected-hash resolution**
+- [x] **Step 11: Implement causal selection and selected-hash resolution**
 
 ```python
 def validate_assertion_chain(
@@ -524,6 +527,7 @@ def build_cutoff_selection_proof(
     selections: Sequence[AssertionSelectionResultV1],
     manifest: DatasetManifestV2,
     decision: DatasetValidationDecisionV2,
+    context_bundles: Sequence[ValidatedDatasetBundleV1],
     selection_implementation_hash: SHA256Hash,
 ) -> CutoffSelectionProofV1: ...
 
@@ -541,13 +545,13 @@ def resolve_selected_records[T](
 
 `build_cutoff_selection_proof` requires a passing V2 decision whose manifest, role, schema, and temporal-contract hashes match the query and manifest. It sorts/deduplicates record hashes and verifies every selected hash was considered and validated. Its availability classification is indeterminate if any component selection is indeterminate, eligible if at least one component is selected and none is indeterminate, otherwise ineligible. Business conflict/status remains in the purpose-specific resolution result. Require supplied record keys to equal, not contain, selected hashes. Refuse conversion of current-interpretation or non-decision proofs to decision references.
 
-- [ ] **Step 12: Run focused and full gates**
+- [x] **Step 12: Run focused and full gates**
 
 Run: `uv run pytest tests/unit/test_assertions.py tests/unit/test_manifest_v2.py tests/unit/test_dataset_validation_v2.py tests/integration/test_m1b_m1a_compatibility.py -v`
 
 Then run the full gate from Global Constraints. Expected: all pass and V1 bytes/hashes are unchanged.
 
-- [ ] **Step 13: Commit the additive foundation**
+- [x] **Step 13: Commit the additive foundation**
 
 ```bash
 git add src/drift/domain/assertions.py src/drift/domain/manifests.py src/drift/domain/dataset_validation.py src/drift/datasets/assertions.py src/drift/datasets/hashing.py src/drift/datasets/events.py tests/unit/test_assertions.py tests/unit/test_manifest_v2.py tests/unit/test_dataset_validation_v2.py tests/integration/test_m1b_m1a_compatibility.py
