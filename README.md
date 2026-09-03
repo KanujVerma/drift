@@ -12,9 +12,9 @@ Drift is not a trading system or an equity backtester. M1a uses only synthetic
 fixtures and has no real data source, historical market semantics, evaluator,
 backtester, broker, strategy-execution, agent, network, order-management,
 portfolio-management, production configuration, or production-credential
-capability. M1b remains required before Drift can make historical US-equity
-evaluation claims. `StrategyArtifact` is compact provenance metadata, not
-executable strategy code.
+capability. M1b identity/universe semantics and M1c event/observation semantics
+remain required before Drift can make historical US-equity evaluation claims.
+`StrategyArtifact` is compact provenance metadata, not executable strategy code.
 
 ## Core philosophy
 

@@ -9,8 +9,9 @@ boundary unless an explicitly approved milestone changes it.
 ## Current boundary
 
 - M1a uses synthetic fixtures and has no real source, historical market
-  semantics, evaluator, backtester, or trading capability. M1b remains required
-  before historical US-equity evaluation claims.
+  semantics, evaluator, backtester, or trading capability. M1b identity/universe
+  semantics and M1c event/observation semantics remain required before
+  historical US-equity evaluation claims.
 - Do not add broker or market-data connections, order placement, trading,
   backtesting, agent orchestration, production configuration, credentials, or
   network side effects during M0 or M1a maintenance.

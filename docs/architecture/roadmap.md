@@ -27,16 +27,29 @@ semantics, evaluator, backtester, broker, trading behavior, provider connection,
 credential, or network side effect. It does not make Drift ready for equity
 backtesting.
 
-## M1b, deferred
+## M1b, design proposed and not started
 
-M1b remains required before any historical US-equity evaluation claim. Its
-deferred scope includes stable security and listing identity, dated identifier
-mappings, point-in-time universe membership, corporate actions and delistings,
-raw-versus-adjusted price meaning, exchange calendars and sessions, explicit
-market-data missingness, and tradability semantics.
+M1b is Historical Security Identity and Universes. Its proposed scope is stable
+issuer, security, and listing identity; correctable identity assertions; dated
+external-identifier and primary-listing mappings; listing lifecycle and
+termination state; historical universe definitions/membership; and structural
+eligibility. M1b contains no price, corporate-action accounting, calendar, bar,
+or evaluator behavior.
 
-M1 is not complete until both M1a and M1b are complete. M1b requires its own
-approved design and executable plan. Neither M1a nor the deferred M1b scope is
+## M1c, design proposed and not started
+
+M1c is Market Events and Observation Semantics. It depends on validated M1b
+identities and is proposed to cover versioned corporate actions, terminal
+economic outcomes, source/raw daily observations, cutoff-aware normalization,
+decision-versus-outcome roles, pinned session schedules, typed missingness, and
+historical-tradability results.
+
+The umbrella design is
+`docs/superpowers/specs/2026-09-02-m1b-m1c-historical-equity-semantics-design.md`.
+It is awaiting review. No M1b or M1c implementation plan exists, and neither
+milestone has started.
+
+M1 is not complete until M1a, M1b, and M1c are complete. The design is not
 authorization to build a market-data platform, download live data, evaluate
 strategies, adopt a research framework, connect a broker, or add agents.
 
