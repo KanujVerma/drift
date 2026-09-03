@@ -1,11 +1,12 @@
 # Drift
 
-Drift is an evidence-driven, self-improving quantitative research and trading
-system. Its implemented scope is an M0 research evidence kernel plus M1a
-temporal provenance. M0 records structured research metadata and a hash-chained
-audit history. M1a adds exact-byte dataset manifests, explicit channel-scoped
-availability evidence, immutable fact revisions, exact-object validation
-records, and per-query tri-state cutoff decisions.
+Drift's long-term ambition is an evidence-driven, self-improving quantitative
+research and trading system. Its current implemented scope is an M0 research
+evidence kernel plus M1a temporal provenance. M0 records structured research
+metadata and a hash-chained audit history. M1a adds exact-byte dataset
+manifests, explicit channel-scoped availability evidence, immutable fact
+revisions, exact-object validation records, and per-query tri-state cutoff
+decisions.
 
 Drift is not a trading system or an equity backtester. M1a uses only synthetic
 fixtures and has no real data source, historical market semantics, evaluator,
