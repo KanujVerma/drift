@@ -3,7 +3,7 @@
 from collections.abc import Sequence
 from enum import StrEnum
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 
 from drift.domain.artifacts import ArtifactReference
 from drift.domain.common import (
@@ -13,6 +13,7 @@ from drift.domain.common import (
     SHA256Hash,
     UTCDateTime,
 )
+from drift.domain.provenance_references import validate_safe_provenance_reference
 from drift.errors import DriftError
 
 
@@ -45,6 +46,13 @@ class ValidationFindingV1(FrozenModel):
     severity: FindingSeverity
     message: NonBlankStr
     artifact_references: tuple[ArtifactReference, ...] = ()
+
+    @field_validator("artifact_references")
+    @classmethod
+    def reject_credential_bearing_locators(
+        cls, references: tuple[ArtifactReference, ...]
+    ) -> tuple[ArtifactReference, ...]:
+        return tuple(validate_safe_provenance_reference(item) for item in references)
 
 
 class ValidationRunContextV1(FrozenModel):

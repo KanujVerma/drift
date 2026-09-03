@@ -43,7 +43,7 @@ _MANIFEST_CONTRACT = "dataset-manifest-v1"
 _RECORD_CONTRACT = "record-temporal-v1"
 _SUPPORTED_VALIDATOR_VERSION = "1"
 _SYNTHETIC_FACT_SCHEMA_HASH_V1 = (
-    "aa0b033243bd749e2312353bf6434a79b34825e2a06af8a709890e2fb2dbfe7c"
+    "9a1e17e375d16a278d543164e70fd456d9d843377b89b27d0e78716d332372ca"
 )
 
 _SYNTHETIC_FACT_FIELDS_V1 = (
@@ -69,7 +69,7 @@ _SYNTHETIC_FACT_FIELDS_V1 = (
         field_id="logical_key.dimensions",
         name="logical_key.dimensions",
         logical_type=LogicalType.JSON,
-        nullable=False,
+        nullable=True,
     ),
     FieldDescriptorV1(
         field_id="logical_key.entity_key",

@@ -9,6 +9,7 @@ from drift.domain.dataset_validation import (
 )
 from drift.domain.datasets import DatasetReference
 from drift.domain.manifests import DatasetManifestV1
+from drift.domain.provenance_references import validate_safe_provenance_reference
 
 
 def build_dataset_reference(
@@ -17,6 +18,7 @@ def build_dataset_reference(
     decision: DatasetValidationDecisionV1,
 ) -> DatasetReference:
     """Build provenance only, without certifying a cutoff or authorizing promotion."""
+    validate_safe_provenance_reference(manifest_reference)
     digest = manifest_hash(manifest)
     if manifest_reference.kind is not ArtifactKind.DATASET:
         raise DatasetValidationError.single("manifest_artifact_kind")

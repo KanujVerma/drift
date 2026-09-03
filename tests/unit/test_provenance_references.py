@@ -7,10 +7,25 @@ from uuid import uuid7
 import pytest
 from pydantic import BaseModel, ValidationError
 
+from drift.datasets.hashing import manifest_hash
+from drift.datasets.references import build_dataset_reference
+from drift.datasets.validation import (
+    SYNTHETIC_FACT_SCHEMA_V1,
+    synthetic_fact_temporal_contract_v1,
+)
 from drift.domain.artifacts import ArtifactKind, ArtifactReference
+from drift.domain.dataset_validation import (
+    DatasetValidationDecisionV1,
+    FindingSeverity,
+    ValidationFindingV1,
+    ValidationResult,
+    ValidationScope,
+)
 from drift.domain.datasets import TemporalCoverage
 from drift.domain.manifests import (
     AcquisitionDescriptorV1,
+    DatasetKind,
+    DatasetManifestV1,
     DeterminismClaim,
     LicenseDescriptorV1,
     LineageDescriptorV1,
@@ -32,7 +47,7 @@ from drift.domain.temporal import (
     SourcePrecision,
     ValidPeriodV1,
 )
-from drift.serialization.canonical import content_hash
+from drift.serialization.canonical import canonical_json, content_hash
 
 HASH_A = "a" * 64
 HASH_B = "b" * 64
@@ -176,6 +191,89 @@ def partition_model(item: ArtifactReference) -> BaseModel:
     )
 
 
+def validation_finding_model(item: ArtifactReference) -> BaseModel:
+    return ValidationFindingV1(
+        code="unsafe_reference",
+        severity=FindingSeverity.ERROR,
+        message="unsafe reference",
+        artifact_references=(item,),
+    )
+
+
+def _bridge_manifest() -> DatasetManifestV1:
+    partition_digest = HASH_B
+    partition = PartitionDescriptorV1(
+        partition_id=uuid7(),
+        partition_key="part=1",
+        artifact=reference(
+            f"drift+sha256://{partition_digest}", digest=partition_digest
+        ),
+        byte_size=1,
+        media_type="application/json",
+        format_version="1",
+        row_count=1,
+        schema_hash=SYNTHETIC_FACT_SCHEMA_V1.schema_hash,
+        coverage=TemporalCoverage(started_at=NOW, ended_at=NOW),
+    )
+    return DatasetManifestV1(
+        manifest_schema_version="1",
+        hash_profile="drift-canonical-json-sha256-v1",
+        dataset_id=uuid7(),
+        dataset_version="1",
+        dataset_kind=DatasetKind.SOURCE_FACTS,
+        created_at=NOW,
+        source=SourceDescriptorV1(
+            source_id="source",
+            publisher="publisher",
+            product="product",
+            evidence_reference=reference("evidence:source"),
+        ),
+        acquisition=AcquisitionDescriptorV1(
+            acquired_at=NOW,
+            collector_id="collector",
+            collector_version="1",
+            evidence_reference=reference("evidence:acquisition"),
+        ),
+        license=LicenseDescriptorV1(
+            provider_legal_name="provider",
+            license_reference="license",
+            acquired_at=NOW,
+            terms_evidence_reference=reference("evidence:license"),
+        ),
+        schema_definition=SYNTHETIC_FACT_SCHEMA_V1,
+        partitions=(partition,),
+        temporal_contract=synthetic_fact_temporal_contract_v1((PUBLIC,)),
+    )
+
+
+BRIDGE_MANIFEST = _bridge_manifest()
+BRIDGE_DECISION = DatasetValidationDecisionV1(
+    decision_id=uuid7(),
+    manifest_hash=manifest_hash(BRIDGE_MANIFEST),
+    validator_version="1",
+    validator_implementation_hash=HASH_A,
+    validation_profile_id="synthetic",
+    validation_profile_hash=HASH_B,
+    checked_at=NOW,
+    validation_scope=ValidationScope.RECORDS,
+    result=ValidationResult.PASS,
+    validated_artifact_hashes=(HASH_B,),
+    validated_record_hashes=(HASH_A,),
+    checked_contracts=("dataset-manifest-v1", "record-temporal-v1"),
+    findings=(),
+)
+
+
+def dataset_reference_bridge(item: ArtifactReference) -> BaseModel:
+    manifest_reference = item.model_copy(
+        update={
+            "kind": ArtifactKind.DATASET,
+            "content_hash": manifest_hash(BRIDGE_MANIFEST),
+        }
+    )
+    return build_dataset_reference(BRIDGE_MANIFEST, manifest_reference, BRIDGE_DECISION)
+
+
 REFERENCE_MODELS: tuple[tuple[str, Callable[[ArtifactReference], BaseModel]], ...] = (
     ("source", source_model),
     ("acquisition", acquisition_model),
@@ -186,6 +284,8 @@ REFERENCE_MODELS: tuple[tuple[str, Callable[[ArtifactReference], BaseModel]], ..
     ("temporal rule", rule_derivation_model),
     ("fact source", fact_model),
     ("partition", partition_model),
+    ("validation finding", validation_finding_model),
+    ("dataset reference bridge", dataset_reference_bridge),
 )
 
 UNSAFE_LOCATIONS = (
@@ -204,5 +304,21 @@ def test_every_m1a_reference_model_rejects_credential_bearing_locations(
     location: str,
 ) -> None:
     """Removing any model validator would persist a credential-bearing locator."""
-    with pytest.raises(ValidationError, match="credentials"):
+    with pytest.raises((ValidationError, ValueError), match="credentials"):
         factory(reference(location))
+
+
+@pytest.mark.parametrize(("model_name", "factory"), REFERENCE_MODELS)
+def test_every_m1a_reference_seam_accepts_and_retains_a_safe_location(
+    model_name: str,
+    factory: Callable[[ArtifactReference], BaseModel],
+) -> None:
+    """Over-broad credential screening would reject a safe retained reference."""
+    safe_location = (
+        f"drift+sha256://{HASH_A}" if model_name == "partition" else "evidence:safe"
+    )
+    safe = reference(safe_location)
+
+    result = factory(safe)
+
+    assert safe_location.encode() in canonical_json(result)

@@ -188,7 +188,7 @@ FIELDS = (
         field_id="logical_key.dimensions",
         name="logical_key.dimensions",
         logical_type=LogicalType.JSON,
-        nullable=False,
+        nullable=True,
     ),
     FieldDescriptorV1(
         field_id="logical_key.entity_key",
@@ -434,7 +434,7 @@ def test_record_decision_binds_manifest_bytes_and_fact_payloads() -> None:
 def test_pinned_synthetic_schema_describes_the_serialized_fact_format() -> None:
     """Dropping or renaming a serialized path must change the pinned schema."""
     assert SYNTHETIC_FACT_SCHEMA_V1.schema_hash == (
-        "aa0b033243bd749e2312353bf6434a79b34825e2a06af8a709890e2fb2dbfe7c"
+        "9a1e17e375d16a278d543164e70fd456d9d843377b89b27d0e78716d332372ca"
     )
     assert tuple(
         (field.field_id, field.name, field.logical_type, field.nullable, field.unit)
@@ -447,7 +447,7 @@ def test_pinned_synthetic_schema_describes_the_serialized_fact_format() -> None:
             "logical_key.dimensions",
             "logical_key.dimensions",
             LogicalType.JSON,
-            False,
+            True,
             None,
         ),
         (
@@ -513,6 +513,30 @@ def test_pinned_synthetic_schema_describes_the_serialized_fact_format() -> None:
     assert expected_contract.source_sequence_field_id == "source_sequence"
     assert expected_contract.value_field_id == "value"
     assert expected_contract.null_reason_field_id == "null_reason"
+
+
+def test_null_dimensions_bytes_match_pinned_schema_and_validate() -> None:
+    """Declaring dimensions non-null would contradict accepted fact bytes."""
+    raw = version().model_dump(mode="python")
+    logical_key = cast(dict[str, object], raw["logical_key"])
+    logical_key["dimensions"] = None
+    payload = dict(raw)
+    payload.pop("payload_hash")
+    raw["payload_hash"] = content_hash(payload)
+    verified = verified_document(raw_versions=[raw])
+    current = manifest_for(verified)
+
+    parsed = parse_synthetic_fact_bytes(verified)
+    decision = validate_synthetic_fact_dataset(current, (verified,), CONTEXT)
+    dimensions_field = next(
+        field
+        for field in current.schema_definition.fields
+        if field.field_id == "logical_key.dimensions"
+    )
+
+    assert parsed[0].logical_key.dimensions is None
+    assert decision.result is ValidationResult.PASS
+    assert dimensions_field.nullable is True
 
 
 @pytest.mark.parametrize(
