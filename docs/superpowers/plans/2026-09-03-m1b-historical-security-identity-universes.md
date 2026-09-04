@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** Implementation in progress. Task 1 is complete and verified; Task 2 is next. This is the only active executable M1b plan.
+**Status:** Implementation in progress. Tasks 1 and 2 are complete and verified; Task 2 commit approval is pending. This is the only active executable M1b plan.
 
 **Prerequisite:** Start from `main` with umbrella-design commit `6086a1f` present. M1a is complete at `0385493`.
 
@@ -576,7 +576,7 @@ git commit -m "feat: add assertion temporal dataset contracts"
 - Consumes: Task 1 assertion envelope, interval evaluator, V2 validation, causal selection/proof APIs, canonical hashing, and verified bytes.
 - Produces: identity records below, `validate_identity_dataset`, `resolve_identity_assignment`, `resolve_identity`, `IdentityAssignmentResolutionResultV1`, and `IdentityResolutionResultV1`.
 
-- [ ] **Step 1: Write failing hierarchy and endpoint tests**
+- [x] **Step 1: Write failing hierarchy and endpoint tests**
 
 Use these exact records:
 
@@ -657,17 +657,17 @@ class IdentityRelationshipVersionV1(FrozenModel):
 
 Assert the full endpoint matrix: issuer-to-security, security-to-listing, same-kind equivalence/distinction, and same-kind issuer/security succession/reorganization. Reject self-relations, listing succession through generic relationships, wrong UUID kind, and venues outside XNYS/XNAS/XASE. Prove issuer grouping does not collapse two security IDs.
 
-- [ ] **Step 2: Verify model tests are RED**
+- [x] **Step 2: Verify model tests are RED**
 
 Run: `uv run pytest tests/unit/test_security_identity.py -v`
 
 Expected: collection FAIL because `drift.domain.securities` does not exist.
 
-- [ ] **Step 3: Implement identity records and parent payload-hash checks**
+- [x] **Step 3: Implement identity records and parent payload-hash checks**
 
 Require unique sorted availability channels and safe source artifacts. Dataset parsing recomputes `revision.payload_hash` from the parent assertion and its complete record hash. Core identity objects contain no issuer name, ticker, mutable alias, or provider field. Add `identity_reference(identity: IssuerV1 | SecurityV1 | ListingV1) -> IdentityReferenceV1` and use it everywhere a relationship endpoint is needed. The retained assignment record is the provenance for creation of the typed identity object, including a listing's fixed venue.
 
-- [ ] **Step 4: Write failing correction and equivalence tests**
+- [x] **Step 4: Write failing correction and equivalence tests**
 
 Use fixed UUIDv7 values and these histories:
 
@@ -679,13 +679,13 @@ Use fixed UUIDv7 values and these histories:
 
 Assert no serialized parent pointer, path-compression state, or chosen canonical identity exists.
 
-- [ ] **Step 5: Verify correction tests are RED**
+- [x] **Step 5: Verify correction tests are RED**
 
 Run: `uv run pytest tests/unit/test_security_identity.py -k "correction or equivalent or distinct or manifest" -v`
 
 Expected: FAIL because validation and resolution functions are absent.
 
-- [ ] **Step 6: Implement identity validation and audit-side resolution**
+- [x] **Step 6: Implement identity validation and audit-side resolution**
 
 ```python
 class IdentityResolutionClassification(StrEnum):
@@ -765,19 +765,19 @@ Reject non-passing or mismatched validation decisions. `as_known` selects only c
 
 Build equivalence components only from resolved active assertions. Sort records and IDs. Active equivalent/distinct contradictions or cycles return conflict; disputed evidence returns indeterminate. Never choose a winner.
 
-- [ ] **Step 7: Create and hash-pin the identity fixture**
+- [x] **Step 7: Create and hash-pin the identity fixture**
 
 `identity-assignments.json` contains the issuer, two share classes, and listing assignments. `identity-relationships.json` contains equivalent IDs on 2020-01-01, a distinct correction effective 2021-01-01 and available 2021-02-01, and a superseded wrong issuer link. Store each exact SHA-256 in the integration test and read through `read_verified_local_artifact` only. Each file has its own matching role/schema/manifest.
 
 Build identity bundle version `1` from the two passing role decisions. Pin `content_hash(bundle)` and prove a rebuild from the same members yields the same bundle hash and assignment results.
 
-- [ ] **Step 8: Run focused and full gates**
+- [x] **Step 8: Run focused and full gates**
 
 Run: `uv run pytest tests/unit/test_security_identity.py tests/integration/test_m1b_identity_history.py -v`
 
 Then run the full gate. Expected: all pass; old manifests replay unchanged; no mutable registry exists.
 
-- [ ] **Step 9: Commit identity primitives and corrections**
+- [x] **Step 9: Commit identity primitives and corrections**
 
 ```bash
 git add src/drift/domain/securities.py src/drift/markets/__init__.py src/drift/markets/identity.py src/drift/markets/validation.py tests/unit/test_security_identity.py tests/integration/test_m1b_identity_history.py tests/fixtures/datasets/m1b/identity-assignments.json tests/fixtures/datasets/m1b/identity-relationships.json
