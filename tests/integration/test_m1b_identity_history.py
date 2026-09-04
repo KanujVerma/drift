@@ -1,6 +1,7 @@
 """Hash-pinned immutable identity fixture validation and historical replay."""
 
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
@@ -8,7 +9,10 @@ from uuid import UUID
 
 import pytest
 
-from drift.datasets.assertions import build_validated_dataset_bundle
+from drift.datasets.assertions import (
+    build_cutoff_selection_proof,
+    build_validated_dataset_bundle,
+)
 from drift.datasets.hashing import assertion_version_payload, schema_hash
 from drift.datasets.resolver import (
     ResolverLimits,
@@ -17,6 +21,8 @@ from drift.datasets.resolver import (
 )
 from drift.domain.artifacts import ArtifactKind, ArtifactReference
 from drift.domain.assertions import (
+    AssertionVersionProjectionV1,
+    CutoffSelectionProofV1,
     InformationRole,
     M1bSelectionPurpose,
     NormalizedSelectionQueryV1,
@@ -24,6 +30,8 @@ from drift.domain.assertions import (
 )
 from drift.domain.dataset_validation import (
     DatasetValidationDecisionV2,
+    DatasetValidationError,
+    ValidatedDatasetBundleV1,
     ValidationResult,
     ValidationRunContextV1,
     ValidationScope,
@@ -47,6 +55,7 @@ from drift.domain.manifests import (
     TemporalContractKindV2,
 )
 from drift.domain.securities import (
+    ExternalIdentifierMappingVersionV1,
     IdentityAssignmentEffect,
     IdentityAssignmentSubjectV1,
     IdentityAssignmentVersionV1,
@@ -54,24 +63,166 @@ from drift.domain.securities import (
     IdentityReferenceV1,
     IdentityRelationshipKind,
     IdentityRelationshipVersionV1,
+    IdentityResolutionResultV1,
+    ListingHistoryCoverageResolutionV1,
+    ListingHistoryCoverageStatus,
+    ListingHistoryCoverageVersionV1,
+    ListingLifecycleEventKind,
+    ListingLifecycleResolutionV1,
+    ListingLifecycleStatus,
+    ListingLifecycleVersionV1,
+    ListingRoleVersionV1,
+    ListingTerminationReason,
+    ListingTerminationResolutionV1,
+    ListingTerminationStatus,
+    ListingTerminationVersionV1,
+    RecordResolutionClassification,
+    SecurityClassificationStatus,
+    SecurityClassificationVersionV1,
 )
 from drift.domain.temporal import (
     AvailabilityChannelV1,
     AvailabilityPolicyV1,
     ChannelKind,
 )
-from drift.markets.identity import resolve_identity, resolve_identity_assignment
-from drift.markets.validation import validate_identity_dataset
+from drift.markets.identity import (
+    _relationship_chains_for_subject,
+    _select_identity_chain,
+    resolve_external_identifier,
+    resolve_identity,
+    resolve_identity_assignment,
+    resolve_listing_history_coverage,
+    resolve_listing_lifecycle,
+    resolve_listing_termination,
+    resolve_primary_listing,
+    resolve_security_classification,
+)
+from drift.markets.validation import (
+    EXTERNAL_IDENTIFIER_MAPPING_SCHEMA_V1,
+    LISTING_HISTORY_COVERAGE_SCHEMA_V1,
+    LISTING_LIFECYCLE_SCHEMA_V1,
+    LISTING_ROLE_SCHEMA_V1,
+    LISTING_TERMINATION_SCHEMA_V1,
+    SECURITY_CLASSIFICATION_SCHEMA_V1,
+    validate_identity_bundle_references,
+    validate_identity_dataset,
+)
 from drift.serialization.canonical import canonical_json, content_hash
 
 FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "datasets" / "m1b"
 ASSIGNMENTS_HASH = "d47bb481991d63b615fb55e48b5b9d5f41fc7f30404eba5f929646f50f998f96"
 RELATIONSHIPS_HASH = "78fdb58ceaac088ecefa0ff36036c01caebd38dace313153c62a2ca219d1b75d"
+ASSIGNMENTS_V2_HASH = "9ecafcc7a4a4080c68e6ee3b223e1b578579a06e5a8cc109c0adf3f929ddc6d1"
+RELATIONSHIPS_V2_HASH = (
+    "7cf23769bc0d26532f8a2ae142ec0ae9548b575cacb0b8170722ade6f41db26f"
+)
+TASK3_FIXTURE_HASHES = {
+    "external_identifier_mapping": (
+        "65ac3b52f5894401ed4f6564bb702f3014fac7f05f20aaa93d0354598a3180c7"
+    ),
+    "security_classification": (
+        "cfed335e22f23fea603901fc35b1b817c7b414eef10b46106f0a19989f467336"
+    ),
+    "listing_role": "075f46482c528af1dac9beb6467af37fae5e60d529a38546fbfd48fb84e140c5",
+    "listing_lifecycle": (
+        "05844803d91223a61036b31bb219a94f26c5f5cc80700d2d0602f1b54a735305"
+    ),
+    "listing_termination": (
+        "d118d172e8408df849b64bf5fefa02967404b0d0fa7f3807003a2a5f60dc407e"
+    ),
+    "listing_history_coverage": (
+        "67f1ebc7c594b4bd915eda01780acb91bb1ff31e93fbcab7ed169f590d606b28"
+    ),
+}
+TASK3_FIXTURE_FILES = {
+    "external_identifier_mapping": "external-identifiers.json",
+    "security_classification": "security-classifications.json",
+    "listing_role": "listing-roles.json",
+    "listing_lifecycle": "listing-lifecycle.json",
+    "listing_termination": "listing-terminations.json",
+    "listing_history_coverage": "listing-history-coverage.json",
+}
+TASK3_FIXTURE_ROWS = {
+    "external_identifier_mapping": 4,
+    "security_classification": 2,
+    "listing_role": 4,
+    "listing_lifecycle": 11,
+    "listing_termination": 9,
+    "listing_history_coverage": 4,
+}
+EXPECTED_BUNDLE_V2_HASH = (
+    "ad4e53455227d00d2c4755890d6608d8ef2fe87fff744870631d60996580b561"
+)
 EXPECTED_BUNDLE_HASH = (
     "df6f114d50a8f8d0b434bdcdb88520e79a8b8446fe747b6bf17abc1f2eb20bde"
 )
 NOW = datetime(2026, 9, 3, 12, tzinfo=UTC)
 PUBLIC = AvailabilityChannelV1(kind=ChannelKind.PUBLIC, identifier="synthetic")
+
+TASK3_SCHEMAS = {
+    "external_identifier_mapping": EXTERNAL_IDENTIFIER_MAPPING_SCHEMA_V1,
+    "security_classification": SECURITY_CLASSIFICATION_SCHEMA_V1,
+    "listing_role": LISTING_ROLE_SCHEMA_V1,
+    "listing_lifecycle": LISTING_LIFECYCLE_SCHEMA_V1,
+    "listing_termination": LISTING_TERMINATION_SCHEMA_V1,
+    "listing_history_coverage": LISTING_HISTORY_COVERAGE_SCHEMA_V1,
+}
+TASK3_EFFECTIVE_FIELDS = {
+    "external_identifier_mapping": (
+        "effective_interval",
+        AssertionEffectiveShape.INTERVAL,
+    ),
+    "security_classification": (
+        "effective_interval",
+        AssertionEffectiveShape.INTERVAL,
+    ),
+    "listing_role": ("effective_interval", AssertionEffectiveShape.INTERVAL),
+    "listing_lifecycle": ("effective_time", AssertionEffectiveShape.BOUNDARY),
+    "listing_termination": ("effective_time", AssertionEffectiveShape.BOUNDARY),
+    "listing_history_coverage": (
+        "complete_through",
+        AssertionEffectiveShape.BOUNDARY,
+    ),
+}
+TASK3_SEMANTIC_FIELDS = {
+    "external_identifier_mapping": (
+        "identifier_value",
+        "mapping_status",
+        "namespace",
+        "target",
+    ),
+    "security_classification": (
+        "domestic_status",
+        "incorporation_country",
+        "instrument_form",
+        "issuer_domicile",
+        "issuer_form",
+        "issuer_id",
+        "security_id",
+        "share_class_label",
+        "source_fields",
+        "source_taxonomy_id",
+        "source_taxonomy_version",
+    ),
+    "listing_role": (
+        "listing_id",
+        "methodology_id",
+        "methodology_version",
+        "role",
+        "security_id",
+    ),
+    "listing_lifecycle": ("event_kind", "listing_id", "related_listing_id"),
+    "listing_termination": (
+        "last_regular_trade_time",
+        "listing_id",
+        "outcome_evidence_status",
+        "reason",
+        "source_reason_code",
+        "source_reason_text",
+        "successor_relationship_ids",
+    ),
+    "listing_history_coverage": ("coverage_status", "listing_id"),
+}
 
 
 def artifact(suffix: int, digest: str, location: str) -> ArtifactReference:
@@ -144,7 +295,12 @@ def fixture_context(suffix: int) -> ValidationRunContextV1:
 
 
 def identity_manifest(
-    role: str, artifact_hash: str, byte_size: int, row_count: int
+    role: str,
+    artifact_hash: str,
+    byte_size: int,
+    row_count: int,
+    *,
+    dataset_version: str = "1",
 ) -> DatasetManifestV2:
     """Bind a role-specific V2 manifest to one exact fixture byte stream."""
     schema = fixture_schema(role)
@@ -172,11 +328,19 @@ def identity_manifest(
         manifest_schema_version="2",
         hash_profile="drift-canonical-json-sha256-v1",
         dataset_id=UUID(
-            "019b8240-0000-7000-8000-000000000601"
-            if role == "identity_assignment"
-            else "019b8240-0000-7000-8000-000000000602"
+            (
+                "019b8240-0000-7000-8000-000000000601"
+                if role == "identity_assignment"
+                else "019b8240-0000-7000-8000-000000000602"
+            )
+            if dataset_version == "1"
+            else (
+                "019b8240-0000-7000-8000-000000000801"
+                if role == "identity_assignment"
+                else "019b8240-0000-7000-8000-000000000802"
+            )
         ),
-        dataset_version="1",
+        dataset_version=dataset_version,
         dataset_kind=DatasetKind.SOURCE_FACTS,
         dataset_role=DatasetRoleV1(namespace="drift", name=role, version="1"),
         created_at=NOW,
@@ -224,6 +388,100 @@ def identity_manifest(
     )
 
 
+def task3_manifest(
+    role: str,
+    artifact_hash: str,
+    byte_size: int,
+    row_count: int,
+) -> DatasetManifestV2:
+    """Bind one exact Task 3 role schema and boundary contract to fixture bytes."""
+    role_index = tuple(TASK3_FIXTURE_FILES).index(role)
+    schema = TASK3_SCHEMAS[role]
+    effective_field, effective_shape = TASK3_EFFECTIVE_FIELDS[role]
+    contract = AssertionTemporalContractV1(
+        contract_version="1",
+        evidence_granularity=EvidenceGranularity.RECORD,
+        logical_record_id_field_id="revision.logical_record_id",
+        record_version_id_field_id="revision.record_version_id",
+        revision_kind_field_id="revision.revision_kind",
+        supersedes_field_id="revision.supersedes_record_version_id",
+        source_sequence_field_id="revision.source_sequence",
+        availability_field_id="revision.availability",
+        source_artifact_field_id="revision.source_artifact",
+        payload_hash_field_id="revision.payload_hash",
+        effective_time_field_id=effective_field,
+        effective_shape=effective_shape,
+        semantic_state_field_ids=TASK3_SEMANTIC_FIELDS[role],
+        declared_channels=(PUBLIC,),
+    )
+    dataset_suffix = 700 + role_index
+    return DatasetManifestV2(
+        manifest_schema_version="2",
+        hash_profile="drift-canonical-json-sha256-v1",
+        dataset_id=UUID(f"019b8240-0000-7000-8000-{dataset_suffix:012d}"),
+        dataset_version="1",
+        dataset_kind=DatasetKind.SOURCE_FACTS,
+        dataset_role=DatasetRoleV1(namespace="drift", name=role, version="1"),
+        created_at=NOW,
+        source=SourceDescriptorV1(
+            source_id="synthetic",
+            publisher="Drift",
+            product=f"M1b {role} fixture",
+            evidence_reference=artifact(
+                720 + role_index,
+                "b" * 64,
+                f"evidence/{role}-source.json",
+            ),
+        ),
+        acquisition=AcquisitionDescriptorV1(
+            acquired_at=NOW,
+            collector_id="fixture",
+            collector_version="1",
+            evidence_reference=artifact(
+                730 + role_index,
+                "c" * 64,
+                f"evidence/{role}-acquisition.json",
+            ),
+        ),
+        license=LicenseDescriptorV1(
+            provider_legal_name="Synthetic",
+            license_reference="synthetic-only",
+            acquired_at=NOW,
+            terms_evidence_reference=artifact(
+                740 + role_index,
+                "b" * 64,
+                f"evidence/{role}-license.json",
+            ),
+        ),
+        schema_definition=schema,
+        partitions=(
+            PartitionDescriptorV1(
+                partition_id=UUID(f"019b8240-0000-7000-8000-{750 + role_index:012d}"),
+                partition_key="all",
+                artifact=ArtifactReference(
+                    artifact_id=UUID(
+                        f"019b8240-0000-7000-8000-{760 + role_index:012d}"
+                    ),
+                    kind=ArtifactKind.DATASET,
+                    content_hash=artifact_hash,
+                    location=f"drift+sha256://{artifact_hash}",
+                ),
+                byte_size=byte_size,
+                media_type="application/json",
+                format_version="1",
+                row_count=row_count,
+                schema_hash=schema.schema_hash,
+                coverage=TemporalCoverage(started_at=NOW, ended_at=NOW),
+            ),
+        ),
+        temporal_contract=TemporalContractBindingV2(
+            kind=TemporalContractKindV2.ASSERTION_TEMPORAL_V1,
+            contract=contract,
+        ),
+        lineage=None,
+    )
+
+
 def verified_bytes(data: bytes) -> VerifiedArtifactBytes:
     """Treat controlled test bytes as already read from one verified descriptor."""
     return VerifiedArtifactBytes(
@@ -256,6 +514,510 @@ def relationship_records_from(
 def finding_codes(decision: DatasetValidationDecisionV2) -> set[str]:
     """Return validation finding codes without depending on message text."""
     return {finding.code for finding in decision.findings}
+
+
+def all_object_keys(value: object) -> set[str]:
+    """Collect JSON object keys for explicit M1b capability-boundary checks."""
+    if isinstance(value, dict):
+        return set(value).union(*(all_object_keys(item) for item in value.values()))
+    if isinstance(value, list):
+        return set().union(*(all_object_keys(item) for item in value))
+    return set()
+
+
+@dataclass(frozen=True)
+class CanonicalTask3Context:
+    """Exact fixture records and validation evidence for bundle-v2 replay."""
+
+    assignments: tuple[IdentityAssignmentVersionV1, ...]
+    relationships: tuple[IdentityRelationshipVersionV1, ...]
+    mappings: tuple[ExternalIdentifierMappingVersionV1, ...]
+    classifications: tuple[SecurityClassificationVersionV1, ...]
+    roles: tuple[ListingRoleVersionV1, ...]
+    events: tuple[ListingLifecycleVersionV1, ...]
+    terminations: tuple[ListingTerminationVersionV1, ...]
+    coverage: tuple[ListingHistoryCoverageVersionV1, ...]
+    assignment_manifest: DatasetManifestV2
+    assignment_decision: DatasetValidationDecisionV2
+    relationship_manifest: DatasetManifestV2
+    relationship_decision: DatasetValidationDecisionV2
+    manifests: dict[str, DatasetManifestV2]
+    decisions: dict[str, DatasetValidationDecisionV2]
+    bundle: ValidatedDatasetBundleV1
+    policy: AvailabilityPolicyV1
+
+
+def canonical_task3_context() -> CanonicalTask3Context:
+    """Load and validate every exact member selected by canonical bundle v2."""
+    assignment_bytes = read_verified_local_artifact(
+        FIXTURE_ROOT,
+        "identity-assignments-v2.json",
+        ASSIGNMENTS_V2_HASH,
+        ResolverLimits(max_bytes=200_000),
+    )
+    relationship_bytes = read_verified_local_artifact(
+        FIXTURE_ROOT,
+        "identity-relationships-v2.json",
+        RELATIONSHIPS_V2_HASH,
+        ResolverLimits(max_bytes=200_000),
+    )
+    assignment_manifest = identity_manifest(
+        "identity_assignment",
+        assignment_bytes.content_hash,
+        assignment_bytes.byte_size,
+        21,
+        dataset_version="2",
+    )
+    relationship_manifest = identity_manifest(
+        "identity_relationship",
+        relationship_bytes.content_hash,
+        relationship_bytes.byte_size,
+        21,
+        dataset_version="2",
+    )
+    assignment_decision = validate_identity_dataset(
+        assignment_manifest, (assignment_bytes,), fixture_context(560)
+    )
+    relationship_decision = validate_identity_dataset(
+        relationship_manifest, (relationship_bytes,), fixture_context(561)
+    )
+    manifests: dict[str, DatasetManifestV2] = {}
+    decisions: dict[str, DatasetValidationDecisionV2] = {}
+    documents: dict[str, dict[str, object]] = {}
+    for index, role in enumerate(TASK3_FIXTURE_FILES):
+        role_bytes = read_verified_local_artifact(
+            FIXTURE_ROOT,
+            TASK3_FIXTURE_FILES[role],
+            TASK3_FIXTURE_HASHES[role],
+            ResolverLimits(max_bytes=200_000),
+        )
+        role_manifest = task3_manifest(
+            role,
+            role_bytes.content_hash,
+            role_bytes.byte_size,
+            TASK3_FIXTURE_ROWS[role],
+        )
+        role_decision = validate_identity_dataset(
+            role_manifest, (role_bytes,), fixture_context(570 + index)
+        )
+        assert role_decision.result is ValidationResult.PASS
+        manifests[role] = role_manifest
+        decisions[role] = role_decision
+        document = json.loads(role_bytes.data)
+        assert isinstance(document, dict)
+        documents[role] = document
+    bundle = build_validated_dataset_bundle(
+        UUID("019b8240-0000-7000-8000-000000000550"),
+        "2",
+        NOW,
+        (
+            (assignment_manifest, assignment_decision),
+            (relationship_manifest, relationship_decision),
+            *((manifests[role], decisions[role]) for role in TASK3_FIXTURE_FILES),
+        ),
+    )
+
+    def raw_records(role: str) -> list[object]:
+        records = documents[role]["records"]
+        assert isinstance(records, list)
+        return records
+
+    return CanonicalTask3Context(
+        assignments=assignment_records_from(assignment_bytes),
+        relationships=relationship_records_from(relationship_bytes),
+        mappings=tuple(
+            ExternalIdentifierMappingVersionV1.model_validate_json(
+                canonical_json(record)
+            )
+            for record in raw_records("external_identifier_mapping")
+        ),
+        classifications=tuple(
+            SecurityClassificationVersionV1.model_validate_json(canonical_json(record))
+            for record in raw_records("security_classification")
+        ),
+        roles=tuple(
+            ListingRoleVersionV1.model_validate_json(canonical_json(record))
+            for record in raw_records("listing_role")
+        ),
+        events=tuple(
+            ListingLifecycleVersionV1.model_validate_json(canonical_json(record))
+            for record in raw_records("listing_lifecycle")
+        ),
+        terminations=tuple(
+            ListingTerminationVersionV1.model_validate_json(canonical_json(record))
+            for record in raw_records("listing_termination")
+        ),
+        coverage=tuple(
+            ListingHistoryCoverageVersionV1.model_validate_json(canonical_json(record))
+            for record in raw_records("listing_history_coverage")
+        ),
+        assignment_manifest=assignment_manifest,
+        assignment_decision=assignment_decision,
+        relationship_manifest=relationship_manifest,
+        relationship_decision=relationship_decision,
+        manifests=manifests,
+        decisions=decisions,
+        bundle=bundle,
+        policy=AvailabilityPolicyV1(policy_id="strict"),
+    )
+
+
+def canonical_query(
+    context: CanonicalTask3Context,
+    role: str,
+    purpose: M1bSelectionPurpose,
+    subject: object,
+    evaluation_time: datetime,
+    *,
+    knowledge_cutoff: datetime = NOW,
+    mode: ResolutionMode = ResolutionMode.AS_KNOWN,
+) -> NormalizedSelectionQueryV1:
+    """Bind one canonical K/E query to an exact bundle-v2 member."""
+    if role == "identity_assignment":
+        manifest = context.assignment_manifest
+        decision = context.assignment_decision
+    elif role == "identity_relationship":
+        manifest = context.relationship_manifest
+        decision = context.relationship_decision
+    else:
+        manifest = context.manifests[role]
+        decision = context.decisions[role]
+    return NormalizedSelectionQueryV1(
+        schema_version="1",
+        purpose=purpose,
+        information_role=(
+            InformationRole.DECISION_INFORMATION
+            if mode is ResolutionMode.AS_KNOWN
+            else InformationRole.EX_POST_OUTCOME
+        ),
+        resolution_mode=mode,
+        subject_hash=content_hash(subject),
+        source_manifest_hash=decision.manifest_hash,
+        validation_decision_hash=content_hash(decision),
+        context_bundle_hashes=(content_hash(context.bundle),),
+        dataset_role_hash=content_hash(manifest.dataset_role),
+        record_contract_hash=content_hash(manifest.temporal_contract.contract),
+        schema_hash=manifest.schema_definition.schema_hash,
+        knowledge_cutoff=knowledge_cutoff,
+        evaluation_time=evaluation_time,
+        requested_channel=PUBLIC,
+        policy_id=context.policy.policy_id,
+        policy_hash=content_hash(context.policy),
+    )
+
+
+def canonical_relationship_evidence(
+    context: CanonicalTask3Context,
+    subject: IdentityReferenceV1,
+    evaluation_time: datetime,
+    *,
+    knowledge_cutoff: datetime = NOW,
+    mode: ResolutionMode = ResolutionMode.AS_KNOWN,
+) -> tuple[IdentityResolutionResultV1, CutoffSelectionProofV1]:
+    """Replay one exact relationship outcome and its cutoff proof."""
+    query = canonical_query(
+        context,
+        "identity_relationship",
+        M1bSelectionPurpose.IDENTITY_RESOLUTION,
+        subject,
+        evaluation_time,
+        knowledge_cutoff=knowledge_cutoff,
+        mode=mode,
+    )
+    result = resolve_identity(
+        subject,
+        context.assignments,
+        context.relationships,
+        query,
+        context.bundle,
+        context.relationship_manifest,
+        context.relationship_decision,
+        context.policy,
+        {},
+        assignment_manifest=context.assignment_manifest,
+        assignment_decision=context.assignment_decision,
+    )
+    selections = tuple(
+        _select_identity_chain(
+            tuple(
+                AssertionVersionProjectionV1(
+                    revision=record.revision,
+                    record_hash=content_hash(record),
+                )
+                for record in chain
+            ),
+            query,
+            context.policy,
+            {},
+        )
+        for chain in _relationship_chains_for_subject(
+            context.relationships, subject
+        ).values()
+    )
+    proof = build_cutoff_selection_proof(
+        query,
+        selections,
+        context.relationship_manifest,
+        context.relationship_decision,
+        (context.bundle,),
+        "bf61c84a232e0d5c11a99b6451f9a43f37f96dab220c1c7036456252394c961d",
+    )
+    assert result.selection_proof_hashes == (content_hash(proof),)
+    return result, proof
+
+
+def test_hash_pinned_task3_role_fixtures_build_identity_bundle_v2() -> None:
+    """Six exact role streams extend, but never rewrite, Task 2 bundle history."""
+    task3_artifacts: dict[str, VerifiedArtifactBytes] = {}
+    task3_manifests: dict[str, DatasetManifestV2] = {}
+    task3_decisions: dict[str, DatasetValidationDecisionV2] = {}
+    task3_documents: dict[str, dict[str, object]] = {}
+    for index, role in enumerate(TASK3_FIXTURE_FILES):
+        artifact_bytes = read_verified_local_artifact(
+            FIXTURE_ROOT,
+            TASK3_FIXTURE_FILES[role],
+            TASK3_FIXTURE_HASHES[role],
+            ResolverLimits(max_bytes=200_000),
+        )
+        manifest = task3_manifest(
+            role,
+            artifact_bytes.content_hash,
+            artifact_bytes.byte_size,
+            TASK3_FIXTURE_ROWS[role],
+        )
+        decision = validate_identity_dataset(
+            manifest,
+            (artifact_bytes,),
+            fixture_context(520 + index),
+        )
+        assert decision.result is ValidationResult.PASS
+        assert decision.validation_scope is ValidationScope.RECORDS
+        assert decision.schema_hash == TASK3_SCHEMAS[role].schema_hash
+        assert len(decision.validated_record_hashes) == TASK3_FIXTURE_ROWS[role]
+        assert f"{role.replace('_', '-')}-v1" in decision.checked_contracts
+        task3_artifacts[role] = artifact_bytes
+        task3_manifests[role] = manifest
+        task3_decisions[role] = decision
+        document = json.loads(artifact_bytes.data)
+        assert isinstance(document, dict)
+        task3_documents[role] = document
+
+    assignments = read_verified_local_artifact(
+        FIXTURE_ROOT,
+        "identity-assignments.json",
+        ASSIGNMENTS_HASH,
+        ResolverLimits(max_bytes=100_000),
+    )
+    relationships = read_verified_local_artifact(
+        FIXTURE_ROOT,
+        "identity-relationships.json",
+        RELATIONSHIPS_HASH,
+        ResolverLimits(max_bytes=100_000),
+    )
+    assignments_manifest = identity_manifest(
+        "identity_assignment", assignments.content_hash, assignments.byte_size, 8
+    )
+    relationships_manifest = identity_manifest(
+        "identity_relationship",
+        relationships.content_hash,
+        relationships.byte_size,
+        6,
+    )
+    assignments_decision = validate_identity_dataset(
+        assignments_manifest,
+        (assignments,),
+        fixture_context(501),
+    )
+    relationships_decision = validate_identity_dataset(
+        relationships_manifest,
+        (relationships,),
+        fixture_context(502),
+    )
+    assignments_v2 = read_verified_local_artifact(
+        FIXTURE_ROOT,
+        "identity-assignments-v2.json",
+        ASSIGNMENTS_V2_HASH,
+        ResolverLimits(max_bytes=200_000),
+    )
+    relationships_v2 = read_verified_local_artifact(
+        FIXTURE_ROOT,
+        "identity-relationships-v2.json",
+        RELATIONSHIPS_V2_HASH,
+        ResolverLimits(max_bytes=200_000),
+    )
+    assignments_v2_manifest = identity_manifest(
+        "identity_assignment",
+        assignments_v2.content_hash,
+        assignments_v2.byte_size,
+        21,
+        dataset_version="2",
+    )
+    relationships_v2_manifest = identity_manifest(
+        "identity_relationship",
+        relationships_v2.content_hash,
+        relationships_v2.byte_size,
+        21,
+        dataset_version="2",
+    )
+    assignments_v2_decision = validate_identity_dataset(
+        assignments_v2_manifest,
+        (assignments_v2,),
+        fixture_context(503),
+    )
+    relationships_v2_decision = validate_identity_dataset(
+        relationships_v2_manifest,
+        (relationships_v2,),
+        fixture_context(504),
+    )
+    assert assignments_v2_decision.result is ValidationResult.PASS
+    assert relationships_v2_decision.result is ValidationResult.PASS
+    version_1 = build_validated_dataset_bundle(
+        UUID("019b8240-0000-7000-8000-000000000501"),
+        "1",
+        NOW,
+        (
+            (assignments_manifest, assignments_decision),
+            (relationships_manifest, relationships_decision),
+        ),
+    )
+    version_2 = build_validated_dataset_bundle(
+        UUID("019b8240-0000-7000-8000-000000000550"),
+        "2",
+        NOW,
+        (
+            (assignments_v2_manifest, assignments_v2_decision),
+            (relationships_v2_manifest, relationships_v2_decision),
+            *(
+                (task3_manifests[role], task3_decisions[role])
+                for role in TASK3_FIXTURE_FILES
+            ),
+        ),
+    )
+    assert content_hash(version_1) == EXPECTED_BUNDLE_HASH
+    assert content_hash(version_2) == EXPECTED_BUNDLE_V2_HASH
+    assert version_2.bundle_version == "2"
+    assert tuple(member.dataset_role.name for member in version_2.members) == (
+        "external_identifier_mapping",
+        "identity_assignment",
+        "identity_relationship",
+        "listing_history_coverage",
+        "listing_lifecycle",
+        "listing_role",
+        "listing_termination",
+        "security_classification",
+    )
+
+    mappings = task3_documents["external_identifier_mapping"]["records"]
+    assert isinstance(mappings, list)
+    mapping_records = tuple(
+        ExternalIdentifierMappingVersionV1.model_validate_json(canonical_json(record))
+        for record in mappings
+    )
+    assert tuple(record.identifier_value for record in mapping_records) == (
+        "OLD",
+        "NEW",
+        "NEW",
+        "OLD",
+    )
+    assert len({record.target.internal_id for record in mapping_records}) == 3
+
+    classifications = task3_documents["security_classification"]["records"]
+    assert isinstance(classifications, list)
+    classification_records = tuple(
+        SecurityClassificationVersionV1.model_validate_json(canonical_json(record))
+        for record in classifications
+    )
+    assert len({record.issuer_id for record in classification_records}) == 1
+    assert len({record.security_id for record in classification_records}) == 2
+    assert (
+        len({record.share_class_label.value for record in classification_records}) == 2
+    )
+
+    roles = task3_documents["listing_role"]["records"]
+    assert isinstance(roles, list)
+    role_records = tuple(
+        ListingRoleVersionV1.model_validate_json(canonical_json(record))
+        for record in roles
+    )
+    assert len({record.listing_id for record in role_records}) >= 2
+    assert len({record.methodology_id for record in role_records}) >= 2
+
+    lifecycle = task3_documents["listing_lifecycle"]["records"]
+    assert isinstance(lifecycle, list)
+    lifecycle_records = tuple(
+        ListingLifecycleVersionV1.model_validate_json(canonical_json(record))
+        for record in lifecycle
+    )
+    assert any(
+        record.event_kind is ListingLifecycleEventKind.VENUE_TRANSFER
+        and record.related_listing_id is not None
+        for record in lifecycle_records
+    )
+    assert (
+        sum(
+            record.event_kind is ListingLifecycleEventKind.FIRST_REGULAR_TRADE
+            for record in lifecycle_records
+        )
+        >= 3
+    )
+
+    terminations = task3_documents["listing_termination"]["records"]
+    assert isinstance(terminations, list)
+    termination_records = tuple(
+        ListingTerminationVersionV1.model_validate_json(canonical_json(record))
+        for record in terminations
+    )
+    assert {record.reason for record in termination_records} == set(
+        ListingTerminationReason
+    )
+    assert any(
+        record.reason is ListingTerminationReason.UNKNOWN
+        for record in termination_records
+    )
+
+    coverage = task3_documents["listing_history_coverage"]["records"]
+    assert isinstance(coverage, list)
+    coverage_records = tuple(
+        ListingHistoryCoverageVersionV1.model_validate_json(canonical_json(record))
+        for record in coverage
+    )
+    assert {record.coverage_status for record in coverage_records} == set(
+        ListingHistoryCoverageStatus
+    )
+    assignment_v2_records = assignment_records_from(assignments_v2)
+    relationship_v2_records = relationship_records_from(relationships_v2)
+    assert {
+        content_hash(record) for record in assignment_records_from(assignments)
+    }.issubset({content_hash(record) for record in assignment_v2_records})
+    assert {
+        content_hash(record) for record in relationship_records_from(relationships)
+    }.issubset({content_hash(record) for record in relationship_v2_records})
+    validate_identity_bundle_references(
+        assignment_v2_records,
+        relationship_v2_records,
+        mapping_records,
+        classification_records,
+        role_records,
+        lifecycle_records,
+        termination_records,
+        coverage_records,
+    )
+    forbidden = {
+        "price",
+        "prices",
+        "bar",
+        "bars",
+        "payout",
+        "share_ratio",
+        "cash",
+        "return",
+        "schedule",
+    }
+    assert not forbidden.intersection(
+        set().union(
+            *(all_object_keys(document) for document in task3_documents.values())
+        )
+    )
 
 
 def test_hash_pinned_identity_fixtures_validate_and_rebuild_stably() -> None:
@@ -991,3 +1753,419 @@ def test_identity_validation_rejects_extra_and_mixed_role_fields() -> None:
         decision = validate_identity_dataset(manifest, (fixture,), fixture_context(512))
         assert decision.result is ValidationResult.FAIL
         assert "identity_role_schema_mismatch" in finding_codes(decision)
+
+
+def test_canonical_bundle_v2_executes_complete_task3_resolution_flow() -> None:
+    """The pinned v2 bundle must execute every Task 3 resolver as one context."""
+    context = canonical_task3_context()
+    validate_identity_bundle_references(
+        context.assignments,
+        context.relationships,
+        context.mappings,
+        context.classifications,
+        context.roles,
+        context.events,
+        context.terminations,
+        context.coverage,
+    )
+    listing_old = UUID("019b8240-0000-7000-8000-000000000005")
+    issuer = UUID("019b8240-0000-7000-8000-000000000001")
+    security = UUID("019b8240-0000-7000-8000-000000000002")
+    history_time = datetime(2019, 2, 1, tzinfo=UTC)
+    post_transfer_time = datetime(2022, 1, 4, tzinfo=UTC)
+    old_namespace = next(
+        record.namespace
+        for record in context.mappings
+        if record.identifier_value == "OLD" and record.target.internal_id == listing_old
+    )
+    mapping_query = canonical_query(
+        context,
+        "external_identifier_mapping",
+        M1bSelectionPurpose.IDENTITY_RESOLUTION,
+        {"namespace": old_namespace, "identifier_value": "OLD"},
+        history_time,
+    )
+    mapping_result = resolve_external_identifier(
+        old_namespace,
+        "OLD",
+        context.mappings,
+        mapping_query,
+        context.bundle,
+        context.manifests["external_identifier_mapping"],
+        context.decisions["external_identifier_mapping"],
+        context.policy,
+        {},
+        assignments=context.assignments,
+        assignment_manifest=context.assignment_manifest,
+        assignment_decision=context.assignment_decision,
+        lifecycle_events=context.events,
+        lifecycle_manifest=context.manifests["listing_lifecycle"],
+        lifecycle_decision=context.decisions["listing_lifecycle"],
+        terminations=context.terminations,
+        termination_manifest=context.manifests["listing_termination"],
+        termination_decision=context.decisions["listing_termination"],
+    )
+    assert mapping_result.classification is RecordResolutionClassification.RESOLVED
+    assert mapping_result.targets == (
+        IdentityReferenceV1(kind=IdentityKind.LISTING, internal_id=listing_old),
+    )
+    assert mapping_result.target_lifecycle_proof_hashes
+
+    issuer_ref = IdentityReferenceV1(kind=IdentityKind.ISSUER, internal_id=issuer)
+    issuer_resolution, issuer_proof = canonical_relationship_evidence(
+        context, issuer_ref, history_time
+    )
+    classification_query = canonical_query(
+        context,
+        "security_classification",
+        M1bSelectionPurpose.STRUCTURAL_ELIGIBILITY,
+        {"issuer_id": issuer, "security_id": security},
+        history_time,
+    )
+    classification_result = resolve_security_classification(
+        issuer,
+        security,
+        context.classifications,
+        classification_query,
+        context.bundle,
+        context.manifests["security_classification"],
+        context.decisions["security_classification"],
+        context.policy,
+        {},
+        identity_assignments=context.assignments,
+        assignment_manifest=context.assignment_manifest,
+        assignment_decision=context.assignment_decision,
+        identity_relationships=context.relationships,
+        relationship_resolution=issuer_resolution,
+        relationship_proof=issuer_proof,
+        relationship_manifest=context.relationship_manifest,
+        relationship_decision=context.relationship_decision,
+    )
+    assert (
+        classification_result.classification is SecurityClassificationStatus.SUPPORTED
+    )
+
+    security_ref = IdentityReferenceV1(kind=IdentityKind.SECURITY, internal_id=security)
+    security_resolution, security_proof = canonical_relationship_evidence(
+        context, security_ref, history_time
+    )
+    primary_query = canonical_query(
+        context,
+        "listing_role",
+        M1bSelectionPurpose.STRUCTURAL_ELIGIBILITY,
+        {"security_id": security, "methodology_id": "synthetic-primary-v1"},
+        history_time,
+    )
+    primary_result = resolve_primary_listing(
+        security,
+        "synthetic-primary-v1",
+        context.roles,
+        context.relationships,
+        primary_query,
+        context.bundle,
+        context.manifests["listing_role"],
+        context.decisions["listing_role"],
+        context.policy,
+        {},
+        identity_assignments=context.assignments,
+        assignment_manifest=context.assignment_manifest,
+        assignment_decision=context.assignment_decision,
+        relationship_resolution=security_resolution,
+        relationship_proof=security_proof,
+        relationship_manifest=context.relationship_manifest,
+        relationship_decision=context.relationship_decision,
+    )
+    assert primary_result.listing_id == listing_old
+
+    coverage_query = canonical_query(
+        context,
+        "listing_history_coverage",
+        M1bSelectionPurpose.LISTING_LIFECYCLE,
+        {"listing_id": listing_old},
+        post_transfer_time,
+    )
+    coverage_result = resolve_listing_history_coverage(
+        listing_old,
+        context.coverage,
+        coverage_query,
+        context.bundle,
+        context.manifests["listing_history_coverage"],
+        context.decisions["listing_history_coverage"],
+        context.policy,
+        {},
+    )
+    termination_query = canonical_query(
+        context,
+        "listing_termination",
+        M1bSelectionPurpose.LISTING_TERMINATION,
+        {"listing_id": listing_old},
+        post_transfer_time,
+    )
+    termination_result = resolve_listing_termination(
+        listing_old,
+        context.terminations,
+        coverage_result,
+        termination_query,
+        context.bundle,
+        context.manifests["listing_termination"],
+        context.decisions["listing_termination"],
+        context.policy,
+        {},
+        coverage_versions=context.coverage,
+        coverage_manifest=context.manifests["listing_history_coverage"],
+        coverage_decision=context.decisions["listing_history_coverage"],
+    )
+    assert termination_result.status is ListingTerminationStatus.TERMINATED
+
+    transfer_resolution, transfer_proof = canonical_relationship_evidence(
+        context, security_ref, post_transfer_time
+    )
+    lifecycle_query = canonical_query(
+        context,
+        "listing_lifecycle",
+        M1bSelectionPurpose.LISTING_LIFECYCLE,
+        {"listing_id": listing_old},
+        post_transfer_time,
+    )
+    lifecycle_result = resolve_listing_lifecycle(
+        listing_old,
+        context.events,
+        termination_result,
+        lifecycle_query,
+        context.bundle,
+        context.manifests["listing_lifecycle"],
+        context.decisions["listing_lifecycle"],
+        context.policy,
+        {},
+        terminations=context.terminations,
+        termination_manifest=context.manifests["listing_termination"],
+        termination_decision=context.decisions["listing_termination"],
+        coverage=coverage_result,
+        coverage_versions=context.coverage,
+        coverage_manifest=context.manifests["listing_history_coverage"],
+        coverage_decision=context.decisions["listing_history_coverage"],
+        identity_relationships=context.relationships,
+        relationship_resolution=transfer_resolution,
+        relationship_proof=transfer_proof,
+        relationship_manifest=context.relationship_manifest,
+        relationship_decision=context.relationship_decision,
+        identity_assignments=context.assignments,
+        assignment_manifest=context.assignment_manifest,
+        assignment_decision=context.assignment_decision,
+    )
+    assert lifecycle_result.status is ListingLifecycleStatus.TERMINATED
+    assert lifecycle_result.selected_transfer_relationship_record_hashes
+
+
+def test_canonical_corrections_replay_as_known_and_current_by_stage() -> None:
+    """Coverage, termination, and lifecycle retain executable correction history."""
+    context = canonical_task3_context()
+    listing_id = UUID("019b8240-0000-7000-8000-000000000005")
+    pre_correction_cutoff = datetime(2024, 12, 31, tzinfo=UTC)
+    terminated_at = datetime(2022, 1, 4, tzinfo=UTC)
+
+    def coverage_for(
+        mode: ResolutionMode, evaluation_time: datetime
+    ) -> ListingHistoryCoverageResolutionV1:
+        return resolve_listing_history_coverage(
+            listing_id,
+            context.coverage,
+            canonical_query(
+                context,
+                "listing_history_coverage",
+                M1bSelectionPurpose.LISTING_LIFECYCLE,
+                {"listing_id": listing_id},
+                evaluation_time,
+                knowledge_cutoff=pre_correction_cutoff,
+                mode=mode,
+            ),
+            context.bundle,
+            context.manifests["listing_history_coverage"],
+            context.decisions["listing_history_coverage"],
+            context.policy,
+            {},
+        )
+
+    as_known_coverage = coverage_for(ResolutionMode.AS_KNOWN, terminated_at)
+    current_coverage = coverage_for(
+        ResolutionMode.CURRENT_INTERPRETATION, terminated_at
+    )
+    assert as_known_coverage.complete_through.lower_bound == datetime(
+        2026, 12, 31, tzinfo=UTC
+    )
+    assert current_coverage.complete_through.lower_bound == datetime(
+        2027, 12, 31, tzinfo=UTC
+    )
+
+    def termination_for(
+        mode: ResolutionMode,
+        coverage: ListingHistoryCoverageResolutionV1,
+        evaluation_time: datetime,
+    ) -> ListingTerminationResolutionV1:
+        return resolve_listing_termination(
+            listing_id,
+            context.terminations,
+            coverage,
+            canonical_query(
+                context,
+                "listing_termination",
+                M1bSelectionPurpose.LISTING_TERMINATION,
+                {"listing_id": listing_id},
+                evaluation_time,
+                knowledge_cutoff=pre_correction_cutoff,
+                mode=mode,
+            ),
+            context.bundle,
+            context.manifests["listing_termination"],
+            context.decisions["listing_termination"],
+            context.policy,
+            {},
+            coverage_versions=context.coverage,
+            coverage_manifest=context.manifests["listing_history_coverage"],
+            coverage_decision=context.decisions["listing_history_coverage"],
+        )
+
+    as_known_termination = termination_for(
+        ResolutionMode.AS_KNOWN, as_known_coverage, terminated_at
+    )
+    current_termination = termination_for(
+        ResolutionMode.CURRENT_INTERPRETATION, current_coverage, terminated_at
+    )
+    assert as_known_termination.selected_termination_version_id == UUID(
+        "019b8240-0000-7000-8000-000000002550"
+    )
+    assert current_termination.selected_termination_version_id == UUID(
+        "019b8240-0000-7000-8000-000000002551"
+    )
+
+    lifecycle_time = datetime(2020, 3, 15, 20, tzinfo=UTC)
+    as_known_lifecycle_coverage = coverage_for(ResolutionMode.AS_KNOWN, lifecycle_time)
+    current_lifecycle_coverage = coverage_for(
+        ResolutionMode.CURRENT_INTERPRETATION, lifecycle_time
+    )
+    as_known_pretermination = termination_for(
+        ResolutionMode.AS_KNOWN,
+        as_known_lifecycle_coverage,
+        lifecycle_time,
+    )
+    current_pretermination = termination_for(
+        ResolutionMode.CURRENT_INTERPRETATION,
+        current_lifecycle_coverage,
+        lifecycle_time,
+    )
+
+    def lifecycle_for(
+        mode: ResolutionMode,
+        coverage: ListingHistoryCoverageResolutionV1,
+        termination: ListingTerminationResolutionV1,
+    ) -> ListingLifecycleResolutionV1:
+        return resolve_listing_lifecycle(
+            listing_id,
+            context.events,
+            termination,
+            canonical_query(
+                context,
+                "listing_lifecycle",
+                M1bSelectionPurpose.LISTING_LIFECYCLE,
+                {"listing_id": listing_id},
+                lifecycle_time,
+                knowledge_cutoff=pre_correction_cutoff,
+                mode=mode,
+            ),
+            context.bundle,
+            context.manifests["listing_lifecycle"],
+            context.decisions["listing_lifecycle"],
+            context.policy,
+            {},
+            terminations=context.terminations,
+            termination_manifest=context.manifests["listing_termination"],
+            termination_decision=context.decisions["listing_termination"],
+            coverage=coverage,
+            coverage_versions=context.coverage,
+            coverage_manifest=context.manifests["listing_history_coverage"],
+            coverage_decision=context.decisions["listing_history_coverage"],
+        )
+
+    as_known_lifecycle = lifecycle_for(
+        ResolutionMode.AS_KNOWN,
+        as_known_lifecycle_coverage,
+        as_known_pretermination,
+    )
+    current_lifecycle = lifecycle_for(
+        ResolutionMode.CURRENT_INTERPRETATION,
+        current_lifecycle_coverage,
+        current_pretermination,
+    )
+    assert as_known_lifecycle.status is ListingLifecycleStatus.ACTIVE
+    assert current_lifecycle.status is ListingLifecycleStatus.SUSPENDED
+
+
+@pytest.mark.parametrize("mutation", ("missing", "mistyped", "inactive", "interval"))
+def test_canonical_bundle_rejects_invalid_cross_role_references(mutation: str) -> None:
+    """Canonical v2 cannot admit a broken typed or temporal listing reference."""
+    context = canonical_task3_context()
+    listing_id = UUID("019b8240-0000-7000-8000-000000000008")
+    listing_ref = IdentityReferenceV1(kind=IdentityKind.LISTING, internal_id=listing_id)
+    assignments = list(context.assignments)
+    mappings = list(context.mappings)
+    if mutation == "missing":
+        assignments = [
+            record
+            for record in assignments
+            if record.identity.model_dump(mode="python").get("listing_id") != listing_id
+        ]
+    elif mutation == "mistyped":
+        mapping_index = next(
+            index
+            for index, record in enumerate(mappings)
+            if record.target == listing_ref
+        )
+        mappings[mapping_index] = mappings[mapping_index].model_copy(
+            update={
+                "target": IdentityReferenceV1(
+                    kind=IdentityKind.LISTING,
+                    internal_id=UUID("019b8240-0000-7000-8000-000000000007"),
+                )
+            }
+        )
+    else:
+        assignment_index = next(
+            index
+            for index, record in enumerate(assignments)
+            if record.identity.model_dump(mode="python").get("listing_id") == listing_id
+        )
+        if mutation == "inactive":
+            assignments[assignment_index] = assignments[assignment_index].model_copy(
+                update={"assignment_effect": IdentityAssignmentEffect.UNASSIGNED}
+            )
+        else:
+            assignment = assignments[assignment_index]
+            assignments[assignment_index] = assignment.model_copy(
+                update={
+                    "effective_interval": assignment.effective_interval.model_copy(
+                        update={
+                            "start": context.mappings[
+                                -1
+                            ].effective_interval.start.model_copy(
+                                update={
+                                    "lower_bound": datetime(2025, 1, 1, tzinfo=UTC),
+                                    "upper_bound": datetime(2025, 1, 1, tzinfo=UTC),
+                                    "source_time_label": "2025-01-01T00:00:00Z",
+                                }
+                            )
+                        }
+                    )
+                }
+            )
+
+    with pytest.raises(DatasetValidationError, match="mapping_target_reference"):
+        validate_identity_bundle_references(
+            tuple(assignments),
+            context.relationships,
+            tuple(mappings),
+            context.classifications,
+            context.roles,
+            context.events,
+            context.terminations,
+            context.coverage,
+        )

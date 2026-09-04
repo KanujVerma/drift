@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** Implementation in progress. Tasks 1 and 2 are complete and verified; Task 2 commit approval is pending. This is the only active executable M1b plan.
+**Status:** Implementation in progress. Tasks 1 and 2 are complete at `2d65d97` and `1f03374`; Task 3 is independently reviewed, controller-verified, and pending commit approval. This is the only active executable M1b plan.
 
 **Prerequisite:** Start from `main` with umbrella-design commit `6086a1f` present. M1a is complete at `0385493`.
 
@@ -800,10 +800,24 @@ git commit -m "feat: add immutable historical security identity"
 - Fixture: `tests/fixtures/datasets/m1b/listing-lifecycle.json`
 - Fixture: `tests/fixtures/datasets/m1b/listing-terminations.json`
 - Fixture: `tests/fixtures/datasets/m1b/listing-history-coverage.json`
+- Fixture: `tests/fixtures/datasets/m1b/identity-assignments-v2.json`
+- Fixture: `tests/fixtures/datasets/m1b/identity-relationships-v2.json`
 
 **Interfaces:**
 - Consumes: validated identities and Task 1 cutoff proofs.
 - Produces: mappings, source classifications, listing roles/lifecycle/termination records, and their audit-side resolvers.
+
+**Full-review corrections:**
+
+- Keep `identity-assignments.json`, `identity-relationships.json`, and bundle v1 byte-for-byte unchanged. Bundle v2 replaces those two roles with immutable `identity-assignments-v2.json` and `identity-relationships-v2.json`; each v2 stream retains every v1 record, adds the Task 3 identities and relationships, and carries the interval corrections needed by the fixed OLD/NEW/transfer/reuse history.
+- Add executable cross-role validation over the exact assignment, relationship, mapping, classification, role, lifecycle, termination, and coverage records. It must reject missing, mistyped, inactive, and interval-incompatible references before the bundle is usable.
+- Relationship-dependent resolvers gain the exact assignment records, assignment manifest, and assignment decision. Their dependency authenticator must replay `resolve_identity` from those inputs plus the exact relationship records, manifest, decision, query, policy, and retained evidence, then require equality with the supplied result.
+- `resolve_external_identifier` gains exact lifecycle and termination record, manifest, and decision inputs for listing targets. It causally selects the requested mapping chains before target, collision, and dependency validation; then it proves the selected target against causally selected assignment and lifecycle bounds. Unrelated or unavailable future records cannot poison an earlier query.
+- `ExternalIdentifierResolutionResultV1` gains lifecycle-proof hashes and an outcome-binding hash covering namespace, exact value, classification, reasons, targets, mapping evidence, assignment proof hashes, and lifecycle proof hashes.
+- Termination and transfer relationship checks run only after the selected termination or transfer is effective at E. Their relationship intervals are checked at the event boundary rather than requiring future or historical links to be active at the parent query time.
+- Bounded termination ordering is valid only when the latest possible last regular trade is no later than the earliest possible termination. Overlap fails validation; unresolved ordering produces an indeterminate result.
+- Coverage, termination, and lifecycle fixtures each retain an executable correction chain tested in both `as_known` and `current_interpretation` modes. The canonical bundle-v2 integration test must execute mapping, identity, classification, primary-listing, coverage, termination, and lifecycle resolution.
+- Selection implementation hashes for coverage, termination, and lifecycle replay are `content_hash` values of documented immutable algorithm/version specifications, with pinned literal regression tests.
 
 Resolution outputs are fixed before implementation:
 
@@ -822,6 +836,9 @@ class ExternalIdentifierResolutionResultV1(FrozenModel):
     classification: RecordResolutionClassification
     reasons: tuple[NonBlankStr, ...]
     evidence: ResolutionEvidenceV1
+    target_assignment_proof_hashes: tuple[SHA256Hash, ...]
+    target_lifecycle_proof_hashes: tuple[SHA256Hash, ...]
+    outcome_binding_hash: SHA256Hash
 
 
 class SecurityClassificationStatus(StrEnum):
@@ -890,7 +907,7 @@ class ListingTerminationResolutionV1(FrozenModel):
     evidence: ResolutionEvidenceV1
 ```
 
-- [ ] **Step 1: Write failing external-identifier tests**
+- [x] **Step 1: Write failing external-identifier tests**
 
 ```python
 class ExternalIdentifierKind(StrEnum):
@@ -929,7 +946,7 @@ class ExternalIdentifierMappingVersionV1(FrozenModel):
 
 Require namespace target level to equal target kind. Ticker and exchange-symbol schemes target listings and require venue; CIK targets issuers and forbids venue. CUSIP, FIGI, provider, and other schemes retain an explicit target level and forbid venue unless their versioned scheme explicitly defines listing-venue scope. Collision identity includes authority, scheme, identifier kind, target level, exact normalized text, and venue. Reject overlapping asserted mappings to distinct targets unless all overlapping records are ambiguous. Reject mapping intervals outside the selected target identity/lifecycle interval.
 
-- [ ] **Step 2: Write failing ticker and transfer history tests**
+- [x] **Step 2: Write failing ticker and transfer history tests**
 
 Use this exact synthetic history:
 
@@ -943,13 +960,13 @@ Use this exact synthetic history:
 
 Each K/E query resolves the period-specific mapping. Equal text never merges SA/SC. Ticker change mints no identity. Venue transfer mints a listing, not a security.
 
-- [ ] **Step 3: Verify mapping tests are RED**
+- [x] **Step 3: Verify mapping tests are RED**
 
 Run: `uv run pytest tests/unit/test_listing_semantics.py -k "mapping or ticker or transfer" -v`
 
 Expected: FAIL because mapping/lifecycle models are absent.
 
-- [ ] **Step 4: Implement mapping validation and resolution**
+- [x] **Step 4: Implement mapping validation and resolution**
 
 Implement this exact signature and validate `query.subject_hash == content_hash({"namespace": namespace, "identifier_value": value})`:
 
@@ -964,12 +981,22 @@ def resolve_external_identifier(
     decision: DatasetValidationDecisionV2,
     policy: AvailabilityPolicyV1,
     retained_evidence: Mapping[SHA256Hash, AvailabilityEvidenceV1],
+    *,
+    assignments: Sequence[IdentityAssignmentVersionV1],
+    assignment_manifest: DatasetManifestV2,
+    assignment_decision: DatasetValidationDecisionV2,
+    lifecycle_events: Sequence[ListingLifecycleVersionV1],
+    lifecycle_manifest: DatasetManifestV2,
+    lifecycle_decision: DatasetValidationDecisionV2,
+    terminations: Sequence[ListingTerminationVersionV1],
+    termination_manifest: DatasetManifestV2,
+    termination_decision: DatasetValidationDecisionV2,
 ) -> ExternalIdentifierResolutionResultV1: ...
 ```
 
 Bind manifest/decision/query and considered/selected hashes. Return typed targets with resolved/conflict/indeterminate. The initial synthetic ticker scheme uses exact uppercase text; no unversioned punctuation normalization is allowed.
 
-- [ ] **Step 5: Write failing classification and primary-role tests**
+- [x] **Step 5: Write failing classification and primary-role tests**
 
 ```python
 class IssuerForm(StrEnum):
@@ -1045,13 +1072,13 @@ class ListingRoleVersionV1(FrozenModel):
 
 Known text requires a value; unknown text forbids one. Test every excluded issuer/instrument category, foreign/indeterminate status, conflicting assertions, two share classes, a timeless-primary attempt, same-methodology primary overlap, and cross-methodology disagreement.
 
-- [ ] **Step 6: Implement classification and primary-role resolution**
+- [x] **Step 6: Implement classification and primary-role resolution**
 
-`resolve_security_classification(issuer_id, security_id, classifications, query, identity_bundle, manifest, decision, policy, retained_evidence) -> SecurityClassificationResolutionV1` returns supported/unsupported/conflict/indeterminate. Its subject hash binds both IDs, and the classification manifest/decision must be an identity-bundle member. Only explicit excluded evidence is unsupported; unknown/conflict is indeterminate.
+`resolve_security_classification(issuer_id, security_id, classifications, query, identity_bundle, manifest, decision, policy, retained_evidence, *, identity_assignments, assignment_manifest, assignment_decision, identity_relationships, relationship_resolution, relationship_proof, relationship_manifest, relationship_decision) -> SecurityClassificationResolutionV1` returns supported/unsupported/conflict/indeterminate. Its subject hash binds both IDs, and the classification manifest/decision must be an identity-bundle member. Only explicit excluded evidence is unsupported; unknown/conflict is indeterminate.
 
-`resolve_primary_listing(security_id, methodology_id, roles, selected_security_listing_relationships, query, identity_bundle, manifest, decision, policy, retained_evidence) -> PrimaryListingResolutionV1` requires one active primary under one selected methodology. Its subject hash binds the security and methodology, and the role manifest/decision must be an identity-bundle member. Two primaries in one methodology fail validation. A role listing must have a selected `security_has_listing` relationship.
+`resolve_primary_listing(security_id, methodology_id, roles, selected_security_listing_relationships, query, identity_bundle, manifest, decision, policy, retained_evidence, *, identity_assignments, assignment_manifest, assignment_decision, relationship_resolution, relationship_proof, relationship_manifest, relationship_decision) -> PrimaryListingResolutionV1` requires one active primary under one selected methodology. Its subject hash binds the security and methodology, and the role manifest/decision must be an identity-bundle member. Two primaries in one methodology fail validation. A role listing must have a selected `security_has_listing` relationship.
 
-- [ ] **Step 7: Write failing lifecycle and termination tests**
+- [x] **Step 7: Write failing lifecycle and termination tests**
 
 ```python
 class ListingLifecycleEventKind(StrEnum):
@@ -1111,7 +1138,7 @@ class ListingHistoryCoverageVersionV1(FrozenModel):
 
 Test pre-admission, admitted but not first-traded, active, suspended, resumed, terminated, bounded first/last trade, all termination families, unknown reason, and an observation-shaped input that cannot create termination. Require complete listing-history coverage through E before absence of termination means not terminated; partial, unknown, or short coverage yields indeterminate. Require `related_listing_id` only for transfer, require a different related listing under the same security, and require the matching sole termination record. Every `successor_relationship_id` must resolve to a selected `successor_of` or `reorganized_from` security relationship, never a listing transfer. Never add `terminated` to `ListingLifecycleEventKind`.
 
-- [ ] **Step 8: Implement lifecycle validation and resolution**
+- [x] **Step 8: Implement lifecycle validation and resolution**
 
 ```python
 class ListingLifecycleStatus(StrEnum):
@@ -1162,22 +1189,22 @@ def resolve_listing_history_coverage(
 
 Resolve coverage first with a `listing_lifecycle` query. Run termination with a separate `listing_termination` query, then lifecycle with its event query; require matching subject, K, E, channel, policy, and bundle throughout. A selected termination yields terminated. No selected termination yields not-terminated only when selected coverage is complete through E; otherwise it is indeterminate. Only definitely effective first regular trade yields active. Admission alone is not-yet-listed or indeterminate. Suspension/resumption alternates causally. Missing records never imply termination.
 
-- [ ] **Step 9: Create and hash-pin the listing fixture**
+- [x] **Step 9: Create and hash-pin the listing fixture**
 
 The six role-specific files contain the fixed ticker/transfer/reuse history, two share classes, two simultaneous listings, a primary-methodology conflict, every termination family, one unknown reason, and complete/partial/unknown coverage examples. Each has its own schema/manifest and pinned SHA-256. They contain no prices, bars, payout, share ratio, cash, return, or schedule.
 
-Build identity bundle version `2` from the unchanged Task 2 members plus these six role manifests and passing decisions. Version `1` remains replayable and is never rewritten.
+Build identity bundle version `2` from `identity-assignments-v2.json`, `identity-relationships-v2.json`, and the six Task 3 role manifests and passing decisions. The v2 identity members retain every v1 record and add only Task 3 closure/correction history. Version `1` continues to use the unchanged Task 2 members and remains pinned at its original hash.
 
-- [ ] **Step 10: Run focused and full gates**
+- [x] **Step 10: Run focused and full gates**
 
 Run: `uv run pytest tests/unit/test_listing_semantics.py tests/integration/test_m1b_identity_history.py -v`
 
 Then run the full gate. Expected: all pass; ticker/listing are not identity shortcuts; termination has no economic result.
 
-- [ ] **Step 11: Commit listing semantics**
+- [x] **Step 11: Commit listing semantics after explicit controller approval**
 
 ```bash
-git add src/drift/domain/securities.py src/drift/markets/identity.py src/drift/markets/validation.py tests/unit/test_listing_semantics.py tests/integration/test_m1b_identity_history.py tests/fixtures/datasets/m1b/external-identifiers.json tests/fixtures/datasets/m1b/security-classifications.json tests/fixtures/datasets/m1b/listing-roles.json tests/fixtures/datasets/m1b/listing-lifecycle.json tests/fixtures/datasets/m1b/listing-terminations.json tests/fixtures/datasets/m1b/listing-history-coverage.json
+git add src/drift/domain/securities.py src/drift/markets/identity.py src/drift/markets/validation.py tests/unit/test_listing_semantics.py tests/integration/test_m1b_identity_history.py tests/fixtures/datasets/m1b/external-identifiers.json tests/fixtures/datasets/m1b/identity-assignments-v2.json tests/fixtures/datasets/m1b/identity-relationships-v2.json tests/fixtures/datasets/m1b/security-classifications.json tests/fixtures/datasets/m1b/listing-roles.json tests/fixtures/datasets/m1b/listing-lifecycle.json tests/fixtures/datasets/m1b/listing-terminations.json tests/fixtures/datasets/m1b/listing-history-coverage.json
 git commit -m "feat: add historical listing semantics"
 ```
 
