@@ -128,17 +128,43 @@ _LISTING_LIFECYCLE_SELECTION_IMPLEMENTATION_SPEC_V1 = {
     "dependency_rule": "authenticate-transfer-only-when-effective",
 }
 
+# Retain the V1 specifications above as historical provenance. The current
+# resolver emits V2 proofs; reproducing V1 outcomes requires its pinned code.
+_EXTERNAL_IDENTIFIER_SELECTION_IMPLEMENTATION_SPEC_V2 = {
+    "algorithm_id": "drift.external-identifier-resolution",
+    "algorithm_version": "2",
+    "chain_selection": "causal-as-known-or-pinned-current",
+    "identity_rule": "exact-assignment-namespace-venue-and-mapping-interval",
+    "lifetime_rule": "independent-selected-known-admission-and-termination-bounds",
+    "unknown_rule": "lifecycle-uncertainty-does-not-erase-mapping",
+    "activity_rule": "resolved-mapping-does-not-establish-activity",
+}
+_LISTING_TERMINATION_SELECTION_IMPLEMENTATION_SPEC_V2 = {
+    **_LISTING_TERMINATION_SELECTION_IMPLEMENTATION_SPEC_V1,
+    "algorithm_version": "2",
+    "ordering_rule": "reject-overlapping-supplied-bounds-preserve-unknown-last-trade",
+    "termination_rule": "definitely-effective-selected-termination",
+}
+_LISTING_LIFECYCLE_SELECTION_IMPLEMENTATION_SPEC_V2 = {
+    **_LISTING_LIFECYCLE_SELECTION_IMPLEMENTATION_SPEC_V1,
+    "algorithm_version": "2",
+    "termination_rule": "definite-effect-independent-of-unknown-last-trade",
+}
+
 _IDENTITY_RELATIONSHIP_SELECTION_IMPLEMENTATION_HASH = (
     "bf61c84a232e0d5c11a99b6451f9a43f37f96dab220c1c7036456252394c961d"
+)
+_EXTERNAL_IDENTIFIER_SELECTION_IMPLEMENTATION_HASH = content_hash(
+    _EXTERNAL_IDENTIFIER_SELECTION_IMPLEMENTATION_SPEC_V2
 )
 _LISTING_COVERAGE_SELECTION_IMPLEMENTATION_HASH = content_hash(
     _LISTING_COVERAGE_SELECTION_IMPLEMENTATION_SPEC_V1
 )
 _LISTING_TERMINATION_SELECTION_IMPLEMENTATION_HASH = content_hash(
-    _LISTING_TERMINATION_SELECTION_IMPLEMENTATION_SPEC_V1
+    _LISTING_TERMINATION_SELECTION_IMPLEMENTATION_SPEC_V2
 )
 _LISTING_LIFECYCLE_SELECTION_IMPLEMENTATION_HASH = content_hash(
-    _LISTING_LIFECYCLE_SELECTION_IMPLEMENTATION_SPEC_V1
+    _LISTING_LIFECYCLE_SELECTION_IMPLEMENTATION_SPEC_V2
 )
 
 
@@ -334,7 +360,7 @@ def resolve_external_identifier(
         manifest,
         decision,
         (identity_bundle,),
-        "9d554fa6a364cdb46a7a6c4e3fd8da9eb420a58ad307fc565c3b22802c31724b",
+        _EXTERNAL_IDENTIFIER_SELECTION_IMPLEMENTATION_HASH,
     )
     mapping_targets = tuple(
         sorted(
@@ -433,12 +459,8 @@ def resolve_external_identifier(
             target: tuple(intervals) for target, intervals in target_intervals.items()
         },
     )
-    (
-        lifecycle_intervals,
-        lifecycle_proof_hashes,
-        lifecycle_dependencies_usable,
-    ) = _mapping_lifecycle_intervals(
-        mapping_targets,
+    lifecycle_proof_hashes = _validate_mapping_lifecycle_bounds(
+        selected,
         lifecycle_events,
         lifecycle_manifest,
         lifecycle_decision,
@@ -450,14 +472,6 @@ def resolve_external_identifier(
         policy,
         retained_evidence,
     )
-    listing_records = tuple(
-        record for record in selected if record.target.kind is IdentityKind.LISTING
-    )
-    if listing_records and lifecycle_dependencies_usable:
-        validate_external_identifier_mappings(
-            listing_records,
-            target_intervals=lifecycle_intervals,
-        )
     active = tuple(
         record
         for record in selected
@@ -471,7 +485,6 @@ def resolve_external_identifier(
     }
     indeterminate = (
         proof.classification is CutoffEligibility.INDETERMINATE
-        or not lifecycle_dependencies_usable
         or not candidates
         or any(
             record.mapping_status is MappingStatus.AMBIGUOUS
@@ -500,11 +513,7 @@ def resolve_external_identifier(
         selected_record_hashes=proof.selected_record_hashes,
         selection_proof_hashes=(content_hash(proof),),
     )
-    reasons = (
-        (classification.value, "mapping_lifecycle_dependency_unusable")
-        if not lifecycle_dependencies_usable
-        else (classification.value,)
-    )
+    reasons = (classification.value,)
     assignment_proof_hashes = (content_hash(assignment_proof),)
     return ExternalIdentifierResolutionResultV1(
         schema_version="1",
@@ -558,8 +567,8 @@ def _build_assignment_context_query(
     )
 
 
-def _mapping_lifecycle_intervals(
-    mapping_targets: Sequence[IdentityReferenceV1],
+def _validate_mapping_lifecycle_bounds(
+    mappings: Sequence[ExternalIdentifierMappingVersionV1],
     lifecycle_events: Sequence[ListingLifecycleVersionV1],
     lifecycle_manifest: DatasetManifestV2,
     lifecycle_decision: DatasetValidationDecisionV2,
@@ -570,17 +579,20 @@ def _mapping_lifecycle_intervals(
     identity_bundle: ValidatedDatasetBundleV1,
     policy: AvailabilityPolicyV1,
     retained_evidence: Mapping[SHA256Hash, AvailabilityEvidenceV1],
-) -> tuple[
-    dict[IdentityReferenceV1, tuple[TemporalIntervalClaimV1, ...]],
-    tuple[SHA256Hash, ...],
-    bool,
-]:
-    """Replay listing admission and termination bounds for selected mapping targets."""
+) -> tuple[SHA256Hash, ...]:
+    """Check known lifetime bounds without requiring a proof of listing activity."""
     listing_targets = tuple(
-        target for target in mapping_targets if target.kind is IdentityKind.LISTING
+        sorted(
+            {
+                record.target
+                for record in mappings
+                if record.target.kind is IdentityKind.LISTING
+            },
+            key=lambda target: str(target.internal_id),
+        )
     )
     if not listing_targets:
-        return {}, (), True
+        return ()
     _require_validated_lifecycle_dataset(
         lifecycle_events,
         lifecycle_manifest,
@@ -593,9 +605,7 @@ def _mapping_lifecycle_intervals(
         termination_decision,
         identity_bundle,
     )
-    intervals: dict[IdentityReferenceV1, tuple[TemporalIntervalClaimV1, ...]] = {}
     proof_hashes: list[SHA256Hash] = []
-    dependencies_usable = True
     for target in listing_targets:
         listing_subject = {"listing_id": target.internal_id}
         lifecycle_query = _build_dependency_query(
@@ -653,69 +663,30 @@ def _mapping_lifecycle_intervals(
             for event in selected_events
             if event.event_kind is ListingLifecycleEventKind.ADMITTED
         )
-        lifecycle_boundary_statuses = tuple(
-            evaluate_boundary_at(event.effective_time, parent_query.evaluation_time)
-            for event in selected_events
-        )
-        effective_events = tuple(
-            event
-            for event, status in zip(
-                selected_events, lifecycle_boundary_statuses, strict=True
-            )
-            if status is EffectiveTimeStatus.EFFECTIVE
-        )
-        lifecycle_usable = (
-            lifecycle_proof.classification is CutoffEligibility.ELIGIBLE
-            and len(admissions) == 1
-            and all(
-                status is not EffectiveTimeStatus.INDETERMINATE
-                for status in lifecycle_boundary_statuses
-            )
-            and not _has_uncertain_effective_event_order(effective_events)
-        )
-        selected_termination = (
-            selected_terminations[0] if len(selected_terminations) == 1 else None
-        )
-        termination_boundary_status = (
-            None
-            if selected_termination is None
-            else evaluate_boundary_at(
-                selected_termination.effective_time,
-                parent_query.evaluation_time,
-            )
-        )
-        termination_ordering_certain = bool(
-            selected_termination is not None
-            and selected_termination.last_regular_trade_time.upper_bound is not None
-            and selected_termination.effective_time.lower_bound is not None
-            and selected_termination.last_regular_trade_time.upper_bound
-            <= selected_termination.effective_time.lower_bound
-        )
-        termination_usable = (
-            termination_proof.classification is CutoffEligibility.ELIGIBLE
-            and selected_termination is not None
-            and termination_boundary_status is not EffectiveTimeStatus.INDETERMINATE
-            and termination_ordering_certain
-        ) or (
-            not termination_candidates
-            and termination_proof.classification is CutoffEligibility.INELIGIBLE
-            and termination_proof.reasons == ("no_assertion_chains",)
-        )
-        if not lifecycle_usable or not termination_usable:
-            dependencies_usable = False
-            continue
-        intervals[target] = (
-            TemporalIntervalClaimV1(
-                schema_version="1",
-                start=admissions[0].effective_time,
-                end=(
-                    None
-                    if selected_termination is None
-                    else selected_termination.effective_time
-                ),
-            ),
-        )
-    return intervals, tuple(sorted(set(proof_hashes))), dependencies_usable
+        for mapping in (record for record in mappings if record.target == target):
+            # Each selected known bound constrains the mapping independently.
+            # Missing bounds are not evidence of activity or infinite lifetime.
+            for admission in admissions:
+                admission_upper = admission.effective_time.upper_bound
+                mapping_start = mapping.effective_interval.start.lower_bound
+                if admission_upper is not None and (
+                    mapping_start is None or mapping_start < admission_upper
+                ):
+                    raise DatasetValidationError.single(
+                        "mapping_interval_outside_target_interval"
+                    )
+            for termination in selected_terminations:
+                termination_lower = termination.effective_time.lower_bound
+                mapping_end = mapping.effective_interval.end
+                if termination_lower is not None and (
+                    mapping_end is None
+                    or mapping_end.upper_bound is None
+                    or mapping_end.upper_bound > termination_lower
+                ):
+                    raise DatasetValidationError.single(
+                        "mapping_interval_outside_target_interval"
+                    )
+    return tuple(sorted(set(proof_hashes)))
 
 
 def _build_dependency_query(
@@ -1341,16 +1312,7 @@ def resolve_listing_termination(
         if selected_record is None
         else evaluate_boundary_at(selected_record.effective_time, query.evaluation_time)
     )
-    ordering_is_certain = bool(
-        selected_record is not None
-        and selected_record.last_regular_trade_time.upper_bound is not None
-        and selected_record.effective_time.lower_bound is not None
-        and selected_record.last_regular_trade_time.upper_bound
-        <= selected_record.effective_time.lower_bound
-    )
     if proof.classification is CutoffEligibility.INDETERMINATE:
-        status = ListingTerminationStatus.INDETERMINATE
-    elif selected_record is not None and not ordering_is_certain:
         status = ListingTerminationStatus.INDETERMINATE
     elif boundary_status is EffectiveTimeStatus.EFFECTIVE:
         status = ListingTerminationStatus.TERMINATED
@@ -1396,7 +1358,12 @@ def resolve_listing_termination(
         else None
     )
     evidence = _resolution_evidence(query, proof)
-    reasons = (status.value,)
+    reasons = (
+        (status.value, "last_regular_trade_time_unknown")
+        if selected_record is not None
+        and selected_record.last_regular_trade_time.shape is BoundaryShape.UNKNOWN
+        else (status.value,)
+    )
     coverage_hash = content_hash(coverage)
     return ListingTerminationResolutionV1(
         schema_version="1",

@@ -101,6 +101,7 @@ from drift.domain.securities import (
     SecurityV1,
     SourcedTextValueV1,
     identity_reference,
+    listing_termination_resolution_binding_hash,
 )
 from drift.domain.temporal import (
     AvailabilityPolicyV1,
@@ -4634,8 +4635,8 @@ def test_termination_validation_rejects_overlapping_bounded_trade_window() -> No
         validate_listing_terminations((record,))
 
 
-def test_unknown_last_trade_ordering_makes_termination_indeterminate() -> None:
-    """An exact termination cannot hide unknown last-trade ordering."""
+def test_known_termination_preserves_unknown_last_trade_independently() -> None:
+    """Missing final-trade timing cannot erase a sourced effective termination."""
     unknown = TemporalBoundaryClaimV1(
         schema_version="1",
         shape=BoundaryShape.UNKNOWN,
@@ -4660,7 +4661,16 @@ def test_unknown_last_trade_ordering_makes_termination_indeterminate() -> None:
 
     result = invoke_termination(inputs, invoke_coverage(inputs))
 
-    assert result.status is ListingTerminationStatus.INDETERMINATE
+    assert result.status is ListingTerminationStatus.TERMINATED
+    assert (
+        result.selected_termination_version_id == termination.revision.record_version_id
+    )
+    assert "last_regular_trade_time_unknown" in result.reasons
+    assert termination.last_regular_trade_time.shape is BoundaryShape.UNKNOWN
+    assert (
+        invoke_lifecycle(inputs, termination=result).status
+        is ListingLifecycleStatus.TERMINATED
+    )
 
 
 def test_cross_role_validator_accepts_closed_identity_context() -> None:
@@ -4749,29 +4759,77 @@ def test_cross_role_validator_rejects_invalid_mapping_reference(mutation: str) -
 def test_selection_implementation_hashes_derive_from_pinned_specs() -> None:
     """Selection proof implementation IDs must hash documented immutable specs."""
     expected = {
+        "_EXTERNAL_IDENTIFIER_SELECTION_IMPLEMENTATION_HASH": (
+            "b251e8b74c1dcb11fdf6a4b03bc9a71e9f75354f9cc0b1a3df44716752587a63"
+        ),
         "_LISTING_COVERAGE_SELECTION_IMPLEMENTATION_HASH": (
             "32e70af63c8da70f4671537f5c3c6f636d9dd61f94dbbb948d62ff16057862c9"
         ),
         "_LISTING_TERMINATION_SELECTION_IMPLEMENTATION_HASH": (
-            "77d589a19c24aa404bf638165b3566dd6cfcb44440f9a49f489cd55e4a458fff"
+            "a7431294e1e4950c0f4bd01896f37703a8cb27f8ca795a33045f25c9648fa943"
         ),
         "_LISTING_LIFECYCLE_SELECTION_IMPLEMENTATION_HASH": (
-            "99938548614bd63368494e0803cbb40060ca7cffb151d95e8980092c2c21cf20"
+            "2d9ffe0d083bd584011fb8218ba2d8be9ac0ca9995d76a8a6c887b9ce4e9a247"
         ),
     }
     for hash_name in expected:
-        spec_name = hash_name.replace("_HASH", "_SPEC_V1")
+        version = "1" if "COVERAGE" in hash_name else "2"
+        spec_name = hash_name.replace("_HASH", f"_SPEC_V{version}")
         implementation_hash = getattr(identity_module, hash_name)
         specification = getattr(identity_module, spec_name)
         assert implementation_hash == content_hash(specification)
         assert implementation_hash == expected[hash_name]
 
+    assert content_hash(
+        identity_module._LISTING_TERMINATION_SELECTION_IMPLEMENTATION_SPEC_V1
+    ) == ("77d589a19c24aa404bf638165b3566dd6cfcb44440f9a49f489cd55e4a458fff")
+    assert content_hash(
+        identity_module._LISTING_LIFECYCLE_SELECTION_IMPLEMENTATION_SPEC_V1
+    ) == ("99938548614bd63368494e0803cbb40060ca7cffb151d95e8980092c2c21cf20")
+
+
+def test_lifecycle_rejects_legacy_termination_proof_even_when_status_agrees() -> None:
+    """Current replay must reject a self-consistent result from the old algorithm."""
+    inputs = lifecycle_inputs(standard_lifecycle_events())
+    current = invoke_termination(inputs, invoke_coverage(inputs))
+    legacy_evidence = current.evidence.model_copy(
+        update={
+            "selection_proof_hashes": (
+                "e709768f433c4a3c09dd54b1b14f13019548fd0fbeeaefcf579dec44bcf7d99b",
+            ),
+        }
+    )
+    legacy_hash = listing_termination_resolution_binding_hash(
+        current.listing_id,
+        current.status,
+        current.selected_termination_version_id,
+        current.reasons,
+        legacy_evidence,
+        current.coverage_resolution_hash,
+        current.selected_termination_record_hash,
+        current.dependent_relationship_resolution_hashes,
+        current.dependent_relationship_proof_hashes,
+        current.selected_successor_relationship_record_hashes,
+    )
+    legacy = ListingTerminationResolutionV1.model_validate(
+        {
+            **current.model_dump(mode="python"),
+            "evidence": legacy_evidence,
+            "outcome_binding_hash": legacy_hash,
+        }
+    )
+    assert legacy.status is ListingTerminationStatus.NOT_TERMINATED
+    with pytest.raises(
+        DatasetValidationError, match="termination_resolution_replay_mismatch"
+    ):
+        invoke_lifecycle(inputs, termination=legacy)
+
 
 @pytest.mark.parametrize("availability_case", ("indeterminate", "unavailable"))
-def test_mapping_is_indeterminate_when_effective_termination_is_not_usable(
+def test_mapping_survives_unavailable_or_uncertain_termination(
     availability_case: str,
 ) -> None:
-    """An effective but unusable termination dependency cannot authorize mapping."""
+    """A termination not known by K cannot erase the independent mapping assertion."""
     namespace = ticker_namespace(ListingVenue.XNAS)
     inputs = resolution_inputs(
         namespace,
@@ -4859,14 +4917,15 @@ def test_mapping_is_indeterminate_when_effective_termination_is_not_usable(
 
     result = invoke_resolution(uncertain_inputs)
 
-    assert result.classification is RecordResolutionClassification.INDETERMINATE
-    assert result.targets == ()
-    assert "mapping_lifecycle_dependency_unusable" in result.reasons
+    assert result.classification is RecordResolutionClassification.RESOLVED
+    assert result.targets == (
+        IdentityReferenceV1(kind=IdentityKind.LISTING, internal_id=uid(1)),
+    )
     assert len(result.target_lifecycle_proof_hashes) == 2
 
 
-def test_mapping_is_indeterminate_when_lifecycle_admission_is_indeterminate() -> None:
-    """An uncertain admission selection cannot define a mapping target interval."""
+def test_mapping_survives_indeterminate_admission() -> None:
+    """A retained identity assignment supports mapping despite uncertain admission."""
     namespace = ticker_namespace(ListingVenue.XNAS)
     inputs = resolution_inputs(
         namespace,
@@ -4955,10 +5014,250 @@ def test_mapping_is_indeterminate_when_lifecycle_admission_is_indeterminate() ->
 
     result = invoke_resolution(uncertain_inputs)
 
-    assert result.classification is RecordResolutionClassification.INDETERMINATE
-    assert result.targets == ()
-    assert "mapping_lifecycle_dependency_unusable" in result.reasons
+    assert result.classification is RecordResolutionClassification.RESOLVED
+    assert result.targets == (
+        IdentityReferenceV1(kind=IdentityKind.LISTING, internal_id=uid(1)),
+    )
     assert len(result.target_lifecycle_proof_hashes) == 2
+
+
+def with_mapping_lifecycle_context(
+    inputs: ResolutionInputs,
+    events: tuple[ListingLifecycleVersionV1, ...],
+    terminations: tuple[ListingTerminationVersionV1, ...],
+) -> ResolutionInputs:
+    """Revalidate replacement lifecycle families and pin their actual bundle."""
+    lifecycle_manifest, lifecycle_bytes = role_dataset("listing_lifecycle", events)
+    lifecycle_decision = validate_identity_dataset(
+        lifecycle_manifest, (lifecycle_bytes,), role_validation_context(2250)
+    )
+    termination_manifest, termination_bytes = role_dataset(
+        "listing_termination", terminations
+    )
+    termination_decision = validate_identity_dataset(
+        termination_manifest, (termination_bytes,), role_validation_context(2251)
+    )
+    assert lifecycle_decision.result is ValidationResult.PASS
+    assert termination_decision.result is ValidationResult.PASS
+    bundle = build_validated_dataset_bundle(
+        uid(2252),
+        "2",
+        datetime(2026, 9, 3, 12, tzinfo=UTC),
+        (
+            (inputs.manifest, inputs.decision),
+            (inputs.assignment_manifest, inputs.assignment_decision),
+            (lifecycle_manifest, lifecycle_decision),
+            (termination_manifest, termination_decision),
+        ),
+    )
+    return replace(
+        inputs,
+        bundle=bundle,
+        query=inputs.query.model_copy(
+            update={"context_bundle_hashes": (content_hash(bundle),)}
+        ),
+        lifecycle_events=events,
+        lifecycle_manifest=lifecycle_manifest,
+        lifecycle_decision=lifecycle_decision,
+        terminations=terminations,
+        termination_manifest=termination_manifest,
+        termination_decision=termination_decision,
+    )
+
+
+@pytest.mark.parametrize(
+    "uncertain_fact", ("missing_history", "suspension", "resumption")
+)
+def test_known_mapping_does_not_claim_known_listing_activity(
+    uncertain_fact: str,
+) -> None:
+    """Mapping survives activity uncertainty that still blocks lifecycle resolution."""
+    namespace = ticker_namespace(ListingVenue.XNAS)
+    mapping_inputs = resolution_inputs(
+        namespace,
+        "OLD",
+        (
+            mapping(
+                2260,
+                namespace,
+                "OLD",
+                1,
+                "2019-01-02T00:00:00Z",
+                "2021-12-31T00:00:00Z",
+            ),
+        ),
+        "2020-04-01T00:00:00Z",
+    )
+    events = standard_lifecycle_events()
+    if uncertain_fact == "missing_history":
+        events = ()
+    else:
+        kind = (
+            ListingLifecycleEventKind.SUSPENDED
+            if uncertain_fact == "suspension"
+            else ListingLifecycleEventKind.RESUMED
+        )
+        events = tuple(
+            lifecycle_record(
+                2270,
+                kind,
+                bounded_boundary("2020-03-01T00:00:00Z", "2020-05-01T00:00:00Z"),
+            )
+            if event.event_kind is kind
+            else event
+            for event in events
+        )
+    lifecycle_context = lifecycle_inputs(
+        events,
+        coverage_versions=() if uncertain_fact == "missing_history" else None,
+        evaluation_time="2020-04-01T00:00:00Z",
+    )
+    bundle = build_validated_dataset_bundle(
+        uid(2271),
+        "2",
+        datetime(2026, 9, 3, 12, tzinfo=UTC),
+        (
+            (mapping_inputs.manifest, mapping_inputs.decision),
+            (mapping_inputs.assignment_manifest, mapping_inputs.assignment_decision),
+            (
+                lifecycle_context.lifecycle_manifest,
+                lifecycle_context.lifecycle_decision,
+            ),
+            (
+                lifecycle_context.termination_manifest,
+                lifecycle_context.termination_decision,
+            ),
+            (lifecycle_context.coverage_manifest, lifecycle_context.coverage_decision),
+        ),
+    )
+    context = {"context_bundle_hashes": (content_hash(bundle),)}
+    mapping_context = replace(
+        mapping_inputs,
+        bundle=bundle,
+        query=mapping_inputs.query.model_copy(update=context),
+        lifecycle_events=events,
+        lifecycle_manifest=lifecycle_context.lifecycle_manifest,
+        lifecycle_decision=lifecycle_context.lifecycle_decision,
+        terminations=(),
+        termination_manifest=lifecycle_context.termination_manifest,
+        termination_decision=lifecycle_context.termination_decision,
+    )
+    lifecycle_context = replace(
+        lifecycle_context,
+        bundle=bundle,
+        lifecycle_query=lifecycle_context.lifecycle_query.model_copy(update=context),
+        termination_query=lifecycle_context.termination_query.model_copy(
+            update=context
+        ),
+        coverage_query=lifecycle_context.coverage_query.model_copy(update=context),
+    )
+    result = invoke_resolution(mapping_context)
+    assert result.classification is RecordResolutionClassification.RESOLVED
+    assert result.targets == (
+        IdentityReferenceV1(kind=IdentityKind.LISTING, internal_id=uid(1)),
+    )
+    assert (
+        invoke_lifecycle(lifecycle_context).status
+        is ListingLifecycleStatus.INDETERMINATE
+    )
+
+
+@pytest.mark.parametrize("missing_bound", ("admission", "termination"))
+def test_mapping_checks_known_lifetime_bound_without_the_other(
+    missing_bound: str,
+) -> None:
+    """Missing one lifecycle bound cannot hide a contradiction with the other."""
+    namespace = ticker_namespace(ListingVenue.XNAS)
+    inputs = resolution_inputs(
+        namespace,
+        "OLD",
+        (
+            mapping(
+                2280,
+                namespace,
+                "OLD",
+                1,
+                "2019-01-02T00:00:00Z",
+                "2021-12-31T00:00:00Z",
+            ),
+        ),
+        "2020-04-01T00:00:00Z",
+    )
+    events = (
+        ()
+        if missing_bound == "admission"
+        else (
+            lifecycle_record(
+                2290, ListingLifecycleEventKind.ADMITTED, "2019-02-01T00:00:00Z"
+            ),
+        )
+    )
+    terminations = (
+        ()
+        if missing_bound == "termination"
+        else (
+            termination_record(
+                2300,
+                ListingTerminationReason.EXCHANGE_DELISTING,
+                last_trade="2020-05-31T00:00:00Z",
+                effective_time="2020-06-01T00:00:00Z",
+            ),
+        )
+    )
+    with pytest.raises(DatasetValidationError, match="outside_target_interval"):
+        invoke_resolution(with_mapping_lifecycle_context(inputs, events, terminations))
+
+
+def test_mapping_lifetime_bound_does_not_require_last_trade_time() -> None:
+    """Known termination bounds mapping despite unknown final-trade timing."""
+    namespace = ticker_namespace(ListingVenue.XNAS)
+    inputs = resolution_inputs(
+        namespace,
+        "OLD",
+        (
+            mapping(
+                2310,
+                namespace,
+                "OLD",
+                1,
+                "2019-01-02T00:00:00Z",
+                "2021-12-31T00:00:00Z",
+            ),
+        ),
+        "2020-04-01T00:00:00Z",
+    )
+    unknown = TemporalBoundaryClaimV1(
+        schema_version="1",
+        shape=BoundaryShape.UNKNOWN,
+        lower_bound=None,
+        upper_bound=None,
+        source_precision=SourcePrecision.UNKNOWN,
+        source_time_label=None,
+        source_timezone=None,
+        evidence_reference=None,
+    )
+    consistent = termination_record(
+        2320,
+        ListingTerminationReason.EXCHANGE_DELISTING,
+        last_trade=unknown,
+        effective_time="2021-12-31T00:00:00Z",
+    )
+    result = invoke_resolution(
+        with_mapping_lifecycle_context(inputs, inputs.lifecycle_events, (consistent,))
+    )
+    assert result.classification is RecordResolutionClassification.RESOLVED
+    contradictory = termination_record(
+        2330,
+        ListingTerminationReason.EXCHANGE_DELISTING,
+        last_trade=unknown,
+        effective_time="2020-06-01T00:00:00Z",
+    )
+    with pytest.raises(DatasetValidationError, match="outside_target_interval"):
+        invoke_resolution(
+            with_mapping_lifecycle_context(
+                inputs, inputs.lifecycle_events, (contradictory,)
+            )
+        )
 
 
 def successor_validation_context(

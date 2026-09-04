@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** Implementation in progress. Tasks 1 and 2 are complete at `2d65d97` and `1f03374`; Task 3 is independently reviewed, controller-verified, and pending commit approval. This is the only active executable M1b plan.
+**Status:** Implementation in progress. Tasks 1, 2, and 3 are committed at `2d65d97`, `1f03374`, and `1cf3afa`. The bounded Task 3 semantic correction below is undergoing independent review before Task 4 starts. This is the only active executable M1b plan.
 
 **Prerequisite:** Start from `main` with umbrella-design commit `6086a1f` present. M1a is complete at `0385493`.
 
@@ -812,12 +812,44 @@ git commit -m "feat: add immutable historical security identity"
 - Keep `identity-assignments.json`, `identity-relationships.json`, and bundle v1 byte-for-byte unchanged. Bundle v2 replaces those two roles with immutable `identity-assignments-v2.json` and `identity-relationships-v2.json`; each v2 stream retains every v1 record, adds the Task 3 identities and relationships, and carries the interval corrections needed by the fixed OLD/NEW/transfer/reuse history.
 - Add executable cross-role validation over the exact assignment, relationship, mapping, classification, role, lifecycle, termination, and coverage records. It must reject missing, mistyped, inactive, and interval-incompatible references before the bundle is usable.
 - Relationship-dependent resolvers gain the exact assignment records, assignment manifest, and assignment decision. Their dependency authenticator must replay `resolve_identity` from those inputs plus the exact relationship records, manifest, decision, query, policy, and retained evidence, then require equality with the supplied result.
-- `resolve_external_identifier` gains exact lifecycle and termination record, manifest, and decision inputs for listing targets. It causally selects the requested mapping chains before target, collision, and dependency validation; then it proves the selected target against causally selected assignment and lifecycle bounds. Unrelated or unavailable future records cannot poison an earlier query.
+- `resolve_external_identifier` gains exact lifecycle and termination record, manifest, and decision inputs for listing targets. It causally selects the requested mapping chains before target, collision, and dependency validation; then it proves the selected target against causally selected assignments and checks each known admission/termination bound independently. Unknown or unavailable lifecycle facts do not erase a known historical mapping. A resolved mapping does not establish listing activity. Unrelated or unavailable future records cannot poison an earlier query.
 - `ExternalIdentifierResolutionResultV1` gains lifecycle-proof hashes and an outcome-binding hash covering namespace, exact value, classification, reasons, targets, mapping evidence, assignment proof hashes, and lifecycle proof hashes.
 - Termination and transfer relationship checks run only after the selected termination or transfer is effective at E. Their relationship intervals are checked at the event boundary rather than requiring future or historical links to be active at the parent query time.
-- Bounded termination ordering is valid only when the latest possible last regular trade is no later than the earliest possible termination. Overlap fails validation; unresolved ordering produces an indeterminate result.
+- Bounded termination ordering is valid only when the latest possible last regular trade is no later than the earliest possible termination. Supplied overlapping bounds fail validation. An unknown last regular trade remains unknown and is reported explicitly; a selected definitely effective termination still resolves as terminated. An unknown or not definitely effective termination boundary does not establish termination. Absence of termination still requires complete coverage through E.
 - Coverage, termination, and lifecycle fixtures each retain an executable correction chain tested in both `as_known` and `current_interpretation` modes. The canonical bundle-v2 integration test must execute mapping, identity, classification, primary-listing, coverage, termination, and lifecycle resolution.
 - Selection implementation hashes for coverage, termination, and lifecycle replay are `content_hash` values of documented immutable algorithm/version specifications, with pinned literal regression tests.
+
+**Task 3 semantic-audit ruling (2026-09-04):**
+
+[ADR 0006](../../adr/0006-independent-historical-identity-and-lifecycle-facts.md)
+records the bounded correction. The strongest argument for the former coupling
+was rejection of mappings outside valid listing lifetimes and conservative
+chronology validation. The contrary evidence was that uncertain suspension or
+last-trade timing erased independent mapping/termination facts, while missing
+termination records already permitted mapping without activity coverage. Keep
+known lifetime contradictions and exact dependent replay; place activity
+completeness in lifecycle and structural eligibility. This changes M1b resolver
+interpretation, not M0/M1a persisted contracts or milestone scope.
+
+| Area | Verdict | Evidence | Change required? |
+| --- | --- | --- | --- |
+| A. Mapping versus lifecycle | SHOULD DECOUPLE | `test_mapping_survives_unavailable_or_uncertain_termination`, `test_known_mapping_does_not_claim_known_listing_activity` | Bounded correction; mapping remains independently knowable. |
+| B. Ticker change/reuse/transfer | PASS AS DESIGNED | `test_ticker_change_reuse_and_venue_transfer_resolve_by_period`, canonical bundle-v2 resolver integration | None. |
+| C. Termination versus economics | PASS AS DESIGNED | `test_termination_model_rejects_economic_outcome_fields`, strict termination schema | None. |
+| D. History completeness | PASS AS DESIGNED with bounded chronology correction | `test_no_termination_requires_complete_history_through_e`, `test_known_termination_preserves_unknown_last_trade_independently` | Preserve coverage rule; unknown last trade does not erase definite termination. |
+| E. Dependent replay | PASS AS DESIGNED | `test_relationship_dependency_replays_the_complete_identity_outcome`, `test_lifecycle_rejects_legacy_termination_proof_even_when_status_agrees` | Preserve authentication; version corrected interpretation. |
+| F. Exact role schemas | PASS AS DESIGNED | `test_role_datasets_require_exact_schema_typed_parse_and_checked_contract` | None; future versions require explicit new contracts. |
+| G. Primary listing | PASS AS DESIGNED | `test_listing_role_rejects_timeless_primary`, `test_cross_methodology_primary_disagreement_remains_separate` | None. |
+| H. Corrections | PASS AS DESIGNED | pinned v1/v2 fixture bytes and `test_canonical_corrections_replay_as_known_and_current_by_stage` | Keep old data; new interpretation uses new algorithm hashes. |
+| I. Task boundary | PASS AS DESIGNED | Task 3 source and fixture scope inspection; no universe or M1c implementation | None; Task 4 remains next. |
+| J. Test quality | PASS with semantic regression correction | direct resolver, provenance-forgery, independent-bound, and shared-bundle mapping/activity cases | Replace tests that enforced over-coupling; retain adversarial checks. |
+
+Mapping, termination, and composed lifecycle now use V2 implementation
+specifications and proof hashes. Coverage retains V1. Record schemas, source
+fixtures, manifests, and M0/M1a contracts stay unchanged. Historical V1 M1b
+outcomes require the interpreter pinned at `1cf3afa`; the current interpreter
+does not dispatch old semantics or silently accept an old proof as a V2 result.
+The old specifications and hashes remain retained for identification.
 
 Resolution outputs are fixed before implementation:
 
