@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** Implementation in progress. Tasks 1, 2, and 3 are committed at `2d65d97`, `1f03374`, and `1cf3afa`. The bounded Task 3 semantic correction below is undergoing independent review before Task 4 starts. This is the only active executable M1b plan.
+**Status:** Implementation in progress. Tasks 1, 2, and 3 are committed at `2d65d97`, `1f03374`, and `1cf3afa`; the Task 3 semantic correction is committed at `11f5d4b`. Task 4 passed independent review and the controller's full 779-test verification gate and is ready for its authorized commit. Task 5 has not started. This is the only active executable M1b plan.
 
 **Prerequisite:** Start from `main` with umbrella-design commit `6086a1f` present. M1a is complete at `0385493`.
 
@@ -841,7 +841,7 @@ interpretation, not M0/M1a persisted contracts or milestone scope.
 | F. Exact role schemas | PASS AS DESIGNED | `test_role_datasets_require_exact_schema_typed_parse_and_checked_contract` | None; future versions require explicit new contracts. |
 | G. Primary listing | PASS AS DESIGNED | `test_listing_role_rejects_timeless_primary`, `test_cross_methodology_primary_disagreement_remains_separate` | None. |
 | H. Corrections | PASS AS DESIGNED | pinned v1/v2 fixture bytes and `test_canonical_corrections_replay_as_known_and_current_by_stage` | Keep old data; new interpretation uses new algorithm hashes. |
-| I. Task boundary | PASS AS DESIGNED | Task 3 source and fixture scope inspection; no universe or M1c implementation | None; Task 4 remains next. |
+| I. Task boundary | PASS AS DESIGNED | Task 3 source and fixture scope inspection; no universe or M1c implementation in Task 3 | None; later universe work belongs to Task 4. |
 | J. Test quality | PASS with semantic regression correction | direct resolver, provenance-forgery, independent-bound, and shared-bundle mapping/activity cases | Replace tests that enforced over-coupling; retain adversarial checks. |
 
 Mapping, termination, and composed lifecycle now use V2 implementation
@@ -1254,8 +1254,41 @@ git commit -m "feat: add historical listing semantics"
 - Fixture: `tests/fixtures/datasets/m1b/universe-memberships.json`
 
 **Interfaces:**
-- Consumes: selected identity, classification, primary listing, lifecycle, termination, and Task 1 proof/reference results.
-- Produces: universe records, `resolve_universe_membership`, and `resolve_structural_eligibility`.
+- Consumes: complete retained identity/universe records, exact manifests and validation decisions, and Task 1 query/proof contracts through frozen audit-side contexts.
+- Produces: universe records, `resolve_source_universe_definition`, `resolve_universe_membership`, and `resolve_structural_eligibility`.
+
+**Accepted Task 4 preflight rulings:**
+
+[ADR 0007](../../adr/0007-authenticated-point-in-time-universe-composition.md)
+records the evidence and interface corrections. A raw source definition or a
+self-consistent result hash is insufficient authority. Select the source
+definition from its complete validated dataset under its own K/E query, and
+replay that result before membership use. A research policy is directly
+content-addressed outside the universe bundle, with no claim that the policy
+was published at the historical cutoff. It pins both bundles without a hash cycle.
+
+Membership validates the complete source dataset before filtering; its subject
+and result bind the selected definition hash and source-definition resolution
+hash. Corrections preserve logical event owner, target, and source-event ID.
+Withdrawal removes an assertion, never creates a business removal. Known future
+additions are upcoming only; absent prior events are indeterminate, so the
+synthetic index has an explicit historical exclusion. Independent events are
+ordered by effective boundaries, never their unrelated revision sequences.
+Opposing latest ties/overlaps and unknown effective boundaries fail closed.
+
+Membership target provenance establishes a causally knowable retained internal
+identity at K. An ended assignment interval or `UNASSIGNED` source-key
+association does not erase that identity or create a membership removal.
+`UNASSIGNED` alone cannot establish identity; its earlier positive assignment
+must be causally provable. Withdrawn-only and future-only identity evidence
+cannot authorize a target. This leaves Task 2 assignment resolution unchanged.
+
+Public structural resolution accepts `StructuralResolutionContext`, containing
+complete validated datasets, and reconstructs all component outcomes before
+private pure composition. It retains active assignment and lifecycle checks at
+E. Missing component evidence stays indeterminate; no caller-provided status or
+outcome hash grants admission. The full normalized query carries K/E, channel,
+policy, mode, role, and bundle bindings. No provider or result registry is added.
 
 ```python
 class UniverseMembershipResolutionV1(FrozenModel):
@@ -1264,13 +1297,19 @@ class UniverseMembershipResolutionV1(FrozenModel):
     universe_version: NonBlankStr
     target_level: UniverseTargetLevel
     target_id: UUID7
+    definition_hash: SHA256Hash | None
+    definition_resolution_hash: SHA256Hash | None
+    identity_bundle_hash: SHA256Hash
+    universe_bundle_hash: SHA256Hash
+    target_assignment_proof_hashes: tuple[SHA256Hash, ...]
     status: MembershipStatus
     known_upcoming_effects: tuple[MembershipEffect, ...]
     reasons: tuple[NonBlankStr, ...]
     evidence: ResolutionEvidenceV1
+    outcome_binding_hash: SHA256Hash
 ```
 
-- [ ] **Step 1: Write failing definition and target-level tests**
+- [x] **Step 1: Write failing definition and target-level tests**
 
 ```python
 class UniverseTargetLevel(StrEnum):
@@ -1288,10 +1327,11 @@ class ResearchUniverseDefinitionV1(FrozenModel):
     universe_id: UUID7
     universe_version: NonBlankStr
     universe_kind: Literal["structural"]
-    target_level: UniverseTargetLevel
+    target_level: Literal[UniverseTargetLevel.LISTING]
     methodology_reference: ArtifactReference
     methodology_hash: SHA256Hash
     identity_bundle_hash: SHA256Hash
+    universe_bundle_hash: SHA256Hash
     classification_contract_hash: SHA256Hash
     created_at: UTCDateTime
 
@@ -1311,17 +1351,17 @@ class SourceUniverseDefinitionVersionV1(FrozenModel):
 
 Require safe methodology references whose content hash equals `methodology_hash`. One version has one target level. Issuer and mixed-level definitions fail. The initial structural fixture targets listing; the generic source contract may target security or listing.
 
-- [ ] **Step 2: Verify definition tests are RED**
+- [x] **Step 2: Verify definition tests are RED**
 
 Run: `uv run pytest tests/unit/test_universes.py -k "definition or target" -v`
 
 Expected: collection FAIL because universe contracts do not exist.
 
-- [ ] **Step 3: Implement definitions without strategy screens**
+- [x] **Step 3: Implement definitions without strategy screens**
 
 Do not add price, volume, market-cap, liquidity, factor, feature, or rank fields. `classification_contract_hash` identifies the exact strict-scope mapping policy; changing the policy changes definition identity.
 
-- [ ] **Step 4: Write failing membership timing and correction tests**
+- [x] **Step 4: Write failing membership timing and correction tests**
 
 ```python
 class MembershipEffect(StrEnum):
@@ -1349,26 +1389,20 @@ class MembershipStatus(StrEnum):
 
 Test a synthetic addition available on 2020-05-20 and effective 2020-06-01: it is known upcoming on May 25 but not current membership; it is included June 1. Test later exclusion, correction of announcement evidence, correction of effective boundary, and withdrawal of a bad assertion. `revision_kind=withdrawal` is never a membership exclusion.
 
-- [ ] **Step 5: Implement membership resolution with separate K and E**
+- [x] **Step 5: Implement membership resolution with separate K and E**
 
 ```python
 def resolve_universe_membership(
-    definition: ResearchUniverseDefinitionV1 | SourceUniverseDefinitionVersionV1,
-    target_level: UniverseTargetLevel,
-    target_id: UUID7,
-    memberships: Sequence[UniverseMembershipVersionV1],
+    definition: ResearchUniverseDefinitionV1 | SourceUniverseDefinitionResolutionV1,
+    target: IdentityReferenceV1,
     query: NormalizedSelectionQueryV1,
-    universe_bundle: ValidatedDatasetBundleV1,
-    manifest: DatasetManifestV2,
-    decision: DatasetValidationDecisionV2,
-    policy: AvailabilityPolicyV1,
-    retained_evidence: Mapping[SHA256Hash, AvailabilityEvidenceV1],
+    context: UniverseResolutionContext,
 ) -> UniverseMembershipResolutionV1: ...
 ```
 
 First select causally available assertions by K, then evaluate business effect at E. A current snapshot without historical events is indeterminate for an earlier period. Target mismatch is a validation error.
 
-- [ ] **Step 6: Write failing structural-eligibility tests**
+- [x] **Step 6: Write failing structural-eligibility tests**
 
 ```python
 class StructuralEligibilityClassification(StrEnum):
@@ -1379,52 +1413,49 @@ class StructuralEligibilityClassification(StrEnum):
 
 class StructuralEligibilityResultV1(FrozenModel):
     schema_version: Literal["1"]
+    issuer_id: UUID7
     listing_id: UUID7
     security_id: UUID7
+    methodology_id: NonBlankStr
+    definition_hash: SHA256Hash
     classification: StructuralEligibilityClassification
     reasons: tuple[NonBlankStr, ...]
-    knowledge_cutoff: UTCDateTime
-    evaluation_time: UTCDateTime
-    requested_channel: AvailabilityChannelV1
-    policy_id: NonBlankStr
-    policy_hash: SHA256Hash
+    normalized_query: NormalizedSelectionQueryV1
     identity_bundle_hash: SHA256Hash
     universe_bundle_hash: SHA256Hash
     identity_assignment_resolution_hashes: tuple[SHA256Hash, ...]
-    identity_resolution_hash: SHA256Hash
-    classification_resolution_hash: SHA256Hash
-    primary_listing_resolution_hash: SHA256Hash
-    lifecycle_resolution_hash: SHA256Hash
+    identity_resolution_hashes: tuple[SHA256Hash, ...]
+    classification_resolution_hash: SHA256Hash | None
+    primary_listing_resolution_hash: SHA256Hash | None
+    lifecycle_resolution_hash: SHA256Hash | None
     membership_resolution_hash: SHA256Hash
     selection_proof_hashes: tuple[SHA256Hash, ...]
+    outcome_binding_hash: SHA256Hash
 ```
 
 Strict eligibility requires resolved issuer-security-listing links; operating-company/common-share/domestic classification; XNYS/XNAS/XASE venue; exactly one primary under the selected methodology; definitely effective first trade; complete lifecycle/termination coverage through E; no effective suspension/termination; and effective inclusion in the listing-target structural universe.
 
 Explicit exclusion is ineligible. Missing, unknown, bounded-at-E, conflicting, or unavailable evidence is indeterminate. Both fail admission, but remain distinct.
 
-- [ ] **Step 7: Implement structural eligibility as pure composition**
+- [x] **Step 7: Implement authenticated structural resolution with private pure composition**
 
-Implement this exact composition boundary:
+Implement this public reconstruction boundary, followed by private pure composition:
 
 ```python
 def resolve_structural_eligibility(
     definition: ResearchUniverseDefinitionV1,
     listing: ListingV1,
+    issuer_id: UUID7,
     security_id: UUID7,
-    identity_assignments: tuple[IdentityAssignmentResolutionResultV1, ...],
-    identity: IdentityResolutionResultV1,
-    classification: SecurityClassificationResolutionV1,
-    primary_listing: PrimaryListingResolutionV1,
-    lifecycle: ListingLifecycleResolutionV1,
-    membership: UniverseMembershipResolutionV1,
+    methodology_id: str,
     query: NormalizedSelectionQueryV1,
+    context: StructuralResolutionContext,
 ) -> StructuralEligibilityResultV1: ...
 ```
 
-The assignment tuple must prove exactly one issuer, the named security, and the named listing under matching query context. The function operates on already validated exact results. It must not read manifests, fetch records, infer sessions, inspect observations, or calculate tradability. Reject mismatched K, E, channel, policy, manifest, target, and proof purpose.
+The public function validates exact dataset bindings, reconstructs the named issuer/security/listing assignments, identity links, classification, primary role, coverage, termination, lifecycle, and membership under matching query context, then invokes private pure composition. Contexts group records with their manifests/decisions and exact bundles; they carry no trusted status fields. Unavailable components have absent hashes and cannot produce eligible results. The function performs no external reads, session inference, observation inspection, or tradability calculation. Reject mismatched K, E, channel, policy, manifest, target, and proof purpose.
 
-- [ ] **Step 8: Create and hash-pin the universe fixture**
+- [x] **Step 8: Create and hash-pin the universe fixture**
 
 The source-definition and membership files have separate roles/manifests and together cover:
 
@@ -1443,11 +1474,16 @@ Use no actual index name, real constituent, or market observation.
 
 Build universe bundle version `1` from the passing source-definition and membership manifests/decisions. The research structural definition binds identity bundle version `2` and the universe bundle hash.
 
-- [ ] **Step 9: Run focused and full gates**
+- [x] **Step 9: Run focused and full gates**
 
 Run: `uv run pytest tests/unit/test_universes.py tests/integration/test_m1b_universe_leakage.py -v`
 
 Then run the full gate. Expected: all pass; leakage, survivorship deletion, unknown-as-eligible, and early membership fail mechanically.
+
+Worker gate on 2026-09-04: 779 tests pass, including 64 Task 4 unit cases and
+10 canonical fixture integration cases; Ruff passes; 92 files are formatted;
+mypy passes for 67 source files; source and wheel builds pass. Independent
+review and the controller commit remain outstanding. Task 5 has not started.
 
 - [ ] **Step 10: Commit historical universe semantics**
 

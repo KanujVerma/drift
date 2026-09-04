@@ -55,6 +55,10 @@ from drift.domain.securities import (
     SecurityClassificationVersionV1,
     identity_reference,
 )
+from drift.domain.universes import (
+    SourceUniverseDefinitionVersionV1,
+    UniverseMembershipVersionV1,
+)
 from drift.errors import CanonicalSerializationError
 from drift.serialization.canonical import canonical_json, content_hash
 
@@ -66,6 +70,8 @@ _LISTING_ROLE = "listing_role"
 _LIFECYCLE_ROLE = "listing_lifecycle"
 _TERMINATION_ROLE = "listing_termination"
 _COVERAGE_ROLE = "listing_history_coverage"
+_SOURCE_UNIVERSE_ROLE = "source_universe_definition"
+_MEMBERSHIP_ROLE = "universe_membership"
 
 _IDENTITY_BASE_FIELDS: dict[str, tuple[LogicalType, bool]] = {
     "revision.logical_record_id": (LogicalType.STRING, False),
@@ -229,6 +235,30 @@ LISTING_LIFECYCLE_SCHEMA_V1 = _exact_schema(_LISTING_LIFECYCLE_FIELDS)
 LISTING_TERMINATION_SCHEMA_V1 = _exact_schema(_LISTING_TERMINATION_FIELDS)
 LISTING_HISTORY_COVERAGE_SCHEMA_V1 = _exact_schema(_LISTING_HISTORY_COVERAGE_FIELDS)
 
+_SOURCE_UNIVERSE_FIELDS = {
+    **_EXACT_ASSERTION_FIELDS,
+    "universe_id": (LogicalType.STRING, False),
+    "universe_version": (LogicalType.STRING, False),
+    "universe_kind": (LogicalType.STRING, False),
+    "target_level": (LogicalType.STRING, False),
+    "methodology_reference": (LogicalType.JSON, False),
+    "methodology_hash": (LogicalType.STRING, False),
+    "identity_bundle_hash": (LogicalType.STRING, False),
+    "effective_interval": (LogicalType.JSON, False),
+}
+_MEMBERSHIP_FIELDS = {
+    **_EXACT_ASSERTION_FIELDS,
+    "universe_id": (LogicalType.STRING, False),
+    "universe_version": (LogicalType.STRING, False),
+    "target_level": (LogicalType.STRING, False),
+    "target_id": (LogicalType.STRING, False),
+    "membership_effect": (LogicalType.STRING, False),
+    "effective_time": (LogicalType.JSON, False),
+    "source_event_id": (LogicalType.STRING, False),
+}
+SOURCE_UNIVERSE_DEFINITION_SCHEMA_V1 = _exact_schema(_SOURCE_UNIVERSE_FIELDS)
+UNIVERSE_MEMBERSHIP_SCHEMA_V1 = _exact_schema(_MEMBERSHIP_FIELDS)
+
 _EXACT_ROLE_CONTRACTS: dict[
     str,
     tuple[
@@ -238,6 +268,31 @@ _EXACT_ROLE_CONTRACTS: dict[
         AssertionEffectiveShape,
     ],
 ] = {
+    _SOURCE_UNIVERSE_ROLE: (
+        SOURCE_UNIVERSE_DEFINITION_SCHEMA_V1,
+        tuple(
+            sorted(
+                field
+                for field in _SOURCE_UNIVERSE_FIELDS
+                if field not in _EXACT_ASSERTION_FIELDS
+                and field != "effective_interval"
+            )
+        ),
+        "effective_interval",
+        AssertionEffectiveShape.INTERVAL,
+    ),
+    _MEMBERSHIP_ROLE: (
+        UNIVERSE_MEMBERSHIP_SCHEMA_V1,
+        tuple(
+            sorted(
+                field
+                for field in _MEMBERSHIP_FIELDS
+                if field not in _EXACT_ASSERTION_FIELDS and field != "effective_time"
+            )
+        ),
+        "effective_time",
+        AssertionEffectiveShape.BOUNDARY,
+    ),
     _MAPPING_ROLE: (
         EXTERNAL_IDENTIFIER_MAPPING_SCHEMA_V1,
         _EXTERNAL_IDENTIFIER_MAPPING_SEMANTIC_FIELDS,
@@ -341,6 +396,8 @@ def validate_identity_dataset(
         | ListingLifecycleVersionV1
         | ListingTerminationVersionV1
         | ListingHistoryCoverageVersionV1
+        | SourceUniverseDefinitionVersionV1
+        | UniverseMembershipVersionV1
     ] = []
     role = manifest.dataset_role.name
     if role not in {
@@ -352,6 +409,8 @@ def validate_identity_dataset(
         _LIFECYCLE_ROLE,
         _TERMINATION_ROLE,
         _COVERAGE_ROLE,
+        _SOURCE_UNIVERSE_ROLE,
+        _MEMBERSHIP_ROLE,
     }:
         findings.append(_finding("unsupported_identity_dataset_role"))
     else:
@@ -418,6 +477,18 @@ def validate_identity_dataset(
                 )
             )
 
+    findings.extend(
+        _universe_ownership_findings(
+            tuple(
+                record
+                for record in records
+                if isinstance(
+                    record,
+                    SourceUniverseDefinitionVersionV1 | UniverseMembershipVersionV1,
+                )
+            )
+        )
+    )
     canonical_findings = _canonical_findings(findings)
     return structure.model_copy(
         update={
@@ -496,7 +567,9 @@ def _parse_identity_records(
         | ListingRoleVersionV1
         | ListingLifecycleVersionV1
         | ListingTerminationVersionV1
-        | ListingHistoryCoverageVersionV1,
+        | ListingHistoryCoverageVersionV1
+        | SourceUniverseDefinitionVersionV1
+        | UniverseMembershipVersionV1,
         ...,
     ],
     tuple[ValidationFindingV1, ...],
@@ -515,6 +588,12 @@ def _parse_identity_records(
         return _parse_listing_lifecycle_document(artifact)
     if role == _TERMINATION_ROLE:
         return _parse_listing_termination_document(artifact)
+    if role == _SOURCE_UNIVERSE_ROLE:
+        return _parse_typed_identity_document(
+            artifact, SourceUniverseDefinitionVersionV1
+        )
+    if role == _MEMBERSHIP_ROLE:
+        return _parse_typed_identity_document(artifact, UniverseMembershipVersionV1)
     return _parse_listing_history_coverage_document(artifact)
 
 
@@ -582,6 +661,8 @@ def _parse_typed_identity_document[
     | ListingLifecycleVersionV1
     | ListingTerminationVersionV1
     | ListingHistoryCoverageVersionV1
+    | SourceUniverseDefinitionVersionV1
+    | UniverseMembershipVersionV1
 ](
     artifact: VerifiedArtifactBytes,
     model: type[T],
@@ -613,6 +694,33 @@ def _parse_typed_identity_document[
             continue
         records.append(record)
     return tuple(records), tuple(findings)
+
+
+def _universe_ownership_findings(
+    records: Sequence[SourceUniverseDefinitionVersionV1 | UniverseMembershipVersionV1],
+) -> tuple[ValidationFindingV1, ...]:
+    owners: dict[object, tuple[object, ...]] = {}
+    levels: dict[tuple[object, str], object] = {}
+    events: dict[tuple[object, ...], object] = {}
+    codes: set[str] = set()
+    for record in records:
+        universe = (record.universe_id, record.universe_version)
+        owner: tuple[object, ...] = (*universe, record.target_level)
+        if isinstance(record, UniverseMembershipVersionV1):
+            owner += (record.target_id, record.source_event_id)
+            if owner in events and events[owner] != record.revision.logical_record_id:
+                codes.add("duplicate_membership_source_event")
+            events[owner] = record.revision.logical_record_id
+        else:
+            owner += (record.universe_kind,)
+        logical = record.revision.logical_record_id
+        if logical in owners and owners[logical] != owner:
+            codes.add("universe_revision_owner_changed")
+        owners[logical] = owner
+        if universe in levels and levels[universe] != record.target_level:
+            codes.add("universe_version_target_level_changed")
+        levels[universe] = record.target_level
+    return tuple(_finding(code) for code in sorted(codes))
 
 
 def _finding(code: str) -> ValidationFindingV1:
