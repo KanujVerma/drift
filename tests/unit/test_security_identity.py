@@ -570,9 +570,13 @@ def test_identity_resolution_selects_superseding_issuer_link() -> None:
 
 def test_multiple_assignments_resolve_only_with_equivalence_evidence() -> None:
     """Multiple assignments need an explicit selected equivalence assertion."""
+    from test_listing_semantics import assignment_dataset, relationship_dataset
+
+    from drift.datasets.hashing import assertion_version_payload
+
     first = reference(IdentityKind.SECURITY, 2)
     second = reference(IdentityKind.SECURITY, 3)
-    assignments = (
+    assignments: tuple[IdentityAssignmentVersionV1, ...] = (
         assignment_for_reference(first).model_copy(
             update={"source_key": "shared-security"}
         ),
@@ -585,14 +589,29 @@ def test_multiple_assignments_resolve_only_with_equivalence_evidence() -> None:
         IdentityKind.SECURITY,
         IdentityKind.SECURITY,
     ).model_copy(update={"left": first, "right": second, "revision": revision(90)})
-    assignment_manifest = fixed_manifest("identity_assignment")
-    relationship_manifest = fixed_manifest("identity_relationship")
-    assignment_decision = decision_for(
-        "identity_assignment", *(content_hash(item) for item in assignments)
+    assignments = tuple(
+        record.model_copy(
+            update={
+                "revision": record.revision.model_copy(
+                    update={
+                        "payload_hash": content_hash(assertion_version_payload(record)),
+                    }
+                )
+            }
+        )
+        for record in assignments
     )
-    relationship_decision = decision_for(
-        "identity_relationship", content_hash(equivalent)
+    equivalent = equivalent.model_copy(
+        update={
+            "revision": equivalent.revision.model_copy(
+                update={
+                    "payload_hash": content_hash(assertion_version_payload(equivalent)),
+                }
+            )
+        }
     )
+    assignment_manifest, assignment_decision = assignment_dataset(assignments)
+    relationship_manifest, relationship_decision = relationship_dataset((equivalent,))
     bundle = build_validated_dataset_bundle(
         uid(86),
         "1",
@@ -604,7 +623,12 @@ def test_multiple_assignments_resolve_only_with_equivalence_evidence() -> None:
     )
     relationship_query = query_for(
         relationship_decision, content_hash(bundle)
-    ).model_copy(update={"subject_hash": content_hash(first)})
+    ).model_copy(
+        update={
+            "subject_hash": content_hash(first),
+            "schema_hash": relationship_manifest.schema_definition.schema_hash,
+        }
+    )
     equivalence = resolve_identity(
         first,
         assignments,
@@ -624,7 +648,10 @@ def test_multiple_assignments_resolve_only_with_equivalence_evidence() -> None:
         source_key="shared-security",
     )
     assignment_query = query_for(assignment_decision, content_hash(bundle)).model_copy(
-        update={"subject_hash": content_hash(assignment_subject)}
+        update={
+            "subject_hash": content_hash(assignment_subject),
+            "schema_hash": assignment_manifest.schema_definition.schema_hash,
+        }
     )
     conflicted = resolve_identity_assignment(
         assignment_subject,
@@ -684,6 +711,9 @@ def test_multiple_assignments_resolve_only_with_equivalence_evidence() -> None:
         {},
         equivalence_resolution=equivalence,
         equivalence_proof=proof,
+        equivalence_relationships=(equivalent,),
+        equivalence_manifest=relationship_manifest,
+        equivalence_decision=relationship_decision,
     )
     assert resolved.classification is IdentityResolutionClassification.RESOLVED
     assert resolved.assigned_identities == (first, second)

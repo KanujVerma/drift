@@ -180,6 +180,9 @@ def resolve_identity_assignment(
     *,
     equivalence_resolution: IdentityResolutionResultV1 | None = None,
     equivalence_proof: CutoffSelectionProofV1 | None = None,
+    equivalence_relationships: Sequence[IdentityRelationshipVersionV1] | None = None,
+    equivalence_manifest: DatasetManifestV2 | None = None,
+    equivalence_decision: DatasetValidationDecisionV2 | None = None,
 ) -> IdentityAssignmentResolutionResultV1:
     """Resolve one source key without minting or guessing an identity."""
     if query.purpose is not M1bSelectionPurpose.IDENTITY_RESOLUTION:
@@ -194,6 +197,19 @@ def resolve_identity_assignment(
         decision,
         identity_bundle,
     )
+    if equivalence_resolution is not None and equivalence_proof is None:
+        raise DatasetValidationError.single("equivalence_selection_proof_required")
+    equivalence_inputs = (
+        equivalence_resolution,
+        equivalence_proof,
+        equivalence_relationships,
+        equivalence_manifest,
+        equivalence_decision,
+    )
+    if any(item is not None for item in equivalence_inputs) and any(
+        item is None for item in equivalence_inputs
+    ):
+        raise DatasetValidationError.single("equivalence_dependency_incomplete")
 
     candidates = tuple(
         assignment
@@ -251,8 +267,28 @@ def resolve_identity_assignment(
         for record in selected_records
     )
     if equivalence_resolution is not None:
-        if equivalence_proof is None:
-            raise DatasetValidationError.single("equivalence_selection_proof_required")
+        assert equivalence_proof is not None
+        assert equivalence_relationships is not None
+        assert equivalence_manifest is not None
+        assert equivalence_decision is not None
+        _authenticate_relationship_dependency(
+            assignments,
+            equivalence_relationships,
+            equivalence_resolution,
+            equivalence_proof,
+            equivalence_manifest,
+            equivalence_decision,
+            identity_bundle,
+            query,
+            policy,
+            retained_evidence,
+            assignment_manifest=manifest,
+            assignment_decision=decision,
+            relationship_subject=equivalence_resolution.subject,
+            relationship_kind=IdentityRelationshipKind.EQUIVALENT_TO,
+            expected_right=None,
+            missing_code="selected_equivalence_required",
+        )
         assignments_are_resolved = _equivalence_resolves_assignments(
             assigned,
             equivalence_resolution,
@@ -2025,6 +2061,7 @@ def _equivalence_resolves_assignments(
     query: NormalizedSelectionQueryV1,
     identity_bundle: ValidatedDatasetBundleV1,
 ) -> bool:
+    """Compare the assigned alias set after complete dependent proof/result replay."""
     return bool(
         resolution is not None
         and resolution.classification is IdentityResolutionClassification.RESOLVED

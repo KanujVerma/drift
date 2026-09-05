@@ -450,10 +450,19 @@ def resolve_selected_records[T](
     reference: DecisionSelectionReferenceV1,
     records_by_hash: Mapping[str, T],
 ) -> Mapping[str, T]:
-    """Expose exactly the record set authorized by a decision reference."""
-    if set(records_by_hash) != set(reference.selected_record_hashes):
+    """Verify selected content: canonical model/JSON hashes or exact-byte SHA-256."""
+    records = dict(records_by_hash)
+    if set(records) != set(reference.selected_record_hashes):
         raise DatasetValidationError.single("unauthorized_record_hash")
-    return MappingProxyType(dict(records_by_hash))
+    for expected_hash, value in records.items():
+        actual_hash = (
+            sha256(value).hexdigest()
+            if isinstance(value, bytes)
+            else content_hash(value)
+        )
+        if actual_hash != expected_hash:
+            raise DatasetValidationError.single("selected_record_content_hash_mismatch")
+    return MappingProxyType(records)
 
 
 def _validate_query_dataset_binding(

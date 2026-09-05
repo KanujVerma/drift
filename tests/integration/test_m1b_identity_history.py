@@ -12,6 +12,8 @@ import pytest
 from drift.datasets.assertions import (
     build_cutoff_selection_proof,
     build_validated_dataset_bundle,
+    decision_reference_from_proof,
+    resolve_selected_records,
 )
 from drift.datasets.hashing import assertion_version_payload, schema_hash
 from drift.datasets.resolver import (
@@ -86,8 +88,10 @@ from drift.domain.temporal import (
     ChannelKind,
 )
 from drift.markets.identity import (
+    _LISTING_COVERAGE_SELECTION_IMPLEMENTATION_HASH,
     _relationship_chains_for_subject,
     _select_identity_chain,
+    _select_records_for_query,
     resolve_external_identifier,
     resolve_identity,
     resolve_identity_assignment,
@@ -107,7 +111,7 @@ from drift.markets.validation import (
     validate_identity_bundle_references,
     validate_identity_dataset,
 )
-from drift.serialization.canonical import canonical_json, content_hash
+from drift.serialization.canonical import canonical_data, canonical_json, content_hash
 
 FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "datasets" / "m1b"
 ASSIGNMENTS_HASH = "d47bb481991d63b615fb55e48b5b9d5f41fc7f30404eba5f929646f50f998f96"
@@ -2169,3 +2173,63 @@ def test_canonical_bundle_rejects_invalid_cross_role_references(mutation: str) -
             context.terminations,
             context.coverage,
         )
+
+
+@pytest.mark.parametrize("representation", ("model", "json", "bytes"))
+def test_selected_value_cannot_substitute_future_payload_under_genuine_hash(
+    representation: str,
+) -> None:
+    """An authentic selected key authorizes its content, not a caller's label."""
+    context = canonical_task3_context()
+    listing_id = UUID("019b8240-0000-7000-8000-000000000005")
+    query = canonical_query(
+        context,
+        "listing_history_coverage",
+        M1bSelectionPurpose.LISTING_LIFECYCLE,
+        {"listing_id": listing_id},
+        datetime(2022, 1, 4, tzinfo=UTC),
+        knowledge_cutoff=datetime(2024, 12, 31, tzinfo=UTC),
+    )
+    records = tuple(
+        record for record in context.coverage if record.listing_id == listing_id
+    )
+    selected, proof = _select_records_for_query(
+        records,
+        query,
+        context.bundle,
+        context.manifests["listing_history_coverage"],
+        context.decisions["listing_history_coverage"],
+        context.policy,
+        {},
+        _LISTING_COVERAGE_SELECTION_IMPLEMENTATION_HASH,
+    )
+    assert context.decisions["listing_history_coverage"].result is ValidationResult.PASS
+    assert len(selected) == 1
+    chosen = selected[0]
+    future = next(
+        record
+        for record in records
+        if any(
+            evidence.lower_bound is not None
+            and evidence.lower_bound > query.knowledge_cutoff
+            for evidence in record.revision.availability
+        )
+    )
+    reference = decision_reference_from_proof(proof)
+    assert reference.selected_record_hashes == (content_hash(chosen),)
+    assert content_hash(future) not in reference.selected_record_hashes
+
+    def payload(record: ListingHistoryCoverageVersionV1) -> object:
+        if representation == "json":
+            return canonical_data(record)
+        if representation == "bytes":
+            return canonical_json(record)
+        return record
+
+    chosen_payload, future_payload = payload(chosen), payload(future)
+    supplied = {content_hash(chosen): chosen_payload}
+    resolved = resolve_selected_records(reference, supplied)
+    assert resolved[content_hash(chosen)] is chosen_payload
+    assert supplied == {content_hash(chosen): chosen_payload}
+    with pytest.raises(DatasetValidationError, match="selected_record_content_hash"):
+        resolve_selected_records(reference, {content_hash(chosen): future_payload})

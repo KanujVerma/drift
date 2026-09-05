@@ -1,6 +1,7 @@
 """Tests for M1b assertion temporality and cutoff authorization."""
 
 from datetime import UTC, datetime
+from hashlib import sha256
 from uuid import UUID
 
 import pytest
@@ -393,7 +394,10 @@ def query_for(
 def test_selection_proof_and_decision_reference_hide_considered_records() -> None:
     """Decision capability must hide the audit candidate set."""
     manifest = fixed_manifest()
-    decision = record_decision(HASH_A, HASH_B)
+    selected_bytes, future_bytes = b"selected", b"future"
+    selected_hash = sha256(selected_bytes).hexdigest()
+    future_hash = sha256(future_bytes).hexdigest()
+    decision = record_decision(selected_hash, future_hash)
     bundle = build_validated_dataset_bundle(
         UUID("019b8240-0000-7000-8000-000000000030"),
         "1",
@@ -411,17 +415,17 @@ def test_selection_proof_and_decision_reference_hide_considered_records() -> Non
         policy_id="strict",
         policy_hash=query.policy_hash,
         considered_versions=(
-            projection(0, "2020-01-01T00:00:00Z"),
+            projection(0, "2020-01-01T00:00:00Z", record_hash=selected_hash),
             projection(
                 1,
                 "2020-03-01T00:00:00Z",
                 revision_kind=RevisionKind.CORRECTION,
                 predecessor=UUID("019b8240-0000-7000-8000-000000000021"),
-                record_hash=HASH_B,
+                record_hash=future_hash,
             ),
         ),
-        considered_record_hashes=(HASH_A, HASH_B),
-        selected_record_hash=HASH_A,
+        considered_record_hashes=(selected_hash, future_hash),
+        selected_record_hash=selected_hash,
     )
     proof = build_cutoff_selection_proof(
         query, (selection,), manifest, decision, (bundle,), "e" * 64
@@ -429,13 +433,17 @@ def test_selection_proof_and_decision_reference_hide_considered_records() -> Non
     reference = decision_reference_from_proof(proof)
     assert isinstance(proof, CutoffSelectionProofV1)
     assert isinstance(reference, DecisionSelectionReferenceV1)
-    assert reference.selected_record_hashes == (HASH_A,)
+    assert reference.selected_record_hashes == (selected_hash,)
     assert not hasattr(reference, "considered_record_hashes")
-    assert resolve_selected_records(reference, {HASH_A: b"selected"}) == {
-        HASH_A: b"selected"
+    assert resolve_selected_records(reference, {selected_hash: selected_bytes}) == {
+        selected_hash: selected_bytes
     }
     with pytest.raises(DatasetValidationError, match="unauthorized_record_hash"):
-        resolve_selected_records(reference, {HASH_A: b"selected", HASH_B: b"future"})
+        resolve_selected_records(
+            reference, {selected_hash: selected_bytes, future_hash: future_bytes}
+        )
+    with pytest.raises(DatasetValidationError, match="selected_record_content_hash"):
+        resolve_selected_records(reference, {selected_hash: future_bytes})
     with pytest.raises(DatasetValidationError, match="context_bundle"):
         build_cutoff_selection_proof(
             query, (selection,), manifest, decision, (), "e" * 64
