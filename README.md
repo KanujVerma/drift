@@ -15,8 +15,10 @@ Drift is not a trading system or an equity backtester. M1b uses only synthetic
 local fixtures and has no real data source, evaluator,
 backtester, broker, strategy-execution, agent, network, order-management,
 portfolio-management, production configuration, or production-credential
-capability. M1c economic events/outcomes and M1d observations/sessions/normalization
-remain designed but unplanned and unimplemented. Prices, corporate-action
+capability. M1c economic events/outcomes are planned but unimplemented; the
+[M1c implementation plan](docs/superpowers/plans/2026-09-05-m1c-corporate-actions-economic-outcomes.md)
+requires separate execution authorization. M1d observations/sessions/normalization
+remain designed only, with no executable plan. Prices, corporate-action
 economics, sessions, and historical research-session eligibility remain absent,
 and M1b does not authorize historical return evaluation.
 `StrategyArtifact` is compact provenance metadata, not executable strategy code.

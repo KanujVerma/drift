@@ -6,8 +6,9 @@ and verified. Its historical execution record is:
 The original combined M1c scope below is historical design context, superseded
 by the [2026-09-05 economic events and observations design](2026-09-05-historical-economic-events-and-observations-design.md)
 and [ADR 0009](../../adr/0009-separate-economic-events-and-observation-semantics.md).
-The successor M1c and M1d milestones are designed only, with no executable plans
-or implementation. The new design governs all future-market sketches below,
+The successor M1c milestone has one [implementation plan](../plans/2026-09-05-m1c-corporate-actions-economic-outcomes.md)
+but is unimplemented. M1d remains designed only, without an executable plan.
+The new design governs all future-market sketches below,
 including outcome anchoring, role/query families, normalization, sessions,
 missingness, research eligibility, and completion criteria. It does not change
 completed M1b behavior.

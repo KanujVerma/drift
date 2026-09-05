@@ -93,9 +93,11 @@ and [ADR 0007](../adr/0007-authenticated-point-in-time-universe-composition.md).
 There is no provider connection, price/action accounting, session engine,
 historical-tradability model, evaluator, or process-isolated decision runtime.
 M1c economic events/outcomes and M1d observations/sessions/normalization remain
-separate future milestones, both designed only. Their boundaries are recorded
+separate future milestones. M1c is planned but unimplemented; M1d is designed
+only, without an executable plan. Their boundaries are recorded
 in [ADR 0009](../adr/0009-separate-economic-events-and-observation-semantics.md)
-and the [roadmap](roadmap.md). Neither has an executable plan or implementation.
+and the [roadmap](roadmap.md). The roadmap points to the sole active M1c plan;
+implementation requires separate authorization.
 
 ## Compatibility contract
 

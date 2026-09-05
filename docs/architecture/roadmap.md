@@ -45,7 +45,7 @@ tests and the full runtime gate pass using synthetic local fixtures. The final
 acceptance record is the Git commit titled `docs: complete M1b identity milestone`;
 its actual hash is read from Git rather than embedded self-referentially.
 
-## M1c, designed only and not started
+## M1c, planned and not started
 
 M1c is Corporate Actions and Economic Outcomes. It will represent immutable
 action terms, occurrence/entitlement/settlement facts, revisions, fixed cash/share
@@ -65,9 +65,12 @@ Total-return accounting and evaluation remain later responsibilities.
 The canonical successor design is
 `docs/superpowers/specs/2026-09-05-historical-economic-events-and-observations-design.md`;
 the decision is recorded in ADR 0009. It supersedes the original umbrella's
-combined M1c scope, not completed M1b contracts. Neither M1c nor M1d has an
-executable implementation plan or implementation. Next authorization is M1c
-implementation planning only, after user review of this specification.
+combined M1c scope, not completed M1b contracts. The sole active executable plan
+is `docs/superpowers/plans/2026-09-05-m1c-corporate-actions-economic-outcomes.md`.
+All its implementation steps remain unchecked. M1c and M1d are unimplemented;
+M1d has no executable plan. The next authorization is M1c implementation only.
+Completed/superseded M1b plans and the old M1b handoff are historical records,
+not instructions to restart earlier work.
 
 M1 is not complete until M1a, M1b, M1c, and M1d are complete. The design is not
 authorization to build a market-data platform, download live data, evaluate

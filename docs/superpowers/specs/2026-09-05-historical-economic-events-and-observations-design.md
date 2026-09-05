@@ -1,6 +1,6 @@
 # Drift Historical Economic Events and Observations Design
 
-Date: 2026-09-05. Status: independently reviewed design. No executable plan or implementation is authorized.
+Date: 2026-09-05. Status: independently reviewed design. The [M1c implementation plan](../plans/2026-09-05-m1c-corporate-actions-economic-outcomes.md) now supplies the executable decomposition and bounded implementation refinements. Neither M1c nor M1d is implemented; execution requires separate authorization. M1d has no executable plan.
 
 Canonical destination: `docs/superpowers/specs/2026-09-05-historical-economic-events-and-observations-design.md`.
 
@@ -49,7 +49,7 @@ Repository facts outrank the older umbrella's pseudotypes. At the verified basel
 
 Preserve all M0/M1a/M1b persisted V1 schemas, hashes, fixtures and interpretations. Reuse `RevisionEnvelopeV1`, temporal boundary claims, exact-byte validation and compatible `DatasetManifestV2` contracts. Add new market purpose/query/proof/reference families with their own versioned algorithms; do not expand the closed old purpose vocabulary or repurpose an old role/mode combination. Corrections create new source datasets, not changes to old manifests. No M1b lifecycle or universe record is rewritten because later action/outcome evidence changes.
 
-This reviewed document supersedes the former M1c portion and related unresolved design questions of `2026-09-02-m1b-m1c-historical-equity-semantics-design.md`. That umbrella remains historical context and M1b provenance. Roadmap and lifecycle pointers say M1c and M1d are designed only and separately require implementation planning authorization. M1 historical semantics are not complete until both are accepted. Checkpoint records verified documentation state; no Session Handoff is needed for this completed design task.
+This reviewed document supersedes the former M1c portion and related unresolved design questions of `2026-09-02-m1b-m1c-historical-equity-semantics-design.md`. That umbrella remains historical context and M1b provenance. Current lifecycle status belongs in the roadmap: M1c has the linked executable plan and M1d remains designed only. M1 historical semantics are not complete until both are implemented and accepted. Checkpoint records verified documentation state; no Session Handoff is needed for the completed design task.
 
 ## 4. Time, evidence and authorization contracts
 
@@ -84,6 +84,8 @@ Role separation governs the query and consumer authority, not a permanent ban on
 `EconomicSettlementVersionV1` owns a source report of an actual distribution/settlement occurrence, not an automatically distinct economic payout merely because its source ID differs. It retains typed delivered components, amount/quantity basis, actual date and residual obligations where known, plus effect/terms associations when resolved. Scheduled payable date and promised consideration are not proof of payment. An installment is another business occurrence; correcting an installment creates its revision. Do not overwrite installment one with installment two.
 
 Effect/settlement associations explicitly distinguish resolved exact selected references, unresolved source-native references, and unknown association with reasons. A verified payment for a resolved security remains a valid source fact when its original terms or entitlement record is absent. Never synthesize a parent fact to satisfy a link. Association uncertainty and known paid components remain separately visible; overall terminal completeness is unknown/partial unless independently established. Conflicting known links block dependent use without erasing the retained source claim.
+
+Implementation refinement: persisted source associations are query-neutral claims, not decision/outcome capabilities. Exact selected references and resolved/unresolved/conflicting linkage belong to query-bound results. Cancelling a proposed action is distinct from extinguishing the security claim. A statement of no further consideration does not erase earlier deliveries. The M1c plan makes these distinctions executable without adding a fourth economic fact family.
 
 `EconomicOutcomeResolutionV1` is a query-bound result composed from these facts. It anchors to a security/action, optionally references selected listing termination evidence, and carries known components, unresolved components/reasons, claim status, completeness, H/V, references and hashes. It does not own a second copied set of authoritative source terms.
 
@@ -421,7 +423,7 @@ The future evaluator receives: PIT-safe decision information and historical elig
 
 ## 14. Readiness, limits and non-goals
 
-No unresolved source choice blocks a provider-neutral synthetic M1c implementation plan. This design selects the action shapes, fact ownership, exact ratio representation, temporal roles, coverage minimum and additive query family. Planning still requires explicit user authorization and independent acceptance of this specification; neither is inferred from its presence.
+No unresolved source choice blocks provider-neutral synthetic M1c implementation planning. This design selects the action shapes, fact ownership, exact ratio representation, temporal roles, coverage minimum and additive query family. The separately requested M1c plan now defines the executable tasks; its presence is not implementation authorization.
 
 Synthetic M1d planning likewise need not wait for actual data. Its generic profile, exact arithmetic, ambiguous mapping rejection and role family are defined here. An actual adapter must later settle the concrete population/condition mappings and prove coverage. Historical start year, complete calendar corpus, venue differences, source revision capture, licensing and retention are acquisition/real-experiment gates. A future source may fail them; the synthetic contract must report that honestly.
 
@@ -432,6 +434,8 @@ Evidence limits: current exchange pages are not a complete historical corpus. Ca
 Explicit non-goals: executable implementation plans, M1c/M1d production code, provider adapters or downloads, database/framework/dependency adoption, broker integration (including Robinhood/Alpaca), MCP, live trading, orders/execution, portfolio/risk engine, agent runtime, recursive research, OpenAI SDK, LangGraph, Qlib, ML models, strategy generation, returns/performance metrics/Sharpe, optimizer, cloud deployment, live streaming, intraday/extended hours and all excluded instruments. Synthetic examples explain contracts only.
 
 ## 15. Design verification and completion reporting
+
+This section records the completed design task at `ba1ea66205fda1d649a2bd1034e0c8788c33664d`, not the current planning checkpoint. The linked M1c plan and roadmap govern the current next action. The design task's prohibition on creating plans did not prohibit a separately authorized later planning task.
 
 The verified baseline is `14bad1733222758ee3836568a10a90f2a16aeac3`. Three focused research workers covered actions/outcomes, observations/normalization, and sessions/missingness/replay. An Astra synthesizer produced the design candidate. The controller checked material claims against live code/tests and primary sources. A fresh Astra reviewer independently read the request, specification, ADR and lifecycle changes, then re-reviewed the corrections. Final review: Approved, with no residual concrete planning blockers.
 

@@ -7,8 +7,10 @@ status belong in `docs/architecture/roadmap.md`.
 
 ## Current boundary
 
-- M1c (economic events/outcomes) and M1d (observations/sessions/normalization)
-  remain designed but have no executable plans or implementation. Do not add
+- M1c has one executable implementation plan, with implementation not started:
+  `docs/superpowers/plans/2026-09-05-m1c-corporate-actions-economic-outcomes.md`.
+  Execution requires separate user authorization. M1d remains designed only,
+  with no executable plan or implementation. Do not add
   prices, corporate-action economics, sessions, observations, tradability,
   evaluation, or backtesting without separate approval.
 - Do not add broker or market-data connections, order placement, trading,

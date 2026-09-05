@@ -2,8 +2,9 @@
 
 ## Status
 
-Independently reviewed design decision, 2026-09-05. M1c and M1d remain
-unplanned and unimplemented.
+Independently reviewed design decision, 2026-09-05. M1c is now planned but
+unimplemented in the [sole executable M1c plan](../superpowers/plans/2026-09-05-m1c-corporate-actions-economic-outcomes.md).
+M1d remains unplanned and unimplemented. Execution needs separate authorization.
 The canonical design, evidence, support matrix, adversarial requirements, and
 review record are in the
 [historical economic events and observations specification](../superpowers/specs/2026-09-05-historical-economic-events-and-observations-design.md).
@@ -68,15 +69,21 @@ strongest arguments on both sides are retained in the specification.
 
 ## Consequences and boundaries
 
+The M1c plan refines source associations into query-neutral persisted claims and
+query-bound resolved references. It also uses finite-cutoff M1a selection for
+M1c identity dependencies: existing M1b `current_interpretation` intentionally
+selects the current retained revision and is not a finite-V selector. Neither
+refinement changes M1b source models, query modes, algorithms, or hashes.
+
 The split adds an explicit M1d composition review. It does not establish that
 every conceivable action can be priced, nor promise real-data completeness.
 Total-return accounting, holding conversion, imputation, and execution remain
 outside both milestones. Missing facts block dependent claims, not independent
 identity or historical universe evidence.
 
-M1c synthetic implementation planning can be authorized after design review.
+M1c synthetic implementation planning is recorded in the linked plan.
 Real provider semantics, historical coverage, licensing, and full schedule
 validation remain later acceptance gates, not reasons to block provider-neutral
-fact contracts. Neither milestone has an executable plan. No dependency,
+fact contracts. M1d has no executable plan; neither milestone is implemented. No dependency,
 runtime, provider, broker, credential, agent functionality, or trading capability
 is added by this decision.
