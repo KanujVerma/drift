@@ -30,8 +30,11 @@ from drift.domain.economic_common import (
     EconomicAssociationV1,
     EconomicComponentV1,
     EconomicOccurrenceV1,
+    EconomicRecipientV1,
+    EconomicShareBasisV1,
     EconomicSourceKeyV1,
     EconomicUnitBasisV1,
+    FractionTreatmentV1,
     PositiveRatioV1,
     ShareComponentV1,
     UnsupportedPropertyComponentV1,
@@ -78,9 +81,13 @@ from drift.domain.revisions import RevisionKind
 from drift.domain.securities import (
     IdentityAssignmentEffect,
     IdentityAssignmentVersionV1,
+    ListingV1,
+    ListingVenue,
     SecurityV1,
 )
 from drift.domain.temporal import (
+    CONSERVATIVE_UPPER_BOUND_RULE_HASH,
+    CONSERVATIVE_UPPER_BOUND_RULE_SPEC,
     AvailabilityBasis,
     AvailabilityChannelV1,
     AvailabilityEvidenceV1,
@@ -88,6 +95,7 @@ from drift.domain.temporal import (
     AvailabilityShape,
     ChannelKind,
     SourcePrecision,
+    derive_conservative_upper_bound,
 )
 from drift.markets.economic_validation import (
     ECONOMIC_VALIDATION_PROFILE_ID,
@@ -130,6 +138,15 @@ def public_channel() -> AvailabilityChannelV1:
     return AvailabilityChannelV1(
         kind=ChannelKind.PUBLIC,
         identifier="issuer-filings",
+        version="v1",
+    )
+
+
+def vendor_channel() -> AvailabilityChannelV1:
+    """Return the fixed second channel used by multichannel selection tests."""
+    return AvailabilityChannelV1(
+        kind=ChannelKind.VENDOR,
+        identifier="synthetic-vendor",
         version="v1",
     )
 
@@ -207,6 +224,16 @@ def economic_methodology(
 def support_bytes(reference: ArtifactReference) -> VerifiedArtifactBytes:
     """Reconstruct and verify bytes encoded by a synthetic economic reference."""
     parsed = urlsplit(reference.location)
+    if (
+        parsed.scheme == "drift+sha256"
+        and reference.content_hash == CONSERVATIVE_UPPER_BOUND_RULE_HASH
+    ):
+        data = canonical_json(CONSERVATIVE_UPPER_BOUND_RULE_SPEC)
+        return VerifiedArtifactBytes(
+            data=data,
+            byte_size=len(data),
+            content_hash=reference.content_hash,
+        )
     if parsed.scheme != "synthetic-economic" or parsed.netloc not in {
         "source",
         "methodology",
@@ -270,6 +297,41 @@ def public_availability(
         upper_bound=instant_value,
         precision=SourcePrecision.SECOND,
         source_time_label=value,
+        source_timezone=None,
+        basis=AvailabilityBasis.SOURCE_OBSERVED,
+        evidence_reference=evidence_reference,
+    )
+
+
+def vendor_availability(
+    value: str, evidence_reference: ArtifactReference
+) -> AvailabilityEvidenceV1:
+    """Build exact vendor availability backed by actual fixture source bytes."""
+    instant_value = parse_utc(value)
+    return AvailabilityEvidenceV1(
+        channel=vendor_channel(),
+        shape=AvailabilityShape.EXACT,
+        lower_bound=instant_value,
+        upper_bound=instant_value,
+        precision=SourcePrecision.SECOND,
+        source_time_label=value,
+        source_timezone=None,
+        basis=AvailabilityBasis.VENDOR_DELIVERY,
+        evidence_reference=evidence_reference,
+    )
+
+
+def bounded_availability(
+    lower: str, upper: str, evidence_reference: ArtifactReference
+) -> AvailabilityEvidenceV1:
+    """Build raw bounded public availability for cutoff-overlap tests."""
+    return AvailabilityEvidenceV1(
+        channel=public_channel(),
+        shape=AvailabilityShape.BOUNDED,
+        lower_bound=parse_utc(lower),
+        upper_bound=parse_utc(upper),
+        precision=SourcePrecision.INTERVAL,
+        source_time_label=f"{lower}/{upper}",
         source_timezone=None,
         basis=AvailabilityBasis.SOURCE_OBSERVED,
         evidence_reference=evidence_reference,
@@ -645,6 +707,35 @@ def effect_record(
     )
 
 
+def bounded_effect_record(
+    suffix: int,
+    lower: str,
+    upper: str,
+    availability_lower: str,
+    availability_upper: str,
+) -> EconomicEffectVersionV1:
+    """Build an occurred effect with bounded actual and publication windows."""
+    base = effect_record(suffix, effective_at=lower, known_at=availability_upper)
+    evidence = base.revision.source_artifact
+    availability = AvailabilityEvidenceV1(
+        channel=public_channel(),
+        shape=AvailabilityShape.BOUNDED,
+        lower_bound=parse_utc(availability_lower),
+        upper_bound=parse_utc(availability_upper),
+        precision=SourcePrecision.INTERVAL,
+        source_time_label=f"{availability_lower}/{availability_upper}",
+        source_timezone=None,
+        basis=AvailabilityBasis.SOURCE_OBSERVED,
+        evidence_reference=evidence,
+    )
+    values = {name: getattr(base, name) for name in type(base).model_fields}
+    values["revision"] = base.revision.model_copy(
+        update={"availability": (availability,)}
+    )
+    values["effective_time"] = bounded_boundary(lower, upper, evidence)
+    return rebind_record_evidence(type(base), values)
+
+
 def settlement_record(
     suffix: int,
     amount: str = "5",
@@ -866,6 +957,7 @@ def economic_dataset(
     role: str,
     records: tuple[EconomicInputRecordV1, ...],
     source_id: str = "synthetic-a",
+    declared_channels: tuple[AvailabilityChannelV1, ...] | None = None,
 ) -> EconomicDatasetInput:
     """Build and validate one exact-byte synthetic M1c role dataset."""
     data = canonical_json({"schema_version": "1", "records": records})
@@ -930,7 +1022,10 @@ def economic_dataset(
         ),
         temporal_contract=TemporalContractBindingV2(
             kind=TemporalContractKindV2.ASSERTION_TEMPORAL_V1,
-            contract=economic_role_contract(role, (public_channel(),)),
+            contract=economic_role_contract(
+                role,
+                (public_channel(),) if declared_channels is None else declared_channels,
+            ),
         ),
         lineage=None,
     )
@@ -964,9 +1059,13 @@ def economic_dataset(
     )
 
 
-def _identity_assignment(suffix: int, security_id: int) -> IdentityAssignmentVersionV1:
+def _identity_assignment(
+    suffix: int,
+    security_id: int,
+    known_at: str = "2020-01-01T00:00:00Z",
+) -> IdentityAssignmentVersionV1:
     evidence, _ = economic_evidence(f"identity assignment for security {security_id}")
-    revision_value = revision(suffix, "2020-01-01T00:00:00Z", evidence)
+    revision_value = revision(suffix, known_at, evidence)
     record = IdentityAssignmentVersionV1(
         schema_version="1",
         revision=revision_value,
@@ -989,6 +1088,97 @@ def _identity_assignment(suffix: int, security_id: int) -> IdentityAssignmentVer
     )
 
 
+def identity_assignment(
+    suffix: int,
+    identity_id: int,
+    *,
+    identity_kind: Literal["security", "listing"] = "security",
+    known_at: str = "2020-01-01T00:00:00Z",
+    effect: IdentityAssignmentEffect = IdentityAssignmentEffect.ASSIGNED,
+    started_at: str = "2020-01-01T00:00:00Z",
+    ended_at: str | None = None,
+) -> IdentityAssignmentVersionV1:
+    """Build a complete initial retained-identity assertion for selection tests."""
+    evidence, _ = economic_evidence(
+        f"{identity_kind} assignment {suffix} for identity {identity_id}"
+    )
+    revision_value = revision(suffix, known_at, evidence)
+    identity = (
+        SecurityV1(schema_version="1", security_id=uid(identity_id))
+        if identity_kind == "security"
+        else ListingV1(
+            schema_version="1", listing_id=uid(identity_id), venue=ListingVenue.XNAS
+        )
+    )
+    record = IdentityAssignmentVersionV1(
+        schema_version="1",
+        revision=revision_value,
+        identity=identity,
+        source_namespace="synthetic-master",
+        source_key=f"{identity_kind}-{suffix}",
+        assignment_effect=effect,
+        effective_interval=TemporalIntervalClaimV1(
+            schema_version="1",
+            start=exact_boundary(started_at, evidence),
+            end=(None if ended_at is None else exact_boundary(ended_at, evidence)),
+        ),
+    )
+    return record.model_copy(
+        update={
+            "revision": revision_value.model_copy(
+                update={"payload_hash": content_hash(assertion_version_payload(record))}
+            )
+        }
+    )
+
+
+def revise_identity_assignment(
+    record: IdentityAssignmentVersionV1,
+    suffix: int,
+    known_at: str,
+    *,
+    identity_id: int | None = None,
+    effect: IdentityAssignmentEffect | None = None,
+    withdrawal: bool = False,
+) -> IdentityAssignmentVersionV1:
+    """Build one correction or withdrawal in the same assignment chain."""
+    evidence, _ = economic_evidence(f"identity correction {suffix}")
+    revision_value = RevisionEnvelopeV1(
+        schema_version="1",
+        logical_record_id=record.revision.logical_record_id,
+        record_version_id=uid(suffix + 1_000_000),
+        revision_kind=(
+            RevisionKind.WITHDRAWAL if withdrawal else RevisionKind.CORRECTION
+        ),
+        supersedes_record_version_id=record.revision.record_version_id,
+        source_sequence=record.revision.source_sequence + 1,
+        availability=(public_availability(known_at, evidence),),
+        history_completeness=record.revision.history_completeness,
+        source_native_revision_label=f"identity-correction-{suffix}",
+        source_artifact=evidence,
+        payload_hash=HASH_A,
+    )
+    identity = record.identity
+    if identity_id is not None:
+        identity = SecurityV1(schema_version="1", security_id=uid(identity_id))
+    corrected = record.model_copy(
+        update={
+            "revision": revision_value,
+            "identity": identity,
+            "assignment_effect": effect or record.assignment_effect,
+        }
+    )
+    return corrected.model_copy(
+        update={
+            "revision": revision_value.model_copy(
+                update={
+                    "payload_hash": content_hash(assertion_version_payload(corrected))
+                }
+            )
+        }
+    )
+
+
 def history_assignments() -> tuple[IdentityAssignmentVersionV1, ...]:
     """Return fresh synthetic assigned security and recipient identities."""
     return (_identity_assignment(2100, 21), _identity_assignment(2200, 22))
@@ -996,6 +1186,7 @@ def history_assignments() -> tuple[IdentityAssignmentVersionV1, ...]:
 
 def identity_input(
     assignments: tuple[IdentityAssignmentVersionV1, ...],
+    declared_channels: tuple[AvailabilityChannelV1, ...] | None = None,
 ) -> EconomicIdentityInput:
     """Build exact identity bytes, decision, and bundle for an M1c context."""
     field_types = {
@@ -1099,7 +1290,11 @@ def identity_input(
                 effective_time_field_id="effective_interval",
                 effective_shape=AssertionEffectiveShape.INTERVAL,
                 semantic_state_field_ids=("assignment_effect",),
-                declared_channels=(public_channel(),),
+                declared_channels=(
+                    (public_channel(),)
+                    if declared_channels is None
+                    else declared_channels
+                ),
             ),
         ),
         lineage=None,
@@ -1160,7 +1355,13 @@ class EconomicHarness:
     context: EconomicResolutionContext
     source_policy: EconomicSourceSelectionPolicyV1
 
-    def decision_query(self, t: str, k: str, e: str) -> MarketDecisionQueryV1:
+    def decision_query(
+        self,
+        t: str,
+        k: str,
+        e: str,
+        requested_channel: AvailabilityChannelV1 | None = None,
+    ) -> MarketDecisionQueryV1:
         effective = parse_utc(e)
         if effective != self.source_policy.through:
             raise ValueError("decision effective cutoff must equal policy through")
@@ -1171,7 +1372,9 @@ class EconomicHarness:
             security_id=self.source_policy.security_id,
             action_kinds=tuple(sorted(ActionKind, key=lambda item: item.value)),
             history_start=parse_utc("2020-01-01T00:00:00Z"),
-            requested_channel=public_channel(),
+            requested_channel=(
+                public_channel() if requested_channel is None else requested_channel
+            ),
             availability_policy_id=self.context.availability_policy.policy_id,
             availability_policy_hash=content_hash(self.context.availability_policy),
             source_selection_policy_hash=content_hash(self.source_policy),
@@ -1181,7 +1384,12 @@ class EconomicHarness:
             effective_cutoff=effective,
         )
 
-    def outcome_query(self, h: str, v: str) -> MarketOutcomeQueryV1:
+    def outcome_query(
+        self,
+        h: str,
+        v: str,
+        requested_channel: AvailabilityChannelV1 | None = None,
+    ) -> MarketOutcomeQueryV1:
         horizon = parse_utc(h)
         if horizon != self.source_policy.through:
             raise ValueError("outcome horizon must equal policy through")
@@ -1192,7 +1400,9 @@ class EconomicHarness:
             security_id=self.source_policy.security_id,
             action_kinds=tuple(sorted(ActionKind, key=lambda item: item.value)),
             history_start=parse_utc("2020-01-01T00:00:00Z"),
-            requested_channel=public_channel(),
+            requested_channel=(
+                public_channel() if requested_channel is None else requested_channel
+            ),
             availability_policy_id=self.context.availability_policy.policy_id,
             availability_policy_hash=content_hash(self.context.availability_policy),
             source_selection_policy_hash=content_hash(self.source_policy),
@@ -1209,6 +1419,13 @@ def validated_case(
     owner_source: str = "synthetic-a",
     through: str = "2021-01-01T00:00:00Z",
     coverage_snapshot_at: str | None = None,
+    security_id: UUID | None = None,
+    coverage_revision_support: Literal[
+        "captured_history", "current_only", "unknown"
+    ] = "captured_history",
+    declared_channels: tuple[AvailabilityChannelV1, ...] | None = None,
+    identity_assignments: tuple[IdentityAssignmentVersionV1, ...] | None = None,
+    retained_evidence: Mapping[str, AvailabilityEvidenceV1] | None = None,
 ) -> EconomicHarness:
     """Build a closed, immutable synthetic M1c validation context."""
     owned_records: list[EconomicRecordV1] = []
@@ -1242,6 +1459,7 @@ def validated_case(
                 )
             ),
             owner_source,
+            declared_channels,
         )
         for role in ("economic_terms", "economic_effect", "economic_settlement")
     )
@@ -1283,6 +1501,7 @@ def validated_case(
             dataset.decision.validated_artifact_hashes,
             dataset.decision.validated_record_hashes,
             completeness="complete" if complete_coverage else "partial",
+            revision_support=coverage_revision_support,
             snapshot_at=snapshot_text,
             source_id=owner_source,
             coverage_end=coverage_end,
@@ -1292,10 +1511,16 @@ def validated_case(
         )
     )
     coverage_input = economic_dataset(
-        "economic_coverage", coverage_records, owner_source
+        "economic_coverage",
+        coverage_records,
+        owner_source,
+        declared_channels,
     )
     datasets = (*fact_inputs, coverage_input)
-    identity = identity_input(history_assignments())
+    identity = identity_input(
+        history_assignments() if identity_assignments is None else identity_assignments,
+        declared_channels,
+    )
     references_by_hash: dict[str, ArtifactReference] = {}
     for dataset in datasets:
         for reference in _fixture_artifact_references(
@@ -1307,6 +1532,10 @@ def validated_case(
             )
         ):
             references_by_hash.setdefault(reference.content_hash, reference)
+    for reference in _fixture_artifact_references(
+        () if retained_evidence is None else tuple(retained_evidence.values())
+    ):
+        references_by_hash.setdefault(reference.content_hash, reference)
     supporting_artifacts = tuple(
         sorted(
             (support_bytes(reference) for reference in references_by_hash.values()),
@@ -1319,7 +1548,7 @@ def validated_case(
         availability_policy=AvailabilityPolicyV1(
             policy_id="public-v1", permitted_rule_hashes=()
         ),
-        retained_evidence={},
+        retained_evidence=({} if retained_evidence is None else retained_evidence),
         supporting_artifacts=supporting_artifacts,
     )
     bindings = tuple(
@@ -1343,13 +1572,319 @@ def validated_case(
         for family, dataset in zip(families, fact_inputs, strict=True)
     )
     policy = source_policy(
-        uid(21),
+        uid(21) if security_id is None else security_id,
         bindings,
         owners,
         parse_utc("2020-01-01T00:00:00Z"),
         through_value,
     )
     return EconomicHarness(context=context, source_policy=policy)
+
+
+def mixed_settlement_case(
+    recipient_known_at: str, listing_id: UUID | None = None
+) -> EconomicHarness:
+    """Build cash plus recipient-share delivery with independently timed identity."""
+    base = settlement_record(
+        4100,
+        amount="4",
+        settled_at="2020-06-15T00:00:00Z",
+        known_at="2020-06-15T00:00:00Z",
+    )
+    assert base.payload is not None
+    share = ShareComponentV1(
+        kind="shares",
+        component_id="shares",
+        recipient=EconomicRecipientV1(kind="security", security_id=uid(22)),
+        ratio=PositiveRatioV1(numerator="1", denominator="2"),
+        ratio_meaning="additional_per_predecessor",
+        unit_basis=EconomicShareBasisV1(
+            security_id=uid(21), share_basis="predecessor_pre_action"
+        ),
+        fraction_treatment=FractionTreatmentV1(kind="unknown"),
+        applicability="ordinary_passive_holder",
+        conditions=(),
+    )
+    values = {name: getattr(base, name) for name in type(base).model_fields}
+    values["listing_id"] = listing_id
+    values["payload"] = base.payload.model_copy(
+        update={
+            "action_kind": ActionKind.MIXED_ACQUISITION,
+            "delivered_components": (
+                cash_component(amount="4", component_id="cash"),
+                share,
+            ),
+        }
+    )
+    mixed = rebind_record_evidence(type(base), values)
+    case = validated_case((mixed,), through="2021-01-01T00:00:00Z")
+    identity = identity_input(
+        (
+            _identity_assignment(2100, 21),
+            _identity_assignment(2200, 22, recipient_known_at),
+        )
+    )
+    context = EconomicResolutionContext(
+        datasets=case.context.datasets,
+        identity=identity,
+        availability_policy=case.context.availability_policy,
+        retained_evidence=case.context.retained_evidence,
+        supporting_artifacts=case.context.supporting_artifacts,
+    )
+    return EconomicHarness(context=context, source_policy=case.source_policy)
+
+
+def evidence_bearing_partial_projection_case() -> EconomicHarness:
+    """Build safe evidence-bearing components beside one future recipient leg."""
+    base_case = mixed_settlement_case("2021-02-01T00:00:00Z")
+    base = next(
+        record
+        for dataset in base_case.context.datasets
+        for record in dataset.records
+        if isinstance(record, EconomicSettlementVersionV1)
+    )
+    assert base.payload is not None
+    cash, future_share = base.payload.delivered_components
+    assert isinstance(future_share, ShareComponentV1)
+    future_share = future_share.model_copy(
+        update={"ratio_meaning": "resulting_per_predecessor"}
+    )
+    known_share = ShareComponentV1(
+        kind="shares",
+        component_id="known-shares",
+        recipient=EconomicRecipientV1(kind="security", security_id=uid(23)),
+        ratio=PositiveRatioV1(numerator="1", denominator="3"),
+        ratio_meaning="resulting_per_predecessor",
+        unit_basis=EconomicShareBasisV1(
+            security_id=uid(21), share_basis="predecessor_pre_action"
+        ),
+        fraction_treatment=FractionTreatmentV1(
+            kind="round_up",
+            source_rule="round fractional shares up",
+            evidence_reference=base.revision.source_artifact,
+        ),
+        applicability="ordinary_passive_holder",
+        conditions=(),
+    )
+    property_component = UnsupportedPropertyComponentV1(
+        kind="unsupported_property",
+        component_id="source-property",
+        recipient=EconomicRecipientV1(
+            kind="unresolved_property",
+            source_property_key="source-property-class",
+            reason="source property is outside normalized share support",
+        ),
+        source_description="one source-reported property unit",
+        reason="property shape is retained without normalization",
+        evidence_reference=base.revision.source_artifact,
+    )
+    values = {name: getattr(base, name) for name in type(base).model_fields}
+    values["payload"] = base.payload.model_copy(
+        update={
+            "delivered_components": (
+                cash,
+                future_share,
+                known_share,
+                property_component,
+            )
+        }
+    )
+    changed = rebind_record_evidence(type(base), values)
+    case = validated_case((changed,), through="2021-01-01T00:00:00Z")
+    return with_identity_assignments(
+        case,
+        (
+            identity_assignment(6100, 21),
+            identity_assignment(6101, 22, known_at="2021-02-01T00:00:00Z"),
+            identity_assignment(6102, 23),
+        ),
+    )
+
+
+def multichannel_actual_case(
+    family: Literal["effect", "settlement"],
+    *,
+    corrected: bool = False,
+) -> tuple[EconomicHarness, EconomicRecordV1, EconomicRecordV1 | None]:
+    """Build one fully validated public/vendor actual-claim history."""
+    initial = (
+        effect_record(
+            7200,
+            effective_at="2020-06-01T00:00:00Z",
+            known_at="2020-05-01T00:00:00Z",
+        )
+        if family == "effect"
+        else settlement_record(
+            7200,
+            settled_at="2020-06-01T00:00:00Z",
+            known_at="2020-05-01T00:00:00Z",
+        )
+    )
+    initial_values = {
+        name: getattr(initial, name) for name in type(initial).model_fields
+    }
+    initial_values["revision"] = initial.revision.model_copy(
+        update={
+            "availability": (
+                initial.revision.availability[0],
+                vendor_availability(
+                    "2020-07-01T00:00:00Z", initial.revision.source_artifact
+                ),
+            )
+        }
+    )
+    initial = rebind_record_evidence(type(initial), initial_values)
+    correction: EconomicRecordV1 | None = None
+    if corrected:
+        correction = revise_record(initial, 7201, "2020-07-01T00:00:00Z", changes={})
+        correction_values = {
+            name: getattr(correction, name) for name in type(correction).model_fields
+        }
+        correction_values["revision"] = correction.revision.model_copy(
+            update={
+                "availability": (
+                    correction.revision.availability[0],
+                    vendor_availability(
+                        "2020-07-01T00:00:00Z",
+                        correction.revision.source_artifact,
+                    ),
+                )
+            }
+        )
+        correction = rebind_record_evidence(type(correction), correction_values)
+
+    assignment = identity_assignment(7202, 21)
+    assignment_values = {
+        name: getattr(assignment, name) for name in type(assignment).model_fields
+    }
+    assignment_values["revision"] = assignment.revision.model_copy(
+        update={
+            "availability": (
+                assignment.revision.availability[0],
+                vendor_availability(
+                    "2020-01-01T00:00:00Z", assignment.revision.source_artifact
+                ),
+            )
+        }
+    )
+    dual_assignment = seal_record(type(assignment), assignment_values)
+    records = (initial,) if correction is None else (initial, correction)
+    case = validated_case(
+        records,
+        through="2020-07-02T00:00:00Z",
+        declared_channels=(public_channel(), vendor_channel()),
+        identity_assignments=(dual_assignment,),
+    )
+    return case, initial, correction
+
+
+def multichannel_untrusted_evidence_case(
+    evidence_kind: Literal["unknown", "indeterminate", "unapproved"],
+) -> EconomicHarness:
+    """Build a valid actual row whose second channel cannot create a veto."""
+    base = effect_record(
+        7250,
+        effective_at="2020-06-01T00:00:00Z",
+        known_at="2020-07-01T00:00:00Z",
+    )
+    source_reference = base.revision.source_artifact
+    retained: dict[str, AvailabilityEvidenceV1] = {}
+    if evidence_kind == "unknown":
+        extra = AvailabilityEvidenceV1(
+            channel=vendor_channel(),
+            shape=AvailabilityShape.UNKNOWN,
+            precision=SourcePrecision.UNKNOWN,
+            basis=AvailabilityBasis.VENDOR_DELIVERY,
+            evidence_reference=source_reference,
+        )
+    elif evidence_kind == "indeterminate":
+        extra = AvailabilityEvidenceV1(
+            channel=vendor_channel(),
+            shape=AvailabilityShape.BOUNDED,
+            lower_bound=parse_utc("2020-05-15T00:00:00Z"),
+            upper_bound=parse_utc("2020-06-15T00:00:00Z"),
+            precision=SourcePrecision.INTERVAL,
+            source_time_label=("2020-05-15T00:00:00Z/2020-06-15T00:00:00Z"),
+            basis=AvailabilityBasis.VENDOR_DELIVERY,
+            evidence_reference=source_reference,
+        )
+    else:
+        raw_reference, _ = economic_evidence("unapproved vendor availability window")
+        raw = AvailabilityEvidenceV1(
+            channel=vendor_channel(),
+            shape=AvailabilityShape.BOUNDED,
+            lower_bound=parse_utc("2020-05-01T00:00:00Z"),
+            upper_bound=parse_utc("2020-05-02T00:00:00Z"),
+            precision=SourcePrecision.INTERVAL,
+            source_time_label="2020-05-01T00:00:00Z/2020-05-02T00:00:00Z",
+            basis=AvailabilityBasis.VENDOR_DELIVERY,
+            evidence_reference=raw_reference,
+        )
+        rule_reference = ArtifactReference(
+            artifact_id=uid(7251),
+            kind=ArtifactKind.OTHER,
+            content_hash=CONSERVATIVE_UPPER_BOUND_RULE_HASH,
+            location=f"drift+sha256://{CONSERVATIVE_UPPER_BOUND_RULE_HASH}",
+        )
+        extra = derive_conservative_upper_bound(raw, rule_reference)
+        retained[content_hash(raw)] = raw
+
+    values = {name: getattr(base, name) for name in type(base).model_fields}
+    values["revision"] = base.revision.model_copy(
+        update={"availability": (base.revision.availability[0], extra)}
+    )
+    record = rebind_record_evidence(type(base), values)
+    if evidence_kind == "unapproved":
+        final_reference = record.revision.source_artifact
+        raw_reference, _ = economic_evidence("unapproved vendor availability window")
+        raw = AvailabilityEvidenceV1(
+            channel=vendor_channel(),
+            shape=AvailabilityShape.BOUNDED,
+            lower_bound=parse_utc("2020-05-01T00:00:00Z"),
+            upper_bound=parse_utc("2020-05-02T00:00:00Z"),
+            precision=SourcePrecision.INTERVAL,
+            source_time_label="2020-05-01T00:00:00Z/2020-05-02T00:00:00Z",
+            basis=AvailabilityBasis.VENDOR_DELIVERY,
+            evidence_reference=final_reference,
+        )
+        rule_reference = ArtifactReference(
+            artifact_id=uid(7251),
+            kind=ArtifactKind.OTHER,
+            content_hash=CONSERVATIVE_UPPER_BOUND_RULE_HASH,
+            location=f"drift+sha256://{CONSERVATIVE_UPPER_BOUND_RULE_HASH}",
+        )
+        extra = derive_conservative_upper_bound(raw, rule_reference)
+        retained = {content_hash(raw): raw}
+        final_values = {
+            name: getattr(record, name) for name in type(record).model_fields
+        }
+        final_values["revision"] = record.revision.model_copy(
+            update={"availability": (record.revision.availability[0], extra)}
+        )
+        record = seal_record(type(record), final_values)
+    return validated_case(
+        (record,),
+        complete_coverage=False,
+        through="2020-07-02T00:00:00Z",
+        declared_channels=(public_channel(), vendor_channel()),
+        identity_assignments=(identity_assignment(7252, 21),),
+        retained_evidence=retained,
+    )
+
+
+def with_identity_assignments(
+    case: EconomicHarness,
+    assignments: tuple[IdentityAssignmentVersionV1, ...],
+) -> EconomicHarness:
+    """Replace only the separately bound retained-identity input."""
+    context = EconomicResolutionContext(
+        datasets=case.context.datasets,
+        identity=identity_input(assignments),
+        availability_policy=case.context.availability_policy,
+        retained_evidence=case.context.retained_evidence,
+        supporting_artifacts=case.context.supporting_artifacts,
+    )
+    return EconomicHarness(context=context, source_policy=case.source_policy)
 
 
 def policy_fixture() -> EconomicSourceSelectionPolicyV1:
