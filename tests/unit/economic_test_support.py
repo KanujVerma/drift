@@ -1,7 +1,8 @@
 """Shared, literal fixtures for M1c economic query contract tests."""
 
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Literal, get_args
 from urllib.parse import quote, unquote, urlsplit
@@ -9,7 +10,8 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
-from drift.datasets.hashing import assertion_version_payload
+from drift.datasets.assertions import build_validated_dataset_bundle
+from drift.datasets.hashing import assertion_version_payload, manifest_hash, schema_hash
 from drift.datasets.resolver import VerifiedArtifactBytes
 from drift.domain.artifacts import ArtifactKind, ArtifactReference
 from drift.domain.assertions import (
@@ -20,6 +22,8 @@ from drift.domain.assertions import (
     TemporalIntervalClaimV1,
 )
 from drift.domain.common import FrozenModel
+from drift.domain.dataset_validation import ValidationResult, ValidationRunContextV1
+from drift.domain.datasets import TemporalCoverage
 from drift.domain.economic_common import (
     ActionKind,
     CashComponentV1,
@@ -35,6 +39,7 @@ from drift.domain.economic_common import (
 from drift.domain.economic_coverage import (
     DatasetBindingV1,
     EconomicCoverageVersionV1,
+    EconomicInputRecordV1,
     EconomicSourceOwnerV1,
     EconomicSourceSelectionPolicyV1,
 )
@@ -51,15 +56,52 @@ from drift.domain.economic_events import (
     TermsPayloadV1,
     UnknownEffectV1,
 )
+from drift.domain.economic_queries import MarketDecisionQueryV1, MarketOutcomeQueryV1
+from drift.domain.manifests import (
+    AcquisitionDescriptorV1,
+    AssertionEffectiveShape,
+    AssertionTemporalContractV1,
+    DatasetKind,
+    DatasetManifestV2,
+    DatasetRoleV1,
+    EvidenceGranularity,
+    FieldDescriptorV1,
+    LicenseDescriptorV1,
+    LogicalType,
+    PartitionDescriptorV1,
+    SchemaDescriptorV1,
+    SourceDescriptorV1,
+    TemporalContractBindingV2,
+    TemporalContractKindV2,
+)
 from drift.domain.revisions import RevisionKind
+from drift.domain.securities import (
+    IdentityAssignmentEffect,
+    IdentityAssignmentVersionV1,
+    SecurityV1,
+)
 from drift.domain.temporal import (
     AvailabilityBasis,
     AvailabilityChannelV1,
     AvailabilityEvidenceV1,
+    AvailabilityPolicyV1,
     AvailabilityShape,
     ChannelKind,
     SourcePrecision,
 )
+from drift.markets.economic_validation import (
+    ECONOMIC_VALIDATION_PROFILE_ID,
+    EconomicDatasetInput,
+    EconomicIdentityInput,
+    EconomicResolutionContext,
+    economic_context_hash,
+    economic_role_contract,
+    economic_role_schema,
+    economic_validation_profile_hash,
+    economic_validator_implementation_hash,
+    validate_economic_dataset,
+)
+from drift.markets.validation import validate_identity_dataset
 from drift.serialization.canonical import canonical_json, content_hash
 
 HASH_A = "a" * 64
@@ -72,6 +114,10 @@ HASH_E = "e" * 64
 def uid(suffix: int) -> UUID:
     """Return a fixed UUIDv7, derived only from a fixture suffix."""
     return UUID(f"019b8240-0000-7000-8000-{suffix:012d}")
+
+
+def _stable_suffix(label: str) -> int:
+    return int(sha256(label.encode()).hexdigest()[:12], 16) % 1_000_000_000_000
 
 
 def instant(day: int) -> datetime:
@@ -132,13 +178,48 @@ def economic_evidence(
     )
 
 
+def economic_methodology(
+    methodology_version: str = "synthetic-economic-occurrence-v1",
+) -> tuple[ArtifactReference, VerifiedArtifactBytes]:
+    """Build the exact independent synthetic M1c methodology profile bytes."""
+    data = canonical_json(
+        {
+            "schema_version": "1",
+            "kind": "drift_economic_coverage_methodology",
+            "methodology_version": methodology_version,
+            "omission_detection": "closed_artifact_and_record_inventory",
+            "revision_tracking": "source_sequence_and_supersession",
+            "occurrence_identification": "stable_economic_occurrence_id",
+        }
+    )
+    digest = sha256(data).hexdigest()
+    reference = ArtifactReference(
+        artifact_id=uid(_stable_suffix(f"methodology:{digest}")),
+        kind=ArtifactKind.OTHER,
+        content_hash=digest,
+        location=f"synthetic-economic://methodology/{quote(data.decode(), safe='')}",
+    )
+    return reference, VerifiedArtifactBytes(
+        data=data, byte_size=len(data), content_hash=digest
+    )
+
+
 def support_bytes(reference: ArtifactReference) -> VerifiedArtifactBytes:
     """Reconstruct and verify bytes encoded by a synthetic economic reference."""
     parsed = urlsplit(reference.location)
-    if parsed.scheme != "synthetic-economic" or parsed.netloc != "source":
+    if parsed.scheme != "synthetic-economic" or parsed.netloc not in {
+        "source",
+        "methodology",
+    }:
         raise ValueError("fixture requires a synthetic economic evidence locator")
     statement = unquote(parsed.path.removeprefix("/"))
-    reconstructed_reference, verified = economic_evidence(statement)
+    reconstructed_reference, verified = (
+        economic_evidence(statement)
+        if parsed.netloc == "source"
+        else economic_methodology(
+            __import__("json").loads(statement)["methodology_version"]
+        )
+    )
     if reconstructed_reference.content_hash != reference.content_hash:
         raise ValueError("synthetic economic evidence digest mismatch")
     return verified
@@ -410,10 +491,10 @@ def rebind_coverage_evidence(
     values: dict[str, object],
 ) -> EconomicCoverageVersionV1:
     """Bind a coverage assertion and its methodology to final acyclic source bytes."""
-    methodology_statement = canonical_json(
-        {"kind": "coverage_methodology", "coverage": _coverage_source_semantics(values)}
-    ).decode()
-    methodology, _ = economic_evidence(methodology_statement)
+    methodology_version = values.get("methodology_version")
+    if not isinstance(methodology_version, str):
+        raise TypeError("coverage fixture requires a methodology version")
+    methodology, _ = economic_methodology(methodology_version)
     rebound = dict(values)
     rebound["methodology_reference"] = methodology
     source_statement = canonical_json(
@@ -685,14 +766,17 @@ def coverage_record(
     security_id: UUID | None = None,
     listing_id: UUID | None = None,
     availability: tuple[AvailabilityEvidenceV1, ...] | None = None,
+    source_id: str = "synthetic-a",
+    coverage_start: str = "2020-01-01T00:00:00Z",
+    coverage_end: str = "2021-01-02T00:00:00Z",
 ) -> EconomicCoverageVersionV1:
     """Build a hash-addressed synthetic coverage declaration with final claims."""
     snapshot = parse_utc(snapshot_at)
     placeholder, _ = economic_evidence("coverage fixture placeholder")
     interval = TemporalIntervalClaimV1(
         schema_version="1",
-        start=exact_boundary("2020-01-01T00:00:00Z", placeholder),
-        end=exact_boundary("2021-01-02T00:00:00Z", placeholder),
+        start=exact_boundary(coverage_start, placeholder),
+        end=exact_boundary(coverage_end, placeholder),
     )
     revision_value = revision(suffix, snapshot_at, placeholder)
     if availability is not None:
@@ -704,7 +788,7 @@ def coverage_record(
             "schema_version": "1",
             "revision": revision_value,
             "source_key": EconomicSourceKeyV1(
-                source_id="synthetic-a",
+                source_id=source_id,
                 family="coverage",
                 native_record_id=f"coverage-{suffix}",
             ),
@@ -776,6 +860,496 @@ def source_policy(
         owners=owners,
         input_dataset_bindings=bindings,
     )
+
+
+def economic_dataset(
+    role: str,
+    records: tuple[EconomicInputRecordV1, ...],
+    source_id: str = "synthetic-a",
+) -> EconomicDatasetInput:
+    """Build and validate one exact-byte synthetic M1c role dataset."""
+    data = canonical_json({"schema_version": "1", "records": records})
+    digest = sha256(data).hexdigest()
+    schema = economic_role_schema(role)
+    now = parse_utc("2026-09-05T12:00:00Z")
+    source_reference, _ = economic_evidence(
+        f"manifest source evidence for {source_id} {role}"
+    )
+    acquisition_reference, _ = economic_evidence(
+        f"manifest acquisition evidence for {source_id} {role}"
+    )
+    license_reference, _ = economic_evidence(
+        f"manifest license evidence for {source_id} {role}"
+    )
+    role_suffix = _stable_suffix(f"{source_id}:{role}")
+    partition_reference = ArtifactReference(
+        artifact_id=uid(_stable_suffix(f"partition:{source_id}:{role}")),
+        kind=ArtifactKind.DATASET,
+        content_hash=digest,
+        location=f"drift+sha256://{digest}",
+    )
+    manifest = DatasetManifestV2(
+        manifest_schema_version="2",
+        hash_profile="drift-canonical-json-sha256-v1",
+        dataset_id=uid(role_suffix),
+        dataset_version="1",
+        dataset_kind=DatasetKind.SOURCE_FACTS,
+        dataset_role=DatasetRoleV1(namespace="drift", name=role, version="1"),
+        created_at=now,
+        source=SourceDescriptorV1(
+            source_id=source_id,
+            publisher="Drift",
+            product="M1c synthetic fixture",
+            evidence_reference=source_reference,
+        ),
+        acquisition=AcquisitionDescriptorV1(
+            acquired_at=now,
+            collector_id="economic-test-support",
+            collector_version="1",
+            evidence_reference=acquisition_reference,
+        ),
+        license=LicenseDescriptorV1(
+            provider_legal_name="Synthetic",
+            license_reference="synthetic-only",
+            acquired_at=now,
+            terms_evidence_reference=license_reference,
+        ),
+        schema_definition=schema,
+        partitions=(
+            PartitionDescriptorV1(
+                partition_id=uid(_stable_suffix(f"descriptor:{source_id}:{role}")),
+                partition_key="all",
+                artifact=partition_reference,
+                byte_size=len(data),
+                media_type="application/json",
+                format_version="1",
+                row_count=len(records),
+                schema_hash=schema.schema_hash,
+                coverage=TemporalCoverage(started_at=now, ended_at=now),
+            ),
+        ),
+        temporal_contract=TemporalContractBindingV2(
+            kind=TemporalContractKindV2.ASSERTION_TEMPORAL_V1,
+            contract=economic_role_contract(role, (public_channel(),)),
+        ),
+        lineage=None,
+    )
+    verified = VerifiedArtifactBytes(
+        data=data,
+        byte_size=len(data),
+        content_hash=digest,
+    )
+    run = ValidationRunContextV1(
+        decision_id=uid(_stable_suffix(f"decision:{source_id}:{role}:{digest}")),
+        validator_version="1",
+        validator_implementation_hash=economic_validator_implementation_hash(),
+        validation_profile_id=ECONOMIC_VALIDATION_PROFILE_ID,
+        validation_profile_hash=economic_validation_profile_hash(),
+        checked_at=now,
+    )
+    decision, parsed = validate_economic_dataset(manifest, (verified,), run)
+    bundle = build_validated_dataset_bundle(
+        bundle_id=uid(_stable_suffix(f"bundle:{source_id}:{role}:{digest}")),
+        bundle_version="1",
+        created_at=now,
+        validated_datasets=((manifest, decision),),
+    )
+    return EconomicDatasetInput(
+        records=parsed,
+        manifest=manifest,
+        decision=decision,
+        verified_artifacts=(verified,),
+        validation_run=run,
+        bundle=bundle,
+    )
+
+
+def _identity_assignment(suffix: int, security_id: int) -> IdentityAssignmentVersionV1:
+    evidence, _ = economic_evidence(f"identity assignment for security {security_id}")
+    revision_value = revision(suffix, "2020-01-01T00:00:00Z", evidence)
+    record = IdentityAssignmentVersionV1(
+        schema_version="1",
+        revision=revision_value,
+        identity=SecurityV1(schema_version="1", security_id=uid(security_id)),
+        source_namespace="synthetic-master",
+        source_key=f"security-{security_id}",
+        assignment_effect=IdentityAssignmentEffect.ASSIGNED,
+        effective_interval=TemporalIntervalClaimV1(
+            schema_version="1",
+            start=exact_boundary("2020-01-01T00:00:00Z", evidence),
+            end=None,
+        ),
+    )
+    return record.model_copy(
+        update={
+            "revision": revision_value.model_copy(
+                update={"payload_hash": content_hash(assertion_version_payload(record))}
+            )
+        }
+    )
+
+
+def history_assignments() -> tuple[IdentityAssignmentVersionV1, ...]:
+    """Return fresh synthetic assigned security and recipient identities."""
+    return (_identity_assignment(2100, 21), _identity_assignment(2200, 22))
+
+
+def identity_input(
+    assignments: tuple[IdentityAssignmentVersionV1, ...],
+) -> EconomicIdentityInput:
+    """Build exact identity bytes, decision, and bundle for an M1c context."""
+    field_types = {
+        "revision.logical_record_id": (LogicalType.STRING, False),
+        "revision.record_version_id": (LogicalType.STRING, False),
+        "revision.revision_kind": (LogicalType.STRING, False),
+        "revision.supersedes_record_version_id": (LogicalType.STRING, True),
+        "revision.source_sequence": (LogicalType.INTEGER, False),
+        "revision.availability": (LogicalType.JSON, False),
+        "revision.source_artifact": (LogicalType.JSON, False),
+        "revision.payload_hash": (LogicalType.STRING, False),
+        "effective_interval": (LogicalType.JSON, False),
+        "assignment_effect": (LogicalType.STRING, False),
+    }
+    fields = tuple(
+        sorted(
+            (
+                FieldDescriptorV1(
+                    field_id=field_id,
+                    name=field_id,
+                    logical_type=logical_type,
+                    nullable=nullable,
+                )
+                for field_id, (logical_type, nullable) in field_types.items()
+            ),
+            key=lambda item: item.field_id,
+        )
+    )
+    provisional = SchemaDescriptorV1.model_construct(
+        schema_version="1", fields=fields, schema_hash=HASH_A
+    )
+    schema = SchemaDescriptorV1(
+        schema_version="1", fields=fields, schema_hash=schema_hash(provisional)
+    )
+    data = canonical_json({"schema_version": "1", "records": assignments})
+    digest = sha256(data).hexdigest()
+    now = parse_utc("2026-09-05T12:00:00Z")
+    source_reference, _ = economic_evidence("identity manifest source")
+    acquisition_reference, _ = economic_evidence("identity manifest acquisition")
+    license_reference, _ = economic_evidence("identity manifest license")
+    manifest = DatasetManifestV2(
+        manifest_schema_version="2",
+        hash_profile="drift-canonical-json-sha256-v1",
+        dataset_id=uid(_stable_suffix(f"identity:{digest}")),
+        dataset_version="1",
+        dataset_kind=DatasetKind.SOURCE_FACTS,
+        dataset_role=DatasetRoleV1(
+            namespace="drift", name="identity_assignment", version="1"
+        ),
+        created_at=now,
+        source=SourceDescriptorV1(
+            source_id="synthetic-identity",
+            publisher="Drift",
+            product="M1c identity fixture",
+            evidence_reference=source_reference,
+        ),
+        acquisition=AcquisitionDescriptorV1(
+            acquired_at=now,
+            collector_id="economic-test-support",
+            collector_version="1",
+            evidence_reference=acquisition_reference,
+        ),
+        license=LicenseDescriptorV1(
+            provider_legal_name="Synthetic",
+            license_reference="synthetic-only",
+            acquired_at=now,
+            terms_evidence_reference=license_reference,
+        ),
+        schema_definition=schema,
+        partitions=(
+            PartitionDescriptorV1(
+                partition_id=uid(_stable_suffix(f"identity-partition:{digest}")),
+                partition_key="all",
+                artifact=ArtifactReference(
+                    artifact_id=uid(_stable_suffix(f"identity-artifact:{digest}")),
+                    kind=ArtifactKind.DATASET,
+                    content_hash=digest,
+                    location=f"drift+sha256://{digest}",
+                ),
+                byte_size=len(data),
+                media_type="application/json",
+                format_version="1",
+                row_count=len(assignments),
+                schema_hash=schema.schema_hash,
+                coverage=TemporalCoverage(started_at=now, ended_at=now),
+            ),
+        ),
+        temporal_contract=TemporalContractBindingV2(
+            kind=TemporalContractKindV2.ASSERTION_TEMPORAL_V1,
+            contract=AssertionTemporalContractV1(
+                contract_version="1",
+                evidence_granularity=EvidenceGranularity.RECORD,
+                logical_record_id_field_id="revision.logical_record_id",
+                record_version_id_field_id="revision.record_version_id",
+                revision_kind_field_id="revision.revision_kind",
+                supersedes_field_id="revision.supersedes_record_version_id",
+                source_sequence_field_id="revision.source_sequence",
+                availability_field_id="revision.availability",
+                source_artifact_field_id="revision.source_artifact",
+                payload_hash_field_id="revision.payload_hash",
+                effective_time_field_id="effective_interval",
+                effective_shape=AssertionEffectiveShape.INTERVAL,
+                semantic_state_field_ids=("assignment_effect",),
+                declared_channels=(public_channel(),),
+            ),
+        ),
+        lineage=None,
+    )
+    verified = VerifiedArtifactBytes(
+        data=data, byte_size=len(data), content_hash=digest
+    )
+    run = ValidationRunContextV1(
+        decision_id=uid(_stable_suffix(f"identity-decision:{digest}")),
+        validator_version="1",
+        validator_implementation_hash=HASH_A,
+        validation_profile_id="m1b-role-v1",
+        validation_profile_hash=HASH_B,
+        checked_at=now,
+    )
+    decision = validate_identity_dataset(manifest, (verified,), run)
+    assert decision.result is ValidationResult.PASS
+    bundle = build_validated_dataset_bundle(
+        bundle_id=uid(_stable_suffix(f"identity-bundle:{digest}")),
+        bundle_version="1",
+        created_at=now,
+        validated_datasets=((manifest, decision),),
+    )
+    return EconomicIdentityInput(
+        records=assignments,
+        manifest=manifest,
+        decision=decision,
+        verified_artifacts=(verified,),
+        validation_run=run,
+        bundle=bundle,
+    )
+
+
+def _fixture_artifact_references(value: object) -> tuple[ArtifactReference, ...]:
+    references: list[ArtifactReference] = []
+
+    def visit(item: object) -> None:
+        if isinstance(item, ArtifactReference):
+            references.append(item)
+        elif isinstance(item, BaseModel):
+            for name in type(item).model_fields:
+                visit(getattr(item, name))
+        elif isinstance(item, Mapping):
+            for nested in item.values():
+                visit(nested)
+        elif isinstance(item, tuple | list):
+            for nested in item:
+                visit(nested)
+
+    visit(value)
+    return tuple(references)
+
+
+@dataclass(frozen=True)
+class EconomicHarness:
+    """One fully validated synthetic M1c context and its source policy."""
+
+    context: EconomicResolutionContext
+    source_policy: EconomicSourceSelectionPolicyV1
+
+    def decision_query(self, t: str, k: str, e: str) -> MarketDecisionQueryV1:
+        effective = parse_utc(e)
+        if effective != self.source_policy.through:
+            raise ValueError("decision effective cutoff must equal policy through")
+        return MarketDecisionQueryV1(
+            schema_version="1",
+            kind="decision",
+            purpose="economic_facts",
+            security_id=self.source_policy.security_id,
+            action_kinds=tuple(sorted(ActionKind, key=lambda item: item.value)),
+            history_start=parse_utc("2020-01-01T00:00:00Z"),
+            requested_channel=public_channel(),
+            availability_policy_id=self.context.availability_policy.policy_id,
+            availability_policy_hash=content_hash(self.context.availability_policy),
+            source_selection_policy_hash=content_hash(self.source_policy),
+            input_context_hash=economic_context_hash(self.context),
+            decision_time=parse_utc(t),
+            knowledge_cutoff=parse_utc(k),
+            effective_cutoff=effective,
+        )
+
+    def outcome_query(self, h: str, v: str) -> MarketOutcomeQueryV1:
+        horizon = parse_utc(h)
+        if horizon != self.source_policy.through:
+            raise ValueError("outcome horizon must equal policy through")
+        return MarketOutcomeQueryV1(
+            schema_version="1",
+            kind="outcome",
+            purpose="economic_outcome",
+            security_id=self.source_policy.security_id,
+            action_kinds=tuple(sorted(ActionKind, key=lambda item: item.value)),
+            history_start=parse_utc("2020-01-01T00:00:00Z"),
+            requested_channel=public_channel(),
+            availability_policy_id=self.context.availability_policy.policy_id,
+            availability_policy_hash=content_hash(self.context.availability_policy),
+            source_selection_policy_hash=content_hash(self.source_policy),
+            input_context_hash=economic_context_hash(self.context),
+            economic_horizon=horizon,
+            evidence_vintage_cutoff=parse_utc(v),
+        )
+
+
+def validated_case(
+    records: tuple[EconomicRecordV1, ...],
+    *,
+    complete_coverage: bool = True,
+    owner_source: str = "synthetic-a",
+    through: str = "2021-01-01T00:00:00Z",
+    coverage_snapshot_at: str | None = None,
+) -> EconomicHarness:
+    """Build a closed, immutable synthetic M1c validation context."""
+    owned_records: list[EconomicRecordV1] = []
+    for record in records:
+        if record.source_key.source_id == owner_source:
+            owned_records.append(record)
+            continue
+        values = {name: getattr(record, name) for name in type(record).model_fields}
+        values["source_key"] = record.source_key.model_copy(
+            update={"source_id": owner_source}
+        )
+        owned_records.append(rebind_record_evidence(type(record), values))
+
+    fact_inputs = tuple(
+        economic_dataset(
+            role,
+            tuple(
+                record
+                for record in owned_records
+                if (
+                    role == "economic_terms"
+                    and isinstance(record, CorporateActionTermsVersionV1)
+                )
+                or (
+                    role == "economic_effect"
+                    and isinstance(record, EconomicEffectVersionV1)
+                )
+                or (
+                    role == "economic_settlement"
+                    and isinstance(record, EconomicSettlementVersionV1)
+                )
+            ),
+            owner_source,
+        )
+        for role in ("economic_terms", "economic_effect", "economic_settlement")
+    )
+    through_value = parse_utc(through)
+    minimum_snapshot = through_value + timedelta(days=1)
+    if complete_coverage and any(
+        evidence.upper_bound is None
+        for record in owned_records
+        for evidence in record.revision.availability
+    ):
+        raise ValueError("unknown availability cannot support complete coverage")
+    known_upper_bounds = tuple(
+        evidence.upper_bound
+        for record in owned_records
+        for evidence in record.revision.availability
+        if evidence.upper_bound is not None
+    )
+    if known_upper_bounds:
+        minimum_snapshot = max(minimum_snapshot, *known_upper_bounds)
+    snapshot = (
+        minimum_snapshot
+        if coverage_snapshot_at is None
+        else parse_utc(coverage_snapshot_at)
+    )
+    if snapshot < minimum_snapshot:
+        raise ValueError("coverage snapshot precedes synthetic inventory vintage")
+    coverage_end = (through_value + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    snapshot_text = snapshot.strftime("%Y-%m-%dT%H:%M:%SZ")
+    families: tuple[Literal["terms", "effect", "settlement"], ...] = (
+        "terms",
+        "effect",
+        "settlement",
+    )
+    coverage_records = tuple(
+        coverage_record(
+            3000 + index,
+            family,
+            manifest_hash(dataset.manifest),
+            dataset.decision.validated_artifact_hashes,
+            dataset.decision.validated_record_hashes,
+            completeness="complete" if complete_coverage else "partial",
+            snapshot_at=snapshot_text,
+            source_id=owner_source,
+            coverage_end=coverage_end,
+        )
+        for index, (family, dataset) in enumerate(
+            zip(families, fact_inputs, strict=True)
+        )
+    )
+    coverage_input = economic_dataset(
+        "economic_coverage", coverage_records, owner_source
+    )
+    datasets = (*fact_inputs, coverage_input)
+    identity = identity_input(history_assignments())
+    references_by_hash: dict[str, ArtifactReference] = {}
+    for dataset in datasets:
+        for reference in _fixture_artifact_references(
+            (
+                dataset.records,
+                dataset.manifest.source,
+                dataset.manifest.acquisition,
+                dataset.manifest.license,
+            )
+        ):
+            references_by_hash.setdefault(reference.content_hash, reference)
+    supporting_artifacts = tuple(
+        sorted(
+            (support_bytes(reference) for reference in references_by_hash.values()),
+            key=lambda artifact: artifact.content_hash,
+        )
+    )
+    context = EconomicResolutionContext(
+        datasets=datasets,
+        identity=identity,
+        availability_policy=AvailabilityPolicyV1(
+            policy_id="public-v1", permitted_rule_hashes=()
+        ),
+        retained_evidence={},
+        supporting_artifacts=supporting_artifacts,
+    )
+    bindings = tuple(
+        DatasetBindingV1(
+            manifest_hash=manifest_hash(dataset.manifest),
+            decision_hash=content_hash(dataset.decision),
+            bundle_hash=content_hash(dataset.bundle),
+            role=dataset.manifest.dataset_role.name,
+            source_id=dataset.manifest.source.source_id,
+        )
+        for dataset in datasets
+    )
+    coverage_manifest_hash = manifest_hash(coverage_input.manifest)
+    owners = tuple(
+        EconomicSourceOwnerV1(
+            family=family,
+            source_id=owner_source,
+            fact_manifest_hash=manifest_hash(dataset.manifest),
+            coverage_manifest_hash=coverage_manifest_hash,
+        )
+        for family, dataset in zip(families, fact_inputs, strict=True)
+    )
+    policy = source_policy(
+        uid(21),
+        bindings,
+        owners,
+        parse_utc("2020-01-01T00:00:00Z"),
+        through_value,
+    )
+    return EconomicHarness(context=context, source_policy=policy)
 
 
 def policy_fixture() -> EconomicSourceSelectionPolicyV1:
