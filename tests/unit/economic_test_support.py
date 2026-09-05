@@ -17,6 +17,7 @@ from drift.domain.assertions import (
     HistoryCompleteness,
     RevisionEnvelopeV1,
     TemporalBoundaryClaimV1,
+    TemporalIntervalClaimV1,
 )
 from drift.domain.common import FrozenModel
 from drift.domain.economic_common import (
@@ -30,6 +31,12 @@ from drift.domain.economic_common import (
     PositiveRatioV1,
     ShareComponentV1,
     UnsupportedPropertyComponentV1,
+)
+from drift.domain.economic_coverage import (
+    DatasetBindingV1,
+    EconomicCoverageVersionV1,
+    EconomicSourceOwnerV1,
+    EconomicSourceSelectionPolicyV1,
 )
 from drift.domain.economic_events import (
     CancelledActionV1,
@@ -238,6 +245,22 @@ def _record_source_semantics[T: EconomicRecordV1](
     return semantics
 
 
+def _coverage_source_semantics(
+    values: dict[str, object],
+) -> dict[str, object]:
+    """Project every coverage assertion field without evidence-reference cycles."""
+    revision_value = values["revision"]
+    source_key_value = values["source_key"]
+    if not isinstance(revision_value, RevisionEnvelopeV1):
+        raise TypeError("coverage fixture requires a real revision envelope")
+    if not isinstance(source_key_value, EconomicSourceKeyV1):
+        raise TypeError("coverage fixture requires a real economic source key")
+    semantics = _acyclic_source_semantics(values)
+    if not isinstance(semantics, dict):
+        raise TypeError("coverage source semantics require an object")
+    return semantics
+
+
 def _acyclic_source_semantics(value: object) -> object:
     """Project every model field while replacing evidence identities by presence."""
     if isinstance(value, ArtifactReference):
@@ -269,6 +292,8 @@ def _contains_artifact_reference(annotation: object) -> bool:
 def _rebind_boundary(
     boundary: TemporalBoundaryClaimV1, reference: ArtifactReference
 ) -> TemporalBoundaryClaimV1:
+    if boundary.evidence_reference is None:
+        return boundary
     return boundary.model_copy(update={"evidence_reference": reference})
 
 
@@ -379,6 +404,48 @@ def rebind_record_evidence[T: EconomicRecordV1](
         if isinstance(boundary, TemporalBoundaryClaimV1):
             rebound[field] = _rebind_boundary(boundary, reference)
     return seal_record(model, rebound)
+
+
+def rebind_coverage_evidence(
+    values: dict[str, object],
+) -> EconomicCoverageVersionV1:
+    """Bind a coverage assertion and its methodology to final acyclic source bytes."""
+    methodology_statement = canonical_json(
+        {"kind": "coverage_methodology", "coverage": _coverage_source_semantics(values)}
+    ).decode()
+    methodology, _ = economic_evidence(methodology_statement)
+    rebound = dict(values)
+    rebound["methodology_reference"] = methodology
+    source_statement = canonical_json(
+        {"kind": "coverage_assertion", "coverage": _coverage_source_semantics(rebound)}
+    ).decode()
+    reference, _ = economic_evidence(source_statement)
+    revision_value = rebound["revision"]
+    interval_value = rebound["coverage_interval"]
+    if not isinstance(revision_value, RevisionEnvelopeV1):
+        raise TypeError("coverage fixture requires a real revision envelope")
+    if not isinstance(interval_value, TemporalIntervalClaimV1):
+        raise TypeError("coverage fixture requires a temporal interval")
+    rebound["revision"] = revision_value.model_copy(
+        update={
+            "availability": tuple(
+                evidence.model_copy(update={"evidence_reference": reference})
+                if evidence.evidence_reference is not None
+                else evidence
+                for evidence in revision_value.availability
+            ),
+            "source_artifact": reference,
+        }
+    )
+    rebound["coverage_interval"] = interval_value.model_copy(
+        update={
+            "start": _rebind_boundary(interval_value.start, reference),
+            "end": None
+            if interval_value.end is None
+            else _rebind_boundary(interval_value.end, reference),
+        }
+    )
+    return seal_record(EconomicCoverageVersionV1, rebound)
 
 
 def _unknown_association() -> EconomicAssociationV1:
@@ -576,3 +643,186 @@ def revise_record[T: EconomicRecordV1](
     values.update(changes)
     values["revision"] = corrected_revision
     return rebind_record_evidence(type(record), values)
+
+
+def coverage_inventory_hashes(suffix: int) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return independently hash-addressed retained inventory identities."""
+    artifact_hashes = tuple(
+        sorted(
+            economic_evidence(f"coverage {suffix} retained artifact {index}")[
+                0
+            ].content_hash
+            for index in (1, 2)
+        )
+    )
+    record_hashes = tuple(
+        sorted(
+            economic_evidence(f"coverage {suffix} retained record {index}")[
+                0
+            ].content_hash
+            for index in (1, 2)
+        )
+    )
+    return artifact_hashes, record_hashes
+
+
+def coverage_record(
+    suffix: int,
+    family: Literal["terms", "effect", "settlement"],
+    target_manifest_hash: str,
+    inventory_artifact_hashes: tuple[str, ...],
+    inventory_record_hashes: tuple[str, ...],
+    completeness: Literal["complete", "partial", "unknown"] = "complete",
+    *,
+    action_kinds: tuple[ActionKind, ...] = tuple(ActionKind),
+    revision_support: Literal["captured_history", "current_only", "unknown"] = (
+        "captured_history"
+    ),
+    occurrence_key_semantics: Literal[
+        "economic_occurrence_ids", "report_ids_only", "unknown"
+    ] = "economic_occurrence_ids",
+    snapshot_at: str = "2021-01-02T00:00:00Z",
+    security_id: UUID | None = None,
+    listing_id: UUID | None = None,
+    availability: tuple[AvailabilityEvidenceV1, ...] | None = None,
+) -> EconomicCoverageVersionV1:
+    """Build a hash-addressed synthetic coverage declaration with final claims."""
+    snapshot = parse_utc(snapshot_at)
+    placeholder, _ = economic_evidence("coverage fixture placeholder")
+    interval = TemporalIntervalClaimV1(
+        schema_version="1",
+        start=exact_boundary("2020-01-01T00:00:00Z", placeholder),
+        end=exact_boundary("2021-01-02T00:00:00Z", placeholder),
+    )
+    revision_value = revision(suffix, snapshot_at, placeholder)
+    if availability is not None:
+        revision_value = revision_value.model_copy(
+            update={"availability": availability}
+        )
+    return rebind_coverage_evidence(
+        {
+            "schema_version": "1",
+            "revision": revision_value,
+            "source_key": EconomicSourceKeyV1(
+                source_id="synthetic-a",
+                family="coverage",
+                native_record_id=f"coverage-{suffix}",
+            ),
+            "security_id": uid(21) if security_id is None else security_id,
+            "listing_id": listing_id,
+            "coverage_interval": interval,
+            "fact_family": family,
+            "action_kinds": action_kinds,
+            "target_manifest_hash": target_manifest_hash,
+            "inventory_artifact_hashes": inventory_artifact_hashes,
+            "inventory_record_hashes": inventory_record_hashes,
+            "methodology_reference": placeholder,
+            "methodology_version": "synthetic-economic-occurrence-v1",
+            "snapshot_at": snapshot,
+            "completeness": completeness,
+            "revision_support": revision_support,
+            "occurrence_key_semantics": occurrence_key_semantics,
+            "gaps": (),
+            "exceptions": (),
+        }
+    )
+
+
+def correct_coverage(
+    record: EconomicCoverageVersionV1,
+    suffix: int,
+    known_at: str,
+    changes: dict[str, object] | None = None,
+) -> EconomicCoverageVersionV1:
+    """Build an immutable correction with new hash-addressed source bytes."""
+    placeholder, _ = economic_evidence("coverage correction placeholder")
+    corrected_revision = RevisionEnvelopeV1(
+        schema_version="1",
+        logical_record_id=record.revision.logical_record_id,
+        record_version_id=uid(suffix + 1_000_000),
+        revision_kind=RevisionKind.CORRECTION,
+        supersedes_record_version_id=record.revision.record_version_id,
+        source_sequence=record.revision.source_sequence + 1,
+        availability=(public_availability(known_at, placeholder),),
+        history_completeness=record.revision.history_completeness,
+        source_native_revision_label=f"correction-{suffix}",
+        source_artifact=placeholder,
+        payload_hash=HASH_A,
+    )
+    values = {field: getattr(record, field) for field in type(record).model_fields}
+    if changes is not None:
+        values.update(changes)
+    values["revision"] = corrected_revision
+    return rebind_coverage_evidence(values)
+
+
+def source_policy(
+    security_id: UUID,
+    bindings: tuple[DatasetBindingV1, ...],
+    owners: tuple[EconomicSourceOwnerV1, ...],
+    history_start: datetime,
+    through: datetime,
+) -> EconomicSourceSelectionPolicyV1:
+    """Build the literal bounded source-policy fixture shape."""
+    return EconomicSourceSelectionPolicyV1(
+        schema_version="1",
+        policy_id="synthetic-economic-policy",
+        policy_version="1",
+        security_id=security_id,
+        action_kinds=tuple(ActionKind),
+        scope="all_security_occurrences",
+        history_start=history_start,
+        through=through,
+        owners=owners,
+        input_dataset_bindings=bindings,
+    )
+
+
+def policy_fixture() -> EconomicSourceSelectionPolicyV1:
+    """Build policy shape only, never a resolution-ready dataset context."""
+    hashes = (HASH_A, HASH_B, HASH_C, HASH_D, HASH_E, "f" * 64)
+    owners = (
+        EconomicSourceOwnerV1(
+            family="terms",
+            source_id="synthetic-a",
+            fact_manifest_hash=hashes[0],
+            coverage_manifest_hash=hashes[1],
+        ),
+        EconomicSourceOwnerV1(
+            family="effect",
+            source_id="synthetic-b",
+            fact_manifest_hash=hashes[2],
+            coverage_manifest_hash=hashes[3],
+        ),
+        EconomicSourceOwnerV1(
+            family="settlement",
+            source_id="synthetic-a",
+            fact_manifest_hash=hashes[4],
+            coverage_manifest_hash=hashes[5],
+        ),
+    )
+    bindings = tuple(
+        DatasetBindingV1(
+            manifest_hash=digest,
+            decision_hash=digest,
+            bundle_hash=digest,
+            role=(
+                "economic_terms"
+                if index == 0
+                else "economic_effect"
+                if index == 2
+                else "economic_settlement"
+                if index == 4
+                else "economic_coverage"
+            ),
+            source_id="synthetic-b" if index in (2, 3) else "synthetic-a",
+        )
+        for index, digest in enumerate(hashes)
+    )
+    return source_policy(
+        uid(21),
+        bindings,
+        owners,
+        parse_utc("2020-01-01T00:00:00Z"),
+        parse_utc("2021-01-01T00:00:00Z"),
+    )
