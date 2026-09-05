@@ -92,7 +92,10 @@ boundaries are recorded in [ADR 0006](../adr/0006-independent-historical-identit
 and [ADR 0007](../adr/0007-authenticated-point-in-time-universe-composition.md).
 There is no provider connection, price/action accounting, session engine,
 historical-tradability model, evaluator, or process-isolated decision runtime.
-M1c remains a separate future milestone.
+M1c economic events/outcomes and M1d observations/sessions/normalization remain
+separate future milestones, both designed only. Their boundaries are recorded
+in [ADR 0009](../adr/0009-separate-economic-events-and-observation-semantics.md)
+and the [roadmap](roadmap.md). Neither has an executable plan or implementation.
 
 ## Compatibility contract
 

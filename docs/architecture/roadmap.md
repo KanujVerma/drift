@@ -45,20 +45,31 @@ tests and the full runtime gate pass using synthetic local fixtures. The final
 acceptance record is the Git commit titled `docs: complete M1b identity milestone`;
 its actual hash is read from Git rather than embedded self-referentially.
 
-## M1c, design proposed and not started
+## M1c, designed only and not started
 
-M1c is Market Events and Observation Semantics. It depends on validated M1b
-identities and is proposed to cover versioned corporate actions, terminal
-economic outcomes, source/raw daily observations, cutoff-aware normalization,
-decision-versus-outcome roles, pinned session schedules, typed missingness, and
-historical-tradability results.
+M1c is Corporate Actions and Economic Outcomes. It will represent immutable
+action terms, occurrence/entitlement/settlement facts, revisions, fixed cash/share
+components, claim-level known/partial/unknown outcomes, coverage, and separate
+decision versus outcome selection. It consumes M1a/M1b without prices, sessions,
+derived adjustment factors, or portfolio accounting.
 
-The umbrella design is
-`docs/superpowers/specs/2026-09-02-m1b-m1c-historical-equity-semantics-design.md`.
-It is approved as M1b planning input. No executable M1c implementation plan
-exists, and M1c has not started.
+## M1d, designed only and not started
 
-M1 is not complete until M1a, M1b, and M1c are complete. The design is not
+M1d is Source Observations, Sessions, and Normalization. It will represent
+source-defined daily observations, pinned schedule and realized-session facts,
+orthogonal missingness, narrow research-session eligibility, and cutoff-safe
+source/split-normalized views. Normalization joins observations with M1c actions;
+preserving a source observation does not itself require an action dataset.
+Total-return accounting and evaluation remain later responsibilities.
+
+The canonical successor design is
+`docs/superpowers/specs/2026-09-05-historical-economic-events-and-observations-design.md`;
+the decision is recorded in ADR 0009. It supersedes the original umbrella's
+combined M1c scope, not completed M1b contracts. Neither M1c nor M1d has an
+executable implementation plan or implementation. Next authorization is M1c
+implementation planning only, after user review of this specification.
+
+M1 is not complete until M1a, M1b, M1c, and M1d are complete. The design is not
 authorization to build a market-data platform, download live data, evaluate
 strategies, adopt a research framework, connect a broker, or add agents.
 

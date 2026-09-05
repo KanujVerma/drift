@@ -3,7 +3,14 @@
 **Status:** Approved architecture with M1b implemented, independently reviewed,
 and verified. Its historical execution record is:
 `docs/superpowers/plans/2026-09-03-m1b-historical-security-identity-universes.md`.
-M1c remains designed but unplanned and unimplemented.
+The original combined M1c scope below is historical design context, superseded
+by the [2026-09-05 economic events and observations design](2026-09-05-historical-economic-events-and-observations-design.md)
+and [ADR 0009](../../adr/0009-separate-economic-events-and-observation-semantics.md).
+The successor M1c and M1d milestones are designed only, with no executable plans
+or implementation. The new design governs all future-market sketches below,
+including outcome anchoring, role/query families, normalization, sessions,
+missingness, research eligibility, and completion criteria. It does not change
+completed M1b behavior.
 
 Implementation refinements are recorded in
 [ADR 0006](../../adr/0006-independent-historical-identity-and-lifecycle-facts.md)
