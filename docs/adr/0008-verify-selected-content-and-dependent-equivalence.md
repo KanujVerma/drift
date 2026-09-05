@@ -2,8 +2,8 @@
 
 ## Status
 
-Bounded M1b hardening authorized on 2026-09-04. Implementation awaits fresh
-independent review and the controller's hardening commit.
+Accepted and independently reviewed on 2026-09-04. Implemented at `dc1537f`;
+the controller's full 793-test gate passes.
 
 ## Evidence
 

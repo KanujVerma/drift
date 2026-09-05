@@ -1,11 +1,15 @@
 # Drift M1 Point-in-Time Data Design
 
-**Status:** M1a implemented and verified. M1b deferred; M1 remains incomplete.
+**Status:** Historical umbrella research. M1a is implemented and verified. The
+original mixed M1b scope below was superseded by the separately approved M1b/M1c
+design; current milestone state belongs in `docs/architecture/roadmap.md`.
 
 The implementation rulings and completed M1a execution record are in
 `../plans/2026-09-01-m1a-temporal-provenance.md`. This document remains the
-umbrella research and design source. Its M1b research is not an approved
-implementation plan or a claim of implemented historical market semantics.
+historical research source. Current historical-equity architecture is in
+`2026-09-02-m1b-m1c-historical-equity-semantics-design.md`; M1b implementation is
+recorded in `../plans/2026-09-03-m1b-historical-security-identity-universes.md`.
+The two-part milestone sequence below is retained as history, not current scope.
 
 ## Decision summary
 

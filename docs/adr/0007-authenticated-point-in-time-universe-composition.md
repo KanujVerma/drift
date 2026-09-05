@@ -3,7 +3,7 @@
 ## Status
 
 Accepted on 2026-09-04 within the approved M1b Task 4 preflight scope.
-Implementation acceptance remains subject to independent review and commit.
+Implemented and independently accepted at `ea35028`, with the full gate passing.
 
 ## Context and strongest alternatives
 
@@ -89,5 +89,5 @@ Tests exercise actual resolver chains, including a self-consistent forged source
 definition result, complete-record omission, K/E separation, independent event
 ordering, correction/withdrawal, retained versus future identity, every excluded
 instrument category, missing coverage, and canonical Task 3 fixture composition.
-The two new local fixture files are hash-pinned. Independent review is still
-required before the controller's authorized Task 4 commit.
+The two new local fixture files are hash-pinned. Task 4's independent review and
+commit are complete; the M1b execution record tracks final milestone acceptance.

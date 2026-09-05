@@ -4,16 +4,19 @@
 
 **Completed M1a execution record:** `docs/superpowers/plans/2026-09-01-m1a-temporal-provenance.md`
 
-**Deferred M1b boundary:** `docs/superpowers/plans/2026-09-01-m1b-historical-market-semantics.md`
+**Historical M1b boundary:** `docs/superpowers/plans/2026-09-01-m1b-historical-market-semantics.md`
+
+**Subsequent M1b execution record:** `docs/superpowers/plans/2026-09-03-m1b-historical-security-identity-universes.md`
 
 The mixed task sequence below predates the M1a-only implementation ruling. Its
 unchecked execution state has been neutralized so Resume treats it only as
 history. The umbrella design remains canonical research context; the
-completed M1a record and deferred M1b outline above describe current plan state.
+completed M1a record and historical M1b outline describe that earlier planning
+state. Current milestone status belongs in `docs/architecture/roadmap.md`.
 
 > **Research history only:** Do not execute this task sequence. Use the completed
-> M1a record linked above only as execution history; M1b has no approved
-> execution plan.
+> M1a record linked above only as execution history. M1b's separately approved
+> execution record is linked above; this mixed sequence remains superseded.
 
 **Goal:** Add immutable point-in-time dataset contracts and fail-closed validators that bind exact bytes to channel-scoped temporal evidence, then add the minimum historical equity identity, universe, corporate-action, and session semantics required to prevent common leakage.
 

@@ -3,7 +3,7 @@
 ## Status
 
 Accepted on 2026-09-04 within the approved M1b semantic-audit scope.
-Implementation acceptance remains subject to independent review and the full gate.
+Implemented and independently accepted at `11f5d4b`, with the full gate passing.
 
 ## Context and evidence
 

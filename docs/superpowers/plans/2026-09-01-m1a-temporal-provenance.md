@@ -1,8 +1,13 @@
 # Drift M1a Temporal Provenance Implementation Plan
 
-**Status:** Complete and verified on 2026-09-02. No M1 plan is currently executable.
+**Status:** Complete and verified on 2026-09-02. This M1a plan is historical and
+not executable. Current milestone state belongs in `docs/architecture/roadmap.md`.
 
-> **Completion record:** All steps below are retained as execution history. M1b remains explicitly deferred and requires a separately approved design and executable plan.
+> **Completion record:** All steps below retain the M1a execution history and its
+> then-applicable boundaries. M1b was subsequently approved and implemented under
+> `docs/superpowers/plans/2026-09-03-m1b-historical-security-identity-universes.md`.
+> Historical statements below about deferred M1b describe the M1a closure, not
+> current repository status. M1c still has no executable implementation plan.
 
 **Goal:** Add asset-neutral, immutable dataset and revision provenance that answers a channel-, policy-, and cutoff-specific point-in-time eligibility question without inventing temporal precision.
 

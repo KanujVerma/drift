@@ -2,18 +2,22 @@
 
 Drift's long-term ambition is an evidence-driven, self-improving quantitative
 research and trading system. Its current implemented scope is an M0 research
-evidence kernel plus M1a temporal provenance. M0 records structured research
+evidence kernel, M1a temporal provenance, and M1b historical identity and universes.
+M0 records structured research
 metadata and a hash-chained audit history. M1a adds exact-byte dataset
 manifests, explicit channel-scoped availability evidence, immutable fact
 revisions, exact-object validation records, and per-query tri-state cutoff
-decisions.
+decisions. M1b adds immutable issuer/security/listing identities, dated identifier
+and primary-listing assertions, lifecycle and termination facts, historical
+universe membership, and structural eligibility over exact validated evidence.
 
-Drift is not a trading system or an equity backtester. M1a uses only synthetic
-fixtures and has no real data source, historical market semantics, evaluator,
+Drift is not a trading system or an equity backtester. M1b uses only synthetic
+local fixtures and has no real data source, evaluator,
 backtester, broker, strategy-execution, agent, network, order-management,
 portfolio-management, production configuration, or production-credential
-capability. M1b identity/universe semantics and M1c event/observation semantics
-remain required before Drift can make historical US-equity evaluation claims.
+capability. M1c event/observation semantics remain designed but unplanned and
+unimplemented. Prices, corporate-action economics, sessions, and historical
+tradability remain absent, and M1b does not authorize historical return evaluation.
 `StrategyArtifact` is compact provenance metadata, not executable strategy code.
 
 ## Core philosophy
@@ -32,8 +36,24 @@ research -> experiments -> evidence -> challengers -> gated promotion
 -> production strategy -> deterministic risk/execution
 ```
 
-M0 and M1a implement only the research and temporal-provenance foundations.
+M0, M1a, and M1b implement the evidence, temporal-provenance, and historical
+identity/universe foundations.
 They do not implement any later stage in that flow.
+
+## Historical identity and candidacy
+
+M1b distinguishes what an identifier referred to, what is known about a listing's
+lifecycle, and whether the listing meets a declared historical universe policy.
+A known mapping does not prove activity. Membership facts can remain known after
+an association ends; structural eligibility independently requires valid identity
+links, supported classification, the selected primary methodology, lifecycle
+evidence, and effective membership.
+
+Every query binds its knowledge cutoff, evaluation time, channel, policy, exact
+datasets, and supporting proofs. Later corrections create a new reproducible
+interpretation. Audit-only current interpretation cannot become historical
+decision information. See the [architecture overview](docs/architecture/overview.md)
+and [milestone record](docs/superpowers/plans/2026-09-03-m1b-historical-security-identity-universes.md).
 
 ## Install and verify
 

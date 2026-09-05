@@ -27,18 +27,23 @@ semantics, evaluator, backtester, broker, trading behavior, provider connection,
 credential, or network side effect. It does not make Drift ready for equity
 backtesting.
 
-## M1b, planned and not started
+## M1b, complete
 
-M1b is Historical Security Identity and Universes. Its proposed scope is stable
+M1b is Historical Security Identity and Universes. Its implemented scope is stable
 issuer, security, and listing identity; correctable identity assertions; dated
 external-identifier and primary-listing mappings; listing lifecycle and
 termination state; historical universe definitions/membership; and structural
 eligibility. M1b contains no price, corporate-action accounting, calendar, bar,
 or evaluator behavior.
 
-The only active executable plan is
+Runtime implementation is independently accepted through `dc1537f`, including
+Task 4 at `ea35028`, the semantic correction at `11f5d4b`, and final selected-value
+and equivalence-replay hardening. The execution and verification record is
 `docs/superpowers/plans/2026-09-03-m1b-historical-security-identity-universes.md`.
-It is awaiting implementation approval. No M1b runtime work has started.
+Final independent review has no open Critical or Important findings. All 793
+tests and the full runtime gate pass using synthetic local fixtures. The final
+acceptance record is the Git commit titled `docs: complete M1b identity milestone`;
+its actual hash is read from Git rather than embedded self-referentially.
 
 ## M1c, design proposed and not started
 
@@ -51,7 +56,7 @@ historical-tradability results.
 The umbrella design is
 `docs/superpowers/specs/2026-09-02-m1b-m1c-historical-equity-semantics-design.md`.
 It is approved as M1b planning input. No executable M1c implementation plan
-exists, and neither milestone has started.
+exists, and M1c has not started.
 
 M1 is not complete until M1a, M1b, and M1c are complete. The design is not
 authorization to build a market-data platform, download live data, evaluate

@@ -1,10 +1,18 @@
 # Drift M1b and M1c Historical Equity Semantics Design
 
-**Status:** Approved as architecture for M1b implementation planning. The causal
-M1b/M1c split is designed; both milestones remain unimplemented. The only active
-M1b plan is
+**Status:** Approved architecture with M1b implemented, independently reviewed,
+and verified. Its historical execution record is:
 `docs/superpowers/plans/2026-09-03-m1b-historical-security-identity-universes.md`.
-No executable M1c implementation plan exists.
+M1c remains designed but unplanned and unimplemented.
+
+Implementation refinements are recorded in
+[ADR 0006](../../adr/0006-independent-historical-identity-and-lifecycle-facts.md)
+(independent mapping/lifecycle facts and versioned interpretation) and
+[ADR 0007](../../adr/0007-authenticated-point-in-time-universe-composition.md)
+(source-definition replay, retained membership identity, and authenticated
+structural composition). [ADR 0008](../../adr/0008-verify-selected-content-and-dependent-equivalence.md)
+records selected-value integrity and dependent-equivalence replay. These rulings and the execution record govern M1b
+where they refine the original sketches below. M0/M1a contracts are unchanged.
 
 ## Decision summary
 
@@ -58,7 +66,10 @@ minimum scientific contracts against which future adapters can be tested.
 
 ## Evidence classification
 
-### Repository facts
+### Repository facts at design time
+
+This subsection records the pre-M1b baseline. Current implemented capabilities
+are described in the architecture overview and execution record linked above.
 
 - M0 provides immutable research references, canonical JSON, SHA-256 content
   hashing, append-only audit-event drafts, SQLite ledger storage, verified replay,
@@ -1383,7 +1394,11 @@ The review changed the design in eleven material ways:
   pass;
 - no evaluator, portfolio accounting, broker, or trading capability exists.
 
-## Non-goals
+## Original design authorization boundary
+
+This section records what this design document alone did not authorize. M1b was
+subsequently approved and implemented through its separate execution plan;
+M1c and the other deferred capabilities still have no implementation authority.
 
 This design does not authorize or include:
 
@@ -1393,7 +1408,7 @@ This design does not authorize or include:
 - CRSP, OpenFIGI, SEC, exchange, or index-provider integration;
 - Arrow, Parquet, DuckDB, `exchange_calendars`, LEAN, Zipline, NautilusTrader,
   Qlib, RD-Agent, or another new dependency;
-- an identity-resolution algorithm or mutable master registry;
+- a general automated entity-resolution engine or mutable master registry;
 - a calendar engine or market-data store;
 - an evaluator, backtester, feature engine, strategy, model, portfolio, cash
   ledger, tax, settlement, risk, execution, broker, order, or trading system;

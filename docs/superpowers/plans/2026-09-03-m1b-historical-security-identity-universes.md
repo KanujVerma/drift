@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** Implementation in progress. Tasks 1, 2, and 3 are committed at `2d65d97`, `1f03374`, and `1cf3afa`; the Task 3 semantic correction is committed at `11f5d4b`. Task 4 passed independent review and the controller's full 779-test verification gate and is ready for its authorized commit. Task 5 has not started. This is the only active executable M1b plan.
+**Status:** Complete and verified on 2026-09-04. Historical execution record, not an active plan. Tasks 1-5, final independent review, commits, and post-commit Checkpoint are complete. Both final integrity findings are fixed at `dc1537f`; the controller verified 793 passing tests and all repository gates. M1c remains designed, unplanned, and unimplemented.
 
 **Prerequisite:** Start from `main` with umbrella-design commit `6086a1f` present. M1a is complete at `0385493`.
 
@@ -743,6 +743,12 @@ def resolve_identity_assignment(
     decision: DatasetValidationDecisionV2,
     policy: AvailabilityPolicyV1,
     retained_evidence: Mapping[SHA256Hash, AvailabilityEvidenceV1],
+    *,
+    equivalence_resolution: IdentityResolutionResultV1 | None = None,
+    equivalence_proof: CutoffSelectionProofV1 | None = None,
+    equivalence_relationships: Sequence[IdentityRelationshipVersionV1] | None = None,
+    equivalence_manifest: DatasetManifestV2 | None = None,
+    equivalence_decision: DatasetValidationDecisionV2 | None = None,
 ) -> IdentityAssignmentResolutionResultV1: ...
 
 
@@ -1483,9 +1489,9 @@ Then run the full gate. Expected: all pass; leakage, survivorship deletion, unkn
 Worker gate on 2026-09-04: 779 tests pass, including 64 Task 4 unit cases and
 10 canonical fixture integration cases; Ruff passes; 92 files are formatted;
 mypy passes for 67 source files; source and wheel builds pass. Independent
-review and the controller commit remain outstanding. Task 5 has not started.
+review and controller verification subsequently accepted Task 4 at `ea35028`.
 
-- [ ] **Step 10: Commit historical universe semantics**
+- [x] **Step 10: Commit historical universe semantics**
 
 ```bash
 git add src/drift/domain/universes.py src/drift/markets/universes.py src/drift/markets/validation.py tests/unit/test_universes.py tests/integration/test_m1b_universe_leakage.py tests/fixtures/datasets/m1b/source-universe-definitions.json tests/fixtures/datasets/m1b/universe-memberships.json
@@ -1497,51 +1503,74 @@ git commit -m "feat: add point-in-time research universes"
 ### Task 5: Adversarial Hardening, Compatibility, and Lifecycle Documentation
 
 **Files:**
+- Harden: `src/drift/datasets/assertions.py`, `src/drift/markets/identity.py`.
+- Add regressions: `tests/unit/test_m1b_final_hardening.py`, `tests/unit/test_assertions.py`.
+- Add ruling: `docs/adr/0008-verify-selected-content-and-dependent-equivalence.md`.
 - Modify: `tests/integration/test_m1b_identity_history.py`
-- Modify: `tests/integration/test_m1b_universe_leakage.py`
-- Modify: `tests/integration/test_m1b_m1a_compatibility.py`
+- Verify: `tests/integration/test_m1b_universe_leakage.py`
+- Verify: `tests/integration/test_m1b_m1a_compatibility.py`
 - Modify: `tests/unit/test_security_identity.py`
-- Modify: `tests/unit/test_listing_semantics.py`
-- Modify: `tests/unit/test_universes.py`
+- Verify: `tests/unit/test_listing_semantics.py`
+- Verify: `tests/unit/test_universes.py`
 - Modify: `README.md`
 - Modify: `AGENTS.md`
 - Modify: `docs/architecture/overview.md`
 - Modify: `docs/architecture/roadmap.md`
 - Modify: `docs/superpowers/plans/2026-09-03-m1b-historical-security-identity-universes.md`
+- Clarify accepted status: `docs/adr/0006-independent-historical-identity-and-lifecycle-facts.md`, `docs/adr/0007-authenticated-point-in-time-universe-composition.md`.
+- Clarify historical headers/pointers: `docs/superpowers/plans/2026-09-01-m1-point-in-time-data.md`, `docs/superpowers/plans/2026-09-01-m1a-temporal-provenance.md`, `docs/superpowers/specs/2026-09-01-m1-point-in-time-data-design.md`, `docs/superpowers/specs/2026-09-02-m1b-m1c-historical-equity-semantics-design.md`.
 
 **Interfaces:**
 - Consumes: all M1b results.
-- Produces: closed adversarial evidence and canonical lifecycle status. No new runtime capability.
+- Produces: closed adversarial evidence, bounded integrity fixes, and canonical lifecycle status. No new product capability.
 
-- [ ] **Step 1: Complete the adversarial review matrix**
+**Final independent-review findings:**
+
+[ADR 0008](../../adr/0008-verify-selected-content-and-dependent-equivalence.md)
+records two Important findings and the bounded fixes. F1 demonstrated a future
+payload returned under a genuine selected old hash. F2 demonstrated a forged
+equivalence set accepted with a genuine distinction proof. The earlier named
+tests covered keys and matching metadata, not these value/entailment substitutions.
+
+F1 now verifies every returned value against its selected key: canonical content
+hash for models/JSON, exact-byte SHA-256 for bytes. F2 requires the complete
+optional equivalence input group and reuses full relationship proof/result replay
+from exact assignment and relationship datasets. Valid output shapes, persisted
+contracts, and ordinary assignment calls remain unchanged. This is integrity
+enforcement, not cryptographic authentication or M1c scope expansion.
+
+- [x] **Step 1: Complete the adversarial review matrix**
 
 Add or confirm one named test for every row:
 
-| Attempted cheat | Mechanical defense |
+All rows were verified against executable assertions, not test counts alone.
+Test names below are in the M1b unit/integration files identified by the file map.
+
+| Attempted cheat | Mechanical defense and named test |
 | --- | --- |
-| Join by today's ticker | Historical mapping selects the period-specific listing. |
-| Treat ticker change as new security | Same security/listing persist across OLD to NEW. |
-| Collapse ticker reuse | OLD maps to a distinct later listing/security. |
-| Collapse issuer/share class | Kind-safe endpoints reject it. |
-| Collapse two classes | One issuer retains two securities. |
-| Timeless primary | Query selects methodology and E; overlap fails. |
-| Rewrite correction | Old manifest/result remain reproducible. |
-| Pick arbitrary equivalent ID | Resolver returns sorted equivalence set. |
-| Apply current constituents historically | Earlier query is indeterminate. |
-| Add member at announcement | Upcoming is known but not effective. |
-| Drop terminated firm | Earlier listing/membership remain resolvable. |
-| Unknown classification is eligible | Result is indeterminate and admission fails. |
-| Mix target levels | Validation fails. |
-| Infer termination from bar absence | No M1b API accepts observation absence. |
-| Treat missing termination row as proof of activity | Complete listing-history coverage through E is required. |
-| Store economic outcome in termination | Cash, ratio, payout, return, and value fields fail `extra="forbid"`. |
-| Inject considered/future records | Selected-record resolver rejects every extra hash. |
+| Join by today's ticker | Period-specific listing: `test_ticker_change_reuse_and_venue_transfer_resolve_by_period`. |
+| Treat ticker change as new security | Continuing identity: `test_ticker_change_reuse_and_venue_transfer_resolve_by_period`, `test_canonical_bundle_v2_executes_complete_task3_resolution_flow`. |
+| Collapse ticker reuse | Distinct later identity: `test_ticker_change_reuse_and_venue_transfer_resolve_by_period`. |
+| Collapse issuer/share class | Complete endpoint matrix: `test_relationship_endpoint_matrix_is_closed`. |
+| Collapse two classes | `test_issuer_with_two_share_classes_keeps_distinct_security_ids`, `test_two_share_classes_keep_classification_bound_to_each_security`. |
+| Timeless primary | `test_listing_role_rejects_timeless_primary`, `test_same_methodology_overlapping_primaries_fail_validation`. |
+| Rewrite correction | `test_earlier_identity_manifest_replays_unchanged_after_later_manifest`, `test_membership_correction_and_withdrawal_replay_by_cutoff`. |
+| Pick arbitrary equivalent ID | Sorted set and conflict: `test_equivalence_returns_a_sorted_set_and_distinction_creates_conflict`; dependent entailment: `test_distinction_proof_cannot_authorize_a_forged_equivalence_result`. |
+| Apply current constituents historically | `test_current_snapshot_cannot_backfill_historical_membership`. |
+| Add member at announcement | `test_membership_announcement_is_not_effective_membership`, `test_pinned_synthetic_index_replays_announcement_effect_and_correction`. |
+| Drop terminated firm | `test_later_delisting_does_not_delete_historical_universe_identity`, `test_membership_retains_identity_without_inferring_current_association`. |
+| Unknown classification is eligible | `test_unknown_classification_evidence_is_indeterminate`, `test_structural_admission_uses_replayed_classification`. |
+| Mix target levels | `test_mapping_target_kind_must_match_its_namespace`, `test_membership_target_kind_cannot_be_substituted`. |
+| Infer termination from bar absence | `test_observation_shaped_input_cannot_create_termination`. |
+| Treat missing termination row as proof of activity | `test_no_termination_requires_complete_history_through_e`, `test_known_membership_does_not_authorize_unknown_activity`. |
+| Store economic outcome in termination | `test_termination_model_rejects_economic_outcome_fields`. |
+| Inject considered/future records | `test_selection_proof_and_decision_reference_hide_considered_records`, `test_pinned_membership_records_cannot_be_replaced_by_selected_subset`, `test_selected_value_cannot_substitute_future_payload_under_genuine_hash`. |
 
-- [ ] **Step 2: Keep invariant testing dependency-free**
+- [x] **Step 2: Keep invariant testing dependency-free**
 
-Do not add Hypothesis. These invariants use finite enums, an endpoint matrix, causal chains, and boundary partitions with deterministic oracles. Use `itertools.product` to exhaust relationship-kind/endpoint-kind triples and strict classification combinations. Keep example histories for temporal graph behavior. Reconsider a dependency only if implementation exposes a stronger generator-friendly invariant not covered by exhaustive tables.
+No dependency was added. Existing tests use `itertools.product` for relationship-kind/endpoint-kind triples, finite classification tables, and concrete temporal histories. Final independent review exposed F1/F2 despite the earlier passing suite; genuine-data substitution regressions and bounded fixes now cover those gaps. Reconsider a generator dependency only for a concrete uncovered invariant.
 
-- [ ] **Step 3: Run scope and forbidden-capability checks**
+- [x] **Step 3: Run scope and forbidden-capability checks**
 
 ```text
 git diff 6086a1f -- pyproject.toml uv.lock
@@ -1551,7 +1580,7 @@ rg -n -i "price|ohlc|dividend|split|cash consideration|terminal return|portfolio
 
 Expected: dependency diff empty. Inspect every search hit. Only negative tests, scope comments, ex-post role vocabulary, and outcome-evidence status are allowed.
 
-- [ ] **Step 4: Prove M0/M1a compatibility**
+- [x] **Step 4: Prove M0/M1a compatibility**
 
 ```text
 uv run pytest tests/integration/test_m1b_m1a_compatibility.py tests/integration/test_m1_m0_compatibility.py tests/integration/test_replay.py tests/integration/test_tamper_detection.py -v
@@ -1560,11 +1589,11 @@ uv run pytest tests/unit/test_canonical_serialization.py tests/unit/test_manifes
 
 Expected: all pinned bytes, hashes, decisions, dataset events, and replay tests pass unchanged.
 
-- [ ] **Step 5: Update canonical documentation**
+- [x] **Step 5: Update canonical documentation**
 
 Only after gates pass, update README/overview to say M1b supplies synthetic identity/universe semantics and M1c still blocks observations/backtesting; update AGENTS.md boundaries; mark M1b complete in the roadmap at its commit; retain M1c as designed/not started with no plan; record commit hashes and verification in this plan. Do not create a session-continuity database.
 
-- [ ] **Step 6: Run the final completion gate**
+- [x] **Step 6: Run the final completion gate after F1/F2 hardening**
 
 ```text
 uv run pytest
@@ -1578,20 +1607,30 @@ git diff --check
 git status -sb
 ```
 
-Expected: all code gates pass; placeholder and U+2014 scans have no matches; diff check is clean; only M1b files plus unrelated `.DS_Store` appear before commit.
+Expected: all code gates pass; placeholder and U+2014 scans have no matches; diff check is clean; only M1b changes and the untouched pre-existing `.DS_Store` and untracked handoff appear before commit.
 
-- [ ] **Step 7: Perform a final requirements review**
+- [x] **Step 7: Perform the final independent requirements review (controller)**
 
 Read umbrella sections 210-642, 849-978, 1076-1144, 1216-1273, and 1338-1401 plus every plan item. Record PASS/FAIL for identity, correction, mapping, classification, primary role, lifecycle, termination, universe, selection boundary, compatibility, scope, and docs. Fix each FAIL before committing.
 
-- [ ] **Step 8: Commit hardening and lifecycle docs**
+- [x] **Step 7a: Commit accepted F1/F2 hardening separately (controller)**
+
+After fresh re-review, commit the runtime/test fixes and ADR independently of
+the existing eleven-file lifecycle-documentation preparation:
 
 ```bash
-git add AGENTS.md README.md docs/architecture/overview.md docs/architecture/roadmap.md docs/superpowers/plans/2026-09-03-m1b-historical-security-identity-universes.md tests/integration/test_m1b_identity_history.py tests/integration/test_m1b_universe_leakage.py tests/integration/test_m1b_m1a_compatibility.py tests/unit/test_security_identity.py tests/unit/test_listing_semantics.py tests/unit/test_universes.py
+git add src/drift/datasets/assertions.py src/drift/markets/identity.py tests/unit/test_assertions.py tests/unit/test_security_identity.py tests/unit/test_m1b_final_hardening.py tests/integration/test_m1b_identity_history.py docs/adr/0008-verify-selected-content-and-dependent-equivalence.md
+git commit -m "fix: verify selected record and equivalence evidence"
+```
+
+- [x] **Step 8: Commit final lifecycle docs (controller)**
+
+```bash
+git add AGENTS.md README.md docs/architecture/overview.md docs/architecture/roadmap.md docs/adr/0006-independent-historical-identity-and-lifecycle-facts.md docs/adr/0007-authenticated-point-in-time-universe-composition.md docs/superpowers/plans/2026-09-01-m1-point-in-time-data.md docs/superpowers/plans/2026-09-01-m1a-temporal-provenance.md docs/superpowers/plans/2026-09-03-m1b-historical-security-identity-universes.md docs/superpowers/specs/2026-09-01-m1-point-in-time-data-design.md docs/superpowers/specs/2026-09-02-m1b-m1c-historical-equity-semantics-design.md
 git commit -m "docs: complete M1b identity milestone"
 ```
 
-- [ ] **Step 9: Run Checkpoint**
+- [x] **Step 9: Run Checkpoint (controller)**
 
 Verify Git status/log/diff and the full gate against the final commit. Do not create a Session Handoff if repository and plan are canonical. Do not create an M1c plan.
 
@@ -1611,17 +1650,53 @@ M1b is complete only when every box above is checked and fresh evidence proves:
 - audit proofs retain considered hashes while decision resolution exposes only selected hashes;
 - V2 validates exact objects without changing M0/M1a bytes, hashes, events, or replay;
 - no M1c, evaluator, provider, network, broker, credential, or trading capability exists;
-- the full gate passes and the tree is clean except for pre-existing `.DS_Store`.
+- the full gate passes, the tracked tree and index are clean, and pre-existing `.DS_Store` and the untracked handoff remain untouched.
 
 ## Implementation Commit Sequence
 
-1. `feat: add assertion temporal dataset contracts`
-2. `feat: add immutable historical security identity`
-3. `feat: add historical listing semantics`
-4. `feat: add point-in-time research universes`
-5. `docs: complete M1b identity milestone`
+1. `2d65d97e115fb946ae7555a4cb3b9d96fa335ed6`: `feat: add assertion temporal dataset contracts`.
+2. `1f033748ceb054fdc24540dbda247ee97ed32eb7`: `feat: add immutable historical security identity`.
+3. `1cf3afadc4efdc1a1153326aa1d224d9c40aeb7a`: `feat: add historical listing semantics`.
+4. `11f5d4b218683be1cc3bc214916db7faa9e695f6`: `fix: separate historical mapping and lifecycle uncertainty`.
+5. `ea350285302c4c851081f52a09ffb6a53444904a`: `feat: add point-in-time research universes`.
+6. `dc1537f44b80330e0502761732fdae9791667177`: `fix: verify selected record and equivalence evidence`.
+7. The final completion record is the Git commit titled `docs: complete M1b identity milestone`; retrieve its actual hash from Git rather than embedding a self-referential hash in that commit.
 
 These are implementation-time commits. This planning document's commit does not count as M1b implementation.
+
+## Pre-review worker verification, 2026-09-04
+
+At `ea35028`, all 779 tests pass; the explicit M0/M1a compatibility and verified
+replay group passes 13 tests; the canonical/temporal contract group passes 185.
+Ruff is clean, 93 files pass formatting, mypy passes for 67 source files, and
+source/wheel builds pass using installed offline dependencies. Every matrix row
+above had an existing executable test. The subsequent independent review exposed
+F1/F2, so this 779-test gate is historical evidence, not final hardening acceptance.
+
+Dependency manifests are unchanged from `6086a1f`. Scope-search hits are confined
+to credential-rejection tests/validation and reused source-precision vocabulary;
+`SourcePrecision.SESSION` does not implement a session schedule or market calendar.
+No M1c plan or runtime capability was added. Documentation contradiction,
+stale-plan, placeholder, U+2014, and diff checks pass; remaining M1b-deferred
+language occurs only inside explicitly historical M1a execution instructions.
+This pre-review snapshot is historical; final review and hardening evidence follow.
+
+## F1/F2 hardening worker verification, 2026-09-04
+
+F1 reproduced four payload substitutions, then all four passed after actual
+content hashing. F2 reproduced forged-equivalence and ignored-proof failures
+while its genuine-equivalence control passed; all 14 covering equivalence cases
+now pass with complete exact evidence. The broader covering suite passes 327
+tests. Full gate: 793 tests pass, Ruff is clean, 95 files pass formatting, mypy
+passes for 68 source files, and source/wheel builds pass offline.
+
+No persisted domain schema, canonical/ledger code, existing fixture, dependency,
+or M0/M1a contract changed. Final independent re-review passed with no open
+Critical or Important findings and 16 fresh focused checks, including genuine
+selected references and equivalence proof replay. The controller independently
+ran the full gate: 793 tests, clean Ruff, 95 formatted files, mypy across 68
+source files, and source/wheel builds. Hardening is committed at `dc1537f`.
+The earlier 779-test report is historical, not the final acceptance evidence.
 
 ## Explicit M1c and Later Deferrals
 
@@ -1629,4 +1704,15 @@ No task may add source/raw/normalized prices; actions or economic outcomes; cash
 
 ## Resume Rule
 
-At each implementation session run Resume first. Repository state wins. Confirm `6086a1f`, locate the first unchecked task, inspect uncommitted files, and continue only there. Checkpoint after each accepted commit. Never store development continuity in Drift's scientific ledger or a duplicate continuity database.
+Final post-commit Checkpoint passed on 2026-09-04: 793 tests, Ruff lint,
+95 formatted files, mypy across 68 source files, and source/wheel builds.
+The index and tracked working tree were clean. Only the untouched pre-existing
+`.DS_Store` and untracked session handoff remained outside Git. No new handoff,
+M1c plan, dependency, or external-system capability was created. The final
+completion commit is identified by its subject in the sequence above; this
+closure receipt is included in that same local documentation commit.
+
+This plan is a historical execution record. Run Resume
+against Git before any future work; do not replay completed tasks or infer M1c
+authorization from this record. Never store development continuity in Drift's
+scientific ledger or a duplicate continuity database.

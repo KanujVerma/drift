@@ -2,11 +2,12 @@
 
 ## Purpose and scope
 
-Drift M0 is a local research evidence kernel. Its purpose is to preserve what
+Drift combines a local research evidence kernel (M0), temporal provenance (M1a),
+and historical identity/universe semantics (M1b). Its purpose is to preserve what
 was proposed, tested, observed, and concluded in a form that can be checked
 later. It does not make trading decisions or connect to a trading environment.
 
-The system has four small responsibilities:
+The M0 core has four small responsibilities:
 
 1. Frozen domain models validate research objects such as hypotheses, dataset
    references, experiment specifications and runs, evidence, and artifact
@@ -50,9 +51,59 @@ The first creates a missing local database and verifies it. The second verifies
 an existing database and reports its event count without creating a missing
 file. `[path]` defaults to `.drift/ledger.db`.
 
+## Temporal and historical resolution
+
+M1a binds exact source bytes and immutable revisions to explicit availability
+evidence. It answers what was knowable through a named channel and policy by a
+knowledge cutoff. M1b adds independently versioned identity, mapping,
+classification, primary-role, lifecycle, termination, and universe assertions.
+Their effective time answers a separate question from source availability.
+
+Local readers verify artifact bytes before role-specific parsing. Exact schemas
+and validation decisions bind the parsed records into immutable dataset bundles.
+Audit-side resolvers select causal versions at the knowledge cutoff and evaluate
+their effect at the requested historical time. They retain considered and selected
+record hashes with query and proof bindings. Decision references expose only
+selected hashes; ex-post current interpretation cannot acquire decision authority.
+
+Issuer, security, and venue listing remain separate identities. Ticker changes
+preserve the listing; reuse names a distinct identity; venue transfer can create
+a new listing for the same security. Primary status is temporal and methodology
+specific. Known mapping is independent of uncertain lifecycle. An absent
+termination record proves neither continued activity nor termination. Asserting
+continued activity requires complete lifecycle history through the evaluation time.
+
+Source universe definitions have their own causal selection and replay. Research
+policies are directly content-addressed and pin both input bundles. Membership
+uses explicit effective events; an upcoming addition or a current snapshot cannot
+establish historical inclusion. An ended source-key association does not erase a
+retained identity or create a membership removal.
+
+The public structural resolver reconstructs identity, classification, primary,
+lifecycle, and membership outcomes from complete validated inputs before pure
+composition. It accepts no caller status as trusted evidence. Supported domestic
+operating-company common shares require an evidenced primary listing on XNYS,
+XNAS, or XASE, definite first trade and lifecycle state, and effective membership.
+Unknown or conflicting evidence remains indeterminate and fails admission.
+
+Canonical contracts live in `src/drift/domain/`; audit-side resolvers and exact
+role validation live in `src/drift/markets/`. The semantic separations and trust
+boundaries are recorded in [ADR 0006](../adr/0006-independent-historical-identity-and-lifecycle-facts.md)
+and [ADR 0007](../adr/0007-authenticated-point-in-time-universe-composition.md).
+There is no provider connection, price/action accounting, session engine,
+historical-tradability model, evaluator, or process-isolated decision runtime.
+M1c remains a separate future milestone.
+
 ## Compatibility contract
 
 A future storage adapter, including PostgreSQL, must preserve the event
 envelope, canonical hashing rules, database-assigned ordering, deduplication
 uniqueness, append-only behavior, checkpoint coverage, and full verification
 semantics. M0 does not include that adapter.
+
+M1b's manifest and validation-decision V2 contracts are additive. Existing M0/M1a
+canonical bytes, hashes, schemas, event envelopes, ledger behavior, and replay
+remain unchanged and covered by pinned compatibility tests. Historical M1b
+interpretations also require their pinned interpreter: the Task 3 semantic
+correction versions mapping/termination/lifecycle proofs rather than silently
+reusing the earlier proof identity. Old records and manifests remain retained.

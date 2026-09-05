@@ -1,20 +1,20 @@
 # Drift
 
-Drift currently implements an M0 research evidence kernel plus M1a temporal
-provenance, not a trading system or equity backtester. M1a provides exact-byte
-manifests, explicit channel-scoped evidence, immutable revisions, exact-object
-validation records, and per-query tri-state cutoff decisions. Preserve that
-boundary unless an explicitly approved milestone changes it.
+Drift implements an M0 research evidence kernel, M1a temporal provenance, and
+M1b historical identity/universe semantics using synthetic local fixtures.
+It is not a trading system or equity backtester. Current capability and milestone
+status belong in `docs/architecture/roadmap.md`.
 
 ## Current boundary
 
-- M1a uses synthetic fixtures and has no real source, historical market
-  semantics, evaluator, backtester, or trading capability. M1b identity/universe
-  semantics and M1c event/observation semantics remain required before
-  historical US-equity evaluation claims.
+- M1c remains designed but has no executable plan or implementation. Do not add
+  prices, corporate-action economics, sessions, observations, tradability,
+  evaluation, or backtesting without separate approval.
 - Do not add broker or market-data connections, order placement, trading,
   backtesting, agent orchestration, production configuration, credentials, or
-  network side effects during M0 or M1a maintenance.
+  network side effects during evidence/identity maintenance.
+- Preserve M0/M1a persisted contracts and M1b immutable source history. Known
+  mapping or membership is not proof of listing activity or structural eligibility.
 - `StrategyArtifact` and `StrategyReference` are immutable provenance metadata,
   not executable strategy or promotion behavior.
 
