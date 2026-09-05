@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-05-historical-economic-events-and-observations-design.md`, accepted at `ba1ea66205fda1d649a2bd1034e0c8788c33664d`; ADR 0009. Read both and ADRs 0006-0008 before execution.
 
-**Status:** Reviewed executable plan, planning complete on 2026-09-05. Implementation is not started. All Task 1-8 implementation checkboxes remain unchecked. This is the sole active M1c plan; Task 1 may begin only after separate implementation authorization. M1d has no executable plan.
+**Status:** Implementation in progress, authorized on 2026-09-05 from planning checkpoint `8bc8bbed3abe0ce977445184e4aa495a6a89dd03`. Task 1 is implemented, independently reviewed and verified; Task 2 is next. Tasks 2-8 remain pending. This is the sole active M1c plan. The user authorized reviewed task commits and continuation without routine approval stops; M1d has no executable plan or implementation authority.
 
 ## Global Constraints
 
@@ -22,7 +22,7 @@
 - M1c owns historical economic facts only. No prices/OHLCV, observations, normalization, calendars/sessions, action-to-session mapping, missing-observation logic, portfolio accounting, returns, reinvestment, backtest/evaluator, provider/network/broker/runtime-agent capability.
 - All source facts and policy/proof artifacts are immutable, explicitly versioned and content-addressed. Hashes and frozen objects establish integrity, not process authorization.
 - Initial supported investment scope remains domestic operating-company common shares, primary XNYS/XNAS/XASE, long-only daily research. A receipt may identify excluded property without granting investment eligibility.
-- This is the single active executable M1c plan after its planning review/commit. It does not authorize execution. The current request stops after planning; future execution and commit authority must be separately established.
+- This is the single active executable M1c plan. Its original authoring request stopped after planning; the subsequent 2026-09-05 implementation request authorizes all reviewed M1c slices and commits. Material stop conditions and the M1d boundary still apply.
 - Never edit existing source/test/fixture/dependency files as a convenience. Escalate a demonstrated protected-contract change as a material design issue.
 
 ---
@@ -97,6 +97,8 @@ Three sets have different authority: revision-selected records at K/V remain aud
 
 Hash rules for all new derived contracts are uniform: query_hash=`content_hash(query)`, policy hash=`content_hash(policy)`, association/projection/reference/outcome identities=`content_hash(object)`, selection_proof_hash=`content_hash(proof)`. No new proof/result/projection self-hash fields and no arbitrary omitted-field helper. Only existing fixed `revision.payload_hash` and existing schema preimages retain their established exclusions. A context hash binds its explicit canonical input descriptor, not a dataclass repr or unbound path.
 
+Task 1 execution clarification, supported by failing state-matrix probes: terms projections have fact_status=terms, component_role=terms, claim_status=unknown and residual_status=unknown. Their consideration is components when a known/withheld component exists, otherwise unknown. Only occurred effects may carry sourced claim/consideration/residual state; cancelled_action and unknown effects have role owed, no components, and unknown claim/consideration/residual. Settlement projections have fact_status=delivered, role delivered, claim_status=unknown and component consideration with at least one known/withheld component; all sourced residual states are permitted, including outstanding and closed_for_action. Non-component consideration cannot carry component values or gaps. This closes impossible derived states without adding a new source family or conflating promises/payment with claim-state evidence.
+
 Algorithm-spec hashes and implementation hashes are different. Store `content_hash` of a literal semantic-rule specification dictionary as each `*_algorithm_spec_hash`; pin that dictionary/version in tests. Store a byte-implementation digest as `*_implementation_hash`: add `economic_implementation_hash() -> str` in Task 1 common module, hashing a canonical sorted inventory of relative paths and exact SHA-256 bytes for every `.py` source file under the installed `drift` package. Inventory format is `{'profile':'drift-python-source-inventory-v1','files':[{'path':relative_posix_path,'sha256':digest}]}`. Reject symlinks/unreadable files; never include caches, absolute locations or timestamps. This is a source-code identity hook, not an environment/replay package. All byte hashes bind current exact code; spec hash alone is not code identity. No old hash algorithm changes.
 
 ### B. Source keys, associations and components
@@ -157,7 +159,7 @@ Do not sum components numerically. Composition produces distinct delivered occur
 
 **Interfaces:** Produces all common types, ActionKind, RetainedEconomicIdentityV1 and query/proof/reference/projection models in contracts A/B, including complete declared fields before consumers import them. Functions: `validate_canonical_cash(value: object) -> str`, `market_cutoff(query: MarketSelectionQueryV1) -> datetime`, `market_horizon(query: MarketSelectionQueryV1) -> datetime`, `economic_implementation_hash() -> str`. PositiveRatioV1 fields are canonical positive integer strings numerator/denominator with gcd one. No floats or Decimal conversion of source input, no arbitrary self-hash helper.
 
-- [ ] Write tests including this behavioral RED and query K/E/T pairs:
+- [x] Write tests including this behavioral RED and query K/E/T pairs:
 
 ```python
 import pytest
@@ -181,8 +183,8 @@ def test_exact_ratio_and_cash_round_trip() -> None:
         PositiveRatioV1(numerator="6", denominator="4")
 ```
 
-- [ ] Run `uv run pytest tests/unit/test_economic_numbers_queries.py -q`; confirm missing interfaces first, then semantic failures for any partial implementation.
-- [ ] Implement the local validator kernel and strict frozen model validators:
+- [x] Run `uv run pytest tests/unit/test_economic_numbers_queries.py -q`; confirm missing interfaces first, then semantic failures for any partial implementation.
+- [x] Implement the local validator kernel and strict frozen model validators:
 
 ```python
 import re
@@ -224,8 +226,8 @@ Cash source reports in this first delivered/owed profile are nonnegative; negati
 
 Query validators compare contract A datetime fields and reject opposite-role fields through extra='forbid'. New hashes always use full external content_hash as specified above. Test self-consistent outcome-reference JSON rejected by the decision-reference discriminator. Add literal digest fixtures for query, policy, proof, reference, association and outcome plus a mutation table asserting each semantically/provenance-relevant field changes the full digest. A later Task adds its result fixture when that type exists; no earlier wire type changes. Test source-byte change alters implementation hash even if the semantic spec dictionary is unchanged.
 
-- [ ] Add exact tests: K>T, E>T, start>E, start>H, independently ordered H/V accepted, naive dates, outcome H/V in decision payload, decision T/K/E in outcome payload, zero selected hashes valid reference, canonical source-key/recipient union shape and ratio meaning missing rejected. Valid query fixtures bind literal known hash strings here only; no Task 1 proof claims authenticity.
-- [ ] Run focused GREEN, full gate and independent review. Proposed accepted boundary: `feat: add exact M1c economic primitives and queries`.
+- [x] Add exact tests: K>T, E>T, start>E, start>H, independently ordered H/V accepted, naive dates, outcome H/V in decision payload, decision T/K/E in outcome payload, zero selected hashes valid reference, canonical source-key/recipient union shape and ratio meaning missing rejected. Valid query fixtures bind literal known hash strings here only; no Task 1 proof claims authenticity.
+- [x] Run focused GREEN, full gate and independent review. Proposed accepted boundary: `feat: add exact M1c economic primitives and queries`.
 
 ## Task 2: Terms, actual effects and settlement reports
 
@@ -844,3 +846,13 @@ Final checks on 2026-09-05: `uv run pytest` passed all 793 existing tests; `uv r
 Documentation checks passed: eight task sections, all 41 implementation steps unchecked, exactly one active M1c plan, no executable M1d plan, prior plans explicitly completed/superseded, current lifecycle pointers consistent, local Markdown links valid, no unresolved placeholders, no U+2014, and a clean whitespace diff. Protected-path comparison against the design checkpoint is empty.
 
 Checkpoint preserves this plan and the minimal canonical lifecycle/refinement updates. All unrelated `.DS_Store` files and the historical M1b handoff remain excluded and matched their starting hashes. No new Session Handoff is needed because the continuation boundary is canonical: implementation is unstarted, Task 1 is next only after authorization, and M1d remains unplanned. The actual planning commit hash and final Git status are reported from Git rather than embedded self-referentially here. Stop after the planning commit/checkpoint; do not offer or begin execution within this planning-only request.
+
+## M1c execution record
+
+Implementation authorization supersedes the planning-only stop above. Start: `main` at `8bc8bbed3abe0ce977445184e4aa495a6a89dd03`, with 793 tests and the full repository gate passing. Task-level evidence and accepted commit/checkpoint summaries are appended here as work earns acceptance. Detailed transient briefs and reports use the established plan-scoped Superpowers scratch workflow, never Drift's scientific ledger. No M1d, external integration, dependency or prior persisted-contract change is authorized.
+
+### Task 1 acceptance
+
+Terra implemented exact primitives and complete query/proof/projection wire contracts; a fresh Sol reviewer required one fix round and then approved spec compliance and code quality. Controller probes confirmed and fixes closed false cancelled-action claim authority, rejection of valid outstanding settlements, symlink omission in the byte fingerprint, and missing boundary/mutation tests. The strict projection matrix above is the source-family authority ruling. Whole-package fingerprinting remains conservative and separate from semantic hashes; disposable package tests prove byte churn and link rejection without modifying protected source.
+
+RED evidence includes six semantic failures before initial validators, then four regression failures before the review repairs. Focused GREEN: 38 tests. Controller full gate: 831 tests passed, Ruff lint/format passed, mypy passed across 72 source files, build passed, and whitespace check passed. Existing source/test/fixture/dependency files and unrelated-file hashes are unchanged. Accepted commit subject: `feat: add exact M1c economic primitives and queries`; resolve its hash from Git. Task 2 must expand the temporary cash_component helper to its already specified signature rather than treat the Task 1 test helper as a new contract.
