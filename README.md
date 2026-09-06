@@ -2,7 +2,8 @@
 
 Drift's long-term ambition is an evidence-driven, self-improving quantitative
 research and trading system. Its current implemented scope is an M0 research
-evidence kernel, M1a temporal provenance, and M1b historical identity and universes.
+evidence kernel, M1a temporal provenance, M1b historical identity and universes,
+and M1c historical economic facts.
 M0 records structured research
 metadata and a hash-chained audit history. M1a adds exact-byte dataset
 manifests, explicit channel-scoped availability evidence, immutable fact
@@ -10,17 +11,20 @@ revisions, exact-object validation records, and per-query tri-state cutoff
 decisions. M1b adds immutable issuer/security/listing identities, dated identifier
 and primary-listing assertions, lifecycle and termination facts, historical
 universe membership, and structural eligibility over exact validated evidence.
+M1c adds immutable action terms, occurred/cancelled effects, reported settlements,
+exact cash/share/property components, coverage and separate decision/outcome
+selection with complete dependent replay.
 
-Drift is not a trading system or an equity backtester. M1b uses only synthetic
-local fixtures and has no real data source, evaluator,
+Drift is not a trading system or an equity backtester. Its market semantics use
+synthetic local fixtures. It has no real data source, evaluator,
 backtester, broker, strategy-execution, agent, network, order-management,
 portfolio-management, production configuration, or production-credential
-capability. M1c economic events/outcomes are planned but unimplemented; the
-[M1c implementation plan](docs/superpowers/plans/2026-09-05-m1c-corporate-actions-economic-outcomes.md)
-requires separate execution authorization. M1d observations/sessions/normalization
-remain designed only, with no executable plan. Prices, corporate-action
-economics, sessions, and historical research-session eligibility remain absent,
-and M1b does not authorize historical return evaluation.
+capability. M1c is complete; its
+[implementation and acceptance record](docs/superpowers/plans/2026-09-05-m1c-corporate-actions-economic-outcomes.md)
+documents the tested boundary. M1d observations/sessions/normalization remain
+designed only, with no executable plan or implementation. Prices, sessions,
+normalization, historical research-session eligibility, and return evaluation
+remain absent.
 `StrategyArtifact` is compact provenance metadata, not executable strategy code.
 
 ## Core philosophy
@@ -39,8 +43,8 @@ research -> experiments -> evidence -> challengers -> gated promotion
 -> production strategy -> deterministic risk/execution
 ```
 
-M0, M1a, and M1b implement the evidence, temporal-provenance, and historical
-identity/universe foundations.
+M0, M1a, M1b, and M1c implement the evidence, temporal-provenance, historical
+identity/universe, and economic-fact foundations.
 They do not implement any later stage in that flow.
 
 ## Historical identity and candidacy
@@ -57,6 +61,23 @@ datasets, and supporting proofs. Later corrections create a new reproducible
 interpretation. Audit-only current interpretation cannot become historical
 decision information. See the [architecture overview](docs/architecture/overview.md)
 and [milestone record](docs/superpowers/plans/2026-09-03-m1b-historical-security-identity-universes.md).
+
+## Historical economic facts
+
+M1c keeps promises, actual effects and reported deliveries separate. It selects
+source revisions before comparing reports of the same evidenced occurrence,
+so corrections and corroborating reports do not mint additional payouts.
+Known payments can survive missing parents; delisting does not imply claim
+extinction or zero proceeds. Partial evidence and unsupported economic shapes
+remain explicit rather than being converted to complete results.
+
+Decision and outcome references are not interchangeable. Exact-byte validation
+must pass, supplied values are checked in a stable snapshot, and replay binds
+the query, source policy, identity evidence and interpreter. Semantic-rule hashes
+and the conservative installed-source fingerprint have different purposes.
+Immutable fixtures retain old source bytes and code bindings instead of silently
+rewriting them. These guarantees use synthetic evidence; they establish neither
+real-market completeness nor valuation or backtest readiness.
 
 ## Install and verify
 

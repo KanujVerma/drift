@@ -1,23 +1,25 @@
 # Drift
 
-Drift implements an M0 research evidence kernel, M1a temporal provenance, and
-M1b historical identity/universe semantics using synthetic local fixtures.
+Drift implements an M0 research evidence kernel, M1a temporal provenance,
+M1b historical identity/universes, and M1c historical economic facts using
+synthetic local fixtures.
 It is not a trading system or equity backtester. Current capability and milestone
 status belong in `docs/architecture/roadmap.md`.
 
 ## Current boundary
 
-- M1c has one executable implementation plan, with implementation not started:
+- M1c is complete; its historical implementation and acceptance record is
   `docs/superpowers/plans/2026-09-05-m1c-corporate-actions-economic-outcomes.md`.
-  Execution requires separate user authorization. M1d remains designed only,
-  with no executable plan or implementation. Do not add
-  prices, corporate-action economics, sessions, observations, tradability,
-  evaluation, or backtesting without separate approval.
+  M1d remains designed only, with no executable plan or implementation.
+  Do not add prices, sessions, observations, normalization, tradability,
+  portfolio accounting, evaluation, or backtesting without separate approval.
 - Do not add broker or market-data connections, order placement, trading,
   backtesting, agent orchestration, production configuration, credentials, or
   network side effects during evidence/identity maintenance.
 - Preserve M0/M1a persisted contracts and M1b immutable source history. Known
   mapping or membership is not proof of listing activity or structural eligibility.
+- Preserve accepted M1c fixture versions and their implementation bindings.
+  Reported terms, effects and deliveries are distinct; unknown is not zero.
 - `StrategyArtifact` and `StrategyReference` are immutable provenance metadata,
   not executable strategy or promotion behavior.
 

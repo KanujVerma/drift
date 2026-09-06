@@ -40,18 +40,30 @@ Runtime implementation is independently accepted through `dc1537f`, including
 Task 4 at `ea35028`, the semantic correction at `11f5d4b`, and final selected-value
 and equivalence-replay hardening. The execution and verification record is
 `docs/superpowers/plans/2026-09-03-m1b-historical-security-identity-universes.md`.
-Final independent review has no open Critical or Important findings. All 793
-tests and the full runtime gate pass using synthetic local fixtures. The final
+Final independent M1b review had no open Critical or Important findings. All 793
+tests and the full runtime gate passed at that synthetic-fixture checkpoint. The final
 acceptance record is the Git commit titled `docs: complete M1b identity milestone`;
 its actual hash is read from Git rather than embedded self-referentially.
 
-## M1c, planned and not started
+## M1c, complete
 
-M1c is Corporate Actions and Economic Outcomes. It will represent immutable
-action terms, occurrence/entitlement/settlement facts, revisions, fixed cash/share
-components, claim-level known/partial/unknown outcomes, coverage, and separate
-decision versus outcome selection. It consumes M1a/M1b without prices, sessions,
-derived adjustment factors, or portfolio accounting.
+M1c is Corporate Actions and Economic Outcomes. It implements immutable terms,
+occurred/cancelled effects, reported settlements, exact cash/share/property
+components, query-bound associations, claim and residual outcomes, coverage,
+and separate decision/outcome selection and replay. It consumes M1a/M1b without
+prices, sessions, derived adjustment factors, holdings or portfolio accounting.
+
+Runtime and synthetic integration acceptance is complete through
+`8f2621d20c2b010ffc105b2e1aded65acaa9c091`, including final evidence/temporal
+hardening. Independent final review has no unresolved findings. All 1,093 tests
+and the full repository gate pass; the focused compatibility entry points pass
+366 tests. The
+[completed implementation plan](../superpowers/plans/2026-09-05-m1c-corporate-actions-economic-outcomes.md)
+records exact scope, reviewed corrections, immutable v1/current v2 fixture
+bindings, and verification. Documentation publication uses the commit subject
+`docs: complete M1c economic fact milestone`; the controller reports its actual
+hash and post-commit Checkpoint result after publication.
+No provider, network, broker, dependency, evaluator or trading capability was added.
 
 ## M1d, designed only and not started
 
@@ -65,10 +77,9 @@ Total-return accounting and evaluation remain later responsibilities.
 The canonical successor design is
 `docs/superpowers/specs/2026-09-05-historical-economic-events-and-observations-design.md`;
 the decision is recorded in ADR 0009. It supersedes the original umbrella's
-combined M1c scope, not completed M1b contracts. The sole active executable plan
-is `docs/superpowers/plans/2026-09-05-m1c-corporate-actions-economic-outcomes.md`.
-All its implementation steps remain unchecked. M1c and M1d are unimplemented;
-M1d has no executable plan. The next authorization is M1c implementation only.
+combined M1c scope, not completed M1b contracts. M1c's implementation plan is now
+a completed historical record. M1d has no executable plan or implementation;
+any M1d planning or execution requires a new explicit authorization.
 Completed/superseded M1b plans and the old M1b handoff are historical records,
 not instructions to restart earlier work.
 

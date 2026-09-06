@@ -2,9 +2,10 @@
 
 ## Status
 
-Independently reviewed design decision, 2026-09-05. M1c is now planned but
-unimplemented in the [sole executable M1c plan](../superpowers/plans/2026-09-05-m1c-corporate-actions-economic-outcomes.md).
-M1d remains unplanned and unimplemented. Execution needs separate authorization.
+Independently reviewed design decision, 2026-09-05. M1c is implemented and
+accepted in the [completed M1c execution record](../superpowers/plans/2026-09-05-m1c-corporate-actions-economic-outcomes.md).
+M1d remains designed, unplanned and unimplemented; further work requires
+separate authorization.
 The canonical design, evidence, support matrix, adversarial requirements, and
 review record are in the
 [historical economic events and observations specification](../superpowers/specs/2026-09-05-historical-economic-events-and-observations-design.md).
@@ -81,9 +82,9 @@ Total-return accounting, holding conversion, imputation, and execution remain
 outside both milestones. Missing facts block dependent claims, not independent
 identity or historical universe evidence.
 
-M1c synthetic implementation planning is recorded in the linked plan.
+M1c synthetic implementation and acceptance are recorded in the linked plan.
 Real provider semantics, historical coverage, licensing, and full schedule
 validation remain later acceptance gates, not reasons to block provider-neutral
-fact contracts. M1d has no executable plan; neither milestone is implemented. No dependency,
-runtime, provider, broker, credential, agent functionality, or trading capability
-is added by this decision.
+fact contracts. M1d has no executable plan or implementation. The original
+design decision itself added no runtime. M1c implementation added no dependency,
+provider, broker, credential, agent functionality, or trading capability.

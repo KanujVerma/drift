@@ -3,9 +3,10 @@
 ## Purpose and scope
 
 Drift combines a local research evidence kernel (M0), temporal provenance (M1a),
-and historical identity/universe semantics (M1b). Its purpose is to preserve what
-was proposed, tested, observed, and concluded in a form that can be checked
-later. It does not make trading decisions or connect to a trading environment.
+historical identity/universe semantics (M1b), and economic facts (M1c). Its purpose
+is to preserve what was proposed, tested, observed, and concluded in a form that
+can be checked later. It does not make trading decisions or connect to a trading
+environment.
 
 The M0 core has four small responsibilities:
 
@@ -92,12 +93,47 @@ boundaries are recorded in [ADR 0006](../adr/0006-independent-historical-identit
 and [ADR 0007](../adr/0007-authenticated-point-in-time-universe-composition.md).
 There is no provider connection, price/action accounting, session engine,
 historical-tradability model, evaluator, or process-isolated decision runtime.
-M1c economic events/outcomes and M1d observations/sessions/normalization remain
-separate future milestones. M1c is planned but unimplemented; M1d is designed
-only, without an executable plan. Their boundaries are recorded
+M1c economic events/outcomes are implemented. M1d observations/sessions/normalization
+remain designed only, without an executable plan or implementation. Their
+boundaries are recorded
 in [ADR 0009](../adr/0009-separate-economic-events-and-observation-semantics.md)
-and the [roadmap](roadmap.md). The roadmap points to the sole active M1c plan;
-implementation requires separate authorization.
+and the [roadmap](roadmap.md), which points to the completed M1c acceptance record.
+
+## Economic facts and outcome resolution
+
+Three immutable source families distinguish action terms, actual effects and
+reported settlements. Coverage is a separate evidence family, not an economic
+event or consumer fact. Terms do not prove occurrence; owed property does not
+prove delivery. An explicit no-consideration effect is not an invented zero
+payment, and unknown bankruptcy evidence remains unknown.
+
+M1c queries separate decision time, knowledge cutoff and economic evaluation
+time from an outcome horizon and finite evidence vintage. Full source chains
+are selected before subject/authority filtering. Actual-event authority must
+also satisfy the finite cutoff, including facts before the requested window.
+Prior facts can support claim and closure evidence without being emitted again
+as window deliveries. Known future-scheduled terms remain reported information,
+not realized effects.
+
+One source owns each fact-family/security/query scope in V1. Positively evidenced
+occurrence identity, not equal dates or amounts, enables comparison. All causally
+selected, admitted reports of that occurrence constrain equality before emission;
+a boundary cannot hide a known conflict. Composition preserves component
+multiplicity and provenance without adding quantities or converting holdings.
+Relevant uncertainty withholds stronger claim or closure conclusions, while
+definite precedence and distinct action scopes remain separate.
+
+Source validation must genuinely pass as well as replay exactly. Query-bound
+safe projections retain independently known components and mark withheld
+dependencies. Consumer resolvers snapshot supplied mappings before verifying
+their values, expose only matching decision/outcome authority, and reconstruct
+all dependent proofs. Audit outcomes are not decision capabilities. These local
+contracts do not provide process isolation, authentication or real-source truth.
+
+Evidence completeness and factual support are independent. A known unsupported
+property can remain evidence without investment eligibility or valuation.
+Exact contracts, limits, interpreter/fixture versioning and verification evidence
+live in the [M1c execution record](../superpowers/plans/2026-09-05-m1c-corporate-actions-economic-outcomes.md).
 
 ## Compatibility contract
 
