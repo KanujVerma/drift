@@ -644,7 +644,10 @@ def _record_applicability(
     elif boundary.lower_bound is None or boundary.upper_bound is None:
         status = "indeterminate"
         reason = "actual_time_unknown"
-    elif boundary.upper_bound < query.history_start:
+    elif (
+        boundary.upper_bound < query.history_start
+        and boundary.upper_bound <= market_cutoff(query)
+    ):
         status = "before_window"
         reason = "actual_before_window"
     elif boundary.lower_bound >= query.history_start and boundary.upper_bound <= min(
@@ -967,14 +970,15 @@ def resolve_decision_records(
         raise TypeError("resolve_decision_records requires a decision reference")
     if not isinstance(query, MarketDecisionQueryV1):
         raise TypeError("resolve_decision_records requires a decision query")
+    snapshot = dict(records_by_hash)
     expected = decision_reference(query, context, source_policy)
     if reference != expected:
         raise ValueError("decision reference does not match exact replay")
-    if set(records_by_hash) != set(reference.selected_record_hashes):
+    if set(snapshot) != set(reference.selected_record_hashes):
         raise ValueError("decision record hash keys must match authorized set")
-    if any(content_hash(value) != key for key, value in records_by_hash.items()):
+    if any(content_hash(value) != key for key, value in snapshot.items()):
         raise ValueError("decision record hash does not match supplied value")
-    return MappingProxyType(dict(records_by_hash))
+    return MappingProxyType(snapshot)
 
 
 def resolve_outcome_records(
@@ -989,14 +993,15 @@ def resolve_outcome_records(
         raise TypeError("resolve_outcome_records requires an outcome reference")
     if not isinstance(query, MarketOutcomeQueryV1):
         raise TypeError("resolve_outcome_records requires an outcome query")
+    snapshot = dict(records_by_hash)
     expected = outcome_reference(query, context, source_policy)
     if reference != expected:
         raise ValueError("outcome reference does not match exact replay")
-    if set(records_by_hash) != set(reference.selected_record_hashes):
+    if set(snapshot) != set(reference.selected_record_hashes):
         raise ValueError("outcome record hash keys must match authorized set")
-    if any(content_hash(value) != key for key, value in records_by_hash.items()):
+    if any(content_hash(value) != key for key, value in snapshot.items()):
         raise ValueError("outcome record hash does not match supplied value")
-    return MappingProxyType(dict(records_by_hash))
+    return MappingProxyType(snapshot)
 
 
 def resolve_decision_projections(
@@ -1011,14 +1016,15 @@ def resolve_decision_projections(
         raise TypeError("resolve_decision_projections requires a decision reference")
     if not isinstance(query, MarketDecisionQueryV1):
         raise TypeError("resolve_decision_projections requires a decision query")
+    snapshot = dict(projections_by_hash)
     expected = decision_reference(query, context, source_policy)
     if reference != expected:
         raise ValueError("decision reference does not match exact replay")
-    if set(projections_by_hash) != set(reference.projection_hashes):
+    if set(snapshot) != set(reference.projection_hashes):
         raise ValueError("decision projection hash keys must match authorized set")
-    if any(content_hash(value) != key for key, value in projections_by_hash.items()):
+    if any(content_hash(value) != key for key, value in snapshot.items()):
         raise ValueError("decision projection hash does not match supplied value")
-    return MappingProxyType(dict(projections_by_hash))
+    return MappingProxyType(snapshot)
 
 
 def resolve_outcome_projections(
@@ -1033,14 +1039,15 @@ def resolve_outcome_projections(
         raise TypeError("resolve_outcome_projections requires an outcome reference")
     if not isinstance(query, MarketOutcomeQueryV1):
         raise TypeError("resolve_outcome_projections requires an outcome query")
+    snapshot = dict(projections_by_hash)
     expected = outcome_reference(query, context, source_policy)
     if reference != expected:
         raise ValueError("outcome reference does not match exact replay")
-    if set(projections_by_hash) != set(reference.projection_hashes):
+    if set(snapshot) != set(reference.projection_hashes):
         raise ValueError("outcome projection hash keys must match authorized set")
-    if any(content_hash(value) != key for key, value in projections_by_hash.items()):
+    if any(content_hash(value) != key for key, value in snapshot.items()):
         raise ValueError("outcome projection hash does not match supplied value")
-    return MappingProxyType(dict(projections_by_hash))
+    return MappingProxyType(snapshot)
 
 
 def project_market_facts(

@@ -514,6 +514,8 @@ def validate_economic_context(context: EconomicResolutionContext) -> None:
             raise DatasetValidationError.single(
                 "economic_validated_artifact_set_mismatch"
             )
+        if decision.result is not ValidationResult.PASS:
+            raise DatasetValidationError.single("economic_validation_decision_not_pass")
 
     _require_exact_bundle_membership(context.datasets)
     _validate_identity_input(context.identity)
@@ -736,6 +738,8 @@ def _validate_identity_input(identity: EconomicIdentityInput) -> None:
     )
     if actual_members != (expected_member,):
         raise DatasetValidationError.single("identity_bundle_membership_mismatch")
+    if decision.result is not ValidationResult.PASS:
+        raise DatasetValidationError.single("identity_validation_decision_not_pass")
 
 
 def _validate_coverage_inventories(

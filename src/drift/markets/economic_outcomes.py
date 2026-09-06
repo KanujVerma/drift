@@ -1,7 +1,7 @@
 """Replayable audit-side composition of selected M1c economic facts."""
 
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, Sequence, Set
 from typing import Literal
 from uuid import UUID
 
@@ -581,6 +581,7 @@ def _resolve_associations(
 
 def _delivery_groups(
     settlements: Sequence[EconomicSettlementVersionV1],
+    delivery_candidate_hashes: Set[str],
     projections_by_source: Mapping[str, EconomicSafeFactProjectionV1],
     occurrence_identity_supported: bool,
     associations: Sequence[EconomicAssociationResolutionV1],
@@ -591,20 +592,25 @@ def _delivery_groups(
     uncomposed: list[str] = []
     reasons: list[str] = []
     for record in settlements:
+        record_hash = content_hash(record)
         occurrence_id = record.occurrence.native_occurrence_id
         if (
             record.occurrence.kind != "identified"
             or occurrence_id is None
             or not occurrence_identity_supported
         ):
-            uncomposed.append(content_hash(record))
-            reasons.append("settlement_occurrence_identity_unavailable")
+            if record_hash in delivery_candidate_hashes:
+                uncomposed.append(record_hash)
+                reasons.append("settlement_occurrence_identity_unavailable")
             continue
         key = (record.source_key.source_id, record.security_id, occurrence_id)
         grouped[key].append(record)
 
     results: list[EconomicDeliveryGroupV1] = []
     for key, reports in sorted(grouped.items(), key=lambda item: item[0]):
+        report_hashes = {content_hash(item) for item in reports}
+        if not report_hashes & delivery_candidate_hashes:
+            continue
         payloads = {
             content_hash(settlement_occurrence_payload_v1(item)) for item in reports
         }
@@ -683,9 +689,20 @@ def _effect_parts(
     return tuple(occurred), tuple(sorted(cancelled)), tuple(sorted(unknown))
 
 
+def _effect_definitely_precedes(
+    left: EconomicEffectVersionV1, right: EconomicEffectVersionV1
+) -> bool:
+    return (
+        left.effective_time.upper_bound is not None
+        and right.effective_time.lower_bound is not None
+        and left.effective_time.upper_bound < right.effective_time.lower_bound
+    )
+
+
 def _claim_status(
     effects: Sequence[EconomicEffectVersionV1],
     projections_by_source: Mapping[str, EconomicSafeFactProjectionV1],
+    indeterminate_constraints: Sequence[EconomicEffectVersionV1],
 ) -> tuple[
     Literal["continuing", "converted", "extinguished", "unknown"], tuple[str, ...]
 ]:
@@ -739,6 +756,36 @@ def _claim_status(
             return "unknown", ("claim_terminal_state_resurrected",)
         latest = payload.claim_status
         terminal_seen = terminal_seen or latest in {"converted", "extinguished"}
+    terminal_statuses = {"converted", "extinguished"}
+    definite_terminals = tuple(
+        item
+        for item in applicable
+        if isinstance(item.payload, OccurredEffectV1)
+        and item.payload.claim_status in terminal_statuses
+    )
+    for item in indeterminate_constraints:
+        payload = item.payload
+        if not isinstance(payload, OccurredEffectV1):
+            continue
+        if payload.claim_status == latest:
+            continue
+        if payload.claim_status in terminal_statuses and any(
+            isinstance(later.payload, OccurredEffectV1)
+            and later.payload.claim_status == "continuing"
+            and _effect_definitely_precedes(item, later)
+            for later in applicable
+        ):
+            return "unknown", ("claim_terminal_state_resurrected",)
+        if (
+            payload.claim_status == "continuing"
+            and definite_terminals
+            and all(
+                _effect_definitely_precedes(item, terminal)
+                for terminal in definite_terminals
+            )
+        ):
+            continue
+        return "unknown", ("claim_effect_chronology_indeterminate",)
     return latest, ()
 
 
@@ -869,6 +916,8 @@ def _record_boundary(
 def _residual_resolutions(
     settlements: Sequence[EconomicSettlementVersionV1],
     effects: Sequence[EconomicEffectVersionV1],
+    indeterminate_settlements: Sequence[EconomicSettlementVersionV1],
+    indeterminate_effects: Sequence[EconomicEffectVersionV1],
     associations: Sequence[EconomicAssociationResolutionV1],
     selected_records: Sequence[object],
     projections_by_source: Mapping[str, EconomicSafeFactProjectionV1],
@@ -999,6 +1048,44 @@ def _residual_resolutions(
                 if not closed_by_later_evidence:
                     possible_unresolved_later = True
                     break
+        possible_indeterminate_settlement = False
+        possible_indeterminate_effect = False
+        if closure_hashes:
+            constraints: tuple[
+                EconomicEffectVersionV1 | EconomicSettlementVersionV1, ...
+            ] = (*indeterminate_effects, *indeterminate_settlements)
+            for record in constraints:
+                if record.security_id != _action_record.security_id:
+                    continue
+                constraint_action: ActionResolution
+                if isinstance(record, EconomicSettlementVersionV1):
+                    constraint_action = _settlement_action(
+                        record, association_map, selected_by_hash
+                    )
+                else:
+                    constraint_action = _action_from_effect(
+                        record, association_map, selected_by_hash
+                    )
+                if constraint_action is not None and constraint_action != "conflicting":
+                    if constraint_action[0].source_key != action_key:
+                        continue
+                boundary_upper = _record_boundary(record).upper_bound
+                closed_by_later_evidence = False
+                if boundary_upper is not None:
+                    for closure in valid_closure_records:
+                        closure_lower = _record_boundary(closure).lower_bound
+                        if (
+                            closure_lower is not None
+                            and boundary_upper <= closure_lower
+                        ):
+                            closed_by_later_evidence = True
+                            break
+                if closed_by_later_evidence:
+                    continue
+                if isinstance(record, EconomicSettlementVersionV1):
+                    possible_indeterminate_settlement = True
+                else:
+                    possible_indeterminate_effect = True
         if conflicting:
             status: Literal["closed", "outstanding", "unknown", "conflicting"] = (
                 "conflicting"
@@ -1006,9 +1093,12 @@ def _residual_resolutions(
             reasons: tuple[str, ...] = (
                 "residual_action_scope_or_chronology_conflicting",
             )
-        elif possible_unresolved_later:
+        elif possible_unresolved_later or possible_indeterminate_settlement:
             status = "unknown"
             reasons = ("unresolved_later_installment_prevents_closure",)
+        elif possible_indeterminate_effect:
+            status = "unknown"
+            reasons = ("indeterminate_action_fact_prevents_closure",)
         elif closure_hashes and not later_outstanding:
             status = "closed"
             reasons = ()
@@ -1082,6 +1172,31 @@ def resolve_economic_facts(
         if projections_by_source[content_hash(item)].applicability.status
         in {"before_window", "in_window"}
     )
+    in_window_settlements = tuple(
+        item
+        for item in relevant_settlements
+        if projections_by_source[content_hash(item)].applicability.status == "in_window"
+    )
+    indeterminate_effects = tuple(
+        item
+        for item in effects
+        if projections_by_source[content_hash(item)].applicability.status
+        == "indeterminate"
+        and (
+            item.effective_time.lower_bound is None
+            or item.effective_time.lower_bound <= market_horizon(query)
+        )
+    )
+    indeterminate_settlements = tuple(
+        item
+        for item in settlements
+        if projections_by_source[content_hash(item)].applicability.status
+        == "indeterminate"
+        and (
+            item.settled_time.lower_bound is None
+            or item.settled_time.lower_bound <= market_horizon(query)
+        )
+    )
     indeterminate_settlement_hashes = tuple(
         sorted(
             content_hash(item)
@@ -1109,12 +1224,15 @@ def resolve_economic_facts(
     residual_resolutions = _residual_resolutions(
         relevant_settlements,
         relevant_effects,
+        indeterminate_settlements,
+        indeterminate_effects,
         associations,
         selected_records,
         projections_by_source,
     )
     delivery_groups, uncomposed, grouping_reasons = _delivery_groups(
-        relevant_settlements,
+        settlements,
+        {content_hash(item) for item in in_window_settlements},
         projections_by_source,
         occurrence_supported,
         associations,
@@ -1123,7 +1241,9 @@ def resolve_economic_facts(
     effect_projections, cancelled, unknown = _effect_parts(
         effects, projections_by_source
     )
-    claim_status, claim_reasons = _claim_status(effects, projections_by_source)
+    claim_status, claim_reasons = _claim_status(
+        effects, projections_by_source, indeterminate_effects
+    )
     selected_terms = tuple(
         sorted(
             content_hash(item)

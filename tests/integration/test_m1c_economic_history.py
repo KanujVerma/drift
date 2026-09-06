@@ -3,6 +3,7 @@
 import json
 import sys
 from pathlib import Path
+from typing import Literal
 
 import pytest
 from pydantic import BaseModel
@@ -57,9 +58,11 @@ _FIXTURE_FILES = (
     "identity.json",
     "support.json",
 )
-_EXPECTED_HASH_INDEX = (
-    "90eb1764cb1f2ee25b84b2c138340e55d51fbe880237c6b59d53ecdab8bbac10"
-)
+_EXPECTED_HASH_INDEXES = {
+    "v1": "90eb1764cb1f2ee25b84b2c138340e55d51fbe880237c6b59d53ecdab8bbac10",
+    "v2": "ed3a9cf19c502580e170484a3e15853e8a05d83f7b4ac24b8af6b333c48686c4",
+}
+_ARCHIVED_V1_IMPLEMENTATION_COMMIT = "4d54d7e553beba8cdd5413ea1181e7efac7a236b"
 
 _FIRST_INSTALLMENT_HASH = (
     "2d8b6c9181b268b471b7a7d6cb86a2d96a9418dd9f3e1bd9f30f58bf179c05c3"
@@ -111,12 +114,28 @@ def _read(root: Path, expected: dict[str, object], name: str) -> VerifiedArtifac
     )
 
 
-def load_m1c_history(root: Path) -> EconomicHarness:
-    """Load a closed history from exact, independently pinned local bytes."""
+def _fixture_version(root: Path) -> Literal["v1", "v2"]:
+    if root.name != "liquidation":
+        raise ValueError("fixture root must name the liquidation history")
+    if root.parent.name == "v1":
+        return "v1"
+    if root.parent.name == "v2":
+        return "v2"
+    raise ValueError("fixture root must belong to the literal v1 or v2 inventory")
+
+
+def _read_closed_fixture(
+    root: Path, version: Literal["v1", "v2"]
+) -> tuple[
+    dict[str, object],
+    dict[str, VerifiedArtifactBytes],
+    tuple[VerifiedArtifactBytes, ...],
+]:
+    """Read every pinned byte without interpreting archived code-bound decisions."""
     expected_artifact = read_verified_local_artifact(
         root,
         "expected-hashes.json",
-        _EXPECTED_HASH_INDEX,
+        _EXPECTED_HASH_INDEXES[version],
         ResolverLimits(max_bytes=2_000_000),
     )
     expected = _json(expected_artifact.data)
@@ -128,11 +147,22 @@ def load_m1c_history(root: Path) -> EconomicHarness:
         support_index.get("support_files"), list
     ):
         raise ValueError("fixture support index is invalid")
-    indexed_supports = tuple(
-        _read(root, expected, name)
-        for name in support_index["support_files"]
-        if isinstance(name, str)
-    )
+    support_names = support_index["support_files"]
+    if not all(isinstance(name, str) for name in support_names):
+        raise ValueError("fixture support index contains a non-path entry")
+    indexed_supports = tuple(_read(root, expected, name) for name in support_names)
+    return expected, raw, indexed_supports
+
+
+def load_m1c_history(root: Path) -> EconomicHarness:
+    """Load a closed history from exact, independently pinned local bytes."""
+    version = _fixture_version(root)
+    expected, raw, indexed_supports = _read_closed_fixture(root, version)
+    if version == "v1":
+        raise ValueError(
+            "archived v1 decisions require the pinned implementation at "
+            f"{_ARCHIVED_V1_IMPLEMENTATION_COMMIT}; current replay uses v2"
+        )
     descriptors = _json(raw["manifests.json"].data)
     if not isinstance(descriptors, dict) or not isinstance(
         descriptors.get("economic"), list
@@ -273,7 +303,7 @@ def load_m1c_history(root: Path) -> EconomicHarness:
 
 
 def test_m1c_fixture_preserves_installment_lineage() -> None:
-    root = Path(__file__).parents[1] / "fixtures" / "m1c" / "v1" / "liquidation"
+    root = Path(__file__).parents[1] / "fixtures" / "m1c" / "v2" / "liquidation"
     case = load_m1c_history(root)
     query = case.outcome_query("2021-01-01T00:00:00Z", "2021-01-02T00:00:00Z")
     result = resolve_economic_facts(query, case.context, case.source_policy)
@@ -304,7 +334,7 @@ def test_m1c_fixture_preserves_installment_lineage() -> None:
 
 
 def test_m1c_fixture_selects_corrected_installment_revision() -> None:
-    root = Path(__file__).parents[1] / "fixtures" / "m1c" / "v1" / "liquidation"
+    root = Path(__file__).parents[1] / "fixtures" / "m1c" / "v2" / "liquidation"
     case = load_m1c_history(root)
     old_query = case.outcome_query("2021-01-01T00:00:00Z", "2020-07-01T00:00:00Z")
     corrected_query = case.outcome_query("2021-01-01T00:00:00Z", "2021-01-02T00:00:00Z")
@@ -406,8 +436,8 @@ def test_m1c_fixture_selects_corrected_installment_revision() -> None:
 
 
 def test_m1c_fixture_rejects_pinned_partition_tampering(tmp_path: Path) -> None:
-    root = Path(__file__).parents[1] / "fixtures" / "m1c" / "v1" / "liquidation"
-    target = tmp_path / "liquidation"
+    root = Path(__file__).parents[1] / "fixtures" / "m1c" / "v2" / "liquidation"
+    target = tmp_path / "v2" / "liquidation"
     import shutil
 
     shutil.copytree(root, target)
@@ -419,11 +449,43 @@ def test_m1c_fixture_rejects_pinned_partition_tampering(tmp_path: Path) -> None:
 
 
 def test_m1c_fixture_rejects_expected_hash_index_tampering(tmp_path: Path) -> None:
-    root = Path(__file__).parents[1] / "fixtures" / "m1c" / "v1" / "liquidation"
-    target = tmp_path / "liquidation"
+    root = Path(__file__).parents[1] / "fixtures" / "m1c" / "v2" / "liquidation"
+    target = tmp_path / "v2" / "liquidation"
     import shutil
 
     shutil.copytree(root, target)
     target.joinpath("expected-hashes.json").write_bytes(b"{}")
     with pytest.raises(ArtifactIntegrityError):
         load_m1c_history(target)
+
+
+def test_m1c_v1_bytes_remain_valid_but_replay_requires_pinned_code() -> None:
+    root = Path(__file__).parents[1] / "fixtures" / "m1c" / "v1" / "liquidation"
+
+    _, raw, supports = _read_closed_fixture(root, "v1")
+
+    assert len(raw) == len(_FIXTURE_FILES)
+    assert len(supports) == 24
+    with pytest.raises(
+        ValueError, match="archived v1 decisions require the pinned"
+    ) as error:
+        load_m1c_history(root)
+    assert _ARCHIVED_V1_IMPLEMENTATION_COMMIT in str(error.value)
+
+
+def test_m1c_v2_preserves_v1_economic_source_facts() -> None:
+    fixtures = Path(__file__).parents[1] / "fixtures" / "m1c"
+    _, v1, _ = _read_closed_fixture(fixtures / "v1" / "liquidation", "v1")
+    _, v2, _ = _read_closed_fixture(fixtures / "v2" / "liquidation", "v2")
+
+    source_fact_files = (
+        "terms.json",
+        "effects.json",
+        "settlements-a.json",
+        "settlements-b.json",
+        "coverage-a.json",
+        "coverage-b.json",
+    )
+    assert {name: v1[name].data for name in source_fact_files} == {
+        name: v2[name].data for name in source_fact_files
+    }

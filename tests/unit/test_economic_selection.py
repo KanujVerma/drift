@@ -1122,6 +1122,9 @@ def test_ambiguous_assignment_interval_overlap_fails_closed() -> None:
     proof = select_market_records(query, case.context, case.source_policy)
 
     assert proof.identity_proofs[0].status == "conflicting"
+    assert proof.identity_proofs[0].reasons == (
+        "competing_identity_assignment_overlap_indeterminate",
+    )
     assert proof.raw_materializable_record_hashes == ()
     assert proof.projection_hashes == ()
 
