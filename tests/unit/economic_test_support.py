@@ -789,6 +789,85 @@ def settlement_record(
     )
 
 
+def duplicate_report(
+    record: EconomicSettlementVersionV1, suffix: int
+) -> EconomicSettlementVersionV1:
+    """Report the same evidenced occurrence with independent report provenance."""
+    if record.payload is None:
+        raise ValueError("cannot duplicate a withdrawn settlement fixture")
+    statement = f"duplicate settlement report-{suffix} corroborates occurrence"
+    evidence, _ = economic_evidence(statement)
+    availability_upper = record.revision.availability[0].upper_bound
+    if availability_upper is None:
+        raise ValueError("duplicate report fixture requires known availability")
+    known_at = (availability_upper + timedelta(seconds=1)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    components: list[EconomicComponentV1] = []
+    for index, component in enumerate(record.payload.delivered_components):
+        component_id = f"payment-{suffix}-{index}"
+        if isinstance(component, CashComponentV1):
+            components.append(
+                component.model_copy(
+                    update={
+                        "component_id": component_id,
+                        "source_amount_text": component.amount,
+                        "source_precision": 0,
+                        "conditions": tuple(reversed(component.conditions)),
+                    }
+                )
+            )
+        else:
+            components.append(
+                component.model_copy(update={"component_id": component_id})
+            )
+    residual = record.payload.residual
+    if residual.kind in {"unknown", "outstanding"}:
+        residual = residual.model_copy(
+            update={"reason": f"independent report {suffix} residual statement"}
+        )
+    return rebind_record_evidence(
+        EconomicSettlementVersionV1,
+        {
+            "schema_version": "1",
+            "revision": revision(suffix, known_at, evidence),
+            "source_key": EconomicSourceKeyV1(
+                source_id=record.source_key.source_id,
+                family="settlement",
+                native_record_id=f"report-{suffix}",
+            ),
+            "security_id": record.security_id,
+            "listing_id": record.listing_id,
+            "occurrence": record.occurrence,
+            "source_action_code": f"duplicate-{suffix}",
+            "settled_time": record.settled_time,
+            "terms_association": record.terms_association,
+            "effect_association": record.effect_association,
+            "payload": record.payload.model_copy(
+                update={
+                    "delivered_components": tuple(components),
+                    "residual": residual,
+                }
+            ),
+        },
+    )
+
+
+def second_installment(
+    record: EconomicSettlementVersionV1, suffix: int, occurrence_id: str
+) -> EconomicSettlementVersionV1:
+    """Report an economically equal but positively distinct delivered occurrence."""
+    duplicate = duplicate_report(record, suffix)
+    evidence = duplicate.revision.source_artifact
+    values = {name: getattr(duplicate, name) for name in type(duplicate).model_fields}
+    values["occurrence"] = EconomicOccurrenceV1(
+        kind="identified",
+        native_occurrence_id=occurrence_id,
+        evidence_reference=evidence,
+    )
+    return rebind_record_evidence(type(duplicate), values)
+
+
 def revise_record[T: EconomicRecordV1](
     record: T, suffix: int, known_at: str, changes: dict[str, object]
 ) -> T:
@@ -1423,6 +1502,10 @@ def validated_case(
     coverage_revision_support: Literal[
         "captured_history", "current_only", "unknown"
     ] = "captured_history",
+    coverage_occurrence_key_semantics: Literal[
+        "economic_occurrence_ids", "report_ids_only", "unknown"
+    ] = "economic_occurrence_ids",
+    split_settlement_coverage: bool = False,
     declared_channels: tuple[AvailabilityChannelV1, ...] | None = None,
     identity_assignments: tuple[IdentityAssignmentVersionV1, ...] | None = None,
     retained_evidence: Mapping[str, AvailabilityEvidenceV1] | None = None,
@@ -1493,23 +1576,45 @@ def validated_case(
         "effect",
         "settlement",
     )
-    coverage_records = tuple(
-        coverage_record(
-            3000 + index,
-            family,
-            manifest_hash(dataset.manifest),
-            dataset.decision.validated_artifact_hashes,
-            dataset.decision.validated_record_hashes,
-            completeness="complete" if complete_coverage else "partial",
-            revision_support=coverage_revision_support,
-            snapshot_at=snapshot_text,
-            source_id=owner_source,
-            coverage_end=coverage_end,
-        )
-        for index, (family, dataset) in enumerate(
-            zip(families, fact_inputs, strict=True)
-        )
-    )
+    coverage_values: list[EconomicCoverageVersionV1] = []
+    for index, (family, dataset) in enumerate(zip(families, fact_inputs, strict=True)):
+        common = {
+            "family": family,
+            "target_manifest_hash": manifest_hash(dataset.manifest),
+            "inventory_artifact_hashes": dataset.decision.validated_artifact_hashes,
+            "inventory_record_hashes": dataset.decision.validated_record_hashes,
+            "completeness": "complete" if complete_coverage else "partial",
+            "revision_support": coverage_revision_support,
+            "occurrence_key_semantics": coverage_occurrence_key_semantics,
+            "snapshot_at": snapshot_text,
+            "security_id": uid(21) if security_id is None else security_id,
+            "source_id": owner_source,
+        }
+        if family == "settlement" and split_settlement_coverage:
+            coverage_values.extend(
+                (
+                    coverage_record(
+                        3100,
+                        coverage_end="2020-06-01T00:00:00Z",
+                        **common,  # type: ignore[arg-type]
+                    ),
+                    coverage_record(
+                        3101,
+                        coverage_start="2020-06-01T00:00:00Z",
+                        coverage_end=coverage_end,
+                        **common,  # type: ignore[arg-type]
+                    ),
+                )
+            )
+        else:
+            coverage_values.append(
+                coverage_record(
+                    3000 + index,
+                    coverage_end=coverage_end,
+                    **common,  # type: ignore[arg-type]
+                )
+            )
+    coverage_records = tuple(coverage_values)
     coverage_input = economic_dataset(
         "economic_coverage",
         coverage_records,
@@ -1579,6 +1684,186 @@ def validated_case(
         through_value,
     )
     return EconomicHarness(context=context, source_policy=policy)
+
+
+def _rebuild_economic_record[T: EconomicRecordV1](
+    record: T, updates: Mapping[str, object]
+) -> T:
+    values = {name: getattr(record, name) for name in type(record).model_fields}
+    values.update(updates)
+    return rebind_record_evidence(type(record), values)
+
+
+def closed_liquidation_case(wrong_scope: bool = False) -> EconomicHarness:
+    """Build payment, terminal claim effect and exact action-scope closure evidence."""
+    terms = terms_record(600, action_kind=ActionKind.LIQUIDATION)
+    assert terms.payload is not None
+    terms = _rebuild_economic_record(
+        terms,
+        {
+            "payload": terms.payload.model_copy(
+                update={"action_kind": ActionKind.LIQUIDATION}
+            )
+        },
+    )
+    other_terms = terms_record(601, action_kind=ActionKind.LIQUIDATION)
+    action_association = EconomicAssociationV1(
+        kind="identified", target=terms.source_key
+    )
+    wrong_association = EconomicAssociationV1(
+        kind="identified", target=other_terms.source_key
+    )
+
+    initial = effect_record(
+        602,
+        claim_status="continuing",
+        effective_at="2020-06-01T00:00:00Z",
+    )
+    assert isinstance(initial.payload, OccurredEffectV1)
+    initial = _rebuild_economic_record(
+        initial,
+        {
+            "terms_association": action_association,
+            "payload": initial.payload.model_copy(
+                update={
+                    "action_kind": ActionKind.LIQUIDATION,
+                    "residual": ResidualClaimV1(
+                        kind="outstanding",
+                        scope_action=action_association,
+                        reason="liquidation consideration remains outstanding",
+                    ),
+                }
+            ),
+        },
+    )
+    payment = settlement_record(603, amount="5", occurrence_id="liquidation-payment")
+    assert payment.payload is not None
+    payment = _rebuild_economic_record(
+        payment,
+        {
+            "terms_association": action_association,
+            "effect_association": EconomicAssociationV1(
+                kind="identified", target=initial.source_key
+            ),
+            "payload": payment.payload.model_copy(
+                update={
+                    "action_kind": ActionKind.LIQUIDATION,
+                    "residual": ResidualClaimV1(
+                        kind="outstanding",
+                        scope_action=action_association,
+                        reason="more liquidation consideration may follow",
+                    ),
+                }
+            ),
+        },
+    )
+    terminal = effect_record(
+        604,
+        claim_status="extinguished",
+        effective_at="2020-07-01T00:00:00Z",
+    )
+    assert isinstance(terminal.payload, OccurredEffectV1)
+    terminal = _rebuild_economic_record(
+        terminal,
+        {
+            "terms_association": action_association,
+            "payload": terminal.payload.model_copy(
+                update={
+                    "action_kind": ActionKind.LIQUIDATION,
+                    "claim_status": "extinguished",
+                    "consideration_status": "explicit_none",
+                    "owed_components": (),
+                    "residual": ResidualClaimV1(
+                        kind="closed_for_action",
+                        scope_action=(
+                            wrong_association if wrong_scope else action_association
+                        ),
+                        evidence_reference=terminal.revision.source_artifact,
+                    ),
+                }
+            ),
+        },
+    )
+    records: tuple[EconomicRecordV1, ...] = (
+        (terms, other_terms, initial, payment, terminal)
+        if wrong_scope
+        else (terms, initial, payment, terminal)
+    )
+    return validated_case(records)
+
+
+def known_unsupported_case() -> EconomicHarness:
+    """Build fully evidenced CVR property delivery with unsupported evaluation shape."""
+    terms = terms_record(620, action_kind=ActionKind.RIGHTS_WARRANTS_CVR)
+    property_component = UnsupportedPropertyComponentV1(
+        kind="unsupported_property",
+        component_id="cvr",
+        recipient=EconomicRecipientV1(kind="security", security_id=uid(22)),
+        source_description="one contractual contingent value right",
+        reason="valuation semantics deliberately unsupported in M1c",
+        evidence_reference=terms.revision.source_artifact,
+    )
+    assert terms.payload is not None
+    terms = _rebuild_economic_record(
+        terms,
+        {
+            "payload": TermsPayloadV1(
+                kind="unsupported",
+                action_kind=ActionKind.RIGHTS_WARRANTS_CVR,
+                components=(property_component,),
+                dates=(),
+                conditions=(),
+                reason="CVR valuation is outside M1c",
+            )
+        },
+    )
+    action_association = EconomicAssociationV1(
+        kind="identified", target=terms.source_key
+    )
+    effect = effect_record(621, claim_status="continuing")
+    assert isinstance(effect.payload, OccurredEffectV1)
+    effect = _rebuild_economic_record(
+        effect,
+        {
+            "terms_association": action_association,
+            "payload": OccurredEffectV1(
+                kind="occurred",
+                action_kind=ActionKind.RIGHTS_WARRANTS_CVR,
+                claim_status="continuing",
+                consideration_status="components",
+                owed_components=(property_component,),
+                residual=ResidualClaimV1(
+                    kind="outstanding",
+                    scope_action=action_association,
+                    reason="CVR delivery remained outstanding",
+                ),
+                evidence_reference=effect.revision.source_artifact,
+            ),
+        },
+    )
+    payment = settlement_record(622, occurrence_id="cvr-delivery")
+    assert payment.payload is not None
+    payment = _rebuild_economic_record(
+        payment,
+        {
+            "terms_association": action_association,
+            "effect_association": EconomicAssociationV1(
+                kind="identified", target=effect.source_key
+            ),
+            "payload": DeliveredSettlementV1(
+                kind="delivered",
+                action_kind=ActionKind.RIGHTS_WARRANTS_CVR,
+                delivered_components=(property_component,),
+                residual=ResidualClaimV1(
+                    kind="closed_for_action",
+                    scope_action=action_association,
+                    evidence_reference=payment.revision.source_artifact,
+                ),
+                evidence_reference=payment.revision.source_artifact,
+            ),
+        },
+    )
+    return validated_case((terms, effect, payment))
 
 
 def mixed_settlement_case(

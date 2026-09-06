@@ -112,7 +112,7 @@ def _selection_pipeline(
     source_policy: EconomicSourceSelectionPolicyV1,
 ) -> tuple[MarketSelectionProofV1, tuple[EconomicSafeFactProjectionV1, ...]]:
     """Build the acyclic audit proof and its separately hash-bound projections."""
-    _require_selection_bindings(query, context, source_policy)
+    source_policy = _require_selection_bindings(query, context, source_policy)
     dataset_selections = tuple(
         sorted(
             (
@@ -248,7 +248,10 @@ def _require_selection_bindings(
     query: MarketSelectionQueryV1,
     context: EconomicResolutionContext,
     source_policy: EconomicSourceSelectionPolicyV1,
-) -> None:
+) -> EconomicSourceSelectionPolicyV1:
+    source_policy = EconomicSourceSelectionPolicyV1.model_validate(
+        source_policy.model_dump(mode="python")
+    )
     validate_economic_context(context)
     if query.input_context_hash != economic_context_hash(context):
         raise DatasetValidationError.single("economic_selection_context_mismatch")
@@ -289,6 +292,7 @@ def _require_selection_bindings(
         raise DatasetValidationError.single(
             "economic_selection_dataset_binding_mismatch"
         )
+    return source_policy
 
 
 def _select_dataset(

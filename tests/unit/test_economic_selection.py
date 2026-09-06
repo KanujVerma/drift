@@ -1245,3 +1245,62 @@ def test_untrusted_other_channel_evidence_does_not_create_contradiction(
 
     assert applicability.status == "in_window"
     assert effect_hash in proof.raw_materializable_record_hashes
+
+
+@pytest.mark.parametrize(
+    "entrypoint",
+    ["selection", "projection", "decision_reference", "outcome_reference"],
+)
+@pytest.mark.parametrize(
+    "policy_defect",
+    ["duplicate_owner", "missing_owner", "duplicate_binding"],
+)
+def test_public_selection_pipeline_rejects_constructor_bypassed_policy_shape(
+    entrypoint: Literal[
+        "selection", "projection", "decision_reference", "outcome_reference"
+    ],
+    policy_defect: Literal["duplicate_owner", "missing_owner", "duplicate_binding"],
+) -> None:
+    case = validated_case((terms_record(9100),))
+    owners = case.source_policy.owners
+    bindings = case.source_policy.input_dataset_bindings
+    if policy_defect == "duplicate_owner":
+        owners = (*owners, owners[-1])
+    elif policy_defect == "missing_owner":
+        owners = owners[:-1]
+    else:
+        bindings = (*bindings, bindings[-1])
+    forged_policy = type(case.source_policy).model_construct(
+        schema_version=case.source_policy.schema_version,
+        policy_id=case.source_policy.policy_id,
+        policy_version=case.source_policy.policy_version,
+        security_id=case.source_policy.security_id,
+        action_kinds=case.source_policy.action_kinds,
+        scope=case.source_policy.scope,
+        history_start=case.source_policy.history_start,
+        through=case.source_policy.through,
+        owners=owners,
+        input_dataset_bindings=bindings,
+    )
+    if entrypoint == "decision_reference":
+        decision_query = case.decision_query(
+            "2021-01-02T00:00:00Z",
+            "2021-01-02T00:00:00Z",
+            "2021-01-01T00:00:00Z",
+        ).model_copy(
+            update={"source_selection_policy_hash": content_hash(forged_policy)}
+        )
+        with pytest.raises(ValueError, match="owner|binding"):
+            decision_reference(decision_query, case.context, forged_policy)
+        return
+    outcome_query = case.outcome_query(
+        "2021-01-01T00:00:00Z", "2021-01-02T00:00:00Z"
+    ).model_copy(update={"source_selection_policy_hash": content_hash(forged_policy)})
+
+    with pytest.raises(ValueError, match="owner|binding"):
+        if entrypoint == "selection":
+            select_market_records(outcome_query, case.context, forged_policy)
+        elif entrypoint == "projection":
+            project_market_facts(outcome_query, case.context, forged_policy)
+        else:
+            outcome_reference(outcome_query, case.context, forged_policy)
