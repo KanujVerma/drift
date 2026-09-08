@@ -4,8 +4,8 @@
 
 Independently reviewed design decision, 2026-09-05. M1c is implemented and
 accepted in the [completed M1c execution record](../superpowers/plans/2026-09-05-m1c-corporate-actions-economic-outcomes.md).
-M1d remains designed, unplanned and unimplemented; further work requires
-separate authorization.
+M1d has a [reviewed executable plan](../superpowers/plans/2026-09-07-m1d-source-observations-sessions-normalization.md)
+as of 2026-09-07 and remains unimplemented. Execution requires separate authorization.
 The canonical design, evidence, support matrix, adversarial requirements, and
 review record are in the
 [historical economic events and observations specification](../superpowers/specs/2026-09-05-historical-economic-events-and-observations-design.md).
@@ -85,6 +85,10 @@ identity or historical universe evidence.
 M1c synthetic implementation and acceptance are recorded in the linked plan.
 Real provider semantics, historical coverage, licensing, and full schedule
 validation remain later acceptance gates, not reasons to block provider-neutral
-fact contracts. M1d has no executable plan or implementation. The original
+fact contracts. The M1d plan refines per-field source methods, independent realized
+sessions, exact TZif provenance, orthogonal missingness, finite-cutoff M1b reuse,
+and M1c action/session mapping without changing older contracts. It retains one
+milestone with a mandatory joined normalization gate and explicit pinned-code
+legacy replay. These are planning decisions, not implementation acceptance. The original
 design decision itself added no runtime. M1c implementation added no dependency,
 provider, broker, credential, agent functionality, or trading capability.

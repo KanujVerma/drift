@@ -65,7 +65,7 @@ bindings, and verification. Documentation publication uses the commit subject
 hash and post-commit Checkpoint result after publication.
 No provider, network, broker, dependency, evaluator or trading capability was added.
 
-## M1d, designed only and not started
+## M1d, planned and not implemented
 
 M1d is Source Observations, Sessions, and Normalization. It will represent
 source-defined daily observations, pinned schedule and realized-session facts,
@@ -78,8 +78,10 @@ The canonical successor design is
 `docs/superpowers/specs/2026-09-05-historical-economic-events-and-observations-design.md`;
 the decision is recorded in ADR 0009. It supersedes the original umbrella's
 combined M1c scope, not completed M1b contracts. M1c's implementation plan is now
-a completed historical record. M1d has no executable plan or implementation;
-any M1d planning or execution requires a new explicit authorization.
+a completed historical record. M1d's single active
+[reviewed executable plan](../superpowers/plans/2026-09-07-m1d-source-observations-sessions-normalization.md)
+defines eight bounded tasks and a mandatory joined acceptance gate. Planning
+is complete; runtime implementation still requires separate explicit authorization.
 Completed/superseded M1b plans and the old M1b handoff are historical records,
 not instructions to restart earlier work.
 

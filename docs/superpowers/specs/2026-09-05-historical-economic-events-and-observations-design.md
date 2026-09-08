@@ -1,6 +1,6 @@
 # Drift Historical Economic Events and Observations Design
 
-Date: 2026-09-05. Status: independently reviewed design. M1c is now implemented and accepted; the [completed M1c execution record](../plans/2026-09-05-m1c-corporate-actions-economic-outcomes.md) preserves its decomposition, bounded refinements and verification. M1d remains designed, unplanned and unimplemented, with no executable plan. Further work requires separate authorization.
+Date: 2026-09-05. Status: independently reviewed design. M1c is now implemented and accepted; the [completed M1c execution record](../plans/2026-09-05-m1c-corporate-actions-economic-outcomes.md) preserves its decomposition, bounded refinements and verification. As of 2026-09-07, M1d has one [reviewed executable plan](../plans/2026-09-07-m1d-source-observations-sessions-normalization.md), which records bounded semantic refinements and acceptance oracles. M1d remains unimplemented and execution requires separate authorization. Dated design and M1c execution statements below are historical; current lifecycle status belongs in the roadmap.
 
 Canonical destination: `docs/superpowers/specs/2026-09-05-historical-economic-events-and-observations-design.md`.
 
@@ -49,7 +49,7 @@ Repository facts outrank the older umbrella's pseudotypes. At the verified basel
 
 Preserve all M0/M1a/M1b persisted V1 schemas, hashes, fixtures and interpretations. Reuse `RevisionEnvelopeV1`, temporal boundary claims, exact-byte validation and compatible `DatasetManifestV2` contracts. Add new market purpose/query/proof/reference families with their own versioned algorithms; do not expand the closed old purpose vocabulary or repurpose an old role/mode combination. Corrections create new source datasets, not changes to old manifests. No M1b lifecycle or universe record is rewritten because later action/outcome evidence changes.
 
-This reviewed document supersedes the former M1c portion and related unresolved design questions of `2026-09-02-m1b-m1c-historical-equity-semantics-design.md`. That umbrella remains historical context and M1b provenance. Current lifecycle status belongs in the roadmap: M1c is complete and M1d remains designed only. M1 historical semantics remain incomplete until M1d is implemented and accepted. Checkpoint records verified documentation state; no Session Handoff was needed for the completed design task.
+This reviewed document supersedes the former M1c portion and related unresolved design questions of `2026-09-02-m1b-m1c-historical-equity-semantics-design.md`. That umbrella remains historical context and M1b provenance. Current lifecycle status belongs in the roadmap: M1c is complete and M1d is planned but unimplemented. M1 historical semantics remain incomplete until M1d is implemented and accepted. Checkpoint records verified documentation state; no Session Handoff was needed for the completed design task.
 
 ## 4. Time, evidence and authorization contracts
 

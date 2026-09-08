@@ -21,8 +21,9 @@ backtester, broker, strategy-execution, agent, network, order-management,
 portfolio-management, production configuration, or production-credential
 capability. M1c is complete; its
 [implementation and acceptance record](docs/superpowers/plans/2026-09-05-m1c-corporate-actions-economic-outcomes.md)
-documents the tested boundary. M1d observations/sessions/normalization remain
-designed only, with no executable plan or implementation. Prices, sessions,
+documents the tested boundary. M1d observations/sessions/normalization have a
+[reviewed implementation plan](docs/superpowers/plans/2026-09-07-m1d-source-observations-sessions-normalization.md),
+but implementation remains unauthorized and absent. Prices, sessions,
 normalization, historical research-session eligibility, and return evaluation
 remain absent.
 `StrategyArtifact` is compact provenance metadata, not executable strategy code.

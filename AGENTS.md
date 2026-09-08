@@ -10,7 +10,8 @@ status belong in `docs/architecture/roadmap.md`.
 
 - M1c is complete; its historical implementation and acceptance record is
   `docs/superpowers/plans/2026-09-05-m1c-corporate-actions-economic-outcomes.md`.
-  M1d remains designed only, with no executable plan or implementation.
+  M1d has a reviewed [implementation plan](docs/superpowers/plans/2026-09-07-m1d-source-observations-sessions-normalization.md)
+  but no implementation authorization or runtime implementation.
   Do not add prices, sessions, observations, normalization, tradability,
   portfolio accounting, evaluation, or backtesting without separate approval.
 - Do not add broker or market-data connections, order placement, trading,

@@ -94,7 +94,8 @@ and [ADR 0007](../adr/0007-authenticated-point-in-time-universe-composition.md).
 There is no provider connection, price/action accounting, session engine,
 historical-tradability model, evaluator, or process-isolated decision runtime.
 M1c economic events/outcomes are implemented. M1d observations/sessions/normalization
-remain designed only, without an executable plan or implementation. Their
+have a [reviewed executable plan](../superpowers/plans/2026-09-07-m1d-source-observations-sessions-normalization.md)
+but no runtime implementation or authorization to begin it. Their
 boundaries are recorded
 in [ADR 0009](../adr/0009-separate-economic-events-and-observation-semantics.md)
 and the [roadmap](roadmap.md), which points to the completed M1c acceptance record.
