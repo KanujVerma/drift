@@ -78,15 +78,10 @@ def verify_schedule(
         raise ValueError("schedule artifact replay mismatch")
 
 
-def _generate_schedule(
-    query: ObservationQueryV1,
-    context: M1dResolutionContext,
-    policy: ScheduleGenerationPolicyV1,
-    generated_at: datetime,
-) -> ScheduleArtifactV1:
-    validate_m1d_resolution_context(context)
-    if query.input_context_hash != m1d_context_hash(context):
-        raise ValueError("schedule query context hash mismatch")
+def validate_schedule_generation_policy(
+    policy: ScheduleGenerationPolicyV1, context: M1dResolutionContext
+) -> None:
+    """Validate installed semantics and exact retained reconstruction lineage."""
     if (
         policy.semantic_algorithm_hash != schedule_generation_algorithm_hash()
         or policy.canonical_encoding_contract_hash
@@ -104,6 +99,18 @@ def _generate_schedule(
         )
     ):
         raise ValueError("reconstruction lineage artifact unavailable")
+
+
+def _generate_schedule(
+    query: ObservationQueryV1,
+    context: M1dResolutionContext,
+    policy: ScheduleGenerationPolicyV1,
+    generated_at: datetime,
+) -> ScheduleArtifactV1:
+    validate_m1d_resolution_context(context)
+    if query.input_context_hash != m1d_context_hash(context):
+        raise ValueError("schedule query context hash mismatch")
+    validate_schedule_generation_policy(policy, context)
     availability_policy = context.availability_policies.get(
         query.availability_policy_hash
     )

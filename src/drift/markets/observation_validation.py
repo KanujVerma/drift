@@ -6,7 +6,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
 from types import MappingProxyType
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
@@ -19,6 +19,7 @@ from drift.datasets.hashing import assertion_version_payload, manifest_hash, sch
 from drift.datasets.resolver import VerifiedArtifactBytes
 from drift.domain.artifacts import ArtifactReference
 from drift.domain.assertions import AssertionVersionProjectionV1
+from drift.domain.common import UUID7, SHA256Hash
 from drift.domain.dataset_validation import (
     DatasetValidationDecisionV2,
     DatasetValidationError,
@@ -53,7 +54,9 @@ from drift.domain.temporal import (
     AvailabilityEvidenceV1,
     AvailabilityPolicyV1,
 )
+from drift.domain.universes import ResearchUniverseDefinitionV1
 from drift.errors import CanonicalSerializationError, DriftError
+from drift.markets.universes import StructuralResolutionContext
 from drift.serialization.canonical import canonical_json, content_hash
 
 OBSERVATION_VALIDATION_PROFILE_ID = "m1d-source-observation-v1"
@@ -423,6 +426,12 @@ class M1dResolutionContext:
     retained_evidence: Mapping[str, AvailabilityEvidenceV1]
     supporting_artifacts: Mapping[str, VerifiedArtifactBytes]
     session_datasets: tuple[M1dDatasetInput[SessionInputRecordV1], ...] = ()
+    structural_context: StructuralResolutionContext | None = None
+    research_definition: ResearchUniverseDefinitionV1 | None = None
+    issuer_id: UUID7 | None = None
+    structural_methodology_id: str | None = None
+    m1b_requested_channel: AvailabilityChannelV1 | None = None
+    schedule_generation_policy_hash: SHA256Hash | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -442,6 +451,18 @@ class M1dResolutionContext:
             "supporting_artifacts",
             MappingProxyType(dict(self.supporting_artifacts)),
         )
+        m1b_values = (
+            self.structural_context,
+            self.research_definition,
+            self.issuer_id,
+            self.structural_methodology_id,
+        )
+        if any(value is None for value in m1b_values) and any(
+            value is not None for value in m1b_values
+        ):
+            raise ValueError("M1b observation context fields must be supplied together")
+        if self.m1b_requested_channel is not None and self.structural_context is None:
+            raise ValueError("M1b channel mapping requires a structural context")
 
 
 def m1d_context_descriptor(context: M1dResolutionContext) -> dict[str, object]:
@@ -492,7 +513,7 @@ def m1d_context_descriptor(context: M1dResolutionContext) -> dict[str, object]:
             ),
         )
     )
-    return {
+    descriptor: dict[str, object] = {
         "context_schema_version": "1",
         "observation_datasets": datasets,
         "session_datasets": session_datasets,
@@ -509,6 +530,55 @@ def m1d_context_descriptor(context: M1dResolutionContext) -> dict[str, object]:
             )
         ),
         "supporting_artifact_hashes": tuple(sorted(context.supporting_artifacts)),
+    }
+    m1b = _m1b_context_descriptor(context)
+    if m1b is not None:
+        descriptor["m1b"] = m1b
+    if context.schedule_generation_policy_hash is not None:
+        descriptor["schedule_generation_policy_hash"] = (
+            context.schedule_generation_policy_hash
+        )
+    return descriptor
+
+
+def _validated_records_descriptor(records: Any) -> dict[str, object]:
+    return {
+        "manifest_hash": manifest_hash(records.manifest),
+        "decision_hash": content_hash(records.decision),
+        "record_hashes": tuple(sorted(content_hash(item) for item in records.records)),
+    }
+
+
+def _m1b_context_descriptor(context: M1dResolutionContext) -> object:
+    structural = context.structural_context
+    if structural is None:
+        return None
+    universe = structural.universe
+    return {
+        "research_definition_hash": content_hash(context.research_definition),
+        "issuer_id": context.issuer_id,
+        "methodology_id": context.structural_methodology_id,
+        "requested_channel": context.m1b_requested_channel,
+        "identity_bundle_hash": content_hash(universe.identity_bundle),
+        "universe_bundle_hash": content_hash(universe.universe_bundle),
+        "policy_hash": content_hash(universe.policy),
+        "retained_evidence": tuple(
+            sorted(
+                (key, content_hash(value))
+                for key, value in universe.retained_evidence.items()
+            )
+        ),
+        "assignments": _validated_records_descriptor(universe.assignments),
+        "memberships": _validated_records_descriptor(universe.memberships),
+        "source_definitions": _validated_records_descriptor(
+            universe.source_definitions
+        ),
+        "relationships": _validated_records_descriptor(structural.relationships),
+        "classifications": _validated_records_descriptor(structural.classifications),
+        "roles": _validated_records_descriptor(structural.roles),
+        "lifecycle": _validated_records_descriptor(structural.lifecycle),
+        "terminations": _validated_records_descriptor(structural.terminations),
+        "coverage": _validated_records_descriptor(structural.coverage),
     }
 
 

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Existing Python 3.14+, Pydantic, pytest, Ruff, mypy, uv; standard-library `fractions`, `decimal`, `zoneinfo`, `io`, `hashlib`. No new dependency.
 
-**Execution status:** Task 1 is accepted at `0f2aa6d89b49401f77af225655d61ca2f522553d`. Task 2 is accepted at `e9052b54e173be177afe194c2289b806f4e69977`; its post-commit Checkpoint passed all 1,221 tests and required checks. Task 3 has earned independent Sol and controller acceptance and is the next planned commit with subject `feat: bind causal observations to historical sessions`. Tasks 4 through 8 remain unstarted. The planning-only acceptance record below is historical.
+**Execution status:** Tasks 1 through 3 are accepted. Task 4 has earned independent Sol, Terra, and controller acceptance and is the next planned commit with subject `feat: compose historical observation usability`. Tasks 5 through 8 remain unstarted. The planning-only acceptance record below is historical.
 
 **Current orchestration authority, 2026-09-08:** The user's current instruction supersedes the historical Task 2-only stop boundary and authorizes the Sol root to complete reviewed Tasks 2 through 8 autonomously. Task 2 must first close its independent-review repair loop, acceptance gate, commit, and Checkpoint. Execution then continues directly through Task 8 unless a material stop condition in the current authorization is reached.
 
@@ -591,9 +591,9 @@ The harness replaces its frozen context rather than mutating `original_context`.
 
 **Files:** Task4 row; add harness `assess`. **Consumes:** selection/binding and unchanged M1b public folds with exact context rebuild. **Produces:** section5 functions/results. Do not produce factors or action mapping here.
 
-- [ ] RED: M01 through M09, O01/O02/O03/O06/O07/O08 and T04. Pair missing/zero/explicit marker to prove they do not collapse to one reason. Pair historically active delisted listing with post-termination interval.
-- [ ] Run `uv run pytest tests/unit/test_observation_usability.py -q`; observe false provider-gap/no-trade and interval/lifecycle leakage failures.
-- [ ] GREEN: implement independent axis derivation and necessary-condition composition; reuse M1b AS_KNOWN finite-C queries, not copied folds. Do not turn partial interruption into full suspension or require unrelated dataset completeness.
+- [x] RED: M01 through M09, O01/O02/O03/O06/O07/O08 and T04. Pair missing/zero/explicit marker to prove they do not collapse to one reason. Pair historically active delisted listing with post-termination interval.
+- [x] Run `uv run pytest tests/unit/test_observation_usability.py -q`; observe false provider-gap/no-trade and interval/lifecycle leakage failures.
+- [x] GREEN: implement independent axis derivation and necessary-condition composition; reuse M1b AS_KNOWN finite-C queries, not copied folds. Do not turn partial interruption into full suspension or require unrelated dataset completeness.
 
 ```python
 from observation_test_support import ObservationHarness
@@ -612,7 +612,7 @@ def test_same_day_close_is_not_available_at_open():
     assert result.provider_gap == "not_proven"
 ```
 
-- [ ] Independent Sol missingness/adversarial review plus Terra unchanged-M1b compatibility review. Full gate. Commit `feat: compose historical observation usability` after authority gate. This is the preservation review boundary, not milestone completion.
+- [x] Independent Sol missingness/adversarial review plus Terra unchanged-M1b compatibility review. Full gate. Commit `feat: compose historical observation usability` after authority gate. This is the preservation review boundary, not milestone completion.
 
 ### Task 5: Verified M1c action-to-session application boundaries
 
@@ -837,3 +837,13 @@ One fresh Sol implementer added finite observation/session selection, complete s
 Fresh Sol review rejected the first candidate with one Critical and four Important findings. The controller reproduced future realized-outcome exposure, a private policy-bypassing contract path, arbitrary-population endpoint checks, rejection of schema-permitted equivalent overlaps, and dataset-wide coverage incorrectly blocking an exact present row. The repaired design adds a closed completion-evidence companion referenced by the existing realized record. Exact-bounds opened reports use actual close; did-not-open and opened-without-bounds reports require exact source completion plus a matching availability witness that does not predate completion. This preserves accepted Task 2 record bytes, keeps availability distinct from event completion, and prevents later cutoffs from curing intrinsically early publication. Contract selection uses an additive audit facade with exact policy, manifest, methodology, cutoff, and replay binding. Equivalent overlaps collapse only on identical authority; relevant endpoint rules come only from field-used populations.
 
 Two scoped Sol re-reviews found and closed residual backdating and extra-methodology inventory defects. A final test-only round converted both live probes into durable regression tests. Fresh controller acceptance passed 44 Task 3 tests in 8.44s, 231 affected Task 1/2/temporal tests in 11.49s, and all 1,265 tests in 54.65s. Ruff lint, format (135 files), mypy (103 source files), source/wheel build, and `git diff --check` passed. No Task 4 missingness, M1b/M1c action use, normalization, dependency, provider, network, broker, evaluator, return, portfolio, or trading capability was added. The accepted publication subject is `feat: bind causal observations to historical sessions`; its exact hash is obtained from Git history after publication.
+
+### Task 4 acceptance, 2026-09-09
+
+Task 4 adds orthogonal assessment/read-failure contracts, narrow source-profile admission, conjunctive provider-gap proof, scheduled research eligibility, and finite M1b interval composition through unchanged public AS_KNOWN folds at outer C=K/V. Missing, null, zero, sentinel, source adjustment, integrity, coverage, schedule, realization, listing state, and activity remain separate axes. Nonusable or indeterminate results expose no numeric view. A complete present fact does not require dataset-wide completeness; absence and provider gap do.
+
+Parallel Sol and Terra reviews rejected the first candidate. The controller verified incomplete structural boundary coverage, ignored unknown boundaries, incomplete venue-transfer dependencies, unproved partial-suspension aggregation, noncausal coverage snapshots, inferred M1b channel fallback, future-correction poisoning, corrupt reads masking forged context/policy, realized-outcome coupling in scheduled eligibility, and binding-first erasure of intrinsic profile failures. The repaired implementation sweeps every relevant selected M1b structural fact family, treats exact boundaries as half-open, preserves relevant bounded/unknown uncertainty, and supplies full identity/relationship dependencies. Partial suspension requires a closed exact interruption-aggregation artifact plus matching realized intervals. Coverage snapshot completion and availability chronology are causal. M1b channel selection is explicit and context-hashed. Present-row cutoff follows the selected witness; later unavailable corrections stay audit-side. Query/context/policy authority is checked before typed read errors. Scheduled eligibility uses an exact retained generation policy and schedule artifact but grants no realization, tradability, or bar usability.
+
+Scoped Terra and Sol re-reviews found two residual Important defects: a bounded uncertainty ending exactly at a segment start was falsely overlapping, and incomplete generation-policy lineage checks could still be masked by corrupt observation bytes. Fix round 2 corrected the half-open predicate and extracted one shared Task 2 policy validator used both by generation and Task 4 pre-read authority checks. Both scoped re-reviews then approved with no new Critical or Important issue.
+
+Fresh controller acceptance passed 69 Task 4 tests in 54.06s, 106 Task 2/3 tests in 11.00s, 339 M1b identity/universe tests in 3.82s, and all 1,334 tests in 109.88s. Ruff lint, format (138 files), mypy (106 source files), source/wheel build, and `git diff --check` passed. M1b persisted models, resolvers, enums, fixtures, and all M0-M1c contracts remain unchanged. No action mapping, normalization, provider, network, dependency, broker, evaluator, return, portfolio, backtest, or trading capability was added. The accepted publication subject is `feat: compose historical observation usability`; its exact hash is obtained from Git history after publication.
