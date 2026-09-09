@@ -8,7 +8,7 @@
 
 **Tech Stack:** Existing Python 3.14+, Pydantic, pytest, Ruff, mypy, uv; standard-library `fractions`, `decimal`, `zoneinfo`, `io`, `hashlib`. No new dependency.
 
-**Execution status:** Task 1 is accepted at `0f2aa6d89b49401f77af225655d61ca2f522553d`; its post-commit Checkpoint passed all 1,159 tests and required checks. Task 2 has earned independent Sol and controller acceptance after three bounded repair rounds and is the next planned commit with subject `feat: add immutable scheduled and realized sessions`. Task 3 remains unstarted until that commit and post-commit Checkpoint. The planning-only acceptance record below is historical.
+**Execution status:** Task 1 is accepted at `0f2aa6d89b49401f77af225655d61ca2f522553d`. Task 2 is accepted at `e9052b54e173be177afe194c2289b806f4e69977`; its post-commit Checkpoint passed all 1,221 tests and required checks. Task 3 has earned independent Sol and controller acceptance and is the next planned commit with subject `feat: bind causal observations to historical sessions`. Tasks 4 through 8 remain unstarted. The planning-only acceptance record below is historical.
 
 **Current orchestration authority, 2026-09-08:** The user's current instruction supersedes the historical Task 2-only stop boundary and authorizes the Sol root to complete reviewed Tasks 2 through 8 autonomously. Task 2 must first close its independent-review repair loop, acceptance gate, commit, and Checkpoint. Execution then continues directly through Task 8 unless a material stop condition in the current authorization is reached.
 
@@ -550,10 +550,10 @@ def test_retained_synthetic_winter_and_summer():
 
 **Files:** Task3 row; extend owned harness methods for selection/binding. **Consumes:** audited Task1/2 contexts. **Produces:** `select_observation_records`, verifier, binding functions and proof family section2/4. Every consumer verifies selected-value equality, not just hash agreement.
 
-- [ ] RED: T01/T02/T03, S03/S05/S07/S10/S11, O04/O05 and P01/P03/P06. Include empty verified inventory distinct from unknown coverage.
-- [ ] Run `uv run pytest tests/unit/test_observation_selection.py tests/unit/test_session_binding.py -q` and observe historical revision/session substitution failures.
-- [ ] GREEN: use M1a finite revision/availability selection on each family, never latest; source/contract/coverage cutoffs independently checked. Bind against actual bounds and explicit label/endpoint semantics; retain schedule comparison separately.
-- [ ] Concrete regression uses two immutable source revisions:
+- [x] RED: T01/T02/T03, S03/S05/S07/S10/S11, O04/O05 and P01/P03/P06. Include empty verified inventory distinct from unknown coverage.
+- [x] Run `uv run pytest tests/unit/test_observation_selection.py tests/unit/test_session_binding.py -q` and observe historical revision/session substitution failures.
+- [x] GREEN: use M1a finite revision/availability selection on each family, never latest; source/contract/coverage cutoffs independently checked. Bind against actual bounds and explicit label/endpoint semantics; retain schedule comparison separately.
+- [x] Concrete regression uses two immutable source revisions:
 
 ```python
 from observation_test_support import ObservationHarness
@@ -585,7 +585,7 @@ def test_correction_does_not_rewrite_prior_selection():
 
 The harness replaces its frozen context rather than mutating `original_context`. Old proofs replay only against their original retained snapshot. Pair this test with an assertion that the old query plus expanded context is rejected. Context/query/proof hashes change when retained future evidence is added; historical selected values do not. Apply the same rule to schedule-correction S07: replay the old artifact against old inputs; a new inventory requires a freshly bound query even if UTC output matches. Future-only facts must not be projected into decision payload/diagnostic facts; inventory provenance is not authorization to expose them.
 
-- [ ] Fresh Sol temporal/session review; replay every Important finding. Focused tests plus old temporal tests and Ruff/mypy. Commit `feat: bind causal observations to historical sessions` after authority gate.
+- [x] Fresh Sol temporal/session review; replay every Important finding. Focused tests plus old temporal tests and Ruff/mypy. Commit `feat: bind causal observations to historical sessions` after authority gate.
 
 ### Task 4: Orthogonal missingness and narrow research usability
 
@@ -829,3 +829,11 @@ The original Task 2 implementer remained the only source writer for three bounde
 The three inherited worker concerns were substantiated as follows. The proof-subject compatibility seam was a genuine Important contract defect and was removed. Missing direct DST fold/gap coverage was a genuine Important acceptance gap; the underlying retained-byte conversion behavior was correct and now has public-path fold, gap, wrong-fold, and ambient-lookup tests. The permissive helper type was only partly a defect by itself, but it exposed a genuine Minor unchecked context-slot topology; both the runtime invariant and structural typing were repaired.
 
 Final controller acceptance gate on the reviewed snapshot: source/session focused tests passed 118 in 3.07s; full `uv run pytest -q` passed 1,221 in 44.95s; Ruff lint and format (131 files), mypy (99 source files), source/wheel build, and `git diff --check` passed. The full suite includes actual pinned M1c replay. Task 2 remains additive and preserves source schedule, realized outcome, reconstruction provenance, and historical authority as separate facts. No M0-M1c persisted contract, dependency, provider, network, broker, evaluator, return, portfolio, or trading capability changed. The accepted publication subject is `feat: add immutable scheduled and realized sessions`; its exact hash is obtained from Git history after publication rather than embedded self-referentially here.
+
+### Task 3 acceptance, 2026-09-08
+
+One fresh Sol implementer added finite observation/session selection, complete selection replay, and exact observation-to-realized-session binding. A bounded extraction removed the duplicate Task 2 selector while preserving its semantic algorithm identity. Public selection now covers all six purposes through honest observation, session, and contract facades. Old proofs replay only against their original context; retained future revisions can change context identity without rewriting an earlier selected value. Exact present observations bind only through independently selected realized intervals and explicit field-used endpoint/auction semantics. Schedule and coverage facts remain separate diagnostics rather than substitute authority.
+
+Fresh Sol review rejected the first candidate with one Critical and four Important findings. The controller reproduced future realized-outcome exposure, a private policy-bypassing contract path, arbitrary-population endpoint checks, rejection of schema-permitted equivalent overlaps, and dataset-wide coverage incorrectly blocking an exact present row. The repaired design adds a closed completion-evidence companion referenced by the existing realized record. Exact-bounds opened reports use actual close; did-not-open and opened-without-bounds reports require exact source completion plus a matching availability witness that does not predate completion. This preserves accepted Task 2 record bytes, keeps availability distinct from event completion, and prevents later cutoffs from curing intrinsically early publication. Contract selection uses an additive audit facade with exact policy, manifest, methodology, cutoff, and replay binding. Equivalent overlaps collapse only on identical authority; relevant endpoint rules come only from field-used populations.
+
+Two scoped Sol re-reviews found and closed residual backdating and extra-methodology inventory defects. A final test-only round converted both live probes into durable regression tests. Fresh controller acceptance passed 44 Task 3 tests in 8.44s, 231 affected Task 1/2/temporal tests in 11.49s, and all 1,265 tests in 54.65s. Ruff lint, format (135 files), mypy (103 source files), source/wheel build, and `git diff --check` passed. No Task 4 missingness, M1b/M1c action use, normalization, dependency, provider, network, broker, evaluator, return, portfolio, or trading capability was added. The accepted publication subject is `feat: bind causal observations to historical sessions`; its exact hash is obtained from Git history after publication.

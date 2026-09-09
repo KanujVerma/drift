@@ -4,20 +4,17 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from io import BytesIO
-from typing import Literal
+from typing import Literal, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import ValidationError
 
-from drift.datasets.assertions import select_assertion_version
 from drift.datasets.hashing import manifest_hash
-from drift.domain.assertions import AssertionVersionProjectionV1
 from drift.domain.observation_query import (
     M1dSelectionProofV1,
     ObservationQueryV1,
     ObservationSourceBindingV1,
     ObservationSourceSelectionPolicyV1,
-    SessionSubjectV1,
     m1d_implementation_hash,
     observation_cutoff,
 )
@@ -40,13 +37,13 @@ from drift.domain.sessions import (
 from drift.domain.temporal import (
     AvailabilityBasis,
     AvailabilityEvidenceV1,
-    AvailabilityPolicyV1,
     AvailabilityShape,
     CutoffEligibility,
     CutoffEligibilityResultV1,
     SourcePrecision,
     evaluate_availability,
 )
+from drift.markets.observation_selection import _select_bound_records
 from drift.markets.observation_validation import (
     M1dDatasetInput,
     M1dResolutionContext,
@@ -146,11 +143,41 @@ def _generate_schedule(
             classification="indeterminate",
             reasons=reasons or ("session_source_binding_missing",),
         )
-    selected_source, source_proof, source_dataset = _select_record(
-        query, context, availability_policy, scheduled_binding
+    selected_source_result, source_dataset_value = _select_bound_records(
+        query,
+        context,
+        availability_policy,
+        scheduled_binding,
+        "scheduled_session",
+        "scheduled_session",
+        semantic_algorithm_hash=schedule_generation_algorithm_hash(),
     )
-    selected_coverage, coverage_proof, coverage_dataset = _select_record(
-        query, context, availability_policy, coverage_binding
+    selected_coverage_result, coverage_dataset_value = _select_bound_records(
+        query,
+        context,
+        availability_policy,
+        coverage_binding,
+        "session_coverage",
+        "session_coverage",
+        semantic_algorithm_hash=schedule_generation_algorithm_hash(),
+    )
+    selected_source = (
+        selected_source_result.records[0]
+        if len(selected_source_result.records) == 1
+        else None
+    )
+    selected_coverage = (
+        selected_coverage_result.records[0]
+        if len(selected_coverage_result.records) == 1
+        else None
+    )
+    source_proof = selected_source_result.proof
+    coverage_proof = selected_coverage_result.proof
+    source_dataset = cast(
+        M1dDatasetInput[SessionInputRecordV1] | None, source_dataset_value
+    )
+    coverage_dataset = cast(
+        M1dDatasetInput[SessionInputRecordV1] | None, coverage_dataset_value
     )
     if not isinstance(selected_source, ScheduledSessionVersionV1):
         return _artifact(
@@ -298,128 +325,6 @@ def _unique_binding(
         if not matches
         else "competing_session_source_bindings"
     )
-
-
-def _select_record(
-    query: ObservationQueryV1,
-    context: M1dResolutionContext,
-    availability_policy: AvailabilityPolicyV1,
-    binding: ObservationSourceBindingV1,
-) -> tuple[
-    ScheduledSessionVersionV1 | SessionCoverageVersionV1 | None,
-    M1dSelectionProofV1,
-    M1dDatasetInput[SessionInputRecordV1] | None,
-]:
-    matching_datasets = tuple(
-        item
-        for item in context.session_datasets
-        if item.manifest.dataset_role.name == binding.dataset_role
-        and item.manifest.source.source_id == binding.source_id
-        and manifest_hash(item.manifest) in binding.manifest_hashes
-    )
-    candidates: list[ScheduledSessionVersionV1 | SessionCoverageVersionV1] = []
-    for dataset in matching_datasets:
-        for record in dataset.records:
-            if isinstance(record, ScheduledSessionVersionV1) and (
-                binding.dataset_role == "scheduled_session"
-                and record.source_id == binding.source_id
-                and record.source_methodology_hash in binding.methodology_hashes
-                and record.session_key.mic == query.venue.value
-                and record.session_key.session_scope == "regular"
-                and record.session_key.local_date == query.session_date
-            ):
-                candidates.append(record)
-            elif isinstance(record, SessionCoverageVersionV1) and (
-                binding.dataset_role == "session_coverage"
-                and record.source_id == binding.source_id
-                and record.methodology_hash in binding.methodology_hashes
-                and record.mic == query.venue.value
-                and record.session_scope == "regular"
-                and record.start_date <= query.session_date <= record.end_date
-            ):
-                candidates.append(record)
-    by_logical: dict[
-        object, list[ScheduledSessionVersionV1 | SessionCoverageVersionV1]
-    ] = {}
-    for record in candidates:
-        by_logical.setdefault(record.revision.logical_record_id, []).append(record)
-    selections = tuple(
-        select_assertion_version(
-            tuple(
-                AssertionVersionProjectionV1(
-                    revision=item.revision, record_hash=content_hash(item)
-                )
-                for item in versions
-            ),
-            query.requested_channel,
-            availability_policy,
-            observation_cutoff(query),
-            context.retained_evidence,
-        )
-        for versions in by_logical.values()
-    )
-    selected_hashes = tuple(
-        selection.selected_record_hash
-        for selection in selections
-        if selection.classification is CutoffEligibility.ELIGIBLE
-        and selection.selected_record_hash is not None
-    )
-    selected = tuple(
-        record for record in candidates if content_hash(record) in selected_hashes
-    )
-    availability_decisions: list[CutoffEligibilityResultV1] = []
-    for record in candidates:
-        evidence = next(
-            (
-                item
-                for item in record.revision.availability
-                if item.channel == query.requested_channel
-            ),
-            None,
-        )
-        if evidence is not None:
-            availability_decisions.append(
-                evaluate_availability(
-                    evidence,
-                    query.requested_channel,
-                    availability_policy,
-                    observation_cutoff(query),
-                    context.retained_evidence,
-                )
-            )
-    selection_classification: Literal["selected", "absent", "indeterminate"] = (
-        "selected"
-        if len(selected) == 1
-        else "indeterminate"
-        if any(
-            item.classification is CutoffEligibility.INDETERMINATE
-            for item in selections
-        )
-        or len(selected) > 1
-        else "absent"
-    )
-    proof = M1dSelectionProofV1(
-        schema_version="1",
-        query=query,
-        query_hash=content_hash(query),
-        purpose=binding.dataset_role,  # type: ignore[arg-type]
-        context_hash=query.input_context_hash,
-        subject=SessionSubjectV1(
-            source_id=binding.source_id,
-            mic=query.venue.value,
-            session_date=query.session_date,
-            session_scope="regular",
-        ),
-        considered_version_hashes=tuple(content_hash(item) for item in candidates),
-        selected_hashes=(content_hash(selected[0]),) if len(selected) == 1 else (),
-        assertion_selections=selections,
-        availability_decisions=tuple(availability_decisions),
-        semantic_algorithm_hash=schedule_generation_algorithm_hash(),
-        implementation_hash=m1d_implementation_hash(),
-        classification=selection_classification,
-    )
-    selected_dataset = matching_datasets[0] if len(matching_datasets) == 1 else None
-    return (selected[0] if len(selected) == 1 else None), proof, selected_dataset
 
 
 def _coverage_reason(
