@@ -47,6 +47,7 @@ from drift.domain.observation_query import (
     ObservationSourceBindingV1,
     ObservationSourceSelectionPolicyV1,
     ObservationSubjectV1,
+    SessionSubjectV1,
     m1d_implementation_hash,
     observation_cutoff,
     observation_horizon,
@@ -446,19 +447,29 @@ def selected_proof(
         evidence, query.requested_channel, policy, cutoff, {}
     )
     assert selection.selected_record_hash == record_hash
-    return M1dSelectionProofV1(
-        query=query,
-        query_hash=content_hash(query),
-        purpose=purpose,
-        context_hash=query.input_context_hash,
-        subject=ObservationSubjectV1(
+    subject = (
+        SessionSubjectV1(
+            source_id=query.source_id,
+            mic=query.venue.value,
+            session_date=query.session_date,
+            session_scope="regular",
+        )
+        if purpose in {"scheduled_session", "realized_session", "session_coverage"}
+        else ObservationSubjectV1(
             listing_id=query.listing_id,
             security_id=query.security_id,
             venue=query.venue,
             session_date=query.session_date,
             source_id=query.source_id,
             contract_hash=query.contract_hash,
-        ),
+        )
+    )
+    return M1dSelectionProofV1(
+        query=query,
+        query_hash=content_hash(query),
+        purpose=purpose,
+        context_hash=query.input_context_hash,
+        subject=subject,
         considered_version_hashes=(record_hash,),
         selected_hashes=(record_hash,),
         assertion_selections=(selection,),

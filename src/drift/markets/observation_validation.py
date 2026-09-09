@@ -6,6 +6,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
 from types import MappingProxyType
+from typing import Generic, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
@@ -46,6 +47,7 @@ from drift.domain.observations import (
     ObservationMethodologyV1,
     observation_methodology_for_contract,
 )
+from drift.domain.sessions import SessionInputRecordV1
 from drift.domain.temporal import (
     AvailabilityChannelV1,
     AvailabilityEvidenceV1,
@@ -387,14 +389,21 @@ def parse_observation_document(
     return tuple(parsed)
 
 
+M1dRecordT = TypeVar(
+    "M1dRecordT",
+    bound=ObservationInputRecordV1 | SessionInputRecordV1,
+    default=ObservationInputRecordV1,
+)
+
+
 @dataclass(frozen=True, slots=True)
-class M1dDatasetInput:
+class M1dDatasetInput(Generic[M1dRecordT]):
     """One immutable claimed M1d input, replayed before every public use."""
 
     manifest: DatasetManifestV2
     validation_run: ValidationRunContextV1
     artifacts: Mapping[str, VerifiedArtifactBytes]
-    records: tuple[ObservationInputRecordV1, ...]
+    records: tuple[M1dRecordT, ...]
     decision: DatasetValidationDecisionV2
     bundle: ValidatedDatasetBundleV1
 
@@ -409,15 +418,17 @@ class M1dDatasetInput:
 class M1dResolutionContext:
     """Task-1 inputs retained for later additive M1d resolution stages."""
 
-    observation_datasets: tuple[M1dDatasetInput, ...]
+    observation_datasets: tuple[M1dDatasetInput[ObservationInputRecordV1], ...]
     availability_policies: Mapping[str, AvailabilityPolicyV1]
     retained_evidence: Mapping[str, AvailabilityEvidenceV1]
     supporting_artifacts: Mapping[str, VerifiedArtifactBytes]
+    session_datasets: tuple[M1dDatasetInput[SessionInputRecordV1], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self, "observation_datasets", tuple(self.observation_datasets)
         )
+        object.__setattr__(self, "session_datasets", tuple(self.session_datasets))
         object.__setattr__(
             self,
             "availability_policies",
@@ -458,9 +469,33 @@ def m1d_context_descriptor(context: M1dResolutionContext) -> dict[str, object]:
             ),
         )
     )
+    session_datasets = tuple(
+        sorted(
+            (
+                {
+                    "role": item.manifest.dataset_role.name,
+                    "source_id": item.manifest.source.source_id,
+                    "manifest_hash": manifest_hash(item.manifest),
+                    "decision_hash": content_hash(item.decision),
+                    "bundle_hash": content_hash(item.bundle),
+                    "artifact_hashes": tuple(sorted(item.artifacts)),
+                    "record_hashes": tuple(
+                        sorted(content_hash(record) for record in item.records)
+                    ),
+                }
+                for item in context.session_datasets
+            ),
+            key=lambda item: (
+                item["role"],
+                item["source_id"],
+                item["manifest_hash"],
+            ),
+        )
+    )
     return {
         "context_schema_version": "1",
         "observation_datasets": datasets,
+        "session_datasets": session_datasets,
         "availability_policies": tuple(
             sorted(
                 (key, content_hash(value))
@@ -484,12 +519,30 @@ def m1d_context_hash(context: M1dResolutionContext) -> str:
 
 def validate_m1d_resolution_context(context: M1dResolutionContext) -> None:
     """Validate the exact Task-1 context closure."""
+    if any(
+        item.manifest.dataset_role.name
+        not in {"source_observation", "observation_coverage"}
+        for item in context.observation_datasets
+    ):
+        raise DatasetValidationError.single("session_dataset_in_observation_slot")
+    if any(
+        item.manifest.dataset_role.name
+        not in {"scheduled_session", "realized_session", "session_coverage"}
+        for item in context.session_datasets
+    ):
+        raise DatasetValidationError.single("observation_dataset_in_session_slot")
     identities = tuple(
         (item.manifest.source.source_id, item.manifest.dataset_role.name)
         for item in context.observation_datasets
     )
     if len(set(identities)) != len(identities):
         raise DatasetValidationError.single("duplicate_observation_source_role")
+    session_identities = tuple(
+        (item.manifest.source.source_id, item.manifest.dataset_role.name)
+        for item in context.session_datasets
+    )
+    if len(set(session_identities)) != len(session_identities):
+        raise DatasetValidationError.single("duplicate_session_source_role")
     support_findings = _artifact_mapping_findings(
         context.supporting_artifacts, "observation_supporting_artifact"
     )
@@ -503,32 +556,56 @@ def validate_m1d_resolution_context(context: M1dResolutionContext) -> None:
             raise DatasetValidationError.single(
                 "availability_evidence_mapping_mismatch"
             )
-    for dataset in context.observation_datasets:
-        validate_m1d_dataset_input(dataset, context.supporting_artifacts)
+    for observation_dataset in context.observation_datasets:
+        validate_m1d_dataset_input(observation_dataset, context.supporting_artifacts)
+    for session_dataset in context.session_datasets:
+        validate_m1d_dataset_input(session_dataset, context.supporting_artifacts)
     _validate_coverage_inventories(context.observation_datasets)
+    from drift.markets.session_validation import (
+        validate_session_coverage_inventories,
+    )
+
+    validate_session_coverage_inventories(context.session_datasets)
 
 
 def validate_m1d_dataset_input(
-    dataset: M1dDatasetInput,
+    dataset: M1dDatasetInput[ObservationInputRecordV1]
+    | M1dDatasetInput[SessionInputRecordV1],
     supporting_artifacts: Mapping[str, VerifiedArtifactBytes],
 ) -> None:
     """Reconstruct a source dataset PASS from exact retained bytes."""
-    decision, records = validate_observation_dataset(
-        dataset.manifest,
-        dataset.artifacts,
-        dataset.validation_run,
-        supporting_artifacts,
-    )
-    if decision != dataset.decision:
-        raise DatasetValidationError.single("observation_validation_decision_mismatch")
-    if records != dataset.records:
-        raise DatasetValidationError.single("observation_parsed_records_mismatch")
-    if decision.result is not ValidationResult.PASS:
-        raise DatasetValidationError.single("observation_validation_decision_not_pass")
-    if tuple(sorted(dataset.artifacts)) != decision.validated_artifact_hashes:
-        raise DatasetValidationError.single(
-            "observation_validated_artifact_set_mismatch"
+    role = dataset.manifest.dataset_role.name
+    records: tuple[ObservationInputRecordV1, ...] | tuple[SessionInputRecordV1, ...]
+    if role in {"source_observation", "observation_coverage"}:
+        decision, observation_records = validate_observation_dataset(
+            dataset.manifest,
+            dataset.artifacts,
+            dataset.validation_run,
+            supporting_artifacts,
         )
+        records = observation_records
+        prefix = "observation"
+    elif role in {"scheduled_session", "realized_session", "session_coverage"}:
+        from drift.markets.session_validation import validate_session_dataset
+
+        decision, session_records = validate_session_dataset(
+            dataset.manifest,
+            dataset.artifacts,
+            dataset.validation_run,
+            supporting_artifacts,
+        )
+        records = session_records
+        prefix = "session"
+    else:
+        raise DatasetValidationError.single("unsupported_m1d_dataset_role")
+    if decision != dataset.decision:
+        raise DatasetValidationError.single(f"{prefix}_validation_decision_mismatch")
+    if records != dataset.records:
+        raise DatasetValidationError.single(f"{prefix}_parsed_records_mismatch")
+    if decision.result is not ValidationResult.PASS:
+        raise DatasetValidationError.single(f"{prefix}_validation_decision_not_pass")
+    if tuple(sorted(dataset.artifacts)) != decision.validated_artifact_hashes:
+        raise DatasetValidationError.single(f"{prefix}_validated_artifact_set_mismatch")
     try:
         validated_bundle = ValidatedDatasetBundleV1.model_validate(
             dataset.bundle.model_dump(mode="python")
@@ -540,9 +617,9 @@ def validate_m1d_dataset_input(
             validated_datasets=((dataset.manifest, decision),),
         )
     except (TypeError, ValueError, ValidationError) as error:
-        raise DatasetValidationError.single("observation_bundle_invalid") from error
+        raise DatasetValidationError.single(f"{prefix}_bundle_invalid") from error
     if rebuilt_bundle != validated_bundle:
-        raise DatasetValidationError.single("observation_bundle_membership_mismatch")
+        raise DatasetValidationError.single(f"{prefix}_bundle_membership_mismatch")
 
 
 class _DuplicateJSONKeyError(ValueError):

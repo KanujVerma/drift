@@ -8,7 +8,9 @@
 
 **Tech Stack:** Existing Python 3.14+, Pydantic, pytest, Ruff, mypy, uv; standard-library `fractions`, `decimal`, `zoneinfo`, `io`, `hashlib`. No new dependency.
 
-**Execution status:** Active under the separate 2026-09-07 user authorization to implement Tasks 1 through 8 and create reviewed task commits from planning checkpoint `95a98a603cf926b949e59e77cd7198b4c7d61d32`. Task 1 is independently accepted with the full gate passing; publication and Checkpoint are reported from Git after they occur. Task 2 is next. The planning-only acceptance record below remains historical; it is not the current authorization boundary. No milestone after M1d is authorized.
+**Execution status:** Task 1 is accepted at `0f2aa6d89b49401f77af225655d61ca2f522553d`; its post-commit Checkpoint passed all 1,159 tests and required checks. Task 2 has earned independent Sol and controller acceptance after three bounded repair rounds and is the next planned commit with subject `feat: add immutable scheduled and realized sessions`. Task 3 remains unstarted until that commit and post-commit Checkpoint. The planning-only acceptance record below is historical.
+
+**Current orchestration authority, 2026-09-08:** The user's current instruction supersedes the historical Task 2-only stop boundary and authorizes the Sol root to complete reviewed Tasks 2 through 8 autonomously. Task 2 must first close its independent-review repair loop, acceptance gate, commit, and Checkpoint. Execution then continues directly through Task 8 unless a material stop condition in the current authorization is reached.
 
 **Spec:** [Historical economic events and observations](../specs/2026-09-05-historical-economic-events-and-observations-design.md), especially sections 7 through 10 and the M1d acceptance rows; ADRs [0006](../../adr/0006-independent-historical-identity-and-lifecycle-facts.md), [0007](../../adr/0007-authenticated-point-in-time-universe-composition.md), [0008](../../adr/0008-verify-selected-content-and-dependent-equivalence.md), [0009](../../adr/0009-separate-economic-events-and-observation-semantics.md).
 
@@ -520,10 +522,12 @@ def test_source_decimal_round_trip():
 
 **Files:** Task2 row. **Consumes:** Task1 audited inputs/query/proof types; existing availability/resolver. **Produces:** section4 models, `generate_schedule`, `verify_schedule`, `validate_session_dataset` and fixed session fixture helpers.
 
-- [ ] RED: S01/S02/S04/S06/S08/S09 and S13-S19, distinguishing unknown historical offset authority from modern reconstruction capture. Build a finite synthetic TZif with explicit transitions and documented bytes; do not load a system timezone as the oracle.
-- [ ] Run `uv run pytest tests/unit/test_session_artifacts.py -q`; verify failures specifically concern conversion, availability, realized/source independence and identity.
-- [ ] GREEN: implement explicit-row conversion and full input/output replay; retain source rows separately from query-bound generated artifact. Implement independent realized axes with no required schedule dependency.
-- [ ] Test core standard-library conversion against the exact fixture:
+Task 2 may add session datasets and closed role dispatch to the shared M1d context, and session-specific subjects to the shared proof family. Select the calendar publisher through its role-specific policy binding, not the bar's `query.source_id`. A narrow session selector is required here for generation before Task 3's generic observation selection exists; Task 3 must reuse it. Preserve observation role/type/subject guards. A small typed selected-session container beside session models is permitted to avoid circular imports while reusing the same proof family. These are dependency-preserving M1d additions, not changes to older contracts or a second query engine.
+
+- [x] RED: S01/S02/S04/S06/S08/S09 and S13-S19, distinguishing unknown historical offset authority from modern reconstruction capture. Build a finite synthetic TZif with explicit transitions and documented bytes; do not load a system timezone as the oracle.
+- [x] Run `uv run pytest tests/unit/test_session_artifacts.py -q`; verify failures specifically concern conversion, availability, realized/source independence and identity.
+- [x] GREEN: implement explicit-row conversion and full input/output replay; retain source rows separately from query-bound generated artifact. Implement independent realized axes with no required schedule dependency.
+- [x] Test core standard-library conversion against the exact fixture:
 
 ```python
 from datetime import datetime, timezone
@@ -540,7 +544,7 @@ def test_retained_synthetic_winter_and_summer():
     assert summer.isoformat() == "2026-07-06T13:30:00+00:00"
 ```
 
-- [ ] Independently review causal provenance and fold/endpoint attacks with fresh Sol. Focused tests, Ruff and mypy. Commit `feat: add immutable scheduled and realized sessions` with exact owned paths after authority gate.
+- [x] Independently review causal provenance and fold/endpoint attacks with fresh Sol. Focused tests, Ruff and mypy. Commit `feat: add immutable scheduled and realized sessions` with exact owned paths after authority gate.
 
 ### Task 3: Causal selection and observation/session binding
 
@@ -797,3 +801,31 @@ The legacy lane's first RED was only an absent helper. Its subsequent guard-remo
 An initial controller gate passed 1,135 tests but failed full mypy with 110 errors in the new test file omitted by the narrower worker check. The repaired final controller gate passed `uv run pytest` with 1,159 tests in 42.96s; Ruff lint and format (126 files), `uv run mypy src tests` (94 files), `uv build`, and working/index whitespace checks all passed. The source-plus-legacy focused run passed 66 tests, including actual archived M1c replay. The literal six-node lane also preserves single-node invocations and checks exact old module definitions and immutable inventory bytes.
 
 All changes are additive M1d source/tests plus this execution record. Protected M0-M1c source/tests/fixtures, dependency/lock/Python settings, all five unrelated `.DS_Store` files and the old M1b handoff remain unchanged. No provider, networking, broker, credentials, runtime agent, database, session implementation, normalization, evaluator or trading capability was added by Task 1. Task 2 begins only after the planned `feat: add exact source observation contracts` publication and Checkpoint. Its session interfaces will extend the new context additively and select calendar sources by role-specific policy bindings, not by the observation provider ID.
+
+### Task 2 worker-output checkpoint, 2026-09-08: NOT ACCEPTED
+
+Baseline and current HEAD: `0f2aa6d89b49401f77af225655d61ca2f522553d`. Task 2 commit: **none**. The Sol worker completed its bounded assignment with `DONE_WITH_CONCERNS`, froze all files, and made no staging or commit changes. Per the user's latest stop instruction, the controller did not start a fresh acceptance review or fix loop. Task 2 execution checkboxes remain unchecked because worker completion and passing checks are not acceptance.
+
+Preserved output: new `domain/sessions.py`, `markets/session_generation.py`, `markets/session_validation.py`, `tests/unit/test_session_artifacts.py` and `tests/unit/session_test_support.py`; bounded shared changes in `domain/observation_query.py` and `markets/observation_validation.py`. Production paths are under `src/drift/`. These implement source schedule/coverage/realized models, exact session validation, finite role-bound selection, retained TZif conversion against independent historical offset authority, and query-bound generation/replay. No Task 3 observation selector, usability, action mapping, normalization, provider or evaluator work was started.
+
+Continuation interfaces: `ScheduleArtifactV1` retains its full query and generation policy beside their hashes; `verify_schedule(artifact, context)` therefore has the data needed to replay. `SessionSubjectV1` contains source/MIC/local-date/regular-scope fields. `SelectedSessionRecordsV1` reuses the shared `M1dSelectionProofV1`, while `M1dSelectedRecordsV1` stays observation-only. Task 3 should reuse or extract the Task 2 finite `_select_record` semantics rather than introduce a second proof family. Session publishers are selected from role-specific policy bindings, not from the bar query's source ID.
+
+Worker report and detailed RED/GREEN history: `.superpowers/sdd/2026-09-07-m1d-source-observations-sessions-normalization/task-2-report.md`. Review these three explicitly reported concerns before accepting Task 2:
+
+1. The shared proof still accepts an observation-subject shape for a session purpose to preserve an earlier Task 1 construction test. The selected-session container requires `SessionSubjectV1`; independently review whether this compatibility seam is justified.
+2. Ambiguous-fold and nonexistent-local-time branches have round-trip guards, but direct synthetic transition-hour cases were not added. Required Task 2 coverage for those branches remains an acceptance question, not a waived requirement.
+3. Session coverage replay uses a permissively typed internal helper to avoid a shared-container import cycle. Review that boundary and exact replay behavior.
+
+Fresh controller Checkpoint evidence on the frozen runtime state: `uv run pytest tests/unit/test_session_artifacts.py tests/unit/test_observation_contracts.py -q` passed **89 tests in 1.66s**; full `uv run pytest` passed **1,192 tests in 44.83s**; `uv run ruff check .`, `uv run ruff format --check .` (131 files), `uv run mypy src tests` (99 files), `uv build` and `git diff --check` all passed. The full suite includes the pinned M1c replay lane. This verifies the reported snapshot, not the unperformed independent acceptance review.
+
+Index is empty. Task 2's shared-file edits and this plan are tracked modifications; the five new Task 2 files are untracked. The existing minimal M1d handoff remains untracked. All five unrelated `.DS_Store` hashes and the historical M1b handoff hash match the saved baseline; dependencies/lockfile are unchanged. No Task 2 commit is claimed or created for unreviewed work. Resume from Git plus this record, review/finish Task 2 acceptance, then proceed to the still-unstarted Task 3 only in the fresh authorized continuation.
+
+### Task 2 acceptance, 2026-09-08
+
+A fresh Sol continuation reproduced the frozen 89-test baseline and independently reviewed the exact uncommitted Task 2 snapshot. The review rejected the first candidate with five Important findings and one Minor runtime-topology finding. The controller independently reproduced each issue before repair: false unretained reconstruction identities still generated and replayed; nested source-temporal evidence could be missing while validation returned PASS; an observation-shaped subject could claim a session-purpose proof; realized-session payload substitution survived direct model validation; named S02/S08/S09/S17-S19 public-path oracles were incomplete; and typed context slots were not enforced at runtime.
+
+The original Task 2 implementer remained the only source writer for three bounded behavioral repair rounds. Fix round 1 closed exact reconstruction-lineage retention and running implementation identity, recursive nested evidence closure, strict session subjects, realized payload self-hashes, context-slot allowlists, and acyclic coverage-helper typing. Fix round 2 added direct constructor and serialized payload attacks plus genuine public schedule cases for sparse coverage, producer-only provenance changes, authorized UTC changes, ambient lookup resistance, and corrected historical offset authority across separate old/new contexts. A scoped reviewer found the ambient sentinel patched the wrong imported symbol; fix round 3 corrected it with a live proxy on the generator-owned `ZoneInfo` binding that permits retained-byte `from_file` and rejects direct ambient construction. Fresh Sol scoped re-reviews closed every finding with no new Important or Critical issue.
+
+The three inherited worker concerns were substantiated as follows. The proof-subject compatibility seam was a genuine Important contract defect and was removed. Missing direct DST fold/gap coverage was a genuine Important acceptance gap; the underlying retained-byte conversion behavior was correct and now has public-path fold, gap, wrong-fold, and ambient-lookup tests. The permissive helper type was only partly a defect by itself, but it exposed a genuine Minor unchecked context-slot topology; both the runtime invariant and structural typing were repaired.
+
+Final controller acceptance gate on the reviewed snapshot: source/session focused tests passed 118 in 3.07s; full `uv run pytest -q` passed 1,221 in 44.95s; Ruff lint and format (131 files), mypy (99 source files), source/wheel build, and `git diff --check` passed. The full suite includes actual pinned M1c replay. Task 2 remains additive and preserves source schedule, realized outcome, reconstruction provenance, and historical authority as separate facts. No M0-M1c persisted contract, dependency, provider, network, broker, evaluator, return, portfolio, or trading capability changed. The accepted publication subject is `feat: add immutable scheduled and realized sessions`; its exact hash is obtained from Git history after publication rather than embedded self-referentially here.

@@ -35,7 +35,13 @@ class ObservationSourceBindingV1(FrozenModel):
     """One exact source/role/listing/date authority binding."""
 
     schema_version: Literal["1"] = "1"
-    dataset_role: Literal["source_observation", "observation_coverage"]
+    dataset_role: Literal[
+        "source_observation",
+        "observation_coverage",
+        "scheduled_session",
+        "realized_session",
+        "session_coverage",
+    ]
     source_id: NonBlankStr
     contract_hash: SHA256Hash | None
     venue: ListingVenue
@@ -58,6 +64,14 @@ class ObservationSourceBindingV1(FrozenModel):
     def validate_date_scope(self) -> Self:
         if self.start_date > self.end_date:
             raise ValueError("source binding date interval cannot be reversed")
+        observation_role = self.dataset_role in {
+            "source_observation",
+            "observation_coverage",
+        }
+        if observation_role != (self.contract_hash is not None):
+            raise ValueError(
+                "only observation bindings carry an observation contract hash"
+            )
         return self
 
 
@@ -153,6 +167,16 @@ class ObservationSubjectV1(FrozenModel):
     contract_hash: SHA256Hash
 
 
+class SessionSubjectV1(FrozenModel):
+    """The source/MIC/date/scope subject of one session selection."""
+
+    schema_version: Literal["1"] = "1"
+    source_id: NonBlankStr
+    mic: NonBlankStr
+    session_date: date
+    session_scope: Literal["regular"]
+
+
 class M1dSelectionProofV1(FrozenModel):
     """Complete audit proof for one M1d source-selection request."""
 
@@ -161,7 +185,7 @@ class M1dSelectionProofV1(FrozenModel):
     query_hash: SHA256Hash
     purpose: M1dSelectionPurpose
     context_hash: SHA256Hash
-    subject: ObservationSubjectV1
+    subject: ObservationSubjectV1 | SessionSubjectV1
     considered_version_hashes: tuple[SHA256Hash, ...]
     selected_hashes: tuple[SHA256Hash, ...]
     assertion_selections: tuple[AssertionSelectionResultV1, ...]
@@ -193,16 +217,25 @@ class M1dSelectionProofV1(FrozenModel):
             raise ValueError("selection proof query hash must match query")
         if self.context_hash != self.query.input_context_hash:
             raise ValueError("selection proof context hash must match query")
-        expected_subject = ObservationSubjectV1(
-            listing_id=self.query.listing_id,
-            security_id=self.query.security_id,
-            venue=self.query.venue,
-            session_date=self.query.session_date,
-            source_id=self.query.source_id,
-            contract_hash=self.query.contract_hash,
-        )
-        if self.subject != expected_subject:
-            raise ValueError("selection proof subject must match query")
+        if self.purpose in {"observation", "observation_coverage", "contract"}:
+            expected_subject = ObservationSubjectV1(
+                listing_id=self.query.listing_id,
+                security_id=self.query.security_id,
+                venue=self.query.venue,
+                session_date=self.query.session_date,
+                source_id=self.query.source_id,
+                contract_hash=self.query.contract_hash,
+            )
+            if self.subject != expected_subject:
+                raise ValueError("selection proof subject must match query")
+        elif not isinstance(self.subject, SessionSubjectV1):
+            raise ValueError("session selection proof requires a session subject")
+        elif (
+            self.subject.mic != self.query.venue.value
+            or self.subject.session_date != self.query.session_date
+            or self.subject.session_scope != "regular"
+        ):
+            raise ValueError("session selection proof subject must match query context")
         if not set(self.selected_hashes).issubset(self.considered_version_hashes):
             raise ValueError("selected hashes must be considered")
         if self.classification == "selected":
