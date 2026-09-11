@@ -8,7 +8,7 @@
 
 **Tech Stack:** Existing Python 3.14+, Pydantic, pytest, Ruff, mypy, uv; standard-library `fractions`, `decimal`, `zoneinfo`, `io`, `hashlib`. No new dependency.
 
-**Execution status:** Tasks 1 through 4 are accepted. Task 5 has earned independent Sol and controller acceptance and is the next planned commit with subject `feat: map economic actions to session share basis`. Tasks 6 through 8 remain unstarted. The planning-only acceptance record below is historical.
+**Execution status:** Tasks 1 through 5 are accepted. Task 6 has earned independent Sol and controller acceptance and is the next planned commit with subject `feat: derive cutoff-safe split observation views`. Tasks 7 and 8 remain unstarted. The planning-only acceptance record below is historical.
 
 **Current orchestration authority, 2026-09-08:** The user's current instruction supersedes the historical Task 2-only stop boundary and authorizes the Sol root to complete reviewed Tasks 2 through 8 autonomously. Task 2 must first close its independent-review repair loop, acceptance gate, commit, and Checkpoint. Execution then continues directly through Task 8 unless a material stop condition in the current authorization is reached.
 
@@ -669,9 +669,9 @@ def test_mapping_has_no_implicit_date_roll(basis, mode, expected, date):
 
 **Files:** Task6 row; harness normalization methods. **Consumes:** proven usability and mapped occurred effects with complete relevant action coverage. **Produces:** section7 result/view/reference/materializer families, exact factors and final quantization.
 
-- [ ] RED: N01 through N11 and P02/P03/P04/P06. Numeric happy path alone is insufficient: a forged factor with correct output must fail replay. Source-basis path must pass with no economic context.
-- [ ] Run `uv run pytest tests/unit/test_normalization.py -q`; record future-anchor/effective-cutoff/role and exact-rational failures before fixes.
-- [ ] GREEN: implement source-basis and exact split algorithm section7 with no cash/returns. Use exact Fraction accumulation and integer half-even code shown there; serialize canonical rational components. Rebuild all dependencies from snapshot on every materialization.
+- [x] RED: N01 through N11 and P02/P03/P04/P06. Numeric happy path alone is insufficient: a forged factor with correct output must fail replay. Source-basis path must pass with no economic context.
+- [x] Run `uv run pytest tests/unit/test_normalization.py -q`; record future-anchor/effective-cutoff/role and exact-rational failures before fixes.
+- [x] GREEN: implement source-basis and exact split algorithm section7 with no cash/returns. Use exact Fraction accumulation and integer half-even code shown there; serialize canonical rational components. Rebuild all dependencies from snapshot on every materialization.
 
 ```python
 from drift.domain.normalization import ExactRatioV1
@@ -691,7 +691,7 @@ def test_reciprocal_composition_without_intermediate_rounding():
     )
 ```
 
-- [ ] Fresh Sol causal/normalization review, separate from mapping implementer. Full gate including current-code M1c composition and pinned legacy fixture lane. Commit `feat: derive cutoff-safe split observation views` after authority gate.
+- [x] Fresh Sol causal/normalization review, separate from mapping implementer. Full gate including current-code M1c composition and pinned legacy fixture lane. Commit `feat: derive cutoff-safe split observation views` after authority gate.
 
 ### Task 7: Immutable joined fixture and adversarial acceptance
 
@@ -857,3 +857,13 @@ Fresh Sol review rejected the first candidate with five Important findings. Root
 The first scoped re-review found two residual Important defects. Effect-time-only methodology was overconstrained to require terms, and source-session choice still depended on the label date. Fix round 2 permits absent terms and association lineage only when the exact selected effect alone proves the full pure-split predicate. Any supplied terms hash still requires exact association and selected-target equality. Equivalent offset-bearing and Z spellings of one instant now map identically; current and intervening session coverage is mandatory. The final scoped Sol review approved with no new Critical or Important issue. M1c's one-owner-per-family policy itself rejects overlapping effect owners; Task 5 adds no cross-source occurrence-equivalence seam.
 
 The synthetic outcome uses H=2026-12-01 and finite V=2026-12-02 because accepted M1c complete coverage requires interval end after H, snapshot at or after the end, and availability by V. Fresh controller acceptance passed 54 Task 5 tests in 59.58s, 493 affected M1c/M1d tests in 103.16s, 38 M1c hardening tests, and all 1,388 tests in 170.90s. Ruff lint, format (142 files), mypy (110 source files), source/wheel build, `git diff --check`, and the protected `economic_test_support.py` SHA-256 passed. No M1c persisted contract/fixture, normalization, provider, network, dependency, broker, evaluator, return, portfolio, backtest, or trading capability changed. The accepted publication subject is `feat: map economic actions to session share basis`; its exact hash is obtained from Git history after publication.
+
+### Task 6 acceptance, 2026-09-11
+
+Task 6 adds exact ratio, normalization policy/query, field transform, derivation, source/split view, role-specific reference, result, verifier, and explicit-full-query materializer families. Source-basis materialization strips typed M1c inputs before context hashing/assessment, retains exact native Decimal precision with factor one, and performs no action lookup or quantization. Split mode requires a usable source view, exact opening-basis anchor no later than B/C, complete fourteen-class relevant M1c history, replayed Task 5 mappings, and exact occurrence groups. Only prices receive 1/Q and proven share volume receives Q. Cash-only events are neutral; unsupported share-basis effects block. Settlement gaps do not block proven unit conversion.
+
+Fresh Sol review rejected the first candidate with one Critical and four Important findings. Root verified hash-order-dependent neutralization of conflicting same-occurrence reports, completed-close-shaped anchor evidence, partial numeric payloads on nonmaterialized results, public factor-bound exceptions, and incomplete property/N06/N10/P03/P04/P08 evidence. The repaired implementation compares complete occurrence groups before neutrality or window filtering; only unanimous neutral groups disappear and compatible duplicate splits contribute once. A closed exact anchor-opening companion permits an opened-without-bounds anchor after open and before close, with source/record/session identity and post-open availability. Nonmaterialized results require all output members null. Factor-product expansion failures become replayable indeterminate results with diagnostics.
+
+The finite property loop covers all 91 coprime positive numerator/denominator pairs from 1 through 12 crossed with scales 0 through 6, asserting reciprocity, exact roundtrip, and independent half-even oracles without Hypothesis or filtering. Direct regressions cover end-to-end nonshare-volume refusal, source-session-equals-first-post factor one, both role-confusion directions, policy identity, and a guaranteed-cleanup unimported Python mutation that changes joined M1c/M1d lineage and replay while source/action facts and numbers remain equal. The scoped Sol re-review approved every repair with no new Critical or Important issue; one report wording error was corrected.
+
+Fresh controller acceptance passed 192 focused normalization tests in 173.31s, 215 affected Task 3-5/M1c/pinned-replay tests in 116.69s, and all 1,580 tests in 355.85s. Ruff lint, format (145 files), mypy (113 source files), source/wheel build, `git diff --check`, P08 probe cleanup, and the protected M1c helper SHA-256 passed. No M1c persisted source/fixture, provider, network, dependency, dividend/return, holdings/accounting, evaluator, backtester, broker, or trading capability changed. The accepted publication subject is `feat: derive cutoff-safe split observation views`; its exact hash is obtained from Git history after publication.

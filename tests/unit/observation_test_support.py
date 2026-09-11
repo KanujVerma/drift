@@ -1,7 +1,7 @@
 """Literal exact-byte fixtures for M1d source-observation contract tests."""
 
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Literal
@@ -524,6 +524,26 @@ def coverage_dataset(
     contract_artifact = support[contract_hash]
     contract = ObservationContractV1.model_validate_json(contract_artifact.data)
     target_record = target.records[0]
+    target_dates = tuple(
+        record.session_date
+        for record in target.records
+        if isinstance(record, DailySourceObservationVersionV1)
+    )
+    assert target_dates
+    coverage_start = (
+        date(2026, 1, 1)
+        if all(item.month == 1 for item in target_dates)
+        else min(target_dates)
+    )
+    coverage_end = (
+        date(2026, 1, 31)
+        if all(item.month == 1 for item in target_dates)
+        else max(target_dates)
+    )
+    inferred_snapshot = datetime.combine(
+        coverage_end, datetime.min.time(), tzinfo=UTC
+    ).replace(hour=23)
+    inferred_availability = _evidence_at(inferred_snapshot, 711)
     values: dict[str, object] = {
         "schema_version": "1",
         "revision": RevisionEnvelopeV1(
@@ -533,7 +553,14 @@ def coverage_dataset(
             revision_kind=RevisionKind.INITIAL,
             supersedes_record_version_id=None,
             source_sequence=0,
-            availability=(snapshot_availability or availability(6),),
+            availability=(
+                snapshot_availability
+                or (
+                    availability(6)
+                    if coverage_end.month == 1
+                    else inferred_availability
+                ),
+            ),
             history_completeness=HistoryCompleteness.UNKNOWN,
             source_native_revision_label=None,
             source_artifact=reference(702),
@@ -545,10 +572,15 @@ def coverage_dataset(
         "venue": ListingVenue.XNYS,
         "listing_id": target_record.listing_id,
         "security_id": target_record.security_id,
-        "start_date": date(2026, 1, 1),
-        "end_date": date(2026, 1, 31),
+        "start_date": coverage_start,
+        "end_date": coverage_end,
         "snapshot_identifier": "snapshot-1",
-        "snapshot_as_of": snapshot_as_of or boundary(5),
+        "snapshot_as_of": snapshot_as_of
+        or (
+            boundary(5)
+            if coverage_end.month == 1
+            else _boundary_at(inferred_snapshot, 712)
+        ),
         "covered_dataset_hashes": (manifest_hash(target.manifest),),
         "covered_partition_hashes": tuple(sorted(target.artifacts)),
         "record_inventory": tuple(
@@ -713,11 +745,18 @@ class ObservationHarness:
         auction_event_inclusion: RuleDisposition = "included",
         used_population_rules: RuleDisposition = "included",
         assessment_ready: bool = False,
+        security_id: UUID | None = None,
+        listing_id: UUID | None = None,
+        issuer_id: UUID | None = None,
+        claimed_open_utc: tuple[int, int] = (14, 35),
+        claimed_close_utc: tuple[int, int] = (20, 55),
     ) -> None:
         self.session_date = session_date
-        self.security_id = market_uid(200)
-        self.listing_id = market_uid(201)
-        self.issuer_id = market_uid(202)
+        self.security_id = market_uid(200) if security_id is None else security_id
+        self.listing_id = market_uid(201) if listing_id is None else listing_id
+        self.issuer_id = market_uid(202) if issuer_id is None else issuer_id
+        self._claimed_open_utc = claimed_open_utc
+        self._claimed_close_utc = claimed_close_utc
         self._assessment_ready = False
         self._default_lifecycle_case = "active"
         self._contract, self._contract_support = observation_contract(
@@ -759,8 +798,12 @@ class ObservationHarness:
     ) -> DailySourceObservationVersionV1:
         effective_date = self.session_date if record_date is None else record_date
         midnight = datetime.combine(effective_date, datetime.min.time(), tzinfo=UTC)
-        session_open = midnight.replace(hour=14, minute=35)
-        session_close = midnight.replace(hour=20, minute=55)
+        session_open = midnight.replace(
+            hour=self._claimed_open_utc[0], minute=self._claimed_open_utc[1]
+        )
+        session_close = midnight.replace(
+            hour=self._claimed_close_utc[0], minute=self._claimed_close_utc[1]
+        )
         source_bytes = canonical_json(
             {
                 "kind": "synthetic-source-observation",
@@ -1536,12 +1579,16 @@ class ObservationHarness:
         )
         from drift.markets.validation import validate_identity_dataset
 
+        issuer_suffix = int(str(self.issuer_id).rsplit("-", 1)[1])
+        security_suffix = int(str(self.security_id).rsplit("-", 1)[1])
+        listing_suffix = int(str(self.listing_id).rsplit("-", 1)[1])
+
         membership_records: tuple[Any, ...] = (
             membership(
                 2640,
                 MembershipEffect.INCLUDED,
                 "2019-01-02T00:00:00Z",
-                target=201,
+                target=listing_suffix,
             ),
         )
         if structural_case == "membership_removal":
@@ -1551,7 +1598,7 @@ class ObservationHarness:
                     2641,
                     MembershipEffect.EXCLUDED,
                     "2026-01-05T17:00:00Z",
-                    target=201,
+                    target=listing_suffix,
                 ),
             )
         base_definition, universe = membership_context(membership_records)
@@ -1589,8 +1636,10 @@ class ObservationHarness:
         assignments = (*assignments[:2], listing_assignment)
         assignment_manifest, assignment_decision = assignment_dataset(assignments)
         relationships: tuple[Any, ...] = (
-            issuer_security_relationship(2660, issuer=202, security=200),
-            relationship_record(200, 201, 2670),
+            issuer_security_relationship(
+                2660, issuer=issuer_suffix, security=security_suffix
+            ),
+            relationship_record(security_suffix, listing_suffix, 2670),
         )
         if lifecycle_case == "venue_transfer":
             related = IdentityReferenceV1(
@@ -1601,7 +1650,7 @@ class ObservationHarness:
             relationships = (
                 *relationships,
                 relationship_record(
-                    200,
+                    security_suffix,
                     203,
                     2671,
                     start="2026-01-05T17:00:00Z",
@@ -1617,13 +1666,13 @@ class ObservationHarness:
                 2681,
                 ListingLifecycleEventKind.ADMITTED,
                 "2019-01-02T00:00:00Z",
-                listing=201,
+                listing=listing_suffix,
             ),
             lifecycle_record(
                 2682,
                 ListingLifecycleEventKind.FIRST_REGULAR_TRADE,
                 "2019-01-03T14:30:00Z",
-                listing=201,
+                listing=listing_suffix,
             ),
         )
         terminations: tuple[ListingTerminationVersionV1, ...] = ()
@@ -1633,13 +1682,13 @@ class ObservationHarness:
                     2681,
                     ListingLifecycleEventKind.ADMITTED,
                     "2026-01-06T00:00:00Z",
-                    listing=201,
+                    listing=listing_suffix,
                 ),
                 lifecycle_record(
                     2682,
                     ListingLifecycleEventKind.FIRST_REGULAR_TRADE,
                     "2026-01-06T14:30:00Z",
-                    listing=201,
+                    listing=listing_suffix,
                 ),
             )
         elif lifecycle_case == "fully_suspended":
@@ -1649,7 +1698,7 @@ class ObservationHarness:
                     2683,
                     ListingLifecycleEventKind.SUSPENDED,
                     "2026-01-04T00:00:00Z",
-                    listing=201,
+                    listing=listing_suffix,
                 ),
             )
         elif lifecycle_case == "partial_suspension":
@@ -1659,13 +1708,13 @@ class ObservationHarness:
                     2683,
                     ListingLifecycleEventKind.SUSPENDED,
                     "2026-01-05T17:00:00Z",
-                    listing=201,
+                    listing=listing_suffix,
                 ),
                 lifecycle_record(
                     2684,
                     ListingLifecycleEventKind.RESUMED,
                     "2026-01-05T17:15:00Z",
-                    listing=201,
+                    listing=listing_suffix,
                 ),
             )
         elif lifecycle_case == "disjoint_bounded_unknown":
@@ -1675,13 +1724,13 @@ class ObservationHarness:
                     2683,
                     ListingLifecycleEventKind.SUSPENDED,
                     bounded_boundary("2026-01-01T10:00:00Z", "2026-01-01T12:00:00Z"),
-                    listing=201,
+                    listing=listing_suffix,
                 ),
                 lifecycle_record(
                     2684,
                     ListingLifecycleEventKind.RESUMED,
                     "2026-01-02T00:00:00Z",
-                    listing=201,
+                    listing=listing_suffix,
                 ),
             )
         elif lifecycle_case == "overlapping_bounded_unknown":
@@ -1691,13 +1740,13 @@ class ObservationHarness:
                     2683,
                     ListingLifecycleEventKind.SUSPENDED,
                     bounded_boundary("2026-01-05T16:30:00Z", "2026-01-05T17:30:00Z"),
-                    listing=201,
+                    listing=listing_suffix,
                 ),
                 lifecycle_record(
                     2684,
                     ListingLifecycleEventKind.RESUMED,
                     "2026-01-05T18:00:00Z",
-                    listing=201,
+                    listing=listing_suffix,
                 ),
             )
         elif lifecycle_case == "bounded_endpoint_touch":
@@ -1707,13 +1756,13 @@ class ObservationHarness:
                     2683,
                     ListingLifecycleEventKind.SUSPENDED,
                     bounded_boundary("2026-01-05T16:30:00Z", "2026-01-05T17:00:00Z"),
-                    listing=201,
+                    listing=listing_suffix,
                 ),
                 lifecycle_record(
                     2684,
                     ListingLifecycleEventKind.RESUMED,
                     "2026-01-05T17:00:00Z",
-                    listing=201,
+                    listing=listing_suffix,
                 ),
             )
         elif lifecycle_case == "unknown_boundary":
@@ -1723,7 +1772,7 @@ class ObservationHarness:
                     2683,
                     ListingLifecycleEventKind.SUSPENDED,
                     unknown_boundary(),
-                    listing=201,
+                    listing=listing_suffix,
                 ),
             )
         elif lifecycle_case == "venue_transfer":
@@ -1733,7 +1782,7 @@ class ObservationHarness:
                     2683,
                     ListingLifecycleEventKind.VENUE_TRANSFER,
                     "2026-01-05T17:00:00Z",
-                    listing=201,
+                    listing=listing_suffix,
                     related_listing=203,
                 ),
             )
@@ -1741,7 +1790,7 @@ class ObservationHarness:
                 termination_record(
                     2690,
                     ListingTerminationReason.VENUE_TRANSFER,
-                    listing=201,
+                    listing=listing_suffix,
                     last_trade="2026-01-05T16:59:00Z",
                     effective_time="2026-01-05T17:00:00Z",
                 ),
@@ -1761,7 +1810,7 @@ class ObservationHarness:
             termination = termination_record(
                 2690,
                 ListingTerminationReason.EXCHANGE_DELISTING,
-                listing=201,
+                listing=listing_suffix,
                 last_trade="2026-01-03T21:00:00Z",
                 effective_time=effective,
             )
@@ -1788,8 +1837,8 @@ class ObservationHarness:
         classifications: tuple[Any, ...] = (
             classification_record(
                 2700,
-                issuer=202,
-                security=200,
+                issuer=issuer_suffix,
+                security=security_suffix,
                 end=(
                     "2026-01-05T17:00:00Z"
                     if structural_case == "classification_change"
@@ -1802,15 +1851,17 @@ class ObservationHarness:
                 *classifications,
                 classification_record(
                     2701,
-                    issuer=202,
-                    security=200,
+                    issuer=issuer_suffix,
+                    security=security_suffix,
                     issuer_form=IssuerForm.FUND,
                     start="2026-01-05T17:00:00Z",
                 ),
             )
         record_sets: dict[str, tuple[Any, ...]] = {
             "security_classification": classifications,
-            "listing_role": (role_record(2710, 201, security=200),),
+            "listing_role": (
+                role_record(2710, listing_suffix, security=security_suffix),
+            ),
             "listing_lifecycle": events,
             "listing_termination": terminations,
             "listing_history_coverage": (
@@ -1818,7 +1869,7 @@ class ObservationHarness:
                     2720,
                     ListingHistoryCoverageStatus.COMPLETE,
                     "2026-12-31T00:00:00Z",
-                    listing=201,
+                    listing=listing_suffix,
                 ),
             ),
         }
@@ -2136,6 +2187,53 @@ class ObservationHarness:
         )
         self._rebuild()
 
+    def use_numeric_values(
+        self,
+        *,
+        open_value: str,
+        high: str,
+        low: str,
+        close: str,
+        volume: str,
+    ) -> None:
+        """Replace all admitted numeric values with exact literal test values."""
+        replacements = {
+            "open": open_value,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": volume,
+        }
+        record = self._records[0]
+        fields = tuple(
+            field.model_copy(
+                update={
+                    "native_text": replacements[field.field_name],
+                    "value": Decimal(replacements[field.field_name]),
+                    "state": "value",
+                }
+            )
+            for field in record.fields
+        )
+        self._records = (self._reseal_record(record, fields=fields),)
+        self._rebuild()
+
+    def use_volume_semantics(
+        self,
+        *,
+        meaning: ObservationFieldMeaning,
+        unit: FieldUnit,
+    ) -> None:
+        """Replace the retained volume method with one exact semantic variant."""
+        methods = tuple(
+            method.model_copy(update={"meaning": meaning, "unit": unit})
+            if method.field_name == "volume"
+            else method
+            for method in self._contract.field_methods
+        )
+        self._replace_contract(field_methods=methods)
+        self._rebuild()
+
     def use_lifecycle_case(
         self,
         case: str,
@@ -2273,3 +2371,390 @@ class ObservationHarness:
         verify_observation_assessment(
             result, self.context if context is None else context
         )
+
+
+def _with_anchor_opening_case(
+    context: M1dResolutionContext,
+    case: Literal["matching", "missing", "mismatched", "backdated", "did_not_open"],
+) -> M1dResolutionContext:
+    """Replace the Nov30 realized row with one Task 6 anchor-opening case."""
+    from session_test_support import AUTHORITY_HASH, session_dataset
+    from session_test_support import uid as session_uid
+
+    from drift.domain.normalization import AnchorOpeningEvidenceV1
+    from drift.domain.sessions import RealizedSessionVersionV1
+
+    realized_dataset = next(
+        item
+        for item in context.session_datasets
+        if item.manifest.dataset_role.name == "realized_session"
+    )
+    records = tuple(
+        item
+        for item in realized_dataset.records
+        if isinstance(item, RealizedSessionVersionV1)
+    )
+    anchor = next(
+        item for item in records if item.session_key.local_date == date(2026, 11, 30)
+    )
+    actual_open = datetime(2026, 11, 30, 14, 30, tzinfo=UTC)
+    witness_time = datetime(
+        2026, 11, 30, 14, 25 if case == "backdated" else 35, tzinfo=UTC
+    )
+    availability = anchor.revision.availability[0].model_copy(
+        update={
+            "shape": AvailabilityShape.EXACT,
+            "lower_bound": witness_time,
+            "upper_bound": witness_time,
+            "precision": SourcePrecision.SECOND,
+            "source_time_label": witness_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+    )
+    revision = anchor.revision.model_copy(
+        update={"availability": (availability,), "payload_hash": "0" * 64}
+    )
+    support = dict(context.supporting_artifacts)
+    source_evidence_hashes: tuple[str, ...] = (AUTHORITY_HASH,)
+    if case not in {"missing", "did_not_open"}:
+        companion = AnchorOpeningEvidenceV1(
+            source_id=anchor.source_id,
+            logical_record_id=revision.logical_record_id,
+            record_version_id=(
+                session_uid(9990)
+                if case == "mismatched"
+                else revision.record_version_id
+            ),
+            session_key=anchor.session_key,
+            actual_open=actual_open,
+            source_artifact_hash=revision.source_artifact.content_hash,
+            record_availability_evidence_hash=content_hash(availability),
+        )
+        companion_bytes = canonical_json(companion)
+        companion_hash = sha256(companion_bytes).hexdigest()
+        support[companion_hash] = VerifiedArtifactBytes(
+            data=companion_bytes,
+            byte_size=len(companion_bytes),
+            content_hash=companion_hash,
+        )
+        source_evidence_hashes = tuple(
+            sorted((*source_evidence_hashes, companion_hash))
+        )
+    values = {name: getattr(anchor, name) for name in type(anchor).model_fields}
+    values.update(
+        {
+            "revision": revision,
+            "outcome": "did_not_open" if case == "did_not_open" else "opened",
+            "actual_open": None,
+            "actual_close": None,
+            "reported_as_scheduled": "asserted",
+            "late_open": "unknown",
+            "early_close": "unknown",
+            "source_evidence_hashes": source_evidence_hashes,
+        }
+    )
+    provisional = RealizedSessionVersionV1.model_construct(**values)
+    values["revision"] = revision.model_copy(
+        update={"payload_hash": content_hash(assertion_version_payload(provisional))}
+    )
+    changed_anchor = RealizedSessionVersionV1.model_validate(values)
+    changed_records = tuple(
+        changed_anchor if item is anchor else item for item in records
+    )
+    changed_dataset = session_dataset("realized_session", changed_records, support)
+    return replace(
+        context,
+        session_datasets=tuple(
+            changed_dataset if item is realized_dataset else item
+            for item in context.session_datasets
+        ),
+        supporting_artifacts=support,
+    )
+
+
+class NormalizationHarness:
+    """Genuine source/session/M1b/M1c composition for Task 6 tests."""
+
+    def __init__(
+        self,
+        *,
+        source_only: bool = False,
+        basis: str = "2026-11-27T18:05:00Z",
+        ratio: tuple[str, str] = ("2", "1"),
+        outer_kind: Literal["decision", "outcome"] = "outcome",
+        coverage_action_kinds: tuple[Any, ...] | None = None,
+        settlement_coverage: Literal["complete", "partial", "unknown"] = "complete",
+        action_kind: Any = None,
+        extra_component: bool = False,
+        numeric_values: tuple[str, str, str, str, str] | None = None,
+        omit_effect: bool = False,
+        include_cash_only_effect: bool = False,
+        additional_splits: tuple[tuple[str, tuple[str, str], Any], ...] = (),
+        duplicate: Literal[
+            "none", "equal", "conflict_outside_window", "effect_time_conflict"
+        ] = "none",
+        volume_semantics: tuple[ObservationFieldMeaning, FieldUnit] | None = None,
+        anchor_opening_case: Literal[
+            "completed",
+            "matching",
+            "missing",
+            "mismatched",
+            "backdated",
+            "did_not_open",
+        ] = "completed",
+        economic_through: str | None = None,
+        occurrence_group_case: Literal[
+            "base",
+            "cancelled_conflict",
+            "cash_conflict",
+            "cancelled_neutral",
+            "cash_neutral",
+        ] = "base",
+        neutral_suffix: int = 6110,
+        source_session_date: date = date(2026, 11, 27),
+        include_prior_open: bool = False,
+    ) -> None:
+        from economic_test_support import uid as economic_uid
+
+        from drift.domain.economic_common import ActionKind
+
+        self.source_only = source_only
+        self.outer_kind = outer_kind
+        if source_only:
+            self.source = ObservationHarness(assessment_ready=True)
+            if numeric_values is not None:
+                self.source.use_numeric_values(
+                    open_value=numeric_values[0],
+                    high=numeric_values[1],
+                    low=numeric_values[2],
+                    close=numeric_values[3],
+                    volume=numeric_values[4],
+                )
+            self.context = self.source.context
+            self.mapping_policy_hash = None
+            return
+
+        from action_session_test_support import ACTION_LISTING_ID, action_session_case
+
+        effective_kind = (
+            ActionKind.FORWARD_SPLIT if action_kind is None else action_kind
+        )
+        action = action_session_case(
+            basis,
+            "exact_trading_basis_transition",
+            ratio=ratio,
+            outer_kind=outer_kind,
+            coverage_action_kinds=(
+                tuple(ActionKind)
+                if coverage_action_kinds is None
+                else coverage_action_kinds
+            ),
+            settlement_coverage=settlement_coverage,
+            action_kind=effective_kind,
+            terms_action_kind=effective_kind,
+            extra_component=extra_component,
+            omit_effect=omit_effect,
+            include_cash_only_effect=include_cash_only_effect,
+            additional_splits=additional_splits,
+            duplicate=duplicate,
+            economic_through=economic_through,
+            occurrence_group_case=occurrence_group_case,
+            neutral_suffix=neutral_suffix,
+            include_prior_open=include_prior_open,
+        )
+        self.action = action
+        action_context = action.context
+        if anchor_opening_case != "completed":
+            action_context = _with_anchor_opening_case(
+                action_context, anchor_opening_case
+            )
+        self.source = ObservationHarness(
+            session_date=source_session_date,
+            close="100.000",
+            available_at=(
+                f"{source_session_date.isoformat()}T21:05:00Z"
+                if source_session_date == date(2026, 11, 25)
+                else f"{source_session_date.isoformat()}T18:05:00Z"
+            ),
+            security_id=economic_uid(21),
+            listing_id=ACTION_LISTING_ID,
+            issuer_id=economic_uid(20),
+            claimed_open_utc=(14, 30),
+            claimed_close_utc=(
+                (21, 0) if source_session_date == date(2026, 11, 25) else (18, 0)
+            ),
+        )
+        if numeric_values is not None:
+            self.source.use_numeric_values(
+                open_value=numeric_values[0],
+                high=numeric_values[1],
+                low=numeric_values[2],
+                close=numeric_values[3],
+                volume=numeric_values[4],
+            )
+        if volume_semantics is not None:
+            self.source.use_volume_semantics(
+                meaning=volume_semantics[0], unit=volume_semantics[1]
+            )
+        self.source.attach_m1b()
+        action_policy = ObservationSourceSelectionPolicyV1.model_validate_json(
+            action.context.supporting_artifacts[
+                action.query.outer_query.source_selection_policy_hash
+            ].data
+        )
+        if anchor_opening_case != "completed":
+            realized_dataset = next(
+                item
+                for item in action_context.session_datasets
+                if item.manifest.dataset_role.name == "realized_session"
+            )
+            action_policy = action_policy.model_copy(
+                update={
+                    "bindings": tuple(
+                        binding.model_copy(
+                            update={
+                                "manifest_hashes": (
+                                    manifest_hash(realized_dataset.manifest),
+                                )
+                            }
+                        )
+                        if binding.dataset_role == "realized_session"
+                        else binding
+                        for binding in action_policy.bindings
+                    )
+                }
+            )
+        combined_policy = ObservationSourceSelectionPolicyV1(
+            policy_id="normalization-source-authority",
+            version="1",
+            bindings=(*self.source._observation_bindings, *action_policy.bindings),
+        )
+        policy_bytes = canonical_json(combined_policy)
+        policy_hash = sha256(policy_bytes).hexdigest()
+        support = {
+            **dict(self.source.context.supporting_artifacts),
+            **dict(action_context.supporting_artifacts),
+            policy_hash: VerifiedArtifactBytes(
+                data=policy_bytes,
+                byte_size=len(policy_bytes),
+                content_hash=policy_hash,
+            ),
+        }
+        self._source_policy_hash = policy_hash
+        self.mapping_policy_hash = action.query.action_session_policy_hash
+        self.context = M1dResolutionContext(
+            observation_datasets=self.source.context.observation_datasets,
+            session_datasets=action_context.session_datasets,
+            availability_policies={
+                **dict(self.source.context.availability_policies),
+                **dict(action_context.availability_policies),
+            },
+            retained_evidence={
+                **dict(self.source.context.retained_evidence),
+                **dict(action_context.retained_evidence),
+            },
+            supporting_artifacts=support,
+            structural_context=self.source.context.structural_context,
+            research_definition=self.source.context.research_definition,
+            issuer_id=self.source.context.issuer_id,
+            structural_methodology_id=self.source.context.structural_methodology_id,
+            m1b_requested_channel=self.source.context.m1b_requested_channel,
+            economic_context=action_context.economic_context,
+            economic_source_policy=action_context.economic_source_policy,
+        )
+
+    def normalization_query(
+        self,
+        mode: Literal["source_basis", "split_normalized"],
+        *,
+        anchor_date: date | None = None,
+        price_scale: int = 2,
+        volume_scale: int = 0,
+        effective_cutoff: str | None = None,
+    ) -> Any:
+        """Create a genuine retained policy and its full context-bound query."""
+        from drift.domain.normalization import (
+            NormalizationPolicyV1,
+            NormalizationQueryV1,
+            normalization_algorithm_hash,
+        )
+        from drift.domain.observation_query import m1d_implementation_hash
+        from drift.domain.sessions import SessionKeyV1
+
+        policy = NormalizationPolicyV1(
+            policy_id=f"synthetic-{mode}-policy",
+            policy_version="1",
+            mode=mode,
+            profile_hash=regular_session_trade_bar_profile_hash(),
+            mapping_policy_hash=(
+                self.mapping_policy_hash if mode == "split_normalized" else None
+            ),
+            price_output_scale=price_scale if mode == "split_normalized" else None,
+            volume_output_scale=volume_scale if mode == "split_normalized" else None,
+            rounding="half_even",
+            semantic_algorithm_hash=normalization_algorithm_hash(),
+            implementation_hash=m1d_implementation_hash(),
+        )
+        policy_bytes = canonical_json(policy)
+        policy_hash = sha256(policy_bytes).hexdigest()
+        support = dict(self.context.supporting_artifacts)
+        support[policy_hash] = VerifiedArtifactBytes(
+            data=policy_bytes,
+            byte_size=len(policy_bytes),
+            content_hash=policy_hash,
+        )
+        self.context = replace(self.context, supporting_artifacts=support)
+        query_context = (
+            replace(self.context, economic_context=None, economic_source_policy=None)
+            if mode == "source_basis"
+            else self.context
+        )
+        context_hash = m1d_context_hash(query_context)
+        economic_through = (
+            self.context.economic_source_policy.through
+            if self.context.economic_source_policy is not None
+            else _parse_instant("2026-01-05T22:00:00Z")
+        )
+        through_text = economic_through.strftime("%Y-%m-%dT%H:%M:%SZ")
+        vintage_text = (economic_through + timedelta(days=1)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        if self.source_only or self.outer_kind == "decision":
+            base: ObservationQueryV1 = self.source.decision(
+                vintage_text if not self.source_only else through_text,
+                vintage_text if not self.source_only else through_text,
+                effective_cutoff or through_text,
+                self.source.session_date.isoformat(),
+            )
+        else:
+            base = self.source.outcome(
+                through_text,
+                vintage_text,
+                self.source.session_date.isoformat(),
+            )
+        observation = base.model_copy(
+            update={
+                "source_selection_policy_hash": (
+                    base.source_selection_policy_hash
+                    if self.source_only
+                    else self._source_policy_hash
+                ),
+                "input_context_hash": context_hash,
+            }
+        )
+        anchor = (
+            None
+            if anchor_date is None
+            else SessionKeyV1(
+                mic="XNYS", session_scope="regular", local_date=anchor_date
+            )
+        )
+        return NormalizationQueryV1(
+            observation=observation,
+            policy_hash=policy_hash,
+            anchor_session=anchor,
+        )
+
+    def normalize(self, query: Any) -> Any:
+        from drift.markets.normalization import normalize_observation
+
+        return normalize_observation(query, self.context)

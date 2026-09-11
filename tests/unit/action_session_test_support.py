@@ -314,6 +314,20 @@ def _split_effect(
     return rebind_record_evidence(type(base), values)
 
 
+def _identified_neutral_effect(
+    effect: EconomicEffectVersionV1, occurrence_id: str, source_id: str
+) -> EconomicEffectVersionV1:
+    values = {name: getattr(effect, name) for name in type(effect).model_fields}
+    values["source_key"] = effect.source_key.model_copy(update={"source_id": source_id})
+    values["occurrence"] = EconomicOccurrenceV1(
+        kind="identified",
+        native_occurrence_id=occurrence_id,
+        evidence_reference=effect.revision.source_artifact,
+    )
+    values["listing_id"] = ACTION_LISTING_ID
+    return rebind_record_evidence(type(effect), values)
+
+
 def _realized_session(
     local_date: date, *, opened: bool, suffix: int
 ) -> RealizedSessionVersionV1:
@@ -394,6 +408,7 @@ def _session_inputs(
     ),
     emergency_date: date | None = None,
     corrected_schedule_state: Literal["closed", "unknown"] | None = None,
+    include_prior_open: bool = False,
 ) -> tuple[
     tuple[M1dDatasetInput[SessionInputRecordV1], ...],
     dict[str, VerifiedArtifactBytes],
@@ -401,9 +416,13 @@ def _session_inputs(
     tuple[ObservationSourceBindingV1, ...],
 ]:
     methodology_hash, support, retained = session_supporting_artifacts()
+    prior_states: tuple[
+        tuple[date, Literal["regular", "early_close", "closed", "unknown"]], ...
+    ] = ((date(2026, 11, 25), "regular"),) if include_prior_open else ()
     states: tuple[
         tuple[date, Literal["regular", "early_close", "closed", "unknown"]], ...
     ] = (
+        *prior_states,
         (date(2026, 11, 26), "closed"),
         (date(2026, 11, 27), "early_close"),
         (date(2026, 11, 28), "closed"),
@@ -448,12 +467,17 @@ def _session_inputs(
         scheduled,
         methodology_hash,
         suffix=5100,
-        start_date=date(2026, 11, 26),
+        start_date=date(2026, 11, 25) if include_prior_open else date(2026, 11, 26),
         end_date=date(2026, 11, 30),
         status=coverage_status,
     )
     coverage = session_dataset("session_coverage", (coverage_record,), support)
     realized_records = (
+        *(
+            (_realized_session(date(2026, 11, 25), opened=True, suffix=5180),)
+            if include_prior_open
+            else ()
+        ),
         _realized_session(
             date(2026, 11, 27),
             opened=emergency_date != date(2026, 11, 27),
@@ -509,7 +533,9 @@ def _session_inputs(
             contract_hash=None,
             venue=ListingVenue.XNYS,
             listing_id=ACTION_LISTING_ID,
-            start_date=date(2026, 11, 26),
+            start_date=(
+                date(2026, 11, 25) if include_prior_open else date(2026, 11, 26)
+            ),
             end_date=date(2026, 11, 30),
             manifest_hashes=(manifest_hash(scheduled.manifest),),
             methodology_hashes=(methodology_hash,),
@@ -520,7 +546,9 @@ def _session_inputs(
             contract_hash=None,
             venue=ListingVenue.XNYS,
             listing_id=ACTION_LISTING_ID,
-            start_date=date(2026, 11, 26),
+            start_date=(
+                date(2026, 11, 25) if include_prior_open else date(2026, 11, 26)
+            ),
             end_date=date(2026, 11, 30),
             manifest_hashes=(manifest_hash(coverage.manifest),),
             methodology_hashes=(methodology_hash,),
@@ -531,7 +559,9 @@ def _session_inputs(
             contract_hash=None,
             venue=ListingVenue.XNYS,
             listing_id=ACTION_LISTING_ID,
-            start_date=date(2026, 11, 26),
+            start_date=(
+                date(2026, 11, 25) if include_prior_open else date(2026, 11, 26)
+            ),
             end_date=date(2026, 11, 30),
             manifest_hashes=(manifest_hash(realized.manifest),),
             methodology_hashes=(AUTHORITY_HASH,),
@@ -604,8 +634,12 @@ def _validated_action_economic_case(
         (),
     )
     family_sources: tuple[str, ...] = tuple(
-        next(iter(sources)) if sources else settlement_source_id
-        for records_for_family in family_records
+        next(iter(sources))
+        if sources
+        else settlement_source_id
+        if family == "settlement"
+        else f"{family}-source"
+        for family, records_for_family in zip(families, family_records, strict=True)
         for sources in ({record.source_key.source_id for record in records_for_family},)
     )
     if any(
@@ -809,6 +843,19 @@ def action_session_case(
     ),
     open_endpoint_designation: Literal["none", "post_basis"] = "none",
     close_endpoint_designation: Literal["none", "pre_basis"] = "none",
+    omit_effect: bool = False,
+    include_cash_only_effect: bool = False,
+    additional_splits: tuple[tuple[str, tuple[str, str], ActionKind], ...] = (),
+    economic_through: str | None = None,
+    occurrence_group_case: Literal[
+        "base",
+        "cancelled_conflict",
+        "cash_conflict",
+        "cancelled_neutral",
+        "cash_neutral",
+    ] = "base",
+    neutral_suffix: int = 6110,
+    include_prior_open: bool = False,
 ) -> ActionSessionCase:
     """Build one exact, validated action/session composition fixture."""
     role: DateRole = (
@@ -839,7 +886,98 @@ def action_session_case(
         extra_component=extra_component,
     )
     terms: tuple[CorporateActionTermsVersionV1, ...] = (primary,)
-    effects: tuple[EconomicEffectVersionV1, ...] = (primary_effect,)
+    effects: tuple[EconomicEffectVersionV1, ...] = (
+        () if omit_effect else (primary_effect,)
+    )
+    if occurrence_group_case in {"cancelled_conflict", "cancelled_neutral"}:
+        cancelled_one = _identified_neutral_effect(
+            _split_effect(
+                neutral_suffix,
+                primary,
+                basis,
+                effect_kind="cancelled_action",
+                source_id=effect_source_id,
+            ),
+            "split-occurrence-1",
+            effect_source_id,
+        )
+        if occurrence_group_case == "cancelled_conflict":
+            effects = (*effects, cancelled_one)
+        else:
+            cancelled_two = _identified_neutral_effect(
+                _split_effect(
+                    neutral_suffix + 1,
+                    primary,
+                    basis,
+                    effect_kind="cancelled_action",
+                    source_id=effect_source_id,
+                ),
+                "split-occurrence-1",
+                effect_source_id,
+            )
+            effects = (cancelled_one, cancelled_two)
+    elif occurrence_group_case in {"cash_conflict", "cash_neutral"}:
+        cash_one = _identified_neutral_effect(
+            effect_record(
+                neutral_suffix,
+                effective_at=basis,
+                known_at=basis,
+            ),
+            "split-occurrence-1",
+            effect_source_id,
+        )
+        if occurrence_group_case == "cash_conflict":
+            effects = (*effects, cash_one)
+        else:
+            cash_two = _identified_neutral_effect(
+                effect_record(
+                    neutral_suffix + 1,
+                    effective_at=basis,
+                    known_at=basis,
+                ),
+                "split-occurrence-1",
+                effect_source_id,
+            )
+            effects = (cash_one, cash_two)
+    if include_cash_only_effect:
+        cash_effect = effect_record(
+            6070,
+            effective_at="2026-11-28T00:00:00Z",
+            known_at="2026-11-28T00:00:00Z",
+        )
+        cash_values = {
+            name: getattr(cash_effect, name) for name in type(cash_effect).model_fields
+        }
+        cash_values["source_key"] = cash_effect.source_key.model_copy(
+            update={"source_id": effect_source_id}
+        )
+        effects = (
+            *effects,
+            rebind_record_evidence(type(cash_effect), cash_values),
+        )
+    for index, (additional_basis, additional_ratio, additional_kind) in enumerate(
+        additional_splits
+    ):
+        additional_terms = _split_terms(
+            6080 + index * 20,
+            additional_basis,
+            role,
+            ratio=additional_ratio,
+            action_kind=additional_kind,
+            source_id=terms_source_id,
+            listing_id=terms_listing_id,
+        )
+        additional_effect = _split_effect(
+            6090 + index * 20,
+            additional_terms,
+            additional_basis,
+            occurrence_id=f"split-occurrence-{index + 2}",
+            action_kind=additional_kind,
+            ratio=additional_ratio,
+            source_id=effect_source_id,
+        )
+        terms = (*terms, additional_terms)
+        effects = (*effects, additional_effect)
     if correction_basis is not None:
         assert primary.payload is not None
         corrected_payload = primary.payload.model_copy(
@@ -921,7 +1059,8 @@ def action_session_case(
         effects = (*effects, outside_effect)
     economic = _validated_action_economic_case(
         (*terms, *effects),
-        through=(
+        through=economic_through
+        or (
             "2026-12-03T00:00:00Z"
             if duplicate in {"conflict_outside_window", "effect_time_conflict"}
             else "2026-12-01T00:00:00Z"
@@ -945,11 +1084,14 @@ def action_session_case(
         (record for record in actual_terms if record.source_key == primary.source_key),
         key=lambda record: record.revision.source_sequence,
     )
-    primary_effect = next(
-        record
-        for record in actual_effects
-        if record.source_key == primary_effect.source_key
-    )
+    if occurrence_group_case in {"cancelled_neutral", "cash_neutral"}:
+        primary_effect = actual_effects[0]
+    elif not omit_effect:
+        primary_effect = next(
+            record
+            for record in actual_effects
+            if record.source_key == primary_effect.source_key
+        )
     if selected_terms == "substitute":
         substitute = next(
             record
@@ -962,6 +1104,7 @@ def action_session_case(
         coverage_status=session_coverage,
         emergency_date=emergency_date,
         corrected_schedule_state=corrected_schedule_state,
+        include_prior_open=include_prior_open,
     )
     source_policy = ObservationSourceSelectionPolicyV1(
         policy_id="action-session-source-authority",
@@ -1090,7 +1233,9 @@ def action_session_case(
         source_id=effect_source_id,
         native_occurrence_id="split-occurrence-1",
         selected_terms_hash=selected_terms_hash,
-        selected_effect_hash=content_hash(primary_effect),
+        selected_effect_hash=(
+            "f" * 64 if omit_effect else content_hash(primary_effect)
+        ),
         listing_id=ACTION_LISTING_ID,
         security_id=economic_uid(21),
         mic="XNYS",
