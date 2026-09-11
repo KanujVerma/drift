@@ -30,6 +30,7 @@ from drift.domain.dataset_validation import (
     ValidationRunContextV1,
     ValidationScope,
 )
+from drift.domain.economic_coverage import EconomicSourceSelectionPolicyV1
 from drift.domain.manifests import (
     AssertionEffectiveShape,
     AssertionTemporalContractV1,
@@ -56,6 +57,11 @@ from drift.domain.temporal import (
 )
 from drift.domain.universes import ResearchUniverseDefinitionV1
 from drift.errors import CanonicalSerializationError, DriftError
+from drift.markets.economic_validation import (
+    EconomicResolutionContext,
+    economic_context_hash,
+    validate_economic_context,
+)
 from drift.markets.universes import StructuralResolutionContext
 from drift.serialization.canonical import canonical_json, content_hash
 
@@ -432,6 +438,8 @@ class M1dResolutionContext:
     structural_methodology_id: str | None = None
     m1b_requested_channel: AvailabilityChannelV1 | None = None
     schedule_generation_policy_hash: SHA256Hash | None = None
+    economic_context: EconomicResolutionContext | None = None
+    economic_source_policy: EconomicSourceSelectionPolicyV1 | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -463,6 +471,8 @@ class M1dResolutionContext:
             raise ValueError("M1b observation context fields must be supplied together")
         if self.m1b_requested_channel is not None and self.structural_context is None:
             raise ValueError("M1b channel mapping requires a structural context")
+        if (self.economic_context is None) != (self.economic_source_policy is None):
+            raise ValueError("M1c context and source policy must be supplied together")
 
 
 def m1d_context_descriptor(context: M1dResolutionContext) -> dict[str, object]:
@@ -538,6 +548,12 @@ def m1d_context_descriptor(context: M1dResolutionContext) -> dict[str, object]:
         descriptor["schedule_generation_policy_hash"] = (
             context.schedule_generation_policy_hash
         )
+    if context.economic_context is not None:
+        assert context.economic_source_policy is not None
+        descriptor["m1c"] = {
+            "economic_context_hash": economic_context_hash(context.economic_context),
+            "economic_source_policy_hash": content_hash(context.economic_source_policy),
+        }
     return descriptor
 
 
@@ -636,6 +652,12 @@ def validate_m1d_resolution_context(context: M1dResolutionContext) -> None:
     )
 
     validate_session_coverage_inventories(context.session_datasets)
+    if context.economic_context is not None:
+        assert context.economic_source_policy is not None
+        validate_economic_context(context.economic_context)
+        EconomicSourceSelectionPolicyV1.model_validate(
+            context.economic_source_policy.model_dump(mode="python")
+        )
 
 
 def validate_m1d_dataset_input(

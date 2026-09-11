@@ -4,7 +4,7 @@ from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from hashlib import sha256
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
 from drift.datasets.assertions import build_validated_dataset_bundle
@@ -88,6 +88,9 @@ from drift.markets.observation_validation import (
     validate_observation_dataset,
 )
 from drift.serialization.canonical import canonical_json, content_hash
+
+if TYPE_CHECKING:
+    from drift.domain.action_sessions import FirstPostActionSessionResultV1
 
 RULE_BYTES = canonical_json({"kind": "synthetic-observation-rule", "version": "1"})
 RULE_HASH = sha256(RULE_BYTES).hexdigest()
@@ -1001,6 +1004,16 @@ class ObservationHarness:
             availability_policy_hash=self._availability_policy_hash,
             input_context_hash=m1d_context_hash(self.context),
         )
+
+    def map_action(
+        self,
+        basis: str,
+        mode: Literal["explicit_first_basis_date", "exact_trading_basis_transition"],
+    ) -> FirstPostActionSessionResultV1:
+        """Execute the public Task-5 mapper over the fixed November corpus."""
+        from action_session_test_support import action_session_case
+
+        return action_session_case(basis, mode).map()
 
     def replace_source_revision(self, *, close: str, available_at: str) -> None:
         self._records = (
