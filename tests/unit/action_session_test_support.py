@@ -597,6 +597,7 @@ def _validated_action_economic_case(
     coverage_action_kinds: tuple[ActionKind, ...],
     settlement_coverage: Literal["complete", "partial", "unknown"],
     settlement_source_id: str = "settlement-source",
+    coverage_evidence: EconomicRecordV1 | None = None,
 ) -> EconomicHarness:
     """Build a closed M1c fixture locally without changing protected M1c support."""
     channel = session_public_channel()
@@ -614,6 +615,9 @@ def _validated_action_economic_case(
         )
         rechanneled.append(rebind_record_evidence(type(record), values))
     owned_records = tuple(rechanneled)
+    evidence_record = owned_records[0] if owned_records else coverage_evidence
+    if evidence_record is None:
+        raise ValueError("empty economic fixture requires retained coverage evidence")
     families: tuple[Literal["terms", "effect", "settlement"], ...] = (
         "terms",
         "effect",
@@ -660,13 +664,15 @@ def _validated_action_economic_case(
     )
     through_value = parse_utc(through)
     snapshot = max(
-        through_value + timedelta(days=1),
-        *(
-            evidence.upper_bound
-            for record in owned_records
-            for evidence in record.revision.availability
-            if evidence.upper_bound is not None
-        ),
+        (
+            through_value + timedelta(days=1),
+            *(
+                evidence.upper_bound
+                for record in owned_records
+                for evidence in record.revision.availability
+                if evidence.upper_bound is not None
+            ),
+        )
     )
     snapshot_text = snapshot.strftime("%Y-%m-%dT%H:%M:%SZ")
     coverage_end = (through_value + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -686,7 +692,7 @@ def _validated_action_economic_case(
             source_id=source_id,
             availability=(
                 economic_public_availability(
-                    snapshot_text, owned_records[0].revision.source_artifact
+                    snapshot_text, evidence_record.revision.source_artifact
                 ).model_copy(update={"channel": channel}),
             ),
         )
@@ -844,6 +850,7 @@ def action_session_case(
     open_endpoint_designation: Literal["none", "post_basis"] = "none",
     close_endpoint_designation: Literal["none", "pre_basis"] = "none",
     omit_effect: bool = False,
+    omit_terms: bool = False,
     include_cash_only_effect: bool = False,
     additional_splits: tuple[tuple[str, tuple[str, str], ActionKind], ...] = (),
     economic_through: str | None = None,
@@ -858,6 +865,8 @@ def action_session_case(
     include_prior_open: bool = False,
 ) -> ActionSessionCase:
     """Build one exact, validated action/session composition fixture."""
+    if omit_terms and not omit_effect:
+        raise ValueError("omitting terms requires omitting the dependent effect")
     role: DateRole = (
         ("ex" if mode == "explicit_first_basis_date" else "trading_basis")
         if date_role is None
@@ -885,7 +894,7 @@ def action_session_case(
         source_id=effect_source_id,
         extra_component=extra_component,
     )
-    terms: tuple[CorporateActionTermsVersionV1, ...] = (primary,)
+    terms: tuple[CorporateActionTermsVersionV1, ...] = () if omit_terms else (primary,)
     effects: tuple[EconomicEffectVersionV1, ...] = (
         () if omit_effect else (primary_effect,)
     )
@@ -1067,6 +1076,7 @@ def action_session_case(
         ),
         coverage_action_kinds=coverage_action_kinds,
         settlement_coverage=settlement_coverage,
+        coverage_evidence=primary,
     )
     actual_terms = tuple(
         record
@@ -1080,10 +1090,15 @@ def action_session_case(
         for record in dataset.records
         if isinstance(record, EconomicEffectVersionV1)
     )
-    primary = max(
-        (record for record in actual_terms if record.source_key == primary.source_key),
-        key=lambda record: record.revision.source_sequence,
-    )
+    if actual_terms:
+        primary = max(
+            (
+                record
+                for record in actual_terms
+                if record.source_key == primary.source_key
+            ),
+            key=lambda record: record.revision.source_sequence,
+        )
     if occurrence_group_case in {"cancelled_neutral", "cash_neutral"}:
         primary_effect = actual_effects[0]
     elif not omit_effect:
@@ -1220,7 +1235,9 @@ def action_session_case(
         )
     )
     selected_terms_hash = (
-        content_hash(substitute)
+        None
+        if omit_terms
+        else content_hash(substitute)
         if selected_terms == "substitute"
         else "a" * 64
         if selected_terms == "arbitrary"
