@@ -14,6 +14,10 @@ status belong in `docs/architecture/roadmap.md`.
   composition, M1c action mapping, source/split views, and fixture replay.
   This acceptance does not authorize provider acceptance, evaluator or
   backtester work, returns, portfolio accounting, or any production market use.
+- M1e is a reviewed architecture proposal only. It places a bounded,
+  license-gated real-source qualification and offline replay closure before any
+  evaluator. It authorizes no executable plan, acquisition, provider adapter,
+  dependency, credential, or runtime change.
 - Do not add broker or market-data connections, order placement, trading,
   backtesting, agent orchestration, production configuration, credentials, or
   network side effects during evidence/identity maintenance.

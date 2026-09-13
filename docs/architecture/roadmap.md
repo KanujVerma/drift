@@ -106,3 +106,17 @@ the M1d scope boundary are unchanged.
 After M1, reassess evaluator and run contracts before deterministic baselines.
 External tools remain candidates and must satisfy Drift-defined contracts; see
 ADR 0005 and `docs/architecture/tool-evaluation.md`.
+
+## M1e, proposed design only
+
+M1e is the proposed License-Gated Real-Source Qualification and Replay Closure
+Pilot. It tests one exact provider/product/use scope against independent M1b,
+M1c, M1d, rights, acquisition-completeness, and offline-replay gates before any
+evaluator is implemented. A documented negative qualification is a valid pilot
+result but does not authorize real-data evaluation.
+
+The reviewed architecture is recorded in
+`docs/superpowers/specs/2026-09-12-license-gated-real-source-qualification-replay-closure-design.md`
+and ADR 0010. No executable M1e plan or runtime capability exists. Provider
+selection, contract answers, data acquisition, adapters, environment packaging,
+and evaluator work remain unauthorized.
