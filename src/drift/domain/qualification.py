@@ -1,9 +1,8 @@
 """Immutable M1e qualification profiles, results, and lifecycle contracts."""
 
-from datetime import UTC, date, datetime
+from datetime import date
 from enum import StrEnum
 from typing import Literal, Self
-from uuid import uuid7
 
 from pydantic import Field, field_validator, model_validator
 
@@ -116,84 +115,11 @@ class M1eCompletionKind(StrEnum):
     COMPLETED_NEGATIVE = "completed_negative"
 
 
-class StageArtifactKind(StrEnum):
-    """Named evidence guards for nonterminal lifecycle transitions."""
-
-    PILOT_PROFILE_SET = "pilot_profile_set"
-    QUALIFICATION_PROFILE = "qualification_profile"
-    GOLDEN_CASE_INSTANCE_MANIFEST = "golden_case_instance_manifest"
-    VALIDATED_RIGHTS_ASSESSMENT = "validated_rights_assessment"
-    CONTRACT_TOPOLOGY_EVIDENCE = "contract_topology_evidence"
-    ACQUISITION_ELIGIBILITY = "acquisition_eligibility"
-    ACQUISITION_APPROVAL = "acquisition_approval"
-    ACQUISITION_AUTHORIZATION = "acquisition_authorization"
-    ACQUISITION_PLAN = "acquisition_plan"
-    ACQUISITION_RECEIPT = "acquisition_receipt"
-    NATIVE_BYTE_GRAPH = "native_byte_graph"
-    ACQUISITION_RECONCILIATION = "acquisition_reconciliation"
-    QUALIFICATION_TARGET = "qualification_target"
-    CANDIDATE_VALIDATION_CONTEXT = "candidate_validation_context"
-    CROSS_COMPONENT_CONSISTENCY = "cross_component_consistency"
-    REPLAY_INPUT_INVENTORY = "replay_input_inventory"
-    EXPECTED_M1B_M1D_OUTPUTS = "expected_m1b_m1d_outputs"
-    REAL_SOURCE_SNAPSHOT = "real_source_snapshot"
-    GOLDEN_CASE_RESULTS = "golden_case_results"
-    PRE_REPLAY_QUALIFICATION_REPORT = "pre_replay_qualification_report"
-    REPLAY_AUTHORIZATION_DECISION = "replay_authorization_decision"
-    REPLAY_EXECUTION_RECORD = "replay_execution_record"
-    SYSTEM_OFFLINE_ATTESTATION = "system_offline_attestation"
-    FRESH_RESTORE_ATTESTATION = "fresh_restore_attestation"
-    REPLAY_RESULT = "replay_result"
-
-
 _PRE_REPLAY_DIMENSIONS = tuple(QualificationDimension)[:-1]
 _ALL_DIMENSIONS = tuple(QualificationDimension)
 _TERMINAL_STAGES = {
     PilotStage.COMPLETED_POSITIVE,
     PilotStage.COMPLETED_NEGATIVE,
-}
-
-STAGE_REQUIRED_ARTIFACT_KINDS: dict[PilotStage, tuple[StageArtifactKind, ...]] = {
-    PilotStage.PROFILE_FROZEN: (
-        StageArtifactKind.PILOT_PROFILE_SET,
-        StageArtifactKind.QUALIFICATION_PROFILE,
-        StageArtifactKind.GOLDEN_CASE_INSTANCE_MANIFEST,
-    ),
-    PilotStage.RIGHTS_ASSESSED: (
-        StageArtifactKind.VALIDATED_RIGHTS_ASSESSMENT,
-        StageArtifactKind.CONTRACT_TOPOLOGY_EVIDENCE,
-    ),
-    PilotStage.ACQUISITION_AUTHORIZED: (
-        StageArtifactKind.ACQUISITION_ELIGIBILITY,
-        StageArtifactKind.ACQUISITION_APPROVAL,
-        StageArtifactKind.ACQUISITION_AUTHORIZATION,
-    ),
-    PilotStage.ACQUIRED: (
-        StageArtifactKind.ACQUISITION_PLAN,
-        StageArtifactKind.ACQUISITION_RECEIPT,
-        StageArtifactKind.NATIVE_BYTE_GRAPH,
-        StageArtifactKind.ACQUISITION_RECONCILIATION,
-    ),
-    PilotStage.SNAPSHOT_FROZEN: (
-        StageArtifactKind.QUALIFICATION_TARGET,
-        StageArtifactKind.ACQUISITION_RECEIPT,
-        StageArtifactKind.CANDIDATE_VALIDATION_CONTEXT,
-        StageArtifactKind.CROSS_COMPONENT_CONSISTENCY,
-        StageArtifactKind.REPLAY_INPUT_INVENTORY,
-        StageArtifactKind.EXPECTED_M1B_M1D_OUTPUTS,
-        StageArtifactKind.REAL_SOURCE_SNAPSHOT,
-    ),
-    PilotStage.QUALIFIED: (
-        StageArtifactKind.GOLDEN_CASE_RESULTS,
-        StageArtifactKind.PRE_REPLAY_QUALIFICATION_REPORT,
-    ),
-    PilotStage.REPLAY_AUTHORIZED: (StageArtifactKind.REPLAY_AUTHORIZATION_DECISION,),
-    PilotStage.REPLAYED: (
-        StageArtifactKind.REPLAY_EXECUTION_RECORD,
-        StageArtifactKind.SYSTEM_OFFLINE_ATTESTATION,
-        StageArtifactKind.FRESH_RESTORE_ATTESTATION,
-        StageArtifactKind.REPLAY_RESULT,
-    ),
 }
 
 
@@ -592,6 +518,11 @@ class PurposeQualificationReportV1(FrozenModel):
             and self.target.acquisition_state is not AcquisitionState.SNAPSHOT_BOUND
         ):
             raise ValueError("reached replay requires a snapshot-bound target")
+        if replay_reached and any(
+            item.reachability is not ExecutionReachability.REACHED
+            for item in self.results[:-1]
+        ):
+            raise ValueError("reached replay requires all prior dimensions reached")
         return self
 
 
@@ -711,14 +642,6 @@ class ContentDispositionRecordV1(FrozenModel):
         return self
 
 
-class StageArtifactReferenceV1(FrozenModel):
-    """One typed content hash satisfying a lifecycle evidence guard."""
-
-    schema_version: Literal["1"] = "1"
-    kind: StageArtifactKind
-    artifact_hash: SHA256Hash
-
-
 class PurposeStageStateV1(FrozenModel):
     """Ordered stage and evidence history for one purpose profile."""
 
@@ -731,16 +654,15 @@ class PurposeStageStateV1(FrozenModel):
 
     @model_validator(mode="after")
     def validate_stage(self) -> Self:
+        if self.stage in _TERMINAL_STAGES:
+            raise ValueError("Task 2 cannot construct terminal purpose state")
         if self.stage is None:
             if self.reached_stage_artifact_hashes or self.terminal_blocker is not None:
                 raise ValueError("initial purpose state cannot carry reached evidence")
         elif not self.reached_stage_artifact_hashes:
             raise ValueError("reached purpose stage requires artifact evidence")
-        if self.stage is PilotStage.COMPLETED_NEGATIVE:
-            if self.terminal_blocker is None:
-                raise ValueError("negative terminal state requires a blocker")
-        elif self.terminal_blocker is not None:
-            raise ValueError("only negative terminal state carries a blocker")
+        if self.terminal_blocker is not None:
+            raise ValueError("Task 2 cannot bind a terminal blocker")
         return self
 
 
@@ -775,46 +697,24 @@ class M1ePilotStateV1(FrozenModel):
 
 
 class M1eTransitionV1(FrozenModel):
-    """One guarded nonterminal transition for one exact purpose profile."""
+    """Verified Task 2 start of one exact purpose profile."""
 
     schema_version: Literal["1"] = "1"
     transition_id: UUID7
-    purpose: ConsumerPurpose
-    profile_hash: SHA256Hash
-    from_stage: PilotStage | None
-    to_stage: PilotStage
-    artifacts: tuple[StageArtifactReferenceV1, ...]
-    authorized_profile_hashes: tuple[SHA256Hash, ...]
-    shared_artifact_hashes: tuple[SHA256Hash, ...]
-
-    @field_validator("authorized_profile_hashes", "shared_artifact_hashes")
-    @classmethod
-    def canonicalize_hashes(cls, values: tuple[str, ...]) -> tuple[str, ...]:
-        return _sorted_unique_strings(values, label="transition hashes")
+    profile_set: PilotProfileSetV1
+    profile: QualificationProfileV1
+    from_stage: Literal[None] = None
+    to_stage: Literal[PilotStage.PROFILE_FROZEN] = PilotStage.PROFILE_FROZEN
 
     @model_validator(mode="after")
-    def validate_guard_shape(self) -> Self:
-        if self.to_stage in _TERMINAL_STAGES:
-            raise ValueError("Task 2 lifecycle cannot construct terminal states")
-        required = STAGE_REQUIRED_ARTIFACT_KINDS[self.to_stage]
-        kinds = tuple(item.kind for item in self.artifacts)
-        hashes = tuple(item.artifact_hash for item in self.artifacts)
-        if kinds != required or len(hashes) != len(set(hashes)):
-            raise ValueError("transition requires exact ordered stage evidence")
-        acquisition_stage = self.to_stage in {
-            PilotStage.ACQUISITION_AUTHORIZED,
-            PilotStage.ACQUIRED,
-        }
-        if acquisition_stage:
-            if self.profile_hash not in self.authorized_profile_hashes:
-                raise ValueError(
-                    "acquisition transition requires profile authorization"
-                )
-        elif self.authorized_profile_hashes:
-            raise ValueError("only acquisition transitions name authorized profiles")
-        artifact_hashes = set(hashes)
-        if any(item not in artifact_hashes for item in self.shared_artifact_hashes):
-            raise ValueError("shared transition hashes must name transition artifacts")
+    def validate_exact_profile(self) -> Self:
+        matches = tuple(
+            item
+            for item in self.profile_set.profiles
+            if item.purpose is self.profile.purpose
+        )
+        if len(matches) != 1 or matches[0] != self.profile:
+            raise ValueError("profile freeze requires the exact purpose profile")
         return self
 
 
@@ -851,58 +751,16 @@ class M1eCompletionRecordV1(FrozenModel):
 
     @model_validator(mode="after")
     def validate_completion(self) -> Self:
-        states = {item.purpose: item for item in self.purpose_states}
-        reports = {item.purpose: item for item in self.purpose_reports}
-        if set(states) != set(ConsumerPurpose) or len(states) != 2:
-            raise ValueError("completion requires exactly two purpose states")
-        if set(reports) != set(ConsumerPurpose) or len(reports) != 2:
-            raise ValueError("completion requires exactly two purpose reports")
-        for purpose in ConsumerPurpose:
-            if reports[purpose].target.profile_hash != states[purpose].profile_hash:
-                raise ValueError("completion report profile hash mismatch")
-        if any(item.stage not in _TERMINAL_STAGES for item in self.purpose_states):
-            raise ValueError("completion requires terminal purpose states")
-        if any(
-            item.status is ExternalDependencyStatus.PENDING
-            for item in self.external_dependencies
-        ):
-            raise ValueError("pending external dependency cannot support completion")
-        if any(
-            item.contractual_duty is not ContentDispositionDuty.NONE
-            and item.status is ContentDispositionStatus.PENDING
-            for item in self.content_dispositions
-        ):
-            raise ValueError("pending mandatory disposition prevents completion")
-        if self.completion_kind is M1eCompletionKind.COMPLETED_POSITIVE:
-            if any(
-                item.stage is not PilotStage.COMPLETED_POSITIVE
-                for item in self.purpose_states
-            ):
-                raise ValueError("positive completion requires two positive purposes")
-            if self.blocking_dimensions or self.blocking_evidence_hashes:
-                raise ValueError("positive completion cannot carry blockers")
-            if any(
-                result.status is not QualificationStatus.PASS
-                or result.reachability is not ExecutionReachability.REACHED
-                for report in self.purpose_reports
-                for result in report.results
-            ):
-                raise ValueError("positive completion requires all dimensions to pass")
-        else:
-            if not any(
-                item.stage is PilotStage.COMPLETED_NEGATIVE
-                for item in self.purpose_states
-            ):
-                raise ValueError("negative completion requires a negative purpose")
-            if not self.blocking_dimensions or not self.blocking_evidence_hashes:
-                raise ValueError("negative completion requires exact blockers")
-        return self
+        raise ValueError("M1e completion requires the Task 7 typed finalizer")
 
 
 def build_negative_report(
     target: QualificationTargetV1,
     reached_results: tuple[DimensionQualificationResultV1, ...],
     blocker_dimension: QualificationDimension,
+    *,
+    report_id: UUID7,
+    reported_at: UTCDateTime,
 ) -> PurposeQualificationReportV1:
     """Build a truthful final report without inventing unreached artifacts."""
 
@@ -946,9 +804,9 @@ def build_negative_report(
         for dimension in QualificationDimension
     )
     return PurposeQualificationReportV1(
-        report_id=uuid7(),
+        report_id=report_id,
         report_version="1",
-        reported_at=datetime.now(UTC),
+        reported_at=reported_at,
         purpose=purpose,
         target=target,
         results=results,

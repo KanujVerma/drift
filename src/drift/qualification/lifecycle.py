@@ -1,62 +1,65 @@
-"""Pure nonterminal state transitions for the M1e pilot lifecycle."""
+"""Verified profile-freeze start for the M1e pilot lifecycle."""
 
 from drift.domain.qualification import (
     M1ePilotStateV1,
     M1eTransitionV1,
     PilotStage,
+    qualification_profile_hash,
 )
-
-_NEXT_STAGE: dict[PilotStage | None, PilotStage] = {
-    None: PilotStage.PROFILE_FROZEN,
-    PilotStage.PROFILE_FROZEN: PilotStage.RIGHTS_ASSESSED,
-    PilotStage.RIGHTS_ASSESSED: PilotStage.ACQUISITION_AUTHORIZED,
-    PilotStage.ACQUISITION_AUTHORIZED: PilotStage.ACQUIRED,
-    PilotStage.ACQUIRED: PilotStage.SNAPSHOT_FROZEN,
-    PilotStage.SNAPSHOT_FROZEN: PilotStage.QUALIFIED,
-    PilotStage.QUALIFIED: PilotStage.REPLAY_AUTHORIZED,
-    PilotStage.REPLAY_AUTHORIZED: PilotStage.REPLAYED,
-}
+from drift.serialization.canonical import content_hash
 
 
 def transition_pilot(
     state: M1ePilotStateV1,
     transition: M1eTransitionV1,
 ) -> M1ePilotStateV1:
-    """Advance exactly one matching purpose lane along one normative edge."""
+    """Freeze one exact profile from the state's actual two-profile set."""
 
+    profile_set_hash = content_hash(transition.profile_set)
+    if state.profile_set_hash != profile_set_hash:
+        raise ValueError("profile freeze set does not match pilot state")
+    expected_profiles = {
+        item.purpose: qualification_profile_hash(item)
+        for item in transition.profile_set.profiles
+    }
+    actual_profiles = {item.purpose: item.profile_hash for item in state.purpose_states}
+    if actual_profiles != expected_profiles:
+        raise ValueError("pilot state purpose profiles do not match profile set")
     matches = tuple(
-        item for item in state.purpose_states if item.purpose is transition.purpose
+        item
+        for item in state.purpose_states
+        if item.purpose is transition.profile.purpose
     )
     if len(matches) != 1:
-        raise ValueError("transition purpose is not present exactly once")
+        raise ValueError("profile freeze purpose is not present exactly once")
     current = matches[0]
-    if current.profile_hash != transition.profile_hash:
-        raise ValueError("transition profile hash does not match its purpose lane")
-    if current.stage != transition.from_stage:
-        raise ValueError("transition from-stage does not match current state")
-    expected = _NEXT_STAGE.get(current.stage)
-    if expected is None or transition.to_stage is not expected:
-        raise ValueError("transition is not a permitted nonterminal lifecycle edge")
+    profile_hash = qualification_profile_hash(transition.profile)
+    if current.profile_hash != profile_hash:
+        raise ValueError("profile freeze hash does not match its purpose lane")
+    if current.stage is not None:
+        raise ValueError("profile purpose has already started")
 
-    new_hashes = tuple(item.artifact_hash for item in transition.artifacts)
+    reached_hashes = (
+        profile_set_hash,
+        profile_hash,
+        transition.profile.golden_case_instance_manifest_hash,
+    )
     advanced = current.model_copy(
         update={
-            "stage": transition.to_stage,
-            "reached_stage_artifact_hashes": (
-                *current.reached_stage_artifact_hashes,
-                *new_hashes,
-            ),
+            "stage": PilotStage.PROFILE_FROZEN,
+            "reached_stage_artifact_hashes": reached_hashes,
         }
     )
     purpose_states = tuple(
-        advanced if item.purpose is transition.purpose else item
+        advanced if item.purpose is transition.profile.purpose else item
         for item in state.purpose_states
     )
     shared_hashes = tuple(
         sorted(
             {
                 *state.shared_artifact_hashes,
-                *transition.shared_artifact_hashes,
+                profile_set_hash,
+                transition.profile.golden_case_instance_manifest_hash,
             }
         )
     )

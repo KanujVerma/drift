@@ -1,11 +1,11 @@
 from datetime import UTC, date, datetime
-from hashlib import sha256
 from typing import cast
 from uuid import uuid7
 
 import pytest
 from pydantic import ValidationError
 
+import drift.domain.qualification as qualification_contracts
 from drift.domain.qualification import (
     AcquisitionState,
     ConsumerPurpose,
@@ -23,8 +23,6 @@ from drift.domain.qualification import (
     QualificationProfileV1,
     QualificationStatus,
     QualificationTargetV1,
-    StageArtifactKind,
-    StageArtifactReferenceV1,
     SubscriberUseScopeV1,
     build_negative_report,
     qualification_profile_hash,
@@ -34,6 +32,7 @@ from drift.serialization.canonical import content_hash
 
 H = tuple(f"{index:x}" * 64 for index in range(1, 16))
 NOW = datetime(2026, 9, 13, 12, tzinfo=UTC)
+REPORT_ID = uuid7()
 
 
 def make_profile(purpose: ConsumerPurpose) -> QualificationProfileV1:
@@ -84,7 +83,7 @@ def make_profile(purpose: ConsumerPurpose) -> QualificationProfileV1:
             sessions_after_event=20,
         ),
         purpose=purpose,
-        critical_dimensions=tuple(QualificationDimension),
+        critical_dimensions=(QualificationDimension.LICENSING_RETENTION,),
         required_golden_case_ids=("G01",),
         golden_case_instance_manifest_hash=H[4],
         adjudication_policy_hash=H[5],
@@ -122,218 +121,76 @@ def pilot() -> tuple[
     return profile_set, decision, audit, state
 
 
-REQUIRED_KINDS = {
-    PilotStage.PROFILE_FROZEN: (
-        StageArtifactKind.PILOT_PROFILE_SET,
-        StageArtifactKind.QUALIFICATION_PROFILE,
-        StageArtifactKind.GOLDEN_CASE_INSTANCE_MANIFEST,
-    ),
-    PilotStage.RIGHTS_ASSESSED: (
-        StageArtifactKind.VALIDATED_RIGHTS_ASSESSMENT,
-        StageArtifactKind.CONTRACT_TOPOLOGY_EVIDENCE,
-    ),
-    PilotStage.ACQUISITION_AUTHORIZED: (
-        StageArtifactKind.ACQUISITION_ELIGIBILITY,
-        StageArtifactKind.ACQUISITION_APPROVAL,
-        StageArtifactKind.ACQUISITION_AUTHORIZATION,
-    ),
-    PilotStage.ACQUIRED: (
-        StageArtifactKind.ACQUISITION_PLAN,
-        StageArtifactKind.ACQUISITION_RECEIPT,
-        StageArtifactKind.NATIVE_BYTE_GRAPH,
-        StageArtifactKind.ACQUISITION_RECONCILIATION,
-    ),
-    PilotStage.SNAPSHOT_FROZEN: (
-        StageArtifactKind.QUALIFICATION_TARGET,
-        StageArtifactKind.ACQUISITION_RECEIPT,
-        StageArtifactKind.CANDIDATE_VALIDATION_CONTEXT,
-        StageArtifactKind.CROSS_COMPONENT_CONSISTENCY,
-        StageArtifactKind.REPLAY_INPUT_INVENTORY,
-        StageArtifactKind.EXPECTED_M1B_M1D_OUTPUTS,
-        StageArtifactKind.REAL_SOURCE_SNAPSHOT,
-    ),
-    PilotStage.QUALIFIED: (
-        StageArtifactKind.GOLDEN_CASE_RESULTS,
-        StageArtifactKind.PRE_REPLAY_QUALIFICATION_REPORT,
-    ),
-    PilotStage.REPLAY_AUTHORIZED: (StageArtifactKind.REPLAY_AUTHORIZATION_DECISION,),
-    PilotStage.REPLAYED: (
-        StageArtifactKind.REPLAY_EXECUTION_RECORD,
-        StageArtifactKind.SYSTEM_OFFLINE_ATTESTATION,
-        StageArtifactKind.FRESH_RESTORE_ATTESTATION,
-        StageArtifactKind.REPLAY_RESULT,
-    ),
-}
-
-
-def make_transition(
-    purpose: ConsumerPurpose,
-    profile_hash: str,
-    from_stage: PilotStage | None,
-    to_stage: PilotStage,
-    *,
-    authorized_profile_hashes: tuple[str, ...] = (),
+def freeze_transition(
+    profile_set: PilotProfileSetV1,
+    profile: QualificationProfileV1,
 ) -> M1eTransitionV1:
-    kinds = REQUIRED_KINDS[to_stage]
-    artifacts = tuple(
-        StageArtifactReferenceV1(
-            kind=kind, artifact_hash=sha256(kind.value.encode()).hexdigest()
-        )
-        for kind in kinds
-    )
     return M1eTransitionV1(
         transition_id=uuid7(),
-        purpose=purpose,
-        profile_hash=profile_hash,
-        from_stage=from_stage,
-        to_stage=to_stage,
-        artifacts=artifacts,
-        authorized_profile_hashes=authorized_profile_hashes,
-        shared_artifact_hashes=(),
+        profile_set=profile_set,
+        profile=profile,
     )
 
 
-def advance_to(
-    state: M1ePilotStateV1,
-    purpose: ConsumerPurpose,
-    profile_hash: str,
-    destination: PilotStage,
-) -> M1ePilotStateV1:
-    current: PilotStage | None = None
-    for next_stage in tuple(REQUIRED_KINDS):
-        transition = make_transition(
-            purpose,
-            profile_hash,
-            current,
-            next_stage,
-            authorized_profile_hashes=(profile_hash,)
-            if next_stage in {PilotStage.ACQUISITION_AUTHORIZED, PilotStage.ACQUIRED}
-            else (),
-        )
-        state = transition_pilot(state, transition)
-        current = next_stage
-        if next_stage is destination:
-            return state
-    raise AssertionError("unreachable destination")
+def test_profile_freeze_uses_actual_profile_set_and_profile_data() -> None:
+    profile_set, decision, audit, state = pilot()
 
+    advanced = transition_pilot(state, freeze_transition(profile_set, decision))
 
-def test_every_nonterminal_transition_advances_one_purpose_only() -> None:
-    _, decision, audit, state = pilot()
-    decision_hash = qualification_profile_hash(decision)
-    state = advance_to(state, decision.purpose, decision_hash, PilotStage.REPLAYED)
-
-    by_purpose = {item.purpose: item for item in state.purpose_states}
-    assert by_purpose[decision.purpose].stage is PilotStage.REPLAYED
+    by_purpose = {item.purpose: item for item in advanced.purpose_states}
+    decision_state = by_purpose[decision.purpose]
+    assert decision_state.stage is PilotStage.PROFILE_FROZEN
+    assert decision_state.reached_stage_artifact_hashes == (
+        content_hash(profile_set),
+        qualification_profile_hash(decision),
+        decision.golden_case_instance_manifest_hash,
+    )
     assert by_purpose[audit.purpose].stage is None
-    reached_hashes = by_purpose[decision.purpose].reached_stage_artifact_hashes
-    receipt_hash = sha256(
-        StageArtifactKind.ACQUISITION_RECEIPT.value.encode()
-    ).hexdigest()
-    assert len(reached_hashes) == 26
-    assert reached_hashes.count(receipt_hash) == 2
-    assert by_purpose[audit.purpose].reached_stage_artifact_hashes == ()
-
-
-@pytest.mark.parametrize(
-    ("from_stage", "to_stage"),
-    [
-        (None, PilotStage.RIGHTS_ASSESSED),
-        (PilotStage.PROFILE_FROZEN, PilotStage.ACQUISITION_AUTHORIZED),
-        (PilotStage.RIGHTS_ASSESSED, PilotStage.PROFILE_FROZEN),
-        (PilotStage.QUALIFIED, PilotStage.SNAPSHOT_FROZEN),
-        (PilotStage.REPLAYED, PilotStage.REPLAYED),
-    ],
-)
-def test_skip_backtrack_and_repeat_are_rejected(
-    from_stage: PilotStage | None, to_stage: PilotStage
-) -> None:
-    _, decision, _, state = pilot()
-    profile_hash = qualification_profile_hash(decision)
-    if from_stage is not None:
-        state = advance_to(state, decision.purpose, profile_hash, from_stage)
-
-    with pytest.raises(ValueError):
-        transition_pilot(
-            state,
-            make_transition(decision.purpose, profile_hash, from_stage, to_stage),
+    assert advanced.shared_artifact_hashes == tuple(
+        sorted(
+            (
+                content_hash(profile_set),
+                decision.golden_case_instance_manifest_hash,
+            )
         )
-
-
-def test_transition_rejects_purpose_and_profile_hash_substitution() -> None:
-    _, decision, audit, state = pilot()
-    decision_hash = qualification_profile_hash(decision)
-    audit_hash = qualification_profile_hash(audit)
-
-    with pytest.raises(ValueError):
-        transition_pilot(
-            state,
-            make_transition(
-                decision.purpose, audit_hash, None, PilotStage.PROFILE_FROZEN
-            ),
-        )
-    with pytest.raises(ValueError):
-        transition_pilot(
-            state,
-            make_transition(
-                ConsumerPurpose.RETROSPECTIVE_AUDIT,
-                decision_hash,
-                None,
-                PilotStage.PROFILE_FROZEN,
-            ),
-        )
-
-
-def test_transition_rejects_missing_named_guard_artifact() -> None:
-    _, decision, _, state = pilot()
-    profile_hash = qualification_profile_hash(decision)
-    transition = make_transition(
-        decision.purpose, profile_hash, None, PilotStage.PROFILE_FROZEN
     )
 
-    with pytest.raises(ValidationError):
-        transition.model_copy(update={"artifacts": transition.artifacts[:-1]})
 
+def test_profile_freeze_can_start_each_exact_purpose_once() -> None:
+    profile_set, decision, audit, state = pilot()
+    state = transition_pilot(state, freeze_transition(profile_set, decision))
+    state = transition_pilot(state, freeze_transition(profile_set, audit))
 
-def test_shared_receipt_cannot_advance_unauthorized_sibling_profile() -> None:
-    _, decision, audit, state = pilot()
-    decision_hash = qualification_profile_hash(decision)
-    audit_hash = qualification_profile_hash(audit)
-    state = advance_to(state, audit.purpose, audit_hash, PilotStage.RIGHTS_ASSESSED)
+    assert all(item.stage is PilotStage.PROFILE_FROZEN for item in state.purpose_states)
     with pytest.raises(ValueError):
-        transition_pilot(
-            state,
-            make_transition(
-                audit.purpose,
-                audit_hash,
-                PilotStage.RIGHTS_ASSESSED,
-                PilotStage.ACQUISITION_AUTHORIZED,
-                authorized_profile_hashes=(decision_hash,),
-            ),
-        )
+        transition_pilot(state, freeze_transition(profile_set, decision))
 
 
-@pytest.mark.parametrize(
-    "terminal",
-    [PilotStage.COMPLETED_POSITIVE, PilotStage.COMPLETED_NEGATIVE],
-)
-def test_lifecycle_exposes_no_terminal_transition_finalizer(
-    terminal: PilotStage,
-) -> None:
-    _, decision, _, state = pilot()
-    profile_hash = qualification_profile_hash(decision)
-    state = advance_to(state, decision.purpose, profile_hash, PilotStage.REPLAYED)
+def test_profile_freeze_rejects_profile_or_profile_set_substitution() -> None:
+    profile_set, decision, audit, state = pilot()
+    substitute = make_profile(decision.purpose)
+    other_set = PilotProfileSetV1(
+        pilot_id=uuid7(),
+        pilot_version="1",
+        profiles=(substitute, audit.model_copy(update={"profile_id": uuid7()})),
+    )
+
+    with pytest.raises(ValueError):
+        transition_pilot(state, freeze_transition(profile_set, substitute))
+    with pytest.raises(ValueError):
+        transition_pilot(state, freeze_transition(other_set, substitute))
+
+
+def test_generic_future_stage_evidence_and_advancement_are_not_exposed() -> None:
+    assert not hasattr(qualification_contracts, "StageArtifactKind")
+    assert not hasattr(qualification_contracts, "StageArtifactReferenceV1")
+    profile_set, decision, _, _ = pilot()
+    transition = freeze_transition(profile_set, decision)
 
     with pytest.raises(ValidationError):
-        M1eTransitionV1(
-            transition_id=uuid7(),
-            purpose=decision.purpose,
-            profile_hash=profile_hash,
-            from_stage=PilotStage.REPLAYED,
-            to_stage=terminal,
-            artifacts=(),
-            authorized_profile_hashes=(),
-            shared_artifact_hashes=(),
-        )
+        transition.model_copy(update={"to_stage": PilotStage.RIGHTS_ASSESSED})
+    with pytest.raises(ValueError):
+        transition.model_copy(update={"artifacts": (H[0],)})
 
 
 @pytest.mark.parametrize(
@@ -350,7 +207,7 @@ def test_lifecycle_exposes_no_terminal_transition_finalizer(
         ),
     ],
 )
-def test_negative_report_preserves_reached_results_and_never_invents_outputs(
+def test_negative_report_is_deterministic_and_never_invents_outputs(
     acquisition_state: AcquisitionState, blocker: QualificationDimension
 ) -> None:
     value = make_profile(ConsumerPurpose.HISTORICAL_DECISION_INPUT)
@@ -399,8 +256,24 @@ def test_negative_report_preserves_reached_results_and_never_invents_outputs(
         }
     )
 
-    report = build_negative_report(qualification_target, (passed, blocked), blocker)
+    report = build_negative_report(
+        qualification_target,
+        (passed, blocked),
+        blocker,
+        report_id=REPORT_ID,
+        reported_at=NOW,
+    )
+    repeated = build_negative_report(
+        qualification_target,
+        (passed, blocked),
+        blocker,
+        report_id=REPORT_ID,
+        reported_at=NOW,
+    )
 
+    assert repeated == report
+    assert report.report_id == REPORT_ID
+    assert report.reported_at == NOW
     by_dimension = {item.dimension: item for item in report.results}
     assert by_dimension[passed.dimension] == passed
     assert by_dimension[blocker] == blocked
@@ -444,6 +317,8 @@ def test_negative_report_rejects_pass_blocker_or_cross_purpose_results() -> None
             qualification_target,
             (passed,),
             QualificationDimension.LICENSING_RETENTION,
+            report_id=REPORT_ID,
+            reported_at=NOW,
         )
     with pytest.raises(ValueError):
         build_negative_report(
@@ -459,4 +334,6 @@ def test_negative_report_rejects_pass_blocker_or_cross_purpose_results() -> None
                 audit,
             ),
             QualificationDimension.LICENSING_RETENTION,
+            report_id=REPORT_ID,
+            reported_at=NOW,
         )

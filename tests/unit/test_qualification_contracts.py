@@ -8,9 +8,6 @@ from pydantic import ValidationError
 from drift.domain.qualification import (
     AcquisitionState,
     ConsumerPurpose,
-    ContentDispositionDuty,
-    ContentDispositionRecordV1,
-    ContentDispositionStatus,
     DimensionQualificationResultV1,
     ExecutionReachability,
     ExternalDependencyResolutionV1,
@@ -420,6 +417,27 @@ def test_final_report_has_all_12_dimensions_and_replay_binding() -> None:
         report.model_copy(update={"pre_replay_report_hash": None})
 
 
+def test_reached_offline_replay_requires_all_prior_dimensions_reached() -> None:
+    value = profile()
+    results = tuple(dimension_result(item) for item in QualificationDimension)
+    not_reached = dimension_result(
+        QualificationDimension.SECURITY_LISTING_IDENTITY,
+        status=QualificationStatus.UNKNOWN,
+        reachability=ExecutionReachability.NOT_REACHED,
+    )
+
+    with pytest.raises(ValidationError):
+        PurposeQualificationReportV1(
+            report_id=uuid7(),
+            report_version="1",
+            reported_at=NOW,
+            purpose=value.purpose,
+            target=target(qualification_profile_hash(value)),
+            results=(not_reached, *results[1:]),
+            pre_replay_report_hash=H3,
+        )
+
+
 def test_one_purpose_result_cannot_be_used_in_the_other_purpose_report() -> None:
     value = profile(ConsumerPurpose.RETROSPECTIVE_AUDIT)
     results = tuple(
@@ -471,7 +489,28 @@ def test_external_dependency_terminal_evidence_and_pre_profile_abandonment() -> 
     assert attempt.outcome is PreProfileAttemptStatus.ABANDONED_PRE_PROFILE
 
 
-def test_completion_rejects_pending_mandatory_disposition_or_dependency() -> None:
+def test_task2_rejects_direct_terminal_purpose_state_construction() -> None:
+    value = profile()
+
+    for stage in (
+        PilotStage.COMPLETED_POSITIVE,
+        PilotStage.COMPLETED_NEGATIVE,
+    ):
+        with pytest.raises(ValidationError):
+            PurposeStageStateV1(
+                purpose=value.purpose,
+                profile_hash=qualification_profile_hash(value),
+                stage=stage,
+                reached_stage_artifact_hashes=(H1,),
+                terminal_blocker=(
+                    QualificationDimension.LICENSING_RETENTION
+                    if stage is PilotStage.COMPLETED_NEGATIVE
+                    else None
+                ),
+            )
+
+
+def test_task2_rejects_direct_positive_completion_record_construction() -> None:
     decision = profile()
     audit = profile(ConsumerPurpose.RETROSPECTIVE_AUDIT)
     profiles = (decision, audit)
@@ -486,19 +525,15 @@ def test_completion_rejects_pending_mandatory_disposition_or_dependency() -> Non
                 report_version="1",
                 reported_at=NOW,
                 purpose=item.purpose,
-                target=target(
-                    qualification_profile_hash(item), AcquisitionState.NOT_ACQUIRED
-                ),
+                target=target(qualification_profile_hash(item)),
                 results=tuple(
                     dimension_result(
                         dimension,
                         item.purpose,
-                        status=QualificationStatus.UNKNOWN,
-                        reachability=ExecutionReachability.NOT_REACHED,
                     )
                     for dimension in QualificationDimension
                 ),
-                pre_replay_report_hash=None,
+                pre_replay_report_hash=H3,
             )
             for item in profiles
         ),
@@ -506,31 +541,15 @@ def test_completion_rejects_pending_mandatory_disposition_or_dependency() -> Non
     states = cast(
         tuple[PurposeStageStateV1, PurposeStageStateV1],
         tuple(
-            PurposeStageStateV1(
+            PurposeStageStateV1.model_construct(
                 purpose=item.purpose,
                 profile_hash=qualification_profile_hash(item),
-                stage=PilotStage.COMPLETED_NEGATIVE,
+                stage=PilotStage.COMPLETED_POSITIVE,
                 reached_stage_artifact_hashes=(H1,),
-                terminal_blocker=QualificationDimension.LICENSING_RETENTION,
+                terminal_blocker=None,
             )
             for item in profiles
         ),
-    )
-    pending_disposition = ContentDispositionRecordV1(
-        content_hash=H1,
-        backup_hashes=(),
-        contractual_duty=ContentDispositionDuty.DELETE,
-        status=ContentDispositionStatus.PENDING,
-        evidence_hashes=(H2,),
-        disposition_time=None,
-    )
-    pending_dependency = ExternalDependencyResolutionV1(
-        dependency_kind="provider-contract",
-        responsible_party="provider",
-        status=ExternalDependencyStatus.PENDING,
-        evidence_hashes=(H3,),
-        decision_time=None,
-        limitations=("awaiting response",),
     )
     common = {
         "completion_id": uuid7(),
@@ -539,25 +558,17 @@ def test_completion_rejects_pending_mandatory_disposition_or_dependency() -> Non
         "profile_set_hash": content_hash(profile_set),
         "purpose_states": states,
         "shared_artifact_hashes": (H1,),
-        "blocking_dimensions": (QualificationDimension.LICENSING_RETENTION,),
-        "blocking_evidence_hashes": (H2,),
+        "blocking_dimensions": (),
+        "blocking_evidence_hashes": (),
         "purpose_reports": reports,
-        "completion_kind": M1eCompletionKind.COMPLETED_NEGATIVE,
+        "completion_kind": M1eCompletionKind.COMPLETED_POSITIVE,
     }
 
     with pytest.raises(ValidationError):
         M1eCompletionRecordV1.model_validate(
             {
                 **common,
-                "content_dispositions": (pending_disposition,),
-                "external_dependencies": (),
-            }
-        )
-    with pytest.raises(ValidationError):
-        M1eCompletionRecordV1.model_validate(
-            {
-                **common,
                 "content_dispositions": (),
-                "external_dependencies": (pending_dependency,),
+                "external_dependencies": (),
             }
         )
