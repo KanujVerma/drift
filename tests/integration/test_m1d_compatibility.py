@@ -31,6 +31,7 @@ V1_COMMIT = "4d54d7e553beba8cdd5413ea1181e7efac7a236b"
 M1C_V2_COMMIT = BASELINE
 TASK7_COMMIT = "256154e40121d28cec6a65ebcde223c12563752d"
 TASK8_COMMIT = "a909148a941081d8d05c5090794346c5ce54db8c"
+PINNED_M1D_COMMIT = "af75cce0f763de025f8ae3516577a9d0a1acead9"
 HISTORY_MODULE = "tests/integration/test_m1c_economic_history.py"
 M1D_V1_FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "m1d" / "v1"
 M1D_V2_FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "m1d" / "v2"
@@ -53,9 +54,13 @@ EXPECTED_V1_HASH_INDEX_SHA256 = (
 ALLOWED_TASK1_PINNED_LANE_ADDITIONS = frozenset(
     {
         "tests/_pinned_m1c.py",
+        "tests/_pinned_m1d.py",
         "tests/conftest.py",
         "tests/integration/test_m1c_pinned_replay.py",
+        "tests/integration/test_m1d_pinned_replay.py",
+        "tests/integration/test_m1e_compatibility.py",
         "tests/fixtures/m1d-compatibility/m1c-v2-protected-sha256.json",
+        "tests/fixtures/m1e-compatibility/m1d-v3-protected-sha256.json",
     }
 )
 
@@ -260,6 +265,9 @@ def _current_diff() -> list[tuple[str, str]]:
     for line in _git("diff", "--name-status", BASELINE).splitlines():
         status, path, *_ = line.split("\t")
         rows.append((status, path))
+    for path in _git("ls-files", "--others", "--exclude-standard").splitlines():
+        if path:
+            rows.append(("A", path))
     return rows
 
 
@@ -348,6 +356,21 @@ def _runtime_additions() -> tuple[Path, ...]:
             assert status == "A", f"old runtime source modified: {path}"
             additions.append(REPO_ROOT / path)
     return tuple(sorted(additions))
+
+
+def _accepted_m1d_runtime_paths() -> tuple[str, ...]:
+    """Return the finite M1d source additions, not a prohibition on M1e source."""
+    baseline = set(_git_paths(BASELINE, "src/drift"))
+    accepted = set(_git_paths(PINNED_M1D_COMMIT, "src/drift"))
+    return tuple(sorted(path for path in accepted - baseline if path.endswith(".py")))
+
+
+def _accepted_m1d_source_paths() -> tuple[str, ...]:
+    return tuple(
+        path
+        for path in _git_paths(PINNED_M1D_COMMIT, "src/drift")
+        if path.endswith(".py")
+    )
 
 
 def test_c01_protected_m0_m1c_bytes_match_planning_baseline() -> None:
@@ -531,9 +554,16 @@ def test_c03_forbidden_runtime_capabilities_and_dependencies_remain_absent() -> 
         for _status, path in _current_diff()
     )
 
-    runtime_files = _runtime_additions()
-    assert len(runtime_files) == 14
-    for path in runtime_files:
+    accepted_additions = _accepted_m1d_runtime_paths()
+    assert len(accepted_additions) == 14
+    assert set(_runtime_additions()) >= {
+        REPO_ROOT / path for path in accepted_additions
+    }
+    for relative in _accepted_m1d_source_paths():
+        path = REPO_ROOT / relative
+        assert path.read_bytes() == _git_bytes(PINNED_M1D_COMMIT, relative), relative
+    for relative in accepted_additions:
+        path = REPO_ROOT / relative
         _assert_runtime_ast_allowed(path.read_text(encoding="utf-8"), str(path))
 
     # A generator's lock is temporary test machinery; it must not leak into
