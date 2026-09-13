@@ -56,7 +56,6 @@ PROCESS_ORCHESTRATION_SCRIPT_PATHS = frozenset(
         "scripts/qualify_m1e_pilot.py",
     }
 )
-ACQUISITION_SCRIPT_PATH = "scripts/acquire_m1e_pilot.py"
 NETWORK_IMPORT_ROOTS = frozenset(
     {
         "boto3",
@@ -187,8 +186,8 @@ def _assert_definition_allowed(name: str, relative: str, *, script: bool) -> Non
             f"process definition outside planned orchestration script: {name}"
         )
     if any(term in lowered for term in NETWORK_OR_CREDENTIAL_DEFINITION_TERMS):
-        assert script and relative == ACQUISITION_SCRIPT_PATH, (
-            f"network or credential definition outside acquisition script: {name}"
+        raise AssertionError(
+            f"network or credential definition is deferred to Task 8: {name}"
         )
 
 
@@ -233,8 +232,8 @@ def _assert_m1e_script_allowed(relative: str, source: str) -> None:
         for module in modules:
             root = module.split(".", maxsplit=1)[0]
             if root in NETWORK_IMPORT_ROOTS:
-                assert relative == ACQUISITION_SCRIPT_PATH, (
-                    f"network import outside acquisition script: {module}"
+                raise AssertionError(
+                    f"network import is deferred to Task 8: {module}"
                 )
             if root in PROCESS_IMPORT_ROOTS:
                 assert relative in PROCESS_ORCHESTRATION_SCRIPT_PATHS, (
@@ -252,14 +251,14 @@ def _assert_m1e_script_allowed(relative: str, source: str) -> None:
                     f"process call outside planned orchestration script: {call_path}"
                 )
             if call_path in CREDENTIAL_READ_CALLS:
-                assert relative == ACQUISITION_SCRIPT_PATH, (
-                    f"credential read outside acquisition script: {call_path}"
+                raise AssertionError(
+                    f"credential read is deferred to Task 8: {call_path}"
                 )
         if isinstance(node, ast.Subscript):
             access_path = _call_path(node.value, aliases)
             if access_path == "os.environ":
-                assert relative == ACQUISITION_SCRIPT_PATH, (
-                    "credential read outside acquisition script: os.environ"
+                raise AssertionError(
+                    "credential read is deferred to Task 8: os.environ"
                 )
 
 
@@ -327,8 +326,10 @@ def test_production_ast_guard_rejects_alias_aware_process_and_dynamic_execution(
             _assert_m1e_production_module_allowed(source, "negative-control.py")
 
 
-def test_script_ast_guard_partitions_process_and_acquisition_capabilities() -> None:
-    """Only planned scripts can orchestrate processes or eventually acquire bytes."""
+def test_script_ast_guard_partitions_process_and_defers_acquisition_capabilities() -> (
+    None
+):
+    """Task 1 permits planned process work but no network or credential access."""
     with pytest.raises(AssertionError):
         _assert_m1e_script_allowed(
             "scripts/intake_m1e_truth.py",
@@ -353,7 +354,8 @@ def test_script_ast_guard_partitions_process_and_acquisition_capabilities() -> N
         "scripts/capture_m1e_environment.py",
         "import subprocess\nsubprocess.run(['true'])\n",
     )
-    _assert_m1e_script_allowed(
-        "scripts/acquire_m1e_pilot.py",
-        "import requests\nimport os\nrequests.get('https://example.invalid')\nos.getenv('M1E_TOKEN')\n",
-    )
+    with pytest.raises(AssertionError):
+        _assert_m1e_script_allowed(
+            "scripts/acquire_m1e_pilot.py",
+            "import requests\nimport os\nrequests.get('https://example.invalid')\nos.getenv('M1E_TOKEN')\n",
+        )
