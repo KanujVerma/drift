@@ -137,6 +137,12 @@ def validate_contract_topology(
     for node in topology.nodes:
         if any(party_id not in known_parties for party_id in node.party_ids):
             findings.append(_finding("unknown_contract_party", node=node))
+        if node.confidentiality_class is not ConfidentialityClass.PUBLIC and not (
+            _is_private_content_addressed(node.artifact_reference)
+        ):
+            findings.append(
+                _finding("confidential_evidence_public_reference", node=node)
+            )
         if node.applicability_status is ApplicabilityStatus.UNKNOWN:
             findings.append(_finding("unknown_contract_applicability", node=node))
         if node.applicability_status is not ApplicabilityStatus.APPLICABLE:
@@ -147,12 +153,6 @@ def validate_contract_topology(
             findings.append(_finding("unmatched_contract_publisher", node=node))
         if not (node.assent_evidence_hashes or node.signature_evidence_hashes):
             findings.append(_finding("absent_contract_assent", node=node))
-        if node.confidentiality_class is not ConfidentialityClass.PUBLIC and not (
-            _is_private_content_addressed(node.artifact_reference)
-        ):
-            findings.append(
-                _finding("confidential_evidence_public_reference", node=node)
-            )
     confidential_hashes = {
         node.artifact_reference.content_hash
         for node in topology.nodes
@@ -352,10 +352,13 @@ def validate_rights_assessment(
     ):
         raise ValueError("subscriber legal party does not match frozen profile")
     expected_party_ids = {providers[0].party_id, subscribers[0].party_id}
-    if len(evidence.topology.parties) != 2 or any(
-        node.applicability_status is ApplicabilityStatus.APPLICABLE
-        and set(node.party_ids) != expected_party_ids
+    root_nodes = tuple(
+        node
         for node in evidence.topology.nodes
+        if node.node_id in evidence.topology.root_agreement_ids
+    )
+    if not root_nodes or any(
+        not expected_party_ids.issubset(node.party_ids) for node in root_nodes
     ):
         raise ValueError("contract topology parties do not match frozen profile")
 

@@ -142,6 +142,23 @@ def transition_acquisition_authorized(
         raise ValueError("acquisition profile set does not match pilot state")
     authorized = set(bundle.authorization.authorized_profile_hashes)
     assessments = {item.assessment.profile_hash: item for item in bundle.assessments}
+    purpose_states_by_profile = {
+        item.profile_hash: item for item in state.purpose_states
+    }
+    for profile_hash, assessment in assessments.items():
+        recorded = purpose_states_by_profile.get(profile_hash)
+        if (
+            recorded is None
+            or recorded.stage is not PilotStage.RIGHTS_ASSESSED
+            or recorded.reached_stage_artifact_hashes[-2:]
+            != (
+                content_hash(assessment.topology),
+                content_hash(assessment.assessment),
+            )
+        ):
+            raise ValueError(
+                "acquisition bundle does not match recorded rights assessment"
+            )
     purpose_states = []
     for item in state.purpose_states:
         if item.profile_hash not in authorized:
@@ -149,14 +166,6 @@ def transition_acquisition_authorized(
             continue
         if item.stage is not PilotStage.RIGHTS_ASSESSED:
             raise ValueError("acquisition authorization requires assessed rights")
-        assessment = assessments.get(item.profile_hash)
-        if assessment is None or item.reached_stage_artifact_hashes[-2:] != (
-            content_hash(assessment.topology),
-            content_hash(assessment.assessment),
-        ):
-            raise ValueError(
-                "acquisition bundle does not match recorded rights assessment"
-            )
         purpose_states.append(
             item.model_copy(
                 update={

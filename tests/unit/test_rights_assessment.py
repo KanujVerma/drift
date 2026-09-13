@@ -192,7 +192,12 @@ def make_evidence(topology: ContractTopologyV1) -> RightsEvidenceContext:
         topology=topology,
         contract_evidence=(CONTRACT,),
         assent_evidence=(ASSENT,),
-        amendment_evidence=(),
+        amendment_evidence=(PRECEDENCE,)
+        if any(
+            PRECEDENCE.content_hash in edge.precedence_evidence_hashes
+            for edge in topology.edges
+        )
+        else (),
         schedule_evidence=(),
         policy_evidence=(),
         notice_evidence=(NOTICE,),
@@ -374,6 +379,49 @@ def test_complete_lawful_synthetic_topology_validates() -> None:
     assert validated.topology == topology
 
 
+def test_topology_permits_evidenced_additional_parties_and_unilateral_nodes() -> None:
+    profile = make_profile(ConsumerPurpose.HISTORICAL_DECISION_INPUT)
+    topology = make_topology()
+    private_location = f"drift+sha256://{CONTRACT.content_hash}"
+    publisher = LegalPartyV1(
+        party_id="publisher-party-1",
+        exact_legal_name="Upstream Publisher Inc.",
+        role="publisher",
+        jurisdiction="New York",
+        jurisdiction_unknown=False,
+        evidence_references=(_reference(CONTRACT, location=private_location),),
+    )
+    notice = topology.nodes[0].model_copy(
+        update={
+            "node_id": "publisher-notice",
+            "document_kind": "unilateral_notice",
+            "title": "Upstream Publisher Notice",
+            "party_ids": (publisher.party_id,),
+            "assent_evidence_hashes": (),
+            "signature_evidence_hashes": (ASSENT.content_hash,),
+        }
+    )
+    edge = ContractPrecedenceEdgeV1(
+        controlling_node_id="agreement",
+        subordinate_node_id=notice.node_id,
+        relationship="incorporates_notice",
+        precedence_evidence_hashes=(PRECEDENCE.content_hash,),
+    )
+    topology = topology.model_copy(
+        update={
+            "parties": (*topology.parties, publisher),
+            "nodes": (*topology.nodes, notice),
+            "edges": (edge,),
+        }
+    )
+
+    assert validate_contract_topology(topology) == ()
+    validated = validate_rights_assessment(
+        profile, make_assessment(profile, topology), make_evidence(topology)
+    )
+    assert validated.topology == topology
+
+
 def test_topology_reports_duplicate_edges_and_cycles() -> None:
     topology = make_topology()
     second = topology.nodes[0].model_copy(
@@ -469,6 +517,17 @@ def test_confidential_legal_evidence_requires_private_content_addressing(
     location: str,
 ) -> None:
     topology = make_topology(location=location)
+
+    assert "confidential_evidence_public_reference" in {
+        item.code for item in validate_contract_topology(topology)
+    }
+
+
+def test_confidential_locator_is_checked_even_when_node_is_not_applicable() -> None:
+    topology = make_topology(
+        applicability=ApplicabilityStatus.NOT_APPLICABLE,
+        location="https://github.com/example/not-applicable-contract.pdf",
+    )
 
     assert "confidential_evidence_public_reference" in {
         item.code for item in validate_contract_topology(topology)
