@@ -431,14 +431,14 @@ profile raise `ValueError`. `PENDING` external evidence is not a transition.
 `transition_pilot` cannot construct either terminal state; the Task 7 finalizer
 does so only after verifying both purpose bundles.
 
-- [ ] **Step 1: Write contract RED tests**
+- [x] **Step 1: Write contract RED tests**
 
 Add dump/load, canonical hash, ordering, duplication, bound-size, and mutation
 tests. Assert that one purpose's PASS cannot authorize the other, a pre-replay
 report contains exactly 11 non-replay dimensions, a final report contains all
 12, and a profile cannot contain delivered-byte identity.
 
-- [ ] **Step 2: Write lifecycle RED tests**
+- [x] **Step 2: Write lifecycle RED tests**
 
 Table-test every legal transition and every prohibited skip/backtrack. Include
 rights-negative before acquisition, acquired-unsnapshotted negative,
@@ -446,25 +446,25 @@ semantics-negative, terminal external evidence, and a rejected attempt to claim
 positive completion without the later typed replay API. Tests initially fail
 because the models and state functions do not exist.
 
-- [ ] **Step 3: Implement minimal frozen contracts and transitions**
+- [x] **Step 3: Implement minimal frozen contracts and transitions**
 
 Implement only the types and pure functions above. Do not import provider,
 network, evaluator, ledger, or storage code. Do not add a generic score.
 
-- [ ] **Step 4: Run focused GREEN**
+- [x] **Step 4: Run focused GREEN**
 
 ```text
 uv run pytest tests/unit/test_qualification_contracts.py tests/unit/test_m1e_lifecycle.py tests/unit/test_canonical_serialization.py -q
 ```
 
-- [ ] **Step 5: Fresh lifecycle/adversarial review and full gate**
+- [x] **Step 5: Fresh lifecycle/adversarial review and full gate**
 
 Sol owns the difficult implementation. A fresh Sol reviewer attacks purpose
 confusion, fake reachability, missing dimensions, invented negative outputs,
 critical non-PASS positive completion, and vendor-wide generalization. Fix all
 genuine Important/Critical findings, then run the full repository gate once.
 
-- [ ] **Step 6: Commit and Checkpoint**
+- [x] **Step 6: Commit and Checkpoint**
 
 Stage only Task 2 paths and the accurate execution-record update. Commit:
 
@@ -2336,6 +2336,48 @@ evaluator capability was introduced.
 - External artifacts: none. The archived M1d input inventory binds
   `af75cce0f763de025f8ae3516577a9d0a1acead9`; M1e production source remains
   absent. Task 2 remains unstarted.
+
+### Task 2 accepted, 2026-09-13
+
+Task 2 added immutable purpose-specific qualification profiles, bounded scope,
+dimension results, truthful target states, negative reports, external dependency
+and content disposition records, and the initial two-purpose pilot state. Its
+implementation commits are `1c25708` (`feat: add M1e qualification lifecycle`),
+`5878d1d` (`fix: restrict M1e lifecycle authority`), and `01ba5fe` (`fix:
+restrict M1e persisted stages`). No provider, entitlement, rights PASS,
+acquisition, real snapshot, environment closure, replay result, evaluator, or
+trading capability was introduced.
+
+- RED evidence: initial contract and lifecycle collection failed with two
+  missing-module errors before production code existed. The first adversarial
+  review added uncovered scope, purpose, reachability, and receipt-continuity
+  cases and produced `9 failed, 27 passed`. Fix round 1 then produced `10 failed,
+  21 passed`, proving generic caller-labeled future-stage advancement, direct
+  terminal construction, incomplete replay reachability, and nondeterministic
+  report metadata. Fix round 2 produced `14 failed, 8 deselected`, proving every
+  direct `RIGHTS_ASSESSED`-through-`REPLAYED` purpose state and aggregate pilot
+  state was still constructible without typed verifier output.
+- GREEN evidence: the final Task 2 focused gate passed `62` tests, and Task 1
+  M1e compatibility plus pinned M1d replay passed `10` tests. The independently
+  run final full repository gate passed `1,704` tests. `uv run ruff check .`,
+  `uv run ruff format --check .`, `uv run mypy src tests`, `uv build`, and `git
+  diff --check` passed; formatting reported `162` files and mypy reported no
+  issues in `127` source files.
+- Review and closure: fix round 1 removed generic stage-artifact labels and
+  future-stage transition authority, rejected Task 2 terminal state and
+  completion construction, required all first 11 dimensions to be reached
+  before replay is reached, removed the incorrect all-12-dimensions-PASS rule,
+  and made negative report metadata explicit and deterministic. Fix round 2
+  independently rejected later-stage values embedded directly or through an
+  unchecked nested purpose state. Final independent review found no open
+  Critical or Important finding.
+- Controller ruling: Task 2 exposes only verified `PROFILE_FROZEN` advancement
+  using the actual `PilotProfileSetV1`, exact purpose profile, and frozen
+  golden-case manifest identity. Tasks 3 through 7 add only their own typed
+  verifier-backed transitions. Task 7 alone owns terminal completion.
+- External artifacts: none. Task 3 is next and remains unstarted. Task 3 must own
+  the typed `RIGHTS_ASSESSED` advancement and may not reuse generic Task 2
+  transition authority.
 
 ## 9. Planning review and publication verification
 
