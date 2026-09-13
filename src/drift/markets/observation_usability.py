@@ -122,6 +122,8 @@ _USABILITY_ALGORITHM_V1 = {
     "coverage_chronology": "exact_snapshot_complete_by_cutoff_not_backdated",
     "profile_order": "intrinsic_source_compatibility_before_session_binding",
     "interruption_aggregation": "exact_contract_bound_closed_policy_required",
+    "realized_interruption": "independent_complete-coverage-and-policy-gate",
+    "activity_consistency": "positive-price-trade-conflicts-with-explicit-no-any-trade",
 }
 _ELIGIBILITY_ALGORITHM_V1 = {
     "schema_version": "1",
@@ -134,6 +136,7 @@ _ELIGIBILITY_ALGORITHM_V1 = {
     "unknown_boundary": "whole_interval_indeterminate",
     "bounded_overlap": "lower_before_segment_close_and_upper_after_segment_open",
     "m1b_channel": "outer_or_explicit_context_mapping_only",
+    "realized_interruption": "complete-coverage-and-exact-aggregation-policy-required",
 }
 
 
@@ -347,6 +350,13 @@ def _assess_verified_observation(
     profile_status, profile_reasons, values = _profile_compatibility(
         query, observation, contract, binding.classification, context
     )
+    if qualifying_activity == "reported" and any_activity == "explicit_none":
+        profile_status = "incompatible"
+        profile_reasons = (
+            *profile_reasons,
+            "activity_claim_conflict:any_trade_explicit_none_with_qualifying_price_trade",
+        )
+        values = None
     provider_gap: ProviderGapStatus = (
         "proven"
         if _provider_gap_is_proven(
@@ -1009,6 +1019,18 @@ def _classify_interval(
         return "indeterminate", ("lifecycle_interval_unresolved",)
     structural = {item.structural_classification for item in segments}
     lifecycle = {item.lifecycle for item in segments}
+    interruption_reasons: tuple[str, ...]
+    if realized is not None and realized.interruption_intervals:
+        if (
+            contract is not None
+            and _complete_realized_interruption_coverage(realized)
+            and _compatible_interruption_policy(contract, context)
+        ):
+            interruption_reasons = ("realized_interruption_explicitly_aggregated",)
+        else:
+            return "indeterminate", ("realized_interruption_aggregation_unknown",)
+    else:
+        interruption_reasons = ()
     if lifecycle == {"active", "suspended"} and structural <= {
         "eligible",
         "ineligible",
@@ -1019,7 +1041,14 @@ def _classify_interval(
             and _complete_interruption_aggregation(segments, realized)
             and _compatible_interruption_policy(contract, context)
         ):
-            return "eligible", ("partial_suspension_explicitly_aggregated",)
+            return "eligible", tuple(
+                sorted(
+                    {
+                        *interruption_reasons,
+                        "partial_suspension_explicitly_aggregated",
+                    }
+                )
+            )
         return "indeterminate", ("partial_suspension_aggregation_unknown",)
     if "ineligible" in structural or lifecycle in (
         {"not_yet_listed"},
@@ -1030,7 +1059,9 @@ def _classify_interval(
     if "indeterminate" in structural or "indeterminate" in lifecycle:
         return "indeterminate", ("listing_interval_indeterminate",)
     if lifecycle == {"active"} and structural == {"eligible"}:
-        return "eligible", ("listing_interval_active",)
+        return "eligible", tuple(
+            sorted({*interruption_reasons, "listing_interval_active"})
+        )
     return "indeterminate", ("listing_interval_mixed",)
 
 
@@ -1051,6 +1082,39 @@ def _complete_interruption_aggregation(
         and claim.start.lower_bound == segment.opened_at
         and claim.end.upper_bound == segment.closed_at
         for claim, segment in zip(claims, interrupted, strict=True)
+    )
+
+
+def _complete_realized_interruption_coverage(
+    realized: RealizedSessionVersionV1,
+) -> bool:
+    if (
+        realized.interruption_coverage != "complete"
+        or realized.actual_open is None
+        or realized.actual_close is None
+    ):
+        return False
+    intervals: list[tuple[datetime, datetime]] = []
+    for claim in realized.interruption_intervals:
+        if (
+            claim.start.shape is not BoundaryShape.EXACT
+            or claim.end is None
+            or claim.end.shape is not BoundaryShape.EXACT
+            or claim.start.lower_bound is None
+            or claim.start.lower_bound != claim.start.upper_bound
+            or claim.end.lower_bound is None
+            or claim.end.lower_bound != claim.end.upper_bound
+            or claim.start.lower_bound < realized.actual_open
+            or claim.end.lower_bound > realized.actual_close
+            or claim.end.lower_bound <= claim.start.lower_bound
+        ):
+            return False
+        intervals.append((claim.start.lower_bound, claim.end.lower_bound))
+    return all(
+        prior_close <= next_open
+        for (_prior_open, prior_close), (next_open, _next_close) in zip(
+            intervals, intervals[1:], strict=False
+        )
     )
 
 

@@ -105,6 +105,8 @@ def test_designated_close_keeps_truthful_endpoint_relationship() -> None:
     assert result.first_post_session is not None
     assert result.first_post_session.local_date == date(2026, 11, 30)
     assert result.transition_claim is not None
+    assert result.transition_claim.source_session_key.local_date == date(2026, 11, 27)
+    assert result.transition_claim is not None
     assert result.transition_claim.relationship == "exactly_at_close"
     assert result.transition_claim.source_session_key.local_date == date(2026, 11, 27)
     assert result.transition_claim.session_key.local_date == date(2026, 11, 30)
@@ -289,8 +291,20 @@ def test_exact_transition_is_representation_independent_across_midnight(
     assert result.classification == "mapped"
     assert result.first_post_session is not None
     assert result.first_post_session.local_date == date(2026, 11, 30)
-    assert result.transition_claim is not None
-    assert result.transition_claim.source_session_key.local_date == date(2026, 11, 27)
+
+
+def test_action_mapping_rejects_claimed_offset_that_contradicts_authority() -> None:
+    case = action_session_case(
+        "2026-11-28T04:30:00Z",
+        "exact_trading_basis_transition",
+        contradict_schedule_offsets=True,
+    )
+
+    result = case.map()
+
+    assert result.classification == "indeterminate"
+    assert result.first_post_session is None
+    assert "authenticated_schedule_generation_unavailable" in result.reasons
 
 
 def test_a09_no_foreign_source_equality_seam() -> None:

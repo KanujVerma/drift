@@ -2172,7 +2172,9 @@ class ObservationHarness:
             "reported"
             if case == "explicit_no_price_trade"
             else (
-                "unknown"
+                "explicit_none"
+                if case == "contradictory_no_any_trade"
+                else "unknown"
                 if case in {"zero_volume", "volume_sentinel", "null_close"}
                 else record.any_trade_claim
             )
@@ -2502,6 +2504,7 @@ class NormalizationHarness:
             "did_not_open",
         ] = "completed",
         economic_through: str | None = None,
+        economic_history_start: str = "2020-01-01T00:00:00Z",
         occurrence_group_case: Literal[
             "base",
             "cancelled_conflict",
@@ -2557,6 +2560,7 @@ class NormalizationHarness:
             additional_splits=additional_splits,
             duplicate=duplicate,
             economic_through=economic_through,
+            economic_history_start=economic_history_start,
             occurrence_group_case=occurrence_group_case,
             neutral_suffix=neutral_suffix,
             include_prior_open=include_prior_open,
@@ -2660,6 +2664,9 @@ class NormalizationHarness:
             m1b_requested_channel=self.source.context.m1b_requested_channel,
             economic_context=action_context.economic_context,
             economic_source_policy=action_context.economic_source_policy,
+            schedule_generation_policy_hash=(
+                action_context.schedule_generation_policy_hash
+            ),
         )
 
     def normalization_query(
@@ -2670,6 +2677,7 @@ class NormalizationHarness:
         price_scale: int = 2,
         volume_scale: int = 0,
         effective_cutoff: str | None = None,
+        outer_horizon: str | None = None,
     ) -> Any:
         """Create a genuine retained policy and its full context-bound query."""
         from drift.domain.normalization import (
@@ -2715,7 +2723,9 @@ class NormalizationHarness:
             else _parse_instant("2026-01-05T22:00:00Z")
         )
         through_text = economic_through.strftime("%Y-%m-%dT%H:%M:%SZ")
-        vintage_text = (economic_through + timedelta(days=1)).strftime(
+        outer_horizon_text = outer_horizon or through_text
+        outer_horizon_value = _parse_instant(outer_horizon_text)
+        vintage_text = (outer_horizon_value + timedelta(days=1)).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         )
         if self.source_only or self.outer_kind == "decision":
@@ -2727,7 +2737,7 @@ class NormalizationHarness:
             )
         else:
             base = self.source.outcome(
-                through_text,
+                outer_horizon_text,
                 vintage_text,
                 self.source.session_date.isoformat(),
             )

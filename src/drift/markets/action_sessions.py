@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, time, timedelta
+from hashlib import sha256
 from typing import Literal, cast
 
 from pydantic import BaseModel, ValidationError
@@ -37,13 +38,27 @@ from drift.domain.economic_results import (
     EconomicEffectProjectionV1,
     EconomicOutcomeResolutionV1,
 )
-from drift.domain.observation_query import m1d_implementation_hash
+from drift.domain.normalization import AnchorOpeningEvidenceV1
+from drift.domain.observation_query import (
+    ObservationQueryV1,
+    m1d_implementation_hash,
+    observation_cutoff,
+    observation_horizon,
+)
 from drift.domain.sessions import (
     RealizedSessionVersionV1,
+    ScheduleArtifactV1,
     ScheduledSessionVersionV1,
+    ScheduleGenerationPolicyV1,
     SelectedSessionRecordsV1,
     SessionCoverageVersionV1,
     SessionKeyV1,
+    SessionOutputV1,
+)
+from drift.domain.temporal import (
+    AvailabilityBasis,
+    AvailabilityShape,
+    CutoffEligibility,
 )
 from drift.markets.economic_outcomes import resolve_economic_facts
 from drift.markets.economic_selection import select_market_records
@@ -55,6 +70,10 @@ from drift.markets.observation_validation import (
     M1dResolutionContext,
     m1d_context_hash,
     validate_m1d_resolution_context,
+)
+from drift.markets.session_generation import (
+    generate_schedule,
+    validate_schedule_generation_policy,
 )
 from drift.serialization.canonical import canonical_json, content_hash
 
@@ -97,6 +116,11 @@ def map_action_to_session(
         or source_policy.security_id != query.security_id
     ):
         raise ValueError("action session economic source policy mismatch")
+    if (
+        query.economic_history_start < source_policy.history_start
+        or query.economic_through > source_policy.through
+    ):
+        raise ValueError("action session economic window is not policy-authorized")
 
     policy = _load_artifact_model(
         query.action_session_policy_hash, ActionSessionPolicyV1, context
@@ -191,8 +215,14 @@ def map_action_to_session(
     if policy_owner(source_policy, "effect").source_id != query.source_id:
         return finish("indeterminate", ("selected_effect_source_mismatch",))
 
-    outcome = resolve_economic_facts(economic_query, economic_context, source_policy)
-    proof = select_market_records(economic_query, economic_context, source_policy)
+    window_policy = source_policy.model_copy(
+        update={
+            "history_start": query.economic_history_start,
+            "through": query.economic_through,
+        }
+    )
+    outcome = resolve_economic_facts(economic_query, economic_context, window_policy)
+    proof = select_market_records(economic_query, economic_context, window_policy)
     records = {
         content_hash(record): record
         for dataset in economic_context.datasets
@@ -499,6 +529,12 @@ def _economic_query(
     economic_context = context.economic_context
     source_policy = context.economic_source_policy
     assert economic_context is not None and source_policy is not None
+    window_policy = source_policy.model_copy(
+        update={
+            "history_start": query.economic_history_start,
+            "through": query.economic_through,
+        }
+    )
     outer = query.outer_query
     if outer.kind == "decision":
         return MarketDecisionQueryV1(
@@ -507,15 +543,15 @@ def _economic_query(
             purpose="economic_facts",
             security_id=query.security_id,
             action_kinds=_REQUIRED_ACTION_KINDS,
-            history_start=source_policy.history_start,
+            history_start=query.economic_history_start,
             requested_channel=outer.requested_channel,
             availability_policy_id=economic_context.availability_policy.policy_id,
             availability_policy_hash=content_hash(economic_context.availability_policy),
-            source_selection_policy_hash=query.economic_source_policy_hash,
+            source_selection_policy_hash=content_hash(window_policy),
             input_context_hash=economic_context_hash(economic_context),
             decision_time=outer.decision_time,
             knowledge_cutoff=outer.knowledge_cutoff,
-            effective_cutoff=outer.effective_cutoff,
+            effective_cutoff=query.economic_through,
         )
     return MarketOutcomeQueryV1(
         schema_version="1",
@@ -523,13 +559,13 @@ def _economic_query(
         purpose="economic_outcome",
         security_id=query.security_id,
         action_kinds=_REQUIRED_ACTION_KINDS,
-        history_start=source_policy.history_start,
+        history_start=query.economic_history_start,
         requested_channel=outer.requested_channel,
         availability_policy_id=economic_context.availability_policy.policy_id,
         availability_policy_hash=content_hash(economic_context.availability_policy),
-        source_selection_policy_hash=query.economic_source_policy_hash,
+        source_selection_policy_hash=content_hash(window_policy),
         input_context_hash=economic_context_hash(economic_context),
-        economic_horizon=outer.economic_horizon,
+        economic_horizon=query.economic_through,
         evidence_vintage_cutoff=outer.evidence_vintage_cutoff,
     )
 
@@ -761,6 +797,8 @@ type _SessionSnapshot = tuple[
     SessionCoverageVersionV1 | None,
     tuple[str, ...],
     tuple[str, ...],
+    ScheduleArtifactV1 | None,
+    tuple[datetime, str] | None,
 ]
 
 
@@ -780,6 +818,26 @@ def _map_projection_to_session(
     record_hashes = tuple(
         digest for snapshot in snapshots.values() for digest in snapshot[4]
     )
+    incomplete_coverage_reason = _incomplete_coverage_reason(
+        snapshots, projection.basis_boundary.lower_bound
+    )
+    if incomplete_coverage_reason is not None:
+        return _indeterminate(
+            incomplete_coverage_reason,
+            proof_hashes,
+            record_hashes,
+        )
+    if any(
+        snapshot[0] is not None
+        and snapshot[0].state in {"regular", "early_close"}
+        and _generated_output(snapshot) is None
+        for snapshot in snapshots.values()
+    ):
+        return _indeterminate(
+            "authenticated_schedule_generation_unavailable",
+            proof_hashes,
+            record_hashes,
+        )
     boundary = projection.basis_boundary
     if methodology.mapping_mode == "explicit_first_basis_date":
         try:
@@ -793,7 +851,8 @@ def _map_projection_to_session(
             return _indeterminate(
                 "basis_date_outside_candidate_range", proof_hashes, record_hashes
             )
-        scheduled, realized, coverage, _, _ = snapshot
+        scheduled, realized, coverage, _, _, _, _ = snapshot
+        realized_bounds = _realized_bounds(snapshot)
         if realized is not None and realized.outcome == "did_not_open":
             return _indeterminate(
                 "candidate_session_did_not_open", proof_hashes, record_hashes
@@ -803,24 +862,24 @@ def _map_projection_to_session(
             or scheduled.state not in {"regular", "early_close"}
             or realized is None
             or realized.outcome != "opened"
-            or realized.actual_open is None
-            or realized.actual_close is None
+            or realized_bounds is None
             or not _coverage_proves_schedule(coverage, scheduled)
         ):
             return _indeterminate(
                 "candidate_session_not_proven_open", proof_hashes, record_hashes
             )
         key = realized.session_key
+        actual_open, actual_close = realized_bounds
         transition = ActionSessionTransitionClaimV1(
             mapping_mode=methodology.mapping_mode,
             relationship="explicit_first_basis_date",
             basis_boundary=boundary,
             source_session_key=key,
-            source_actual_open=realized.actual_open,
-            source_actual_close=realized.actual_close,
+            source_actual_open=actual_open,
+            source_actual_close=actual_close,
             session_key=key,
-            actual_open=realized.actual_open,
-            actual_close=realized.actual_close,
+            actual_open=actual_open,
+            actual_close=actual_close,
             applied_rule="exact_date_is_actual_open_session",
         )
         return _SessionMapping(
@@ -847,7 +906,8 @@ def _map_projection_to_session(
             "basis_source_session_unproved", proof_hashes, record_hashes
         )
     source_date, current = located
-    scheduled, realized, coverage, _, _ = current
+    scheduled, realized, coverage, _, _, _, _ = current
+    realized_bounds = _realized_bounds(current)
     if realized is not None and realized.outcome == "did_not_open":
         return _indeterminate(
             "candidate_session_did_not_open", proof_hashes, record_hashes
@@ -857,8 +917,7 @@ def _map_projection_to_session(
         or scheduled.state not in {"regular", "early_close"}
         or realized is None
         or realized.outcome != "opened"
-        or realized.actual_open is None
-        or realized.actual_close is None
+        or realized_bounds is None
     ):
         return _indeterminate(
             "candidate_session_not_proven_open", proof_hashes, record_hashes
@@ -869,21 +928,22 @@ def _map_projection_to_session(
         "exactly_at_open",
         "exactly_at_close",
     ]
-    if transition_at == realized.actual_open:
+    actual_open, actual_close = realized_bounds
+    if transition_at == actual_open:
         if methodology.open_endpoint_designation != "post_basis":
             return _indeterminate(
                 "transition_endpoint_undesignated", proof_hashes, record_hashes
             )
         relationship = "exactly_at_open"
-    elif transition_at == realized.actual_close:
+    elif actual_close is not None and transition_at == actual_close:
         if methodology.close_endpoint_designation != "pre_basis":
             return _indeterminate(
                 "transition_endpoint_undesignated", proof_hashes, record_hashes
             )
         relationship = "exactly_at_close"
-    elif transition_at < realized.actual_open:
+    elif transition_at < actual_open:
         relationship = "strictly_before_open"
-    elif transition_at > realized.actual_close:
+    elif actual_close is not None and transition_at > actual_close:
         relationship = "strictly_after_close"
     else:
         return _indeterminate(
@@ -909,11 +969,11 @@ def _map_projection_to_session(
             relationship=relationship,
             basis_boundary=boundary,
             source_session_key=realized.session_key,
-            source_actual_open=realized.actual_open,
-            source_actual_close=realized.actual_close,
+            source_actual_open=actual_open,
+            source_actual_close=actual_close,
             session_key=realized.session_key,
-            actual_open=realized.actual_open,
-            actual_close=realized.actual_close,
+            actual_open=actual_open,
+            actual_close=actual_close,
             applied_rule=(
                 "designated_open_post_basis"
                 if relationship == "exactly_at_open"
@@ -936,11 +996,7 @@ def _map_projection_to_session(
     later = tuple(
         (day, snapshot)
         for day, snapshot in snapshots.items()
-        if day > source_date
-        and snapshot[1] is not None
-        and snapshot[1].outcome == "opened"
-        and snapshot[1].actual_open is not None
-        and snapshot[1].actual_close is not None
+        if day > source_date and _realized_bounds(snapshot) is not None
     )
     if not later:
         return _indeterminate(
@@ -948,7 +1004,7 @@ def _map_projection_to_session(
         )
     next_date, next_snapshot = min(later, key=lambda item: item[0])
     for day in _date_range(source_date + timedelta(days=1), next_date):
-        day_schedule, _day_realized, day_coverage, _, _ = snapshots[day]
+        day_schedule, _day_realized, day_coverage, _, _, _, _ = snapshots[day]
         if day_schedule is None or not _coverage_proves_schedule(
             day_coverage, day_schedule
         ):
@@ -961,10 +1017,11 @@ def _map_projection_to_session(
             return _indeterminate(
                 "intervening_session_state_not_closed", proof_hashes, record_hashes
             )
-    next_schedule, next_realized, next_coverage, _, _ = next_snapshot
+    next_schedule, next_realized, next_coverage, _, _, _, _ = next_snapshot
     assert next_realized is not None
-    assert next_realized.actual_open is not None
-    assert next_realized.actual_close is not None
+    next_bounds = _realized_bounds(next_snapshot)
+    assert next_bounds is not None
+    next_open, next_close = next_bounds
     if next_schedule is None or not _coverage_proves_schedule(
         next_coverage, next_schedule
     ):
@@ -976,11 +1033,11 @@ def _map_projection_to_session(
         relationship=relationship,
         basis_boundary=boundary,
         source_session_key=realized.session_key,
-        source_actual_open=realized.actual_open,
-        source_actual_close=realized.actual_close,
+        source_actual_open=actual_open,
+        source_actual_close=actual_close,
         session_key=next_realized.session_key,
-        actual_open=next_realized.actual_open,
-        actual_close=next_realized.actual_close,
+        actual_open=next_open,
+        actual_close=next_close,
         applied_rule=(
             "designated_close_pre_basis_next_open_complete_coverage"
             if relationship == "exactly_at_close"
@@ -1011,13 +1068,202 @@ def _session_snapshot(
     schedule = _one_record(selections[0].records, ScheduledSessionVersionV1)
     realized = _one_record(selections[1].records, RealizedSessionVersionV1)
     coverage = _one_record(selections[2].records, SessionCoverageVersionV1)
+    opening: tuple[datetime, str] | None = None
+    if realized is None:
+        causal = _causal_opening_record(selections[1], context, local_date)
+        if causal is not None:
+            opening = _opening_companion(causal, outer, context)
+            if opening is not None:
+                realized = causal
+    generated = _authenticated_schedule(outer, context)
+    generated_hash = _stable_schedule_hash(generated)
     return (
         schedule,
         realized,
         coverage,
         tuple(content_hash(item.proof) for item in selections),
-        tuple(content_hash(record) for item in selections for record in item.records),
+        tuple(
+            sorted(
+                {
+                    *(
+                        content_hash(record)
+                        for item in selections
+                        for record in item.records
+                    ),
+                    *(value for value in (generated_hash,) if value is not None),
+                    *(
+                        value
+                        for value in (opening[1] if opening is not None else None,)
+                        if value is not None
+                    ),
+                }
+            )
+        ),
+        generated,
+        opening,
     )
+
+
+def _causal_opening_record(
+    selected: SelectedSessionRecordsV1,
+    context: M1dResolutionContext,
+    local_date: date,
+) -> RealizedSessionVersionV1 | None:
+    causal_hashes = {
+        item.selected_record_hash
+        for item in selected.proof.assertion_selections
+        if item.classification is CutoffEligibility.ELIGIBLE
+        and item.selected_record_hash is not None
+    }
+    matches = tuple(
+        record
+        for dataset in context.session_datasets
+        if dataset.manifest.dataset_role.name == "realized_session"
+        for record in dataset.records
+        if isinstance(record, RealizedSessionVersionV1)
+        and content_hash(record) in causal_hashes
+        and record.source_id == selected.proof.subject.source_id
+        and record.session_key.local_date == local_date
+        and record.outcome == "opened"
+        and record.actual_open is None
+        and record.actual_close is None
+    )
+    return matches[0] if len(matches) == 1 else None
+
+
+def _opening_companion(
+    record: RealizedSessionVersionV1,
+    outer: ObservationQueryV1,
+    context: M1dResolutionContext,
+) -> tuple[datetime, str] | None:
+    availability = tuple(
+        evidence
+        for evidence in record.revision.availability
+        if evidence.channel == outer.requested_channel
+        and evidence.shape is AvailabilityShape.EXACT
+        and evidence.lower_bound is not None
+        and evidence.lower_bound == evidence.upper_bound
+        and evidence.basis is AvailabilityBasis.SOURCE_OBSERVED
+        and evidence.evidence_reference is not None
+        and evidence.evidence_reference.content_hash
+        == record.revision.source_artifact.content_hash
+    )
+    if len(availability) != 1:
+        return None
+    witness = availability[0]
+    assert witness.upper_bound is not None
+    matches: list[tuple[datetime, str]] = []
+    for digest in record.source_evidence_hashes:
+        artifact = context.supporting_artifacts.get(digest)
+        if artifact is None:
+            continue
+        try:
+            opening = AnchorOpeningEvidenceV1.model_validate_json(artifact.data)
+        except ValidationError:
+            continue
+        if (
+            canonical_json(opening) != artifact.data
+            or content_hash(opening) != digest
+            or sha256(artifact.data).hexdigest() != digest
+            or opening.source_id != record.source_id
+            or opening.logical_record_id != record.revision.logical_record_id
+            or opening.record_version_id != record.revision.record_version_id
+            or opening.session_key != record.session_key
+            or opening.source_artifact_hash
+            != record.revision.source_artifact.content_hash
+            or opening.record_availability_evidence_hash != content_hash(witness)
+            or opening.actual_open >= witness.upper_bound
+            or witness.upper_bound > observation_cutoff(outer)
+            or opening.actual_open > observation_horizon(outer)
+        ):
+            continue
+        matches.append((opening.actual_open, digest))
+    return matches[0] if len(matches) == 1 else None
+
+
+def _authenticated_schedule(
+    outer: ObservationQueryV1, context: M1dResolutionContext
+) -> ScheduleArtifactV1 | None:
+    digest = context.schedule_generation_policy_hash
+    if digest is None:
+        return None
+    artifact = context.supporting_artifacts.get(digest)
+    if artifact is None:
+        return None
+    try:
+        policy = ScheduleGenerationPolicyV1.model_validate_json(artifact.data)
+    except ValidationError:
+        return None
+    if (
+        canonical_json(policy) != artifact.data
+        or content_hash(policy) != digest
+        or sha256(artifact.data).hexdigest() != digest
+    ):
+        return None
+    try:
+        validate_schedule_generation_policy(policy, context)
+        return generate_schedule(outer, context, policy)
+    except ValueError:
+        return None
+
+
+def _stable_schedule_hash(artifact: ScheduleArtifactV1 | None) -> str | None:
+    if artifact is None:
+        return None
+    return content_hash(artifact.model_dump(mode="python", exclude={"generated_at"}))
+
+
+def _generated_output(snapshot: _SessionSnapshot) -> SessionOutputV1 | None:
+    schedule, _realized, _coverage, _proofs, _records, artifact, _opening = snapshot
+    if (
+        schedule is None
+        or artifact is None
+        or artifact.classification != "generated"
+        or len(artifact.rows) != 1
+        or artifact.rows[0].source_version_hash != content_hash(schedule)
+        or artifact.rows[0].output.interpretation_status != "authorized"
+        or artifact.rows[0].output.session_key != schedule.session_key
+    ):
+        return None
+    return artifact.rows[0].output
+
+
+def _realized_bounds(
+    snapshot: _SessionSnapshot,
+) -> tuple[datetime, datetime | None] | None:
+    _schedule, realized, _coverage, _proofs, _records, _artifact, opening = snapshot
+    if realized is None or realized.outcome != "opened":
+        return None
+    if realized.actual_open is not None and realized.actual_close is not None:
+        return realized.actual_open, realized.actual_close
+    if (
+        realized.actual_open is None
+        and realized.actual_close is None
+        and opening is not None
+    ):
+        return opening[0], None
+    return None
+
+
+def _incomplete_coverage_reason(
+    snapshots: Mapping[date, _SessionSnapshot], transition_at: datetime | None
+) -> str | None:
+    if not any(
+        snapshot[0] is not None
+        and not _coverage_proves_schedule(snapshot[2], snapshot[0])
+        for snapshot in snapshots.values()
+    ):
+        return None
+    if transition_at is None:
+        return "source_session_coverage_incomplete"
+    completed = sorted(
+        bounds
+        for snapshot in snapshots.values()
+        if (bounds := _realized_bounds(snapshot)) is not None and bounds[1] is not None
+    )
+    if any(close is not None and close <= transition_at for _open, close in completed):
+        return "intervening_session_coverage_incomplete"
+    return "source_session_coverage_incomplete"
 
 
 def _one_record[T](values: Sequence[object], model: type[T]) -> T | None:
@@ -1066,17 +1312,18 @@ def _locate_source_session(
 ) -> tuple[date, _SessionSnapshot] | None:
     matches: list[tuple[date, _SessionSnapshot]] = []
     for local_date, snapshot in snapshots.items():
-        scheduled, realized, _coverage, _proofs, _records = snapshot
+        scheduled, realized, _coverage, _proofs, _records, _artifact, _opening = (
+            snapshot
+        )
         if (
             scheduled is None
             or scheduled.state not in {"regular", "early_close"}
             or realized is None
             or realized.outcome != "opened"
-            or realized.actual_open is None
-            or realized.actual_close is None
+            or _realized_bounds(snapshot) is None
         ):
             continue
-        day_bounds = _scheduled_local_day_bounds(scheduled)
+        day_bounds = _scheduled_local_day_bounds(snapshot)
         if day_bounds is None:
             continue
         day_start, day_end = day_bounds
@@ -1086,20 +1333,27 @@ def _locate_source_session(
 
 
 def _scheduled_local_day_bounds(
-    schedule: ScheduledSessionVersionV1,
+    snapshot: _SessionSnapshot,
 ) -> tuple[datetime, datetime] | None:
-    open_offset = next(
-        (
-            item.utc_offset_seconds
-            for item in schedule.historical_boundary_offsets
-            if item.boundary == "open"
-        ),
-        None,
-    )
-    if open_offset is None:
+    schedule = snapshot[0]
+    output = _generated_output(snapshot)
+    if (
+        schedule is None
+        or schedule.local_open is None
+        or output is None
+        or output.utc_open is None
+    ):
+        return None
+    try:
+        local_open = datetime.fromisoformat(schedule.local_open).time()
+    except ValueError:
         return None
     local_midnight = datetime.combine(schedule.session_key.local_date, time(), UTC)
-    start = local_midnight - timedelta(seconds=open_offset)
+    local_open_as_utc = datetime.combine(
+        schedule.session_key.local_date, local_open, UTC
+    )
+    offset = local_open_as_utc - output.utc_open
+    start = local_midnight - offset
     return start, start + timedelta(days=1)
 
 

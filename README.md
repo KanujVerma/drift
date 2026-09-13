@@ -3,7 +3,8 @@
 Drift's long-term ambition is an evidence-driven, self-improving quantitative
 research and trading system. Its current implemented scope is an M0 research
 evidence kernel, M1a temporal provenance, M1b historical identity and universes,
-and M1c historical economic facts.
+M1c historical economic facts, and M1d source observations, sessions, and
+normalization.
 M0 records structured research
 metadata and a hash-chained audit history. M1a adds exact-byte dataset
 manifests, explicit channel-scoped availability evidence, immutable fact
@@ -21,11 +22,14 @@ backtester, broker, strategy-execution, agent, network, order-management,
 portfolio-management, production configuration, or production-credential
 capability. M1c is complete; its
 [implementation and acceptance record](docs/superpowers/plans/2026-09-05-m1c-corporate-actions-economic-outcomes.md)
-documents the tested boundary. M1d observations/sessions/normalization have a
-[reviewed implementation plan](docs/superpowers/plans/2026-09-07-m1d-source-observations-sessions-normalization.md),
-but implementation remains unauthorized and absent. Prices, sessions,
-normalization, historical research-session eligibility, and return evaluation
-remain absent.
+documents the tested boundary. M1d is complete; its
+[implementation and acceptance record](docs/superpowers/plans/2026-09-07-m1d-source-observations-sessions-normalization.md)
+documents immutable source claims, pinned schedule and realized-session facts,
+orthogonal missingness, finite M1b composition, M1c action-to-session mapping,
+cutoff-safe source/split views, and fixture-only replay across the 81-row
+acceptance matrix. This establishes neither provider acceptance nor evaluator,
+backtester, broker, trading, returns, portfolio, network, dependency, or
+environment-closure capability.
 `StrategyArtifact` is compact provenance metadata, not executable strategy code.
 
 ## Core philosophy
@@ -79,6 +83,19 @@ and the conservative installed-source fingerprint have different purposes.
 Immutable fixtures retain old source bytes and code bindings instead of silently
 rewriting them. These guarantees use synthetic evidence; they establish neither
 real-market completeness nor valuation or backtest readiness.
+
+## Source observations, sessions, and normalization
+
+M1d preserves immutable source observation claims instead of treating them as
+objective market truth. It retains schedule and realized-session facts separately,
+keeps missingness dimensions independent, uses finite M1b composition for narrow
+research-session eligibility, maps selected M1c occurred effects to proven
+sessions, and materializes query-bound source-basis or exact split-normalized
+views with fixture-only replay.
+
+This is not provider acceptance or a real-market coverage claim. Drift still has
+no evaluator, backtester, broker, trading, return, portfolio, network, new
+dependency, or environment-closure capability.
 
 ## Install and verify
 

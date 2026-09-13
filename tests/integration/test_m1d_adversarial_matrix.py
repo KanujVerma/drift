@@ -18,8 +18,9 @@ import pytest
 from m1d_fixture_generator import (
     EXPECTED_MATRIX_IDS,
     REQUIRED_JOINED_IDS,
+    V1_FIXTURE_ROOT,
     JoinedScenario,
-    write_fixture_v1,
+    write_fixture_v2,
 )
 from m1d_fixture_generator import (
     joined_scenario as _joined_scenario,
@@ -29,7 +30,7 @@ from m1d_fixture_support import (
     FIXTURE_ROOT,
     assert_roundtrip_replays,
     field,
-    load_m1d_fixture_v1,
+    load_m1d_fixture_v2,
     materialize_result,
 )
 from pydantic import BaseModel
@@ -140,13 +141,13 @@ def _positive_result(scenario: JoinedScenario) -> NormalizationResultV1:
     return result
 
 
-def test_task7_v1_fixture_hash_index_is_exact() -> None:
+def test_current_v2_fixture_hash_index_is_exact() -> None:
     raw_index = _fixture_bytes("hash-index.json")
     assert sha256(raw_index).hexdigest() == EXPECTED_HASH_INDEX_SHA256
     parsed = json.loads(raw_index)
     assert canonical_json(parsed) == raw_index
     assert parsed["schema_version"] == "1"
-    assert parsed["fixture_version"] == "m1d/v1"
+    assert parsed["fixture_version"] == "m1d/v2"
     declared = {entry["path"] for entry in parsed["entries"]}
     actual = set(_fixture_files(FIXTURE_ROOT))
     assert actual == declared | {"hash-index.json"}
@@ -160,20 +161,22 @@ def test_task7_v1_fixture_hash_index_is_exact() -> None:
         assert sha256(data).hexdigest() == entry["sha256"]
 
 
-def test_task7_v1_generator_reproduces_exact_bytes_and_refuses_overwrite(
+def test_v2_generator_reproduces_exact_bytes_and_refuses_both_versions(
     tmp_path: Path,
 ) -> None:
-    generated = tmp_path / "v1"
-    write_fixture_v1(generated)
+    generated = tmp_path / "v2"
+    write_fixture_v2(generated)
     assert _fixture_files(generated) == _fixture_files(FIXTURE_ROOT)
     with pytest.raises(FileExistsError, match="cannot be overwritten"):
-        write_fixture_v1(generated)
+        write_fixture_v2(generated)
+    with pytest.raises(FileExistsError, match="v1 fixture cannot be overwritten"):
+        write_fixture_v2(V1_FIXTURE_ROOT)
 
 
-def test_task7_v1_generator_exclusively_reserves_concurrent_target(
+def test_v2_generator_exclusively_reserves_concurrent_target(
     tmp_path: Path,
 ) -> None:
-    target = tmp_path / "v1"
+    target = tmp_path / "v2"
     start = Barrier(3)
     successes: list[str] = []
     failures: list[FileExistsError] = []
@@ -184,7 +187,7 @@ def test_task7_v1_generator_exclusively_reserves_concurrent_target(
     def writer(name: str) -> None:
         start.wait()
         try:
-            write_fixture_v1(target, payload_factory=payload_factory)
+            write_fixture_v2(target, payload_factory=payload_factory)
         except FileExistsError as error:
             failures.append(error)
         else:
@@ -204,13 +207,13 @@ def test_task7_v1_generator_exclusively_reserves_concurrent_target(
         "fixture-metadata.json": b"{}",
         "hash-index.json": (target / "hash-index.json").read_bytes(),
     }
-    assert not (tmp_path / ".v1.generation.lock").exists()
+    assert not (tmp_path / ".v2.generation.lock").exists()
     with pytest.raises(FileExistsError, match="cannot be overwritten"):
-        write_fixture_v1(target, payload_factory=payload_factory)
+        write_fixture_v2(target, payload_factory=payload_factory)
 
 
 def test_task7_expected_decision_and_outcome_bytes_replay() -> None:
-    fixture = load_m1d_fixture_v1()
+    fixture = load_m1d_fixture_v2()
     assert_roundtrip_replays(fixture.decision_result, fixture.context)
     assert_roundtrip_replays(fixture.outcome_result, fixture.context)
     assert materialize_result(fixture.decision_result, fixture.context) == (
@@ -259,8 +262,8 @@ def test_fixture_only_replay_needs_no_unit_harness_or_generator_import() -> None
     project_root = Path(__file__).parents[2]
     program = """
 import sys
-from m1d_fixture_support import load_m1d_fixture_v1, materialize_result
-loaded = load_m1d_fixture_v1()
+from m1d_fixture_support import load_m1d_fixture_v2, materialize_result
+loaded = load_m1d_fixture_v2()
 assert materialize_result(loaded.decision_result, loaded.context) == loaded.decision_result.view
 assert materialize_result(loaded.outcome_result, loaded.context) == loaded.outcome_result.view
 for name in ('observation_test_support', 'action_session_test_support', 'session_test_support', 'm1d_fixture_generator'):

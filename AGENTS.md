@@ -1,19 +1,19 @@
 # Drift
 
 Drift implements an M0 research evidence kernel, M1a temporal provenance,
-M1b historical identity/universes, and M1c historical economic facts using
-synthetic local fixtures.
+M1b historical identity/universes, M1c historical economic facts, and M1d
+source observations, sessions, and normalization using synthetic local fixtures.
 It is not a trading system or equity backtester. Current capability and milestone
 status belong in `docs/architecture/roadmap.md`.
 
 ## Current boundary
 
-- M1c is complete; its historical implementation and acceptance record is
-  `docs/superpowers/plans/2026-09-05-m1c-corporate-actions-economic-outcomes.md`.
-  M1d has a reviewed [implementation plan](docs/superpowers/plans/2026-09-07-m1d-source-observations-sessions-normalization.md)
-  but no implementation authorization or runtime implementation.
-  Do not add prices, sessions, observations, normalization, tradability,
-  portfolio accounting, evaluation, or backtesting without separate approval.
+- M1d is complete and accepted as a synthetic-fixture milestone. Its
+  [execution and acceptance record](docs/superpowers/plans/2026-09-07-m1d-source-observations-sessions-normalization.md)
+  records source claims, sessions, orthogonal missingness, finite M1b
+  composition, M1c action mapping, source/split views, and fixture replay.
+  This acceptance does not authorize provider acceptance, evaluator or
+  backtester work, returns, portfolio accounting, or any production market use.
 - Do not add broker or market-data connections, order placement, trading,
   backtesting, agent orchestration, production configuration, credentials, or
   network side effects during evidence/identity maintenance.

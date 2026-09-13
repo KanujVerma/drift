@@ -65,29 +65,30 @@ bindings, and verification. Documentation publication uses the commit subject
 hash and post-commit Checkpoint result after publication.
 No provider, network, broker, dependency, evaluator or trading capability was added.
 
-## M1d, planned and not implemented
+## M1d, complete
 
-M1d is Source Observations, Sessions, and Normalization. It will represent
-source-defined daily observations, pinned schedule and realized-session facts,
-orthogonal missingness, narrow research-session eligibility, and cutoff-safe
-source/split-normalized views. Normalization joins observations with M1c actions;
-preserving a source observation does not itself require an action dataset.
+M1d is Source Observations, Sessions, and Normalization. It represents immutable
+source-defined daily claims, pinned schedule and realized-session facts,
+orthogonal missingness, narrow research-session eligibility through finite M1b
+composition, M1c action-to-session mapping, and cutoff-safe source/split views.
+Its fixture-only replay and 81-row acceptance matrix verify the joined synthetic
+capability. Preserving a source observation does not itself require an action
+dataset; normalization joins the selected observation, session, and M1c facts.
 Total-return accounting and evaluation remain later responsibilities.
 
-The canonical successor design is
+The canonical design is
 `docs/superpowers/specs/2026-09-05-historical-economic-events-and-observations-design.md`;
 the decision is recorded in ADR 0009. It supersedes the original umbrella's
 combined M1c scope, not completed M1b contracts. M1c's implementation plan is now
-a completed historical record. M1d's single active
-[reviewed executable plan](../superpowers/plans/2026-09-07-m1d-source-observations-sessions-normalization.md)
-defines eight bounded tasks and a mandatory joined acceptance gate. Planning
-is complete; runtime implementation still requires separate explicit authorization.
-Completed/superseded M1b plans and the old M1b handoff are historical records,
-not instructions to restart earlier work.
+a completed historical record. M1d's [completed execution record](../superpowers/plans/2026-09-07-m1d-source-observations-sessions-normalization.md)
+records its eight bounded tasks and mandatory joined acceptance gate. Completed
+and superseded plans are historical records, not instructions to restart earlier
+work.
 
-M1 is not complete until M1a, M1b, M1c, and M1d are complete. The design is not
-authorization to build a market-data platform, download live data, evaluate
-strategies, adopt a research framework, connect a broker, or add agents.
+M1 is complete. M1d acceptance does not authorize a market-data platform,
+provider acceptance, live data, an evaluator or backtester, returns or portfolio
+accounting, a broker, trading, network access, a dependency, or environment
+closure.
 
 After M1, reassess evaluator and run contracts before deterministic baselines.
 External tools remain candidates and must satisfy Drift-defined contracts; see

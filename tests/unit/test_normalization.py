@@ -1026,6 +1026,59 @@ def test_anchor_opening_evidence_materializes_before_close_without_anchor_bar() 
     )
 
     assert result.classification == "materialized"
+
+
+def test_normalization_rejects_policy_history_start_after_source_open() -> None:
+    harness = NormalizationHarness(
+        economic_history_start="2026-11-28T00:00:00Z",
+        economic_through="2026-11-30T14:30:00Z",
+    )
+    query = harness.normalization_query(
+        "split_normalized",
+        anchor_date=date(2026, 11, 30),
+        outer_horizon="2026-12-01T00:00:00Z",
+    )
+
+    result = harness.normalize(query)
+
+    assert result.classification == "indeterminate"
+    assert result.view is None
+    assert "economic_history_window_mismatch" in result.reasons
+
+
+def test_normalization_ignores_outer_uncertainty_after_proven_anchor_open() -> None:
+    harness = NormalizationHarness(
+        economic_history_start="2026-11-27T14:30:00Z",
+        economic_through="2026-11-30T14:30:00Z",
+    )
+    query = harness.normalization_query(
+        "split_normalized",
+        anchor_date=date(2026, 11, 30),
+        outer_horizon="2026-12-01T00:00:00Z",
+    )
+
+    result = harness.normalize(query)
+
+    assert result.classification == "materialized"
+    assert result.view is not None
+    assert _field(result, "close").quantized_value == Decimal("50.00")
+
+
+def test_split_first_post_session_can_reuse_opening_only_anchor_companion() -> None:
+    harness = NormalizationHarness(
+        basis="2026-11-30T14:00:00Z",
+        anchor_opening_case="matching",
+        economic_history_start="2026-11-27T14:30:00Z",
+        economic_through="2026-11-30T14:30:00Z",
+    )
+    query = harness.normalization_query(
+        "split_normalized", anchor_date=date(2026, 11, 30)
+    )
+
+    result = harness.normalize(query)
+
+    assert result.classification == "materialized"
+    assert result.view is not None
     assert _field(result, "close").quantized_value == Decimal("50.00")
     anchor_records = tuple(
         record

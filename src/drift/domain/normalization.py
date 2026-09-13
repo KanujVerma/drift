@@ -25,6 +25,7 @@ _NORMALIZATION_ALGORITHM_V1 = {
     "source_basis": "unadjusted-exact-native-decimal-without-economic-context",
     "split_basis": "complete-m1c-history-plus-replayed-first-post-session-mappings",
     "anchor_basis": "exact-open-or-closed-anchor-opening-companion",
+    "economic_window": "exact-source-open-through-proven-anchor-open",
     "occurrence_groups": "compare-complete-selected-group-before-neutrality-or-window",
     "split_units": "price-reciprocal-and-share-volume-forward",
     "arithmetic": "exact-rational-single-final-half-even-quantization",

@@ -20,6 +20,7 @@ from drift.domain.action_sessions import (
     FirstPostActionSessionResultV1,
 )
 from drift.domain.economic_common import ActionKind, CashComponentV1, ShareComponentV1
+from drift.domain.economic_coverage import EconomicSourceSelectionPolicyV1
 from drift.domain.economic_events import (
     CancelledActionV1,
     EconomicEffectVersionV1,
@@ -695,11 +696,15 @@ def _anchor_basis(
 
 
 def _economic_query(
-    outer: ObservationQueryV1, context: M1dResolutionContext
+    outer: ObservationQueryV1,
+    context: M1dResolutionContext,
+    *,
+    source_policy: EconomicSourceSelectionPolicyV1,
+    history_start: datetime,
+    through: datetime,
 ) -> MarketSelectionQueryV1:
     economic_context = context.economic_context
-    source_policy = context.economic_source_policy
-    assert economic_context is not None and source_policy is not None
+    assert economic_context is not None
     if isinstance(outer, ObservationDecisionQueryV1):
         return MarketDecisionQueryV1(
             schema_version="1",
@@ -707,7 +712,7 @@ def _economic_query(
             purpose="economic_facts",
             security_id=outer.security_id,
             action_kinds=_REQUIRED_ACTION_KINDS,
-            history_start=source_policy.history_start,
+            history_start=history_start,
             requested_channel=outer.requested_channel,
             availability_policy_id=economic_context.availability_policy.policy_id,
             availability_policy_hash=content_hash(economic_context.availability_policy),
@@ -715,7 +720,7 @@ def _economic_query(
             input_context_hash=economic_context_hash(economic_context),
             decision_time=outer.decision_time,
             knowledge_cutoff=outer.knowledge_cutoff,
-            effective_cutoff=outer.effective_cutoff,
+            effective_cutoff=through,
         )
     return MarketOutcomeQueryV1(
         schema_version="1",
@@ -723,13 +728,13 @@ def _economic_query(
         purpose="economic_outcome",
         security_id=outer.security_id,
         action_kinds=_REQUIRED_ACTION_KINDS,
-        history_start=source_policy.history_start,
+        history_start=history_start,
         requested_channel=outer.requested_channel,
         availability_policy_id=economic_context.availability_policy.policy_id,
         availability_policy_hash=content_hash(economic_context.availability_policy),
         source_selection_policy_hash=content_hash(source_policy),
         input_context_hash=economic_context_hash(economic_context),
-        economic_horizon=outer.economic_horizon,
+        economic_horizon=through,
         evidence_vintage_cutoff=outer.evidence_vintage_cutoff,
     )
 
@@ -747,13 +752,24 @@ def _split_lineage(
     source_policy = context.economic_source_policy
     if economic_context is None or source_policy is None:
         return _SplitLineage(failure_reason="economic_context_unavailable")
+    if source_policy.history_start > source_open or source_policy.through < anchor_open:
+        return _SplitLineage(failure_reason="economic_history_window_mismatch")
     if set(source_policy.action_kinds) != set(_REQUIRED_ACTION_KINDS):
         return _SplitLineage(failure_reason="economic_action_class_coverage_incomplete")
     assert policy.mapping_policy_hash is not None
     _load_artifact(policy.mapping_policy_hash, ActionSessionPolicyV1, context)
-    economic_query = _economic_query(query.observation, context)
-    outcome = resolve_economic_facts(economic_query, economic_context, source_policy)
-    proof = select_market_records(economic_query, economic_context, source_policy)
+    window_policy = source_policy.model_copy(
+        update={"history_start": source_open, "through": anchor_open}
+    )
+    economic_query = _economic_query(
+        query.observation,
+        context,
+        source_policy=window_policy,
+        history_start=source_open,
+        through=anchor_open,
+    )
+    outcome = resolve_economic_facts(economic_query, economic_context, window_policy)
+    proof = select_market_records(economic_query, economic_context, window_policy)
     required_coverage = {
         item.family: item
         for item in outcome.coverage_results
@@ -881,6 +897,8 @@ def _split_lineage(
             mic=query.observation.venue.value,
             candidate_start_date=source_session.local_date,
             candidate_end_date=anchor.local_date,
+            economic_history_start=source_open,
+            economic_through=anchor_open,
             action_session_policy_hash=policy.mapping_policy_hash,
             economic_source_policy_hash=content_hash(source_policy),
         )

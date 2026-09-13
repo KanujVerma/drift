@@ -37,6 +37,7 @@ from economic_test_support import (
 from pydantic import BaseModel
 from session_test_support import (
     AUTHORITY_HASH,
+    generation_case,
     realized_record,
     schedule_record,
     session_dataset,
@@ -102,6 +103,7 @@ from drift.domain.revisions import RevisionKind
 from drift.domain.securities import ListingVenue
 from drift.domain.sessions import (
     RealizedSessionVersionV1,
+    ScheduledSessionVersionV1,
     SessionInputRecordV1,
     SessionKeyV1,
 )
@@ -401,6 +403,32 @@ def _realized_session(
     return RealizedSessionVersionV1.model_validate(values)
 
 
+def _with_contradicted_schedule_offsets(
+    record: ScheduledSessionVersionV1,
+) -> ScheduledSessionVersionV1:
+    """Change only claimed offsets while retaining their original authority bytes."""
+    revision = record.revision.model_copy(update={"payload_hash": "0" * 64})
+    values = {name: getattr(record, name) for name in type(record).model_fields}
+    values.update(
+        {
+            "revision": revision,
+            "historical_boundary_offsets": tuple(
+                item.model_copy(
+                    update={"utc_offset_seconds": item.utc_offset_seconds - 3_600}
+                )
+                if item.utc_offset_seconds is not None
+                else item
+                for item in record.historical_boundary_offsets
+            ),
+        }
+    )
+    provisional = ScheduledSessionVersionV1.model_construct(**values)
+    values["revision"] = revision.model_copy(
+        update={"payload_hash": content_hash(assertion_version_payload(provisional))}
+    )
+    return ScheduledSessionVersionV1.model_validate(values)
+
+
 def _session_inputs(
     *,
     coverage_status: Literal["expected_complete", "partial", "unknown"] = (
@@ -409,6 +437,7 @@ def _session_inputs(
     emergency_date: date | None = None,
     corrected_schedule_state: Literal["closed", "unknown"] | None = None,
     include_prior_open: bool = False,
+    contradict_schedule_offsets: bool = False,
 ) -> tuple[
     tuple[M1dDatasetInput[SessionInputRecordV1], ...],
     dict[str, VerifiedArtifactBytes],
@@ -440,6 +469,10 @@ def _session_inputs(
         )
         for index, (local_date, state) in enumerate(states)
     )
+    if contradict_schedule_offsets:
+        schedules = tuple(
+            _with_contradicted_schedule_offsets(item) for item in schedules
+        )
     if corrected_schedule_state is not None:
         schedules = (
             *schedules,
@@ -598,6 +631,7 @@ def _validated_action_economic_case(
     settlement_coverage: Literal["complete", "partial", "unknown"],
     settlement_source_id: str = "settlement-source",
     coverage_evidence: EconomicRecordV1 | None = None,
+    history_start: str = "2020-01-01T00:00:00Z",
 ) -> EconomicHarness:
     """Build a closed M1c fixture locally without changing protected M1c support."""
     channel = session_public_channel()
@@ -807,7 +841,7 @@ def _validated_action_economic_case(
         economic_uid(21),
         bindings,
         owners,
-        parse_utc("2020-01-01T00:00:00Z"),
+        parse_utc(history_start),
         through_value,
     )
     return EconomicHarness(context=context, source_policy=policy)
@@ -863,6 +897,8 @@ def action_session_case(
     ] = "base",
     neutral_suffix: int = 6110,
     include_prior_open: bool = False,
+    contradict_schedule_offsets: bool = False,
+    economic_history_start: str = "2020-01-01T00:00:00Z",
 ) -> ActionSessionCase:
     """Build one exact, validated action/session composition fixture."""
     if omit_terms and not omit_effect:
@@ -1077,6 +1113,7 @@ def action_session_case(
         coverage_action_kinds=coverage_action_kinds,
         settlement_coverage=settlement_coverage,
         coverage_evidence=primary,
+        history_start=economic_history_start,
     )
     actual_terms = tuple(
         record
@@ -1120,6 +1157,18 @@ def action_session_case(
         emergency_date=emergency_date,
         corrected_schedule_state=corrected_schedule_state,
         include_prior_open=include_prior_open,
+        contradict_schedule_offsets=contradict_schedule_offsets,
+    )
+    generation_context, _generation_query, generation_policy = generation_case(
+        local_date=date(2026, 11, 27)
+    )
+    support.update(generation_context.supporting_artifacts)
+    generation_policy_bytes = canonical_json(generation_policy)
+    generation_policy_hash = sha256(generation_policy_bytes).hexdigest()
+    support[generation_policy_hash] = VerifiedArtifactBytes(
+        data=generation_policy_bytes,
+        byte_size=len(generation_policy_bytes),
+        content_hash=generation_policy_hash,
     )
     source_policy = ObservationSourceSelectionPolicyV1(
         policy_id="action-session-source-authority",
@@ -1193,6 +1242,7 @@ def action_session_case(
         supporting_artifacts=support,
         economic_context=economic.context,
         economic_source_policy=economic.source_policy,
+        schedule_generation_policy_hash=generation_policy_hash,
     )
     horizon = economic.source_policy.through
     context_hash = m1d_context_hash(context)
@@ -1258,6 +1308,8 @@ def action_session_case(
         mic="XNYS",
         candidate_start_date=date(2026, 11, 26),
         candidate_end_date=date(2026, 11, 30),
+        economic_history_start=economic.source_policy.history_start,
+        economic_through=economic.source_policy.through,
         action_session_policy_hash=policy_hash,
         economic_source_policy_hash=content_hash(economic.source_policy),
     )

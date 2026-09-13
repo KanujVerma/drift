@@ -4,10 +4,9 @@
 
 Independently reviewed design decision, 2026-09-05. M1c is implemented and
 accepted in the [completed M1c execution record](../superpowers/plans/2026-09-05-m1c-corporate-actions-economic-outcomes.md).
-M1d has a [reviewed executable plan](../superpowers/plans/2026-09-07-m1d-source-observations-sessions-normalization.md)
-as of 2026-09-07 and remains unimplemented. Execution requires separate authorization.
+M1d is implemented and accepted in the [completed M1d execution record](../superpowers/plans/2026-09-07-m1d-source-observations-sessions-normalization.md).
 The canonical design, evidence, support matrix, adversarial requirements, and
-review record are in the
+historical review record are in the
 [historical economic events and observations specification](../superpowers/specs/2026-09-05-historical-economic-events-and-observations-design.md).
 This decision supersedes the original umbrella's combined M1c sketches. It does
 not reopen completed M1b at `14bad1733222758ee3836568a10a90f2a16aeac3`.
@@ -82,13 +81,12 @@ Total-return accounting, holding conversion, imputation, and execution remain
 outside both milestones. Missing facts block dependent claims, not independent
 identity or historical universe evidence.
 
-M1c synthetic implementation and acceptance are recorded in the linked plan.
-Real provider semantics, historical coverage, licensing, and full schedule
-validation remain later acceptance gates, not reasons to block provider-neutral
-fact contracts. The M1d plan refines per-field source methods, independent realized
-sessions, exact TZif provenance, orthogonal missingness, finite-cutoff M1b reuse,
-and M1c action/session mapping without changing older contracts. It retains one
-milestone with a mandatory joined normalization gate and explicit pinned-code
-legacy replay. These are planning decisions, not implementation acceptance. The original
-design decision itself added no runtime. M1c implementation added no dependency,
-provider, broker, credential, agent functionality, or trading capability.
+M1c and M1d synthetic implementation and acceptance are recorded in their linked
+execution plans. M1d preserves source claims and distinct schedule/realized-session
+facts, retains orthogonal missingness, uses finite-cutoff M1b composition, maps M1c
+effects to sessions, materializes source/split views, and replays fixture-only
+evidence through the 81-row acceptance matrix without changing older contracts.
+Real provider semantics, historical coverage, licensing, full schedule validation,
+evaluator and backtester behavior, returns, portfolio accounting, broker and
+trading behavior, network access, dependency adoption, and environment closure
+remain outside the accepted milestone.

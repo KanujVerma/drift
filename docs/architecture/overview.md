@@ -3,10 +3,10 @@
 ## Purpose and scope
 
 Drift combines a local research evidence kernel (M0), temporal provenance (M1a),
-historical identity/universe semantics (M1b), and economic facts (M1c). Its purpose
-is to preserve what was proposed, tested, observed, and concluded in a form that
-can be checked later. It does not make trading decisions or connect to a trading
-environment.
+historical identity/universe semantics (M1b), economic facts (M1c), and synthetic
+source observations, sessions, and normalization (M1d). Its purpose is to preserve
+what was proposed, tested, observed, and concluded in a form that can be checked
+later. It does not make trading decisions or connect to a trading environment.
 
 The M0 core has four small responsibilities:
 
@@ -91,14 +91,15 @@ Canonical contracts live in `src/drift/domain/`; audit-side resolvers and exact
 role validation live in `src/drift/markets/`. The semantic separations and trust
 boundaries are recorded in [ADR 0006](../adr/0006-independent-historical-identity-and-lifecycle-facts.md)
 and [ADR 0007](../adr/0007-authenticated-point-in-time-universe-composition.md).
-There is no provider connection, price/action accounting, session engine,
-historical-tradability model, evaluator, or process-isolated decision runtime.
-M1c economic events/outcomes are implemented. M1d observations/sessions/normalization
-have a [reviewed executable plan](../superpowers/plans/2026-09-07-m1d-source-observations-sessions-normalization.md)
-but no runtime implementation or authorization to begin it. Their
-boundaries are recorded
-in [ADR 0009](../adr/0009-separate-economic-events-and-observation-semantics.md)
-and the [roadmap](roadmap.md), which points to the completed M1c acceptance record.
+There is no provider connection, historical-tradability model, evaluator,
+backtester, broker, trading, return, portfolio, network, dependency, or
+environment-closure capability. M1c economic events/outcomes and M1d synthetic
+observations/sessions/normalization are implemented. M1d preserves source claims,
+pinned schedule and realized-session facts, orthogonal missingness, finite M1b
+composition, M1c action-to-session mapping, cutoff-safe source/split views, and
+fixture-only replay across an 81-row matrix. Its boundaries and accepted lifecycle
+record are in [ADR 0009](../adr/0009-separate-economic-events-and-observation-semantics.md),
+the [roadmap](roadmap.md), and the [M1d execution record](../superpowers/plans/2026-09-07-m1d-source-observations-sessions-normalization.md).
 
 ## Economic facts and outcome resolution
 

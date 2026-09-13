@@ -38,12 +38,13 @@ _ACTION_SESSION_ALGORITHM_V1 = {
     "algorithm": "verified-m1c-action-to-session-v1",
     "economic_selection": "exact-m1c-resolution-and-association-replay",
     "date_authority": ("date-bearing-source-role-methodology-bound-trading-basis-only"),
-    "session_authority": "actual-open-bounds-plus-complete-selected-calendar",
+    "session_authority": "authenticated-generated-schedule-plus-realized-interval",
     "roll_rule": "none-without-explicit-after-close-method-and-dense-coverage",
     "endpoint_truth": "equality-preserved-separately-from-basis-designation",
     "exact_instant_attribution": (
-        "selected-schedule-local-day-bounds-and-realized-utc-interval"
+        "generated-schedule-local-day-bounds-and-realized-utc-interval"
     ),
+    "opening_only_anchor": "same-authenticated-opening-companion-without-close",
     "effect_time_only": "complete-occurred-split-with-absent-terms-lineage",
     "split_predicate": "fixed-single-same-security-directional-ratio",
     "occurrence_equality": "single-owner-source-native-economic-occurrence",
@@ -140,6 +141,8 @@ class ActionSessionQueryV1(FrozenModel):
     mic: NonBlankStr
     candidate_start_date: date
     candidate_end_date: date
+    economic_history_start: UTCDateTime
+    economic_through: UTCDateTime
     action_session_policy_hash: SHA256Hash
     economic_source_policy_hash: SHA256Hash
 
@@ -160,6 +163,8 @@ class ActionSessionQueryV1(FrozenModel):
             raise ValueError("action query subject must match outer query")
         if self.candidate_start_date > self.candidate_end_date:
             raise ValueError("candidate session date range cannot be reversed")
+        if self.economic_history_start > self.economic_through:
+            raise ValueError("action economic window cannot be reversed")
         return self
 
 
@@ -247,10 +252,10 @@ class ActionSessionTransitionClaimV1(FrozenModel):
     basis_boundary: ActionBasisBoundaryV1
     source_session_key: SessionKeyV1
     source_actual_open: UTCDateTime
-    source_actual_close: UTCDateTime
+    source_actual_close: UTCDateTime | None
     session_key: SessionKeyV1
     actual_open: UTCDateTime
-    actual_close: UTCDateTime
+    actual_close: UTCDateTime | None
     applied_rule: Literal[
         "exact_date_is_actual_open_session",
         "before_open_current_session",
@@ -261,10 +266,24 @@ class ActionSessionTransitionClaimV1(FrozenModel):
 
     @model_validator(mode="after")
     def validate_session_interval(self) -> Self:
-        if self.source_actual_close <= self.source_actual_open:
+        if (
+            self.source_actual_close is not None
+            and self.source_actual_close <= self.source_actual_open
+        ):
             raise ValueError("action transition source close must follow source open")
-        if self.actual_close <= self.actual_open:
+        if self.actual_close is not None and self.actual_close <= self.actual_open:
             raise ValueError("action transition actual close must follow actual open")
+        if (self.source_actual_close is None or self.actual_close is None) and (
+            self.relationship
+            not in {
+                "explicit_first_basis_date",
+                "strictly_before_open",
+                "exactly_at_open",
+            }
+            or self.source_session_key != self.session_key
+            or self.source_actual_open != self.actual_open
+        ):
+            raise ValueError("opening-only action transition has incompatible shape")
         if self.session_key.mic == "":
             raise ValueError("action transition session MIC cannot be empty")
         return self

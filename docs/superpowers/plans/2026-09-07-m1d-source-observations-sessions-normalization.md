@@ -8,7 +8,7 @@
 
 **Tech Stack:** Existing Python 3.14+, Pydantic, pytest, Ruff, mypy, uv; standard-library `fractions`, `decimal`, `zoneinfo`, `io`, `hashlib`. No new dependency.
 
-**Execution status:** Tasks 1 through 7 are accepted. Task 6 is accepted at `0467a5268497d68c4569e3bd614fbf7c03693d84`; its post-commit Checkpoint passed all 1,580 tests and required checks. Task 7 passed its pre-commit gate with all 1,623 tests and required checks; its exact commit is the commit containing this execution record. Task 8 remains unstarted. The planning-only acceptance record below is historical.
+**Execution status:** Tasks 1 through 8 are accepted. Task 7 is accepted at `256154e40121d28cec6a65ebcde223c12563752d`. Task 8 passed its final candidate gate, fresh Astra audit repair loop, and final Sol acceptance. M1d completes only the synthetic source-observation, session, missingness, finite-M1b, M1c-mapping, source/split-view, and fixture-replay scope. It adds no provider acceptance, evaluator, backtester, broker, trading, returns, portfolio, network, dependency, or environment-closure capability. The planning-only acceptance record below is historical.
 
 **Current orchestration authority, 2026-09-08:** The user's current instruction supersedes the historical Task 2-only stop boundary and authorizes the Sol root to complete reviewed Tasks 2 through 8 autonomously. Task 2 must first close its independent-review repair loop, acceptance gate, commit, and Checkpoint. Execution then continues directly through Task 8 unless a material stop condition in the current authorization is reached.
 
@@ -721,11 +721,11 @@ The integration tests supply public normalized results and exact retained contex
 
 **Files:** Task8 row; `AGENTS.md`, `README.md`, `docs/architecture/roadmap.md`, `docs/architecture/overview.md`, ADR0009/spec lifecycle and this plan, only to record actually accepted implementation. **Consumes:** all exact acceptance evidence. **Produces:** completed canonical M1d status, not provider/evaluator readiness.
 
-- [ ] RED if any old contract bytes/source/fixture silently changed, pinned replay lane skipped, matrix case missing, new dependency or forbidden runtime capability exists. Compare protected paths against planning baseline; classify every difference, fail on unauthorized old contract modification.
-- [ ] Run complete compatibility/full gate section11, explicitly inspect archived v1/v2 subprocess results and current-code cross-layer tests.
-- [ ] GREEN: fix only demonstrated M1d regressions; if older persisted contract must change, STOP for user decision instead of adapting it. Record task commits, RED/GREEN, reviewer outcomes and deliberate limitations in execution record.
-- [ ] Fresh independent final review across six lenses; controller validates every Important/Critical finding. Stop polishing once no material defect remains.
-- [ ] Commit exact canonical completion docs/tests only, `docs: complete M1d synthetic observation milestone`, if future commit authority allows. Run Checkpoint and STOP. No provider bake-off, evaluator plan, implementation of later capability, or clean-completion handoff.
+- [x] RED: the candidate compatibility gate proved all 148 protected baseline paths unchanged, executed pinned M1c and M1d v1 plus current v2 replay, retained all 81 matrix rows, and rejected dependency or forbidden runtime capability additions.
+- [x] Complete compatibility/full gate passed: 9 Task 8, 43 joined Task 7, 10 pinned M1c, 443 explicit compatibility, and 1,643 full-suite tests; Ruff, format, mypy, build, diff, fixture, protected-hash, no-lock, P08-cleanup, and documentation checks passed.
+- [x] GREEN: six demonstrated M1d defects and one residual semantic-identity defect were repaired without changing any M0-M1c persisted contract. Immutable v1 is pinned to Task 7 code and current code uses immutable v2.
+- [x] The fresh Astra audit reported 0 Critical, 6 Important, and 0 Minor findings. Every Important finding was reproduced, fixed, and accepted by fresh Sol review; the residual eligibility-identity fix also passed scoped Sol re-review. Terra accepted compatibility and fixture migration.
+- [x] Canonical completion docs/tests are ready for publication with subject `docs: complete M1d synthetic observation milestone`. The actual publication commit and post-publication Checkpoint are read from Git after publication rather than embedded here. No provider bake-off, evaluator plan, implementation of later capability, or clean-completion handoff.
 
 ## 10. Protected M1c replay lane
 
@@ -877,3 +877,57 @@ Fresh Sol and Terra review rejected the first candidate. Root reproduced a disco
 A07 deliberately uses separate immutable old and corrected contexts. One expanded context cannot authorize the old cutoff because accepted M1c validation rejects complete coverage snapshots predating a retained correction. N01 uses one subject and context with explicit decision T/K/E clocks. N02 compares available future terms without an occurred effect against a genuine complete no-terms/no-effect control, then proves later authorized application in a later immutable context. A default-off test-support extension enables this empty-action control without changing production or M1c contracts.
 
 Final independent Terra fixture/inventory review and Sol causal review found no open Critical or Important issue. Fresh controller acceptance passed 43 focused Task 7 tests in 535.01s, 10 protected M1c replay tests in 4.77s, 443 explicit M0-M1c compatibility tests in 20.36s, and all 1,623 tests in 895.44s. Ruff lint, format (150 files), mypy (118 source files), source/wheel build, `git diff --check`, fixture lock cleanup, protected helper SHA-256, dependency and U+2014 checks passed. No production source, old fixture, dependency, provider, network, broker, credential, evaluator, backtester, portfolio, strategy, agent product functionality, database, or trading capability changed. The accepted publication subject is `test: prove joined historical observation normalization`; its exact hash is obtained from Git history after publication.
+
+### Task 8 acceptance, 2026-09-12
+
+The Task 8 candidate begins from Task 7 commit
+`256154e40121d28cec6a65ebcde223c12563752d`. The compatibility suite now has
+nine tests covering all 148 protected baseline paths, actual archived M1c and
+M1d v1 execution, current v2 fixture replay, the 81-row matrix, dependency
+closure, and alias-aware forbidden network/process capability controls.
+
+The one fresh Astra whole-milestone audit reported 0 Critical, 6 Important,
+and 0 Minor findings. All six were reproduced and repaired: authenticated
+schedule authority for action mapping; exact source-open through anchor-open
+economic coverage; full realized-session aggregation intervals; interruption
+admission independent of M1b suspension; explicit no-trade contradiction
+handling; and opening-only first-post anchor support. A final Sol review
+accepted all six repairs and the v1/v2 migration with no open Critical or
+Important issue. A residual interruption-rule identity finding was repaired by
+versioning the eligibility semantic preimage and adding eligible/indeterminate
+replay tests; final scoped Sol review passed.
+
+Ruling: Action-to-session attribution consumes authenticated generated schedule output and selected realized intervals with dense coverage, never unchecked local-offset claims. Cost if wrong: additional replay work per relevant session and conservative indeterminacy when authority is missing; prevents timezone claims from silently changing split factors.
+
+Ruling: Split normalization proves complete M1c terms/effect history for exactly source open through anchor open. Broader retained policy authority may be narrowed immutably to that consumer window; late starts and early coverage ends fail closed. Cost if wrong: policy/query lineage grows and unrelated post-anchor uncertainty is excluded; prevents factor-one claims for unproved intervening history.
+
+Ruling: A daily observation's claimed aggregation interval must equal the exact realized regular-session interval. First and last eligible trades may remain interior. Cost if wrong: partial-session bars are conservatively rejected; prevents truncated daily high/low/close values from appearing complete.
+
+Ruling: Realized venue interruptions independently gate observation admission even when M1b lifecycle remains active. Complete interruption coverage and the exact contract-bound aggregation policy are required. Cost if wrong: more indeterminate interrupted sessions; preserves the separation between venue events and listing lifecycle.
+
+Ruling: Explicit absence of any trading conflicts with qualifying-price activity or positive trade-bar fields. Preserve both claims, emit a named reason, and expose no numeric view. Cost if wrong: contradictory provider claims become unusable rather than being silently prioritized.
+
+Ruling: First-post mapping may reuse the same authenticated opening-only companion as normalization when the destination is the anchor session. It grants no close, complete bar, or fabricated interval. Cost if wrong: a narrow companion dependency is shared across mapper and normalizer; permits pre-close research only after exact opening proof.
+
+Ruling: Production semantic changes after Task 7 do not rewrite accepted fixture v1. Genuine pinned execution at `256154e40121d28cec6a65ebcde223c12563752d` preserves v1, while current code uses a separately immutable v2. Cost if wrong: two fixture versions and archive replay maintenance; avoids hash monkeypatching or false historical equivalence.
+
+Accepted v1 remains byte-exact at index
+`9dee138ff8768bf37f7d78d1204ad4a5c92b223a8f0d39d9462561d51dc57c02`
+and replays only with pinned Task 7 code. Current code uses immutable v2 at
+`23dd18f8ba2626c6f68906ec3559d4552e8155be4cdca66ef09a6945ece1f2e6`.
+The final controller gate passed 9 Task 8 tests, 43 joined Task 7 tests in
+530.68 seconds, 10 pinned M1c tests in 4.69 seconds, 443 explicit compatibility
+tests in 20.72 seconds, and all 1,643 tests in 1,066.24 seconds. Ruff lint,
+format across 151 files, mypy across 119 source files, source/wheel build, diff,
+fixture locks, P08 cleanup, U+2014, protected helper, and v1/v2 index checks
+all passed.
+
+The accepted synthetic capability preserves immutable source claims, pinned
+schedule and realized-session facts, orthogonal missingness, finite M1b
+composition, M1c action-to-session mapping, cutoff-safe source/split views, and
+fixture-only replay across the exact 81-row matrix. It changes no M0-M1c
+persisted contract and establishes no provider acceptance, evaluator, backtester,
+broker, trading, returns, portfolio, network, dependency, or environment-closure
+capability. The completion publication subject is `docs: complete M1d synthetic
+observation milestone`; read its actual commit and post-publication Checkpoint
+from Git rather than embedding self-referential values in this record.

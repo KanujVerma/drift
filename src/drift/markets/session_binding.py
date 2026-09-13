@@ -221,7 +221,7 @@ def bind_observation_session(
             observation_record, realized_record, contract
         ):
             classification = "conflict"
-            blocking_reasons = ["observation_interval_outside_realized_session"]
+            blocking_reasons = ["claimed_interval_not_exact_realized_session"]
         elif not blocking_reasons:
             classification = "bound"
             actual_interval = ExactSessionIntervalV1(
@@ -451,7 +451,7 @@ def _claimed_interval_is_compatible(
         return False
     start = observation.claimed_interval.start.lower_bound
     end = claimed_end.upper_bound
-    if start < realized.actual_open or end > realized.actual_close:
+    if start != realized.actual_open or end != realized.actual_close:
         return False
     first = observation.first_eligible_trade_time
     last = observation.last_eligible_trade_time

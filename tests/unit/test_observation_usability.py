@@ -2,14 +2,22 @@
 
 from dataclasses import replace
 from decimal import Decimal
+from typing import Literal
 
 import pytest
 from observation_test_support import ObservationHarness
 from pydantic import ValidationError
 
 from drift.domain.observation_query import ObservationOutcomeQueryV1
-from drift.domain.observation_usability import ObservationAssessmentV1
+from drift.domain.observation_usability import (
+    ListingSessionEligibilityResultV1,
+    ObservationAssessmentV1,
+)
 from drift.errors import ArtifactIntegrityError
+from drift.markets.observation_usability import (
+    listing_session_eligibility_algorithm_hash,
+    resolve_listing_session_eligibility,
+)
 from drift.markets.observation_validation import m1d_context_hash
 
 
@@ -29,6 +37,92 @@ def test_valid_source_bar_is_usable_without_action_inputs() -> None:
     assert result.required_fields == "complete"
     assert result.numeric_view is not None
     assert result.numeric_view.close == Decimal("100.000")
+
+
+def test_daily_profile_rejects_shortened_claimed_aggregation_interval() -> None:
+    h = ObservationHarness(
+        assessment_ready=True,
+        claimed_open_utc=(15, 0),
+        claimed_close_utc=(20, 0),
+    )
+
+    result = h.assess(completed_query(h))
+
+    assert result.kind == "assessment"
+    assert result.usability == "unusable"
+    assert result.numeric_view is None
+    assert "claimed_interval_not_exact_realized_session" in result.reasons
+
+
+@pytest.mark.parametrize(
+    ("coverage", "policy"),
+    (("unknown", "matching"), ("complete", "missing")),
+)
+def test_realized_venue_interruption_requires_complete_exact_aggregation_authority(
+    coverage: Literal["complete", "partial", "unknown"], policy: str
+) -> None:
+    h = ObservationHarness(assessment_ready=True)
+    h._configure_aggregation_policy(policy)
+    h._rebuild()
+    h.attach_sessions(with_interruption=True, interruption_coverage=coverage)
+    h.attach_m1b()
+
+    result = h.assess(completed_query(h))
+
+    assert result.kind == "assessment"
+    assert result.usability == "indeterminate"
+    assert result.numeric_view is None
+    assert "realized_interruption_aggregation_unknown" in result.reasons
+
+
+@pytest.mark.parametrize(
+    ("coverage", "policy", "classification"),
+    (
+        ("complete", "matching", "eligible"),
+        ("unknown", "matching", "indeterminate"),
+        ("complete", "missing", "indeterminate"),
+    ),
+)
+def test_realized_interruption_eligibility_binds_current_semantics_and_replays(
+    coverage: Literal["complete", "partial", "unknown"],
+    policy: str,
+    classification: Literal["eligible", "indeterminate"],
+) -> None:
+    h = ObservationHarness(assessment_ready=True)
+    h._configure_aggregation_policy(policy)
+    h._rebuild()
+    h.attach_sessions(with_interruption=True, interruption_coverage=coverage)
+    h.attach_m1b()
+    query = completed_query(h)
+
+    result = resolve_listing_session_eligibility(query, h.context)
+    loaded = ListingSessionEligibilityResultV1.model_validate_json(
+        result.model_dump_json()
+    )
+
+    assert result.classification == classification
+    assert (
+        result.semantic_algorithm_hash == listing_session_eligibility_algorithm_hash()
+    )
+    assert loaded == result
+    assert resolve_listing_session_eligibility(query, h.context) == loaded
+
+
+def test_positive_price_bar_conflicts_with_explicit_no_any_trade_claim() -> None:
+    h = ObservationHarness(assessment_ready=True)
+    h.use_field_case("contradictory_no_any_trade")
+
+    result = h.assess(completed_query(h))
+
+    assert result.kind == "assessment"
+    assert result.qualifying_price_activity == "reported"
+    assert result.any_reported_activity == "explicit_none"
+    assert result.usability == "unusable"
+    assert result.numeric_view is None
+    assert (
+        "activity_claim_conflict:any_trade_explicit_none_with_qualifying_price_trade"
+        in result.reasons
+    )
 
 
 def test_same_day_close_is_not_available_at_open() -> None:
