@@ -931,3 +931,66 @@ broker, trading, returns, portfolio, network, dependency, or environment-closure
 capability. The completion publication subject is `docs: complete M1d synthetic
 observation milestone`; read its actual commit and post-publication Checkpoint
 from Git rather than embedding self-referential values in this record.
+
+### Targeted Astra re-review correction, 2026-09-12
+
+The targeted post-commit Astra re-review at
+`a909148a941081d8d05c5090794346c5ce54db8c` reported 0 Critical, 1 Important,
+and 1 Minor residual. This entry extends the accepted history above; it does not
+rewrite the earlier Task 8 audit or acceptance record.
+
+The Important residual was reproduced in the completed-source to
+destination-opening path. `ActionSessionTransitionClaimV1` rejected the valid
+narrow shape with a known source close and null destination close even though
+the mapper had authenticated the destination opening companion. The correction
+admits only a different destination session under exact
+`strictly_after_close`/`after_close_next_open_complete_coverage` or
+`exactly_at_close`/`designated_close_pre_basis_next_open_complete_coverage`
+pairs. It requires an exact boundary consistent with the known source close and
+destination open. An unknown source close remains prohibited, and the
+destination close remains null. The regression executes split normalization,
+dump/load verification, and the decision materializer over this path.
+
+The Minor residual was also reproduced. An explicit `any_trade_claim` of
+`explicit_none` could remain merely indeterminate when `activity_claim` was
+unknown even after the complete positive qualifying trade-bar field profile had
+been independently validated. The correction preserves both claims, returns
+unusable with the named
+`activity_claim_conflict:any_trade_explicit_none_with_positive_qualifying_trade_bar_fields`
+reason, and exposes no numeric view.
+
+Both semantic preimages and the whole-package implementation identity change.
+Accepted v1 remains byte-exact at Task 7 commit
+`256154e40121d28cec6a65ebcde223c12563752d` with index
+`9dee138ff8768bf37f7d78d1204ad4a5c92b223a8f0d39d9462561d51dc57c02`.
+Accepted v2 remains byte-exact at Task 8 commit
+`a909148a941081d8d05c5090794346c5ce54db8c` with index
+`23dd18f8ba2626c6f68906ec3559d4552e8155be4cdca66ef09a6945ece1f2e6`.
+Both execute under genuine pinned Git archives. Current code uses immutable v3
+with index
+`f57be824420909b7ee07f7c8062d379515b045a4729602533fd08f266e6f47b5`.
+The loader, exclusive generator, compatibility gate, fixture inventory, and
+no-lock checks now name v3 while protecting v1 and v2 from overwrite.
+
+The corrective lane adds no provider, network, dependency, broker, credential,
+evaluator, backtester, returns, portfolio, agent product, database, or trading
+capability. The final corrective verification is recorded in the Task 8 report.
+
+The required bounded Astra re-review of that corrective lane reported 0
+Critical, 0 Important, and 1 Minor residual. The opening-only transition and
+v1/v2/v3 migration passed. The Minor showed that the positive-field no-trade
+contradiction could still become indeterminate when realized-session binding
+was independently unavailable. The final correction carries intrinsic verified
+positive fields through the private profile check even when binding is absent,
+so the contradiction remains unusable with its named reason and no numeric
+view. The still-uncommitted v3 candidate was regenerated once at index
+`f57be824420909b7ee07f7c8062d379515b045a4729602533fd08f266e6f47b5`; v1 and v2 remain unchanged.
+
+Fresh Sol review of the Important and Minor corrective patch found no Critical,
+Important, or Minor issue. The final bounded Astra re-review then reported 0
+Critical, 0 Important, and 1 Minor; after the Minor fix, the final corrective
+gate passed 10 Task 8 compatibility tests in 117.22 seconds, 10 pinned M1c
+tests in 4.72 seconds, 443 explicit compatibility tests in 20.18 seconds, and
+all 1,649 tests in 1,126.01 seconds. Ruff, format across 151 files, mypy across
+119 source files, source/wheel build, diff, v1/v2 preservation, v3 index,
+no-lock, P08 cleanup, U+2014, and protected helper checks passed.

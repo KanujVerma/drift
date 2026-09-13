@@ -123,7 +123,10 @@ _USABILITY_ALGORITHM_V1 = {
     "profile_order": "intrinsic_source_compatibility_before_session_binding",
     "interruption_aggregation": "exact_contract_bound_closed_policy_required",
     "realized_interruption": "independent_complete-coverage-and-policy-gate",
-    "activity_consistency": "positive-price-trade-conflicts-with-explicit-no-any-trade",
+    "activity_consistency": (
+        "positive-qualifying-trade-bar-fields-or-price-trade-conflict-with-"
+        "explicit-no-any-trade"
+    ),
 }
 _ELIGIBILITY_ALGORITHM_V1 = {
     "schema_version": "1",
@@ -355,6 +358,17 @@ def _assess_verified_observation(
         profile_reasons = (
             *profile_reasons,
             "activity_claim_conflict:any_trade_explicit_none_with_qualifying_price_trade",
+        )
+        values = None
+    elif (
+        qualifying_activity == "unknown"
+        and any_activity == "explicit_none"
+        and values is not None
+    ):
+        profile_status = "incompatible"
+        profile_reasons = (
+            *profile_reasons,
+            "activity_claim_conflict:any_trade_explicit_none_with_positive_qualifying_trade_bar_fields",
         )
         values = None
     provider_gap: ProviderGapStatus = (
@@ -1330,7 +1344,7 @@ def _profile_compatibility(
     ):
         return "incompatible", ("source_population_profile_incompatible",), None
     if binding != "bound":
-        return "indeterminate", ("exact_realized_binding_unavailable",), None
+        return "indeterminate", ("exact_realized_binding_unavailable",), exact_values
     return "compatible", ("regular_session_trade_bar_profile_satisfied",), exact_values
 
 

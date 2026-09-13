@@ -2165,7 +2165,7 @@ class ObservationHarness:
             if case == "explicit_no_price_trade"
             else "unknown"
             if case in {"zero_volume", "volume_sentinel", "null_close"}
-            or case == "unknown_activity"
+            or case in {"unknown_activity", "unknown_activity_no_any_trade"}
             else record.activity_claim
         )
         any_trade = (
@@ -2173,7 +2173,8 @@ class ObservationHarness:
             if case == "explicit_no_price_trade"
             else (
                 "explicit_none"
-                if case == "contradictory_no_any_trade"
+                if case
+                in {"contradictory_no_any_trade", "unknown_activity_no_any_trade"}
                 else "unknown"
                 if case in {"zero_volume", "volume_sentinel", "null_close"}
                 else record.any_trade_claim

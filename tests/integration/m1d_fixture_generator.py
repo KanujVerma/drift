@@ -1,4 +1,4 @@
-"""Exact immutable fixture support for the repaired M1d v2 integration tests."""
+"""Exact immutable fixture support for the current M1d v3 integration tests."""
 
 # ruff: noqa: E402
 
@@ -80,14 +80,17 @@ from drift.markets.observation_validation import (
 from drift.markets.session_generation import generate_schedule
 from drift.serialization.canonical import canonical_json, content_hash
 
-FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "m1d" / "v2"
+FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "m1d" / "v3"
 V1_FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "m1d" / "v1"
+V2_FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "m1d" / "v2"
 
 __all__ = (
     "EXPECTED_MATRIX_IDS",
     "FIXTURE_ROOT",
     "MATRIX_POINTERS",
     "REQUIRED_JOINED_IDS",
+    "V1_FIXTURE_ROOT",
+    "V2_FIXTURE_ROOT",
     "JoinedScenario",
     "ObservationHarness",
     "action_session_case",
@@ -95,7 +98,7 @@ __all__ = (
     "joined_scenario",
     "matrix_index_bytes",
     "timezone_bytes",
-    "write_fixture_v2",
+    "write_fixture_v3",
 )
 
 EXPECTED_MATRIX_IDS = frozenset(
@@ -1297,7 +1300,7 @@ def fixture_payloads() -> dict[str, bytes]:
         "fixture-metadata.json": canonical_json(
             {
                 "schema_version": "1",
-                "fixture_version": "m1d/v2",
+                "fixture_version": "m1d/v3",
                 "joined_normalization_context": "joined-context.json",
                 "joined_schedule_generation": {
                     "context": "joined-context.json",
@@ -1336,7 +1339,7 @@ def _hash_index_bytes(payloads: dict[str, bytes]) -> bytes:
     return canonical_json(
         {
             "schema_version": "1",
-            "fixture_version": "m1d/v2",
+            "fixture_version": "m1d/v3",
             "entries": entries,
         }
     )
@@ -1359,20 +1362,25 @@ def write_closed_payloads(target: Path, payloads: dict[str, bytes]) -> None:
         path.write_bytes(data)
 
 
-def write_fixture_v2(
+def write_fixture_v3(
     target: Path = FIXTURE_ROOT,
     *,
     payload_factory: Callable[[], dict[str, bytes]] = fixture_payloads,
 ) -> None:
-    if target.resolve() == V1_FIXTURE_ROOT.resolve():
-        raise FileExistsError("accepted M1d v1 fixture cannot be overwritten")
+    protected = {
+        V1_FIXTURE_ROOT.resolve(): "v1",
+        V2_FIXTURE_ROOT.resolve(): "v2",
+    }
+    if target.resolve() in protected:
+        version = protected[target.resolve()]
+        raise FileExistsError(f"accepted M1d {version} fixture cannot be overwritten")
     descriptor, lock = _reserve_fixture_target(target)
     try:
         if target.exists():
-            raise FileExistsError("accepted M1d v2 fixture cannot be overwritten")
+            raise FileExistsError("accepted M1d v3 fixture cannot be overwritten")
         payloads = payload_factory()
         payloads["hash-index.json"] = _hash_index_bytes(payloads)
-        with TemporaryDirectory(prefix=".m1d-v2-", dir=target.parent) as temporary:
+        with TemporaryDirectory(prefix=".m1d-v3-", dir=target.parent) as temporary:
             staged = Path(temporary)
             write_closed_payloads(staged, payloads)
             staged.rename(target)
@@ -1385,7 +1393,7 @@ def _main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("target", nargs="?", type=Path, default=FIXTURE_ROOT)
     arguments = parser.parse_args()
-    write_fixture_v2(arguments.target)
+    write_fixture_v3(arguments.target)
 
 
 if __name__ == "__main__":

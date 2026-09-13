@@ -90,6 +90,19 @@ provider acceptance, live data, an evaluator or backtester, returns or portfolio
 accounting, a broker, trading, network access, a dependency, or environment
 closure.
 
+A targeted post-completion Astra re-review reported 0 Critical, 1 Important,
+and 1 Minor residual. The corrective v3 lane admits only a completed-source to
+authenticated destination-opening after-close mapping, rejects contradictory
+explicit no-trade claims even when the activity enum is unknown, and preserves
+immutable v1/v2 execution at their original commits. The M1d capability boundary
+is unchanged.
+
+A final bounded Astra re-review passed the opening-only and fixture-migration
+repairs and found one Minor audit-classification residual. The final v3
+correction keeps the positive-field no-trade contradiction unusable even when
+realized-session binding is independently unavailable. Numeric authority and
+the M1d scope boundary are unchanged.
+
 After M1, reassess evaluator and run contracts before deterministic baselines.
 External tools remain candidates and must satisfy Drift-defined contracts; see
 ADR 0005 and `docs/architecture/tool-evaluation.md`.

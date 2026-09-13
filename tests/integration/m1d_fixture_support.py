@@ -1,4 +1,4 @@
-"""Fixture-only exact-byte loader for the immutable current M1d v2 fixture."""
+"""Fixture-only exact-byte loader for the immutable current M1d v3 fixture."""
 
 from __future__ import annotations
 
@@ -81,18 +81,18 @@ from drift.markets.universes import (
 from drift.markets.validation import validate_identity_dataset
 from drift.serialization.canonical import canonical_json, content_hash
 
-FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "m1d" / "v2"
+FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "m1d" / "v3"
 EXPECTED_HASH_INDEX_SHA256 = (
-    "23dd18f8ba2626c6f68906ec3559d4552e8155be4cdca66ef09a6945ece1f2e6"
+    "f57be824420909b7ee07f7c8062d379515b045a4729602533fd08f266e6f47b5"
 )
 
 __all__ = (
     "EXPECTED_HASH_INDEX_SHA256",
     "FIXTURE_ROOT",
-    "LoadedM1dFixtureV2",
+    "LoadedM1dFixtureV3",
     "assert_roundtrip_replays",
     "field",
-    "load_m1d_fixture_v2",
+    "load_m1d_fixture_v3",
     "materialize_result",
 )
 
@@ -100,7 +100,7 @@ _LIMITS = ResolverLimits(max_bytes=64 * 1024 * 1024)
 
 
 @dataclass(frozen=True)
-class LoadedM1dFixtureV2:
+class LoadedM1dFixtureV3:
     context: M1dResolutionContext
     decision_query: NormalizationQueryV1
     decision_result: NormalizationResultV1
@@ -142,7 +142,7 @@ def _read_fixture_objects(
         "entries",
     }:
         raise ValueError("invalid M1d fixture hash index")
-    if index["schema_version"] != "1" or index["fixture_version"] != "m1d/v2":
+    if index["schema_version"] != "1" or index["fixture_version"] != "m1d/v3":
         raise ValueError("unexpected M1d fixture version")
     entries = index["entries"]
     if not isinstance(entries, list):
@@ -505,7 +505,7 @@ def _load_context(
     return context
 
 
-def load_m1d_fixture_v2(root: Path = FIXTURE_ROOT) -> LoadedM1dFixtureV2:
+def load_m1d_fixture_v3(root: Path = FIXTURE_ROOT) -> LoadedM1dFixtureV3:
     files, objects = _read_fixture_objects(root)
     context = _load_context(files["joined-context.json"], objects)
     decision_query = NormalizationQueryV1.model_validate_json(
@@ -533,7 +533,7 @@ def load_m1d_fixture_v2(root: Path = FIXTURE_ROOT) -> LoadedM1dFixtureV2:
         files["joined-schedule-result.json"]
     )
     verify_schedule(schedule_artifact, context)
-    return LoadedM1dFixtureV2(
+    return LoadedM1dFixtureV3(
         context=context,
         decision_query=decision_query,
         decision_result=decision_result,

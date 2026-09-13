@@ -44,7 +44,10 @@ _ACTION_SESSION_ALGORITHM_V1 = {
     "exact_instant_attribution": (
         "generated-schedule-local-day-bounds-and-realized-utc-interval"
     ),
-    "opening_only_anchor": "same-authenticated-opening-companion-without-close",
+    "opening_only_anchor": (
+        "same-authenticated-opening-companion-without-close-including-"
+        "completed-source-to-distinct-after-close-destination"
+    ),
     "effect_time_only": "complete-occurred-split-with-absent-terms-lineage",
     "split_predicate": "fixed-single-same-security-directional-ratio",
     "occurrence_equality": "single-owner-source-native-economic-occurrence",
@@ -273,15 +276,41 @@ class ActionSessionTransitionClaimV1(FrozenModel):
             raise ValueError("action transition source close must follow source open")
         if self.actual_close is not None and self.actual_close <= self.actual_open:
             raise ValueError("action transition actual close must follow actual open")
-        if (self.source_actual_close is None or self.actual_close is None) and (
+        same_session_opening_only = (
             self.relationship
-            not in {
+            in {
                 "explicit_first_basis_date",
                 "strictly_before_open",
                 "exactly_at_open",
             }
-            or self.source_session_key != self.session_key
-            or self.source_actual_open != self.actual_open
+            and self.source_session_key == self.session_key
+            and self.source_actual_open == self.actual_open
+        )
+        after_close_rules = {
+            "strictly_after_close": "after_close_next_open_complete_coverage",
+            "exactly_at_close": (
+                "designated_close_pre_basis_next_open_complete_coverage"
+            ),
+        }
+        boundary = self.basis_boundary.lower_bound
+        after_close_destination_opening_only = (
+            self.mapping_mode == "exact_trading_basis_transition"
+            and self.source_actual_close is not None
+            and self.actual_close is None
+            and self.source_session_key != self.session_key
+            and after_close_rules.get(self.relationship) == self.applied_rule
+            and boundary is not None
+            and boundary == self.basis_boundary.upper_bound
+            and (
+                boundary > self.source_actual_close
+                if self.relationship == "strictly_after_close"
+                else boundary == self.source_actual_close
+            )
+            and boundary <= self.actual_open
+            and self.source_actual_close < self.actual_open
+        )
+        if (self.source_actual_close is None or self.actual_close is None) and not (
+            same_session_opening_only or after_close_destination_opening_only
         ):
             raise ValueError("opening-only action transition has incompatible shape")
         if self.session_key.mic == "":

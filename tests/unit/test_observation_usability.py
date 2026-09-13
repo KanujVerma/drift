@@ -125,6 +125,42 @@ def test_positive_price_bar_conflicts_with_explicit_no_any_trade_claim() -> None
     )
 
 
+def test_positive_fields_conflict_with_no_any_trade_when_activity_unknown() -> None:
+    h = ObservationHarness(assessment_ready=True)
+    h.use_field_case("unknown_activity_no_any_trade")
+
+    result = h.assess(completed_query(h))
+
+    assert result.kind == "assessment"
+    assert result.qualifying_price_activity == "unknown"
+    assert result.any_reported_activity == "explicit_none"
+    assert result.usability == "unusable"
+    assert result.numeric_view is None
+    assert (
+        "activity_claim_conflict:any_trade_explicit_none_with_positive_qualifying_trade_bar_fields"
+        in result.reasons
+    )
+
+
+def test_positive_fields_no_trade_conflict_survives_missing_session_binding() -> None:
+    h = ObservationHarness(assessment_ready=True)
+    h.use_field_case("unknown_activity_no_any_trade")
+    h.attach_sessions(realized_outcome="missing")
+
+    result = h.assess(completed_query(h))
+
+    assert result.kind == "assessment"
+    assert result.qualifying_price_activity == "unknown"
+    assert result.any_reported_activity == "explicit_none"
+    assert result.profile_compatibility == "incompatible"
+    assert result.usability == "unusable"
+    assert result.numeric_view is None
+    assert (
+        "activity_claim_conflict:any_trade_explicit_none_with_positive_qualifying_trade_bar_fields"
+        in result.reasons
+    )
+
+
 def test_same_day_close_is_not_available_at_open() -> None:
     h = ObservationHarness(assessment_ready=True, available_at="2026-01-05T14:00:00Z")
     query = h.decision(

@@ -10,6 +10,7 @@ from observation_test_support import ObservationHarness
 
 from drift.domain.action_sessions import (
     ActionSessionQueryV1,
+    ActionSessionTransitionClaimV1,
     FirstPostActionSessionResultV1,
 )
 from drift.domain.economic_common import ActionKind
@@ -114,6 +115,58 @@ def test_designated_close_keeps_truthful_endpoint_relationship() -> None:
         result.transition_claim.applied_rule
         == "designated_close_pre_basis_next_open_complete_coverage"
     )
+
+
+@pytest.mark.parametrize(
+    ("relationship", "applied_rule"),
+    (
+        ("strictly_after_close", "after_close_next_open_complete_coverage"),
+        (
+            "exactly_at_close",
+            "designated_close_pre_basis_next_open_complete_coverage",
+        ),
+    ),
+)
+def test_after_close_transition_keeps_completed_source_and_opening_only_destination(
+    relationship: Literal["strictly_after_close", "exactly_at_close"],
+    applied_rule: Literal[
+        "after_close_next_open_complete_coverage",
+        "designated_close_pre_basis_next_open_complete_coverage",
+    ],
+) -> None:
+    mapped = action_session_case(
+        "2026-11-27T18:00:00Z"
+        if relationship == "exactly_at_close"
+        else "2026-11-27T18:05:00Z",
+        "exact_trading_basis_transition",
+        close_endpoint_designation=(
+            "pre_basis" if relationship == "exactly_at_close" else "none"
+        ),
+    ).map()
+    assert mapped.transition_claim is not None
+    payload = mapped.transition_claim.model_dump(mode="python")
+    payload["actual_close"] = None
+
+    transition = ActionSessionTransitionClaimV1.model_validate(payload)
+
+    assert transition.relationship == relationship
+    assert transition.applied_rule == applied_rule
+    assert transition.source_session_key != transition.session_key
+    assert transition.source_actual_close is not None
+    assert transition.actual_close is None
+
+    payload["applied_rule"] = (
+        "designated_close_pre_basis_next_open_complete_coverage"
+        if relationship == "strictly_after_close"
+        else "after_close_next_open_complete_coverage"
+    )
+    with pytest.raises(ValueError, match="opening-only action transition"):
+        ActionSessionTransitionClaimV1.model_validate(payload)
+
+    payload["applied_rule"] = applied_rule
+    payload["source_actual_close"] = None
+    with pytest.raises(ValueError, match="opening-only action transition"):
+        ActionSessionTransitionClaimV1.model_validate(payload)
 
 
 @pytest.mark.parametrize("role", ["announcement", "record", "payable", "legal_effect"])

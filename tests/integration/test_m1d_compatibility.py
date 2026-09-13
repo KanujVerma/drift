@@ -28,14 +28,19 @@ REPO_ROOT = Path(
 ).resolve()
 BASELINE = "aecee94207dbd64aa5154fe03295f35566ec7268"
 V1_COMMIT = "4d54d7e553beba8cdd5413ea1181e7efac7a236b"
-V2_COMMIT = BASELINE
+M1C_V2_COMMIT = BASELINE
 TASK7_COMMIT = "256154e40121d28cec6a65ebcde223c12563752d"
+TASK8_COMMIT = "a909148a941081d8d05c5090794346c5ce54db8c"
 HISTORY_MODULE = "tests/integration/test_m1c_economic_history.py"
 M1D_V1_FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "m1d" / "v1"
-M1D_FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "m1d" / "v2"
+M1D_V2_FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "m1d" / "v2"
+M1D_FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "m1d" / "v3"
 MATRIX_INDEX = M1D_FIXTURE_ROOT / "matrix-index.json"
 HASH_INDEX = M1D_FIXTURE_ROOT / "hash-index.json"
 EXPECTED_HASH_INDEX_SHA256 = (
+    "f57be824420909b7ee07f7c8062d379515b045a4729602533fd08f266e6f47b5"
+)
+EXPECTED_V2_HASH_INDEX_SHA256 = (
     "23dd18f8ba2626c6f68906ec3559d4552e8155be4cdca66ef09a6945ece1f2e6"
 )
 EXPECTED_V1_HASH_INDEX_SHA256 = (
@@ -153,6 +158,79 @@ def _git_bytes(ref: str, path: str) -> bytes:
     )
     assert completed.returncode == 0, completed.stderr.decode(errors="replace")
     return completed.stdout
+
+
+def _run_archived_m1d_replay(commit: str, node: str, label: str) -> None:
+    with tempfile.TemporaryDirectory(prefix=f"drift-m1d-{label}-replay-") as directory:
+        archive_root = Path(directory)
+        completed = subprocess.run(
+            [
+                "git",
+                "archive",
+                "--format=tar",
+                commit,
+                "--",
+                "src/drift",
+                "tests",
+                "pyproject.toml",
+                "uv.lock",
+            ],
+            cwd=REPO_ROOT,
+            check=False,
+            capture_output=True,
+        )
+        assert completed.returncode == 0, completed.stderr.decode(errors="replace")
+        with tarfile.open(fileobj=BytesIO(completed.stdout), mode="r:") as archive:
+            members = archive.getmembers()
+            assert not any(
+                member.name.startswith("/") or ".." in Path(member.name).parts
+                for member in members
+            )
+            archive.extractall(archive_root, members=members, filter="data")
+        environment = dict(os.environ)
+        environment.pop("PYTEST_ADDOPTS", None)
+        environment["PYTHONPATH"] = os.pathsep.join(
+            (
+                str(archive_root / "src"),
+                str(archive_root / "tests" / "unit"),
+                str(archive_root / "tests" / "integration"),
+            )
+        )
+        environment["PYTHONNOUSERSITE"] = "1"
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+        imported = subprocess.run(
+            [sys.executable, "-c", "import drift; print(drift.__file__)"],
+            cwd=archive_root,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert imported.returncode == 0, imported.stdout + imported.stderr
+        assert (
+            Path(imported.stdout.strip())
+            .resolve()
+            .is_relative_to(archive_root.resolve())
+        )
+        replay = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "-q",
+                "-p",
+                "no:cacheprovider",
+                node,
+            ],
+            cwd=archive_root,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert replay.returncode == 0, replay.stdout + replay.stderr
+        assert "1 passed" in replay.stdout
 
 
 def _protected_baseline_paths() -> tuple[str, ...]:
@@ -339,14 +417,14 @@ def test_c02_actual_pinned_v1_and_v2_m1c_replay_executes() -> None:
     assert v1.case_count == 4
     assert len(helper.REPLAY_TEST_NAMES) == 6
     for name in sorted(helper.REPLAY_TEST_NAMES):
-        result = helper.run_archived_node(V2_COMMIT, f"{HISTORY_MODULE}::{name}")
+        result = helper.run_archived_node(M1C_V2_COMMIT, f"{HISTORY_MODULE}::{name}")
         assert result.returncode == 0, result.output
 
 
 def test_c02_current_code_composes_m1c_into_fixture_only_m1d_replay() -> None:
     """The public fixture runner verifies M1c context plus M1d materialization."""
     support = _load_fixture_support()
-    fixture = support.load_m1d_fixture_v2()
+    fixture = support.load_m1d_fixture_v3()
     assert fixture.context.economic_context is not None
     assert fixture.context.economic_source_policy is not None
     for result in (fixture.decision_result, fixture.outcome_result):
@@ -410,78 +488,32 @@ def test_m1d_v1_bytes_match_task7_and_replay_under_archived_code() -> None:
     )
     for path in paths:
         assert (REPO_ROOT / path).read_bytes() == _git_bytes(TASK7_COMMIT, path)
+    _run_archived_m1d_replay(
+        TASK7_COMMIT,
+        "tests/integration/test_m1d_adversarial_matrix.py::"
+        "test_task7_expected_decision_and_outcome_bytes_replay",
+        "v1",
+    )
 
-    with tempfile.TemporaryDirectory(prefix="drift-m1d-v1-replay-") as directory:
-        archive_root = Path(directory)
-        completed = subprocess.run(
-            [
-                "git",
-                "archive",
-                "--format=tar",
-                TASK7_COMMIT,
-                "--",
-                "src/drift",
-                "tests",
-                "pyproject.toml",
-                "uv.lock",
-            ],
-            cwd=REPO_ROOT,
-            check=False,
-            capture_output=True,
-        )
-        assert completed.returncode == 0, completed.stderr.decode(errors="replace")
-        with tarfile.open(fileobj=BytesIO(completed.stdout), mode="r:") as archive:
-            members = archive.getmembers()
-            assert not any(
-                member.name.startswith("/") or ".." in Path(member.name).parts
-                for member in members
-            )
-            archive.extractall(archive_root, members=members, filter="data")
-        environment = dict(os.environ)
-        environment.pop("PYTEST_ADDOPTS", None)
-        environment["PYTHONPATH"] = os.pathsep.join(
-            (
-                str(archive_root / "src"),
-                str(archive_root / "tests" / "unit"),
-                str(archive_root / "tests" / "integration"),
-            )
-        )
-        environment["PYTHONNOUSERSITE"] = "1"
-        environment["PYTHONDONTWRITEBYTECODE"] = "1"
-        environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
-        imported = subprocess.run(
-            [sys.executable, "-c", "import drift; print(drift.__file__)"],
-            cwd=archive_root,
-            env=environment,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        assert imported.returncode == 0, imported.stdout + imported.stderr
-        assert (
-            Path(imported.stdout.strip())
-            .resolve()
-            .is_relative_to(archive_root.resolve())
-        )
-        replay = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pytest",
-                "-q",
-                "-p",
-                "no:cacheprovider",
-                "tests/integration/test_m1d_adversarial_matrix.py::"
-                "test_task7_expected_decision_and_outcome_bytes_replay",
-            ],
-            cwd=archive_root,
-            env=environment,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        assert replay.returncode == 0, replay.stdout + replay.stderr
-        assert "1 passed" in replay.stdout
+
+def test_m1d_v2_bytes_match_task8_and_replay_under_archived_code() -> None:
+    """Accepted v2 stays byte-exact and executes only with Task 8 code."""
+    paths = _git_paths(TASK8_COMMIT, "tests/fixtures/m1d/v2")
+    assert len(paths) == 160
+    assert (
+        hashlib.sha256(
+            (M1D_V2_FIXTURE_ROOT / "hash-index.json").read_bytes()
+        ).hexdigest()
+        == EXPECTED_V2_HASH_INDEX_SHA256
+    )
+    for path in paths:
+        assert (REPO_ROOT / path).read_bytes() == _git_bytes(TASK8_COMMIT, path)
+    _run_archived_m1d_replay(
+        TASK8_COMMIT,
+        "tests/integration/test_m1d_adversarial_matrix.py::"
+        "test_task7_expected_decision_and_outcome_bytes_replay",
+        "v2",
+    )
 
 
 def test_c03_forbidden_runtime_capabilities_and_dependencies_remain_absent() -> None:
@@ -508,6 +540,7 @@ def test_c03_forbidden_runtime_capabilities_and_dependencies_remain_absent() -> 
     # the candidate repository or fixture tree.
     assert not list(REPO_ROOT.rglob(".v1.generation.lock"))
     assert not list(REPO_ROOT.rglob(".v2.generation.lock"))
+    assert not list(REPO_ROOT.rglob(".v3.generation.lock"))
 
 
 def test_c03_ast_guard_rejects_process_and_network_but_allows_local_identity() -> None:

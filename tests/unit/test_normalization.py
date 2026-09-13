@@ -1094,6 +1094,38 @@ def test_split_first_post_session_can_reuse_opening_only_anchor_companion() -> N
     assert anchor.actual_close is None  # type: ignore[union-attr]
 
 
+def test_after_close_split_maps_to_authenticated_opening_only_anchor_and_replays() -> (
+    None
+):
+    harness = NormalizationHarness(
+        outer_kind="decision",
+        basis="2026-11-27T18:05:00Z",
+        anchor_opening_case="matching",
+        economic_history_start="2026-11-27T14:30:00Z",
+        economic_through="2026-11-30T14:30:00Z",
+    )
+    query = harness.normalization_query(
+        "split_normalized", anchor_date=date(2026, 11, 30)
+    )
+
+    result = harness.normalize(query)
+
+    assert result.classification == "materialized"
+    assert result.view is not None
+    assert _field(result, "close").quantized_value == Decimal("50.00")
+    assert result.derivation is not None
+    assert len(result.action_mapping_hashes) == 1
+
+    loaded = NormalizationResultV1.model_validate_json(result.model_dump_json())
+    verify_normalization(loaded, harness.context)
+    assert loaded == result
+    assert isinstance(loaded.reference, ObservationDecisionReferenceV1)
+    assert (
+        materialize_observation_decision(loaded.reference, query, harness.context)
+        == loaded.view
+    )
+
+
 @pytest.mark.parametrize("case", ("missing", "mismatched", "backdated", "did_not_open"))
 def test_anchor_opening_evidence_fails_closed_when_not_exact(case: str) -> None:
     harness = NormalizationHarness(
