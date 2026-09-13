@@ -33,6 +33,15 @@ from drift.serialization.canonical import content_hash
 H = tuple(f"{index:x}" * 64 for index in range(1, 16))
 NOW = datetime(2026, 9, 13, 12, tzinfo=UTC)
 REPORT_ID = uuid7()
+LATER_NONTERMINAL_STAGES = (
+    PilotStage.RIGHTS_ASSESSED,
+    PilotStage.ACQUISITION_AUTHORIZED,
+    PilotStage.ACQUIRED,
+    PilotStage.SNAPSHOT_FROZEN,
+    PilotStage.QUALIFIED,
+    PilotStage.REPLAY_AUTHORIZED,
+    PilotStage.REPLAYED,
+)
 
 
 def make_profile(purpose: ConsumerPurpose) -> QualificationProfileV1:
@@ -191,6 +200,48 @@ def test_generic_future_stage_evidence_and_advancement_are_not_exposed() -> None
         transition.model_copy(update={"to_stage": PilotStage.RIGHTS_ASSESSED})
     with pytest.raises(ValueError):
         transition.model_copy(update={"artifacts": (H[0],)})
+
+
+@pytest.mark.parametrize("stage", LATER_NONTERMINAL_STAGES)
+def test_task2_rejects_direct_later_purpose_stage_construction(
+    stage: PilotStage,
+) -> None:
+    with pytest.raises(ValidationError):
+        PurposeStageStateV1(
+            purpose=ConsumerPurpose.HISTORICAL_DECISION_INPUT,
+            profile_hash=H[12],
+            stage=stage,
+            reached_stage_artifact_hashes=(H[0],),
+            terminal_blocker=None,
+        )
+
+
+@pytest.mark.parametrize("stage", LATER_NONTERMINAL_STAGES)
+def test_task2_rejects_later_stage_hidden_in_pilot_state(
+    stage: PilotStage,
+) -> None:
+    later = PurposeStageStateV1.model_construct(
+        schema_version="1",
+        purpose=ConsumerPurpose.HISTORICAL_DECISION_INPUT,
+        profile_hash=H[12],
+        stage=stage,
+        reached_stage_artifact_hashes=(H[0],),
+        terminal_blocker=None,
+    )
+    initial = PurposeStageStateV1(
+        purpose=ConsumerPurpose.RETROSPECTIVE_AUDIT,
+        profile_hash=H[13],
+        stage=None,
+        reached_stage_artifact_hashes=(),
+        terminal_blocker=None,
+    )
+
+    with pytest.raises(ValidationError):
+        M1ePilotStateV1(
+            profile_set_hash=H[14],
+            purpose_states=(later, initial),
+            shared_artifact_hashes=(),
+        )
 
 
 @pytest.mark.parametrize(
