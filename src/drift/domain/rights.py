@@ -377,7 +377,15 @@ class ContentRightsPolicyV1(FrozenModel):
     controlling_provision_hashes: tuple[SHA256Hash, ...]
     permitted_purposes: tuple[ConsumerPurpose, ...]
     permitted_user_ids: tuple[NonBlankStr, ...]
+    permitted_contractor_ids: tuple[NonBlankStr, ...]
+    permitted_service_provider_ids: tuple[NonBlankStr, ...]
     permitted_location_ids: tuple[NonBlankStr, ...]
+    permitted_backup_location_ids: tuple[NonBlankStr, ...]
+    machine_identity: NonBlankStr
+    shared_account: bool
+    real_data_ci: bool
+    cloud_processing: bool
+    private_store_policy_hash: SHA256Hash
     retention_until: UTCDateTime | None
     post_termination_use: RightsDisposition
     disposition_duty: ContentDispositionDuty
@@ -393,6 +401,15 @@ class ContentRightsPolicyV1(FrozenModel):
         if not values:
             raise ValueError("content-rights policy collections must be nonempty")
         return _sorted_unique(values, label="content-rights policy collections")
+
+    @field_validator(
+        "permitted_contractor_ids",
+        "permitted_service_provider_ids",
+        "permitted_backup_location_ids",
+    )
+    @classmethod
+    def canonicalize_optional_strings(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        return _sorted_unique(values, label="content-rights optional scopes")
 
     @field_validator("permitted_purposes")
     @classmethod
@@ -415,7 +432,15 @@ class ContentRightsBindingV1(FrozenModel):
     controlling_provision_hashes: tuple[SHA256Hash, ...]
     permitted_purposes: tuple[ConsumerPurpose, ...]
     permitted_user_ids: tuple[NonBlankStr, ...]
+    permitted_contractor_ids: tuple[NonBlankStr, ...]
+    permitted_service_provider_ids: tuple[NonBlankStr, ...]
     permitted_location_ids: tuple[NonBlankStr, ...]
+    permitted_backup_location_ids: tuple[NonBlankStr, ...]
+    machine_identity: NonBlankStr
+    shared_account: bool
+    real_data_ci: bool
+    cloud_processing: bool
+    private_store_policy_hash: SHA256Hash
     retention_until: UTCDateTime | None
     post_termination_use: RightsDisposition
     disposition_duty: ContentDispositionDuty
@@ -431,6 +456,15 @@ class ContentRightsBindingV1(FrozenModel):
         if not values:
             raise ValueError("content-rights binding collections must be nonempty")
         return _sorted_unique(values, label="content-rights binding collections")
+
+    @field_validator(
+        "permitted_contractor_ids",
+        "permitted_service_provider_ids",
+        "permitted_backup_location_ids",
+    )
+    @classmethod
+    def canonicalize_optional_strings(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        return _sorted_unique(values, label="content-rights binding optional scopes")
 
     @field_validator("permitted_purposes")
     @classmethod

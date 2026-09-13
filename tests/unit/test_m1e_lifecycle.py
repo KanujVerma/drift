@@ -136,6 +136,67 @@ def test_task3_rights_transition_rejects_profile_substitution() -> None:
         transition_rights_assessed(state, validated)
 
 
+def test_acquisition_transition_rejects_assessment_substitution() -> None:
+    decision = make_rights_profile(ConsumerPurpose.HISTORICAL_DECISION_INPUT)
+    audit = make_rights_profile(ConsumerPurpose.RETROSPECTIVE_AUDIT)
+    profile_set = PilotProfileSetV1(
+        pilot_id=uuid7(), pilot_version="1", profiles=(decision, audit)
+    )
+    state = M1ePilotStateV1(
+        profile_set_hash=content_hash(profile_set),
+        purpose_states=cast(
+            tuple[PurposeStageStateV1, PurposeStageStateV1],
+            tuple(
+                PurposeStageStateV1(
+                    purpose=profile.purpose,
+                    profile_hash=qualification_profile_hash(profile),
+                    stage=None,
+                    reached_stage_artifact_hashes=(),
+                    terminal_blocker=None,
+                )
+                for profile in profile_set.profiles
+            ),
+        ),
+        shared_artifact_hashes=(),
+    )
+    for profile in profile_set.profiles:
+        state = transition_pilot(state, freeze_transition(profile_set, profile))
+    topology = make_topology()
+    assessed = tuple(
+        validate_rights_assessment(
+            profile,
+            make_assessment(profile, topology),
+            make_evidence(topology),
+        )
+        for profile in profile_set.profiles
+    )
+    for assessment in assessed:
+        state = transition_rights_assessed(state, assessment)
+
+    substituted = (
+        validate_rights_assessment(
+            decision,
+            make_assessment(decision, topology),
+            make_evidence(topology),
+        ),
+        assessed[1],
+    )
+    eligibility = assess_acquisition_eligibility(profile_set, substituted)
+    approval = _approval(eligibility)
+    authorization = authorize_acquisition(eligibility, approval, _approval_context())
+    bundle = AcquisitionAuthorizationVerificationBundle(
+        profiles=profile_set,
+        assessments=substituted,
+        eligibility=eligibility,
+        approval=approval,
+        approval_evidence=_approval_context(),
+        authorization=authorization,
+    )
+
+    with pytest.raises(ValueError, match="recorded rights assessment"):
+        transition_acquisition_authorized(state, bundle)
+
+
 def make_profile(purpose: ConsumerPurpose) -> QualificationProfileV1:
     return QualificationProfileV1(
         profile_id=uuid7(),

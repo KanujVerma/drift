@@ -4,11 +4,13 @@ from dataclasses import dataclass
 from hashlib import sha256
 
 from drift.datasets.resolver import VerifiedArtifactBytes
+from drift.domain.artifacts import ArtifactReference
 from drift.domain.dataset_validation import (
     FindingSeverity,
     ValidationFindingV1,
 )
 from drift.domain.qualification import (
+    ContentDispositionDuty,
     PilotProfileSetV1,
     QualificationProfileV1,
     qualification_profile_hash,
@@ -65,13 +67,21 @@ class ReplayAuthorizationVerificationBundle:
 _MARKETING_KINDS = frozenset(
     {"marketing", "marketing_copy", "sales_email", "website", "brochure"}
 )
-_PUBLIC_SCHEMES = frozenset({"git", "github", "public"})
 
 
 def _finding(
-    code: str, *, node: ContractDocumentNodeV1 | None = None
+    code: str,
+    *,
+    node: ContractDocumentNodeV1 | None = None,
+    reference: ArtifactReference | None = None,
 ) -> ValidationFindingV1:
-    references = () if node is None else (node.artifact_reference,)
+    references: tuple[ArtifactReference, ...]
+    if node is not None:
+        references = (node.artifact_reference,)
+    elif reference is not None:
+        references = (reference,)
+    else:
+        references = ()
     return ValidationFindingV1(
         code=code,
         severity=FindingSeverity.ERROR,
@@ -137,13 +147,28 @@ def validate_contract_topology(
             findings.append(_finding("unmatched_contract_publisher", node=node))
         if not (node.assent_evidence_hashes or node.signature_evidence_hashes):
             findings.append(_finding("absent_contract_assent", node=node))
-        if (
-            node.confidentiality_class is not ConfidentialityClass.PUBLIC
-            and _is_public_reference(node)
+        if node.confidentiality_class is not ConfidentialityClass.PUBLIC and not (
+            _is_private_content_addressed(node.artifact_reference)
         ):
             findings.append(
                 _finding("confidential_evidence_public_reference", node=node)
             )
+    confidential_hashes = {
+        node.artifact_reference.content_hash
+        for node in topology.nodes
+        if node.confidentiality_class is not ConfidentialityClass.PUBLIC
+    }
+    for party in topology.parties:
+        for reference in party.evidence_references:
+            if reference.content_hash in confidential_hashes and not (
+                _is_private_content_addressed(reference)
+            ):
+                findings.append(
+                    _finding(
+                        "confidential_evidence_public_reference",
+                        reference=reference,
+                    )
+                )
     if topology.missing_nodes:
         findings.append(_finding("missing_contract_node"))
     missing_ids = tuple(item.node_id for item in topology.missing_nodes)
@@ -154,9 +179,8 @@ def validate_contract_topology(
     return tuple(sorted(findings, key=lambda item: item.code))
 
 
-def _is_public_reference(node: ContractDocumentNodeV1) -> bool:
-    scheme, separator, _ = node.artifact_reference.location.partition(":")
-    return bool(separator) and scheme.casefold() in _PUBLIC_SCHEMES
+def _is_private_content_addressed(reference: ArtifactReference) -> bool:
+    return reference.location == f"drift+sha256://{reference.content_hash}"
 
 
 def _has_cycle(topology: ContractTopologyV1) -> bool:
@@ -242,7 +266,7 @@ def content_rights_policy_hash(policy: ContentRightsPolicyV1) -> str:
 
 def bind_content_rights(
     *,
-    content_hash: str,
+    content: VerifiedArtifactBytes,
     policy: ContentRightsPolicyV1,
     assessment: ValidatedRightsAssessment,
 ) -> ContentRightsBindingV1:
@@ -254,30 +278,45 @@ def bind_content_rights(
     )
     if revalidated != assessment:
         raise ValueError("rights assessment does not reverify")
+    if (
+        content.byte_size != len(content.data)
+        or content.content_hash != sha256(content.data).hexdigest()
+    ):
+        raise ValueError("content bytes are not hash-verified")
+    result = next(
+        item
+        for item in assessment.assessment.purpose_results
+        if item.purpose is assessment.profile.purpose
+    )
+    if result.disposition is not RightsDisposition.ALLOWED:
+        raise ValueError("purpose rights result must be ALLOWED before binding")
     if policy.policy_hash != content_rights_policy_hash(policy):
         raise ValueError("content-rights policy hash mismatch")
     if policy not in assessment.assessment.content_rights_policies:
         raise ValueError("content-rights policy is not in the frozen assessment")
     return ContentRightsBindingV1(
-        content_hash=content_hash,
+        content_hash=content.content_hash,
         policy_hash=policy.policy_hash,
         provider_contractual_class=policy.provider_contractual_class,
         controlling_provision_hashes=policy.controlling_provision_hashes,
         permitted_purposes=policy.permitted_purposes,
         permitted_user_ids=policy.permitted_user_ids,
+        permitted_contractor_ids=policy.permitted_contractor_ids,
+        permitted_service_provider_ids=policy.permitted_service_provider_ids,
         permitted_location_ids=policy.permitted_location_ids,
+        permitted_backup_location_ids=policy.permitted_backup_location_ids,
+        machine_identity=policy.machine_identity,
+        shared_account=policy.shared_account,
+        real_data_ci=policy.real_data_ci,
+        cloud_processing=policy.cloud_processing,
+        private_store_policy_hash=policy.private_store_policy_hash,
         retention_until=policy.retention_until,
         post_termination_use=policy.post_termination_use,
         disposition_duty=policy.disposition_duty,
         backup_allowed=policy.backup_allowed,
         backup_rule=policy.backup_rule,
-        frozen_assessment_hash=content_hash_fn(assessment.assessment),
+        frozen_assessment_hash=content_hash(assessment.assessment),
     )
-
-
-def content_hash_fn(value: object) -> str:
-    """Keep the public ``content_hash`` argument from shadowing canonical hashing."""
-    return content_hash(value)
 
 
 def validate_rights_assessment(
@@ -297,6 +336,28 @@ def validate_rights_assessment(
         profile.provider.publisher_ids
     ):
         raise ValueError("contract publishers do not match qualification profile")
+    providers = tuple(
+        party for party in evidence.topology.parties if party.role == "provider"
+    )
+    if len(providers) != 1 or (
+        providers[0].party_id != profile.provider.provider_legal_id
+        or providers[0].exact_legal_name != profile.provider.provider_legal_name
+    ):
+        raise ValueError("provider legal party does not match frozen profile")
+    subscribers = tuple(
+        party for party in evidence.topology.parties if party.role == "subscriber"
+    )
+    if len(subscribers) != 1 or (
+        subscribers[0].exact_legal_name != profile.subscriber.subscriber_legal_entity
+    ):
+        raise ValueError("subscriber legal party does not match frozen profile")
+    expected_party_ids = {providers[0].party_id, subscribers[0].party_id}
+    if len(evidence.topology.parties) != 2 or any(
+        node.applicability_status is ApplicabilityStatus.APPLICABLE
+        and set(node.party_ids) != expected_party_ids
+        for node in evidence.topology.nodes
+    ):
+        raise ValueError("contract topology parties do not match frozen profile")
 
     topology_findings = validate_contract_topology(evidence.topology)
     blocking = {
@@ -384,13 +445,13 @@ def validate_rights_assessment(
             raise ValueError("rights answer validity exceeds assessment")
         if not set(answer.evidence_hashes).issubset(all_hashes):
             raise ValueError("rights answer evidence is not hash-resolved")
+        nodes = tuple(
+            node_by_hash.get(value) for value in answer.controlling_node_hashes
+        )
+        if any(node is None for node in nodes):
+            raise ValueError("rights answer has nonexistent controlling contract")
+        applicable = tuple(node for node in nodes if node is not None)
         if answer.disposition is RightsDisposition.ALLOWED:
-            nodes = tuple(
-                node_by_hash.get(value) for value in answer.controlling_node_hashes
-            )
-            if any(node is None for node in nodes):
-                raise ValueError("allowed answer has nonexistent controlling contract")
-            applicable = tuple(node for node in nodes if node is not None)
             if any(
                 node.document_kind.casefold() in _MARKETING_KINDS for node in applicable
             ):
@@ -487,26 +548,54 @@ def validate_rights_assessment(
     for policy in assessment.content_rights_policies:
         if policy.policy_hash != content_rights_policy_hash(policy):
             raise ValueError("content-rights policy hash mismatch")
-        if profile.purpose not in policy.permitted_purposes:
-            raise ValueError("content-rights policy purpose mismatch")
-        if set(profile.infrastructure.user_ids) - set(policy.permitted_user_ids):
-            raise ValueError("content-rights policy user mismatch")
-        if profile.infrastructure.machine_identity not in policy.permitted_location_ids:
-            raise ValueError("content-rights policy location mismatch")
+        if policy.permitted_purposes != (profile.purpose,):
+            raise ValueError("content-rights policy requires exact assessed purpose")
+        exact_infrastructure = (
+            policy.permitted_user_ids == profile.infrastructure.user_ids
+            and policy.permitted_contractor_ids == profile.infrastructure.contractor_ids
+            and policy.permitted_service_provider_ids
+            == profile.infrastructure.service_provider_ids
+            and policy.permitted_location_ids
+            == (profile.infrastructure.machine_identity,)
+            and policy.permitted_backup_location_ids
+            == profile.infrastructure.backup_location_ids
+            and policy.machine_identity == profile.infrastructure.machine_identity
+            and policy.shared_account == profile.infrastructure.shared_account
+            and policy.real_data_ci == profile.infrastructure.real_data_ci
+            and policy.cloud_processing == profile.infrastructure.cloud_processing
+            and policy.private_store_policy_hash
+            == profile.infrastructure.private_store_policy_hash
+        )
+        if not exact_infrastructure:
+            raise ValueError(
+                "content-rights policy requires exact authorized infrastructure"
+            )
         if not set(policy.controlling_provision_hashes).issubset(all_hashes):
             raise ValueError("content-rights policy evidence is not hash-resolved")
+        backup_disposition = answer_by_question[
+            RightsQuestion.BACKUP_STORAGE
+        ].disposition
+        if policy.backup_allowed != (backup_disposition is RightsDisposition.ALLOWED):
+            raise ValueError("content policy and backup answer are inconsistent")
+        post_term_disposition = answer_by_question[
+            RightsQuestion.POST_SUBSCRIPTION_RAW_USE
+        ].disposition
+        if policy.post_termination_use is not post_term_disposition:
+            raise ValueError(
+                "content policy and post-termination answer are inconsistent"
+            )
+        deletion_duties = {
+            ContentDispositionDuty.DELETE,
+            ContentDispositionDuty.CERTIFY_DELETE,
+        }
         if (
-            answer_by_question[RightsQuestion.BACKUP_STORAGE].disposition
-            is RightsDisposition.ALLOWED
-            and not policy.backup_allowed
+            post_term_disposition is RightsDisposition.ALLOWED
+            and policy.disposition_duty in deletion_duties
+        ) or (
+            post_term_disposition is RightsDisposition.DENIED
+            and policy.disposition_duty not in deletion_duties
         ):
-            raise ValueError("content policy contradicts allowed backup rights")
-        if (
-            answer_by_question[RightsQuestion.POST_SUBSCRIPTION_RAW_USE].disposition
-            is RightsDisposition.ALLOWED
-            and policy.post_termination_use is not RightsDisposition.ALLOWED
-        ):
-            raise ValueError("content policy contradicts post-termination rights")
+            raise ValueError("post-termination rights and disposition duty conflict")
         if (
             policy.retention_until is not None
             and policy.retention_until < assessment.valid_until

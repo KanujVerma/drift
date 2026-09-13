@@ -139,18 +139,25 @@ def make_topology(
     document_kind: str = "executed_agreement",
     applicability: ApplicabilityStatus = ApplicabilityStatus.APPLICABLE,
     confidentiality: ConfidentialityClass = ConfidentialityClass.CONFIDENTIAL,
-    location: str = "evidence:restricted/agreement",
+    location: str | None = None,
     missing_nodes: tuple[MissingContractNodeV1, ...] = (),
 ) -> ContractTopologyV1:
-    party = LegalPartyV1(
+    private_location = f"drift+sha256://{CONTRACT.content_hash}"
+    provider = LegalPartyV1(
         party_id="provider-1",
         exact_legal_name="Synthetic Data LLC",
         role="provider",
         jurisdiction="Delaware",
         jurisdiction_unknown=False,
-        evidence_references=(
-            _reference(CONTRACT, location="evidence:restricted/agreement"),
-        ),
+        evidence_references=(_reference(CONTRACT, location=private_location),),
+    )
+    subscriber = LegalPartyV1(
+        party_id="subscriber-1",
+        exact_legal_name="Synthetic Research LLC",
+        role="subscriber",
+        jurisdiction="Delaware",
+        jurisdiction_unknown=False,
+        evidence_references=(_reference(CONTRACT, location=private_location),),
     )
     node = ContractDocumentNodeV1(
         node_id="agreement",
@@ -159,10 +166,10 @@ def make_topology(
         document_version="2026-01",
         effective_at=NOW - timedelta(days=30),
         expires_at=LATER,
-        artifact_reference=_reference(CONTRACT, location=location),
+        artifact_reference=_reference(CONTRACT, location=location or private_location),
         product_ids=("daily-equities",),
         publisher_ids=("publisher-1",),
-        party_ids=("provider-1",),
+        party_ids=("provider-1", "subscriber-1"),
         assent_evidence_hashes=(ASSENT.content_hash,),
         signature_evidence_hashes=(),
         confidentiality_class=confidentiality,
@@ -170,7 +177,7 @@ def make_topology(
     )
     return ContractTopologyV1(
         topology_version="1",
-        parties=(party,),
+        parties=(provider, subscriber),
         nodes=(node,),
         edges=(),
         root_agreement_ids=("agreement",),
@@ -202,7 +209,15 @@ def make_policy(profile: QualificationProfileV1) -> ContentRightsPolicyV1:
         controlling_provision_hashes=(CONTRACT.content_hash,),
         permitted_purposes=(profile.purpose,),
         permitted_user_ids=profile.infrastructure.user_ids,
+        permitted_contractor_ids=profile.infrastructure.contractor_ids,
+        permitted_service_provider_ids=profile.infrastructure.service_provider_ids,
         permitted_location_ids=(profile.infrastructure.machine_identity,),
+        permitted_backup_location_ids=profile.infrastructure.backup_location_ids,
+        machine_identity=profile.infrastructure.machine_identity,
+        shared_account=profile.infrastructure.shared_account,
+        real_data_ci=profile.infrastructure.real_data_ci,
+        cloud_processing=profile.infrastructure.cloud_processing,
+        private_store_policy_hash=profile.infrastructure.private_store_policy_hash,
         retention_until=LATER,
         post_termination_use=RightsDisposition.ALLOWED,
         disposition_duty=ContentDispositionDuty.RETAIN,
@@ -261,6 +276,29 @@ def make_assessment(
         else (),
         assessed_use="automated internal research",
     )
+    policy = make_policy(profile)
+    backup_disposition = overrides.get(
+        RightsQuestion.BACKUP_STORAGE, RightsDisposition.ALLOWED
+    )
+    post_term_disposition = overrides.get(
+        RightsQuestion.POST_SUBSCRIPTION_RAW_USE, RightsDisposition.ALLOWED
+    )
+    if (
+        backup_disposition is not RightsDisposition.ALLOWED
+        or post_term_disposition is not RightsDisposition.ALLOWED
+    ):
+        policy = policy.model_copy(
+            update={
+                "backup_allowed": backup_disposition is RightsDisposition.ALLOWED,
+                "post_termination_use": post_term_disposition,
+                "disposition_duty": ContentDispositionDuty.DELETE
+                if post_term_disposition is RightsDisposition.DENIED
+                else ContentDispositionDuty.RETAIN,
+            }
+        )
+        policy = policy.model_copy(
+            update={"policy_hash": content_rights_policy_hash(policy)}
+        )
     return RightsAssessmentV1(
         assessment_id=uuid7(),
         profile_hash=qualification_profile_hash(profile),
@@ -280,7 +318,7 @@ def make_assessment(
         service_providers=(),
         answers=answers,
         notice_evidence_hashes=(NOTICE.content_hash,),
-        content_rights_policies=(make_policy(profile),),
+        content_rights_policies=(policy,),
         reassessment_triggers=("contract change", "termination notice"),
         policy_hash=profile.adjudication_policy_hash,
         assessor_identity="reviewer-1",
@@ -420,6 +458,68 @@ def test_topology_fails_closed_for_incomplete_or_mismatched_authority(
     assert expected in {item.code for item in validate_contract_topology(topology)}
 
 
+@pytest.mark.parametrize(
+    "location",
+    (
+        "https://github.com/example/private-contract.pdf",
+        "/Users/example/contracts/private-contract.pdf",
+    ),
+)
+def test_confidential_legal_evidence_requires_private_content_addressing(
+    location: str,
+) -> None:
+    topology = make_topology(location=location)
+
+    assert "confidential_evidence_public_reference" in {
+        item.code for item in validate_contract_topology(topology)
+    }
+
+
+def test_topology_parties_must_match_frozen_provider_and_subscriber() -> None:
+    profile = make_profile(ConsumerPurpose.HISTORICAL_DECISION_INPUT)
+    topology = make_topology()
+
+    provider_only = topology.model_copy(update={"parties": (topology.parties[0],)})
+    with pytest.raises(ValueError, match="subscriber legal party"):
+        validate_rights_assessment(
+            profile,
+            make_assessment(profile, provider_only),
+            make_evidence(provider_only),
+        )
+    wrong_provider = topology.model_copy(
+        update={
+            "parties": tuple(
+                item.model_copy(update={"exact_legal_name": "Different Provider LLC"})
+                if item.role == "provider"
+                else item
+                for item in topology.parties
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="provider legal party"):
+        validate_rights_assessment(
+            profile,
+            make_assessment(profile, wrong_provider),
+            make_evidence(wrong_provider),
+        )
+    wrong_role = topology.model_copy(
+        update={
+            "parties": tuple(
+                item.model_copy(update={"role": "Provider"})
+                if item.role == "provider"
+                else item
+                for item in topology.parties
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="provider legal party"):
+        validate_rights_assessment(
+            profile,
+            make_assessment(profile, wrong_role),
+            make_evidence(wrong_role),
+        )
+
+
 def test_missing_applicable_node_forces_affected_answer_unknown() -> None:
     missing = MissingContractNodeV1(
         node_id="publisher-schedule",
@@ -521,6 +621,38 @@ def test_nonexistent_or_mismatched_contract_evidence_hash_is_rejected() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "disposition", (RightsDisposition.DENIED, RightsDisposition.UNKNOWN)
+)
+def test_every_answer_disposition_resolves_controlling_nodes(
+    disposition: RightsDisposition,
+) -> None:
+    profile = make_profile(ConsumerPurpose.HISTORICAL_DECISION_INPUT)
+    topology = make_topology()
+    assessment = make_assessment(
+        profile,
+        topology,
+        overrides={RightsQuestion.RAW_BYTE_RETENTION: disposition},
+    )
+    answer = next(
+        item
+        for item in assessment.answers
+        if item.question is RightsQuestion.RAW_BYTE_RETENTION
+    )
+    forged = answer.model_copy(update={"controlling_node_hashes": ("f" * 64,)})
+    assessment = assessment.model_copy(
+        update={
+            "answers": tuple(
+                forged if item.question is forged.question else item
+                for item in assessment.answers
+            )
+        }
+    )
+
+    with pytest.raises(ValueError, match="controlling contract"):
+        validate_rights_assessment(profile, assessment, make_evidence(topology))
+
+
 def test_assessment_then_per_object_binding_is_acyclic() -> None:
     profile = make_profile(ConsumerPurpose.HISTORICAL_DECISION_INPUT)
     topology = make_topology()
@@ -530,7 +662,7 @@ def test_assessment_then_per_object_binding_is_acyclic() -> None:
     policy = validated.assessment.content_rights_policies[0]
 
     binding = bind_content_rights(
-        content_hash=_digest(b"later acquired row"),
+        content=_verified(b"later acquired row"),
         policy=policy,
         assessment=validated,
     )
@@ -542,6 +674,110 @@ def test_assessment_then_per_object_binding_is_acyclic() -> None:
     assert binding.frozen_assessment_hash == content_hash(validated.assessment)
     assert binding.provider_contractual_class == policy.provider_contractual_class
     assert binding.backup_rule == policy.backup_rule
+    assert (
+        binding.private_store_policy_hash
+        == profile.infrastructure.private_store_policy_hash
+    )
+
+
+def test_binding_requires_allowed_purpose_and_cannot_widen_policy_scope() -> None:
+    profile = make_profile(ConsumerPurpose.HISTORICAL_DECISION_INPUT)
+    topology = make_topology()
+    denied = validate_rights_assessment(
+        profile,
+        make_assessment(
+            profile,
+            topology,
+            overrides={RightsQuestion.RAW_BYTE_RETENTION: RightsDisposition.DENIED},
+        ),
+        make_evidence(topology),
+    )
+    with pytest.raises(ValueError, match="purpose rights.*ALLOWED"):
+        bind_content_rights(
+            content=_verified(b"denied content"),
+            policy=denied.assessment.content_rights_policies[0],
+            assessment=denied,
+        )
+
+    allowed = validate_rights_assessment(
+        profile, make_assessment(profile, topology), make_evidence(topology)
+    )
+    policy = allowed.assessment.content_rights_policies[0]
+    widened = policy.model_copy(
+        update={
+            "permitted_purposes": tuple(ConsumerPurpose),
+            "permitted_user_ids": (*policy.permitted_user_ids, "other-user"),
+            "permitted_location_ids": (*policy.permitted_location_ids, "other-host"),
+        }
+    )
+    widened = widened.model_copy(
+        update={"policy_hash": content_rights_policy_hash(widened)}
+    )
+    assessment = allowed.assessment.model_copy(
+        update={"content_rights_policies": (widened,)}
+    )
+    with pytest.raises(ValueError, match="exact.*purpose|exact.*infrastructure"):
+        validate_rights_assessment(profile, assessment, make_evidence(topology))
+
+    deleting = policy.model_copy(
+        update={"disposition_duty": ContentDispositionDuty.DELETE}
+    )
+    deleting = deleting.model_copy(
+        update={"policy_hash": content_rights_policy_hash(deleting)}
+    )
+    assessment = allowed.assessment.model_copy(
+        update={"content_rights_policies": (deleting,)}
+    )
+    with pytest.raises(ValueError, match="post-termination.*duty"):
+        validate_rights_assessment(profile, assessment, make_evidence(topology))
+
+
+def test_policy_cannot_omit_profile_contractors_or_backup_locations() -> None:
+    profile = make_profile(ConsumerPurpose.HISTORICAL_DECISION_INPUT)
+    profile = profile.model_copy(
+        update={
+            "infrastructure": profile.infrastructure.model_copy(
+                update={
+                    "contractor_ids": ("contractor-1",),
+                    "backup_location_ids": ("backup-1",),
+                }
+            )
+        }
+    )
+    topology = make_topology()
+    assessment = make_assessment(profile, topology)
+    policy = assessment.content_rights_policies[0].model_copy(
+        update={
+            "permitted_contractor_ids": (),
+            "permitted_backup_location_ids": (),
+        }
+    )
+    policy = policy.model_copy(
+        update={"policy_hash": content_rights_policy_hash(policy)}
+    )
+    assessment = assessment.model_copy(update={"content_rights_policies": (policy,)})
+
+    with pytest.raises(ValueError, match="exact.*infrastructure"):
+        validate_rights_assessment(profile, assessment, make_evidence(topology))
+
+
+def test_binding_requires_verified_content_bytes() -> None:
+    profile = make_profile(ConsumerPurpose.HISTORICAL_DECISION_INPUT)
+    topology = make_topology()
+    validated = validate_rights_assessment(
+        profile, make_assessment(profile, topology), make_evidence(topology)
+    )
+
+    with pytest.raises(ValueError, match="content bytes.*hash-verified"):
+        bind_content_rights(
+            content=VerifiedArtifactBytes(
+                data=b"claimed content",
+                byte_size=len(b"claimed content"),
+                content_hash="f" * 64,
+            ),
+            policy=validated.assessment.content_rights_policies[0],
+            assessment=validated,
+        )
 
 
 @pytest.mark.parametrize(
