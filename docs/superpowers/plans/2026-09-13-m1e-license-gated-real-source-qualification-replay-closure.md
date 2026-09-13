@@ -226,7 +226,7 @@ protects all `af75cce` source/fixture bytes, and requires unchanged
 network or credential read exists before Task 8, and only
 `scripts/acquire_m1e_pilot.py` may contain the eventual authorized boundary.
 
-- [ ] **Step 1: Capture meaningful RED evidence without modifying the checkout**
+- [x] **Step 1: Capture meaningful RED evidence without modifying the checkout**
 
 Create a temporary `git archive` of `af75cce`, add one harmless Python file only
 inside that temporary archive, and run the v3 exact replay node with that archive
@@ -236,20 +236,20 @@ first on `PYTHONPATH`.
 Expected: FAIL because the whole-package M1d implementation fingerprint changes.
 ```
 
-- [ ] **Step 2: Write the pinned-lane tests**
+- [x] **Step 2: Write the pinned-lane tests**
 
 Tests must fail because `_pinned_m1d.py` and the literal inventory do not yet
 exist. Add attacks for a changed source byte, changed v3 byte, re-signed index,
 wrong commit, missing node, new/renamed test definition, inherited current
 package import, and archived-child failure.
 
-- [ ] **Step 3: Implement authenticated archived execution**
+- [x] **Step 3: Implement authenticated archived execution**
 
 Use bounded `git archive` extraction into `TemporaryDirectory`, reject absolute
 or parent-traversing tar members, and cache one archive per parent pytest
 session. Do not copy current imported Drift objects into the child.
 
-- [ ] **Step 4: Run focused GREEN and compatibility**
+- [x] **Step 4: Run focused GREEN and compatibility**
 
 ```text
 uv run pytest tests/integration/test_m1d_pinned_replay.py tests/integration/test_m1d_compatibility.py tests/integration/test_m1d_adversarial_matrix.py tests/integration/test_m1c_pinned_replay.py -q
@@ -258,13 +258,13 @@ uv run pytest tests/integration/test_m1d_pinned_replay.py tests/integration/test
 Expected: archived v3 executes, v1/v2 and M1c archived replay remain green, and
 the current checkout contains no M1e production source.
 
-- [ ] **Step 5: Fresh compatibility review and full gate**
+- [x] **Step 5: Fresh compatibility review and full gate**
 
 Terra implements. A fresh Sol reviewer checks archive authentication, exact-node
 routing, no fake PASS/skip, no fixture rebinding, and current-suite coverage.
 Fix all genuine Important/Critical findings. Run the repository full gate once.
 
-- [ ] **Step 6: Commit and Checkpoint**
+- [x] **Step 6: Commit and Checkpoint**
 
 Stage only the six Task 1 paths and commit:
 
@@ -2305,6 +2305,34 @@ adapter, environment closure, replay result, or evaluator authorization exists.
 Future task acceptance entries must record exact commit, focused RED/GREEN
 evidence, full gate, reviewer findings/fixes, external artifacts used, and
 Checkpoint result. Do not duplicate the plan into a continuity database.
+
+### Task 1 accepted, 2026-09-13
+
+Task 1 pinned accepted M1d v3 replay before any M1e production source. Its
+implementation commits are `1c647bf` (`test: pin accepted M1d v3 replay`),
+`8aa74a0` (`test: harden M1e compatibility guard`), and `333f142`
+(`test: defer M1e acquisition boundary`). No provider, entitlement, rights
+PASS, acquisition, real snapshot, environment closure, replay result, or
+evaluator capability was introduced.
+
+- RED evidence: a temporary `af75cce` archive with one harmless added Python
+  file failed M1d v3 replay because the whole-package implementation fingerprint
+  changed; the initial pinned-lane tests failed while the helper and literal
+  inventory were absent. Review fix round 1 then failed for absent history and
+  partitioned-guard behavior; fix round 2 failed because the acquisition script
+  still allowed network and credential access before Task 8.
+- GREEN evidence: the required Task 1 focused gate passed `43` tests. The final
+  full repository gate passed `1,657` tests in `1,240.02` seconds. `uv run ruff
+  check .`, `uv run ruff format --check .`, `uv run mypy src tests`, and `uv
+  build` passed. The focused review-fix checks also passed.
+- Review and closure: two review-fix rounds hardened future-source history,
+  script partitioning, alias-aware process and dynamic-execution rejection, and
+  the pre-Task-8 network and credential boundary. Final review found no open
+  Critical or Important finding. The deferred Minor remains noted and was not
+  changed in Task 1.
+- External artifacts: none. The archived M1d input inventory binds
+  `af75cce0f763de025f8ae3516577a9d0a1acead9`; M1e production source remains
+  absent. Task 2 remains unstarted.
 
 ## 9. Planning review and publication verification
 
