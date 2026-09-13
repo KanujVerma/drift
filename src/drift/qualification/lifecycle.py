@@ -6,6 +6,12 @@ from drift.domain.qualification import (
     PilotStage,
     qualification_profile_hash,
 )
+from drift.domain.rights import ValidatedRightsAssessment
+from drift.qualification.rights import (
+    AcquisitionAuthorizationVerificationBundle,
+    validate_rights_assessment,
+    verify_acquisition_authorization,
+)
 from drift.serialization.canonical import content_hash
 
 
@@ -67,5 +73,111 @@ def transition_pilot(
         update={
             "purpose_states": purpose_states,
             "shared_artifact_hashes": shared_hashes,
+        }
+    )
+
+
+def transition_rights_assessed(
+    state: M1ePilotStateV1,
+    assessment: ValidatedRightsAssessment,
+) -> M1ePilotStateV1:
+    """Advance one frozen purpose only after reverifying its exact rights evidence."""
+    validated = validate_rights_assessment(
+        assessment.profile,
+        assessment.assessment,
+        assessment.evidence,
+    )
+    if validated != assessment:
+        raise ValueError("rights assessment does not reverify")
+    profile_hash = qualification_profile_hash(assessment.profile)
+    matches = tuple(
+        item
+        for item in state.purpose_states
+        if item.purpose is assessment.profile.purpose
+    )
+    if len(matches) != 1 or matches[0].profile_hash != profile_hash:
+        raise ValueError("rights assessment profile does not match pilot state")
+    current = matches[0]
+    if current.stage is not PilotStage.PROFILE_FROZEN:
+        raise ValueError("rights assessment requires a frozen profile")
+    assessment_hash = content_hash(assessment.assessment)
+    topology_hash = content_hash(assessment.topology)
+    advanced = current.model_copy(
+        update={
+            "stage": PilotStage.RIGHTS_ASSESSED,
+            "reached_stage_artifact_hashes": (
+                *current.reached_stage_artifact_hashes,
+                topology_hash,
+                assessment_hash,
+            ),
+        }
+    )
+    purpose_states = tuple(
+        advanced if item.purpose is assessment.profile.purpose else item
+        for item in state.purpose_states
+    )
+    return state.model_copy(
+        update={
+            "purpose_states": purpose_states,
+            "shared_artifact_hashes": tuple(
+                sorted(
+                    {
+                        *state.shared_artifact_hashes,
+                        topology_hash,
+                        assessment_hash,
+                    }
+                )
+            ),
+        }
+    )
+
+
+def transition_acquisition_authorized(
+    state: M1ePilotStateV1,
+    bundle: AcquisitionAuthorizationVerificationBundle,
+) -> M1ePilotStateV1:
+    """Advance only purpose lanes named by a reverified acquisition authority."""
+    verify_acquisition_authorization(bundle)
+    if state.profile_set_hash != content_hash(bundle.profiles):
+        raise ValueError("acquisition profile set does not match pilot state")
+    authorized = set(bundle.authorization.authorized_profile_hashes)
+    purpose_states = []
+    for item in state.purpose_states:
+        if item.profile_hash not in authorized:
+            purpose_states.append(item)
+            continue
+        if item.stage is not PilotStage.RIGHTS_ASSESSED:
+            raise ValueError("acquisition authorization requires assessed rights")
+        purpose_states.append(
+            item.model_copy(
+                update={
+                    "stage": PilotStage.ACQUISITION_AUTHORIZED,
+                    "reached_stage_artifact_hashes": (
+                        *item.reached_stage_artifact_hashes,
+                        content_hash(bundle.eligibility),
+                        content_hash(bundle.approval),
+                        content_hash(bundle.authorization),
+                    ),
+                }
+            )
+        )
+    if not authorized or not authorized.issubset(
+        {item.profile_hash for item in state.purpose_states}
+    ):
+        raise ValueError("authorization names an unknown purpose profile")
+    shared = tuple(
+        sorted(
+            {
+                *state.shared_artifact_hashes,
+                content_hash(bundle.eligibility),
+                content_hash(bundle.approval),
+                content_hash(bundle.authorization),
+            }
+        )
+    )
+    return state.model_copy(
+        update={
+            "purpose_states": tuple(purpose_states),
+            "shared_artifact_hashes": shared,
         }
     )

@@ -4,6 +4,15 @@ from uuid import uuid7
 
 import pytest
 from pydantic import ValidationError
+from test_replay_authorization import _approval, _approval_context
+from test_rights_assessment import (
+    make_assessment,
+    make_evidence,
+    make_topology,
+)
+from test_rights_assessment import (
+    make_profile as make_rights_profile,
+)
 
 import drift.domain.qualification as qualification_contracts
 from drift.domain.qualification import (
@@ -27,21 +36,104 @@ from drift.domain.qualification import (
     build_negative_report,
     qualification_profile_hash,
 )
-from drift.qualification.lifecycle import transition_pilot
+from drift.qualification.lifecycle import (
+    transition_acquisition_authorized,
+    transition_pilot,
+    transition_rights_assessed,
+)
+from drift.qualification.rights import (
+    AcquisitionAuthorizationVerificationBundle,
+    assess_acquisition_eligibility,
+    authorize_acquisition,
+    validate_rights_assessment,
+)
 from drift.serialization.canonical import content_hash
 
 H = tuple(f"{index:x}" * 64 for index in range(1, 16))
 NOW = datetime(2026, 9, 13, 12, tzinfo=UTC)
 REPORT_ID = uuid7()
 LATER_NONTERMINAL_STAGES = (
-    PilotStage.RIGHTS_ASSESSED,
-    PilotStage.ACQUISITION_AUTHORIZED,
     PilotStage.ACQUIRED,
     PilotStage.SNAPSHOT_FROZEN,
     PilotStage.QUALIFIED,
     PilotStage.REPLAY_AUTHORIZED,
     PilotStage.REPLAYED,
 )
+
+
+def test_task3_advances_rights_and_acquisition_only_from_typed_verification() -> None:
+    decision = make_rights_profile(ConsumerPurpose.HISTORICAL_DECISION_INPUT)
+    audit = make_rights_profile(ConsumerPurpose.RETROSPECTIVE_AUDIT)
+    profile_set = PilotProfileSetV1(
+        pilot_id=uuid7(), pilot_version="1", profiles=(decision, audit)
+    )
+    state = M1ePilotStateV1(
+        profile_set_hash=content_hash(profile_set),
+        purpose_states=cast(
+            tuple[PurposeStageStateV1, PurposeStageStateV1],
+            tuple(
+                PurposeStageStateV1(
+                    purpose=profile.purpose,
+                    profile_hash=qualification_profile_hash(profile),
+                    stage=None,
+                    reached_stage_artifact_hashes=(),
+                    terminal_blocker=None,
+                )
+                for profile in profile_set.profiles
+            ),
+        ),
+        shared_artifact_hashes=(),
+    )
+    for profile in profile_set.profiles:
+        state = transition_pilot(state, freeze_transition(profile_set, profile))
+
+    topology = make_topology()
+    assessments = tuple(
+        validate_rights_assessment(
+            profile,
+            make_assessment(profile, topology),
+            make_evidence(topology),
+        )
+        for profile in profile_set.profiles
+    )
+    for assessment in assessments:
+        state = transition_rights_assessed(state, assessment)
+    assert all(
+        item.stage is PilotStage.RIGHTS_ASSESSED for item in state.purpose_states
+    )
+
+    eligibility = assess_acquisition_eligibility(profile_set, assessments)
+    approval = _approval(eligibility)
+    authorization = authorize_acquisition(eligibility, approval, _approval_context())
+    state = transition_acquisition_authorized(
+        state,
+        AcquisitionAuthorizationVerificationBundle(
+            profiles=profile_set,
+            assessments=assessments,
+            eligibility=eligibility,
+            approval=approval,
+            approval_evidence=_approval_context(),
+            authorization=authorization,
+        ),
+    )
+    assert all(
+        item.stage is PilotStage.ACQUISITION_AUTHORIZED for item in state.purpose_states
+    )
+
+
+def test_task3_rights_transition_rejects_profile_substitution() -> None:
+    profile_set, decision, _, state = pilot()
+    state = transition_pilot(state, freeze_transition(profile_set, decision))
+    substitute = make_rights_profile(decision.purpose)
+    topology = make_topology()
+    validated = validate_rights_assessment(
+        substitute,
+        make_assessment(substitute, topology),
+        make_evidence(topology),
+    )
+
+    with pytest.raises(ValueError, match="profile"):
+        transition_rights_assessed(state, validated)
 
 
 def make_profile(purpose: ConsumerPurpose) -> QualificationProfileV1:
