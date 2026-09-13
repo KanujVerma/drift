@@ -58,6 +58,16 @@ platform-specific offline bundle. A portable lockfile or copied virtual
 environment alone is insufficient. OCI packaging is an escalation path, not a
 new default dependency.
 
+The pre-acquisition qualification profile is snapshot-free; a later target
+records not acquired, acquired but unsnapshotted, or binds it to delivered
+bytes. Historical-decision and retrospective-audit use are
+separate purpose profiles grouped within the pilot. Replay `MATCH` additionally
+requires evidence of system-level network isolation and a fresh restore target;
+package-manager offline flags alone are insufficient. A pre-replay report binds
+the eleven non-replay dimensions; post-run attempt-bound attestations and the
+typed replay result produce the final twelve-dimension report without a hash
+cycle.
+
 M1e does not add an evaluator, backtester, provider connection, recurring
 ingestion, production credentials, broker, portfolio, strategy, order, or
 trading capability. An executable M1e plan requires the user decisions listed

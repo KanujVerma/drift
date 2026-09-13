@@ -117,6 +117,8 @@ result but does not authorize real-data evaluation.
 
 The reviewed architecture is recorded in
 `docs/superpowers/specs/2026-09-12-license-gated-real-source-qualification-replay-closure-design.md`
-and ADR 0010. No executable M1e plan or runtime capability exists. Provider
-selection, contract answers, data acquisition, adapters, environment packaging,
-and evaluator work remain unauthorized.
+and ADR 0010. The executable implementation plan is
+`docs/superpowers/plans/2026-09-13-m1e-license-gated-real-source-qualification-replay-closure.md`.
+Planning is complete but implementation is unstarted and unauthorized. Provider
+selection, contract answers, acquisition, adapters, environment packaging, and
+evaluator work remain absent.

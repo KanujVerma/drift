@@ -222,12 +222,25 @@ The profile declares:
 - security/listing/universe scope;
 - date range and revision cutoff;
 - requested M1b/M1c/M1d roles;
-- required golden cases;
+- required golden-case definition and pre-acquisition instance-manifest hashes;
 - critical versus optional dimensions;
 - accepted downstream purpose, such as “historical decision input”,
   “retrospective audit only”, or “coverage diagnostic only”.
 
 Changing any field creates a different qualification.
+
+The profile freezes before acquisition and therefore does not contain delivered
+snapshot identity. `QualificationTargetV1` records `NOT_ACQUIRED`,
+`ACQUIRED_UNSNAPSHOTTED` with exact receipts/failure evidence, or
+`SNAPSHOT_BOUND` with the exact `RealSourceSnapshotV1` hash. A negative result
+never mints a snapshot that was not built.
+
+Historical-decision input and retrospective audit are separate qualification
+identities. The initial pilot uses a `PilotProfileSetV1` with exactly two
+purpose-specific profiles whose provider, subscriber, infrastructure, source
+scope, policy, and golden-case requirements otherwise match. They may share
+legally authorized acquisition evidence, but each retains independent dimension
+results and acceptance.
 
 ### 7.2 Result acceptance
 
@@ -236,10 +249,25 @@ or pass current retrospective analysis while failing historical decision use.
 The report preserves those distinctions. No overall score may hide a critical
 `FAIL` or `UNKNOWN`.
 
+The pre-replay report contains the eleven non-replay dimensions. Replay binds
+that immutable report, then the typed replay result supplies the twelfth
+dimension and produces the final purpose report. The final report is never an
+input to its own replay.
+
 ## 8. Golden real-source cases
 
 The pilot uses a continuous bounded sample plus event windows. Independent
 truth sources grade provider claims; the provider does not grade itself.
+
+Before candidate acquisition, freeze an exact instance manifest for all 18
+cases, including any evidence-backed substitutions. Each executable predicate
+retains a pre-acquisition subject/logical-key selector specification, independent
+truth claim or constant, comparison operation, evidence requirements, and every
+status branch. After mapping, a separate binding records zero or more exact
+candidate record/mapping hashes without changing that selector. Human-
+adjudicated extraction decisions bind exact primary-source bytes and extracted
+typed values; later truth claims reference those decisions. Bare URLs or prose
+invariants are not executable grading evidence.
 
 | ID | Historical case | What it tests | Independent primary evidence |
 |---|---|---|---|
@@ -301,6 +329,12 @@ existing manifest acquisition descriptor. It contains:
 
 It never stores secrets, authorization headers, cookies, signed URLs, or
 credential-bearing error text.
+
+Before the first request, `AcquisitionPlanV1` binds the authorization, exact
+credential-free request scope, expected-object inventory hash, native-layer
+rule, limits, and freeze time. An inventory-discovery request is separately
+authorized and receipted. Expected inventory cannot be derived after observing
+the response it is supposed to test.
 
 Provider-native bytes mean the exact post-transfer-decoding response entity or
 published file before collector decompression, parsing, normalization, or
@@ -507,8 +541,9 @@ promoted. A patched environment is a new environment identity.
 Given a retained qualification snapshot and environment closure from six months
 earlier, a fresh offline host must:
 
-1. obtain a current replay-time authorization decision, then verify source,
-   license, environment and package artifact hashes;
+1. obtain a current replay-time authorization decision, freeze pre-run isolation
+   and clean-target plans, then verify source, license, environment and package
+   artifact hashes;
 2. reconstruct the declared environment without provider access or populated
    package caches;
 3. load exact native source bytes;
@@ -519,7 +554,11 @@ earlier, a fresh offline host must:
 8. reproduce M1d schedule, mapping, derivation, view and reference hashes;
 9. reproduce qualification-dimension outcomes and limitations from the exact
    retained queries, policies, contexts, validation identities, and grading
-   evidence.
+   evidence;
+10. record execution and dispose of the target under the frozen plan; and
+11. verify post-run system-offline and fresh-target attestations bound to that
+    exact request, attempt, target, process tree, and control interval before
+    finalizing `MATCH`.
 
 Historical reconstruction preserves original canonical IDs, timestamps, query
 payloads, policies, contexts, and dependency hashes. The new replay attempt has
@@ -540,6 +579,19 @@ Replay results distinguish:
 
 A retained hash without bytes may explain what is missing but cannot produce
 `MATCH`.
+
+Package-manager flags such as `uv --offline` or `--no-index` are not proof that
+the process lacked network capability. Replay returns `MATCH` only when an
+enforced OS, host, or VM isolation mechanism and fresh restore target are bound
+by exact evidence. Until that mechanism is selected and evidenced for the
+macOS/arm64 target, environment machinery may be tested but accepted replay
+must pause.
+
+The immutable replay request binds pre-run isolation and clean-target plans.
+System-offline and fresh-target attestations are created only after execution
+and disposal, and bind the exact request, attempt, VM/boot, target, process tree,
+and control interval. A post-run attestation cannot be fabricated as a pre-run
+request input.
 
 ## 14. Historical depth
 
@@ -714,7 +766,8 @@ The design fails if any attack can silently produce `PASS` or replay
 
 M1e completes positively when:
 
-1. one qualification profile is frozen;
+1. one pilot profile set with separate historical-decision and retrospective-
+   audit profiles is frozen;
 2. exact applicable legal evidence is retained and adjudicated;
 3. one bounded real-source corpus is acquired under explicit authorization;
 4. every critical dimension is `PASS`, and every optional dimension has an
