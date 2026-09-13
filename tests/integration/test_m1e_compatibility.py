@@ -232,9 +232,7 @@ def _assert_m1e_script_allowed(relative: str, source: str) -> None:
         for module in modules:
             root = module.split(".", maxsplit=1)[0]
             if root in NETWORK_IMPORT_ROOTS:
-                raise AssertionError(
-                    f"network import is deferred to Task 8: {module}"
-                )
+                raise AssertionError(f"network import is deferred to Task 8: {module}")
             if root in PROCESS_IMPORT_ROOTS:
                 assert relative in PROCESS_ORCHESTRATION_SCRIPT_PATHS, (
                     f"process import outside planned orchestration script: {module}"

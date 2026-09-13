@@ -2324,12 +2324,15 @@ evaluator capability was introduced.
 - GREEN evidence: the required Task 1 focused gate passed `43` tests. The final
   full repository gate passed `1,657` tests in `1,240.02` seconds. `uv run ruff
   check .`, `uv run ruff format --check .`, `uv run mypy src tests`, and `uv
-  build` passed. The focused review-fix checks also passed.
-- Review and closure: two review-fix rounds hardened future-source history,
+  build` passed. The focused review-fix checks also passed. Post-acceptance fix
+  round 3 mechanically formatted the M1e compatibility guard; its 10 affected
+  tests passed, Ruff passed, `uv run ruff format --check .` reported 157 files
+  already formatted, and mypy passed for the touched test.
+- Review and closure: three review-fix rounds hardened future-source history,
   script partitioning, alias-aware process and dynamic-execution rejection, and
-  the pre-Task-8 network and credential boundary. Final review found no open
-  Critical or Important finding. The deferred Minor remains noted and was not
-  changed in Task 1.
+  the pre-Task-8 network and credential boundary, then closed the formatter gap.
+  Final review found no open Critical or Important finding. The deferred Minor
+  remains noted and was not changed in Task 1.
 - External artifacts: none. The archived M1d input inventory binds
   `af75cce0f763de025f8ae3516577a9d0a1acead9`; M1e production source remains
   absent. Task 2 remains unstarted.
