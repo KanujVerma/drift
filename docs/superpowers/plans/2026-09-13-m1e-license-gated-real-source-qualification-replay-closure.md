@@ -2422,8 +2422,8 @@ access, a download, or a syntactically valid hash into `ALLOWED`.
   purpose-specific decision never inferred from acquisition-time authority.
   Task 4 next adds only typed acquisition/evidence-gathering behavior.
 - External artifacts: none. Task 4 is next and remains unstarted. Task 4 must
-  own the typed `EVIDENCE_GATHERED` advancement and may not reuse Task 3
-  rights authority.
+  own the typed `ACQUIRED` advancement and may not reuse Task 3 rights
+  authority.
 
 ## 9. Planning review and publication verification
 
