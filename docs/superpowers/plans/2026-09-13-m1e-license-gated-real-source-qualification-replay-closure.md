@@ -665,7 +665,7 @@ that acquisition/retention scope; bytes cannot be used for a denied sibling
 purpose. Replay performs a new purpose-specific decision using current
 entitlement and notices.
 
-- [ ] **Step 1: Write contract-topology RED tests**
+- [x] **Step 1: Write contract-topology RED tests**
 
 Cover duplicate/cyclic precedence, missing incorporated agreement, unknown
 applicability, unmatched product/publisher, absent assent, confidential evidence
@@ -673,7 +673,7 @@ in a public reference, acyclic construction of assessment then per-object rights
 binding, and a complete lawful synthetic topology. A missing
 applicable node forces the affected answer to `UNKNOWN`.
 
-- [ ] **Step 2: Write rights and authorization RED tests**
+- [x] **Step 2: Write rights and authorization RED tests**
 
 Cover unresolved classification, marketing-only claims, denied raw retention,
 denied backup, post-term deletion, purpose mismatch, unauthorized service
@@ -681,26 +681,26 @@ provider, expired validity, changed users/infrastructure, new termination
 notice, nonexistent/mismatched contract or approval evidence hashes, and replay
 using only an old acquisition-time PASS.
 
-- [ ] **Step 3: Implement validation without legal inference**
+- [x] **Step 3: Implement validation without legal inference**
 
 Implement the models and pure validators. The only route to `ALLOWED` is an
 explicit `RightsAnswerV1` with complete applicable contract evidence and the
 exact requested scope. Preserve `DENIED` and `UNKNOWN` independently.
 
-- [ ] **Step 4: Run focused GREEN**
+- [x] **Step 4: Run focused GREEN**
 
 ```text
 uv run pytest tests/unit/test_rights_assessment.py tests/unit/test_replay_authorization.py tests/unit/test_provenance_references.py -q
 ```
 
-- [ ] **Step 5: Independent rights review and full gate**
+- [x] **Step 5: Independent rights review and full gate**
 
 A fresh Sol reviewer owns licensing/negative-completion review. Verify contract
 topology closure, current authorization, per-object rights, purpose separation,
 and that confidential evidence cannot leak into Git-facing records. Fix genuine
 Important/Critical findings, then run the full repository gate once.
 
-- [ ] **Step 6: Commit and Checkpoint**
+- [x] **Step 6: Commit and Checkpoint**
 
 Stage only Task 3 files plus the execution-record update. Commit:
 
@@ -2378,6 +2378,52 @@ trading capability was introduced.
 - External artifacts: none. Task 3 is next and remains unstarted. Task 3 must own
   the typed `RIGHTS_ASSESSED` advancement and may not reuse generic Task 2
   transition authority.
+
+### Task 3 accepted, 2026-09-14
+
+Task 3 added the rights topology (contract documents, precedence,
+classification, parties and service providers), per-question rights
+assessments, prospective content-rights policies with later per-object
+bindings, purpose-separated acquisition eligibility, externally evidenced
+acquisition approval and authorization, and independent per-purpose replay
+authorization. Its implementation commits are `4364e9b` (`feat: gate M1e
+data rights`), `10fecd9` (`fix: close M1e rights authority gaps`), and
+`8e15531` (`fix: preserve M1e rights topology continuity`). No provider,
+credential, acquisition adapter, network access, real byte, evaluator, or
+trading capability was introduced. No function converts marketing, account
+access, a download, or a syntactically valid hash into `ALLOWED`.
+
+- RED evidence: Step 1 and Step 2 tests failed before the Task 3 modules
+  existed (missing `drift.domain.rights` and `drift.qualification.rights`).
+  Subsequent focused runs reproduced seven material rights/authority defects
+  from the first independent review (denied-purpose bindings, scope widening,
+  legal-party substitution, adjudication substitution between stages,
+  hash-only object binding, unsafe confidential locators, and unresolved
+  negative-answer evidence) and three residual defects (party validation too
+  strict for upstream publishers, sibling assessment substitution escaping
+  continuity checks, and confidential locator validation skipping
+  not-applicable nodes).
+- GREEN evidence: the final focused gate passed `91` tests
+  (`test_rights_assessment.py`, `test_replay_authorization.py`,
+  `test_provenance_references.py`). The final full repository gate passed
+  `1,740` tests in 2,671.01 seconds. `uv run ruff check .`, `uv run ruff
+  format --check .` (`166` files), `uv run mypy src tests` (no issues in
+  `131` source files), `uv build`, and `git diff --check` passed. The final
+  gate ran against the reviewed Task 3 implementation at `8e15531` with no
+  tracked working-tree changes.
+- Review and closure: a fresh independent rights reviewer found seven
+  material Critical/Important findings; fix round 1 (`10fecd9`) closed four
+  and fix round 2 (`8e15531`) closed the remaining three. The final
+  independent review reported the implementation clean with no open Critical
+  or Important finding.
+- Controller ruling: Task 3 owns the typed `RIGHTS_ASSESSED` advancement.
+  Acquisition authority requires `AcquisitionEligibilityV1` plus externally
+  evidenced `AcquisitionApprovalV1`; replay authority is a separate
+  purpose-specific decision never inferred from acquisition-time authority.
+  Task 4 next adds only typed acquisition/evidence-gathering behavior.
+- External artifacts: none. Task 4 is next and remains unstarted. Task 4 must
+  own the typed `EVIDENCE_GATHERED` advancement and may not reuse Task 3
+  rights authority.
 
 ## 9. Planning review and publication verification
 
