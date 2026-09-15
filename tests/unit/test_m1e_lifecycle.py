@@ -53,7 +53,6 @@ H = tuple(f"{index:x}" * 64 for index in range(1, 16))
 NOW = datetime(2026, 9, 13, 12, tzinfo=UTC)
 REPORT_ID = uuid7()
 LATER_NONTERMINAL_STAGES = (
-    PilotStage.SNAPSHOT_FROZEN,
     PilotStage.QUALIFIED,
     PilotStage.REPLAY_AUTHORIZED,
     PilotStage.REPLAYED,
@@ -603,3 +602,21 @@ def test_negative_report_rejects_pass_blocker_or_cross_purpose_results() -> None
             report_id=REPORT_ID,
             reported_at=NOW,
         )
+
+
+def test_transition_snapshot_frozen_lifecycle() -> None:
+    from test_source_snapshots import _make_sample_snapshot_and_state
+
+    from drift.qualification.lifecycle import transition_snapshot_frozen
+
+    snapshot, artifacts, contexts, target, state = _make_sample_snapshot_and_state()
+    advanced = transition_snapshot_frozen(state, target, snapshot, artifacts, contexts)
+    assert advanced.purpose_states[0].stage is PilotStage.SNAPSHOT_FROZEN
+    assert (
+        snapshot.snapshot_hash
+        in advanced.purpose_states[0].reached_stage_artifact_hashes
+    )
+    assert (
+        content_hash(target) in advanced.purpose_states[0].reached_stage_artifact_hashes
+    )
+    assert snapshot.snapshot_hash in advanced.shared_artifact_hashes

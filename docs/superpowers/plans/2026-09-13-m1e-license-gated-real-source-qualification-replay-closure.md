@@ -1060,7 +1060,7 @@ caller-supplied PASS or reconstruct a query from a digest. `DatasetManifestV2`,
 `AcquisitionDescriptorV1`, and `LicenseDescriptorV1` continue to own dataset
 lineage; the snapshot indexes, rather than replaces, those objects.
 
-- [ ] **Step 1: Write snapshot-identity RED tests**
+- [x] **Step 1: Write snapshot-identity RED tests**
 
 Mutate rights, receipt ordering, one byte layer, release ID, source-state time,
 cutoff rule, coverage, schema/methodology, adapter identity, validation decision,
@@ -1068,33 +1068,33 @@ query, context, grading evidence, limitation, and expected output. Every semanti
 mutation changes identity or fails verification. Relocating the private root does
 not.
 
-- [ ] **Step 2: Write consistency and closure RED tests**
+- [x] **Step 2: Write consistency and closure RED tests**
 
 Combine identity, actions, and observations from different uncoordinated
 vintages. Assert `UNKNOWN` or `PARTIAL`, never PASS. Omit each replay input family
 one at a time and assert closure rejection. A retained hash without retrievable
 bytes cannot close replay.
 
-- [ ] **Step 3: Implement builder and verifier through old public APIs**
+- [x] **Step 3: Implement builder and verifier through old public APIs**
 
 Do not modify or duplicate M1a-M1d query, context, decision, bundle, or reference
 models. The verifier loads their exact canonical bytes and replays their existing
 owners.
 
-- [ ] **Step 4: Run focused GREEN**
+- [x] **Step 4: Run focused GREEN**
 
 ```text
 uv run pytest tests/unit/test_source_snapshots.py tests/unit/test_cross_component_consistency.py tests/unit/test_temporal.py tests/unit/test_security_identity.py tests/unit/test_economic_outcomes.py tests/unit/test_normalization.py -q
 ```
 
-- [ ] **Step 5: Independent temporal/snapshot review and full gate**
+- [x] **Step 5: Independent temporal/snapshot review and full gate**
 
 Terra may implement plumbing. A fresh Sol reviewer attacks current-vintage
 fallback, cross-component inconsistency, missing replay inputs, substituted old
 contexts, location identity, and duplicate provenance. Fix genuine
 Important/Critical findings, then run the full repository gate once.
 
-- [ ] **Step 6: Commit and Checkpoint**
+- [x] **Step 6: Commit and Checkpoint**
 
 Stage only Task 5 files and the execution-record update. Commit:
 
@@ -2460,7 +2460,52 @@ evaluator, or trading capability was introduced.
   authorization and inventory hashes, native layer rules matching profile set hash,
   request scope consistency, and limits enforcement. Task 5 next adds exact real-source
   snapshots and replay-input closure.
-- External artifacts: none. Task 5 is next and remains unstarted.
+- External artifacts: none. Task 5 is complete. Task 6 is next and remains unstarted.
+
+### Task 5 accepted, 2026-09-14
+
+Task 5 added exact real-source snapshot contracts (`RealSourceSnapshotV1`,
+`real_source_snapshot_hash`), closed-world replay-input closure (`ReplayInputKind`
+across all 12 closed categories, `CanonicalReplayInputEntryV1`, `RawReplayInputEntryV1`),
+cross-component temporal consistency rules (`SourceComponentRole`, `ConsistencyStatus`,
+`TemporalBoundaryClaimV1`, `ProviderReleaseEvidenceV1`, `CoordinatedCutoffRuleV1`,
+`CrossComponentConsistencyDecisionV1`), safe content-addressed artifact reference
+binding (`drift+sha256://<hash>`), snapshot builders, location-neutral verifiers
+executing public M1b/M1c/M1d contract validators, and the typed verifier-backed
+transition to `PilotStage.SNAPSHOT_FROZEN`.
+No external network, provider credentials, provider SDKs, real market data,
+evaluator, or trading capability was introduced.
+
+- RED evidence: Snapshot identity tests proved that any semantic mutation (rights,
+  receipt ordering, byte layers, release ID, source times, cutoff rules, coverage
+  assertions, schema/methodology, adapter identity, validation decisions, queries,
+  contexts, grading evidence, expected outputs) changes snapshot hash or fails
+  verification. Cross-component consistency tests proved fail-closed behavior on
+  uncoordinated vintages, malformed ISO cutoffs, undeclared component roles, and
+  decision hash tampering. Context integrity tests proved that dummy or mutated M1b,
+  M1c, and M1d contexts fail verification without trusting caller-supplied claims.
+- GREEN evidence: The focused gate passed 51 tests (`test_source_snapshots.py`,
+  `test_cross_component_consistency.py`, `test_m1e_lifecycle.py`) and 178 tests in
+  adjacent unit suites. The full repository gate passed 1,828 tests in 1,214.68
+  seconds. `uv run ruff check .`, `uv run ruff format --check .` (176 files),
+  `uv run mypy src tests` (no issues in 141 source files), `uv build --offline`,
+  and `git diff --check` passed. No em dashes (U+2014) exist in the tree.
+- Review and closure: A fresh independent adversarial reviewer attacked snapshot
+  identity, location neutrality, cross-component temporal consistency, closed-world
+  replay closure, context integrity, and lifecycle gating. The review produced 4
+  Critical, 5 Important, and 3 Minor findings (SEC-M1E-01 through SEC-M1E-12) and
+  test suite gaps (SEC-M1E-T1). All findings were remediated: self-excluding decision
+  hashing, location URI format enforcement, strict temporal string parsing,
+  full 12-category replay closure, authentic context validation via existing public
+  verifiers, grading evidence separation, and lifecycle receipt provenance binding.
+  All remediations were verified against the repository and proven by passing tests.
+- Controller ruling: Task 5 owns the typed `SNAPSHOT_FROZEN` advancement. Advancement
+  strictly requires `RealSourceSnapshotV1` verification against exact retained bytes,
+  re-evaluation of cross-component temporal consistency, closed-world replay closure,
+  public validation of authentic M1b, M1c, and M1d resolution contexts, and matching
+  profile set and receipt provenance in pilot state. Task 6 next adds the provider-neutral
+  adapter boundary, qualification harness, and golden cases.
+- External artifacts: none. Task 6 is next and remains unstarted.
 
 ## 9. Planning review and publication verification
 

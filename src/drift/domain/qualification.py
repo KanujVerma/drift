@@ -117,12 +117,13 @@ class M1eCompletionKind(StrEnum):
 
 _PRE_REPLAY_DIMENSIONS = tuple(QualificationDimension)[:-1]
 _ALL_DIMENSIONS = tuple(QualificationDimension)
-_TASK4_PERSISTED_STAGES = {
+_TASK5_PERSISTED_STAGES = {
     None,
     PilotStage.PROFILE_FROZEN,
     PilotStage.RIGHTS_ASSESSED,
     PilotStage.ACQUISITION_AUTHORIZED,
     PilotStage.ACQUIRED,
+    PilotStage.SNAPSHOT_FROZEN,
 }
 
 
@@ -387,8 +388,15 @@ class QualificationTargetV1(FrozenModel):
                 raise ValueError(
                     "acquired-unsnapshotted target requires receipts and blocker only"
                 )
-        elif not self.receipt_hashes or self.snapshot_hash is None:
-            raise ValueError("snapshot-bound target requires receipts and snapshot")
+        elif (
+            not self.receipt_hashes
+            or self.snapshot_hash is None
+            or self.failure_evidence_hashes
+        ):
+            raise ValueError(
+                "snapshot-bound target requires receipts and snapshot, "
+                "and no failure evidence"
+            )
         return self
 
 
@@ -657,7 +665,7 @@ class PurposeStageStateV1(FrozenModel):
 
     @model_validator(mode="after")
     def validate_stage(self) -> Self:
-        if self.stage not in _TASK4_PERSISTED_STAGES:
+        if self.stage not in _TASK5_PERSISTED_STAGES:
             raise ValueError("later purpose stage requires its typed verifier")
         if self.stage is None:
             if self.reached_stage_artifact_hashes or self.terminal_blocker is not None:
@@ -692,7 +700,7 @@ class M1ePilotStateV1(FrozenModel):
         if len({item.profile_hash for item in self.purpose_states}) != 2:
             raise ValueError("M1e purpose states require distinct profile hashes")
         if any(
-            item.stage not in _TASK4_PERSISTED_STAGES for item in self.purpose_states
+            item.stage not in _TASK5_PERSISTED_STAGES for item in self.purpose_states
         ):
             raise ValueError("pilot state contains a stage without a typed verifier")
         object.__setattr__(

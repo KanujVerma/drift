@@ -9,16 +9,23 @@ from drift.domain.acquisition import (
     AcquisitionReconciliationV1,
 )
 from drift.domain.qualification import (
+    AcquisitionState,
     M1ePilotStateV1,
     M1eTransitionV1,
     PilotStage,
+    QualificationTargetV1,
     qualification_profile_hash,
 )
 from drift.domain.rights import ValidatedRightsAssessment
+from drift.domain.source_snapshots import RealSourceSnapshotV1
 from drift.qualification.rights import (
     AcquisitionAuthorizationVerificationBundle,
     validate_rights_assessment,
     verify_acquisition_authorization,
+)
+from drift.qualification.snapshots import (
+    ExistingContractContexts,
+    verify_real_source_snapshot,
 )
 from drift.serialization.canonical import content_hash
 
@@ -328,6 +335,83 @@ def transition_acquired(
                 receipt_plan_hash,
                 receipt_recon_hash,
                 receipt_hash,
+            }
+        )
+    )
+    return state.model_copy(
+        update={
+            "purpose_states": tuple(purpose_states),
+            "shared_artifact_hashes": shared,
+        }
+    )
+
+
+def transition_snapshot_frozen(
+    state: M1ePilotStateV1,
+    target: QualificationTargetV1,
+    snapshot: RealSourceSnapshotV1,
+    artifacts: Mapping[str, VerifiedArtifactBytes],
+    contexts: ExistingContractContexts,
+) -> M1ePilotStateV1:
+    """Advance one purpose lane to SNAPSHOT_FROZEN after verifying
+    snapshot and target.
+    """
+    if target.acquisition_state is not AcquisitionState.SNAPSHOT_BOUND:
+        raise ValueError("target must be in SNAPSHOT_BOUND acquisition state")
+    if target.snapshot_hash != snapshot.snapshot_hash:
+        raise ValueError("target snapshot hash does not match snapshot hash")
+    if state.profile_set_hash != snapshot.profile_set_hash:
+        raise ValueError("snapshot profile set does not match pilot state")
+    if target.profile_hash not in snapshot.authorized_profile_hashes:
+        raise ValueError("target profile is not in snapshot authorized profiles")
+    if target.receipt_hashes != snapshot.receipt_hashes:
+        raise ValueError("target receipt hashes do not match snapshot receipt hashes")
+    if not set(snapshot.receipt_hashes).issubset(set(state.shared_artifact_hashes)):
+        raise ValueError("snapshot receipt hashes were not acquired in pilot state")
+
+    verify_real_source_snapshot(snapshot, artifacts, contexts)
+
+    target_hash = content_hash(target)
+    snapshot_hash = snapshot.snapshot_hash
+
+    purpose_states = []
+    matched = False
+    for item in state.purpose_states:
+        if item.profile_hash != target.profile_hash:
+            purpose_states.append(item)
+            continue
+        if item.stage is not PilotStage.ACQUIRED:
+            raise ValueError("advancement to SNAPSHOT_FROZEN requires ACQUIRED stage")
+        if (
+            not item.reached_stage_artifact_hashes
+            or item.reached_stage_artifact_hashes[-1] not in snapshot.receipt_hashes
+        ):
+            raise ValueError(
+                "snapshot does not contain the acquired receipt for this purpose lane"
+            )
+        matched = True
+        purpose_states.append(
+            item.model_copy(
+                update={
+                    "stage": PilotStage.SNAPSHOT_FROZEN,
+                    "reached_stage_artifact_hashes": (
+                        *item.reached_stage_artifact_hashes,
+                        target_hash,
+                        snapshot_hash,
+                    ),
+                }
+            )
+        )
+
+    if not matched:
+        raise ValueError("target profile does not match any profile in pilot state")
+
+    shared = tuple(
+        sorted(
+            {
+                *state.shared_artifact_hashes,
+                target_hash,
+                snapshot_hash,
             }
         )
     )
