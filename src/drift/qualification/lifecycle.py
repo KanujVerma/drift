@@ -1,5 +1,13 @@
 """Verified profile-freeze start for the M1e pilot lifecycle."""
 
+from collections.abc import Mapping
+
+from drift.datasets.resolver import VerifiedArtifactBytes
+from drift.domain.acquisition import (
+    AcquisitionPlanV1,
+    AcquisitionReceiptV1,
+    AcquisitionReconciliationV1,
+)
 from drift.domain.qualification import (
     M1ePilotStateV1,
     M1eTransitionV1,
@@ -190,6 +198,136 @@ def transition_acquisition_authorized(
                 content_hash(bundle.eligibility),
                 content_hash(bundle.approval),
                 content_hash(bundle.authorization),
+            }
+        )
+    )
+    return state.model_copy(
+        update={
+            "purpose_states": tuple(purpose_states),
+            "shared_artifact_hashes": shared,
+        }
+    )
+
+
+def transition_acquired(
+    state: M1ePilotStateV1,
+    receipt: AcquisitionReceiptV1,
+    plan: AcquisitionPlanV1,
+    reconciliation: AcquisitionReconciliationV1,
+    artifacts: Mapping[str, VerifiedArtifactBytes],
+) -> M1ePilotStateV1:
+    """Advance purpose lanes to ACQUIRED upon verified receipts and reconciliation."""
+    from drift.domain.acquisition import AcquisitionCompleteness
+    from drift.qualification.acquisition import verify_acquisition_receipt
+
+    verify_acquisition_receipt(receipt, artifacts)
+
+    if reconciliation.result is not AcquisitionCompleteness.PASS:
+        raise ValueError(
+            f"acquisition completeness is {reconciliation.result.value}; "
+            "cannot advance to ACQUIRED"
+        )
+
+    receipt_recon_hash = content_hash(reconciliation)
+    if receipt.reconciliation_hash != receipt_recon_hash:
+        raise ValueError(
+            "receipt reconciliation hash does not match reconciliation content"
+        )
+
+    receipt_plan_hash = content_hash(plan)
+    if receipt.acquisition_plan_hash != receipt_plan_hash:
+        raise ValueError("receipt acquisition plan hash does not match plan content")
+
+    if receipt.authorization_hash != plan.authorization_hash:
+        raise ValueError("receipt authorization hash does not match acquisition plan")
+
+    if receipt.expected_inventory_hash != plan.expected_inventory_hash:
+        raise ValueError(
+            "receipt expected inventory hash does not match acquisition plan"
+        )
+
+    if content_hash(receipt.native_layer_rule) != plan.planned_native_layer_rule_hash:
+        raise ValueError(
+            "receipt native layer rule hash does not match acquisition plan"
+        )
+
+    if receipt.native_layer_rule.profile_set_hash != state.profile_set_hash:
+        raise ValueError(
+            "receipt native layer rule profile set does not match pilot state"
+        )
+
+    if plan.request_scope_hash != content_hash(receipt.request):
+        raise ValueError(
+            "acquisition plan request scope hash does not match request content"
+        )
+
+    if len(receipt.pages) > plan.max_pages:
+        raise ValueError(
+            f"receipt page count {len(receipt.pages)} "
+            f"exceeds plan max_pages {plan.max_pages}"
+        )
+
+    if len(receipt.observed_objects) > plan.max_objects:
+        raise ValueError(
+            f"receipt observed objects count {len(receipt.observed_objects)} "
+            f"exceeds plan max_objects {plan.max_objects}"
+        )
+
+    total_bytes = sum(obj.byte_size for obj in receipt.byte_graph.objects)
+    if total_bytes > plan.max_bytes:
+        raise ValueError(
+            f"total byte size {total_bytes} exceeds plan max_bytes {plan.max_bytes}"
+        )
+
+    if state.profile_set_hash != receipt.profile_set_hash:
+        raise ValueError("receipt profile set does not match pilot state")
+
+    supported_profiles = set(receipt.native_layer_rule.supported_profile_hashes)
+    purpose_states = []
+    advanced_count = 0
+    receipt_hash = content_hash(receipt)
+
+    for item in state.purpose_states:
+        if item.profile_hash not in supported_profiles:
+            purpose_states.append(item)
+            continue
+        if item.stage is not PilotStage.ACQUISITION_AUTHORIZED:
+            raise ValueError(
+                "advancement to ACQUIRED requires ACQUISITION_AUTHORIZED stage"
+            )
+        if (
+            not item.reached_stage_artifact_hashes
+            or item.reached_stage_artifact_hashes[-1] != receipt.authorization_hash
+        ):
+            raise ValueError(
+                "receipt authorization does not match purpose state authorization"
+            )
+
+        advanced_count += 1
+        purpose_states.append(
+            item.model_copy(
+                update={
+                    "stage": PilotStage.ACQUIRED,
+                    "reached_stage_artifact_hashes": (
+                        *item.reached_stage_artifact_hashes,
+                        receipt_plan_hash,
+                        receipt_recon_hash,
+                        receipt_hash,
+                    ),
+                }
+            )
+        )
+
+    if advanced_count == 0:
+        raise ValueError("receipt does not match any profile in pilot state")
+
+    shared = tuple(
+        sorted(
+            {
+                *state.shared_artifact_hashes,
+                receipt_plan_hash,
+                receipt_recon_hash,
+                receipt_hash,
             }
         )
     )

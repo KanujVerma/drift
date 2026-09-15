@@ -53,7 +53,6 @@ H = tuple(f"{index:x}" * 64 for index in range(1, 16))
 NOW = datetime(2026, 9, 13, 12, tzinfo=UTC)
 REPORT_ID = uuid7()
 LATER_NONTERMINAL_STAGES = (
-    PilotStage.ACQUIRED,
     PilotStage.SNAPSHOT_FROZEN,
     PilotStage.QUALIFIED,
     PilotStage.REPLAY_AUTHORIZED,

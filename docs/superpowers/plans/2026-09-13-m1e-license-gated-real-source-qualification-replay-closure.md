@@ -2425,6 +2425,43 @@ access, a download, or a syntactically valid hash into `ALLOWED`.
   own the typed `ACQUIRED` advancement and may not reuse Task 3 rights
   authority.
 
+### Task 4 accepted, 2026-09-14
+
+Task 4 added exact acquisition receipts, byte-layer identity (`ByteLayerKind`,
+`ByteObjectV1`, `ByteTransformationV1`, `NativeByteGraphV1`), provider-native
+layer rules, request and origin evidence, page and retry receipts, expected
+vs observed inventory reconciliation, secret screening, transactional private
+content storage (`PrivateStoreSession`, directory fsync, quarantine, and recovery),
+and the typed verifier-backed transition to `PilotStage.ACQUIRED`.
+No external network, provider credentials, provider SDKs, real market data,
+evaluator, or trading capability was introduced.
+
+- RED evidence: Initial imports failed before domain and qualification modules
+  existed. Dedicated tests proved closed-world completeness failures on missing
+  or undeclared objects, cursor loops, unclosed pagination, duplicate objects,
+  secret/credential leakage, symlink escapes, uncommitted transaction leakage,
+  and unauthorized lifecycle advancement. Subsequent adversarial review caught
+  ast-forbidden network imports in production (`urllib`), in-place mutation of
+  in-degrees during Kahn's topological sort causing false graph rejection, and
+  lifecycle stage classification inconsistencies.
+- GREEN evidence: The focused gate passed 83 tests (`test_acquisition_receipts.py`,
+  `test_acquisition_reconciliation.py`, `test_private_content_store.py`,
+  `test_m1e_lifecycle.py`, and `test_m1e_compatibility.py`). The full repository gate
+  passed 1,797 tests in 1,210.73 seconds. `uv run ruff check .`, `uv run ruff format --check .`
+  (172 files), `uv run mypy src tests` (no issues in 137 source files),
+  `uv build --offline`, and `git diff --check` passed. No em dashes (U+2014) exist in
+  the tree.
+- Review and closure: An independent adversarial review verified the byte-layer
+  identity invariants, closed-world reconciliation completeness, path confinement,
+  fsync commit order, quarantine recovery, and lifecycle gating. All findings
+  were remediated, verified against the repository, and proven by passing tests.
+- Controller ruling: Task 4 owns the typed `ACQUIRED` advancement. Advancement
+  strictly requires `AcquisitionReconciliationV1` with completeness `PASS`, matching
+  authorization and inventory hashes, native layer rules matching profile set hash,
+  request scope consistency, and limits enforcement. Task 5 next adds exact real-source
+  snapshots and replay-input closure.
+- External artifacts: none. Task 5 is next and remains unstarted.
+
 ## 9. Planning review and publication verification
 
 Sol High owned the architecture/decomposition pass. A Terra repository mapper
