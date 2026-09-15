@@ -1865,14 +1865,14 @@ credential, user-site, and inherited Python variables are absent. The script
 verifies `sys.executable`, `sys.prefix`, `sys.path`, `drift.__file__`, installed
 file hashes, `otool -L`, and captured dynamic-library evidence before replay.
 
-- [ ] **Step 1: Write environment-identity RED tests**
+- [x] **Step 1: Write environment-identity RED tests**
 
 Mutate the Git tree, built artifact, uv lock, pylock, uv, Python executable,
 stdlib, wheel, sdist toolchain, native library, platform, TZif, source snapshot,
 restore recipe, and vulnerability evidence. Each changes closure identity or
 fails verification. A copied `.venv` is never an accepted artifact class.
 
-- [ ] **Step 2: Write offline and replay-result RED tests**
+- [x] **Step 2: Write offline and replay-result RED tests**
 
 Reject `uv --offline` as system proof, a nonfresh target, mutable tag, absent
 wheel, wrong interpreter, unavailable source bytes, expired rights, changed
@@ -1884,34 +1884,34 @@ of a non-MATCH result cannot complete positively. Table-test every
 `NegativeStageEvidence` variant from post-profile external failure through replay
 failure, and reject a variant whose supplied artifacts belong to another stage.
 
-- [ ] **Step 3: Implement pure closure and replay verification**
+- [x] **Step 3: Implement pure closure and replay verification**
 
 Keep process creation and filesystem orchestration in scripts. Production
 modules validate immutable artifacts and run deterministic in-process replay
 through the Task 6 harness. Do not add a downloader, container engine,
 vulnerability scanner, credential provider, or network control mechanism.
 
-- [ ] **Step 4: Prove a synthetic clean-prefix restore**
+- [x] **Step 4: Prove a synthetic clean-prefix restore**
 
 Stage only current public build/dependency artifacts in a temporary private
 root, restore to a fresh temporary prefix with package/provider access disabled,
 and replay a runtime-generated synthetic M1e corpus. This proves closure mechanics, not
 system-level offline acceptance and not a real-provider `MATCH`.
 
-- [ ] **Step 5: Run focused GREEN**
+- [x] **Step 5: Run focused GREEN**
 
 ```text
 uv run pytest tests/unit/test_environment_closure.py tests/unit/test_replay_authorization.py tests/integration/test_m1e_offline_replay.py tests/integration/test_m1c_pinned_replay.py tests/integration/test_m1d_pinned_replay.py -q
 ```
 
-- [ ] **Step 6: Independent environment/replay review**
+- [x] **Step 6: Independent environment/replay review**
 
 A fresh Sol reviewer checks restore completeness, process boundaries,
 system-offline truth, fresh-target truth, old-vulnerability isolation,
 comparison exclusions, failure classification, and OCI nonadoption. Fix every
 genuine Important/Critical finding.
 
-- [ ] **Step 7: Full gate, commit, and Checkpoint**
+- [x] **Step 7: Full gate, commit, and Checkpoint**
 
 Run the full repository gate once. Stage only Task 7 files and the execution
 record. Commit:
@@ -2554,7 +2554,65 @@ evaluator, or trading capability was introduced.
   The qualification report evaluates all 11 pre-replay dimensions, requiring passing
   public contract validation, matching snapshot hashes, and verified golden cases.
   Task 7 next adds the macOS/arm64 environment closure, offline attestations, and replay.
-- External artifacts: none. Task 7 is next and remains unstarted.
+- External artifacts: none. Task 7 is complete below.
+
+### Task 7 accepted, 2026-09-15
+
+Task 7 added the macOS/arm64 environment closure contracts and verifiers
+(`EnvironmentArtifactKind`, `EnvironmentArtifactV1`, `PythonRuntimeIdentityV1`,
+`PackageArtifactV1`, `SystemLibraryIdentityV1`, `PlatformIdentityV1`,
+`EnvironmentClosureV1`, `build_environment_closure`, `verify_environment_closure`),
+the offline and replay contracts (`OfflineControlStatus`, `ReplayOutcome`,
+`OfflineProbeResultV1`, `IsolationExecutionPlanV1`, `CleanTargetPlanV1`,
+`SystemOfflineAttestationV1`, `FreshRestoreAttestationV1`,
+`ReplayComparisonPolicyV1`, `ReplayRequestV1`, `ReplayAttemptEnvelopeV1`,
+`ReplayExecutionRecordV1`, `ReplayResultV1`, `verify_system_offline_attestation`,
+`verify_fresh_restore_attestation`, `execute_replay`, `finalize_replay_result`,
+`compare_replay_outputs`, `finalize_qualification_report`), the terminal
+completion and negative evidence framework (`PositivePurposeTerminalBundle`,
+`ProfileExternalNegativeEvidence`, `RightsNegativeEvidence`,
+`AcquisitionNegativeEvidence`, `SnapshotNegativeEvidence`,
+`QualificationNegativeEvidence`, `ReplayAuthorizationNegativeEvidence`,
+`ReplayNegativeEvidence`, `NegativePurposeTerminalBundle`, `finalize_pilot`,
+`require_qualified_purpose`, `build_qualified_source_handoff`,
+`derive_qualified_reference_inventory`), and the local-only scripts
+(`scripts/capture_m1e_environment.py`, `scripts/replay_m1e_offline.py`).
+No external network, provider credentials, provider SDKs, real market data,
+evaluator, or trading capability was introduced.
+
+- RED evidence: Mutation tests proved fail-closed behavior across all 19
+  `EnvironmentArtifactKind` categories and every `EnvironmentClosureV1` field.
+  `SystemOfflineAttestationV1` rejects package-manager flags alone.
+  `FreshRestoreAttestationV1` rejects inherited state. `finalize_replay_result`
+  enforces Table 1775 outcome hierarchy and rejects mismatched or predated
+  attestations. `finalize_pilot` rejects non-MATCH outcomes in positive bundles,
+  requires two distinct purpose bundles, and table-tests all 7
+  `NegativeStageEvidence` variants against their mandatory blocker dimensions.
+  `execute_replay` enforces rights, platform compatibility, semantic identity,
+  and source byte availability before process execution.
+- GREEN evidence: Focused suite passed 49 tests (`test_environment_closure.py`,
+  `test_replay_authorization.py`, `test_m1e_offline_replay.py`,
+  `test_m1c_pinned_replay.py`, `test_m1d_pinned_replay.py`). The full repository
+  gate passed 1,882 tests in 1,232.90 seconds. `uv run ruff check .`,
+  `uv run ruff format --check .` (194 files), `uv run mypy src tests` (no issues in
+  156 source files), `uv build --offline` (sdist and wheel built), and
+  `git diff --check` passed. Zero em dashes (U+2014) exist in the diff.
+- Review and closure: An independent adversarial review attacked environment closure
+  completeness, system offline truth, fresh target truth, process boundaries,
+  evaluator confinement, replay outcome hierarchy, and terminal completion.
+  All findings were resolved and verified: `finalize_pilot` correctly validates
+  both positive and negative bundles; `derive_qualified_reference_inventory`
+  uses deterministic UUIDv7 and strictly filters for purpose-authorized canonical
+  inputs while rejecting raw input bytes; `build_qualified_source_handoff` sets
+  target hash from target content hash; Table 1775 outcome hierarchy evaluates
+  probe results, process tree identity, and target identity; child process
+  environment is strictly confined to `ALLOWED_ENV_VARS`; and verification
+  functions require verified evidence backing.
+- Controller ruling: Task 7 completes the macOS/arm64 environment closure, offline
+  attestations, and deterministic replay harness. Task 8 (license-gated pilot
+  execution) requires explicit user authorization and external inputs and remains
+  unstarted.
+- External artifacts: none. Task 8 is license-gated and unstarted.
 
 ## 9. Planning review and publication verification
 
