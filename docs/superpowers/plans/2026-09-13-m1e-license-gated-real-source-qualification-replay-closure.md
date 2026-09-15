@@ -2505,7 +2505,56 @@ evaluator, or trading capability was introduced.
   public validation of authentic M1b, M1c, and M1d resolution contexts, and matching
   profile set and receipt provenance in pilot state. Task 6 next adds the provider-neutral
   adapter boundary, qualification harness, and golden cases.
-- External artifacts: none. Task 6 is next and remains unstarted.
+- External artifacts: none. Task 5 is complete.
+
+### Task 6 accepted, 2026-09-14
+
+Task 6 added the provider-neutral adapter boundary (`AdapterIdentityV1`,
+`FieldMappingDecisionV1`, `ProviderMappingReportV1`, `CandidateContextBlueprintV1`,
+`QualifiedSourceHandoffV1`), candidate validation dispatcher executing unchanged
+public M1b/M1c/M1d contract validators (`validate_candidate_facts`), golden case
+domain contracts and exact predicate operators covering Table 1401 G01 through G18
+(`GoldenCaseDefinitionV1`, `IndependentTruthClaimV1`, `TruthIntakeReceiptV1`,
+`TruthExtractionDecisionV1`, `PredicateOperator`, `evaluate_predicate`), the
+independent golden case grader and verifier (`grade_golden_case`, `verify_golden_case_result`),
+the qualification harness evaluating all 11 pre-replay dimensions (`qualify_source`,
+`verify_qualification_report`), and the local-only truth intake script
+(`scripts/intake_m1e_truth.py`).
+No external network, provider credentials, provider SDKs, real market data,
+evaluator, or trading capability was introduced.
+
+- RED evidence: Golden case predicate tests proved fail-closed behavior across all
+  9 predicate operators: non-matching values return FALSE; unreached records or
+  missing coverage on REQUIRED_ABSENT return UNKNOWN; unsupported native types return
+  UNSUPPORTED; and status determination strictly follows FAIL > UNKNOWN > PARTIAL > PASS.
+  Tampering with golden case results or report content hashes fails verification.
+  Forbidden inferences (ticker minting identity, daily minting regular session, etc.)
+  cannot be mapped as clean lossless mappings. Candidate datasets failing public
+  M1b/M1c/M1d validators are rejected.
+- GREEN evidence: The focused gate passed 29 tests (`test_qualification_adapter_boundary.py`,
+  `test_golden_case_contracts.py`, `test_truth_evidence.py`, `test_qualification_harness.py`).
+  The full repository gate passed 1,857 tests in 1,245.04 seconds. `uv run ruff check .`,
+  `uv run ruff format --check .` (186 files), `uv run mypy src tests` (no issues in
+  150 source files), `uv build --offline`, and `git diff --check` passed. No em dashes
+  (U+2014) exist in the tree.
+- Review and closure: Two independent adversarial reviews attacked provider semantics,
+  golden cases G01-G18, Table 1401 predicate mapping, truth intake provenance, evaluator
+  leakage, harness integrity, and scope confinement. The review identified 5 Critical,
+  5 Important, and 4 Minor findings across domain models, adapter validation, harness
+  dimension coverage, golden case predicate extraction, and truth intake scripts.
+  All findings were remediated: explicit truth claim selectors and expected constants
+  on G01-G18; canonical domain field alignment; required coverage passing checks on
+  absence predicates; safe cross-format instant comparisons; candidate record extraction
+  bound via claim bindings; canonical PreReplayQualificationReportV1 evaluation covering
+  all 11 pre-replay dimensions; snapshot-bound enforcement and snapshot hash verification;
+  profile set hash binding; expected inventory hash enforcement on truth receipts; and
+  local-only script execution. All remediations were verified against the repository
+  and proven by passing tests.
+- Controller ruling: Task 6 owns the qualification harness and adapter boundary.
+  The qualification report evaluates all 11 pre-replay dimensions, requiring passing
+  public contract validation, matching snapshot hashes, and verified golden cases.
+  Task 7 next adds the macOS/arm64 environment closure, offline attestations, and replay.
+- External artifacts: none. Task 7 is next and remains unstarted.
 
 ## 9. Planning review and publication verification
 
