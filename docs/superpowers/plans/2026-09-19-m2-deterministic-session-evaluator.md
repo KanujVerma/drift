@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Implement Drift M2: a deterministic, provider-neutral session-level evaluator and portfolio accounting kernel operating across two structurally distinct evidence lanes (`EXPLORATORY` and `PROMOTION`) with zero lookahead, unadjusted source-basis accounting, native M1c corporate actions, content-addressed execution traces, and strict anti-laundering enforcement.
+**Goal:** Implement Drift M2: a deterministic, provider-neutral session-level evaluator and portfolio accounting kernel operating across two structurally distinct evidence lanes (`EXPLORATORY` and `PROMOTION`) with zero lookahead, unadjusted source-basis accounting, proof-carrying M1b-M1d integration, native M1c corporate action effect and settlement processing, atomic plan-then-commit execution, content-addressed execution traces, and strict anti-laundering enforcement.
 
-**Architecture:** A single provider-neutral evaluator core consumes validated `EvaluationInputBundleV1` artifacts and executes a 5-phase deterministic daily session schedule (Pre-Open Effects, Open Execution, Intrasession Effects, Close Mark, Post-Close Decision). Lane separation is structurally enforced at the type layer (`ExploratoryEvaluationAdmissionV1` / `ExploratoryEvaluationResultV1` vs `PromotionEvaluationAdmissionV1` / `PromotionEvaluationResultV1`). Economic holdings are keyed by `security_id` (UUID7), accounting uses source-basis unadjusted prices, and execution deltas are filled at the next regular session open. The Alpaca exploratory bridge is isolated in Task 8 as an offline intake script outside the evaluator core.
+**Architecture:** A single provider-neutral evaluator core consumes validated, proof-carrying `EvaluationInputBundleV1` artifacts and executes a 5-phase deterministic daily session schedule (Pre-Open Effects, Open Execution, Intrasession Effects, Close Mark, Post-Close Decision). Lane separation is structurally enforced at the type layer (`ExploratoryEvaluationAdmissionV1` / `ExploratoryEvaluationResultV1` vs `PromotionEvaluationAdmissionV1` / `PromotionEvaluationResultV1`). Economic holdings are keyed by `security_id` (UUID7), accounting uses source-basis unadjusted prices, and execution deltas are filled at the next realized regular session open via an atomic plan-then-commit rebalance. The Alpaca exploratory bridge is isolated in Task 8 as an offline intake script outside the evaluator core.
 
 **Tech Stack:** Existing Python 3.14+, Pydantic (FrozenModel), pytest, Ruff, mypy, uv, and Python standard library only. Decimal arithmetic for all prices, cash balances, and fees. No new dependencies, database migrations, broker connections, or live trading capabilities.
 
-**Execution Status:** Planning and architecture specification approved. Implementation authorized task-by-task under this plan.
+**Execution Status:** Planning and architecture specification approved with externally adjudicated corrections. Implementation authorized task-by-task under this plan.
 
 **Spec:** [M2 Deterministic Session-Level Evaluator and Portfolio Accounting Kernel Design Specification](../specs/2026-09-19-m2-deterministic-session-evaluator-design.md), [ADR 0010](../../adr/0010-qualify-real-source-rights-and-replay-before-evaluation.md), and [ADR 0012](../../adr/0012-permit-exploratory-evaluation-before-promotion-grade-source-qualification.md).
 
@@ -19,14 +19,20 @@
 - **Workspace Boundary**: Work strictly in `/Users/kanuj/Documents/projects/drift`. Never touch external mirrors or unapproved local directories.
 - **Repository Truth**: Canonical baseline is commit `ef24c2c` (and underlying verified Task 7 checkpoint at `4b343f77a0cb60d0c4ba56f066dc33ac538a9b8d`).
 - **Protected Prior Milestones**: M0 through M1e Tasks 1-7 are complete and protected. Do not mutate persisted models, schemas, or fixtures in `src/drift/domain/experiments.py`, `strategies.py`, `securities.py`, `universes.py`, `observations.py`, or `qualification.py`. Add M2 evaluator contracts beside them.
-- **Strict Two-Lane Anti-Upgrade Invariant**: Exploratory evaluation results can NEVER be upgraded, converted, or relabeled into promotion evidence. No constructor, helper, or mutable field may bridge the two lanes. Promotion strictly requires an independent, fresh evaluation run against verified M1e promotion-qualified data.
+- **Strict Two-Lane Anti-Upgrade Invariant**: Exploratory evaluation results can NEVER be upgraded, converted, or relabeled into promotion evidence. No constructor, helper, or mutable field may bridge the two lanes. Promotion strictly requires an independent, fresh evaluation run against verified M1e promotion-qualified data with positive completion (`M1eCompletionKind.COMPLETED_POSITIVE`).
+- **Evidence Grade Only (No Strategy Promotion)**: M2 certifies evidence quality (`is_promotion_grade_evidence: bool`); it does NOT decide strategy promotion, which belongs exclusively to M10 and M11. Never expose `is_promotable=True`.
 - **Acyclic Admission Hashing**: The dependency graph is strictly acyclic: Market Data -> `EvaluationInputBundleV1` (`bundle_hash`) -> `EvaluationAdmissionV1` (`input_bundle_hash = bundle_hash`) -> `EvaluationRunIdentity`. `EvaluationInputBundleV1` does NOT hold a reference to `admission_hash`.
+- **Proof-Carrying Input Bundles**: The evaluator must not trust flat self-authored copies. Bundles cryptographically bind authoritative M1b structural eligibility, M1c outcome resolution, and M1d observation view proof hashes.
 - **Zero Em Dashes**: The Unicode em dash (U+2014) is strictly forbidden across all code, docstrings, markdown documents, and commit messages. Always use the ASCII hyphen (U+002D).
 - **Offline / Network-Free Core**: The evaluator core and all standard unit test suites must run 100% offline with zero network access or socket activity.
 - **Decimal Precision**: All currency balances, prices, execution marks, dividends, fees, and slippage calculations must use Python `Decimal` or exact integer strings. Floating-point arithmetic for portfolio accounting is strictly forbidden.
-- **Lookahead Prevention**: Session D post-close decisions execute exclusively at session D+1 regular session open. No same-bar close execution.
-- **Accounting Basis**: Accounting and marks strictly use source-basis unadjusted prices. Corporate actions come exclusively from M1c economic facts. Split-adjusted prices are forbidden in portfolio accounting.
-- **Missingness Fail-Closed**: Missing prices, missing corporate action terms, or unprovable outcomes fail closed to `INDETERMINATE`. Never forward-fill close marks, substitute close for open, or synthesize zero. Encountering fatal indeterminacy halts further session stepping.
+- **Realized Session Clock**: Session boundaries are driven by authenticated M1d realized session open/close timestamps (`actual_open`, `actual_close`), correctly handling variable session hours (early closes). Post-close decisions occur after actual realized close.
+- **Atomic Plan-Then-Commit Execution**: Sells and buys in an open rebalance are verified as 100% funded before any fills are committed. If unfunded, 0 fills are committed, `FillRejectionTraceEventV1` is emitted, and the run is classified `REJECTED`.
+- **No Fraction Truncation**: Share conversions must never use Python `int(...)` truncation. Compute exact rational entitlements and apply explicit M1c `FractionTreatmentV1` (e.g. `aggregate_sale_cash`, `round_down`, `round_up`). Unknown or unsupported fraction treatments fail closed to `INDETERMINATE`.
+- **Due-Bill and Legal Entitlement**: Dividends create receivables only when M1c occurred effect evidence proves legal entitlement under the event's exact rule, correctly handling due-bill redemptions.
+- **Missingness Fail-Closed**: Missing prices, unquantified corporate actions, or unprovable outcomes fail closed to `INDETERMINATE` and cleanly halt session stepping. Never forward-fill close marks, substitute close for open, or synthesize zero.
+- **No False Halt Syntheses**: Missing halt telemetry remains `UNKNOWN`. Never synthesize `not_halted` by default.
+- **Deterministic Replay Identity**: Evaluator results contain only deterministic values derived from inputs and historical evidence. No random UUID7s or wall-clock timestamps inside deterministic result artifacts. Operational metadata belong to M0 `ExperimentRun`.
 - **Secret Handling**: Alpaca credentials reside exclusively in `.env` (mode 0600, gitignored). Never print, log, commit, or pass credentials to the evaluator core.
 - **TDD Workflow**: Every task requires meaningful RED tests confirming failure before implementation, followed by GREEN acceptance, focused verification, adversarial review, full gate, and Checkpoint commit.
 
@@ -34,29 +40,29 @@
 
 ## Task Decomposition Overview
 
-- **Task 1: Evaluation Lane Contracts, Protocol Definitions, Cost Models, and Admission Gatekeeper**
-  Establish immutable admission types, protocol parameters, versioned cost/slippage models, and promotion gatekeeper logic.
-- **Task 2: Provider-Neutral Evaluation Input Bundle, Session Clock, and Deterministic Replay Identity**
-  Build the self-contained input bundle contract (acyclic, snapshot-bound), session clock schedule, and canonical replay hashing.
-- **Task 3: Portfolio State, Cash Accounting, Whole-Share Positions, and Pending Claims Kernel**
-  Implement long-only whole-share holdings, USD cash accounting, deterministic dividend receivables, and weekend settlement logic.
+- **Task 1: Evaluation Lane Contracts, Protocol Definitions, Cost Models, and Authentic M1e Gatekeeper**
+  Establish immutable admission types, protocol parameters, versioned cost/slippage models, canonical Alpaca limitation constants, and the external positive M1e completion gatekeeper.
+- **Task 2: Proof-Carrying Evaluation Input Bundle, Realized Session Clock, and Deterministic Replay Identity**
+  Build the proof-carrying input bundle contract (acyclic, snapshot-linked, cryptographically verified), realized session clock (early-close aware), and canonical replay hashing without wall-clock contamination.
+- **Task 3: Portfolio State, Cash Accounting, Whole-Share Positions, and Deterministic Claims Kernel**
+  Implement long-only whole-share holdings, USD cash accounting, deterministic occurrence-bound claims, weekend/holiday settlements, and cost basis relief formulas.
 - **Task 4: First-Class M1c Corporate Action and Economic Outcome Accounting**
-  Process forward/reverse splits, staged target split-scaling, cash dividends, mergers, spin-offs, and terminations natively from M1c facts.
-- **Task 5: Target-Position Strategy Protocol, Deterministic Next-Open Fill Engine, and Cost Application**
-  Implement runtime strategy interface, whole-share delta derivation with explicit omission rule, sell-first/buy-second fills, and Phase 2 cash solvency enforcement.
+  Process forward/reverse splits, staged target split-scaling, exact `FractionTreatmentV1` handling (no truncation), due-bill dividend entitlements, mergers, spin-offs, and terminations natively from M1c facts.
+- **Task 5: Target-Position Strategy Boundary, Atomic Next-Open Fill Engine, and Cost Application**
+  Implement runtime strategy interface with canonical sorted views, whole-share delta derivation with explicit complete target set omission rule, and atomic plan-then-commit execution.
 - **Task 6: Deterministic Session Evaluator Engine, Canonical Trace Generation, and M0 Integration**
-  Assemble the 5-phase session evaluator loop, content-addressed trace logger, scientific classification system, and M0 ExperimentRun binding.
+  Assemble the 5-phase session evaluator loop, content-addressed trace logger, fatal indeterminacy halting, complete result models without random/wall-clock fields, and M0 ExperimentRun binding.
 - **Task 7: Comprehensive Adversarial Verification, Anti-Laundering Invariants, and Closed-World Replay Testing**
-  Execute the complete 28-case adversarial matrix, anti-upgrade invariants, and bitwise replay validation.
+  Execute the complete 28-case adversarial matrix, anti-upgrade invariants, atomic solvency checks, and bitwise replay validation across ExperimentRuns.
 - **Task 8: Bounded Alpaca Development Bridge and End-to-End Exploratory Smoke Validation**
   Build the offline Alpaca intake adapter, map bounded historical data to M1b-M1d, bind canonical limitation constants, and execute an exploratory smoke run.
 
 ---
 
-## Task 1: Evaluation Lane Contracts, Protocol Definitions, Cost Models, and Admission Gatekeeper
+## Task 1: Evaluation Lane Contracts, Protocol Definitions, Cost Models, and Authentic M1e Gatekeeper
 
 ### 1. Objective
-Define the fundamental M2 domain contracts for evaluation lane admission (`ExploratoryEvaluationAdmissionV1` vs `PromotionEvaluationAdmissionV1`), evaluation protocol configuration (`EvaluationProtocolV1`), versioned transaction cost/slippage parameters (`EvaluationCostModelV1`), canonical Alpaca limitation constants, and the external promotion gatekeeper function.
+Define the fundamental M2 domain contracts for evaluation lane admission (`ExploratoryEvaluationAdmissionV1` vs `PromotionEvaluationAdmissionV1`), evaluation protocol configuration (`EvaluationProtocolV1`), versioned transaction cost/slippage parameters (`EvaluationCostModelV1`), canonical Alpaca limitation constants, and the external positive M1e completion gatekeeper function (`validate_promotion_admission`).
 
 ### 2. Exact Files Expected
 - `src/drift/domain/evaluator_lanes.py`
@@ -70,12 +76,12 @@ Define the fundamental M2 domain contracts for evaluation lane admission (`Explo
 
 ### 3. Contracts and Interfaces
 - Canonical Alpaca limitation constants:
-  - `ALPACO_LIMITATION_TRUNCATED_CA = "corporate-action-mutation-replay-truncated-to-approx-72-days"`
+  - `ALPACA_LIMITATION_TRUNCATED_CA = "corporate-action-mutation-replay-truncated-to-approx-72-days"`
   - `ALPACA_LIMITATION_UNVERSIONED_BARS = "derived-bars-unversioned-without-provider-vintages"`
   - `ALPACA_LIMITATION_ABSENT_HALTS = "trading-halt-telemetry-absent-from-api"`
   - `ALPACA_LIMITATION_BOUNDED_COHORT = "evaluation-restricted-to-declared-bounded-cohort"`
 - `ExploratoryEvaluationAdmissionV1(FrozenModel)`:
-  - `admission_id: UUID7`
+  - `admission_id: SHA256Hash` (content-addressably derived)
   - `lane: Literal["exploratory"] = "exploratory"`
   - `development_source_profile_hash: SHA256Hash`
   - `input_bundle_hash: SHA256Hash`
@@ -83,23 +89,37 @@ Define the fundamental M2 domain contracts for evaluation lane admission (`Explo
   - `admitted_at: UTCDateTime`
   - `admission_hash: SHA256Hash`
 - `PromotionEvaluationAdmissionV1(FrozenModel)`:
-  - `admission_id: UUID7`
+  - `admission_id: SHA256Hash` (content-addressably derived)
   - `lane: Literal["promotion"] = "promotion"`
+  - `m1e_completion_record_hash: SHA256Hash`
+  - `m1e_profile_hash: SHA256Hash`
   - `m1e_qualification_report_hash: SHA256Hash`
   - `m1e_purpose: Literal["historical_decision_input"]`
   - `m1e_snapshot_hash: SHA256Hash`
   - `m1e_rights_assessment_hash: SHA256Hash`
   - `m1e_replay_result_hash: SHA256Hash`
   - `input_bundle_hash: SHA256Hash`
-  - `admitted_at: UTCDateTime`
+  - `admitted_at: UTCDateTime` (deterministically anchored to upstream evidence timestamp; never wall-clock now)
   - `admission_hash: SHA256Hash`
 - `EvaluationAdmissionV1 = Annotated[ExploratoryEvaluationAdmissionV1 | PromotionEvaluationAdmissionV1, Field(discriminator="lane")]`
-- `validate_promotion_admission(admission, bundle_snapshot_hash, report)`:
-  - Validates that `admission.lane == "promotion"`.
-  - Validates that `bundle_snapshot_hash == admission.m1e_snapshot_hash`.
-  - Validates that `admission.m1e_purpose == "historical_decision_input"`.
-  - Validates that `report.purpose == "historical_decision_input"`.
-  - Validates that all 12 dimensions in `report.results` evaluate to `QualificationStatus.PASS`.
+- `validate_promotion_admission(admission, bundle, completion, profile, report)`:
+  - Verifies `admission.lane == "promotion"`.
+  - Verifies `completion.completion_kind == M1eCompletionKind.COMPLETED_POSITIVE`.
+  - Verifies `content_hash(completion) == admission.m1e_completion_record_hash`.
+  - Verifies `content_hash(profile) == admission.m1e_profile_hash`.
+  - Verifies `content_hash(report) == admission.m1e_qualification_report_hash`.
+  - Verifies `bundle.bundle_hash == admission.input_bundle_hash`.
+  - Verifies `bundle.source_snapshot_hash == admission.m1e_snapshot_hash`.
+  - Verifies `report in completion.purpose_reports`.
+  - Verifies `admission.m1e_purpose == ConsumerPurpose.HISTORICAL_DECISION_INPUT`.
+  - Verifies `report.purpose == ConsumerPurpose.HISTORICAL_DECISION_INPUT`.
+  - Verifies `profile.purpose == ConsumerPurpose.HISTORICAL_DECISION_INPUT`.
+  - Verifies that all 12 dimensions are explicitly present in `report.results` (`len(results_by_dim) == 12 and set(results_by_dim.keys()) == set(QualificationDimension)`).
+  - Verifies that for every dimension in `profile.critical_dimensions`:
+    - `res.status == QualificationStatus.PASS`
+    - `res.reachability == ExecutionReachability.REACHED`
+    - `res.admitted_purpose is True`
+  - Does NOT require non-critical dimensions to be PASS.
 - `EvaluationCostModelV1(FrozenModel)`:
   - `model_id: NonBlankStr`
   - `commission_per_share: Decimal` (must be >= 0)
@@ -121,7 +141,8 @@ Define the fundamental M2 domain contracts for evaluation lane admission (`Explo
 ### 5. GREEN Acceptance Criteria
 - `ExploratoryEvaluationAdmissionV1` validates that `acknowledged_limitations` is non-empty.
 - Self-excluding canonical hashing verifies `admission_hash`, `cost_model_hash`, and `protocol_hash`.
-- `validate_promotion_admission` rejects any report where a dimension is not PASS or where snapshot hashes diverge.
+- `validate_promotion_admission` rejects any report where a critical dimension did not PASS or where M1e completion is negative.
+- `validate_promotion_admission` correctly permits non-critical dimensions to be non-PASS when M1e completion is positive.
 - Discriminator `lane` correctly deserializes either admission variant from JSON.
 - `EvaluationCostModelV1` enforces non-negative Decimals and computes exact costs for sample orders.
 
@@ -133,21 +154,22 @@ uv run pytest tests/unit/test_evaluator_lanes.py tests/unit/test_evaluator_proto
 ### 7. Adversarial Test Cases
 - Attempt to create `ExploratoryEvaluationAdmissionV1` with empty limitations -> ValueError.
 - Attempt to mutate `admission_hash` without changing payload -> ValueError mismatch.
-- Promotion admission pointing to an M1e report with a failed or unknown dimension -> ValueError.
+- Promotion admission pointing to an M1e completion that is `COMPLETED_NEGATIVE` -> ValueError.
+- Critical dimension is `FAIL` while non-critical is `PASS` -> ValueError.
+- Non-critical dimension is `PARTIAL` while all critical are `PASS` -> Accepted.
 - Bundle snapshot hash not matching promotion admission snapshot hash -> ValueError.
-- Attempt to pass negative basis points or negative fees into `EvaluationCostModelV1` -> ValueError.
 
 ### 8. Review and Commit Boundary
-- Independent review covering lane separation, gatekeeper verification, hashing integrity, and Decimal precision.
-- Commit message: `feat: add M2 evaluation lane admission, cost models, and promotion gatekeeper`
+- Independent review covering lane separation, gatekeeper verification, critical-dimension logic, and Decimal precision.
+- Commit message: `feat: add M2 evaluation lane admission, cost models, and authentic M1e gatekeeper`
 - Checkpoint execution.
 
 ---
 
-## Task 2: Provider-Neutral Evaluation Input Bundle, Session Clock, and Deterministic Replay Identity
+## Task 2: Proof-Carrying Evaluation Input Bundle, Realized Session Clock, and Deterministic Replay Identity
 
 ### 1. Objective
-Implement the provider-neutral `EvaluationInputBundleV1` contract (acyclic, snapshot-linked), explicit schemas for session calendar entries and unadjusted session observations, the causal session scheduler (`SessionClockV1`) with warmup transition, and canonical evaluation run replay hashing.
+Implement the proof-carrying `EvaluationInputBundleV1` contract (acyclic, snapshot-linked, cryptographically validated against M1b-M1d proof hashes), the realized session scheduler (`SessionClockV1`) with variable session hours (early closes) and warmup transitions, and canonical evaluation run replay hashing without wall-clock contamination.
 
 ### 2. Exact Files Expected
 - `src/drift/domain/evaluator_bundles.py`
@@ -157,50 +179,43 @@ Implement the provider-neutral `EvaluationInputBundleV1` contract (acyclic, snap
 - `tests/unit/test_evaluator_clock.py`
 
 ### 3. Contracts and Interfaces
-- `SessionCalendarEntryV1(FrozenModel)`:
-  - `session_key: SessionKeyV1`
-  - `session_date: date`
-  - `open_time_utc: UTCDateTime`
-  - `close_time_utc: UTCDateTime`
-  - `session_scope: Literal["regular"] = "regular"`
-- `UnadjustedSessionObservationV1(FrozenModel)`:
-  - `security_id: UUID7`
-  - `session_key: SessionKeyV1`
-  - `open_price: Decimal`
-  - `close_price: Decimal`
-  - `share_volume: int`
-  - `is_halted: bool = False`
 - `EvaluationInputBundleV1(FrozenModel)`:
-  - `bundle_id: UUID7`
+  - `bundle_id: SHA256Hash` (content-addressed hash of bundle payload)
   - `evaluation_interval: TemporalIntervalClaimV1`
-  - `source_snapshot_hash: SHA256Hash | None = None` (present for M1e promotion-qualified bundles)
-  - `universe_bundle_hash: SHA256Hash`
-  - `economic_context_hash: SHA256Hash`
-  - `observation_context_hash: SHA256Hash`
-  - `session_context_hash: SHA256Hash`
-  - `normalization_policy_hashes: tuple[SHA256Hash, ...]`
+  - `source_snapshot_hash: SHA256Hash | None = None`
+  - `m1b_structural_eligibility_hashes: tuple[SHA256Hash, ...]`
+  - `m1c_outcome_resolution_hashes: tuple[SHA256Hash, ...]`
+  - `m1d_observation_view_hashes: tuple[SHA256Hash, ...]`
+  - `m1d_realized_session_hashes: tuple[SHA256Hash, ...]`
+  - `m1d_scheduled_session_hashes: tuple[SHA256Hash, ...]`
   - `security_identities: tuple[SecurityV1, ...]`
   - `listing_identities: tuple[ListingV1, ...]`
-  - `session_calendar: tuple[SessionCalendarEntryV1, ...]`
-  - `unadjusted_observations: tuple[UnadjustedSessionObservationV1, ...]`
+  - `scheduled_sessions: tuple[ScheduledSessionVersionV1, ...]`
+  - `realized_sessions: tuple[RealizedSessionVersionV1, ...]`
+  - `structural_eligibilities: tuple[StructuralEligibilityResultV1, ...]`
+  - `economic_outcomes: tuple[EconomicOutcomeResolutionV1, ...]`
+  - `unadjusted_observation_views: tuple[DerivedObservationViewV1, ...]`
   - `decision_observation_views: tuple[DerivedObservationViewV1, ...]`
-  - `corporate_action_occurrences: tuple[CorporateActionTermsVersionV1, ...]`
   - `bundle_hash: SHA256Hash`
+  - Validator: verifies that all included entities (`structural_eligibilities`, `economic_outcomes`, `unadjusted_observation_views`, `decision_observation_views`, `scheduled_sessions`, `realized_sessions`) match their bound proof hashes.
 - `SessionClockV1`:
   - Sequence of realized sessions within `evaluation_interval`.
-  - Identifies warmup sessions: for session indices $0$ to $W-1$, `is_warmup == True`.
-  - Warmup transition: session $W-1$ post-close is the first decision point where strategy targets are staged for session $W$ open execution.
+  - Driven by authenticated `RealizedSessionVersionV1.actual_open` and `actual_close`.
+  - Handles early closes: post-close decision occurs immediately after `actual_close` (e.g. 13:00 ET).
+  - Warmup schedule: 0-based `session_index` derives `is_warmup: bool = (session_index < W)`. Sessions $0$ to $W - 2$ skip `strategy.decide()`. Session $W - 1$ post-close is the first decision point (`session_index >= W - 1`) staging targets for session $W$ open. Protocols require $W \ge 1$.
 - `evaluation_run_identity(...) -> SHA256Hash`:
-  - Computes canonical hash over `(strategy_reference, parameters, input_bundle, protocol, cost_model, admission, code_hash, environment_hash)`.
+  - Computes canonical hash over `(strategy_reference, parameters, input_bundle_hash, protocol_hash, cost_model_hash, admission_hash, code_hash, environment_hash)`.
+  - Excludes all random UUIDs and wall-clock timestamps.
 
 ### 4. RED Acceptance Criteria
 - Unit tests fail with `ModuleNotFoundError` for `evaluator_bundles` and `evaluator_clock`.
 
 ### 5. GREEN Acceptance Criteria
 - Input bundle self-hash validation verifies integrity without circular dependence on admission.
-- Session clock correctly iterates regular sessions in strictly ascending calendar order.
+- Bundle rejects fabricated observation views or outcomes that do not match bound proof hashes.
+- Session clock correctly identifies realized session open and close times, including early closes at 13:00 ET.
 - Warmup interval correctly flags the first $W$ sessions as non-trading, with session $W$ executing initial fills.
-- Any change in constituent parameters, code hash, or environment hash alters `evaluation_run_identity`.
+- Re-executing identical evaluation parameters under two different mock runs produces bitwise-identical `evaluation_run_identity`.
 
 ### 6. Focused Tests
 ```bash
@@ -209,21 +224,21 @@ uv run pytest tests/unit/test_evaluator_bundles.py tests/unit/test_evaluator_clo
 
 ### 7. Adversarial Test Cases
 - Circular hash deadlock test: verify `bundle_hash` computes cleanly without requiring admission.
-- Out-of-order session calendar entries -> ValueError.
-- Observation timestamp outside declared evaluation interval -> ValueError.
-- Replaying with altered parameter dict yields distinct run hash.
+- Bundle validation with fabricated observation view missing matching proof hash -> ValueError.
+- Early-close session ending at 13:00 ET: verify decision cutoff occurs after 13:00 ET without waiting for 16:00 ET.
+- Observation view without anchor session anchored to decision session -> ValueError.
 
 ### 8. Review and Commit Boundary
-- Independent review covering calendar causality, bundle acyclic hashing, and snapshot linkage.
-- Commit message: `feat: add M2 evaluation input bundle and session clock`
+- Independent review covering calendar causality, early-close handling, bundle proof verification, and acyclic hashing.
+- Commit message: `feat: add M2 proof-carrying input bundle and realized session clock`
 - Checkpoint execution.
 
 ---
 
-## Task 3: Portfolio State, Cash Accounting, Whole-Share Positions, and Pending Claims Kernel
+## Task 3: Portfolio State, Cash Accounting, Whole-Share Positions, and Deterministic Claims Kernel
 
 ### 1. Objective
-Implement the long-only, whole-share portfolio state representation, USD cash accounting, deterministic dividend receivables (`PendingCashClaimV1`), and weekend/holiday dividend settlement logic.
+Implement the long-only, whole-share portfolio state representation, USD cash accounting, deterministic occurrence-bound claims (`PendingCashClaimV1`), weekend/holiday dividend settlement logic, and exact cost basis relief formulas.
 
 ### 2. Exact Files Expected
 - `src/drift/domain/evaluator_portfolio.py`
@@ -237,13 +252,15 @@ Implement the long-only, whole-share portfolio state representation, USD cash ac
   - `cost_basis: Decimal` (total acquisition cost including fees)
   - `average_cost_per_share: Decimal` (property: `cost_basis / quantity`)
 - `PendingCashClaimV1(FrozenModel)`:
-  - `claim_id: SHA256Hash` (deterministically derived from `security_id, action_kind, ex_session, payable_session`)
+  - `claim_id: SHA256Hash` (deterministically derived from `security_id, action_kind, occurrence_id, component_id, entitlement_session, payable_session`)
   - `security_id: UUID7`
   - `action_kind: ActionKind`
+  - `occurrence_id: NonBlankStr`
+  - `component_id: NonBlankStr`
   - `entitled_quantity: int`
   - `cash_per_share: Decimal`
   - `total_cash_expected: Decimal`
-  - `ex_session: date`
+  - `entitlement_session: date`
   - `payable_session: date`
 - `PortfolioStateV1(FrozenModel)`:
   - `session_key: SessionKeyV1`
@@ -261,15 +278,15 @@ Implement the long-only, whole-share portfolio state representation, USD cash ac
   - Gross realized PnL: $(\Delta q_{\text{sell}} \times P_{\text{fill}}) - \text{Sold Cost Basis}$.
   - Net realized PnL: $\text{Gross Realized PnL} - \text{Costs}$.
 - `PortfolioAccountingKernel`:
-  - Methods: `apply_fill(fill)`, `record_claim(claim)`, `settle_claims(current_session_date)`, `mark_close(close_prices)`.
-  - `settle_claims` settles all claims where `current_session_date >= claim.payable_session`.
+  - Methods: `apply_fill(fill)`, `record_claim(claim)`, `settle_claims(delivered_claim_ids)`, `mark_close(close_prices)`.
+  - `settle_claims` settles explicit delivered claims proven by M1c delivered settlement evidence.
 
 ### 4. RED Acceptance Criteria
 - Tests fail because `evaluator_portfolio.py` and portfolio accounting classes do not exist.
 
 ### 5. GREEN Acceptance Criteria
 - Adding holdings and updating cash balances enforces exact Decimal arithmetic.
-- Deterministic claim ID generation produces identical hash across repeated runs.
+- Deterministic claim ID generation produces distinct hashes for multiple components on the same date.
 - Claims payable on weekend dates settle cleanly on the first subsequent trading session.
 - Marking portfolio at close computes exact holdings market value using unadjusted close prices.
 - Pending claims contribute to NAV but do not alter `cash_balance` until settled.
@@ -281,7 +298,7 @@ uv run pytest tests/unit/test_evaluator_portfolio.py -v
 
 ### 7. Adversarial Test Cases
 - Attempt to create `SecurityHoldingV1` with quantity <= 0 -> ValueError.
-- Non-deterministic ID injection attack: verify identical inputs produce identical `claim_id`.
+- Multiple cash components on same date with same security ID: verify distinct `claim_id` generation.
 - Dividend payable on Saturday: verify claim settles on Monday trading session.
 - Missing close mark for a currently held position -> IndeterminateValuationError.
 
@@ -295,7 +312,7 @@ uv run pytest tests/unit/test_evaluator_portfolio.py -v
 ## Task 4: First-Class M1c Corporate Action and Economic Outcome Accounting
 
 ### 1. Objective
-Implement the corporate action processing engine that applies M1c economic facts (splits, dividends, spin-offs, mergers, terminations) directly to portfolio state during Pre-Open and Intrasession phases, with automatic staged target scaling for overnight splits.
+Implement the corporate action processing engine that applies M1c occurred economic effects (`EconomicEffectVersionV1`) and delivered settlements (`EconomicSettlementVersionV1`) directly to portfolio state, enforcing exact `FractionTreatmentV1` handling (no truncation), staged target split-scaling, and due-bill dividend entitlements.
 
 ### 2. Exact Files Expected
 - `src/drift/domain/evaluator_corporate_actions.py`
@@ -304,30 +321,37 @@ Implement the corporate action processing engine that applies M1c economic facts
 
 ### 3. Contracts and Interfaces
 - `CorporateActionProcessor`:
-  - `apply_pre_open_actions(portfolio_state, staged_targets, actions, current_session) -> tuple[PortfolioStateV1, tuple[SecurityTargetPositionV1, ...]]`
-  - `apply_intrasession_settlements(portfolio_state, current_session) -> PortfolioStateV1`
+  - `apply_pre_open_actions(portfolio_state, staged_targets, economic_outcomes, current_session) -> tuple[PortfolioStateV1, tuple[SecurityTargetPositionV1, ...]]`
+  - `apply_intrasession_settlements(portfolio_state, economic_outcomes, current_session) -> PortfolioStateV1`
 - Action Handlers:
+  - Exact rational arithmetic: use `fractions.Fraction(int(ratio.numerator), int(ratio.denominator))` or exact integer quotient/remainder; floats strictly prohibited.
+  - Inspect `ShareComponentV1.ratio_meaning`:
+    - `resulting_per_predecessor` (splits, stock acquisitions): $\text{exact\_shares} = q \times (n/d)$.
+    - `additional_per_predecessor` with same recipient (stock dividends): $\text{exact\_shares} = q + (q \times (n/d))$.
+    - `additional_per_predecessor` with child recipient (spinoff): parent shares unchanged, child entitlement $= q \times (n/d)$.
   - `ActionKind.FORWARD_SPLIT` / `REVERSE_SPLIT`:
-    - Holdings quantity: $\text{new\_quantity} = \text{int}(\text{current\_quantity} \times n / d)$.
-    - Cost basis preserved; average cost per share divides by $n / d$.
-    - Staged target positions scaled: $\text{staged\_target}' = \text{int}(\text{staged\_target} \times n / d)$.
+    - If integral: materialize whole shares.
+    - If non-integral: apply explicit `FractionTreatmentV1` (`round_down`, `round_up`, `round_nearest`, `aggregate_sale_cash`). If treatment is `fraction_issued` or `unknown`, fail closed to `INDETERMINATE`.
+    - Scale staged target positions: $\text{staged\_target}' = \text{staged\_target} \times (n/d)$. If non-integral and unresolved, fail closed to `INDETERMINATE`.
   - `ActionKind.REGULAR_CASH_DIVIDEND` / `SPECIAL_CASH_DISTRIBUTION`:
-    - Ex-date creates `PendingCashClaimV1`.
-    - Payable date settles into `cash_balance`.
+    - Create `PendingCashClaimV1` ONLY when M1c occurred effect evidence proves legal entitlement.
+    - Handle due-bill distributions: entitlement follows proven due-bill redemption rules, not generic ex-dates.
+    - Payable date settles into `cash_balance` when delivered settlement proves payment.
   - `ActionKind.CASH_ACQUISITION`: removes target position, credits cash entitlement.
-  - `ActionKind.STOCK_ACQUISITION`: converts target holding into acquirer holding using exchange ratio.
+  - `ActionKind.STOCK_ACQUISITION`: converts target holding into acquirer holding using exact ratio and `FractionTreatmentV1`.
   - `ActionKind.MIXED_ACQUISITION`: credits cash entitlement and acquirer share holding.
-  - `ActionKind.SPINOFF`: creates child security holding; if parent and child closing prices exist, NAV calculation is complete.
+  - `ActionKind.SPINOFF`: creates child security holding using exact distribution ratio and `FractionTreatmentV1`. Daily NAV marks normally if parent/child closing prices exist, without requiring tax allocation percentages.
   - `ActionKind.LIQUIDATION`: credits known liquidation proceeds; missing terms fail closed to `INDETERMINATE`.
 
 ### 4. RED Acceptance Criteria
 - Tests fail because `evaluator_corporate_actions.py` does not exist.
 
 ### 5. GREEN Acceptance Criteria
+- 1-for-8 reverse split on 10 shares with `aggregate_sale_cash`: creates 1 whole share and a pending cash-in-lieu claim for 0.25 shares.
+- Reverse split with `unknown` fraction treatment fails closed to `INDETERMINATE`.
 - 2-for-1 forward split doubles holdings AND doubles staged target positions, preserving intended delta.
-- Cash dividend on ex-date logs receivable; payable date credits cash.
-- Spin-off marks NAV cleanly when market prices exist, without requiring tax allocation percentages.
-- Double-adjustment check: rejects any input where observations are already split-adjusted.
+- Due-bill special dividend correctly defers entitlement until due-bill redemption session.
+- Spin-off marks NAV cleanly when market prices exist.
 
 ### 6. Focused Tests
 ```bash
@@ -335,22 +359,22 @@ uv run pytest tests/unit/test_evaluator_corporate_actions.py -v
 ```
 
 ### 7. Adversarial Test Cases
-- Split ratio with 0 denominator -> ValueError.
-- Staged target scaling across split: verify post-split delta execution matches intended target.
-- Bankruptcy delisting assumed to be zero without M1c proof -> IndeterminateValuationError.
-- Dividend with missing cash per share -> IndeterminateValuationError.
+- Attempt to use `int(...)` truncation on fractional split entitlement -> Rejected.
+- Reverse split on non-divisible holding with unknown fraction treatment -> IndeterminateValuationError.
+- Special dividend with due bill: generic ex-date entitlement attempt -> CausalViolationError.
+- Terms record without occurred effect report -> No portfolio mutation committed.
 
 ### 8. Review and Commit Boundary
-- Independent review covering staged target split-scaling, ActionKind alignment, and NAV spin-off decoupling.
+- Independent review covering fraction treatment, due-bill logic, staged target scaling, and M1c outcome binding.
 - Commit message: `feat: add M2 corporate action accounting kernel`
 - Checkpoint execution.
 
 ---
 
-## Task 5: Target-Position Strategy Boundary, Deterministic Next-Open Fill Engine, and Cost Application
+## Task 5: Target-Position Strategy Boundary, Atomic Next-Open Fill Engine, and Cost Application
 
 ### 1. Objective
-Implement the runtime strategy interface, `PositionViewV1`, the explicit complete target set omission rule, the sell-first/buy-second execution engine, Phase 2 cash solvency enforcement, and versioned cost/slippage application.
+Implement the runtime strategy interface with canonical sorted views (`StrategyDecisionViewV1`), `PositionViewV1`, the explicit complete target set omission rule, the atomic plan-then-commit execution engine, and versioned cost/slippage application.
 
 ### 2. Exact Files Expected
 - `src/drift/domain/evaluator_strategy.py`
@@ -365,41 +389,44 @@ Implement the runtime strategy interface, `PositionViewV1`, the explicit complet
   - `quantity: int`
   - `cost_basis: Decimal`
   - `average_cost_per_share: Decimal`
+- `StrategyDecisionViewV1(FrozenModel)`:
+  - `security_id: UUID7`
+  - `views: tuple[DerivedObservationViewV1, ...]`
 - `StrategyDecisionContextV1`:
   - `session_key: SessionKeyV1`
   - `decision_cutoff: UTCDateTime`
-  - `admitted_universe: tuple[UUID7, ...]`
-  - `current_holdings: tuple[PositionViewV1, ...]`
+  - `admitted_universe: tuple[UUID7, ...]` (canonical sorted tuple)
+  - `current_holdings: tuple[PositionViewV1, ...]` (canonical sorted tuple)
   - `current_cash: Decimal`
   - `portfolio_nav: Decimal`
-  - `decision_views: Mapping[str, tuple[DerivedObservationViewV1, ...]]`
+  - `decision_views: tuple[StrategyDecisionViewV1, ...]` (canonical sorted tuple)
 - `SecurityTargetPositionV1`:
   - `security_id: UUID7`
   - `execution_listing_id: UUID7`
   - `target_quantity: int` (must be >= 0)
 - `StrategyDecisionIntentV1`:
   - `session_key: SessionKeyV1`
-  - `decision_time: UTCDateTime`
+  - `decision_time: UTCDateTime` (must strictly match `context.decision_cutoff`; wall-clock `now()` prohibited)
   - `targets: tuple[SecurityTargetPositionV1, ...]`
 - Explicit Complete Target Set Rule:
   - Any held security omitted from `targets` is assigned `target_quantity = 0` (liquidate all).
   - Securities removed from `admitted_universe` are permitted to have `target_quantity = 0`.
-- `FillExecutionEngine`:
-  - Delta calculation: $\Delta q_i = \text{staged\_target}_i - \text{current\_quantity}_i$.
-  - Executes sells first ($\Delta q_i < 0$), buys second ($\Delta q_i > 0$).
-  - Canonical order: sorted by `security_id` UUID bytes within phase.
-  - Adverse slippage: Buy $P_{\text{open}}(1 + \text{bps}/10000)$, Sell $P_{\text{open}}(1 - \text{bps}/10000)$.
-  - Transaction costs deducted from cash.
-  - Cash solvency enforcement: if cash after sells is insufficient to fund all buys, emit `FillRejectionTraceEventV1`, reject unfunded buys, and classify evaluation as `EvaluationClassification.REJECTED`.
+- `AtomicRebalanceEngine`:
+  - Fetch unadjusted open prices for all target deltas.
+  - Plan sells: calculate proceeds net of costs.
+  - Plan buys: calculate required cash including costs.
+  - Solvency check: verify `current_cash + Gross Sells - Required Cash >= 0`.
+  - If unfunded: emit `FillRejectionTraceEventV1`, commit **ZERO** fills and **ZERO** mutations, immediately halt subsequent session stepping, and classify run as `REJECTED`.
+  - If funded: commit sells first, buys second, in canonical order sorted by `security_id` UUID bytes.
 
 ### 4. RED Acceptance Criteria
 - Tests fail because `evaluator_strategy` and `evaluator_execution` do not exist.
 
 ### 5. GREEN Acceptance Criteria
 - Strategy omitting a held security generates an automatic liquidation order ($\Delta q = -\text{current}$).
-- Sells execute first, replenishing cash so subsequent buys succeed within the same open execution phase.
-- Adverse slippage strictly increases buy prices and decreases sell prices.
-- Cash shortfall emits `FillRejectionTraceEventV1` and marks scientific classification `REJECTED` without crashing.
+- Strategy decision context uses explicit sorted tuples rather than unordered mappings.
+- Rebalance where buys exceed cash after sells results in ZERO committed fills and a scientific `REJECTED` classification.
+- Valid rebalance executes sells before buys, applying adverse slippage and deducting transaction costs.
 
 ### 6. Focused Tests
 ```bash
@@ -410,11 +437,11 @@ uv run pytest tests/unit/test_evaluator_strategy.py tests/unit/test_evaluator_ex
 - Negative target quantity emitted in Phase 5 -> Rejected immediately.
 - Strategy attempts entry (`target > 0`) for non-admitted security -> Rejected.
 - Strategy attempts liquidation (`target = 0`) for non-admitted security -> Allowed.
-- Cash exhaustion scenario: buy orders exceed cash -> `FillRejectionTraceEventV1` emitted, classified `REJECTED`.
+- Atomic rebalance shortfall test: multi-buy order where cash is insufficient for one buy -> verify ZERO fills committed and no holdings mutated.
 
 ### 8. Review and Commit Boundary
-- Independent review covering omission liquidation semantics, sell-first sequencing, and Phase 2 cash solvency.
-- Commit message: `feat: add M2 strategy protocol and next-open execution engine`
+- Independent review covering atomic rebalance execution, omission liquidation semantics, and canonical collection sorting.
+- Commit message: `feat: add M2 strategy protocol and atomic next-open execution engine`
 - Checkpoint execution.
 
 ---
@@ -422,7 +449,7 @@ uv run pytest tests/unit/test_evaluator_strategy.py tests/unit/test_evaluator_ex
 ## Task 6: Deterministic Session Evaluator Engine, Canonical Trace Generation, and M0 Integration
 
 ### 1. Objective
-Assemble the complete 5-phase session evaluator loop, content-addressed trace logger, scientific classification system, complete result models (`ExploratoryEvaluationResultV1`, `PromotionEvaluationResultV1`, `EvaluationSummaryMetricsV1`), and integration with M0 `ExperimentSpecification` and `ExperimentRun`.
+Assemble the complete 5-phase session evaluator loop, content-addressed trace logger, fatal indeterminacy halting, complete result models without random UUIDs or wall-clock timestamps, and integration with M0 `ExperimentSpecification` and `ExperimentRun`.
 
 ### 2. Exact Files Expected
 - `src/drift/domain/evaluator_trace.py`
@@ -442,21 +469,22 @@ Assemble the complete 5-phase session evaluator loop, content-addressed trace lo
 - `EvaluationClassification(StrEnum)`: `COMPLETE`, `INDETERMINATE`, `REJECTED`.
 - Result Models:
   - `EvaluationSummaryMetricsV1(FrozenModel)`: complete Pydantic schema with initial/ending cash, NAV, PnL, turnover, equity series.
-  - `ExploratoryEvaluationResultV1(FrozenModel)`: carries `lane: Literal["exploratory"]`, binds `ExploratoryEvaluationAdmissionV1`, `is_promotable = False`.
-  - `PromotionEvaluationResultV1(FrozenModel)`: carries `lane: Literal["promotion"]`, binds `PromotionEvaluationAdmissionV1`, `is_promotable = True`.
-- Fatal Indeterminacy Halting:
+  - `ExploratoryEvaluationResultV1(FrozenModel)`: carries `lane: Literal["exploratory"]`, binds `ExploratoryEvaluationAdmissionV1`, `is_promotion_grade_evidence = False`. `result_id` is content-addressably derived. No wall-clock timestamps.
+  - `PromotionEvaluationResultV1(FrozenModel)`: carries `lane: Literal["promotion"]`, binds `PromotionEvaluationAdmissionV1`, `is_promotion_grade_evidence = True`. `result_id` is content-addressably derived. No wall-clock timestamps.
+- Fatal Indeterminacy and Rejection Halting:
   - Encountering fatal missing price or unprovable outcome emits `IndeterminateCauseTraceEventV1`, immediately halts session stepping, and marks result `INDETERMINATE`.
+  - Encountering an unfunded rebalance emits `FillRejectionTraceEventV1`, immediately halts session stepping, commits **ZERO** fills, and marks result `REJECTED`.
 - `SessionEvaluatorEngine.run(...) -> EvaluationResult`:
   - Orchestrates phases 1-5 for each session.
 - `execute_experiment_run(spec, runner_context) -> ExperimentRun`:
-  - Wraps M2 evaluator in M0 experiment runner, attaching trace and result artifact references.
+  - Wraps M2 evaluator in M0 experiment runner, attaching trace and result artifact references. M0 `ExperimentRun` owns `run_id`, `started_at`, and `completed_at`.
 
 ### 4. RED Acceptance Criteria
 - Tests fail because `engine.py`, `evaluator_trace.py`, and `evaluator_results.py` do not exist.
 
 ### 5. GREEN Acceptance Criteria
 - Multi-session synthetic evaluation executes end-to-end through all 5 phases.
-- Content-addressed trace log reproduces bitwise-identical hash on rerun.
+- Content-addressed trace log and result artifact reproduce bitwise-identical hash on rerun, even under different `ExperimentRun` IDs.
 - Fatal indeterminacy cleanly halts stepping and records `classification=INDETERMINATE` with `status=COMPLETED`.
 - `ExperimentRun` records `status=COMPLETED`, binds artifact references, and includes metrics summary.
 
@@ -467,11 +495,12 @@ uv run pytest tests/unit/test_evaluator_trace.py tests/unit/test_evaluator_engin
 
 ### 7. Adversarial Test Cases
 - Attempt to construct `PromotionEvaluationResultV1` with `ExploratoryEvaluationAdmissionV1` -> Type/Validation error.
+- Replaying identical input under two different `ExperimentRun` UUIDs and timestamps produces bitwise identical `evaluation_hash` and `trace_hash`.
 - Fatal missing open price: verify evaluator halts subsequent sessions and outputs `classification=INDETERMINATE`.
 - Unhandled Python exception correctly marks `ExperimentRun` as `FAILED` with `error_details`.
 
 ### 8. Review and Commit Boundary
-- Independent review covering 5-phase execution, fatal indeterminacy halting, and M0 experiment provenance.
+- Independent review covering 5-phase execution, fatal indeterminacy halting, deterministic result identity, and M0 experiment provenance.
 - Commit message: `feat: add M2 session evaluator engine and trace logger`
 - Checkpoint execution.
 
@@ -488,14 +517,14 @@ Implement the complete 28-case adversarial acceptance test suite covering causal
 - `tests/adversarial/test_m2_anti_laundering.py`
 - `tests/adversarial/test_m2_replay_determinism.py`
 
-### 3. Adversarial Invariants Tested (Table 25 of Spec)
-- **Causality**: Same-bar close lookahead rejection, post-cutoff observation leakage rejection, terminal ticker fallback rejection, future corporate action leak rejection.
-- **Universe**: Survivorship bias rejection, indeterminate eligibility exclusion, post-delisting entry rejection, post-delisting liquidation permission.
-- **Accounting**: Double-adjustment rejection, premature dividend cash settlement rejection, vanishing receivables prevention, unevidenced delisting recovery rejection, unquantified merger rejection, missing close mark indeterminacy halting, negative cash balance prevention.
-- **Execution**: Close-for-open fallback rejection, negative target rejection, fractional share rejection, sell-before-buy verification, cash shortfall rejection event.
+### 3. Adversarial Invariants Tested (Table 22 of Spec)
+- **Causality**: Same-bar close lookahead rejection, post-cutoff observation leakage rejection, early-close realized timing (13:00 ET), future corporate action leak rejection.
+- **Universe**: Survivorship bias rejection, indeterminate eligibility exclusion, post-delisting liquidation permission.
+- **Accounting**: Double-adjustment rejection, premature dividend cash settlement rejection, due-bill special dividend rule compliance, unevidenced delisting recovery rejection, fractional split unknown treatment indeterminacy, missing close mark indeterminacy halting, multiple same-date cash claim distinctness.
+- **Execution**: Close-for-open fallback rejection, negative target rejection, fractional share rejection, unfunded rebalance shortfall atomic rejection (0 fills committed).
 - **Cost**: Cost parameter mutation run identity change, positive slippage rejection.
-- **Evidence Lanes**: Circular hash deadlock prevention, lane upgrade impossibility, mutable boolean override impossibility, unqualified promotion admission rejection, exploratory bundle in promotion run rejection.
-- **Replay Determinism**: Bitwise reproducibility of trace and NAV series across identical runs; parameter alteration changing run hash; deterministic claim IDs across re-runs.
+- **Evidence Lanes**: Non-critical dimension partial acceptance with positive M1e completion, critical dimension failed rejection by gatekeeper, fake PASS report with negative M1e completion rejection, promotion evidence scope containment (no M10/M11 approval claim).
+- **Replay Determinism**: Bitwise reproducibility of trace and evaluation hash across different `ExperimentRun` instances; overnight split target scaling.
 - **Provider Boundary**: Raw vendor JSON rejection, missing halt inference rejection.
 
 ### 4. RED Acceptance Criteria
@@ -534,10 +563,10 @@ Build the bounded, offline Alpaca exploratory intake bridge to acquire free deve
   - Uses read-only REST endpoints (historical bars and corporate actions).
   - Credentials loaded from `.env` without echoing to stdout/logs.
   - Acquired bytes stored in private root outside Git; writes `AcquisitionReceiptV1`.
-  - Maps to `SecurityV1`, `ListingV1`, `UnadjustedSessionObservationV1`, `CorporateActionTermsVersionV1`.
+  - Maps to `SecurityV1`, `ListingV1`, `ScheduledSessionVersionV1`, `RealizedSessionVersionV1`, `DerivedObservationViewV1`, `CorporateActionTermsVersionV1`.
   - Runs Drift public validators (`DatasetValidationDecisionV2`).
   - Mints `ExploratoryEvaluationAdmissionV1` binding the four canonical limitation constants:
-    1. `ALPACO_LIMITATION_TRUNCATED_CA`
+    1. `ALPACA_LIMITATION_TRUNCATED_CA`
     2. `ALPACA_LIMITATION_UNVERSIONED_BARS`
     3. `ALPACA_LIMITATION_ABSENT_HALTS`
     4. `ALPACA_LIMITATION_BOUNDED_COHORT`
@@ -545,7 +574,7 @@ Build the bounded, offline Alpaca exploratory intake bridge to acquire free deve
 - `intake_alpaca_exploratory.py`: CLI tool for bounded cohort acquisition.
 - `test_alpaca_exploratory_smoke.py`:
   - Executes a complete exploratory evaluation run using the Alpaca development bundle and a simple reference strategy.
-  - Confirms `ExploratoryEvaluationResultV1` is produced with `is_promotable=False`.
+  - Confirms `ExploratoryEvaluationResultV1` is produced with `is_promotion_grade_evidence=False`.
   - Standard CI/test execution uses recorded/pinned fixture bytes; network access is never required.
 
 ### 4. RED Acceptance Criteria
