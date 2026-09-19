@@ -126,30 +126,26 @@ class ExploratoryEvaluationAdmissionV1(FrozenModel):
     """Admission proof for exploratory evaluation using development-grade data."""
 
     schema_version: Literal["1"] = "1"
-    admission_id: SHA256Hash  # Content-addressably derived
     lane: Literal["exploratory"] = "exploratory"
     development_source_profile_hash: SHA256Hash
     input_bundle_hash: SHA256Hash
     acknowledged_limitations: tuple[NonBlankStr, ...]
-    admitted_at: UTCDateTime  # Deterministically anchored to input bundle evaluation_interval.end_time
     admission_hash: SHA256Hash
 
 
 class PromotionEvaluationAdmissionV1(FrozenModel):
-    """Admission proof strictly requiring verified M1e positive completion evidence."""
+    """Admission proof strictly requiring verified M1e positive completion evidence across both consumer purposes."""
 
     schema_version: Literal["1"] = "1"
-    admission_id: SHA256Hash  # Content-addressably derived
     lane: Literal["promotion"] = "promotion"
     m1e_completion_record_hash: SHA256Hash
-    m1e_profile_hash: SHA256Hash
-    m1e_qualification_report_hash: SHA256Hash
-    m1e_purpose: Literal["historical_decision_input"]
+    m1e_profile_set_hash: SHA256Hash
+    m1e_decision_profile_hash: SHA256Hash
+    m1e_audit_profile_hash: SHA256Hash
+    m1e_decision_report_hash: SHA256Hash
+    m1e_audit_report_hash: SHA256Hash
     m1e_snapshot_hash: SHA256Hash
-    m1e_rights_assessment_hash: SHA256Hash
-    m1e_replay_result_hash: SHA256Hash
     input_bundle_hash: SHA256Hash
-    admitted_at: UTCDateTime  # Deterministically anchored to M1e completion.completed_at
     admission_hash: SHA256Hash
 
 
@@ -158,7 +154,9 @@ type EvaluationAdmissionV1 = Annotated[
     Field(discriminator="lane"),
 ]
 
-Note on admission determinism: `admitted_at` must never be populated with wall-clock `datetime.now(timezone.utc)`. For exploratory admission, it is deterministically anchored to `bundle.evaluation_interval.end_time`; for promotion admission, it is deterministically anchored to `completion.completed_at`. Re-minting an admission for the same bundle and source evidence produces bitwise identical `admission_hash`.
+Note on admission determinism: Admissions do not carry operational wall-clock creation timestamps (`admitted_at`) or redundant identifier fields (`admission_id`). Operational timestamps belong to M0 `ExperimentRun`, audit events, and upstream M1e completion records. The semantic identity is a single self-excluding `admission_hash = content_hash(...)`. Re-evaluating the identical bundle with identical qualification evidence yields bitwise identical `admission_hash`.
+
+Dual-purpose M1e binding: A promotion evaluation relies on two distinct epistemic roles: `HISTORICAL_DECISION_INPUT` (for point-in-time information the strategy was permitted to know at decision cutoffs) and `RETROSPECTIVE_AUDIT` (for ex-post accounting truth, settlements, terminal liquidations, and evaluation reconstruction). Both profiles and reports must be bound, verified, and authenticated. Redundant orphan hashes (`m1e_rights_assessment_hash`, `m1e_replay_result_hash`) are omitted from the admission payload because `M1eCompletionRecordV1` transitively and authoritatively binds and proves them.
 
 
 class EvaluationSummaryMetricsV1(FrozenModel):
@@ -317,7 +315,6 @@ class SecurityTargetPositionV1(FrozenModel):
     """Target position intent emitted for one admitted security."""
 
     security_id: UUID7
-    execution_listing_id: UUID7
     target_quantity: int  # Must be >= 0 (whole shares, long-only)
 
 
@@ -343,7 +340,13 @@ class RuntimeStrategy(Protocol):
 
 Note on decision determinism: The evaluator engine strictly validates that `intent.decision_time == context.decision_cutoff`. Strategies are prohibited from populating `decision_time` using system wall-clock functions like `datetime.now(timezone.utc)`. If a strategy returns an intent with a mismatched timestamp, validation fails closed with `ValueError("decision intent decision_time must strictly match context.decision_cutoff")`.
 
-### 6.3 Whole-Share Target Positions and Explicit Omission Rule
+### 6.3 Security-Level Targets and Historical Listing Resolution
+Strategies target economic securities (`security_id`), NOT historical listings (`listing_id`) or exchange tickers:
+- **No Stale Listing Selection in Strategy**: Strategies do not pick exchange venues or track historical listing migrations.
+- **Evaluator Execution-Listing Policy**: The evaluator resolves the execution listing dynamically at Phase 2 (Open Execution) using M1b structural eligibility evidence: "execute through the uniquely resolved eligible historical primary listing for the execution session."
+- **Fail-Closed Resolution**: If no exact eligible listing exists for an admitted security on the execution date, or if multiple candidate listings cannot be uniquely resolved, execution halts fail-closed to `INDETERMINATE`. The resolved `listing_id` and venue are recorded on `FillTraceEventV1`.
+
+### 6.4 Whole-Share Target Positions and Explicit Omission Rule
 Strategies emit target WHOLE-SHARE quantities rather than fractional weights or raw buy/sell orders:
 - **No Evaluator Capital Allocation Guessing**: The evaluator does not guess how to round fractional shares or allocate remaining cash. The strategy specifies exact target share counts.
 - **Explicit Complete Target Set Rule**:
@@ -357,18 +360,80 @@ Strategies emit target WHOLE-SHARE quantities rather than fractional weights or 
 
 ---
 
-## 7. Proof-Carrying Evaluation Input Bundle
+## 7. Proof-Carrying Evaluation Input Bundle and Epistemic Input Separation
 
-An evaluation run operates on a self-contained, content-addressed bundle of authentic Drift artifacts. M2 does NOT flatten away M1b-M1d provenance into self-authored convenience facts:
+An evaluation run operates on a self-contained, content-addressed bundle of authentic Drift artifacts. M2 does NOT flatten away M1b-M1d provenance into self-authored convenience facts, nor does it launder retrospective data into historical decision evidence.
+
+### 7.1 Exploratory Reconstructed Decision Input vs True Decision Information
+
+Free development providers (such as Alpaca) provide current snapshots of historical bars and corporate actions, but lack historical provider assertion vintages, publication cutoffs, and halt telemetry. Therefore, an exploratory run cannot truthfully produce M1d `ObservationDecisionReferenceV1` under an `InformationRole.DECISION_INFORMATION` claim.
+
+M2 explicitly defines an exploratory-only input contract:
+
+```python
+class ExploratoryReconstructedDecisionInputV1(FrozenModel):
+    """Retrospectively reconstructed historical strategy input used ONLY for exploratory research."""
+
+    schema_version: Literal["1"] = "1"
+    reconstruction_kind: Literal["retrospective_reconstruction"] = (
+        "retrospective_reconstruction"
+    )
+    source_reference_hash: (
+        SHA256Hash  # Bound to M1d outcome reference or normalization result
+    )
+    observation_view: DerivedObservationViewV1
+    evidence_vintage: (
+        UTCDateTime  # Upstream retrieval/download timestamp (e.g. 2026 download)
+    )
+    reconstructed_session: (
+        SessionKeyV1  # Historical session being reconstructed (e.g. 2022)
+    )
+    reconstruction_policy: NonBlankStr
+    acknowledged_limitations: tuple[NonBlankStr, ...]
+    source_context_hash: SHA256Hash
+    development_source_profile_hash: SHA256Hash
+    input_hash: SHA256Hash
+```
+
+**Epistemic Contract**:
+- **Retrospective Knowledge Warning**: An exploratory reconstructed input may contain corrections, corporate action revisions, or source adjustments published AFTER the historical decision cutoff.
+- **Scientific Utility**: Valid and authorized for engineering validation, harness closure, indicator calculation, and exploratory strategy screening.
+- **Strict Prohibition**: NEVER historical-decision proof; NEVER promotion-grade; NEVER convertible into promotion evidence.
+- **Promotion Lane Prohibition**: Any promotion evaluation that encounters an `ExploratoryReconstructedDecisionInputV1` is immediately rejected by structural type validation.
+
+### 7.2 Exploratory Business-Time Causality Invariant
+
+Exploratory relaxation of publication vintages does NOT permit future business-time leakage:
+- **Historical Business-Time Ordering**: The strategy at session $D$ post-close may see only historical business-time facts up through session $D$ under its declared reconstruction policy.
+- **Strictly Prohibited at Session $D$**:
+  - Session $D+1$ or later market prices (open, high, low, close, volume).
+  - Later-session returns or future price movements.
+  - Future corporate action effective dates before their business-time occurrence.
+  - Ex-post labels, future universe exits, or target forward outcomes.
+- **What Exploratory Relaxes**: Provider publication/revision availability timestamps (e.g. a corrected 2022 bar retrieved in 2026 may be used in an exploratory backtest of 2022). It does NOT relax chronological business-time ordering.
+
+### 7.3 Promotion Inputs: Authentic Decision Information
+
+Promotion lane strategy inputs strictly require:
+- `InformationRole.DECISION_INFORMATION`
+- `ResolutionMode.AS_KNOWN` where applicable
+- `ObservationDecisionReferenceV1` / decision-role normalization
+- Historical publication and availability cutoffs verified under positive M1e qualification.
+
+### 7.4 Input Bundle and Replay-Bound Preparation
+
+A compact runtime bundle exposes numeric views for execution efficiency, but bundle preparation must verify that every view derives from exact upstream Drift kernel replays rather than untrusted Pydantic construction:
 
 ```python
 class EvaluationInputBundleV1(FrozenModel):
     """Complete, proof-carrying input bundle for an evaluation interval."""
 
     schema_version: Literal["1"] = "1"
-    bundle_id: SHA256Hash  # Content-addressed hash of bundle payload
     evaluation_interval: TemporalIntervalClaimV1
     source_snapshot_hash: SHA256Hash | None = None  # Bound for M1e promotion
+    session_clock_mode: Literal[
+        "realized_session_authority", "scheduled_session_reconstruction"
+    ]
     m1b_structural_eligibility_hashes: tuple[SHA256Hash, ...]
     m1c_outcome_resolution_hashes: tuple[SHA256Hash, ...]
     m1d_observation_view_hashes: tuple[SHA256Hash, ...]
@@ -382,17 +447,24 @@ class EvaluationInputBundleV1(FrozenModel):
     economic_outcomes: tuple[EconomicOutcomeResolutionV1, ...]
     unadjusted_observation_views: tuple[DerivedObservationViewV1, ...]
     decision_observation_views: tuple[DerivedObservationViewV1, ...]
+    exploratory_decision_inputs: tuple[
+        ExploratoryReconstructedDecisionInputV1, ...
+    ] = ()
     bundle_hash: SHA256Hash
+
+    @property
+    def has_exploratory_reconstructions(self) -> bool:
+        return (
+            len(self.exploratory_decision_inputs) > 0
+            or self.session_clock_mode == "scheduled_session_reconstruction"
+        )
 
     @model_validator(mode="after")
     def validate_bundle_integrity(self) -> Self:
-        # Verify self-excluding canonical hash
-        expected = content_hash(
-            self.model_dump(mode="python", exclude={"bundle_id", "bundle_hash"})
-        )
-        if self.bundle_hash != expected or self.bundle_id != expected:
+        expected = content_hash(self.model_dump(mode="python", exclude={"bundle_hash"}))
+        if self.bundle_hash != expected:
             raise ValueError("input bundle canonical hash mismatch")
-        # Verify that all included views, outcomes, and sessions match their bound proof hashes
+        # Verify bound proof hashes
         actual_eligibility_hashes = tuple(
             sorted(content_hash(item) for item in self.structural_eligibilities)
         )
@@ -427,10 +499,27 @@ class EvaluationInputBundleV1(FrozenModel):
         return self
 ```
 
-### 7.1 Separation of Scheduled and Realized Session Authority
-The bundle binds `scheduled_sessions` (from `ScheduledSessionVersionV1`) and `realized_sessions` (from `RealizedSessionVersionV1`) separately. The evaluator session clock uses realized session facts for actual open/close boundaries and missingness determination.
+**Preparation Boundary (`build_evaluation_input_bundle` / `verify_evaluation_input_bundle`)**:
+1. **Promotion Decision Views**: Replays and materializes each view using `materialize_observation_decision(reference, query, context)` with `M1dResolutionContext`, verifying exact match with `ObservationDecisionReferenceV1`.
+2. **Accounting Outcome Views**: Replays and materializes unadjusted views using `materialize_observation_outcome(reference, query, context)`.
+3. **Exploratory Strategy Views**: Materializes from current-vintage/outcome material, wraps in `ExploratoryReconstructedDecisionInputV1`, binds explicit limitations, and never relabels as `ObservationDecisionReferenceV1`.
+4. **M1b Universes**: Replays and verifies `StructuralEligibilityResultV1` against selection context. In exploratory mode, permits `ResolutionMode.CURRENT_INTERPRETATION` with `InformationRole.EX_POST_OUTCOME` for declared bounded cohorts, binding `ALPACA_LIMITATION_BOUNDED_COHORT`. Never relabels current interpretation as `AS_KNOWN`.
+5. **M1c Economics**: Replays and verifies `EconomicOutcomeResolutionV1` against M1c selection context, proving terms, occurred effects, and delivered settlements independently.
 
-### 7.2 No False Halt Syntheses
+### 7.5 Clock Authority Modes (Realized vs Scheduled Reconstruction)
+
+M2 defines two distinct clock authority modes:
+- **`PROMOTION` Lane**: Strictly requires `realized_session_authority` backed by authenticated `RealizedSessionVersionV1` instances with proven `actual_open`, `actual_close`, and interruption telemetry.
+- **`EXPLORATORY` Lane**: Uses `realized_session_authority` when genuinely available, OR `scheduled_session_reconstruction` derived from `ScheduledSessionVersionV1` calendar records.
+  - When operating under `scheduled_session_reconstruction`:
+    - Derives open/close boundaries from scheduled times.
+    - Explicitly records `ALPACA_LIMITATION_ABSENT_HALTS` and `ALPACA_LIMITATION_SCHEDULED_SESSION_RECONSTRUCTION`.
+    - NEVER manufactures synthetic `RealizedSessionVersionV1` instances.
+    - NEVER claims "no halt occurred" or "actual open proven."
+    - If a scheduled session is expected open but required market observations fail to materialize: fails closed to `INDETERMINATE`. It does not invent `did_not_open` or halt causes.
+- **Anti-Laundering Gate**: Promotion admission strictly rejects any bundle configured with `scheduled_session_reconstruction`.
+
+### 7.6 No False Halt Syntheses
 M2 removes artificial boolean flags like `is_halted: bool = False`. If an observation source (such as Alpaca) does not provide authenticated halt telemetry, halt status is `UNKNOWN`. The evaluator core relies on M1d realized session facts (`outcome="opened"` vs `"did_not_open"`) rather than inventing "not halted" claims.
 
 ---
@@ -479,16 +568,17 @@ Session D+1 (Next Eligible Realized Regular Trading Session)
 ```
 
 ### 8.1 Variable Session Hours (Early Closes)
-The regular trading session close is NOT hardcoded to 16:00 ET. On scheduled or unscheduled early-close sessions (e.g. 13:00 ET on Christmas Eve or day before July 4th), Phase 5 post-close decision occurs immediately after the proven realized close (`actual_close`). No artificial delay to 16:00 is enforced. Execution at Phase 2 occurs at the next proven realized `actual_open`.
+The regular trading session close is NOT hardcoded to 16:00 ET:
+- **Promotion Lane**: On scheduled or unscheduled early-close sessions (e.g. 13:00 ET on Christmas Eve or day before July 4th), Phase 5 post-close decision occurs immediately after the proven realized close (`actual_close`). No artificial delay to 16:00 is enforced. Execution at Phase 2 occurs at the next proven realized `actual_open`.
+- **Exploratory Lane (Scheduled Reconstruction)**: When realized history is unavailable, the clock derives the early close directly from `ScheduledSessionVersionV1` (e.g. 13:00 close). Phase 5 executes immediately after 13:00, carrying `ALPACA_LIMITATION_SCHEDULED_SESSION_RECONSTRUCTION`.
 
 ### 8.2 Explicit Warmup Schedule and Transition
-- Evaluation protocols specify an explicit warmup session count $W \ge 1$ (e.g. 50 sessions).
+- **Strict Protocol Requirement**: Evaluation protocols require `warmup_session_count >= 1`. A warmup session count of zero is out of scope for M2 V1 and is rejected by `EvaluationProtocolV1` validation.
 - The session clock derives `is_warmup: bool = (session_index < W)` using 0-based session index $0 \le \text{session\_index} < N$.
 - Warmup observations populate strategy indicators and rolling state.
 - **Sessions $0$ through $W - 2$** (the first $W - 1$ warmup sessions): Phase 5 does NOT invoke `strategy.decide()`; no target intents are staged.
 - **Session $W - 1$ Post-Close** (the $W$-th warmup session): Phase 5 invokes `strategy.decide()` for the first time (`session_index >= W - 1`). Target positions are staged for execution at Session $W$ open.
 - **Session $W$** (the $(W+1)$-th session, and first non-warmup trading session): Phase 2 (Open Execution) executes trades and fills for the first time.
-- If $W = 0$ is declared, Session $0$ open executes 0 trades (no staged targets exist prior to interval start), and Session $0$ post-close is the first decision point. Next-open execution protocols require $W \ge 1$ for non-empty opening execution.
 
 ---
 
@@ -605,8 +695,8 @@ For reverse splits, stock acquisitions, spin-offs, and stock dividends:
 3. If $\text{exact\_shares}$ is non-integral, apply the explicit `FractionTreatmentV1` proved by M1c:
    - `round_down`: truncate fraction, keep whole shares.
    - `round_up`: ceiling fraction to next whole share.
-   - `round_nearest`: round to nearest whole share.
-   - `aggregate_sale_cash`: retain whole shares; convert fractional entitlement into a pending cash-in-lieu claim once M1c settlement/effect proves the cash rate.
+   - `round_nearest`: `round_nearest` alone does not define tie-breaking semantics (bankers rounding vs half-up vs half-away-from-zero). M2 V1 directly supports integral, `round_down`, and `round_up`. For `round_nearest`, an exact interpreted tie-breaking rule artifact from source evidence is required; if unavailable, fail closed to `INDETERMINATE`.
+   - `aggregate_sale_cash`: retain whole shares; convert fractional entitlement into a pending cash-in-lieu claim only after explicit subsequent M1c settlement/effect evidence proves the actual cash rate.
    - `fraction_issued`: unsupported by M2 V1 whole-share holding model; fail closed to `INDETERMINATE`.
    - `unknown`: fail closed to `INDETERMINATE`.
 
@@ -618,9 +708,12 @@ If $\text{staged\_target}'$ is non-integral and cannot be resolved by an admitte
 ### 12.3 Dividend and Due-Bill Entitlement Logic
 M2 does NOT globally equate ex-date with entitlement:
 - An economic receivable (`PendingCashClaimV1`) is created ONLY when M1c occurred effect evidence proves that the holding became legally entitled under the event's exact rule.
-- For ordinary dividends, entitlement aligns with the admitted ex-date rule.
-- For special dividends subject to due-bill redemption: entitlement follows the explicit due-bill redemption date proven by M1c, not the preliminary calendar date.
-- Settlement into available cash occurs in Phase 3 when `current_session.date >= claim.payable_session` and M1c delivered settlement evidence proves payment.
+- **Ordinary Cash Dividends**: Entitlement aligns with the admitted ex-date rule.
+- **Special and Due-Bill Distributions**: A due-bill redemption date alone does not encode the complete holder entitlement rule. M1c preserves `due_bill_start`, `due_bill_end`, `due_bill_redemption`, `ex`, `record`, `payable`, and `rule_reference`. For M2 V1:
+  - Special distributions with an explicitly implemented and evidence-bound executable rule may be supported.
+  - Using a generic shortcut like `due_bill_redemption_date == entitlement_date` is strictly prohibited.
+  - If the exact retained due-bill rule cannot be deterministically interpreted under M2 V1 execution semantics, the run fails closed to `INDETERMINATE`.
+- **Delivered Cash Settlement**: Settlement into available cash occurs in Phase 3 when `current_session.date >= claim.payable_session` and M1c delivered settlement evidence proves payment. Terms alone never credit cash.
 
 ### 12.4 Mergers and Acquisitions
 - `CASH_ACQUISITION`: Target holding converts to cash claim upon effective date; settled when payment delivered.
@@ -782,90 +875,161 @@ ALPACA_LIMITATION_UNVERSIONED_BARS = (
 )
 ALPACA_LIMITATION_ABSENT_HALTS = "trading-halt-telemetry-absent-from-api"
 ALPACA_LIMITATION_BOUNDED_COHORT = "evaluation-restricted-to-declared-bounded-cohort"
+ALPACA_LIMITATION_SCHEDULED_SESSION_RECONSTRUCTION = "session-clock-reconstructed-from-scheduled-calendar-without-independent-realized-history"
+ALPACA_LIMITATION_RETROSPECTIVE_RECONSTRUCTION = (
+    "strategy-inputs-retrospectively-reconstructed-from-audit-vintage-bars"
+)
 ```
 
 ---
 
 ## 20. Promotion Lane Admission and Authentic M1e Gatekeeper
 
-An admission gatekeeper function operates outside the pure evaluator core:
+An admission gatekeeper function operates outside the pure evaluator core, binding authentic M1e qualification evidence across both consumer purposes (`HISTORICAL_DECISION_INPUT` and `RETROSPECTIVE_AUDIT`):
 
 ```python
 def validate_promotion_admission(
     admission: PromotionEvaluationAdmissionV1,
     bundle: EvaluationInputBundleV1,
+    profile_set: PilotProfileSetV1,
     completion: M1eCompletionRecordV1,
-    profile: QualificationProfileV1,
-    report: PurposeQualificationReportV1,
+    decision_profile: QualificationProfileV1,
+    audit_profile: QualificationProfileV1,
+    decision_report: PurposeQualificationReportV1,
+    audit_report: PurposeQualificationReportV1,
 ) -> None:
-    """Verify promotion admission against authentic M1e qualification evidence."""
+    """Verify promotion admission against authentic M1e qualification evidence across both purposes."""
     if admission.lane != "promotion":
         raise ValueError("admission must belong to promotion lane")
     if completion.completion_kind != M1eCompletionKind.COMPLETED_POSITIVE:
         raise ValueError("promotion requires positive M1e completion")
     if content_hash(completion) != admission.m1e_completion_record_hash:
         raise ValueError("completion record hash mismatch with admission")
-    if content_hash(profile) != admission.m1e_profile_hash:
-        raise ValueError("qualification profile hash mismatch with admission")
-    if content_hash(report) != admission.m1e_qualification_report_hash:
-        raise ValueError("qualification report hash mismatch with admission")
+    if content_hash(profile_set) != admission.m1e_profile_set_hash:
+        raise ValueError("pilot profile set hash mismatch with admission")
+    if completion.profile_set_hash != admission.m1e_profile_set_hash:
+        raise ValueError("completion record profile set binding mismatch")
+
+    # Decision profile and report checks
+    if decision_profile.purpose != ConsumerPurpose.HISTORICAL_DECISION_INPUT:
+        raise ValueError("decision profile must have historical_decision_input purpose")
+    if content_hash(decision_profile) != admission.m1e_decision_profile_hash:
+        raise ValueError("decision profile hash mismatch with admission")
+    if decision_profile not in profile_set.profiles:
+        raise ValueError("decision profile is not a member of bound profile set")
+    if decision_report.purpose != ConsumerPurpose.HISTORICAL_DECISION_INPUT:
+        raise ValueError("decision report must have historical_decision_input purpose")
+    if content_hash(decision_report) != admission.m1e_decision_report_hash:
+        raise ValueError("decision report hash mismatch with admission")
+    if decision_report.target.profile_hash != admission.m1e_decision_profile_hash:
+        raise ValueError("decision report target profile hash mismatch")
+    if decision_report not in completion.purpose_reports:
+        raise ValueError("decision report is not bound in completion record")
+
+    # Audit profile and report checks
+    if audit_profile.purpose != ConsumerPurpose.RETROSPECTIVE_AUDIT:
+        raise ValueError("audit profile must have retrospective_audit purpose")
+    if content_hash(audit_profile) != admission.m1e_audit_profile_hash:
+        raise ValueError("audit profile hash mismatch with admission")
+    if audit_profile not in profile_set.profiles:
+        raise ValueError("audit profile is not a member of bound profile set")
+    if audit_report.purpose != ConsumerPurpose.RETROSPECTIVE_AUDIT:
+        raise ValueError("audit report must have retrospective_audit purpose")
+    if content_hash(audit_report) != admission.m1e_audit_report_hash:
+        raise ValueError("audit report hash mismatch with admission")
+    if audit_report.target.profile_hash != admission.m1e_audit_profile_hash:
+        raise ValueError("audit report target profile hash mismatch")
+    if audit_report not in completion.purpose_reports:
+        raise ValueError("audit report is not bound in completion record")
+
+    # Input bundle and snapshot checks
     if bundle.bundle_hash != admission.input_bundle_hash:
         raise ValueError("input bundle hash mismatch with admission")
-    if bundle.source_snapshot_hash != admission.m1e_snapshot_hash:
+    if (
+        bundle.source_snapshot_hash != admission.m1e_snapshot_hash
+        or bundle.source_snapshot_hash != decision_report.target.snapshot_hash
+    ):
         raise ValueError("input bundle snapshot mismatch with promotion admission")
-    if report not in completion.purpose_reports:
-        raise ValueError("qualification report is not bound within completion record")
-    if admission.m1e_purpose != ConsumerPurpose.HISTORICAL_DECISION_INPUT:
-        raise ValueError("admission requires historical_decision_input purpose")
-    if report.purpose != ConsumerPurpose.HISTORICAL_DECISION_INPUT:
-        raise ValueError("qualification report purpose mismatch")
-    if profile.purpose != ConsumerPurpose.HISTORICAL_DECISION_INPUT:
-        raise ValueError("qualification profile purpose mismatch")
 
-    # Cardinality check: all 12 dimensions must be present in the report
-    results_by_dim = {res.dimension: res for res in report.results}
-    if len(results_by_dim) != 12 or set(results_by_dim.keys()) != set(
-        QualificationDimension
+    # Structural anti-laundering checks on input bundle
+    if bundle.has_exploratory_reconstructions:
+        raise ValueError(
+            "promotion evaluation cannot consume exploratory reconstructed inputs"
+        )
+    if (
+        bundle.session_clock_mode != "realized_session_authority"
+        or not bundle.realized_sessions
     ):
         raise ValueError(
-            "qualification report must contain all 12 qualification dimensions"
+            "promotion evaluation requires authentic realized session authority"
         )
 
-    # Critical dimension check: every CRITICAL dimension in the profile must PASS
-    for crit_dim in profile.critical_dimensions:
-        res = results_by_dim.get(crit_dim)
-        if res is None:
-            raise ValueError(f"critical dimension {crit_dim} missing from report")
-        if res.status != QualificationStatus.PASS:
-            raise ValueError(f"critical dimension {crit_dim} did not PASS")
-        if res.reachability != ExecutionReachability.REACHED:
-            raise ValueError(f"critical dimension {crit_dim} was not REACHED")
-        if not res.admitted_purpose:
-            raise ValueError(f"critical dimension {crit_dim} did not admit purpose")
+    # Check all 12 dimensions in both reports
+    for report, profile in (
+        (decision_report, decision_profile),
+        (audit_report, audit_profile),
+    ):
+        results_by_dim = {res.dimension: res for res in report.results}
+        if len(results_by_dim) != 12 or set(results_by_dim.keys()) != set(
+            QualificationDimension
+        ):
+            raise ValueError(
+                f"report for {profile.purpose} must contain all 12 qualification dimensions"
+            )
+        for crit_dim in profile.critical_dimensions:
+            res = results_by_dim.get(crit_dim)
+            if res is None:
+                raise ValueError(
+                    f"critical dimension {crit_dim} missing from {profile.purpose} report"
+                )
+            if res.status != QualificationStatus.PASS:
+                raise ValueError(
+                    f"critical dimension {crit_dim} did not PASS in {profile.purpose} report"
+                )
+            if res.reachability != ExecutionReachability.REACHED:
+                raise ValueError(
+                    f"critical dimension {crit_dim} was not REACHED in {profile.purpose} report"
+                )
+            if not res.admitted_purpose:
+                raise ValueError(
+                    f"critical dimension {crit_dim} did not admit {profile.purpose}"
+                )
 ```
 
 ---
 
 ## 21. Alpaca Development Bridge and Acquisition Isolation
 
-The Alpaca development bridge is an operational data preparation utility that executes outside the evaluator core.
+The Alpaca development bridge is an operational data preparation utility that executes strictly outside the evaluator core.
 
-### 21.1 Architecture Isolation
-- The evaluator core NEVER imports or executes the Alpaca bridge.
-- The Alpaca bridge runs as an offline intake script (`scripts/intake_alpaca_exploratory.py`).
-- It fetches bounded historical SIP bars and corporate actions via authenticated REST endpoints.
-- Acquired bytes are stored in private content-addressed storage outside Git.
-- An `AcquisitionReceiptV1` and dataset manifest are generated.
-- Sourced records are mapped to standard M1b, M1c, and M1d domain models.
-- All mapped datasets are validated using Drift's existing public validators (`DatasetValidationDecisionV2`).
-- An `ExploratoryEvaluationAdmissionV1` is minted containing explicit known Alpaca limitations.
-- An `EvaluationInputBundleV1` is emitted for the evaluator core.
+### 21.1 Layered Data Pipeline
+The bridge follows a strict layered pipeline preserving provenance:
+```
+Alpaca REST API Responses
+  |
+  +--> 1. Retain Exact Native Response Bytes in private storage outside Git
+  +--> 2. Generate AcquisitionReceiptV1 and Dataset Manifest
+  +--> 3. Map native payloads to standard Drift source records (M1b/M1c/M1d)
+  +--> 4. Validate datasets via Drift public validators (DatasetValidationDecisionV2)
+  +--> 5. Execute standard M1b/M1c/M1d selection/normalization functions
+  +--> 6. Wrap in ExploratoryReconstructedDecisionInputV1 with explicit limitations
+  +--> 7. Emit EvaluationInputBundleV1 for evaluator core
+```
+
+### 21.2 Strict Layering Prohibitions
+- **NO Manual Derived Views**: The bridge must NEVER construct `DerivedObservationViewV1` manually from provider JSON. Views must be derived through existing M1d normalization routines.
+- **NO Fake Realized Sessions**: Scheduled calendar rows must NEVER be converted into `RealizedSessionVersionV1`. The bridge produces `ScheduledSessionVersionV1` and operates under `scheduled_session_reconstruction`.
+- **NO Invented Corporate Action Effects or Settlements**: Alpaca corporate actions records must be mapped conservatively:
+  - If a record establishes terms only: map terms only.
+  - If occurrence/effect semantics are explicitly supported: map the exact supported effect.
+  - If delivered settlement cannot be proven: do NOT mint `EconomicSettlementVersionV1`. Missing settlements fail closed to `INDETERMINATE` if required for portfolio cash.
+- **Quiet-Window Exploratory Smoke Run**: For the Task 8 smoke run, select a bounded cohort and date window with valid free SIP historical bars, scheduled calendar rows, and minimal corporate action complexity, verifying pipeline plumbing end-to-end. Full corporate action accounting is verified via pinned/synthetic fixtures in Tasks 3-7.
 
 ---
 
 ## 22. Adversarial Acceptance Test Matrix
 
-The M2 implementation must pass the following 28 explicit adversarial acceptance tests:
+The M2 implementation must pass the following explicit adversarial acceptance tests:
 
 | Category | Invariant Tested | Attack Scenario / Input | Expected Result |
 |---|---|---|---|
@@ -873,12 +1037,23 @@ The M2 implementation must pass the following 28 explicit adversarial acceptance
 | **Causality** | Post-Cutoff Observation Leakage | Observation with availability timestamp > decision cutoff passed to strategy | Filtered out or triggers fail-closed error. |
 | **Causality** | Early-Close Realized Timing | Session closes at 13:00; strategy decision evaluated after 13:00 | Accepted; uses actual realized close, not 16:00. |
 | **Causality** | Future Corporate Action Knowledge | Strategy context contains corporate action announced after decision date | Rejected by M1c causal selection query. |
+| **Epistemic Lanes** | 2026 Downloaded Bar as Decision Ref | Alpaca 2022 bar downloaded in 2026 submitted as M1d `ObservationDecisionReferenceV1` | Rejected; cannot produce decision-role reference without vintage. |
+| **Epistemic Lanes** | Reconstructed Input in Promotion | `ExploratoryReconstructedDecisionInputV1` submitted to PROMOTION evaluation | Structural rejection; gatekeeper fails closed. |
+| **Epistemic Lanes** | Reconstructed Input in Exploratory | 2022 bar wrapped in `ExploratoryReconstructedDecisionInputV1` with retrospective limitations | Permitted in EXPLORATORY lane only. |
+| **Universe** | Current Interpretation as As-Known | M1b `CURRENT_INTERPRETATION` submitted as `AS_KNOWN` in PROMOTION | Rejected; promotion requires authentic as-known authority. |
 | **Universe** | Survivorship Bias | Current active asset list used as historical universe | Rejected; requires historical universe definition. |
 | **Universe** | Indeterminate Eligibility | Security with `MembershipStatus.INDETERMINATE` admitted to trading | Rejected; indeterminate is not eligible. |
 | **Universe** | Post-Delisting Liquidation | Strategy emits target=0 for held security dropped from universe | Permitted; exits non-admitted holding cleanly. |
+| **Universe** | Listing Migration at Execution | Security changes primary listing before execution session open | Phase 2 resolves exact new historical listing; does not use stale listing. |
+| **Clock Authority** | Scheduled Row as Realized Session | Alpaca scheduled calendar row passed as `RealizedSessionVersionV1` | Prohibited; scheduled rows cannot mint realized sessions. |
+| **Clock Authority** | Scheduled Exploratory Early Close | Scheduled 13:00 close evaluated under `scheduled_session_reconstruction` | Accepted; executes post-close after 13:00 with explicit limitation. |
+| **Clock Authority** | Missing Bar on Scheduled Open | Scheduled session expected open, but required market bars missing | Fails closed to `INDETERMINATE`; does not infer halt. |
+| **Replay Integrity** | View Hash vs M1d Replay | Self-consistent fabricated view without successful M1d replay | Bundle preparation rejects; requires exact M1d replay. |
 | **Accounting** | Double-Counting Adjustment | Accounting configured with split-adjusted prices while applying M1c splits | Validation rejects adjusted accounting prices. |
 | **Accounting** | Premature Dividend Settlement | Dividend cash credited to available cash on ex-date before payable date | Rejected; ex-date creates receivable, not cash. |
-| **Accounting** | Due-Bill Special Dividend | Generic ex-date entitlement applied to special due-bill dividend | Rejected; follows explicit M1c due-bill rule. |
+| **Accounting** | Generic Due-Bill Shortcut | Generic `due_bill_redemption_date == entitlement_date` applied to special dividend | Rejected; requires explicit executable rule, else `INDETERMINATE`. |
+| **Accounting** | Round Nearest Without Rule | `round_nearest` applied without source tie-breaking rule artifact | Fails closed to `INDETERMINATE`. |
+| **Accounting** | Terms-Only Corporate Action | Alpaca terms record without occurred effect or settlement | No portfolio cash/share mutation committed. |
 | **Accounting** | Fabricated Delisting Recovery | Security delists without liquidation terms; accounting assumes zero or recovery | Valuation fails closed to `INDETERMINATE`. |
 | **Accounting** | Fractional Split Unknown Treatment | Reverse split yields non-integral shares with unknown fraction treatment | Valuation fails closed to `INDETERMINATE`. |
 | **Accounting** | Missing Close Forward-Fill | Held position has missing close price; evaluator forward-fills prior close | Valuation fails closed to `INDETERMINATE`. |
@@ -886,13 +1061,14 @@ The M2 implementation must pass the following 28 explicit adversarial acceptance
 | **Execution** | Close-for-Open Fallback | Missing open price replaced by prior or current close price | Execution fails closed to `INDETERMINATE`. |
 | **Execution** | Negative Target Position | Strategy emits negative whole-share target quantity (short position) | Intent rejected; run classified as `REJECTED`. |
 | **Execution** | Fractional Share Target | Strategy emits floating-point target quantity (e.g. 10.5 shares) | Intent rejected; whole shares only. |
-| **Execution** | Unfunded Rebalance Shortfall | Target rebalance exceeds cash after planned sells | 0 fills committed; classified `REJECTED`. |
-| **Cost** | Cost Parameter Mutation | Cost model modified from 0 bps to 5 bps without changing run identity | Prohibited; cost hash changes run hash. |
-| **Cost** | Favorable Slippage Applied | Strategy claims positive price improvement on market order | Prohibited; slippage is strictly adverse. |
-| **Evidence Lanes** | Non-Critical Dimension Partial | Optional dimension is PARTIAL in positive M1e completion | Promotion admission permitted if critical PASS. |
-| **Evidence Lanes** | Critical Dimension Failed | Profile-critical dimension is FAIL or UNKNOWN in report | Promotion admission rejected by gatekeeper. |
-| **Evidence Lanes** | Fake PASS Report | Report has PASS but M1e completion record is NEGATIVE | Promotion admission rejected by gatekeeper. |
-| **Evidence Lanes** | Promotion Evidence Scope | Caller treats `PromotionEvaluationResultV1` as M10 strategy approval | Disallowed; M2 provides evidence, not approval. |
+| **Execution** | Unfunded Rebalance Shortfall | Target rebalance exceeds cash after planned sells | 0 fills committed; stepping halts; classified `REJECTED`. |
+| **Execution** | Zero Warmup Session Count | Protocol declared with `warmup_session_count = 0` | Rejected by protocol validation; requires W >= 1. |
+| **Gatekeeper** | Missing Audit Purpose Report | Promotion admission has decision report but lacks retrospective audit report | Rejected by gatekeeper; requires both purpose reports. |
+| **Gatekeeper** | Audit Critical Dimension Failed | Decision report passes, but Retrospective Audit critical dimension fails | Rejected by gatekeeper. |
+| **Gatekeeper** | Report Profile Hash Mismatch | `report.target.profile_hash` does not equal bound profile hash | Rejected by gatekeeper. |
+| **Gatekeeper** | Profile Not in Profile Set | Profile is not a member of bound `PilotProfileSetV1.profiles` | Rejected by gatekeeper. |
+| **Gatekeeper** | Fake PASS Report | Report has PASS but M1e completion record is NEGATIVE | Promotion admission rejected by gatekeeper. |
+| **Gatekeeper** | Promotion Evidence Scope | Caller treats `PromotionEvaluationResultV1` as M10 strategy approval | Disallowed; M2 provides evidence, not approval. |
 | **Replay** | Replay Across ExperimentRuns | Identical input evaluated under different ExperimentRun UUIDs | Bitwise identical evaluation hash and trace hash. |
 | **Replay** | Overnight Split Target Scaling | Staged target scaled across forward split before Open Execution | Delta correctly matches intended economic target. |
 | **Provider Boundary** | Raw Vendor Payload Leakage | Raw Alpaca JSON dictionary passed into strategy or evaluator core | Prohibited; core accepts only Drift domain models. |
