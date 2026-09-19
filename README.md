@@ -64,10 +64,14 @@ historical source evidence
 - **M1b: Historical Identity and Universes**: Complete (issuer/security/listing separation, survivor-free universes).
 - **M1c: Corporate Actions and Economic Outcomes**: Complete (action terms, occurred effects, reported settlements).
 - **M1d: Observations, Sessions, and Normalization**: Complete (raw source claims, realized sessions, split normalization).
-- **M1e: Real-Source Qualification and Replay Closure**: In Progress.
+- **M1e: Real-Source Qualification and Replay Closure**: In Progress / Deferred.
   Tasks 1 through 7 are complete (offline macOS/arm64 environment closure, golden case
-  grader G01-G18, replay harness). Task 8 (provider pilot) is pending empirical screening.
-  (See [M1e Provider Selection](docs/architecture/m1e-provider-selection.md)).
+  grader G01-G18, replay harness). Task 8 (paid promotion-grade qualification) is deferred
+  under ADR 0012 until economically justified by exploratory research.
+  (See [M1e Provider Selection](docs/architecture/m1e-provider-selection.md) and [ADR 0012](docs/adr/0012-permit-exploratory-evaluation-before-promotion-grade-source-qualification.md)).
+- **M2: Evaluator and Backtester**: Next Milestone. Exploratory evaluator development
+  with free development data (Alpaca Basic) is authorized under ADR 0012; promotion-grade
+  evaluation remains strictly gated on positive M1e qualification.
 
 ---
 

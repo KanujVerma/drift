@@ -45,3 +45,26 @@ datasets, temporary logs, model checkpoints, and duplicated intermediate
 artifacts. M0 retains their references and hashes, not the artifact bytes, and
 does not currently delete or expire them. Any future expiry policy must preserve
 the compact provenance needed to explain what an expired artifact represented.
+
+## Evidence Quality and Promotion Boundary (ADR 0012)
+
+Research and evaluation evidence is partitioned into two distinct epistemic lanes:
+
+1. **Exploratory Development Evidence (`EXPLORATORY`)**:
+   - Generated using development-grade, free, or imperfect datasets (default:
+     Alpaca Basic).
+   - Serves evaluator engine verification, baseline establishment, signal
+     exploration, and preliminary hypothesis screening.
+   - Strictly non-promotable: cannot be admitted to champion/challenger
+     tournaments (M10), overfitting promotion gates (M11), or live execution
+     (M16+).
+2. **Promotion-Grade Evidence (`PROMOTION`)**:
+   - Gated strictly by positive M1e qualification across all twelve dimensions.
+   - Requires verified rights, point-in-time assertion fidelity, exact retained
+     native bytes, and isolated offline replay closure.
+
+### Absolute Non-Upgrade Rule
+An exploratory result can NEVER be relabeled, promoted, converted, or upgraded
+into promotion-grade evidence. Promotion requires an entirely NEW, independent
+evaluation run executed directly against an accepted promotion-qualified M1e
+dataset. Evidence laundering is strictly prohibited.

@@ -7,36 +7,72 @@ system. Its core objective is to discover whether a strategy has repeatable
 predictive and risk-adjusted value without fooling itself through lookahead
 bias, survivorship bias, or ungrounded simulation assumptions.
 
-The system is organized around an end-to-end flow separating untrusted AI
-research from deterministic execution safety:
+The system is organized around two evaluation lanes separating untrusted exploratory
+research from promotion-grade live execution safety:
 
 ```text
-historical source evidence
-  -> provenance and point-in-time reconstruction
-  -> evaluator and backtester
-  -> deterministic baselines
-  -> prediction and outcome tracking
-  -> structured research memory
-  -> AI research agent
-  -> recursive R&D loop
-  -> champion / challenger tournament
-  -> promotion and anti-overfitting gates
-  -> shadow broker
-  -> deterministic hard risk
-  -> broker-neutral execution interface
-  -> live validation
-  -> official Robinhood Agentic MCP
-  -> tiny-money canary
-  -> bounded autonomy
+               [Free Development Data (Alpaca Basic)]
+                                  │
+                                  ▼
+               [Exploratory Evaluator / R&D (M2-M9)]
+                                  │
+                                  ▼
+               [Candidate Worth Promotion Validation?]
+                        │                   │
+                     No │                   │ Yes
+                        ▼                   ▼
+                 [Iterate / Retire]  [M1e Promotion Qualification]
+                                            │
+                                            ▼
+                                     [Fresh Promotion Run]
+                                            │
+                                            ▼
+                               [Champion / Challenger (M10)]
+                                            │
+                                            ▼
+                              [Overfitting Controls (M11)]
+                                            │
+                                            ▼
+                                   [Shadow Broker (M12)]
+                                            │
+                                            ▼
+                               [Deterministic Hard Risk (M13)]
+                                            │
+                                            ▼
+                              [Broker-Neutral Execution (M14)]
+                                            │
+                                            ▼
+                                   [Live Validation (M15)]
+                                            │
+                                            ▼
+                                 [Robinhood MCP Live (M16)]
+                                            │
+                                            ▼
+                                  [Tiny-Money Canary (M17)]
+                                            │
+                                            ▼
+                                   [Bounded Autonomy (M18+)]
 ```
 
-### Core Architecture Principle: Research / Safety Separation
-- **Untrusted Research**: Strategies, hypotheses, predictive models, and agent
-  reasoning are treated as untrusted experimental outputs. They can propose
-  intent but have zero direct access to order placement or live market controls.
-- **Deterministic Live Safety**: Execution, risk limits, position sizing, and
-  account safeguards are implemented in deterministic, audited runtime code
-  outside the AI agent's prompt or reasoning context.
+### Core Architecture Principles
+
+1. **Two Evaluation Lanes (ADR 0012)**:
+   - *Exploratory Lane*: Consumes free, imperfect development data (Alpaca Basic)
+     to build evaluator mechanics, test baselines, explore signals, and discover
+     promising hypotheses. Strictly non-promotable.
+   - *Promotion Lane*: Gated by positive M1e real-source qualification, exact
+     retained source bytes, and verified offline replay closure.
+2. **Absolute Non-Upgrade Rule**:
+   Exploratory evaluation results can NEVER be relabeled, converted, or upgraded
+   into promotion-grade evidence. Promotion requires a fresh, independent
+   evaluation run against an accepted promotion-qualified M1e dataset.
+3. **Research / Safety Separation**:
+   - *Untrusted Research*: Strategies, hypotheses, predictive models, and agent
+     reasoning are treated as untrusted experimental outputs. They can propose
+     intent but have zero direct access to order placement or live market controls.
+   - *Deterministic Live Safety*: Execution, risk limits, position sizing, and
+     account safeguards are implemented in deterministic, audited runtime code
+     outside the AI agent's prompt or reasoning context.
 
 ---
 
@@ -75,13 +111,15 @@ semantic layers:
 - Orthogonal missingness dimensions distinguishing no-trade from non-reporting.
 - Cutoff-safe source-basis and split-normalized historical views.
 
-### M1e: Real-Source Qualification and Replay Closure (In Progress)
+### M1e: License-Gated Real-Source Qualification and Replay Closure (In Progress / Deferred)
 - Tasks 1 through 7 complete and verified across 1,882 tests.
 - Provider-neutral qualification profiles, rights assessments, and private content store.
 - Exact source snapshots and Table 1401 golden case invariant grader (G01-G18).
 - macOS/arm64 environment closure (19 artifact kinds) and offline replay harness.
-- Task 8 (real provider pilot) is pending provider empirical screening. See
-  [M1e Provider Selection](m1e-provider-selection.md).
+- Task 8 (real provider pilot): Paid promotion-grade source qualification is
+  paused/deferred under ADR 0012 until economically justified by exploratory
+  research. See [M1e Provider Selection](m1e-provider-selection.md) and
+  [ADR 0012](../adr/0012-permit-exploratory-evaluation-before-promotion-grade-source-qualification.md).
 
 ---
 

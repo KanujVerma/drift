@@ -38,6 +38,19 @@ Four sequences were considered.
 | C. Thin evaluator and qualification together | Provides an immediate consumer and exposes interface gaps | Changes two uncertain systems together; a return can conceal source fallback or leakage | Reject |
 | D. Capability-scoped qualification plus offline replay; evaluator contract review only | Falsifies source, rights, snapshot, and replay assumptions through existing M1a-M1d contracts | Requires disciplined sample and packaging limits | **Accept** |
 
+> **Sequencing Update (2026-09-19, [ADR 0012](../../adr/0012-permit-exploratory-evaluation-before-promotion-grade-source-qualification.md))**:
+> The original sequencing decision (Sequence D above) was architecturally correct
+> under the uncertainty available at design time. Subsequent empirical provider
+> screening across algoseek, Databento free tier, and Alpaca Basic successfully exposed
+> the real-world omission, revision, licensing, and session failure modes the sequence
+> was intended to discover. However, because no zero-cost provider satisfies all
+> promotion-grade M1e hard gates, paid promotion-grade qualification (Task 8) is
+> deferred until exploratory research produces candidates that economically justify
+> paying for commercial reference validation. Under ADR 0012, an exploratory M2
+> evaluator implementation is authorized before positive M1e completion, using free
+> development data (Alpaca Basic) with explicit limitations. Positive M1e qualification
+> remains strictly required for promotion-grade evaluation.
+
 The current hypothesis B was directionally correct but insufficiently bounded.
 The unit of qualification is not a vendor. It is:
 

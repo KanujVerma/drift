@@ -50,13 +50,14 @@ For complete operational details, see the
 - **Completed**: M0 (evidence kernel), M1a (temporal provenance), M1b (historical
   identity/universes), M1c (economic facts), M1d (observations/sessions/normalization),
   and M1e Tasks 1-7 (offline environment closure, golden case grader, replay harness).
-- **In Progress**: M1e Task 8 (real provider pilot).
-- **Current Milestone State**: Provider research is in progress (algoseek reference
-  revisions disqualify it as sole historical source; Databento is strong challenger;
-  Alpaca free tier is next empirical target). No real provider profile is frozen, no
-  production adapter implemented, and no acquisition authorized.
-- **Strictly Forbidden**: Do not add broker connections, order placement,
-  evaluators, backtesters, trading models, or portfolio accounting.
+- **Sequencing State (ADR 0012)**: M1e Task 8 (promotion-grade real-source qualification)
+  is paused/deferred until economically justified. M2 evaluator architecture and exploratory
+  development are authorized using free development data (Alpaca Basic).
+- **Evidence Boundary**: Exploratory evaluation evidence is strictly non-promotable and
+  cannot be upgraded or relabeled into promotion-grade evidence. Promotion requires a fresh,
+  independent evaluation run against an accepted promotion-qualified M1e dataset.
+- **Strictly Forbidden**: Do not add broker connections, order placement, live trading,
+  or treat exploratory evaluation results as promotion-grade evidence.
 
 ---
 

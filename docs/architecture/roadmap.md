@@ -19,8 +19,8 @@ execution.
 | **M1b** | Historical Identity / Universes | **COMPLETE** | Issuer/security/listing separation, point-in-time universe composition. |
 | **M1c** | Corporate Actions / Economic Facts | **COMPLETE** | Terms, occurred effects, reported settlements, dependent replay. |
 | **M1d** | Observations, Sessions, Normalization | **COMPLETE** | Source claims, realized sessions, missingness, split-normalized views. |
-| **M1e** | Real-Source Qualification & Replay | **IN PROGRESS** | Tasks 1-7 complete (offline closure); Task 8 provider pilot pending. |
-| **M2** | Evaluator / Backtester | Planned | Deterministic point-in-time strategy evaluation without lookahead. |
+| **M1e** | Real-Source Qualification & Replay | **IN PROGRESS / DEFERRED** | Tasks 1-7 complete (offline closure); Task 8 paid promotion qualification deferred. |
+| **M2** | Evaluator / Backtester | **NEXT** | Deterministic point-in-time strategy evaluation; exploratory lane authorized under ADR 0012. |
 | **M3** | Deterministic Baselines | Planned | Passive, factor, and mechanical reference benchmark strategies. |
 | **M4** | Prediction / Outcome Tracking | Planned | Audited tracking of ex-ante forecasts against realized market facts. |
 | **M5** | Statistical / Model Scorecards | Planned | Rigorous performance attribution, calibration, and degradation metrics. |
@@ -73,29 +73,46 @@ execution.
   realized-session facts, orthogonal missingness dimensions, finite M1b composition
   for research sessions, M1c action-to-session mapping, and cutoff-safe normalized views.
 
-### M1e: License-Gated Real-Source Qualification and Replay Closure (In Progress)
+### M1e: License-Gated Real-Source Qualification and Replay Closure (In Progress / Deferred)
 - **Status**:
   - Tasks 1 through 7 complete and verified across 1,882 tests at commit `4b343f7` (`4b343f77a0cb60d0c4ba56f066dc33ac538a9b8d`).
   - Implemented provider-neutral qualification profiles, rights assessments,
     private content store, exact snapshots, golden case grader (G01-G18), macOS/arm64
     environment closure (19 artifact categories), and offline replay harness.
-  - Task 8 (Real-Source Pilot) is pending provider empirical screening.
-- **Provider Status**:
+  - Task 8 (Real-Source Pilot): Paid promotion-grade source qualification is
+    paused/deferred under ADR 0012 until economically justified by exploratory
+    research. Task 8 remains open.
+- **Provider Screening Results**:
   - *algoseek*: Sandbox testing proved strong identity and market event semantics,
     but reference-data revisions overwrite historical assertions, preventing its use
     as the sole source for historical decision input.
-  - *Databento*: Verified batch download manifests and market feeds; reference data
-    requires paid subscription.
-  - *Alpaca*: Designated as the next free-path candidate to evaluate corporate
-    action mutation streams and historical data before committing capital to Databento.
-- **Document**: See [M1e Provider Selection](m1e-provider-selection.md).
+  - *Databento*: Leading candidate for future promotion-grade qualification (`pit=True`,
+    `event_unique_id`, `ts_record`, Security Master from 2005, batch manifests).
+    Paid reference subscription is deferred.
+  - *Alpaca*: Screened on free Basic plan. Designated under ADR 0012 as the preferred
+    FREE DEVELOPMENT source for exploratory evaluator engineering. Explicitly NOT
+    M1e-qualified (corporate action mutation replay truncated to ~72 days, derived
+    bars unversioned, trading halts absent).
+- **Documents**: See [M1e Provider Selection](m1e-provider-selection.md) and
+  [ADR 0012](../adr/0012-permit-exploratory-evaluation-before-promotion-grade-source-qualification.md).
 
 ### M2: Evaluator and Backtester (Next Major Milestone)
-- **Objective**: Implement a deterministic, point-in-time strategy evaluation engine.
-- **Prerequisites**: Successful completion of M1e qualification.
+- **Status**: NEXT major milestone (exploratory lane authorized under ADR 0012).
+- **Objective**: Implement a single deterministic, provider-neutral evaluator core
+  operating across two distinct evaluation lanes:
+  - *EXPLORATORY Lane*: Consumes free development data (Alpaca Basic) with known
+    explicit limitations for signal exploration, baseline verification, and
+    engineering validation. Strictly non-promotable.
+  - *PROMOTION Lane*: Strictly gated by positive M1e real-source qualification,
+    exact retained source bytes, and verified offline replay closure.
+- **Absolute Non-Upgrade Rule**: Exploratory evaluation results can NEVER be
+  relabelled, promoted, or converted to promotion-grade evidence. Promotion
+  requires a fresh, independent evaluation run executed directly against an
+  accepted promotion-qualified M1e dataset.
 - **Invariants**: Consumes only accepted provider-neutral M1b-M1d artifacts,
-  explicit limitations, and replay identities. Never evaluates with future information.
-  Completely decoupled from live brokerage or execution logic.
+  explicit limitations, and replay identities. Never evaluates with future
+  information. Completely decoupled from live brokerage or execution logic. No
+  vendor-specific API logic in the evaluator core.
 
 ### M3 through M6: Quantitative Modeling Foundations
 - **M3 Deterministic Baselines**: Build passive, factor, and mechanical reference

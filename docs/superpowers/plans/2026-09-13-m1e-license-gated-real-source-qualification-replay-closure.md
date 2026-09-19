@@ -8,7 +8,7 @@
 
 **Tech Stack:** Existing Python 3.14+, Pydantic, pytest, Ruff, mypy, uv, and Python standard library only. No new dependency, database, object store, provider SDK, evaluator, broker, or trading capability.
 
-**Execution status:** Planning only. No M1e implementation, provider selection, acquisition, credential, environment closure, or evaluator work is authorized by this document. Task checkboxes remain unchecked until a separately authorized Sol High implementation root records verified acceptance.
+**Execution status:** Tasks 1 through 7 complete, verified across 1,882 tests, and accepted at commit `4b343f77a0cb60d0c4ba56f066dc33ac538a9b8d`. Provider empirical screening is complete across algoseek, Databento free tier, and Alpaca Basic. Paid promotion-grade source qualification under Task 8 is paused/deferred until economically justified by exploratory research. Task 8 remains open. Under [ADR 0012](../../adr/0012-permit-exploratory-evaluation-before-promotion-grade-source-qualification.md), exploratory M2 evaluator architecture is authorized while Task 8 is deferred. Promotion-grade evaluation remains strictly gated on positive M1e qualification.
 
 **Spec:** [M1e License-Gated Real-Source Qualification and Replay Closure Pilot](../specs/2026-09-12-license-gated-real-source-qualification-replay-closure-design.md), [ADR 0010](../../adr/0010-qualify-real-source-rights-and-replay-before-evaluation.md), and the completed [M1d execution record](2026-09-07-m1d-source-observations-sessions-normalization.md).
 
