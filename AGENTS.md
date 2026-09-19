@@ -70,7 +70,9 @@ For complete operational details, see the
 - **M1e Provider Selection State**: [`docs/architecture/m1e-provider-selection.md`](docs/architecture/m1e-provider-selection.md)
 - **Trust Boundaries**: [`docs/architecture/trust-boundaries.md`](docs/architecture/trust-boundaries.md)
 - **Accepted Architecture Decisions**: [`docs/adr/`](docs/adr/)
-- **Active Executable Plan**: [`docs/superpowers/plans/2026-09-13-m1e-license-gated-real-source-qualification-replay-closure.md`](docs/superpowers/plans/2026-09-13-m1e-license-gated-real-source-qualification-replay-closure.md)
+- **Active Executable Plan**: [`docs/superpowers/plans/2026-09-19-m2-deterministic-session-evaluator.md`](docs/superpowers/plans/2026-09-19-m2-deterministic-session-evaluator.md)
+  (Deferred M1e plan: [`docs/superpowers/plans/2026-09-13-m1e-license-gated-real-source-qualification-replay-closure.md`](docs/superpowers/plans/2026-09-13-m1e-license-gated-real-source-qualification-replay-closure.md))
+- **M2 Design Specification**: [`docs/superpowers/specs/2026-09-19-m2-deterministic-session-evaluator-design.md`](docs/superpowers/specs/2026-09-19-m2-deterministic-session-evaluator-design.md)
 
 Read the canonical source before modifying any area. Do not duplicate contents.
 

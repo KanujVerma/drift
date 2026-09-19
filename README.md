@@ -69,9 +69,11 @@ historical source evidence
   grader G01-G18, replay harness). Task 8 (paid promotion-grade qualification) is deferred
   under ADR 0012 until economically justified by exploratory research.
   (See [M1e Provider Selection](docs/architecture/m1e-provider-selection.md) and [ADR 0012](docs/adr/0012-permit-exploratory-evaluation-before-promotion-grade-source-qualification.md)).
-- **M2: Evaluator and Backtester**: Next Milestone. Exploratory evaluator development
-  with free development data (Alpaca Basic) is authorized under ADR 0012; promotion-grade
-  evaluation remains strictly gated on positive M1e qualification.
+- **M2: Deterministic Session-Level Evaluator and Portfolio Accounting Kernel**: Next Milestone.
+  Exploratory evaluator development with free development data (Alpaca Basic) is authorized
+  under ADR 0012; promotion-grade evaluation remains strictly gated on positive M1e qualification.
+  (See [M2 Design](docs/superpowers/specs/2026-09-19-m2-deterministic-session-evaluator-design.md)
+  and [M2 Plan](docs/superpowers/plans/2026-09-19-m2-deterministic-session-evaluator.md)).
 
 ---
 

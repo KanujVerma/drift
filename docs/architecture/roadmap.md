@@ -96,7 +96,7 @@ execution.
 - **Documents**: See [M1e Provider Selection](m1e-provider-selection.md) and
   [ADR 0012](../adr/0012-permit-exploratory-evaluation-before-promotion-grade-source-qualification.md).
 
-### M2: Evaluator and Backtester (Next Major Milestone)
+### M2: Deterministic Session-Level Evaluator and Portfolio Accounting Kernel (Next Major Milestone)
 - **Status**: NEXT major milestone (exploratory lane authorized under ADR 0012).
 - **Objective**: Implement a single deterministic, provider-neutral evaluator core
   operating across two distinct evaluation lanes:
@@ -113,6 +113,8 @@ execution.
   explicit limitations, and replay identities. Never evaluates with future
   information. Completely decoupled from live brokerage or execution logic. No
   vendor-specific API logic in the evaluator core.
+- **Documents**: See [M2 Design Specification](../superpowers/specs/2026-09-19-m2-deterministic-session-evaluator-design.md)
+  and [M2 Implementation Plan](../superpowers/plans/2026-09-19-m2-deterministic-session-evaluator.md).
 
 ### M3 through M6: Quantitative Modeling Foundations
 - **M3 Deterministic Baselines**: Build passive, factor, and mechanical reference
