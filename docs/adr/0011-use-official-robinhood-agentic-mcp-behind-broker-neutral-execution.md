@@ -10,8 +10,10 @@ Drift requires live execution validation and capital allocation in later
 milestones (M14 through M17). Historically, automated trading projects
 integrating with consumer brokerages relied on unofficial private APIs (such as
 `robin_stocks`), reverse-engineered authentication tokens, or brittle browser
-automation. These mechanisms are fragile, violate brokerage terms of service,
-risk account suspension, and fail Drift's trust and auditability standards.
+automation. These mechanisms are unsupported by the official integration
+surface, brittle against private endpoint and auth changes, may conflict with
+brokerage account or terms controls, create unnecessary operational and
+security risk, and fail Drift's supportability and auditability standards.
 
 Robinhood has released an official Agentic Trading MCP (Model Context Protocol)
 service designed specifically for autonomous trading agents operating on

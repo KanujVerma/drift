@@ -40,7 +40,7 @@ historical source evidence
 
 ---
 
-## Implemented Foundations (M0 through M1e)
+## Implemented Foundations (M0-M1d) and Current M1e
 
 The codebase currently implements the foundational evidence, temporal, and
 semantic layers:
@@ -48,7 +48,7 @@ semantic layers:
 ### M0: Research Evidence Kernel (Complete)
 - Frozen Pydantic domain models for hypotheses, runs, evidence, and artifacts.
 - Canonical JSON serialization guaranteeing deterministic byte representation.
-- SHA-256 hash-chained audit events recording an immutable causal history.
+- SHA-256 hash-chained audit events recording a tamper-evident, append-only causal history.
 - Transactional, append-only local SQLite ledger with monotonic sequencing and
   snapshot verification.
 

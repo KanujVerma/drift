@@ -60,10 +60,12 @@ Claims in this document are strictly classified using four epistemic tiers:
 ### 1. algoseek
 
 #### EMPIRICALLY OBSERVED (via User Sandbox Account)
-- **Identity Semantics**: Strong alignment with Drift M1b. Persistent `ASID`
-  (algoseek Security Identifier) tracks economic securities across ticker
-  renames, name changes, mergers, and delistings from 2007 onward. Unique
-  `SecId` tracks listing-level manifestations.
+- **Identity Semantics**: Strong alignment with Drift M1b. Empirical testing
+  demonstrated persistent identity across observed ticker and name changes,
+  listing and venue transitions, and delisted securities remaining addressable.
+  Observed chains associate multiple `SecId` records through a stable `ASID`
+  (algoseek Security Identifier) from 2007 onward while maintaining distinct
+  identities under ticker reuse.
 - **Universe Coverage**: Listed and delisted US equities are addressable with
   explicit start and end dates.
 - **Corporate Action Terms**: Adjustment factors, event reasons (e.g.,
@@ -129,8 +131,10 @@ Claims in this document are strictly classified using four epistemic tiers:
 - **Security Master**: Supports `ts_record` and `ts_effective`, separating
   issuer, security, and listing concepts with point-in-time symbology resolution
   (`stype_in`/`stype_out`).
-- **Historical Breadth**: Reference datasets span multiple decades, well beyond
-  the bounded M1e pilot requirements.
+- **Historical Breadth**: Security Master history is documented approximately from
+  2005-01-01, while Corporate Actions history is documented approximately from
+  2018-05-01. Both exceed or substantially support the bounded M1e pilot
+  requirements, though their historical depths differ.
 
 #### UNKNOWN
 - Empirical verification of reference-data point-in-time behavior on the paid

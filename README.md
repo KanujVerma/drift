@@ -5,11 +5,11 @@ system. Its core objective is to discover whether a strategy has repeatable
 predictive and risk-adjusted value without fooling itself through lookahead
 bias, survivorship bias, or ungrounded simulation assumptions.
 
-Research outputs in Drift remain strictly untrusted until validated through an
-immutable evidence chain and explicit promotion gates.
+Research outputs in Drift remain strictly untrusted until validated through a
+tamper-evident, append-only evidence history and explicit promotion gates.
 
 > **Current Boundary**: Drift is not yet an equity backtester or a live trading bot.
-> Completed milestones (M0 through M1d) provide an immutable research evidence
+> Completed milestones (M0 through M1d) provide a tamper-evident, append-only research evidence
 > kernel, temporal provenance, historical identity/universes, economic action
 > terms, and normalized observations using synthetic local fixtures. M1e
 > (real-source qualification and offline replay closure) is currently in progress.
@@ -20,7 +20,7 @@ immutable evidence chain and explicit promotion gates.
 ## Core Philosophy
 
 1. **Evidence First**: All hypotheses, datasets, experiments, models, and
-   outcomes are immutably recorded in a tamper-evident, hash-chained ledger.
+   outcomes are recorded in a tamper-evident, append-only, hash-chained ledger.
 2. **Point-in-Time Truth**: Data contracts strictly enforce what was observable
    and available at each exact historical instant. Future information leakage is
    a hard failure.
@@ -33,7 +33,7 @@ immutable evidence chain and explicit promotion gates.
 
 ## Architecture Flow
 
-Drift is designed around an end-to-end pipeline spanning twenty milestones:
+Drift's roadmap runs from M0 through M18+, with M1 split into independently accepted submilestones:
 
 ```text
 historical source evidence
