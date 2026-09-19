@@ -242,6 +242,24 @@ Claims in this document are strictly classified using four epistemic tiers:
 
 ---
 
+## Eliminated Standard Profiles
+
+The following standard consumer/commercial offerings have been evaluated and
+eliminated from consideration as primary M1e sources under their default terms:
+
+| Provider | Critical Disqualifier | Reference Clause |
+|---|---|---|
+| **Nasdaq Data Link (Sharadar)** | Mandatory complete raw data purge and destruction upon subscription termination. | Standard Data License Terms, Section 8 (Termination and Purge Certification). |
+| **Norgate Data** | Mandatory deletion of all Content and Information upon subscription expiration; no point-in-time revision tracking. | Norgate Data EULA, Section 5 (Termination). |
+| **Tiingo** | Explicit requirement to promptly and permanently delete all data from all systems, storage, and backups upon plan termination or downgrade. | Tiingo Terms of Use, Section 6 (Termination and Deletion). |
+| **Massive / Polygon.io** | Standard developer terms prohibit non-display automated trading/strategy creation and mandate market data deletion upon termination. | Massive Market Data Terms of Service (Post-Termination Obligations). |
+
+These eliminations apply strictly to the standard terms reviewed. They do not
+preclude custom negotiated enterprise agreements if such options are ever
+authorized.
+
+---
+
 ## Canonical Next Action
 
 Under ADR 0012, paid promotion-grade M1e qualification is deferred until

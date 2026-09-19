@@ -59,7 +59,8 @@ Research and evaluation evidence is partitioned into two distinct epistemic lane
      tournaments (M10), overfitting promotion gates (M11), or live execution
      (M16+).
 2. **Promotion-Grade Evidence (`PROMOTION`)**:
-   - Gated strictly by positive M1e qualification across all twelve dimensions.
+   - Gated strictly by positive M1e qualification where every critical required
+     dimension must PASS and every dimension has an explicit evidenced status.
    - Requires verified rights, point-in-time assertion fidelity, exact retained
      native bytes, and isolated offline replay closure.
 
