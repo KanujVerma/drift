@@ -1,152 +1,138 @@
-# Architecture overview
+# Architecture Overview
 
-## Purpose and scope
+## Long-Term Vision and End-to-End Pipeline
 
-Drift combines a local research evidence kernel (M0), temporal provenance (M1a),
-historical identity/universe semantics (M1b), economic facts (M1c), and synthetic
-source observations, sessions, and normalization (M1d). Its purpose is to preserve
-what was proposed, tested, observed, and concluded in a form that can be checked
-later. It does not make trading decisions or connect to a trading environment.
+Drift is an evidence-driven, self-improving quantitative research and trading
+system. Its core objective is to discover whether a strategy has repeatable
+predictive and risk-adjusted value without fooling itself through lookahead
+bias, survivorship bias, or ungrounded simulation assumptions.
 
-The M0 core has four small responsibilities:
-
-1. Frozen domain models validate research objects such as hypotheses, dataset
-   references, experiment specifications and runs, evidence, and artifact
-   references.
-2. Canonical JSON turns supported values into deterministic bytes for hashing.
-3. SHA-256 event hashing binds a complete event to the preceding event hash.
-4. A SQLite ledger appends and verifies the ordered audit history.
-
-`StrategyArtifact` records a versioned candidate and its content hash. It is
-not a strategy runtime and has no executable behavior.
-
-## Data flow
-
-An application creates an `AuditEventDraft` with validated research metadata.
-`SQLiteLedger.append` assigns the current predecessor hash, computes the event
-hash over the canonical unsigned event, stores the event, and stores the event
-hash as an append-only checkpoint in one transaction. SQLite assigns the
-sequence number. The sequence, not the timestamp, establishes order.
-
-`SQLiteLedger.verified_events` opens one read transaction, loads the ordered
-event rows and checkpoint rows once, and verifies the exact rows it read. It
-checks contiguous sequence values, checkpoint count and sequence, checkpoint
-hash equality, predecessor links, recomputed hashes, and canonical raw storage.
-`replay_events` returns that one verified tuple without a second database read.
-
-Canonical raw-row validation closes a subtle representation gap. For example,
-an equivalent but noncanonical UUID, timestamp, or JSON representation is still
-rejected because the bytes stored in the ledger must match the canonical output.
-
-## Local interfaces
-
-The only supplied runtime interfaces are local Python imports, a local SQLite
-file, and two installed script invocations:
+The system is organized around an end-to-end flow separating untrusted AI
+research from deterministic execution safety:
 
 ```text
-uv run python scripts/init_local_db.py [path]
-uv run python scripts/verify_ledger.py [path]
+historical source evidence
+  -> provenance and point-in-time reconstruction
+  -> evaluator and backtester
+  -> deterministic baselines
+  -> prediction and outcome tracking
+  -> structured research memory
+  -> AI research agent
+  -> recursive R&D loop
+  -> champion / challenger tournament
+  -> promotion and anti-overfitting gates
+  -> shadow broker
+  -> deterministic hard risk
+  -> broker-neutral execution interface
+  -> live validation
+  -> official Robinhood Agentic MCP
+  -> tiny-money canary
+  -> bounded autonomy
 ```
 
-The first creates a missing local database and verifies it. The second verifies
-an existing database and reports its event count without creating a missing
-file. `[path]` defaults to `.drift/ledger.db`.
+### Core Architecture Principle: Research / Safety Separation
+- **Untrusted Research**: Strategies, hypotheses, predictive models, and agent
+  reasoning are treated as untrusted experimental outputs. They can propose
+  intent but have zero direct access to order placement or live market controls.
+- **Deterministic Live Safety**: Execution, risk limits, position sizing, and
+  account safeguards are implemented in deterministic, audited runtime code
+  outside the AI agent's prompt or reasoning context.
 
-## Temporal and historical resolution
+---
 
-M1a binds exact source bytes and immutable revisions to explicit availability
-evidence. It answers what was knowable through a named channel and policy by a
-knowledge cutoff. M1b adds independently versioned identity, mapping,
-classification, primary-role, lifecycle, termination, and universe assertions.
-Their effective time answers a separate question from source availability.
+## Implemented Foundations (M0 through M1e)
 
-Local readers verify artifact bytes before role-specific parsing. Exact schemas
-and validation decisions bind the parsed records into immutable dataset bundles.
-Audit-side resolvers select causal versions at the knowledge cutoff and evaluate
-their effect at the requested historical time. They retain considered and selected
-record hashes with query and proof bindings. Decision references expose only
-selected hashes; ex-post current interpretation cannot acquire decision authority.
+The codebase currently implements the foundational evidence, temporal, and
+semantic layers:
 
-Issuer, security, and venue listing remain separate identities. Ticker changes
-preserve the listing; reuse names a distinct identity; venue transfer can create
-a new listing for the same security. Primary status is temporal and methodology
-specific. Known mapping is independent of uncertain lifecycle. An absent
-termination record proves neither continued activity nor termination. Asserting
-continued activity requires complete lifecycle history through the evaluation time.
+### M0: Research Evidence Kernel (Complete)
+- Frozen Pydantic domain models for hypotheses, runs, evidence, and artifacts.
+- Canonical JSON serialization guaranteeing deterministic byte representation.
+- SHA-256 hash-chained audit events recording an immutable causal history.
+- Transactional, append-only local SQLite ledger with monotonic sequencing and
+  snapshot verification.
 
-Source universe definitions have their own causal selection and replay. Research
-policies are directly content-addressed and pin both input bundles. Membership
-uses explicit effective events; an upcoming addition or a current snapshot cannot
-establish historical inclusion. An ended source-key association does not erase a
-retained identity or create a membership removal.
+### M1a: Temporal Provenance (Complete)
+- Exact-byte dataset manifests with SHA-256 digests and file sizes.
+- Channel-scoped availability evidence proving what was accessible when.
+- Immutable fact revisions and exact-object validation records.
+- Query-bound tri-state cutoff decisions preventing future information leakage.
 
-The public structural resolver reconstructs identity, classification, primary,
-lifecycle, and membership outcomes from complete validated inputs before pure
-composition. It accepts no caller status as trusted evidence. Supported domestic
-operating-company common shares require an evidenced primary listing on XNYS,
-XNAS, or XASE, definite first trade and lifecycle state, and effective membership.
-Unknown or conflicting evidence remains indeterminate and fails admission.
+### M1b: Historical Identity and Universes (Complete)
+- Strict separation of issuer, security, and venue listing identities.
+- Historical ticker mappings, primary listing venue histories, and delistings.
+- Point-in-time universe composition and structural eligibility rules.
 
-Canonical contracts live in `src/drift/domain/`; audit-side resolvers and exact
-role validation live in `src/drift/markets/`. The semantic separations and trust
-boundaries are recorded in [ADR 0006](../adr/0006-independent-historical-identity-and-lifecycle-facts.md)
-and [ADR 0007](../adr/0007-authenticated-point-in-time-universe-composition.md).
-There is no provider connection, historical-tradability model, evaluator,
-backtester, broker, trading, return, portfolio, network, dependency, or
-environment-closure capability. M1c economic events/outcomes and M1d synthetic
-observations/sessions/normalization are implemented. M1d preserves source claims,
-pinned schedule and realized-session facts, orthogonal missingness, finite M1b
-composition, M1c action-to-session mapping, cutoff-safe source/split views, and
-fixture-only replay across an 81-row matrix. Its boundaries and accepted lifecycle
-record are in [ADR 0009](../adr/0009-separate-economic-events-and-observation-semantics.md),
-the [roadmap](roadmap.md), and the [M1d execution record](../superpowers/plans/2026-09-07-m1d-source-observations-sessions-normalization.md).
+### M1c: Historical Economic Facts (Complete)
+- Independent modeling of announced action terms, actual occurred effects, and
+  reported settlement deliveries.
+- Explicit cash, share, and property consideration components.
+- Exact multi-source occurrence reconciliation with dependent replay.
 
-## Economic facts and outcome resolution
+### M1d: Observations, Sessions, and Normalization (Complete)
+- Immutable source observation claims preserved without lossy assumptions.
+- Pinned schedule and realized-session facts capturing early closes and halts.
+- Orthogonal missingness dimensions distinguishing no-trade from non-reporting.
+- Cutoff-safe source-basis and split-normalized historical views.
 
-Three immutable source families distinguish action terms, actual effects and
-reported settlements. Coverage is a separate evidence family, not an economic
-event or consumer fact. Terms do not prove occurrence; owed property does not
-prove delivery. An explicit no-consideration effect is not an invented zero
-payment, and unknown bankruptcy evidence remains unknown.
+### M1e: Real-Source Qualification and Replay Closure (In Progress)
+- Tasks 1 through 7 complete and verified across 1,882 tests.
+- Provider-neutral qualification profiles, rights assessments, and private content store.
+- Exact source snapshots and Table 1401 golden case invariant grader (G01-G18).
+- macOS/arm64 environment closure (19 artifact kinds) and offline replay harness.
+- Task 8 (real provider pilot) is pending provider empirical screening. See
+  [M1e Provider Selection](m1e-provider-selection.md).
 
-M1c queries separate decision time, knowledge cutoff and economic evaluation
-time from an outcome horizon and finite evidence vintage. Full source chains
-are selected before subject/authority filtering. Actual-event authority must
-also satisfy the finite cutoff, including facts before the requested window.
-Prior facts can support claim and closure evidence without being emitted again
-as window deliveries. Known future-scheduled terms remain reported information,
-not realized effects.
+---
 
-One source owns each fact-family/security/query scope in V1. Positively evidenced
-occurrence identity, not equal dates or amounts, enables comparison. All causally
-selected, admitted reports of that occurrence constrain equality before emission;
-a boundary cannot hide a known conflict. Composition preserves component
-multiplicity and provenance without adding quantities or converting holdings.
-Relevant uncertainty withholds stronger claim or closure conclusions, while
-definite precedence and distinct action scopes remain separate.
+## Future Execution Architecture (M13 through M16)
 
-Source validation must genuinely pass as well as replay exactly. Query-bound
-safe projections retain independently known components and mark withheld
-dependencies. Consumer resolvers snapshot supplied mappings before verifying
-their values, expose only matching decision/outcome authority, and reconstruct
-all dependent proofs. Audit outcomes are not decision capabilities. These local
-contracts do not provide process isolation, authentication or real-source truth.
+### Live Execution Safety Controls (M13 - M15)
+When Drift reaches live execution validation, the runtime incorporates strict
+safety patterns drawn from institutional trading systems:
 
-Evidence completeness and factual support are independent. A known unsupported
-property can remain evidence without investment eligibility or valuation.
-Exact contracts, limits, interpreter/fixture versioning and verification evidence
-live in the [M1c execution record](../superpowers/plans/2026-09-05-m1c-corporate-actions-economic-outcomes.md).
+1. **Deterministic Position and Order Limits**: Hard-coded caps on maximum order
+   notional, maximum open position size, and maximum portfolio leverage.
+2. **Persistent Kill Switch**: An external, file-backed emergency stop switch
+   that survives process restarts and immediately cancels pending orders.
+3. **Pending Order Intent State**: Orders must be recorded in an intent journal
+   before submission to prevent duplicate order generation during network latency.
+4. **Broker Readback and Reconciliation**: Continuous reconciliation loop matching
+   local position intent against actual broker account positions.
+5. **Crash Recovery**: Deterministic state reconstruction from the execution
+   journal upon startup.
+6. **Private Runtime State Outside Git**: All credentials, session tokens, and
+   account state live in private local storage outside source control.
+7. **Dry-Run / Shadow Preview Mode**: Full validation pipeline running against live
+   quotes without order placement.
+8. **Tiny-Capital Canary Rollout**: Real-money execution strictly constrained to
+   minimal capital allocations (e.g., single-share canary testing).
+9. **Cumulative Daily Loss Limits**: Hard automated circuit breakers halting
+   trading if realized or unrealized drawdown exceeds daily thresholds.
+10. **Asset Allowlists**: Execution restricted strictly to pre-approved, highly
+    liquid symbols meeting universe criteria.
 
-## Compatibility contract
+### Official Robinhood Agentic MCP Adapter (M16)
+Drift integrates with live brokerages exclusively through standard, supported
+interfaces (ADR 0002 and ADR 0011):
 
-A future storage adapter, including PostgreSQL, must preserve the event
-envelope, canonical hashing rules, database-assigned ordering, deduplication
-uniqueness, append-only behavior, checkpoint coverage, and full verification
-semantics. M0 does not include that adapter.
+- **No Unofficial APIs**: Drift forbids reverse-engineered web scrapers,
+  `robin_stocks`, browser automation, or private endpoint emulation.
+- **Broker-Neutral Interface**: Core trading strategies interact with an
+  abstract, broker-neutral execution boundary.
+- **Official MCP Connection**: The live execution adapter communicates with
+  Robinhood via the official Robinhood Agentic MCP protocol on a dedicated
+  Agentic Trading Account.
+- **Role Isolation**: Robinhood is live execution and account state
+  infrastructure, never Drift's historical research truth source.
 
-M1b's manifest and validation-decision V2 contracts are additive. Existing M0/M1a
-canonical bytes, hashes, schemas, event envelopes, ledger behavior, and replay
-remain unchanged and covered by pinned compatibility tests. Historical M1b
-interpretations also require their pinned interpreter: the Task 3 semantic
-correction versions mapping/termination/lifecycle proofs rather than silently
-reusing the earlier proof identity. Old records and manifests remain retained.
+---
+
+## Canonical Documentation Map
+
+- **Roadmap and Milestone Status**: [roadmap.md](roadmap.md)
+- **Agent Operating Workflow and Authority**: [agent-workflow.md](agent-workflow.md)
+- **Trust Boundaries and Retention**: [trust-boundaries.md](trust-boundaries.md)
+- **M1e Provider Selection State**: [m1e-provider-selection.md](m1e-provider-selection.md)
+- **Accepted Architecture Decisions**: [docs/adr/](../adr/)
+- **Active Executable Plan**: [docs/superpowers/plans/2026-09-13-m1e-license-gated-real-source-qualification-replay-closure.md](../superpowers/plans/2026-09-13-m1e-license-gated-real-source-qualification-replay-closure.md)

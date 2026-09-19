@@ -1,121 +1,85 @@
 # Drift
 
-Drift's long-term ambition is an evidence-driven, self-improving quantitative
-research and trading system. Its current implemented scope is an M0 research
-evidence kernel, M1a temporal provenance, M1b historical identity and universes,
-M1c historical economic facts, and M1d source observations, sessions, and
-normalization.
-M0 records structured research
-metadata and a hash-chained audit history. M1a adds exact-byte dataset
-manifests, explicit channel-scoped availability evidence, immutable fact
-revisions, exact-object validation records, and per-query tri-state cutoff
-decisions. M1b adds immutable issuer/security/listing identities, dated identifier
-and primary-listing assertions, lifecycle and termination facts, historical
-universe membership, and structural eligibility over exact validated evidence.
-M1c adds immutable action terms, occurred/cancelled effects, reported settlements,
-exact cash/share/property components, coverage and separate decision/outcome
-selection with complete dependent replay.
+Drift is an evidence-driven, self-improving quantitative research and trading
+system. Its core objective is to discover whether a strategy has repeatable
+predictive and risk-adjusted value without fooling itself through lookahead
+bias, survivorship bias, or ungrounded simulation assumptions.
 
-Drift is not a trading system or an equity backtester. Its market semantics use
-synthetic local fixtures. It has no real data source, evaluator,
-backtester, broker, strategy-execution, agent, network, order-management,
-portfolio-management, production configuration, or production-credential
-capability. M1c is complete; its
-[implementation and acceptance record](docs/superpowers/plans/2026-09-05-m1c-corporate-actions-economic-outcomes.md)
-documents the tested boundary. M1d is complete; its
-[implementation and acceptance record](docs/superpowers/plans/2026-09-07-m1d-source-observations-sessions-normalization.md)
-documents immutable source claims, pinned schedule and realized-session facts,
-orthogonal missingness, finite M1b composition, M1c action-to-session mapping,
-cutoff-safe source/split views, and fixture-only replay across the 81-row
-acceptance matrix. This establishes neither provider acceptance nor evaluator,
-backtester, broker, trading, returns, portfolio, network, dependency, or
-environment-closure capability.
-`StrategyArtifact` is compact provenance metadata, not executable strategy code.
+Research outputs in Drift remain strictly untrusted until validated through an
+immutable evidence chain and explicit promotion gates.
 
-## Core philosophy
+> **Current Boundary**: Drift is not yet an equity backtester or a live trading bot.
+> Completed milestones (M0 through M1d) provide an immutable research evidence
+> kernel, temporal provenance, historical identity/universes, economic action
+> terms, and normalized observations using synthetic local fixtures. M1e
+> (real-source qualification and offline replay closure) is currently in progress.
+> Drift has no live broker connection, active order execution, or live capital.
 
-The goal is not to make an AI trade frequently. The goal is to build a system
-capable of discovering whether it has repeatable predictive or
-portfolio-management value without fooling itself. Research outputs remain
-untrusted until a future, explicit promotion process approves them.
+---
 
-## Long-term architecture
+## Core Philosophy
 
-Future milestones may extend the evidence kernel through this controlled flow:
+1. **Evidence First**: All hypotheses, datasets, experiments, models, and
+   outcomes are immutably recorded in a tamper-evident, hash-chained ledger.
+2. **Point-in-Time Truth**: Data contracts strictly enforce what was observable
+   and available at each exact historical instant. Future information leakage is
+   a hard failure.
+3. **Research / Safety Separation**: Autonomous AI agents may propose research
+   hypotheses and strategy models, but live execution safety, hard risk limits,
+   position caps, and emergency kill switches are enforced deterministically
+   outside the agent's context.
+
+---
+
+## Architecture Flow
+
+Drift is designed around an end-to-end pipeline spanning twenty milestones:
 
 ```text
-research -> experiments -> evidence -> challengers -> gated promotion
--> production strategy -> deterministic risk/execution
+historical source evidence
+  -> provenance and point-in-time reconstruction
+  -> evaluator and backtester
+  -> deterministic baselines
+  -> prediction and outcome tracking
+  -> structured research memory
+  -> AI research agent
+  -> recursive R&D loop
+  -> champion / challenger tournament
+  -> promotion and anti-overfitting gates
+  -> shadow broker
+  -> deterministic hard risk
+  -> broker-neutral execution interface
+  -> live validation
+  -> official Robinhood Agentic MCP
+  -> tiny-money canary
+  -> bounded autonomy
 ```
 
-M0, M1a, M1b, and M1c implement the evidence, temporal-provenance, historical
-identity/universe, and economic-fact foundations.
-They do not implement any later stage in that flow.
+---
 
-## Historical identity and candidacy
+## Current Project Status
 
-M1b distinguishes what an identifier referred to, what is known about a listing's
-lifecycle, and whether the listing meets a declared historical universe policy.
-A known mapping does not prove activity. Membership facts can remain known after
-an association ends; structural eligibility independently requires valid identity
-links, supported classification, the selected primary methodology, lifecycle
-evidence, and effective membership.
+- **M0: Auditable Evidence Kernel**: Complete (monotonically sequenced SQLite ledger).
+- **M1a: Temporal Provenance**: Complete (exact manifests, availability, cutoff gates).
+- **M1b: Historical Identity and Universes**: Complete (issuer/security/listing separation, survivor-free universes).
+- **M1c: Corporate Actions and Economic Outcomes**: Complete (action terms, occurred effects, reported settlements).
+- **M1d: Observations, Sessions, and Normalization**: Complete (raw source claims, realized sessions, split normalization).
+- **M1e: Real-Source Qualification and Replay Closure**: In Progress.
+  Tasks 1 through 7 are complete (offline macOS/arm64 environment closure, golden case
+  grader G01-G18, replay harness). Task 8 (provider pilot) is pending empirical screening.
+  (See [M1e Provider Selection](docs/architecture/m1e-provider-selection.md)).
 
-Every query binds its knowledge cutoff, evaluation time, channel, policy, exact
-datasets, and supporting proofs. Later corrections create a new reproducible
-interpretation. Audit-only current interpretation cannot become historical
-decision information. See the [architecture overview](docs/architecture/overview.md)
-and [milestone record](docs/superpowers/plans/2026-09-03-m1b-historical-security-identity-universes.md).
+---
 
-## Historical economic facts
-
-M1c keeps promises, actual effects and reported deliveries separate. It selects
-source revisions before comparing reports of the same evidenced occurrence,
-so corrections and corroborating reports do not mint additional payouts.
-Known payments can survive missing parents; delisting does not imply claim
-extinction or zero proceeds. Partial evidence and unsupported economic shapes
-remain explicit rather than being converted to complete results.
-
-Decision and outcome references are not interchangeable. Exact-byte validation
-must pass, supplied values are checked in a stable snapshot, and replay binds
-the query, source policy, identity evidence and interpreter. Semantic-rule hashes
-and the conservative installed-source fingerprint have different purposes.
-Immutable fixtures retain old source bytes and code bindings instead of silently
-rewriting them. These guarantees use synthetic evidence; they establish neither
-real-market completeness nor valuation or backtest readiness.
-
-## Source observations, sessions, and normalization
-
-M1d preserves immutable source observation claims instead of treating them as
-objective market truth. It retains schedule and realized-session facts separately,
-keeps missingness dimensions independent, uses finite M1b composition for narrow
-research-session eligibility, maps selected M1c occurred effects to proven
-sessions, and materializes query-bound source-basis or exact split-normalized
-views with fixture-only replay.
-
-This is not provider acceptance or a real-market coverage claim. Drift still has
-no evaluator, backtester, broker, trading, return, portfolio, network, new
-dependency, or environment-closure capability.
-
-## Install and verify
+## Quick Start and Verification
 
 Drift requires Python 3.14 or later and [uv](https://docs.astral.sh/uv/).
 
-```text
+```bash
+# Sync development dependencies
 uv sync --dev
-uv run python scripts/init_local_db.py [path]
-uv run python scripts/verify_ledger.py [path]
-```
 
-`[path]` is optional and defaults to `.drift/ledger.db`. Initialization creates
-the local parent directory if needed and verifies the resulting ledger.
-Verification does not create a missing database. Use the installed `uv run
-python` commands above. Direct source-checkout execution through a script
-shebang is not a supported invocation.
-
-Run the maintainer checks with:
-
-```text
+# Run standard verification suite
 uv run pytest
 uv run ruff check .
 uv run ruff format --check .
@@ -123,38 +87,22 @@ uv run mypy src tests
 uv build
 ```
 
-## What the ledger guarantees
+To initialize and verify the local audit ledger:
 
-Domain objects are frozen Pydantic models. Canonical JSON normalizes supported
-values before SHA-256 hashing and rejects naive datetimes and non-finite floats.
-The SQLite ledger assigns a monotonic sequence, gives each event the preceding
-event hash, and writes an append-only checkpoint for every event in the same
-transaction. Database triggers reject ordinary updates and deletes of both
-event and checkpoint rows.
+```bash
+uv run python scripts/init_local_db.py .drift/ledger.db
+uv run python scripts/verify_ledger.py .drift/ledger.db
+```
 
-Verification reads the events and checkpoints from one SQLite read snapshot.
-It checks contiguous sequence numbers, the previous-hash link, recomputed event
-hashes, checkpoint correspondence, and canonical raw-row storage. The
-raw-row comparison matters: a database value that parses to the same logical
-object but is not in the canonical stored representation is rejected. Replay
-returns the exact verified snapshot in database sequence order, rather than a
-later query result.
+---
 
-This is tamper-evident, not tamper-proof. A privileged actor who can coordinate
-a database rewrite, restore checkpoints, and recompute the chain can produce a
-new internally consistent ledger. M0 supplies local integrity evidence; it does
-not provide external anchoring, access control, key management, or independent
-attestation.
+## Canonical Documentation Map
 
-## Retention
-
-Keep compact provenance immutable: hypotheses, specifications and runs, hashes,
-parameters, metrics, dataset references, evidence lineage, failures, and any
-future promotion history. Bulky artifacts, including raw datasets, temporary
-logs, model checkpoints, and duplicate intermediate outputs, can expire under
-explicit future retention rules. M0 records their locations and hashes but does
-not expire or manage those artifacts.
-
-See [the architecture overview](docs/architecture/overview.md),
-[trust boundaries](docs/architecture/trust-boundaries.md), and the
-[M1 roadmap](docs/architecture/roadmap.md).
+- **Operating Contract for AI/Engineers**: [`AGENTS.md`](AGENTS.md)
+- **Agent Operating Workflow & Continuity**: [`docs/architecture/agent-workflow.md`](docs/architecture/agent-workflow.md)
+- **Architecture Overview**: [`docs/architecture/overview.md`](docs/architecture/overview.md)
+- **Project Roadmap (M0 to M18+)**: [`docs/architecture/roadmap.md`](docs/architecture/roadmap.md)
+- **M1e Provider Selection & Screening**: [`docs/architecture/m1e-provider-selection.md`](docs/architecture/m1e-provider-selection.md)
+- **Trust Boundaries & Data Retention**: [`docs/architecture/trust-boundaries.md`](docs/architecture/trust-boundaries.md)
+- **Accepted Architecture Decision Records**: [`docs/adr/`](docs/adr/)
+- **Active Implementation Plan**: [`docs/superpowers/plans/2026-09-13-m1e-license-gated-real-source-qualification-replay-closure.md`](docs/superpowers/plans/2026-09-13-m1e-license-gated-real-source-qualification-replay-closure.md)

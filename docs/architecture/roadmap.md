@@ -1,124 +1,139 @@
-# Roadmap
+# Drift Project Roadmap
 
-## M0, complete
+This document outlines the phased milestone progression of Drift from an
+immutable evidence kernel to a bounded, self-improving quantitative trading system.
 
-M0 provides validated immutable research objects, canonical serialization,
-SHA-256 hash-chained audit events, and a transactional append-only local SQLite
-ledger. It verifies and replays one consistent snapshot, while remaining a
-local research-only system.
+Milestones are ordered by causal dependency. Milestone numbers do not represent
+equal units of engineering effort; earlier milestones establish scientific and
+data integrity, while later milestones introduce modeling, evaluation, and live
+execution.
 
-M0 landed at commit `301dc9d`. Maintenance after that commit may clarify
-documentation or verification without starting M1.
+---
 
-M0 deliberately excludes broker access, market-data access, order placement,
-trading, backtesting, strategy execution, network clients, language-model or
-agent orchestration, production configuration, and production credentials.
+## Milestone Status Overview
 
-## M1a, complete
+| Milestone | Title | Status | Primary Output / Invariant |
+|---|---|---|---|
+| **M0** | Auditable Evidence Kernel | **COMPLETE** | Monotonic append-only SQLite ledger with SHA-256 hash chaining. |
+| **M1a** | Temporal Provenance | **COMPLETE** | Exact-byte manifests, channel availability, and tri-state cutoffs. |
+| **M1b** | Historical Identity / Universes | **COMPLETE** | Issuer/security/listing separation, point-in-time universe composition. |
+| **M1c** | Corporate Actions / Economic Facts | **COMPLETE** | Terms, occurred effects, reported settlements, dependent replay. |
+| **M1d** | Observations, Sessions, Normalization | **COMPLETE** | Source claims, realized sessions, missingness, split-normalized views. |
+| **M1e** | Real-Source Qualification & Replay | **IN PROGRESS** | Tasks 1-7 complete (offline closure); Task 8 provider pilot pending. |
+| **M2** | Evaluator / Backtester | Planned | Deterministic point-in-time strategy evaluation without lookahead. |
+| **M3** | Deterministic Baselines | Planned | Passive, factor, and mechanical reference benchmark strategies. |
+| **M4** | Prediction / Outcome Tracking | Planned | Audited tracking of ex-ante forecasts against realized market facts. |
+| **M5** | Statistical / Model Scorecards | Planned | Rigorous performance attribution, calibration, and degradation metrics. |
+| **M6** | Structured Research Memory | Planned | Semantic storage of past experiments, failures, and causal insights. |
+| **M7** | First AI Research Agent | Planned | Autonomous hypothesis generation and experiment specification. |
+| **M8** | Recursive R&D Loop | Planned | Continuous exploration, hypothesis refinement, and model iteration. |
+| **M9** | Multi-Agent Research | Planned | Specialized research teams (pursued only if evidence warrants). |
+| **M10** | Champion / Challenger Tournament | Planned | Systematic out-of-sample comparison of incumbent and contender models. |
+| **M11** | Promotion & Overfitting Controls | Planned | Deflated Sharpe ratios, multiple-testing penalties, strict gatekeeping. |
+| **M12** | Shadow Broker | Planned | High-fidelity simulated broker tracking orders, queue priority, fills. |
+| **M13** | Deterministic Hard Risk | Planned | Hard-coded executor limits, persistent kill switches, drawdown stops. |
+| **M14** | Broker-Neutral Execution | Planned | Abstract execution interfaces decoupling strategies from venues. |
+| **M15** | Real-World Paper / Shadow Validation | Planned | Live market feed validation without capital risk. |
+| **M16** | Official Robinhood Agentic MCP Adapter | Planned | Integration with Robinhood via official Agentic Trading protocol. |
+| **M17** | Tiny-Money Canary | Planned | Minimal real-capital validation (e.g., single-share order routing). |
+| **M18+** | Bounded Autonomy & Improvement | Planned | Controlled live allocation with ongoing empirical evidence governance. |
 
-M1a provides asset-neutral temporal provenance through exact-byte manifests,
-explicit channel-scoped availability evidence, immutable fact revisions,
-exact-object validation records, and per-query tri-state cutoff decisions. Its
-validators and adversarial fixtures fail closed when evidence is late, bounded,
-unknown, channel-mismatched, mutated, or structurally incomplete.
+---
 
-M1a uses synthetic fixtures only. It adds no real data source, historical market
-semantics, evaluator, backtester, broker, trading behavior, provider connection,
-credential, or network side effect. It does not make Drift ready for equity
-backtesting.
+## Detailed Milestone Definitions
 
-## M1b, complete
+### M0: Auditable Evidence Kernel (Complete)
+- **Status**: Landed at commit `301dc9d`.
+- **Delivered**: Domain models for research provenance, canonical JSON serialization,
+  SHA-256 event hashing, and an append-only SQLite ledger with monotonic sequencing
+  and snapshot verification.
+- **Boundary**: Deliberately excludes market data, backtesting, brokers, and network access.
 
-M1b is Historical Security Identity and Universes. Its implemented scope is stable
-issuer, security, and listing identity; correctable identity assertions; dated
-external-identifier and primary-listing mappings; listing lifecycle and
-termination state; historical universe definitions/membership; and structural
-eligibility. M1b contains no price, corporate-action accounting, calendar, bar,
-or evaluator behavior.
+### M1a: Temporal Provenance (Complete)
+- **Status**: Complete with synthetic fixtures.
+- **Delivered**: Asset-neutral temporal provenance through exact-byte manifests,
+  channel-scoped availability evidence, immutable fact revisions, exact-object
+  validation records, and per-query tri-state cutoff decisions.
 
-Runtime implementation is independently accepted through `dc1537f`, including
-Task 4 at `ea35028`, the semantic correction at `11f5d4b`, and final selected-value
-and equivalence-replay hardening. The execution and verification record is
-`docs/superpowers/plans/2026-09-03-m1b-historical-security-identity-universes.md`.
-Final independent M1b review had no open Critical or Important findings. All 793
-tests and the full runtime gate passed at that synthetic-fixture checkpoint. The final
-acceptance record is the Git commit titled `docs: complete M1b identity milestone`;
-its actual hash is read from Git rather than embedded self-referentially.
+### M1b: Historical Identity and Universes (Complete)
+- **Status**: Complete through commit `dc1537f`.
+- **Delivered**: Stable issuer, security, and listing identities; dated identifier
+  and primary-listing mappings; listing lifecycle and termination state; point-in-time
+  historical universe definitions; and structural eligibility resolvers.
 
-## M1c, complete
+### M1c: Corporate Actions and Economic Outcomes (Complete)
+- **Status**: Complete through commit `8f2621d`.
+- **Delivered**: Immutable announced action terms, occurred effects, reported
+  settlements, exact cash/share/property consideration components, coverage
+  assertions, and separate decision/outcome selection with dependent replay.
 
-M1c is Corporate Actions and Economic Outcomes. It implements immutable terms,
-occurred/cancelled effects, reported settlements, exact cash/share/property
-components, query-bound associations, claim and residual outcomes, coverage,
-and separate decision/outcome selection and replay. It consumes M1a/M1b without
-prices, sessions, derived adjustment factors, holdings or portfolio accounting.
+### M1d: Observations, Sessions, and Normalization (Complete)
+- **Status**: Complete through commit `af75cce`.
+- **Delivered**: Immutable source observation claims, pinned schedule and
+  realized-session facts, orthogonal missingness dimensions, finite M1b composition
+  for research sessions, M1c action-to-session mapping, and cutoff-safe normalized views.
 
-Runtime and synthetic integration acceptance is complete through
-`8f2621d20c2b010ffc105b2e1aded65acaa9c091`, including final evidence/temporal
-hardening. Independent final review has no unresolved findings. All 1,093 tests
-and the full repository gate pass; the focused compatibility entry points pass
-366 tests. The
-[completed implementation plan](../superpowers/plans/2026-09-05-m1c-corporate-actions-economic-outcomes.md)
-records exact scope, reviewed corrections, immutable v1/current v2 fixture
-bindings, and verification. Documentation publication uses the commit subject
-`docs: complete M1c economic fact milestone`; the controller reports its actual
-hash and post-commit Checkpoint result after publication.
-No provider, network, broker, dependency, evaluator or trading capability was added.
+### M1e: License-Gated Real-Source Qualification and Replay Closure (In Progress)
+- **Status**:
+  - Tasks 1 through 7 complete and verified across 1,882 tests at commit `4b343f7`.
+  - Implemented provider-neutral qualification profiles, rights assessments,
+    private content store, exact snapshots, golden case grader (G01-G18), macOS/arm64
+    environment closure (19 artifact categories), and offline replay harness.
+  - Task 8 (Real-Source Pilot) is pending provider empirical screening.
+- **Provider Status**:
+  - *algoseek*: Sandbox testing proved strong identity and market event semantics,
+    but reference-data revisions overwrite historical assertions, preventing its use
+    as the sole source for historical decision input.
+  - *Databento*: Verified batch download manifests and market feeds; reference data
+    requires paid subscription.
+  - *Alpaca*: Designated as the next free-path candidate to evaluate corporate
+    action mutation streams and historical data before committing capital to Databento.
+- **Document**: See [M1e Provider Selection](m1e-provider-selection.md).
 
-## M1d, complete
+### M2: Evaluator and Backtester (Next Major Milestone)
+- **Objective**: Implement a deterministic, point-in-time strategy evaluation engine.
+- **Prerequisites**: Successful completion of M1e qualification.
+- **Invariants**: Consumes only accepted provider-neutral M1b-M1d artifacts,
+  explicit limitations, and replay identities. Never evaluates with future information.
+  Completely decoupled from live brokerage or execution logic.
 
-M1d is Source Observations, Sessions, and Normalization. It represents immutable
-source-defined daily claims, pinned schedule and realized-session facts,
-orthogonal missingness, narrow research-session eligibility through finite M1b
-composition, M1c action-to-session mapping, and cutoff-safe source/split views.
-Its fixture-only replay and 81-row acceptance matrix verify the joined synthetic
-capability. Preserving a source observation does not itself require an action
-dataset; normalization joins the selected observation, session, and M1c facts.
-Total-return accounting and evaluation remain later responsibilities.
+### M3 through M6: Quantitative Modeling Foundations
+- **M3 Deterministic Baselines**: Build passive, factor, and mechanical reference
+  strategies against which all future research models are compared.
+- **M4 Prediction and Outcome Tracking**: Record ex-ante model predictions and link
+  them immutably to subsequent realized market facts in the ledger.
+- **M5 Statistical and Model Scorecards**: Measure calibration, information coefficients,
+  drawdown profiles, and turnover with multiple-testing adjustments.
+- **M6 Structured Research Memory**: Establish a queryable historical archive of
+  hypotheses, trials, parameter searches, and failure postmortems to prevent repeat errors.
 
-The canonical design is
-`docs/superpowers/specs/2026-09-05-historical-economic-events-and-observations-design.md`;
-the decision is recorded in ADR 0009. It supersedes the original umbrella's
-combined M1c scope, not completed M1b contracts. M1c's implementation plan is now
-a completed historical record. M1d's [completed execution record](../superpowers/plans/2026-09-07-m1d-source-observations-sessions-normalization.md)
-records its eight bounded tasks and mandatory joined acceptance gate. Completed
-and superseded plans are historical records, not instructions to restart earlier
-work.
+### M7 through M11: Autonomous Research and R&D Loop
+- **M7 First AI Research Agent**: Deploy an autonomous agent tasked with generating
+  testable hypotheses and creating valid experiment specifications.
+- **M8 Recursive R&D Loop**: Establish an automated pipeline where the agent inspects
+  evaluation results, diagnoses weaknesses, and proposes iterative refinements.
+- **M9 Multi-Agent Research**: Introduce specialized agent roles (e.g., hypothesis
+  generator, risk critic, feature engineer) only if empirical evidence proves superior
+  results over a unified agent.
+- **M10 Champion / Challenger Tournament**: Run ongoing out-of-sample competitions
+  between current production models and newly promoted contenders.
+- **M11 Promotion and Overfitting Controls**: Strict statistical gatekeeping enforcing
+  Deflated Sharpe Ratios, White's Reality Check, and minimum out-of-sample horizons.
 
-M1 is complete. M1d acceptance does not authorize a market-data platform,
-provider acceptance, live data, an evaluator or backtester, returns or portfolio
-accounting, a broker, trading, network access, a dependency, or environment
-closure.
+### M12 through M15: Execution and Risk Architecture
+- **M12 Shadow Broker**: Simulate realistic order execution, fill probabilities,
+  slippage models, and exchange queue dynamics without capital risk.
+- **M13 Deterministic Hard Risk**: Hard-coded, non-negotiable risk limits (position caps,
+  daily loss limits, persistent kill switches) running outside the AI agent's control.
+- **M14 Broker-Neutral Execution**: Abstract execution protocols and order intent
+  journals decoupling strategy logic from broker APIs (ADR 0002).
+- **M15 Real-World Paper / Shadow Validation**: Live market feed processing and order
+  intent generation running in shadow mode.
 
-A targeted post-completion Astra re-review reported 0 Critical, 1 Important,
-and 1 Minor residual. The corrective v3 lane admits only a completed-source to
-authenticated destination-opening after-close mapping, rejects contradictory
-explicit no-trade claims even when the activity enum is unknown, and preserves
-immutable v1/v2 execution at their original commits. The M1d capability boundary
-is unchanged.
-
-A final bounded Astra re-review passed the opening-only and fixture-migration
-repairs and found one Minor audit-classification residual. The final v3
-correction keeps the positive-field no-trade contradiction unusable even when
-realized-session binding is independently unavailable. Numeric authority and
-the M1d scope boundary are unchanged.
-
-After M1, reassess evaluator and run contracts before deterministic baselines.
-External tools remain candidates and must satisfy Drift-defined contracts; see
-ADR 0005 and `docs/architecture/tool-evaluation.md`.
-
-## M1e, proposed design only
-
-M1e is the proposed License-Gated Real-Source Qualification and Replay Closure
-Pilot. It tests one exact provider/product/use scope against independent M1b,
-M1c, M1d, rights, acquisition-completeness, and offline-replay gates before any
-evaluator is implemented. A documented negative qualification is a valid pilot
-result but does not authorize real-data evaluation.
-
-The reviewed architecture is recorded in
-`docs/superpowers/specs/2026-09-12-license-gated-real-source-qualification-replay-closure-design.md`
-and ADR 0010. The executable implementation plan is
-`docs/superpowers/plans/2026-09-13-m1e-license-gated-real-source-qualification-replay-closure.md`.
-Planning is complete but implementation is unstarted and unauthorized. Provider
-selection, contract answers, acquisition, adapters, environment packaging, and
-evaluator work remain absent.
+### M16 through M18+: Live Execution and Controlled Autonomy
+- **M16 Official Robinhood Agentic MCP Adapter**: Implement the live brokerage
+  connection using Robinhood's official Agentic Trading protocol (ADR 0011).
+- **M17 Tiny-Money Canary**: Route minimal real-capital orders (e.g., single-share
+  allocations) to validate connectivity, fill reporting, and settlement reconciliation.
+- **M18+ Bounded Autonomy**: Gradually expand allocation caps under continuous,
+  audited evidence governance.
