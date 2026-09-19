@@ -1,7 +1,7 @@
 # Drift M2: Deterministic Session-Level Evaluator and Portfolio Accounting Kernel Design Specification
 
 Date: 2026-09-19. Status: Canonical architecture design specification for Drift M2 (incorporating external architectural rulings).
-Canonical Baseline: Commit `ef24c2c` (and underlying verified Task 7 checkpoint at `4b343f77a0cb60d0c4ba56f066dc33ac538a9b8d`).
+Canonical Baseline: Implementation baseline is commit `8c954f1988482b670fa66d81cfa99c82e8711e61` (with underlying verified M1e Task 7 checkpoint at `4b343f77a0cb60d0c4ba56f066dc33ac538a9b8d` and prior planning commits preserved in history).
 Related Architecture Decisions: [ADR 0010](../../adr/0010-qualify-real-source-rights-and-replay-before-evaluation.md), [ADR 0012](../../adr/0012-permit-exploratory-evaluation-before-promotion-grade-source-qualification.md).
 
 ---
@@ -127,7 +127,6 @@ class ExploratoryEvaluationAdmissionV1(FrozenModel):
 
     schema_version: Literal["1"] = "1"
     lane: Literal["exploratory"] = "exploratory"
-    development_source_profile_hash: SHA256Hash
     input_bundle_hash: SHA256Hash
     acknowledged_limitations: tuple[NonBlankStr, ...]
     admission_hash: SHA256Hash
@@ -140,11 +139,8 @@ class PromotionEvaluationAdmissionV1(FrozenModel):
     lane: Literal["promotion"] = "promotion"
     m1e_completion_record_hash: SHA256Hash
     m1e_profile_set_hash: SHA256Hash
-    m1e_decision_profile_hash: SHA256Hash
-    m1e_audit_profile_hash: SHA256Hash
-    m1e_decision_report_hash: SHA256Hash
-    m1e_audit_report_hash: SHA256Hash
-    m1e_snapshot_hash: SHA256Hash
+    decision_handoff_hash: SHA256Hash
+    audit_handoff_hash: SHA256Hash
     input_bundle_hash: SHA256Hash
     admission_hash: SHA256Hash
 
@@ -156,7 +152,7 @@ type EvaluationAdmissionV1 = Annotated[
 
 Note on admission determinism: Admissions do not carry operational wall-clock creation timestamps (`admitted_at`) or redundant identifier fields (`admission_id`). Operational timestamps belong to M0 `ExperimentRun`, audit events, and upstream M1e completion records. The semantic identity is a single self-excluding `admission_hash = content_hash(...)`. Re-evaluating the identical bundle with identical qualification evidence yields bitwise identical `admission_hash`.
 
-Dual-purpose M1e binding: A promotion evaluation relies on two distinct epistemic roles: `HISTORICAL_DECISION_INPUT` (for point-in-time information the strategy was permitted to know at decision cutoffs) and `RETROSPECTIVE_AUDIT` (for ex-post accounting truth, settlements, terminal liquidations, and evaluation reconstruction). Both profiles and reports must be bound, verified, and authenticated. Redundant orphan hashes (`m1e_rights_assessment_hash`, `m1e_replay_result_hash`) are omitted from the admission payload because `M1eCompletionRecordV1` transitively and authoritatively binds and proves them.
+Dual-purpose M1e binding via QualifiedSourceHandoffV1: A promotion evaluation relies on two distinct epistemic roles: `HISTORICAL_DECISION_INPUT` (for point-in-time information the strategy was permitted to know at decision cutoffs) and `RETROSPECTIVE_AUDIT` (for ex-post accounting truth, settlements, terminal liquidations, and evaluation reconstruction). Both purposes are bound authoritatively through `decision_handoff_hash` and `audit_handoff_hash`, pointing to M1e `QualifiedSourceHandoffV1` objects. Those handoffs bind the exact profile, report, target, snapshot, environment closure, and replay authorization hashes, eliminating redundant duplicated fields from the admission token while maintaining unbroken cryptographic provenance.
 
 
 class EvaluationSummaryMetricsV1(FrozenModel):
@@ -602,7 +598,8 @@ Today's constituent list (e.g. current S&P 500 or active Alpaca assets) cannot b
 
 | Domain Layer | Data Basis | Source Authority | Purpose |
 |---|---|---|---|
-| **Strategy Decision Context** | Split-Normalized / Causal Views | M1d Decision Views | Indicator calculations, moving averages, signal formulation. |
+| **Strategy Decision Context (PROMOTION)** | Split-Normalized / Causal Views | Authentic M1d Decision Views (`AS_KNOWN`) | Point-in-time decision indicators, moving averages, signals. |
+| **Strategy Decision Context (EXPLORATORY)** | Split-Normalized / Causal Views | Authentic M1d Decision Views OR `ExploratoryReconstructedDecisionInputV1` (with retrospective limitations) | Exploratory screening, prototype indicators, signals. |
 | **Portfolio Accounting** | Source-Basis UNADJUSTED Prices | M1d Unadjusted Views | Cash movements, fill prices, portfolio close marks, NAV. |
 | **Corporate Action Economics** | Occurred Effects & Settlements | M1c Resolutions | Share ratio adjustments, cash dividend receivables, mergers. |
 
@@ -885,18 +882,21 @@ ALPACA_LIMITATION_RETROSPECTIVE_RECONSTRUCTION = (
 
 ## 20. Promotion Lane Admission and Authentic M1e Gatekeeper
 
-An admission gatekeeper function operates outside the pure evaluator core, binding authentic M1e qualification evidence across both consumer purposes (`HISTORICAL_DECISION_INPUT` and `RETROSPECTIVE_AUDIT`):
+An admission gatekeeper operates outside the pure evaluator core, binding authentic M1e qualification evidence across both consumer purposes (`HISTORICAL_DECISION_INPUT` and `RETROSPECTIVE_AUDIT`).
+
+In Task 1, `validate_m1e_promotion_evidence` validates the M1e qualification artifacts and `QualifiedSourceHandoffV1` objects against `PromotionEvaluationAdmissionV1`. In Task 2, `validate_promotion_admission` composes that evidence check with `EvaluationInputBundleV1` structural anti-laundering validation.
 
 ```python
-def validate_promotion_admission(
+def validate_m1e_promotion_evidence(
     admission: PromotionEvaluationAdmissionV1,
-    bundle: EvaluationInputBundleV1,
     profile_set: PilotProfileSetV1,
     completion: M1eCompletionRecordV1,
     decision_profile: QualificationProfileV1,
     audit_profile: QualificationProfileV1,
     decision_report: PurposeQualificationReportV1,
     audit_report: PurposeQualificationReportV1,
+    decision_handoff: QualifiedSourceHandoffV1,
+    audit_handoff: QualifiedSourceHandoffV1,
 ) -> None:
     """Verify promotion admission against authentic M1e qualification evidence across both purposes."""
     if admission.lane != "promotion":
@@ -913,15 +913,12 @@ def validate_promotion_admission(
     # Decision profile and report checks
     if decision_profile.purpose != ConsumerPurpose.HISTORICAL_DECISION_INPUT:
         raise ValueError("decision profile must have historical_decision_input purpose")
-    if content_hash(decision_profile) != admission.m1e_decision_profile_hash:
-        raise ValueError("decision profile hash mismatch with admission")
     if decision_profile not in profile_set.profiles:
         raise ValueError("decision profile is not a member of bound profile set")
+    dec_prof_hash = qualification_profile_hash(decision_profile)
     if decision_report.purpose != ConsumerPurpose.HISTORICAL_DECISION_INPUT:
         raise ValueError("decision report must have historical_decision_input purpose")
-    if content_hash(decision_report) != admission.m1e_decision_report_hash:
-        raise ValueError("decision report hash mismatch with admission")
-    if decision_report.target.profile_hash != admission.m1e_decision_profile_hash:
+    if decision_report.target.profile_hash != dec_prof_hash:
         raise ValueError("decision report target profile hash mismatch")
     if decision_report not in completion.purpose_reports:
         raise ValueError("decision report is not bound in completion record")
@@ -929,40 +926,97 @@ def validate_promotion_admission(
     # Audit profile and report checks
     if audit_profile.purpose != ConsumerPurpose.RETROSPECTIVE_AUDIT:
         raise ValueError("audit profile must have retrospective_audit purpose")
-    if content_hash(audit_profile) != admission.m1e_audit_profile_hash:
-        raise ValueError("audit profile hash mismatch with admission")
     if audit_profile not in profile_set.profiles:
         raise ValueError("audit profile is not a member of bound profile set")
+    audit_prof_hash = qualification_profile_hash(audit_profile)
     if audit_report.purpose != ConsumerPurpose.RETROSPECTIVE_AUDIT:
         raise ValueError("audit report must have retrospective_audit purpose")
-    if content_hash(audit_report) != admission.m1e_audit_report_hash:
-        raise ValueError("audit report hash mismatch with admission")
-    if audit_report.target.profile_hash != admission.m1e_audit_profile_hash:
+    if audit_report.target.profile_hash != audit_prof_hash:
         raise ValueError("audit report target profile hash mismatch")
     if audit_report not in completion.purpose_reports:
         raise ValueError("audit report is not bound in completion record")
 
-    # Input bundle and snapshot checks
-    if bundle.bundle_hash != admission.input_bundle_hash:
-        raise ValueError("input bundle hash mismatch with admission")
-    if (
-        bundle.source_snapshot_hash != admission.m1e_snapshot_hash
-        or bundle.source_snapshot_hash != decision_report.target.snapshot_hash
-    ):
-        raise ValueError("input bundle snapshot mismatch with promotion admission")
+    # Purpose states checks
+    dec_state = next(
+        (
+            s
+            for s in completion.purpose_states
+            if s.purpose == ConsumerPurpose.HISTORICAL_DECISION_INPUT
+        ),
+        None,
+    )
+    if dec_state is None:
+        raise ValueError("missing historical_decision_input purpose state")
+    if dec_state.profile_hash != dec_prof_hash:
+        raise ValueError("decision purpose state profile hash mismatch")
+    if dec_state.stage != PilotStage.COMPLETED_POSITIVE:
+        raise ValueError("decision purpose state not completed_positive")
+    if dec_state.terminal_blocker is not None:
+        raise ValueError("decision purpose state has terminal blocker")
 
-    # Structural anti-laundering checks on input bundle
-    if bundle.has_exploratory_reconstructions:
-        raise ValueError(
-            "promotion evaluation cannot consume exploratory reconstructed inputs"
-        )
+    audit_state = next(
+        (
+            s
+            for s in completion.purpose_states
+            if s.purpose == ConsumerPurpose.RETROSPECTIVE_AUDIT
+        ),
+        None,
+    )
+    if audit_state is None:
+        raise ValueError("missing retrospective_audit purpose state")
+    if audit_state.profile_hash != audit_prof_hash:
+        raise ValueError("audit purpose state profile hash mismatch")
+    if audit_state.stage != PilotStage.COMPLETED_POSITIVE:
+        raise ValueError("audit purpose state not completed_positive")
+    if audit_state.terminal_blocker is not None:
+        raise ValueError("audit purpose state has terminal blocker")
+
+    # Shared snapshot checks across both reports
     if (
-        bundle.session_clock_mode != "realized_session_authority"
-        or not bundle.realized_sessions
+        not decision_report.target.snapshot_hash
+        or not audit_report.target.snapshot_hash
     ):
+        raise ValueError("reports must have non-null snapshot hashes")
+    if decision_report.target.snapshot_hash != audit_report.target.snapshot_hash:
         raise ValueError(
-            "promotion evaluation requires authentic realized session authority"
+            "decision and audit reports must reference identical snapshot hash"
         )
+    shared_snapshot = decision_report.target.snapshot_hash
+
+    # QualifiedSourceHandoffV1 checks
+    if content_hash(decision_handoff) != admission.decision_handoff_hash:
+        raise ValueError("decision handoff hash mismatch with admission")
+    if decision_handoff.purpose != ConsumerPurpose.HISTORICAL_DECISION_INPUT:
+        raise ValueError("decision handoff purpose mismatch")
+    if decision_handoff.profile_hash != dec_prof_hash:
+        raise ValueError("decision handoff profile hash mismatch")
+    if decision_handoff.report_hash != content_hash(decision_report):
+        raise ValueError("decision handoff report hash mismatch")
+    if decision_handoff.target_hash != content_hash(decision_report.target):
+        raise ValueError("decision handoff target hash mismatch")
+    if decision_handoff.snapshot_hash != shared_snapshot:
+        raise ValueError("decision handoff snapshot hash mismatch")
+    if decision_handoff.environment_closure_hash is None:
+        raise ValueError("decision handoff missing environment closure hash")
+    if decision_handoff.replay_authorization_hash is None:
+        raise ValueError("decision handoff missing replay authorization hash")
+
+    if content_hash(audit_handoff) != admission.audit_handoff_hash:
+        raise ValueError("audit handoff hash mismatch with admission")
+    if audit_handoff.purpose != ConsumerPurpose.RETROSPECTIVE_AUDIT:
+        raise ValueError("audit handoff purpose mismatch")
+    if audit_handoff.profile_hash != audit_prof_hash:
+        raise ValueError("audit handoff profile hash mismatch")
+    if audit_handoff.report_hash != content_hash(audit_report):
+        raise ValueError("audit handoff report hash mismatch")
+    if audit_handoff.target_hash != content_hash(audit_report.target):
+        raise ValueError("audit handoff target hash mismatch")
+    if audit_handoff.snapshot_hash != shared_snapshot:
+        raise ValueError("audit handoff snapshot hash mismatch")
+    if audit_handoff.environment_closure_hash is None:
+        raise ValueError("audit handoff missing environment closure hash")
+    if audit_handoff.replay_authorization_hash is None:
+        raise ValueError("audit handoff missing replay authorization hash")
 
     # Check all 12 dimensions in both reports
     for report, profile in (
@@ -994,6 +1048,51 @@ def validate_promotion_admission(
                 raise ValueError(
                     f"critical dimension {crit_dim} did not admit {profile.purpose}"
                 )
+
+
+def validate_promotion_admission(
+    admission: PromotionEvaluationAdmissionV1,
+    bundle: EvaluationInputBundleV1,
+    profile_set: PilotProfileSetV1,
+    completion: M1eCompletionRecordV1,
+    decision_profile: QualificationProfileV1,
+    audit_profile: QualificationProfileV1,
+    decision_report: PurposeQualificationReportV1,
+    audit_report: PurposeQualificationReportV1,
+    decision_handoff: QualifiedSourceHandoffV1,
+    audit_handoff: QualifiedSourceHandoffV1,
+) -> None:
+    """Full promotion admission validator composing M1e evidence verification with bundle anti-laundering gate."""
+    validate_m1e_promotion_evidence(
+        admission=admission,
+        profile_set=profile_set,
+        completion=completion,
+        decision_profile=decision_profile,
+        audit_profile=audit_profile,
+        decision_report=decision_report,
+        audit_report=audit_report,
+        decision_handoff=decision_handoff,
+        audit_handoff=audit_handoff,
+    )
+
+    # Input bundle and snapshot checks
+    if bundle.bundle_hash != admission.input_bundle_hash:
+        raise ValueError("input bundle hash mismatch with admission")
+    if bundle.source_snapshot_hash != decision_handoff.snapshot_hash:
+        raise ValueError("input bundle snapshot mismatch with promotion admission")
+
+    # Structural anti-laundering checks on input bundle
+    if bundle.has_exploratory_reconstructions:
+        raise ValueError(
+            "promotion evaluation cannot consume exploratory reconstructed inputs"
+        )
+    if (
+        bundle.session_clock_mode != "realized_session_authority"
+        or not bundle.realized_sessions
+    ):
+        raise ValueError(
+            "promotion evaluation requires authentic realized session authority"
+        )
 ```
 
 ---

@@ -17,7 +17,7 @@
 ## Global Constraints
 
 - **Workspace Boundary**: Work strictly in `/Users/kanuj/Documents/projects/drift`. Never touch external mirrors or unapproved local directories.
-- **Repository Truth**: Canonical baseline is commit `ef24c2c` (and underlying verified Task 7 checkpoint at `4b343f77a0cb60d0c4ba56f066dc33ac538a9b8d`).
+- **Repository Truth**: Canonical implementation baseline is commit `8c954f1988482b670fa66d81cfa99c82e8711e61` (with underlying verified M1e Task 7 checkpoint at `4b343f77a0cb60d0c4ba56f066dc33ac538a9b8d` and prior planning commits preserved in history).
 - **Protected Prior Milestones**: M0 through M1e Tasks 1-7 are complete and protected. Do not mutate persisted models, schemas, or fixtures in `src/drift/domain/experiments.py`, `strategies.py`, `securities.py`, `universes.py`, `observations.py`, or `qualification.py`. Add M2 evaluator contracts beside them.
 - **Strict Two-Lane Anti-Upgrade Invariant**: Exploratory evaluation results can NEVER be upgraded, converted, or relabeled into promotion evidence. No constructor, helper, or mutable field may bridge the two lanes. Promotion strictly requires an independent, fresh evaluation run against verified M1e promotion-qualified data with positive completion (`M1eCompletionKind.COMPLETED_POSITIVE`).
 - **Evidence Grade Only (No Strategy Promotion)**: M2 certifies evidence quality (`is_promotion_grade_evidence: bool`); it does NOT decide strategy promotion, which belongs exclusively to M10 and M11. Never expose `is_promotable=True`.
@@ -26,7 +26,7 @@
 - **Zero Em Dashes**: The Unicode em dash (U+2014) is strictly forbidden across all code, docstrings, markdown documents, and commit messages. Always use the ASCII hyphen (U+002D).
 - **Offline / Network-Free Core**: The evaluator core and all standard unit test suites must run 100% offline with zero network access or socket activity.
 - **Decimal Precision**: All currency balances, prices, execution marks, dividends, fees, and slippage calculations must use Python `Decimal` or exact integer strings. Floating-point arithmetic for portfolio accounting is strictly forbidden.
-- **Realized Session Clock**: Session boundaries are driven by authenticated M1d realized session open/close timestamps (`actual_open`, `actual_close`), correctly handling variable session hours (early closes). Post-close decisions occur after actual realized close.
+- **Session Clock Authority**: PROMOTION requires authentic realized-session authority (actual open/close timestamps, halt telemetry). EXPLORATORY may use authentic realized sessions when available, or scheduled session reconstruction from `ScheduledSessionVersionV1` with explicit limitations (never claiming actual realized open/close or absence of halts).
 - **Atomic Plan-Then-Commit Execution**: Sells and buys in an open rebalance are verified as 100% funded before any fills are committed. If unfunded, 0 fills are committed, `FillRejectionTraceEventV1` is emitted, and the run is classified `REJECTED`.
 - **No Fraction Truncation**: Share conversions must never use Python `int(...)` truncation. Compute exact rational entitlements and apply explicit M1c `FractionTreatmentV1` (e.g. `aggregate_sale_cash`, `round_down`, `round_up`). Unknown or unsupported fraction treatments fail closed to `INDETERMINATE`.
 - **Due-Bill and Legal Entitlement**: Dividends create receivables only when M1c occurred effect evidence proves legal entitlement under the event's exact rule, correctly handling due-bill redemptions.
@@ -53,7 +53,7 @@
 - **Task 6: Deterministic Session Evaluator Engine, Canonical Trace Generation, and M0 Integration**
   Assemble the 5-phase session evaluator loop, content-addressed trace logger, fatal indeterminacy and shortfall halting, complete result models without random/wall-clock fields, and M0 ExperimentRun binding.
 - **Task 7: Comprehensive Adversarial Verification, Anti-Laundering Invariants, and Closed-World Replay Testing**
-  Execute the complete 28-case adversarial matrix across causality, epistemic lanes, universe, clock authority, replay integrity, accounting, execution, gatekeeper, replay, and provider boundary invariants.
+  Execute the complete M2 adversarial acceptance matrix across causality, epistemic lanes, universe, clock authority, replay integrity, accounting, execution, gatekeeper, replay, and provider boundary invariants.
 - **Task 8: Bounded Alpaca Development Bridge and End-to-End Exploratory Smoke Validation**
   Build the layered offline Alpaca intake adapter (native bytes -> receipt -> mapping -> source contracts -> validators -> resolvers -> exploratory wrapper -> input bundle), bind canonical limitation constants, and execute a quiet-window exploratory smoke run.
 
@@ -62,12 +62,13 @@
 ## Task 1: Evaluation Lane Contracts, Protocol Definitions, Cost Models, and Authentic M1e Gatekeeper
 
 ### 1. Objective
-Define the fundamental M2 domain contracts for evaluation lane admission (`ExploratoryEvaluationAdmissionV1` vs `PromotionEvaluationAdmissionV1`), evaluation protocol configuration (`EvaluationProtocolV1`), versioned transaction cost/slippage parameters (`EvaluationCostModelV1`), canonical Alpaca limitation constants, and the external positive M1e completion gatekeeper function (`validate_promotion_admission`).
+Define the fundamental M2 domain contracts for evaluation lane admission (`ExploratoryEvaluationAdmissionV1` vs `PromotionEvaluationAdmissionV1`), evaluation protocol configuration (`EvaluationProtocolV1`), versioned transaction cost/slippage parameters (`EvaluationCostModelV1`), canonical Alpaca limitation constants, and the M1e promotion evidence verifier (`validate_m1e_promotion_evidence`).
 
 ### 2. Exact Files Expected
 - `src/drift/domain/evaluator_lanes.py`
 - `src/drift/domain/evaluator_protocol.py`
 - `src/drift/domain/evaluator_costs.py`
+- `src/drift/evaluator/__init__.py`
 - `src/drift/evaluator/admission.py`
 - `tests/unit/test_evaluator_lanes.py`
 - `tests/unit/test_evaluator_protocol.py`
@@ -83,47 +84,66 @@ Define the fundamental M2 domain contracts for evaluation lane admission (`Explo
   - `ALPACA_LIMITATION_SCHEDULED_SESSION_RECONSTRUCTION = "session-clock-reconstructed-from-scheduled-calendar-without-independent-realized-history"`
   - `ALPACA_LIMITATION_RETROSPECTIVE_RECONSTRUCTION = "strategy-inputs-retrospectively-reconstructed-from-audit-vintage-bars"`
 - `ExploratoryEvaluationAdmissionV1(FrozenModel)`:
+  - `schema_version: Literal["1"] = "1"`
   - `lane: Literal["exploratory"] = "exploratory"`
-  - `development_source_profile_hash: SHA256Hash`
   - `input_bundle_hash: SHA256Hash`
-  - `acknowledged_limitations: tuple[NonBlankStr, ...]` (must not be empty)
+  - `acknowledged_limitations: tuple[NonBlankStr, ...]` (non-empty, unique, canonical sorted tuple)
   - `admission_hash: SHA256Hash` (self-excluding canonical hash; no wall-clock timestamps or duplicate IDs)
 - `PromotionEvaluationAdmissionV1(FrozenModel)`:
+  - `schema_version: Literal["1"] = "1"`
   - `lane: Literal["promotion"] = "promotion"`
   - `m1e_completion_record_hash: SHA256Hash`
   - `m1e_profile_set_hash: SHA256Hash`
-  - `m1e_decision_profile_hash: SHA256Hash`
-  - `m1e_audit_profile_hash: SHA256Hash`
-  - `m1e_decision_report_hash: SHA256Hash`
-  - `m1e_audit_report_hash: SHA256Hash`
-  - `m1e_snapshot_hash: SHA256Hash`
+  - `decision_handoff_hash: SHA256Hash`
+  - `audit_handoff_hash: SHA256Hash`
   - `input_bundle_hash: SHA256Hash`
   - `admission_hash: SHA256Hash` (self-excluding canonical hash; no wall-clock timestamps or duplicate IDs)
 - `EvaluationAdmissionV1 = Annotated[ExploratoryEvaluationAdmissionV1 | PromotionEvaluationAdmissionV1, Field(discriminator="lane")]`
-- `validate_promotion_admission(admission, bundle, profile_set, completion, decision_profile, audit_profile, decision_report, audit_report)`:
+- `validate_m1e_promotion_evidence(admission, profile_set, completion, decision_profile, audit_profile, decision_report, audit_report, decision_handoff, audit_handoff)`:
   - Verifies `admission.lane == "promotion"`.
   - Verifies `completion.completion_kind == M1eCompletionKind.COMPLETED_POSITIVE`.
   - Verifies `content_hash(completion) == admission.m1e_completion_record_hash`.
   - Verifies `content_hash(profile_set) == admission.m1e_profile_set_hash`.
   - Verifies `completion.profile_set_hash == admission.m1e_profile_set_hash`.
-  - Verifies decision profile: in `profile_set.profiles`, `purpose == ConsumerPurpose.HISTORICAL_DECISION_INPUT`, hash matches `admission.m1e_decision_profile_hash`.
-  - Verifies decision report: in `completion.purpose_reports`, `purpose == ConsumerPurpose.HISTORICAL_DECISION_INPUT`, hash matches `admission.m1e_decision_report_hash`, `target.profile_hash` matches decision profile.
-  - Verifies audit profile: in `profile_set.profiles`, `purpose == ConsumerPurpose.RETROSPECTIVE_AUDIT`, hash matches `admission.m1e_audit_profile_hash`.
-  - Verifies audit report: in `completion.purpose_reports`, `purpose == ConsumerPurpose.RETROSPECTIVE_AUDIT`, hash matches `admission.m1e_audit_report_hash`, `target.profile_hash` matches audit profile.
-  - Verifies `bundle.bundle_hash == admission.input_bundle_hash`.
-  - Verifies `bundle.source_snapshot_hash == admission.m1e_snapshot_hash == decision_report.target.snapshot_hash`.
-  - Verifies structural anti-laundering: `bundle.has_exploratory_reconstructions is False` and `bundle.session_clock_mode == "realized_session_authority"`.
+  - Verifies decision profile: in `profile_set.profiles`, `purpose == ConsumerPurpose.HISTORICAL_DECISION_INPUT`.
+  - Verifies audit profile: in `profile_set.profiles`, `purpose == ConsumerPurpose.RETROSPECTIVE_AUDIT`.
+  - Verifies decision report: in `completion.purpose_reports`, `purpose == ConsumerPurpose.HISTORICAL_DECISION_INPUT`, `target.profile_hash == qualification_profile_hash(decision_profile)`.
+  - Verifies audit report: in `completion.purpose_reports`, `purpose == ConsumerPurpose.RETROSPECTIVE_AUDIT`, `target.profile_hash == qualification_profile_hash(audit_profile)`.
+  - Verifies purpose states in `completion.purpose_states`:
+    - Decision purpose state: `profile_hash == qualification_profile_hash(decision_profile)`, `stage == PilotStage.COMPLETED_POSITIVE`, `terminal_blocker is None`.
+    - Audit purpose state: `profile_hash == qualification_profile_hash(audit_profile)`, `stage == PilotStage.COMPLETED_POSITIVE`, `terminal_blocker is None`.
+  - Verifies shared snapshot: `decision_report.target.snapshot_hash == audit_report.target.snapshot_hash` and both are non-null.
+  - Verifies `decision_handoff` (`QualifiedSourceHandoffV1`):
+    - `content_hash(decision_handoff) == admission.decision_handoff_hash`.
+    - `decision_handoff.purpose == ConsumerPurpose.HISTORICAL_DECISION_INPUT`.
+    - `decision_handoff.profile_hash == qualification_profile_hash(decision_profile)`.
+    - `decision_handoff.report_hash == content_hash(decision_report)`.
+    - `decision_handoff.target_hash == content_hash(decision_report.target)`.
+    - `decision_handoff.snapshot_hash == decision_report.target.snapshot_hash`.
+    - `decision_handoff.environment_closure_hash is not None`.
+    - `decision_handoff.replay_authorization_hash is not None`.
+  - Verifies `audit_handoff` (`QualifiedSourceHandoffV1`):
+    - `content_hash(audit_handoff) == admission.audit_handoff_hash`.
+    - `audit_handoff.purpose == ConsumerPurpose.RETROSPECTIVE_AUDIT`.
+    - `audit_handoff.profile_hash == qualification_profile_hash(audit_profile)`.
+    - `audit_handoff.report_hash == content_hash(audit_report)`.
+    - `audit_handoff.target_hash == content_hash(audit_report.target)`.
+    - `audit_handoff.snapshot_hash == audit_report.target.snapshot_hash`.
+    - `audit_handoff.environment_closure_hash is not None`.
+    - `audit_handoff.replay_authorization_hash is not None`.
+  - Verifies shared snapshot across handoffs: `decision_handoff.snapshot_hash == audit_handoff.snapshot_hash`.
   - Verifies that all 12 dimensions are explicitly present in both reports (`len(results_by_dim) == 12 and set(results_by_dim.keys()) == set(QualificationDimension)`).
   - Verifies that for every dimension in `decision_profile.critical_dimensions` and `audit_profile.critical_dimensions`:
     - `res.status == QualificationStatus.PASS`
     - `res.reachability == ExecutionReachability.REACHED`
     - `res.admitted_purpose is True`
+- Input Bundle Hash Boundary Note: Task 1 admission binds `input_bundle_hash`, but Task 1 does not yet have `EvaluationInputBundleV1`. `validate_m1e_promotion_evidence` validates M1e evidence against admission; Task 2 will implement `validate_promotion_admission` which composes this check with bundle anti-laundering verification.
 - `EvaluationCostModelV1(FrozenModel)`:
   - `model_id: NonBlankStr`
   - `commission_per_share: Decimal` (must be >= 0)
   - `fixed_fee_per_order: Decimal` (must be >= 0)
   - `notional_fee_basis_points: Decimal` (must be >= 0)
-  - `adverse_slippage_basis_points: Decimal` (must be >= 0)
+  - `adverse_slippage_basis_points: Decimal` (must be >= 0 and < 10000)
   - `cost_model_hash: SHA256Hash`
 - `EvaluationProtocolV1(FrozenModel)`:
   - `protocol_id: NonBlankStr`
@@ -137,13 +157,13 @@ Define the fundamental M2 domain contracts for evaluation lane admission (`Explo
 - Unit tests fail initially because domain modules and admission gatekeeper do not exist.
 
 ### 5. GREEN Acceptance Criteria
-- `ExploratoryEvaluationAdmissionV1` validates that `acknowledged_limitations` is non-empty.
+- `ExploratoryEvaluationAdmissionV1` validates that `acknowledged_limitations` is non-empty, unique, and sorted.
 - Self-excluding canonical hashing verifies `admission_hash`, `cost_model_hash`, and `protocol_hash`.
-- `validate_promotion_admission` validates positive M1e completion and both purpose profiles/reports.
-- `validate_promotion_admission` rejects any report where a critical dimension did not PASS, where an audit report is missing, or where exploratory inputs are present in the bundle.
+- `validate_m1e_promotion_evidence` validates positive M1e completion, purpose states, shared snapshots, both handoffs, and both purpose profiles/reports.
+- `validate_m1e_promotion_evidence` rejects any report where a critical dimension did not PASS, where an audit report/handoff is missing, or where snapshots mismatch.
 - `EvaluationProtocolV1` rejects `warmup_session_count = 0`.
 - Discriminator `lane` correctly deserializes either admission variant from JSON.
-- `EvaluationCostModelV1` enforces non-negative Decimals and computes exact costs for sample orders.
+- `EvaluationCostModelV1` enforces non-negative Decimals, bounded adverse slippage (< 10000 bps), and computes exact costs for sample orders.
 
 ### 6. Focused Tests
 ```bash
@@ -155,9 +175,9 @@ uv run pytest tests/unit/test_evaluator_lanes.py tests/unit/test_evaluator_proto
 - Attempt to mutate `admission_hash` without changing payload -> ValueError mismatch.
 - Promotion admission pointing to an M1e completion that is `COMPLETED_NEGATIVE` -> ValueError.
 - Critical dimension is `FAIL` while non-critical is `PASS` -> ValueError.
-- Missing retrospective audit report in promotion admission -> ValueError.
+- Missing retrospective audit report or handoff in promotion admission -> ValueError.
 - Protocol declared with `warmup_session_count = 0` -> ValueError.
-- Bundle snapshot hash not matching promotion admission snapshot hash -> ValueError.
+- Handoff snapshot hash mismatch between decision and audit handoffs -> ValueError.
 
 ### 8. Review and Commit Boundary
 - Independent review covering lane separation, gatekeeper verification, critical-dimension logic, and Decimal precision.
@@ -549,7 +569,7 @@ uv run pytest tests/unit/test_evaluator_trace.py tests/unit/test_evaluator_engin
 ## Task 7: Comprehensive Adversarial Verification, Anti-Laundering Invariants, and Closed-World Replay Testing
 
 ### 1. Objective
-Implement the complete 28-case adversarial acceptance test suite covering causality, epistemic lanes, universe rules, clock authority, replay integrity, accounting, execution, gatekeeper, replay determinism, and provider boundaries.
+Implement the complete M2 adversarial acceptance test suite covering causality, epistemic lanes, universe rules, clock authority, replay integrity, accounting, execution, gatekeeper, replay determinism, and provider boundaries.
 
 ### 2. Exact Files Expected
 - `tests/adversarial/test_m2_causality.py`
@@ -613,7 +633,7 @@ Implement the complete 28-case adversarial acceptance test suite covering causal
 - Adversarial tests identify any gaps or lenient defaults in Tasks 1-6.
 
 ### 5. GREEN Acceptance Criteria
-- All 28 adversarial test scenarios pass unambiguously.
+- All adversarial test scenarios in the complete M2 adversarial acceptance matrix pass unambiguously.
 - Anti-laundering tests mathematically prove no exploratory result can satisfy promotion validation.
 
 ### 6. Focused Tests
