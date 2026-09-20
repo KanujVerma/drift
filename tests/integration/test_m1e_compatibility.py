@@ -152,7 +152,15 @@ def _m1e_paths_on_disk() -> set[str]:
     baseline = _git_paths(PINNED_M1D_COMMIT, "src/drift") | _git_paths(
         PINNED_M1D_COMMIT, "scripts"
     )
-    return candidates - baseline
+    # M2 evaluator paths are additive under ADR 0012 and separate from
+    # M1e qualification.
+    m1e_candidates = {
+        path
+        for path in candidates
+        if not path.startswith("src/drift/evaluator/")
+        and not path.startswith("src/drift/domain/evaluator_")
+    }
+    return m1e_candidates - baseline
 
 
 def _import_aliases(tree: ast.AST) -> dict[str, str]:
