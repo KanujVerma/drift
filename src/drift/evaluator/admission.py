@@ -46,6 +46,12 @@ def validate_m1e_promotion_evidence(
     # 1. Positive completion record
     if completion.completion_kind != M1eCompletionKind.COMPLETED_POSITIVE:
         raise ValueError("promotion admission requires positive M1e completion")
+    if completion.blocking_dimensions:
+        raise ValueError("positive M1e completion cannot carry blocking dimensions")
+    if completion.blocking_evidence_hashes:
+        raise ValueError(
+            "positive M1e completion cannot carry blocking evidence hashes"
+        )
 
     actual_comp_hash = content_hash(completion)
     if actual_comp_hash != admission.m1e_completion_record_hash:
@@ -166,17 +172,36 @@ def validate_m1e_promotion_evidence(
                 f"report for {purpose} does not carry the exact 12 dimension set"
             )
 
+        # Positive completion cannot contain unreached or foreign-purpose
+        # dimension results; every reached result carries genuine evidence.
+        for dim_res in report.results:
+            if dim_res.purpose != purpose:
+                raise ValueError(
+                    f"dimension result {dim_res.dimension} for {purpose} "
+                    "has purpose mismatch"
+                )
+            if dim_res.reachability is not ExecutionReachability.REACHED:
+                raise ValueError(
+                    f"dimension result {dim_res.dimension} for {purpose} "
+                    "is not REACHED in a positive completion"
+                )
+            if not dim_res.evidence_hashes:
+                raise ValueError(
+                    f"dimension result {dim_res.dimension} for {purpose} "
+                    "carries no evidence"
+                )
+
         for crit_dim in profile.critical_dimensions:
-            dim_res = results_by_dim.get(crit_dim)
-            if dim_res is None:
+            crit_res = results_by_dim.get(crit_dim)
+            if crit_res is None:
                 raise ValueError(
                     f"critical dimension {crit_dim} missing from report for {purpose}"
                 )
-            if dim_res.reachability != ExecutionReachability.REACHED:
+            if crit_res.reachability != ExecutionReachability.REACHED:
                 raise ValueError(f"critical dimension {crit_dim} was not REACHED")
-            if dim_res.status != QualificationStatus.PASS:
+            if crit_res.status != QualificationStatus.PASS:
                 raise ValueError(f"critical dimension {crit_dim} did not PASS")
-            if not dim_res.admitted_purpose:
+            if not crit_res.admitted_purpose:
                 raise ValueError(
                     f"critical dimension {crit_dim} was not admitted for {purpose}"
                 )

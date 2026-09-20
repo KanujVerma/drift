@@ -788,7 +788,7 @@ def test_validate_m1e_promotion_evidence_rejects_critical_not_reached() -> None:
         m1e_completion_record_hash=content_hash(bad_comp),
         decision_handoff_hash=bad_handoff.handoff_hash,
     )
-    with pytest.raises(ValueError, match="was not REACHED"):
+    with pytest.raises(ValueError, match="is not REACHED"):
         validate_m1e_promotion_evidence(
             **{
                 **f,
@@ -959,3 +959,103 @@ def test_validate_m1e_promotion_evidence_rejects_handoff_snapshot_mismatch() -> 
         validate_m1e_promotion_evidence(
             **{**f, "decision_handoff": bad_handoff, "admission": bad_adm}
         )
+
+
+def test_validate_m1e_promotion_evidence_rejects_noncritical_not_reached() -> None:
+    f = make_test_fixture()
+    mod_results = list(f["decision_report"].results)
+    for i, r in enumerate(mod_results):
+        if r.dimension == QualificationDimension.COVERAGE_OMISSION:
+            mod_results[i] = copy_constructed(
+                r, reachability=ExecutionReachability.NOT_REACHED
+            )
+    bad_report = copy_constructed(f["decision_report"], results=tuple(mod_results))
+    bad_comp = copy_constructed(
+        f["completion"], purpose_reports=(bad_report, f["audit_report"])
+    )
+    bad_handoff = copy_constructed(
+        f["decision_handoff"], report_hash=content_hash(bad_report)
+    )
+    bad_handoff = copy_constructed(
+        bad_handoff, handoff_hash=qualified_source_handoff_hash(bad_handoff)
+    )
+    bad_adm = rebind_admission(
+        f,
+        m1e_completion_record_hash=content_hash(bad_comp),
+        decision_handoff_hash=bad_handoff.handoff_hash,
+    )
+    with pytest.raises(ValueError, match="is not REACHED"):
+        validate_m1e_promotion_evidence(
+            **{
+                **f,
+                "decision_report": bad_report,
+                "completion": bad_comp,
+                "decision_handoff": bad_handoff,
+                "admission": bad_adm,
+            }
+        )
+
+
+def test_validate_m1e_promotion_evidence_rejects_result_purpose_mismatch() -> None:
+    f = make_test_fixture()
+    bad_results = list(f["decision_report"].results)
+    bad_results[0] = copy_constructed(
+        bad_results[0], purpose=ConsumerPurpose.RETROSPECTIVE_AUDIT
+    )
+    bad_report = copy_constructed(f["decision_report"], results=tuple(bad_results))
+    bad_comp = copy_constructed(
+        f["completion"], purpose_reports=(bad_report, f["audit_report"])
+    )
+    bad_handoff = copy_constructed(
+        f["decision_handoff"], report_hash=content_hash(bad_report)
+    )
+    bad_handoff = copy_constructed(
+        bad_handoff, handoff_hash=qualified_source_handoff_hash(bad_handoff)
+    )
+    bad_adm = rebind_admission(
+        f,
+        m1e_completion_record_hash=content_hash(bad_comp),
+        decision_handoff_hash=bad_handoff.handoff_hash,
+    )
+    with pytest.raises(ValueError, match="has purpose mismatch"):
+        validate_m1e_promotion_evidence(
+            **{
+                **f,
+                "decision_report": bad_report,
+                "completion": bad_comp,
+                "decision_handoff": bad_handoff,
+                "admission": bad_adm,
+            }
+        )
+
+
+def test_validate_m1e_promotion_evidence_rejects_blocking_dimensions() -> None:
+    f = make_test_fixture()
+    bad_comp = copy_constructed(
+        f["completion"],
+        blocking_dimensions=(QualificationDimension.LICENSING_RETENTION,),
+    )
+    bad_adm = rebind_admission(f, m1e_completion_record_hash=content_hash(bad_comp))
+    with pytest.raises(ValueError, match="blocking dimensions"):
+        validate_m1e_promotion_evidence(
+            **{**f, "completion": bad_comp, "admission": bad_adm}
+        )
+
+
+def test_validate_m1e_promotion_evidence_rejects_blocking_evidence() -> None:
+    f = make_test_fixture()
+    bad_comp = copy_constructed(f["completion"], blocking_evidence_hashes=(H1,))
+    bad_adm = rebind_admission(f, m1e_completion_record_hash=content_hash(bad_comp))
+    with pytest.raises(ValueError, match="blocking evidence hashes"):
+        validate_m1e_promotion_evidence(
+            **{**f, "completion": bad_comp, "admission": bad_adm}
+        )
+
+
+def test_validate_m1e_promotion_evidence_binds_self_excluding_handoff_hash() -> None:
+    f = make_test_fixture()
+    whole_handoff_hash = content_hash(f["decision_handoff"])
+    assert whole_handoff_hash != f["decision_handoff"].handoff_hash
+    bad_adm = rebind_admission(f, decision_handoff_hash=whole_handoff_hash)
+    with pytest.raises(ValueError, match="decision handoff hash mismatch"):
+        validate_m1e_promotion_evidence(**{**f, "admission": bad_adm})
