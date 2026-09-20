@@ -1,7 +1,7 @@
 # Drift M2: Deterministic Session-Level Evaluator and Portfolio Accounting Kernel Design Specification
 
 Date: 2026-09-19. Status: Canonical architecture design specification for Drift M2 (incorporating external architectural rulings).
-Canonical Baseline: Implementation baseline is commit `8c954f1988482b670fa66d81cfa99c82e8711e61` (with underlying verified M1e Task 7 checkpoint at `4b343f77a0cb60d0c4ba56f066dc33ac538a9b8d` and prior planning commits preserved in history).
+Canonical Baseline: Implementation baseline is commit `68092d299f5618fb0da86049ce6f364b9e5a9f3c` (with earlier M2 checkpoints at `3aa0a5b` and `8c954f1`, and the underlying verified M1e Task 7 checkpoint at `4b343f77a0cb60d0c4ba56f066dc33ac538a9b8d`, preserved in history).
 Related Architecture Decisions: [ADR 0010](../../adr/0010-qualify-real-source-rights-and-replay-before-evaluation.md), [ADR 0012](../../adr/0012-permit-exploratory-evaluation-before-promotion-grade-source-qualification.md).
 
 ---
@@ -360,42 +360,29 @@ Strategies emit target WHOLE-SHARE quantities rather than fractional weights or 
 
 An evaluation run operates on a self-contained, content-addressed bundle of authentic Drift artifacts. M2 does NOT flatten away M1b-M1d provenance into self-authored convenience facts, nor does it launder retrospective data into historical decision evidence.
 
-### 7.1 Exploratory Reconstructed Decision Input vs True Decision Information
+### 7.1 Exploratory Reconstructed Session Observation vs True Decision Information
 
-Free development providers (such as Alpaca) provide current snapshots of historical bars and corporate actions, but lack historical provider assertion vintages, publication cutoffs, and halt telemetry. Therefore, an exploratory run cannot truthfully produce M1d `ObservationDecisionReferenceV1` under an `InformationRole.DECISION_INFORMATION` claim.
+Free development providers (such as Alpaca) provide current snapshots of historical bars and corporate actions, but lack historical provider assertion vintages, publication cutoffs, and halt telemetry. Strict M1d normalization requires authentic `RealizedSessionVersionV1` authority (`bind_observation_session` only classifies an observation as fully bound through realized open/close evidence), so scheduled-only exploratory history must never be forced through `materialize_observation_decision`/`materialize_observation_outcome`: it would either fail honestly or fabricate realized history. Fabrication is forbidden.
 
-M2 explicitly defines an exploratory-only input contract:
+Nor may exploratory inputs claim M1b structural authority. `resolve_structural_eligibility(...)` accepts only `ResolutionMode.AS_KNOWN` with `InformationRole.DECISION_INFORMATION` by deliberate fail-closed M1b invariant (`structural_decision_mode_required`); `CURRENT_INTERPRETATION` + `EX_POST_OUTCOME` structural evidence does not exist and must not be built by M2. Exploratory evaluation therefore operates over an explicitly predeclared bounded security cohort instead of a historical universe.
 
-```python
-class ExploratoryReconstructedDecisionInputV1(FrozenModel):
-    """Retrospectively reconstructed historical strategy input used ONLY for exploratory research."""
+M2 defines exploratory-only contracts:
 
-    schema_version: Literal["1"] = "1"
-    reconstruction_kind: Literal["retrospective_reconstruction"] = (
-        "retrospective_reconstruction"
-    )
-    source_reference_hash: (
-        SHA256Hash  # Bound to M1d outcome reference or normalization result
-    )
-    observation_view: DerivedObservationViewV1
-    evidence_vintage: (
-        UTCDateTime  # Upstream retrieval/download timestamp (e.g. 2026 download)
-    )
-    reconstructed_session: (
-        SessionKeyV1  # Historical session being reconstructed (e.g. 2022)
-    )
-    reconstruction_policy: NonBlankStr
-    acknowledged_limitations: tuple[NonBlankStr, ...]
-    source_context_hash: SHA256Hash
-    development_source_profile_hash: SHA256Hash
-    input_hash: SHA256Hash
-```
+**ExploratoryCohortAuthorizationV1** (`schema_version="1"`, `kind="predeclared_bounded_security_cohort"`, `cohort_id`, `cohort_version`, `security_ids: tuple[UUID7, ...]` nonempty/unique/canonically sorted, self-excluding `cohort_hash`): experiment SCOPE authorization only. It asserts only that these securities are authorized exploratory subjects. It is NOT proof of universe membership, survivorship-free selection, structural listing eligibility, primary listing, or the historical availability of any record. It carries no listing/ticker, timestamp, provider, or random fields. Its use mechanically requires the exploratory admission to acknowledge `ALPACA_LIMITATION_BOUNDED_COHORT`.
+
+**ExploratoryReconstructionPolicyV1** (`schema_version="1"`, `policy_id`, `policy_version`, `mode="source_basis_scheduled_session_reconstruction_v1"`, `required_fields` exactly `("close", "high", "low", "open", "volume")` canonically ordered, `required_basis="unadjusted"`, `semantic_policy_hash`, self-excluding `policy_hash`): immutable, content-addressed, no network/provider/clock/random fields. The scheduled exploratory path is source-basis UNADJUSTED only; it never produces `basis_mode="split_normalized"` and never re-implements M1d split normalization.
+
+**ExploratoryReconstructedFieldV1**: binds `field_name` (exactly one of open/high/low/close/volume), exact Decimal `source_value` (float/NaN/Infinity rejected), `method_id`, field `meaning` (price for OHLC, share_volume for volume), and `source_field_hash`. Methods must exist in the selected `ObservationContractV1` with unadjusted semantics; unknown or fallback semantics fail closed.
+
+**ExploratoryReconstructedSessionObservationV1** (`kind="exploratory_reconstructed_session_observation"`): binds `session_key`, `security_id`, `listing_id`, `venue`, `cohort_hash`, the exact source observation / observation contract / scheduled-session hashes with their selection proofs, the schedule artifact and generated row hashes, the `ObservationOutcomeQueryV1` hash, source context hash, `evidence_vintage_cutoff`, `reconstruction_policy_hash`, `currency`, canonical `fields`, `acknowledged_limitations` (always at least `ALPACA_LIMITATION_RETROSPECTIVE_RECONSTRUCTION` and `ALPACA_LIMITATION_UNVERSIONED_BARS`), and a self-excluding `reconstruction_hash`. The builder replays existing `select_observation_records` selection and `generate_schedule` generation; it never calls `bind_observation_session`, the M1d materializers, or the M1b structural resolver.
+
+An `ExploratoryReconstructedSessionObservationV1` is NOT: `DerivedObservationViewV1`, `ObservationDecisionReferenceV1`, `ObservationOutcomeReferenceV1`, an M1d `NormalizationResultV1`, proof of historical publication availability, proof of a realized session, proof of the absence of halts, or promotion-grade evidence.
 
 **Epistemic Contract**:
-- **Retrospective Knowledge Warning**: An exploratory reconstructed input may contain corrections, corporate action revisions, or source adjustments published AFTER the historical decision cutoff.
-- **Scientific Utility**: Valid and authorized for engineering validation, harness closure, indicator calculation, and exploratory strategy screening.
+- **Retrospective Knowledge Warning**: A reconstructed observation may contain corrections, corporate action revisions, or source adjustments published AFTER the historical session; `evidence_vintage_cutoff` is that retrospective cutoff.
+- **Scientific Utility**: Valid and authorized for engineering validation, harness closure, indicator calculation, and exploratory strategy screening over the declared cohort.
 - **Strict Prohibition**: NEVER historical-decision proof; NEVER promotion-grade; NEVER convertible into promotion evidence.
-- **Promotion Lane Prohibition**: Any promotion evaluation that encounters an `ExploratoryReconstructedDecisionInputV1` is immediately rejected by structural type validation.
+- **Promotion Lane Prohibition**: Any promotion evaluation that encounters an `ExploratoryReconstructedSessionObservationV1` is immediately rejected by structural validation.
 
 ### 7.2 Exploratory Business-Time Causality Invariant
 
@@ -427,92 +414,64 @@ class EvaluationInputBundleV1(FrozenModel):
     schema_version: Literal["1"] = "1"
     evaluation_interval: TemporalIntervalClaimV1
     source_snapshot_hash: SHA256Hash | None = None  # Bound for M1e promotion
-    session_clock_mode: Literal[
-        "realized_session_authority", "scheduled_session_reconstruction"
-    ]
-    m1b_structural_eligibility_hashes: tuple[SHA256Hash, ...]
-    m1c_outcome_resolution_hashes: tuple[SHA256Hash, ...]
-    m1d_observation_view_hashes: tuple[SHA256Hash, ...]
-    m1d_realized_session_hashes: tuple[SHA256Hash, ...]
-    m1d_scheduled_session_hashes: tuple[SHA256Hash, ...]
+    session_clock: SessionClockV1
     security_identities: tuple[SecurityV1, ...]
     listing_identities: tuple[ListingV1, ...]
-    scheduled_sessions: tuple[ScheduledSessionVersionV1, ...]
-    realized_sessions: tuple[RealizedSessionVersionV1, ...]
     structural_eligibilities: tuple[StructuralEligibilityResultV1, ...]
     economic_outcomes: tuple[EconomicOutcomeResolutionV1, ...]
-    unadjusted_observation_views: tuple[DerivedObservationViewV1, ...]
-    decision_observation_views: tuple[DerivedObservationViewV1, ...]
-    exploratory_decision_inputs: tuple[
-        ExploratoryReconstructedDecisionInputV1, ...
+    authentic_decision_views: tuple[DerivedObservationViewV1, ...]
+    authentic_accounting_views: tuple[DerivedObservationViewV1, ...]
+    exploratory_reconstructed_observations: tuple[
+        ExploratoryReconstructedSessionObservationV1, ...
     ] = ()
-    bundle_hash: SHA256Hash
+    bundle_hash: SHA256Hash  # self-excluding canonical content hash
 
     @property
     def has_exploratory_reconstructions(self) -> bool:
-        return (
-            len(self.exploratory_decision_inputs) > 0
-            or self.session_clock_mode == "scheduled_session_reconstruction"
+        return bool(self.exploratory_reconstructed_observations) or (
+            self.session_clock.mode == "scheduled_session_reconstruction"
         )
-
-    @model_validator(mode="after")
-    def validate_bundle_integrity(self) -> Self:
-        expected = content_hash(self.model_dump(mode="python", exclude={"bundle_hash"}))
-        if self.bundle_hash != expected:
-            raise ValueError("input bundle canonical hash mismatch")
-        # Verify bound proof hashes
-        actual_eligibility_hashes = tuple(
-            sorted(content_hash(item) for item in self.structural_eligibilities)
-        )
-        if actual_eligibility_hashes != self.m1b_structural_eligibility_hashes:
-            raise ValueError("structural eligibility proof hash mismatch")
-        actual_outcome_hashes = tuple(
-            sorted(content_hash(item) for item in self.economic_outcomes)
-        )
-        if actual_outcome_hashes != self.m1c_outcome_resolution_hashes:
-            raise ValueError("economic outcome resolution proof hash mismatch")
-        actual_view_hashes = tuple(
-            sorted(
-                content_hash(item)
-                for item in (
-                    *self.unadjusted_observation_views,
-                    *self.decision_observation_views,
-                )
-            )
-        )
-        if actual_view_hashes != self.m1d_observation_view_hashes:
-            raise ValueError("observation view proof hash mismatch")
-        actual_scheduled_hashes = tuple(
-            sorted(content_hash(item) for item in self.scheduled_sessions)
-        )
-        if actual_scheduled_hashes != self.m1d_scheduled_session_hashes:
-            raise ValueError("scheduled session proof hash mismatch")
-        actual_realized_hashes = tuple(
-            sorted(content_hash(item) for item in self.realized_sessions)
-        )
-        if actual_realized_hashes != self.m1d_realized_session_hashes:
-            raise ValueError("realized session proof hash mismatch")
-        return self
 ```
 
 **Preparation Boundary (`build_evaluation_input_bundle` / `verify_evaluation_input_bundle`)**:
 1. **Promotion Decision Views**: Replays and materializes each view using `materialize_observation_decision(reference, query, context)` with `M1dResolutionContext`, verifying exact match with `ObservationDecisionReferenceV1`.
 2. **Accounting Outcome Views**: Replays and materializes unadjusted views using `materialize_observation_outcome(reference, query, context)`.
-3. **Exploratory Strategy Views**: Materializes from current-vintage/outcome material, wraps in `ExploratoryReconstructedDecisionInputV1`, binds explicit limitations, and never relabels as `ObservationDecisionReferenceV1`.
-4. **M1b Universes**: Replays and verifies `StructuralEligibilityResultV1` against selection context. In exploratory mode, permits `ResolutionMode.CURRENT_INTERPRETATION` with `InformationRole.EX_POST_OUTCOME` for declared bounded cohorts, binding `ALPACA_LIMITATION_BOUNDED_COHORT`. Never relabels current interpretation as `AS_KNOWN`.
+3. **Exploratory Strategy Views**: Constructs `ExploratoryReconstructedSessionObservationV1` through `build_exploratory_reconstructed_session_observation(query, context, cohort, policy)` under an `ObservationOutcomeQueryV1`, using existing M1d source selection and schedule generation, with explicit retrospective/unversioned limitations. It never yields `ObservationDecisionReferenceV1`, `ObservationOutcomeReferenceV1`, or `DerivedObservationViewV1`.
+4. **M1b Universes**: Replays and verifies `StructuralEligibilityResultV1` against selection context. Promotion strictly requires `ResolutionMode.AS_KNOWN` plus `InformationRole.DECISION_INFORMATION`. Exploratory evaluation is scoped by `ExploratoryCohortAuthorizationV1` instead of historical structural eligibility, because `resolve_structural_eligibility` correctly accepts only as-known decision information; `CURRENT_INTERPRETATION` plus `EX_POST_OUTCOME` structural evidence does not exist and must not be built by M2. The cohort mechanically binds `ALPACA_LIMITATION_BOUNDED_COHORT` in the exploratory admission.
 5. **M1c Economics**: Replays and verifies `EconomicOutcomeResolutionV1` against M1c selection context, proving terms, occurred effects, and delivered settlements independently.
 
-### 7.5 Clock Authority Modes (Realized vs Scheduled Reconstruction)
+### 7.5 Session Clock Contract (Realized vs Scheduled Reconstruction)
 
-M2 defines two distinct clock authority modes:
-- **`PROMOTION` Lane**: Strictly requires `realized_session_authority` backed by authenticated `RealizedSessionVersionV1` instances with proven `actual_open`, `actual_close`, and interruption telemetry.
-- **`EXPLORATORY` Lane**: Uses `realized_session_authority` when genuinely available, OR `scheduled_session_reconstruction` derived from `ScheduledSessionVersionV1` calendar records.
-  - When operating under `scheduled_session_reconstruction`:
-    - Derives open/close boundaries from scheduled times.
-    - Explicitly records `ALPACA_LIMITATION_ABSENT_HALTS` and `ALPACA_LIMITATION_SCHEDULED_SESSION_RECONSTRUCTION`.
-    - NEVER manufactures synthetic `RealizedSessionVersionV1` instances.
-    - NEVER claims "no halt occurred" or "actual open proven."
-    - If a scheduled session is expected open but required market observations fail to materialize: fails closed to `INDETERMINATE`. It does not invent `did_not_open` or halt causes.
+M2 defines two distinct clock authority modes via `SessionClockMode = Literal["realized_session_authority", "scheduled_session_reconstruction"]`:
+
+```python
+class EvaluationSessionV1(FrozenModel):
+    """One evaluation session boundary with bound proof authority."""
+
+    schema_version: Literal["1"] = "1"
+    session_key: SessionKeyV1
+    opened_at: UTCDateTime
+    closed_at: UTCDateTime  # must be strictly after opened_at
+    authority: Literal["realized", "scheduled_reconstruction"]
+    authority_record_hashes: tuple[SHA256Hash, ...]
+    authority_proof_hashes: tuple[SHA256Hash, ...]
+    session_hash: SHA256Hash  # self-excluding canonical content hash
+
+
+class SessionClockV1(FrozenModel):
+    """Immutable content-addressed sequence of evaluation sessions."""
+
+    schema_version: Literal["1"] = "1"
+    mode: SessionClockMode
+    sessions: tuple[EvaluationSessionV1, ...]  # nonempty, unique keys, chronological
+    acknowledged_limitations: tuple[NonBlankStr, ...]
+    clock_hash: SHA256Hash  # self-excluding canonical content hash
+```
+
+- **`PROMOTION` Lane**: Strictly requires `mode == "realized_session_authority"`, whose sessions bind authentic selected `RealizedSessionVersionV1` instances with proven `outcome="opened"` and non-null `actual_open`/`actual_close` (`closed` strictly after `opened`), plus their exact selection proof and record identity hashes. A `did_not_open` or `unknown` realized outcome can never produce an evaluation session. Early closes use the proven `actual_close`; nothing hardcodes 16:00 or 09:30.
+- **`EXPLORATORY` Lane**: Uses realized authority when genuinely available, or `scheduled_session_reconstruction` built from existing M1d scheduled selection plus the `generate_schedule(...)` pipeline. An included scheduled session requires artifact `classification == "generated"`, output `interpretation_status == "authorized"`, state in (`regular`, `early_close`), and non-null generated UTC open/close. Early closes preserve the exact generated close. The clock's limitations include `ALPACA_LIMITATION_ABSENT_HALTS` and `ALPACA_LIMITATION_SCHEDULED_SESSION_RECONSTRUCTION`.
+  - Under scheduled reconstruction the clock NEVER manufactures synthetic `RealizedSessionVersionV1` instances and NEVER claims "no halt occurred" or "actual open proven."
+  - If a scheduled session is expected open but required market observations fail to materialize, later evaluation is `INDETERMINATE`; the clock records neither `did_not_open` nor a halt cause.
 - **Anti-Laundering Gate**: Promotion admission strictly rejects any bundle configured with `scheduled_session_reconstruction`.
 
 ### 7.6 No False Halt Syntheses
@@ -581,7 +540,7 @@ The regular trading session close is NOT hardcoded to 16:00 ET:
 ## 9. Universe Admission and Historical Survivorship Rules
 
 ### 9.1 Sourced M1b Universe Authority
-- Evaluator universe membership is derived session-by-session from `StructuralEligibilityResultV1`.
+- Evaluator universe membership is derived session-by-session from `StructuralEligibilityResultV1` (replay under `AS_KNOWN` / `DECISION_INFORMATION`). This M1b replay applies to the promotion lane; exploratory evaluation is scoped by `ExploratoryCohortAuthorizationV1` instead (Section 7.1), which asserts experiment scope only and makes no universe-membership claim.
 - `StructuralEligibilityClassification.ELIGIBLE` admits the security to the decision universe.
 - `INELIGIBLE` or `INDETERMINATE` removes the security from eligibility.
 - Indeterminate membership is never treated as eligible.
@@ -599,7 +558,7 @@ Today's constituent list (e.g. current S&P 500 or active Alpaca assets) cannot b
 | Domain Layer | Data Basis | Source Authority | Purpose |
 |---|---|---|---|
 | **Strategy Decision Context (PROMOTION)** | Split-Normalized / Causal Views | Authentic M1d Decision Views (`AS_KNOWN`) | Point-in-time decision indicators, moving averages, signals. |
-| **Strategy Decision Context (EXPLORATORY)** | Split-Normalized / Causal Views | Authentic M1d Decision Views OR `ExploratoryReconstructedDecisionInputV1` (with retrospective limitations) | Exploratory screening, prototype indicators, signals. |
+| **Strategy Decision Context (EXPLORATORY)** | Split-Normalized / Causal Views OR Source-Basis UNADJUSTED | Authentic M1d Decision Views when genuinely available, OR `ExploratoryReconstructedSessionObservationV1` (source-basis only, with retrospective limitations) | Exploratory screening, prototype indicators, signals. |
 | **Portfolio Accounting** | Source-Basis UNADJUSTED Prices | M1d Unadjusted Views | Cash movements, fill prices, portfolio close marks, NAV. |
 | **Corporate Action Economics** | Occurred Effects & Settlements | M1c Resolutions | Share ratio adjustments, cash dividend receivables, mergers. |
 
@@ -884,7 +843,9 @@ ALPACA_LIMITATION_RETROSPECTIVE_RECONSTRUCTION = (
 
 An admission gatekeeper operates outside the pure evaluator core, binding authentic M1e qualification evidence across both consumer purposes (`HISTORICAL_DECISION_INPUT` and `RETROSPECTIVE_AUDIT`).
 
-In Task 1, `validate_m1e_promotion_evidence` validates the M1e qualification artifacts and `QualifiedSourceHandoffV1` objects against `PromotionEvaluationAdmissionV1`. In Task 2, `validate_promotion_admission` composes that evidence check with `EvaluationInputBundleV1` structural anti-laundering validation.
+In Task 1, `validate_m1e_promotion_evidence` validates the M1e qualification artifacts and `QualifiedSourceHandoffV1` objects against `PromotionEvaluationAdmissionV1`. Task 2 is internally sequenced for implementation: slice 2A delivers the exploratory cohort authorization, exploratory reconstruction policy/fields/observation, and the realized/scheduled session-clock contracts and builders; slice 2B then delivers the immutable `EvaluationInputBundleV1`, replay-bound preparation, admission-to-bundle gates, and the deterministic evaluation-run identity. In Task 2B, `validate_promotion_admission` composes the Task 1 evidence check with `EvaluationInputBundleV1` structural anti-laundering validation.
+
+**Authoritative landing corrections** (superseding the illustrative pseudocode below): handoff integrity is `qualified_source_handoff_hash(handoff) == handoff.handoff_hash`, and the admission binds `decision_handoff.handoff_hash` / `audit_handoff.handoff_hash` exactly (`handoff_hash` is SELF-EXCLUDING; a whole-object `content_hash(handoff)` would include that field and must never be bound). For positive M1e evidence, every one of the 12 final dimension results in BOTH purpose reports must be `REACHED`, carry evidence, and match the owning report purpose; only profile-critical dimensions must additionally `PASS` with `admitted_purpose=True` (a non-critical reached `PARTIAL` is permitted); a positive completion must not carry `blocking_dimensions` or `blocking_evidence_hashes`.
 
 ```python
 def validate_m1e_promotion_evidence(
@@ -984,7 +945,9 @@ def validate_m1e_promotion_evidence(
     shared_snapshot = decision_report.target.snapshot_hash
 
     # QualifiedSourceHandoffV1 checks
-    if content_hash(decision_handoff) != admission.decision_handoff_hash:
+    if qualified_source_handoff_hash(decision_handoff) != decision_handoff.handoff_hash:
+        raise ValueError("inconsistent decision handoff hash")
+    if decision_handoff.handoff_hash != admission.decision_handoff_hash:
         raise ValueError("decision handoff hash mismatch with admission")
     if decision_handoff.purpose != ConsumerPurpose.HISTORICAL_DECISION_INPUT:
         raise ValueError("decision handoff purpose mismatch")
@@ -1001,7 +964,9 @@ def validate_m1e_promotion_evidence(
     if decision_handoff.replay_authorization_hash is None:
         raise ValueError("decision handoff missing replay authorization hash")
 
-    if content_hash(audit_handoff) != admission.audit_handoff_hash:
+    if qualified_source_handoff_hash(audit_handoff) != audit_handoff.handoff_hash:
+        raise ValueError("inconsistent audit handoff hash")
+    if audit_handoff.handoff_hash != admission.audit_handoff_hash:
         raise ValueError("audit handoff hash mismatch with admission")
     if audit_handoff.purpose != ConsumerPurpose.RETROSPECTIVE_AUDIT:
         raise ValueError("audit handoff purpose mismatch")
@@ -1086,12 +1051,15 @@ def validate_promotion_admission(
         raise ValueError(
             "promotion evaluation cannot consume exploratory reconstructed inputs"
         )
-    if (
-        bundle.session_clock_mode != "realized_session_authority"
-        or not bundle.realized_sessions
-    ):
+    if bundle.session_clock.mode != "realized_session_authority":
         raise ValueError(
             "promotion evaluation requires authentic realized session authority"
+        )
+    if any(
+        session.authority != "realized" for session in bundle.session_clock.sessions
+    ):
+        raise ValueError(
+            "promotion evaluation requires realized session evidence for every session"
         )
 ```
 
@@ -1111,7 +1079,7 @@ Alpaca REST API Responses
   +--> 3. Map native payloads to standard Drift source records (M1b/M1c/M1d)
   +--> 4. Validate datasets via Drift public validators (DatasetValidationDecisionV2)
   +--> 5. Execute standard M1b/M1c/M1d selection/normalization functions
-  +--> 6. Wrap in ExploratoryReconstructedDecisionInputV1 with explicit limitations
+  +--> 6. Reconstruct ExploratoryReconstructedSessionObservationV1 (source-basis, with explicit limitations)
   +--> 7. Emit EvaluationInputBundleV1 for evaluator core
 ```
 
@@ -1137,8 +1105,8 @@ The M2 implementation must pass the following explicit adversarial acceptance te
 | **Causality** | Early-Close Realized Timing | Session closes at 13:00; strategy decision evaluated after 13:00 | Accepted; uses actual realized close, not 16:00. |
 | **Causality** | Future Corporate Action Knowledge | Strategy context contains corporate action announced after decision date | Rejected by M1c causal selection query. |
 | **Epistemic Lanes** | 2026 Downloaded Bar as Decision Ref | Alpaca 2022 bar downloaded in 2026 submitted as M1d `ObservationDecisionReferenceV1` | Rejected; cannot produce decision-role reference without vintage. |
-| **Epistemic Lanes** | Reconstructed Input in Promotion | `ExploratoryReconstructedDecisionInputV1` submitted to PROMOTION evaluation | Structural rejection; gatekeeper fails closed. |
-| **Epistemic Lanes** | Reconstructed Input in Exploratory | 2022 bar wrapped in `ExploratoryReconstructedDecisionInputV1` with retrospective limitations | Permitted in EXPLORATORY lane only. |
+| **Epistemic Lanes** | Reconstructed Observation in Promotion | `ExploratoryReconstructedSessionObservationV1` submitted to PROMOTION evaluation | Structural rejection; gatekeeper fails closed. |
+| **Epistemic Lanes** | Reconstructed Observation in Exploratory | 2022 session reconstructed as `ExploratoryReconstructedSessionObservationV1` (source-basis) with retrospective limitations | Permitted in EXPLORATORY lane only, over the predeclared cohort. |
 | **Universe** | Current Interpretation as As-Known | M1b `CURRENT_INTERPRETATION` submitted as `AS_KNOWN` in PROMOTION | Rejected; promotion requires authentic as-known authority. |
 | **Universe** | Survivorship Bias | Current active asset list used as historical universe | Rejected; requires historical universe definition. |
 | **Universe** | Indeterminate Eligibility | Security with `MembershipStatus.INDETERMINATE` admitted to trading | Rejected; indeterminate is not eligible. |
