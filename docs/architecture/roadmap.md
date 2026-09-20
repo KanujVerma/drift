@@ -8,35 +8,46 @@ equal units of engineering effort; earlier milestones establish scientific and
 data integrity, while later milestones introduce modeling, evaluation, and live
 execution.
 
+Permanent implementation owners for M2 through M18+ are defined in
+[workstreams.md](workstreams.md). GitHub Issues and PRs own live task state.
+This roadmap does not track current issue numbers, percent complete, or
+session status.
+
+[ADR 0013](../adr/0013-parallelize-owned-milestones-without-advancing-authorization.md)
+allows dependency-safe architecture preparation and later offline foundations
+to proceed across different owned milestones. Build order may parallelize
+across milestone owners. Scientific and safety authorization gates remain
+intact. Code availability is not operational authorization.
+
 ---
 
 ## Milestone Status Overview
 
-| Milestone | Title | Status | Primary Output / Invariant |
-|---|---|---|---|
-| **M0** | Auditable Evidence Kernel | **COMPLETE** | Monotonic append-only SQLite ledger with SHA-256 hash chaining. |
-| **M1a** | Temporal Provenance | **COMPLETE** | Exact-byte manifests, channel availability, and tri-state cutoffs. |
-| **M1b** | Historical Identity / Universes | **COMPLETE** | Issuer/security/listing separation, point-in-time universe composition. |
-| **M1c** | Corporate Actions / Economic Facts | **COMPLETE** | Terms, occurred effects, reported settlements, dependent replay. |
-| **M1d** | Observations, Sessions, Normalization | **COMPLETE** | Source claims, realized sessions, missingness, split-normalized views. |
-| **M1e** | Real-Source Qualification & Replay | **IN PROGRESS / DEFERRED** | Tasks 1-7 complete (offline closure); Task 8 paid promotion qualification deferred. |
-| **M2** | Evaluator / Backtester | **NEXT** | Deterministic point-in-time strategy evaluation; exploratory lane authorized under ADR 0012. |
-| **M3** | Deterministic Baselines | Planned | Passive, factor, and mechanical reference benchmark strategies. |
-| **M4** | Prediction / Outcome Tracking | Planned | Audited tracking of ex-ante forecasts against realized market facts. |
-| **M5** | Statistical / Model Scorecards | Planned | Rigorous performance attribution, calibration, and degradation metrics. |
-| **M6** | Structured Research Memory | Planned | Semantic storage of past experiments, failures, and causal insights. |
-| **M7** | First AI Research Agent | Planned | Autonomous hypothesis generation and experiment specification. |
-| **M8** | Recursive R&D Loop | Planned | Continuous exploration, hypothesis refinement, and model iteration. |
-| **M9** | Multi-Agent Research | Planned | Specialized research teams (pursued only if evidence warrants). |
-| **M10** | Champion / Challenger Tournament | Planned | Systematic out-of-sample comparison of incumbent and contender models. |
-| **M11** | Promotion & Overfitting Controls | Planned | Deflated Sharpe ratios, multiple-testing penalties, strict gatekeeping. |
-| **M12** | Shadow Broker | Planned | Realistic simulated broker tracking intended orders, fills, and exposures. |
-| **M13** | Deterministic Hard Risk | Planned | Hard-coded executor limits, persistent kill switches, drawdown stops. |
-| **M14** | Broker-Neutral Execution | Planned | Abstract execution interfaces decoupling strategies from venues. |
-| **M15** | Real-World Paper / Shadow Validation | Planned | Live market feed validation without capital risk. |
-| **M16** | Official Robinhood Agentic MCP Adapter | Planned | Integration with Robinhood via official Agentic Trading protocol. |
-| **M17** | Tiny-Money Canary | Planned | Minimal real-capital validation (e.g., single-share order routing). |
-| **M18+** | Bounded Autonomy & Improvement | Planned | Controlled live allocation with ongoing empirical evidence governance. |
+| Milestone | Title | Owner | Status | Primary Output / Invariant |
+|---|---|---|---|---|
+| **M0** | Auditable Evidence Kernel | - | **COMPLETE** | Monotonic append-only SQLite ledger with SHA-256 hash chaining. |
+| **M1a** | Temporal Provenance | - | **COMPLETE** | Exact-byte manifests, channel availability, and tri-state cutoffs. |
+| **M1b** | Historical Identity / Universes | - | **COMPLETE** | Issuer/security/listing separation, point-in-time universe composition. |
+| **M1c** | Corporate Actions / Economic Facts | - | **COMPLETE** | Terms, occurred effects, reported settlements, dependent replay. |
+| **M1d** | Observations, Sessions, Normalization | - | **COMPLETE** | Source claims, realized sessions, missingness, split-normalized views. |
+| **M1e** | Real-Source Qualification & Replay | - | **IN PROGRESS / DEFERRED** | Tasks 1-7 complete (offline closure); Task 8 paid promotion qualification deferred. |
+| **M2** | Evaluator / Backtester | Kanuj | **NEXT** | Deterministic point-in-time strategy evaluation; exploratory lane authorized under ADR 0012. |
+| **M3** | Deterministic Baselines | Kanuj | Planned | Passive, factor, and mechanical reference benchmark strategies. |
+| **M4** | Prediction / Outcome Tracking | Kanuj | Planned | Audited tracking of ex-ante forecasts against realized market facts. |
+| **M5** | Statistical / Model Scorecards | Krish | Planned | Rigorous performance attribution, calibration, and degradation metrics. |
+| **M6** | Structured Research Memory | Kanuj | Planned | Semantic storage of past experiments, failures, and causal insights. |
+| **M7** | First AI Research Agent | Kanuj | Planned | Autonomous hypothesis generation and experiment specification. |
+| **M8** | Recursive R&D Loop | Kanuj | Planned | Continuous exploration, hypothesis refinement, and model iteration. |
+| **M9** | Multi-Agent Research | Kanuj | Planned | Specialized research teams (pursued only if evidence warrants). |
+| **M10** | Champion / Challenger Tournament | Kanuj | Planned | Systematic out-of-sample comparison of incumbent and contender models. |
+| **M11** | Promotion & Overfitting Controls | Krish | Planned | Deflated Sharpe ratios, multiple-testing penalties, strict gatekeeping. |
+| **M12** | Shadow Broker | Krish | Planned | Realistic simulated broker tracking intended orders, fills, and exposures. |
+| **M13** | Deterministic Hard Risk | Krish | Planned | Hard-coded executor limits, persistent kill switches, drawdown stops. |
+| **M14** | Broker-Neutral Execution | Krish | Planned | Abstract execution interfaces decoupling strategies from venues. |
+| **M15** | Real-World Paper / Shadow Validation | Krish | Planned | Live market feed validation without capital risk. |
+| **M16** | Official Robinhood Agentic MCP Adapter | Krish | Planned | Integration with Robinhood via official Agentic Trading protocol. |
+| **M17** | Tiny-Money Canary | Krish | Planned | Minimal real-capital validation (e.g., single-share order routing). |
+| **M18+** | Bounded Autonomy & Improvement | Krish (operational) | Planned | Controlled live allocation with ongoing empirical evidence governance. M18+ is excluded from bounded 8/8 milestone parity. |
 
 ---
 
@@ -97,6 +108,7 @@ execution.
   [ADR 0012](../adr/0012-permit-exploratory-evaluation-before-promotion-grade-source-qualification.md).
 
 ### M2: Deterministic Session-Level Evaluator and Portfolio Accounting Kernel (Next Major Milestone)
+- **Owner**: Kanuj. All remaining M2 implementation belongs to workstream `kanuj`.
 - **Status**: NEXT major milestone (exploratory lane authorized under ADR 0012).
 - **Objective**: Implement a single deterministic, provider-neutral evaluator core
   operating across two distinct evaluation lanes:
@@ -117,45 +129,47 @@ execution.
   and [M2 Implementation Plan](../superpowers/plans/2026-09-19-m2-deterministic-session-evaluator.md).
 
 ### M3 through M6: Quantitative Modeling Foundations
-- **M3 Deterministic Baselines**: Build passive, factor, and mechanical reference
+- **M3 Deterministic Baselines** (Kanuj): Build passive, factor, and mechanical reference
   strategies against which all future research models are compared.
-- **M4 Prediction and Outcome Tracking**: Record ex-ante model predictions and link
+- **M4 Prediction and Outcome Tracking** (Kanuj): Record ex-ante model predictions and link
   them auditably to subsequent realized market facts in the ledger.
-- **M5 Statistical and Model Scorecards**: Measure calibration, information coefficients,
+- **M5 Statistical and Model Scorecards** (Krish): Measure calibration, information coefficients,
   drawdown profiles, and turnover with multiple-testing adjustments.
-- **M6 Structured Research Memory**: Establish a queryable historical archive of
+- **M6 Structured Research Memory** (Kanuj): Establish a queryable historical archive of
   hypotheses, trials, parameter searches, and failure postmortems to prevent repeat errors.
 
 ### M7 through M11: Autonomous Research and R&D Loop
-- **M7 First AI Research Agent**: Deploy an autonomous agent tasked with generating
+- **M7 First AI Research Agent** (Kanuj): Deploy an autonomous agent tasked with generating
   testable hypotheses and creating valid experiment specifications.
-- **M8 Recursive R&D Loop**: Establish an automated pipeline where the agent inspects
+- **M8 Recursive R&D Loop** (Kanuj): Establish an automated pipeline where the agent inspects
   evaluation results, diagnoses weaknesses, and proposes iterative refinements.
-- **M9 Multi-Agent Research**: Introduce specialized agent roles (e.g., hypothesis
+- **M9 Multi-Agent Research** (Kanuj, conditional): Introduce specialized agent roles (e.g., hypothesis
   generator, risk critic, feature engineer) only if empirical evidence proves superior
-  results over a unified agent.
-- **M10 Champion / Challenger Tournament**: Run ongoing out-of-sample competitions
+  results over a unified agent. Ownership does not make M9 ready.
+- **M10 Champion / Challenger Tournament** (Kanuj): Run ongoing out-of-sample competitions
   between current production models and newly promoted contenders.
-- **M11 Promotion and Overfitting Controls**: Strict statistical gatekeeping incorporating
+- **M11 Promotion and Overfitting Controls** (Krish): Strict statistical gatekeeping incorporating
   Deflated Sharpe Ratios, Probability of Backtest Overfitting (PBO), multiple-testing
   and search-inflation controls, walk-forward out-of-sample evidence, stability/regime
   testing, and experiment-count awareness.
 
 ### M12 through M15: Execution and Risk Architecture
-- **M12 Shadow Broker**: Bridge research into realistic simulated execution, tracking
+- **M12 Shadow Broker** (Krish): Bridge research into realistic simulated execution, tracking
   intended orders, simulated/expected fills, portfolio exposure, realized outcomes,
   and explicit execution assumptions with deterministic accounting and reconciliation.
-- **M13 Deterministic Hard Risk**: Hard-coded, non-negotiable risk limits (position caps,
+  Architecture preparation may begin before M2 runtime is complete; M12 runtime waits
+  for required upstream contract freeze (ADR 0013).
+- **M13 Deterministic Hard Risk** (Krish): Hard-coded, non-negotiable risk limits (position caps,
   daily loss limits, persistent kill switches) running outside the AI agent's control.
-- **M14 Broker-Neutral Execution**: Abstract execution protocols and order intent
+- **M14 Broker-Neutral Execution** (Krish): Abstract execution protocols and order intent
   journals decoupling strategy logic from broker APIs (ADR 0002).
-- **M15 Real-World Paper / Shadow Validation**: Live market feed processing and order
+- **M15 Real-World Paper / Shadow Validation** (Krish): Live market feed processing and order
   intent generation running in shadow mode.
 
 ### M16 through M18+: Live Execution and Controlled Autonomy
-- **M16 Official Robinhood Agentic MCP Adapter**: Implement the live brokerage
+- **M16 Official Robinhood Agentic MCP Adapter** (Krish): Implement the live brokerage
   connection using Robinhood's official Agentic Trading protocol (ADR 0011).
-- **M17 Tiny-Money Canary**: Route minimal real-capital orders (e.g., single-share
+- **M17 Tiny-Money Canary** (Krish): Route minimal real-capital orders (e.g., single-share
   allocations) to validate connectivity, fill reporting, and settlement reconciliation.
-- **M18+ Bounded Autonomy**: Gradually expand allocation caps under continuous,
-  audited evidence governance.
+- **M18+ Bounded Autonomy** (Krish, operational; excluded from bounded 8/8 parity):
+  Gradually expand allocation caps under continuous, audited evidence governance.

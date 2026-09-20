@@ -169,6 +169,7 @@ interfaces (ADR 0002 and ADR 0011):
 ## Canonical Documentation Map
 
 - **Roadmap and Milestone Status**: [roadmap.md](roadmap.md)
+- **Workstream Ownership**: [workstreams.md](workstreams.md)
 - **Agent Operating Workflow and Authority**: [agent-workflow.md](agent-workflow.md)
 - **Trust Boundaries and Retention**: [trust-boundaries.md](trust-boundaries.md)
 - **M1e Provider Selection State**: [m1e-provider-selection.md](m1e-provider-selection.md)
