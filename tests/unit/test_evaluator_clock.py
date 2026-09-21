@@ -18,11 +18,18 @@ from drift.domain.evaluator_lanes import (
     ALPACA_LIMITATION_SCHEDULED_SESSION_RECONSTRUCTION,
 )
 from drift.domain.observation_query import ObservationOutcomeQueryV1
-from drift.domain.sessions import RealizedSessionVersionV1, SessionKeyV1
+from drift.domain.sessions import (
+    RealizedSessionVersionV1,
+    ScheduleArtifactV1,
+    ScheduleGenerationPolicyV1,
+    SessionKeyV1,
+)
 from drift.evaluator.clock import (
     build_realized_session_clock,
     build_scheduled_reconstruction_clock,
 )
+from drift.markets.observation_validation import M1dResolutionContext
+from drift.markets.session_generation import generate_schedule
 
 H0 = "0" * 64
 H1 = "1" * 64
@@ -195,11 +202,12 @@ def make_session(
     opened: datetime = OPEN,
     closed: datetime = CLOSE,
     authority: str = "scheduled_reconstruction",
+    mic: str = "XNYS",
 ) -> EvaluationSessionV1:
     draft = EvaluationSessionV1.model_construct(
         schema_version="1",
         session_key=SessionKeyV1(
-            mic="XNYS", session_scope="regular", local_date=local_date
+            mic=mic, session_scope="regular", local_date=local_date
         ),
         opened_at=opened,
         closed_at=closed,
@@ -270,6 +278,60 @@ def test_clock_is_frozen_and_state_hash_verified() -> None:
     payload["clock_hash"] = H1
     with pytest.raises(ValidationError, match="clock hash mismatch"):
         SessionClockV1.model_validate(payload)
+
+
+def _validated_scheduled_clock(
+    sessions: tuple[EvaluationSessionV1, ...],
+) -> SessionClockV1:
+    limitations = (
+        ALPACA_LIMITATION_SCHEDULED_SESSION_RECONSTRUCTION,
+        ALPACA_LIMITATION_ABSENT_HALTS,
+    )
+    draft = SessionClockV1.model_construct(
+        schema_version="1",
+        mode="scheduled_session_reconstruction",
+        sessions=sessions,
+        acknowledged_limitations=limitations,
+        clock_hash=H0,
+    )
+    hashed = draft.model_copy(update={"clock_hash": session_clock_hash(draft)})
+    return SessionClockV1.model_validate(hashed.model_dump(mode="python"))
+
+
+def test_clock_accepts_utc_order_when_mic_order_disagrees() -> None:
+    earlier = make_session(mic="ZZZZ", local_date=JAN5, opened=OPEN, closed=CLOSE)
+    later = make_session(
+        mic="AAAA",
+        local_date=JAN6,
+        opened=datetime(2026, 1, 6, 14, 30, tzinfo=UTC),
+        closed=datetime(2026, 1, 6, 21, 0, tzinfo=UTC),
+    )
+    clock = _validated_scheduled_clock((earlier, later))
+    assert tuple(session.session_key.mic for session in clock.sessions) == (
+        "ZZZZ",
+        "AAAA",
+    )
+    with pytest.raises(ValidationError, match="chronological"):
+        _validated_scheduled_clock((later, earlier))
+
+
+def test_scheduled_clock_rejects_selected_source_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def mismatched(
+        query: ObservationOutcomeQueryV1,
+        context: M1dResolutionContext,
+        policy: ScheduleGenerationPolicyV1,
+    ) -> ScheduleArtifactV1:
+        artifact = generate_schedule(query, context, policy)
+        row = artifact.rows[0]
+        bad_row = row.model_copy(update={"source_version_hash": "ab" * 32})
+        return artifact.model_copy(update={"rows": (bad_row, *artifact.rows[1:])})
+
+    monkeypatch.setattr("drift.evaluator.clock.generate_schedule", mismatched)
+    harness = _ready_harness()
+    with pytest.raises(ValueError, match="independently selected scheduled session"):
+        build_scheduled_reconstruction_clock(_queries(harness), harness.context)
 
 
 def test_scheduled_clock_mode_requires_scheduled_limitations() -> None:

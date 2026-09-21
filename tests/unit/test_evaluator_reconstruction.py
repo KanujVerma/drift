@@ -27,9 +27,17 @@ from drift.domain.evaluator_reconstruction import (
 )
 from drift.domain.normalization import DerivedObservationViewV1
 from drift.domain.observation_query import ObservationOutcomeQueryV1
+from drift.domain.observations import DailySourceObservationVersionV1
+from drift.domain.sessions import ScheduleArtifactV1, ScheduleGenerationPolicyV1
 from drift.evaluator.reconstruction import (
     build_exploratory_reconstructed_session_observation,
 )
+from drift.markets.observation_selection import (
+    SelectedM1dRecordsV1,
+    select_observation_records,
+)
+from drift.markets.observation_validation import M1dResolutionContext
+from drift.markets.session_generation import generate_schedule
 
 H0 = "0" * 64
 H1 = "1" * 64
@@ -403,6 +411,83 @@ def test_builder_rejects_tampered_cohort_or_policy() -> None:
     )
     with pytest.raises(ValueError, match="reconstruction policy hash"):
         build_from_harness(harness, policy=bad_policy)
+
+
+def test_builder_rejects_missing_required_ohlcv_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def missing_high(
+        query: ObservationOutcomeQueryV1,
+        purpose: str,
+        context: M1dResolutionContext,
+    ) -> SelectedM1dRecordsV1:
+        selected = select_observation_records(query, purpose, context)
+        if purpose != "observation":
+            return selected
+        record = selected.records[0]
+        if not isinstance(record, DailySourceObservationVersionV1):
+            raise AssertionError("observation selection did not return a daily row")
+        fields = tuple(field for field in record.fields if field.field_name != "high")
+        record_values = {
+            name: getattr(record, name) for name in type(record).model_fields
+        }
+        record_values["fields"] = fields
+        bad_record = type(record).model_construct(**record_values)
+        selected_values = {
+            name: getattr(selected, name) for name in type(selected).model_fields
+        }
+        selected_values["records"] = (bad_record,)
+        return type(selected).model_construct(**selected_values)
+
+    monkeypatch.setattr(
+        "drift.evaluator.reconstruction.select_observation_records",
+        missing_high,
+    )
+    with pytest.raises(ValueError, match="required field high is missing"):
+        build_from_harness(_ready_harness())
+
+
+def test_reconstruction_rejects_tampered_hash() -> None:
+    built = build_from_harness(_ready_harness())
+    payload = built.model_dump(mode="python")
+    payload["reconstruction_hash"] = H1
+    with pytest.raises(ValidationError, match="reconstruction hash mismatch"):
+        ExploratoryReconstructedSessionObservationV1.model_validate(payload)
+
+
+def test_reconstruction_does_not_resolve_structural_eligibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("resolve_structural_eligibility must not be called")
+
+    monkeypatch.setattr(
+        "drift.markets.universes.resolve_structural_eligibility",
+        forbidden,
+    )
+    built = build_from_harness(_ready_harness())
+    assert built.reconstruction_hash == exploratory_reconstruction_hash(built)
+
+
+def test_reconstruction_rejects_selected_source_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def mismatched(
+        query: ObservationOutcomeQueryV1,
+        context: M1dResolutionContext,
+        policy: ScheduleGenerationPolicyV1,
+    ) -> ScheduleArtifactV1:
+        artifact = generate_schedule(query, context, policy)
+        row = artifact.rows[0]
+        bad_row = row.model_copy(update={"source_version_hash": "ab" * 32})
+        return artifact.model_copy(update={"rows": (bad_row, *artifact.rows[1:])})
+
+    monkeypatch.setattr(
+        "drift.evaluator.reconstruction.generate_schedule",
+        mismatched,
+    )
+    with pytest.raises(ValueError, match="independently selected scheduled session"):
+        build_from_harness(_ready_harness())
 
 
 def test_reconstruction_determinism_and_input_sensitivity() -> None:

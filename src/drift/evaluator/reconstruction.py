@@ -140,6 +140,11 @@ def build_exploratory_reconstructed_session_observation(
             "exploratory reconstruction requires exactly one generated session"
         )
     generated_row = rows[0]
+    if generated_row.source_version_hash != content_hash(session_record):
+        raise ValueError(
+            "generated schedule source does not match the independently "
+            "selected scheduled session"
+        )
     if generated_row.output.interpretation_status != "authorized":
         raise ValueError(
             "exploratory reconstruction requires an authorized generated session"

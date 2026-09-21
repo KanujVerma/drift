@@ -7,6 +7,7 @@ from drift.domain.evaluator_clock import (
     SessionClockV1,
     evaluation_session_hash,
     session_clock_hash,
+    session_order_key,
 )
 from drift.domain.evaluator_lanes import (
     ALPACA_LIMITATION_ABSENT_HALTS,
@@ -17,6 +18,7 @@ from drift.domain.sessions import (
     GeneratedSessionRowV1,
     RealizedSessionVersionV1,
     ScheduleArtifactV1,
+    ScheduledSessionVersionV1,
     ScheduleGenerationPolicyV1,
     SessionKeyV1,
 )
@@ -65,12 +67,7 @@ def _build_clock(
     sessions: tuple[EvaluationSessionV1, ...],
     limitations: tuple[str, ...],
 ) -> SessionClockV1:
-    sessions = tuple(
-        sorted(
-            sessions,
-            key=lambda item: (item.session_key.mic, item.session_key.local_date),
-        )
-    )
+    sessions = tuple(sorted(sessions, key=session_order_key))
     for session in sessions:
         EvaluationSessionV1.model_validate(session.model_dump())
     if not sessions:
@@ -88,13 +85,7 @@ def _build_clock(
 
 def _ensure_ordered_unique(sessions: tuple[EvaluationSessionV1, ...]) -> None:
     for previous, current in zip(sessions, sessions[1:], strict=False):
-        if (
-            previous.session_key.mic,
-            previous.session_key.local_date,
-        ) >= (
-            current.session_key.mic,
-            current.session_key.local_date,
-        ):
+        if session_order_key(previous) >= session_order_key(current):
             raise ValueError("session keys must be unique and chronologically ordered")
         if current.opened_at < previous.closed_at:
             raise ValueError("session clock sessions must not overlap")
@@ -162,6 +153,16 @@ def build_scheduled_reconstruction_clock(
     sessions: list[EvaluationSessionV1] = []
     for query in queries:
         selected = select_observation_records(query, "scheduled_session", context)
+        if selected.proof.classification != "selected" or len(selected.records) != 1:
+            raise ValueError(
+                "scheduled reconstruction requires exactly one selected "
+                "scheduled session"
+            )
+        selected_record = selected.records[0]
+        if not isinstance(selected_record, ScheduledSessionVersionV1):
+            raise ValueError(
+                "scheduled reconstruction selection returned an unexpected record"
+            )
         artifact = generate_schedule(query, context, policy)
         if artifact.classification != "generated":
             raise ValueError(
@@ -174,6 +175,11 @@ def build_scheduled_reconstruction_clock(
                 "scheduled reconstruction requires exactly one generated session row"
             )
         row = rows[0]
+        if row.source_version_hash != content_hash(selected_record):
+            raise ValueError(
+                "generated schedule source does not match the independently "
+                "selected scheduled session"
+            )
         output = row.output
         if output.interpretation_status != "authorized":
             raise ValueError(

@@ -37,6 +37,22 @@ def session_clock_hash(clock: SessionClockV1) -> SHA256Hash:
     return content_hash(dump)
 
 
+def session_order_key(session: EvaluationSessionV1) -> tuple[object, ...]:
+    """Canonical chronological ordering key for evaluation sessions.
+
+    Ordering follows actual UTC session boundaries first. Local date, venue
+    MIC, and session scope break only boundary ties, in that order. MIC never
+    precedes time, so a venue change across dates stays chronological.
+    """
+    return (
+        session.opened_at,
+        session.closed_at,
+        session.session_key.local_date,
+        session.session_key.mic,
+        session.session_key.session_scope,
+    )
+
+
 class EvaluationSessionV1(FrozenModel):
     """One evaluation session with exact boundary and bound authority evidence."""
 
@@ -95,13 +111,7 @@ class SessionClockV1(FrozenModel):
         )
         if len(set(keys)) != len(keys):
             raise ValueError("session clock requires unique session keys")
-        ordered = sorted(
-            sessions,
-            key=lambda session: (
-                session.session_key.mic,
-                session.session_key.local_date,
-            ),
-        )
+        ordered = sorted(sessions, key=session_order_key)
         if tuple(sessions) != tuple(ordered):
             raise ValueError(
                 "session clock requires strict chronological session order"
