@@ -161,6 +161,7 @@ def test_promotion_admission_valid_and_hash_verification() -> None:
         decision_handoff_hash=H3,
         audit_handoff_hash=H4,
         input_bundle_hash=H1,
+        provenance_proof_hash=H3,
         admission_hash=H0,
     )
     expected_hash = promotion_evaluation_admission_hash(unhashed)
@@ -173,6 +174,7 @@ def test_promotion_admission_valid_and_hash_verification() -> None:
     assert admission.decision_handoff_hash == H3
     assert admission.audit_handoff_hash == H4
     assert admission.input_bundle_hash == H1
+    assert admission.provenance_proof_hash == H3
     assert admission.admission_hash == expected_hash
 
 
@@ -186,6 +188,7 @@ def test_promotion_admission_tampered_hash_rejected() -> None:
             decision_handoff_hash=H3,
             audit_handoff_hash=H4,
             input_bundle_hash=H1,
+            provenance_proof_hash=H3,
             admission_hash=H2,
         )
 
@@ -211,6 +214,7 @@ def test_admission_discriminator_serialization() -> None:
         decision_handoff_hash=H3,
         audit_handoff_hash=H4,
         input_bundle_hash=H1,
+        provenance_proof_hash=H3,
         admission_hash=H0,
     )
     prom_hash = promotion_evaluation_admission_hash(prom_unhashed)

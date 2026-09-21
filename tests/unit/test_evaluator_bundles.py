@@ -28,6 +28,7 @@ from drift.domain.evaluator_lanes import (
 )
 from drift.domain.normalization import DerivedObservationViewV1
 from drift.domain.observation_query import ObservationOutcomeQueryV1
+from drift.domain.replay_provenance import build_bundle_provenance_proof
 from drift.domain.securities import ListingV1, ListingVenue, SecurityV1
 from drift.evaluator.bundles import (
     assemble_evaluation_input_bundle,
@@ -241,10 +242,20 @@ def test_exploratory_gate_rejects_dropped_limitation() -> None:
 
 def _promotion_case(bundle: EvaluationInputBundleV1) -> dict[str, Any]:
     fixture = make_test_fixture()
+    # The gate now validates a provenance proof. Snapshot binding of the proof
+    # itself is exercised in tests/unit/test_replay_provenance.py.
+    proof = build_bundle_provenance_proof(
+        qualified_context_hash=H["9"],
+        source_snapshot_hash=bundle.source_snapshot_hash or H["0"],
+        bundle=bundle,
+    )
     fixture["admission"] = rebind_admission(
-        fixture, input_bundle_hash=bundle.bundle_hash
+        fixture,
+        input_bundle_hash=bundle.bundle_hash,
+        provenance_proof_hash=proof.proof_hash,
     )
     fixture["bundle"] = bundle
+    fixture["proof"] = proof
     return fixture
 
 
