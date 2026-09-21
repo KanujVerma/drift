@@ -19,6 +19,7 @@ from drift.domain.evaluator_portfolio import (
 )
 from drift.domain.sessions import SessionKeyV1
 from drift.evaluator.portfolio import PortfolioAccountingKernel, initial_portfolio_state
+from drift.serialization.canonical import content_hash
 
 SEC_A = uid(21)
 SEC_B = uid(22)
@@ -625,3 +626,135 @@ def test_non_terminating_basis_relief_is_deterministic() -> None:
         ctx.prec = 9
         second = run()
     assert first == second
+
+
+# --- settled-claim replay (double payment) ---
+
+
+def test_settled_claim_cannot_be_recorded_again() -> None:
+    kernel = PortfolioAccountingKernel(_state("1000.00"))
+    claim = _claim(quantity=100, per_share="0.50", entitlement=FRI, payable=FRI)
+    kernel.record_claim(claim)
+    kernel.settle_claims((claim.claim_id,))
+    assert kernel.state.cash_balance == Decimal("1050.00")
+    with pytest.raises(ValueError, match="already settled"):
+        kernel.record_claim(claim)
+    assert kernel.state.cash_balance == Decimal("1050.00")
+
+
+def test_repeated_record_settle_cycles_cannot_pay_twice() -> None:
+    kernel = PortfolioAccountingKernel(_state("1000.00"))
+    claim = _claim(quantity=100, per_share="0.50", entitlement=FRI, payable=FRI)
+    kernel.record_claim(claim)
+    kernel.settle_claims((claim.claim_id,))
+    for _ in range(3):
+        with pytest.raises(ValueError, match="already settled"):
+            kernel.record_claim(claim)
+    # Exactly one payment, no matter how many times the effect is re-yielded.
+    assert kernel.state.cash_balance == Decimal("1050.00")
+
+
+def test_settled_claim_survives_session_advance() -> None:
+    kernel = PortfolioAccountingKernel(_state("1000.00", day=FRI))
+    claim = _claim(quantity=100, per_share="0.50", entitlement=FRI, payable=FRI)
+    kernel.record_claim(claim)
+    kernel.settle_claims((claim.claim_id,))
+    kernel.advance_session(_key(MON))
+    with pytest.raises(ValueError, match="already settled"):
+        kernel.record_claim(claim)
+    assert kernel.state.cash_balance == Decimal("1050.00")
+
+
+def test_settled_ledger_is_carried_on_state_and_survives_reconstruction() -> None:
+    kernel = PortfolioAccountingKernel(_state("1000.00"))
+    claim = _claim(entitlement=FRI, payable=FRI)
+    kernel.record_claim(claim)
+    kernel.settle_claims((claim.claim_id,))
+    assert kernel.state.settled_claim_ids == (claim.claim_id,)
+    # A kernel rebuilt from persisted state must keep the guard.
+    rebuilt = PortfolioAccountingKernel(kernel.state)
+    with pytest.raises(ValueError, match="already settled"):
+        rebuilt.record_claim(claim)
+
+
+def test_state_rejects_settled_claim_reappearing_as_pending() -> None:
+    claim = _claim(entitlement=FRI, payable=FRI)
+    with pytest.raises((ValidationError, ValueError), match="already settled"):
+        PortfolioStateV1(
+            session_key=_key(FRI),
+            cash_balance=Decimal("0.00"),
+            holdings=(),
+            pending_cash_claims=(claim,),
+            settled_claim_ids=(claim.claim_id,),
+            is_marked=False,
+            holdings_market_value=Decimal("0.00"),
+            pending_claims_value=claim.total_cash_expected,
+            net_asset_value=claim.total_cash_expected,
+            realized_gross_pnl=Decimal("0.00"),
+            realized_net_pnl=Decimal("0.00"),
+            cumulative_transaction_costs=Decimal("0.00"),
+        )
+
+
+# --- ambient decimal context independence ---
+
+
+def _cycle_hashes() -> tuple[str, Decimal]:
+    # Cash is deliberately large: NAV must exceed the significant digits a
+    # low ambient precision would keep, otherwise the test cannot detect an
+    # unpinned rebuild.
+    kernel = PortfolioAccountingKernel(_state("12345678.91"))
+    kernel.apply_fill(_buy(3, "33.33"))
+    first = _claim(
+        component_id="cash-1",
+        quantity=3,
+        per_share="0.33",
+        entitlement=FRI,
+        payable=FRI,
+    )
+    second = _claim(
+        component_id="cash-2",
+        quantity=7,
+        per_share="1.11",
+        entitlement=FRI,
+        payable=FRI,
+    )
+    third = _claim(
+        component_id="cash-3",
+        quantity=9,
+        per_share="2.22",
+        entitlement=FRI,
+        payable=FRI,
+    )
+    kernel.record_claim(first)
+    kernel.record_claim(second)
+    kernel.record_claim(third)
+    kernel.settle_claims((first.claim_id,))
+    kernel.mark_close({SEC_A: Decimal("34.00")})
+    return content_hash(kernel.state), kernel.state.net_asset_value
+
+
+def test_state_hash_is_independent_of_ambient_decimal_context() -> None:
+    baseline, baseline_nav = _cycle_hashes()
+    for precision in (34, 28, 12, 9, 7):
+        with localcontext() as ctx:
+            ctx.prec = precision
+            digest, nav = _cycle_hashes()
+        assert nav == baseline_nav, f"NAV drifted at ambient prec {precision}"
+        assert digest == baseline, f"state hash drifted at ambient prec {precision}"
+
+
+def test_opening_state_reconciles_under_low_ambient_precision() -> None:
+    with localcontext() as ctx:
+        ctx.prec = 9
+        state = initial_portfolio_state(
+            session_key=_key(FRI), initial_cash=Decimal("12345678.91")
+        )
+    assert state.net_asset_value == Decimal("12345678.91")
+
+
+def test_claim_validation_holds_under_low_ambient_precision() -> None:
+    with localcontext() as ctx:
+        ctx.prec = 6
+        claim = _claim(quantity=100, per_share="0.50", entitlement=FRI, payable=FRI)
+    assert claim.total_cash_expected == Decimal("50.00")

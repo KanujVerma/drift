@@ -29,6 +29,7 @@ def initial_portfolio_state(
         cash_balance=initial_cash,
         holdings=(),
         pending_cash_claims=(),
+        settled_claim_ids=(),
         is_marked=False,
         holdings_market_value=ZERO,
         pending_claims_value=ZERO,
@@ -69,6 +70,7 @@ class PortfolioAccountingKernel:
         self._cash = state.cash_balance
         self._market_value = state.holdings_market_value
         self._marked = state.is_marked
+        self._settled: set[SHA256Hash] = set(state.settled_claim_ids)
         self._realized_gross = state.realized_gross_pnl
         self._realized_net = state.realized_net_pnl
         self._costs = state.cumulative_transaction_costs
@@ -86,6 +88,7 @@ class PortfolioAccountingKernel:
             self._cash,
             self._market_value,
             self._marked,
+            set(self._settled),
             self._realized_gross,
             self._realized_net,
             self._costs,
@@ -100,6 +103,7 @@ class PortfolioAccountingKernel:
             self._cash,
             self._market_value,
             self._marked,
+            self._settled,
             self._realized_gross,
             self._realized_net,
             self._costs,
@@ -124,6 +128,10 @@ class PortfolioAccountingKernel:
             raise
 
     def _rebuild(self) -> None:
+        with decimal_context():
+            self._rebuild_under_pinned_context()
+
+    def _rebuild_under_pinned_context(self) -> None:
         claims_value = sum(
             (claim.total_cash_expected for claim in self._claims.values()), ZERO
         )
@@ -132,6 +140,7 @@ class PortfolioAccountingKernel:
             cash_balance=self._cash,
             holdings=_ordered_holdings(self._holdings),
             pending_cash_claims=_ordered_claims(self._claims),
+            settled_claim_ids=tuple(sorted(self._settled)),
             is_marked=self._marked,
             holdings_market_value=self._market_value,
             pending_claims_value=claims_value,
@@ -211,6 +220,11 @@ class PortfolioAccountingKernel:
         """Record cash owed by a corporate action. Does not move cash."""
         if claim.claim_id in self._claims:
             raise ValueError(f"duplicate pending claim {claim.claim_id}")
+        # Settlement removes the claim from the pending set, so the pending
+        # check alone stops guarding it. Claim identity is the economic
+        # occurrence, so a settled id must never be payable again.
+        if claim.claim_id in self._settled:
+            raise ValueError(f"claim already settled {claim.claim_id}")
         with self._transaction():
             self._claims[claim.claim_id] = claim
             self._rebuild()
@@ -237,10 +251,11 @@ class PortfolioAccountingKernel:
                     f"payable {claim.payable_session}, session "
                     f"{self._session.local_date}"
                 )
-        with self._transaction():
+        with self._transaction(), decimal_context():
             for claim in settling:
                 self._cash += claim.total_cash_expected
                 del self._claims[claim.claim_id]
+                self._settled.add(claim.claim_id)
             self._rebuild()
 
     def advance_session(self, session_key: SessionKeyV1) -> None:

@@ -107,6 +107,10 @@ class PendingCashClaimV1(FrozenModel):
 
     @model_validator(mode="after")
     def validate_claim(self) -> Self:
+        with decimal_context():
+            return self._validate_claim_under_pinned_context()
+
+    def _validate_claim_under_pinned_context(self) -> Self:
         if self.cash_per_share < Decimal("0"):
             raise ValueError("cash per share must be non-negative")
         expected_total = self.cash_per_share * self.entitled_quantity
@@ -159,6 +163,7 @@ class PortfolioStateV1(FrozenModel):
     cash_balance: Decimal
     holdings: tuple[SecurityHoldingV1, ...]
     pending_cash_claims: tuple[PendingCashClaimV1, ...]
+    settled_claim_ids: tuple[SHA256Hash, ...] = ()
     is_marked: bool
     holdings_market_value: Decimal
     pending_claims_value: Decimal
@@ -169,6 +174,10 @@ class PortfolioStateV1(FrozenModel):
 
     @model_validator(mode="after")
     def validate_state(self) -> Self:
+        with decimal_context():
+            return self._validate_under_pinned_context()
+
+    def _validate_under_pinned_context(self) -> Self:
         if self.cash_balance < Decimal("0"):
             raise ValueError("cash balance must be non-negative")
         if self.holdings_market_value < Decimal("0"):
@@ -182,6 +191,19 @@ class PortfolioStateV1(FrozenModel):
         claim_ids = tuple(claim.claim_id for claim in self.pending_cash_claims)
         if len(set(claim_ids)) != len(claim_ids):
             raise ValueError("pending claims must be unique by claim id")
+
+        # A settled claim must never reappear as pending. Claim identity is
+        # derived from the economic occurrence, so the same id is the same
+        # entitlement and paying it twice creates cash from nothing.
+        if len(set(self.settled_claim_ids)) != len(self.settled_claim_ids):
+            raise ValueError("settled claim ids must be unique")
+        if tuple(sorted(self.settled_claim_ids)) != self.settled_claim_ids:
+            raise ValueError("settled claim ids must be canonically sorted")
+        replayed = set(self.settled_claim_ids) & set(claim_ids)
+        if replayed:
+            raise ValueError(
+                f"claim already settled cannot be pending again: {sorted(replayed)[0]}"
+            )
 
         expected_claims = sum(
             (claim.total_cash_expected for claim in self.pending_cash_claims),
