@@ -1,0 +1,139 @@
+name: Drift executable task
+description: Create an executable Drift issue with one workstream owner, write-set, and blockers.
+title: "[M?][<Workstream>] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Every executable Drift task needs exactly one workstream owner.
+        There is no shared workstream. Live status stays on this issue and
+        its pull request. Durable ownership lives in `docs/architecture/workstreams.md`.
+
+        After creating this issue, add labels: `workstream:kanuj` or
+        `workstream:krish`, `kind:*`, `state:*`, `priority:*`, and
+        `needs:architecture` when required. Also set the GitHub Milestone.
+  - type: dropdown
+    id: workstream
+    attributes:
+      label: Workstream owner
+      description: Exactly one execution owner.
+      options:
+        - kanuj
+        - krish
+    validations:
+      required: true
+  - type: dropdown
+    id: milestone_id
+    attributes:
+      label: Roadmap milestone
+      options:
+        - M2
+        - M3
+        - M4
+        - M5
+        - M6
+        - M7
+        - M8
+        - M9
+        - M10
+        - M11
+        - M12
+        - M13
+        - M14
+        - M15
+        - M16
+        - M17
+        - M18+
+        - Coordination / docs / contract (not a roadmap milestone)
+    validations:
+      required: true
+  - type: input
+    id: task_slice
+    attributes:
+      label: Task / slice
+      description: Short identifier such as M2-2B or M12-P0.
+    validations:
+      required: true
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+    validations:
+      required: true
+  - type: textarea
+    id: blocked_by
+    attributes:
+      label: Dependencies / blocked-by
+      description: Native GitHub blocked-by relationships plus `Blocked by #...` text.
+      placeholder: "Blocked by #123"
+    validations:
+      required: true
+  - type: textarea
+    id: consumed_contracts
+    attributes:
+      label: Consumed contracts
+      description: Existing interfaces this issue may read but must not alter unless it is a producer contract issue.
+    validations:
+      required: true
+  - type: textarea
+    id: write_set
+    attributes:
+      label: Allowed write-set
+      description: Exact paths this issue may modify. All other paths are read-only.
+      placeholder: |
+        - src/drift/example.py
+        - tests/unit/test_example.py
+    validations:
+      required: true
+  - type: textarea
+    id: read_only
+    attributes:
+      label: Read-only / protected surfaces
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+    validations:
+      required: true
+  - type: textarea
+    id: tests
+    attributes:
+      label: Test requirements
+    validations:
+      required: true
+  - type: dropdown
+    id: docs_impact
+    attributes:
+      label: Documentation impact
+      options:
+        - No canonical docs become false or incomplete
+        - Update docs inside this write-set in the same PR
+        - File a separate kind:docs issue; this write-set cannot touch the stale docs
+    validations:
+      required: true
+  - type: textarea
+    id: stop_conditions
+    attributes:
+      label: Stop conditions
+      description: When to STOP for architecture adjudication, missing contracts, write-set overlap, or unresolved workstream identity.
+    validations:
+      required: true
+  - type: dropdown
+    id: architecture_review
+    attributes:
+      label: Architecture review required?
+      options:
+        - "No"
+        - "Yes - needs:architecture Decision Packet before runtime implementation"
+    validations:
+      required: true
+  - type: textarea
+    id: pr_boundary
+    attributes:
+      label: Expected PR boundary
+      description: Branch convention `kanuj/<issue>-<name>` or `krish/<issue>-<name>`, and whether this PR may close the issue.
+    validations:
+      required: true

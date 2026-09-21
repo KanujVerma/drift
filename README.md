@@ -105,6 +105,7 @@ uv run python scripts/verify_ledger.py .drift/ledger.db
 ## Canonical Documentation Map
 
 - **Operating Contract for AI/Engineers**: [`AGENTS.md`](AGENTS.md)
+- **Workstream Ownership**: [`docs/architecture/workstreams.md`](docs/architecture/workstreams.md)
 - **Agent Operating Workflow & Continuity**: [`docs/architecture/agent-workflow.md`](docs/architecture/agent-workflow.md)
 - **Architecture Overview**: [`docs/architecture/overview.md`](docs/architecture/overview.md)
 - **Project Roadmap (M0 to M18+)**: [`docs/architecture/roadmap.md`](docs/architecture/roadmap.md)
