@@ -97,6 +97,14 @@ class EvaluationInputBundleV1(FrozenModel):
     def canonicalize_decision_views(
         cls, members: tuple[DerivedObservationViewV1, ...]
     ) -> tuple[DerivedObservationViewV1, ...]:
+        # An outcome-role view is ex-post information. Admitting one into the
+        # decision bucket would be a lookahead channel, so bind role to bucket.
+        for member in members:
+            if member.role != "decision":
+                raise ValueError(
+                    "authentic decision views require decision-role evidence, "
+                    f"got role {member.role}"
+                )
         return _canonicalize(members, "authentic decision views")
 
     @field_validator("authentic_accounting_views")
@@ -104,6 +112,17 @@ class EvaluationInputBundleV1(FrozenModel):
     def canonicalize_accounting_views(
         cls, members: tuple[DerivedObservationViewV1, ...]
     ) -> tuple[DerivedObservationViewV1, ...]:
+        for member in members:
+            if member.role != "outcome":
+                raise ValueError(
+                    "authentic accounting views require outcome-role evidence, "
+                    f"got role {member.role}"
+                )
+            if member.basis_mode != "source_basis":
+                raise ValueError(
+                    "authentic accounting views require unadjusted source basis, "
+                    f"got basis mode {member.basis_mode}"
+                )
         return _canonicalize(members, "authentic accounting views")
 
     @field_validator("exploratory_reconstructed_observations")
