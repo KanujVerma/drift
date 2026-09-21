@@ -26,6 +26,7 @@ from drift.domain.evaluator_lanes import (
     ExploratoryEvaluationAdmissionV1,
     exploratory_evaluation_admission_hash,
 )
+from drift.domain.normalization import DerivedObservationViewV1
 from drift.domain.observation_query import ObservationOutcomeQueryV1
 from drift.domain.securities import ListingV1, ListingVenue, SecurityV1
 from drift.evaluator.bundles import (
@@ -517,3 +518,38 @@ def test_promotion_gate_rejects_clock_declaring_exploratory_limitations() -> Non
 
 def test_bundle_source_snapshot_defaults_to_none() -> None:
     assert _realized_bundle().source_snapshot_hash is None
+
+
+def test_verify_rejects_same_count_view_that_differs_from_replay() -> None:
+    harness, query, reference, view = _decision_case()
+    forged = DerivedObservationViewV1.model_construct(
+        **(dict(view) | {"derivation_hash": H["e"]})
+    )
+    bundle = assemble_evaluation_input_bundle(
+        evaluation_interval=_interval(),
+        session_clock=_realized_clock(),
+        authentic_decision_views=(forged,),
+    )
+    assert len(bundle.authentic_decision_views) == 1
+    with pytest.raises(ValueError, match="do not match exact upstream replay"):
+        verify_evaluation_input_bundle(
+            bundle=bundle,
+            context=harness.context,
+            decision_requests=((reference, query),),
+        )
+
+
+def test_build_and_verify_accounting_views_through_replay() -> None:
+    harness, query, reference, view = _accounting_case()
+    bundle = build_evaluation_input_bundle(
+        evaluation_interval=_interval(),
+        session_clock=_realized_clock(),
+        context=harness.context,
+        accounting_requests=((reference, query),),
+    )
+    assert bundle.authentic_accounting_views == (view,)
+    verify_evaluation_input_bundle(
+        bundle=bundle,
+        context=harness.context,
+        accounting_requests=((reference, query),),
+    )
