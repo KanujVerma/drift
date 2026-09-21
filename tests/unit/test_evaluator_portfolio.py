@@ -1,7 +1,7 @@
 """Unit tests for M2 Task 3 portfolio state and cash accounting kernel."""
 
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from uuid import UUID
 
 import pytest
@@ -165,6 +165,7 @@ def test_state_rejects_negative_cash() -> None:
             cash_balance=Decimal("-0.01"),
             holdings=(),
             pending_cash_claims=(),
+            is_marked=False,
             holdings_market_value=Decimal("0.00"),
             pending_claims_value=Decimal("0.00"),
             net_asset_value=Decimal("-0.01"),
@@ -181,6 +182,7 @@ def test_state_rejects_nav_that_does_not_reconcile() -> None:
             cash_balance=Decimal("100.00"),
             holdings=(),
             pending_cash_claims=(),
+            is_marked=False,
             holdings_market_value=Decimal("0.00"),
             pending_claims_value=Decimal("0.00"),
             net_asset_value=Decimal("999.00"),
@@ -200,6 +202,7 @@ def test_state_rejects_duplicate_holdings_for_one_security() -> None:
             cash_balance=Decimal("0.00"),
             holdings=(holding, holding),
             pending_cash_claims=(),
+            is_marked=False,
             holdings_market_value=Decimal("0.00"),
             pending_claims_value=Decimal("0.00"),
             net_asset_value=Decimal("0.00"),
@@ -413,3 +416,212 @@ def test_nav_reconciles_across_a_full_cycle() -> None:
         == state.cash_balance + state.holdings_market_value + state.pending_claims_value
     )
     assert state.cumulative_transaction_costs == Decimal("1.00")
+
+
+# --- mark invalidation (value-creation guard) ---
+
+
+def test_sell_after_mark_cannot_create_net_asset_value() -> None:
+    kernel = PortfolioAccountingKernel(_state("10000.00"))
+    kernel.apply_fill(_buy(10, "20.00"))
+    kernel.mark_close({SEC_A: Decimal("20.00")})
+    assert kernel.state.net_asset_value == Decimal("10000.00")
+    kernel.apply_fill(_sell(10, "20.00"))
+    state = kernel.state
+    assert state.holdings == ()
+    assert state.holdings_market_value == Decimal("0")
+    assert state.is_marked is False
+    assert state.net_asset_value == Decimal("10000.00")
+
+
+def test_buy_after_mark_invalidates_the_mark() -> None:
+    kernel = PortfolioAccountingKernel(_state("10000.00"))
+    kernel.apply_fill(_buy(10, "20.00"))
+    kernel.mark_close({SEC_A: Decimal("25.00")})
+    assert kernel.state.is_marked is True
+    kernel.apply_fill(_buy(5, "20.00"))
+    assert kernel.state.is_marked is False
+    assert kernel.state.holdings_market_value == Decimal("0")
+
+
+def test_advance_session_clears_the_mark() -> None:
+    kernel = PortfolioAccountingKernel(_state("10000.00", day=FRI))
+    kernel.apply_fill(_buy(10, "20.00"))
+    kernel.mark_close({SEC_A: Decimal("25.00")})
+    kernel.advance_session(_key(MON))
+    assert kernel.state.is_marked is False
+    assert kernel.state.holdings_market_value == Decimal("0")
+    assert kernel.state.holdings[0].quantity == 10
+
+
+def test_state_rejects_market_value_without_holdings() -> None:
+    with pytest.raises((ValidationError, ValueError)):
+        PortfolioStateV1(
+            session_key=_key(FRI),
+            cash_balance=Decimal("100.00"),
+            holdings=(),
+            pending_cash_claims=(),
+            is_marked=True,
+            holdings_market_value=Decimal("50.00"),
+            pending_claims_value=Decimal("0.00"),
+            net_asset_value=Decimal("150.00"),
+            realized_gross_pnl=Decimal("0.00"),
+            realized_net_pnl=Decimal("0.00"),
+            cumulative_transaction_costs=Decimal("0.00"),
+        )
+
+
+def test_state_rejects_unmarked_state_carrying_a_mark() -> None:
+    holding = SecurityHoldingV1(
+        security_id=SEC_A, quantity=1, cost_basis=Decimal("10.00")
+    )
+    with pytest.raises((ValidationError, ValueError)):
+        PortfolioStateV1(
+            session_key=_key(FRI),
+            cash_balance=Decimal("0.00"),
+            holdings=(holding,),
+            pending_cash_claims=(),
+            is_marked=False,
+            holdings_market_value=Decimal("11.00"),
+            pending_claims_value=Decimal("0.00"),
+            net_asset_value=Decimal("11.00"),
+            realized_gross_pnl=Decimal("0.00"),
+            realized_net_pnl=Decimal("0.00"),
+            cumulative_transaction_costs=Decimal("0.00"),
+        )
+
+
+# --- atomicity ---
+
+
+def test_rejected_sell_rolls_back_completely() -> None:
+    kernel = PortfolioAccountingKernel(_state("100.00"))
+    kernel.apply_fill(_buy(1, "100.00"))
+    before = kernel.state
+    with pytest.raises(ValueError, match="insufficient cash for sell costs"):
+        kernel.apply_fill(_sell(1, "100.00", "500.00"))
+    assert kernel.state == before
+    # The rejected fill must not surface through a later successful operation.
+    claim = _claim(quantity=1, per_share="1.00", entitlement=FRI, payable=FRI)
+    kernel.record_claim(claim)
+    kernel.settle_claims((claim.claim_id,))
+    assert kernel.state.holdings[0].quantity == 1
+    assert kernel.state.cumulative_transaction_costs == Decimal("0.00")
+    assert kernel.state.realized_net_pnl == Decimal("0")
+
+
+def test_sell_side_costs_accumulate() -> None:
+    kernel = PortfolioAccountingKernel(_state("10000.00"))
+    kernel.apply_fill(_buy(10, "20.00", "1.00"))
+    kernel.apply_fill(_sell(5, "20.00", "2.00"))
+    assert kernel.state.cumulative_transaction_costs == Decimal("3.00")
+
+
+# --- settlement container robustness ---
+
+
+def test_settlement_enforces_unknown_guard_for_mapping_evidence() -> None:
+    kernel = PortfolioAccountingKernel(_state("1000.00"))
+    kernel.record_claim(_claim(entitlement=FRI, payable=FRI))
+    with pytest.raises(ValueError, match="unknown claim"):
+        kernel.settle_claims({"f" * 64: "delivered"})
+
+
+def test_settlement_enforces_unknown_guard_for_keys_view() -> None:
+    kernel = PortfolioAccountingKernel(_state("1000.00"))
+    kernel.record_claim(_claim(entitlement=FRI, payable=FRI))
+    with pytest.raises(ValueError, match="unknown claim"):
+        kernel.settle_claims({"f" * 64: 1}.keys())
+
+
+def test_settlement_settles_only_the_named_claim() -> None:
+    kernel = PortfolioAccountingKernel(_state("1000.00"))
+    first = _claim(
+        component_id="cash-1", per_share="0.50", entitlement=FRI, payable=FRI
+    )
+    second = _claim(
+        component_id="cash-2", per_share="0.25", entitlement=FRI, payable=FRI
+    )
+    kernel.record_claim(first)
+    kernel.record_claim(second)
+    kernel.settle_claims((first.claim_id,))
+    state = kernel.state
+    assert state.cash_balance == Decimal("1050.00")
+    assert state.pending_cash_claims == (second,)
+    assert state.pending_claims_value == Decimal("25.00")
+
+
+# --- multi-security ---
+
+
+def test_mark_close_values_every_holding() -> None:
+    kernel = PortfolioAccountingKernel(_state("10000.00"))
+    kernel.apply_fill(_buy(10, "20.00"))
+    kernel.apply_fill(
+        PortfolioFillV1(
+            security_id=SEC_B,
+            side="buy",
+            quantity=4,
+            fill_price=Decimal("50.00"),
+            transaction_costs=Decimal("0.00"),
+        )
+    )
+    kernel.mark_close({SEC_A: Decimal("21.00"), SEC_B: Decimal("55.00")})
+    assert kernel.state.holdings_market_value == Decimal("430.00")
+
+
+def test_mark_close_is_indeterminate_when_one_of_many_prices_is_absent() -> None:
+    kernel = PortfolioAccountingKernel(_state("10000.00"))
+    kernel.apply_fill(_buy(10, "20.00"))
+    kernel.apply_fill(
+        PortfolioFillV1(
+            security_id=SEC_B,
+            side="buy",
+            quantity=4,
+            fill_price=Decimal("50.00"),
+            transaction_costs=Decimal("0.00"),
+        )
+    )
+    with pytest.raises(IndeterminateValuationError):
+        kernel.mark_close({SEC_A: Decimal("21.00")})
+
+
+def test_cost_basis_is_isolated_per_security() -> None:
+    kernel = PortfolioAccountingKernel(_state("10000.00"))
+    kernel.apply_fill(_buy(10, "20.00"))
+    kernel.apply_fill(
+        PortfolioFillV1(
+            security_id=SEC_B,
+            side="buy",
+            quantity=4,
+            fill_price=Decimal("50.00"),
+            transaction_costs=Decimal("0.00"),
+        )
+    )
+    by_id = {h.security_id: h for h in kernel.state.holdings}
+    assert by_id[SEC_A].cost_basis == Decimal("200.00")
+    assert by_id[SEC_B].cost_basis == Decimal("200.00")
+
+
+# --- opening state and determinism ---
+
+
+def test_initial_state_rejects_non_positive_cash() -> None:
+    for bad in ("0.00", "-1.00"):
+        with pytest.raises(ValueError, match="initial cash"):
+            initial_portfolio_state(session_key=_key(FRI), initial_cash=Decimal(bad))
+
+
+def test_non_terminating_basis_relief_is_deterministic() -> None:
+    def run() -> Decimal:
+        kernel = PortfolioAccountingKernel(_state("10000.00"))
+        kernel.apply_fill(_buy(3, "33.33"))
+        kernel.apply_fill(_sell(1, "40.00"))
+        return kernel.state.holdings[0].cost_basis
+
+    first = run()
+    with localcontext() as ctx:
+        # A dependency mangling the ambient context must not change the books.
+        ctx.prec = 9
+        second = run()
+    assert first == second

@@ -1,6 +1,7 @@
 """Deterministic portfolio accounting kernel for M2 evaluation."""
 
-from collections.abc import Container, Mapping
+from collections.abc import Collection, Iterator, Mapping
+from contextlib import contextmanager
 from decimal import Decimal
 
 from drift.domain.common import UUID7, SHA256Hash
@@ -10,6 +11,7 @@ from drift.domain.evaluator_portfolio import (
     PortfolioFillV1,
     PortfolioStateV1,
     SecurityHoldingV1,
+    decimal_context,
 )
 from drift.domain.sessions import SessionKeyV1
 
@@ -27,6 +29,7 @@ def initial_portfolio_state(
         cash_balance=initial_cash,
         holdings=(),
         pending_cash_claims=(),
+        is_marked=False,
         holdings_market_value=ZERO,
         pending_claims_value=ZERO,
         net_asset_value=initial_cash,
@@ -65,6 +68,7 @@ class PortfolioAccountingKernel:
         }
         self._cash = state.cash_balance
         self._market_value = state.holdings_market_value
+        self._marked = state.is_marked
         self._realized_gross = state.realized_gross_pnl
         self._realized_net = state.realized_net_pnl
         self._costs = state.cumulative_transaction_costs
@@ -75,6 +79,50 @@ class PortfolioAccountingKernel:
         """Current immutable state."""
         return self._state
 
+    def _snapshot(self) -> tuple[object, ...]:
+        return (
+            dict(self._holdings),
+            dict(self._claims),
+            self._cash,
+            self._market_value,
+            self._marked,
+            self._realized_gross,
+            self._realized_net,
+            self._costs,
+            self._session,
+            self._state,
+        )
+
+    def _restore(self, snapshot: tuple[object, ...]) -> None:
+        (
+            self._holdings,
+            self._claims,
+            self._cash,
+            self._market_value,
+            self._marked,
+            self._realized_gross,
+            self._realized_net,
+            self._costs,
+            self._session,
+            self._state,
+        ) = snapshot  # type: ignore[assignment]
+
+    @contextmanager
+    def _transaction(self) -> Iterator[None]:
+        """Apply a mutation atomically.
+
+        Without this, a mutation that fails validation during rebuild would
+        leave the kernel's internal fields advanced while state still showed
+        the old value, so a rejected fill would be silently committed by the
+        next successful operation.
+        """
+        snapshot = self._snapshot()
+        try:
+            yield
+        except BaseException:
+            self._restore(snapshot)
+            raise
+
     def _rebuild(self) -> None:
         claims_value = sum(
             (claim.total_cash_expected for claim in self._claims.values()), ZERO
@@ -84,6 +132,7 @@ class PortfolioAccountingKernel:
             cash_balance=self._cash,
             holdings=_ordered_holdings(self._holdings),
             pending_cash_claims=_ordered_claims(self._claims),
+            is_marked=self._marked,
             holdings_market_value=self._market_value,
             pending_claims_value=claims_value,
             net_asset_value=self._cash + self._market_value + claims_value,
@@ -93,13 +142,20 @@ class PortfolioAccountingKernel:
         )
 
     def apply_fill(self, fill: PortfolioFillV1) -> None:
-        """Apply one executed fill to cash, holdings, and realized results."""
-        if fill.side == "buy":
-            self._apply_buy(fill)
-        else:
-            self._apply_sell(fill)
-        self._costs += fill.transaction_costs
-        self._rebuild()
+        """Apply one executed fill to cash, holdings, and realized results.
+
+        Any existing mark is invalidated, because a mark taken against the
+        previous holdings no longer describes the position.
+        """
+        with self._transaction(), decimal_context():
+            if fill.side == "buy":
+                self._apply_buy(fill)
+            else:
+                self._apply_sell(fill)
+            self._costs += fill.transaction_costs
+            self._marked = False
+            self._market_value = ZERO
+            self._rebuild()
 
     def _apply_buy(self, fill: PortfolioFillV1) -> None:
         gross = fill.fill_price * fill.quantity
@@ -130,9 +186,15 @@ class PortfolioAccountingKernel:
             raise ValueError(
                 f"sell quantity {fill.quantity} exceeds held quantity {held}"
             )
-        relieved = existing.cost_basis * fill.quantity / existing.quantity
         proceeds = fill.fill_price * fill.quantity
-        self._cash += proceeds - fill.transaction_costs
+        net_proceeds = proceeds - fill.transaction_costs
+        if self._cash + net_proceeds < ZERO:
+            raise ValueError(
+                f"insufficient cash for sell costs: proceeds {proceeds}, "
+                f"costs {fill.transaction_costs}, holds {self._cash}"
+            )
+        relieved = existing.cost_basis * fill.quantity / existing.quantity
+        self._cash += net_proceeds
         self._realized_gross += proceeds - relieved
         self._realized_net += proceeds - relieved - fill.transaction_costs
         remaining = existing.quantity - fill.quantity
@@ -149,10 +211,11 @@ class PortfolioAccountingKernel:
         """Record cash owed by a corporate action. Does not move cash."""
         if claim.claim_id in self._claims:
             raise ValueError(f"duplicate pending claim {claim.claim_id}")
-        self._claims[claim.claim_id] = claim
-        self._rebuild()
+        with self._transaction():
+            self._claims[claim.claim_id] = claim
+            self._rebuild()
 
-    def settle_claims(self, delivered_claim_ids: Container[SHA256Hash]) -> None:
+    def settle_claims(self, delivered_claim_ids: Collection[SHA256Hash]) -> None:
         """Convert claims with proven delivered settlement evidence into cash.
 
         Only claims explicitly proven delivered settle. A claim whose payable
@@ -160,14 +223,13 @@ class PortfolioAccountingKernel:
         later session where delivered evidence exists, because settlement is
         driven by evidence rather than by the calendar.
         """
-        settling = tuple(
-            claim
-            for claim_id, claim in self._claims.items()
-            if claim_id in delivered_claim_ids
-        )
-        for claim_id in _requested_ids(delivered_claim_ids):
-            if claim_id not in self._claims:
-                raise ValueError(f"unknown claim {claim_id}")
+        # Normalize once. Accepting a bare Container let a mapping or deque
+        # satisfy membership while silently skipping the unknown-claim guard.
+        requested = frozenset(delivered_claim_ids)
+        unknown = tuple(sorted(requested - set(self._claims)))
+        if unknown:
+            raise ValueError(f"unknown claim {unknown[0]}")
+        settling = tuple(self._claims[claim_id] for claim_id in sorted(requested))
         for claim in settling:
             if claim.payable_session > self._session.local_date:
                 raise ValueError(
@@ -175,10 +237,11 @@ class PortfolioAccountingKernel:
                     f"payable {claim.payable_session}, session "
                     f"{self._session.local_date}"
                 )
-        for claim in settling:
-            self._cash += claim.total_cash_expected
-            del self._claims[claim.claim_id]
-        self._rebuild()
+        with self._transaction():
+            for claim in settling:
+                self._cash += claim.total_cash_expected
+                del self._claims[claim.claim_id]
+            self._rebuild()
 
     def advance_session(self, session_key: SessionKeyV1) -> None:
         """Move the book to a later session and drop any stale mark."""
@@ -187,12 +250,23 @@ class PortfolioAccountingKernel:
                 f"session must advance beyond {self._session.local_date}, "
                 f"got {session_key.local_date}"
             )
-        self._session = session_key
-        self._market_value = ZERO
-        self._rebuild()
+        with self._transaction():
+            self._session = session_key
+            self._marked = False
+            self._market_value = ZERO
+            self._rebuild()
 
     def mark_close(self, close_prices: Mapping[UUID7, Decimal]) -> None:
         """Mark every held position at its exact unadjusted close price."""
+        total = ZERO
+        with decimal_context():
+            total = self._marked_total(close_prices)
+        with self._transaction():
+            self._market_value = total
+            self._marked = True
+            self._rebuild()
+
+    def _marked_total(self, close_prices: Mapping[UUID7, Decimal]) -> Decimal:
         total = ZERO
         for holding in self._holdings.values():
             price = close_prices.get(holding.security_id)
@@ -203,12 +277,4 @@ class PortfolioAccountingKernel:
             if price <= ZERO:
                 raise ValueError(f"close price must be strictly positive, got {price}")
             total += price * holding.quantity
-        self._market_value = total
-        self._rebuild()
-
-
-def _requested_ids(delivered: Container[SHA256Hash]) -> tuple[SHA256Hash, ...]:
-    """Enumerate requested ids when the container supports it."""
-    if isinstance(delivered, (tuple, list, set, frozenset)):
-        return tuple(delivered)
-    return ()
+        return total

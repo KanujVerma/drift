@@ -1,7 +1,9 @@
 """M2 portfolio state, whole-share holdings, and deterministic cash claims."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Context, Decimal, localcontext
 from typing import Literal, Self
 
 from pydantic import Field, model_validator
@@ -13,6 +15,22 @@ from drift.errors import DriftError
 from drift.serialization.canonical import content_hash
 
 CLAIM_ID_PROFILE = "drift-pending-cash-claim-v1"
+
+# Proportional basis relief can produce a non-terminating quotient, so the
+# arithmetic context must be pinned rather than inherited. Without this an
+# unrelated dependency touching getcontext() would silently change recorded
+# books and break replay reproducibility.
+PORTFOLIO_DECIMAL_PRECISION = 34
+PORTFOLIO_DECIMAL_ROUNDING = ROUND_HALF_EVEN
+
+
+@contextmanager
+def decimal_context() -> Iterator[None]:
+    """Pin the decimal context used for all portfolio arithmetic."""
+    with localcontext(
+        Context(prec=PORTFOLIO_DECIMAL_PRECISION, rounding=PORTFOLIO_DECIMAL_ROUNDING)
+    ):
+        yield
 
 
 class IndeterminateValuationError(DriftError):
@@ -62,8 +80,14 @@ class SecurityHoldingV1(FrozenModel):
 
     @property
     def average_cost_per_share(self) -> Decimal:
-        """Exact per-share cost. Quantity is always positive."""
-        return self.cost_basis / self.quantity
+        """Per-share cost under the pinned Drift decimal context.
+
+        Not exact in general: a basis that does not divide evenly by quantity
+        has no finite decimal representation. The pinned context makes the
+        rounding deterministic, not absent.
+        """
+        with decimal_context():
+            return self.cost_basis / self.quantity
 
 
 class PendingCashClaimV1(FrozenModel):
@@ -135,6 +159,7 @@ class PortfolioStateV1(FrozenModel):
     cash_balance: Decimal
     holdings: tuple[SecurityHoldingV1, ...]
     pending_cash_claims: tuple[PendingCashClaimV1, ...]
+    is_marked: bool
     holdings_market_value: Decimal
     pending_claims_value: Decimal
     net_asset_value: Decimal
@@ -167,6 +192,20 @@ class PortfolioStateV1(FrozenModel):
                 f"pending claims value must equal {expected_claims}, "
                 f"got {self.pending_claims_value}"
             )
+
+        # A mark is only meaningful for the holdings it was taken against.
+        # Coupling the two here stops a stale mark surviving a fill and
+        # inventing net asset value that no position backs.
+        if not self.is_marked and self.holdings_market_value != Decimal("0"):
+            raise ValueError("unmarked state cannot carry a holdings market value")
+        if not self.holdings and self.holdings_market_value != Decimal("0"):
+            raise ValueError("state without holdings cannot carry a market value")
+        if (
+            self.is_marked
+            and self.holdings
+            and self.holdings_market_value <= Decimal("0")
+        ):
+            raise ValueError("marked holdings must carry a positive market value")
 
         expected_nav = (
             self.cash_balance + self.holdings_market_value + self.pending_claims_value
