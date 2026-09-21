@@ -4,6 +4,12 @@
 
 Accepted architecture decision, 2026-09-20.
 
+The exact 8/8 Kanuj/Krish ownership allocation in this ADR is superseded by
+[ADR 0014](0014-transfer-active-drift-implementation-ownership-to-krish.md).
+One-milestone-one-owner, the separation of build order from authorization
+order, contract freeze, and GitHub coordination remain in force unless ADR
+0014 says otherwise. The historical rationale below is unchanged.
+
 ## Context
 
 Drift's bounded roadmap from M2 through M17 contains sixteen milestone IDs.

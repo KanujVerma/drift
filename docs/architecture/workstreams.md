@@ -11,20 +11,19 @@ status here.
 
 ## 1. Purpose
 
-Drift has two long-lived implementation workstreams:
+Drift keeps two identity values, `kanuj` and `krish`. The current active
+implementation owner for every remaining roadmap milestone is Krish.
+`kanuj` remains a valid historical identity and can be reactivated only by
+an explicit GitHub transfer plus a canonical documentation update.
 
-- **kanuj**: research and autonomous R&D
-- **krish**: statistics, safety, execution, and live systems
+This document is the canonical durable ownership contract. It tells any
+zero-context human or coding agent:
 
-This document is the canonical durable ownership contract for those
-workstreams. It tells any zero-context human or coding agent:
-
-- which human/workstream it belongs to;
-- which milestones that workstream permanently owns;
-- what the other workstream owns;
+- which workstream identity it belongs to;
+- which milestones that identity currently owns;
 - how to select the next GitHub issue;
 - which files it may modify;
-- how to request a cross-workstream contract change;
+- how to request a shared-contract change;
 - how to stop for architecture adjudication;
 - how to continue without prior chat memory.
 
@@ -37,8 +36,8 @@ schemas, tests, and Git history.
 
 **Invariant:** one roadmap milestone has exactly one human workstream owner.
 
-Do not split milestone implementation across Kanuj and Krish to increase
-short-term parallelism. Within a milestone, its owner owns:
+Do not split one milestone across agents to increase short-term
+parallelism. Within a milestone, its owner owns:
 
 - implementation;
 - tests;
@@ -55,78 +54,33 @@ transfer requires:
 2. a canonical update to the ownership table in this document;
 3. GitHub label and assignment updates on affected issues.
 
-There is no permanent `shared` workstream. Cross-workstream work still has
+There is no permanent `shared` workstream. Shared-contract work still has
 exactly one execution owner.
 
 ---
 
-## 3. Exact 8/8 Bounded Milestone Ownership
+## 3. Current Active Ownership
 
-The bounded roadmap milestones M2 through M17 contain exactly 16 milestone
-IDs. Ownership is exactly eight bounded milestones each.
+Historical implementation through
+`ca055b8011e72b0834075f67a402228df76e18da` was completed under the Kanuj
+workstream. Effective after that commit, all remaining active Drift
+implementation ownership is assigned to Krish.
 
-This is 50/50 by bounded milestone count. It is not a 50/50 difficulty split.
-The harder statistical, safety, execution, and live-systems milestones are
-intentionally skewed to Krish.
-
-### Kanuj owns exactly 8
-
-| Milestone | Title |
+| Milestone | Active owner |
 |---|---|
-| M2 | Deterministic Session-Level Evaluator and Portfolio Accounting Kernel |
-| M3 | Deterministic Baselines |
-| M4 | Prediction / Outcome Tracking |
-| M6 | Structured Research Memory |
-| M7 | First AI Research Agent |
-| M8 | Recursive R&D Loop |
-| M9 | Multi-Agent Research, only if evidence warrants activation |
-| M10 | Champion / Challenger Tournament |
+| M2 through M18+ | Krish |
 
-Kanuj's chain is:
+Kanuj currently owns no active roadmap milestone. The `kanuj` identity
+remains valid for historical provenance and a possible future transfer.
 
-```text
-M2 -> M3 -> M4 -> M6 -> M7 -> M8 -> M9 -> M10
-```
+M9 remains conditional. Ownership does not make M9 ready and does not
+satisfy dependencies or authorization gates.
 
-M2 is entirely Kanuj-owned. Krish must not modify M2 runtime or M2 task
-implementation. Krish may read M2 contracts as future dependencies.
+M18+ remains an open-ended operating phase. It is Krish-owned, and it is
+not a bounded milestone comparable to M2 through M17.
 
-M9 remains conditional. Ownership of M9 does not make M9 ready.
-
-### Krish owns exactly 8
-
-| Milestone | Title |
-|---|---|
-| M5 | Statistical / Model Scorecards |
-| M11 | Promotion & Overfitting Controls |
-| M12 | Shadow Broker |
-| M13 | Deterministic Hard Risk |
-| M14 | Broker-Neutral Execution |
-| M15 | Real-World Paper / Shadow Validation |
-| M16 | Official Robinhood Agentic MCP Adapter |
-| M17 | Tiny-Money Canary |
-
-Krish's chains are:
-
-```text
-M5
-M11
-M12 -> M13 -> M14 -> M15 -> M16 -> M17
-then M18+
-```
-
-Krish's side intentionally carries the more difficult and risk-sensitive
-work: statistical and model evaluation, overfitting and promotion controls,
-stateful simulated brokerage, deterministic hard safety, execution
-abstraction, real-world validation, official broker integration, real-capital
-canary work, and bounded live autonomy.
-
-### M18+ is operationally Krish-owned and excluded from 8/8 parity
-
-M18+ Bounded Autonomy & Improvement belongs operationally to Krish's
-execution and safety workstream. Do not count M18+ as one of the eight
-bounded Krish milestones. M18+ is an open-ended operating phase, not a
-comparable bounded milestone.
+ADR 0013's exact 8/8 allocation is historical. See
+[ADR 0014](../adr/0014-transfer-active-drift-implementation-ownership-to-krish.md).
 
 ---
 
@@ -152,25 +106,18 @@ are complete, provided all of the following hold:
 4. earlier authorization gates remain unchanged;
 5. no live behavior or promotion authority is advanced prematurely.
 
-Runtime implementation against another workstream's interface waits for an
-explicit producer-owned `kind:contract` freeze. Implementing a later
-component does not authorize its operational use.
+Runtime implementation against another milestone's interface waits for an
+explicit producer-owned `kind:contract` freeze, even when the same human
+owns both milestones. Implementing a later component does not authorize its
+operational use.
 
-See [ADR 0013](../adr/0013-parallelize-owned-milestones-without-advancing-authorization.md).
+See [ADR 0013](../adr/0013-parallelize-owned-milestones-without-advancing-authorization.md)
+and [ADR 0014](../adr/0014-transfer-active-drift-implementation-ownership-to-krish.md).
 
-Authorized pattern while Kanuj completes M2:
-
-- Krish may begin M12 architecture preparation and dependency mapping.
-- Krish may not implement M12 runtime against invented M2 interfaces.
-- After the exact required M2/M12 interfaces are externally designed and
-  frozen, Krish may begin corresponding offline/synthetic M12 foundation
-  work even while Kanuj continues later research milestones.
-- Krish may subsequently develop M13, M14, and offline/mockable M16
-  foundation work when required predecessor contracts are frozen.
-
-This does not authorize live trading, real capital, bypassing M1e, bypassing
-M5/M11, bypassing M15, bypassing M17, strategy promotion, or paper/live
-activation merely because code exists.
+A single owner may still prepare a later milestone only after its required
+upstream contracts are frozen. Owning M2 does not authorize M12 runtime,
+paper trading, live trading, real capital, promotion, or bypassing M1e,
+M5, M11, M15, or M17.
 
 ---
 
@@ -232,10 +179,19 @@ Resume workstream resolution order:
 If identity is still unresolved, **STOP** with `WORKSTREAM_IDENTITY_UNRESOLVED`.
 Do not guess. Do not require repeated prompting.
 
-Do not infer `krish` from an unrecognized GitHub login. Record Krish's GitHub
-login in GitHub collaborator state and, once known, in an explicit accepted
-issue or documentation update. Until then, `drift.workstream` or a `krish/`
-branch prefix is required.
+The current active implementation identity is `krish`. A normal active
+development clone should set:
+
+```bash
+git config --local drift.workstream krish
+```
+
+A clone configured as `kanuj` selects only explicitly Kanuj-owned READY
+issues. It must not steal Krish issues. If none exist, it reports that
+Kanuj has no READY work. Do not reinterpret `kanuj` as `krish`.
+
+GitHub collaborator state is the source for account permissions. Do not
+guess a login that is not present there.
 
 ---
 
@@ -309,12 +265,13 @@ to the producer workstream through a `kind:contract` issue.
 
 ## 9. Zero Human Relay
 
-If one workstream requires something owned by the other, the agent must not
-ask a human to relay instructions, prompts, or summaries.
+If an agent requires something outside its issue, it must not ask a human
+to relay instructions, prompts, or summaries. This applies between Krish
+agents, across milestone boundaries, and to any future ownership change.
 
 Required flow:
 
-1. create a GitHub issue owned by the other workstream;
+1. create a GitHub issue owned by the execution owner of the needed change;
 2. describe the exact required output or change;
 3. include evidence and why it is required;
 4. include the requested contract or interface;
@@ -322,18 +279,18 @@ Required flow:
 6. link the blocked issue;
 7. create a native blocked-by dependency where supported;
 8. comment on the blocked issue;
-9. move to the next READY issue in the requester's workstream if one exists.
+9. move to the next READY issue for this identity if one exists.
 
-No human relay is a valid technical dependency. All inter-workstream
-requirements must survive in GitHub.
+No human relay is a valid technical dependency. All requirements between
+agents must survive in GitHub.
 
 ---
 
-## 10. Cross-Workstream Contract Freeze
+## 10. Cross-Milestone / Shared Contract Freeze
 
-A contract consumed by both workstreams requires a dedicated `kind:contract`
-issue. That issue has exactly one owner: the workstream that owns the
-producer module or API.
+A contract consumed by more than one milestone, or by concurrent agents,
+requires a dedicated `kind:contract` issue. That issue has exactly one
+owner: the workstream that owns the producer module or API.
 
 The contract issue must state:
 
@@ -350,30 +307,31 @@ The contract issue must state:
 - dependent issues.
 
 Dependent issues remain blocked until the contract PR merges. After merge,
-consumers code against that frozen interface. Neither workstream may modify
-the shared interface opportunistically inside an unrelated PR. A later change
+consumers code against that frozen interface. No agent may modify the
+shared interface opportunistically inside an unrelated PR. A later change
 requires another contract issue.
 
 Do not invent a specific M2/M12 contract in advance. M12 architecture
 determines what it actually needs. Any M12 implementation requiring
 M2-produced interfaces is blocked by an explicit shared-contract freeze
-issue owned by Kanuj as the M2 producer.
+issue owned by the M2 producer. One human owning both milestones does not
+remove that freeze.
 
 ---
 
-## 11. Cross-Workstream Interface Request
+## 11. Interface Request
 
-If Krish needs something from a Kanuj-owned producer module, Krish's agent
-creates:
+If one issue needs a change in another milestone's producer module, the
+requester creates:
 
 ```text
-[Interface Request][Kanuj] <specific contract>
+[Interface Request][<owner>] <specific contract>
 ```
 
 Required fields:
 
-- Requester: Krish
-- Owner: Kanuj
+- Requester
+- Owner
 - Blocked issue: `#...`
 - Existing interface
 - Required behavior
@@ -382,9 +340,9 @@ Required fields:
 - Acceptance tests
 - Expected paths
 
-Kanuj's Resume queue sees it automatically. Kanuj's agent implements it.
-After merge, Krish's blocked issue becomes unblocked. The same flow applies
-from Kanuj to Krish.
+The owner's Resume queue sees it. After the contract PR merges, the blocked
+issue can become unblocked. The same flow applies if ownership later returns
+to another identity.
 
 ---
 
@@ -507,22 +465,19 @@ cd drift
 git config --local drift.workstream krish
 ```
 
-Run Resume. GitHub Issues for `workstream:krish` are the work queue. Do not
-ask Kanuj for chat context, local files, or a prompt relay.
+Run Resume. GitHub Issues for `workstream:krish` are the active work queue.
+Do not copy Kanuj's local files, handoffs, `.env`, credentials, or chat
+history.
 
-Until two-workstream repository files are on `main`, fetch the open
-coordination PR or its branch and read `AGENTS.md`, this file, and
-`agent-workflow.md` from that revision.
-
-### Kanuj, existing clone
+### Kanuj, inactive clone
 
 ```bash
 git config --local drift.workstream kanuj
 ```
 
-Do not change a shared worktree config while another agent has an in-flight
-direct-`main` slice on that same checkout. Prefer setting identity after that
-slice lands, or use `--worktree` configuration if two worktrees must differ.
+A Kanuj-configured agent reports no READY implementation work unless an
+explicit Kanuj-owned issue exists. Do not retarget that clone to `krish`
+merely because Kanuj has stepped away from active implementation.
 
 ---
 

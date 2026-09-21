@@ -43,13 +43,17 @@ The local implementation agent owns:
 - Proposing commits, maintaining Checkpoint discipline, and publishing accepted
   slices through issue branches and pull requests.
 
-### Two Workstreams
-Implementation work is owned by exactly one of two workstreams: `kanuj` or
-`krish`. See [workstreams.md](workstreams.md) and
-[ADR 0013](../adr/0013-parallelize-owned-milestones-without-advancing-authorization.md).
+### Workstream Ownership
+Implementation work has exactly one owner identity, `kanuj` or `krish`.
+Krish is the current active owner of remaining roadmap milestones M2
+through M18+. Kanuj is inactive unless an explicit issue is assigned to
+that identity. See [workstreams.md](workstreams.md) and
+[ADR 0014](../adr/0014-transfer-active-drift-implementation-ownership-to-krish.md).
 
-Agents do not implement another workstream's milestone. Cross-workstream
-needs become GitHub issues. No human is a valid message relay.
+Agents do not take another identity's issue. One human owning every
+milestone does not let an agent skip issue boundaries, write-sets, or
+contract freezes. Needs that cross an issue boundary become GitHub issues.
+No human is a valid message relay.
 
 ### Evidence-Backed Disagreement Protocol
 Implementation agents are expected to challenge architecture decisions when
@@ -115,13 +119,19 @@ rigor. Authority resides in the role boundaries, not the specific model brand:
 
 Accepted values: `kanuj` and `krish`. There is no third permanent workstream.
 
-Preferred setup is a separate clone per human:
+The current active implementation identity is `krish`. A Kanuj-configured
+agent selects only Kanuj-owned READY issues and must not steal Krish work.
+If none exist, it reports that Kanuj has no READY work. Do not reinterpret
+`kanuj` as `krish`.
+
+Preferred setup for the active implementation clone:
 
 ```bash
-git config --local drift.workstream kanuj
-# or
 git config --local drift.workstream krish
 ```
+
+`git config --local drift.workstream kanuj` remains valid for a historical
+or future Kanuj clone. It does not select Krish issues.
 
 If multiple worktrees share one repository metadata and need different
 identities, use Git worktree-specific configuration rather than a shared

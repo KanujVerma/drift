@@ -115,9 +115,11 @@ next READY issue in this workstream. If none exists, report blocked.
   qualification) is paused/deferred until economically justified. M2
   evaluator architecture and exploratory development are authorized using
   free development data (Alpaca Basic).
-- **Ownership (ADR 0013)**: M2 through M10 research/R&D except M5 are Kanuj.
-  M5 and M11 through M17 are Krish. M18+ is Krish operationally. See
-  [workstreams.md](docs/architecture/workstreams.md).
+- **Ownership (ADR 0014)**: All remaining active roadmap implementation
+  from M2 through M18+ is Krish-owned. Historical Kanuj work through
+  `ca055b8011e72b0834075f67a402228df76e18da` stays attributed to that
+  workstream. M9 remains conditional. Authorization gates are unchanged.
+  See [workstreams.md](docs/architecture/workstreams.md).
 - **Evidence Boundary**: Exploratory evaluation evidence is strictly
   non-promotable and cannot be upgraded or relabeled into promotion-grade
   evidence. Promotion requires a fresh, independent evaluation run against
