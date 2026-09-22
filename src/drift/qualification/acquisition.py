@@ -6,6 +6,8 @@ from collections.abc import Mapping
 from datetime import datetime
 from hashlib import sha256
 
+from pydantic import BaseModel
+
 from drift.datasets.resolver import VerifiedArtifactBytes
 from drift.domain.acquisition import (
     AcquisitionCompleteness,
@@ -63,7 +65,12 @@ _SECRET_VALUE_PATTERNS = (
 
 
 def validate_secret_free_acquisition_payload(value: object) -> None:
-    """Recursively reject credentials, tokens, signatures, and cookies."""
+    """Recursively reject credentials, tokens, signatures, and cookies.
+
+    Every value is screened. Keys are screened only when they are arbitrary
+    mapping keys carried in payload data, since those can be provider-supplied
+    at runtime; declared Pydantic model field names are not screened.
+    """
     if value is None or isinstance(value, (bool, int, float)):
         return
 
@@ -116,6 +123,20 @@ def validate_secret_free_acquisition_payload(value: object) -> None:
     if isinstance(value, (list, tuple, set, frozenset)):
         for item in value:
             validate_secret_free_acquisition_payload(item)
+        return
+
+    if isinstance(value, BaseModel):
+        # A declared model field name is fixed by Drift source code, so it can
+        # never carry a credential smuggled in at runtime. Screening it only
+        # produces false positives on legitimate schema vocabulary such as
+        # OriginEvidenceV1.provider_signatures. Field values are still screened
+        # in full, and any undeclared extra key is runtime-supplied, so it is
+        # routed back through the arbitrary-mapping key screen.
+        for field_name in type(value).model_fields:
+            validate_secret_free_acquisition_payload(getattr(value, field_name))
+        extra = value.model_extra
+        if extra:
+            validate_secret_free_acquisition_payload(extra)
         return
 
     if hasattr(value, "model_dump"):

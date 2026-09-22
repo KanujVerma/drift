@@ -35,11 +35,12 @@ from drift.domain.replay_provenance import (
     BundleProvenanceProofV1,
     QualifiedReplayContextV1,
     ReplayContextIdentityV1,
+    _build_bundle_provenance_proof,
     bind_context_identity_to_snapshot,
-    build_bundle_provenance_proof,
     bundle_provenance_proof_hash,
     replay_context_identity_hash,
     validate_bundle_component_coverage,
+    verify_snapshot_binding,
 )
 from drift.domain.securities import ListingV1, SecurityV1
 from drift.domain.source_snapshots import RealSourceSnapshotV1
@@ -316,7 +317,7 @@ def mint_bundle_provenance_proof(
         accounting_requests=accounting_requests,
     )
 
-    return build_bundle_provenance_proof(
+    return _build_bundle_provenance_proof(
         qualified_context_hash=qualified_context.qualified_hash,
         source_snapshot_hash=qualified_context.source_snapshot_hash,
         bundle=bundle,
@@ -379,19 +380,27 @@ def validate_promotion_admission(
     decision_handoff: QualifiedSourceHandoffV1,
     audit_handoff: QualifiedSourceHandoffV1,
     proof: BundleProvenanceProofV1,
+    qualified_context: QualifiedReplayContextV1,
+    snapshot: RealSourceSnapshotV1,
 ) -> None:
     """Validate a promotion admission against M1e evidence and its input bundle.
 
     Composes the Task 1 M1e evidence gate with structural anti-laundering
-    verification of the bundle itself and with the provenance proof that binds
-    the bundle to a qualified snapshot.
+    verification of the bundle itself and with the provenance chain that binds
+    the bundle's contents to a qualified snapshot.
 
-    The proof parameter is required. The unsafe signature that accepted a bundle
-    carrying only a self-declared `source_snapshot_hash` is deliberately not
-    preserved for compatibility: the issue 31 ruling forbids it.
+    The proof, the qualified replay context, and the snapshot are all required.
+    The unsafe signature that accepted a bundle carrying only a self-declared
+    `source_snapshot_hash` is deliberately not preserved for compatibility, and
+    neither is the intermediate signature that took a proof but had no channel
+    through which the containment witness could be re-audited: the issue 31
+    ruling forbids keeping an unsafe signature. A proof alone proved only that
+    some qualified context existed, never that its witness was real, because
+    `QualifiedReplayContextV1` cannot check its own witness without a snapshot.
 
     No full M1d replay runs here. Replay verification already ran once at mint
-    time; this gate revalidates the minted proof cheaply and fail-closed.
+    time, and re-auditing the witness is only `content_hash` recomputation and
+    dictionary lookups over `snapshot.replay_inputs`, so this gate stays cheap.
     """
     validate_m1e_promotion_evidence(
         admission=admission,
@@ -430,6 +439,27 @@ def validate_promotion_admission(
             f"{proof.source_snapshot_hash}, bundle asserts "
             f"{bundle.source_snapshot_hash}"
         )
+
+    # The proof names a qualified replay context by hash. Without the context
+    # itself the gate would trust that name, so require the object and bind it.
+    if proof.qualified_context_hash != qualified_context.qualified_hash:
+        raise ValueError(
+            "provenance proof qualified context mismatch: proof binds "
+            f"{proof.qualified_context_hash}, context is "
+            f"{qualified_context.qualified_hash}"
+        )
+    if qualified_context.source_snapshot_hash != bundle.source_snapshot_hash:
+        raise ValueError(
+            "qualified replay context snapshot mismatch with bundle: context "
+            f"binds {qualified_context.source_snapshot_hash}, bundle asserts "
+            f"{bundle.source_snapshot_hash}"
+        )
+    # A qualified context validates its own witness only for coverage of the
+    # context, because proving containment needs the snapshot and the model
+    # never sees one. Re-audit it here against the snapshot in hand, which is
+    # the check that refuses a hand-built witness naming a foreign corpus.
+    verify_snapshot_binding(qualified=qualified_context, snapshot=snapshot)
+
     validate_bundle_component_coverage(proof=proof, bundle=bundle)
     if admission.provenance_proof_hash != proof.proof_hash:
         raise ValueError(
