@@ -248,6 +248,15 @@ def _assert_definition_allowed(name: str, relative: str, *, script: bool) -> Non
 
 
 def _assert_m1e_production_module_allowed(source: str, label: str) -> None:
+    """Hold production source to every prohibition its name implies.
+
+    Credential reads were deferred to Task 8 for the *script* only.  Production
+    modules never had that deferral lifted, so the same two checks the script
+    guard applies -- the ``CREDENTIAL_READ_CALLS`` call set and the
+    ``os.environ`` subscript -- are applied here as well.  Without them an
+    ``os.getenv("ALPACA_API_KEY")`` injected into a production module, the
+    Alpaca bridge included, left the whole suite green.
+    """
     tree = ast.parse(source, label)
     aliases = _import_aliases(tree)
     for node in ast.walk(tree):
@@ -271,6 +280,14 @@ def _assert_m1e_production_module_allowed(source: str, label: str) -> None:
             )
             assert call_path not in FORBIDDEN_DYNAMIC_CALLS, (
                 f"forbidden M1e dynamic call {call_path} in {label}"
+            )
+            assert call_path not in CREDENTIAL_READ_CALLS, (
+                f"credential read {call_path} in production module {label}"
+            )
+        if isinstance(node, ast.Subscript):
+            access_path = _call_path(node.value, aliases)
+            assert access_path != "os.environ", (
+                f"credential read os.environ in production module {label}"
             )
 
 
@@ -424,6 +441,43 @@ def test_production_ast_guard_rejects_alias_aware_process_and_dynamic_execution(
     for source in attacks:
         with pytest.raises(AssertionError):
             _assert_m1e_production_module_allowed(source, "negative-control.py")
+
+
+def test_production_ast_guard_refuses_every_credential_read() -> None:
+    """Production modules never had the Task 8 credential deferral lifted."""
+    attacks = (
+        "import os\nos.getenv('ALPACA_API_KEY')\n",
+        "import os\nos.environ.get('ALPACA_API_KEY')\n",
+        "import os\nos.environ['ALPACA_API_KEY']\n",
+        "from os import getenv\ngetenv('ALPACA_API_KEY')\n",
+        "import keyring\nkeyring.get_password('alpaca', 'key')\n",
+    )
+    for source in attacks:
+        with pytest.raises(AssertionError):
+            _assert_m1e_production_module_allowed(source, "negative-control.py")
+
+    # The guard is specific: the file writing the adapter actually does is not
+    # a credential read and must still pass.
+    _assert_m1e_production_module_allowed(
+        "import os\nos.open('/tmp/x', os.O_WRONLY)\n", "negative-control.py"
+    )
+
+
+def test_injecting_a_credential_read_into_the_alpaca_bridge_now_fails() -> None:
+    """The bridge is scanned as production source, so the check binds to it."""
+    relative = "src/drift/adapters/alpaca_exploratory.py"
+    source = (REPO_ROOT / relative).read_text(encoding="utf-8")
+
+    # Unmodified, the real adapter passes.
+    _assert_m1e_production_module_allowed(source, relative)
+
+    for injection in (
+        '\n\n_LEAKED = os.getenv("ALPACA_API_KEY")\n',
+        '\n\n_LEAKED = os.environ.get("ALPACA_API_KEY")\n',
+        '\n\n_LEAKED = os.environ["ALPACA_API_KEY"]\n',
+    ):
+        with pytest.raises(AssertionError):
+            _assert_m1e_production_module_allowed(source + injection, relative)
 
 
 def test_script_ast_guard_partitions_process_and_defers_acquisition_capabilities() -> (

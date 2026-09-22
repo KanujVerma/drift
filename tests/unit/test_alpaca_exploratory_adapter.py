@@ -12,31 +12,46 @@ import json
 import os
 import stat
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
 from struct import pack
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
 
 from drift.adapters.alpaca_exploratory import (
+    _CORE_PACKAGES,
+    _POLICY_DOCUMENTS,
+    ACTIONS_OBJECT_KEY,
     ALPACA_ACTION_SOURCE_ID,
     ALPACA_BAR_SOURCE_ID,
     ALPACA_CALENDAR_SOURCE_ID,
+    ALPACA_DATA_HOST,
     ALPACA_EXPLORATORY_LIMITATIONS,
+    ALPACA_TRADING_HOST,
+    BARS_OBJECT_KEY,
+    CALENDAR_OBJECT_KEY,
     AlpacaBridgeIncompleteError,
     AlpacaBridgeProhibitedError,
     AlpacaCohortMember,
     AlpacaExploratoryIntakeResult,
     AlpacaIntakeRequest,
     AlpacaNativePayloads,
+    AlpacaOriginObservation,
     AlpacaReconstructionLineage,
     AlpacaTimezoneEvidence,
+    RetainedNativeBytes,
+    _coverage_record,
     _exact_decimal,
+    _policy_hash,
+    _session_bounds,
+    _verified,
     assert_core_isolation,
+    build_alpaca_acquisition_evidence,
     build_bridge_admission,
     map_calendar_day,
     map_cash_dividend,
@@ -60,13 +75,15 @@ from drift.domain.evaluator_lanes import (
 )
 from drift.domain.normalization import DerivedObservationViewV1
 from drift.domain.securities import ListingVenue
-from drift.domain.sessions import ScheduledSessionVersionV1
+from drift.domain.sessions import (
+    ScheduledSessionVersionV1,
+    SessionCoverageVersionV1,
+)
 from drift.evaluator.bundles import (
     assemble_evaluation_input_bundle,
     validate_exploratory_admission,
 )
 from drift.markets.observation_validation import M1dDatasetInput
-from drift.serialization.canonical import content_hash
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ADAPTER_PATH = REPO_ROOT / "src" / "drift" / "adapters" / "alpaca_exploratory.py"
@@ -165,6 +182,47 @@ PLAN_FROZEN_AT = datetime(2026, 9, 20, 11, 0, tzinfo=UTC)
 REQUEST_START = datetime(2026, 9, 20, 11, 30, tzinfo=UTC)
 REQUEST_END = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
 EVIDENCE_CUTOFF = datetime(2026, 9, 21, 0, 0, tzinfo=UTC)
+#: The instant each pinned response finished being read. Pinned exactly like
+#: the bytes are, and inside the declared acquisition window, because the
+#: bridge refuses a window that does not contain its own measurements.
+MEASURED_AT = datetime(2026, 9, 20, 11, 45, tzinfo=UTC)
+
+
+#: Directories whose contents churn because of the test runner, the virtual
+#: environment, or Git itself rather than because of the bridge. Everything
+#: else in the working tree, including `.venv`, is scanned.
+_UNSCANNED_REPOSITORY_DIRECTORIES = frozenset(
+    {".git", ".mypy_cache", ".pytest_cache", ".ruff_cache", "__pycache__"}
+)
+
+
+def repository_paths() -> set[str]:
+    """Return every path inside the working tree, so a new one is detectable."""
+    found: set[str] = set()
+    for directory, subdirectories, files in os.walk(REPO_ROOT):
+        subdirectories[:] = [
+            name
+            for name in subdirectories
+            if name not in _UNSCANNED_REPOSITORY_DIRECTORIES
+        ]
+        for name in (*subdirectories, *files):
+            found.add(Path(directory, name).relative_to(REPO_ROOT).as_posix())
+    return found
+
+
+def assert_private_bytes_are_locked_down(root: Path) -> None:
+    """Assert every retained provider byte is readable only by its owner."""
+    files = sorted(path for path in root.rglob("*") if path.is_file())
+    directories = [root, *sorted(path for path in root.rglob("*") if path.is_dir())]
+    assert files, f"nothing was retained under {root}"
+    for path in files:
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600, (
+            f"retained provider bytes are not owner-only: {path}"
+        )
+    for path in directories:
+        assert stat.S_IMODE(path.stat().st_mode) == 0o700, (
+            f"a private retention directory is not owner-only: {path}"
+        )
 
 
 def pinned_tzif_bytes() -> bytes:
@@ -221,6 +279,43 @@ def pinned_boundary_offsets() -> dict[tuple[date, str], int]:
     }
 
 
+def pinned_origin_observations() -> dict[str, AlpacaOriginObservation]:
+    """Return the origin evidence measured when the pinned bytes were fetched.
+
+    These are measurements the transport took, pinned beside the bytes they
+    describe. The adapter opens no connection and so measures none of this
+    itself; supplying nothing here is the honest "no HTTP exchange happened"
+    case, and the bridge then refuses to certify the origin at all.
+    """
+    return {
+        BARS_OBJECT_KEY: AlpacaOriginObservation(
+            object_key=BARS_OBJECT_KEY,
+            request_host=ALPACA_DATA_HOST,
+            tls_endpoint_identity=ALPACA_DATA_HOST,
+            http_status=200,
+            content_type="application/json",
+            observed_at=MEASURED_AT,
+        ),
+        CALENDAR_OBJECT_KEY: AlpacaOriginObservation(
+            object_key=CALENDAR_OBJECT_KEY,
+            # The calendar comes off the trading host, not the data host.
+            request_host=ALPACA_TRADING_HOST,
+            tls_endpoint_identity=ALPACA_TRADING_HOST,
+            http_status=200,
+            content_type="application/json",
+            observed_at=MEASURED_AT,
+        ),
+        ACTIONS_OBJECT_KEY: AlpacaOriginObservation(
+            object_key=ACTIONS_OBJECT_KEY,
+            request_host=ALPACA_DATA_HOST,
+            tls_endpoint_identity=ALPACA_DATA_HOST,
+            http_status=200,
+            content_type="application/json",
+            observed_at=MEASURED_AT,
+        ),
+    }
+
+
 def pinned_request(**overrides: Any) -> AlpacaIntakeRequest:
     """Return the pinned bounded intake declaration, with optional overrides."""
     request = AlpacaIntakeRequest(
@@ -248,6 +343,7 @@ def pinned_request(**overrides: Any) -> AlpacaIntakeRequest:
             python_identity="cpython-3.14",
         ),
         boundary_offsets=pinned_boundary_offsets(),
+        origin_observations=pinned_origin_observations(),
     )
     return replace(request, **overrides) if overrides else request
 
@@ -294,7 +390,16 @@ def test_bars_parse_into_exact_decimals_without_any_binary_float() -> None:
     for bar in bars:
         for value in (bar.open, bar.high, bar.low, bar.close, bar.volume):
             assert isinstance(value, Decimal)
-            assert not isinstance(value, float)
+    # `isinstance(value, Decimal)` alone would still hold for a value routed
+    # through a binary float, so the exact provider spelling is checked too:
+    # 192.00 must survive as two decimal places rather than collapsing to the
+    # nearest binary double and re-rendering as 192.0.
+    assert str(first.high) == "192.00"
+    assert str(first.volume) == "52000000"
+    assert Decimal(str(first.close)) == Decimal("191.25")
+    # The same literal routed through a binary float loses the trailing zero,
+    # so this comparison fails the moment the parser stops being exact.
+    assert str(Decimal(str(float("192.00")))) == "192.0" != str(first.high)
 
 
 def test_bar_parsing_refuses_a_truncated_paginated_response() -> None:
@@ -405,24 +510,279 @@ def test_acquisition_receipt_binds_the_exact_retained_bytes(
     receipt = intake.acquisition.receipt
     graph_hashes = {item.content_hash for item in receipt.byte_graph.objects}
 
+    # Recomputed from the pinned literals rather than from the object under
+    # test: `byte_graph_hash == content_hash(byte_graph)` is enforced by the
+    # model validator, so asserting it here could never fail.
+    assert graph_hashes == {
+        PINNED_BARS_SHA256,
+        PINNED_CALENDAR_SHA256,
+        PINNED_CORPORATE_ACTIONS_SHA256,
+    }
     assert graph_hashes == {
         intake.retained.bars_hash,
         intake.retained.calendar_hash,
         intake.retained.corporate_actions_hash,
     }
-    assert receipt.byte_graph_hash == content_hash(receipt.byte_graph)
+    sizes = {item.content_hash: item.byte_size for item in receipt.byte_graph.objects}
+    assert sizes == {
+        PINNED_BARS_SHA256: len(PINNED_BARS),
+        PINNED_CALENDAR_SHA256: len(PINNED_CALENDAR),
+        PINNED_CORPORATE_ACTIONS_SHA256: len(PINNED_CORPORATE_ACTIONS),
+    }
     assert receipt.collector_version == "1"
 
 
 def test_unverified_origin_evidence_stops_the_pipeline(tmp_path: Path) -> None:
+    plaintext = {
+        key: replace(observation, tls_endpoint_identity=None)
+        for key, observation in pinned_origin_observations().items()
+    }
+
     with pytest.raises(AlpacaBridgeIncompleteError) as error:
-        run_pinned_intake(
-            tmp_path / "private",
-            origin_status=OriginStatus.UNKNOWN,
-            tls_endpoint_identity=None,
-        )
+        run_pinned_intake(tmp_path / "private", origin_observations=plaintext)
 
     assert "closed-world acquisition reconciliation did not pass" in str(error.value)
+
+
+def test_a_replay_that_measured_nothing_asserts_no_http_exchange(
+    tmp_path: Path,
+) -> None:
+    """No measurement means no claim, not a fabricated 200 over TLS."""
+    request = pinned_request(origin_observations=None)
+    retained = retain_native_bytes(tmp_path / "private", pinned_payloads())
+    evidence = build_alpaca_acquisition_evidence(request, retained)
+
+    for observed in evidence.receipt.observed_objects:
+        origin = observed.origin_evidence
+        assert origin.origin_status is OriginStatus.UNKNOWN
+        assert origin.safe_response_metadata is None
+        assert origin.tls_endpoint_identity is None
+    assert evidence.reconciliation.result is not AcquisitionCompleteness.PASS
+    assert any(
+        "unverified origin evidence" in reason
+        for reason in evidence.reconciliation.reasons
+    )
+
+    # And the pipeline refuses to build anything on top of it.
+    with pytest.raises(AlpacaBridgeIncompleteError) as error:
+        run_pinned_intake(tmp_path / "second", origin_observations=None)
+    assert "closed-world acquisition reconciliation did not pass" in str(error.value)
+
+
+def test_the_receipt_carries_the_measured_status_content_type_and_host(
+    intake: AlpacaExploratoryIntakeResult,
+) -> None:
+    """Every origin claim in the receipt traces to one measurement."""
+    by_key = {
+        str(item.matched_expected_key): item
+        for item in intake.acquisition.receipt.observed_objects
+    }
+    measured = pinned_origin_observations()
+
+    assert set(by_key) == set(measured)
+    for key, observed in by_key.items():
+        origin = observed.origin_evidence
+        assert origin.origin_status is OriginStatus.VERIFIED
+        assert origin.safe_response_metadata == {
+            "content_type": measured[key].content_type,
+            "http_status": str(measured[key].http_status),
+            "observed_at": MEASURED_AT.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "request_host": measured[key].request_host,
+        }
+        assert origin.tls_endpoint_identity == measured[key].tls_endpoint_identity
+
+
+def test_the_calendar_origin_names_the_trading_host_not_the_data_host(
+    intake: AlpacaExploratoryIntakeResult,
+) -> None:
+    """The calendar is fetched from api.alpaca.markets and must say so."""
+    by_key = {
+        item.matched_expected_key: item
+        for item in intake.acquisition.receipt.observed_objects
+    }
+    calendar = by_key[CALENDAR_OBJECT_KEY].origin_evidence
+    bars = by_key[BARS_OBJECT_KEY].origin_evidence
+
+    assert calendar.tls_endpoint_identity == ALPACA_TRADING_HOST
+    assert bars.tls_endpoint_identity == ALPACA_DATA_HOST
+    assert calendar.tls_endpoint_identity != bars.tls_endpoint_identity
+    # The request identity names both authenticated hosts, not just one.
+    host_field = intake.acquisition.receipt.request.authenticated_provider_host
+    assert ALPACA_TRADING_HOST in host_field
+    assert ALPACA_DATA_HOST in host_field
+
+
+def test_origin_evidence_measured_against_the_wrong_host_is_refused() -> None:
+    """A response from another origin cannot be filed under a declared key."""
+    observations = pinned_origin_observations()
+    observations[CALENDAR_OBJECT_KEY] = replace(
+        observations[CALENDAR_OBJECT_KEY], request_host="evil.example.invalid"
+    )
+
+    with pytest.raises(AlpacaBridgeIncompleteError) as error:
+        pinned_request(origin_observations=observations)
+
+    assert "declared to come from" in str(error.value)
+
+
+def test_an_acquisition_window_that_excludes_its_own_measurement_is_refused() -> None:
+    """acquired_at is anchored to measured instants, not merely declared."""
+    observations = pinned_origin_observations()
+    observations[BARS_OBJECT_KEY] = replace(
+        observations[BARS_OBJECT_KEY],
+        observed_at=datetime(2026, 9, 20, 13, 0, tzinfo=UTC),
+    )
+
+    with pytest.raises(AlpacaBridgeIncompleteError) as error:
+        pinned_request(origin_observations=observations)
+
+    assert "outside the declared acquisition window" in str(error.value)
+
+
+def test_a_non_200_response_is_not_a_complete_provider_response() -> None:
+    observations = pinned_origin_observations()
+    observations[ACTIONS_OBJECT_KEY] = replace(
+        observations[ACTIONS_OBJECT_KEY], http_status=429
+    )
+
+    with pytest.raises(AlpacaBridgeIncompleteError) as error:
+        pinned_request(origin_observations=observations)
+
+    assert "returned HTTP 429" in str(error.value)
+
+
+def test_partial_origin_evidence_cannot_cover_only_some_endpoints() -> None:
+    observations = pinned_origin_observations()
+    del observations[ACTIONS_OBJECT_KEY]
+
+    with pytest.raises(AlpacaBridgeIncompleteError) as error:
+        pinned_request(origin_observations=observations)
+
+    assert "must cover exactly the declared endpoints" in str(error.value)
+
+
+def test_a_payload_filed_under_the_wrong_object_key_is_refused(
+    tmp_path: Path,
+) -> None:
+    """matched_expected_key has to be earned by the bytes, not assigned."""
+    swapped = AlpacaNativePayloads(
+        bars=PINNED_CALENDAR,
+        calendar=PINNED_BARS,
+        corporate_actions=PINNED_CORPORATE_ACTIONS,
+    )
+    retained = retain_native_bytes(tmp_path / "private", swapped)
+
+    with pytest.raises(AlpacaBridgeIncompleteError) as error:
+        build_alpaca_acquisition_evidence(pinned_request(), retained)
+
+    assert "do not have the shape" in str(error.value)
+    # The correctly filed payloads still reconcile, so this is the shape check
+    # firing and not an unrelated failure.
+    correct = retain_native_bytes(tmp_path / "correct", pinned_payloads())
+    assert (
+        build_alpaca_acquisition_evidence(
+            pinned_request(), correct
+        ).reconciliation.result
+        is AcquisitionCompleteness.PASS
+    )
+
+
+def test_the_expected_inventory_declares_each_endpoints_own_fields(
+    intake: AlpacaExploratoryIntakeResult,
+) -> None:
+    """A calendar row has no OHLCV and a dividend row has no OHLCV."""
+    fields = {
+        item.object_key: item.fields
+        for item in intake.acquisition.expected_inventory.objects
+    }
+
+    assert fields[BARS_OBJECT_KEY] == ("close", "high", "low", "open", "volume")
+    assert fields[CALENDAR_OBJECT_KEY] == ("close", "date", "open")
+    assert fields[ACTIONS_OBJECT_KEY] == (
+        "corporate_action_id",
+        "ex_date",
+        "payable_date",
+        "rate",
+        "record_date",
+        "symbol",
+    )
+    assert len({fields[key] for key in fields}) == 3
+    endpoints = {
+        item.object_key: item.endpoint_or_file
+        for item in intake.acquisition.expected_inventory.objects
+    }
+    assert endpoints[CALENDAR_OBJECT_KEY].startswith(f"https://{ALPACA_TRADING_HOST}")
+    assert endpoints[BARS_OBJECT_KEY].startswith(f"https://{ALPACA_DATA_HOST}")
+
+
+def test_two_endpoints_returning_identical_bodies_are_refused(
+    tmp_path: Path,
+) -> None:
+    """Otherwise the receipt claims three objects over a two-object graph."""
+    same = b'[{"close":"16:00","date":"2026-01-05","open":"09:30"}]'
+
+    with pytest.raises(AlpacaBridgeIncompleteError) as error:
+        retain_native_bytes(
+            tmp_path / "private",
+            AlpacaNativePayloads(
+                bars=same, calendar=same, corporate_actions=PINNED_CORPORATE_ACTIONS
+            ),
+        )
+
+    assert "byte-identical bodies" in str(error.value)
+
+
+def test_a_retention_key_that_does_not_address_its_value_is_refused(
+    tmp_path: Path,
+) -> None:
+    """A content-addressed store that never checks its own addresses is not one."""
+    honest = retain_native_bytes(tmp_path / "private", pinned_payloads())
+    forged = dict(honest.artifacts)
+    forged[honest.bars_hash] = _verified(b"not the bars at all")
+
+    with pytest.raises(AlpacaBridgeIncompleteError) as error:
+        RetainedNativeBytes(
+            root=honest.root,
+            bars_hash=honest.bars_hash,
+            calendar_hash=honest.calendar_hash,
+            corporate_actions_hash=honest.corporate_actions_hash,
+            artifacts=forged,
+        )
+
+    assert "filed under a digest it does not hash to" in str(error.value)
+
+
+def test_receipt_verification_catches_a_forged_retention_mapping(
+    tmp_path: Path,
+) -> None:
+    """M28: `build_alpaca_acquisition_evidence` is public and must be protected.
+
+    `RetainedNativeBytes` now validates its own keys, so the mutant is built
+    around that constructor to prove the *second*, independent defence:
+    `verify_acquisition_receipt` inside `build_alpaca_acquisition_evidence`
+    refuses a byte graph whose declared digest does not address its bytes.
+    """
+    honest = retain_native_bytes(tmp_path / "private", pinned_payloads())
+    forged_artifacts = dict(honest.artifacts)
+    # Right shape, wrong bytes: the endpoint-shape check passes, so the only
+    # thing left standing between this and a minted receipt is the digest.
+    forged_artifacts[honest.bars_hash] = _verified(
+        b'{"bars":{"AAPL":[]},"next_page_token":null}'
+    )
+    forged = object.__new__(RetainedNativeBytes)
+    for name, value in (
+        ("root", honest.root),
+        ("bars_hash", honest.bars_hash),
+        ("calendar_hash", honest.calendar_hash),
+        ("corporate_actions_hash", honest.corporate_actions_hash),
+        ("artifacts", forged_artifacts),
+    ):
+        object.__setattr__(forged, name, value)
+
+    with pytest.raises(ValueError) as error:
+        build_alpaca_acquisition_evidence(pinned_request(), forged)
+
+    assert "artifact hash mismatch" in str(error.value)
 
 
 # --- steps 3 and 4: mapping and public validation -------------------------------------
@@ -455,6 +815,103 @@ def test_observation_contract_records_alpacas_unversioned_snapshot_semantics(
     # Alpaca overwrites derived bars in place and rejects pit=true.
     assert contract.revision_policy.kind == "current_snapshot_only"
     assert {item.adjustment_basis for item in contract.field_methods} == {"unadjusted"}
+
+
+def test_every_policy_slot_addresses_its_own_contentful_document(
+    intake: AlpacaExploratoryIntakeResult,
+) -> None:
+    """A hash over an empty document attests nothing, so there are no stubs."""
+    contract = intake.observation_contract
+    population = contract.populations[0]
+    receipt = intake.acquisition.receipt
+    slots = {
+        "ordering": contract.field_methods[0].ordering_policy_hash,
+        "basis": contract.field_methods[0].basis_methodology_hash,
+        "sale_condition": population.sale_condition_policy_hash,
+        "correction": population.correction_cancellation_policy_hash,
+        "population": population.evidence_hash,
+        "volume_relationship": contract.volume_relationships[0].evidence_hash,
+        "interval": contract.interval_policy.event_policy_hash,
+        "revision": contract.revision_policy.policy_hash,
+        "row_emission": contract.row_emission.omission_marker_policy_hash,
+        "acquisition_methodology": receipt.native_layer_rule.methodology_hash,
+        "license": receipt.license_evidence_hashes[0],
+    }
+
+    # Eleven slots, eleven documents, no reuse.
+    assert len(set(slots.values())) == len(slots)
+    assert set(slots.values()) <= {
+        _policy_hash(policy_id) for policy_id in _POLICY_DOCUMENTS
+    }
+    assert receipt.methodology_evidence_hashes == (
+        _policy_hash("alpaca-acquisition-methodology"),
+    )
+
+    # Every document says something: a subject, a statement, and an explicit
+    # record of what is not established.
+    for policy_id, document in _POLICY_DOCUMENTS.items():
+        assert document["policy_id"] == policy_id
+        assert len(str(document["subject"])) > 20
+        assert len(str(document["statement"])) > 60
+        assert document["not_established"]
+        assert document["provider_publication"] in {
+            "published",
+            "partially_published",
+            "not_published",
+        }
+
+    # And every one of them is resolvable as retained bytes, so the hashes
+    # address something a reader can actually read.
+    for policy_id in _POLICY_DOCUMENTS:
+        digest = _policy_hash(policy_id)
+        assert digest in intake.context.supporting_artifacts
+        assert (
+            sha256(intake.context.supporting_artifacts[digest].data).hexdigest()
+            == digest
+        )
+
+
+def test_auction_dispositions_are_unknown_because_alpaca_publishes_none(
+    intake: AlpacaExploratoryIntakeResult,
+) -> None:
+    """These are load-bearing in session binding and were asserted as fact."""
+    contract = intake.observation_contract
+    population = contract.populations[0]
+
+    assert population.opening_auction_rule == "unknown"
+    assert population.closing_auction_rule == "unknown"
+    assert contract.interval_policy.auction_event_inclusion == "unknown"
+    assert population.odd_lot_rule == "unknown"
+    # The rule document behind the interval policy says so in words too.
+    interval_document = _POLICY_DOCUMENTS["alpaca-interval-endpoints"]
+    assert interval_document["provider_publication"] == "not_published"
+    assert "auction" in str(interval_document["statement"])
+
+
+def test_the_license_reference_is_a_license_document_not_market_data(
+    intake: AlpacaExploratoryIntakeResult,
+) -> None:
+    """Pointing licence evidence at a bars response is not licence evidence."""
+    retained_digests = {
+        intake.retained.bars_hash,
+        intake.retained.calendar_hash,
+        intake.retained.corporate_actions_hash,
+    }
+    manifests = [
+        *(item.manifest for item in intake.context.observation_datasets),
+        *(item.manifest for item in intake.context.session_datasets),
+        intake.economic_terms.manifest,
+    ]
+
+    for manifest in manifests:
+        reference = manifest.license.terms_evidence_reference
+        assert reference.content_hash not in retained_digests
+        assert reference.content_hash == _policy_hash("alpaca-license-terms")
+    document = _POLICY_DOCUMENTS["alpaca-license-terms"]
+    assert "alpaca-basic-free-development-tier" in str(document["statement"])
+    assert intake.acquisition.receipt.license_evidence_hashes == (
+        _policy_hash("alpaca-license-terms"),
+    )
 
 
 def test_corporate_actions_map_as_terms_only(
@@ -587,8 +1044,14 @@ def test_admission_binds_all_six_canonical_alpaca_limitations(
         ALPACA_LIMITATION_SCHEDULED_SESSION_RECONSTRUCTION,
         ALPACA_LIMITATION_RETROSPECTIVE_RECONSTRUCTION,
     }
+    # Comparing the admission against the module constant the bridge built it
+    # from is circular, so the independently spelled set above carries the
+    # content and these two only pin shape: six distinct limitations, sorted.
+    assert len(set(admission.acknowledged_limitations)) == 6
+    assert list(admission.acknowledged_limitations) == sorted(
+        admission.acknowledged_limitations
+    )
     assert admission.acknowledged_limitations == ALPACA_EXPLORATORY_LIMITATIONS
-    assert len(admission.acknowledged_limitations) == 6
     assert admission.input_bundle_hash == intake.bundle.bundle_hash
     validate_exploratory_admission(admission=admission, bundle=intake.bundle)
 
@@ -645,8 +1108,10 @@ def test_converting_a_scheduled_calendar_row_into_a_realized_session_is_rejected
 ) -> None:
     day = parse_alpaca_calendar(PINNED_CALENDAR)[0]
     methodology_hash = intake.session_clock.sessions[0].session_hash
-    support: dict[str, Any] = {}
-    evidence: dict[str, Any] = {}
+    sentinel_support: dict[str, Any] = {"sentinel": "untouched"}
+    sentinel_evidence: dict[str, Any] = {"sentinel": "untouched"}
+    support = dict(sentinel_support)
+    evidence = dict(sentinel_evidence)
 
     with pytest.raises(AlpacaBridgeProhibitedError) as error:
         map_calendar_day(
@@ -662,8 +1127,24 @@ def test_converting_a_scheduled_calendar_row_into_a_realized_session_is_rejected
     assert "cannot convert a scheduled calendar row" in str(error.value)
     assert "RealizedSessionVersionV1" in str(error.value)
     # A refused conversion must not have written anything into the context.
-    assert support == {}
-    assert evidence == {}
+    # Comparing against a pre-seeded sentinel rather than against `{}` so the
+    # assertion cannot pass merely because both sides are empty.
+    assert support == sentinel_support
+    assert evidence == sentinel_evidence
+
+    # The permitted target does write into both, so "unchanged" above is a
+    # real observation about the refusal and not about these arguments being
+    # write-only in general.
+    map_calendar_day(
+        day,
+        pinned_request(),
+        methodology_hash,
+        intake.retained,
+        support,
+        evidence,
+    )
+    assert support != sentinel_support
+    assert evidence != sentinel_evidence
 
 
 @pytest.mark.parametrize("target", ["effect", "settlement"])
@@ -731,9 +1212,25 @@ def test_the_installed_drift_core_does_not_import_the_alpaca_bridge() -> None:
     assert_core_isolation()
 
 
+def _synthetic_core(root: Path) -> Path:
+    """Build a complete, clean synthetic Drift core rooted at ``root``."""
+    for name in _CORE_PACKAGES:
+        package = root / name
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+    (root / "__init__.py").write_text("", encoding="utf-8")
+    (root / "errors.py").write_text(
+        "class DriftError(Exception):\n    pass\n", encoding="utf-8"
+    )
+    (root / "evaluator" / "engine.py").write_text(
+        "from drift.domain.evaluator_bundles import EvaluationInputBundleV1\n",
+        encoding="utf-8",
+    )
+    return root
+
+
 def test_a_core_module_importing_the_bridge_is_detected(tmp_path: Path) -> None:
-    root = tmp_path / "drift"
-    (root / "evaluator").mkdir(parents=True)
+    root = _synthetic_core(tmp_path / "drift")
     (root / "evaluator" / "engine.py").write_text(
         "from drift.adapters.alpaca_exploratory import run_alpaca_exploratory_intake\n",
         encoding="utf-8",
@@ -747,11 +1244,72 @@ def test_a_core_module_importing_the_bridge_is_detected(tmp_path: Path) -> None:
 
 
 def test_a_clean_synthetic_core_passes_the_boundary_check(tmp_path: Path) -> None:
-    root = tmp_path / "drift"
-    (root / "evaluator").mkdir(parents=True)
-    (root / "evaluator" / "engine.py").write_text(
-        "from drift.domain.evaluator_bundles import EvaluationInputBundleV1\n",
+    assert_core_isolation(_synthetic_core(tmp_path / "drift"))
+
+
+def test_a_top_level_core_module_importing_the_bridge_is_detected(
+    tmp_path: Path,
+) -> None:
+    """errors.py is core, is imported nearly everywhere, and was never scanned."""
+    root = _synthetic_core(tmp_path / "drift")
+    (root / "errors.py").write_text(
+        "from drift.adapters.alpaca_exploratory import retain_native_bytes\n",
         encoding="utf-8",
+    )
+
+    with pytest.raises(AlpacaBridgeProhibitedError) as error:
+        assert_core_isolation(root)
+
+    assert "errors.py" in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "from .. import adapters\n",
+        "from . import adapters\n",
+        "from drift import adapters\n",
+        "from ..adapters import alpaca_exploratory\n",
+        "from .adapters.alpaca_exploratory import retain_native_bytes\n",
+    ],
+)
+def test_a_relative_or_aliased_adapter_import_is_detected(
+    tmp_path: Path, statement: str
+) -> None:
+    """An ImportFrom can name the adapter package without naming it in `module`."""
+    root = _synthetic_core(tmp_path / "drift")
+    (root / "markets" / "session_binding.py").write_text(statement, encoding="utf-8")
+
+    with pytest.raises(AlpacaBridgeProhibitedError) as error:
+        assert_core_isolation(root)
+
+    assert "markets/session_binding.py" in str(error.value)
+
+
+def test_an_absent_core_package_fails_loudly_instead_of_being_skipped(
+    tmp_path: Path,
+) -> None:
+    """A skipped directory is a skipped scan, so it is an error, not a pass."""
+    root = _synthetic_core(tmp_path / "drift")
+    for path in sorted((root / "markets").rglob("*")):
+        path.unlink()
+    (root / "markets").rmdir()
+
+    with pytest.raises(AlpacaBridgeProhibitedError) as error:
+        assert_core_isolation(root)
+
+    assert "declared core packages are absent" in str(error.value)
+    assert "markets" in str(error.value)
+
+
+def test_the_boundary_scan_ignores_only_the_adapter_package_itself(
+    tmp_path: Path,
+) -> None:
+    """The bridge is allowed to be an adapter; nothing else under drift is."""
+    root = _synthetic_core(tmp_path / "drift")
+    (root / "adapters").mkdir()
+    (root / "adapters" / "alpaca_exploratory.py").write_text(
+        "from drift.adapters import something\n", encoding="utf-8"
     )
 
     assert_core_isolation(root)
@@ -805,13 +1363,62 @@ def test_the_full_pipeline_runs_with_every_socket_disabled(
 
 
 def test_no_provider_bytes_are_written_inside_the_repository(tmp_path: Path) -> None:
+    """Run the real write path and prove the repository is untouched by it.
+
+    Asserting that a ``tmp_path`` the test itself chose is not inside the
+    repository proves nothing about where the adapter writes. This snapshots
+    every path in the working tree, runs the actual retention and the whole
+    pipeline over it, and snapshots again: any file or directory the bridge
+    creates anywhere under the repository, at any path and under any name,
+    shows up as a difference.
+    """
+    before = repository_paths()
+
     result = run_pinned_intake(tmp_path / "private")
 
+    after = repository_paths()
+    assert after - before == set(), (
+        f"the bridge created paths inside the repository: {sorted(after - before)}"
+    )
+    assert before - after == set()
+    assert_private_bytes_are_locked_down(result.retained.root)
     assert REPO_ROOT not in result.retained.root.parents
-    assert result.retained.root != REPO_ROOT
     assert os.path.commonpath([str(REPO_ROOT), str(result.retained.root)]) != str(
         REPO_ROOT
     )
+
+
+def test_the_retention_scan_detects_a_write_into_the_repository(
+    tmp_path: Path,
+) -> None:
+    """The scan above is only worth having if it can see a stray write.
+
+    This writes one byte into the working tree by hand, exactly as an
+    accidental cache copy inside ``retain_native_bytes`` would, and proves the
+    comparison catches it. Without this the scan could silently degrade into
+    comparing two empty sets.
+    """
+    before = repository_paths()
+    stray = REPO_ROOT / "src" / "drift" / "_stray_provider_cache.json"
+    assert not stray.exists()
+    stray.write_bytes(PINNED_BARS)
+    try:
+        after = repository_paths()
+        assert after - before == {stray.relative_to(REPO_ROOT).as_posix()}
+    finally:
+        stray.unlink()
+
+    assert repository_paths() == before
+
+
+def test_every_retained_private_object_is_owner_only(tmp_path: Path) -> None:
+    retained = retain_native_bytes(tmp_path / "private", pinned_payloads())
+
+    assert_private_bytes_are_locked_down(retained.root)
+    # Including the root itself, which Path.mkdir(parents=True) used to leave
+    # at the ambient umask while locking only the leaf directory.
+    assert stat.S_IMODE(retained.root.stat().st_mode) == 0o700
+    assert stat.S_IMODE((retained.root / "objects").stat().st_mode) == 0o700
 
 
 # --- determinism ----------------------------------------------------------------------
@@ -1113,6 +1720,9 @@ def test_a_late_close_row_is_not_filed_as_an_early_close(tmp_path: Path) -> None
         b'{"close":"16:00","date":"2026-01-08","open":"09:30",',
         b'{"close":"16:30","date":"2026-01-08","open":"09:30",',
     )
+    # Without this the test silently becomes a no-op the moment the pinned
+    # calendar is edited, exactly as its four sibling mutation tests guard.
+    assert late != PINNED_CALENDAR
 
     result = run_alpaca_exploratory_intake(
         request=pinned_request(),
@@ -1131,6 +1741,258 @@ def test_a_late_close_row_is_not_filed_as_an_early_close(tmp_path: Path) -> None
         if isinstance(item, ScheduledSessionVersionV1)
     }
     assert scheduled[date(2026, 1, 8)].state == "regular"
+
+
+# --- fail-closed intake: the declaration guards ---------------------------------------
+
+
+def test_an_empty_cohort_is_rejected() -> None:
+    with pytest.raises(AlpacaBridgeIncompleteError) as error:
+        pinned_request(members=())
+
+    assert "intake requires a nonempty cohort" in str(error.value)
+
+
+def test_a_cohort_repeating_one_symbol_is_rejected() -> None:
+    twin = AlpacaCohortMember(
+        symbol="AAPL",
+        security_id=MSFT_ID,
+        listing_id=MSFT_LISTING,
+        venue=ListingVenue.XNAS,
+    )
+
+    with pytest.raises(AlpacaBridgeIncompleteError) as error:
+        pinned_request(members=(pinned_cohort()[0], twin))
+
+    assert "cohort symbols must be unique" in str(error.value)
+
+
+def test_a_reversed_intake_window_is_rejected() -> None:
+    with pytest.raises(AlpacaBridgeIncompleteError) as error:
+        pinned_request(start_date=SESSION_DATES[-1], end_date=SESSION_DATES[0])
+
+    assert "intake window cannot be reversed" in str(error.value)
+
+
+def test_a_plan_frozen_after_the_request_started_is_rejected() -> None:
+    with pytest.raises(AlpacaBridgeIncompleteError) as error:
+        pinned_request(plan_frozen_at=REQUEST_START + timedelta(seconds=1))
+
+    assert "must be frozen before the request starts" in str(error.value)
+
+
+def test_a_request_ending_before_it_started_is_rejected() -> None:
+    with pytest.raises(AlpacaBridgeIncompleteError) as error:
+        pinned_request(
+            request_end=REQUEST_START - timedelta(seconds=1),
+            origin_observations=None,
+        )
+
+    assert "request end cannot precede its start" in str(error.value)
+
+
+# --- fail-closed intake: the mapping and generation guards ----------------------------
+
+
+def test_a_negative_cash_amount_is_refused(tmp_path: Path) -> None:
+    negative = PINNED_CORPORATE_ACTIONS.replace(b'"rate":"0.250"', b'"rate":"-0.250"')
+    assert negative != PINNED_CORPORATE_ACTIONS
+
+    with pytest.raises(AlpacaBridgeIncompleteError) as error:
+        run_alpaca_exploratory_intake(
+            request=pinned_request(),
+            payloads=AlpacaNativePayloads(
+                bars=PINNED_BARS,
+                calendar=PINNED_CALENDAR,
+                corporate_actions=negative,
+            ),
+            private_root=tmp_path / "private",
+        )
+
+    assert "cash amounts cannot be negative" in str(error.value)
+
+
+def test_a_window_that_returned_no_bars_fails_closed(tmp_path: Path) -> None:
+    empty = b'{"bars":{},"next_page_token":null}'
+
+    with pytest.raises(AlpacaBridgeIncompleteError) as error:
+        run_alpaca_exploratory_intake(
+            request=pinned_request(),
+            payloads=AlpacaNativePayloads(
+                bars=empty,
+                calendar=PINNED_CALENDAR,
+                corporate_actions=PINNED_CORPORATE_ACTIONS,
+            ),
+            private_root=tmp_path / "private",
+        )
+
+    assert "the bounded window returned no bars" in str(error.value)
+
+
+def test_a_session_closing_before_it_opens_fails_closed(tmp_path: Path) -> None:
+    inverted = PINNED_CALENDAR.replace(
+        b'{"close":"16:00","date":"2026-01-08","open":"09:30",',
+        b'{"close":"08:00","date":"2026-01-08","open":"09:30",',
+    )
+    assert inverted != PINNED_CALENDAR
+
+    with pytest.raises(AlpacaBridgeIncompleteError) as error:
+        run_alpaca_exploratory_intake(
+            request=pinned_request(),
+            payloads=AlpacaNativePayloads(
+                bars=PINNED_BARS,
+                calendar=inverted,
+                corporate_actions=PINNED_CORPORATE_ACTIONS,
+            ),
+            private_root=tmp_path / "private",
+        )
+
+    assert "does not close after it opens" in str(error.value)
+
+
+def test_a_scheduled_row_stripped_of_its_attested_offset_fails_closed(
+    intake: AlpacaExploratoryIntakeResult,
+) -> None:
+    """The second offset guard, on the generation side rather than the map side.
+
+    `map_calendar_day` refuses to build a row without an attested offset, so
+    this one is reached only by a row that lost its offsets afterwards. It is
+    exercised directly rather than left unprotected.
+    """
+    row = next(
+        item
+        for dataset in intake.context.session_datasets
+        for item in dataset.records
+        if isinstance(item, ScheduledSessionVersionV1)
+    )
+    stripped = SimpleNamespace(
+        session_key=row.session_key,
+        local_open=row.local_open,
+        local_close=row.local_close,
+        historical_boundary_offsets=(),
+    )
+
+    with pytest.raises(AlpacaBridgeIncompleteError) as error:
+        _session_bounds((cast(Any, stripped),), pinned_request())
+
+    assert "lacks an attested UTC offset" in str(error.value)
+    # The untouched row still resolves, so the refusal is the guard.
+    assert _session_bounds((row,), pinned_request())
+
+
+def test_a_calendar_snapshot_with_no_session_rows_fails_closed(
+    intake: AlpacaExploratoryIntakeResult,
+) -> None:
+    """Reached directly: the pipeline trips an earlier guard on an empty calendar."""
+    empty = SimpleNamespace(records=())
+
+    with pytest.raises(AlpacaBridgeIncompleteError) as error:
+        _coverage_record(
+            cast(Any, empty),
+            pinned_request(),
+            "0" * 64,
+            intake.retained,
+        )
+
+    assert "calendar snapshot carries no session rows" in str(error.value)
+
+
+def _consecutive_payloads(days: tuple[date, ...]) -> AlpacaNativePayloads:
+    """Build a closed response set covering exactly the given session dates."""
+    calendar = [
+        {
+            "close": "16:00",
+            "date": day.isoformat(),
+            "open": "09:30",
+            "settlement_date": day.isoformat(),
+        }
+        for day in days
+    ]
+    bars = {
+        symbol: [
+            {
+                "c": "191.25",
+                "h": "192.00",
+                "l": "189.75",
+                "n": 410000,
+                "o": "190.50",
+                "t": f"{day.isoformat()}T05:00:00Z",
+                "v": "52000000",
+            }
+            for day in days
+        ]
+        for symbol in ("AAPL", "MSFT")
+    }
+    return AlpacaNativePayloads(
+        bars=json.dumps({"bars": bars, "next_page_token": None}).encode("utf-8"),
+        calendar=json.dumps(calendar).encode("utf-8"),
+        corporate_actions=PINNED_CORPORATE_ACTIONS,
+    )
+
+
+def _window_request(days: tuple[date, ...]) -> AlpacaIntakeRequest:
+    return pinned_request(
+        start_date=days[0],
+        end_date=days[-1],
+        boundary_offsets={
+            (day, boundary): WINTER_OFFSET_SECONDS
+            for day in days
+            for boundary in ("open", "close")
+        },
+    )
+
+
+def test_a_window_spanning_a_weekend_gap_fails_closed_by_name(
+    tmp_path: Path,
+) -> None:
+    """The structural ceiling, pinned: one unbroken run of calendar days.
+
+    `expected_complete` with `expected_daily_cardinality=1` means, upstream,
+    that every calendar day between the first and last session carries exactly
+    one session. `session_validation` applies no exception-date skip and
+    `generate_schedule` refuses any status other than `expected_complete`, so
+    neither populating `exception_dates` nor downgrading the status widens
+    this. A two-week window therefore cannot be acquired, and the limit is
+    stated here rather than left to be discovered as an opaque
+    `session_coverage_daily_cardinality_mismatch`.
+    """
+    fortnight = tuple(date(2026, 1, day) for day in (5, 6, 7, 8, 9, 12, 13, 14, 15, 16))
+
+    with pytest.raises(AlpacaBridgeIncompleteError) as error:
+        run_alpaca_exploratory_intake(
+            request=_window_request(fortnight),
+            payloads=_consecutive_payloads(fortnight),
+            private_root=tmp_path / "fortnight",
+        )
+
+    message = str(error.value)
+    assert "one unbroken run of consecutive calendar days" in message
+    assert "2026-01-10" in message and "2026-01-11" in message
+
+
+def test_one_unbroken_run_of_sessions_is_accepted(tmp_path: Path) -> None:
+    """The other half of the ceiling: inside the limit the bridge still works.
+
+    Without this the refusal above could be satisfied by a bridge that refuses
+    every window.
+    """
+    week = tuple(date(2026, 1, day) for day in (5, 6, 7, 8, 9))
+    result = run_alpaca_exploratory_intake(
+        request=_window_request(week),
+        payloads=_consecutive_payloads(week),
+        private_root=tmp_path / "week",
+    )
+
+    assert len(result.session_clock.sessions) == len(week)
+    coverage = next(
+        item
+        for dataset in result.context.session_datasets
+        for item in dataset.records
+        if isinstance(item, SessionCoverageVersionV1)
+    )
+    assert coverage.status == "expected_complete"
+    assert coverage.expected_daily_cardinality == 1
+    assert coverage.exception_dates == ()
 
 
 def test_a_cohort_repeating_one_security_or_listing_is_rejected() -> None:

@@ -259,10 +259,216 @@ ALPACA_EXPLORATORY_LIMITATIONS: tuple[str, ...] = tuple(
 )
 
 _UUID_NAMESPACE = "drift.adapters.alpaca_exploratory.v1"
-_RULE_DOCUMENT: dict[str, str] = {
-    "kind": "alpaca-exploratory-observation-rule",
-    "schema_version": "1",
+
+
+def _policy_statement(
+    policy_id: str,
+    *,
+    source_id: str,
+    subject: str,
+    publication: Literal["published", "partially_published", "not_published"],
+    statement: str,
+    not_established: tuple[str, ...],
+) -> dict[str, Any]:
+    """State one named rule, including the part of it that is not known.
+
+    A hash over an empty document attests nothing. Every policy hash this
+    bridge emits therefore addresses a distinct document that says what Alpaca
+    publishes about that rule, what this bridge relies on, and what remains
+    unestablished. Where ``publication`` is ``"not_published"`` the matching
+    disposition elsewhere in this module is ``"unknown"``.
+    """
+    return {
+        "kind": "alpaca-exploratory-policy-statement",
+        "schema_version": "1",
+        "policy_id": policy_id,
+        "source_id": source_id,
+        "subject": subject,
+        "provider_publication": publication,
+        "statement": statement,
+        "not_established": list(not_established),
+    }
+
+
+_POLICY_DOCUMENTS: dict[str, dict[str, Any]] = {
+    str(document["policy_id"]): document
+    for document in (
+        _policy_statement(
+            "alpaca-trade-ordering",
+            source_id=ALPACA_BAR_SOURCE_ID,
+            subject="ordering of eligible trades inside one 1Day SIP bar",
+            publication="partially_published",
+            statement=(
+                "Alpaca documents that a 1Day bar aggregates consolidated SIP "
+                "trades over the session, so the bridge records execution time "
+                "then source sequence as the ordering it relies on for the "
+                "first and last selectors."
+            ),
+            not_established=(
+                "the tie-break applied to trades sharing an execution timestamp",
+                "the treatment of prints reported out of execution sequence",
+            ),
+        ),
+        _policy_statement(
+            "alpaca-adjustment-basis",
+            source_id=ALPACA_BAR_SOURCE_ID,
+            subject="price adjustment basis of the acquired bars",
+            publication="published",
+            statement=(
+                "The bridge requests adjustment=raw, which Alpaca documents as "
+                "unadjusted prices, so every mapped field carries the "
+                "unadjusted basis and no split or dividend adjustment is "
+                "applied anywhere in this module."
+            ),
+            not_established=(
+                "whether Alpaca retroactively restates raw bars after a "
+                "corporate action",
+            ),
+        ),
+        _policy_statement(
+            "alpaca-sale-condition",
+            source_id=ALPACA_BAR_SOURCE_ID,
+            subject="sale conditions included in the aggregated trade population",
+            publication="not_published",
+            statement=(
+                "Alpaca publishes no sale-condition eligibility table for its "
+                "1Day SIP bars, so this bridge asserts no condition filter and "
+                "records the population as reported by the provider."
+            ),
+            not_established=(
+                "which SIP sale conditions are included in the aggregation",
+                "whether odd lots contribute to price or to volume",
+                "whether opening and closing auction prints are included",
+            ),
+        ),
+        _policy_statement(
+            "alpaca-correction-cancellation",
+            source_id=ALPACA_BAR_SOURCE_ID,
+            subject="treatment of trade corrections and cancellations",
+            publication="not_published",
+            statement=(
+                "Alpaca publishes no correction or cancellation replay rule for "
+                "its derived bars and rejects point-in-time requests, so the "
+                "bridge treats an acquired bar as a current snapshot and "
+                "asserts no correction semantics."
+            ),
+            not_established=(
+                "whether a corrected print restates an already published bar",
+                "the horizon over which a bar can still change",
+            ),
+        ),
+        _policy_statement(
+            "alpaca-trade-population",
+            source_id=ALPACA_BAR_SOURCE_ID,
+            subject="identity of the aggregated trade population",
+            publication="partially_published",
+            statement=(
+                "Alpaca documents the feed identity as the consolidated SIP "
+                "tape and the session scope of a 1Day bar as the regular "
+                "session, which is what the population records."
+            ),
+            not_established=(
+                "the venue-level composition of the consolidated tape as "
+                "aggregated by Alpaca",
+                "the auction-print disposition of the population",
+            ),
+        ),
+        _policy_statement(
+            "alpaca-volume-relationship",
+            source_id=ALPACA_BAR_SOURCE_ID,
+            subject="relationship between the priced and the counted population",
+            publication="published",
+            statement=(
+                "Price fields and the volume field of one Alpaca bar are "
+                "printed on the same row from the same aggregation, so the "
+                "priced and counted populations are the same population."
+            ),
+            not_established=(
+                "whether Alpaca excludes from volume any print it excludes from price",
+            ),
+        ),
+        _policy_statement(
+            "alpaca-interval-endpoints",
+            source_id=ALPACA_BAR_SOURCE_ID,
+            subject="interval endpoint and auction-event treatment",
+            publication="not_published",
+            statement=(
+                "Alpaca publishes no auction-inclusion methodology for 1Day SIP "
+                "bars, so the auction-event disposition recorded by this bridge "
+                "is unknown rather than included."
+            ),
+            not_established=(
+                "whether the opening auction print is inside the bar",
+                "whether the closing auction print is inside the bar",
+            ),
+        ),
+        _policy_statement(
+            "alpaca-revision-policy",
+            source_id=ALPACA_BAR_SOURCE_ID,
+            subject="retention of source corrections",
+            publication="published",
+            statement=(
+                "Alpaca overwrites derived bars in place and rejects "
+                "point-in-time requests, so the only truthful revision policy "
+                "is a current snapshot with no retained correction history."
+            ),
+            not_established=("the horizon over which a snapshot can change",),
+        ),
+        _policy_statement(
+            "alpaca-row-emission",
+            source_id=ALPACA_BAR_SOURCE_ID,
+            subject="when the provider emits a row at all",
+            publication="partially_published",
+            statement=(
+                "Alpaca returns a bar only for a session in which qualifying "
+                "activity was aggregated, and emits no marker row for a "
+                "session it omits."
+            ),
+            not_established=(
+                "whether an omitted session means no activity or no data",
+            ),
+        ),
+        _policy_statement(
+            "alpaca-acquisition-methodology",
+            source_id=BRIDGE_COLLECTOR_ID,
+            subject="how this bridge acquires and retains provider bytes",
+            publication="published",
+            statement=(
+                "One closed GET per declared endpoint over the declared bounded "
+                "window and cohort, retained byte for byte in private "
+                "content-addressed storage outside Git, with the measured "
+                "response status, content type, and host carried into the "
+                "receipt and no value invented where no measurement exists."
+            ),
+            not_established=(
+                "any provider-side checksum, signature, or manifest, none of "
+                "which Alpaca returns",
+            ),
+        ),
+        _policy_statement(
+            "alpaca-license-terms",
+            source_id=BRIDGE_COLLECTOR_ID,
+            subject="the licence under which the bytes were acquired",
+            publication="partially_published",
+            statement=(
+                f"The bytes were acquired under the {BRIDGE_LICENSE_REFERENCE} "
+                f"tier offered by {BRIDGE_PROVIDER_LEGAL_NAME}. This document "
+                "is the licence evidence the manifests reference; the licence "
+                "text itself is not retained by this bridge and no operational "
+                "redistribution right is concluded from it."
+            ),
+            not_established=(
+                "the exact licence text and version in force at acquisition",
+                "any right to redistribute the retained provider bytes",
+            ),
+        ),
+    )
 }
+
+BARS_OBJECT_KEY = "alpaca-historical-bars"
+CALENDAR_OBJECT_KEY = "alpaca-market-calendar"
+ACTIONS_OBJECT_KEY = "alpaca-corporate-actions"
+
 _POPULATION_ID = "alpaca-sip-consolidated-regular-trades"
 REGULAR_LOCAL_CLOSE = "16:00:00"
 _FIELD_MEANINGS: dict[str, str] = {
@@ -562,6 +768,32 @@ class AlpacaReconstructionLineage:
 
 
 @dataclass(frozen=True, slots=True)
+class AlpacaOriginObservation:
+    """What the transport actually measured about one provider response.
+
+    Every field here is a measurement, not a declaration. The bridge itself
+    opens no connection, so it cannot measure any of this; the caller that did
+    the fetching supplies it, and where it supplies nothing the receipt claims
+    nothing.
+    """
+
+    object_key: str
+    request_host: str
+    #: The verified TLS peer identity, or ``None`` when the hop was not TLS.
+    tls_endpoint_identity: str | None
+    http_status: int
+    content_type: str | None
+    #: The instant the response body finished being read.
+    observed_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.observed_at.tzinfo is None:
+            raise AlpacaBridgeIncompleteError(
+                "a measured acquisition instant must carry a UTC offset"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class AlpacaIntakeRequest:
     """The complete, credential-free declaration of one bounded intake run."""
 
@@ -579,8 +811,10 @@ class AlpacaIntakeRequest:
     lineage: AlpacaReconstructionLineage
     #: Externally attested UTC offset in seconds per local date and boundary.
     boundary_offsets: Mapping[tuple[date, str], int]
-    origin_status: OriginStatus = OriginStatus.VERIFIED
-    tls_endpoint_identity: str | None = ALPACA_DATA_HOST
+    #: Measured origin evidence per expected object key, supplied by whatever
+    #: performed the transfer. ``None`` means nothing was measured, which the
+    #: receipt reports as an unverified origin rather than papering over.
+    origin_observations: Mapping[str, AlpacaOriginObservation] | None = None
 
     def __post_init__(self) -> None:
         if not self.members:
@@ -622,10 +856,63 @@ class AlpacaIntakeRequest:
             raise AlpacaBridgeIncompleteError(
                 "the retrospective evidence cutoff cannot precede acquisition"
             )
+        self._validate_origin_observations()
+
+    def _validate_origin_observations(self) -> None:
+        """Bind every measured origin to the declared request it belongs to."""
+        if self.origin_observations is None:
+            return
+        expected = {key for key, _host, _route in _OBJECT_ENDPOINTS}
+        if set(self.origin_observations) != expected:
+            raise AlpacaBridgeIncompleteError(
+                "measured origin evidence must cover exactly the declared "
+                f"endpoints {tuple(sorted(expected))}"
+            )
+        for key, observation in self.origin_observations.items():
+            if observation.object_key != key:
+                raise AlpacaBridgeIncompleteError(
+                    f"origin evidence filed under {key} describes "
+                    f"{observation.object_key}"
+                )
+            if observation.request_host != _OBJECT_HOSTS[key]:
+                raise AlpacaBridgeIncompleteError(
+                    f"{key} was measured against {observation.request_host} but "
+                    f"is declared to come from {_OBJECT_HOSTS[key]}"
+                )
+            if observation.http_status != 200:
+                raise AlpacaBridgeIncompleteError(
+                    f"{key} returned HTTP {observation.http_status}, which is "
+                    "not a complete provider response"
+                )
+            # The acquisition window has to contain the instants that were
+            # actually measured, so it cannot be backdated or forward-dated
+            # away from the acquisition it describes.
+            if not (self.request_start <= observation.observed_at <= self.request_end):
+                raise AlpacaBridgeIncompleteError(
+                    f"{key} was observed at "
+                    f"{observation.observed_at.isoformat()}, outside the "
+                    f"declared acquisition window "
+                    f"{self.request_start.isoformat()} to "
+                    f"{self.request_end.isoformat()}"
+                )
+
+    def observation_for(self, key: str) -> AlpacaOriginObservation | None:
+        """Return the measured origin evidence for one expected object key."""
+        if self.origin_observations is None:
+            return None
+        return self.origin_observations.get(key)
 
     @property
     def acquired_at(self) -> datetime:
-        """The instant the provider bytes were observed."""
+        """The instant by which every provider byte had been observed.
+
+        This is the declared end of the acquisition window, and it is only
+        meaningful because ``__post_init__`` refuses a window that does not
+        contain every measured ``observed_at``. Availability, the BOUNDED
+        completion window, and every ``created_at`` in the receipt are anchored
+        to it, so a run that supplies no measurement anchors nothing and is
+        refused downstream as an unverified origin.
+        """
         return self.request_end
 
     def member_for(self, symbol: str) -> AlpacaCohortMember:
@@ -662,6 +949,41 @@ def _reference(digest: str, seed: str, kind: ArtifactKind) -> ArtifactReference:
         kind=kind,
         content_hash=digest,
         location=f"drift+sha256://{digest}",
+    )
+
+
+def _policy_bytes(policy_id: str) -> bytes:
+    """Return the exact canonical bytes of one named rule document."""
+    return canonical_json(_POLICY_DOCUMENTS[policy_id])
+
+
+def _policy_hash(policy_id: str) -> str:
+    """Return the content address of one named rule document.
+
+    Every policy slot in this module resolves its hash through here, so two
+    slots share a hash only when they genuinely share a document.
+    """
+    return sha256(_policy_bytes(policy_id)).hexdigest()
+
+
+def _policy_artifacts() -> dict[str, VerifiedArtifactBytes]:
+    """Return every rule document keyed by its content address."""
+    artifacts: dict[str, VerifiedArtifactBytes] = {}
+    for policy_id in _POLICY_DOCUMENTS:
+        artifact = _verified(_policy_bytes(policy_id))
+        artifacts[artifact.content_hash] = artifact
+    return artifacts
+
+
+def _license_artifact() -> VerifiedArtifactBytes:
+    """Return the licence evidence document, which is never market data."""
+    return _verified(_policy_bytes("alpaca-license-terms"))
+
+
+def _license_reference() -> ArtifactReference:
+    """Reference the licence document rather than the acquired provider bytes."""
+    return _reference(
+        _license_artifact().content_hash, "license-terms", ArtifactKind.OTHER
     )
 
 
@@ -767,13 +1089,45 @@ def _seal[T: FrozenModel](kind: type[T], values: dict[str, object]) -> T:
 
 @dataclass(frozen=True, slots=True)
 class RetainedNativeBytes:
-    """Content-addressed retention of the exact provider response bytes."""
+    """Content-addressed retention of the exact provider response bytes.
+
+    The mapping validates itself. A content-addressed store whose keys are not
+    checked against its values is not content-addressed, and a receipt minted
+    over such a mapping would claim a digest for bytes that do not hash to it.
+    """
 
     root: Path
     bars_hash: str
     calendar_hash: str
     corporate_actions_hash: str
     artifacts: Mapping[str, VerifiedArtifactBytes]
+
+    def __post_init__(self) -> None:
+        for digest, artifact in self.artifacts.items():
+            computed = sha256(artifact.data).hexdigest()
+            if computed != digest or artifact.content_hash != digest:
+                raise AlpacaBridgeIncompleteError(
+                    "a retained object is filed under a digest it does not "
+                    f"hash to: key {digest}, content {computed}"
+                )
+            if artifact.byte_size != len(artifact.data):
+                raise AlpacaBridgeIncompleteError(
+                    f"retained object {digest} declares the wrong byte size"
+                )
+        declared = (self.bars_hash, self.calendar_hash, self.corporate_actions_hash)
+        missing = tuple(sorted(set(declared) - set(self.artifacts)))
+        if missing:
+            raise AlpacaBridgeIncompleteError(
+                f"retained objects are missing for declared digests {missing}"
+            )
+        # Three distinct endpoints returning byte-identical bodies is a broken
+        # acquisition, and it would also leave the receipt claiming three
+        # observed objects over a two-object byte graph.
+        if len(set(declared)) != len(declared):
+            raise AlpacaBridgeIncompleteError(
+                "two declared Alpaca endpoints returned byte-identical bodies, "
+                "so the acquisition cannot be reconciled object by object"
+            )
 
     @property
     def ordered_hashes(self) -> tuple[str, ...]:
@@ -806,6 +1160,11 @@ def retain_native_bytes(
     _refuse_versioned_root(resolved)
     objects = resolved / "objects" / "sha256"
     objects.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # ``Path.mkdir(parents=True, mode=...)`` applies the mode to the leaf only
+    # and creates every parent at the default umask, which left the private
+    # root itself group and world listable.
+    for directory in (resolved, resolved / "objects", objects):
+        os.chmod(directory, 0o700)
     artifacts: dict[str, VerifiedArtifactBytes] = {}
     for data in (payloads.bars, payloads.calendar, payloads.corporate_actions):
         artifact = _verified(data)
@@ -838,11 +1197,54 @@ def retain_native_bytes(
 # --- step 2: acquisition receipt --------------------------------------------------
 
 
-_OBJECT_KEYS: tuple[tuple[str, str], ...] = (
-    ("alpaca-historical-bars", ALPACA_BARS_ROUTE),
-    ("alpaca-market-calendar", ALPACA_CALENDAR_ROUTE),
-    ("alpaca-corporate-actions", ALPACA_ACTIONS_ROUTE),
+#: Every declared endpoint, as expected object key, authenticated host, and
+#: route. The host is part of the endpoint identity: the calendar is served by
+#: the trading host and not by the market data host, and a receipt that says
+#: otherwise is wrong about where its own bytes came from.
+_OBJECT_ENDPOINTS: tuple[tuple[str, str, str], ...] = (
+    (BARS_OBJECT_KEY, ALPACA_DATA_HOST, ALPACA_BARS_ROUTE),
+    (CALENDAR_OBJECT_KEY, ALPACA_TRADING_HOST, ALPACA_CALENDAR_ROUTE),
+    (ACTIONS_OBJECT_KEY, ALPACA_DATA_HOST, ALPACA_ACTIONS_ROUTE),
 )
+_OBJECT_HOSTS: dict[str, str] = {key: host for key, host, _ in _OBJECT_ENDPOINTS}
+
+#: The fields each endpoint is expected to return. A calendar row carries no
+#: OHLCV and a dividend row carries no OHLCV, so declaring OHLCV for all three
+#: would make the closed-world inventory describe an acquisition nobody ran.
+_EXPECTED_FIELDS: dict[str, tuple[str, ...]] = {
+    BARS_OBJECT_KEY: tuple(sorted(REQUIRED_RECONSTRUCTION_FIELDS)),
+    CALENDAR_OBJECT_KEY: ("close", "date", "open"),
+    ACTIONS_OBJECT_KEY: (
+        "corporate_action_id",
+        "ex_date",
+        "payable_date",
+        "rate",
+        "record_date",
+        "symbol",
+    ),
+}
+
+
+def _document_matches_object_key(key: str, data: bytes) -> bool:
+    """Return whether these bytes have the shape the named endpoint returns.
+
+    ``matched_expected_key`` is only worth recording if something checked it.
+    The check is on the retained bytes themselves, so filing the calendar
+    response under the bars key is refused rather than reconciled.
+    """
+    try:
+        document = _strict_document(data)
+    except UnicodeDecodeError, ValueError:
+        return False
+    if key == BARS_OBJECT_KEY:
+        return isinstance(document, dict) and isinstance(document.get("bars"), dict)
+    if key == CALENDAR_OBJECT_KEY:
+        return isinstance(document, list)
+    if key == ACTIONS_OBJECT_KEY:
+        return isinstance(document, dict) and isinstance(
+            document.get("corporate_actions"), dict
+        )
+    raise AlpacaBridgeIncompleteError(f"{key} is not a declared Alpaca endpoint")
 
 
 def _expected_inventory(request: AlpacaIntakeRequest) -> ExpectedInventoryV1:
@@ -850,9 +1252,9 @@ def _expected_inventory(request: AlpacaIntakeRequest) -> ExpectedInventoryV1:
     objects = tuple(
         ExpectedObjectV1(
             object_key=key,
-            endpoint_or_file=route,
+            endpoint_or_file=f"https://{host}{route}",
             as_of_universe_rule="predeclared bounded exploratory cohort",
-            fields=tuple(sorted(REQUIRED_RECONSTRUCTION_FIELDS)),
+            fields=_EXPECTED_FIELDS[key],
             dates=window,
             partitions=(),
             expected_count=1,
@@ -862,7 +1264,7 @@ def _expected_inventory(request: AlpacaIntakeRequest) -> ExpectedInventoryV1:
                 "bounded window and cohort"
             ),
         )
-        for key, route in _OBJECT_KEYS
+        for key, host, route in _OBJECT_ENDPOINTS
     )
     return ExpectedInventoryV1(
         inventory_id=_derived_uuid7(
@@ -888,7 +1290,7 @@ def _native_layer_rule() -> ProviderNativeLayerRuleV1:
         product_schema_hash=content_hash(
             {"kind": "alpaca-rest-json", "schema_version": "1"}
         ),
-        methodology_hash=content_hash(_RULE_DOCUMENT),
+        methodology_hash=_policy_hash("alpaca-acquisition-methodology"),
         authoritative_native_layer=ByteLayerKind.TRANSPORT_ENTITY,
         exclusions=(),
     )
@@ -929,8 +1331,14 @@ def _request_identity(request: AlpacaIntakeRequest) -> RequestIdentityV1:
     return RequestIdentityV1(
         schema_version="1",
         method="GET",
-        authenticated_provider_host=ALPACA_DATA_HOST,
-        route_template=",".join(route for _, route in _OBJECT_KEYS),
+        # Two hosts are authenticated against, not one. Naming only the market
+        # data host would misattribute the calendar response.
+        authenticated_provider_host=",".join(
+            sorted({host for _, host, _ in _OBJECT_ENDPOINTS})
+        ),
+        route_template=",".join(
+            f"{host}{route}" for _, host, route in _OBJECT_ENDPOINTS
+        ),
         canonical_parameters={
             "adjustment": "raw",
             "end": request.end_date.isoformat(),
@@ -951,14 +1359,50 @@ def _request_identity(request: AlpacaIntakeRequest) -> RequestIdentityV1:
     )
 
 
-def _origin_evidence(request: AlpacaIntakeRequest) -> OriginEvidenceV1:
+def _origin_evidence(request: AlpacaIntakeRequest, key: str) -> OriginEvidenceV1:
+    """Carry the measured origin of one response, or claim nothing at all.
+
+    Nothing here is asserted unless the transport measured it. When no
+    observation was supplied, because the bytes were replayed from retention
+    and no HTTP exchange happened in this process, the origin is reported
+    ``UNKNOWN`` with no status, no content type, and no TLS peer. Closed-world
+    reconciliation then refuses to pass, which is the honest outcome: an
+    unmeasured origin is not a verified one.
+    """
+    observation = request.observation_for(key)
+    if observation is None:
+        return OriginEvidenceV1(
+            schema_version="1",
+            origin_status=OriginStatus.UNKNOWN,
+            provider_request_id=None,
+            provider_object_id=None,
+            safe_response_metadata=None,
+            tls_endpoint_identity=None,
+            provider_checksums=(),
+            provider_signatures=(),
+            provider_manifest_references=(),
+            evidence_references=(),
+        )
+    metadata: dict[str, str] = {
+        "http_status": str(observation.http_status),
+        "observed_at": observation.observed_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "request_host": observation.request_host,
+    }
+    if observation.content_type is not None:
+        metadata["content_type"] = observation.content_type
     return OriginEvidenceV1(
         schema_version="1",
-        origin_status=request.origin_status,
+        # A plaintext hop leaves no endpoint identity to verify against, so it
+        # is recorded as unknown rather than promoted to verified.
+        origin_status=(
+            OriginStatus.VERIFIED
+            if observation.tls_endpoint_identity
+            else OriginStatus.UNKNOWN
+        ),
         provider_request_id=None,
         provider_object_id=None,
-        safe_response_metadata={"status": "200", "content_type": "application/json"},
-        tls_endpoint_identity=request.tls_endpoint_identity,
+        safe_response_metadata=metadata,
+        tls_endpoint_identity=observation.tls_endpoint_identity,
         provider_checksums=(),
         provider_signatures=(),
         provider_manifest_references=(),
@@ -972,14 +1416,21 @@ def _pages_and_objects(
     graph = _byte_graph(retained)
     by_content = {item.content_hash: item.descriptor_hash for item in graph.objects}
     digests = {
-        "alpaca-historical-bars": retained.bars_hash,
-        "alpaca-market-calendar": retained.calendar_hash,
-        "alpaca-corporate-actions": retained.corporate_actions_hash,
+        BARS_OBJECT_KEY: retained.bars_hash,
+        CALENDAR_OBJECT_KEY: retained.calendar_hash,
+        ACTIONS_OBJECT_KEY: retained.corporate_actions_hash,
     }
     pages: list[PageReceiptV1] = []
     observed: list[ObservedObjectV1] = []
-    for order, (key, _route) in enumerate(_OBJECT_KEYS):
-        descriptor = by_content[digests[key]]
+    for order, (key, host, route) in enumerate(_OBJECT_ENDPOINTS):
+        digest = digests[key]
+        descriptor = by_content[digest]
+        if not _document_matches_object_key(key, retained.artifacts[digest].data):
+            raise AlpacaBridgeIncompleteError(
+                f"the bytes retained for {key} do not have the shape "
+                f"https://{host}{route} returns, so they cannot be matched to "
+                "that expected object"
+            )
         pages.append(
             PageReceiptV1(
                 schema_version="1",
@@ -997,11 +1448,11 @@ def _pages_and_objects(
         observed.append(
             ObservedObjectV1(
                 schema_version="1",
-                provider_object_identity=key,
+                provider_object_identity=f"GET https://{host}{route}",
                 matched_expected_key=key,
                 page_identity=f"{key}-page-0",
                 byte_object_descriptor_hashes=(descriptor,),
-                origin_evidence=_origin_evidence(request),
+                origin_evidence=_origin_evidence(request, key),
                 observation_status="retained",
             )
         )
@@ -1080,8 +1531,8 @@ def build_alpaca_acquisition_evidence(
         expected_inventory_hash=content_hash(inventory),
         planned_native_layer_rule_hash=content_hash(rule),
         max_bytes=64 * 1024 * 1024,
-        max_objects=len(_OBJECT_KEYS),
-        max_pages=len(_OBJECT_KEYS),
+        max_objects=len(_OBJECT_ENDPOINTS),
+        max_pages=len(_OBJECT_ENDPOINTS),
         frozen_at=request.plan_frozen_at,
     )
     pages, observed = _pages_and_objects(request, retained)
@@ -1129,8 +1580,8 @@ def build_alpaca_acquisition_evidence(
         expected_inventory_hash=content_hash(inventory),
         reconciliation_hash=content_hash(reconciliation),
         schema_evidence_hashes=(),
-        methodology_evidence_hashes=(content_hash(_RULE_DOCUMENT),),
-        license_evidence_hashes=(),
+        methodology_evidence_hashes=(_policy_hash("alpaca-acquisition-methodology"),),
+        license_evidence_hashes=(_policy_hash("alpaca-license-terms"),),
         collector_source_hash=execution.collector_source_hash,
         collector_version=execution.collector_version,
     )
@@ -1164,9 +1615,22 @@ def map_cohort_identities(
 def build_alpaca_observation_contract(
     request: AlpacaIntakeRequest,
 ) -> tuple[ObservationContractV1, dict[str, VerifiedArtifactBytes]]:
-    """Describe the exact Alpaca daily SIP bar methodology as an M1d contract."""
-    rule_bytes = canonical_json(_RULE_DOCUMENT)
-    rule_hash = sha256(rule_bytes).hexdigest()
+    """Describe the exact Alpaca daily SIP bar methodology as an M1d contract.
+
+    Every policy hash below addresses its own rule document. Nothing is
+    asserted as included, excluded, or conditional unless Alpaca publishes it;
+    where it does not, the disposition is ``"unknown"`` and the document says
+    so in words as well as in the hash.
+    """
+    ordering_hash = _policy_hash("alpaca-trade-ordering")
+    basis_hash = _policy_hash("alpaca-adjustment-basis")
+    sale_condition_hash = _policy_hash("alpaca-sale-condition")
+    correction_hash = _policy_hash("alpaca-correction-cancellation")
+    population_hash = _policy_hash("alpaca-trade-population")
+    volume_relation_hash = _policy_hash("alpaca-volume-relationship")
+    interval_hash = _policy_hash("alpaca-interval-endpoints")
+    revision_hash = _policy_hash("alpaca-revision-policy")
+    row_emission_hash = _policy_hash("alpaca-row-emission")
     venues = tuple(sorted({member.venue.value for member in request.members}))
     methods = tuple(
         ObservationFieldMethodV1(
@@ -1177,7 +1641,7 @@ def build_alpaca_observation_contract(
             population_id=_POPULATION_ID,
             effective_selector=_FIELD_SELECTORS[name],  # type: ignore[arg-type]
             ordering="execution_time_then_source_sequence",
-            ordering_policy_hash=rule_hash,
+            ordering_policy_hash=ordering_hash,
             precision=28,
             scale=9,
             null_meaning="no_value",
@@ -1185,7 +1649,7 @@ def build_alpaca_observation_contract(
             fallback_branch_id=None,
             equivalence_evidence_hash=None,
             adjustment_basis="unadjusted",
-            basis_methodology_hash=rule_hash,
+            basis_methodology_hash=basis_hash,
             intraday_basis_homogeneity="homogeneous",
             unit="shares" if name == "volume" else "currency_per_share",
         )
@@ -1199,7 +1663,9 @@ def build_alpaca_observation_contract(
         "methodology_artifact_hash": "0" * 64,
         "availability": (
             _observed_availability(
-                request.acquired_at, rule_hash, "alpaca-contract-availability"
+                request.acquired_at,
+                _policy_hash("alpaca-acquisition-methodology"),
+                "alpaca-contract-availability",
             ),
         ),
         "market_population": "consolidated",
@@ -1213,12 +1679,16 @@ def build_alpaca_observation_contract(
                 venue_scope=venues,
                 session_scope="regular",
                 event_time_basis="execution",
-                sale_condition_policy_hash=rule_hash,
+                sale_condition_policy_hash=sale_condition_hash,
                 odd_lot_rule="unknown",
-                opening_auction_rule="included",
-                closing_auction_rule="included",
-                correction_cancellation_policy_hash=rule_hash,
-                evidence_hash=rule_hash,
+                # Alpaca publishes no auction-inclusion methodology for 1Day
+                # SIP bars. "included" would be a positive factual claim about
+                # a rule nobody published, and it is load-bearing in
+                # session binding, so the honest disposition is "unknown".
+                opening_auction_rule="unknown",
+                closing_auction_rule="unknown",
+                correction_cancellation_policy_hash=correction_hash,
+                evidence_hash=population_hash,
             ),
         ),
         "field_methods": methods,
@@ -1240,7 +1710,7 @@ def build_alpaca_observation_contract(
                 price_population_id=_POPULATION_ID,
                 volume_population_id=_POPULATION_ID,
                 relation="equal",
-                evidence_hash=rule_hash,
+                evidence_hash=volume_relation_hash,
             ),
         ),
         "currency": "USD",
@@ -1251,8 +1721,9 @@ def build_alpaca_observation_contract(
             schema_version="1",
             open_inclusion="included",
             close_inclusion="included",
-            auction_event_inclusion="included",
-            event_policy_hash=rule_hash,
+            # Same reason as the population dispositions above: unpublished.
+            auction_event_inclusion="unknown",
+            event_policy_hash=interval_hash,
         ),
         # Alpaca overwrites derived bars in place and rejects pit=true, so the
         # only truthful revision policy is a current snapshot with no retained
@@ -1262,12 +1733,12 @@ def build_alpaca_observation_contract(
             kind="current_snapshot_only",
             correction_horizon="unknown",
             correction_duration_seconds=None,
-            policy_hash=rule_hash,
+            policy_hash=revision_hash,
         ),
         "row_emission": RowEmissionPolicyV1(
             schema_version="1",
             kind="conditional_on_qualifying_activity",
-            omission_marker_policy_hash=rule_hash,
+            omission_marker_policy_hash=row_emission_hash,
         ),
         "adjustment_basis": "unadjusted",
     }
@@ -1280,14 +1751,9 @@ def build_alpaca_observation_contract(
         {**values, "methodology_artifact_hash": methodology_hash}
     )
     contract_bytes = canonical_json(contract)
-    support = {
-        artifact.content_hash: artifact
-        for artifact in (
-            _verified(rule_bytes),
-            _verified(methodology_bytes),
-            _verified(contract_bytes),
-        )
-    }
+    support = _policy_artifacts()
+    for artifact in (_verified(methodology_bytes), _verified(contract_bytes)):
+        support[artifact.content_hash] = artifact
     return contract, support
 
 
@@ -1674,7 +2140,10 @@ def _descriptors(
             provider_legal_name=BRIDGE_PROVIDER_LEGAL_NAME,
             license_reference=BRIDGE_LICENSE_REFERENCE,
             acquired_at=request.acquired_at,
-            terms_evidence_reference=evidence,
+            # Licence evidence is a licence document. Pointing this at the
+            # acquired market data bytes would make the manifest claim that a
+            # bars response is the terms it was acquired under.
+            terms_evidence_reference=_license_reference(),
         ),
         schema_definition=schema,
         partitions=(
@@ -1966,6 +2435,22 @@ def _coverage_record(
     and the inventory enumerates exactly the rows the closed calendar response
     returned. It makes no claim about revisions Alpaca may have made before the
     snapshot, which is what the scheduled-reconstruction limitation records.
+
+    Structural ceiling, stated rather than discovered. ``status`` is
+    ``"expected_complete"`` with ``expected_daily_cardinality=1``, and upstream
+    that means literally every calendar day between the first and last returned
+    session carries exactly one session:
+    ``drift.markets.session_validation`` walks ``while current <= end_date``
+    and applies no exception-date skip, so ``exception_dates`` cannot buy back
+    a gap and populating it would change nothing. ``generate_schedule`` in turn
+    refuses any coverage row whose status is not ``"expected_complete"``, so
+    downgrading the status to ``"partial"`` would stop the pipeline instead of
+    widening it. The consequence is that this bridge supports exactly one
+    unbroken run of consecutive session days, in practice a single Monday to
+    Friday week: a two-week window such as 2026-01-05 to 2026-01-16 contains
+    the 01-10 and 01-11 weekend, which no calendar row covers. That case is
+    refused here, by name, rather than surfacing later as an opaque
+    ``session_coverage_daily_cardinality_mismatch`` from the validator.
     """
     rows = tuple(
         item
@@ -1975,6 +2460,24 @@ def _coverage_record(
     if not rows:
         raise AlpacaBridgeIncompleteError("calendar snapshot carries no session rows")
     dates = tuple(item.session_key.local_date for item in rows)
+    ordered = tuple(sorted(set(dates)))
+    if len(ordered) != len(dates):
+        raise AlpacaBridgeIncompleteError(
+            "the calendar snapshot repeats a session date, so it cannot claim "
+            "one session per day"
+        )
+    gaps = tuple(
+        (ordered[0] + timedelta(days=offset)).isoformat()
+        for offset in range((ordered[-1] - ordered[0]).days + 1)
+        if ordered[0] + timedelta(days=offset) not in set(ordered)
+    )
+    if gaps:
+        raise AlpacaBridgeIncompleteError(
+            "this bridge can only claim dense session coverage over one "
+            "unbroken run of consecutive calendar days, and the acquired "
+            f"snapshot skips {gaps}; widen the window only once upstream "
+            "session coverage honours exception dates"
+        )
     seed = f"coverage:{request.mic}:{request.cohort_id}"
     values: dict[str, object] = {
         "schema_version": "1",
@@ -2424,6 +2927,8 @@ def _session_bounds(
 
 # --- architecture boundary --------------------------------------------------------
 
+#: Every package the Drift core is made of. A package named here has to exist:
+#: a silently skipped directory is a silently skipped scan.
 _CORE_PACKAGES: tuple[str, ...] = (
     "config",
     "datasets",
@@ -2434,6 +2939,8 @@ _CORE_PACKAGES: tuple[str, ...] = (
     "qualification",
     "serialization",
 )
+#: The only package under the Drift root that is allowed to be an adapter.
+_ADAPTER_PACKAGE = "adapters"
 
 
 def assert_core_isolation(package_root: Path | None = None) -> None:
@@ -2443,21 +2950,29 @@ def assert_core_isolation(package_root: Path | None = None) -> None:
     because a provider adapter inside the evaluation path would let vendor
     quirks reach evidence semantics. This is checked against the exact installed
     source rather than trusted by convention.
+
+    The scan covers every module under the Drift root except the adapter
+    package itself, which includes top-level modules such as ``errors.py`` that
+    almost everything imports, and it includes packages added after this list
+    was written. A declared core package that is absent is a failure, not a
+    reason to scan less.
     """
     root = (
         Path(__file__).resolve().parent.parent if package_root is None else package_root
     )
+    absent = tuple(name for name in _CORE_PACKAGES if not (root / name).is_dir())
+    if absent:
+        raise AlpacaBridgeProhibitedError(
+            "the Drift core isolation scan cannot be trusted because these "
+            f"declared core packages are absent from {root}: {absent}"
+        )
     offenders: list[str] = []
-    for name in _CORE_PACKAGES:
-        directory = root / name
-        if not directory.is_dir():
+    for path in sorted(root.rglob("*.py")):
+        relative = path.relative_to(root)
+        if relative.parts and relative.parts[0] == _ADAPTER_PACKAGE:
             continue
-        for path in sorted(directory.rglob("*.py")):
-            if _imports_adapters(path):
-                offenders.append(path.relative_to(root).as_posix())
-    module = root / "__init__.py"
-    if module.is_file() and _imports_adapters(module):
-        offenders.append("__init__.py")
+        if _imports_adapters(path):
+            offenders.append(relative.as_posix())
     if offenders:
         raise AlpacaBridgeProhibitedError(
             "the Drift core must not import drift.adapters, but these modules do: "
@@ -2465,17 +2980,34 @@ def assert_core_isolation(package_root: Path | None = None) -> None:
         )
 
 
+def _imported_module_names(node: ast.Import | ast.ImportFrom) -> list[str]:
+    """Return every module path one import statement can reach.
+
+    ``from .. import adapters`` and ``from drift import adapters`` both name
+    the adapter package through an alias rather than through ``node.module``,
+    and a relative import has no module prefix at all, so the alias names are
+    expanded here instead of being dropped.
+    """
+    if isinstance(node, ast.Import):
+        return [alias.name for alias in node.names]
+    names: list[str] = []
+    if node.module:
+        names.append(node.module)
+        names.extend(f"{node.module}.{alias.name}" for alias in node.names)
+    if node.level:
+        names.extend(alias.name for alias in node.names)
+    return names
+
+
 def _imports_adapters(path: Path) -> bool:
     tree = ast.parse(path.read_bytes(), str(path))
     for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            names = [alias.name for alias in node.names]
-        elif isinstance(node, ast.ImportFrom):
-            names = [node.module or ""]
-        else:
+        if not isinstance(node, (ast.Import, ast.ImportFrom)):
             continue
-        for name in names:
+        for name in _imported_module_names(node):
             parts = name.split(".")
-            if parts[:2] == ["drift", "adapters"] or parts[:1] == ["adapters"]:
+            if parts[:2] == ["drift", _ADAPTER_PACKAGE] or parts[:1] == [
+                _ADAPTER_PACKAGE
+            ]:
                 return True
     return False
