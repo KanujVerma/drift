@@ -86,6 +86,9 @@ ENDED_CLAIM_STATUSES = frozenset({"converted", "extinguished"})
 
 type ClaimIdentity = tuple[str, UUID, ActionKind, str, str]
 type TermsIndex = Mapping[EconomicSourceKeyV1, CorporateActionTermsVersionV1]
+# Source, security, native occurrence and component: everything a delivered
+# report names. Claim identity also carries the action kind, which it cannot.
+type _ClaimIndexKey = tuple[str, UUID, str, str]
 
 
 @dataclass
@@ -940,20 +943,26 @@ class CorporateActionProcessor:
 
     def _matched_claim(
         self,
-        index: Mapping[tuple[UUID, str, str], Mapping[SHA256Hash, PendingCashClaimV1]],
+        index: Mapping[_ClaimIndexKey, Mapping[SHA256Hash, PendingCashClaimV1]],
         group: EconomicDeliveryGroupV1,
         component: CashComponentV1,
     ) -> PendingCashClaimV1 | None:
+        source_id = group.source_id
         occurrence_id = group.native_occurrence_id
-        matches = index.get((group.security_id, occurrence_id, component.component_id))
+        matches = index.get(
+            (source_id, group.security_id, occurrence_id, component.component_id)
+        )
         if not matches:
             # Delivered cash that no proven entitlement claims commits nothing.
             # Crediting it would create money from an unmatched report.
             return None
         if len(matches) > 1:
+            # The key does not carry the action kind that claim identity
+            # does, so one source can still hold two claims under it. Paying
+            # either would be a guess.
             raise IndeterminateValuationError(
                 "one delivered cash component matches more than one pending "
-                f"claim: {occurrence_id}/{component.component_id}"
+                f"claim: {source_id}/{occurrence_id}/{component.component_id}"
             )
         return next(iter(matches.values()))
 
@@ -979,20 +988,36 @@ class CorporateActionProcessor:
 
 def _index_pending_claims(
     state: PortfolioStateV1,
-) -> dict[tuple[UUID, str, str], dict[SHA256Hash, PendingCashClaimV1]]:
+) -> dict[_ClaimIndexKey, dict[SHA256Hash, PendingCashClaimV1]]:
     """Index pending claims by the identity a delivery group can name.
 
-    ``PendingCashClaimV1`` does not yet carry ``source_id``, so matching uses
-    security, occurrence, and component. A cash-in-lieu leg is also indexed
-    under the share component it came from, because a source reports the
-    aggregate sale against that original component id.
+    ``PendingCashClaimV1`` and ``EconomicDeliveryGroupV1`` both carry a
+    ``source_id``, and claim identity is itself source-scoped, so matching is
+    too: a delivered report settles the claim raised by its own source and
+    never one another source raised against the same native occurrence id. A
+    cash-in-lieu leg is also indexed under the share component it came from,
+    because a source reports the aggregate sale against that original
+    component id.
+
+    The key stays coarser than claim identity, which also carries the action
+    kind that a delivery group never reports, so one key can still hold more
+    than one claim. The caller fails closed when it does.
     """
-    index: dict[tuple[UUID, str, str], dict[SHA256Hash, PendingCashClaimV1]] = {}
+    index: dict[_ClaimIndexKey, dict[SHA256Hash, PendingCashClaimV1]] = {}
     for claim in state.pending_cash_claims:
-        keys = [(claim.security_id, claim.occurrence_id, claim.component_id)]
+        keys = [
+            (
+                claim.source_id,
+                claim.security_id,
+                claim.occurrence_id,
+                claim.component_id,
+            )
+        ]
         origin = cash_in_lieu_origin(claim.component_id)
         if origin is not None:
-            keys.append((claim.security_id, claim.occurrence_id, origin))
+            keys.append(
+                (claim.source_id, claim.security_id, claim.occurrence_id, origin)
+            )
         for key in keys:
             index.setdefault(key, {})[claim.claim_id] = claim
     return index

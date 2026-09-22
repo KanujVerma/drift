@@ -56,6 +56,7 @@ VIEW_SECURITY = market_uid(21)
 SESSION_DATE = date(2026, 11, 30)
 SOURCE_DATE = date(2026, 11, 27)
 CUTOFF = datetime(2026, 11, 30, 21, 0, tzinfo=UTC)
+CUTOFF_TEXT = "2026-11-30T21:00:00Z"
 
 CODE_HASH = "a" * 64
 
@@ -88,9 +89,35 @@ def _evaluation_session(
 
 @cache
 def _split_normalized_decision_view(anchor: date) -> DerivedObservationViewV1:
-    harness = NormalizationHarness(outer_kind="decision")
-    query = harness.normalization_query("split_normalized", anchor_date=anchor)
+    """A split-normalized decision view genuinely answerable at the cutoff.
+
+    Two fixture facts, not any pipeline rule, used to push this view's clocks
+    past the decision session close. The harness default publishes the anchor
+    session's completed realized record five minutes after its actual close,
+    so the anchor open was unproved at the close itself; `matching` instead
+    uses the dedicated companion-opening path, which witnesses the anchor
+    open at 14:35Z on the anchor day. The harness default also publishes the
+    economic coverage a full day after its `through` instant; pinning both to
+    the close publishes it in time. The split window is
+    `(source_open, anchor_open]`, so nothing after the anchor session's open
+    is ever read, and every dependency is known by K = E = D = close(S).
+    """
+    harness = NormalizationHarness(
+        outer_kind="decision",
+        anchor_opening_case="matching",
+        economic_through=CUTOFF_TEXT,
+        economic_coverage_boundary=CUTOFF_TEXT,
+    )
+    query = harness.normalization_query(
+        "split_normalized",
+        anchor_date=anchor,
+        # The harness derives its vintage as outer_horizon plus one day, and
+        # the vintage is both the decision time and the knowledge cutoff.
+        outer_horizon="2026-11-29T21:00:00Z",
+        effective_cutoff=CUTOFF_TEXT,
+    )
     result = harness.normalize(query)
+    assert result.classification == "materialized", result.reasons
     return materialize_observation_decision(result.reference, query, harness.context)
 
 
@@ -144,28 +171,6 @@ def _reseal(
     return DerivedObservationViewV1.model_validate(dict(sealed))
 
 
-def _reclocked(
-    view: DerivedObservationViewV1, *, decision_time: datetime
-) -> DerivedObservationViewV1:
-    """Restate one decision view's clocks, keeping the query well formed.
-
-    The M1d pipeline can only materialize the split-normalized case with a
-    knowledge clock past the decision session close, because proving the
-    anchor session opened depends on evidence published after that close.
-    Restating the same derived payload under clocks a decision at the cutoff
-    could have read is the only way to exercise the anchor rule and the
-    clock rule independently rather than having one mask the other.
-    """
-    observation = view.query.observation.model_copy(
-        update={
-            "decision_time": decision_time,
-            "knowledge_cutoff": decision_time,
-            "effective_cutoff": decision_time,
-        }
-    )
-    return _reseal(view, observation)
-
-
 def _forged_clocks(
     view: DerivedObservationViewV1, **clocks: datetime
 ) -> DerivedObservationViewV1:
@@ -181,11 +186,41 @@ def _forged_clocks(
     return _reseal(view, observation)
 
 
-@cache
-def _causal_split_normalized_view() -> DerivedObservationViewV1:
-    return _reclocked(
-        _split_normalized_decision_view(SESSION_DATE), decision_time=CUTOFF
+def _as_split_normalized(
+    view: DerivedObservationViewV1,
+) -> DerivedObservationViewV1:
+    """Relabel one anchorless source-basis view as split normalized.
+
+    M1d never emits this pairing, so the context guard against an anchorless
+    split-normalized view can only be exercised on a view relabelled at
+    exactly the field under test.
+    """
+    draft = DerivedObservationViewV1.model_construct(
+        **(dict(view) | {"basis_mode": "split_normalized"})
     )
+    sealed = DerivedObservationViewV1.model_construct(
+        **(dict(draft) | {"output_hash": derived_view_output_hash(draft)})
+    )
+    return DerivedObservationViewV1.model_validate(dict(sealed))
+
+
+@cache
+def _early_source_basis_view() -> DerivedObservationViewV1:
+    """A source-basis decision view genuinely answerable a session early.
+
+    Its clocks all land on 2026-11-29T21:00Z, a full day before the decision
+    cutoff, so it is causal evidence that was nonetheless asked for at some
+    other decision instant.
+    """
+    harness = NormalizationHarness(outer_kind="decision")
+    query = harness.normalization_query(
+        "source_basis",
+        outer_horizon="2026-11-28T21:00:00Z",
+        effective_cutoff="2026-11-29T21:00:00Z",
+    )
+    result = harness.normalize(query)
+    assert result.classification == "materialized", result.reasons
+    return materialize_observation_decision(result.reference, query, harness.context)
 
 
 @cache
@@ -359,21 +394,70 @@ def test_context_rejects_negative_nav() -> None:
 
 
 def test_context_accepts_split_normalized_view_anchored_to_its_session() -> None:
-    view = StrategyDecisionViewV1(
-        security_id=VIEW_SECURITY,
-        views=(_causal_split_normalized_view(),),
-    )
+    evidence = _split_normalized_decision_view(SESSION_DATE)
+    assert evidence.anchor_session is not None
+    assert evidence.anchor_session.local_date == SESSION_DATE
+    view = StrategyDecisionViewV1(security_id=VIEW_SECURITY, views=(evidence,))
+    context = _context(views=(view,))
+    assert context.decision_views == (view,)
+
+
+def test_context_accepts_split_normalized_view_anchored_to_a_past_session() -> None:
+    """A past anchor is admissible: it can only carry less of the future.
+
+    The split window is `(source_open, anchor_open]`, so pulling the anchor
+    back to the source session empties the window and the factors collapse to
+    one. That is strictly less information than the equal-anchor case, and it
+    is trivially materializable because an anchor equal to the source session
+    reuses the source session's own proved open.
+    """
+    evidence = _split_normalized_decision_view(SOURCE_DATE)
+    assert evidence.anchor_session is not None
+    assert evidence.anchor_session.local_date == SOURCE_DATE
+    assert SOURCE_DATE < SESSION_DATE
+    view = StrategyDecisionViewV1(security_id=VIEW_SECURITY, views=(evidence,))
     context = _context(views=(view,))
     assert context.decision_views == (view,)
 
 
 def test_context_rejects_split_normalized_view_anchored_to_a_future_session() -> None:
+    """Only the anchor guard can reject this, and it must.
+
+    A genuinely materialized view anchored after its decision session does
+    not exist: a later session opens after the earlier session closed, so its
+    anchor open always follows the decision cutoff and the anchor basis is
+    unprovable there. The rule is therefore exercised on the real
+    2026-11-30-anchored view offered to a 2026-11-27 decision, and the
+    assertion pins the exact anchor message so that dropping the rule cannot
+    be masked by the clock guard raising something else.
+    """
     view = StrategyDecisionViewV1(
         security_id=VIEW_SECURITY,
-        views=(_causal_split_normalized_view(),),
+        views=(_split_normalized_decision_view(SESSION_DATE),),
     )
-    with pytest.raises(ValidationError, match="anchored"):
+    with pytest.raises(ValidationError) as caught:
         _context(views=(view,), day=SOURCE_DATE)
+    errors = caught.value.errors()
+    assert len(errors) == 1
+    assert errors[0]["msg"] == (
+        "Value error, split normalized decision evidence must not be anchored "
+        f"after its decision session {SOURCE_DATE}, got {SESSION_DATE}"
+    )
+
+
+def test_context_rejects_a_split_normalized_view_carrying_no_anchor() -> None:
+    """A split-normalized view with no anchor cannot prove it read no future."""
+    forged = _as_split_normalized(_causal_source_basis_view())
+    assert forged.basis_mode == "split_normalized"
+    assert forged.anchor_session is None
+    view = StrategyDecisionViewV1(security_id=VIEW_SECURITY, views=(forged,))
+    with pytest.raises(ValidationError) as caught:
+        _context(views=(view,))
+    errors = caught.value.errors()
+    assert len(errors) == 1
+    assert errors[0]["msg"] == (
+        "Value error, split normalized decision evidence must carry an anchor session"
+    )
 
 
 def test_context_accepts_evidence_clocked_exactly_at_the_cutoff() -> None:
@@ -423,9 +507,12 @@ def test_context_rejects_a_forged_knowledge_clock_past_the_cutoff() -> None:
 
 
 def test_context_rejects_evidence_queried_at_another_decision_time() -> None:
-    early = _reclocked(
-        _causal_source_basis_view(), decision_time=CUTOFF - timedelta(days=1)
-    )
+    early = _early_source_basis_view()
+    observation = early.query.observation
+    assert isinstance(observation, ObservationDecisionQueryV1)
+    assert observation.decision_time == CUTOFF - timedelta(days=1)
+    assert observation.knowledge_cutoff < CUTOFF
+    assert observation.effective_cutoff < CUTOFF
     view = StrategyDecisionViewV1(security_id=VIEW_SECURITY, views=(early,))
     with pytest.raises(ValidationError, match="queried at the decision cutoff"):
         _context(views=(view,))

@@ -193,14 +193,22 @@ class StrategyDecisionContextV1(FrozenModel):
                 f"{self.session_key.local_date}"
             )
         # Split normalization against a future anchor leaks the future split
-        # schedule into a past bar, so the anchor is pinned to this session.
-        if view.basis_mode == "split_normalized" and view.anchor_session != (
-            self.session_key
-        ):
-            raise ValueError(
-                "split normalized decision evidence must be anchored to its "
-                f"decision session {self.session_key.local_date}"
-            )
+        # schedule into a past bar, so the anchor may not outrun this session.
+        # An anchor at or before it cannot: the split window is
+        # (source_open, anchor_open], so pulling the anchor back only removes
+        # effects from the window. Nothing about the future is disclosed by
+        # being told about less of it.
+        if view.basis_mode == "split_normalized":
+            if view.anchor_session is None:
+                raise ValueError(
+                    "split normalized decision evidence must carry an anchor session"
+                )
+            if view.anchor_session.local_date > self.session_key.local_date:
+                raise ValueError(
+                    "split normalized decision evidence must not be anchored "
+                    f"after its decision session {self.session_key.local_date}, "
+                    f"got {view.anchor_session.local_date}"
+                )
         self._validate_evidence_clocks(view)
 
     def _validate_evidence_clocks(self, view: DerivedObservationViewV1) -> None:

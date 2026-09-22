@@ -632,8 +632,16 @@ def _validated_action_economic_case(
     settlement_source_id: str = "settlement-source",
     coverage_evidence: EconomicRecordV1 | None = None,
     history_start: str = "2020-01-01T00:00:00Z",
+    coverage_boundary: str | None = None,
 ) -> EconomicHarness:
-    """Build a closed M1c fixture locally without changing protected M1c support."""
+    """Build a closed M1c fixture locally without changing protected M1c support.
+
+    `coverage_boundary` moves the instant that serves as both the declared
+    coverage end and the coverage snapshot. It defaults to one day after
+    `through`, which publishes the coverage after every window this fixture
+    can be asked about. A caller that must decide at an instant inside that
+    day supplies the boundary explicitly.
+    """
     channel = session_public_channel()
     rechanneled: list[EconomicRecordV1] = []
     for record in records:
@@ -697,9 +705,14 @@ def _validated_action_economic_case(
         )
     )
     through_value = parse_utc(through)
+    boundary_value = (
+        through_value + timedelta(days=1)
+        if coverage_boundary is None
+        else parse_utc(coverage_boundary)
+    )
     snapshot = max(
         (
-            through_value + timedelta(days=1),
+            boundary_value,
             *(
                 evidence.upper_bound
                 for record in owned_records
@@ -709,7 +722,7 @@ def _validated_action_economic_case(
         )
     )
     snapshot_text = snapshot.strftime("%Y-%m-%dT%H:%M:%SZ")
-    coverage_end = (through_value + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    coverage_end = boundary_value.strftime("%Y-%m-%dT%H:%M:%SZ")
     coverage_records = tuple(
         economic_coverage_record(
             7000 + index,
@@ -899,6 +912,7 @@ def action_session_case(
     include_prior_open: bool = False,
     contradict_schedule_offsets: bool = False,
     economic_history_start: str = "2020-01-01T00:00:00Z",
+    economic_coverage_boundary: str | None = None,
 ) -> ActionSessionCase:
     """Build one exact, validated action/session composition fixture."""
     if omit_terms and not omit_effect:
@@ -1114,6 +1128,7 @@ def action_session_case(
         settlement_coverage=settlement_coverage,
         coverage_evidence=primary,
         history_start=economic_history_start,
+        coverage_boundary=economic_coverage_boundary,
     )
     actual_terms = tuple(
         record
