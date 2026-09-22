@@ -32,9 +32,10 @@ from drift.adapters.alpaca_exploratory import (
     ALPACA_CALENDAR_SOURCE_ID,
     ALPACA_DATA_HOST,
     ALPACA_EXPLORATORY_LIMITATIONS,
-    ALPACA_TRADING_HOST,
+    ALPACA_PAPER_TRADING_HOST,
     BARS_OBJECT_KEY,
     CALENDAR_OBJECT_KEY,
+    ORIGIN_RECORD_DIRECTORY,
     AlpacaBridgeIncompleteError,
     AlpacaBridgeProhibitedError,
     AlpacaCohortMember,
@@ -47,12 +48,14 @@ from drift.adapters.alpaca_exploratory import (
     RetainedNativeBytes,
     _coverage_record,
     _exact_decimal,
+    _origin_record_bytes,
     _policy_hash,
     _session_bounds,
     _verified,
     assert_core_isolation,
     build_alpaca_acquisition_evidence,
     build_bridge_admission,
+    load_retained_origin_observations,
     map_calendar_day,
     map_cash_dividend,
     map_native_bar,
@@ -60,6 +63,7 @@ from drift.adapters.alpaca_exploratory import (
     parse_alpaca_calendar,
     parse_alpaca_cash_dividends,
     retain_native_bytes,
+    retain_origin_observations,
     run_alpaca_exploratory_intake,
 )
 from drift.domain.acquisition import AcquisitionCompleteness, OriginStatus
@@ -285,7 +289,8 @@ def pinned_origin_observations() -> dict[str, AlpacaOriginObservation]:
     These are measurements the transport took, pinned beside the bytes they
     describe. The adapter opens no connection and so measures none of this
     itself; supplying nothing here is the honest "no HTTP exchange happened"
-    case, and the bridge then refuses to certify the origin at all.
+    case, and the bridge then refuses to certify the origin at all. Each one
+    names the pinned digest and size of the exact body it was taken over.
     """
     return {
         BARS_OBJECT_KEY: AlpacaOriginObservation(
@@ -295,15 +300,19 @@ def pinned_origin_observations() -> dict[str, AlpacaOriginObservation]:
             http_status=200,
             content_type="application/json",
             observed_at=MEASURED_AT,
+            body_sha256=PINNED_BARS_SHA256,
+            body_byte_size=len(PINNED_BARS),
         ),
         CALENDAR_OBJECT_KEY: AlpacaOriginObservation(
             object_key=CALENDAR_OBJECT_KEY,
-            # The calendar comes off the trading host, not the data host.
-            request_host=ALPACA_TRADING_HOST,
-            tls_endpoint_identity=ALPACA_TRADING_HOST,
+            # The calendar comes off the paper trading host, not the data host.
+            request_host=ALPACA_PAPER_TRADING_HOST,
+            tls_endpoint_identity=ALPACA_PAPER_TRADING_HOST,
             http_status=200,
             content_type="application/json",
             observed_at=MEASURED_AT,
+            body_sha256=PINNED_CALENDAR_SHA256,
+            body_byte_size=len(PINNED_CALENDAR),
         ),
         ACTIONS_OBJECT_KEY: AlpacaOriginObservation(
             object_key=ACTIONS_OBJECT_KEY,
@@ -312,6 +321,8 @@ def pinned_origin_observations() -> dict[str, AlpacaOriginObservation]:
             http_status=200,
             content_type="application/json",
             observed_at=MEASURED_AT,
+            body_sha256=PINNED_CORPORATE_ACTIONS_SHA256,
+            body_byte_size=len(PINNED_CORPORATE_ACTIONS),
         ),
     }
 
@@ -354,6 +365,51 @@ def run_pinned_intake(root: Path, **overrides: Any) -> AlpacaExploratoryIntakeRe
         request=pinned_request(**overrides),
         payloads=pinned_payloads(),
         private_root=root,
+    )
+
+
+def measured_over(
+    request: AlpacaIntakeRequest, payloads: AlpacaNativePayloads
+) -> AlpacaIntakeRequest:
+    """Re-take the request's measurements over the bytes a test actually feeds.
+
+    The pinned observations name the pinned bytes, and the bridge certifies an
+    origin only for the exact bytes a measurement names. A test that feeds the
+    bridge other bytes is modelling a transport that measured those bytes, so
+    its measurements are bound to them here. Without this, every such test
+    would fail on the unverified origin instead of on the property it names.
+    """
+    if request.origin_observations is None:
+        return request
+    bodies = {
+        BARS_OBJECT_KEY: payloads.bars,
+        CALENDAR_OBJECT_KEY: payloads.calendar,
+        ACTIONS_OBJECT_KEY: payloads.corporate_actions,
+    }
+    return replace(
+        request,
+        origin_observations={
+            key: replace(
+                observation,
+                body_sha256=sha256(bodies[key]).hexdigest(),
+                body_byte_size=len(bodies[key]),
+            )
+            for key, observation in request.origin_observations.items()
+        },
+    )
+
+
+def run_measured_intake(
+    *,
+    request: AlpacaIntakeRequest,
+    payloads: AlpacaNativePayloads,
+    private_root: Path,
+) -> AlpacaExploratoryIntakeResult:
+    """Run the real bridge over ``payloads`` as a transport that measured them."""
+    return run_alpaca_exploratory_intake(
+        request=measured_over(request, payloads),
+        payloads=payloads,
+        private_root=private_root,
     )
 
 
@@ -595,7 +651,7 @@ def test_the_receipt_carries_the_measured_status_content_type_and_host(
 def test_the_calendar_origin_names_the_trading_host_not_the_data_host(
     intake: AlpacaExploratoryIntakeResult,
 ) -> None:
-    """The calendar is fetched from api.alpaca.markets and must say so."""
+    """The calendar is fetched from paper-api.alpaca.markets and must say so."""
     by_key = {
         item.matched_expected_key: item
         for item in intake.acquisition.receipt.observed_objects
@@ -603,12 +659,12 @@ def test_the_calendar_origin_names_the_trading_host_not_the_data_host(
     calendar = by_key[CALENDAR_OBJECT_KEY].origin_evidence
     bars = by_key[BARS_OBJECT_KEY].origin_evidence
 
-    assert calendar.tls_endpoint_identity == ALPACA_TRADING_HOST
+    assert calendar.tls_endpoint_identity == ALPACA_PAPER_TRADING_HOST
     assert bars.tls_endpoint_identity == ALPACA_DATA_HOST
     assert calendar.tls_endpoint_identity != bars.tls_endpoint_identity
     # The request identity names both authenticated hosts, not just one.
     host_field = intake.acquisition.receipt.request.authenticated_provider_host
-    assert ALPACA_TRADING_HOST in host_field
+    assert ALPACA_PAPER_TRADING_HOST in host_field
     assert ALPACA_DATA_HOST in host_field
 
 
@@ -711,7 +767,9 @@ def test_the_expected_inventory_declares_each_endpoints_own_fields(
         item.object_key: item.endpoint_or_file
         for item in intake.acquisition.expected_inventory.objects
     }
-    assert endpoints[CALENDAR_OBJECT_KEY].startswith(f"https://{ALPACA_TRADING_HOST}")
+    assert endpoints[CALENDAR_OBJECT_KEY].startswith(
+        f"https://{ALPACA_PAPER_TRADING_HOST}"
+    )
     assert endpoints[BARS_OBJECT_KEY].startswith(f"https://{ALPACA_DATA_HOST}")
 
 
@@ -783,6 +841,282 @@ def test_receipt_verification_catches_a_forged_retention_mapping(
         build_alpaca_acquisition_evidence(pinned_request(), forged)
 
     assert "artifact hash mismatch" in str(error.value)
+
+
+# --- a measured origin binds only the exact bytes it measured ------------------------
+
+#: The pinned bars with exactly one byte changed: one closing price digit.
+ONE_BYTE_CHANGED_BARS = PINNED_BARS.replace(b'"c":191.25', b'"c":191.26', 1)
+PINNED_WINDOW = {"window_start": REQUEST_START, "window_end": REQUEST_END}
+
+
+def _records_directory(root: Path) -> Path:
+    return root / ORIGIN_RECORD_DIRECTORY / "sha256"
+
+
+def _retained_with_records(root: Path) -> RetainedNativeBytes:
+    """Retain the pinned bytes and one measured record per object beside them."""
+    retained = retain_native_bytes(root, pinned_payloads())
+    retain_origin_observations(retained, pinned_origin_observations())
+    return retained
+
+
+def test_a_measurement_of_other_bytes_is_never_verified(tmp_path: Path) -> None:
+    """The adapter itself refuses to attach a measurement to different bytes."""
+    observations = pinned_origin_observations()
+    observations[BARS_OBJECT_KEY] = replace(
+        observations[BARS_OBJECT_KEY],
+        body_sha256=sha256(ONE_BYTE_CHANGED_BARS).hexdigest(),
+        body_byte_size=len(ONE_BYTE_CHANGED_BARS),
+    )
+    retained = retain_native_bytes(tmp_path / "private", pinned_payloads())
+
+    evidence = build_alpaca_acquisition_evidence(
+        pinned_request(origin_observations=observations), retained
+    )
+
+    by_key = {
+        item.matched_expected_key: item.origin_evidence
+        for item in evidence.receipt.observed_objects
+    }
+    assert by_key[BARS_OBJECT_KEY].origin_status is OriginStatus.UNKNOWN
+    assert by_key[BARS_OBJECT_KEY].safe_response_metadata is None
+    assert by_key[BARS_OBJECT_KEY].tls_endpoint_identity is None
+    # Only the unbound object loses its origin; the bound ones keep theirs.
+    assert by_key[CALENDAR_OBJECT_KEY].origin_status is OriginStatus.VERIFIED
+    assert by_key[ACTIONS_OBJECT_KEY].origin_status is OriginStatus.VERIFIED
+    assert evidence.reconciliation.result is not AcquisitionCompleteness.PASS
+
+
+def test_an_origin_observation_must_name_the_body_it_measured() -> None:
+    observation = pinned_origin_observations()[BARS_OBJECT_KEY]
+
+    with pytest.raises(
+        AlpacaBridgeIncompleteError, match="must name the lowercase SHA-256"
+    ):
+        replace(observation, body_sha256="not-a-digest")
+    with pytest.raises(
+        AlpacaBridgeIncompleteError, match="must name the lowercase SHA-256"
+    ):
+        replace(observation, body_sha256=PINNED_BARS_SHA256.upper())
+    with pytest.raises(AlpacaBridgeIncompleteError, match="must name the byte size"):
+        replace(observation, body_byte_size=-1)
+
+
+def test_retained_origin_records_round_trip_to_the_same_measurements(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "private"
+    retained = _retained_with_records(root)
+
+    assert (
+        load_retained_origin_observations(retained, **PINNED_WINDOW)
+        == pinned_origin_observations()
+    )
+    records = sorted(_records_directory(root).iterdir())
+    assert len(records) == 3
+    for path in records:
+        assert sha256(path.read_bytes()).hexdigest() == path.name
+    # The same owner-only guarantee as the retained bytes themselves.
+    assert_private_bytes_are_locked_down(root)
+
+
+def test_retaining_a_measurement_of_other_bytes_is_refused(tmp_path: Path) -> None:
+    retained = retain_native_bytes(tmp_path / "private", pinned_payloads())
+    observations = pinned_origin_observations()
+    observations[CALENDAR_OBJECT_KEY] = replace(
+        observations[CALENDAR_OBJECT_KEY], body_byte_size=len(PINNED_CALENDAR) + 1
+    )
+
+    with pytest.raises(
+        AlpacaBridgeIncompleteError,
+        match="refusing to retain an origin measured over bytes other than",
+    ):
+        retain_origin_observations(retained, observations)
+
+
+def test_no_retained_origin_record_binds_nothing(tmp_path: Path) -> None:
+    retained = retain_native_bytes(tmp_path / "private", pinned_payloads())
+
+    assert load_retained_origin_observations(retained, **PINNED_WINDOW) == {}
+
+
+def test_an_origin_record_that_does_not_parse_binds_nothing(tmp_path: Path) -> None:
+    root = tmp_path / "private"
+    retained = retain_native_bytes(root, pinned_payloads())
+    directory = _records_directory(root)
+    directory.mkdir(parents=True)
+    honest = pinned_origin_observations()[BARS_OBJECT_KEY]
+    canonical = {
+        "body_byte_size": honest.body_byte_size,
+        "body_sha256": honest.body_sha256,
+        "content_type": honest.content_type,
+        "http_status": honest.http_status,
+        "kind": "drift-alpaca-measured-origin",
+        "object_key": honest.object_key,
+        "observed_at": honest.observed_at.isoformat(),
+        "request_host": honest.request_host,
+        "schema_version": "1",
+        "tls_endpoint_identity": honest.tls_endpoint_identity,
+    }
+
+    def _encoded(document: dict[str, Any]) -> bytes:
+        return json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+
+    assert _encoded(canonical) == _origin_record_bytes(honest)
+    unreadable = (
+        b"not an origin record",
+        _encoded({**canonical, "kind": "something-else"}),
+        _encoded({**canonical, "http_status": "200"}),
+        _encoded({**canonical, "extra": "field"}),
+        # Equivalent content, but not the canonical bytes this bridge writes.
+        json.dumps(canonical, indent=2, sort_keys=True).encode("ascii"),
+    )
+    for data in unreadable:
+        (directory / sha256(data).hexdigest()).write_bytes(data)
+
+    assert load_retained_origin_observations(retained, **PINNED_WINDOW) == {}
+
+
+def test_an_origin_record_for_different_bytes_binds_nothing(tmp_path: Path) -> None:
+    """The reviewer's case: records exist, but for bytes one byte away."""
+    root = tmp_path / "private"
+    _retained_with_records(root)
+    replayed = retain_native_bytes(
+        root,
+        AlpacaNativePayloads(
+            bars=ONE_BYTE_CHANGED_BARS,
+            calendar=PINNED_CALENDAR,
+            corporate_actions=PINNED_CORPORATE_ACTIONS,
+        ),
+    )
+
+    bound = load_retained_origin_observations(replayed, **PINNED_WINDOW)
+
+    assert set(bound) == {CALENDAR_OBJECT_KEY, ACTIONS_OBJECT_KEY}
+
+
+def test_an_object_without_a_record_entry_stays_unbound(tmp_path: Path) -> None:
+    root = tmp_path / "private"
+    retained = retain_native_bytes(root, pinned_payloads())
+    observations = pinned_origin_observations()
+    del observations[ACTIONS_OBJECT_KEY]
+    retain_origin_observations(retained, observations)
+
+    bound = load_retained_origin_observations(retained, **PINNED_WINDOW)
+
+    assert set(bound) == {BARS_OBJECT_KEY, CALENDAR_OBJECT_KEY}
+
+
+def test_an_origin_record_edited_in_place_binds_nothing(tmp_path: Path) -> None:
+    root = tmp_path / "private"
+    retained = _retained_with_records(root)
+    for path in _records_directory(root).iterdir():
+        original = path.read_bytes()
+        edited = original.replace(b'"http_status":200', b'"http_status":201')
+        assert edited != original
+        path.write_bytes(edited)
+
+    assert load_retained_origin_observations(retained, **PINNED_WINDOW) == {}
+
+
+def test_an_origin_record_outside_the_declared_window_binds_nothing(
+    tmp_path: Path,
+) -> None:
+    retained = _retained_with_records(tmp_path / "private")
+
+    assert (
+        load_retained_origin_observations(
+            retained,
+            window_start=MEASURED_AT + timedelta(seconds=1),
+            window_end=REQUEST_END,
+        )
+        == {}
+    )
+
+
+def test_a_free_standing_origin_file_is_never_read(tmp_path: Path) -> None:
+    """A sidecar beside the bytes, or anywhere in the store, is not a record."""
+    root = tmp_path / "private"
+    retained = retain_native_bytes(root, pinned_payloads())
+    sidecar = json.dumps(
+        {
+            "schema_version": "1",
+            "objects": {
+                key: {
+                    "request_host": item.request_host,
+                    "tls_endpoint_identity": item.tls_endpoint_identity,
+                    "http_status": item.http_status,
+                    "content_type": item.content_type,
+                    "observed_at": item.observed_at.isoformat(),
+                    "body_sha256": item.body_sha256,
+                    "body_byte_size": item.body_byte_size,
+                }
+                for key, item in pinned_origin_observations().items()
+            },
+        }
+    )
+    (root / "origin.json").write_text(sidecar, encoding="utf-8")
+    _records_directory(root).mkdir(parents=True)
+    (_records_directory(root) / "origin.json").write_text(sidecar, encoding="utf-8")
+
+    assert load_retained_origin_observations(retained, **PINNED_WINDOW) == {}
+
+
+def test_the_latest_bound_measurement_of_an_object_is_the_one_replayed(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "private"
+    retained = _retained_with_records(root)
+    later = replace(
+        pinned_origin_observations()[BARS_OBJECT_KEY],
+        observed_at=MEASURED_AT + timedelta(minutes=5),
+        content_type="application/json; charset=utf-8",
+    )
+    retain_origin_observations(retained, {BARS_OBJECT_KEY: later})
+
+    bound = load_retained_origin_observations(retained, **PINNED_WINDOW)
+
+    assert bound[BARS_OBJECT_KEY] == later
+
+
+# --- the calendar is declared against the paper trading host -------------------------
+
+
+def test_the_bridge_declares_only_the_market_data_and_paper_trading_hosts(
+    intake: AlpacaExploratoryIntakeResult,
+) -> None:
+    assert ALPACA_PAPER_TRADING_HOST == "paper-api.alpaca.markets"
+    assert ALPACA_DATA_HOST == "data.alpaca.markets"
+    assert (
+        intake.acquisition.receipt.request.authenticated_provider_host
+        == "data.alpaca.markets,paper-api.alpaca.markets"
+    )
+    endpoints = {
+        item.object_key: item.endpoint_or_file
+        for item in intake.acquisition.expected_inventory.objects
+    }
+    assert endpoints[CALENDAR_OBJECT_KEY] == (
+        "https://paper-api.alpaca.markets/v2/calendar"
+    )
+
+
+def test_a_calendar_measured_against_the_live_brokerage_host_is_refused() -> None:
+    observations = pinned_origin_observations()
+    observations[CALENDAR_OBJECT_KEY] = replace(
+        observations[CALENDAR_OBJECT_KEY],
+        request_host="api.alpaca.markets",
+        tls_endpoint_identity="api.alpaca.markets",
+    )
+
+    with pytest.raises(
+        AlpacaBridgeIncompleteError,
+        match=(
+            "was measured against api.alpaca.markets but is declared to come "
+            "from paper-api.alpaca.markets"
+        ),
+    ):
+        pinned_request(origin_observations=observations)
 
 
 # --- steps 3 and 4: mapping and public validation -------------------------------------
@@ -1440,7 +1774,7 @@ def test_the_bridge_is_deterministic_across_two_independent_runs(
 
 def test_changing_one_native_price_changes_the_bundle_hash(tmp_path: Path) -> None:
     baseline = run_pinned_intake(tmp_path / "baseline")
-    mutated = run_alpaca_exploratory_intake(
+    mutated = run_measured_intake(
         request=pinned_request(),
         payloads=AlpacaNativePayloads(
             bars=PINNED_BARS.replace(b'"c":191.25', b'"c":191.26'),
@@ -1483,7 +1817,7 @@ def test_a_bar_without_a_scheduled_session_fails_closed(tmp_path: Path) -> None:
     )
 
     with pytest.raises(AlpacaBridgeIncompleteError) as error:
-        run_alpaca_exploratory_intake(
+        run_measured_intake(
             request=pinned_request(),
             payloads=AlpacaNativePayloads(
                 bars=extra,
@@ -1586,7 +1920,7 @@ def test_a_missing_bar_on_a_scheduled_session_fails_closed(tmp_path: Path) -> No
     assert without_msft_wednesday != PINNED_BARS
 
     with pytest.raises(ValueError) as error:
-        run_alpaca_exploratory_intake(
+        run_measured_intake(
             request=pinned_request(),
             payloads=AlpacaNativePayloads(
                 bars=without_msft_wednesday,
@@ -1611,7 +1945,7 @@ def test_a_duplicated_native_bar_is_rejected_by_the_public_validators(
     assert duplicated != PINNED_BARS
 
     with pytest.raises(AlpacaBridgeIncompleteError) as error:
-        run_alpaca_exploratory_intake(
+        run_measured_intake(
             request=pinned_request(),
             payloads=AlpacaNativePayloads(
                 bars=duplicated,
@@ -1688,7 +2022,7 @@ def test_an_early_close_row_maps_to_an_early_close_session(tmp_path: Path) -> No
     )
     assert early != PINNED_CALENDAR
 
-    result = run_alpaca_exploratory_intake(
+    result = run_measured_intake(
         request=pinned_request(),
         payloads=AlpacaNativePayloads(
             bars=PINNED_BARS,
@@ -1724,7 +2058,7 @@ def test_a_late_close_row_is_not_filed_as_an_early_close(tmp_path: Path) -> None
     # calendar is edited, exactly as its four sibling mutation tests guard.
     assert late != PINNED_CALENDAR
 
-    result = run_alpaca_exploratory_intake(
+    result = run_measured_intake(
         request=pinned_request(),
         payloads=AlpacaNativePayloads(
             bars=PINNED_BARS,
@@ -1799,7 +2133,7 @@ def test_a_negative_cash_amount_is_refused(tmp_path: Path) -> None:
     assert negative != PINNED_CORPORATE_ACTIONS
 
     with pytest.raises(AlpacaBridgeIncompleteError) as error:
-        run_alpaca_exploratory_intake(
+        run_measured_intake(
             request=pinned_request(),
             payloads=AlpacaNativePayloads(
                 bars=PINNED_BARS,
@@ -1816,7 +2150,7 @@ def test_a_window_that_returned_no_bars_fails_closed(tmp_path: Path) -> None:
     empty = b'{"bars":{},"next_page_token":null}'
 
     with pytest.raises(AlpacaBridgeIncompleteError) as error:
-        run_alpaca_exploratory_intake(
+        run_measured_intake(
             request=pinned_request(),
             payloads=AlpacaNativePayloads(
                 bars=empty,
@@ -1837,7 +2171,7 @@ def test_a_session_closing_before_it_opens_fails_closed(tmp_path: Path) -> None:
     assert inverted != PINNED_CALENDAR
 
     with pytest.raises(AlpacaBridgeIncompleteError) as error:
-        run_alpaca_exploratory_intake(
+        run_measured_intake(
             request=pinned_request(),
             payloads=AlpacaNativePayloads(
                 bars=PINNED_BARS,
@@ -1959,7 +2293,7 @@ def test_a_window_spanning_a_weekend_gap_fails_closed_by_name(
     fortnight = tuple(date(2026, 1, day) for day in (5, 6, 7, 8, 9, 12, 13, 14, 15, 16))
 
     with pytest.raises(AlpacaBridgeIncompleteError) as error:
-        run_alpaca_exploratory_intake(
+        run_measured_intake(
             request=_window_request(fortnight),
             payloads=_consecutive_payloads(fortnight),
             private_root=tmp_path / "fortnight",
@@ -1977,7 +2311,7 @@ def test_one_unbroken_run_of_sessions_is_accepted(tmp_path: Path) -> None:
     every window.
     """
     week = tuple(date(2026, 1, day) for day in (5, 6, 7, 8, 9))
-    result = run_alpaca_exploratory_intake(
+    result = run_measured_intake(
         request=_window_request(week),
         payloads=_consecutive_payloads(week),
         private_root=tmp_path / "week",

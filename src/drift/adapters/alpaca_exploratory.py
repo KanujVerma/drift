@@ -235,7 +235,14 @@ ALPACA_BAR_SOURCE_ID = "alpaca-historical-bars-v2"
 ALPACA_CALENDAR_SOURCE_ID = "alpaca-market-calendar-v2"
 ALPACA_ACTION_SOURCE_ID = "alpaca-corporate-actions-v1"
 ALPACA_DATA_HOST = "data.alpaca.markets"
-ALPACA_TRADING_HOST = "api.alpaca.markets"
+#: The calendar comes off Alpaca's *paper* trading API host. Alpaca was selected
+#: as the free development source because paper account credentials exist, and
+#: paper keys do not authenticate against the live brokerage host
+#: ``api.alpaca.markets``. Nothing authorizes this bridge to hold or use live
+#: brokerage credentials, so the live host is never named as an endpoint and
+#: there is no switch that selects it. Alpaca publishes ``GET /v2/calendar``
+#: with the paper host as a server of the same Trading API.
+ALPACA_PAPER_TRADING_HOST = "paper-api.alpaca.markets"
 ALPACA_BARS_ROUTE = "/v2/stocks/bars"
 ALPACA_CALENDAR_ROUTE = "/v2/calendar"
 ALPACA_ACTIONS_ROUTE = "/v1/corporate-actions"
@@ -775,6 +782,11 @@ class AlpacaOriginObservation:
     opens no connection, so it cannot measure any of this; the caller that did
     the fetching supplies it, and where it supplies nothing the receipt claims
     nothing.
+
+    A measurement is bound to the exact body it was taken over by that body's
+    SHA-256 and byte size. The receipt certifies an origin only for the very
+    bytes this names, so a measurement of one response can never be attached
+    to different bytes, not even bytes that differ by one.
     """
 
     object_key: str
@@ -785,12 +797,35 @@ class AlpacaOriginObservation:
     content_type: str | None
     #: The instant the response body finished being read.
     observed_at: datetime
+    #: SHA-256 of the exact response body this measurement was taken over.
+    body_sha256: str
+    #: Byte length of that exact response body.
+    body_byte_size: int
 
     def __post_init__(self) -> None:
         if self.observed_at.tzinfo is None:
             raise AlpacaBridgeIncompleteError(
                 "a measured acquisition instant must carry a UTC offset"
             )
+        if len(self.body_sha256) != 64 or not set(self.body_sha256) <= set(
+            "0123456789abcdef"
+        ):
+            raise AlpacaBridgeIncompleteError(
+                "a measured origin must name the lowercase SHA-256 of the exact "
+                "body it measured"
+            )
+        if type(self.body_byte_size) is not int or self.body_byte_size < 0:
+            raise AlpacaBridgeIncompleteError(
+                "a measured origin must name the byte size of the exact body it "
+                "measured"
+            )
+
+    def measured(self, data: bytes) -> bool:
+        """Return whether this measurement was taken over exactly ``data``."""
+        return (
+            sha256(data).hexdigest() == self.body_sha256
+            and len(data) == self.body_byte_size
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1150,6 +1185,40 @@ def _refuse_versioned_root(root: Path) -> None:
             )
 
 
+def _private_directory(resolved_root: Path, *parts: str) -> Path:
+    """Create one owner-only directory chain under the private retention root."""
+    directory = resolved_root.joinpath(*parts)
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # ``Path.mkdir(parents=True, mode=...)`` applies the mode to the leaf only
+    # and creates every parent at the default umask, which left the private
+    # root itself group and world listable.
+    for depth in range(len(parts) + 1):
+        os.chmod(resolved_root.joinpath(*parts[:depth]), 0o700)
+    return directory
+
+
+def _write_private_object(directory: Path, data: bytes) -> str:
+    """Write one owner-only object under its own SHA-256, or verify it is there."""
+    digest = sha256(data).hexdigest()
+    target = directory / digest
+    if target.exists():
+        # A half-written object from an interrupted run would otherwise be
+        # trusted forever purely because its path already exists.
+        if sha256(target.read_bytes()).hexdigest() != digest:
+            raise AlpacaBridgeIncompleteError(
+                f"a retained private object does not match its content address: "
+                f"{digest}"
+            )
+    else:
+        descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(descriptor, data)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    return digest
+
+
 def retain_native_bytes(
     root: Path, payloads: AlpacaNativePayloads
 ) -> RetainedNativeBytes:
@@ -1158,32 +1227,11 @@ def retain_native_bytes(
         raise AlpacaBridgeProhibitedError("private retention root must be absolute")
     resolved = root.resolve()
     _refuse_versioned_root(resolved)
-    objects = resolved / "objects" / "sha256"
-    objects.mkdir(parents=True, exist_ok=True, mode=0o700)
-    # ``Path.mkdir(parents=True, mode=...)`` applies the mode to the leaf only
-    # and creates every parent at the default umask, which left the private
-    # root itself group and world listable.
-    for directory in (resolved, resolved / "objects", objects):
-        os.chmod(directory, 0o700)
+    objects = _private_directory(resolved, "objects", "sha256")
     artifacts: dict[str, VerifiedArtifactBytes] = {}
     for data in (payloads.bars, payloads.calendar, payloads.corporate_actions):
         artifact = _verified(data)
-        target = objects / artifact.content_hash
-        if target.exists():
-            # A half-written object from an interrupted run would otherwise be
-            # trusted forever purely because its path already exists.
-            if sha256(target.read_bytes()).hexdigest() != artifact.content_hash:
-                raise AlpacaBridgeIncompleteError(
-                    "a retained private object does not match its content address: "
-                    f"{artifact.content_hash}"
-                )
-        else:
-            descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            try:
-                os.write(descriptor, data)
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
+        _write_private_object(objects, data)
         artifacts[artifact.content_hash] = artifact
     return RetainedNativeBytes(
         root=resolved,
@@ -1194,16 +1242,199 @@ def retain_native_bytes(
     )
 
 
+# --- step 1b: retain what was measured, bound to the bytes it measured -------------
+
+#: Where measured origin records live under the private retention root.
+ORIGIN_RECORD_DIRECTORY = "origins"
+ORIGIN_RECORD_SCHEMA_VERSION = "1"
+_ORIGIN_RECORD_KIND = "drift-alpaca-measured-origin"
+_ORIGIN_RECORD_FIELDS = frozenset(
+    {
+        "body_byte_size",
+        "body_sha256",
+        "content_type",
+        "http_status",
+        "kind",
+        "object_key",
+        "observed_at",
+        "request_host",
+        "schema_version",
+        "tls_endpoint_identity",
+    }
+)
+
+
+def _retained_body(retained: RetainedNativeBytes, key: str) -> bytes:
+    """Return the exact retained bytes filed under one expected object key."""
+    digests = {
+        BARS_OBJECT_KEY: retained.bars_hash,
+        CALENDAR_OBJECT_KEY: retained.calendar_hash,
+        ACTIONS_OBJECT_KEY: retained.corporate_actions_hash,
+    }
+    return retained.artifacts[digests[key]].data
+
+
+def _origin_record_bytes(observation: AlpacaOriginObservation) -> bytes:
+    """Encode one measured origin as the canonical bytes of its record."""
+    document = {
+        "body_byte_size": observation.body_byte_size,
+        "body_sha256": observation.body_sha256,
+        "content_type": observation.content_type,
+        "http_status": observation.http_status,
+        "kind": _ORIGIN_RECORD_KIND,
+        "object_key": observation.object_key,
+        "observed_at": observation.observed_at.astimezone(UTC).isoformat(),
+        "request_host": observation.request_host,
+        "schema_version": ORIGIN_RECORD_SCHEMA_VERSION,
+        "tls_endpoint_identity": observation.tls_endpoint_identity,
+    }
+    return json.dumps(document, sort_keys=True, separators=(",", ":")).encode("ascii")
+
+
+def _parse_origin_record(data: bytes) -> AlpacaOriginObservation | None:
+    """Decode one origin record, or ``None`` for anything but a canonical one."""
+    try:
+        document = json.loads(data.decode("ascii"))
+    except UnicodeDecodeError, ValueError:
+        return None
+    if not isinstance(document, dict) or set(document) != _ORIGIN_RECORD_FIELDS:
+        return None
+    if (
+        document["kind"] != _ORIGIN_RECORD_KIND
+        or document["schema_version"] != ORIGIN_RECORD_SCHEMA_VERSION
+    ):
+        return None
+    texts = ("object_key", "body_sha256", "request_host", "observed_at")
+    optional_texts = ("tls_endpoint_identity", "content_type")
+    integers = ("http_status", "body_byte_size")
+    if (
+        not all(isinstance(document[name], str) for name in texts)
+        or not all(
+            document[name] is None or isinstance(document[name], str)
+            for name in optional_texts
+        )
+        or not all(type(document[name]) is int for name in integers)
+    ):
+        return None
+    try:
+        observation = AlpacaOriginObservation(
+            object_key=document["object_key"],
+            request_host=document["request_host"],
+            tls_endpoint_identity=document["tls_endpoint_identity"],
+            http_status=document["http_status"],
+            content_type=document["content_type"],
+            observed_at=datetime.fromisoformat(document["observed_at"]),
+            body_sha256=document["body_sha256"],
+            body_byte_size=document["body_byte_size"],
+        )
+    except ValueError:
+        return None
+    # Only the exact bytes this bridge writes are a record. Anything else,
+    # however equivalent, was written by something other than this bridge.
+    if _origin_record_bytes(observation) != data:
+        return None
+    return observation
+
+
+def retain_origin_observations(
+    retained: RetainedNativeBytes,
+    observations: Mapping[str, AlpacaOriginObservation],
+) -> tuple[str, ...]:
+    """Persist what an online acquisition measured, beside the bytes it measured.
+
+    Each observation becomes one content-addressed record in the same private
+    retention store as the bytes, owner-only like them, carrying the SHA-256
+    and byte size of the exact body it was taken over. An offline replay can
+    later certify an origin only by reading one of these records back and
+    finding that it names the very bytes being replayed.
+
+    Only a caller that performed the transfer should call this, and it refuses
+    a measurement of any bytes other than the ones retained for that key.
+    Returns the record digests in object key order.
+    """
+    directory = _private_directory(retained.root, ORIGIN_RECORD_DIRECTORY, "sha256")
+    digests: list[str] = []
+    for key in sorted(observations):
+        observation = observations[key]
+        if observation.object_key != key:
+            raise AlpacaBridgeIncompleteError(
+                f"origin evidence filed under {key} describes {observation.object_key}"
+            )
+        if not observation.measured(_retained_body(retained, key)):
+            raise AlpacaBridgeIncompleteError(
+                f"refusing to retain an origin measured over bytes other than the "
+                f"ones retained for {key}"
+            )
+        digests.append(
+            _write_private_object(directory, _origin_record_bytes(observation))
+        )
+    return tuple(digests)
+
+
+def load_retained_origin_observations(
+    retained: RetainedNativeBytes,
+    *,
+    window_start: datetime,
+    window_end: datetime,
+) -> dict[str, AlpacaOriginObservation]:
+    """Read back the measured origins that bind to exactly these retained bytes.
+
+    A record is used only if it is content addressed under its own SHA-256,
+    decodes to exactly the canonical bytes this bridge writes, names one of the
+    three expected object keys, names the SHA-256 and byte size of exactly the
+    bytes retained for that key, and was measured inside the declared
+    acquisition window. Everything else is ignored, so its object stays
+    unmeasured: no record, a record that does not parse, a record for other
+    bytes, even bytes one byte apart, and any free-standing file beside the
+    bytes, which this function never reads. Where several records bind one
+    object the latest measurement wins, then the lowest record digest.
+
+    Residual trust, stated plainly: the store is exactly as trustworthy as the
+    retained bytes themselves. An operator with write access who forges both
+    the bytes and a matching record defeats this, as they could forge the
+    bytes alone; what this closes is certifying bytes nothing ever measured.
+    """
+    directory = retained.root / ORIGIN_RECORD_DIRECTORY / "sha256"
+    if directory.is_symlink() or not directory.is_dir():
+        return {}
+    bodies = {key: _retained_body(retained, key) for key, _, _ in _OBJECT_ENDPOINTS}
+    chosen: dict[str, tuple[datetime, str, AlpacaOriginObservation]] = {}
+    for path in sorted(directory.iterdir()):
+        if path.is_symlink() or not path.is_file():
+            continue
+        data = path.read_bytes()
+        if sha256(data).hexdigest() != path.name:
+            continue
+        observation = _parse_origin_record(data)
+        if observation is None:
+            continue
+        body = bodies.get(observation.object_key)
+        if body is None or not observation.measured(body):
+            continue
+        if not window_start <= observation.observed_at <= window_end:
+            continue
+        current = chosen.get(observation.object_key)
+        # Paths are visited in ascending digest order, so a strictly later
+        # measurement replaces the current choice and a tie keeps the lower.
+        if current is None or observation.observed_at > current[0]:
+            chosen[observation.object_key] = (
+                observation.observed_at,
+                path.name,
+                observation,
+            )
+    return {key: item[2] for key, item in sorted(chosen.items())}
+
+
 # --- step 2: acquisition receipt --------------------------------------------------
 
 
 #: Every declared endpoint, as expected object key, authenticated host, and
 #: route. The host is part of the endpoint identity: the calendar is served by
-#: the trading host and not by the market data host, and a receipt that says
-#: otherwise is wrong about where its own bytes came from.
+#: the paper trading API host and not by the market data host, and a receipt
+#: that says otherwise is wrong about where its own bytes came from.
 _OBJECT_ENDPOINTS: tuple[tuple[str, str, str], ...] = (
     (BARS_OBJECT_KEY, ALPACA_DATA_HOST, ALPACA_BARS_ROUTE),
-    (CALENDAR_OBJECT_KEY, ALPACA_TRADING_HOST, ALPACA_CALENDAR_ROUTE),
+    (CALENDAR_OBJECT_KEY, ALPACA_PAPER_TRADING_HOST, ALPACA_CALENDAR_ROUTE),
     (ACTIONS_OBJECT_KEY, ALPACA_DATA_HOST, ALPACA_ACTIONS_ROUTE),
 )
 _OBJECT_HOSTS: dict[str, str] = {key: host for key, host, _ in _OBJECT_ENDPOINTS}
@@ -1331,8 +1562,9 @@ def _request_identity(request: AlpacaIntakeRequest) -> RequestIdentityV1:
     return RequestIdentityV1(
         schema_version="1",
         method="GET",
-        # Two hosts are authenticated against, not one. Naming only the market
-        # data host would misattribute the calendar response.
+        # Two hosts are authenticated against, not one: the market data host
+        # and the paper trading API host. Naming only the market data host
+        # would misattribute the calendar response.
         authenticated_provider_host=",".join(
             sorted({host for _, host, _ in _OBJECT_ENDPOINTS})
         ),
@@ -1359,18 +1591,21 @@ def _request_identity(request: AlpacaIntakeRequest) -> RequestIdentityV1:
     )
 
 
-def _origin_evidence(request: AlpacaIntakeRequest, key: str) -> OriginEvidenceV1:
+def _origin_evidence(
+    request: AlpacaIntakeRequest, key: str, data: bytes
+) -> OriginEvidenceV1:
     """Carry the measured origin of one response, or claim nothing at all.
 
-    Nothing here is asserted unless the transport measured it. When no
-    observation was supplied, because the bytes were replayed from retention
-    and no HTTP exchange happened in this process, the origin is reported
-    ``UNKNOWN`` with no status, no content type, and no TLS peer. Closed-world
-    reconciliation then refuses to pass, which is the honest outcome: an
-    unmeasured origin is not a verified one.
+    Nothing here is asserted unless the transport measured it over exactly
+    ``data``, the retained bytes this object is being reconciled from. When no
+    observation was supplied, or the one supplied was taken over any other
+    bytes, the origin is reported ``UNKNOWN`` with no status, no content type,
+    and no TLS peer. Closed-world reconciliation then refuses to pass, which is
+    the honest outcome: an unmeasured origin is not a verified one, and a
+    measurement of other bytes is not a measurement of these.
     """
     observation = request.observation_for(key)
-    if observation is None:
+    if observation is None or not observation.measured(data):
         return OriginEvidenceV1(
             schema_version="1",
             origin_status=OriginStatus.UNKNOWN,
@@ -1452,7 +1687,9 @@ def _pages_and_objects(
                 matched_expected_key=key,
                 page_identity=f"{key}-page-0",
                 byte_object_descriptor_hashes=(descriptor,),
-                origin_evidence=_origin_evidence(request, key),
+                origin_evidence=_origin_evidence(
+                    request, key, retained.artifacts[digest].data
+                ),
                 observation_status="retained",
             )
         )
