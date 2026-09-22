@@ -859,6 +859,10 @@ Binding is total, not sampled: every artifact a context supplies appears exactly
 
 Minting is split from validation. `mint_bundle_provenance_proof` runs replay verification once and emits the proof; `validate_promotion_admission` gains a required `proof` parameter and revalidates cheaply and fail-closed, with no full M1d replay inside admission. `PromotionEvaluationAdmissionV1` gains `provenance_proof_hash`. `EvaluationInputBundleV1` gains nothing, so the hash graph stays acyclic: the proof references the bundle, never the reverse. The exploratory lane is unaffected; an unqualified context stays constructible and usable, and the wrapper is required only where a promotion-grade claim is made.
 
+**Second amendment, issue 31 reopened (supersedes the paragraph above where they conflict).** A required `proof` parameter alone was not sufficient, and the residual recorded when issue 31 was first closed rested on a cost argument that does not hold. The gate validated `proof.proof_hash`, `proof.bundle_hash`, `proof.source_snapshot_hash` and component coverage, but never read `proof.qualified_context_hash`, and had no parameter through which a `QualifiedReplayContextV1` or a `RealSourceSnapshotV1` could reach it. A hand-constructed qualified replay context naming a foreign snapshot, over a real context identity and with invented `snapshot_entry_hash` values, is fully valid under its own contract, because proving the containment witness requires the snapshot and the model never sees one. Such a context passed `mint_bundle_provenance_proof` and the gate admitted the result. The stated justification was that the ruling forbade M1d replay inside admission; `verify_snapshot_binding` performs no M1d replay at all, only `content_hash` recomputation and dictionary lookups over `snapshot.replay_inputs`, so the cost constraint never applied to the check that closes the gap.
+
+`validate_promotion_admission` therefore requires `qualified_context: QualifiedReplayContextV1` and `snapshot: RealSourceSnapshotV1` alongside `proof`, and adds three fail-closed checks: `qualified_context.qualified_hash == proof.qualified_context_hash`; `qualified_context.source_snapshot_hash == bundle.source_snapshot_hash`; and `verify_snapshot_binding(qualified=qualified_context, snapshot=snapshot)`. The intermediate signature that took a proof without the evidence behind it is not preserved for compatibility. The pure-assembly helper becomes module-private as `_build_bundle_provenance_proof`, so the module boundary rather than a docstring enforces that production reaches a proof only through minting.
+
 **Authoritative landing corrections** (superseding the illustrative pseudocode below): handoff integrity is `qualified_source_handoff_hash(handoff) == handoff.handoff_hash`, and the admission binds `decision_handoff.handoff_hash` / `audit_handoff.handoff_hash` exactly (`handoff_hash` is SELF-EXCLUDING; a whole-object `content_hash(handoff)` would include that field and must never be bound). For positive M1e evidence, every one of the 12 final dimension results in BOTH purpose reports must be `REACHED`, carry evidence, and match the owning report purpose; only profile-critical dimensions must additionally `PASS` with `admitted_purpose=True` (a non-critical reached `PARTIAL` is permitted); a positive completion must not carry `blocking_dimensions` or `blocking_evidence_hashes`.
 
 ```python
@@ -1041,6 +1045,8 @@ def validate_promotion_admission(
     decision_handoff: QualifiedSourceHandoffV1,
     audit_handoff: QualifiedSourceHandoffV1,
     proof: BundleProvenanceProofV1,
+    qualified_context: QualifiedReplayContextV1,
+    snapshot: RealSourceSnapshotV1,
 ) -> None:
     """Full promotion admission validator composing M1e evidence verification with bundle anti-laundering and provenance-proof gates."""
     validate_m1e_promotion_evidence(
@@ -1068,6 +1074,15 @@ def validate_promotion_admission(
         raise ValueError("provenance proof bundle hash mismatch")
     if proof.source_snapshot_hash != bundle.source_snapshot_hash:
         raise ValueError("provenance proof snapshot mismatch")
+
+    # Provenance evidence, re-verified rather than named (issue 31 reopened).
+    # All hashing and dictionary lookups: no M1d replay runs here.
+    if proof.qualified_context_hash != qualified_context.qualified_hash:
+        raise ValueError("provenance proof qualified context mismatch")
+    if qualified_context.source_snapshot_hash != bundle.source_snapshot_hash:
+        raise ValueError("qualified replay context snapshot mismatch with bundle")
+    verify_snapshot_binding(qualified=qualified_context, snapshot=snapshot)
+
     validate_bundle_component_coverage(proof=proof, bundle=bundle)
     if admission.provenance_proof_hash != proof.proof_hash:
         raise ValueError("admission is not bound to the provenance proof")
