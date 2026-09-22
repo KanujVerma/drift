@@ -8,7 +8,7 @@ or proves it fails closed.
 """
 
 from datetime import UTC, date, datetime
-from typing import Any, Literal
+from typing import Any, Literal, get_args, get_origin
 from uuid import UUID
 
 import pytest
@@ -19,8 +19,13 @@ from observation_test_support import (
     uid,
 )
 from pydantic import ValidationError
+from pydantic_core import PydanticUndefined
 from test_assertions import exact_boundary
 from test_evaluator_admission_gatekeeper import make_test_fixture, rebind_admission
+from test_evaluator_bundles import (
+    normalization_realized_clock,
+    normalization_scheduled_clock,
+)
 from test_universes import invoke_structural, structural_inputs
 
 from drift.domain.artifacts import ArtifactKind, ArtifactReference
@@ -28,6 +33,7 @@ from drift.domain.assertions import TemporalIntervalClaimV1
 from drift.domain.evaluator_bundles import EvaluationInputBundleV1
 from drift.domain.evaluator_lanes import (
     ExploratoryEvaluationAdmissionV1,
+    PromotionEvaluationAdmissionV1,
     exploratory_evaluation_admission_hash,
 )
 from drift.domain.qualification import ConsumerPurpose
@@ -67,10 +73,6 @@ from drift.evaluator.bundles import (
     validate_exploratory_admission,
     validate_promotion_admission,
     verify_evaluation_input_bundle,
-)
-from drift.evaluator.clock import (
-    build_realized_session_clock,
-    build_scheduled_reconstruction_clock,
 )
 from drift.markets.economic_outcomes import resolve_economic_facts
 from drift.markets.normalization import (
@@ -197,48 +199,17 @@ def _interval() -> TemporalIntervalClaimV1:
     return TemporalIntervalClaimV1(schema_version="1", start=exact_boundary(), end=None)
 
 
-RealizedOutcomeT = Literal[
-    "opened", "opened_without_bounds", "did_not_open", "unknown", "missing"
-]
-
-
-def _clock_harness(*, realized_outcome: RealizedOutcomeT = "missing") -> Any:
-    harness = ObservationHarness()
-    harness.attach_sessions(schedule_state="regular", realized_outcome=realized_outcome)
-    return harness
-
-
-def _clock_queries(harness: Any) -> tuple[Any, ...]:
-    return (
-        harness.outcome(
-            economic_horizon="2026-01-06T00:00:00Z",
-            evidence_vintage_cutoff="2026-01-06T00:00:00Z",
-            session_date="2026-01-05",
-        ),
-    )
-
-
-def _realized_clock() -> Any:
-    harness = _clock_harness(realized_outcome="opened")
-    return build_realized_session_clock(_clock_queries(harness), harness.context)
-
-
-def _scheduled_clock() -> Any:
-    harness = _clock_harness()
-    return build_scheduled_reconstruction_clock(
-        _clock_queries(harness), harness.context
-    )
-
-
 def _promotion_bundle(
     harness: NormalizationHarness,
     query: Any,
     reference: Any,
     snapshot: RealSourceSnapshotV1,
 ) -> EvaluationInputBundleV1:
+    # The clock comes from the same corpus the views replay over, because a
+    # bundle member outside its own session clock now fails closed.
     return build_evaluation_input_bundle(
         evaluation_interval=_interval(),
-        session_clock=_realized_clock(),
+        session_clock=normalization_realized_clock(harness),
         context=harness.context,
         decision_requests=((reference, query),),
         source_snapshot_hash=snapshot.snapshot_hash,
@@ -274,7 +245,7 @@ def _fully_populated_bundle() -> EvaluationInputBundleV1:
 
     return assemble_evaluation_input_bundle(
         evaluation_interval=_interval(),
-        session_clock=_realized_clock(),
+        session_clock=normalization_realized_clock(decision_harness),
         security_identities=(SecurityV1(schema_version="1", security_id=uid(21)),),
         listing_identities=(
             ListingV1(schema_version="1", listing_id=uid(22), venue=ListingVenue.XNAS),
@@ -627,6 +598,10 @@ def test_proof_identity_is_deterministic_and_versioned() -> None:
 
 
 def test_proof_version_is_pinned_and_cannot_be_relabelled() -> None:
+    annotation = BundleProvenanceProofV1.model_fields["proof_version"].annotation
+    assert get_origin(annotation) is Literal
+    assert get_args(annotation) == (BUNDLE_PROVENANCE_PROOF_VERSION,)
+
     harness, query, reference = _decision_case()
     snapshot = _qualified_snapshot(harness.context)
     qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
@@ -639,7 +614,30 @@ def test_proof_version_is_pinned_and_cannot_be_relabelled() -> None:
     )
     payload = proof.model_dump()
     payload["proof_version"] = "m2-bundle-provenance-v2"
-    with pytest.raises(ValidationError):
+    # The message must come from the pinned literal, not from an incidental
+    # self-hash mismatch that a widened annotation would also produce.
+    with pytest.raises(
+        ValidationError, match="Input should be 'm2-bundle-provenance-v1'"
+    ):
+        BundleProvenanceProofV1.model_validate(payload)
+
+
+def test_proof_requires_at_least_one_component() -> None:
+    """A proof covering nothing proves nothing, so it must not be constructible."""
+    draft = BundleProvenanceProofV1.model_construct(
+        schema_version="1",
+        proof_version=BUNDLE_PROVENANCE_PROOF_VERSION,
+        qualified_context_hash=H["1"],
+        source_snapshot_hash=H["2"],
+        decision_request_hashes=(),
+        accounting_request_hashes=(),
+        component_hashes=(),
+        bundle_hash=H["3"],
+        proof_hash=H["0"],
+    )
+    payload = draft.model_dump()
+    payload["proof_hash"] = bundle_provenance_proof_hash(draft)
+    with pytest.raises(ValidationError, match="at least one component hash"):
         BundleProvenanceProofV1.model_validate(payload)
 
 
@@ -666,7 +664,7 @@ def test_mint_rejects_a_bundle_asserting_a_different_snapshot() -> None:
     qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
     bundle = build_evaluation_input_bundle(
         evaluation_interval=_interval(),
-        session_clock=_realized_clock(),
+        session_clock=normalization_realized_clock(harness),
         context=harness.context,
         decision_requests=((reference, query),),
         source_snapshot_hash=H["7"],
@@ -686,7 +684,7 @@ def test_mint_rejects_a_bundle_whose_views_replay_did_not_produce() -> None:
     qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
     bundle = assemble_evaluation_input_bundle(
         evaluation_interval=_interval(),
-        session_clock=_realized_clock(),
+        session_clock=normalization_realized_clock(harness),
         source_snapshot_hash=snapshot.snapshot_hash,
     )
     with pytest.raises(ValueError, match="view count mismatch against replay"):
@@ -953,10 +951,15 @@ def test_bundle_carries_no_proof_or_admission_reference() -> None:
 
 
 def test_promotion_admission_requires_a_provenance_proof_hash() -> None:
+    """An optional binding would let a promotion claim stand with no proof."""
+    field = PromotionEvaluationAdmissionV1.model_fields["provenance_proof_hash"]
+    assert field.is_required()
+    assert field.default is PydanticUndefined
+
     payload = make_test_fixture()["admission"].model_dump()
     del payload["provenance_proof_hash"]
-    with pytest.raises(ValidationError):
-        type(make_test_fixture()["admission"]).model_validate(payload)
+    with pytest.raises(ValidationError, match="Field required"):
+        PromotionEvaluationAdmissionV1.model_validate(payload)
 
 
 # --- exploratory lane stays unaffected ---
@@ -970,7 +973,7 @@ def test_exploratory_unqualified_context_stays_constructible_and_usable() -> Non
 
     bundle = build_evaluation_input_bundle(
         evaluation_interval=_interval(),
-        session_clock=_scheduled_clock(),
+        session_clock=normalization_scheduled_clock(harness),
         context=harness.context,
         decision_requests=((reference, query),),
     )

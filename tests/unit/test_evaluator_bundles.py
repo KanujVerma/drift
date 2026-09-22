@@ -20,8 +20,14 @@ from drift.domain.evaluator_bundles import (
     evaluation_input_bundle_hash,
     evaluation_run_identity_hash,
 )
+from drift.domain.evaluator_clock import (
+    SessionClockV1,
+    session_clock_hash,
+    session_order_key,
+)
 from drift.domain.evaluator_lanes import (
     ALPACA_LIMITATION_ABSENT_HALTS,
+    ALPACA_LIMITATION_BOUNDED_COHORT,
     ALPACA_LIMITATION_SCHEDULED_SESSION_RECONSTRUCTION,
     ExploratoryEvaluationAdmissionV1,
     exploratory_evaluation_admission_hash,
@@ -46,6 +52,7 @@ from drift.markets.normalization import (
     materialize_observation_decision,
     materialize_observation_outcome,
 )
+from drift.markets.observation_validation import m1d_context_hash
 
 H = {c: c * 64 for c in "0123456789abcdef"}
 
@@ -86,6 +93,61 @@ def _realized_clock() -> Any:
 def _scheduled_clock() -> Any:
     harness = _harness()
     return build_scheduled_reconstruction_clock(_queries(harness), harness.context)
+
+
+def _normalization_session_query(harness: NormalizationHarness) -> Any:
+    """A session query over the normalization corpus's own realized session."""
+    return harness.source.outcome(
+        economic_horizon="2026-12-01T00:00:00Z",
+        evidence_vintage_cutoff="2026-12-01T00:00:00Z",
+        session_date="2026-11-27",
+    ).model_copy(
+        update={
+            "source_selection_policy_hash": harness._source_policy_hash,
+            "input_context_hash": m1d_context_hash(harness.context),
+        }
+    )
+
+
+def normalization_realized_clock(harness: NormalizationHarness) -> Any:
+    """Realized clock over the session the normalization views actually bind.
+
+    Bundle members must fall inside their own clock, so evidence materialized
+    from a normalization harness needs a clock built from that same corpus.
+    """
+    return build_realized_session_clock(
+        (_normalization_session_query(harness),), harness.context
+    )
+
+
+def normalization_scheduled_clock(harness: NormalizationHarness) -> Any:
+    """Scheduled-reconstruction clock over the normalization corpus's session."""
+    return build_scheduled_reconstruction_clock(
+        (_normalization_session_query(harness),), harness.context
+    )
+
+
+def _merged_realized_clock(harness: NormalizationHarness) -> SessionClockV1:
+    """One realized clock covering both corpora used by these fixtures."""
+    sessions = tuple(
+        sorted(
+            (
+                *_realized_clock().sessions,
+                *normalization_realized_clock(harness).sessions,
+            ),
+            key=session_order_key,
+        )
+    )
+    draft = SessionClockV1.model_construct(
+        schema_version="1",
+        mode="realized_session_authority",
+        sessions=sessions,
+        acknowledged_limitations=(),
+        clock_hash=H["0"],
+    )
+    return SessionClockV1.model_validate(
+        draft.model_copy(update={"clock_hash": session_clock_hash(draft)}).model_dump()
+    )
 
 
 def _realized_bundle(**overrides: Any) -> EvaluationInputBundleV1:
@@ -261,10 +323,13 @@ def _promotion_case(bundle: EvaluationInputBundleV1) -> dict[str, Any]:
 
 def test_promotion_gate_accepts_realized_snapshot_bound_bundle() -> None:
     snapshot = make_test_fixture()["decision_handoff"].snapshot_hash
-    _, _, _, decision_view = _decision_case()
+    harness, _, _, decision_view = _decision_case()
+    # The clock must contain the session the decision view binds. This test
+    # previously encoded the broken shape where it did not.
     validate_promotion_admission(
         **_promotion_case(
             _realized_bundle(
+                session_clock=normalization_realized_clock(harness),
                 source_snapshot_hash=snapshot,
                 authentic_decision_views=(decision_view,),
             )
@@ -302,16 +367,102 @@ def test_promotion_gate_rejects_missing_snapshot() -> None:
         validate_promotion_admission(**case)
 
 
+# --- bundle evidence bound to its own session clock ---
+
+
+def test_bundle_rejects_decision_view_outside_its_session_clock() -> None:
+    """Lane leakage: evidence must belong to the clock the bundle declares."""
+    _, _, _, decision_view = _decision_case()
+    with pytest.raises(
+        (ValidationError, ValueError), match="session clock does not contain"
+    ):
+        _realized_bundle(authentic_decision_views=(decision_view,))
+
+
+def test_bundle_rejects_accounting_view_outside_its_session_clock() -> None:
+    _, _, _, accounting_view = _accounting_case()
+    with pytest.raises(
+        (ValidationError, ValueError), match="session clock does not contain"
+    ):
+        _realized_bundle(authentic_accounting_views=(accounting_view,))
+
+
+def test_bundle_rejects_reconstruction_outside_its_session_clock() -> None:
+    observation = build_from_harness(_harness())
+    harness = NormalizationHarness(outer_kind="decision")
+    with pytest.raises(
+        (ValidationError, ValueError), match="session clock does not contain"
+    ):
+        assemble_evaluation_input_bundle(
+            evaluation_interval=_interval(),
+            session_clock=normalization_realized_clock(harness),
+            exploratory_reconstructed_observations=(observation,),
+        )
+
+
+def test_bundle_accepts_evidence_inside_its_session_clock() -> None:
+    harness, _, _, decision_view = _decision_case()
+    clock = normalization_realized_clock(harness)
+    bundle = assemble_evaluation_input_bundle(
+        evaluation_interval=_interval(),
+        session_clock=clock,
+        authentic_decision_views=(decision_view,),
+    )
+    assert bundle.authentic_decision_views == (decision_view,)
+    assert decision_view.source_session in {
+        session.session_key for session in clock.sessions
+    }
+
+
+def test_bundle_rejects_clock_opening_before_its_evaluation_interval() -> None:
+    late = TemporalIntervalClaimV1(
+        schema_version="1", start=exact_boundary("2026-06-01T00:00:00Z"), end=None
+    )
+    with pytest.raises(
+        (ValidationError, ValueError), match="opens before its evaluation interval"
+    ):
+        assemble_evaluation_input_bundle(
+            evaluation_interval=late, session_clock=_realized_clock()
+        )
+
+
+def test_bundle_rejects_clock_closing_after_its_evaluation_interval() -> None:
+    early = TemporalIntervalClaimV1(
+        schema_version="1",
+        start=exact_boundary("2020-01-02T14:30:00Z"),
+        end=exact_boundary("2026-01-04T00:00:00Z"),
+    )
+    with pytest.raises(
+        (ValidationError, ValueError), match="closes after its evaluation interval"
+    ):
+        assemble_evaluation_input_bundle(
+            evaluation_interval=early, session_clock=_realized_clock()
+        )
+
+
+def test_bundle_accepts_a_clock_inside_its_evaluation_interval() -> None:
+    spanning = TemporalIntervalClaimV1(
+        schema_version="1",
+        start=exact_boundary("2026-01-01T00:00:00Z"),
+        end=exact_boundary("2026-01-31T00:00:00Z"),
+    )
+    bundle = assemble_evaluation_input_bundle(
+        evaluation_interval=spanning, session_clock=_realized_clock()
+    )
+    assert bundle.evaluation_interval == spanning
+
+
 # --- deterministic run identity ---
 
 
-def _identity_args(**overrides: str) -> dict[str, str]:
-    args = {
+def _identity_args(**overrides: Any) -> dict[str, Any]:
+    bundle = _scheduled_bundle()
+    args: dict[str, Any] = {
         "strategy_hash": H["1"],
         "protocol_hash": H["2"],
         "cost_model_hash": H["3"],
-        "admission_hash": H["4"],
-        "bundle_hash": H["5"],
+        "admission": _exploratory_admission(bundle),
+        "bundle": bundle,
         "code_version_hash": H["6"],
         "environment_closure_hash": H["7"],
     }
@@ -332,8 +483,6 @@ def test_run_identity_is_deterministic() -> None:
         "strategy_hash",
         "protocol_hash",
         "cost_model_hash",
-        "admission_hash",
-        "bundle_hash",
         "code_version_hash",
         "environment_closure_hash",
     ],
@@ -342,6 +491,46 @@ def test_run_identity_depends_on_every_input(field: str) -> None:
     base = build_evaluation_run_identity(**_identity_args())
     changed = build_evaluation_run_identity(**_identity_args(**{field: H["e"]}))
     assert base.run_identity_hash != changed.run_identity_hash
+
+
+def test_run_identity_depends_on_the_admitted_bundle() -> None:
+    base = build_evaluation_run_identity(**_identity_args())
+    other = _scheduled_bundle(
+        security_identities=(SecurityV1(schema_version="1", security_id=uid(51)),)
+    )
+    changed = build_evaluation_run_identity(
+        **_identity_args(admission=_exploratory_admission(other), bundle=other)
+    )
+    assert base.bundle_hash != changed.bundle_hash
+    assert base.admission_hash != changed.admission_hash
+    assert base.run_identity_hash != changed.run_identity_hash
+
+
+def test_run_identity_depends_on_the_admission() -> None:
+    bundle = _scheduled_bundle()
+    base = build_evaluation_run_identity(**_identity_args(bundle=bundle))
+    widened = _exploratory_admission(
+        bundle,
+        limitations=(*bundle.required_limitations, ALPACA_LIMITATION_BOUNDED_COHORT),
+    )
+    changed = build_evaluation_run_identity(
+        **_identity_args(bundle=bundle, admission=widened)
+    )
+    assert base.bundle_hash == changed.bundle_hash
+    assert base.run_identity_hash != changed.run_identity_hash
+
+
+def test_run_identity_requires_the_admission_to_admit_this_bundle() -> None:
+    """The declared chain input_bundle_hash == bundle_hash is enforced, not assumed."""
+    admitted = _scheduled_bundle()
+    other = _scheduled_bundle(
+        security_identities=(SecurityV1(schema_version="1", security_id=uid(52)),)
+    )
+    assert admitted.bundle_hash != other.bundle_hash
+    with pytest.raises(ValueError, match="admission to admit this exact bundle"):
+        build_evaluation_run_identity(
+            **_identity_args(admission=_exploratory_admission(admitted), bundle=other)
+        )
 
 
 def test_run_identity_rejects_tampered_hash() -> None:
@@ -377,7 +566,7 @@ def test_build_bundle_materializes_views_through_replay() -> None:
     harness, query, reference, view = _decision_case()
     bundle = build_evaluation_input_bundle(
         evaluation_interval=_interval(),
-        session_clock=_realized_clock(),
+        session_clock=normalization_realized_clock(harness),
         context=harness.context,
         decision_requests=((reference, query),),
     )
@@ -388,7 +577,7 @@ def test_verify_accepts_genuinely_replayed_bundle() -> None:
     harness, query, reference, _ = _decision_case()
     bundle = build_evaluation_input_bundle(
         evaluation_interval=_interval(),
-        session_clock=_realized_clock(),
+        session_clock=normalization_realized_clock(harness),
         context=harness.context,
         decision_requests=((reference, query),),
     )
@@ -406,7 +595,7 @@ def test_verify_rejects_view_that_replay_did_not_produce() -> None:
             dict(
                 assemble_evaluation_input_bundle(
                     evaluation_interval=_interval(),
-                    session_clock=_realized_clock(),
+                    session_clock=normalization_realized_clock(harness),
                     authentic_decision_views=(view,),
                 )
             )
@@ -427,7 +616,7 @@ def test_verify_rejects_bundle_whose_hash_does_not_match_contents() -> None:
     harness, query, reference, _ = _decision_case()
     bundle = build_evaluation_input_bundle(
         evaluation_interval=_interval(),
-        session_clock=_realized_clock(),
+        session_clock=normalization_realized_clock(harness),
         context=harness.context,
         decision_requests=((reference, query),),
     )
@@ -513,11 +702,13 @@ def test_promotion_gate_rejects_vacuous_bundle() -> None:
 
 
 def test_promotion_gate_rejects_clock_declaring_exploratory_limitations() -> None:
-    harness = _harness()
-    observation = build_from_harness(harness)
-    _, _, _, decision_view = _decision_case()
+    observation = build_from_harness(_harness())
+    normalization, _, _, decision_view = _decision_case()
     snapshot = make_test_fixture()["decision_handoff"].snapshot_hash
+    # The clock spans both corpora so the bundle is internally coherent, and it
+    # is the promotion gate, not bundle validation, that rejects this case.
     bundle = _realized_bundle(
+        session_clock=_merged_realized_clock(normalization),
         source_snapshot_hash=snapshot,
         authentic_decision_views=(decision_view,),
         exploratory_reconstructed_observations=(observation,),
@@ -538,7 +729,7 @@ def test_verify_rejects_same_count_view_that_differs_from_replay() -> None:
     )
     bundle = assemble_evaluation_input_bundle(
         evaluation_interval=_interval(),
-        session_clock=_realized_clock(),
+        session_clock=normalization_realized_clock(harness),
         authentic_decision_views=(forged,),
     )
     assert len(bundle.authentic_decision_views) == 1
@@ -554,7 +745,7 @@ def test_build_and_verify_accounting_views_through_replay() -> None:
     harness, query, reference, view = _accounting_case()
     bundle = build_evaluation_input_bundle(
         evaluation_interval=_interval(),
-        session_clock=_realized_clock(),
+        session_clock=normalization_realized_clock(harness),
         context=harness.context,
         accounting_requests=((reference, query),),
     )

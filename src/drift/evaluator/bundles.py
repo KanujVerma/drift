@@ -11,6 +11,7 @@ from drift.domain.evaluator_bundles import (
 )
 from drift.domain.evaluator_clock import SessionClockV1
 from drift.domain.evaluator_lanes import (
+    EvaluationAdmissionV1,
     ExploratoryEvaluationAdmissionV1,
     PromotionEvaluationAdmissionV1,
 )
@@ -473,19 +474,31 @@ def build_evaluation_run_identity(
     strategy_hash: SHA256Hash,
     protocol_hash: SHA256Hash,
     cost_model_hash: SHA256Hash,
-    admission_hash: SHA256Hash,
-    bundle_hash: SHA256Hash,
+    admission: EvaluationAdmissionV1,
+    bundle: EvaluationInputBundleV1,
     code_version_hash: SHA256Hash,
     environment_closure_hash: SHA256Hash,
 ) -> EvaluationRunIdentityV1:
-    """Build the deterministic semantic identity for one evaluation run."""
+    """Build the deterministic semantic identity for one evaluation run.
+
+    The admission and the bundle are taken as objects rather than as loose
+    hashes so the declared chain `admission.input_bundle_hash == bundle_hash`
+    is enforced here. Accepting the two hashes independently allowed a run
+    identity to bind an admission to a bundle that admission never admitted.
+    """
+    if admission.input_bundle_hash != bundle.bundle_hash:
+        raise ValueError(
+            "run identity requires the admission to admit this exact bundle: "
+            f"admission binds {admission.input_bundle_hash}, "
+            f"bundle is {bundle.bundle_hash}"
+        )
     draft = EvaluationRunIdentityV1.model_construct(
         schema_version="1",
         strategy_hash=strategy_hash,
         protocol_hash=protocol_hash,
         cost_model_hash=cost_model_hash,
-        admission_hash=admission_hash,
-        bundle_hash=bundle_hash,
+        admission_hash=admission.admission_hash,
+        bundle_hash=bundle.bundle_hash,
         code_version_hash=code_version_hash,
         environment_closure_hash=environment_closure_hash,
         run_identity_hash="0" * 64,

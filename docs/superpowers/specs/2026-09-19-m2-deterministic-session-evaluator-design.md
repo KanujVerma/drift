@@ -118,6 +118,8 @@ $$\text{Market Data} \longrightarrow \text{EvaluationInputBundleV1} (\text{bundl
 
 `EvaluationInputBundleV1` does NOT hold a reference to `admission_hash`. The input bundle is immutable historical evidence independent of the evaluation lane under which it is evaluated. The admission token authorizes the bundle.
 
+**Amendment, cross-slice adversarial finding F4.** The `input_bundle_hash = bundle_hash` link above was declared but never enforced, so a valid `EvaluationRunIdentityV1` could bind a promotion admission hash over a bundle that admission never admitted. `build_evaluation_run_identity` now takes the admission and the bundle as objects rather than two independent hashes, and fails closed unless `admission.input_bundle_hash == bundle.bundle_hash`.
+
 ### 4.3 Distinct Immutable Admission and Result Types
 The domain model enforces disjoint type hierarchies:
 
@@ -407,6 +409,8 @@ Promotion lane strategy inputs strictly require:
 ### 7.4 Input Bundle and Replay-Bound Preparation
 
 A compact runtime bundle exposes numeric views for execution efficiency, but bundle preparation must verify that every view derives from exact upstream Drift kernel replays rather than untrusted Pydantic construction:
+
+**Amendment, cross-slice adversarial finding F2 (lane leakage).** Replay-boundness alone did not stop a bundle from carrying evidence for sessions its own clock never contained, which let evidence from one corpus ride into an evaluation authorized over another. `EvaluationInputBundleV1` now fails closed in its own validator when any `authentic_decision_views[*].source_session`, any `authentic_accounting_views[*].source_session`, or any `exploratory_reconstructed_observations[*].session_key` is absent from `session_clock`, and when the clock's span escapes `evaluation_interval`. A split-normalization `anchor_session` is deliberately exempt: it is a normalization reference point, not evidence consumed over the interval. This is complementary to the issue 34 provenance proof, which binds contents to a snapshot rather than to the clock.
 
 ```python
 class EvaluationInputBundleV1(FrozenModel):
