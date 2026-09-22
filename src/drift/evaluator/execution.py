@@ -15,7 +15,7 @@ from uuid import UUID
 
 from drift.domain.assertions import TemporalBoundaryClaimV1, TemporalIntervalClaimV1
 from drift.domain.common import UUID7
-from drift.domain.evaluator_clock import EvaluationSessionV1
+from drift.domain.evaluator_clock import EvaluationSessionV1, SessionClockV1
 from drift.domain.evaluator_costs import EvaluationCostModelV1
 from drift.domain.evaluator_execution import (
     BASIS_POINT_DENOMINATOR,
@@ -320,13 +320,24 @@ class AtomicRebalanceEngine:
     caller holding exactly the state it passed in.
     """
 
-    def __init__(self, *, cost_model: EvaluationCostModelV1) -> None:
+    def __init__(
+        self,
+        *,
+        cost_model: EvaluationCostModelV1,
+        session_clock: SessionClockV1,
+    ) -> None:
         self._cost_model = cost_model
+        self._session_clock = session_clock
 
     @property
     def cost_model(self) -> EvaluationCostModelV1:
         """The versioned cost and slippage model applied to every fill."""
         return self._cost_model
+
+    @property
+    def session_clock(self) -> SessionClockV1:
+        """Authority-bound clock the committing kernel is validated against."""
+        return self._session_clock
 
     def plan(
         self,
@@ -551,11 +562,13 @@ class AtomicRebalanceEngine:
             halt_stepping=True,
         )
 
-    @staticmethod
     def _commit(
-        *, state: PortfolioStateV1, plan: RebalancePlanV1
+        self, *, state: PortfolioStateV1, plan: RebalancePlanV1
     ) -> RebalanceOutcomeV1:
-        kernel = PortfolioAccountingKernel(state)
+        # The throwaway kernel is validated against the same authority-bound
+        # clock as the real book. Synthesizing a clock here would defeat the
+        # guard that a book cannot operate on an unauthorized session.
+        kernel = PortfolioAccountingKernel(state, session_clock=self._session_clock)
         try:
             for fill in plan.planned_fills:
                 kernel.apply_fill(fill.to_portfolio_fill())

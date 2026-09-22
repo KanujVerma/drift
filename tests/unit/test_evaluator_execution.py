@@ -17,7 +17,9 @@ from drift.domain.assertions import (
 from drift.domain.common import UUID7
 from drift.domain.evaluator_clock import (
     EvaluationSessionV1,
+    SessionClockV1,
     evaluation_session_hash,
+    session_clock_hash,
 )
 from drift.domain.evaluator_costs import (
     EvaluationCostModelV1,
@@ -32,6 +34,11 @@ from drift.domain.evaluator_execution import (
     RebalanceOutcomeV1,
     RebalancePlanV1,
     canonical_fill_order,
+)
+from drift.domain.evaluator_lanes import (
+    ALPACA_LIMITATION_BOUNDED_COHORT,
+    ExploratoryEvaluationAdmissionV1,
+    exploratory_evaluation_admission_hash,
 )
 from drift.domain.evaluator_portfolio import (
     PortfolioStateV1,
@@ -101,6 +108,25 @@ def _session(
         session_hash=H0,
     )
     return draft.model_copy(update={"session_hash": evaluation_session_hash(draft)})
+
+
+def _clock(
+    *, sessions: tuple[EvaluationSessionV1, ...] | None = None
+) -> SessionClockV1:
+    """Realized-authority clock authorizing the execution session under test."""
+    members = sessions if sessions is not None else (_session(),)
+    draft = SessionClockV1.model_construct(
+        schema_version="1",
+        mode="realized_session_authority",
+        sessions=members,
+        acknowledged_limitations=(),
+        clock_hash=H0,
+    )
+    candidate = draft.model_copy(update={"clock_hash": session_clock_hash(draft)})
+    return SessionClockV1.model_validate(candidate.model_dump())
+
+
+EXEC_CLOCK = _clock()
 
 
 def _cost_model(
@@ -233,6 +259,23 @@ NEW = _listing(LISTING_NEW, ListingVenue.XNAS)
 OTHER = _listing(LISTING_OTHER, ListingVenue.XASE)
 
 
+def _execution_admission() -> ExploratoryEvaluationAdmissionV1:
+    """Exploratory lane admission for books under execution test."""
+    draft = ExploratoryEvaluationAdmissionV1.model_construct(
+        schema_version="1",
+        lane="exploratory",
+        input_bundle_hash="b" * 64,
+        acknowledged_limitations=(ALPACA_LIMITATION_BOUNDED_COHORT,),
+        admission_hash="0" * 64,
+    )
+    return draft.model_copy(
+        update={"admission_hash": exploratory_evaluation_admission_hash(draft)}
+    )
+
+
+EXECUTION_ADMISSION = _execution_admission()
+
+
 def _state(
     *,
     cash: str = "10000.00",
@@ -243,7 +286,11 @@ def _state(
     # The opening-state factory requires strictly positive seed cash, so a
     # zero-cash book is seeded then drawn down to the balance under test.
     seed = balance if balance > Decimal("0") else Decimal("1.00")
-    opening = initial_portfolio_state(session_key=_key(day), initial_cash=seed)
+    opening = initial_portfolio_state(
+        session_key=_key(day),
+        initial_cash=seed,
+        admission=EXECUTION_ADMISSION,
+    )
     update: dict[str, object] = {}
     if seed != balance:
         update |= {"cash_balance": balance, "net_asset_value": balance}
@@ -738,7 +785,7 @@ def test_many_security_resolution_consults_termination_evidence() -> None:
 
 
 def test_plan_applies_adverse_slippage_and_costs_to_a_buy() -> None:
-    engine = AtomicRebalanceEngine(cost_model=_cost_model())
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=_cost_model())
     plan = engine.plan(
         state=_state(),
         staged_targets=(_target(SEC_A, 10),),
@@ -760,7 +807,7 @@ def test_plan_applies_adverse_slippage_and_costs_to_a_buy() -> None:
 
 
 def test_plan_applies_adverse_slippage_and_costs_to_a_sell() -> None:
-    engine = AtomicRebalanceEngine(cost_model=_cost_model())
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=_cost_model())
     plan = engine.plan(
         state=_state(holdings=(_holding(SEC_A, 20, "800.00"),)),
         staged_targets=(_target(SEC_A, 0),),
@@ -779,9 +826,10 @@ def test_plan_applies_adverse_slippage_and_costs_to_a_sell() -> None:
 
 def test_notional_fee_uses_the_unadjusted_open_price() -> None:
     engine = AtomicRebalanceEngine(
+        session_clock=EXEC_CLOCK,
         cost_model=_cost_model(
             commission="0.00", fixed_fee="0.00", notional_bps="100", slippage_bps="1000"
-        )
+        ),
     )
     plan = engine.plan(
         state=_state(),
@@ -795,7 +843,7 @@ def test_notional_fee_uses_the_unadjusted_open_price() -> None:
 
 
 def test_plan_records_the_resolved_execution_listing_and_venue() -> None:
-    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
     plan = engine.plan(
         state=_state(),
         staged_targets=(_target(SEC_A, 1),),
@@ -808,7 +856,7 @@ def test_plan_records_the_resolved_execution_listing_and_venue() -> None:
 
 
 def test_plan_skips_a_zero_delta_and_requires_no_price_for_it() -> None:
-    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
     plan = engine.plan(
         state=_state(holdings=(_holding(SEC_A, 5, "50.00"),)),
         staged_targets=(_target(SEC_A, 5),),
@@ -820,7 +868,7 @@ def test_plan_skips_a_zero_delta_and_requires_no_price_for_it() -> None:
 
 
 def test_plan_fails_closed_on_a_missing_open_price() -> None:
-    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
     with pytest.raises(IndeterminateExecutionError, match="open price"):
         engine.plan(
             state=_state(),
@@ -841,7 +889,7 @@ def test_open_price_contract_rejects_a_non_positive_amount() -> None:
 
 
 def test_plan_fails_closed_on_a_non_positive_open_price() -> None:
-    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
     for bad in (Decimal("0.00"), Decimal("-1.00")):
         forged = ListingOpenPriceV1.model_construct(
             schema_version="1",
@@ -859,7 +907,7 @@ def test_plan_fails_closed_on_a_non_positive_open_price() -> None:
 
 
 def test_plan_fails_closed_on_a_price_bound_to_another_listing() -> None:
-    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
     with pytest.raises(IndeterminateExecutionError, match="bound to listing"):
         engine.plan(
             state=_state(),
@@ -870,7 +918,7 @@ def test_plan_fails_closed_on_a_price_bound_to_another_listing() -> None:
 
 
 def test_plan_fails_closed_on_a_price_bound_to_another_venue() -> None:
-    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
     mislabelled = ListingOpenPriceV1(
         listing_id=LISTING_NEW,
         venue=ListingVenue.XNYS,
@@ -886,7 +934,7 @@ def test_plan_fails_closed_on_a_price_bound_to_another_venue() -> None:
 
 
 def test_migrated_security_refuses_the_price_from_its_old_listing() -> None:
-    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
     records = (
         _role_record(listing_id=LISTING_OLD, start=BEFORE, end=MIGRATION),
         _role_record(listing_id=LISTING_NEW, start=MIGRATION, suffix=811),
@@ -910,7 +958,7 @@ def test_migrated_security_refuses_the_price_from_its_old_listing() -> None:
 
 
 def test_plan_fails_closed_without_a_resolved_execution_listing() -> None:
-    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
     with pytest.raises(IndeterminateExecutionError, match="execution listing"):
         engine.plan(
             state=_state(),
@@ -921,7 +969,7 @@ def test_plan_fails_closed_without_a_resolved_execution_listing() -> None:
 
 
 def test_plan_requires_staged_targets_to_cover_every_holding() -> None:
-    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
     # An uncovered holding leaves the intended position unknowable, so it
     # belongs to the execution taxonomy rather than to a bare ValueError.
     with pytest.raises(IndeterminateExecutionError, match="every held security"):
@@ -934,7 +982,7 @@ def test_plan_requires_staged_targets_to_cover_every_holding() -> None:
 
 
 def test_uncovered_holding_stays_inside_the_execution_error_taxonomy() -> None:
-    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
     with pytest.raises(IndeterminateExecutionError) as caught:
         engine.plan(
             state=_state(holdings=(_holding(SEC_B, 5, "50.00"),)),
@@ -947,7 +995,7 @@ def test_uncovered_holding_stays_inside_the_execution_error_taxonomy() -> None:
 
 
 def test_plan_rejects_duplicate_staged_targets() -> None:
-    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
     with pytest.raises(ValueError, match="unique"):
         engine.plan(
             state=_state(),
@@ -958,7 +1006,7 @@ def test_plan_rejects_duplicate_staged_targets() -> None:
 
 
 def test_plan_rejects_a_forged_negative_staged_target() -> None:
-    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
     forged = SecurityTargetPositionV1.model_construct(
         schema_version="1", security_id=SEC_A, target_quantity=-1
     )
@@ -972,7 +1020,7 @@ def test_plan_rejects_a_forged_negative_staged_target() -> None:
 
 
 def test_plan_orders_sells_before_buys_by_security_uuid_bytes() -> None:
-    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
     plan = engine.plan(
         state=_state(
             holdings=(_holding(SEC_B, 4, "40.00"), _holding(SEC_C, 4, "40.00"))
@@ -993,7 +1041,7 @@ def test_plan_orders_sells_before_buys_by_security_uuid_bytes() -> None:
 
 
 def test_plan_orders_sells_by_descending_cash_delta_before_uuid_bytes() -> None:
-    engine = AtomicRebalanceEngine(cost_model=FEE_ONLY)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=FEE_ONLY)
     plan = engine.plan(
         state=_state(
             cash="0.00",
@@ -1014,7 +1062,7 @@ def test_plan_orders_sells_by_descending_cash_delta_before_uuid_bytes() -> None:
 
 
 def test_funded_rebalance_with_a_fee_heavy_sell_commits() -> None:
-    engine = AtomicRebalanceEngine(cost_model=FEE_ONLY)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=FEE_ONLY)
     outcome = engine.rebalance(
         state=_state(
             cash="0.00",
@@ -1032,7 +1080,7 @@ def test_funded_rebalance_with_a_fee_heavy_sell_commits() -> None:
 
 
 def test_fee_heavy_liquidation_outcome_is_invariant_under_swapped_uuids() -> None:
-    engine = AtomicRebalanceEngine(cost_model=FEE_ONLY)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=FEE_ONLY)
 
     def _liquidate(cheap: UUID7, rich: UUID7) -> RebalanceOutcomeV1:
         holdings = tuple(
@@ -1061,7 +1109,7 @@ def test_fee_heavy_liquidation_outcome_is_invariant_under_swapped_uuids() -> Non
 
 
 def test_plan_rejects_sells_reordered_by_uuid_bytes() -> None:
-    engine = AtomicRebalanceEngine(cost_model=FEE_ONLY)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=FEE_ONLY)
     plan = engine.plan(
         state=_state(
             cash="0.00",
@@ -1080,7 +1128,7 @@ def test_plan_rejects_sells_reordered_by_uuid_bytes() -> None:
 
 
 def test_plan_breaks_equal_sell_cash_deltas_by_security_uuid_bytes() -> None:
-    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
     plan = engine.plan(
         state=_state(
             cash="0.00",
@@ -1170,7 +1218,7 @@ def test_canonical_order_is_stable_under_an_ambient_decimal_context() -> None:
 
 
 def test_plan_is_immune_to_an_ambient_decimal_context() -> None:
-    engine = AtomicRebalanceEngine(cost_model=_cost_model())
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=_cost_model())
     pinned = engine.plan(
         state=_state(),
         staged_targets=(_target(SEC_A, 7),),
@@ -1192,7 +1240,7 @@ def test_plan_is_immune_to_an_ambient_decimal_context() -> None:
 
 
 def test_execution_commits_sells_before_buys() -> None:
-    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
     state = _state(cash="10.00", holdings=(_holding(SEC_B, 10, "500.00"),))
     outcome = engine.rebalance(
         state=state,
@@ -1206,7 +1254,7 @@ def test_execution_commits_sells_before_buys() -> None:
 
 
 def test_execution_applies_slippage_and_deducts_transaction_costs() -> None:
-    engine = AtomicRebalanceEngine(cost_model=_cost_model())
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=_cost_model())
     outcome = engine.rebalance(
         state=_state(cash="10000.00"),
         staged_targets=(_target(SEC_A, 10),),
@@ -1219,7 +1267,7 @@ def test_execution_applies_slippage_and_deducts_transaction_costs() -> None:
 
 
 def test_execution_clears_a_stale_mark() -> None:
-    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
     outcome = engine.rebalance(
         state=_state(),
         staged_targets=(_target(SEC_A, 1),),
@@ -1231,7 +1279,7 @@ def test_execution_clears_a_stale_mark() -> None:
 
 
 def test_unfunded_rebalance_commits_zero_fills_and_halts() -> None:
-    engine = AtomicRebalanceEngine(cost_model=_cost_model())
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=_cost_model())
     state = _state(cash="100.00")
     outcome = engine.rebalance(
         state=state,
@@ -1252,7 +1300,7 @@ def test_unfunded_rebalance_commits_zero_fills_and_halts() -> None:
 
 
 def test_multi_buy_shortfall_commits_zero_fills() -> None:
-    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
     state = _state(cash="1500.00")
     outcome = engine.rebalance(
         state=state,
@@ -1269,7 +1317,7 @@ def test_multi_buy_shortfall_commits_zero_fills() -> None:
 
 
 def test_shortfall_in_one_buy_blocks_the_affordable_buy_too() -> None:
-    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
     outcome = engine.rebalance(
         state=_state(cash="1000.00"),
         staged_targets=(_target(SEC_A, 1), _target(SEC_B, 100)),
@@ -1281,7 +1329,7 @@ def test_shortfall_in_one_buy_blocks_the_affordable_buy_too() -> None:
 
 
 def test_exactly_funded_rebalance_executes() -> None:
-    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
     outcome = engine.rebalance(
         state=_state(cash="1000.00"),
         staged_targets=(_target(SEC_A, 10),),
@@ -1293,7 +1341,7 @@ def test_exactly_funded_rebalance_executes() -> None:
 
 
 def test_one_cent_short_rebalance_is_rejected() -> None:
-    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
     outcome = engine.rebalance(
         state=_state(cash="999.99"),
         staged_targets=(_target(SEC_A, 10),),
@@ -1306,7 +1354,7 @@ def test_one_cent_short_rebalance_is_rejected() -> None:
 
 
 def test_execute_rejects_a_plan_built_for_another_session() -> None:
-    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
     plan = engine.plan(
         state=_state(day=date(2026, 11, 27)),
         staged_targets=(_target(SEC_A, 1),),
@@ -1318,7 +1366,7 @@ def test_execute_rejects_a_plan_built_for_another_session() -> None:
 
 
 def test_execute_rejects_a_plan_built_against_another_cash_balance() -> None:
-    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
     plan = engine.plan(
         state=_state(cash="10000.00"),
         staged_targets=(_target(SEC_A, 1),),
@@ -1330,7 +1378,7 @@ def test_execute_rejects_a_plan_built_against_another_cash_balance() -> None:
 
 
 def test_execute_rejects_a_plan_built_against_other_holdings() -> None:
-    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
     plan = engine.plan(
         state=_state(cash="10000.00"),
         staged_targets=(_target(SEC_A, 5),),
@@ -1343,7 +1391,7 @@ def test_execute_rejects_a_plan_built_against_other_holdings() -> None:
 
 
 def test_execute_rejects_a_plan_built_against_another_security() -> None:
-    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
     plan = engine.plan(
         state=_state(cash="10000.00", holdings=(_holding(SEC_A, 3, "30.00"),)),
         staged_targets=(_target(SEC_A, 5),),
@@ -1356,7 +1404,7 @@ def test_execute_rejects_a_plan_built_against_another_security() -> None:
 
 
 def test_plan_positions_hash_tracks_held_quantities() -> None:
-    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
 
     def _hash_for(quantity: int) -> str:
         return engine.plan(
@@ -1373,7 +1421,7 @@ def test_plan_positions_hash_tracks_held_quantities() -> None:
 
 
 def test_execute_refuses_to_partially_apply_an_unbookable_plan() -> None:
-    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
     state = _state(cash="1000.00")
     plan = engine.plan(
         state=state,
@@ -1396,7 +1444,7 @@ def test_execute_refuses_to_partially_apply_an_unbookable_plan() -> None:
 
 
 def test_execution_end_to_end_uses_the_migrated_primary_listing() -> None:
-    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
     records = (
         _role_record(listing_id=LISTING_OLD, start=BEFORE, end=MIGRATION),
         _role_record(listing_id=LISTING_NEW, start=MIGRATION, suffix=811),
@@ -1507,7 +1555,7 @@ def test_rejection_requires_an_exact_shortfall() -> None:
 
 
 def _plan_and_state() -> tuple[RebalancePlanV1, PortfolioStateV1]:
-    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
     state = _state(cash="1000.00")
     plan = engine.plan(
         state=state,
@@ -1613,7 +1661,7 @@ def test_plan_rejects_a_forged_required_cash() -> None:
 
 
 def test_plan_rejects_uncanonical_fill_order() -> None:
-    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
     plan = engine.plan(
         state=_state(holdings=(_holding(SEC_B, 4, "40.00"),)),
         staged_targets=(_target(SEC_A, 2), _target(SEC_B, 0)),
