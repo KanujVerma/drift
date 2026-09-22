@@ -2394,40 +2394,82 @@ def test_a_payable_date_revision_carries_one_claim_identity() -> None:
 
 
 def test_two_claims_on_one_component_make_delivery_ambiguous() -> None:
-    # Claim identity is source-scoped, so two sources reusing one native
-    # occurrence id are two entitlements carrying two ids. The delivered
-    # report is matched on security, occurrence and component alone, so it
-    # names both claims and settling either one would be a guess.
-    first = _manual_claim(payable=PAYABLE_DAY, source_id=SOURCE_A)
-    second = _manual_claim(payable=PAYABLE_DAY, source_id=SOURCE_B)
+    # Genuine ambiguity survives source scoping. The index key names the
+    # source, security, occurrence and component, but claim identity also
+    # carries the action kind, which the key does not. One source reusing one
+    # native occurrence id across two action kinds therefore holds two
+    # entitlements under one key, and a delivered report, which carries no
+    # action kind, names both. Settling either one would be a guess.
+    first = _manual_claim(
+        payable=PAYABLE_DAY, action_kind=ActionKind.REGULAR_CASH_DIVIDEND
+    )
+    second = _manual_claim(
+        payable=PAYABLE_DAY, action_kind=ActionKind.SPECIAL_CASH_DISTRIBUTION
+    )
+    assert first.source_id == SOURCE_A
+    assert second.source_id == SOURCE_A
     assert first.claim_id != second.claim_id
     state = _state(claims=(first, second), cash="100", day=PAYABLE_DAY)
     delivered = _outcome(
         effects=(),
-        delivery_groups=(_delivery(components=(_cash(amount="0.5"),)),),
+        delivery_groups=(
+            _delivery(components=(_cash(amount="0.5"),), source_id=SOURCE_A),
+        ),
     )
     with pytest.raises(
         IndeterminateValuationError,
-        match=r"matches more than one pending claim: occ-1/cash-1$",
+        match=(
+            r"^one delivered cash component matches more than one pending "
+            r"claim: synthetic-a/occ-1/cash-1$"
+        ),
     ):
         _processor().apply_intrasession_settlements(
             state, (delivered,), _key(PAYABLE_DAY)
         )
 
 
-def _manual_claim(*, payable: date, source_id: str = SOURCE_A) -> PendingCashClaimV1:
+def test_delivery_settles_the_claim_from_its_own_source() -> None:
+    # Two sources reusing one native occurrence id are two entitlements. The
+    # delivered report carries its own source, so it names exactly one of
+    # them and the other stays pending.
+    mine = _manual_claim(payable=PAYABLE_DAY, source_id=SOURCE_A)
+    theirs = _manual_claim(payable=PAYABLE_DAY, source_id=SOURCE_B)
+    assert mine.claim_id != theirs.claim_id
+    state = _state(claims=(mine, theirs), cash="100", day=PAYABLE_DAY)
+    delivered = _outcome(
+        effects=(),
+        delivery_groups=(
+            _delivery(components=(_cash(amount="0.5"),), source_id=SOURCE_B),
+        ),
+    )
+    settled = _processor().apply_intrasession_settlements(
+        state, (delivered,), _key(PAYABLE_DAY)
+    )
+    assert settled.settled_claim_ids == (theirs.claim_id,)
+    assert tuple(item.claim_id for item in settled.pending_cash_claims) == (
+        mine.claim_id,
+    )
+    assert settled.cash_balance == Decimal("150.0")
+
+
+def _manual_claim(
+    *,
+    payable: date,
+    source_id: str = SOURCE_A,
+    action_kind: ActionKind = ActionKind.REGULAR_CASH_DIVIDEND,
+) -> PendingCashClaimV1:
     per_share = Decimal("0.5")
     return PendingCashClaimV1(
         claim_id=pending_cash_claim_id(
             source_id=source_id,
             security_id=SEC_A,
-            action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
+            action_kind=action_kind,
             occurrence_id="occ-1",
             component_id="cash-1",
         ),
         source_id=source_id,
         security_id=SEC_A,
-        action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
+        action_kind=action_kind,
         occurrence_id="occ-1",
         component_id="cash-1",
         entitled_quantity=100,

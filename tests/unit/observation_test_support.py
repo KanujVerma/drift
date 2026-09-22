@@ -2506,6 +2506,7 @@ class NormalizationHarness:
         ] = "completed",
         economic_through: str | None = None,
         economic_history_start: str = "2020-01-01T00:00:00Z",
+        economic_coverage_boundary: str | None = None,
         occurrence_group_case: Literal[
             "base",
             "cancelled_conflict",
@@ -2562,6 +2563,7 @@ class NormalizationHarness:
             duplicate=duplicate,
             economic_through=economic_through,
             economic_history_start=economic_history_start,
+            economic_coverage_boundary=economic_coverage_boundary,
             occurrence_group_case=occurrence_group_case,
             neutral_suffix=neutral_suffix,
             include_prior_open=include_prior_open,
