@@ -61,7 +61,19 @@ ALLOWED_TASK1_PINNED_LANE_ADDITIONS = frozenset(
         "tests/integration/test_m1e_compatibility.py",
         "tests/fixtures/m1d-compatibility/m1c-v2-protected-sha256.json",
         "tests/fixtures/m1e-compatibility/m1d-v3-protected-sha256.json",
+        # v4 supersedes v3 as the working-tree freeze under issue #32.  v3
+        # stays above, unedited, as the historical af75cce inventory.
+        "tests/fixtures/m1e-compatibility/m1d-v4-protected-sha256.json",
     }
+)
+HISTORICAL_M1D_INVENTORY = (
+    REPO_ROOT / "tests/fixtures/m1e-compatibility/m1d-v3-protected-sha256.json"
+)
+CURRENT_M1D_INVENTORY = (
+    REPO_ROOT / "tests/fixtures/m1e-compatibility/m1d-v4-protected-sha256.json"
+)
+HISTORICAL_M1D_INVENTORY_SHA256 = (
+    "6fb819eb863ebf83e1a3b4e3a7e6af261748116502cdb0ad3603d108d17c2e2b"
 )
 
 FORBIDDEN_IMPORT_ROOTS = frozenset(
@@ -373,6 +385,34 @@ def _accepted_m1d_source_paths() -> tuple[str, ...]:
     )
 
 
+def _current_m1d_inventory() -> dict[str, object]:
+    document = json.loads(CURRENT_M1D_INVENTORY.read_text(encoding="utf-8"))
+    assert isinstance(document, dict)
+    return document
+
+
+def _superseded_m1d_source_pins() -> dict[str, str]:
+    """Return the accepted current sha256 of each superseded M1d source path.
+
+    These are the only accepted M1d source paths whose bytes are allowed to
+    differ from ``PINNED_M1D_COMMIT``.  Each one still has to match an exact
+    pinned digest recorded in the current inventory, so the byte freeze is
+    moved forward rather than relaxed.
+    """
+    document = _current_m1d_inventory()
+    superseded = document["superseded_paths"]
+    assert isinstance(superseded, dict) and superseded
+    pins = document["sha256"]
+    assert isinstance(pins, dict)
+    resolved: dict[str, str] = {}
+    for path, record in superseded.items():
+        assert path.startswith("src/drift/"), path
+        assert record["current_sha256"] == pins[path], path
+        assert record["historical_sha256"] != record["current_sha256"], path
+        resolved[path] = record["current_sha256"]
+    return resolved
+
+
 def test_c01_protected_m0_m1c_bytes_match_planning_baseline() -> None:
     """Canonical, ledger, temporal, identity, economic and fixture bytes stay old."""
     expected = _baseline_hashes()
@@ -559,9 +599,19 @@ def test_c03_forbidden_runtime_capabilities_and_dependencies_remain_absent() -> 
     assert set(_runtime_additions()) >= {
         REPO_ROOT / path for path in accepted_additions
     }
+    superseded = _superseded_m1d_source_pins()
     for relative in _accepted_m1d_source_paths():
         path = REPO_ROOT / relative
-        assert path.read_bytes() == _git_bytes(PINNED_M1D_COMMIT, relative), relative
+        if relative in superseded:
+            # Superseded under issue #32: still byte-pinned, but against the
+            # current inventory instead of PINNED_M1D_COMMIT.
+            assert (
+                hashlib.sha256(path.read_bytes()).hexdigest() == superseded[relative]
+            ), relative
+        else:
+            assert path.read_bytes() == _git_bytes(PINNED_M1D_COMMIT, relative), (
+                relative
+            )
     for relative in accepted_additions:
         path = REPO_ROOT / relative
         _assert_runtime_ast_allowed(path.read_text(encoding="utf-8"), str(path))
@@ -614,3 +664,57 @@ def test_task1_pinned_lane_additions_are_explicit_and_no_old_contract_is_re_sign
     )["sha256"]
     assert len(pinned) == 126
     assert set(pinned).issubset(_baseline_hashes())
+
+
+def test_v3_source_pins_are_superseded_by_v4_without_rewriting_history() -> None:
+    """v3 stays the historical inventory; v4 carries the declared delta only."""
+    historical_raw = HISTORICAL_M1D_INVENTORY.read_bytes()
+    assert (
+        hashlib.sha256(historical_raw).hexdigest() == HISTORICAL_M1D_INVENTORY_SHA256
+    ), "the historical M1d inventory must stay byte-identical for audit"
+    historical = json.loads(historical_raw)
+    assert historical["commit"] == PINNED_M1D_COMMIT
+    assert len(historical["sha256"]) == 544
+
+    current = _current_m1d_inventory()
+    assert current["inventory_id"] == "m1d-v4-protected-sha256"
+    assert current["baseline_commit"] == PINNED_M1D_COMMIT
+    supersedes = current["supersedes"]
+    assert isinstance(supersedes, dict)
+    assert supersedes["inventory_id"] == "m1d-v3-protected-sha256"
+    assert supersedes["commit"] == PINNED_M1D_COMMIT
+    assert supersedes["file_sha256"] == HISTORICAL_M1D_INVENTORY_SHA256
+    assert supersedes["issue"] == 32
+    assert "semantic attestation" in supersedes["reason"]
+
+    superseded = _superseded_m1d_source_pins()
+    assert set(superseded) == {
+        "src/drift/markets/observation_validation.py",
+        "src/drift/markets/session_validation.py",
+    }
+    source_commit = current["source_commit"]
+    assert isinstance(source_commit, str)
+    assert _git("merge-base", "--is-ancestor", source_commit, "HEAD") == ""
+
+    added = current["added_paths"]
+    assert isinstance(added, dict) and added
+    assert set(added) == {"src/drift/domain/semantic_attestation.py"}
+    assert not set(added) & set(historical["sha256"])
+
+    # The supersession is exactly reproducible: v4 is v3 with the declared
+    # paths taken from source_commit, plus the declared additions, and nothing
+    # else touched.
+    expected = dict(historical["sha256"])
+    for relative, digest in superseded.items():
+        assert (
+            hashlib.sha256(_git_bytes(source_commit, relative)).hexdigest() == digest
+        ), relative
+        expected[relative] = digest
+    for relative, record in added.items():
+        assert record["issue"] == 32, relative
+        assert isinstance(record["justification"], str), relative
+        assert record["justification"].strip(), relative
+        live = (REPO_ROOT / relative).read_bytes()
+        assert hashlib.sha256(live).hexdigest() == record["current_sha256"], relative
+        expected[relative] = record["current_sha256"]
+    assert current["sha256"] == expected
