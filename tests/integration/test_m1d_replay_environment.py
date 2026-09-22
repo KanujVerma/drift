@@ -347,16 +347,102 @@ def test_failure_classes_are_four_distinct_siblings() -> None:
 
 def test_pinned_replay_lane_has_no_skip_path() -> None:
     """A failed guard must fail the run; the lane may never skip or xfail."""
-    forbidden = {"skip", "skipif", "xfail", "importorskip", "exit"}
+    skip_names = {"skip", "skipif", "xfail", "importorskip"}
     for relative in ("tests/_pinned_m1d.py", "tests/conftest.py"):
         tree = ast.parse((REPO_ROOT / relative).read_text(encoding="utf-8"))
         for node in ast.walk(tree):
-            if isinstance(node, ast.Attribute) and node.attr in forbidden:
-                owner = node.value
-                assert not (isinstance(owner, ast.Name) and owner.id == "pytest"), (
-                    f"{relative}:{node.lineno} uses pytest.{node.attr}"
+            if isinstance(node, ast.Attribute):
+                # Any owner, so an aliased or dynamically imported pytest
+                # cannot hide a skip.
+                assert node.attr not in skip_names, (
+                    f"{relative}:{node.lineno} uses .{node.attr}"
                 )
+                owner = node.value
+                assert not (
+                    node.attr == "exit"
+                    and isinstance(owner, ast.Name)
+                    and owner.id == "pytest"
+                ), f"{relative}:{node.lineno} uses pytest.exit"
             if isinstance(node, ast.Name):
-                assert node.id not in {"skip", "xfail", "importorskip"}, (
+                assert node.id not in skip_names, (
                     f"{relative}:{node.lineno} references {node.id}"
                 )
+    # The replay helper classifies failures by raising; it never talks to
+    # pytest at all, so it cannot convert a failure into an outcome.
+    helper = ast.parse((REPO_ROOT / "tests/_pinned_m1d.py").read_text("utf-8"))
+    for node in ast.walk(helper):
+        if isinstance(node, ast.Import):
+            assert all(alias.name.split(".")[0] != "pytest" for alias in node.names)
+        if isinstance(node, ast.ImportFrom):
+            assert (node.module or "").split(".")[0] != "pytest"
+
+
+CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+CANONICAL_GATE = (
+    "uv run pytest",
+    "uv run ruff check .",
+    "uv run ruff format --check .",
+    "uv run mypy src tests",
+    "uv build",
+    "git diff --check",
+)
+
+
+def _run_steps(workflow: str) -> list[str]:
+    """Return every single-line ``run:`` command in the workflow, in order."""
+    return [
+        match.group(1).strip()
+        for match in re.finditer(r"(?m)^\s+run: (?!\|)(.+)$", workflow)
+    ]
+
+
+def test_ci_consumes_the_same_interpreter_pin_used_locally() -> None:
+    """CI reads .python-version, never a duplicated version, and checks it."""
+    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+    pin = (REPO_ROOT / ".python-version").read_text(encoding="utf-8").strip()
+    assert pin not in workflow, "CI must not duplicate the interpreter pin"
+    assert "python-version:" not in workflow
+    assert "python-version-file" not in workflow
+    assert "UV_PYTHON:" not in workflow
+    assert re.search(r"(?m)^\s+if ! uv python install; then$", workflow)
+    assert "UV_PYTHON_PREFERENCE: only-managed" in workflow
+    assert "import _pinned_m1d as replay" in workflow
+    assert "replay.verify_replay_interpreter()" in workflow
+    assert "PINNED_REPLAY_ENVIRONMENT_ARTIFACT_UNAVAILABLE" in workflow
+
+
+def test_ci_runs_the_canonical_gate_on_every_pull_request_and_main() -> None:
+    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+    assert re.search(
+        r"(?m)^on:\n  pull_request:\n  push:\n    branches: \[main\]$", workflow
+    )
+    assert re.search(r"(?m)^\s+timeout-minutes: [0-9]+$", workflow)
+    assert "fetch-depth: 0" in workflow
+    assert 'UV_LOCKED: "1"' in workflow
+    steps = _run_steps(workflow)
+    assert "uv sync --locked" in steps
+    positions = [steps.index(command) for command in CANONICAL_GATE]
+    assert positions == sorted(positions)
+    assert steps.index("uv sync --locked") < positions[0]
+
+
+def test_ci_observes_repository_truth_and_never_repairs_it() -> None:
+    """Read-only token, no secrets, no fixture regeneration, no write-back."""
+    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+    assert re.search(r"(?m)^permissions:\n  contents: read$", workflow)
+    assert "persist-credentials: false" in workflow
+    for forbidden in (
+        "secrets.",
+        "write-all",
+        ": write",
+        "pull_request_target",
+        "git commit",
+        "git push",
+        "git add",
+        "write_fixture",
+        "--upgrade",
+        "uv lock",
+        "--no-locked",
+    ):
+        assert forbidden not in workflow, forbidden
+    assert 'test -z "$(git status --porcelain --untracked-files=no)"' in workflow

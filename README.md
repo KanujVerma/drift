@@ -81,6 +81,31 @@ historical source evidence
 
 Drift requires Python 3.14 or later and [uv](https://docs.astral.sh/uv/).
 
+`requires-python = ">=3.14"` is the package compatibility contract. The
+development and pinned-replay environment is a separate, exact contract:
+CPython 3.14.6, pinned in [`.python-version`](.python-version), which uv
+selects automatically and CI reads. Every M1d normalization derivation binds
+the exact interpreter patch version (`python_identity`), so pinned M1d replay
+under any other interpreter fails before replay starts with
+`PINNED_REPLAY_ENVIRONMENT_MISMATCH expected cpython-3.14.6 found cpython-X.Y.Z`.
+Pinned replay failures are always one of four named classes: environment
+mismatch, environment artifact unavailable, semantic replay mismatch, or
+fixture or inventory integrity failure (see
+[`tests/_pinned_m1d.py`](tests/_pinned_m1d.py)).
+
+Changing the pin is an explicit environment migration: change
+`.python-version`, run the complete suite, investigate any semantic
+difference, and mint a new replay baseline and supersession record only if
+equivalence is demonstrated, as
+[`tests/fixtures/m1d-replay-baselines/cpython-3.14.6/`](tests/fixtures/m1d-replay-baselines/cpython-3.14.6/supersession.json)
+does for 3.14.5 to 3.14.6. Never regenerate replay expectations merely because
+a new patch release exists.
+
+GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs
+the verification suite below, plus `git diff --check`, on every pull request
+and on every push to `main`, under the same pinned interpreter. CI never
+regenerates fixtures or baselines.
+
 ```bash
 # Sync development dependencies
 uv sync --dev
