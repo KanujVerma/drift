@@ -62,11 +62,37 @@ M2_ADDITIVE_SOURCE_PATHS = frozenset(
         "src/drift/domain/replay_provenance.py",
     }
 )
+# M2 Task 8 source added under issue #9.  The bounded Alpaca exploratory bridge
+# is a provider adapter under ADR 0012, not M1e qualification source, so it is
+# named here rather than added to the M1e allowlist.  It is deliberately not
+# exempted from the inertness scan: it is routed through the same production
+# AST guard as every other named addition, so it still may not import a
+# transport module, spawn a process, or define a network or credential symbol.
+M2_ALPACA_BRIDGE_SOURCE_PATHS = frozenset(
+    {
+        "src/drift/adapters/__init__.py",
+        "src/drift/adapters/alpaca_exploratory.py",
+    }
+)
+# The Task 8 acquisition CLI is the one place in the repository authorized to
+# open a transport connection and to read an API key from the environment.
+# M1e Task 1 deferred exactly these two capabilities "to Task 8", so the
+# deferral is lifted here and only here.  Every other M1e script keeps the
+# original prohibition, enforced by _assert_m1e_script_allowed below.
+M2_ALPACA_BRIDGE_SCRIPT_PATHS = frozenset(
+    {
+        "scripts/intake_alpaca_exploratory.py",
+    }
+)
 M1E_PRODUCTION_PATHS = frozenset(
     path for path in ALLOWED_M1E_PRODUCTION_PATHS if path.startswith("src/drift/")
 )
 INERT_SOURCE_PATHS = (
-    ALLOWED_M1E_PRODUCTION_PATHS | M1D_REPLAY_IDENTITY_PATHS | M2_ADDITIVE_SOURCE_PATHS
+    ALLOWED_M1E_PRODUCTION_PATHS
+    | M1D_REPLAY_IDENTITY_PATHS
+    | M2_ADDITIVE_SOURCE_PATHS
+    | M2_ALPACA_BRIDGE_SOURCE_PATHS
+    | M2_ALPACA_BRIDGE_SCRIPT_PATHS
 )
 M1E_SCRIPT_PATHS = frozenset(
     path for path in ALLOWED_M1E_PRODUCTION_PATHS if path.startswith("scripts/")
@@ -248,6 +274,43 @@ def _assert_m1e_production_module_allowed(source: str, label: str) -> None:
             )
 
 
+def _assert_m2_bridge_script_allowed(relative: str, source: str) -> None:
+    """Allow the Task 8 acquisition CLI its transport and its API key reads.
+
+    Everything M1e Task 1 forbade for a different reason stays forbidden here:
+    no process execution, no dynamic execution, and no definition named after a
+    network or credential capability. Only the two capabilities M1e explicitly
+    deferred "to Task 8" are permitted, and only for this one script.
+    """
+    assert relative in M2_ALPACA_BRIDGE_SCRIPT_PATHS, (
+        f"unexpected M2 bridge script: {relative}"
+    )
+    tree = ast.parse(source, relative)
+    aliases = _import_aliases(tree)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            modules = [node.module or ""]
+        else:
+            modules = []
+        for module in modules:
+            root = module.split(".", maxsplit=1)[0]
+            assert root not in PROCESS_IMPORT_ROOTS, (
+                f"process import in the M2 bridge script: {module}"
+            )
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            _assert_definition_allowed(node.name, relative, script=True)
+        if isinstance(node, ast.Call):
+            call_path = _call_path(node.func, aliases)
+            assert call_path not in FORBIDDEN_PROCESS_CALLS, (
+                f"forbidden process call in the M2 bridge script: {call_path}"
+            )
+            assert call_path not in FORBIDDEN_DYNAMIC_CALLS, (
+                f"forbidden dynamic call in the M2 bridge script: {call_path}"
+            )
+
+
 def _assert_m1e_script_allowed(relative: str, source: str) -> None:
     assert relative in M1E_SCRIPT_PATHS, f"unexpected M1e script: {relative}"
     tree = ast.parse(source, relative)
@@ -315,13 +378,18 @@ def test_m1e_additions_are_allowlisted_inert_and_leave_m1d_pins_unchanged() -> N
     present = _m1e_paths_on_disk()
     assert present <= INERT_SOURCE_PATHS
     scanned_as_production = (
-        M1E_PRODUCTION_PATHS | M1D_REPLAY_IDENTITY_PATHS | M2_ADDITIVE_SOURCE_PATHS
+        M1E_PRODUCTION_PATHS
+        | M1D_REPLAY_IDENTITY_PATHS
+        | M2_ADDITIVE_SOURCE_PATHS
+        | M2_ALPACA_BRIDGE_SOURCE_PATHS
     )
     assert present & scanned_as_production
     for relative in present:
         source = (REPO_ROOT / relative).read_text(encoding="utf-8")
         if relative in scanned_as_production:
             _assert_m1e_production_module_allowed(source, relative)
+        elif relative in M2_ALPACA_BRIDGE_SCRIPT_PATHS:
+            _assert_m2_bridge_script_allowed(relative, source)
         else:
             _assert_m1e_script_allowed(relative, source)
 
@@ -390,4 +458,37 @@ def test_script_ast_guard_partitions_process_and_defers_acquisition_capabilities
         _assert_m1e_script_allowed(
             "scripts/acquire_m1e_pilot.py",
             "import requests\nimport os\nrequests.get('https://example.invalid')\nos.getenv('M1E_TOKEN')\n",
+        )
+
+
+def test_m2_bridge_script_guard_lifts_only_the_two_deferred_capabilities() -> None:
+    """Task 8 gets transport and API key reads; nothing else is relaxed."""
+    allowed = "scripts/intake_alpaca_exploratory.py"
+
+    _assert_m2_bridge_script_allowed(
+        allowed,
+        "import os\nimport urllib.request\nos.environ.get('APCA_API_KEY_ID')\n",
+    )
+
+    with pytest.raises(AssertionError):
+        _assert_m2_bridge_script_allowed(allowed, "import subprocess\n")
+    with pytest.raises(AssertionError):
+        _assert_m2_bridge_script_allowed(allowed, "import os\nos.system('true')\n")
+    with pytest.raises(AssertionError):
+        _assert_m2_bridge_script_allowed(allowed, "exec('pass')\n")
+    with pytest.raises(AssertionError):
+        _assert_m2_bridge_script_allowed(
+            allowed, "def read_credential_store() -> None:\n    pass\n"
+        )
+    with pytest.raises(AssertionError):
+        _assert_m2_bridge_script_allowed("scripts/init_local_db.py", "x = 1\n")
+
+    # Every M1e script keeps the original Task 1 prohibition.
+    with pytest.raises(AssertionError):
+        _assert_m1e_script_allowed(
+            "scripts/acquire_m1e_pilot.py", "import urllib.request\n"
+        )
+    with pytest.raises(AssertionError):
+        _assert_m1e_script_allowed(
+            "scripts/acquire_m1e_pilot.py", "import os\nos.getenv('M1E_TOKEN')\n"
         )
