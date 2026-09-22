@@ -5,10 +5,17 @@ from contextlib import contextmanager
 from decimal import Decimal
 
 from drift.domain.common import UUID7, SHA256Hash
+from drift.domain.evaluator_clock import SessionClockV1
+from drift.domain.evaluator_lanes import EvaluationAdmissionV1
 from drift.domain.evaluator_portfolio import (
+    LANE_ADMISSIBLE_MARK_GRADES,
+    EvaluationLane,
     IndeterminateValuationError,
+    LaneAdmissibilityError,
+    MarkPriceV1,
     PendingCashClaimV1,
     PortfolioFillV1,
+    PortfolioMarkV1,
     PortfolioStateV1,
     SecurityHoldingV1,
     decimal_context,
@@ -19,18 +26,27 @@ ZERO = Decimal("0")
 
 
 def initial_portfolio_state(
-    *, session_key: SessionKeyV1, initial_cash: Decimal
+    *,
+    session_key: SessionKeyV1,
+    initial_cash: Decimal,
+    admission: EvaluationAdmissionV1,
 ) -> PortfolioStateV1:
-    """Build the opening state for an evaluation run."""
+    """Build the opening state for an evaluation run in an admitted lane.
+
+    The lane is taken from the admission rather than passed alongside it, so a
+    book can never claim a lane its admission does not authorize.
+    """
     if initial_cash <= ZERO:
         raise ValueError("initial cash must be strictly positive")
     return PortfolioStateV1(
+        lane=admission.lane,
+        admission_hash=admission.admission_hash,
         session_key=session_key,
         cash_balance=initial_cash,
         holdings=(),
         pending_cash_claims=(),
         settled_claim_ids=(),
-        is_marked=False,
+        mark=None,
         holdings_market_value=ZERO,
         pending_claims_value=ZERO,
         net_asset_value=initial_cash,
@@ -57,10 +73,29 @@ class PortfolioAccountingKernel:
 
     Marking is deliberately not carried forward across sessions: advancing the
     session clears the mark so a stale price can never value a later session.
+
+    The kernel is bound to the ``SessionClockV1`` that authorizes its sessions.
+    Advancement follows that clock rather than a bare local-date comparison, so
+    a legal multi-venue clock holding two sessions on one local date advances
+    correctly while a session key the clock never authorized is refused.
     """
 
-    def __init__(self, state: PortfolioStateV1) -> None:
+    def __init__(
+        self, state: PortfolioStateV1, *, session_clock: SessionClockV1
+    ) -> None:
+        self._clock = session_clock
+        self._session_positions: dict[SessionKeyV1, int] = {
+            session.session_key: position
+            for position, session in enumerate(session_clock.sessions)
+        }
+        if state.session_key not in self._session_positions:
+            raise ValueError(
+                "session clock does not authorize book session "
+                f"{state.session_key.mic}/{state.session_key.session_scope}/"
+                f"{state.session_key.local_date}"
+            )
         self._state = state
+        self._lane: EvaluationLane = state.lane
         self._holdings: dict[UUID7, SecurityHoldingV1] = {
             holding.security_id: holding for holding in state.holdings
         }
@@ -68,8 +103,7 @@ class PortfolioAccountingKernel:
             claim.claim_id: claim for claim in state.pending_cash_claims
         }
         self._cash = state.cash_balance
-        self._market_value = state.holdings_market_value
-        self._marked = state.is_marked
+        self._mark: PortfolioMarkV1 | None = state.mark
         self._settled: set[SHA256Hash] = set(state.settled_claim_ids)
         self._realized_gross = state.realized_gross_pnl
         self._realized_net = state.realized_net_pnl
@@ -86,8 +120,7 @@ class PortfolioAccountingKernel:
             dict(self._holdings),
             dict(self._claims),
             self._cash,
-            self._market_value,
-            self._marked,
+            self._mark,
             set(self._settled),
             self._realized_gross,
             self._realized_net,
@@ -101,8 +134,7 @@ class PortfolioAccountingKernel:
             self._holdings,
             self._claims,
             self._cash,
-            self._market_value,
-            self._marked,
+            self._mark,
             self._settled,
             self._realized_gross,
             self._realized_net,
@@ -131,20 +163,37 @@ class PortfolioAccountingKernel:
         with decimal_context():
             self._rebuild_under_pinned_context()
 
+    def _marked_value(self) -> Decimal:
+        """Value the current holdings from the current mark, if any.
+
+        Market value is derived from the mark rather than cached beside it, so
+        the two can never disagree about what was priced.
+        """
+        if self._mark is None:
+            return ZERO
+        priced = {price.security_id: price.close_price for price in self._mark.prices}
+        total = ZERO
+        for holding in self._holdings.values():
+            total += priced[holding.security_id] * holding.quantity
+        return total
+
     def _rebuild_under_pinned_context(self) -> None:
         claims_value = sum(
             (claim.total_cash_expected for claim in self._claims.values()), ZERO
         )
+        market_value = self._marked_value()
         self._state = PortfolioStateV1(
+            lane=self._lane,
+            admission_hash=self._state.admission_hash,
             session_key=self._session,
             cash_balance=self._cash,
             holdings=_ordered_holdings(self._holdings),
             pending_cash_claims=_ordered_claims(self._claims),
             settled_claim_ids=tuple(sorted(self._settled)),
-            is_marked=self._marked,
-            holdings_market_value=self._market_value,
+            mark=self._mark,
+            holdings_market_value=market_value,
             pending_claims_value=claims_value,
-            net_asset_value=self._cash + self._market_value + claims_value,
+            net_asset_value=self._cash + market_value + claims_value,
             realized_gross_pnl=self._realized_gross,
             realized_net_pnl=self._realized_net,
             cumulative_transaction_costs=self._costs,
@@ -162,8 +211,7 @@ class PortfolioAccountingKernel:
             else:
                 self._apply_sell(fill)
             self._costs += fill.transaction_costs
-            self._marked = False
-            self._market_value = ZERO
+            self._mark = None
             self._rebuild()
 
     def _apply_buy(self, fill: PortfolioFillV1) -> None:
@@ -218,13 +266,33 @@ class PortfolioAccountingKernel:
 
     def record_claim(self, claim: PendingCashClaimV1) -> None:
         """Record cash owed by a corporate action. Does not move cash."""
-        if claim.claim_id in self._claims:
-            raise ValueError(f"duplicate pending claim {claim.claim_id}")
         # Settlement removes the claim from the pending set, so the pending
-        # check alone stops guarding it. Claim identity is the economic
-        # occurrence, so a settled id must never be payable again.
+        # check alone stops guarding it. Claim identity is the source-scoped
+        # economic occurrence and is independent of every revisable date, so a
+        # settled id must never be payable again, however its dates are later
+        # revised.
         if claim.claim_id in self._settled:
             raise ValueError(f"claim already settled {claim.claim_id}")
+        if claim.claim_id in self._claims:
+            raise ValueError(f"duplicate pending claim {claim.claim_id}")
+        with self._transaction():
+            self._claims[claim.claim_id] = claim
+            self._rebuild()
+
+    def supersede_claim(self, claim: PendingCashClaimV1) -> None:
+        """Replace a pending claim with a revision of the same identity.
+
+        M1c carries payable and entitlement dates as revisable source claims,
+        so a date revision revises the claim already recorded. Because identity
+        is date-independent, the revision resolves here by supersession and can
+        never mint a second claim for one economic entitlement. A settled claim
+        is refused: delivery already happened, so there is nothing left to
+        revise into a second payment.
+        """
+        if claim.claim_id in self._settled:
+            raise ValueError(f"claim already settled {claim.claim_id}")
+        if claim.claim_id not in self._claims:
+            raise ValueError(f"unknown claim {claim.claim_id}")
         with self._transaction():
             self._claims[claim.claim_id] = claim
             self._rebuild()
@@ -259,37 +327,81 @@ class PortfolioAccountingKernel:
             self._rebuild()
 
     def advance_session(self, session_key: SessionKeyV1) -> None:
-        """Move the book to a later session and drop any stale mark."""
-        if session_key.local_date <= self._session.local_date:
+        """Move the book to a later clock session and drop any stale mark.
+
+        Advancement is measured in the bound session clock's own order, not by
+        local date. That admits a legal multi-venue clock holding two sessions
+        on one local date, and refuses any key the clock never authorized, so
+        a book cannot silently accept a session from a different venue or
+        scope.
+        """
+        target = self._session_positions.get(session_key)
+        if target is None:
             raise ValueError(
-                f"session must advance beyond {self._session.local_date}, "
-                f"got {session_key.local_date}"
+                "session clock does not authorize session "
+                f"{session_key.mic}/{session_key.session_scope}/"
+                f"{session_key.local_date}"
+            )
+        if target <= self._session_positions[self._session]:
+            raise ValueError(
+                "session must advance beyond "
+                f"{self._session.mic}/{self._session.local_date}, got "
+                f"{session_key.mic}/{session_key.local_date}"
             )
         with self._transaction():
             self._session = session_key
-            self._marked = False
-            self._market_value = ZERO
+            self._mark = None
             self._rebuild()
 
-    def mark_close(self, close_prices: Mapping[UUID7, Decimal]) -> None:
-        """Mark every held position at its exact unadjusted close price."""
-        total = ZERO
-        with decimal_context():
-            total = self._marked_total(close_prices)
-        with self._transaction():
-            self._market_value = total
-            self._marked = True
+    def mark_close(self, marks: Collection[MarkPriceV1]) -> None:
+        """Mark every held position at an exact, evidence-bound close price.
+
+        Every mark must name the evidence it came from. A mark whose provenance
+        is indeterminate is refused in every lane, and a promotion-lane book
+        refuses evidence weaker than promotion-grade, so an exploratory
+        reconstruction can never reach a promotion-grade net asset value.
+        """
+        priced = self._indexed_marks(marks)
+        missing = tuple(sorted(str(key) for key in self._holdings if key not in priced))
+        if missing:
+            raise IndeterminateValuationError(
+                f"no authorized close price for held security {missing[0]}"
+            )
+        unheld = tuple(sorted(str(key) for key in priced if key not in self._holdings))
+        if unheld:
+            raise ValueError(f"close price for unheld security {unheld[0]}")
+        for security_id in sorted(priced, key=str):
+            self._admit_mark_evidence(priced[security_id])
+        mark = PortfolioMarkV1(
+            session_key=self._session,
+            lane=self._lane,
+            prices=tuple(priced[key] for key in sorted(priced, key=str)),
+        )
+        with self._transaction(), decimal_context():
+            self._mark = mark
             self._rebuild()
 
-    def _marked_total(self, close_prices: Mapping[UUID7, Decimal]) -> Decimal:
-        total = ZERO
-        for holding in self._holdings.values():
-            price = close_prices.get(holding.security_id)
-            if price is None:
-                raise IndeterminateValuationError(
-                    f"no authorized close price for held security {holding.security_id}"
+    def _indexed_marks(
+        self, marks: Collection[MarkPriceV1]
+    ) -> dict[UUID7, MarkPriceV1]:
+        indexed: dict[UUID7, MarkPriceV1] = {}
+        for mark in marks:
+            if mark.security_id in indexed:
+                raise ValueError(
+                    f"repeated close price for security {mark.security_id}"
                 )
-            if price <= ZERO:
-                raise ValueError(f"close price must be strictly positive, got {price}")
-            total += price * holding.quantity
-        return total
+            indexed[mark.security_id] = mark
+        return indexed
+
+    def _admit_mark_evidence(self, mark: MarkPriceV1) -> None:
+        grade = mark.evidence.grade
+        if grade == "indeterminate":
+            raise IndeterminateValuationError(
+                f"close price for security {mark.security_id} has indeterminate "
+                f"provenance: {mark.evidence.reason}"
+            )
+        if grade not in LANE_ADMISSIBLE_MARK_GRADES[self._lane]:
+            raise LaneAdmissibilityError(
+                f"{self._lane} lane refuses {grade} mark evidence for security "
+                f"{mark.security_id}"
+            )

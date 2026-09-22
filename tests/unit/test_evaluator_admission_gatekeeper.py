@@ -77,7 +77,7 @@ def make_dimension_result(
     )
 
 
-def make_test_fixture() -> dict[str, Any]:
+def make_test_fixture(snapshot_hash: str = H5) -> dict[str, Any]:
     # 1. Profiles
     crit_dims = (
         QualificationDimension.LICENSING_RETENTION,
@@ -107,19 +107,19 @@ def make_test_fixture() -> dict[str, Any]:
     )
     profile_set_hash = content_hash(profile_set)
 
-    # 3. Targets and Reports (sharing snapshot H5)
+    # 3. Targets and Reports (sharing one snapshot)
     dec_target = QualificationTargetV1(
         profile_hash=dec_prof_hash,
         acquisition_state=AcquisitionState.SNAPSHOT_BOUND,
         receipt_hashes=(H1,),
-        snapshot_hash=H5,
+        snapshot_hash=snapshot_hash,
         failure_evidence_hashes=(),
     )
     audit_target = QualificationTargetV1(
         profile_hash=audit_prof_hash,
         acquisition_state=AcquisitionState.SNAPSHOT_BOUND,
         receipt_hashes=(H1,),
-        snapshot_hash=H5,
+        snapshot_hash=snapshot_hash,
         failure_evidence_hashes=(),
     )
 
@@ -193,7 +193,7 @@ def make_test_fixture() -> dict[str, Any]:
         profile_hash=dec_prof_hash,
         report_hash=content_hash(dec_report),
         target_hash=content_hash(dec_target),
-        snapshot_hash=H5,
+        snapshot_hash=snapshot_hash,
         rights_assessment_hash=H3,
         universe_references=("drift+sha256://univ",),
         economic_outcome_references=(),
@@ -215,7 +215,7 @@ def make_test_fixture() -> dict[str, Any]:
         profile_hash=audit_prof_hash,
         report_hash=content_hash(audit_report),
         target_hash=content_hash(audit_target),
-        snapshot_hash=H5,
+        snapshot_hash=snapshot_hash,
         rights_assessment_hash=H4,
         universe_references=("drift+sha256://univ",),
         economic_outcome_references=(),
@@ -239,6 +239,7 @@ def make_test_fixture() -> dict[str, Any]:
         decision_handoff_hash=dec_handoff.handoff_hash,
         audit_handoff_hash=audit_handoff.handoff_hash,
         input_bundle_hash=H1,
+        provenance_proof_hash=H2,
         admission_hash=H0,
     )
     admission = admission_unhashed.model_copy(

@@ -136,12 +136,63 @@ class EvaluationInputBundleV1(FrozenModel):
     def validate_bundle(self) -> Self:
         if not self.session_clock.sessions:
             raise ValueError("bundle requires a nonempty session clock")
+        self._validate_session_coherence()
         expected = evaluation_input_bundle_hash(self)
         if self.bundle_hash != expected:
             raise ValueError(
                 f"bundle hash mismatch: expected {expected}, got {self.bundle_hash}"
             )
         return self
+
+    def _validate_session_coherence(self) -> None:
+        """Bind every bundle member to the clock the bundle itself declares.
+
+        Without this a bundle can carry evidence for sessions its own clock
+        never contains, which lets evidence from one corpus ride into an
+        evaluation authorized over a different one. Fail closed on any member
+        outside the clock, and on a clock that escapes the declared interval.
+
+        A split-normalization `anchor_session` is deliberately not required to
+        be in the clock: it is a normalization reference point, not evidence
+        the evaluation consumes over its own interval.
+        """
+        covered = {session.session_key for session in self.session_clock.sessions}
+        for label, views in (
+            ("decision", self.authentic_decision_views),
+            ("accounting", self.authentic_accounting_views),
+        ):
+            for view in views:
+                if view.source_session not in covered:
+                    raise ValueError(
+                        f"authentic {label} view binds session "
+                        f"{view.source_session.mic} {view.source_session.local_date}, "
+                        "which the bundle session clock does not contain"
+                    )
+        for observation in self.exploratory_reconstructed_observations:
+            if observation.session_key not in covered:
+                raise ValueError(
+                    "exploratory reconstruction binds session "
+                    f"{observation.session_key.mic} "
+                    f"{observation.session_key.local_date}, "
+                    "which the bundle session clock does not contain"
+                )
+
+        # Sessions are chronologically ordered by the clock's own validator.
+        first = self.session_clock.sessions[0]
+        last = self.session_clock.sessions[-1]
+        start = self.evaluation_interval.start.lower_bound
+        if start is not None and first.opened_at < start:
+            raise ValueError(
+                f"bundle session clock opens before its evaluation interval: "
+                f"session opens {first.opened_at}, interval starts {start}"
+            )
+        end = self.evaluation_interval.end
+        if end is not None and end.upper_bound is not None:
+            if last.closed_at > end.upper_bound:
+                raise ValueError(
+                    f"bundle session clock closes after its evaluation interval: "
+                    f"session closes {last.closed_at}, interval ends {end.upper_bound}"
+                )
 
     @property
     def has_exploratory_reconstructions(self) -> bool:

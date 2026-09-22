@@ -4,17 +4,26 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import date
 from decimal import ROUND_HALF_EVEN, Context, Decimal, localcontext
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import (
+    BeforeValidator,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from drift.domain.common import UUID7, FrozenModel, NonBlankStr, SHA256Hash
-from drift.domain.economic_common import ActionKind
+from drift.domain.economic_common import ActionKind, validate_canonical_cash
 from drift.domain.sessions import SessionKeyV1
 from drift.errors import DriftError
 from drift.serialization.canonical import content_hash
 
-CLAIM_ID_PROFILE = "drift-pending-cash-claim-v1"
+# Version 2 of the preimage: identity became source-scoped and date-independent.
+# A v1 id and a v2 id for the same occurrence must never be mistaken for one
+# another, so the profile string moves with the preimage shape.
+CLAIM_ID_PROFILE = "drift-pending-cash-claim-v2"
 
 # Proportional basis relief can produce a non-terminating quotient, so the
 # arithmetic context must be pinned rather than inherited. Without this an
@@ -22,6 +31,26 @@ CLAIM_ID_PROFILE = "drift-pending-cash-claim-v1"
 # books and break replay reproducibility.
 PORTFOLIO_DECIMAL_PRECISION = 34
 PORTFOLIO_DECIMAL_ROUNDING = ROUND_HALF_EVEN
+
+type EvaluationLane = Literal["exploratory", "promotion"]
+"""The ADR 0012 lane a portfolio book is admitted under."""
+
+type MarkEvidenceGrade = Literal["promotion_grade", "exploratory", "indeterminate"]
+"""Three-valued grade of the evidence behind one close price.
+
+``indeterminate`` is a distinct answer from ``exploratory``: it means the mark
+cannot name the evidence it came from at all. Collapsing the two into a boolean
+would make an unbound price indistinguishable from an honestly exploratory one.
+"""
+
+LANE_ADMISSIBLE_MARK_GRADES: dict[EvaluationLane, frozenset[MarkEvidenceGrade]] = {
+    # ADR 0012: the exploratory lane must stay fully usable, so it admits
+    # exploratory evidence. The absolute non-upgrade rule means the promotion
+    # lane admits nothing weaker than promotion-grade. Neither lane admits an
+    # indeterminate binding: unknown provenance fails closed everywhere.
+    "exploratory": frozenset({"promotion_grade", "exploratory"}),
+    "promotion": frozenset({"promotion_grade"}),
+}
 
 
 @contextmanager
@@ -37,16 +66,73 @@ class IndeterminateValuationError(DriftError):
     """Raised when a held position cannot be marked from authorized evidence."""
 
 
+class LaneAdmissibilityError(DriftError):
+    """Raised when evidence is refused by the lane the book is admitted under."""
+
+
+def canonical_money(value: Decimal) -> Decimal:
+    """Re-spell an exact monetary Decimal in the M1c canonical cash form.
+
+    ``content_hash`` renders Decimals with ``str()``, so ``Decimal("100000")``
+    and ``Decimal("100000.00")`` are one amount with two hashes. M1c already
+    settled this for source cash text with ``CanonicalCash``, so portfolio money
+    reuses that exact spelling rule instead of inventing a second one; the
+    magnitude is handed straight to ``validate_canonical_cash``. Note that
+    ``decimal_context()`` pins arithmetic, not spelling, so it does not address
+    this at all. The sign is carried separately because portfolio realized PnL
+    may be negative while M1c source cash may not.
+    """
+    with decimal_context():
+        magnitude = abs(value).normalize()
+        text = format(magnitude, "f")
+    validate_canonical_cash(text)
+    return Decimal(f"-{text}") if value < Decimal("0") else Decimal(text)
+
+
+def validate_canonical_money(value: object, info: ValidationInfo) -> Decimal:
+    """Accept only an exact finite decimal and store its canonical spelling."""
+    if info.mode == "json" and isinstance(value, str):
+        try:
+            parsed = Decimal(value)
+        except (ArithmeticError, ValueError) as error:
+            raise ValueError(
+                "monetary amount requires an exact decimal string"
+            ) from error
+    elif info.mode == "python" and isinstance(value, Decimal):
+        parsed = value
+    else:
+        raise ValueError("monetary amount requires an exact decimal value")
+    if not parsed.is_finite():
+        raise ValueError("monetary amount requires a finite decimal value")
+    return canonical_money(parsed)
+
+
+type CanonicalMoney = Annotated[Decimal, BeforeValidator(validate_canonical_money)]
+"""An exact monetary Decimal normalized to one canonical spelling."""
+
+
 def pending_cash_claim_id(
     *,
+    source_id: str,
     security_id: UUID7,
     action_kind: ActionKind,
     occurrence_id: str,
     component_id: str,
-    entitlement_session: date,
-    payable_session: date,
 ) -> SHA256Hash:
     """Derive the deterministic identity of one occurrence-bound cash claim.
+
+    Identity is source-scoped because M1c occurrence identity is source-scoped:
+    ``EconomicDeliveryGroupV1`` keys a delivered occurrence on ``source_id``
+    plus ``native_occurrence_id``, so two sources reusing one native occurrence
+    id are two occurrences and must not collide onto a single claim.
+
+    Identity is date-independent because M1c models payable and entitlement
+    dates as revisable source claims (``EconomicDateFactV1`` role ``"payable"``
+    inside a revision envelope). A date in the preimage would let a payable-date
+    revision mint a second claim id for one economic entitlement, and both
+    settled-claim guards are keyed on ``claim_id``, so neither would fire and
+    the entitlement would pay twice. Dates are therefore attributes of the
+    claim; a revision resolves by superseding the same identity.
 
     Component identity is part of the preimage so that several cash components
     of one action on one date remain distinct claims.
@@ -54,12 +140,11 @@ def pending_cash_claim_id(
     return content_hash(
         {
             "profile": CLAIM_ID_PROFILE,
+            "source_id": source_id,
             "security_id": str(security_id),
             "action_kind": action_kind.value,
             "occurrence_id": occurrence_id,
             "component_id": component_id,
-            "entitlement_session": entitlement_session.isoformat(),
-            "payable_session": payable_session.isoformat(),
         }
     )
 
@@ -70,7 +155,7 @@ class SecurityHoldingV1(FrozenModel):
     schema_version: Literal["1"] = "1"
     security_id: UUID7
     quantity: int = Field(gt=0)
-    cost_basis: Decimal
+    cost_basis: CanonicalMoney
 
     @model_validator(mode="after")
     def validate_holding(self) -> Self:
@@ -91,17 +176,23 @@ class SecurityHoldingV1(FrozenModel):
 
 
 class PendingCashClaimV1(FrozenModel):
-    """Cash owed to the portfolio by a corporate action but not yet delivered."""
+    """Cash owed to the portfolio by a corporate action but not yet delivered.
+
+    ``entitlement_session`` and ``payable_session`` are revisable attributes,
+    not identity. A revised payable date supersedes this claim under the same
+    ``claim_id`` rather than creating a second claim for one entitlement.
+    """
 
     schema_version: Literal["1"] = "1"
     claim_id: SHA256Hash
+    source_id: NonBlankStr
     security_id: UUID7
     action_kind: ActionKind
     occurrence_id: NonBlankStr
     component_id: NonBlankStr
     entitled_quantity: int = Field(gt=0)
-    cash_per_share: Decimal
-    total_cash_expected: Decimal
+    cash_per_share: CanonicalMoney
+    total_cash_expected: CanonicalMoney
     entitlement_session: date
     payable_session: date
 
@@ -122,12 +213,11 @@ class PendingCashClaimV1(FrozenModel):
         if self.payable_session < self.entitlement_session:
             raise ValueError("payable session cannot precede entitlement session")
         expected_id = pending_cash_claim_id(
+            source_id=self.source_id,
             security_id=self.security_id,
             action_kind=self.action_kind,
             occurrence_id=self.occurrence_id,
             component_id=self.component_id,
-            entitlement_session=self.entitlement_session,
-            payable_session=self.payable_session,
         )
         if self.claim_id != expected_id:
             raise ValueError(
@@ -143,8 +233,8 @@ class PortfolioFillV1(FrozenModel):
     security_id: UUID7
     side: Literal["buy", "sell"]
     quantity: int = Field(gt=0)
-    fill_price: Decimal
-    transaction_costs: Decimal = Decimal("0.00")
+    fill_price: CanonicalMoney
+    transaction_costs: CanonicalMoney = Decimal("0")
 
     @model_validator(mode="after")
     def validate_fill(self) -> Self:
@@ -155,22 +245,116 @@ class PortfolioFillV1(FrozenModel):
         return self
 
 
-class PortfolioStateV1(FrozenModel):
-    """Immutable portfolio state as of one evaluation session."""
+class MarkEvidenceV1(FrozenModel):
+    """Provenance binding for one close price used to mark a position.
+
+    A mark that cannot name the exact evidence it came from is ``indeterminate``
+    and names a reason instead of a hash. It is admissible in no lane, so an
+    unbound price can never default into net asset value.
+    """
+
+    schema_version: Literal["1"] = "1"
+    grade: MarkEvidenceGrade
+    evidence_hash: SHA256Hash | None = None
+    reason: NonBlankStr | None = None
+
+    @model_validator(mode="after")
+    def validate_union_shape(self) -> Self:
+        if self.grade == "indeterminate":
+            if self.evidence_hash is not None:
+                raise ValueError(
+                    "indeterminate mark evidence cannot name an evidence hash"
+                )
+            if self.reason is None:
+                raise ValueError("indeterminate mark evidence requires a reason")
+            return self
+        if self.evidence_hash is None:
+            raise ValueError(
+                f"{self.grade} mark evidence requires a bound evidence hash"
+            )
+        if self.reason is not None:
+            raise ValueError("bound mark evidence cannot carry an indeterminacy reason")
+        return self
+
+
+class MarkPriceV1(FrozenModel):
+    """One exact unadjusted close price bound to the evidence that produced it."""
+
+    schema_version: Literal["1"] = "1"
+    security_id: UUID7
+    close_price: CanonicalMoney
+    evidence: MarkEvidenceV1
+
+    @model_validator(mode="after")
+    def validate_mark_price(self) -> Self:
+        if self.close_price <= Decimal("0"):
+            raise ValueError("close price must be strictly positive")
+        return self
+
+
+class PortfolioMarkV1(FrozenModel):
+    """The evidence-bound mark taken for exactly one session in one lane.
+
+    The mark carries the session it was taken in, so a mark can never survive
+    rehydration into a different session: the state refuses a mark whose
+    session key is not its own.
+    """
 
     schema_version: Literal["1"] = "1"
     session_key: SessionKeyV1
-    cash_balance: Decimal
+    lane: EvaluationLane
+    prices: tuple[MarkPriceV1, ...]
+
+    @field_validator("prices")
+    @classmethod
+    def canonicalize_prices(
+        cls, prices: tuple[MarkPriceV1, ...]
+    ) -> tuple[MarkPriceV1, ...]:
+        securities = tuple(price.security_id for price in prices)
+        if len(set(securities)) != len(securities):
+            raise ValueError("mark must carry at most one price per security")
+        return tuple(sorted(prices, key=lambda price: str(price.security_id)))
+
+    @model_validator(mode="after")
+    def validate_mark(self) -> Self:
+        admissible = LANE_ADMISSIBLE_MARK_GRADES[self.lane]
+        for price in self.prices:
+            if price.evidence.grade not in admissible:
+                raise ValueError(
+                    f"{self.lane} lane refuses {price.evidence.grade} mark "
+                    f"evidence for security {price.security_id}"
+                )
+        return self
+
+
+class PortfolioStateV1(FrozenModel):
+    """Immutable portfolio state as of one evaluation session.
+
+    The state names the lane it was produced under and the admission that
+    authorized it, so a book can be shown promotion-grade rather than merely
+    assumed to be.
+    """
+
+    schema_version: Literal["1"] = "1"
+    lane: EvaluationLane
+    admission_hash: SHA256Hash
+    session_key: SessionKeyV1
+    cash_balance: CanonicalMoney
     holdings: tuple[SecurityHoldingV1, ...]
     pending_cash_claims: tuple[PendingCashClaimV1, ...]
     settled_claim_ids: tuple[SHA256Hash, ...] = ()
-    is_marked: bool
-    holdings_market_value: Decimal
-    pending_claims_value: Decimal
-    net_asset_value: Decimal
-    realized_gross_pnl: Decimal
-    realized_net_pnl: Decimal
-    cumulative_transaction_costs: Decimal
+    mark: PortfolioMarkV1 | None = None
+    holdings_market_value: CanonicalMoney
+    pending_claims_value: CanonicalMoney
+    net_asset_value: CanonicalMoney
+    realized_gross_pnl: CanonicalMoney
+    realized_net_pnl: CanonicalMoney
+    cumulative_transaction_costs: CanonicalMoney
+
+    @property
+    def is_marked(self) -> bool:
+        """Whether this state carries a mark taken in its own session."""
+        return self.mark is not None
 
     @model_validator(mode="after")
     def validate_state(self) -> Self:
@@ -193,8 +377,9 @@ class PortfolioStateV1(FrozenModel):
             raise ValueError("pending claims must be unique by claim id")
 
         # A settled claim must never reappear as pending. Claim identity is
-        # derived from the economic occurrence, so the same id is the same
-        # entitlement and paying it twice creates cash from nothing.
+        # derived from the source-scoped economic occurrence and is independent
+        # of every revisable date, so the same id is the same entitlement and
+        # paying it twice creates cash from nothing.
         if len(set(self.settled_claim_ids)) != len(self.settled_claim_ids):
             raise ValueError("settled claim ids must be unique")
         if tuple(sorted(self.settled_claim_ids)) != self.settled_claim_ids:
@@ -215,19 +400,7 @@ class PortfolioStateV1(FrozenModel):
                 f"got {self.pending_claims_value}"
             )
 
-        # A mark is only meaningful for the holdings it was taken against.
-        # Coupling the two here stops a stale mark surviving a fill and
-        # inventing net asset value that no position backs.
-        if not self.is_marked and self.holdings_market_value != Decimal("0"):
-            raise ValueError("unmarked state cannot carry a holdings market value")
-        if not self.holdings and self.holdings_market_value != Decimal("0"):
-            raise ValueError("state without holdings cannot carry a market value")
-        if (
-            self.is_marked
-            and self.holdings
-            and self.holdings_market_value <= Decimal("0")
-        ):
-            raise ValueError("marked holdings must carry a positive market value")
+        self._validate_mark()
 
         expected_nav = (
             self.cash_balance + self.holdings_market_value + self.pending_claims_value
@@ -238,3 +411,43 @@ class PortfolioStateV1(FrozenModel):
                 f"got {self.net_asset_value}"
             )
         return self
+
+    def _validate_mark(self) -> None:
+        # A mark is only meaningful for the holdings it was taken against, in
+        # the session it was taken in, under the lane that admitted it. Coupling
+        # all three here stops a stale mark surviving a fill or a rehydration
+        # into another session and inventing net asset value nothing backs.
+        if not self.holdings and self.holdings_market_value != Decimal("0"):
+            raise ValueError("state without holdings cannot carry a market value")
+        if self.mark is None:
+            if self.holdings_market_value != Decimal("0"):
+                raise ValueError("unmarked state cannot carry a holdings market value")
+            return
+        if self.mark.session_key != self.session_key:
+            raise ValueError(
+                "mark belongs to session "
+                f"{self.mark.session_key.mic}/{self.mark.session_key.local_date}, "
+                f"state is session {self.session_key.mic}/{self.session_key.local_date}"
+            )
+        if self.mark.lane != self.lane:
+            raise ValueError(
+                f"mark was admitted under the {self.mark.lane} lane, "
+                f"state is in the {self.lane} lane"
+            )
+        priced = {price.security_id: price.close_price for price in self.mark.prices}
+        if set(priced) != set(holding.security_id for holding in self.holdings):
+            raise ValueError("mark must price exactly the held securities")
+        expected_value = sum(
+            (
+                priced[holding.security_id] * holding.quantity
+                for holding in self.holdings
+            ),
+            Decimal("0"),
+        )
+        if self.holdings_market_value != expected_value:
+            raise ValueError(
+                f"holdings market value must equal {expected_value}, "
+                f"got {self.holdings_market_value}"
+            )
+        if self.holdings and self.holdings_market_value <= Decimal("0"):
+            raise ValueError("marked holdings must carry a positive market value")
