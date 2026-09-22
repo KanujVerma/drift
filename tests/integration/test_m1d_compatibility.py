@@ -487,9 +487,16 @@ def test_m1d_v1_bytes_match_task7_and_replay_under_archived_code() -> None:
     )
     for path in paths:
         assert (REPO_ROOT / path).read_bytes() == _git_bytes(TASK7_COMMIT, path)
+    # The replay runs against the cpython-3.14.6 baseline that supersedes these
+    # historical bytes (issue #48); the generator node proves TASK7_COMMIT
+    # itself regenerates that baseline byte-for-byte.
     _run_archived_m1d_replay(
         "v1",
         (
+            "tests/integration/test_m1d_adversarial_matrix.py::"
+            "test_task7_v1_fixture_hash_index_is_exact",
+            "tests/integration/test_m1d_adversarial_matrix.py::"
+            "test_task7_v1_generator_reproduces_exact_bytes_and_refuses_overwrite",
             "tests/integration/test_m1d_adversarial_matrix.py::"
             "test_task7_expected_decision_and_outcome_bytes_replay",
         ),
@@ -508,9 +515,16 @@ def test_m1d_v2_bytes_match_task8_and_replay_under_archived_code() -> None:
     )
     for path in paths:
         assert (REPO_ROOT / path).read_bytes() == _git_bytes(TASK8_COMMIT, path)
+    # The replay runs against the cpython-3.14.6 baseline that supersedes these
+    # historical bytes (issue #48); the generator node proves TASK8_COMMIT
+    # itself regenerates that baseline byte-for-byte.
     _run_archived_m1d_replay(
         "v2",
         (
+            "tests/integration/test_m1d_adversarial_matrix.py::"
+            "test_current_v2_fixture_hash_index_is_exact",
+            "tests/integration/test_m1d_adversarial_matrix.py::"
+            "test_v2_generator_reproduces_exact_bytes_and_refuses_both_versions",
             "tests/integration/test_m1d_adversarial_matrix.py::"
             "test_task7_expected_decision_and_outcome_bytes_replay",
         ),

@@ -26,6 +26,25 @@ explicit, separately justified deltas over v3 and nothing else:
 so a pin can be neither silently re-signed nor silently introduced for any path
 the inventory does not declare.
 
+Replay baseline supersession (issue #48)
+----------------------------------------
+
+The M1d result fixtures of generations v1, v2 and v3 were minted under
+cpython-3.14.5 by their source commits (``PINNED_M1D_GENERATIONS``). That
+historical baseline is preserved byte-identical, in the working tree and in
+those commits. ``m1d-replay-baselines/cpython-3.14.6/supersession.json``
+supersedes it for replay only: for each generation it re-mints the two
+expected result documents and the hash index, regenerated from the same
+source commit under cpython-3.14.6, plus the single hash-index digest literal
+in that commit's archived fixture loader. It may supersede nothing else, and
+never semantic source.
+
+A replay archive is therefore ``git archive`` of the source commit,
+authenticated against the preserved v3 pins, with exactly those declared
+paths replaced (``apply_m1d_replay_baseline``) and then re-authenticated
+against the derived replay pins. ``_validated_replay_baseline`` re-derives
+all of it on every load.
+
 Replay environment identity (issue #48)
 ---------------------------------------
 
@@ -99,6 +118,28 @@ _EXPECTED_CURRENT_INVENTORY_SHA256 = (
 _CURRENT_INVENTORY_ID = "m1d-v4-protected-sha256"
 _SUPERSEDED_INVENTORY_ID = "m1d-v3-protected-sha256"
 _SUPERSESSION_ISSUE = 32
+_REPLAY_BASELINE_DIRECTORY = "tests/fixtures/m1d-replay-baselines/cpython-3.14.6"
+_REPLAY_BASELINE_PATH = REPO_ROOT / _REPLAY_BASELINE_DIRECTORY / "supersession.json"
+_EXPECTED_REPLAY_BASELINE_SHA256 = (
+    "3fd15dfde4f656dcedd4574d2b5d5648b8683315e5e044ac6b78ac1b6a2b0585"
+)
+_REPLAY_BASELINE_ID = "m1d-replay-baseline-cpython-3.14.6"
+_SUPERSEDED_REPLAY_BASELINE_ID = "m1d-replay-baseline-cpython-3.14.5"
+_REPLAY_BASELINE_ISSUE = 48
+REPLAY_BASELINE_PYTHON_IDENTITY = "cpython-3.14.6"
+"""Interpreter identity the current M1d replay baseline was minted under."""
+SUPERSEDED_REPLAY_PYTHON_IDENTITY = "cpython-3.14.5"
+"""Interpreter identity of the preserved, superseded historical baseline."""
+_FIXTURE_SUPPORT_PATH = "tests/integration/m1d_fixture_support.py"
+_FIXTURE_SUPPORT_DERIVATION = (
+    "the archived loader with its single hash-index.json sha256 literal "
+    "replaced by the superseding hash-index.json sha256"
+)
+_REMINTED_FIXTURE_NAMES = (
+    "expected-decision-result.json",
+    "expected-outcome-result.json",
+    "hash-index.json",
+)
 _ARCHIVE_PATHS = ("src/drift", "tests", "pyproject.toml", "uv.lock")
 _PIN_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 _IDENTITY_PROGRAM = (
@@ -188,7 +229,15 @@ def pinned_interpreter_identity(pin_path: Path = PYTHON_PIN_PATH) -> str:
             f"interpreter pin {pin_path} must name exactly one X.Y.Z interpreter "
             f"version, found {raw!r}"
         )
-    return f"cpython-{entries[0]}"
+    identity = f"cpython-{entries[0]}"
+    if identity != REPLAY_BASELINE_PYTHON_IDENTITY:
+        # Moving the pin is an explicit environment migration: it needs a
+        # newly minted baseline and supersession record, not just a new pin.
+        raise PinnedReplayIntegrityFailure(
+            f"interpreter pin {pin_path} names {identity} but the current replay "
+            f"baseline was minted under {REPLAY_BASELINE_PYTHON_IDENTITY}"
+        )
+    return identity
 
 
 def verify_replay_interpreter(
@@ -467,6 +516,264 @@ def _historical_generation_pins(generation: str) -> dict[str, str]:
     return pins
 
 
+@dataclass(frozen=True, slots=True)
+class ReplayOverlay:
+    """One declared path the superseding baseline replaces in a replay archive.
+
+    ``baseline_path`` names the repository file holding the replacement bytes.
+    It is ``None`` only for the archived fixture loader, whose replacement is
+    derived by swapping its single hash-index digest literal.
+    """
+
+    path: str
+    historical_sha256: str
+    current_sha256: str
+    baseline_path: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayBaselineGeneration:
+    """The superseding replay baseline for one M1d fixture generation."""
+
+    generation: str
+    source_commit: str
+    overlays: tuple[ReplayOverlay, ...]
+    pins: Mapping[str, str]
+
+
+def _is_digest(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _is_nonblank(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _validated_baseline_hash_index(
+    label: str, overlays: Mapping[str, ReplayOverlay]
+) -> None:
+    """Require the superseding index to describe the superseding results."""
+    index = next(
+        item for path, item in overlays.items() if path.endswith("/hash-index.json")
+    )
+    assert index.baseline_path is not None
+    try:
+        entries = json.loads((REPO_ROOT / index.baseline_path).read_bytes())["entries"]
+        declared = {entry["path"]: entry for entry in entries}
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise PinnedReplayIntegrityFailure(
+            f"{label} hash index is unreadable: {error}"
+        ) from error
+    for path, overlay in overlays.items():
+        name = path.rsplit("/", maxsplit=1)[-1]
+        if overlay.baseline_path is None or name == "hash-index.json":
+            continue
+        data = (REPO_ROOT / overlay.baseline_path).read_bytes()
+        entry = declared.get(name)
+        if (
+            not isinstance(entry, dict)
+            or entry.get("sha256") != overlay.current_sha256
+            or entry.get("byte_size") != len(data)
+        ):
+            raise PinnedReplayIntegrityFailure(
+                f"{label} hash index does not describe the superseding {name}"
+            )
+
+
+def _validated_replay_generation(
+    generation: str, entry: object
+) -> ReplayBaselineGeneration:
+    """Validate one generation and derive its replay archive pins."""
+    label = f"replay baseline {generation}"
+    root = f"tests/fixtures/m1d/{generation}"
+    if (
+        not isinstance(entry, dict)
+        or entry.get("source_commit") != PINNED_M1D_GENERATIONS[generation]
+        or entry.get("fixture_root") != root
+    ):
+        raise PinnedReplayIntegrityFailure(
+            f"{label} must name its own source commit and fixture root"
+        )
+    lockfile = entry.get("lockfile_identity")
+    semantic = entry.get("semantic_implementation_identity")
+    if (
+        not isinstance(lockfile, dict)
+        or set(lockfile) != {"uv_lock_sha256"}
+        or not _is_digest(lockfile["uv_lock_sha256"])
+        or not isinstance(semantic, dict)
+        or set(semantic) != {"implementation_hash", "semantic_algorithm_hash"}
+        or not all(_is_digest(value) for value in semantic.values())
+    ):
+        raise PinnedReplayIntegrityFailure(
+            f"{label} must name its lockfile and semantic implementation identity"
+        )
+    replacements = {
+        f"{root}/{name}": f"{_REPLAY_BASELINE_DIRECTORY}/{generation}/{name}"
+        for name in _REMINTED_FIXTURE_NAMES
+    }
+    allowed = sorted({*replacements, _FIXTURE_SUPPORT_PATH})
+    superseded = entry.get("superseded_paths")
+    if not isinstance(superseded, dict) or sorted(superseded) != allowed:
+        found = sorted(superseded) if isinstance(superseded, dict) else superseded
+        raise PinnedReplayIntegrityFailure(
+            f"{label} may only supersede {allowed}, found {found!r}"
+        )
+    historical = _historical_generation_pins(generation)
+    pins = dict(historical)
+    overlays: dict[str, ReplayOverlay] = {}
+    for path in allowed:
+        record = superseded[path]
+        if (
+            not isinstance(record, dict)
+            or not _is_digest(record.get("historical_sha256"))
+            or not _is_digest(record.get("current_sha256"))
+            or record["historical_sha256"] == record["current_sha256"]
+        ):
+            raise PinnedReplayIntegrityFailure(
+                f"{label} supersession is malformed for {path}"
+            )
+        baseline_path: str | None
+        if path == _FIXTURE_SUPPORT_PATH:
+            if (
+                set(record) != {"historical_sha256", "current_sha256", "derivation"}
+                or record["derivation"] != _FIXTURE_SUPPORT_DERIVATION
+                or path in historical
+            ):
+                raise PinnedReplayIntegrityFailure(
+                    f"{label} supersession is malformed for {path}"
+                )
+            baseline_path = None
+        else:
+            if (
+                set(record) != {"historical_sha256", "current_sha256", "baseline_path"}
+                or record["baseline_path"] != replacements[path]
+            ):
+                raise PinnedReplayIntegrityFailure(
+                    f"{label} supersession is malformed for {path}"
+                )
+            if record["historical_sha256"] != historical.get(path):
+                raise PinnedReplayIntegrityFailure(
+                    f"{label} misstates the historical pin for {path}"
+                )
+            baseline_path = record["baseline_path"]
+            try:
+                data = (REPO_ROOT / baseline_path).read_bytes()
+            except OSError as error:
+                raise PinnedReplayIntegrityFailure(
+                    f"{label} bytes are unavailable for {path}: {error}"
+                ) from error
+            if hashlib.sha256(data).hexdigest() != record["current_sha256"]:
+                raise PinnedReplayIntegrityFailure(
+                    f"{label} bytes do not match the supersession record for {path}"
+                )
+        overlays[path] = ReplayOverlay(
+            path=path,
+            historical_sha256=record["historical_sha256"],
+            current_sha256=record["current_sha256"],
+            baseline_path=baseline_path,
+        )
+        pins[path] = record["current_sha256"]
+    _validated_baseline_hash_index(label, overlays)
+    return ReplayBaselineGeneration(
+        generation=generation,
+        source_commit=PINNED_M1D_GENERATIONS[generation],
+        overlays=tuple(overlays.values()),
+        pins=pins,
+    )
+
+
+def _validated_replay_baseline(document: object) -> dict[str, ReplayBaselineGeneration]:
+    """Validate the supersession record and derive every generation's pins.
+
+    The record may re-mint only the two expected result documents and the
+    hash index of each generation, plus the one digest literal in that
+    generation's archived loader. It can never supersede semantic source.
+    """
+    if (
+        not isinstance(document, dict)
+        or document.get("record_id") != _REPLAY_BASELINE_ID
+        or document.get("role") != "current"
+        or document.get("issue") != _REPLAY_BASELINE_ISSUE
+        or not _is_nonblank(document.get("reason"))
+    ):
+        raise PinnedReplayIntegrityFailure("replay baseline record is malformed")
+    if document.get("baseline") != {
+        "baseline_id": _REPLAY_BASELINE_ID,
+        "python_identity": REPLAY_BASELINE_PYTHON_IDENTITY,
+        "interpreter_pin": PYTHON_PIN_PATH.name,
+    }:
+        raise PinnedReplayIntegrityFailure(
+            "replay baseline must name itself, its interpreter identity "
+            f"{REPLAY_BASELINE_PYTHON_IDENTITY} and its interpreter pin"
+        )
+    supersedes = document.get("supersedes")
+    if (
+        not isinstance(supersedes, dict)
+        or supersedes.get("python_identity") != SUPERSEDED_REPLAY_PYTHON_IDENTITY
+    ):
+        raise PinnedReplayIntegrityFailure(
+            "replay baseline supersession must name the superseded interpreter "
+            f"identity {SUPERSEDED_REPLAY_PYTHON_IDENTITY}"
+        )
+    if (
+        supersedes.get("baseline_id") != _SUPERSEDED_REPLAY_BASELINE_ID
+        or supersedes.get("historical_inventory")
+        != {
+            "inventory_id": _SUPERSEDED_INVENTORY_ID,
+            "path": _INVENTORY_PATH.relative_to(REPO_ROOT).as_posix(),
+            "file_sha256": _EXPECTED_INVENTORY_SHA256,
+        }
+        or not _is_nonblank(supersedes.get("status"))
+    ):
+        raise PinnedReplayIntegrityFailure(
+            "replay baseline supersession must name the superseded baseline and "
+            "its preserved historical inventory"
+        )
+    verification = document.get("verification")
+    if (
+        not isinstance(verification, dict)
+        or verification.get("result") != "passed"
+        or verification.get("python_identity") != REPLAY_BASELINE_PYTHON_IDENTITY
+    ):
+        raise PinnedReplayIntegrityFailure(
+            "replay baseline must record a passed verification under "
+            f"{REPLAY_BASELINE_PYTHON_IDENTITY}"
+        )
+    generations = document.get("generations")
+    if not isinstance(generations, dict) or set(generations) != set(
+        PINNED_M1D_GENERATIONS
+    ):
+        raise PinnedReplayIntegrityFailure(
+            "replay baseline must cover every M1d fixture generation"
+        )
+    return {
+        generation: _validated_replay_generation(generation, generations[generation])
+        for generation in sorted(PINNED_M1D_GENERATIONS)
+    }
+
+
+def _load_replay_baseline() -> dict[str, ReplayBaselineGeneration]:
+    try:
+        raw = _REPLAY_BASELINE_PATH.read_bytes()
+    except OSError as error:
+        raise PinnedReplayIntegrityFailure(
+            f"cannot read replay baseline record: {error}"
+        ) from error
+    if hashlib.sha256(raw).hexdigest() != _EXPECTED_REPLAY_BASELINE_SHA256:
+        raise PinnedReplayIntegrityFailure("replay baseline record sha256 mismatch")
+    try:
+        document = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise PinnedReplayIntegrityFailure(
+            f"cannot parse replay baseline record: {error}"
+        ) from error
+    return _validated_replay_baseline(document)
+
+
+REPLAY_BASELINE = _load_replay_baseline()
+"""Current replay baseline: cpython-3.14.6, superseding the 3.14.5 history."""
+
+
 def _verify_pinned_inputs(
     *, root: Path, pins: Mapping[str, str], required: frozenset[str], label: str
 ) -> None:
@@ -626,6 +933,67 @@ def extract_m1d_generation_archive(
     return destination
 
 
+def apply_m1d_replay_baseline(archive_root: Path, generation: str) -> Path:
+    """Replace the declared historical paths with the superseding baseline.
+
+    Each replaced path must still hold its historical bytes, so the overlay
+    can only ever be applied once and only over the authenticated history.
+    The whole archive is then re-authenticated against the replay pins.
+    """
+    baseline = REPLAY_BASELINE[generation]
+    index = next(
+        overlay
+        for overlay in baseline.overlays
+        if overlay.path.endswith("/hash-index.json")
+    )
+    for overlay in baseline.overlays:
+        target = archive_root / overlay.path
+        try:
+            historical = target.read_bytes()
+        except OSError as error:
+            raise PinnedReplayIntegrityFailure(
+                f"archived {overlay.path} is unavailable: {error}"
+            ) from error
+        if hashlib.sha256(historical).hexdigest() != overlay.historical_sha256:
+            raise PinnedReplayIntegrityFailure(
+                f"archived {overlay.path} is not the superseded historical baseline"
+            )
+        if overlay.baseline_path is None:
+            literal = index.historical_sha256.encode("ascii")
+            if historical.count(literal) != 1:
+                raise PinnedReplayIntegrityFailure(
+                    f"archived {overlay.path} does not pin the historical index once"
+                )
+            replacement = historical.replace(
+                literal, index.current_sha256.encode("ascii")
+            )
+        else:
+            replacement = (REPO_ROOT / overlay.baseline_path).read_bytes()
+        if hashlib.sha256(replacement).hexdigest() != overlay.current_sha256:
+            raise PinnedReplayIntegrityFailure(
+                f"replay baseline {generation} bytes do not match the supersession "
+                f"record for {overlay.path}"
+            )
+        target.write_bytes(replacement)
+    _verify_pinned_inputs(
+        root=archive_root,
+        pins=baseline.pins,
+        required=frozenset(baseline.pins),
+        label=f"replay baseline {generation}",
+    )
+    return archive_root
+
+
+def prepare_m1d_replay_archive(
+    destination: Path, generation: str, *, observed_identity: str | None = None
+) -> Path:
+    """Extract one generation's source commit and apply the current baseline."""
+    archive = extract_m1d_generation_archive(
+        destination, generation, observed_identity=observed_identity
+    )
+    return apply_m1d_replay_baseline(archive, generation)
+
+
 def verify_child_import_location(imported_file: str, archive_root: Path) -> None:
     """Require the child interpreter to import Drift from the extracted archive."""
     imported = Path(imported_file).resolve()
@@ -730,13 +1098,13 @@ def run_replay_child(
 def _run_archived_m1d_node_in_root(
     archive_root: Path, nodeid: str, *, observed_identity: str | None = None
 ) -> PinnedM1dReplayResult:
-    """Run one M1d node inside an already authenticated archived checkout."""
+    """Run one M1d node inside an already prepared v3 replay archive."""
     return run_replay_child(
         archive_root,
         (nodeid,),
         commit=PINNED_M1D_COMMIT,
-        expected_pins=PROTECTED_M1D_ARCHIVE_SHA256,
-        label="archived",
+        expected_pins=REPLAY_BASELINE["v3"].pins,
+        label="replay baseline v3",
         observed_identity=observed_identity,
     )
 
@@ -744,7 +1112,7 @@ def _run_archived_m1d_node_in_root(
 def run_archived_m1d_node(nodeid: str) -> PinnedM1dReplayResult:
     """Authenticate and run one exact M1d node without current-package imports."""
     with tempfile.TemporaryDirectory(prefix="drift-m1d-v3-replay-") as directory:
-        archive = extract_m1d_archive(Path(directory))
+        archive = prepare_m1d_replay_archive(Path(directory), "v3")
         return _run_archived_m1d_node_in_root(archive, nodeid)
 
 
@@ -755,25 +1123,25 @@ def run_m1d_generation_replay(
     with tempfile.TemporaryDirectory(
         prefix=f"drift-m1d-{generation}-replay-"
     ) as directory:
-        archive = extract_m1d_generation_archive(
+        archive = prepare_m1d_replay_archive(
             Path(directory), generation, observed_identity=observed_identity
         )
         return run_replay_child(
             archive,
             nodes,
             commit=PINNED_M1D_GENERATIONS[generation],
-            expected_pins=_historical_generation_pins(generation),
-            label=f"archived {generation}",
+            expected_pins=REPLAY_BASELINE[generation].pins,
+            label=f"replay baseline {generation}",
             observed_identity=observed_identity,
         )
 
 
 class PinnedM1dArchiveCache:
-    """One authenticated M1d archive for the parent pytest session."""
+    """One prepared v3 replay archive for the parent pytest session."""
 
     def __init__(self) -> None:
         self._temporary = tempfile.TemporaryDirectory(prefix="drift-m1d-v3-session-")
-        self.root = extract_m1d_archive(Path(self._temporary.name))
+        self.root = prepare_m1d_replay_archive(Path(self._temporary.name), "v3")
 
     def close(self) -> None:
         self._temporary.cleanup()
