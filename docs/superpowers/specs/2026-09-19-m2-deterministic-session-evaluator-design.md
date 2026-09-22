@@ -621,8 +621,9 @@ class PortfolioStateV1(FrozenModel):
 ```
 
 ### 11.3 Deterministic Replay and Claim IDs
-To guarantee bitwise replay determinism and prevent hash collisions across same-date distributions, `PendingCashClaimV1.claim_id` binds exact M1c occurrence and component identities:
-$$\text{claim\_id} = \text{content\_hash}(\text{security\_id}, \text{action\_kind}, \text{occurrence\_id}, \text{component\_id}, \text{entitlement\_session}, \text{payable\_session})$$
+To guarantee bitwise replay determinism and prevent hash collisions across same-date distributions, `PendingCashClaimV1.claim_id` binds exact M1c occurrence and component identities. Claim identity is **source-scoped** and **date-independent**:
+$$\text{claim\_id} = \text{content\_hash}(\text{source\_id}, \text{security\_id}, \text{action\_kind}, \text{occurrence\_id}, \text{component\_id})$$
+Identity is source-scoped because M1c occurrence identity is source-scoped: `EconomicDeliveryGroupV1` keys a delivered occurrence on `source_id` together with `native_occurrence_id`, so two sources that reuse one native occurrence id describe two occurrences and must not collide onto a single claim. Identity is date-independent because M1c models payable and entitlement dates as revisable source claims (`EconomicDateFactV1` role `"payable"`, carried inside a revision envelope). A revisable date must never determine identity: putting `payable_session` in the preimage lets a payable-date revision mint a second `claim_id` for one economic entitlement, and both settled-claim guards are keyed on `claim_id`, so neither would fire and the same distribution would pay out twice. `entitlement_session` and `payable_session` are therefore **attributes** of the claim. A payable-date revision resolves by **supersession of the same identity** (`PortfolioAccountingKernel.supersede_claim`), never by recording a second claim, and a settled claim id remains unpayable no matter how its dates are later revised.
 
 ### 11.4 Cost Basis Relief and Realized PnL Formulas
 When whole shares are sold ($\Delta q_{\text{sell}} > 0$):
