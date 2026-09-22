@@ -5,6 +5,7 @@ from hashlib import sha256
 from uuid import uuid7
 
 import pytest
+from pydantic import BaseModel, ConfigDict
 
 from drift.datasets.resolver import VerifiedArtifactBytes
 from drift.domain.acquisition import (
@@ -18,10 +19,14 @@ from drift.domain.acquisition import (
     ByteTransformationOperation,
     ByteTransformationV1,
     NativeByteGraphV1,
+    ObservedObjectV1,
+    OriginEvidenceV1,
+    OriginStatus,
     ProviderNativeLayerRuleV1,
     RequestIdentityV1,
 )
 from drift.domain.artifacts import ArtifactKind, ArtifactReference
+from drift.domain.common import ImmutableJSONValue
 from drift.domain.qualification import (
     ConsumerPurpose,
     M1ePilotStateV1,
@@ -755,3 +760,167 @@ def test_secret_screening_in_pages_and_json_payloads() -> None:
     json_str_with_secret = '{"api_key": "secret123"}'
     with pytest.raises(ValueError, match="credential|secret"):
         validate_secret_free_acquisition_payload(json_str_with_secret)
+
+
+def _origin_evidence(
+    safe_response_metadata: ImmutableJSONValue = None,
+) -> OriginEvidenceV1:
+    """Realistic verified origin evidence with populated provider_signatures."""
+    return OriginEvidenceV1(
+        origin_status=OriginStatus.VERIFIED,
+        provider_request_id="req-7f3ac21b",
+        provider_object_id="bars/AAPL/2026-09-01",
+        safe_response_metadata=safe_response_metadata,
+        tls_endpoint_identity="data.provider.test",
+        provider_checksums=("crc32c:0e5b2a11",),
+        provider_signatures=("sha256:" + "ab" * 32,),
+    )
+
+
+def _observed_object(evidence: OriginEvidenceV1) -> ObservedObjectV1:
+    return ObservedObjectV1(
+        provider_object_identity="bars/AAPL/2026-09-01",
+        matched_expected_key="k1",
+        page_identity="page-1",
+        byte_object_descriptor_hashes=("d" * 64,),
+        origin_evidence=evidence,
+        observation_status="complete",
+    )
+
+
+def _build_receipt_with_observed(
+    observed_objects: tuple[ObservedObjectV1, ...],
+) -> AcquisitionReceiptV1:
+    """Build a receipt whose only varying input is observed_objects."""
+    rule = ProviderNativeLayerRuleV1(
+        profile_set_hash="1" * 64,
+        supported_profile_hashes=("2" * 64,),
+        product_schema_hash="3" * 64,
+        methodology_hash="4" * 64,
+        authoritative_native_layer=ByteLayerKind.DECODED_PROVIDER_NATIVE_RECORD,
+    )
+    request = RequestIdentityV1(
+        method="GET",
+        authenticated_provider_host="data.provider.test",
+        route_template="/v1/bars",
+        canonical_parameters={"timeframe": "1Day"},
+        requested_universe=("AAPL",),
+        requested_fields=("close",),
+        requested_date_range=("2026-09-01", "2026-09-02"),
+        request_start=REQ_START,
+        request_end=REQ_END,
+        client_request_id="client-req-obs-1",
+    )
+    plan = AcquisitionPlanV1(
+        plan_id=uuid7(),
+        authorization_hash="a0" + "0" * 62,
+        request_scope_hash=content_hash(request),
+        expected_inventory_hash="c0" + "0" * 62,
+        planned_native_layer_rule_hash=content_hash(rule),
+        max_bytes=1000000,
+        max_objects=10,
+        max_pages=5,
+        frozen_at=FROZEN_PLAN_TIME,
+    )
+    execution = AcquisitionExecutionContextV1(
+        collector_id="test-collector",
+        collector_version="1.0",
+        collector_source_hash="c" * 64,
+        invocation_id=uuid7(),
+        executable_evidence_hashes=("e" * 64,),
+        receipt_id=uuid7(),
+        receipt_version="1",
+        creation_time=REQ_END,
+    )
+    return build_acquisition_receipt(
+        plan=plan,
+        authorization_hash=plan.authorization_hash,
+        profile_set_hash=rule.profile_set_hash,
+        request=request,
+        native_layer_rule=rule,
+        byte_graph=NativeByteGraphV1(
+            objects=(),
+            transformations=(),
+            retained_root_descriptor_hashes=(),
+            provider_native_leaf_descriptor_hashes=(),
+        ),
+        pages=(),
+        retries=(),
+        observed_objects=observed_objects,
+        expected_inventory_hash=plan.expected_inventory_hash,
+        reconciliation_hash="9" * 64,
+        execution=execution,
+    )
+
+
+def test_screener_allows_declared_model_field_named_provider_signatures() -> None:
+    # provider_signatures is a declared OriginEvidenceV1 field name fixed by
+    # Drift source, not a runtime-supplied key, so it is not a credential.
+    validate_secret_free_acquisition_payload(_origin_evidence())
+
+
+def test_build_acquisition_receipt_accepts_non_empty_observed_objects() -> None:
+    observed = (_observed_object(_origin_evidence()),)
+    receipt = _build_receipt_with_observed(observed)
+    assert receipt.observed_objects == observed
+    assert receipt.observed_objects[0].origin_evidence.provider_signatures == (
+        "sha256:" + "ab" * 32,
+    )
+
+
+@pytest.mark.parametrize(
+    ("credential_value", "expected_message"),
+    [
+        (
+            "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+            r"Secret credential pattern detected in payload",
+        ),
+        (
+            "https://data.provider.test/v1/bars?api_key=AKIA1234567890",
+            r"Potential credential term 'api_key' found in payload",
+        ),
+    ],
+)
+def test_build_acquisition_receipt_rejects_credential_value_in_observed_objects(
+    credential_value: str, expected_message: str
+) -> None:
+    observed = (
+        _observed_object(
+            _origin_evidence(safe_response_metadata={"upstream_note": credential_value})
+        ),
+    )
+    with pytest.raises(ValueError, match=expected_message):
+        _build_receipt_with_observed(observed)
+
+
+def test_build_acquisition_receipt_rejects_credential_named_data_key() -> None:
+    # 'authorization' here is a runtime-supplied mapping key inside
+    # safe_response_metadata, not a declared model field, so it stays screened.
+    observed = (
+        _observed_object(
+            _origin_evidence(
+                safe_response_metadata={"headers": {"authorization": "redacted"}}
+            )
+        ),
+    )
+    with pytest.raises(
+        ValueError, match=r"credential parameter or header 'authorization' detected"
+    ):
+        _build_receipt_with_observed(observed)
+
+
+def test_screener_still_screens_undeclared_extra_model_keys() -> None:
+    # An extra key is runtime-supplied rather than declared in Drift source,
+    # so the model-field exemption must not cover it.
+    class PermissiveEnvelope(BaseModel):
+        model_config = ConfigDict(extra="allow")
+
+        note: str
+
+    envelope = PermissiveEnvelope.model_validate(
+        {"note": "ok", "authorization": "redacted"}
+    )
+    with pytest.raises(
+        ValueError, match=r"credential parameter or header 'authorization' detected"
+    ):
+        validate_secret_free_acquisition_payload(envelope)
