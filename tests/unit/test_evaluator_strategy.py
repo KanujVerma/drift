@@ -1,6 +1,6 @@
 """Unit tests for M2 Task 5 strategy boundary contracts and staging rules."""
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from functools import cache
 
@@ -14,6 +14,10 @@ from observation_test_support import (
 from pydantic import ValidationError
 
 from drift.domain.common import UUID7
+from drift.domain.evaluator_clock import (
+    EvaluationSessionV1,
+    evaluation_session_hash,
+)
 from drift.domain.evaluator_portfolio import SecurityHoldingV1
 from drift.domain.evaluator_strategy import (
     DECISION_TIME_MISMATCH,
@@ -27,13 +31,22 @@ from drift.domain.evaluator_strategy import (
     position_view,
     stage_decision_targets,
 )
-from drift.domain.normalization import DerivedObservationViewV1
+from drift.domain.normalization import (
+    DerivedObservationViewV1,
+    NormalizationQueryV1,
+    derived_view_output_hash,
+)
+from drift.domain.observation_query import (
+    ObservationDecisionQueryV1,
+    ObservationOutcomeQueryV1,
+)
 from drift.domain.sessions import SessionKeyV1
 from drift.domain.strategies import StrategyReference
 from drift.markets.normalization import (
     materialize_observation_decision,
     materialize_observation_outcome,
 )
+from drift.serialization.canonical import content_hash
 
 SEC_A = uid(21)
 SEC_B = uid(22)
@@ -46,9 +59,31 @@ CUTOFF = datetime(2026, 11, 30, 21, 0, tzinfo=UTC)
 
 CODE_HASH = "a" * 64
 
+H0 = "0" * 64
+H1 = "1" * 64
+H2 = "2" * 64
+
 
 def _key(day: date = SESSION_DATE) -> SessionKeyV1:
     return SessionKeyV1(mic="XNYS", session_scope="regular", local_date=day)
+
+
+def _evaluation_session(
+    day: date = SESSION_DATE, *, close: datetime | None = None
+) -> EvaluationSessionV1:
+    default_close = datetime.combine(day, time(21, 0), tzinfo=UTC)
+    closed_at = default_close if close is None else close
+    draft = EvaluationSessionV1.model_construct(
+        schema_version="1",
+        session_key=_key(day),
+        opened_at=closed_at - timedelta(hours=6, minutes=30),
+        closed_at=closed_at,
+        authority="realized",
+        authority_record_hashes=(H1,),
+        authority_proof_hashes=(H2,),
+        session_hash=H0,
+    )
+    return draft.model_copy(update={"session_hash": evaluation_session_hash(draft)})
 
 
 @cache
@@ -65,6 +100,92 @@ def _source_basis_decision_view() -> DerivedObservationViewV1:
     query = harness.normalization_query("source_basis")
     result = harness.normalize(query)
     return materialize_observation_decision(result.reference, query, harness.context)
+
+
+@cache
+def _causal_source_basis_view() -> DerivedObservationViewV1:
+    """A source-basis decision view genuinely answerable at the cutoff.
+
+    The default harness query carries a knowledge clock 27 hours past the
+    decision cutoff. This one is materialized under clocks that land exactly
+    on the cutoff, so it is evidence a decision taken there could have read.
+    """
+    harness = NormalizationHarness(outer_kind="decision")
+    query = harness.normalization_query(
+        "source_basis",
+        # The harness derives its vintage as outer_horizon plus one day, and
+        # the vintage is both the decision time and the knowledge cutoff.
+        outer_horizon="2026-11-29T21:00:00Z",
+        effective_cutoff="2026-11-30T21:00:00Z",
+    )
+    result = harness.normalize(query)
+    return materialize_observation_decision(result.reference, query, harness.context)
+
+
+def _reseal(
+    view: DerivedObservationViewV1, observation: object, *, validated: bool = True
+) -> DerivedObservationViewV1:
+    """Rebind one derived view to a restated observation query.
+
+    `validated` is only lowered where the restatement is deliberately
+    forged past a contract the derived view itself already enforces.
+    """
+    query = NormalizationQueryV1.model_construct(
+        **(dict(view.query) | {"observation": observation})
+    )
+    draft = DerivedObservationViewV1.model_construct(
+        **(dict(view) | {"query": query, "query_hash": content_hash(query)})
+    )
+    sealed = DerivedObservationViewV1.model_construct(
+        **(dict(draft) | {"output_hash": derived_view_output_hash(draft)})
+    )
+    if not validated:
+        return sealed
+    return DerivedObservationViewV1.model_validate(dict(sealed))
+
+
+def _reclocked(
+    view: DerivedObservationViewV1, *, decision_time: datetime
+) -> DerivedObservationViewV1:
+    """Restate one decision view's clocks, keeping the query well formed.
+
+    The M1d pipeline can only materialize the split-normalized case with a
+    knowledge clock past the decision session close, because proving the
+    anchor session opened depends on evidence published after that close.
+    Restating the same derived payload under clocks a decision at the cutoff
+    could have read is the only way to exercise the anchor rule and the
+    clock rule independently rather than having one mask the other.
+    """
+    observation = view.query.observation.model_copy(
+        update={
+            "decision_time": decision_time,
+            "knowledge_cutoff": decision_time,
+            "effective_cutoff": decision_time,
+        }
+    )
+    return _reseal(view, observation)
+
+
+def _forged_clocks(
+    view: DerivedObservationViewV1, **clocks: datetime
+) -> DerivedObservationViewV1:
+    """Restate clocks past the observation query's own internal constraint.
+
+    The query itself already forbids a knowledge or effective clock after its
+    decision time, so each context guard can only be exercised on its own by
+    bypassing that constructor.
+    """
+    observation = ObservationDecisionQueryV1.model_construct(
+        **(dict(view.query.observation) | clocks)
+    )
+    return _reseal(view, observation)
+
+
+@cache
+def _causal_split_normalized_view() -> DerivedObservationViewV1:
+    return _reclocked(
+        _split_normalized_decision_view(SESSION_DATE), decision_time=CUTOFF
+    )
 
 
 @cache
@@ -89,11 +210,14 @@ def _context(
     nav: str | None = None,
     views: tuple[StrategyDecisionViewV1, ...] = (),
     day: date = SESSION_DATE,
-    cutoff: datetime = CUTOFF,
+    cutoff: datetime | None = None,
+    session: EvaluationSessionV1 | None = None,
 ) -> StrategyDecisionContextV1:
+    decision_session = _evaluation_session(day) if session is None else session
     return StrategyDecisionContextV1(
         session_key=_key(day),
-        decision_cutoff=cutoff,
+        decision_session=decision_session,
+        decision_cutoff=decision_session.closed_at if cutoff is None else cutoff,
         admitted_universe=admitted,
         current_holdings=holdings,
         current_cash=Decimal(cash),
@@ -237,7 +361,7 @@ def test_context_rejects_negative_nav() -> None:
 def test_context_accepts_split_normalized_view_anchored_to_its_session() -> None:
     view = StrategyDecisionViewV1(
         security_id=VIEW_SECURITY,
-        views=(_split_normalized_decision_view(SESSION_DATE),),
+        views=(_causal_split_normalized_view(),),
     )
     context = _context(views=(view,))
     assert context.decision_views == (view,)
@@ -246,10 +370,118 @@ def test_context_accepts_split_normalized_view_anchored_to_its_session() -> None
 def test_context_rejects_split_normalized_view_anchored_to_a_future_session() -> None:
     view = StrategyDecisionViewV1(
         security_id=VIEW_SECURITY,
-        views=(_split_normalized_decision_view(SESSION_DATE),),
+        views=(_causal_split_normalized_view(),),
     )
     with pytest.raises(ValidationError, match="anchored"):
         _context(views=(view,), day=SOURCE_DATE)
+
+
+def test_context_accepts_evidence_clocked_exactly_at_the_cutoff() -> None:
+    view = StrategyDecisionViewV1(
+        security_id=VIEW_SECURITY, views=(_causal_source_basis_view(),)
+    )
+    observation = _causal_source_basis_view().query.observation
+    assert isinstance(observation, ObservationDecisionQueryV1)
+    assert observation.decision_time == CUTOFF
+    assert observation.knowledge_cutoff == CUTOFF
+    assert observation.effective_cutoff == CUTOFF
+    assert _context(views=(view,)).decision_views == (view,)
+
+
+def test_context_rejects_evidence_whose_knowledge_clock_follows_the_cutoff() -> None:
+    # The reviewer's demonstration: a view whose source session passes the
+    # session guard, carrying a knowledge cutoff 27 hours past the cutoff.
+    shipped = _source_basis_decision_view()
+    observation = shipped.query.observation
+    assert isinstance(observation, ObservationDecisionQueryV1)
+    assert shipped.source_session.local_date == SOURCE_DATE
+    assert observation.knowledge_cutoff == datetime(2026, 12, 2, tzinfo=UTC)
+    assert observation.knowledge_cutoff - CUTOFF == timedelta(hours=27)
+    view = StrategyDecisionViewV1(security_id=VIEW_SECURITY, views=(shipped,))
+    with pytest.raises(ValidationError, match="knowledge cutoff follows"):
+        _context(views=(view,))
+
+
+def test_context_rejects_evidence_whose_effective_clock_follows_the_cutoff() -> None:
+    late = _forged_clocks(
+        _causal_source_basis_view(),
+        effective_cutoff=CUTOFF + timedelta(seconds=1),
+    )
+    view = StrategyDecisionViewV1(security_id=VIEW_SECURITY, views=(late,))
+    with pytest.raises(ValidationError, match="effective cutoff follows"):
+        _context(views=(view,))
+
+
+def test_context_rejects_a_forged_knowledge_clock_past_the_cutoff() -> None:
+    late = _forged_clocks(
+        _causal_source_basis_view(),
+        knowledge_cutoff=CUTOFF + timedelta(seconds=1),
+    )
+    view = StrategyDecisionViewV1(security_id=VIEW_SECURITY, views=(late,))
+    with pytest.raises(ValidationError, match="knowledge cutoff follows"):
+        _context(views=(view,))
+
+
+def test_context_rejects_evidence_queried_at_another_decision_time() -> None:
+    early = _reclocked(
+        _causal_source_basis_view(), decision_time=CUTOFF - timedelta(days=1)
+    )
+    view = StrategyDecisionViewV1(security_id=VIEW_SECURITY, views=(early,))
+    with pytest.raises(ValidationError, match="queried at the decision cutoff"):
+        _context(views=(view,))
+
+
+def _forged_outcome_group(
+    *, horizon: datetime, vintage: datetime
+) -> StrategyDecisionViewV1:
+    """A decision-role view forged onto an ex-post outcome query."""
+    decision = _causal_source_basis_view()
+    fields = dict(decision.query.observation)
+    for clock in ("decision_time", "knowledge_cutoff", "effective_cutoff"):
+        fields.pop(clock)
+    outcome_query = ObservationOutcomeQueryV1.model_construct(
+        **(
+            fields
+            | {
+                "kind": "outcome",
+                "economic_horizon": horizon,
+                "evidence_vintage_cutoff": vintage,
+            }
+        )
+    )
+    forged = _reseal(decision, outcome_query, validated=False)
+    return StrategyDecisionViewV1.model_construct(
+        schema_version="1", security_id=VIEW_SECURITY, views=(forged,)
+    )
+
+
+def test_context_rejects_a_forged_outcome_query_reaching_past_the_cutoff() -> None:
+    beyond = CUTOFF + timedelta(days=1)
+    group = _forged_outcome_group(horizon=beyond, vintage=beyond)
+    with pytest.raises(ValidationError, match="economic horizon follows"):
+        _context(views=(group,))
+
+
+def test_context_rejects_a_forged_outcome_vintage_past_the_cutoff() -> None:
+    # The horizon alone is causal here, so only the vintage guard can fire.
+    group = _forged_outcome_group(horizon=CUTOFF, vintage=CUTOFF + timedelta(days=1))
+    with pytest.raises(ValidationError, match="evidence vintage cutoff follows"):
+        _context(views=(group,))
+
+
+def test_context_requires_the_cutoff_to_be_the_decision_session_close() -> None:
+    with pytest.raises(ValidationError, match="decision session close"):
+        _context(cutoff=CUTOFF - timedelta(seconds=1))
+
+
+def test_context_rejects_a_cutoff_after_the_decision_session_close() -> None:
+    with pytest.raises(ValidationError, match="decision session close"):
+        _context(cutoff=CUTOFF + timedelta(hours=3))
+
+
+def test_context_requires_the_decision_session_to_be_the_context_session() -> None:
+    with pytest.raises(ValidationError, match="decision session must be"):
+        _context(session=_evaluation_session(SOURCE_DATE), cutoff=CUTOFF)
 
 
 def test_context_rejects_view_sourced_after_its_decision_session() -> None:

@@ -7,6 +7,7 @@ evidence, and never reads a clock: the evaluator supplies the decision cutoff
 and the evaluator resolves the execution listing at the next open.
 """
 
+from datetime import datetime
 from decimal import Decimal
 from typing import Literal, Protocol, Self, runtime_checkable
 from uuid import UUID
@@ -14,8 +15,10 @@ from uuid import UUID
 from pydantic import Field, field_validator, model_validator
 
 from drift.domain.common import UUID7, FrozenModel, UTCDateTime
+from drift.domain.evaluator_clock import EvaluationSessionV1
 from drift.domain.evaluator_portfolio import SecurityHoldingV1, decimal_context
 from drift.domain.normalization import DerivedObservationViewV1
+from drift.domain.observation_query import ObservationDecisionQueryV1
 from drift.domain.sessions import SessionKeyV1
 from drift.domain.strategies import StrategyReference
 from drift.errors import DriftError
@@ -118,6 +121,7 @@ class StrategyDecisionContextV1(FrozenModel):
 
     schema_version: Literal["1"] = "1"
     session_key: SessionKeyV1
+    decision_session: EvaluationSessionV1
     decision_cutoff: UTCDateTime
     admitted_universe: tuple[UUID7, ...]
     current_holdings: tuple[PositionViewV1, ...]
@@ -154,6 +158,22 @@ class StrategyDecisionContextV1(FrozenModel):
 
     @model_validator(mode="after")
     def validate_context(self) -> Self:
+        # Every causality guard below compares evidence against the cutoff,
+        # so an unbound cutoff would leave all of them resting on a number
+        # nobody proved. The cutoff is the close of the decision session, as
+        # stated by the authority-bound session clock.
+        if self.decision_session.session_key != self.session_key:
+            raise ValueError(
+                "decision session must be the context session: "
+                f"{self.decision_session.session_key.local_date} is not "
+                f"{self.session_key.local_date}"
+            )
+        if self.decision_cutoff != self.decision_session.closed_at:
+            raise ValueError(
+                "decision cutoff must be the decision session close "
+                f"{self.decision_session.closed_at.isoformat()}, got "
+                f"{self.decision_cutoff.isoformat()}"
+            )
         if self.current_cash < Decimal("0"):
             raise ValueError("current cash must be non-negative")
         if self.portfolio_nav < Decimal("0"):
@@ -180,6 +200,46 @@ class StrategyDecisionContextV1(FrozenModel):
             raise ValueError(
                 "split normalized decision evidence must be anchored to its "
                 f"decision session {self.session_key.local_date}"
+            )
+        self._validate_evidence_clocks(view)
+
+    def _validate_evidence_clocks(self, view: DerivedObservationViewV1) -> None:
+        """Reject evidence whose own clocks run past the decision cutoff.
+
+        The subject session and the split anchor are not the only lookahead
+        channels. A view also carries the knowledge and effective clocks its
+        source observation was answered under, and those are constrained only
+        against each other. Evidence about an early session that was revised,
+        restated, or first published after the decision was taken is
+        post-decision information regardless of which session it describes,
+        and a source-basis view sidesteps the anchor rule entirely.
+        """
+        observation = view.query.observation
+        if isinstance(observation, ObservationDecisionQueryV1):
+            self._require_at_or_before(observation.knowledge_cutoff, "knowledge cutoff")
+            self._require_at_or_before(observation.effective_cutoff, "effective cutoff")
+            # The evidence must have been asked for at this decision, not at
+            # some other instant that merely happens to be causal.
+            if observation.decision_time != self.decision_cutoff:
+                raise ValueError(
+                    "decision evidence must be queried at the decision cutoff "
+                    f"{self.decision_cutoff.isoformat()}, got "
+                    f"{observation.decision_time.isoformat()}"
+                )
+            return
+        # Outcome-role evidence never reaches a strategy, so an outcome query
+        # here is already a contract breach. Its horizon clocks are checked
+        # anyway, so that a forged view cannot skip the guard entirely.
+        self._require_at_or_before(observation.economic_horizon, "economic horizon")
+        self._require_at_or_before(
+            observation.evidence_vintage_cutoff, "evidence vintage cutoff"
+        )
+
+    def _require_at_or_before(self, instant: datetime, label: str) -> None:
+        if instant > self.decision_cutoff:
+            raise ValueError(
+                f"decision evidence {label} follows its decision cutoff: "
+                f"{instant.isoformat()} follows {self.decision_cutoff.isoformat()}"
             )
 
 

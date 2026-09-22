@@ -9,7 +9,11 @@ from observation_test_support import uid
 from pydantic import ValidationError
 from session_test_support import boundary_at, date_evidence, revision
 
-from drift.domain.assertions import TemporalIntervalClaimV1
+from drift.domain.assertions import (
+    BoundaryShape,
+    TemporalBoundaryClaimV1,
+    TemporalIntervalClaimV1,
+)
 from drift.domain.common import UUID7
 from drift.domain.evaluator_clock import (
     EvaluationSessionV1,
@@ -24,8 +28,10 @@ from drift.domain.evaluator_execution import (
     ExecutionFillV1,
     FillRejectionV1,
     IndeterminateExecutionError,
+    ListingOpenPriceV1,
     RebalanceOutcomeV1,
     RebalancePlanV1,
+    canonical_fill_order,
 )
 from drift.domain.evaluator_portfolio import (
     PortfolioStateV1,
@@ -33,12 +39,19 @@ from drift.domain.evaluator_portfolio import (
 )
 from drift.domain.evaluator_strategy import SecurityTargetPositionV1
 from drift.domain.securities import (
+    ListingLifecycleEventKind,
+    ListingLifecycleVersionV1,
     ListingRole,
     ListingRoleVersionV1,
+    ListingTerminationReason,
+    ListingTerminationVersionV1,
     ListingV1,
     ListingVenue,
+    OutcomeEvidenceStatus,
 )
 from drift.domain.sessions import SessionKeyV1
+from drift.domain.temporal import SourcePrecision
+from drift.errors import DriftError
 from drift.evaluator.execution import (
     AtomicRebalanceEngine,
     resolve_execution_listing,
@@ -120,6 +133,14 @@ ZERO_COST = _cost_model(
     slippage_bps="0",
 )
 
+FEE_ONLY = _cost_model(
+    model_id="fee_only_v1",
+    commission="0.00",
+    fixed_fee="1.00",
+    notional_bps="0",
+    slippage_bps="0",
+)
+
 
 def _interval(start: datetime, end: datetime | None) -> TemporalIntervalClaimV1:
     return TemporalIntervalClaimV1(
@@ -151,6 +172,58 @@ def _role_record(
     )
 
 
+UNKNOWN_TIME = TemporalBoundaryClaimV1(
+    schema_version="1",
+    shape=BoundaryShape.UNKNOWN,
+    lower_bound=None,
+    upper_bound=None,
+    source_precision=SourcePrecision.UNKNOWN,
+    source_time_label=None,
+    source_timezone=None,
+    evidence_reference=None,
+)
+
+
+def _termination(
+    *,
+    listing_id: UUID = LISTING_OLD,
+    effective: TemporalBoundaryClaimV1 | None = None,
+    at: datetime = BEFORE,
+    suffix: int = 821,
+) -> ListingTerminationVersionV1:
+    boundary = boundary_at(at, suffix) if effective is None else effective
+    return ListingTerminationVersionV1(
+        schema_version="1",
+        revision=revision(suffix),
+        listing_id=listing_id,
+        reason=ListingTerminationReason.EXCHANGE_DELISTING,
+        source_reason_code=None,
+        source_reason_text=None,
+        last_regular_trade_time=boundary,
+        effective_time=boundary,
+        successor_relationship_ids=(),
+        outcome_evidence_status=OutcomeEvidenceStatus.UNKNOWN,
+    )
+
+
+def _lifecycle(
+    *,
+    kind: ListingLifecycleEventKind,
+    listing_id: UUID = LISTING_OLD,
+    effective: TemporalBoundaryClaimV1 | None = None,
+    at: datetime = BEFORE,
+    suffix: int = 831,
+) -> ListingLifecycleVersionV1:
+    return ListingLifecycleVersionV1(
+        schema_version="1",
+        revision=revision(suffix),
+        listing_id=listing_id,
+        event_kind=kind,
+        effective_time=boundary_at(at, suffix) if effective is None else effective,
+        related_listing_id=None,
+    )
+
+
 def _listing(listing_id: UUID, venue: ListingVenue) -> ListingV1:
     return ListingV1(schema_version="1", listing_id=listing_id, venue=venue)
 
@@ -166,10 +239,19 @@ def _state(
     holdings: tuple[SecurityHoldingV1, ...] = (),
     day: date = EXEC_DATE,
 ) -> PortfolioStateV1:
-    opening = initial_portfolio_state(session_key=_key(day), initial_cash=Decimal(cash))
-    if not holdings:
+    balance = Decimal(cash)
+    # The opening-state factory requires strictly positive seed cash, so a
+    # zero-cash book is seeded then drawn down to the balance under test.
+    seed = balance if balance > Decimal("0") else Decimal("1.00")
+    opening = initial_portfolio_state(session_key=_key(day), initial_cash=seed)
+    update: dict[str, object] = {}
+    if seed != balance:
+        update |= {"cash_balance": balance, "net_asset_value": balance}
+    if holdings:
+        update["holdings"] = holdings
+    if not update:
         return opening
-    return opening.model_copy(update={"holdings": holdings})
+    return opening.model_copy(update=update)
 
 
 def _holding(security_id: UUID7, quantity: int, basis: str) -> SecurityHoldingV1:
@@ -186,6 +268,14 @@ def _listings_for(*securities: UUID7) -> dict[UUID7, ListingV1]:
     return {security_id: NEW for security_id in securities}
 
 
+def _price(amount: str, listing: ListingV1 = NEW) -> ListingOpenPriceV1:
+    return ListingOpenPriceV1(
+        listing_id=listing.listing_id,
+        venue=listing.venue,
+        unadjusted_open_price=Decimal(amount),
+    )
+
+
 # --- listing resolution ---
 
 
@@ -195,6 +285,8 @@ def test_resolution_selects_the_unique_active_primary_listing() -> None:
         execution_session=_session(),
         role_records=(_role_record(listing_id=LISTING_OLD),),
         listings=(OLD, NEW),
+        termination_records=(),
+        lifecycle_records=(),
     )
     assert resolved == OLD
 
@@ -209,6 +301,8 @@ def test_resolution_follows_a_listing_migration_to_the_new_venue() -> None:
         execution_session=_session(),
         role_records=records,
         listings=(OLD, NEW),
+        termination_records=(),
+        lifecycle_records=(),
     )
     assert resolved == NEW
     assert resolved.venue is ListingVenue.XNAS
@@ -226,6 +320,8 @@ def test_resolution_before_a_migration_still_selects_the_old_listing() -> None:
         ),
         role_records=records,
         listings=(OLD, NEW),
+        termination_records=(),
+        lifecycle_records=(),
     )
     assert resolved == OLD
 
@@ -237,6 +333,8 @@ def test_resolution_fails_closed_without_an_active_primary_listing() -> None:
             execution_session=_session(),
             role_records=(_role_record(listing_id=LISTING_OLD, start=AFTER, end=None),),
             listings=(OLD,),
+            termination_records=(),
+            lifecycle_records=(),
         )
 
 
@@ -247,6 +345,8 @@ def test_resolution_ignores_records_for_another_security() -> None:
             execution_session=_session(),
             role_records=(_role_record(listing_id=LISTING_OLD, security_id=SEC_A),),
             listings=(OLD,),
+            termination_records=(),
+            lifecycle_records=(),
         )
 
 
@@ -261,6 +361,8 @@ def test_resolution_fails_closed_on_two_active_primary_listings() -> None:
             execution_session=_session(),
             role_records=records,
             listings=(OLD, NEW),
+            termination_records=(),
+            lifecycle_records=(),
         )
 
 
@@ -274,6 +376,8 @@ def test_resolution_accepts_duplicate_records_naming_one_listing() -> None:
         execution_session=_session(),
         role_records=records,
         listings=(OLD,),
+        termination_records=(),
+        lifecycle_records=(),
     )
     assert resolved == OLD
 
@@ -288,6 +392,8 @@ def test_resolution_fails_closed_on_an_ambiguous_effective_interval() -> None:
             execution_session=_session(),
             role_records=(_role_record(listing_id=LISTING_OLD, interval=ambiguous),),
             listings=(OLD,),
+            termination_records=(),
+            lifecycle_records=(),
         )
 
 
@@ -305,6 +411,8 @@ def test_resolution_fails_closed_on_an_ambiguous_record_beside_a_clear_one() -> 
             execution_session=_session(),
             role_records=records,
             listings=(OLD, NEW),
+            termination_records=(),
+            lifecycle_records=(),
         )
 
 
@@ -321,6 +429,8 @@ def test_resolution_fails_closed_on_an_active_indeterminate_role() -> None:
             execution_session=_session(),
             role_records=records,
             listings=(OLD, NEW),
+            termination_records=(),
+            lifecycle_records=(),
         )
 
 
@@ -334,6 +444,8 @@ def test_resolution_ignores_an_active_secondary_role() -> None:
         execution_session=_session(),
         role_records=records,
         listings=(OLD, NEW),
+        termination_records=(),
+        lifecycle_records=(),
     )
     assert resolved == OLD
 
@@ -345,6 +457,8 @@ def test_resolution_fails_closed_without_the_resolved_listing_identity() -> None
             execution_session=_session(),
             role_records=(_role_record(listing_id=LISTING_OLD),),
             listings=(NEW,),
+            termination_records=(),
+            lifecycle_records=(),
         )
 
 
@@ -358,8 +472,266 @@ def test_resolution_of_many_securities_returns_one_listing_each() -> None:
         execution_session=_session(),
         role_records=records,
         listings=(OLD, NEW),
+        termination_records=(),
+        lifecycle_records=(),
     )
     assert resolved == {SEC_A: OLD, SEC_B: NEW}
+
+
+def test_resolution_fails_closed_on_contradictory_role_evidence() -> None:
+    records = (
+        _role_record(listing_id=LISTING_OLD),
+        _role_record(listing_id=LISTING_OLD, role=ListingRole.SECONDARY, suffix=811),
+    )
+    with pytest.raises(IndeterminateExecutionError, match="contradictory"):
+        resolve_execution_listing(
+            security_id=SEC_A,
+            execution_session=_session(),
+            role_records=records,
+            listings=(OLD,),
+            termination_records=(),
+            lifecycle_records=(),
+        )
+
+
+def test_resolution_fails_closed_on_a_terminated_listing() -> None:
+    with pytest.raises(IndeterminateExecutionError, match="terminated"):
+        resolve_execution_listing(
+            security_id=SEC_A,
+            execution_session=_session(),
+            role_records=(_role_record(listing_id=LISTING_OLD),),
+            listings=(OLD,),
+            termination_records=(_termination(at=MIGRATION),),
+            lifecycle_records=(),
+        )
+
+
+def test_resolution_ignores_a_termination_that_has_not_happened_yet() -> None:
+    resolved = resolve_execution_listing(
+        security_id=SEC_A,
+        execution_session=_session(),
+        role_records=(_role_record(listing_id=LISTING_OLD),),
+        listings=(OLD,),
+        termination_records=(_termination(at=AFTER),),
+        lifecycle_records=(),
+    )
+    assert resolved == OLD
+
+
+def test_resolution_ignores_a_termination_of_another_listing() -> None:
+    resolved = resolve_execution_listing(
+        security_id=SEC_A,
+        execution_session=_session(),
+        role_records=(_role_record(listing_id=LISTING_OLD),),
+        listings=(OLD,),
+        termination_records=(_termination(listing_id=LISTING_NEW, at=BEFORE),),
+        lifecycle_records=(),
+    )
+    assert resolved == OLD
+
+
+def test_resolution_fails_closed_on_a_termination_effective_at_the_open() -> None:
+    # A listing terminated exactly as the execution session opens has already
+    # terminated for that open, so the boundary is inclusive.
+    with pytest.raises(IndeterminateExecutionError, match="terminated"):
+        resolve_execution_listing(
+            security_id=SEC_A,
+            execution_session=_session(),
+            role_records=(_role_record(listing_id=LISTING_OLD),),
+            listings=(OLD,),
+            termination_records=(_termination(at=EXEC_OPEN),),
+            lifecycle_records=(),
+        )
+
+
+def test_resolution_fails_closed_on_an_unknown_termination_time() -> None:
+    with pytest.raises(
+        IndeterminateExecutionError, match="termination evidence has an ambiguous"
+    ):
+        resolve_execution_listing(
+            security_id=SEC_A,
+            execution_session=_session(),
+            role_records=(_role_record(listing_id=LISTING_OLD),),
+            listings=(OLD,),
+            termination_records=(_termination(effective=UNKNOWN_TIME),),
+            lifecycle_records=(),
+        )
+
+
+def test_resolution_fails_closed_on_a_suspended_listing() -> None:
+    with pytest.raises(IndeterminateExecutionError, match="suspended"):
+        resolve_execution_listing(
+            security_id=SEC_A,
+            execution_session=_session(),
+            role_records=(_role_record(listing_id=LISTING_OLD),),
+            listings=(OLD,),
+            termination_records=(),
+            lifecycle_records=(
+                _lifecycle(kind=ListingLifecycleEventKind.SUSPENDED, at=MIGRATION),
+            ),
+        )
+
+
+def test_resolution_accepts_a_suspension_that_was_provably_resumed() -> None:
+    resolved = resolve_execution_listing(
+        security_id=SEC_A,
+        execution_session=_session(),
+        role_records=(_role_record(listing_id=LISTING_OLD),),
+        listings=(OLD,),
+        termination_records=(),
+        lifecycle_records=(
+            _lifecycle(kind=ListingLifecycleEventKind.SUSPENDED, at=BEFORE),
+            _lifecycle(
+                kind=ListingLifecycleEventKind.RESUMED, at=MIGRATION, suffix=841
+            ),
+        ),
+    )
+    assert resolved == OLD
+
+
+def test_resolution_fails_closed_when_a_resume_precedes_its_suspension() -> None:
+    with pytest.raises(IndeterminateExecutionError, match="suspended"):
+        resolve_execution_listing(
+            security_id=SEC_A,
+            execution_session=_session(),
+            role_records=(_role_record(listing_id=LISTING_OLD),),
+            listings=(OLD,),
+            termination_records=(),
+            lifecycle_records=(
+                _lifecycle(kind=ListingLifecycleEventKind.SUSPENDED, at=MIGRATION),
+                _lifecycle(
+                    kind=ListingLifecycleEventKind.RESUMED, at=BEFORE, suffix=841
+                ),
+            ),
+        )
+
+
+def test_resolution_ignores_a_suspension_that_has_not_happened_yet() -> None:
+    resolved = resolve_execution_listing(
+        security_id=SEC_A,
+        execution_session=_session(),
+        role_records=(_role_record(listing_id=LISTING_OLD),),
+        listings=(OLD,),
+        termination_records=(),
+        lifecycle_records=(
+            _lifecycle(kind=ListingLifecycleEventKind.SUSPENDED, at=AFTER),
+        ),
+    )
+    assert resolved == OLD
+
+
+def test_resolution_ignores_a_non_suspending_lifecycle_event() -> None:
+    resolved = resolve_execution_listing(
+        security_id=SEC_A,
+        execution_session=_session(),
+        role_records=(_role_record(listing_id=LISTING_OLD),),
+        listings=(OLD,),
+        termination_records=(),
+        lifecycle_records=(
+            _lifecycle(kind=ListingLifecycleEventKind.ADMITTED, at=BEFORE),
+        ),
+    )
+    assert resolved == OLD
+
+
+def test_resolution_fails_closed_on_a_simultaneous_resumption() -> None:
+    with pytest.raises(IndeterminateExecutionError, match="suspended"):
+        resolve_execution_listing(
+            security_id=SEC_A,
+            execution_session=_session(),
+            role_records=(_role_record(listing_id=LISTING_OLD),),
+            listings=(OLD,),
+            termination_records=(),
+            lifecycle_records=(
+                _lifecycle(kind=ListingLifecycleEventKind.SUSPENDED, at=MIGRATION),
+                _lifecycle(
+                    kind=ListingLifecycleEventKind.RESUMED, at=MIGRATION, suffix=841
+                ),
+            ),
+        )
+
+
+def test_resolution_does_not_treat_an_admission_as_a_resumption() -> None:
+    with pytest.raises(IndeterminateExecutionError, match="suspended"):
+        resolve_execution_listing(
+            security_id=SEC_A,
+            execution_session=_session(),
+            role_records=(_role_record(listing_id=LISTING_OLD),),
+            listings=(OLD,),
+            termination_records=(),
+            lifecycle_records=(
+                _lifecycle(kind=ListingLifecycleEventKind.SUSPENDED, at=BEFORE),
+                _lifecycle(
+                    kind=ListingLifecycleEventKind.ADMITTED, at=MIGRATION, suffix=841
+                ),
+            ),
+        )
+
+
+def test_resolution_fails_closed_on_a_suspension_effective_at_the_open() -> None:
+    with pytest.raises(IndeterminateExecutionError, match="suspended"):
+        resolve_execution_listing(
+            security_id=SEC_A,
+            execution_session=_session(),
+            role_records=(_role_record(listing_id=LISTING_OLD),),
+            listings=(OLD,),
+            termination_records=(),
+            lifecycle_records=(
+                _lifecycle(kind=ListingLifecycleEventKind.SUSPENDED, at=EXEC_OPEN),
+            ),
+        )
+
+
+def test_resolution_fails_closed_on_an_unknown_suspension_time() -> None:
+    with pytest.raises(
+        IndeterminateExecutionError, match="lifecycle evidence has an ambiguous"
+    ):
+        resolve_execution_listing(
+            security_id=SEC_A,
+            execution_session=_session(),
+            role_records=(_role_record(listing_id=LISTING_OLD),),
+            listings=(OLD,),
+            termination_records=(),
+            lifecycle_records=(
+                _lifecycle(
+                    kind=ListingLifecycleEventKind.SUSPENDED, effective=UNKNOWN_TIME
+                ),
+            ),
+        )
+
+
+def test_resolution_ignores_a_suspension_of_another_listing() -> None:
+    resolved = resolve_execution_listing(
+        security_id=SEC_A,
+        execution_session=_session(),
+        role_records=(_role_record(listing_id=LISTING_OLD),),
+        listings=(OLD,),
+        termination_records=(),
+        lifecycle_records=(
+            _lifecycle(
+                kind=ListingLifecycleEventKind.SUSPENDED,
+                listing_id=LISTING_NEW,
+                at=BEFORE,
+            ),
+        ),
+    )
+    assert resolved == OLD
+
+
+def test_many_security_resolution_consults_termination_evidence() -> None:
+    records = (
+        _role_record(listing_id=LISTING_OLD, security_id=SEC_A),
+        _role_record(listing_id=LISTING_NEW, security_id=SEC_B, suffix=811),
+    )
+    with pytest.raises(IndeterminateExecutionError, match="terminated"):
+        resolve_execution_listings(
+            security_ids=(SEC_A, SEC_B),
+            execution_session=_session(),
+            role_records=records,
+            listings=(OLD, NEW),
+            termination_records=(_termination(listing_id=LISTING_NEW, at=BEFORE),),
+            lifecycle_records=(),
+        )
 
 
 # --- planning and cost application ---
@@ -370,7 +742,7 @@ def test_plan_applies_adverse_slippage_and_costs_to_a_buy() -> None:
     plan = engine.plan(
         state=_state(),
         staged_targets=(_target(SEC_A, 10),),
-        open_prices={SEC_A: Decimal("100.00")},
+        open_prices={SEC_A: _price("100.00")},
         execution_listings=_listings_for(SEC_A),
     )
     (fill,) = plan.planned_fills
@@ -392,7 +764,7 @@ def test_plan_applies_adverse_slippage_and_costs_to_a_sell() -> None:
     plan = engine.plan(
         state=_state(holdings=(_holding(SEC_A, 20, "800.00"),)),
         staged_targets=(_target(SEC_A, 0),),
-        open_prices={SEC_A: Decimal("50.00")},
+        open_prices={SEC_A: _price("50.00")},
         execution_listings=_listings_for(SEC_A),
     )
     (fill,) = plan.planned_fills
@@ -414,7 +786,7 @@ def test_notional_fee_uses_the_unadjusted_open_price() -> None:
     plan = engine.plan(
         state=_state(),
         staged_targets=(_target(SEC_A, 1),),
-        open_prices={SEC_A: Decimal("100.00")},
+        open_prices={SEC_A: _price("100.00")},
         execution_listings=_listings_for(SEC_A),
     )
     (fill,) = plan.planned_fills
@@ -427,7 +799,7 @@ def test_plan_records_the_resolved_execution_listing_and_venue() -> None:
     plan = engine.plan(
         state=_state(),
         staged_targets=(_target(SEC_A, 1),),
-        open_prices={SEC_A: Decimal("10.00")},
+        open_prices={SEC_A: _price("10.00")},
         execution_listings={SEC_A: NEW},
     )
     (fill,) = plan.planned_fills
@@ -458,16 +830,83 @@ def test_plan_fails_closed_on_a_missing_open_price() -> None:
         )
 
 
+def test_open_price_contract_rejects_a_non_positive_amount() -> None:
+    for bad in (Decimal("0.00"), Decimal("-1.00")):
+        with pytest.raises(ValidationError, match="open price"):
+            ListingOpenPriceV1(
+                listing_id=LISTING_NEW,
+                venue=ListingVenue.XNAS,
+                unadjusted_open_price=bad,
+            )
+
+
 def test_plan_fails_closed_on_a_non_positive_open_price() -> None:
     engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
     for bad in (Decimal("0.00"), Decimal("-1.00")):
+        forged = ListingOpenPriceV1.model_construct(
+            schema_version="1",
+            listing_id=LISTING_NEW,
+            venue=ListingVenue.XNAS,
+            unadjusted_open_price=bad,
+        )
         with pytest.raises(IndeterminateExecutionError, match="open price"):
             engine.plan(
                 state=_state(),
                 staged_targets=(_target(SEC_A, 1),),
-                open_prices={SEC_A: bad},
+                open_prices={SEC_A: forged},
                 execution_listings=_listings_for(SEC_A),
             )
+
+
+def test_plan_fails_closed_on_a_price_bound_to_another_listing() -> None:
+    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    with pytest.raises(IndeterminateExecutionError, match="bound to listing"):
+        engine.plan(
+            state=_state(),
+            staged_targets=(_target(SEC_A, 1),),
+            open_prices={SEC_A: _price("10.00", OLD)},
+            execution_listings={SEC_A: NEW},
+        )
+
+
+def test_plan_fails_closed_on_a_price_bound_to_another_venue() -> None:
+    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    mislabelled = ListingOpenPriceV1(
+        listing_id=LISTING_NEW,
+        venue=ListingVenue.XNYS,
+        unadjusted_open_price=Decimal("10.00"),
+    )
+    with pytest.raises(IndeterminateExecutionError, match="bound to venue"):
+        engine.plan(
+            state=_state(),
+            staged_targets=(_target(SEC_A, 1),),
+            open_prices={SEC_A: mislabelled},
+            execution_listings={SEC_A: NEW},
+        )
+
+
+def test_migrated_security_refuses_the_price_from_its_old_listing() -> None:
+    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    records = (
+        _role_record(listing_id=LISTING_OLD, start=BEFORE, end=MIGRATION),
+        _role_record(listing_id=LISTING_NEW, start=MIGRATION, suffix=811),
+    )
+    listings = resolve_execution_listings(
+        security_ids=(SEC_A,),
+        execution_session=_session(),
+        role_records=records,
+        listings=(OLD, NEW),
+        termination_records=(),
+        lifecycle_records=(),
+    )
+    assert listings == {SEC_A: NEW}
+    with pytest.raises(IndeterminateExecutionError, match="bound to listing"):
+        engine.rebalance(
+            state=_state(),
+            staged_targets=(_target(SEC_A, 1),),
+            open_prices={SEC_A: _price("10.00", OLD)},
+            execution_listings=listings,
+        )
 
 
 def test_plan_fails_closed_without_a_resolved_execution_listing() -> None:
@@ -476,20 +915,35 @@ def test_plan_fails_closed_without_a_resolved_execution_listing() -> None:
         engine.plan(
             state=_state(),
             staged_targets=(_target(SEC_A, 1),),
-            open_prices={SEC_A: Decimal("10.00")},
+            open_prices={SEC_A: _price("10.00")},
             execution_listings={},
         )
 
 
 def test_plan_requires_staged_targets_to_cover_every_holding() -> None:
     engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
-    with pytest.raises(ValueError, match="every held security"):
+    # An uncovered holding leaves the intended position unknowable, so it
+    # belongs to the execution taxonomy rather than to a bare ValueError.
+    with pytest.raises(IndeterminateExecutionError, match="every held security"):
         engine.plan(
             state=_state(holdings=(_holding(SEC_B, 5, "50.00"),)),
             staged_targets=(_target(SEC_A, 1),),
-            open_prices={SEC_A: Decimal("10.00"), SEC_B: Decimal("10.00")},
+            open_prices={SEC_A: _price("10.00"), SEC_B: _price("10.00")},
             execution_listings=_listings_for(SEC_A, SEC_B),
         )
+
+
+def test_uncovered_holding_stays_inside_the_execution_error_taxonomy() -> None:
+    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    with pytest.raises(IndeterminateExecutionError) as caught:
+        engine.plan(
+            state=_state(holdings=(_holding(SEC_B, 5, "50.00"),)),
+            staged_targets=(_target(SEC_A, 1),),
+            open_prices={SEC_A: _price("10.00"), SEC_B: _price("10.00")},
+            execution_listings=_listings_for(SEC_A, SEC_B),
+        )
+    assert isinstance(caught.value, DriftError)
+    assert "every held security" in str(caught.value)
 
 
 def test_plan_rejects_duplicate_staged_targets() -> None:
@@ -498,7 +952,7 @@ def test_plan_rejects_duplicate_staged_targets() -> None:
         engine.plan(
             state=_state(),
             staged_targets=(_target(SEC_A, 1), _target(SEC_A, 2)),
-            open_prices={SEC_A: Decimal("10.00")},
+            open_prices={SEC_A: _price("10.00")},
             execution_listings=_listings_for(SEC_A),
         )
 
@@ -512,7 +966,7 @@ def test_plan_rejects_a_forged_negative_staged_target() -> None:
         engine.plan(
             state=_state(),
             staged_targets=(forged,),
-            open_prices={SEC_A: Decimal("10.00")},
+            open_prices={SEC_A: _price("10.00")},
             execution_listings=_listings_for(SEC_A),
         )
 
@@ -525,9 +979,9 @@ def test_plan_orders_sells_before_buys_by_security_uuid_bytes() -> None:
         ),
         staged_targets=(_target(SEC_A, 2), _target(SEC_B, 0), _target(SEC_C, 1)),
         open_prices={
-            SEC_A: Decimal("10.00"),
-            SEC_B: Decimal("10.00"),
-            SEC_C: Decimal("10.00"),
+            SEC_A: _price("10.00"),
+            SEC_B: _price("10.00"),
+            SEC_C: _price("10.00"),
         },
         execution_listings=_listings_for(SEC_A, SEC_B, SEC_C),
     )
@@ -538,12 +992,189 @@ def test_plan_orders_sells_before_buys_by_security_uuid_bytes() -> None:
     )
 
 
+def test_plan_orders_sells_by_descending_cash_delta_before_uuid_bytes() -> None:
+    engine = AtomicRebalanceEngine(cost_model=FEE_ONLY)
+    plan = engine.plan(
+        state=_state(
+            cash="0.00",
+            holdings=(_holding(SEC_A, 1, "5.00"), _holding(SEC_B, 10, "500.00")),
+        ),
+        staged_targets=(_target(SEC_A, 0), _target(SEC_B, 0)),
+        open_prices={SEC_A: _price("0.10"), SEC_B: _price("100.00")},
+        execution_listings=_listings_for(SEC_A, SEC_B),
+    )
+    # SEC_A sorts first by UUID bytes but its fixed fee exceeds its proceeds,
+    # so booking it first would drive running cash negative.
+    assert SEC_A.bytes < SEC_B.bytes
+    assert tuple(fill.security_id for fill in plan.planned_fills) == (SEC_B, SEC_A)
+    assert tuple(fill.cash_delta for fill in plan.planned_fills) == (
+        Decimal("999.00"),
+        Decimal("-0.90"),
+    )
+
+
+def test_funded_rebalance_with_a_fee_heavy_sell_commits() -> None:
+    engine = AtomicRebalanceEngine(cost_model=FEE_ONLY)
+    outcome = engine.rebalance(
+        state=_state(
+            cash="0.00",
+            holdings=(_holding(SEC_A, 1, "5.00"), _holding(SEC_B, 10, "500.00")),
+        ),
+        staged_targets=(_target(SEC_A, 0), _target(SEC_B, 0)),
+        open_prices={SEC_A: _price("0.10"), SEC_B: _price("100.00")},
+        execution_listings=_listings_for(SEC_A, SEC_B),
+    )
+    assert outcome.plan.projected_cash == Decimal("998.10")
+    assert outcome.plan.is_funded
+    assert outcome.classification == "executed"
+    assert outcome.state.cash_balance == Decimal("998.10")
+    assert outcome.state.holdings == ()
+
+
+def test_fee_heavy_liquidation_outcome_is_invariant_under_swapped_uuids() -> None:
+    engine = AtomicRebalanceEngine(cost_model=FEE_ONLY)
+
+    def _liquidate(cheap: UUID7, rich: UUID7) -> RebalanceOutcomeV1:
+        holdings = tuple(
+            sorted(
+                (_holding(cheap, 1, "5.00"), _holding(rich, 10, "500.00")),
+                key=lambda holding: holding.security_id.bytes,
+            )
+        )
+        return engine.rebalance(
+            state=_state(cash="0.00", holdings=holdings),
+            staged_targets=tuple(
+                sorted(
+                    (_target(cheap, 0), _target(rich, 0)),
+                    key=lambda target: target.security_id.bytes,
+                )
+            ),
+            open_prices={cheap: _price("0.10"), rich: _price("100.00")},
+            execution_listings=_listings_for(cheap, rich),
+        )
+
+    forward = _liquidate(SEC_A, SEC_B)
+    swapped = _liquidate(SEC_B, SEC_A)
+    assert forward.classification == swapped.classification == "executed"
+    assert forward.state.cash_balance == swapped.state.cash_balance
+    assert forward.state.cash_balance == Decimal("998.10")
+
+
+def test_plan_rejects_sells_reordered_by_uuid_bytes() -> None:
+    engine = AtomicRebalanceEngine(cost_model=FEE_ONLY)
+    plan = engine.plan(
+        state=_state(
+            cash="0.00",
+            holdings=(_holding(SEC_A, 1, "5.00"), _holding(SEC_B, 10, "500.00")),
+        ),
+        staged_targets=(_target(SEC_A, 0), _target(SEC_B, 0)),
+        open_prices={SEC_A: _price("0.10"), SEC_B: _price("100.00")},
+        execution_listings=_listings_for(SEC_A, SEC_B),
+    )
+    uuid_ordered = tuple(
+        sorted(plan.planned_fills, key=lambda fill: fill.security_id.bytes)
+    )
+    assert uuid_ordered != plan.planned_fills
+    with pytest.raises(ValidationError, match="canonical"):
+        plan.model_copy(update={"planned_fills": uuid_ordered})
+
+
+def test_plan_breaks_equal_sell_cash_deltas_by_security_uuid_bytes() -> None:
+    engine = AtomicRebalanceEngine(cost_model=ZERO_COST)
+    plan = engine.plan(
+        state=_state(
+            cash="0.00",
+            holdings=(
+                _holding(SEC_A, 2, "20.00"),
+                _holding(SEC_B, 2, "20.00"),
+                _holding(SEC_C, 2, "20.00"),
+            ),
+        ),
+        staged_targets=(_target(SEC_A, 0), _target(SEC_B, 0), _target(SEC_C, 0)),
+        open_prices={
+            SEC_A: _price("10.00"),
+            SEC_B: _price("10.00"),
+            SEC_C: _price("10.00"),
+        },
+        execution_listings=_listings_for(SEC_A, SEC_B, SEC_C),
+    )
+    assert tuple(fill.cash_delta for fill in plan.planned_fills) == (
+        Decimal("20.00"),
+        Decimal("20.00"),
+        Decimal("20.00"),
+    )
+    assert tuple(fill.security_id for fill in plan.planned_fills) == (
+        SEC_A,
+        SEC_B,
+        SEC_C,
+    )
+
+
+def _sell_fill(security_id: UUID7, price: str, quantity: int = 1) -> ExecutionFillV1:
+    gross = Decimal(price) * quantity
+    return ExecutionFillV1(
+        security_id=security_id,
+        listing_id=LISTING_NEW,
+        venue=ListingVenue.XNAS,
+        side="sell",
+        quantity=quantity,
+        unadjusted_open_price=Decimal(price),
+        fill_price=Decimal(price),
+        gross_notional=gross,
+        transaction_costs=Decimal("1.00"),
+        cash_delta=gross - Decimal("1.00"),
+    )
+
+
+def test_canonical_order_puts_the_largest_cash_positive_sell_first() -> None:
+    cheap = _sell_fill(SEC_A, "0.10")
+    rich = _sell_fill(SEC_B, "100.00")
+    for supplied in ((cheap, rich), (rich, cheap)):
+        assert canonical_fill_order(supplied) == (rich, cheap)
+
+
+def test_canonical_order_breaks_equal_cash_deltas_by_security_uuid_bytes() -> None:
+    first = _sell_fill(SEC_A, "10.00")
+    second = _sell_fill(SEC_B, "10.00")
+    third = _sell_fill(SEC_C, "10.00")
+    assert first.cash_delta == second.cash_delta == third.cash_delta
+    # Supplied in reverse UUID order, so a missing tiebreak pass would be
+    # invisible if the caller happened to supply them already sorted.
+    assert canonical_fill_order((third, second, first)) == (first, second, third)
+
+
+def test_canonical_order_sorts_buys_by_security_uuid_bytes() -> None:
+    first = _fill(security_id=SEC_A)
+    second = _fill(security_id=SEC_B)
+    third = _fill(security_id=SEC_C)
+    assert all(fill.side == "buy" for fill in (first, second, third))
+    assert canonical_fill_order((third, first, second)) == (first, second, third)
+
+
+def test_canonical_order_puts_every_sell_before_every_buy() -> None:
+    buy = _fill(security_id=SEC_A)
+    sell = _sell_fill(SEC_C, "0.10")
+    # The sell is cash-negative after its fee and sorts last by UUID bytes,
+    # and still precedes the buy.
+    assert sell.cash_delta < Decimal("0")
+    assert canonical_fill_order((buy, sell)) == (sell, buy)
+
+
+def test_canonical_order_is_stable_under_an_ambient_decimal_context() -> None:
+    fills = (_sell_fill(SEC_B, "100.0000001"), _sell_fill(SEC_A, "100.0000002"))
+    pinned = canonical_fill_order(fills)
+    with localcontext() as context:
+        context.prec = 4
+        hostile = canonical_fill_order(fills)
+    assert hostile == pinned == (fills[1], fills[0])
+
+
 def test_plan_is_immune_to_an_ambient_decimal_context() -> None:
     engine = AtomicRebalanceEngine(cost_model=_cost_model())
     pinned = engine.plan(
         state=_state(),
         staged_targets=(_target(SEC_A, 7),),
-        open_prices={SEC_A: Decimal("123.456789")},
+        open_prices={SEC_A: _price("123.456789")},
         execution_listings=_listings_for(SEC_A),
     )
     with localcontext() as context:
@@ -551,7 +1182,7 @@ def test_plan_is_immune_to_an_ambient_decimal_context() -> None:
         hostile = engine.plan(
             state=_state(),
             staged_targets=(_target(SEC_A, 7),),
-            open_prices={SEC_A: Decimal("123.456789")},
+            open_prices={SEC_A: _price("123.456789")},
             execution_listings=_listings_for(SEC_A),
         )
     assert hostile == pinned
@@ -566,7 +1197,7 @@ def test_execution_commits_sells_before_buys() -> None:
     outcome = engine.rebalance(
         state=state,
         staged_targets=(_target(SEC_A, 9), _target(SEC_B, 0)),
-        open_prices={SEC_A: Decimal("110.00"), SEC_B: Decimal("100.00")},
+        open_prices={SEC_A: _price("110.00"), SEC_B: _price("100.00")},
         execution_listings=_listings_for(SEC_A, SEC_B),
     )
     assert outcome.classification == "executed"
@@ -579,7 +1210,7 @@ def test_execution_applies_slippage_and_deducts_transaction_costs() -> None:
     outcome = engine.rebalance(
         state=_state(cash="10000.00"),
         staged_targets=(_target(SEC_A, 10),),
-        open_prices={SEC_A: Decimal("100.00")},
+        open_prices={SEC_A: _price("100.00")},
         execution_listings=_listings_for(SEC_A),
     )
     assert outcome.state.cash_balance == Decimal("8997.75")
@@ -592,7 +1223,7 @@ def test_execution_clears_a_stale_mark() -> None:
     outcome = engine.rebalance(
         state=_state(),
         staged_targets=(_target(SEC_A, 1),),
-        open_prices={SEC_A: Decimal("10.00")},
+        open_prices={SEC_A: _price("10.00")},
         execution_listings=_listings_for(SEC_A),
     )
     assert not outcome.state.is_marked
@@ -605,7 +1236,7 @@ def test_unfunded_rebalance_commits_zero_fills_and_halts() -> None:
     outcome = engine.rebalance(
         state=state,
         staged_targets=(_target(SEC_A, 10),),
-        open_prices={SEC_A: Decimal("100.00")},
+        open_prices={SEC_A: _price("100.00")},
         execution_listings=_listings_for(SEC_A),
     )
     assert outcome.classification == "rejected"
@@ -626,7 +1257,7 @@ def test_multi_buy_shortfall_commits_zero_fills() -> None:
     outcome = engine.rebalance(
         state=state,
         staged_targets=(_target(SEC_A, 10), _target(SEC_B, 10)),
-        open_prices={SEC_A: Decimal("100.00"), SEC_B: Decimal("100.00")},
+        open_prices={SEC_A: _price("100.00"), SEC_B: _price("100.00")},
         execution_listings=_listings_for(SEC_A, SEC_B),
     )
     assert outcome.classification == "rejected"
@@ -642,7 +1273,7 @@ def test_shortfall_in_one_buy_blocks_the_affordable_buy_too() -> None:
     outcome = engine.rebalance(
         state=_state(cash="1000.00"),
         staged_targets=(_target(SEC_A, 1), _target(SEC_B, 100)),
-        open_prices={SEC_A: Decimal("10.00"), SEC_B: Decimal("100.00")},
+        open_prices={SEC_A: _price("10.00"), SEC_B: _price("100.00")},
         execution_listings=_listings_for(SEC_A, SEC_B),
     )
     assert outcome.classification == "rejected"
@@ -654,7 +1285,7 @@ def test_exactly_funded_rebalance_executes() -> None:
     outcome = engine.rebalance(
         state=_state(cash="1000.00"),
         staged_targets=(_target(SEC_A, 10),),
-        open_prices={SEC_A: Decimal("100.00")},
+        open_prices={SEC_A: _price("100.00")},
         execution_listings=_listings_for(SEC_A),
     )
     assert outcome.classification == "executed"
@@ -666,7 +1297,7 @@ def test_one_cent_short_rebalance_is_rejected() -> None:
     outcome = engine.rebalance(
         state=_state(cash="999.99"),
         staged_targets=(_target(SEC_A, 10),),
-        open_prices={SEC_A: Decimal("100.00")},
+        open_prices={SEC_A: _price("100.00")},
         execution_listings=_listings_for(SEC_A),
     )
     assert outcome.classification == "rejected"
@@ -679,7 +1310,7 @@ def test_execute_rejects_a_plan_built_for_another_session() -> None:
     plan = engine.plan(
         state=_state(day=date(2026, 11, 27)),
         staged_targets=(_target(SEC_A, 1),),
-        open_prices={SEC_A: Decimal("10.00")},
+        open_prices={SEC_A: _price("10.00")},
         execution_listings=_listings_for(SEC_A),
     )
     with pytest.raises(ValueError, match="session"):
@@ -691,7 +1322,7 @@ def test_execute_rejects_a_plan_built_against_another_cash_balance() -> None:
     plan = engine.plan(
         state=_state(cash="10000.00"),
         staged_targets=(_target(SEC_A, 1),),
-        open_prices={SEC_A: Decimal("10.00")},
+        open_prices={SEC_A: _price("10.00")},
         execution_listings=_listings_for(SEC_A),
     )
     with pytest.raises(ValueError, match="cash"):
@@ -703,7 +1334,7 @@ def test_execute_rejects_a_plan_built_against_other_holdings() -> None:
     plan = engine.plan(
         state=_state(cash="10000.00"),
         staged_targets=(_target(SEC_A, 5),),
-        open_prices={SEC_A: Decimal("10.00")},
+        open_prices={SEC_A: _price("10.00")},
         execution_listings=_listings_for(SEC_A),
     )
     moved = _state(cash="10000.00", holdings=(_holding(SEC_A, 3, "30.00"),))
@@ -716,7 +1347,7 @@ def test_execute_rejects_a_plan_built_against_another_security() -> None:
     plan = engine.plan(
         state=_state(cash="10000.00", holdings=(_holding(SEC_A, 3, "30.00"),)),
         staged_targets=(_target(SEC_A, 5),),
-        open_prices={SEC_A: Decimal("10.00")},
+        open_prices={SEC_A: _price("10.00")},
         execution_listings=_listings_for(SEC_A),
     )
     swapped = _state(cash="10000.00", holdings=(_holding(SEC_B, 3, "30.00"),))
@@ -747,7 +1378,7 @@ def test_execute_refuses_to_partially_apply_an_unbookable_plan() -> None:
     plan = engine.plan(
         state=state,
         staged_targets=(_target(SEC_A, 1),),
-        open_prices={SEC_A: Decimal("10.00")},
+        open_prices={SEC_A: _price("10.00")},
         execution_listings=_listings_for(SEC_A),
     )
     forged_fill = plan.planned_fills[0].model_copy(
@@ -776,11 +1407,13 @@ def test_execution_end_to_end_uses_the_migrated_primary_listing() -> None:
         execution_session=session,
         role_records=records,
         listings=(OLD, NEW),
+        termination_records=(),
+        lifecycle_records=(),
     )
     outcome = engine.rebalance(
         state=_state(),
         staged_targets=(_target(SEC_A, 1),),
-        open_prices={SEC_A: Decimal("10.00")},
+        open_prices={SEC_A: _price("10.00")},
         execution_listings=listings,
     )
     assert outcome.classification == "executed"
@@ -879,7 +1512,7 @@ def _plan_and_state() -> tuple[RebalancePlanV1, PortfolioStateV1]:
     plan = engine.plan(
         state=state,
         staged_targets=(_target(SEC_A, 1),),
-        open_prices={SEC_A: Decimal("10.00")},
+        open_prices={SEC_A: _price("10.00")},
         execution_listings=_listings_for(SEC_A),
     )
     return plan, state
@@ -984,7 +1617,7 @@ def test_plan_rejects_uncanonical_fill_order() -> None:
     plan = engine.plan(
         state=_state(holdings=(_holding(SEC_B, 4, "40.00"),)),
         staged_targets=(_target(SEC_A, 2), _target(SEC_B, 0)),
-        open_prices={SEC_A: Decimal("10.00"), SEC_B: Decimal("10.00")},
+        open_prices={SEC_A: _price("10.00"), SEC_B: _price("10.00")},
         execution_listings=_listings_for(SEC_A, SEC_B),
     )
     with pytest.raises(ValidationError, match="canonical"):
