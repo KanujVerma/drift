@@ -1,0 +1,1000 @@
+"""M2 adversarial acceptance: epistemic lanes, gatekeeper, and replay integrity.
+
+This file attacks the ADR 0012 Absolute Non-Upgrade Rule from every direction
+the type system, the hash graph, and the promotion gate expose. The claim it
+has to establish is the strongest one in the milestone: no exploratory result,
+and no evidence that only looks promotion-grade, can satisfy promotion
+validation.
+
+The last section is deliberately different. It documents, with an executable
+reproduction, the one place where the chain is weaker than it reads:
+``validate_promotion_admission`` never re-verifies the containment witness of
+the qualified replay context behind the proof it validates. Those tests assert
+the behaviour that exists today, not the behaviour one might wish for, so that
+the residual cannot quietly widen and so that closing it forces a visible test
+change rather than silently leaving dead assertions behind.
+"""
+
+# ruff: noqa: E402
+
+import ast
+import inspect
+import sys
+from decimal import Decimal
+from functools import cache
+from pathlib import Path
+from typing import Any
+
+_UNIT_SUPPORT = Path(__file__).resolve().parents[1] / "unit"
+if str(_UNIT_SUPPORT) not in sys.path:
+    sys.path.insert(0, str(_UNIT_SUPPORT))
+
+import pytest
+import test_replay_provenance as rp
+from observation_test_support import NormalizationHarness
+from pydantic import ValidationError
+from test_evaluator_admission_gatekeeper import (
+    copy_constructed,
+    make_dimension_result,
+    make_test_fixture,
+    rebind_admission,
+)
+from test_evaluator_bundles import (
+    _exploratory_admission,
+    _harness,
+    _realized_bundle,
+    _scheduled_bundle,
+    normalization_realized_clock,
+)
+from test_evaluator_reconstruction import build_from_harness
+
+from drift.domain.evaluator_bundles import (
+    EvaluationRunIdentityV1,
+    evaluation_input_bundle_hash,
+    evaluation_run_identity_hash,
+)
+from drift.domain.evaluator_clock import SessionClockV1, session_clock_hash
+from drift.domain.evaluator_lanes import (
+    ALPACA_LIMITATION_ABSENT_HALTS,
+    ALPACA_LIMITATION_BOUNDED_COHORT,
+    ExploratoryEvaluationAdmissionV1,
+    PromotionEvaluationAdmissionV1,
+)
+from drift.domain.evaluator_portfolio import (
+    LANE_ADMISSIBLE_MARK_GRADES,
+    LaneAdmissibilityError,
+    MarkEvidenceV1,
+    MarkPriceV1,
+    PortfolioMarkV1,
+)
+from drift.domain.evaluator_reconstruction import (
+    ExploratoryReconstructedSessionObservationV1,
+)
+from drift.domain.evaluator_results import (
+    ExploratoryEvaluationResultV1,
+    PromotionEvaluationResultV1,
+)
+from drift.domain.normalization import (
+    DerivedObservationViewV1,
+    ObservationDecisionReferenceV1,
+    ObservationOutcomeReferenceV1,
+)
+from drift.domain.qualification import (
+    ConsumerPurpose,
+    M1eCompletionKind,
+    QualificationDimension,
+    QualificationStatus,
+    qualification_profile_hash,
+)
+from drift.domain.replay_provenance import (
+    BundleProvenanceProofV1,
+    QualifiedReplayContextV1,
+    SnapshotBindingEntryV1,
+    build_bundle_provenance_proof,
+    bundle_component_hashes,
+    bundle_provenance_proof_hash,
+    context_supplied_artifact_hashes,
+    qualified_replay_context_hash,
+    snapshot_binding_witness_hash,
+    verify_snapshot_binding,
+)
+from drift.evaluator.bundles import (
+    assemble_evaluation_input_bundle,
+    build_evaluation_input_bundle,
+    derive_replay_context_identity,
+    mint_bundle_provenance_proof,
+    qualify_replay_context,
+    validate_exploratory_admission,
+    validate_promotion_admission,
+    verify_evaluation_input_bundle,
+)
+from drift.evaluator.portfolio import (
+    PortfolioAccountingKernel,
+    initial_portfolio_state,
+)
+from drift.markets.normalization import (
+    materialize_observation_decision,
+    materialize_observation_outcome,
+)
+from drift.serialization.canonical import content_hash
+
+H = {character: character * 64 for character in "0123456789abcdef"}
+
+
+@cache
+def _cached_decision_case() -> tuple[Any, Any, Any]:
+    """One materialized M1d decision corpus, shared by every attack here."""
+    return rp._decision_case()
+
+
+@cache
+def _cached_exploratory_result() -> ExploratoryEvaluationResultV1:
+    import test_evaluator_engine as eng
+
+    result = eng._run(eng._engine()).result
+    assert isinstance(result, ExploratoryEvaluationResultV1)
+    return result
+
+
+# ==========================================================================
+# Lane-bound result artifacts: no relabelling, no conversion
+# ==========================================================================
+
+
+def _exploratory_result() -> ExploratoryEvaluationResultV1:
+    return _cached_exploratory_result()
+
+
+def test_a_promotion_result_cannot_carry_an_exploratory_admission() -> None:
+    result = _exploratory_result()
+
+    with pytest.raises(ValidationError) as error:
+        PromotionEvaluationResultV1.model_validate(
+            dict(result) | {"lane": "promotion", "is_promotion_grade_evidence": True}
+        )
+
+    assert [
+        (item["type"], item["loc"]) for item in error.value.errors(include_url=False)
+    ] == [("model_type", ("admission",))]
+
+
+def test_an_exploratory_result_cannot_carry_a_promotion_admission() -> None:
+    result = _exploratory_result()
+    promotion_admission = make_test_fixture()["admission"]
+
+    with pytest.raises(ValidationError) as error:
+        ExploratoryEvaluationResultV1.model_validate(
+            dict(result) | {"admission": promotion_admission}
+        )
+
+    # The admission field is refused on its type, not merely on a hash. A
+    # hash-only rejection would leave the two lanes structurally swappable.
+    assert [
+        (item["type"], item["loc"]) for item in error.value.errors(include_url=False)
+    ] == [("model_type", ("admission",))]
+
+
+def test_the_promotion_grade_flag_cannot_be_flipped_on_an_exploratory_result() -> None:
+    result = _exploratory_result()
+    assert result.is_promotion_grade_evidence is False
+
+    with pytest.raises(ValidationError) as error:
+        ExploratoryEvaluationResultV1.model_validate(
+            dict(result) | {"is_promotion_grade_evidence": True}
+        )
+
+    assert [item["loc"] for item in error.value.errors(include_url=False)] == [
+        ("is_promotion_grade_evidence",)
+    ]
+
+
+def test_the_lane_literal_cannot_be_flipped_on_an_exploratory_result() -> None:
+    result = _exploratory_result()
+
+    with pytest.raises(ValidationError) as error:
+        ExploratoryEvaluationResultV1.model_validate(
+            dict(result) | {"lane": "promotion"}
+        )
+
+    assert ("lane",) in {item["loc"] for item in error.value.errors(include_url=False)}
+
+
+def _evaluator_sources() -> tuple[Path, ...]:
+    root = Path(__file__).resolve().parents[2] / "src" / "drift"
+    return tuple(
+        sorted(
+            (
+                *(root / "evaluator").glob("*.py"),
+                *(root / "domain").glob("evaluator_*.py"),
+                root / "domain" / "replay_provenance.py",
+            )
+        )
+    )
+
+
+def test_no_conversion_seam_exists_between_the_two_result_artifacts() -> None:
+    """No helper anywhere in M2 turns exploratory evidence into a promotion claim."""
+    inspected = 0
+    offending: list[str] = []
+    for path in _evaluator_sources():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            inspected += 1
+            returns = "" if node.returns is None else ast.unparse(node.returns)
+            if "Promotion" not in returns:
+                continue
+            arguments = ast.unparse(node.args)
+            if "Exploratory" in arguments:
+                offending.append(f"{path.name}:{node.name}")
+
+    assert inspected >= 100, "the conversion-seam scan inspected nothing"
+    assert offending == []
+
+    # Neither result model exposes any public callable beyond its own
+    # validator, so there is no method seam through which a lane could change.
+    for model in (ExploratoryEvaluationResultV1, PromotionEvaluationResultV1):
+        callables = {
+            name
+            for name, member in vars(model).items()
+            if callable(member)
+            and not name.startswith("_")
+            and not name.startswith("model_")
+        }
+        assert callables == {"validate_result"}
+
+
+def test_the_promotion_result_surface_grants_no_strategy_approval() -> None:
+    """Promotion grade is a statement about evidence, never about a strategy."""
+    assert set(PromotionEvaluationResultV1.model_fields) == {
+        "schema_version",
+        "lane",
+        "is_promotion_grade_evidence",
+        "admission",
+        "run_identity",
+        "classification",
+        "halted_session_index",
+        "halt_reason",
+        "metrics",
+        "trace_hash",
+        "result_hash",
+    }
+
+
+def test_two_lanes_over_one_input_produce_two_different_result_identities() -> None:
+    """No identical rerun can turn exploratory output into promotion evidence.
+
+    The admission hash is inside the run identity preimage, which is inside
+    the result preimage. Two lanes over one input therefore cannot collide on
+    a content address, whatever else they share.
+    """
+    result = _exploratory_result()
+    identity = result.run_identity
+    promotion_admission = make_test_fixture()["admission"]
+    assert identity.admission_hash != promotion_admission.admission_hash
+
+    relabelled = EvaluationRunIdentityV1.model_construct(
+        **(dict(identity) | {"admission_hash": promotion_admission.admission_hash})
+    )
+    assert evaluation_run_identity_hash(relabelled) != identity.run_identity_hash
+
+    resealed = EvaluationRunIdentityV1.model_validate(
+        dict(relabelled)
+        | {"run_identity_hash": evaluation_run_identity_hash(relabelled)}
+    )
+    assert resealed.run_identity_hash != identity.run_identity_hash
+
+
+# ==========================================================================
+# Lane-bound valuation: an exploratory mark can never reach a promotion book
+# ==========================================================================
+
+
+def test_the_lane_admissibility_table_is_pinned() -> None:
+    assert LANE_ADMISSIBLE_MARK_GRADES == {
+        "exploratory": frozenset({"promotion_grade", "exploratory"}),
+        "promotion": frozenset({"promotion_grade"}),
+    }
+
+
+def test_a_promotion_book_refuses_an_exploratory_mark() -> None:
+    import test_evaluator_corporate_actions as ca
+
+    promotion_admission = make_test_fixture()["admission"]
+    opening = initial_portfolio_state(
+        session_key=ca._key(),
+        initial_cash=Decimal("1000"),
+        admission=promotion_admission,
+    )
+    state = opening.model_copy(
+        update={"holdings": (ca._holding(quantity=10, basis="100"),)}
+    )
+    kernel = PortfolioAccountingKernel(state, session_clock=ca.CLOCK)
+
+    with pytest.raises(
+        LaneAdmissibilityError,
+        match=r"^promotion lane refuses exploratory mark evidence",
+    ):
+        kernel.mark_close((ca._mark_price(ca.SEC_A, "10"),))
+
+    # Control: the identical book accepts a promotion-grade mark.
+    kernel.mark_close(
+        (
+            MarkPriceV1(
+                security_id=ca.SEC_A,
+                close_price=Decimal("10"),
+                evidence=MarkEvidenceV1(grade="promotion_grade", evidence_hash=H["d"]),
+            ),
+        )
+    )
+    assert kernel.state.holdings_market_value == Decimal("100")
+
+
+def test_a_promotion_mark_cannot_be_assembled_from_exploratory_prices() -> None:
+    import test_evaluator_corporate_actions as ca
+
+    with pytest.raises(
+        ValidationError,
+        match=r"promotion lane refuses exploratory mark evidence",
+    ):
+        PortfolioMarkV1(
+            session_key=ca._key(),
+            lane="promotion",
+            prices=(ca._mark_price(ca.SEC_A, "10"),),
+        )
+
+
+def test_an_exploratory_book_cannot_be_relabelled_into_the_promotion_lane() -> None:
+    import test_evaluator_corporate_actions as ca
+
+    state = ca._state(holdings=(ca._holding(quantity=10, basis="100"),), cash="1000")
+    kernel = PortfolioAccountingKernel(state, session_clock=ca.CLOCK)
+    kernel.mark_close((ca._mark_price(ca.SEC_A, "10"),))
+    marked = kernel.state
+    assert marked.lane == "exploratory"
+
+    with pytest.raises(
+        ValidationError,
+        match=r"mark was admitted under the exploratory lane",
+    ):
+        marked.model_copy(update={"lane": "promotion"})
+
+
+def test_an_indeterminate_mark_is_refused_in_every_lane() -> None:
+    import test_evaluator_corporate_actions as ca
+
+    unbound = MarkPriceV1(
+        security_id=ca.SEC_A,
+        close_price=Decimal("10"),
+        evidence=MarkEvidenceV1(grade="indeterminate", reason="no bound evidence"),
+    )
+    for lane in ("exploratory", "promotion"):
+        with pytest.raises(
+            ValidationError, match=rf"{lane} lane refuses indeterminate mark evidence"
+        ):
+            PortfolioMarkV1(session_key=ca._key(), lane=lane, prices=(unbound,))
+
+
+def test_an_exploratory_run_grades_every_mark_from_its_own_admission() -> None:
+    import test_evaluator_engine as eng
+
+    artifacts = eng._run(eng._engine())
+    mark = artifacts.final_state.mark
+    assert mark is not None
+    assert mark.lane == "exploratory"
+    assert all(price.evidence.grade == "exploratory" for price in mark.prices)
+    marked = [
+        state
+        for state in artifacts.result.metrics.equity_series
+        if state.holdings_market_value > Decimal("0")
+    ]
+    assert marked, "the run must actually mark a position"
+    assert artifacts.result.is_promotion_grade_evidence is False
+
+
+# ==========================================================================
+# Exploratory reconstruction can never masquerade as authentic evidence
+# ==========================================================================
+
+
+def test_a_reconstruction_is_not_a_derived_view_or_a_normalization_reference() -> None:
+    observation = build_from_harness(_harness())
+
+    assert isinstance(observation, ExploratoryReconstructedSessionObservationV1)
+    assert not isinstance(observation, DerivedObservationViewV1)
+    assert not isinstance(observation, ObservationDecisionReferenceV1)
+    assert not isinstance(observation, ObservationOutcomeReferenceV1)
+
+
+def test_a_reconstruction_is_structurally_rejected_by_the_decision_bucket() -> None:
+    """A reconstruction lacks every field a derived view is required to carry."""
+    observation = build_from_harness(_harness())
+
+    with pytest.raises(ValidationError) as error:
+        _realized_bundle(authentic_decision_views=(observation,))
+
+    located = {item["loc"] for item in error.value.errors(include_url=False)}
+    for field in ("role", "query", "query_hash", "source_session", "basis_mode"):
+        assert ("authentic_decision_views", 0, field) in located
+
+
+def test_an_outcome_role_view_cannot_enter_the_decision_bucket() -> None:
+    """Ex-post evidence in the decision bucket would be a lookahead channel."""
+    harness = NormalizationHarness()
+    query = harness.normalization_query("source_basis")
+    outcome_view = materialize_observation_outcome(
+        harness.normalize(query).reference, query, harness.context
+    )
+    assert outcome_view.role == "outcome"
+
+    with pytest.raises(
+        (ValidationError, ValueError),
+        match=r"authentic decision views require decision-role evidence",
+    ):
+        _realized_bundle(authentic_decision_views=(outcome_view,))
+
+
+def test_a_reconstruction_always_carries_its_retrospective_limitations() -> None:
+    observation = build_from_harness(_harness())
+    bundle = _realized_bundle(exploratory_reconstructed_observations=(observation,))
+
+    assert observation.acknowledged_limitations
+    for limitation in observation.acknowledged_limitations:
+        assert limitation in bundle.required_limitations
+
+
+def test_an_exploratory_admission_cannot_drop_a_reconstruction_limitation() -> None:
+    observation = build_from_harness(_harness())
+    bundle = _realized_bundle(exploratory_reconstructed_observations=(observation,))
+    dropped = tuple(
+        item
+        for item in bundle.required_limitations
+        if item != observation.acknowledged_limitations[0]
+    )
+    assert len(dropped) < len(bundle.required_limitations)
+
+    with pytest.raises(
+        ValueError, match=r"^exploratory admission omits required bundle limitations"
+    ):
+        validate_exploratory_admission(
+            admission=_exploratory_admission(bundle, limitations=dropped),
+            bundle=bundle,
+        )
+
+    # Control: acknowledging every limitation is admissible in the exploratory
+    # lane. ADR 0012 keeps lane one fully usable.
+    validate_exploratory_admission(
+        admission=_exploratory_admission(bundle), bundle=bundle
+    )
+
+
+def test_an_exploratory_bundle_cannot_wear_a_promotion_snapshot() -> None:
+    bundle = _realized_bundle(source_snapshot_hash=H["5"])
+
+    with pytest.raises(
+        ValueError,
+        match=r"^exploratory evaluation cannot bind a promotion source snapshot",
+    ):
+        validate_exploratory_admission(
+            admission=_exploratory_admission(
+                bundle, limitations=(ALPACA_LIMITATION_BOUNDED_COHORT,)
+            ),
+            bundle=bundle,
+        )
+
+
+# ==========================================================================
+# The promotion gate, attacked through its composed surface
+# ==========================================================================
+
+
+@cache
+def _cached_admitted_case() -> dict[str, Any]:
+    """A promotion case that the gate genuinely admits, for mutation.
+
+    Cached because building it materializes a full M1d corpus. Every member is
+    a frozen model and every attack below copies rather than mutates, so the
+    cache cannot leak state between tests.
+    """
+    harness, query, reference = _cached_decision_case()
+    snapshot = rp._qualified_snapshot(harness.context)
+    qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
+    bundle = rp._promotion_bundle(harness, query, reference, snapshot)
+    proof = mint_bundle_provenance_proof(
+        qualified_context=qualified,
+        context=harness.context,
+        bundle=bundle,
+        decision_requests=((reference, query),),
+    )
+    return rp._promotion_case(bundle, proof, snapshot.snapshot_hash)
+
+
+def _admitted_case() -> dict[str, Any]:
+    return dict(_cached_admitted_case())
+
+
+def _rebind(case: dict[str, Any], **updates: object) -> dict[str, Any]:
+    """Rebind the admission so only the mutation under test remains."""
+    rebound = dict(case)
+    rebound["admission"] = rebind_admission(rebound, **updates)
+    return rebound
+
+
+def test_the_composed_gate_admits_a_fully_evidenced_promotion_case() -> None:
+    """Control for every attack below: the honest case really is admitted."""
+    validate_promotion_admission(**_admitted_case())
+
+
+def test_the_composed_gate_rejects_a_missing_audit_purpose_report() -> None:
+    case = _admitted_case()
+    completion = copy_constructed(
+        case["completion"], purpose_reports=(case["decision_report"],)
+    )
+    attacked = _rebind(
+        {**case, "completion": completion},
+        m1e_completion_record_hash=content_hash(completion),
+    )
+
+    with pytest.raises(
+        ValueError, match=r"^missing retrospective_audit purpose report in completion"
+    ):
+        validate_promotion_admission(**attacked)
+
+
+def test_the_composed_gate_rejects_a_failed_audit_critical_dimension() -> None:
+    case = _admitted_case()
+    audit_profile = case["audit_profile"]
+    critical = audit_profile.critical_dimensions[0]
+    results = tuple(
+        make_dimension_result(
+            item.dimension,
+            status=QualificationStatus.FAIL,
+            purpose=ConsumerPurpose.RETROSPECTIVE_AUDIT,
+        )
+        if item.dimension == critical
+        else item
+        for item in case["audit_report"].results
+    )
+    report = copy_constructed(case["audit_report"], results=results)
+    completion = copy_constructed(
+        case["completion"], purpose_reports=(case["decision_report"], report)
+    )
+    handoff = copy_constructed(case["audit_handoff"], report_hash=content_hash(report))
+    handoff = copy_constructed(handoff, handoff_hash=_handoff_hash(handoff))
+    attacked = _rebind(
+        {
+            **case,
+            "audit_report": report,
+            "completion": completion,
+            "audit_handoff": handoff,
+        },
+        m1e_completion_record_hash=content_hash(completion),
+        audit_handoff_hash=handoff.handoff_hash,
+    )
+
+    with pytest.raises(
+        ValueError, match=rf"^critical dimension {critical.value} did not PASS"
+    ):
+        validate_promotion_admission(**attacked)
+
+
+def _handoff_hash(handoff: Any) -> str:
+    from drift.domain.qualification_adapters import qualified_source_handoff_hash
+
+    digest: str = qualified_source_handoff_hash(handoff)
+    return digest
+
+
+def test_the_composed_gate_rejects_a_report_profile_hash_mismatch() -> None:
+    case = _admitted_case()
+    target = copy_constructed(case["decision_report"].target, profile_hash=H["a"])
+    report = copy_constructed(case["decision_report"], target=target)
+    completion = copy_constructed(
+        case["completion"], purpose_reports=(report, case["audit_report"])
+    )
+    attacked = _rebind(
+        {**case, "decision_report": report, "completion": completion},
+        m1e_completion_record_hash=content_hash(completion),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(r"^report target profile hash mismatch for historical_decision_input$"),
+    ):
+        validate_promotion_admission(**attacked)
+
+
+def test_the_composed_gate_rejects_a_profile_outside_the_bound_profile_set() -> None:
+    case = _admitted_case()
+    foreign = copy_constructed(
+        case["audit_profile"],
+        critical_dimensions=(QualificationDimension.LICENSING_RETENTION,),
+    )
+    assert qualification_profile_hash(foreign) != qualification_profile_hash(
+        case["audit_profile"]
+    )
+
+    with pytest.raises(
+        ValueError, match=r"^audit profile is not a member of bound profile set"
+    ):
+        validate_promotion_admission(**{**case, "audit_profile": foreign})
+
+
+def test_the_composed_gate_rejects_a_pass_report_over_a_negative_completion() -> None:
+    """A fake PASS cannot outvote the M1e completion record itself."""
+    case = _admitted_case()
+    completion = copy_constructed(
+        case["completion"], completion_kind=M1eCompletionKind.COMPLETED_NEGATIVE
+    )
+    attacked = _rebind(
+        {**case, "completion": completion},
+        m1e_completion_record_hash=content_hash(completion),
+    )
+    # The reports still say PASS on every dimension.
+    for report in (case["decision_report"], case["audit_report"]):
+        assert all(item.status is QualificationStatus.PASS for item in report.results)
+
+    with pytest.raises(
+        ValueError, match=r"^promotion admission requires positive M1e completion"
+    ):
+        validate_promotion_admission(**attacked)
+
+
+def test_the_composed_gate_rejects_an_exploratory_reconstruction() -> None:
+    case = _admitted_case()
+    observation = build_from_harness(_harness())
+    snapshot_hash = case["bundle"].source_snapshot_hash
+    poisoned = _scheduled_bundle(
+        source_snapshot_hash=snapshot_hash,
+        exploratory_reconstructed_observations=(observation,),
+    )
+    proof = build_bundle_provenance_proof(
+        qualified_context_hash=case["proof"].qualified_context_hash,
+        source_snapshot_hash=snapshot_hash,
+        bundle=poisoned,
+    )
+    attacked = _rebind(
+        {**case, "bundle": poisoned, "proof": proof},
+        input_bundle_hash=poisoned.bundle_hash,
+        provenance_proof_hash=proof.proof_hash,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^promotion evaluation cannot consume exploratory reconstructed inputs"
+        ),
+    ):
+        validate_promotion_admission(**attacked)
+
+
+def test_the_composed_gate_rejects_a_bundle_declaring_any_limitation() -> None:
+    """A promotion bundle that still declares development-grade limits is a
+    self-contradiction, and must fail closed rather than be admitted."""
+    harness, query, reference = _cached_decision_case()
+    snapshot = rp._qualified_snapshot(harness.context)
+    qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
+    clock = normalization_realized_clock(harness)
+    draft = SessionClockV1.model_construct(
+        **(
+            dict(clock)
+            | {"acknowledged_limitations": (ALPACA_LIMITATION_ABSENT_HALTS,)}
+        )
+    )
+    limited = SessionClockV1.model_validate(
+        dict(draft) | {"clock_hash": session_clock_hash(draft)}
+    )
+    bundle = build_evaluation_input_bundle(
+        evaluation_interval=rp._interval(),
+        session_clock=limited,
+        context=harness.context,
+        decision_requests=((reference, query),),
+        source_snapshot_hash=snapshot.snapshot_hash,
+    )
+    assert bundle.has_exploratory_reconstructions is False
+    assert bundle.required_limitations == (ALPACA_LIMITATION_ABSENT_HALTS,)
+    proof = mint_bundle_provenance_proof(
+        qualified_context=qualified,
+        context=harness.context,
+        bundle=bundle,
+        decision_requests=((reference, query),),
+    )
+    case = rp._promotion_case(bundle, proof, snapshot.snapshot_hash)
+
+    with pytest.raises(
+        ValueError,
+        match=(r"^promotion evaluation cannot consume evidence declaring limitations"),
+    ):
+        validate_promotion_admission(**case)
+
+
+def test_a_promotion_admission_cannot_omit_its_provenance_proof_hash() -> None:
+    admission = make_test_fixture()["admission"]
+    payload = dict(admission)
+    payload.pop("provenance_proof_hash")
+
+    with pytest.raises(ValidationError) as error:
+        PromotionEvaluationAdmissionV1.model_validate(payload)
+
+    assert ("provenance_proof_hash",) in {
+        item["loc"] for item in error.value.errors(include_url=False)
+    }
+
+
+def test_a_promotion_admission_is_never_an_exploratory_admission() -> None:
+    fixture = make_test_fixture()
+    admission = fixture["admission"]
+    assert isinstance(admission, PromotionEvaluationAdmissionV1)
+
+    with pytest.raises(ValidationError) as error:
+        ExploratoryEvaluationAdmissionV1.model_validate(dict(admission))
+
+    reported = {
+        (item["type"], item["loc"]) for item in error.value.errors(include_url=False)
+    }
+    # The lane discriminator itself refuses the shape, not merely the extra
+    # promotion fields that ride along with it.
+    assert ("literal_error", ("lane",)) in reported
+    assert ("extra_forbidden", ("provenance_proof_hash",)) in reported
+
+
+# ==========================================================================
+# Replay integrity: a view hash is not a replay
+# ==========================================================================
+
+
+def test_a_self_consistent_fabricated_view_is_refused_by_replay_verification() -> None:
+    harness, query, reference = _cached_decision_case()
+    genuine = materialize_observation_decision(reference, query, harness.context)
+    forged = DerivedObservationViewV1.model_construct(
+        **(dict(genuine) | {"derivation_hash": H["e"]})
+    )
+    bundle = assemble_evaluation_input_bundle(
+        evaluation_interval=rp._interval(),
+        session_clock=normalization_realized_clock(harness),
+        authentic_decision_views=(forged,),
+    )
+    # The bundle is entirely self consistent: it carries the forged view and
+    # its own hash checks out against its own contents.
+    assert bundle.authentic_decision_views == (forged,)
+    assert bundle.bundle_hash == evaluation_input_bundle_hash(bundle)
+
+    with pytest.raises(
+        ValueError, match=r"^decision views do not match exact upstream replay"
+    ):
+        verify_evaluation_input_bundle(
+            bundle=bundle,
+            context=harness.context,
+            decision_requests=((reference, query),),
+        )
+
+
+def test_minting_refuses_a_bundle_whose_views_replay_did_not_produce() -> None:
+    harness, query, reference = _cached_decision_case()
+    snapshot = rp._qualified_snapshot(harness.context)
+    qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
+    genuine = materialize_observation_decision(reference, query, harness.context)
+    forged = DerivedObservationViewV1.model_construct(
+        **(dict(genuine) | {"derivation_hash": H["e"]})
+    )
+    bundle = assemble_evaluation_input_bundle(
+        evaluation_interval=rp._interval(),
+        session_clock=normalization_realized_clock(harness),
+        authentic_decision_views=(forged,),
+        source_snapshot_hash=snapshot.snapshot_hash,
+    )
+
+    with pytest.raises(
+        ValueError, match=r"^decision views do not match exact upstream replay"
+    ):
+        mint_bundle_provenance_proof(
+            qualified_context=qualified,
+            context=harness.context,
+            bundle=bundle,
+            decision_requests=((reference, query),),
+        )
+
+
+def test_a_bundle_member_missing_from_the_proof_fails_closed() -> None:
+    """Coverage is total: an unproven authority-bearing member is not admitted."""
+    case = _admitted_case()
+    proof = case["proof"]
+    assert set(proof.component_hashes) == set(bundle_component_hashes(case["bundle"]))
+    draft = BundleProvenanceProofV1.model_construct(
+        **(
+            dict(proof)
+            | {"component_hashes": proof.component_hashes[1:], "proof_hash": H["0"]}
+        )
+    )
+    trimmed = BundleProvenanceProofV1.model_validate(
+        dict(draft) | {"proof_hash": bundle_provenance_proof_hash(draft)}
+    )
+    attacked = _rebind(
+        {**case, "proof": trimmed}, provenance_proof_hash=trimmed.proof_hash
+    )
+
+    with pytest.raises(
+        ValueError, match=r"^provenance proof component coverage mismatch"
+    ):
+        validate_promotion_admission(**attacked)
+
+
+# ==========================================================================
+# Documented residual: the gate never re-verifies the containment witness
+# ==========================================================================
+
+
+def _forge_qualified_context(
+    *, identity: Any, source_snapshot_hash: str
+) -> QualifiedReplayContextV1:
+    """A structurally valid qualified context whose witness is fabricated.
+
+    Every entry names a snapshot entry hash that was invented here. Nothing in
+    ``QualifiedReplayContextV1`` can tell: proving the witness requires the
+    snapshot, and the model never sees one.
+    """
+    witness = tuple(
+        SnapshotBindingEntryV1(
+            schema_version="1",
+            artifact_hash=artifact_hash,
+            snapshot_entry_hash=content_hash({"forged-entry-for": artifact_hash}),
+        )
+        for artifact_hash in context_supplied_artifact_hashes(identity)
+    )
+    ordered = tuple(sorted(witness, key=lambda entry: entry.artifact_hash))
+    draft = QualifiedReplayContextV1.model_construct(
+        schema_version="1",
+        source_snapshot_hash=source_snapshot_hash,
+        context_identity=identity,
+        snapshot_binding_witness=ordered,
+        snapshot_binding_proof_hash=snapshot_binding_witness_hash(ordered),
+        qualified_hash=H["0"],
+    )
+    candidate = QualifiedReplayContextV1.model_construct(
+        **(dict(draft) | {"qualified_hash": qualified_replay_context_hash(draft)})
+    )
+    return QualifiedReplayContextV1.model_validate(candidate.model_dump())
+
+
+def test_a_forged_qualified_replay_context_validates_without_any_snapshot() -> None:
+    """The contract cannot detect a fabricated witness on its own."""
+    harness, _, _ = _cached_decision_case()
+    identity = derive_replay_context_identity(harness.context)
+
+    forged = _forge_qualified_context(identity=identity, source_snapshot_hash=H["5"])
+
+    assert forged.source_snapshot_hash == H["5"]
+    assert forged.qualified_hash == qualified_replay_context_hash(forged)
+    assert tuple(
+        entry.artifact_hash for entry in forged.snapshot_binding_witness
+    ) == context_supplied_artifact_hashes(identity)
+
+
+def test_pure_assembly_mints_a_proof_over_an_arbitrary_context_hash() -> None:
+    """``build_bundle_provenance_proof`` is documented as unverified assembly."""
+    harness, query, reference = _cached_decision_case()
+    snapshot = rp._qualified_snapshot(harness.context)
+    bundle = rp._promotion_bundle(harness, query, reference, snapshot)
+
+    proof = build_bundle_provenance_proof(
+        qualified_context_hash=H["9"],
+        source_snapshot_hash=snapshot.snapshot_hash,
+        bundle=bundle,
+    )
+
+    assert proof.qualified_context_hash == H["9"]
+    case = rp._promotion_case(bundle, proof, snapshot.snapshot_hash)
+    # The gate accepts it. Trust rests entirely on production callers reaching
+    # the proof through mint_bundle_provenance_proof.
+    validate_promotion_admission(**case)
+
+
+def test_the_promotion_gate_admits_a_proof_over_a_forged_qualified_context() -> None:
+    """Accepted residual, reproduced end to end through the sanctioned path.
+
+    Every step below is the production path: a real M1d replay, a real
+    ``mint_bundle_provenance_proof`` call, and a real
+    ``validate_promotion_admission`` call. The only hand-built artifact is the
+    ``QualifiedReplayContextV1``, and it is fully valid under its own contract.
+    The snapshot the bundle claims attests a completely different corpus, and
+    the gate still admits the evaluation, because it never re-verifies the
+    witness.
+    """
+    harness, query, reference = _cached_decision_case()
+    foreign = rp._snapshot_over(
+        context_supplied_artifact_hashes(
+            derive_replay_context_identity(rp._unrelated_context())
+        )
+    )
+    identity = derive_replay_context_identity(harness.context)
+
+    # The honest path refuses outright: this context is not in that snapshot.
+    with pytest.raises(ValueError, match=r"absent from source snapshot"):
+        qualify_replay_context(context=harness.context, snapshot=foreign)
+
+    forged = _forge_qualified_context(
+        identity=identity, source_snapshot_hash=foreign.snapshot_hash
+    )
+    bundle = rp._promotion_bundle(harness, query, reference, foreign)
+    proof = mint_bundle_provenance_proof(
+        qualified_context=forged,
+        context=harness.context,
+        bundle=bundle,
+        decision_requests=((reference, query),),
+    )
+    case = rp._promotion_case(bundle, proof, foreign.snapshot_hash)
+
+    # RESIDUAL: this call succeeds today.
+    validate_promotion_admission(**case)
+
+    # The compensating control catches it, but only with the snapshot in hand,
+    # and the gate has no parameter through which to receive one.
+    with pytest.raises(ValueError, match=r"does not resolve to a snapshot entry of"):
+        verify_snapshot_binding(qualified=forged, snapshot=foreign)
+
+
+def test_the_promotion_gate_has_no_channel_to_re_verify_the_witness() -> None:
+    """Pins the exact shape of the residual so closing it is a visible change."""
+    parameters = set(inspect.signature(validate_promotion_admission).parameters)
+
+    assert "proof" in parameters
+    assert "snapshot" not in parameters
+    assert "qualified_context" not in parameters
+    assert "source_snapshot" not in parameters
+
+
+def test_the_witness_verifier_has_no_production_call_site() -> None:
+    """The compensating control is never invoked outside this test suite.
+
+    ``verify_snapshot_binding`` is the only thing that can catch a fabricated
+    containment witness, and nothing under ``src`` calls it. The whole
+    provenance chain is likewise contract-only: ``qualify_replay_context``,
+    ``mint_bundle_provenance_proof`` and ``validate_promotion_admission`` have
+    no production call site either. That is expected while the promotion lane
+    is unreachable, but it means the "only production path" argument the
+    issue 31 ruling rests on is not yet established by any production path.
+    """
+    root = Path(__file__).resolve().parents[2] / "src"
+    watched = {
+        "verify_snapshot_binding",
+        "qualify_replay_context",
+        "mint_bundle_provenance_proof",
+        "validate_promotion_admission",
+    }
+    scanned = 0
+    call_sites: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        scanned += 1
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                if node.func.id in watched:
+                    call_sites.append(f"{path.name}:{node.lineno}:{node.func.id}")
+
+    assert scanned >= 40, "the production call-site scan found no modules"
+    assert call_sites == []
+
+
+def test_witness_re_verification_needs_no_m1d_replay() -> None:
+    """The compensating control is cheap: hashes and lookups, no replay.
+
+    This matters for the ruling that admission must stay cheap. Re-verifying
+    the witness reads only the snapshot's own replay input entries, so the
+    cost argument does not by itself justify leaving the gap open.
+    """
+    harness, _, _ = _cached_decision_case()
+    snapshot = rp._qualified_snapshot(harness.context)
+    qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
+
+    source = inspect.getsource(verify_snapshot_binding)
+
+    verify_snapshot_binding(qualified=qualified, snapshot=snapshot)
+    assert "replay_inputs" in source
+    for forbidden in (
+        "materialize_observation",
+        "normalize_observation",
+        "M1dResolutionContext",
+        "select_observation_records",
+    ):
+        assert forbidden not in source
