@@ -44,6 +44,7 @@ from drift.domain.economic_events import (
     TermsPayloadV1,
 )
 from drift.domain.economic_results import EconomicDeliveryGroupV1
+from drift.domain.evaluator_clock import SessionClockV1
 from drift.domain.evaluator_corporate_actions import (
     CashInLieuRateV1,
     DueBillRuleV1,
@@ -176,7 +177,9 @@ def _replace_holdings(
             holdings=tuple(holdings[key] for key in sorted(holdings, key=str)),
             pending_cash_claims=state.pending_cash_claims,
             settled_claim_ids=state.settled_claim_ids,
-            is_marked=False,
+            lane=state.lane,
+            admission_hash=state.admission_hash,
+            mark=None,
             holdings_market_value=ZERO,
             pending_claims_value=state.pending_claims_value,
             net_asset_value=state.cash_balance + state.pending_claims_value,
@@ -202,12 +205,17 @@ class CorporateActionProcessor:
     def __init__(
         self,
         *,
+        session_clock: SessionClockV1,
         book_currency_namespace: str,
         book_currency_code: str,
         tie_breaking_rules: Collection[TieBreakingRuleV1] = (),
         due_bill_rules: Collection[DueBillRuleV1] = (),
         cash_in_lieu_rates: Collection[CashInLieuRateV1] = (),
     ) -> None:
+        # The kernels this processor builds are validated against the same
+        # authority-bound clock as the caller's book. A clock derived from the
+        # book being checked would prove nothing.
+        self._session_clock = session_clock
         if not book_currency_namespace.strip() or not book_currency_code.strip():
             raise ValueError("a book currency namespace and code are required")
         self._currency = (book_currency_namespace, book_currency_code)
@@ -331,7 +339,9 @@ class CorporateActionProcessor:
                     settling[claim.claim_id] = claim
         if not settling:
             return portfolio_state
-        kernel = PortfolioAccountingKernel(portfolio_state)
+        kernel = PortfolioAccountingKernel(
+            portfolio_state, session_clock=self._session_clock
+        )
         kernel.settle_claims(tuple(sorted(settling)))
         return kernel.state
 
@@ -875,9 +885,8 @@ class CorporateActionProcessor:
                 action_kind=action_kind,
                 occurrence_id=context.occurrence_id,
                 component_id=component_id,
-                entitlement_session=entitlement_session,
-                payable_session=payable_session,
             ),
+            source_id=context.source_id,
             security_id=context.security_id,
             action_kind=action_kind,
             occurrence_id=context.occurrence_id,
@@ -907,7 +916,7 @@ class CorporateActionProcessor:
         )
         if not fresh:
             return state
-        kernel = PortfolioAccountingKernel(state)
+        kernel = PortfolioAccountingKernel(state, session_clock=self._session_clock)
         for claim in fresh:
             kernel.record_claim(claim)
         return kernel.state
@@ -996,40 +1005,21 @@ def _claim_identity_hash(
     action_kind: ActionKind,
     occurrence_id: str,
     component_id: str,
-    entitlement_session: date,
-    payable_session: date,
 ) -> SHA256Hash:
-    """Derive one pending-claim identity under the RULED claim identity.
+    """Derive one pending-claim identity under the ruled claim identity.
 
-    The ruled identity is ``(source_id, security_id, action_kind,
-    occurrence_id, component_id)``, with the entitlement and payable dates
-    carried as revisable attributes and date revisions handled by
-    supersession. Every caller in this module already passes exactly that
-    tuple.
-
-    ADAPTER, intentionally thin. The shipped
-    ``drift.domain.evaluator_portfolio.pending_cash_claim_id`` still folds the
-    two dates into the preimage and does not accept ``source_id``; that defect
-    is being fixed on ``krish/portfolio-crossslice``, which is outside this
-    task's write-set. Until that lands this function must reproduce the
-    current preimage exactly, or ``PendingCashClaimV1`` would reject every
-    claim it mints.
-
-    When the ruled identity lands, the body below becomes a single call
-    forwarding ``source_id`` and dropping the two date arguments; no caller
-    changes. Two interim consequences are worth naming: a payable-date
-    revision still mints a second id for one entitlement, and two sources
-    reporting one occurrence still collide on a single id. The stricter
-    one-effective-report-per-occurrence guard in ``_apply_outcome`` blocks the
-    second case from reaching here today.
+    Identity is ``(source_id, security_id, action_kind, occurrence_id,
+    component_id)``. The entitlement and payable dates are revisable
+    attributes and never part of identity, so a payable-date revision
+    resolves by supersession of the same claim rather than by minting a
+    second one.
     """
     return pending_cash_claim_id(
+        source_id=source_id,
         security_id=security_id,
         action_kind=action_kind,
         occurrence_id=occurrence_id,
         component_id=component_id,
-        entitlement_session=entitlement_session,
-        payable_session=payable_session,
     )
 
 

@@ -1,6 +1,6 @@
 """Unit tests for M2 Task 4 corporate-action and economic outcome accounting."""
 
-from datetime import date
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from fractions import Fraction
 from uuid import UUID
@@ -52,6 +52,13 @@ from drift.domain.economic_results import (
     EconomicEffectProjectionV1,
     EconomicOutcomeResolutionV1,
 )
+from drift.domain.evaluator_clock import (
+    EvaluationSessionV1,
+    SessionClockV1,
+    evaluation_session_hash,
+    session_clock_hash,
+    session_order_key,
+)
 from drift.domain.evaluator_corporate_actions import (
     CashInLieuRateV1,
     DueBillRuleV1,
@@ -62,8 +69,15 @@ from drift.domain.evaluator_corporate_actions import (
     exact_entitled_shares,
     ratio_fraction,
 )
+from drift.domain.evaluator_lanes import (
+    ALPACA_LIMITATION_BOUNDED_COHORT,
+    ExploratoryEvaluationAdmissionV1,
+    exploratory_evaluation_admission_hash,
+)
 from drift.domain.evaluator_portfolio import (
     IndeterminateValuationError,
+    MarkEvidenceV1,
+    MarkPriceV1,
     PendingCashClaimV1,
     PortfolioStateV1,
     SecurityHoldingV1,
@@ -86,12 +100,17 @@ SEC_OTHER = uid(51)
 EFFECT_DAY = date(2020, 6, 1)
 PAYABLE_DAY = date(2020, 6, 15)
 LATER_DAY = date(2020, 6, 8)
+ENTITLED_DAY = date(2020, 6, 9)
 
 EFFECT_AT = "2020-06-01T00:00:00Z"
 PAYABLE_AT = "2020-06-15T00:00:00Z"
 LATER_AT = "2020-06-08T00:00:00Z"
 
 ZERO = Decimal("0")
+ZERO_HASH = "0" * 64
+
+SOURCE_A = "synthetic-a"
+SOURCE_B = "synthetic-b"
 
 
 # --------------------------------------------------------------------------
@@ -101,6 +120,61 @@ ZERO = Decimal("0")
 
 def _key(day: date = EFFECT_DAY) -> SessionKeyV1:
     return SessionKeyV1(mic="XNYS", session_scope="regular", local_date=day)
+
+
+# --- session clock and lane admission scaffolding ---
+
+
+def _evaluation_session(day: date) -> EvaluationSessionV1:
+    draft = EvaluationSessionV1.model_construct(
+        schema_version="1",
+        session_key=_key(day),
+        opened_at=datetime.combine(day, time(14), tzinfo=UTC),
+        closed_at=datetime.combine(day, time(21), tzinfo=UTC),
+        authority="realized",
+        authority_record_hashes=(HASH_A,),
+        authority_proof_hashes=(HASH_B,),
+        session_hash=ZERO_HASH,
+    )
+    return draft.model_copy(update={"session_hash": evaluation_session_hash(draft)})
+
+
+def _clock(*days: date) -> SessionClockV1:
+    """Realized-authority clock authorizing exactly the sessions under test."""
+    sessions = tuple(
+        sorted((_evaluation_session(day) for day in days), key=session_order_key)
+    )
+    draft = SessionClockV1.model_construct(
+        schema_version="1",
+        mode="realized_session_authority",
+        sessions=sessions,
+        acknowledged_limitations=(),
+        clock_hash=ZERO_HASH,
+    )
+    candidate = draft.model_copy(update={"clock_hash": session_clock_hash(draft)})
+    return SessionClockV1.model_validate(candidate.model_dump())
+
+
+# Every session any test positions a book at. A book session the clock does
+# not authorize is refused by the accounting kernel, so this list is the
+# authority the whole file is evaluated against.
+CLOCK = _clock(EFFECT_DAY, LATER_DAY, ENTITLED_DAY, PAYABLE_DAY)
+
+
+def _exploratory_admission() -> ExploratoryEvaluationAdmissionV1:
+    draft = ExploratoryEvaluationAdmissionV1.model_construct(
+        schema_version="1",
+        lane="exploratory",
+        input_bundle_hash=HASH_C,
+        acknowledged_limitations=(ALPACA_LIMITATION_BOUNDED_COHORT,),
+        admission_hash=ZERO_HASH,
+    )
+    return draft.model_copy(
+        update={"admission_hash": exploratory_evaluation_admission_hash(draft)}
+    )
+
+
+EXPLORATORY = _exploratory_admission()
 
 
 def _ref(label: str) -> ArtifactReference:
@@ -408,6 +482,15 @@ def _outcome(
     )
 
 
+def _mark_price(security_id: UUID, price: str) -> MarkPriceV1:
+    """One exploratory-grade close price bound to the evidence it came from."""
+    return MarkPriceV1(
+        security_id=security_id,
+        close_price=Decimal(price),
+        evidence=MarkEvidenceV1(grade="exploratory", evidence_hash=HASH_D),
+    )
+
+
 def _holding(
     security_id: UUID = SEC_A, quantity: int = 100, basis: str = "1000"
 ) -> SecurityHoldingV1:
@@ -427,12 +510,14 @@ def _state(
     claims_value = sum((claim.total_cash_expected for claim in claims), ZERO)
     cash_value = Decimal(cash)
     return PortfolioStateV1(
+        lane="exploratory",
+        admission_hash=EXPLORATORY.admission_hash,
         session_key=_key(day),
         cash_balance=cash_value,
         holdings=holdings,
         pending_cash_claims=claims,
         settled_claim_ids=tuple(sorted(settled)),
-        is_marked=False,
+        mark=None,
         holdings_market_value=ZERO,
         pending_claims_value=claims_value,
         net_asset_value=cash_value + claims_value,
@@ -449,6 +534,7 @@ def _processor(
     cash_in_lieu_rates: tuple[CashInLieuRateV1, ...] = (),
 ) -> CorporateActionProcessor:
     return CorporateActionProcessor(
+        session_clock=CLOCK,
         book_currency_namespace=BOOK_NAMESPACE,
         book_currency_code=BOOK_CODE,
         tie_breaking_rules=tie_breaking_rules,
@@ -988,8 +1074,8 @@ def test_spinoff_creates_child_holding_and_marks_nav_cleanly() -> None:
     assert by_security[SEC_CHILD].quantity == 50
     assert by_security[SEC_CHILD].cost_basis == ZERO
 
-    kernel = PortfolioAccountingKernel(updated)
-    kernel.mark_close({SEC_A: Decimal("10"), SEC_CHILD: Decimal("4")})
+    kernel = PortfolioAccountingKernel(updated, session_clock=CLOCK)
+    kernel.mark_close((_mark_price(SEC_A, "10"), _mark_price(SEC_CHILD, "4")))
     assert kernel.state.holdings_market_value == Decimal("1200")
     assert kernel.state.net_asset_value == Decimal("1700")
 
@@ -1046,7 +1132,7 @@ def test_due_bill_dividend_defers_entitlement_to_the_proven_rule_session() -> No
     terms, _, outcome = _due_bill_terms()
     # The proven rule names a session that is not the redemption session, so a
     # generic redemption-equals-entitlement shortcut cannot reproduce it.
-    rule = _due_bill_rule(terms, entitlement=date(2020, 6, 9), redemption=LATER_DAY)
+    rule = _due_bill_rule(terms, entitlement=ENTITLED_DAY, redemption=LATER_DAY)
     processor = _processor(due_bill_rules=(rule,))
     state = _state(holdings=(_holding(quantity=100),))
 
@@ -1060,13 +1146,13 @@ def test_due_bill_dividend_defers_entitlement_to_the_proven_rule_session() -> No
     )
     assert on_redemption.pending_cash_claims == ()
 
-    entitled_state = _state(holdings=(_holding(quantity=100),), day=date(2020, 6, 9))
+    entitled_state = _state(holdings=(_holding(quantity=100),), day=ENTITLED_DAY)
     entitled, _ = processor.apply_pre_open_actions(
-        entitled_state, (), (outcome,), _key(date(2020, 6, 9))
+        entitled_state, (), (outcome,), _key(ENTITLED_DAY)
     )
     assert len(entitled.pending_cash_claims) == 1
     claim = entitled.pending_cash_claims[0]
-    assert claim.entitlement_session == date(2020, 6, 9)
+    assert claim.entitlement_session == ENTITLED_DAY
     assert claim.payable_session == PAYABLE_DAY
     assert claim.total_cash_expected == Decimal("200")
 
@@ -1140,7 +1226,7 @@ def test_cash_dividend_creates_claim_and_settles_on_delivered_evidence() -> None
 
 
 def _payable_state(state: PortfolioStateV1) -> PortfolioStateV1:
-    kernel = PortfolioAccountingKernel(state)
+    kernel = PortfolioAccountingKernel(state, session_clock=CLOCK)
     kernel.advance_session(_key(PAYABLE_DAY))
     return kernel.state
 
@@ -1185,7 +1271,7 @@ def test_delivery_before_the_payable_session_is_indeterminate() -> None:
             _delivery(components=(_cash(amount="0.5"),), settled_at=LATER_AT),
         ),
     )
-    kernel = PortfolioAccountingKernel(staged)
+    kernel = PortfolioAccountingKernel(staged, session_clock=CLOCK)
     kernel.advance_session(_key(LATER_DAY))
     with pytest.raises(
         IndeterminateValuationError,
@@ -2015,14 +2101,17 @@ def test_corporate_action_discards_a_stale_mark() -> None:
         suffix=700,
     )
     kernel = PortfolioAccountingKernel(
-        _state(holdings=(_holding(quantity=100, basis="1000"),), cash="500")
+        _state(holdings=(_holding(quantity=100, basis="1000"),), cash="500"),
+        session_clock=CLOCK,
     )
-    kernel.mark_close({SEC_A: Decimal("10")})
+    kernel.mark_close((_mark_price(SEC_A, "10"),))
     marked = kernel.state
     assert marked.is_marked is True
+    assert marked.mark is not None
     updated, _ = _processor().apply_pre_open_actions(marked, (), (outcome,), _key())
     assert updated.holdings[0].quantity == 200
     assert updated.is_marked is False
+    assert updated.mark is None
     assert updated.holdings_market_value == ZERO
     assert updated.net_asset_value == Decimal("500")
 
@@ -2292,12 +2381,26 @@ def test_share_acquisition_that_extinguishes_a_position_is_indeterminate() -> No
         _processor().apply_pre_open_actions(state, (), (outcome,), _key())
 
 
-def test_two_claims_on_one_component_make_delivery_ambiguous() -> None:
-    # Exactly the hazard the in-flight claim-identity change removes: one
-    # entitlement whose payable date was revised currently mints two ids.
-    # Settling either one on a single delivered report would be a guess.
+def test_a_payable_date_revision_carries_one_claim_identity() -> None:
+    # The hazard the ruled claim identity removes. Dates are revisable
+    # attributes, so one entitlement whose payable date was revised keeps a
+    # single id and resolves by supersession. Were it to mint a second id,
+    # both settled-claim guards are keyed on claim id, so neither would fire
+    # and the entitlement would pay twice.
     first = _manual_claim(payable=PAYABLE_DAY)
     second = _manual_claim(payable=LATER_DAY)
+    assert first.payable_session != second.payable_session
+    assert first.claim_id == second.claim_id
+
+
+def test_two_claims_on_one_component_make_delivery_ambiguous() -> None:
+    # Claim identity is source-scoped, so two sources reusing one native
+    # occurrence id are two entitlements carrying two ids. The delivered
+    # report is matched on security, occurrence and component alone, so it
+    # names both claims and settling either one would be a guess.
+    first = _manual_claim(payable=PAYABLE_DAY, source_id=SOURCE_A)
+    second = _manual_claim(payable=PAYABLE_DAY, source_id=SOURCE_B)
+    assert first.claim_id != second.claim_id
     state = _state(claims=(first, second), cash="100", day=PAYABLE_DAY)
     delivered = _outcome(
         effects=(),
@@ -2305,24 +2408,24 @@ def test_two_claims_on_one_component_make_delivery_ambiguous() -> None:
     )
     with pytest.raises(
         IndeterminateValuationError,
-        match="matches more than one pending claim",
+        match=r"matches more than one pending claim: occ-1/cash-1$",
     ):
         _processor().apply_intrasession_settlements(
             state, (delivered,), _key(PAYABLE_DAY)
         )
 
 
-def _manual_claim(*, payable: date) -> PendingCashClaimV1:
+def _manual_claim(*, payable: date, source_id: str = SOURCE_A) -> PendingCashClaimV1:
     per_share = Decimal("0.5")
     return PendingCashClaimV1(
         claim_id=pending_cash_claim_id(
+            source_id=source_id,
             security_id=SEC_A,
             action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
             occurrence_id="occ-1",
             component_id="cash-1",
-            entitlement_session=EFFECT_DAY,
-            payable_session=payable,
         ),
+        source_id=source_id,
         security_id=SEC_A,
         action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
         occurrence_id="occ-1",
