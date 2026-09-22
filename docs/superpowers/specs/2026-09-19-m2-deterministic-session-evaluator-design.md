@@ -387,6 +387,8 @@ An `ExploratoryReconstructedSessionObservationV1` is NOT: `DerivedObservationVie
 - **Strict Prohibition**: NEVER historical-decision proof; NEVER promotion-grade; NEVER convertible into promotion evidence.
 - **Promotion Lane Prohibition**: Any promotion evaluation that encounters an `ExploratoryReconstructedSessionObservationV1` is immediately rejected by structural validation.
 
+**Amendment, issue 46 (the issue 42 adjudication of ADR 0012 Option B).** Reconstructed observations may drive strategy decisions in the EXPLORATORY lane only, through a dedicated exploratory-only type. `src/drift/domain/evaluator_exploratory_strategy.py` defines `ExploratoryStrategyDecisionContextV1`, whose evidence members are `ExploratoryReconstructedDecisionViewV1` groups of `ExploratoryReconstructedSessionObservationV1` (one per session, in business-time order), and `ExploratoryReconstructedRuntimeStrategy.decide_exploratory`, which answers it. `StrategyDecisionViewV1`, `StrategyDecisionContextV1`, and `RuntimeStrategy.decide` are unchanged and are not unions; the only union is the engine's lane-dispatch strategy parameter. The context carries literal `lane="exploratory"`, `evidence_grade="exploratory_reconstructed"`, and `is_promotion_grade_evidence=False`; refuses any decision session without `scheduled_reconstruction` authority; decides at exactly the scheduled close its generated calendar row states (13:00 on an early close, never an artificial 16:00); requires a reconstruction for its own decision session bound to that session's scheduled record and generated row; refuses any reconstruction from a later session; and must acknowledge the scheduled-clock, bounded-cohort, and reconstruction limitations. `SessionEvaluatorEngine` fixes the lane at construction: an `ExploratoryEvaluationAdmissionV1` over a `scheduled_session_reconstruction` clock, with its `ExploratoryCohortAuthorizationV1` supplied as `SessionEvaluatorEvidence.exploratory_cohort`, takes the reconstructed lane after `validate_exploratory_admission`, the bounded-cohort acknowledgement, and a per-reconstruction cohort and calendar-row binding; every other exploratory admission takes the realized lane unchanged; and a `PromotionEvaluationAdmissionV1` over any bundle carrying exploratory reconstructions, or with an exploratory cohort, is refused at construction. Each reconstructed decision reads only reconstructions for clock sessions already stepped, and is traced as `ExploratoryStrategyDecisionTraceEventV1` (never `StrategyDecisionTraceEventV1`), naming every reconstruction read and every limitation carried. Scope boundary: the ruling authorizes reconstructed evidence for decisions only. A scheduled-reconstruction bundle still carries no authorized accounting evidence, so Phase 2 execution of any traded security and Phase 4 marking of any held position remain `INDETERMINATE` until accounting over reconstructed evidence is separately decided.
+
 ### 7.2 Exploratory Business-Time Causality Invariant
 
 Exploratory relaxation of publication vintages does NOT permit future business-time leakage:
@@ -790,6 +792,8 @@ When a fatal indeterminate event occurs, the engine emits `IndeterminateCauseTra
 +-----------------------------------------------------------------------------------+
 ```
 
+Amendment, issue 46: in the EXPLORATORY scheduled-reconstruction lane, Phase 5 constructs `ExploratoryStrategyDecisionContextV1` instead, invokes `decide_exploratory(context)`, validates against the declared cohort, and records `ExploratoryStrategyDecisionTraceEventV1` (section 7.1 amendment). The realized lane is unchanged.
+
 ---
 
 ## 17. Evaluation Result and Canonical Trace Contracts
@@ -803,6 +807,7 @@ The evaluator generates an immutable sequence of typed trace events:
 - `ClaimSettledTraceEventV1`
 - `SessionMarkTraceEventV1`
 - `StrategyDecisionTraceEventV1`
+- `ExploratoryStrategyDecisionTraceEventV1` (issue 46: EXPLORATORY scheduled-reconstruction decisions only)
 - `IndeterminateCauseTraceEventV1`
 
 The complete sequence hashes into `trace_hash = content_hash(tuple(trace_events))`.
@@ -1154,7 +1159,7 @@ The M2 implementation must pass the following explicit adversarial acceptance te
 | **Universe** | Post-Delisting Liquidation | Strategy emits target=0 for held security dropped from universe | Permitted; exits non-admitted holding cleanly. |
 | **Universe** | Listing Migration at Execution | Security changes primary listing before execution session open | Phase 2 resolves exact new historical listing; does not use stale listing. |
 | **Clock Authority** | Scheduled Row as Realized Session | Alpaca scheduled calendar row passed as `RealizedSessionVersionV1` | Prohibited; scheduled rows cannot mint realized sessions. |
-| **Clock Authority** | Scheduled Exploratory Early Close | Scheduled 13:00 close evaluated under `scheduled_session_reconstruction` | Accepted; executes post-close after 13:00 with explicit limitation. |
+| **Clock Authority** | Scheduled Exploratory Early Close | Scheduled 13:00 close evaluated under `scheduled_session_reconstruction` on EXPLORATORY-only reconstructed decision evidence | Accepted; the exploratory decision executes post-close at the 13:00 scheduled close with explicit limitations, no `RealizedSessionVersionV1` is fabricated, and the result stays exploratory and non-promotable. |
 | **Clock Authority** | Missing Bar on Scheduled Open | Scheduled session expected open, but required market bars missing | Fails closed to `INDETERMINATE`; does not infer halt. |
 | **Replay Integrity** | View Hash vs M1d Replay | Self-consistent fabricated view without successful M1d replay | Bundle preparation rejects; requires exact M1d replay. |
 | **Accounting** | Double-Counting Adjustment | Accounting configured with split-adjusted prices while applying M1c splits | Validation rejects adjusted accounting prices. |

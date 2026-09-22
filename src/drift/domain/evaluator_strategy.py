@@ -307,15 +307,40 @@ def stage_decision_targets(
     from the intent is staged at zero, which liquidates it. Phase 5 does not
     check solvency, because the next open price is a future unknown.
     """
-    if intent.session_key != context.session_key:
+    return _stage_targets(
+        intent=intent,
+        session_key=context.session_key,
+        decision_cutoff=context.decision_cutoff,
+        admitted_universe=context.admitted_universe,
+        current_holdings=context.current_holdings,
+    )
+
+
+def _stage_targets(
+    *,
+    intent: StrategyDecisionIntentV1,
+    session_key: SessionKeyV1,
+    decision_cutoff: datetime,
+    admitted_universe: tuple[UUID7, ...],
+    current_holdings: tuple[PositionViewV1, ...],
+) -> tuple[SecurityTargetPositionV1, ...]:
+    """Stage one intent against the four facts any decision context states.
+
+    Shared verbatim by the strong realized-session context and by the
+    EXPLORATORY-only reconstructed context. The staging contract is a property
+    of the intent, not of the evidence grade behind it, so the two lanes must
+    not be allowed to drift apart here. Evidence grade is separated by the
+    context types themselves, which never meet.
+    """
+    if intent.session_key != session_key:
         raise StrategyIntentRejectedError(
             "decision intent session_key must match the decision context session"
         )
-    if intent.decision_time != context.decision_cutoff:
+    if intent.decision_time != decision_cutoff:
         raise StrategyIntentRejectedError(DECISION_TIME_MISMATCH)
 
     staged: dict[UUID, SecurityTargetPositionV1] = {}
-    admitted = frozenset(context.admitted_universe)
+    admitted = frozenset(admitted_universe)
     for target in intent.targets:
         if target.target_quantity < 0:
             raise StrategyIntentRejectedError(
@@ -334,7 +359,7 @@ def stage_decision_targets(
             )
         staged[target.security_id] = target
 
-    for holding in context.current_holdings:
+    for holding in current_holdings:
         if holding.security_id not in staged:
             staged[holding.security_id] = SecurityTargetPositionV1(
                 security_id=holding.security_id, target_quantity=0

@@ -25,14 +25,13 @@ from drift.domain.evaluator_results import (
     EvaluationRunArtifactsV1,
     EvaluationSummaryMetricsV1,
 )
-from drift.domain.evaluator_strategy import RuntimeStrategy
 from drift.domain.evaluator_trace import EvaluationTraceLogV1
 from drift.domain.experiments import (
     ExperimentRun,
     ExperimentRunStatus,
     ExperimentSpecification,
 )
-from drift.evaluator.engine import SessionEvaluatorEngine
+from drift.evaluator.engine import LaneDispatchStrategy, SessionEvaluatorEngine
 from drift.ledger.interface import AuditEventDraft, Ledger
 from drift.serialization.canonical import content_hash
 
@@ -53,7 +52,7 @@ class ExperimentRunnerContext:
     started_at: datetime
     completed_at: datetime
     engine: SessionEvaluatorEngine
-    strategy: RuntimeStrategy
+    strategy: LaneDispatchStrategy
     run_identity: EvaluationRunIdentityV1
     result_artifact_id: UUID7
     trace_artifact_id: UUID7
