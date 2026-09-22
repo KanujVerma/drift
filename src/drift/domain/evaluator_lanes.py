@@ -74,7 +74,12 @@ class ExploratoryEvaluationAdmissionV1(FrozenModel):
 
 
 class PromotionEvaluationAdmissionV1(FrozenModel):
-    """Admission record gating evaluation in the promotion-grade lane."""
+    """Admission record gating evaluation in the promotion-grade lane.
+
+    `provenance_proof_hash` binds the admission to the `BundleProvenanceProofV1`
+    minted by replay verification. It is required, so a promotion-grade claim
+    can never be made without an accepted provenance proof behind it.
+    """
 
     schema_version: Literal["1"] = "1"
     lane: Literal["promotion"] = "promotion"
@@ -83,6 +88,7 @@ class PromotionEvaluationAdmissionV1(FrozenModel):
     decision_handoff_hash: SHA256Hash
     audit_handoff_hash: SHA256Hash
     input_bundle_hash: SHA256Hash
+    provenance_proof_hash: SHA256Hash
     admission_hash: SHA256Hash
 
     @model_validator(mode="after")

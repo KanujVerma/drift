@@ -11,6 +11,7 @@ from drift.domain.evaluator_bundles import (
 )
 from drift.domain.evaluator_clock import SessionClockV1
 from drift.domain.evaluator_lanes import (
+    EvaluationAdmissionV1,
     ExploratoryEvaluationAdmissionV1,
     PromotionEvaluationAdmissionV1,
 )
@@ -30,14 +31,28 @@ from drift.domain.qualification import (
     QualificationProfileV1,
 )
 from drift.domain.qualification_adapters import QualifiedSourceHandoffV1
+from drift.domain.replay_provenance import (
+    BundleProvenanceProofV1,
+    QualifiedReplayContextV1,
+    ReplayContextIdentityV1,
+    bind_context_identity_to_snapshot,
+    build_bundle_provenance_proof,
+    bundle_provenance_proof_hash,
+    replay_context_identity_hash,
+    validate_bundle_component_coverage,
+)
 from drift.domain.securities import ListingV1, SecurityV1
+from drift.domain.source_snapshots import RealSourceSnapshotV1
 from drift.domain.universes import StructuralEligibilityResultV1
 from drift.evaluator.admission import validate_m1e_promotion_evidence
 from drift.markets.normalization import (
     materialize_observation_decision,
     materialize_observation_outcome,
 )
-from drift.markets.observation_validation import M1dResolutionContext
+from drift.markets.observation_validation import (
+    M1dResolutionContext,
+    m1d_context_descriptor,
+)
 from drift.serialization.canonical import content_hash
 
 type DecisionReplayRequests = tuple[
@@ -193,6 +208,127 @@ def verify_evaluation_input_bundle(
         raise ValueError("bundle hash does not match its own contents")
 
 
+def _request_hash(reference: object, query: object) -> SHA256Hash:
+    """Exact identity of one replay request as a reference/query pair."""
+    return content_hash({"reference": reference, "query": query})
+
+
+def derive_replay_context_identity(
+    context: M1dResolutionContext,
+) -> ReplayContextIdentityV1:
+    """Derive the deterministic identity of an M1d resolution context.
+
+    `M1dResolutionContext` is deliberately not modified. Identity is a pure
+    function of it, taken from the same canonical descriptor that already backs
+    `m1d_context_hash`, so this contract stays additive across every existing
+    construction site.
+    """
+    descriptor = m1d_context_descriptor(context)
+    observation_entries = descriptor["observation_datasets"]
+    session_entries = descriptor["session_datasets"]
+    assert isinstance(observation_entries, tuple)
+    assert isinstance(session_entries, tuple)
+
+    m1b = descriptor.get("m1b")
+    m1c = descriptor.get("m1c")
+
+    draft = ReplayContextIdentityV1.model_construct(
+        schema_version="1",
+        observation_dataset_hashes=tuple(
+            sorted({content_hash(entry) for entry in observation_entries})
+        ),
+        session_dataset_hashes=tuple(
+            sorted({content_hash(entry) for entry in session_entries})
+        ),
+        availability_policy_hashes=tuple(
+            sorted(
+                {
+                    content_hash(value)
+                    for value in context.availability_policies.values()
+                }
+            )
+        ),
+        retained_evidence_hashes=tuple(
+            sorted(
+                {content_hash(value) for value in context.retained_evidence.values()}
+            )
+        ),
+        supporting_artifact_hashes=tuple(sorted(set(context.supporting_artifacts))),
+        m1b_context_hash=content_hash(m1b) if m1b is not None else None,
+        m1c_context_hash=content_hash(m1c) if m1c is not None else None,
+        identity_hash="0" * 64,
+    )
+    candidate = draft.model_copy(
+        update={"identity_hash": replay_context_identity_hash(draft)}
+    )
+    return ReplayContextIdentityV1.model_validate(candidate.model_dump())
+
+
+def qualify_replay_context(
+    *,
+    context: M1dResolutionContext,
+    snapshot: RealSourceSnapshotV1,
+) -> QualifiedReplayContextV1:
+    """Bind a resolution context to a qualified snapshot by total containment.
+
+    A context whose artifacts are not all attested by the snapshot cannot be
+    qualified, which is exactly the adversarial case that previously passed.
+    """
+    return bind_context_identity_to_snapshot(
+        identity=derive_replay_context_identity(context),
+        snapshot=snapshot,
+    )
+
+
+def mint_bundle_provenance_proof(
+    *,
+    qualified_context: QualifiedReplayContextV1,
+    context: M1dResolutionContext,
+    bundle: EvaluationInputBundleV1,
+    decision_requests: DecisionReplayRequests = (),
+    accounting_requests: OutcomeReplayRequests = (),
+) -> BundleProvenanceProofV1:
+    """Run replay verification once and mint the proof the gate validates.
+
+    This is the only production path to a `BundleProvenanceProofV1`. It refuses
+    to mint unless the replay context presented here is the very context the
+    qualified snapshot binding was proven over, and unless the bundle asserts
+    that same snapshot.
+    """
+    identity = derive_replay_context_identity(context)
+    if identity.identity_hash != qualified_context.context_identity.identity_hash:
+        raise ValueError(
+            "replay context identity does not match the qualified replay context: "
+            f"replayed {identity.identity_hash}, qualified "
+            f"{qualified_context.context_identity.identity_hash}"
+        )
+    if bundle.source_snapshot_hash != qualified_context.source_snapshot_hash:
+        raise ValueError(
+            "bundle source snapshot does not match the qualified replay context: "
+            f"bundle {bundle.source_snapshot_hash}, qualified "
+            f"{qualified_context.source_snapshot_hash}"
+        )
+
+    verify_evaluation_input_bundle(
+        bundle=bundle,
+        context=context,
+        decision_requests=decision_requests,
+        accounting_requests=accounting_requests,
+    )
+
+    return build_bundle_provenance_proof(
+        qualified_context_hash=qualified_context.qualified_hash,
+        source_snapshot_hash=qualified_context.source_snapshot_hash,
+        bundle=bundle,
+        decision_request_hashes=tuple(
+            _request_hash(reference, query) for reference, query in decision_requests
+        ),
+        accounting_request_hashes=tuple(
+            _request_hash(reference, query) for reference, query in accounting_requests
+        ),
+    )
+
+
 def validate_exploratory_admission(
     *,
     admission: ExploratoryEvaluationAdmissionV1,
@@ -242,11 +378,20 @@ def validate_promotion_admission(
     audit_report: PurposeQualificationReportV1,
     decision_handoff: QualifiedSourceHandoffV1,
     audit_handoff: QualifiedSourceHandoffV1,
+    proof: BundleProvenanceProofV1,
 ) -> None:
     """Validate a promotion admission against M1e evidence and its input bundle.
 
     Composes the Task 1 M1e evidence gate with structural anti-laundering
-    verification of the bundle itself.
+    verification of the bundle itself and with the provenance proof that binds
+    the bundle to a qualified snapshot.
+
+    The proof parameter is required. The unsafe signature that accepted a bundle
+    carrying only a self-declared `source_snapshot_hash` is deliberately not
+    preserved for compatibility: the issue 31 ruling forbids it.
+
+    No full M1d replay runs here. Replay verification already ran once at mint
+    time; this gate revalidates the minted proof cheaply and fail-closed.
     """
     validate_m1e_promotion_evidence(
         admission=admission,
@@ -264,6 +409,33 @@ def validate_promotion_admission(
         raise ValueError("input bundle hash mismatch with admission")
     if bundle.source_snapshot_hash != decision_handoff.snapshot_hash:
         raise ValueError("input bundle snapshot mismatch with promotion admission")
+
+    # Provenance chain, validated cheaply and fail-closed. A bundle that merely
+    # asserts a qualified snapshot hash cannot satisfy this: only a proof minted
+    # from a verified qualified replay context can.
+    recomputed_proof_hash = bundle_provenance_proof_hash(proof)
+    if proof.proof_hash != recomputed_proof_hash:
+        raise ValueError(
+            "inconsistent provenance proof hash: recomputed "
+            f"{recomputed_proof_hash}, declared {proof.proof_hash}"
+        )
+    if proof.bundle_hash != bundle.bundle_hash:
+        raise ValueError(
+            "provenance proof bundle hash mismatch: proof binds "
+            f"{proof.bundle_hash}, bundle is {bundle.bundle_hash}"
+        )
+    if proof.source_snapshot_hash != bundle.source_snapshot_hash:
+        raise ValueError(
+            "provenance proof snapshot mismatch: proof binds "
+            f"{proof.source_snapshot_hash}, bundle asserts "
+            f"{bundle.source_snapshot_hash}"
+        )
+    validate_bundle_component_coverage(proof=proof, bundle=bundle)
+    if admission.provenance_proof_hash != proof.proof_hash:
+        raise ValueError(
+            "admission is not bound to the provenance proof: admission carries "
+            f"{admission.provenance_proof_hash}, proof is {proof.proof_hash}"
+        )
 
     if bundle.has_exploratory_reconstructions:
         raise ValueError(
@@ -302,19 +474,31 @@ def build_evaluation_run_identity(
     strategy_hash: SHA256Hash,
     protocol_hash: SHA256Hash,
     cost_model_hash: SHA256Hash,
-    admission_hash: SHA256Hash,
-    bundle_hash: SHA256Hash,
+    admission: EvaluationAdmissionV1,
+    bundle: EvaluationInputBundleV1,
     code_version_hash: SHA256Hash,
     environment_closure_hash: SHA256Hash,
 ) -> EvaluationRunIdentityV1:
-    """Build the deterministic semantic identity for one evaluation run."""
+    """Build the deterministic semantic identity for one evaluation run.
+
+    The admission and the bundle are taken as objects rather than as loose
+    hashes so the declared chain `admission.input_bundle_hash == bundle_hash`
+    is enforced here. Accepting the two hashes independently allowed a run
+    identity to bind an admission to a bundle that admission never admitted.
+    """
+    if admission.input_bundle_hash != bundle.bundle_hash:
+        raise ValueError(
+            "run identity requires the admission to admit this exact bundle: "
+            f"admission binds {admission.input_bundle_hash}, "
+            f"bundle is {bundle.bundle_hash}"
+        )
     draft = EvaluationRunIdentityV1.model_construct(
         schema_version="1",
         strategy_hash=strategy_hash,
         protocol_hash=protocol_hash,
         cost_model_hash=cost_model_hash,
-        admission_hash=admission_hash,
-        bundle_hash=bundle_hash,
+        admission_hash=admission.admission_hash,
+        bundle_hash=bundle.bundle_hash,
         code_version_hash=code_version_hash,
         environment_closure_hash=environment_closure_hash,
         run_identity_hash="0" * 64,

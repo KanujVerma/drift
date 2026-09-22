@@ -118,6 +118,8 @@ $$\text{Market Data} \longrightarrow \text{EvaluationInputBundleV1} (\text{bundl
 
 `EvaluationInputBundleV1` does NOT hold a reference to `admission_hash`. The input bundle is immutable historical evidence independent of the evaluation lane under which it is evaluated. The admission token authorizes the bundle.
 
+**Amendment, cross-slice adversarial finding F4.** The `input_bundle_hash = bundle_hash` link above was declared but never enforced, so a valid `EvaluationRunIdentityV1` could bind a promotion admission hash over a bundle that admission never admitted. `build_evaluation_run_identity` now takes the admission and the bundle as objects rather than two independent hashes, and fails closed unless `admission.input_bundle_hash == bundle.bundle_hash`.
+
 ### 4.3 Distinct Immutable Admission and Result Types
 The domain model enforces disjoint type hierarchies:
 
@@ -142,6 +144,7 @@ class PromotionEvaluationAdmissionV1(FrozenModel):
     decision_handoff_hash: SHA256Hash
     audit_handoff_hash: SHA256Hash
     input_bundle_hash: SHA256Hash
+    provenance_proof_hash: SHA256Hash
     admission_hash: SHA256Hash
 
 
@@ -406,6 +409,8 @@ Promotion lane strategy inputs strictly require:
 ### 7.4 Input Bundle and Replay-Bound Preparation
 
 A compact runtime bundle exposes numeric views for execution efficiency, but bundle preparation must verify that every view derives from exact upstream Drift kernel replays rather than untrusted Pydantic construction:
+
+**Amendment, cross-slice adversarial finding F2 (lane leakage).** Replay-boundness alone did not stop a bundle from carrying evidence for sessions its own clock never contained, which let evidence from one corpus ride into an evaluation authorized over another. `EvaluationInputBundleV1` now fails closed in its own validator when any `authentic_decision_views[*].source_session`, any `authentic_accounting_views[*].source_session`, or any `exploratory_reconstructed_observations[*].session_key` is absent from `session_clock`, and when the clock's span escapes `evaluation_interval`. A split-normalization `anchor_session` is deliberately exempt: it is a normalization reference point, not evidence consumed over the interval. This is complementary to the issue 34 provenance proof, which binds contents to a snapshot rather than to the clock.
 
 ```python
 class EvaluationInputBundleV1(FrozenModel):
@@ -846,6 +851,14 @@ An admission gatekeeper operates outside the pure evaluator core, binding authen
 
 In Task 1, `validate_m1e_promotion_evidence` validates the M1e qualification artifacts and `QualifiedSourceHandoffV1` objects against `PromotionEvaluationAdmissionV1`. Task 2 is internally sequenced for implementation: slice 2A delivers the exploratory cohort authorization, exploratory reconstruction policy/fields/observation, and the realized/scheduled session-clock contracts and builders; slice 2B then delivers the immutable `EvaluationInputBundleV1`, replay-bound preparation, admission-to-bundle gates, and the deterministic evaluation-run identity. In Task 2B, `validate_promotion_admission` composes the Task 1 evidence check with `EvaluationInputBundleV1` structural anti-laundering validation.
 
+**Amendment, issues 31 and 34 (supersedes this section where they conflict).** Adversarial review found that `EvaluationInputBundleV1.source_snapshot_hash` is an unverified self-declaration: views can be materialized through genuine M1d replay over a resolution context entirely unrelated to the qualified snapshot the bundle names, and the gate as originally specified admits it. Replay-boundness was proven; provenance was not. The specification itself contained the gap, so the API is changed rather than preserved.
+
+`src/drift/domain/replay_provenance.py` adds the proof-bearing chain: `ReplayContextIdentityV1` (deterministic identity derived from an `M1dResolutionContext` by pure function, with the context itself unmodified), `SnapshotBindingEntryV1`, `QualifiedReplayContextV1` (a context identity bound to a `RealSourceSnapshotV1` by a retained, canonically sorted containment witness plus its digest), and `BundleProvenanceProofV1` (`proof_version = "m2-bundle-provenance-v1"`).
+
+Binding is total, not sampled: every artifact a context supplies appears exactly once in the witness, every witness entry resolves to a real snapshot replay input entry that attests that artifact, and `snapshot_binding_proof_hash` is recomputed over the sorted witness so a tampered witness cannot keep a stale digest. `component_hashes` covers all six authority-bearing classes (decision views, accounting views, structural eligibility, economic outcomes, security and listing identity, session-clock authority); a bundle member absent from the proof fails closed.
+
+Minting is split from validation. `mint_bundle_provenance_proof` runs replay verification once and emits the proof; `validate_promotion_admission` gains a required `proof` parameter and revalidates cheaply and fail-closed, with no full M1d replay inside admission. `PromotionEvaluationAdmissionV1` gains `provenance_proof_hash`. `EvaluationInputBundleV1` gains nothing, so the hash graph stays acyclic: the proof references the bundle, never the reverse. The exploratory lane is unaffected; an unqualified context stays constructible and usable, and the wrapper is required only where a promotion-grade claim is made.
+
 **Authoritative landing corrections** (superseding the illustrative pseudocode below): handoff integrity is `qualified_source_handoff_hash(handoff) == handoff.handoff_hash`, and the admission binds `decision_handoff.handoff_hash` / `audit_handoff.handoff_hash` exactly (`handoff_hash` is SELF-EXCLUDING; a whole-object `content_hash(handoff)` would include that field and must never be bound). For positive M1e evidence, every one of the 12 final dimension results in BOTH purpose reports must be `REACHED`, carry evidence, and match the owning report purpose; only profile-critical dimensions must additionally `PASS` with `admitted_purpose=True` (a non-critical reached `PARTIAL` is permitted); a positive completion must not carry `blocking_dimensions` or `blocking_evidence_hashes`.
 
 ```python
@@ -1027,8 +1040,9 @@ def validate_promotion_admission(
     audit_report: PurposeQualificationReportV1,
     decision_handoff: QualifiedSourceHandoffV1,
     audit_handoff: QualifiedSourceHandoffV1,
+    proof: BundleProvenanceProofV1,
 ) -> None:
-    """Full promotion admission validator composing M1e evidence verification with bundle anti-laundering gate."""
+    """Full promotion admission validator composing M1e evidence verification with bundle anti-laundering and provenance-proof gates."""
     validate_m1e_promotion_evidence(
         admission=admission,
         profile_set=profile_set,
@@ -1046,6 +1060,17 @@ def validate_promotion_admission(
         raise ValueError("input bundle hash mismatch with admission")
     if bundle.source_snapshot_hash != decision_handoff.snapshot_hash:
         raise ValueError("input bundle snapshot mismatch with promotion admission")
+
+    # Provenance chain, validated cheaply and fail-closed (issues 31, 34)
+    if proof.proof_hash != bundle_provenance_proof_hash(proof):
+        raise ValueError("inconsistent provenance proof hash")
+    if proof.bundle_hash != bundle.bundle_hash:
+        raise ValueError("provenance proof bundle hash mismatch")
+    if proof.source_snapshot_hash != bundle.source_snapshot_hash:
+        raise ValueError("provenance proof snapshot mismatch")
+    validate_bundle_component_coverage(proof=proof, bundle=bundle)
+    if admission.provenance_proof_hash != proof.proof_hash:
+        raise ValueError("admission is not bound to the provenance proof")
 
     # Structural anti-laundering checks on input bundle
     if bundle.has_exploratory_reconstructions:

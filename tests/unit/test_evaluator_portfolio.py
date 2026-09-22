@@ -60,6 +60,7 @@ H2 = "2" * 64
 H3 = "3" * 64
 H4 = "4" * 64
 H5 = "5" * 64
+H6 = "6" * 64
 ZERO_HASH = "0" * 64
 
 ACCOUNTING_EVIDENCE = "a" * 64
@@ -151,6 +152,7 @@ def _promotion_admission() -> PromotionEvaluationAdmissionV1:
         decision_handoff_hash=H3,
         audit_handoff_hash=H4,
         input_bundle_hash=H5,
+        provenance_proof_hash=H6,
         admission_hash=ZERO_HASH,
     )
     return draft.model_copy(
