@@ -1,6 +1,7 @@
 """Unit tests for M2 Task 2B input bundle, lane gates, and run identity."""
 
 from datetime import date
+from functools import cache
 from typing import Any, Literal
 
 import pytest
@@ -10,6 +11,7 @@ from observation_test_support import (
     uid,
 )
 from pydantic import ValidationError
+from replay_provenance_test_support import qualified_snapshot
 from test_assertions import exact_boundary
 from test_evaluator_admission_gatekeeper import make_test_fixture, rebind_admission
 from test_evaluator_reconstruction import build_from_harness
@@ -34,12 +36,16 @@ from drift.domain.evaluator_lanes import (
 )
 from drift.domain.normalization import DerivedObservationViewV1
 from drift.domain.observation_query import ObservationOutcomeQueryV1
-from drift.domain.replay_provenance import build_bundle_provenance_proof
 from drift.domain.securities import ListingV1, ListingVenue, SecurityV1
+from drift.domain.source_snapshots import RealSourceSnapshotV1
 from drift.evaluator.bundles import (
+    DecisionReplayRequests,
+    OutcomeReplayRequests,
     assemble_evaluation_input_bundle,
     build_evaluation_input_bundle,
     build_evaluation_run_identity,
+    mint_bundle_provenance_proof,
+    qualify_replay_context,
     validate_exploratory_admission,
     validate_promotion_admission,
     verify_evaluation_input_bundle,
@@ -302,14 +308,58 @@ def test_exploratory_gate_rejects_dropped_limitation() -> None:
 # --- promotion lane gate (anti-laundering) ---
 
 
-def _promotion_case(bundle: EvaluationInputBundleV1) -> dict[str, Any]:
-    fixture = make_test_fixture()
-    # The gate now validates a provenance proof. Snapshot binding of the proof
-    # itself is exercised in tests/unit/test_replay_provenance.py.
-    proof = build_bundle_provenance_proof(
-        qualified_context_hash=H["9"],
-        source_snapshot_hash=bundle.source_snapshot_hash or H["0"],
+@cache
+def _provenance_context() -> Any:
+    """A real M1d resolution context for bundles that carry no replayed view.
+
+    Cached so that the snapshot a test asserts on its bundle and the snapshot
+    the case qualifies against are the same artifact rather than two
+    independently rebuilt ones that merely ought to agree.
+    """
+    return _harness(realized_outcome="opened").context
+
+
+@cache
+def _default_promotion_snapshot() -> RealSourceSnapshotV1:
+    """The snapshot for the default context, built once for the whole module."""
+    return qualified_snapshot(_provenance_context())
+
+
+def _promotion_snapshot(context: Any | None = None) -> RealSourceSnapshotV1:
+    """The real snapshot a promotion bundle must assert to be admissible."""
+    if context is None:
+        return _default_promotion_snapshot()
+    return qualified_snapshot(context)
+
+
+def _promotion_case(
+    bundle: EvaluationInputBundleV1,
+    *,
+    context: Any | None = None,
+    decision_requests: DecisionReplayRequests = (),
+    accounting_requests: OutcomeReplayRequests = (),
+    handoff_snapshot_hash: str | None = None,
+) -> dict[str, Any]:
+    """Build gate kwargs through the verified path, never by raw assembly.
+
+    The proof is minted from a genuinely qualified replay context over a real
+    source snapshot, because the gate now re-audits the containment witness.
+    Assembling a proof directly would no longer reach any gate under test.
+    """
+    replay_context = context if context is not None else _provenance_context()
+    snapshot = _promotion_snapshot(context)
+    qualified = qualify_replay_context(context=replay_context, snapshot=snapshot)
+    proof = mint_bundle_provenance_proof(
+        qualified_context=qualified,
+        context=replay_context,
         bundle=bundle,
+        decision_requests=decision_requests,
+        accounting_requests=accounting_requests,
+    )
+    fixture = make_test_fixture(
+        snapshot_hash=handoff_snapshot_hash
+        if handoff_snapshot_hash is not None
+        else snapshot.snapshot_hash
     )
     fixture["admission"] = rebind_admission(
         fixture,
@@ -318,37 +368,45 @@ def _promotion_case(bundle: EvaluationInputBundleV1) -> dict[str, Any]:
     )
     fixture["bundle"] = bundle
     fixture["proof"] = proof
+    fixture["qualified_context"] = qualified
+    fixture["snapshot"] = snapshot
     return fixture
 
 
 def test_promotion_gate_accepts_realized_snapshot_bound_bundle() -> None:
-    snapshot = make_test_fixture()["decision_handoff"].snapshot_hash
-    harness, _, _, decision_view = _decision_case()
+    harness, query, reference, decision_view = _decision_case()
+    snapshot = _promotion_snapshot(harness.context)
     # The clock must contain the session the decision view binds. This test
     # previously encoded the broken shape where it did not.
     validate_promotion_admission(
         **_promotion_case(
             _realized_bundle(
                 session_clock=normalization_realized_clock(harness),
-                source_snapshot_hash=snapshot,
+                source_snapshot_hash=snapshot.snapshot_hash,
                 authentic_decision_views=(decision_view,),
-            )
+            ),
+            context=harness.context,
+            decision_requests=((reference, query),),
         )
     )
 
 
 def test_promotion_gate_rejects_exploratory_reconstruction_clock() -> None:
-    snapshot = make_test_fixture()["decision_handoff"].snapshot_hash
-    case = _promotion_case(_scheduled_bundle(source_snapshot_hash=snapshot))
+    snapshot = _promotion_snapshot()
+    case = _promotion_case(
+        _scheduled_bundle(source_snapshot_hash=snapshot.snapshot_hash)
+    )
     with pytest.raises(ValueError, match="cannot consume exploratory reconstructed"):
         validate_promotion_admission(**case)
 
 
 def test_promotion_gate_rejects_bundle_hash_mismatch() -> None:
-    snapshot = make_test_fixture()["decision_handoff"].snapshot_hash
-    case = _promotion_case(_realized_bundle(source_snapshot_hash=snapshot))
+    snapshot = _promotion_snapshot()
+    case = _promotion_case(
+        _realized_bundle(source_snapshot_hash=snapshot.snapshot_hash)
+    )
     case["bundle"] = _realized_bundle(
-        source_snapshot_hash=snapshot,
+        source_snapshot_hash=snapshot.snapshot_hash,
         security_identities=(SecurityV1(schema_version="1", security_id=uid(41)),),
     )
     with pytest.raises(ValueError, match="input bundle hash mismatch"):
@@ -356,15 +414,52 @@ def test_promotion_gate_rejects_bundle_hash_mismatch() -> None:
 
 
 def test_promotion_gate_rejects_snapshot_mismatch() -> None:
-    case = _promotion_case(_realized_bundle(source_snapshot_hash=H["c"]))
-    with pytest.raises(ValueError, match="snapshot mismatch"):
+    snapshot = _promotion_snapshot()
+    # The bundle is genuinely bound to its snapshot; the admission's M1e
+    # handoff names a different one, which is the mismatch under test.
+    case = _promotion_case(
+        _realized_bundle(source_snapshot_hash=snapshot.snapshot_hash),
+        handoff_snapshot_hash=H["c"],
+    )
+    with pytest.raises(
+        ValueError, match=r"^input bundle snapshot mismatch with promotion admission$"
+    ):
         validate_promotion_admission(**case)
 
 
 def test_promotion_gate_rejects_missing_snapshot() -> None:
-    case = _promotion_case(_realized_bundle())
-    with pytest.raises(ValueError, match="snapshot mismatch"):
+    snapshot = _promotion_snapshot()
+    case = _promotion_case(
+        _realized_bundle(source_snapshot_hash=snapshot.snapshot_hash)
+    )
+    unbound = _realized_bundle()
+    assert unbound.source_snapshot_hash is None
+    case["bundle"] = unbound
+    case["admission"] = rebind_admission(
+        case,
+        input_bundle_hash=unbound.bundle_hash,
+        provenance_proof_hash=case["proof"].proof_hash,
+    )
+    with pytest.raises(
+        ValueError, match=r"^input bundle snapshot mismatch with promotion admission$"
+    ):
         validate_promotion_admission(**case)
+
+
+def test_minting_refuses_a_bundle_that_asserts_no_snapshot() -> None:
+    """A bundle with no snapshot can never obtain a proof in the first place."""
+    replay_context = _provenance_context()
+    snapshot = qualified_snapshot(replay_context)
+    qualified = qualify_replay_context(context=replay_context, snapshot=snapshot)
+    with pytest.raises(
+        ValueError,
+        match=r"^bundle source snapshot does not match the qualified replay context",
+    ):
+        mint_bundle_provenance_proof(
+            qualified_context=qualified,
+            context=replay_context,
+            bundle=_realized_bundle(),
+        )
 
 
 # --- bundle evidence bound to its own session clock ---
@@ -680,10 +775,10 @@ def test_reconstruction_limitations_merge_into_required_limitations() -> None:
 def test_promotion_gate_rejects_reconstructions_on_realized_clock() -> None:
     harness = _harness()
     observation = build_from_harness(harness)
-    snapshot = make_test_fixture()["decision_handoff"].snapshot_hash
+    snapshot = _promotion_snapshot()
     case = _promotion_case(
         _realized_bundle(
-            source_snapshot_hash=snapshot,
+            source_snapshot_hash=snapshot.snapshot_hash,
             exploratory_reconstructed_observations=(observation,),
         )
     )
@@ -695,26 +790,47 @@ def test_promotion_gate_rejects_reconstructions_on_realized_clock() -> None:
 
 
 def test_promotion_gate_rejects_vacuous_bundle() -> None:
-    snapshot = make_test_fixture()["decision_handoff"].snapshot_hash
-    case = _promotion_case(_realized_bundle(source_snapshot_hash=snapshot))
+    snapshot = _promotion_snapshot()
+    case = _promotion_case(
+        _realized_bundle(source_snapshot_hash=snapshot.snapshot_hash)
+    )
     with pytest.raises(ValueError, match="at least one authentic decision view"):
         validate_promotion_admission(**case)
 
 
 def test_promotion_gate_rejects_clock_declaring_exploratory_limitations() -> None:
-    observation = build_from_harness(_harness())
-    normalization, _, _, decision_view = _decision_case()
-    snapshot = make_test_fixture()["decision_handoff"].snapshot_hash
+    normalization, query, reference, decision_view = _decision_case()
+    snapshot = _promotion_snapshot(normalization.context)
     # The clock spans both corpora so the bundle is internally coherent, and it
-    # is the promotion gate, not bundle validation, that rejects this case.
-    bundle = _realized_bundle(
-        session_clock=_merged_realized_clock(normalization),
-        source_snapshot_hash=snapshot,
-        authentic_decision_views=(decision_view,),
-        exploratory_reconstructed_observations=(observation,),
+    # is the promotion gate, not bundle validation, that rejects this case. The
+    # bundle carries no reconstruction, so the limitation gate is the only gate
+    # that can fire and the anchored message below names it exactly.
+    base = _merged_realized_clock(normalization)
+    draft = SessionClockV1.model_construct(
+        **(dict(base) | {"acknowledged_limitations": (ALPACA_LIMITATION_ABSENT_HALTS,)})
     )
-    case = _promotion_case(bundle)
-    with pytest.raises(ValueError):
+    limited = SessionClockV1.model_validate(
+        dict(draft) | {"clock_hash": session_clock_hash(draft)}
+    )
+    bundle = _realized_bundle(
+        session_clock=limited,
+        source_snapshot_hash=snapshot.snapshot_hash,
+        authentic_decision_views=(decision_view,),
+    )
+    assert bundle.has_exploratory_reconstructions is False
+    assert bundle.required_limitations == (ALPACA_LIMITATION_ABSENT_HALTS,)
+    case = _promotion_case(
+        bundle,
+        context=normalization.context,
+        decision_requests=((reference, query),),
+    )
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^promotion evaluation cannot consume evidence declaring limitations: "
+            rf"\('{ALPACA_LIMITATION_ABSENT_HALTS}',\)$"
+        ),
+    ):
         validate_promotion_admission(**case)
 
 

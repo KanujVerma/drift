@@ -375,7 +375,7 @@ def bundle_component_hashes(bundle: EvaluationInputBundleV1) -> tuple[SHA256Hash
     return tuple(sorted({content_hash(member) for member in members}))
 
 
-def build_bundle_provenance_proof(
+def _build_bundle_provenance_proof(
     *,
     qualified_context_hash: SHA256Hash,
     source_snapshot_hash: SHA256Hash,
@@ -385,9 +385,12 @@ def build_bundle_provenance_proof(
 ) -> BundleProvenanceProofV1:
     """Assemble a provenance proof over an already-verified bundle.
 
-    This is pure assembly. It performs no replay verification, so production
-    callers must reach it through `mint_bundle_provenance_proof`, which runs the
-    expensive check first.
+    Module-private on purpose. This is pure assembly: it accepts any 64-hex
+    `qualified_context_hash` and verifies nothing, so an exported version is a
+    minting oracle for proofs over contexts that were never qualified. The only
+    sanctioned way in is `mint_bundle_provenance_proof`, which runs the
+    expensive check first, and the leading underscore is what enforces that at
+    the module boundary rather than in a docstring.
     """
     draft = BundleProvenanceProofV1.model_construct(
         schema_version="1",

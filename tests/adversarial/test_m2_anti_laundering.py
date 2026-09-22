@@ -6,13 +6,13 @@ has to establish is the strongest one in the milestone: no exploratory result,
 and no evidence that only looks promotion-grade, can satisfy promotion
 validation.
 
-The last section is deliberately different. It documents, with an executable
-reproduction, the one place where the chain is weaker than it reads:
-``validate_promotion_admission`` never re-verifies the containment witness of
-the qualified replay context behind the proof it validates. Those tests assert
-the behaviour that exists today, not the behaviour one might wish for, so that
-the residual cannot quietly widen and so that closing it forces a visible test
-change rather than silently leaving dead assertions behind.
+The last section carries the attack that reopened issue 31: a hand-built
+``QualifiedReplayContextV1`` naming a foreign snapshot, valid under its own
+contract because proving a containment witness needs a snapshot the model never
+sees. It used to be admitted. The gate now takes the qualified context and the
+snapshot and re-audits the witness, so the same construction is refused, and
+each of those tests keeps its original attack so the coverage is unchanged and
+only the verdict moved.
 """
 
 # ruff: noqa: E402
@@ -33,6 +33,7 @@ import pytest
 import test_replay_provenance as rp
 from observation_test_support import NormalizationHarness
 from pydantic import ValidationError
+from replay_provenance_test_support import qualified_snapshot, snapshot_over
 from test_evaluator_admission_gatekeeper import (
     copy_constructed,
     make_dimension_result,
@@ -90,7 +91,7 @@ from drift.domain.replay_provenance import (
     BundleProvenanceProofV1,
     QualifiedReplayContextV1,
     SnapshotBindingEntryV1,
-    build_bundle_provenance_proof,
+    _build_bundle_provenance_proof,
     bundle_component_hashes,
     bundle_provenance_proof_hash,
     context_supplied_artifact_hashes,
@@ -98,6 +99,7 @@ from drift.domain.replay_provenance import (
     snapshot_binding_witness_hash,
     verify_snapshot_binding,
 )
+from drift.domain.source_snapshots import RealSourceSnapshotV1
 from drift.evaluator.bundles import (
     assemble_evaluation_input_bundle,
     build_evaluation_input_bundle,
@@ -498,7 +500,7 @@ def _cached_admitted_case() -> dict[str, Any]:
     cache cannot leak state between tests.
     """
     harness, query, reference = _cached_decision_case()
-    snapshot = rp._qualified_snapshot(harness.context)
+    snapshot = qualified_snapshot(harness.context)
     qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
     bundle = rp._promotion_bundle(harness, query, reference, snapshot)
     proof = mint_bundle_provenance_proof(
@@ -507,7 +509,7 @@ def _cached_admitted_case() -> dict[str, Any]:
         bundle=bundle,
         decision_requests=((reference, query),),
     )
-    return rp._promotion_case(bundle, proof, snapshot.snapshot_hash)
+    return rp._promotion_case(bundle, proof, snapshot, qualified)
 
 
 def _admitted_case() -> dict[str, Any]:
@@ -649,7 +651,7 @@ def test_the_composed_gate_rejects_an_exploratory_reconstruction() -> None:
         source_snapshot_hash=snapshot_hash,
         exploratory_reconstructed_observations=(observation,),
     )
-    proof = build_bundle_provenance_proof(
+    proof = _build_bundle_provenance_proof(
         qualified_context_hash=case["proof"].qualified_context_hash,
         source_snapshot_hash=snapshot_hash,
         bundle=poisoned,
@@ -673,7 +675,7 @@ def test_the_composed_gate_rejects_a_bundle_declaring_any_limitation() -> None:
     """A promotion bundle that still declares development-grade limits is a
     self-contradiction, and must fail closed rather than be admitted."""
     harness, query, reference = _cached_decision_case()
-    snapshot = rp._qualified_snapshot(harness.context)
+    snapshot = qualified_snapshot(harness.context)
     qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
     clock = normalization_realized_clock(harness)
     draft = SessionClockV1.model_construct(
@@ -700,7 +702,7 @@ def test_the_composed_gate_rejects_a_bundle_declaring_any_limitation() -> None:
         bundle=bundle,
         decision_requests=((reference, query),),
     )
-    case = rp._promotion_case(bundle, proof, snapshot.snapshot_hash)
+    case = rp._promotion_case(bundle, proof, snapshot, qualified)
 
     with pytest.raises(
         ValueError,
@@ -772,7 +774,7 @@ def test_a_self_consistent_fabricated_view_is_refused_by_replay_verification() -
 
 def test_minting_refuses_a_bundle_whose_views_replay_did_not_produce() -> None:
     harness, query, reference = _cached_decision_case()
-    snapshot = rp._qualified_snapshot(harness.context)
+    snapshot = qualified_snapshot(harness.context)
     qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
     genuine = materialize_observation_decision(reference, query, harness.context)
     forged = DerivedObservationViewV1.model_construct(
@@ -821,7 +823,7 @@ def test_a_bundle_member_missing_from_the_proof_fails_closed() -> None:
 
 
 # ==========================================================================
-# Documented residual: the gate never re-verifies the containment witness
+# Closed finding: the gate re-verifies the containment witness (issue 31)
 # ==========================================================================
 
 
@@ -871,38 +873,53 @@ def test_a_forged_qualified_replay_context_validates_without_any_snapshot() -> N
     ) == context_supplied_artifact_hashes(identity)
 
 
-def test_pure_assembly_mints_a_proof_over_an_arbitrary_context_hash() -> None:
-    """``build_bundle_provenance_proof`` is documented as unverified assembly."""
+def test_pure_assembly_cannot_launder_an_arbitrary_context_hash_past_the_gate() -> None:
+    """Inverted from the characterization test that documented P0-3.
+
+    Same attack, opposite verdict. The unverified assembly function mints a
+    structurally perfect proof over a context hash nobody ever qualified, and
+    the gate used to admit it. It is now module-private, and even reaching past
+    that boundary does not help: the gate demands the qualified context object
+    the proof names and refuses when the hash does not match it.
+    """
     harness, query, reference = _cached_decision_case()
-    snapshot = rp._qualified_snapshot(harness.context)
+    snapshot = qualified_snapshot(harness.context)
+    qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
     bundle = rp._promotion_bundle(harness, query, reference, snapshot)
 
-    proof = build_bundle_provenance_proof(
+    proof = _build_bundle_provenance_proof(
         qualified_context_hash=H["9"],
         source_snapshot_hash=snapshot.snapshot_hash,
         bundle=bundle,
     )
 
     assert proof.qualified_context_hash == H["9"]
-    case = rp._promotion_case(bundle, proof, snapshot.snapshot_hash)
-    # The gate accepts it. Trust rests entirely on production callers reaching
-    # the proof through mint_bundle_provenance_proof.
-    validate_promotion_admission(**case)
+    assert qualified.qualified_hash != H["9"]
+    case = rp._promotion_case(bundle, proof, snapshot, qualified)
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^provenance proof qualified context mismatch: proof binds "
+            rf"{H['9']}, context is {qualified.qualified_hash}$"
+        ),
+    ):
+        validate_promotion_admission(**case)
 
 
-def test_the_promotion_gate_admits_a_proof_over_a_forged_qualified_context() -> None:
-    """Accepted residual, reproduced end to end through the sanctioned path.
+def test_the_promotion_gate_refuses_a_proof_over_a_forged_qualified_context() -> None:
+    """Inverted from the characterization test that documented P0-1.
 
-    Every step below is the production path: a real M1d replay, a real
+    The attack construction is unchanged: a real M1d replay, a real
     ``mint_bundle_provenance_proof`` call, and a real
-    ``validate_promotion_admission`` call. The only hand-built artifact is the
-    ``QualifiedReplayContextV1``, and it is fully valid under its own contract.
-    The snapshot the bundle claims attests a completely different corpus, and
-    the gate still admits the evaluation, because it never re-verifies the
-    witness.
+    ``validate_promotion_admission`` call, with the only hand-built artifact a
+    ``QualifiedReplayContextV1`` that is fully valid under its own contract and
+    names a snapshot attesting a completely different corpus. The gate now
+    receives that context and the snapshot and re-audits the witness, so the
+    evaluation is refused where it used to be admitted.
     """
     harness, query, reference = _cached_decision_case()
-    foreign = rp._snapshot_over(
+    foreign = snapshot_over(
         context_supplied_artifact_hashes(
             derive_replay_context_identity(rp._unrelated_context())
         )
@@ -923,41 +940,89 @@ def test_the_promotion_gate_admits_a_proof_over_a_forged_qualified_context() -> 
         bundle=bundle,
         decision_requests=((reference, query),),
     )
-    case = rp._promotion_case(bundle, proof, foreign.snapshot_hash)
+    case = rp._promotion_case(bundle, proof, foreign, forged)
 
-    # RESIDUAL: this call succeeds today.
-    validate_promotion_admission(**case)
+    # The gate reaches the same verdict the compensating control does, and it
+    # names the exact fabricated witness entry rather than failing vaguely.
+    entry = forged.snapshot_binding_witness[0]
+    expected = (
+        rf"^witness entry {entry.snapshot_entry_hash} does not resolve to a "
+        rf"snapshot entry of {foreign.snapshot_hash}$"
+    )
+    with pytest.raises(ValueError, match=expected):
+        validate_promotion_admission(**case)
 
-    # The compensating control catches it, but only with the snapshot in hand,
-    # and the gate has no parameter through which to receive one.
-    with pytest.raises(ValueError, match=r"does not resolve to a snapshot entry of"):
+    with pytest.raises(ValueError, match=expected):
         verify_snapshot_binding(qualified=forged, snapshot=foreign)
 
 
-def test_the_promotion_gate_has_no_channel_to_re_verify_the_witness() -> None:
-    """Pins the exact shape of the residual so closing it is a visible change."""
-    parameters = set(inspect.signature(validate_promotion_admission).parameters)
+def test_the_promotion_gate_has_a_channel_to_re_verify_the_witness() -> None:
+    """Inverted from the characterization test that pinned the missing channel.
 
-    assert "proof" in parameters
-    assert "snapshot" not in parameters
-    assert "qualified_context" not in parameters
-    assert "source_snapshot" not in parameters
+    The parameters are the fix. Without both the qualified context and the
+    snapshot there is no way for the gate to re-audit anything, which is why
+    the unsafe signature is not preserved for compatibility.
+    """
+    parameters = inspect.signature(validate_promotion_admission).parameters
+
+    for required in ("proof", "qualified_context", "snapshot"):
+        assert required in parameters
+        assert parameters[required].kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameters[required].default is inspect.Parameter.empty
+
+    annotations = {name: parameters[name].annotation for name in parameters}
+    assert annotations["qualified_context"] is QualifiedReplayContextV1
+    assert annotations["snapshot"] is RealSourceSnapshotV1
 
 
-def test_the_witness_verifier_has_no_production_call_site() -> None:
-    """The compensating control is never invoked outside this test suite.
+def test_the_witness_verifier_is_called_from_inside_the_promotion_gate() -> None:
+    """The compensating control is now the gate, not a convention beside it.
 
     ``verify_snapshot_binding`` is the only thing that can catch a fabricated
-    containment witness, and nothing under ``src`` calls it. The whole
-    provenance chain is likewise contract-only: ``qualify_replay_context``,
-    ``mint_bundle_provenance_proof`` and ``validate_promotion_admission`` have
-    no production call site either. That is expected while the promotion lane
-    is unreachable, but it means the "only production path" argument the
-    issue 31 ruling rests on is not yet established by any production path.
+    containment witness. It used to have zero production call sites, so the
+    "trust flows from minting" argument rested on no production path at all.
+    It is now called from the body of ``validate_promotion_admission`` and
+    nowhere else under ``src``, so an edit that drops the call is visible here.
+    """
+    root = Path(__file__).resolve().parents[2] / "src"
+    gate = root / "drift" / "evaluator" / "bundles.py"
+    scanned = 0
+    call_sites: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        scanned += 1
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                if node.func.id == "verify_snapshot_binding":
+                    call_sites.append(f"{path.name}:{node.func.id}")
+
+    assert scanned >= 40, "the production call-site scan found no modules"
+    assert call_sites == ["bundles.py:verify_snapshot_binding"]
+
+    gate_tree = ast.parse(gate.read_text(encoding="utf-8"))
+    inside = [
+        node
+        for node in ast.walk(gate_tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "validate_promotion_admission"
+        for call in ast.walk(node)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "verify_snapshot_binding"
+    ]
+    assert len(inside) == 1
+
+
+def test_the_rest_of_the_chain_stays_contract_only() -> None:
+    """Minting and qualification still have no production caller.
+
+    The promotion lane is unreachable while M1e Task 8 is deferred, so this is
+    expected. It is asserted rather than assumed, because the day one of these
+    gains a caller is the day the lane becomes live and this suite must be the
+    thing that notices.
     """
     root = Path(__file__).resolve().parents[2] / "src"
     watched = {
-        "verify_snapshot_binding",
         "qualify_replay_context",
         "mint_bundle_provenance_proof",
         "validate_promotion_admission",
@@ -977,14 +1042,15 @@ def test_the_witness_verifier_has_no_production_call_site() -> None:
 
 
 def test_witness_re_verification_needs_no_m1d_replay() -> None:
-    """The compensating control is cheap: hashes and lookups, no replay.
+    """The gate stays cheap: hashes and lookups, no replay.
 
-    This matters for the ruling that admission must stay cheap. Re-verifying
-    the witness reads only the snapshot's own replay input entries, so the
-    cost argument does not by itself justify leaving the gap open.
+    This is the ruling the closing note got wrong. Re-verifying the witness
+    reads only the snapshot's own replay input entries, so admitting it into
+    the gate costs nothing the "no M1d replay inside admission" constraint was
+    protecting.
     """
     harness, _, _ = _cached_decision_case()
-    snapshot = rp._qualified_snapshot(harness.context)
+    snapshot = qualified_snapshot(harness.context)
     qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
 
     source = inspect.getsource(verify_snapshot_binding)
