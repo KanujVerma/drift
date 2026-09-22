@@ -1,4 +1,4 @@
-"""Authenticated, byte-pinned M1d v3 replay support used only by pytest tests.
+"""Authenticated, byte-pinned M1d replay support used only by pytest tests.
 
 Two pin inventories live side by side and they are not interchangeable.
 
@@ -25,6 +25,32 @@ explicit, separately justified deltas over v3 and nothing else:
 ``_validated_current_pins`` re-derives the whole reconstruction on every load,
 so a pin can be neither silently re-signed nor silently introduced for any path
 the inventory does not declare.
+
+Replay environment identity (issue #48)
+---------------------------------------
+
+Every M1d normalization derivation binds ``python_identity``, the exact
+interpreter implementation and patch version (``cpython-X.Y.Z``). Pinned replay
+therefore only means something under the exact interpreter the repository pins
+in ``.python-version``. ``verify_replay_interpreter`` checks that identity
+before any archive is extracted, and ``verify_replay_child_interpreter`` checks
+it again for the child interpreter that actually recomputes the derivation.
+
+Failures fall into exactly four classes, each a direct subclass of
+``PinnedM1dReplayError`` whose message starts with its code:
+
+* ``PINNED_REPLAY_ENVIRONMENT_MISMATCH``: the running or child interpreter is
+  not the pinned one. The message names the expected and the found identity.
+* ``PINNED_REPLAY_ENVIRONMENT_ARTIFACT_UNAVAILABLE``: a required replay
+  environment artifact cannot be obtained, such as the pinned interpreter
+  executable or the historical Git objects the replay extracts.
+* ``PINNED_REPLAY_SEMANTIC_MISMATCH``: the environment matched and every
+  archived input authenticated, but the replayed computation failed.
+* ``PINNED_REPLAY_INTEGRITY_FAILURE``: protected bytes differ from their
+  inventory, an inventory or pin is malformed, or the archived harness cannot
+  execute the declared nodes.
+
+Nothing on this lane skips. Each class is a hard failure.
 """
 
 from __future__ import annotations
@@ -32,6 +58,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tarfile
@@ -40,9 +67,18 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
+from typing import ClassVar
 
 PINNED_M1D_COMMIT = "af75cce0f763de025f8ae3516577a9d0a1acead9"
+PINNED_M1D_GENERATIONS: Mapping[str, str] = {
+    "v1": "256154e40121d28cec6a65ebcde223c12563752d",
+    "v2": "a909148a941081d8d05c5090794346c5ce54db8c",
+    "v3": PINNED_M1D_COMMIT,
+}
+"""Source commit that generated, and therefore replays, each M1d fixture."""
 REPO_ROOT = Path(__file__).resolve().parents[1]
+PYTHON_PIN_PATH = REPO_ROOT / ".python-version"
+"""The single exact interpreter pin, shared with uv and with CI."""
 MATRIX_MODULE = "tests/integration/test_m1d_adversarial_matrix.py"
 M1C_COMPOSITION_NODE = (
     "tests/integration/test_m1d_compatibility.py::"
@@ -64,11 +100,46 @@ _CURRENT_INVENTORY_ID = "m1d-v4-protected-sha256"
 _SUPERSEDED_INVENTORY_ID = "m1d-v3-protected-sha256"
 _SUPERSESSION_ISSUE = 32
 _ARCHIVE_PATHS = ("src/drift", "tests", "pyproject.toml", "uv.lock")
-_REQUIRED_PYTHON_FLOOR = (3, 14)
+_PIN_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
+_IDENTITY_PROGRAM = (
+    "import sys; print(f'{sys.implementation.name}-{sys.version_info.major}."
+    "{sys.version_info.minor}.{sys.version_info.micro}')"
+)
+_CHILD_START_TIMEOUT_SECONDS = 120
 
 
 class PinnedM1dReplayError(RuntimeError):
     """Exact archived M1d replay could not be authenticated or executed."""
+
+    code: ClassVar[str] = "PINNED_REPLAY_FAILURE"
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(f"{self.code} {detail}")
+        self.detail = detail
+
+
+class PinnedReplayEnvironmentMismatch(PinnedM1dReplayError):
+    """The running or replay-child interpreter is not the pinned interpreter."""
+
+    code = "PINNED_REPLAY_ENVIRONMENT_MISMATCH"
+
+
+class PinnedReplayEnvironmentArtifactUnavailable(PinnedM1dReplayError):
+    """A required replay environment artifact cannot be obtained."""
+
+    code = "PINNED_REPLAY_ENVIRONMENT_ARTIFACT_UNAVAILABLE"
+
+
+class PinnedReplaySemanticMismatch(PinnedM1dReplayError):
+    """Environment matched and inputs authenticated, but replay differed."""
+
+    code = "PINNED_REPLAY_SEMANTIC_MISMATCH"
+
+
+class PinnedReplayIntegrityFailure(PinnedM1dReplayError):
+    """Protected bytes, an inventory, a pin, or the archived harness is wrong."""
+
+    code = "PINNED_REPLAY_INTEGRITY_FAILURE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,19 +158,111 @@ def _combined_output(completed: subprocess.CompletedProcess[bytes]) -> str:
     )
 
 
+def observed_interpreter_identity() -> str:
+    """Return this interpreter's identity exactly as M1d derivations bind it.
+
+    This mirrors ``python_identity`` in ``src/drift/markets/normalization.py``:
+    the implementation name and the full major.minor.micro version.
+    """
+    return (
+        f"{sys.implementation.name}-{sys.version_info.major}."
+        f"{sys.version_info.minor}.{sys.version_info.micro}"
+    )
+
+
+def pinned_interpreter_identity(pin_path: Path = PYTHON_PIN_PATH) -> str:
+    """Return the identity the repository pins, from ``.python-version`` only."""
+    try:
+        raw = pin_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise PinnedReplayIntegrityFailure(
+            f"cannot read interpreter pin {pin_path}: {error}"
+        ) from error
+    entries = [
+        line.strip()
+        for line in raw.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    if len(entries) != 1 or _PIN_VERSION.fullmatch(entries[0]) is None:
+        raise PinnedReplayIntegrityFailure(
+            f"interpreter pin {pin_path} must name exactly one X.Y.Z interpreter "
+            f"version, found {raw!r}"
+        )
+    return f"cpython-{entries[0]}"
+
+
+def verify_replay_interpreter(
+    *, observed: str | None = None, pin_path: Path = PYTHON_PIN_PATH
+) -> str:
+    """Require the running interpreter to be exactly the pinned interpreter.
+
+    ``observed`` exists so tests can present another identity without
+    touching ``sys``; production callers leave it unset.
+    """
+    expected = pinned_interpreter_identity(pin_path)
+    found = observed_interpreter_identity() if observed is None else observed
+    if found != expected:
+        raise PinnedReplayEnvironmentMismatch(f"expected {expected} found {found}")
+    return found
+
+
+def verify_replay_child_interpreter(
+    executable: str,
+    *,
+    environment: Mapping[str, str] | None = None,
+    cwd: Path | None = None,
+) -> str:
+    """Require the interpreter that recomputes the derivation to be pinned too."""
+    expected = pinned_interpreter_identity()
+    candidate = Path(executable) if executable else None
+    if (
+        candidate is None
+        or not candidate.is_file()
+        or not os.access(candidate, os.X_OK)
+    ):
+        raise PinnedReplayEnvironmentArtifactUnavailable(
+            f"pinned interpreter {expected} executable is unavailable: {executable!r}"
+        )
+    try:
+        completed = subprocess.run(
+            [executable, "-c", _IDENTITY_PROGRAM],
+            cwd=cwd,
+            env=None if environment is None else dict(environment),
+            check=False,
+            capture_output=True,
+            timeout=_CHILD_START_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise PinnedReplayEnvironmentArtifactUnavailable(
+            f"pinned interpreter {expected} could not start {executable}: {error}"
+        ) from error
+    reported = completed.stdout.decode("utf-8", errors="replace").strip()
+    if completed.returncode != 0 or not reported:
+        raise PinnedReplayEnvironmentArtifactUnavailable(
+            f"pinned interpreter {expected} could not start {executable} "
+            f"(exit {completed.returncode}): {_combined_output(completed)}"
+        )
+    if reported != expected:
+        raise PinnedReplayEnvironmentMismatch(
+            f"expected {expected} found {reported} in replay child interpreter "
+            f"{executable}"
+        )
+    return reported
+
+
 def _load_inventory() -> dict[str, str]:
     try:
         raw = _INVENTORY_PATH.read_bytes()
     except OSError as error:
-        raise PinnedM1dReplayError(
+        raise PinnedReplayIntegrityFailure(
             f"cannot read literal M1d inventory: {error}"
         ) from error
     if hashlib.sha256(raw).hexdigest() != _EXPECTED_INVENTORY_SHA256:
-        raise PinnedM1dReplayError("literal M1d inventory sha256 mismatch")
+        raise PinnedReplayIntegrityFailure("literal M1d inventory sha256 mismatch")
     try:
         document = json.loads(raw)
     except json.JSONDecodeError as error:
-        raise PinnedM1dReplayError(
+        raise PinnedReplayIntegrityFailure(
             f"cannot parse literal M1d inventory: {error}"
         ) from error
     pins = document.get("sha256") if isinstance(document, dict) else None
@@ -114,7 +277,7 @@ def _load_inventory() -> dict[str, str]:
             for path, digest in pins.items()
         )
     ):
-        raise PinnedM1dReplayError("literal M1d inventory is malformed")
+        raise PinnedReplayIntegrityFailure("literal M1d inventory is malformed")
     return dict(pins)
 
 
@@ -125,7 +288,7 @@ PROTECTED_M1D_ARCHIVE_SHA256 = _load_inventory()
 def _superseded_source_pins(document: object) -> dict[str, dict[str, str]]:
     """Return the declared supersessions, rejecting a malformed declaration."""
     if not isinstance(document, dict):
-        raise PinnedM1dReplayError("current M1d inventory is malformed")
+        raise PinnedReplayIntegrityFailure("current M1d inventory is malformed")
     supersedes = document.get("supersedes")
     superseded = document.get("superseded_paths")
     if (
@@ -139,7 +302,9 @@ def _superseded_source_pins(document: object) -> dict[str, dict[str, str]]:
         or not isinstance(supersedes.get("reason"), str)
         or not supersedes["reason"].strip()
     ):
-        raise PinnedM1dReplayError("current M1d inventory supersession is malformed")
+        raise PinnedReplayIntegrityFailure(
+            "current M1d inventory supersession is malformed"
+        )
     for path, record in superseded.items():
         if (
             not isinstance(path, str)
@@ -151,7 +316,7 @@ def _superseded_source_pins(document: object) -> dict[str, dict[str, str]]:
             )
             or record["historical_sha256"] == record["current_sha256"]
         ):
-            raise PinnedM1dReplayError(
+            raise PinnedReplayIntegrityFailure(
                 f"current M1d inventory supersession is malformed for {path}"
             )
     return dict(superseded)
@@ -167,7 +332,9 @@ def _added_source_pins(document: Mapping[str, object]) -> dict[str, dict[str, ob
     """
     added = document.get("added_paths", {})
     if not isinstance(added, dict):
-        raise PinnedM1dReplayError("current M1d inventory addition block is malformed")
+        raise PinnedReplayIntegrityFailure(
+            "current M1d inventory addition block is malformed"
+        )
     for path, record in added.items():
         justification = (
             record.get("justification") if isinstance(record, dict) else None
@@ -182,7 +349,7 @@ def _added_source_pins(document: Mapping[str, object]) -> dict[str, dict[str, ob
             or not isinstance(justification, str)
             or not justification.strip()
         ):
-            raise PinnedM1dReplayError(
+            raise PinnedReplayIntegrityFailure(
                 f"current M1d inventory addition is malformed for {path}"
             )
     return dict(added)
@@ -199,7 +366,7 @@ def _validated_current_pins(document: object) -> dict[str, str]:
     silent re-signing or a silent widening and fails closed here.
     """
     if not isinstance(document, dict):
-        raise PinnedM1dReplayError("current M1d inventory is malformed")
+        raise PinnedReplayIntegrityFailure("current M1d inventory is malformed")
     pins = document.get("sha256")
     superseded = _superseded_source_pins(document)
     added = _added_source_pins(document)
@@ -211,38 +378,38 @@ def _validated_current_pins(document: object) -> dict[str, str]:
             not isinstance(digest, str) or len(digest) != 64 for digest in pins.values()
         )
     ):
-        raise PinnedM1dReplayError("current M1d inventory is malformed")
+        raise PinnedReplayIntegrityFailure("current M1d inventory is malformed")
     expected = dict(PROTECTED_M1D_ARCHIVE_SHA256)
     for path, record in superseded.items():
         if path not in expected:
-            raise PinnedM1dReplayError(
+            raise PinnedReplayIntegrityFailure(
                 f"current M1d inventory supersedes an unpinned path: {path}"
             )
         if record["historical_sha256"] != expected[path]:
-            raise PinnedM1dReplayError(
+            raise PinnedReplayIntegrityFailure(
                 f"current M1d inventory misstates the historical pin for {path}"
             )
         expected[path] = record["current_sha256"]
     for path, addition in added.items():
         if path in PROTECTED_M1D_ARCHIVE_SHA256:
-            raise PinnedM1dReplayError(
+            raise PinnedReplayIntegrityFailure(
                 "current M1d inventory declares an addition the historical "
                 f"inventory already pins: {path}"
             )
         expected[path] = str(addition["current_sha256"])
     undeclared = sorted(set(pins) - set(expected))
     if undeclared:
-        raise PinnedM1dReplayError(
+        raise PinnedReplayIntegrityFailure(
             f"current M1d inventory pins an undeclared added path: {undeclared}"
         )
     omitted = sorted(set(expected) - set(pins))
     if omitted:
-        raise PinnedM1dReplayError(
+        raise PinnedReplayIntegrityFailure(
             f"current M1d inventory omits a required protected path: {omitted}"
         )
     if pins != expected:
         drifted = sorted(path for path in pins if pins[path] != expected[path])
-        raise PinnedM1dReplayError(
+        raise PinnedReplayIntegrityFailure(
             f"current M1d inventory re-signs undeclared protected paths: {drifted}"
         )
     return dict(pins)
@@ -252,15 +419,15 @@ def _load_current_inventory() -> dict[str, str]:
     try:
         raw = _CURRENT_INVENTORY_PATH.read_bytes()
     except OSError as error:
-        raise PinnedM1dReplayError(
+        raise PinnedReplayIntegrityFailure(
             f"cannot read current M1d inventory: {error}"
         ) from error
     if hashlib.sha256(raw).hexdigest() != _EXPECTED_CURRENT_INVENTORY_SHA256:
-        raise PinnedM1dReplayError("current M1d inventory sha256 mismatch")
+        raise PinnedReplayIntegrityFailure("current M1d inventory sha256 mismatch")
     try:
         document = json.loads(raw)
     except json.JSONDecodeError as error:
-        raise PinnedM1dReplayError(
+        raise PinnedReplayIntegrityFailure(
             f"cannot parse current M1d inventory: {error}"
         ) from error
     return _validated_current_pins(document)
@@ -273,23 +440,50 @@ _REQUIRED_PROTECTED_PATHS = frozenset(PROTECTED_M1D_SHA256)
 _REQUIRED_ARCHIVE_PATHS = frozenset(PROTECTED_M1D_ARCHIVE_SHA256)
 
 
+def _historical_generation_pins(generation: str) -> dict[str, str]:
+    """Return the preserved v3 pins that authenticate one generation's archive.
+
+    The af75cce archive is authenticated against every v3 pin. The older v1
+    and v2 archives predate the rest of that tree, so they are authenticated
+    against the v3 pins of their own fixture directory, whose bytes never
+    moved after the commit that generated them.
+    """
+    if generation == "v3":
+        return dict(PROTECTED_M1D_ARCHIVE_SHA256)
+    if generation not in PINNED_M1D_GENERATIONS:
+        raise PinnedReplayIntegrityFailure(
+            f"unknown M1d fixture generation: {generation}"
+        )
+    prefix = f"tests/fixtures/m1d/{generation}/"
+    pins = {
+        path: digest
+        for path, digest in PROTECTED_M1D_ARCHIVE_SHA256.items()
+        if path.startswith(prefix)
+    }
+    if len(pins) != 160:
+        raise PinnedReplayIntegrityFailure(
+            f"historical {generation} fixture pins are incomplete: {len(pins)}"
+        )
+    return pins
+
+
 def _verify_pinned_inputs(
     *, root: Path, pins: Mapping[str, str], required: frozenset[str], label: str
 ) -> None:
     if set(pins) != required:
-        raise PinnedM1dReplayError(
+        raise PinnedReplayIntegrityFailure(
             f"{label} M1d inventory is incomplete or contains unknown paths"
         )
     for path, digest in pins.items():
         try:
             data = (root / path).read_bytes()
         except OSError as error:
-            raise PinnedM1dReplayError(
+            raise PinnedReplayIntegrityFailure(
                 f"protected M1d path is unavailable: {path}: {error}"
             ) from error
         actual = hashlib.sha256(data).hexdigest()
         if actual != digest:
-            raise PinnedM1dReplayError(
+            raise PinnedReplayIntegrityFailure(
                 "protected M1d sha256 mismatch for "
                 f"{path}: expected {digest}, got {actual}"
             )
@@ -330,13 +524,31 @@ def is_pinned_m1d_node(nodeid: str) -> bool:
     return nodeid.startswith(f"{MATRIX_MODULE}::") or nodeid == M1C_COMPOSITION_NODE
 
 
-def extract_m1d_archive(destination: Path, *, commit: str = PINNED_M1D_COMMIT) -> Path:
-    """Extract the finite authenticated M1d archive from the local pinned commit."""
-    if commit != PINNED_M1D_COMMIT:
-        raise PinnedM1dReplayError(f"unapproved M1d interpreter commit: {commit}")
-    if tuple(sys.version_info[:2]) < _REQUIRED_PYTHON_FLOOR:
-        raise PinnedM1dReplayError("pinned M1d replay requires Python 3.14")
-    destination.mkdir(parents=True, exist_ok=True)
+def _archive_bytes(commit: str) -> bytes:
+    """Return the finite tar archive of one historical commit.
+
+    A checkout that lacks the commit, for example a shallow clone, cannot
+    replay at all. That is an unavailable environment artifact, not a replay
+    or integrity result.
+    """
+    try:
+        present = subprocess.run(
+            ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
+            cwd=REPO_ROOT,
+            check=False,
+            capture_output=True,
+        )
+    except OSError as error:
+        raise PinnedReplayEnvironmentArtifactUnavailable(
+            f"git is unavailable, so historical Git commit {commit} is unavailable: "
+            f"{error}"
+        ) from error
+    if present.returncode != 0:
+        raise PinnedReplayEnvironmentArtifactUnavailable(
+            f"historical Git commit {commit} is unavailable in this checkout; "
+            "pinned replay needs the full history (a non-shallow clone): "
+            f"{_combined_output(present)}"
+        )
     completed = subprocess.run(
         ["git", "archive", "--format=tar", commit, "--", *_ARCHIVE_PATHS],
         cwd=REPO_ROOT,
@@ -344,25 +556,73 @@ def extract_m1d_archive(destination: Path, *, commit: str = PINNED_M1D_COMMIT) -
         capture_output=True,
     )
     if completed.returncode != 0:
-        raise PinnedM1dReplayError(
+        raise PinnedReplayIntegrityFailure(
             f"cannot extract pinned M1d commit {commit}: {_combined_output(completed)}"
         )
+    return completed.stdout
+
+
+def _unpack_archive(destination: Path, commit: str) -> None:
+    raw = _archive_bytes(commit)
     try:
-        with tarfile.open(fileobj=BytesIO(completed.stdout), mode="r:") as archive:
+        with tarfile.open(fileobj=BytesIO(raw), mode="r:") as archive:
             members = archive.getmembers()
             if any(
                 member.name.startswith("/") or ".." in Path(member.name).parts
                 for member in members
             ):
-                raise PinnedM1dReplayError(
+                raise PinnedReplayIntegrityFailure(
                     "pinned M1d Git archive contains an unsafe path"
                 )
             archive.extractall(destination, members=members, filter="data")
     except (OSError, tarfile.TarError) as error:
-        raise PinnedM1dReplayError(
+        raise PinnedReplayIntegrityFailure(
             f"cannot unpack pinned M1d commit {commit}: {error}"
         ) from error
+
+
+def extract_m1d_archive(
+    destination: Path,
+    *,
+    commit: str = PINNED_M1D_COMMIT,
+    observed_identity: str | None = None,
+) -> Path:
+    """Extract the finite authenticated M1d archive from the local pinned commit.
+
+    The interpreter is verified first, so a wrong interpreter never pays for,
+    or leaves behind, an extracted archive.
+    """
+    if commit != PINNED_M1D_COMMIT:
+        raise PinnedReplayIntegrityFailure(
+            f"unapproved M1d interpreter commit: {commit}"
+        )
+    verify_replay_interpreter(observed=observed_identity)
+    destination.mkdir(parents=True, exist_ok=True)
+    _unpack_archive(destination, commit)
     verify_m1d_archive_inputs(root=destination)
+    return destination
+
+
+def extract_m1d_generation_archive(
+    destination: Path, generation: str, *, observed_identity: str | None = None
+) -> Path:
+    """Extract and authenticate the archive of one generation's source commit."""
+    if generation not in PINNED_M1D_GENERATIONS:
+        raise PinnedReplayIntegrityFailure(
+            f"unknown M1d fixture generation: {generation}"
+        )
+    if generation == "v3":
+        return extract_m1d_archive(destination, observed_identity=observed_identity)
+    pins = _historical_generation_pins(generation)
+    verify_replay_interpreter(observed=observed_identity)
+    destination.mkdir(parents=True, exist_ok=True)
+    _unpack_archive(destination, PINNED_M1D_GENERATIONS[generation])
+    _verify_pinned_inputs(
+        root=destination,
+        pins=pins,
+        required=frozenset(pins),
+        label=f"archived {generation}",
+    )
     return destination
 
 
@@ -370,7 +630,7 @@ def verify_child_import_location(imported_file: str, archive_root: Path) -> None
     """Require the child interpreter to import Drift from the extracted archive."""
     imported = Path(imported_file).resolve()
     if not imported.is_relative_to(archive_root.resolve()):
-        raise PinnedM1dReplayError(
+        raise PinnedReplayIntegrityFailure(
             f"child imported Drift outside pinned archive: {imported}"
         )
 
@@ -392,42 +652,93 @@ def _child_environment(archive_root: Path) -> dict[str, str]:
     return environment
 
 
-def _run_archived_m1d_node_in_root(
-    archive_root: Path, nodeid: str
+def run_replay_child(
+    archive_root: Path,
+    nodes: tuple[str, ...],
+    *,
+    commit: str,
+    expected_pins: Mapping[str, str],
+    label: str,
+    observed_identity: str | None = None,
+    executable: str | None = None,
 ) -> PinnedM1dReplayResult:
-    """Run one M1d node inside an already authenticated archived checkout."""
-    verify_m1d_archive_inputs(root=archive_root)
+    """Run archived nodes in an authenticated archive and classify any failure.
+
+    Order is load-bearing: interpreter identity, then protected input bytes,
+    then the child interpreter's own identity, then the child import location,
+    and only then the replay itself. A failure of the replay can therefore
+    only be a semantic replay mismatch.
+    """
+    if not nodes:
+        raise PinnedReplayIntegrityFailure(f"{label} replay declares no nodes")
+    expected = verify_replay_interpreter(observed=observed_identity)
+    _verify_pinned_inputs(
+        root=archive_root,
+        pins=expected_pins,
+        required=frozenset(expected_pins),
+        label=label,
+    )
     environment = _child_environment(archive_root)
+    interpreter = sys.executable if executable is None else executable
+    verify_replay_child_interpreter(
+        interpreter, environment=environment, cwd=archive_root
+    )
     imported = subprocess.run(
-        [sys.executable, "-c", "import drift; print(drift.__file__)"],
+        [interpreter, "-c", "import drift; print(drift.__file__)"],
         cwd=archive_root,
         env=environment,
         check=False,
         capture_output=True,
     )
     if imported.returncode != 0:
-        raise PinnedM1dReplayError(
+        raise PinnedReplayIntegrityFailure(
             f"child cannot import pinned M1d Drift: {_combined_output(imported)}"
         )
     verify_child_import_location(imported.stdout.decode("utf-8").strip(), archive_root)
     completed = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", nodeid],
+        [interpreter, "-m", "pytest", "-q", "-p", "no:cacheprovider", *nodes],
         cwd=archive_root,
         env=environment,
         check=False,
         capture_output=True,
     )
+    names = " ".join(nodes)
     result = PinnedM1dReplayResult(
-        commit=PINNED_M1D_COMMIT,
-        nodeid=nodeid,
+        commit=commit,
+        nodeid=names,
         returncode=completed.returncode,
         output=_combined_output(completed),
     )
+    if result.returncode == 1:
+        raise PinnedReplaySemanticMismatch(
+            f"environment {expected} matched and {label} inputs authenticated, "
+            f"but replay failed for {names}:\n{result.output}"
+        )
     if result.returncode != 0:
-        raise PinnedM1dReplayError(
-            f"pinned M1d replay failed for {nodeid}:\n{result.output}"
+        raise PinnedReplayIntegrityFailure(
+            f"{label} replay could not execute {names} "
+            f"(pytest exit {result.returncode}):\n{result.output}"
+        )
+    if re.search(rf"(?<![0-9]){len(nodes)} passed", result.output) is None:
+        raise PinnedReplayIntegrityFailure(
+            f"{label} replay did not execute exactly the declared nodes {names}:\n"
+            f"{result.output}"
         )
     return result
+
+
+def _run_archived_m1d_node_in_root(
+    archive_root: Path, nodeid: str, *, observed_identity: str | None = None
+) -> PinnedM1dReplayResult:
+    """Run one M1d node inside an already authenticated archived checkout."""
+    return run_replay_child(
+        archive_root,
+        (nodeid,),
+        commit=PINNED_M1D_COMMIT,
+        expected_pins=PROTECTED_M1D_ARCHIVE_SHA256,
+        label="archived",
+        observed_identity=observed_identity,
+    )
 
 
 def run_archived_m1d_node(nodeid: str) -> PinnedM1dReplayResult:
@@ -435,6 +746,26 @@ def run_archived_m1d_node(nodeid: str) -> PinnedM1dReplayResult:
     with tempfile.TemporaryDirectory(prefix="drift-m1d-v3-replay-") as directory:
         archive = extract_m1d_archive(Path(directory))
         return _run_archived_m1d_node_in_root(archive, nodeid)
+
+
+def run_m1d_generation_replay(
+    generation: str, nodes: tuple[str, ...], *, observed_identity: str | None = None
+) -> PinnedM1dReplayResult:
+    """Authenticate and run nodes from one generation's own source commit."""
+    with tempfile.TemporaryDirectory(
+        prefix=f"drift-m1d-{generation}-replay-"
+    ) as directory:
+        archive = extract_m1d_generation_archive(
+            Path(directory), generation, observed_identity=observed_identity
+        )
+        return run_replay_child(
+            archive,
+            nodes,
+            commit=PINNED_M1D_GENERATIONS[generation],
+            expected_pins=_historical_generation_pins(generation),
+            label=f"archived {generation}",
+            observed_identity=observed_identity,
+        )
 
 
 class PinnedM1dArchiveCache:
