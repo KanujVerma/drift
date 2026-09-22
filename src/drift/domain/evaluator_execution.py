@@ -66,6 +66,32 @@ def positions_digest(holdings: Sequence[SecurityHoldingV1]) -> SHA256Hash:
     )
 
 
+class ListingOpenPriceV1(FrozenModel):
+    """One unadjusted session-open price bound to the listing it was observed on.
+
+    A price is evidence about a listing, never about a security in the
+    abstract. Carrying the listing and venue with the number lets the engine
+    prove that the price it stamps on a fill came from the listing execution
+    actually resolved, instead of asserting a `(listing_id, venue, price)`
+    triple nothing ever checked.
+    """
+
+    schema_version: Literal["1"] = "1"
+    listing_id: UUID7
+    venue: ListingVenue
+    unadjusted_open_price: Decimal
+
+    @model_validator(mode="after")
+    def validate_open_price(self) -> Self:
+        with decimal_context():
+            if (
+                not self.unadjusted_open_price.is_finite()
+                or self.unadjusted_open_price <= ZERO
+            ):
+                raise ValueError("unadjusted open price must be strictly positive")
+        return self
+
+
 class ExecutionFillV1(FrozenModel):
     """One planned or committed whole-share fill at a resolved listing.
 
@@ -123,6 +149,36 @@ class ExecutionFillV1(FrozenModel):
             fill_price=self.fill_price,
             transaction_costs=self.transaction_costs,
         )
+
+
+def canonical_fill_order(
+    fills: Sequence[ExecutionFillV1],
+) -> tuple[ExecutionFillV1, ...]:
+    """Canonical commit order for one rebalance: sells first, then buys.
+
+    Sells are ordered by descending ``cash_delta``. Booking the largest
+    cash-positive sells first makes running cash a concave sequence over the
+    sell leg, so its minimum is attained at one of the two endpoints: the
+    opening cash, which is non-negative, or the balance after every sell,
+    which a funded plan proves non-negative. No intermediate step can dip
+    below zero, so a sell whose fixed fee exceeds its own proceeds can never
+    abort an otherwise funded rebalance. Ordering sells by security UUID
+    bytes has no such property: whether the rebalance aborts would depend on
+    which identifiers the securities happen to carry.
+
+    Ties break on security UUID bytes, keeping the result a canonical total
+    order. Buys follow, ordered by security UUID bytes, because cash only
+    falls across the buy leg and the final balance is therefore its minimum.
+    """
+    sells = [fill for fill in fills if fill.side == "sell"]
+    buys = [fill for fill in fills if fill.side == "buy"]
+    # Two stable passes rather than one negated key: unary minus on a Decimal
+    # is a context operation, and canonical order must not depend on the
+    # ambient decimal context.
+    sells.sort(key=lambda fill: _security_order(fill.security_id))
+    sells.sort(key=lambda fill: fill.cash_delta, reverse=True)
+    buys.sort(key=lambda fill: _security_order(fill.security_id))
+    return tuple(sells) + tuple(buys)
 
 
 class FillRejectionV1(FrozenModel):
@@ -205,13 +261,10 @@ class RebalancePlanV1(FrozenModel):
         buys = tuple(fill for fill in self.planned_fills if fill.side == "buy")
         # Sells fund buys, so the committed order is part of the contract, not
         # an implementation detail.
-        canonical = tuple(
-            sorted(sells, key=lambda fill: _security_order(fill.security_id))
-        ) + tuple(sorted(buys, key=lambda fill: _security_order(fill.security_id)))
-        if self.planned_fills != canonical:
+        if self.planned_fills != canonical_fill_order(self.planned_fills):
             raise ValueError(
-                "planned fills must be in canonical order: sells before buys, "
-                "each sorted by security UUID bytes"
+                "planned fills must be in canonical order: sells by descending "
+                "cash delta, then buys, each tie broken by security UUID bytes"
             )
 
         expected_proceeds = sum((fill.gross_notional for fill in sells), ZERO)

@@ -13,9 +13,9 @@ from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from drift.domain.assertions import TemporalIntervalClaimV1
+from drift.domain.assertions import TemporalBoundaryClaimV1, TemporalIntervalClaimV1
 from drift.domain.common import UUID7
-from drift.domain.evaluator_clock import EvaluationSessionV1
+from drift.domain.evaluator_clock import EvaluationSessionV1, SessionClockV1
 from drift.domain.evaluator_costs import EvaluationCostModelV1
 from drift.domain.evaluator_execution import (
     BASIS_POINT_DENOMINATOR,
@@ -24,13 +24,22 @@ from drift.domain.evaluator_execution import (
     ExecutionFillV1,
     FillRejectionV1,
     IndeterminateExecutionError,
+    ListingOpenPriceV1,
     RebalanceOutcomeV1,
     RebalancePlanV1,
+    canonical_fill_order,
     positions_digest,
 )
 from drift.domain.evaluator_portfolio import PortfolioStateV1, decimal_context
 from drift.domain.evaluator_strategy import SecurityTargetPositionV1
-from drift.domain.securities import ListingRole, ListingRoleVersionV1, ListingV1
+from drift.domain.securities import (
+    ListingLifecycleEventKind,
+    ListingLifecycleVersionV1,
+    ListingRole,
+    ListingRoleVersionV1,
+    ListingTerminationVersionV1,
+    ListingV1,
+)
 from drift.evaluator.portfolio import PortfolioAccountingKernel
 
 ONE = Decimal("1")
@@ -85,25 +94,130 @@ def _is_inactive(interval: TemporalIntervalClaimV1, instant: datetime) -> bool:
     )
 
 
+def _boundary_reached(boundary: TemporalBoundaryClaimV1, instant: datetime) -> bool:
+    """Whether the boundary provably falls at or before the instant."""
+    upper = boundary.upper_bound
+    return upper is not None and upper <= instant
+
+
+def _boundary_not_reached(boundary: TemporalBoundaryClaimV1, instant: datetime) -> bool:
+    """Whether the boundary provably falls strictly after the instant."""
+    lower = boundary.lower_bound
+    return lower is not None and lower > instant
+
+
+def _require_unterminated(
+    *,
+    listing_id: UUID,
+    instant: datetime,
+    termination_records: Sequence[ListingTerminationVersionV1],
+) -> None:
+    """Fail closed unless the listing provably has not terminated yet.
+
+    `ListingTerminationVersionV1` is the sole M1b authority that a listing
+    terminated, so an evidence set carrying none for this listing proves the
+    listing is unterminated. A record that is neither provably in effect nor
+    provably still in the future poisons the answer, exactly as an ambiguous
+    role interval does.
+    """
+    for record in termination_records:
+        if record.listing_id != listing_id:
+            continue
+        boundary = record.effective_time
+        if _boundary_reached(boundary, instant):
+            raise IndeterminateExecutionError(
+                f"terminated listing is not executable: listing {listing_id} "
+                f"at {instant.isoformat()}"
+            )
+        if not _boundary_not_reached(boundary, instant):
+            raise IndeterminateExecutionError(
+                "listing termination evidence has an ambiguous effective time "
+                f"for listing {listing_id} at {instant.isoformat()}"
+            )
+
+
+def _require_unsuspended(
+    *,
+    listing_id: UUID,
+    instant: datetime,
+    lifecycle_records: Sequence[ListingLifecycleVersionV1],
+) -> None:
+    """Fail closed unless the listing provably trades at the instant.
+
+    A suspension lifts only on a resumption that provably follows it. A
+    suspension with no such resumption leaves the listing either suspended or
+    unprovably resumed, and neither is executable.
+    """
+    suspensions: list[TemporalBoundaryClaimV1] = []
+    resumptions: list[TemporalBoundaryClaimV1] = []
+    halting = {
+        ListingLifecycleEventKind.SUSPENDED,
+        ListingLifecycleEventKind.RESUMED,
+    }
+    for record in lifecycle_records:
+        if record.listing_id != listing_id or record.event_kind not in halting:
+            continue
+        boundary = record.effective_time
+        if _boundary_not_reached(boundary, instant):
+            continue
+        if not _boundary_reached(boundary, instant):
+            raise IndeterminateExecutionError(
+                "listing lifecycle evidence has an ambiguous effective time for "
+                f"listing {listing_id} at {instant.isoformat()}"
+            )
+        target = (
+            suspensions
+            if record.event_kind is ListingLifecycleEventKind.SUSPENDED
+            else resumptions
+        )
+        target.append(boundary)
+
+    for suspension in suspensions:
+        if not any(_follows(resumption, suspension) for resumption in resumptions):
+            raise IndeterminateExecutionError(
+                f"suspended listing is not executable: listing {listing_id} "
+                f"at {instant.isoformat()}"
+            )
+
+
+def _follows(later: TemporalBoundaryClaimV1, earlier: TemporalBoundaryClaimV1) -> bool:
+    """Whether `later` provably falls strictly after `earlier`.
+
+    Two events the source places at the same instant have no provable order,
+    so a resumption simultaneous with its suspension does not lift it.
+    """
+    lower = later.lower_bound
+    upper = earlier.upper_bound
+    return lower is not None and upper is not None and lower > upper
+
+
 def resolve_execution_listing(
     *,
     security_id: UUID7,
     execution_session: EvaluationSessionV1,
     role_records: Sequence[ListingRoleVersionV1],
     listings: Sequence[ListingV1],
+    termination_records: Sequence[ListingTerminationVersionV1],
+    lifecycle_records: Sequence[ListingLifecycleVersionV1],
 ) -> ListingV1:
     """Resolve the active historical primary execution listing for a security.
 
     Resolution is as of the execution session open, so a security that
     migrated venues between decision and execution executes on the listing
-    that was primary at execution time. Anything short of a unique, provable
-    answer fails closed.
+    that was primary at execution time. Role evidence alone does not prove a
+    listing is tradable: a delisted or suspended listing can still carry an
+    open-ended primary role record, so termination and lifecycle evidence are
+    consulted too. Anything short of a unique, provable answer fails closed.
+
+    The termination and lifecycle evidence sets are required rather than
+    defaulted, so a caller must state what it holds instead of silently
+    resolving on role evidence alone.
     """
     instant = execution_session.opened_at
     candidates = tuple(
         record for record in role_records if record.security_id == security_id
     )
-    active_listing_ids: set[UUID] = set()
+    active_roles: dict[UUID, set[ListingRole]] = {}
     for record in candidates:
         interval = record.effective_interval
         active = _is_active(interval, instant)
@@ -119,9 +233,33 @@ def resolve_execution_listing(
                 "listing role evidence is indeterminate for security "
                 f"{security_id} at {instant.isoformat()}"
             )
-        if record.role is ListingRole.PRIMARY:
-            active_listing_ids.add(record.listing_id)
+        active_roles.setdefault(record.listing_id, set()).add(record.role)
 
+    # One listing asserted two roles at once is evidence that contradicts
+    # itself, exactly as two distinct active primaries are. Silently keeping
+    # the primary half would pick a side of a contradiction.
+    contradictory = tuple(
+        sorted(
+            (
+                listing_id
+                for listing_id, roles in active_roles.items()
+                if len(roles) > 1
+            ),
+            key=lambda listing_id: listing_id.bytes,
+        )
+    )
+    if contradictory:
+        raise IndeterminateExecutionError(
+            "listing role evidence is contradictory for listing "
+            f"{contradictory[0]} of security {security_id} at "
+            f"{instant.isoformat()}"
+        )
+
+    active_listing_ids = {
+        listing_id
+        for listing_id, roles in active_roles.items()
+        if ListingRole.PRIMARY in roles
+    }
     if not active_listing_ids:
         raise IndeterminateExecutionError(
             f"no active primary listing for security {security_id} at "
@@ -133,6 +271,16 @@ def resolve_execution_listing(
             f"at {instant.isoformat()}"
         )
     resolved_id = next(iter(active_listing_ids))
+    _require_unterminated(
+        listing_id=resolved_id,
+        instant=instant,
+        termination_records=termination_records,
+    )
+    _require_unsuspended(
+        listing_id=resolved_id,
+        instant=instant,
+        lifecycle_records=lifecycle_records,
+    )
     for listing in listings:
         if listing.listing_id == resolved_id:
             return listing
@@ -147,6 +295,8 @@ def resolve_execution_listings(
     execution_session: EvaluationSessionV1,
     role_records: Sequence[ListingRoleVersionV1],
     listings: Sequence[ListingV1],
+    termination_records: Sequence[ListingTerminationVersionV1],
+    lifecycle_records: Sequence[ListingLifecycleVersionV1],
 ) -> dict[UUID7, ListingV1]:
     """Resolve one execution listing per security, failing closed on any gap."""
     return {
@@ -155,6 +305,8 @@ def resolve_execution_listings(
             execution_session=execution_session,
             role_records=role_records,
             listings=listings,
+            termination_records=termination_records,
+            lifecycle_records=lifecycle_records,
         )
         for security_id in sorted(set(security_ids), key=_security_order)
     }
@@ -168,20 +320,31 @@ class AtomicRebalanceEngine:
     caller holding exactly the state it passed in.
     """
 
-    def __init__(self, *, cost_model: EvaluationCostModelV1) -> None:
+    def __init__(
+        self,
+        *,
+        cost_model: EvaluationCostModelV1,
+        session_clock: SessionClockV1,
+    ) -> None:
         self._cost_model = cost_model
+        self._session_clock = session_clock
 
     @property
     def cost_model(self) -> EvaluationCostModelV1:
         """The versioned cost and slippage model applied to every fill."""
         return self._cost_model
 
+    @property
+    def session_clock(self) -> SessionClockV1:
+        """Authority-bound clock the committing kernel is validated against."""
+        return self._session_clock
+
     def plan(
         self,
         *,
         state: PortfolioStateV1,
         staged_targets: Sequence[SecurityTargetPositionV1],
-        open_prices: Mapping[UUID7, Decimal],
+        open_prices: Mapping[UUID7, ListingOpenPriceV1],
         execution_listings: Mapping[UUID7, ListingV1],
     ) -> RebalancePlanV1:
         """Price every non-zero target delta and test the complete rebalance."""
@@ -198,7 +361,7 @@ class AtomicRebalanceEngine:
         *,
         state: PortfolioStateV1,
         staged_targets: Sequence[SecurityTargetPositionV1],
-        open_prices: Mapping[UUID7, Decimal],
+        open_prices: Mapping[UUID7, ListingOpenPriceV1],
         execution_listings: Mapping[UUID7, ListingV1],
     ) -> RebalancePlanV1:
         targets = self._target_quantities(staged_targets)
@@ -208,23 +371,29 @@ class AtomicRebalanceEngine:
         # and a liquidation would silently vanish.
         uncovered = tuple(sorted(set(held) - set(targets), key=_security_order))
         if uncovered:
-            raise ValueError(
+            # The evaluator cannot know whether the missing security was meant
+            # to be held or liquidated, so this is indeterminate rather than a
+            # bare ValueError outside the execution error taxonomy.
+            raise IndeterminateExecutionError(
                 f"staged targets must cover every held security, missing {uncovered[0]}"
             )
 
-        sells: list[ExecutionFillV1] = []
-        buys: list[ExecutionFillV1] = []
+        fills: list[ExecutionFillV1] = []
         for security_id in sorted(set(targets) | set(held), key=_security_order):
             delta = targets[security_id] - held.get(security_id, 0)
             if delta == 0:
                 continue
-            fill = self._build_fill(
-                security_id=security_id,
-                delta=delta,
-                open_prices=open_prices,
-                execution_listings=execution_listings,
+            fills.append(
+                self._build_fill(
+                    security_id=security_id,
+                    delta=delta,
+                    open_prices=open_prices,
+                    execution_listings=execution_listings,
+                )
             )
-            (buys if delta > 0 else sells).append(fill)
+        planned_fills = canonical_fill_order(fills)
+        sells = tuple(fill for fill in planned_fills if fill.side == "sell")
+        buys = tuple(fill for fill in planned_fills if fill.side == "buy")
 
         gross_sell_proceeds = sum((fill.gross_notional for fill in sells), ZERO)
         sell_transaction_costs = sum((fill.transaction_costs for fill in sells), ZERO)
@@ -233,7 +402,7 @@ class AtomicRebalanceEngine:
         )
         return RebalancePlanV1(
             session_key=state.session_key,
-            planned_fills=tuple(sells) + tuple(buys),
+            planned_fills=planned_fills,
             opening_positions_hash=positions_digest(state.holdings),
             current_cash=state.cash_balance,
             gross_sell_proceeds=gross_sell_proceeds,
@@ -270,24 +439,41 @@ class AtomicRebalanceEngine:
         *,
         security_id: UUID7,
         delta: int,
-        open_prices: Mapping[UUID7, Decimal],
+        open_prices: Mapping[UUID7, ListingOpenPriceV1],
         execution_listings: Mapping[UUID7, ListingV1],
     ) -> ExecutionFillV1:
-        open_price = open_prices.get(security_id)
-        # Never substitute a close or a prior open for a missing open.
-        if open_price is None:
-            raise IndeterminateExecutionError(
-                f"no unadjusted open price for security {security_id}"
-            )
-        if not open_price.is_finite() or open_price <= ZERO:
-            raise IndeterminateExecutionError(
-                f"unadjusted open price must be strictly positive for security "
-                f"{security_id}, got {open_price}"
-            )
         listing = execution_listings.get(security_id)
         if listing is None:
             raise IndeterminateExecutionError(
                 f"no resolved execution listing for security {security_id}"
+            )
+        quoted = open_prices.get(security_id)
+        # Never substitute a close or a prior open for a missing open.
+        if quoted is None:
+            raise IndeterminateExecutionError(
+                f"no unadjusted open price for security {security_id}"
+            )
+        # A price is evidence about the listing it was observed on. A security
+        # that migrated venues resolves to the new listing, and carrying over
+        # the old listing's print would stamp the fill with a
+        # (listing_id, venue, price) triple that never traded together.
+        if quoted.listing_id != listing.listing_id:
+            raise IndeterminateExecutionError(
+                f"unadjusted open price for security {security_id} is bound to "
+                f"listing {quoted.listing_id}, but execution resolved listing "
+                f"{listing.listing_id}"
+            )
+        if quoted.venue is not listing.venue:
+            raise IndeterminateExecutionError(
+                f"unadjusted open price for security {security_id} is bound to "
+                f"venue {quoted.venue.value}, but execution resolved venue "
+                f"{listing.venue.value}"
+            )
+        open_price = quoted.unadjusted_open_price
+        if not open_price.is_finite() or open_price <= ZERO:
+            raise IndeterminateExecutionError(
+                f"unadjusted open price must be strictly positive for security "
+                f"{security_id}, got {open_price}"
             )
 
         side: Literal["buy", "sell"] = "buy" if delta > 0 else "sell"
@@ -376,11 +562,13 @@ class AtomicRebalanceEngine:
             halt_stepping=True,
         )
 
-    @staticmethod
     def _commit(
-        *, state: PortfolioStateV1, plan: RebalancePlanV1
+        self, *, state: PortfolioStateV1, plan: RebalancePlanV1
     ) -> RebalanceOutcomeV1:
-        kernel = PortfolioAccountingKernel(state)
+        # The throwaway kernel is validated against the same authority-bound
+        # clock as the real book. Synthesizing a clock here would defeat the
+        # guard that a book cannot operate on an unauthorized session.
+        kernel = PortfolioAccountingKernel(state, session_clock=self._session_clock)
         try:
             for fill in plan.planned_fills:
                 kernel.apply_fill(fill.to_portfolio_fill())
@@ -404,7 +592,7 @@ class AtomicRebalanceEngine:
         *,
         state: PortfolioStateV1,
         staged_targets: Sequence[SecurityTargetPositionV1],
-        open_prices: Mapping[UUID7, Decimal],
+        open_prices: Mapping[UUID7, ListingOpenPriceV1],
         execution_listings: Mapping[UUID7, ListingV1],
     ) -> RebalanceOutcomeV1:
         """Plan and atomically commit one next-open rebalance."""

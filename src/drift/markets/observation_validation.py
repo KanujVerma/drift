@@ -40,7 +40,6 @@ from drift.domain.manifests import (
     LogicalType,
     SchemaDescriptorV1,
 )
-from drift.domain.observation_query import m1d_implementation_hash
 from drift.domain.observations import (
     DailySourceObservationVersionV1,
     ObservationContractV1,
@@ -49,6 +48,7 @@ from drift.domain.observations import (
     ObservationMethodologyV1,
     observation_methodology_for_contract,
 )
+from drift.domain.semantic_attestation import m1d_semantic_attestation_hash
 from drift.domain.sessions import SessionInputRecordV1
 from drift.domain.temporal import (
     AvailabilityChannelV1,
@@ -173,8 +173,13 @@ def observation_validation_profile_hash() -> str:
 
 
 def observation_validator_implementation_hash() -> str:
-    """Return the installed Drift Python source-inventory hash."""
-    return m1d_implementation_hash()
+    """Return the bounded M1d source-validation semantic attestation hash.
+
+    This is the semantic replay identity, not the whole-tree repository
+    provenance hash: only a change inside the declared M1d validation closure
+    can move it.
+    """
+    return m1d_semantic_attestation_hash()
 
 
 def observation_role_schema(role: str) -> SchemaDescriptorV1:

@@ -36,7 +36,7 @@ from drift.domain.manifests import (
     LogicalType,
     SchemaDescriptorV1,
 )
-from drift.domain.observation_query import m1d_implementation_hash
+from drift.domain.semantic_attestation import m1d_semantic_attestation_hash
 from drift.domain.sessions import (
     RealizedSessionVersionV1,
     ScheduledSessionVersionV1,
@@ -170,8 +170,13 @@ def session_validation_profile_hash() -> str:
 
 
 def session_validator_implementation_hash() -> str:
-    """Return the installed package inventory identity."""
-    return m1d_implementation_hash()
+    """Return the bounded M1d source-validation semantic attestation hash.
+
+    This is the semantic replay identity, not the whole-tree repository
+    provenance hash: only a change inside the declared M1d validation closure
+    can move it.
+    """
+    return m1d_semantic_attestation_hash()
 
 
 def session_role_schema(role: str) -> SchemaDescriptorV1:
