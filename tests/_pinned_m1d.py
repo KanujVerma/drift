@@ -1,4 +1,23 @@
-"""Authenticated, byte-pinned M1d v3 replay support used only by pytest tests."""
+"""Authenticated, byte-pinned M1d v3 replay support used only by pytest tests.
+
+Two pin inventories live side by side and they are not interchangeable.
+
+``m1d-v3-protected-sha256.json`` is the HISTORICAL inventory. It records the
+protected paths exactly as they stand at ``PINNED_M1D_COMMIT`` (af75cce), and
+it authenticates the archive extracted from that commit. It is preserved
+byte-identical for audit and is never regenerated.
+
+``m1d-v4-protected-sha256.json`` is the CURRENT inventory. It records the same
+544 protected paths as they must stand in the live working tree, and it
+supersedes v3 for that one role only. Under issue #32 the M1d validator run
+identity moved from the whole-tree ``economic_implementation_hash()`` to the
+versioned semantic attestation, which changed the bytes of the two M1d
+validation entry points. v4 names those paths explicitly in
+``superseded_paths`` and must otherwise reproduce v3 pin for pin;
+``_validated_current_pins`` re-derives that reconstruction on every load, so a
+pin cannot be silently re-signed for any path the supersession does not
+declare.
+"""
 
 from __future__ import annotations
 
@@ -27,6 +46,15 @@ _INVENTORY_PATH = (
 _EXPECTED_INVENTORY_SHA256 = (
     "6fb819eb863ebf83e1a3b4e3a7e6af261748116502cdb0ad3603d108d17c2e2b"
 )
+_CURRENT_INVENTORY_PATH = (
+    REPO_ROOT / "tests/fixtures/m1e-compatibility/m1d-v4-protected-sha256.json"
+)
+_EXPECTED_CURRENT_INVENTORY_SHA256 = (
+    "4a50fd0aa91a92d33aa729fd04ff11483499058f1c91b2c86aa4038a3ae83f63"
+)
+_CURRENT_INVENTORY_ID = "m1d-v4-protected-sha256"
+_SUPERSEDED_INVENTORY_ID = "m1d-v3-protected-sha256"
+_SUPERSESSION_ISSUE = 32
 _ARCHIVE_PATHS = ("src/drift", "tests", "pyproject.toml", "uv.lock")
 _REQUIRED_PYTHON_FLOOR = (3, 14)
 
@@ -82,18 +110,114 @@ def _load_inventory() -> dict[str, str]:
     return dict(pins)
 
 
-PROTECTED_M1D_SHA256 = _load_inventory()
+PROTECTED_M1D_ARCHIVE_SHA256 = _load_inventory()
+"""Historical pins: the protected paths exactly as they stand at af75cce."""
+
+
+def _superseded_source_pins(document: object) -> dict[str, dict[str, str]]:
+    """Return the declared supersessions, rejecting a malformed declaration."""
+    if not isinstance(document, dict):
+        raise PinnedM1dReplayError("current M1d inventory is malformed")
+    supersedes = document.get("supersedes")
+    superseded = document.get("superseded_paths")
+    if (
+        not isinstance(supersedes, dict)
+        or not isinstance(superseded, dict)
+        or not superseded
+        or supersedes.get("inventory_id") != _SUPERSEDED_INVENTORY_ID
+        or supersedes.get("commit") != PINNED_M1D_COMMIT
+        or supersedes.get("file_sha256") != _EXPECTED_INVENTORY_SHA256
+        or supersedes.get("issue") != _SUPERSESSION_ISSUE
+        or not isinstance(supersedes.get("reason"), str)
+        or not supersedes["reason"].strip()
+    ):
+        raise PinnedM1dReplayError("current M1d inventory supersession is malformed")
+    for path, record in superseded.items():
+        if (
+            not isinstance(path, str)
+            or not isinstance(record, dict)
+            or set(record) != {"historical_sha256", "current_sha256"}
+            or any(
+                not isinstance(value, str) or len(value) != 64
+                for value in record.values()
+            )
+            or record["historical_sha256"] == record["current_sha256"]
+        ):
+            raise PinnedM1dReplayError(
+                f"current M1d inventory supersession is malformed for {path}"
+            )
+    return dict(superseded)
+
+
+def _validated_current_pins(document: object) -> dict[str, str]:
+    """Re-derive the current pins from the historical pins plus the delta.
+
+    The current inventory is only allowed to differ from the preserved v3
+    inventory on the paths its own ``superseded_paths`` block declares, and
+    each declared path must carry the historical digest it replaces. Anything
+    else is a silent re-signing and fails closed here.
+    """
+    if not isinstance(document, dict):
+        raise PinnedM1dReplayError("current M1d inventory is malformed")
+    pins = document.get("sha256")
+    superseded = _superseded_source_pins(document)
+    if (
+        not isinstance(pins, dict)
+        or document.get("inventory_id") != _CURRENT_INVENTORY_ID
+        or document.get("baseline_commit") != PINNED_M1D_COMMIT
+        or set(pins) != set(PROTECTED_M1D_ARCHIVE_SHA256)
+        or any(
+            not isinstance(digest, str) or len(digest) != 64 for digest in pins.values()
+        )
+    ):
+        raise PinnedM1dReplayError("current M1d inventory is malformed")
+    expected = dict(PROTECTED_M1D_ARCHIVE_SHA256)
+    for path, record in superseded.items():
+        if path not in expected:
+            raise PinnedM1dReplayError(
+                f"current M1d inventory supersedes an unpinned path: {path}"
+            )
+        if record["historical_sha256"] != expected[path]:
+            raise PinnedM1dReplayError(
+                f"current M1d inventory misstates the historical pin for {path}"
+            )
+        expected[path] = record["current_sha256"]
+    if pins != expected:
+        drifted = sorted(path for path in pins if pins[path] != expected[path])
+        raise PinnedM1dReplayError(
+            f"current M1d inventory re-signs undeclared protected paths: {drifted}"
+        )
+    return dict(pins)
+
+
+def _load_current_inventory() -> dict[str, str]:
+    try:
+        raw = _CURRENT_INVENTORY_PATH.read_bytes()
+    except OSError as error:
+        raise PinnedM1dReplayError(
+            f"cannot read current M1d inventory: {error}"
+        ) from error
+    if hashlib.sha256(raw).hexdigest() != _EXPECTED_CURRENT_INVENTORY_SHA256:
+        raise PinnedM1dReplayError("current M1d inventory sha256 mismatch")
+    try:
+        document = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise PinnedM1dReplayError(
+            f"cannot parse current M1d inventory: {error}"
+        ) from error
+    return _validated_current_pins(document)
+
+
+PROTECTED_M1D_SHA256 = _load_current_inventory()
+"""Current pins: the protected paths as they must stand in the working tree."""
+
 _REQUIRED_PROTECTED_PATHS = frozenset(PROTECTED_M1D_SHA256)
 
 
-def verify_m1d_protected_inputs(
-    *, root: Path, expected: Mapping[str, str] | None = None
-) -> None:
-    """Reject a changed M1d source, fixture, or environment input before replay."""
-    pins = dict(PROTECTED_M1D_SHA256 if expected is None else expected)
+def _verify_pinned_inputs(*, root: Path, pins: Mapping[str, str], label: str) -> None:
     if set(pins) != _REQUIRED_PROTECTED_PATHS:
         raise PinnedM1dReplayError(
-            "protected M1d inventory is incomplete or contains unknown paths"
+            f"{label} M1d inventory is incomplete or contains unknown paths"
         )
     for path, digest in pins.items():
         try:
@@ -108,6 +232,31 @@ def verify_m1d_protected_inputs(
                 "protected M1d sha256 mismatch for "
                 f"{path}: expected {digest}, got {actual}"
             )
+
+
+def verify_m1d_protected_inputs(
+    *, root: Path, expected: Mapping[str, str] | None = None
+) -> None:
+    """Reject a changed M1d source, fixture, or environment input in the tree.
+
+    This is the CURRENT freeze. It uses the v4 pins, which supersede v3 on the
+    paths issue #32 moved and reproduce v3 everywhere else.
+    """
+    pins = PROTECTED_M1D_SHA256 if expected is None else expected
+    _verify_pinned_inputs(root=root, pins=pins, label="protected")
+
+
+def verify_m1d_archive_inputs(
+    *, root: Path, expected: Mapping[str, str] | None = None
+) -> None:
+    """Reject an archived M1d input that is not exactly af75cce.
+
+    This is the HISTORICAL freeze. The extracted replay archive is commit
+    af75cce, so it must authenticate against the preserved v3 pins and never
+    against the superseded working-tree pins.
+    """
+    pins = PROTECTED_M1D_ARCHIVE_SHA256 if expected is None else expected
+    _verify_pinned_inputs(root=root, pins=pins, label="archived")
 
 
 def is_pinned_m1d_node(nodeid: str) -> bool:
@@ -147,7 +296,7 @@ def extract_m1d_archive(destination: Path, *, commit: str = PINNED_M1D_COMMIT) -
         raise PinnedM1dReplayError(
             f"cannot unpack pinned M1d commit {commit}: {error}"
         ) from error
-    verify_m1d_protected_inputs(root=destination)
+    verify_m1d_archive_inputs(root=destination)
     return destination
 
 
@@ -181,7 +330,7 @@ def _run_archived_m1d_node_in_root(
     archive_root: Path, nodeid: str
 ) -> PinnedM1dReplayResult:
     """Run one M1d node inside an already authenticated archived checkout."""
-    verify_m1d_protected_inputs(root=archive_root)
+    verify_m1d_archive_inputs(root=archive_root)
     environment = _child_environment(archive_root)
     imported = subprocess.run(
         [sys.executable, "-c", "import drift; print(drift.__file__)"],

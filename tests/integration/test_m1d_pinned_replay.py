@@ -48,7 +48,7 @@ def test_changed_archived_source_byte_is_rejected_before_child_replay(
     target.write_bytes(target.read_bytes() + b"\n# tampered\n")
 
     with pytest.raises(helper.PinnedM1dReplayError, match="sha256 mismatch"):
-        helper.verify_m1d_protected_inputs(root=archive)
+        helper.verify_m1d_archive_inputs(root=archive)
 
 
 def test_changed_archived_v3_fixture_byte_is_rejected_before_child_replay(
@@ -61,7 +61,7 @@ def test_changed_archived_v3_fixture_byte_is_rejected_before_child_replay(
     target.write_bytes(b"tampered")
 
     with pytest.raises(helper.PinnedM1dReplayError, match="sha256 mismatch"):
-        helper.verify_m1d_protected_inputs(root=archive)
+        helper.verify_m1d_archive_inputs(root=archive)
 
 
 def test_re_signed_or_incomplete_inventory_is_rejected(tmp_path: Path) -> None:
@@ -80,6 +80,45 @@ def test_re_signed_or_incomplete_inventory_is_rejected(tmp_path: Path) -> None:
             helper._load_inventory()
     finally:
         helper._INVENTORY_PATH = original  # type: ignore[attr-defined]
+
+
+def test_archived_replay_still_authenticates_against_the_historical_pins() -> None:
+    """Superseding the working-tree pins must not re-sign the af75cce archive."""
+    helper = _load_replay_helper()
+    historical = helper.PROTECTED_M1D_ARCHIVE_SHA256
+    current = helper.PROTECTED_M1D_SHA256
+    assert set(historical) == set(current)
+    superseded = {path for path in historical if historical[path] != current[path]}
+    assert superseded == {
+        "src/drift/markets/observation_validation.py",
+        "src/drift/markets/session_validation.py",
+    }
+    inventory = json.loads(helper._CURRENT_INVENTORY_PATH.read_text(encoding="utf-8"))
+    assert set(inventory["superseded_paths"]) == superseded
+    assert inventory["supersedes"]["commit"] == helper.PINNED_M1D_COMMIT
+    assert inventory["supersedes"]["file_sha256"] == helper._EXPECTED_INVENTORY_SHA256
+
+
+def test_current_inventory_cannot_re_sign_an_undeclared_protected_path() -> None:
+    """Only the paths the supersession names may differ from the v3 pins."""
+    helper = _load_replay_helper()
+    document = json.loads(helper._CURRENT_INVENTORY_PATH.read_text(encoding="utf-8"))
+    assert helper._validated_current_pins(document) == helper.PROTECTED_M1D_SHA256
+
+    smuggled = json.loads(json.dumps(document))
+    smuggled["sha256"]["src/drift/domain/temporal.py"] = "0" * 64
+    with pytest.raises(
+        helper.PinnedM1dReplayError, match="re-signs undeclared protected paths"
+    ):
+        helper._validated_current_pins(smuggled)
+
+    misstated = json.loads(json.dumps(document))
+    target = "src/drift/markets/session_validation.py"
+    misstated["superseded_paths"][target]["historical_sha256"] = "1" * 64
+    with pytest.raises(
+        helper.PinnedM1dReplayError, match="misstates the historical pin"
+    ):
+        helper._validated_current_pins(misstated)
 
 
 def test_wrong_commit_and_missing_archived_node_fail_closed() -> None:
