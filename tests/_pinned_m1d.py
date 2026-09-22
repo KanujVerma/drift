@@ -7,16 +7,24 @@ protected paths exactly as they stand at ``PINNED_M1D_COMMIT`` (af75cce), and
 it authenticates the archive extracted from that commit. It is preserved
 byte-identical for audit and is never regenerated.
 
-``m1d-v4-protected-sha256.json`` is the CURRENT inventory. It records the same
-544 protected paths as they must stand in the live working tree, and it
-supersedes v3 for that one role only. Under issue #32 the M1d validator run
-identity moved from the whole-tree ``economic_implementation_hash()`` to the
-versioned semantic attestation, which changed the bytes of the two M1d
-validation entry points. v4 names those paths explicitly in
-``superseded_paths`` and must otherwise reproduce v3 pin for pin;
-``_validated_current_pins`` re-derives that reconstruction on every load, so a
-pin cannot be silently re-signed for any path the supersession does not
-declare.
+``m1d-v4-protected-sha256.json`` is the CURRENT inventory. It records the
+protected paths as they must stand in the live working tree, and it supersedes
+v3 for that one role only. Under issue #32 the M1d validator run identity moved
+from the whole-tree ``economic_implementation_hash()`` to the versioned
+semantic attestation, which changed the bytes of the two M1d validation entry
+points and introduced the module that now defines the identity. v4 carries two
+explicit, separately justified deltas over v3 and nothing else:
+
+* ``superseded_paths`` names a path v3 already pins whose working-tree bytes
+  moved, and records both the historical digest it replaces and the current
+  one.
+* ``added_paths`` names a path v3 does not pin at all and brings it under the
+  freeze, with its own issue reference and justification. An addition may not
+  shadow a path v3 already pins; that is what ``superseded_paths`` is for.
+
+``_validated_current_pins`` re-derives the whole reconstruction on every load,
+so a pin can be neither silently re-signed nor silently introduced for any path
+the inventory does not declare.
 """
 
 from __future__ import annotations
@@ -50,7 +58,7 @@ _CURRENT_INVENTORY_PATH = (
     REPO_ROOT / "tests/fixtures/m1e-compatibility/m1d-v4-protected-sha256.json"
 )
 _EXPECTED_CURRENT_INVENTORY_SHA256 = (
-    "4a50fd0aa91a92d33aa729fd04ff11483499058f1c91b2c86aa4038a3ae83f63"
+    "4af2e06734e8fadde2002d69fe9d48bd5eca369e771862f2e09df150238d76d2"
 )
 _CURRENT_INVENTORY_ID = "m1d-v4-protected-sha256"
 _SUPERSEDED_INVENTORY_ID = "m1d-v3-protected-sha256"
@@ -149,23 +157,56 @@ def _superseded_source_pins(document: object) -> dict[str, dict[str, str]]:
     return dict(superseded)
 
 
+def _added_source_pins(document: Mapping[str, object]) -> dict[str, dict[str, object]]:
+    """Return the declared additions, rejecting a malformed declaration.
+
+    An addition widens the freeze onto a path v3 never pinned, so it has to
+    stand on its own justification rather than on the key sets merely
+    differing. Declaring no additions at all is allowed; what is not allowed
+    is a pin that no declaration accounts for.
+    """
+    added = document.get("added_paths", {})
+    if not isinstance(added, dict):
+        raise PinnedM1dReplayError("current M1d inventory addition block is malformed")
+    for path, record in added.items():
+        justification = (
+            record.get("justification") if isinstance(record, dict) else None
+        )
+        if (
+            not isinstance(path, str)
+            or not isinstance(record, dict)
+            or set(record) != {"current_sha256", "issue", "justification"}
+            or not isinstance(record["current_sha256"], str)
+            or len(record["current_sha256"]) != 64
+            or record["issue"] != _SUPERSESSION_ISSUE
+            or not isinstance(justification, str)
+            or not justification.strip()
+        ):
+            raise PinnedM1dReplayError(
+                f"current M1d inventory addition is malformed for {path}"
+            )
+    return dict(added)
+
+
 def _validated_current_pins(document: object) -> dict[str, str]:
     """Re-derive the current pins from the historical pins plus the delta.
 
     The current inventory is only allowed to differ from the preserved v3
-    inventory on the paths its own ``superseded_paths`` block declares, and
-    each declared path must carry the historical digest it replaces. Anything
-    else is a silent re-signing and fails closed here.
+    inventory on the paths its own ``superseded_paths`` and ``added_paths``
+    blocks declare. A superseded path must already be pinned by v3 and must
+    carry the historical digest it replaces; an added path must not be pinned
+    by v3 at all and must carry its own justification. Anything else is a
+    silent re-signing or a silent widening and fails closed here.
     """
     if not isinstance(document, dict):
         raise PinnedM1dReplayError("current M1d inventory is malformed")
     pins = document.get("sha256")
     superseded = _superseded_source_pins(document)
+    added = _added_source_pins(document)
     if (
         not isinstance(pins, dict)
         or document.get("inventory_id") != _CURRENT_INVENTORY_ID
         or document.get("baseline_commit") != PINNED_M1D_COMMIT
-        or set(pins) != set(PROTECTED_M1D_ARCHIVE_SHA256)
         or any(
             not isinstance(digest, str) or len(digest) != 64 for digest in pins.values()
         )
@@ -182,6 +223,23 @@ def _validated_current_pins(document: object) -> dict[str, str]:
                 f"current M1d inventory misstates the historical pin for {path}"
             )
         expected[path] = record["current_sha256"]
+    for path, addition in added.items():
+        if path in PROTECTED_M1D_ARCHIVE_SHA256:
+            raise PinnedM1dReplayError(
+                "current M1d inventory declares an addition the historical "
+                f"inventory already pins: {path}"
+            )
+        expected[path] = str(addition["current_sha256"])
+    undeclared = sorted(set(pins) - set(expected))
+    if undeclared:
+        raise PinnedM1dReplayError(
+            f"current M1d inventory pins an undeclared added path: {undeclared}"
+        )
+    omitted = sorted(set(expected) - set(pins))
+    if omitted:
+        raise PinnedM1dReplayError(
+            f"current M1d inventory omits a required protected path: {omitted}"
+        )
     if pins != expected:
         drifted = sorted(path for path in pins if pins[path] != expected[path])
         raise PinnedM1dReplayError(
@@ -212,10 +270,13 @@ PROTECTED_M1D_SHA256 = _load_current_inventory()
 """Current pins: the protected paths as they must stand in the working tree."""
 
 _REQUIRED_PROTECTED_PATHS = frozenset(PROTECTED_M1D_SHA256)
+_REQUIRED_ARCHIVE_PATHS = frozenset(PROTECTED_M1D_ARCHIVE_SHA256)
 
 
-def _verify_pinned_inputs(*, root: Path, pins: Mapping[str, str], label: str) -> None:
-    if set(pins) != _REQUIRED_PROTECTED_PATHS:
+def _verify_pinned_inputs(
+    *, root: Path, pins: Mapping[str, str], required: frozenset[str], label: str
+) -> None:
+    if set(pins) != required:
         raise PinnedM1dReplayError(
             f"{label} M1d inventory is incomplete or contains unknown paths"
         )
@@ -240,10 +301,13 @@ def verify_m1d_protected_inputs(
     """Reject a changed M1d source, fixture, or environment input in the tree.
 
     This is the CURRENT freeze. It uses the v4 pins, which supersede v3 on the
-    paths issue #32 moved and reproduce v3 everywhere else.
+    paths issue #32 moved, add the module that now defines the M1d replay
+    identity, and reproduce v3 everywhere else.
     """
     pins = PROTECTED_M1D_SHA256 if expected is None else expected
-    _verify_pinned_inputs(root=root, pins=pins, label="protected")
+    _verify_pinned_inputs(
+        root=root, pins=pins, required=_REQUIRED_PROTECTED_PATHS, label="protected"
+    )
 
 
 def verify_m1d_archive_inputs(
@@ -256,7 +320,9 @@ def verify_m1d_archive_inputs(
     against the superseded working-tree pins.
     """
     pins = PROTECTED_M1D_ARCHIVE_SHA256 if expected is None else expected
-    _verify_pinned_inputs(root=root, pins=pins, label="archived")
+    _verify_pinned_inputs(
+        root=root, pins=pins, required=_REQUIRED_ARCHIVE_PATHS, label="archived"
+    )
 
 
 def is_pinned_m1d_node(nodeid: str) -> bool:

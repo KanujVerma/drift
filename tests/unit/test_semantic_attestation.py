@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from drift.domain import semantic_attestation
 from drift.domain.economic_common import economic_implementation_hash
 from drift.domain.semantic_attestation import (
     M1D_VALIDATION_CLOSURE_ID,
@@ -49,6 +50,12 @@ _BASE_DECLARED = (
     "drift.markets.entry",
 )
 _BASE_SEEDS = ("drift.markets.entry",)
+
+_ESCAPE_TO_EXTRA = (
+    r"escaped the declared attestation closure: "
+    r"drift\.markets\.entry -> drift\.markets\.extra"
+)
+"""Full escape sentence, so no tmp_path component can satisfy the matcher."""
 
 
 def _package(tmp_path: Path, files: Mapping[str, str]) -> Path:
@@ -347,6 +354,258 @@ def test_closure_guard_detects_importlib_expansion(tmp_path: Path) -> None:
         verify_semantic_closure(
             modules=_BASE_DECLARED, seeds=_BASE_SEEDS, package_root=root
         )
+
+
+def test_closure_guard_detects_aliased_import_module_expansion(
+    tmp_path: Path,
+) -> None:
+    """An alias for importlib.import_module cannot hide the imported module."""
+    root = _package(
+        tmp_path,
+        _with_entry(
+            "from importlib import import_module as _im\n"
+            'MODULE = _im("drift.markets.extra")\n'
+        ),
+    )
+    with pytest.raises(SemanticClosureError, match=_ESCAPE_TO_EXTRA):
+        verify_semantic_closure(
+            modules=_BASE_DECLARED, seeds=_BASE_SEEDS, package_root=root
+        )
+
+
+def test_closure_guard_rejects_getattr_reached_import_module(
+    tmp_path: Path,
+) -> None:
+    """getattr on a module namespace is an import the guard cannot bind."""
+    root = _package(
+        tmp_path,
+        _with_entry(
+            "import importlib\n"
+            'MODULE = getattr(importlib, "import_module")("drift.markets.extra")\n'
+        ),
+    )
+    with pytest.raises(
+        SemanticClosureError, match="reaches a module namespace indirectly"
+    ):
+        verify_semantic_closure(
+            modules=_BASE_DECLARED, seeds=_BASE_SEEDS, package_root=root
+        )
+
+
+def test_closure_guard_rejects_getattr_on_the_import_machinery(
+    tmp_path: Path,
+) -> None:
+    """A non-literal attribute of importlib is still an unbindable import."""
+    root = _package(
+        tmp_path,
+        _with_entry(
+            "import importlib\n"
+            "\n"
+            "\n"
+            "def load(name: str) -> object:\n"
+            "    return getattr(importlib, name)\n"
+        ),
+    )
+    with pytest.raises(
+        SemanticClosureError, match="reaches a module namespace indirectly"
+    ):
+        verify_semantic_closure(
+            modules=_BASE_DECLARED, seeds=_BASE_SEEDS, package_root=root
+        )
+
+
+def test_closure_guard_rejects_getattr_that_names_a_dynamic_import(
+    tmp_path: Path,
+) -> None:
+    """Naming import_module on an unknown owner must also fail closed."""
+    root = _package(
+        tmp_path,
+        _with_entry(
+            "def load(container: object) -> object:\n"
+            '    return getattr(container, "import_module")\n'
+        ),
+    )
+    with pytest.raises(
+        SemanticClosureError, match="reaches a module namespace indirectly"
+    ):
+        verify_semantic_closure(
+            modules=_BASE_DECLARED, seeds=_BASE_SEEDS, package_root=root
+        )
+
+
+def test_closure_guard_rejects_dynamic_calls_on_an_unresolvable_owner(
+    tmp_path: Path,
+) -> None:
+    """A callee whose owner is itself a call cannot launder exec or import."""
+    evaluation = _package(
+        tmp_path / "evaluation",
+        _with_entry(
+            "def run(factory: object) -> None:\n"
+            '    factory().exec("import drift.markets.extra")\n'
+        ),
+    )
+    with pytest.raises(SemanticClosureError, match="evaluates code dynamically"):
+        verify_semantic_closure(
+            modules=_BASE_DECLARED, seeds=_BASE_SEEDS, package_root=evaluation
+        )
+
+    importer = _package(
+        tmp_path / "importer",
+        _with_entry(
+            "def run(factory: object) -> object:\n"
+            '    return factory().import_module("drift.markets.extra")\n'
+        ),
+    )
+    with pytest.raises(SemanticClosureError, match=_ESCAPE_TO_EXTRA):
+        verify_semantic_closure(
+            modules=_BASE_DECLARED, seeds=_BASE_SEEDS, package_root=importer
+        )
+
+
+def test_closure_guard_rejects_further_dynamic_reach_spellings(
+    tmp_path: Path,
+) -> None:
+    """Each alias of the same reach is rejected, not just the ones demoed."""
+    cases = (
+        ("eval", "VALUE = eval('1 + 1')\n", "evaluates code dynamically"),
+        (
+            "sys-root",
+            "import sys\nREGISTRY = getattr(sys, 'modules')\n",
+            "reaches a module namespace indirectly",
+        ),
+        (
+            "drift-owner",
+            "import drift\nNAMESPACE = vars(drift)\n",
+            "reaches a module namespace indirectly",
+        ),
+    )
+    assert len(cases) == 3
+    for name, source, message in cases:
+        root = _package(tmp_path / name, _with_entry(source))
+        with pytest.raises(SemanticClosureError, match=message):
+            verify_semantic_closure(
+                modules=_BASE_DECLARED, seeds=_BASE_SEEDS, package_root=root
+            )
+
+
+def test_closure_guard_rejects_module_dict_reached_import_module(
+    tmp_path: Path,
+) -> None:
+    """Indexing a module __dict__ is an import the guard cannot bind."""
+    root = _package(
+        tmp_path,
+        _with_entry(
+            "import importlib\n"
+            'MODULE = importlib.__dict__["import_module"]("drift.markets.extra")\n'
+        ),
+    )
+    with pytest.raises(SemanticClosureError, match="indexes a module registry"):
+        verify_semantic_closure(
+            modules=_BASE_DECLARED, seeds=_BASE_SEEDS, package_root=root
+        )
+
+
+def test_closure_guard_rejects_sys_modules_lookup(tmp_path: Path) -> None:
+    """sys.modules reaches an already imported module without importing it."""
+    root = _package(
+        tmp_path,
+        _with_entry('import sys\nMODULE = sys.modules["drift.markets.extra"]\n'),
+    )
+    with pytest.raises(SemanticClosureError, match="indexes a module registry"):
+        verify_semantic_closure(
+            modules=_BASE_DECLARED, seeds=_BASE_SEEDS, package_root=root
+        )
+
+
+def test_closure_guard_detects_attribute_traversal_from_the_package_root(
+    tmp_path: Path,
+) -> None:
+    """Importing only the root package cannot launder a submodule reference."""
+    root = _package(
+        tmp_path,
+        _with_entry("import drift\nOTHER = drift.markets.extra.OTHER\n"),
+    )
+    with pytest.raises(SemanticClosureError, match=_ESCAPE_TO_EXTRA):
+        verify_semantic_closure(
+            modules=_BASE_DECLARED, seeds=_BASE_SEEDS, package_root=root
+        )
+
+
+def test_closure_guard_rejects_exec_reached_import(tmp_path: Path) -> None:
+    """Dynamic code evaluation can import anything, so it fails closed."""
+    root = _package(
+        tmp_path,
+        _with_entry(
+            "NAMESPACE: dict[str, object] = {}\n"
+            'exec("import drift.markets.extra", NAMESPACE)\n'
+        ),
+    )
+    with pytest.raises(SemanticClosureError, match="evaluates code dynamically"):
+        verify_semantic_closure(
+            modules=_BASE_DECLARED, seeds=_BASE_SEEDS, package_root=root
+        )
+
+
+def test_closure_guard_allows_non_module_getattr_and_regex_compilation(
+    tmp_path: Path,
+) -> None:
+    """The indirection guards must not reject ordinary declared-module code."""
+    root = _package(
+        tmp_path,
+        _with_entry(
+            "import os\n"
+            "import re\n"
+            "from drift.domain.core import VALUE\n"
+            "\n"
+            "PATTERN = re.compile(r'^value$')\n"
+            "FLAGS = getattr(os, 'O_NOFOLLOW', 0)\n"
+            "\n"
+            "\n"
+            "def read(item: object, name: str) -> object:\n"
+            "    return getattr(item, name)\n"
+            "\n"
+            "\n"
+            "def total() -> int:\n"
+            "    return VALUE + FLAGS\n"
+        ),
+    )
+    verify_semantic_closure(
+        modules=_BASE_DECLARED, seeds=_BASE_SEEDS, package_root=root
+    )
+
+
+def test_closure_guard_rejects_a_symlinked_source_directory(tmp_path: Path) -> None:
+    """A symlinked package directory can redirect declared bytes off-tree."""
+    root = _package(tmp_path, _BASE_FILES)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "planted.py").write_text("PLANTED = 1\n", encoding="utf-8")
+    (root / "linked").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(SemanticAttestationError, match="must not contain symlinks"):
+        verify_semantic_closure(
+            modules=_BASE_DECLARED, seeds=_BASE_SEEDS, package_root=root
+        )
+
+
+def test_default_package_root_reached_through_a_symlink_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The implicit package root must not be a symlinked directory either."""
+    real = tmp_path / "real_package"
+    (real / "domain").mkdir(parents=True)
+    (real / "domain" / "semantic_attestation.py").write_text("", encoding="utf-8")
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "drift").symlink_to(real, target_is_directory=True)
+    monkeypatch.setattr(
+        semantic_attestation,
+        "__file__",
+        str(source / "drift" / "domain" / "semantic_attestation.py"),
+    )
+    with pytest.raises(
+        SemanticAttestationError, match="must not be reached through a symlink"
+    ):
+        build_semantic_attestation(closure_id=CLOSURE, modules=("drift",))
 
 
 def test_closure_guard_rejects_an_unresolvable_dynamic_import(

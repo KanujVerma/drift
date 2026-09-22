@@ -14,8 +14,13 @@ cannot change that hash.
 
 An explicit declaration is only trustworthy while it stays complete, so
 ``verify_semantic_closure`` re-derives every ``drift`` module reference that the
-declared modules actually make, including function-local imports and literal
-dynamic imports, and fails loudly when a reference escapes the declaration.
+declared modules actually make, including function-local imports, literal
+dynamic imports resolved through their local alias, and attribute traversal
+from the package root, and fails loudly when a reference escapes the
+declaration. Every remaining way to reach a module that cannot be bound to an
+exact name statically -- dynamic code evaluation, a ``getattr`` aimed at the
+import machinery, and indexing ``sys.modules`` or a module ``__dict__`` -- fails
+closed instead of being ignored.
 """
 
 import ast
@@ -86,6 +91,28 @@ M1D_VALIDATION_SEMANTIC_MODULES: tuple[str, ...] = (
 
 _MODULE_NAME_PATTERN = re.compile(r"^drift(\.[A-Za-z_][A-Za-z0-9_]*)*$")
 _DYNAMIC_IMPORT_NAMES = frozenset({"__import__", "import_module"})
+_CODE_EVALUATION_TARGETS = frozenset(
+    {
+        "builtins.compile",
+        "builtins.eval",
+        "builtins.exec",
+        "compile",
+        "eval",
+        "exec",
+    }
+)
+"""Call targets that can import anything from a string the guard cannot read."""
+
+_NAMESPACE_LOOKUP_TARGETS = frozenset(
+    {"builtins.getattr", "builtins.vars", "getattr", "vars"}
+)
+"""Call targets that can pull an arbitrary attribute out of a namespace."""
+
+_IMPORT_MACHINERY_ROOTS = frozenset({"builtins", "importlib", "sys"})
+"""Non-``drift`` roots whose namespaces expose the import machinery itself."""
+
+_MODULE_REGISTRY_PATHS = frozenset({"sys.modules"})
+"""Subscriptable namespaces that hand out already imported module objects."""
 
 
 class SemanticAttestationError(DriftError):
@@ -297,7 +324,9 @@ def _resolved_package_root(package_root: Path | None) -> Path:
     module_path = Path(__file__).absolute()
     root = module_path.parent.parent
     if module_path.is_symlink() or root.is_symlink():
-        raise SemanticAttestationError("semantic source tree must not contain symlinks")
+        raise SemanticAttestationError(
+            "semantic package root must not be reached through a symlink"
+        )
     if not root.is_dir():
         raise SemanticAttestationError("semantic package root must be a real directory")
     return root
@@ -393,6 +422,7 @@ def _semantic_references(
         raise SemanticAttestationError(
             f"declared semantic module does not parse: {module}"
         ) from error
+    aliases = _module_aliases(tree)
     found: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -401,8 +431,129 @@ def _semantic_references(
         elif isinstance(node, ast.ImportFrom):
             found |= _import_from_references(node, module, installed)
         elif isinstance(node, ast.Call):
-            found |= _dynamic_import_references(node, module, installed)
+            found |= _call_references(node, module, installed, aliases)
+        elif isinstance(node, ast.Subscript):
+            _reject_module_registry_subscript(node, module, aliases)
+        elif isinstance(node, ast.Attribute):
+            found |= _attribute_chain_references(node, installed, aliases)
     return frozenset(found)
+
+
+def _module_aliases(tree: ast.AST) -> dict[str, str]:
+    """Bind every locally visible import name to its fully qualified target.
+
+    ``import a.b as c`` binds ``c`` to ``a.b``; ``from a.b import c as d``
+    binds ``d`` to ``a.b.c``. A plain ``import a.b`` needs no entry because an
+    unaliased name already resolves to itself. Resolving through this map is
+    what stops an alias from hiding a module reference.
+    """
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    aliases[alias.asname] = alias.name
+        elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
+            for alias in node.names:
+                aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return aliases
+
+
+def _dotted_path(node: ast.AST, aliases: dict[str, str]) -> str | None:
+    """Resolve a name or attribute chain to a dotted path, or ``None``."""
+    if isinstance(node, ast.Name):
+        return aliases.get(node.id, node.id)
+    if isinstance(node, ast.Attribute):
+        owner = _dotted_path(node.value, aliases)
+        return None if owner is None else f"{owner}.{node.attr}"
+    return None
+
+
+def _terminal_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+def _attribute_chain_references(
+    node: ast.Attribute, installed: frozenset[str], aliases: dict[str, str]
+) -> frozenset[str]:
+    """Treat ``drift.a.b`` attribute traversal as a reference to ``drift.a.b``.
+
+    ``import drift`` followed by ``drift.markets.normalization`` reaches a
+    module without ever naming it in an import statement, so the chain itself
+    has to count as a semantic reference.
+    """
+    path = _dotted_path(node, aliases)
+    if path is None or not path.startswith("drift."):
+        return frozenset()
+    return _ancestor_modules(path, installed)
+
+
+def _reject_module_registry_subscript(
+    node: ast.Subscript, module: str, aliases: dict[str, str]
+) -> None:
+    """Fail closed on ``sys.modules[...]`` and on any module ``__dict__[...]``."""
+    container = _dotted_path(node.value, aliases)
+    if container is None:
+        return
+    if container in _MODULE_REGISTRY_PATHS or container.split(".")[-1] == "__dict__":
+        raise SemanticClosureError(
+            f"declared semantic module {module} indexes a module registry, "
+            "which the closure guard cannot bind to an exact module"
+        )
+
+
+def _call_references(
+    node: ast.Call, module: str, installed: frozenset[str], aliases: dict[str, str]
+) -> frozenset[str]:
+    """Resolve or reject every call that can reach a module at run time."""
+    resolved = _dotted_path(node.func, aliases)
+    terminal = _terminal_name(node.func)
+    if resolved in _CODE_EVALUATION_TARGETS or (
+        resolved is None and terminal in _CODE_EVALUATION_TARGETS
+    ):
+        raise SemanticClosureError(
+            f"declared semantic module {module} evaluates code dynamically, "
+            "which the closure guard cannot bind to an exact module"
+        )
+    if resolved in _NAMESPACE_LOOKUP_TARGETS:
+        _reject_import_machinery_lookup(node, module, installed, aliases)
+        return frozenset()
+    effective = resolved if resolved is not None else terminal
+    if effective is None or effective.split(".")[-1] not in _DYNAMIC_IMPORT_NAMES:
+        return frozenset()
+    return _dynamic_import_references(node, module, installed)
+
+
+def _reject_import_machinery_lookup(
+    node: ast.Call, module: str, installed: frozenset[str], aliases: dict[str, str]
+) -> None:
+    """Fail closed on ``getattr``/``vars`` aimed at an importable namespace.
+
+    ``getattr(item, name)`` over an ordinary object stays allowed: only a
+    lookup whose owner resolves to the import machinery or to an installed
+    ``drift`` module, or whose attribute literally names a dynamic import,
+    can produce a module the guard cannot otherwise see.
+    """
+    owner = _dotted_path(node.args[0], aliases) if node.args else None
+    attribute = node.args[1] if len(node.args) > 1 else None
+    names_dynamic_import = (
+        isinstance(attribute, ast.Constant)
+        and isinstance(attribute.value, str)
+        and attribute.value in _DYNAMIC_IMPORT_NAMES
+    )
+    owns_import_machinery = owner is not None and (
+        owner.split(".")[0] in _IMPORT_MACHINERY_ROOTS
+        or bool(_ancestor_modules(owner, installed))
+    )
+    if names_dynamic_import or owns_import_machinery:
+        raise SemanticClosureError(
+            f"declared semantic module {module} reaches a module namespace "
+            "indirectly, which the closure guard cannot bind to an exact module"
+        )
 
 
 def _import_from_references(
@@ -423,15 +574,6 @@ def _import_from_references(
 def _dynamic_import_references(
     node: ast.Call, module: str, installed: frozenset[str]
 ) -> frozenset[str]:
-    function = node.func
-    if isinstance(function, ast.Name):
-        name = function.id
-    elif isinstance(function, ast.Attribute):
-        name = function.attr
-    else:
-        return frozenset()
-    if name not in _DYNAMIC_IMPORT_NAMES:
-        return frozenset()
     target = node.args[0] if node.args else None
     if not isinstance(target, ast.Constant) or not isinstance(target.value, str):
         raise SemanticClosureError(

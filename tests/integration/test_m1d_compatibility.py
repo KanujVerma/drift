@@ -696,12 +696,25 @@ def test_v3_source_pins_are_superseded_by_v4_without_rewriting_history() -> None
     assert isinstance(source_commit, str)
     assert _git("merge-base", "--is-ancestor", source_commit, "HEAD") == ""
 
+    added = current["added_paths"]
+    assert isinstance(added, dict) and added
+    assert set(added) == {"src/drift/domain/semantic_attestation.py"}
+    assert not set(added) & set(historical["sha256"])
+
     # The supersession is exactly reproducible: v4 is v3 with the declared
-    # paths taken from source_commit and nothing else touched.
+    # paths taken from source_commit, plus the declared additions, and nothing
+    # else touched.
     expected = dict(historical["sha256"])
     for relative, digest in superseded.items():
         assert (
             hashlib.sha256(_git_bytes(source_commit, relative)).hexdigest() == digest
         ), relative
         expected[relative] = digest
+    for relative, record in added.items():
+        assert record["issue"] == 32, relative
+        assert isinstance(record["justification"], str), relative
+        assert record["justification"].strip(), relative
+        live = (REPO_ROOT / relative).read_bytes()
+        assert hashlib.sha256(live).hexdigest() == record["current_sha256"], relative
+        expected[relative] = record["current_sha256"]
     assert current["sha256"] == expected

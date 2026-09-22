@@ -1,7 +1,7 @@
 {
   "inventory_id": "m1d-v4-protected-sha256",
   "role": "current",
-  "scope": "sha256 of the 544 protected M1d paths as they must appear in the live working tree",
+  "scope": "sha256 of the 545 protected M1d paths as they must appear in the live working tree",
   "baseline_commit": "af75cce0f763de025f8ae3516577a9d0a1acead9",
   "source_commit": "81ca3b69f41642b97a0b241a81b1e8cc3858900f",
   "supersedes": {
@@ -23,7 +23,14 @@
       "current_sha256": "d35884fb426f62e4fec7b373be08e12cf000eb22dee2289b1ecf1509b9a7d670"
     }
   },
-  "reconstruction": "sha256 == the v3 inventory's sha256 map with exactly the keys in superseded_paths replaced by their current_sha256, which is the sha256 of that path at source_commit. Enforced at load time by tests/_pinned_m1d.py.",
+  "added_paths": {
+    "src/drift/domain/semantic_attestation.py": {
+      "current_sha256": "423c5a9f22c6017a405d0a0388a8a1eb756224bdedd95e0fc6666cee69acaaea",
+      "issue": 32,
+      "justification": "This module defines the M1d validator replay identity: its declared closure and its own bytes determine the semantic attestation hash that observation_validation.py and session_validation.py now report. v3 predates it and therefore pins every input to that identity except the one that defines it, so a change here could move the recorded identity while every byte freeze stayed green. Adding it under issue 32 closes that gap. It is an addition rather than a supersession because af75cce does not contain the path at all."
+    }
+  },
+  "reconstruction": "sha256 == the v3 inventory's sha256 map with exactly the keys in superseded_paths replaced by their current_sha256, which is the sha256 of that path at source_commit, and exactly the keys in added_paths appended with their current_sha256, which is the sha256 of that path in the working tree. An added path must be absent from v3 and a superseded path must be present in v3. Enforced at load time by tests/_pinned_m1d.py.",
   "sha256": {
     "pyproject.toml": "8912df4576a722d6a1ddd6de65f277e65aec23e75cba55ed1b6c99a497ff82cd",
     "src/drift/__init__.py": "c7fc4f21c9db12bd783f6afa68329f07b2a53d4d6b997fad65d9613faf9f327a",
@@ -61,6 +68,7 @@
     "src/drift/domain/provenance_references.py": "63f096f60fcb329666200c29c80f8a8faa2056aa523954116faba9a1e327749a",
     "src/drift/domain/revisions.py": "742f0486120629e84392a30835ee33da762787ccf0a867e85e66829d7fa452f3",
     "src/drift/domain/securities.py": "8e660c61cb43f6f290a3d208075a624fa0f9344f15915318ab3241cef74d00e0",
+    "src/drift/domain/semantic_attestation.py": "423c5a9f22c6017a405d0a0388a8a1eb756224bdedd95e0fc6666cee69acaaea",
     "src/drift/domain/sessions.py": "5606e141dace4ef8b201568d5b48ab72c74df9ea4b122fed1ec416291b6f3092",
     "src/drift/domain/strategies.py": "bd1eb14f4b1637d91c53b81266cc7f451e8fb19915f20cf6adb003e7e107e137",
     "src/drift/domain/temporal.py": "28313896efa1e84709f9234dbb9ba2d111775ff93358615b62a314ca740cde43",

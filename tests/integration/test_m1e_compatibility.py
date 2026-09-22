@@ -52,10 +52,22 @@ M1D_REPLAY_IDENTITY_PATHS = frozenset(
         "src/drift/domain/semantic_attestation.py",
     }
 )
+# M2 source added under issue #34.  It is additive under ADR 0012 like the
+# evaluator modules, but it does not carry the "evaluator" prefix that
+# _m1e_candidate_paths filters on, so it has to be named.  As with the
+# replay-identity path above it is named rather than exempted, and is routed
+# through the same production AST guard below.
+M2_ADDITIVE_SOURCE_PATHS = frozenset(
+    {
+        "src/drift/domain/replay_provenance.py",
+    }
+)
 M1E_PRODUCTION_PATHS = frozenset(
     path for path in ALLOWED_M1E_PRODUCTION_PATHS if path.startswith("src/drift/")
 )
-INERT_SOURCE_PATHS = ALLOWED_M1E_PRODUCTION_PATHS | M1D_REPLAY_IDENTITY_PATHS
+INERT_SOURCE_PATHS = (
+    ALLOWED_M1E_PRODUCTION_PATHS | M1D_REPLAY_IDENTITY_PATHS | M2_ADDITIVE_SOURCE_PATHS
+)
 M1E_SCRIPT_PATHS = frozenset(
     path for path in ALLOWED_M1E_PRODUCTION_PATHS if path.startswith("scripts/")
 )
@@ -302,9 +314,13 @@ def test_m1e_additions_are_allowlisted_inert_and_leave_m1d_pins_unchanged() -> N
     """Future M1e code is constrained separately from byte-pinned M1d history."""
     present = _m1e_paths_on_disk()
     assert present <= INERT_SOURCE_PATHS
+    scanned_as_production = (
+        M1E_PRODUCTION_PATHS | M1D_REPLAY_IDENTITY_PATHS | M2_ADDITIVE_SOURCE_PATHS
+    )
+    assert present & scanned_as_production
     for relative in present:
         source = (REPO_ROOT / relative).read_text(encoding="utf-8")
-        if relative in M1E_PRODUCTION_PATHS or relative in M1D_REPLAY_IDENTITY_PATHS:
+        if relative in scanned_as_production:
             _assert_m1e_production_module_allowed(source, relative)
         else:
             _assert_m1e_script_allowed(relative, source)
