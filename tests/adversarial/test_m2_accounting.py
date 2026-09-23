@@ -228,6 +228,7 @@ def test_a_payable_date_revision_cannot_pay_one_entitlement_twice() -> None:
         amount="0.5",
         suffix=9210,
         dates=(
+            ca._date_fact("ex", ca.EFFECT_AT),
             ca._date_fact("record", ca.EFFECT_AT),
             ca._date_fact("payable", ca.LATER_AT),
         ),
@@ -289,6 +290,7 @@ def test_two_cash_components_on_one_date_are_two_distinct_claims() -> None:
     first = ca._cash(amount="0.5", component_id="cash-1")
     second = ca._cash(amount="0.25", component_id="cash-2")
     dates = (
+        ca._date_fact("ex", ca.EFFECT_AT),
         ca._date_fact("record", ca.EFFECT_AT),
         ca._date_fact("payable", ca.PAYABLE_AT),
     )
@@ -344,7 +346,7 @@ def test_a_due_bill_distribution_never_falls_back_to_the_record_date() -> None:
     ):
         ca._processor().apply_pre_open_actions(state, (), (due_bill,), ca._key())
 
-    # Control: the record date in that very same terms record is perfectly
+    # Control: the ex date in that very same kind of terms record is perfectly
     # usable, and is used, once the due-bill fact is absent. The failure above
     # is therefore a refusal to derive, not a missing date.
     _, _, plain = ca._dividend_case(
@@ -352,6 +354,7 @@ def test_a_due_bill_distribution_never_falls_back_to_the_record_date() -> None:
         amount="2",
         suffix=9400,
         dates=(
+            ca._date_fact("ex", ca.EFFECT_AT),
             ca._date_fact("record", ca.EFFECT_AT),
             ca._date_fact("payable", ca.PAYABLE_AT),
         ),
@@ -444,6 +447,7 @@ def test_cash_with_no_exact_decimal_spelling_fails_closed() -> None:
     """Rounding a non-terminating quotient would invent or destroy money."""
     component = ca._cash(amount="1", numerator="3", denominator="1")
     dates = (
+        ca._date_fact("ex", ca.EFFECT_AT),
         ca._date_fact("record", ca.EFFECT_AT),
         ca._date_fact("payable", ca.PAYABLE_AT),
     )
@@ -679,6 +683,7 @@ def _share_action_outcome(
     suffix: int,
     recipient: UUID = eng.SEC_A,
     claim_status: str = "continuing",
+    effective_at: str = _ACTION_AT,
 ) -> SecurityEconomicOutcomeV1:
     component = ca._shares(
         numerator=numerator,
@@ -697,7 +702,7 @@ def _share_action_outcome(
         components=(component,),
         terms=terms,
         occurrence_id=f"issue-81-{suffix}",
-        effective_at=_ACTION_AT,
+        effective_at=effective_at,
         security_id=eng.SEC_A,
         claim_status=claim_status,
     )
@@ -1032,6 +1037,320 @@ def test_a_stock_acquisition_never_turns_a_staged_entry_into_a_buy() -> None:
     assert artifacts.result.halt_reason is not None
     assert "would buy the acquirer" in artifacts.result.halt_reason
     assert _fills(artifacts) == []
+
+
+# ==========================================================================
+# Evidence dated off the clock, and the ex-date entitlement rule
+# ==========================================================================
+#
+# An effect is owned by the first session on or after its date. A weekend or
+# a did-not-open day is simply not a session, so the effect lands at the next
+# pre-open, where nothing has traded since the prior close. A cash dividend
+# vests on its ex date against that prior close, whatever the record date.
+
+# Monday 2026-01-05 through Friday 2026-01-09, then Monday 2026-01-12.
+_FRIDAY = date(2026, 1, 9)
+_MONDAY = date(2026, 1, 12)
+_OVER_A_WEEKEND = (*eng.DAYS, _FRIDAY, _MONDAY)
+
+
+def _price_the_weekend(monkeypatch: pytest.MonkeyPatch, monday: str) -> None:
+    """Give the shared engine price table the two extra sessions."""
+    monkeypatch.setitem(eng.PRICES[eng.SEC_A], _FRIDAY, ("120.00", "120.00"))
+    monkeypatch.setitem(eng.PRICES[eng.SEC_A], _MONDAY, (monday, monday))
+
+
+def _run_over(
+    outcome: SecurityEconomicOutcomeV1,
+    *,
+    days: tuple[date, ...],
+    strategy: eng.FixedTargetStrategy,
+    views: tuple[DerivedObservationViewV1, ...] | None = None,
+    warmup: int = 2,
+) -> EvaluationRunArtifactsV1:
+    bundle = eng._bundle(
+        days=days,
+        decision_views=tuple(eng._decision_view(eng.SEC_A, day) for day in days),
+        accounting_views=(
+            tuple(eng._accounting_view(eng.SEC_A, day) for day in days)
+            if views is None
+            else views
+        ),
+        economic_outcomes=(outcome.resolution,),
+    )
+    engine = SessionEvaluatorEngine(
+        bundle=bundle,
+        admission=eng._admission(bundle),
+        protocol=eng._protocol(warmup=warmup),
+        cost_model=eng._cost_model(),
+        evidence=SessionEvaluatorEvidence(
+            listing_role_records=eng.ROLE_RECORDS, economic_outcomes=(outcome,)
+        ),
+        book_currency_namespace=eng.BOOK_NAMESPACE,
+        book_currency_code=eng.BOOK_CODE,
+    )
+    return eng._run(engine, strategy)
+
+
+def _hold_ten(days: tuple[date, ...]) -> eng.FixedTargetStrategy:
+    return eng.FixedTargetStrategy({day: ((eng.SEC_A, 10),) for day in days})
+
+
+def _dividend_outcome(
+    *,
+    suffix: int,
+    ex_at: str | None,
+    payable_at: str,
+    record_at: str | None = None,
+    settled_at: str | None = None,
+    effective_at: str | None = None,
+) -> SecurityEconomicOutcomeV1:
+    """A 0.50 SEC_A dividend, delivered when ``settled_at`` is given."""
+    cash = ca._cash(amount="0.5", component_id="dividend-cash", predecessor=eng.SEC_A)
+    dates = tuple(
+        ca._date_fact(role, label)
+        for role, label in (
+            ("ex", ex_at),
+            ("record", record_at),
+            ("payable", payable_at),
+        )
+        if label is not None
+    )
+    terms = ca._terms(
+        suffix=suffix,
+        action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
+        components=(cash,),
+        dates=dates,
+        security_id=eng.SEC_A,
+    )
+    occurrence = f"issue-82-{suffix}"
+    effect = ca._effect(
+        suffix=suffix + 1,
+        action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
+        components=(cash,),
+        terms=terms,
+        occurrence_id=occurrence,
+        effective_at=(ex_at or payable_at) if effective_at is None else effective_at,
+        security_id=eng.SEC_A,
+    )
+    deliveries = (
+        ()
+        if settled_at is None
+        else (
+            ca._delivery(
+                components=(cash,),
+                security_id=eng.SEC_A,
+                occurrence_id=occurrence,
+                settled_at=settled_at,
+            ),
+        )
+    )
+    return ca._outcome(
+        security_id=eng.SEC_A,
+        terms=(terms,),
+        effects=(effect,),
+        delivery_groups=deliveries,
+        action_kinds=(ActionKind.REGULAR_CASH_DIVIDEND,),
+    )
+
+
+def _applied_sessions(artifacts: EvaluationRunArtifactsV1) -> list[int]:
+    return [
+        event.session_index
+        for event in artifacts.trace.events
+        if event.kind == "corporate_action_applied"
+    ]
+
+
+def _settled(artifacts: EvaluationRunArtifactsV1) -> list[tuple[int, Decimal]]:
+    return [
+        (event.session_index, event.settled_cash)
+        for event in artifacts.trace.events
+        if event.kind == "claim_settled"
+    ]
+
+
+def test_a_weekend_split_is_applied_at_the_next_pre_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _price_the_weekend(monkeypatch, monday="60.00")
+    weekend = _share_action_outcome(
+        ActionKind.FORWARD_SPLIT,
+        numerator="2",
+        denominator="1",
+        meaning="resulting_per_predecessor",
+        suffix=8200,
+        effective_at="2026-01-10T00:00:00Z",
+    )
+
+    artifacts = _run_over(
+        weekend, days=_OVER_A_WEEKEND, strategy=_hold_ten(_OVER_A_WEEKEND[1:5])
+    )
+
+    # Before the fix the Saturday split was never applied: ten shares were
+    # marked at the halved Monday close and NAV fell to 9600.00.
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert _applied_sessions(artifacts) == [5]
+    assert _fills(artifacts) == [(2, "buy", 10)]
+    assert _held(artifacts) == {eng.SEC_A: 20}
+    assert artifacts.result.metrics.ending_net_asset_value == Decimal("10200.00")
+
+
+def test_a_split_on_a_did_not_open_day_is_applied_at_the_next_pre_open() -> None:
+    days = (eng.DAY_0, eng.DAY_1, eng.DAY_3)
+    outcome = eng._forward_split_outcome("2026-01-07T00:00:00Z")
+    views = (
+        eng._accounting_view(eng.SEC_A, eng.DAY_0),
+        eng._accounting_view(eng.SEC_A, eng.DAY_1),
+        eng._accounting_view(
+            eng.SEC_A, eng.DAY_3, open_price="55.00", close_price="60.00"
+        ),
+    )
+    strategy = eng.FixedTargetStrategy(
+        {day: ((eng.SEC_A, 10),) for day in (eng.DAY_0, eng.DAY_1)}
+    )
+
+    artifacts = _run_over(outcome, days=days, strategy=strategy, views=views, warmup=1)
+
+    # DAY_2 is absent from the clock, as a did-not-open day is. Before the fix
+    # the split it carried was dropped and NAV fell to 9600.00.
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert _applied_sessions(artifacts) == [2]
+    assert _held(artifacts) == {eng.SEC_A: 20}
+    assert artifacts.result.metrics.ending_net_asset_value == Decimal("10200.00")
+
+
+def test_a_holiday_record_date_still_pays_the_ex_date_holder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _price_the_weekend(monkeypatch, monday="120.00")
+    outcome = _dividend_outcome(
+        suffix=8210,
+        ex_at="2026-01-09T00:00:00Z",
+        record_at="2026-01-10T00:00:00Z",
+        payable_at="2026-01-12T00:00:00Z",
+        settled_at="2026-01-12T00:00:00Z",
+    )
+
+    artifacts = _run_over(
+        outcome, days=_OVER_A_WEEKEND, strategy=_hold_ten(_OVER_A_WEEKEND[1:5])
+    )
+
+    # Before the fix the Saturday record date pinned no session and the
+    # dividend was never recorded.
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert _applied_sessions(artifacts) == [4]
+    assert _settled(artifacts) == [(5, Decimal("5.0"))]
+    assert artifacts.final_state.cash_balance == Decimal("9005.0")
+    assert artifacts.result.metrics.ending_net_asset_value == Decimal("10205.00")
+
+
+def test_an_ex_date_off_the_clock_vests_at_the_next_pre_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _price_the_weekend(monkeypatch, monday="120.00")
+    outcome = _dividend_outcome(
+        suffix=8220,
+        ex_at="2026-01-10T00:00:00Z",
+        payable_at="2026-01-12T00:00:00Z",
+        settled_at="2026-01-12T00:00:00Z",
+    )
+
+    artifacts = _run_over(
+        outcome, days=_OVER_A_WEEKEND, strategy=_hold_ten(_OVER_A_WEEKEND[1:5])
+    )
+
+    # Friday's close held ten shares and nothing traded before Monday's
+    # pre-open, so the Saturday ex date pays those ten.
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert _applied_sessions(artifacts) == [5]
+    assert _settled(artifacts) == [(5, Decimal("5.0"))]
+    assert artifacts.final_state.cash_balance == Decimal("9005.0")
+
+
+def test_a_t2_buy_at_the_ex_date_open_is_not_paid_the_dividend() -> None:
+    # T+2 era: ex on DAY_2, record on DAY_3. The default strategy buys ten
+    # shares at the DAY_2 open, which is the ex-date open.
+    outcome = _dividend_outcome(
+        suffix=8230,
+        ex_at="2026-01-07T00:00:00Z",
+        record_at="2026-01-08T00:00:00Z",
+        payable_at="2026-01-08T00:00:00Z",
+        settled_at="2026-01-08T00:00:00Z",
+    )
+
+    artifacts = _run_over(outcome, days=eng.DAYS, strategy=_hold_ten(eng.DAYS[1:]))
+
+    # Before the fix the record-date shortcut credited 5.00. The delivered
+    # report is real, but it pays the holders at the ex date's prior close,
+    # and this book held nothing then.
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert _applied_sessions(artifacts) == []
+    assert _settled(artifacts) == []
+    assert artifacts.final_state.cash_balance == Decimal("9000.00")
+    assert artifacts.result.metrics.ending_net_asset_value == Decimal("10200.00")
+
+    # Control: with the ex date one session later, the book held ten shares
+    # at the prior close and is paid.
+    paid = _run_over(
+        _dividend_outcome(
+            suffix=8240,
+            ex_at="2026-01-08T00:00:00Z",
+            payable_at="2026-01-08T00:00:00Z",
+            settled_at="2026-01-08T00:00:00Z",
+        ),
+        days=eng.DAYS,
+        strategy=_hold_ten(eng.DAYS[1:]),
+    )
+    assert paid.result.classification is EvaluationClassification.COMPLETE
+    assert _settled(paid) == [(3, Decimal("5.0"))]
+    assert paid.final_state.cash_balance == Decimal("9005.0")
+
+
+def test_a_held_dividend_without_an_ex_date_halts_the_run() -> None:
+    outcome = _dividend_outcome(
+        suffix=8250,
+        ex_at=None,
+        record_at="2026-01-08T00:00:00Z",
+        payable_at="2026-01-08T00:00:00Z",
+    )
+
+    artifacts = _run_over(outcome, days=eng.DAYS, strategy=_hold_ten(eng.DAYS[1:]))
+
+    # The book first holds SEC_A at the DAY_3 pre-open, and from then on its
+    # dividend entitlement cannot be placed.
+    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
+    assert artifacts.result.halted_session_index == 3
+    assert artifacts.result.halt_reason is not None
+    assert "requires a source ex date" in artifacts.result.halt_reason
+
+
+def test_delivered_cash_no_evidence_explains_halts_a_held_position() -> None:
+    cash = ca._cash(amount="0.5", component_id="dividend-cash", predecessor=eng.SEC_A)
+    unexplained = ca._outcome(
+        security_id=eng.SEC_A,
+        delivery_groups=(
+            ca._delivery(
+                components=(cash,),
+                security_id=eng.SEC_A,
+                occurrence_id="issue-82-unexplained",
+                settled_at="2026-01-08T00:00:00Z",
+            ),
+        ),
+        action_kinds=(ActionKind.REGULAR_CASH_DIVIDEND,),
+    )
+
+    artifacts = _run_over(unexplained, days=eng.DAYS, strategy=_hold_ten(eng.DAYS[1:]))
+
+    # Before the fix the delivered cash was dropped and the run read COMPLETE.
+    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
+    assert artifacts.result.halted_session_index == 3
+    assert artifacts.result.halt_reason is not None
+    assert "no proven entitlement" in artifacts.result.halt_reason
+
+    # Control: a book that never holds SEC_A is not exposed to the report.
+    flat = _run_over(unexplained, days=eng.DAYS, strategy=eng.FixedTargetStrategy({}))
+    assert flat.result.classification is EvaluationClassification.COMPLETE
 
 
 # ==========================================================================
