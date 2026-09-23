@@ -36,6 +36,7 @@ from drift.domain.evaluator_lanes import (
 )
 from drift.domain.normalization import DerivedObservationViewV1
 from drift.domain.observation_query import ObservationOutcomeQueryV1
+from drift.domain.replay_provenance import _build_bundle_provenance_proof
 from drift.domain.securities import ListingV1, ListingVenue, SecurityV1
 from drift.domain.source_snapshots import RealSourceSnapshotV1
 from drift.evaluator.bundles import (
@@ -776,11 +777,33 @@ def test_promotion_gate_rejects_reconstructions_on_realized_clock() -> None:
     harness = _harness()
     observation = build_from_harness(harness)
     snapshot = _promotion_snapshot()
+    poisoned = _realized_bundle(
+        source_snapshot_hash=snapshot.snapshot_hash,
+        exploratory_reconstructed_observations=(observation,),
+    )
+    # The only production path to a proof re-derives every reconstruction, and
+    # it takes no replay inputs, so it can never cover one (issue 55).
+    with pytest.raises(
+        ValueError,
+        match=r"^bundle carries exploratory reconstructions without the replay",
+    ):
+        _promotion_case(poisoned)
+
+    # A proof assembled directly still meets the gate's own refusal.
     case = _promotion_case(
-        _realized_bundle(
-            source_snapshot_hash=snapshot.snapshot_hash,
-            exploratory_reconstructed_observations=(observation,),
-        )
+        _realized_bundle(source_snapshot_hash=snapshot.snapshot_hash)
+    )
+    proof = _build_bundle_provenance_proof(
+        qualified_context_hash=case["proof"].qualified_context_hash,
+        source_snapshot_hash=snapshot.snapshot_hash,
+        bundle=poisoned,
+    )
+    case["bundle"] = poisoned
+    case["proof"] = proof
+    case["admission"] = rebind_admission(
+        case,
+        input_bundle_hash=poisoned.bundle_hash,
+        provenance_proof_hash=proof.proof_hash,
     )
     with pytest.raises(ValueError, match="cannot consume exploratory reconstructed"):
         validate_promotion_admission(**case)

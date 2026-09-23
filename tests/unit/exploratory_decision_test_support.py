@@ -73,6 +73,8 @@ from drift.evaluator.bundles import (
 from drift.evaluator.clock import build_scheduled_reconstruction_clock
 from drift.evaluator.engine import SessionEvaluatorEngine, SessionEvaluatorEvidence
 from drift.evaluator.reconstruction import (
+    ExploratoryReconstructionReplay,
+    ExploratoryReconstructionRequest,
     build_exploratory_reconstructed_session_observation,
 )
 
@@ -95,6 +97,32 @@ ScheduleState = Literal["regular", "early_close"]
 type SessionCase = tuple[
     ExploratoryReconstructedSessionObservationV1, EvaluationSessionV1
 ]
+
+
+# The exact source inputs of every genuine reconstruction built here, by hash.
+# A forged reconstruction is never registered, so it has no replay request.
+_SOURCE_REQUESTS: dict[str, ExploratoryReconstructionRequest] = {}
+
+
+def source_request(
+    observation: ExploratoryReconstructedSessionObservationV1,
+) -> ExploratoryReconstructionRequest:
+    """The query and context a genuine reconstruction was built from."""
+    return _SOURCE_REQUESTS[observation.reconstruction_hash]
+
+
+def replay_of(
+    observations: Sequence[ExploratoryReconstructedSessionObservationV1],
+) -> ExploratoryReconstructionReplay:
+    """Replay inputs for every genuine reconstruction among these."""
+    return ExploratoryReconstructionReplay(
+        policy=make_policy(),
+        requests=tuple(
+            _SOURCE_REQUESTS[item.reconstruction_hash]
+            for item in observations
+            if item.reconstruction_hash in _SOURCE_REQUESTS
+        ),
+    )
 
 
 def utc_close(day: date, state: ScheduleState) -> datetime:
@@ -143,6 +171,7 @@ def scheduled_session_case(
     observation = build_exploratory_reconstructed_session_observation(
         query, harness.context, cohort_of(cohort_securities), make_policy()
     )
+    _SOURCE_REQUESTS[observation.reconstruction_hash] = (query, harness.context)
     clock = build_scheduled_reconstruction_clock((query,), harness.context)
     assert len(clock.sessions) == 1
     return observation, clock.sessions[0]
@@ -282,7 +311,15 @@ def reconstructed_engine(
     cohort: ExploratoryCohortAuthorizationV1 | None = None,
     protocol: EvaluationProtocolV1 | None = None,
     with_cohort: bool = True,
+    replay: ExploratoryReconstructionReplay | None = None,
+    with_replay: bool | None = None,
 ) -> SessionEvaluatorEngine:
+    """An engine over this bundle; replay evidence follows the cohort by default.
+
+    Unless ``replay`` is given, the replay is rebuilt from the registered source
+    inputs of the bundle's genuine reconstructions.
+    """
+    supplies_replay = with_cohort if with_replay is None else with_replay
     return SessionEvaluatorEngine(
         bundle=bundle,
         admission=exploratory_admission(bundle) if admission is None else admission,
@@ -292,6 +329,15 @@ def reconstructed_engine(
             listing_role_records=ROLE_RECORDS,
             exploratory_cohort=(
                 (cohort_of() if cohort is None else cohort) if with_cohort else None
+            ),
+            exploratory_reconstruction_replay=(
+                (
+                    replay_of(bundle.exploratory_reconstructed_observations)
+                    if replay is None
+                    else replay
+                )
+                if supplies_replay
+                else None
             ),
         ),
         book_currency_namespace=BOOK_NAMESPACE,

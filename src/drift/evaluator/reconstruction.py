@@ -1,5 +1,9 @@
 """Exploratory scheduled source-basis observation reconstruction for M2."""
 
+from collections import Counter
+from collections.abc import Sequence
+from dataclasses import dataclass
+
 from drift.domain.evaluator_lanes import (
     ALPACA_LIMITATION_RETROSPECTIVE_RECONSTRUCTION,
     ALPACA_LIMITATION_UNVERSIONED_BARS,
@@ -34,6 +38,10 @@ from drift.markets.observation_validation import (
 )
 from drift.markets.session_generation import generate_schedule
 from drift.serialization.canonical import content_hash
+
+type ExploratoryReconstructionRequest = tuple[
+    ObservationOutcomeQueryV1, M1dResolutionContext
+]
 
 _PRICE_MEANINGS: dict[str, frozenset[str]] = {
     "open": frozenset({"official_open", "first_trade_price"}),
@@ -252,3 +260,70 @@ def _policy_generation_hash(
     if artifact is None:
         raise ValueError("schedule generation policy bytes unavailable")
     return ScheduleGenerationPolicyV1.model_validate_json(artifact.data)
+
+
+@dataclass(frozen=True, slots=True)
+class ExploratoryReconstructionReplay:
+    """The exact source inputs a set of exploratory reconstructions derive from.
+
+    Each request pairs an outcome query with the M1d resolution context it
+    resolves against, and the reconstruction policy is shared. Together with
+    the declared cohort these are exactly the canonical builder's inputs.
+    """
+
+    policy: ExploratoryReconstructionPolicyV1
+    requests: tuple[ExploratoryReconstructionRequest, ...]
+
+
+def replay_exploratory_reconstructions(
+    replay: ExploratoryReconstructionReplay,
+    cohort: ExploratoryCohortAuthorizationV1,
+) -> tuple[ExploratoryReconstructedSessionObservationV1, ...]:
+    """Derive every requested reconstruction through the one canonical builder."""
+    return tuple(
+        build_exploratory_reconstructed_session_observation(
+            query, context, cohort, replay.policy
+        )
+        for query, context in replay.requests
+    )
+
+
+def verify_exploratory_reconstructions(
+    reconstructions: Sequence[ExploratoryReconstructedSessionObservationV1],
+    *,
+    replay: ExploratoryReconstructionReplay,
+    cohort: ExploratoryCohortAuthorizationV1,
+) -> None:
+    """Require exact canonical equality with a fresh re-derivation (#55).
+
+    A reconstruction's own hash only proves it is self-consistent, not that
+    any source produced it. Re-deriving through the canonical builder binds
+    every field at once: the source observation, the scheduled calendar row
+    and generated schedule, the context identity, the policy, the OHLCV
+    values, the limitations, and the hash. Coverage is exact in both
+    directions, so no stored reconstruction goes unverified and no
+    re-derived one may be missing.
+    """
+    expected = replay_exploratory_reconstructions(replay, cohort)
+    if len(expected) != len(reconstructions):
+        raise ValueError(
+            "exploratory reconstruction count mismatch against canonical "
+            f"re-derivation: expected {len(expected)}, "
+            f"got {len(reconstructions)}"
+        )
+    unmatched = Counter(content_hash(item) for item in reconstructions)
+    unmatched.subtract(content_hash(item) for item in expected)
+    forged = tuple(
+        sorted(
+            {
+                item.reconstruction_hash
+                for item in reconstructions
+                if unmatched[content_hash(item)] > 0
+            }
+        )
+    )
+    if forged:
+        raise ValueError(
+            "exploratory reconstructions do not match canonical re-derivation: "
+            f"{forged}"
+        )

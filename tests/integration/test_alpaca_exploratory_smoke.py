@@ -156,7 +156,10 @@ def _engine(intake: AlpacaExploratoryIntakeResult) -> SessionEvaluatorEngine:
         admission=intake.admission,
         protocol=_protocol(warmup=WARMUP_SESSIONS),
         cost_model=_cost_model(),
-        evidence=SessionEvaluatorEvidence(exploratory_cohort=intake.cohort),
+        evidence=SessionEvaluatorEvidence(
+            exploratory_cohort=intake.cohort,
+            exploratory_reconstruction_replay=intake.reconstruction_replay,
+        ),
         book_currency_namespace="iso4217",
         book_currency_code="USD",
     )

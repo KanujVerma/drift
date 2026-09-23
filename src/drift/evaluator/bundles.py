@@ -16,6 +16,7 @@ from drift.domain.evaluator_lanes import (
     PromotionEvaluationAdmissionV1,
 )
 from drift.domain.evaluator_reconstruction import (
+    ExploratoryCohortAuthorizationV1,
     ExploratoryReconstructedSessionObservationV1,
 )
 from drift.domain.normalization import (
@@ -46,6 +47,11 @@ from drift.domain.securities import ListingV1, SecurityV1
 from drift.domain.source_snapshots import RealSourceSnapshotV1
 from drift.domain.universes import StructuralEligibilityResultV1
 from drift.evaluator.admission import validate_m1e_promotion_evidence
+from drift.evaluator.reconstruction import (
+    ExploratoryReconstructionReplay,
+    replay_exploratory_reconstructions,
+    verify_exploratory_reconstructions,
+)
 from drift.markets.normalization import (
     materialize_observation_decision,
     materialize_observation_outcome,
@@ -145,16 +151,17 @@ def build_evaluation_input_bundle(
     listing_identities: tuple[ListingV1, ...] = (),
     structural_eligibilities: tuple[StructuralEligibilityResultV1, ...] = (),
     economic_outcomes: tuple[EconomicOutcomeResolutionV1, ...] = (),
-    exploratory_reconstructed_observations: tuple[
-        ExploratoryReconstructedSessionObservationV1, ...
-    ] = (),
+    exploratory_cohort: ExploratoryCohortAuthorizationV1 | None = None,
+    exploratory_reconstruction_replay: ExploratoryReconstructionReplay | None = None,
     source_snapshot_hash: SHA256Hash | None = None,
 ) -> EvaluationInputBundleV1:
     """Prepare a bundle whose views come from exact upstream Drift replay.
 
     This is the spec preparation boundary. Views are never accepted from the
     caller; they are materialized here, so a view that no genuine replay
-    produces cannot enter a bundle built through this path.
+    produces cannot enter a bundle built through this path. Exploratory
+    reconstructions are likewise derived here, through the one canonical
+    builder, from their declared cohort and replay inputs (issue 55).
     """
     return assemble_evaluation_input_bundle(
         evaluation_interval=evaluation_interval,
@@ -167,9 +174,26 @@ def build_evaluation_input_bundle(
         authentic_accounting_views=replay_accounting_views(
             accounting_requests, context
         ),
-        exploratory_reconstructed_observations=exploratory_reconstructed_observations,
+        exploratory_reconstructed_observations=_replayed_reconstructions(
+            exploratory_cohort, exploratory_reconstruction_replay
+        ),
         source_snapshot_hash=source_snapshot_hash,
     )
+
+
+def _replayed_reconstructions(
+    cohort: ExploratoryCohortAuthorizationV1 | None,
+    replay: ExploratoryReconstructionReplay | None,
+) -> tuple[ExploratoryReconstructedSessionObservationV1, ...]:
+    """Derive reconstructions only from a complete cohort and replay pair."""
+    if cohort is None and replay is None:
+        return ()
+    if cohort is None or replay is None:
+        raise ValueError(
+            "exploratory reconstruction replay requires both its declared cohort "
+            "and its replay inputs"
+        )
+    return replay_exploratory_reconstructions(replay, cohort)
 
 
 def verify_evaluation_input_bundle(
@@ -178,13 +202,17 @@ def verify_evaluation_input_bundle(
     context: M1dResolutionContext,
     decision_requests: DecisionReplayRequests = (),
     accounting_requests: OutcomeReplayRequests = (),
+    exploratory_cohort: ExploratoryCohortAuthorizationV1 | None = None,
+    exploratory_reconstruction_replay: ExploratoryReconstructionReplay | None = None,
 ) -> None:
     """Verify every stored view against exact upstream replay.
 
     Re-materializes the declared views and requires exact equality with what
     the bundle carries. A forged, hand-constructed, or exploratory-derived view
     cannot survive this check, so it is what makes a bundle's contents trusted
-    rather than merely self-declared.
+    rather than merely self-declared. Exploratory reconstructions are
+    re-derived the same way; a bundle carrying any without the inputs to
+    re-derive them is refused.
     """
     expected_decision = replay_decision_views(decision_requests, context)
     expected_accounting = replay_accounting_views(accounting_requests, context)
@@ -203,6 +231,24 @@ def verify_evaluation_input_bundle(
         stored_digests = sorted(content_hash(view) for view in stored)
         if expected_digests != stored_digests:
             raise ValueError(f"{label} views do not match exact upstream replay")
+
+    if exploratory_cohort is None and exploratory_reconstruction_replay is None:
+        if bundle.exploratory_reconstructed_observations:
+            raise ValueError(
+                "bundle carries exploratory reconstructions without the replay "
+                "inputs to re-derive them"
+            )
+    elif exploratory_cohort is None or exploratory_reconstruction_replay is None:
+        raise ValueError(
+            "exploratory reconstruction replay requires both its declared cohort "
+            "and its replay inputs"
+        )
+    else:
+        verify_exploratory_reconstructions(
+            bundle.exploratory_reconstructed_observations,
+            replay=exploratory_reconstruction_replay,
+            cohort=exploratory_cohort,
+        )
 
     rebuilt = evaluation_input_bundle_hash(bundle)
     if rebuilt != bundle.bundle_hash:

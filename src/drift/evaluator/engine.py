@@ -142,6 +142,10 @@ from drift.evaluator.portfolio import (
     PortfolioAccountingKernel,
     initial_portfolio_state,
 )
+from drift.evaluator.reconstruction import (
+    ExploratoryReconstructionReplay,
+    verify_exploratory_reconstructions,
+)
 from drift.serialization.canonical import content_hash
 
 ZERO = Decimal("0")
@@ -222,6 +226,11 @@ class SessionEvaluatorEvidence:
     scheduled-reconstruction evaluation is scoped by, in place of a historical
     universe. It is required exactly when the EXPLORATORY reconstructed
     decision lane is taken, and refused everywhere else.
+
+    ``exploratory_reconstruction_replay`` carries the exact source inputs the
+    bundle's reconstructions derive from. The same rule applies: required
+    exactly on the reconstructed lane, refused everywhere else. The lane gate
+    re-derives every reconstruction from it before any decision reads one.
     """
 
     listing_role_records: tuple[ListingRoleVersionV1, ...] = ()
@@ -232,6 +241,7 @@ class SessionEvaluatorEvidence:
     due_bill_rules: tuple[DueBillRuleV1, ...] = ()
     cash_in_lieu_rates: tuple[CashInLieuRateV1, ...] = ()
     exploratory_cohort: ExploratoryCohortAuthorizationV1 | None = None
+    exploratory_reconstruction_replay: ExploratoryReconstructionReplay | None = None
 
 
 @dataclass(frozen=True)
@@ -300,6 +310,7 @@ def _resolve_reconstructed_lane(
     bundle: EvaluationInputBundleV1,
     admission: EvaluationAdmissionV1,
     cohort: ExploratoryCohortAuthorizationV1 | None,
+    replay: ExploratoryReconstructionReplay | None,
 ) -> _ReconstructedDecisionLane | None:
     """Fix the decision lane at construction, refusing every upgrade path.
 
@@ -318,7 +329,10 @@ def _resolve_reconstructed_lane(
       decision evidence.
     * An exploratory admission over a scheduled-reconstruction clock takes
       the reconstructed lane, and only after proving its admission, its
-      cohort, and every reconstruction against the bundle.
+      cohort, and every reconstruction against the bundle, then re-deriving
+      every reconstruction from its exact source inputs (issue 55). A
+      self-consistent reconstruction no source produces never reaches a
+      decision.
     """
     if isinstance(admission, PromotionEvaluationAdmissionV1):
         if bundle.has_exploratory_reconstructions:
@@ -330,6 +344,11 @@ def _resolve_reconstructed_lane(
             raise ValueError(
                 "a promotion admission cannot evaluate an exploratory cohort"
             )
+        if replay is not None:
+            raise ValueError(
+                "a promotion admission cannot evaluate exploratory "
+                "reconstruction replay evidence"
+            )
         return None
     validate_exploratory_admission(admission=admission, bundle=bundle)
     if bundle.session_clock.mode != "scheduled_session_reconstruction":
@@ -337,6 +356,11 @@ def _resolve_reconstructed_lane(
             raise ValueError(
                 "an exploratory cohort scopes only a scheduled session "
                 "reconstruction evaluation"
+            )
+        if replay is not None:
+            raise ValueError(
+                "exploratory reconstruction replay evidence scopes only a "
+                "scheduled session reconstruction evaluation"
             )
         return None
     if cohort is None:
@@ -358,6 +382,14 @@ def _resolve_reconstructed_lane(
     }
     for observation in bundle.exploratory_reconstructed_observations:
         _bind_reconstruction(observation, sessions[observation.session_key], cohort)
+    if replay is None:
+        raise ValueError(
+            "a scheduled session reconstruction evaluation requires the replay "
+            "evidence its reconstructions re-derive from"
+        )
+    verify_exploratory_reconstructions(
+        bundle.exploratory_reconstructed_observations, replay=replay, cohort=cohort
+    )
     return _ReconstructedDecisionLane(admission=admission, cohort=cohort)
 
 
@@ -447,7 +479,10 @@ class SessionEvaluatorEngine:
         self._mark_grade = LANE_MARK_GRADE[admission.lane]
         self._validate_economic_evidence(evidence, bundle)
         self._reconstructed_lane = _resolve_reconstructed_lane(
-            bundle=bundle, admission=admission, cohort=evidence.exploratory_cohort
+            bundle=bundle,
+            admission=admission,
+            cohort=evidence.exploratory_cohort,
+            replay=evidence.exploratory_reconstruction_replay,
         )
         self._accounting_index = self._index_accounting_views(bundle)
         self._corporate_actions = CorporateActionProcessor(
