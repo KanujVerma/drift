@@ -45,6 +45,7 @@ The realized lane keeps reading authorized accounting views only.
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal, cast
 from uuid import UUID
@@ -539,19 +540,38 @@ class SessionEvaluatorEngine:
           answered with later knowledge is not information the decision could
           have had, so a security that only became eligible afterwards is
           excluded rather than backdated into the universe.
+
+        Among the as-known results the decision could have had, only the latest
+        answers for a security (issue 85, spec 9.1): an INELIGIBLE result known
+        after an ELIGIBLE one removes the security, and conflicting answers
+        known at one instant admit nothing.
         """
         cutoff = session.closed_at
+        latest: dict[UUID, tuple[tuple[datetime, datetime], set[bool]]] = {}
+        for result in self._bundle.structural_eligibilities:
+            query = result.normalized_query
+            if (
+                query.resolution_mode is not ResolutionMode.AS_KNOWN
+                or query.knowledge_cutoff > cutoff
+                or query.evaluation_time > cutoff
+            ):
+                continue
+            key = (query.evaluation_time, query.knowledge_cutoff)
+            eligible = (
+                result.classification is StructuralEligibilityClassification.ELIGIBLE
+            )
+            known = latest.get(result.security_id)
+            if known is None or key > known[0]:
+                latest[result.security_id] = (key, {eligible})
+            elif key == known[0]:
+                known[1].add(eligible)
         return tuple(
             sorted(
-                {
-                    result.security_id
-                    for result in self._bundle.structural_eligibilities
-                    if result.classification
-                    is StructuralEligibilityClassification.ELIGIBLE
-                    and result.normalized_query.resolution_mode
-                    is ResolutionMode.AS_KNOWN
-                    and result.normalized_query.knowledge_cutoff <= cutoff
-                },
+                (
+                    security_id
+                    for security_id, (_, answers) in latest.items()
+                    if answers == {True}
+                ),
                 key=_security_order,
             )
         )
