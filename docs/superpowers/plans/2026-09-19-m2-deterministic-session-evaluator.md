@@ -33,7 +33,7 @@
 - **Missingness Fail-Closed**: Missing prices, unquantified corporate actions, or unprovable outcomes fail closed to `INDETERMINATE` and cleanly halt session stepping. Never forward-fill close marks, substitute close for open, or synthesize zero.
 - **No False Halt Syntheses**: Missing halt telemetry remains `UNKNOWN`. Never synthesize `not_halted` by default.
 - **Deterministic Replay Identity**: Evaluator results contain only deterministic values derived from inputs and historical evidence. No random UUID7s or wall-clock timestamps inside deterministic result artifacts. Operational metadata belong to M0 `ExperimentRun`.
-- **Secret Handling**: Alpaca credentials reside exclusively in `.env` (mode 0600, gitignored). Never print, log, commit, or pass credentials to the evaluator core.
+- **Secret Handling**: Alpaca credentials live only outside Git, in the `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY` environment variables (a gitignored `.env`, mode 0600, may populate them). Never print, log, commit, or pass credentials to the evaluator core.
 - **TDD Workflow**: Every task requires meaningful RED tests confirming failure before implementation, followed by GREEN acceptance, focused verification, adversarial review, full gate, and Checkpoint commit.
 
 ---
@@ -683,8 +683,17 @@ Build the bounded, offline Alpaca exploratory intake bridge to acquire free deve
 ### 3. Contracts and Interfaces
 - `AlpacaExploratoryAdapter`:
   - Completely decoupled from the evaluator core.
-  - Uses read-only REST endpoints (historical bars and corporate actions).
-  - Credentials loaded from `.env` without echoing to stdout/logs.
+  - Uses read-only REST endpoints: historical bars and corporate actions from
+    `data.alpaca.markets`, and the market calendar from the paper trading API
+    `paper-api.alpaca.markets`. Every other host, including the live brokerage
+    host `api.alpaca.markets`, is refused before a request is built, and
+    redirects are refused.
+  - Credentials are read only from the `APCA_API_KEY_ID` and
+    `APCA_API_SECRET_KEY` environment variables, validated, and never echoed
+    to stdout, logs, exceptions, receipts, or the private store.
+  - Measured origin evidence is bound by SHA-256 to the exact retained bytes;
+    an offline replay certifies an origin only from such a record.
+  - (Reconciled with the landed implementation, #9 and #64.)
   - Follows strict Layered Data Pipeline:
     1. Retain exact native response bytes in private storage outside Git.
     2. Generate `AcquisitionReceiptV1` and dataset manifest.
