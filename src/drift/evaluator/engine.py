@@ -144,6 +144,7 @@ from drift.evaluator.portfolio import (
 )
 from drift.evaluator.reconstruction import (
     ExploratoryReconstructionReplay,
+    require_scheduled_calendar_row,
     verify_exploratory_reconstructions,
 )
 from drift.serialization.canonical import content_hash
@@ -418,9 +419,8 @@ def _bind_reconstruction(
     """Bind one reconstruction to the cohort and the clock session it describes.
 
     The bundle already proves the session is in its clock. That is not enough
-    to let the clock time a decision on this bar: the bar must have been
-    reconstructed against the very scheduled calendar row the clock generated
-    its session from, or a 16:00 row's bar could be read at a 13:00 close.
+    to let the clock time a decision on this bar; see
+    ``require_scheduled_calendar_row``.
     """
     key = observation.session_key
     where = f"{key.mic} {key.local_date.isoformat()}"
@@ -435,15 +435,7 @@ def _bind_reconstruction(
             f"exploratory reconstruction on {where} describes security "
             f"{observation.security_id}, which the declared cohort does not admit"
         )
-    authority = frozenset(session.authority_record_hashes)
-    if (
-        observation.scheduled_session_hash not in authority
-        or observation.generated_session_row_hash not in authority
-    ):
-        raise ValueError(
-            f"exploratory reconstruction on {where} does not bind the scheduled "
-            "calendar row its clock session was generated from"
-        )
+    require_scheduled_calendar_row(observation, session)
 
 
 class SessionEvaluatorEngine:

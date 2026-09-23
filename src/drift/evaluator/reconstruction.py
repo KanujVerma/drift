@@ -4,6 +4,7 @@ from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from drift.domain.evaluator_clock import EvaluationSessionV1
 from drift.domain.evaluator_lanes import (
     ALPACA_LIMITATION_RETROSPECTIVE_RECONSTRUCTION,
     ALPACA_LIMITATION_UNVERSIONED_BARS,
@@ -273,6 +274,30 @@ class ExploratoryReconstructionReplay:
 
     policy: ExploratoryReconstructionPolicyV1
     requests: tuple[ExploratoryReconstructionRequest, ...]
+
+
+def require_scheduled_calendar_row(
+    observation: ExploratoryReconstructedSessionObservationV1,
+    session: EvaluationSessionV1,
+) -> None:
+    """Refuse a reconstruction not built on its clock session's calendar row.
+
+    Re-derivation proves a reconstruction came from its replay's M1d context;
+    it says nothing about the clock it is paired with. A bar must have been
+    reconstructed against the very scheduled calendar row the clock generated
+    its session from, or a 16:00 row's bar could be read at a 13:00 close.
+    """
+    authority = frozenset(session.authority_record_hashes)
+    if (
+        observation.scheduled_session_hash not in authority
+        or observation.generated_session_row_hash not in authority
+    ):
+        key = observation.session_key
+        raise ValueError(
+            f"exploratory reconstruction on {key.mic} {key.local_date.isoformat()} "
+            "does not bind the scheduled calendar row its clock session was "
+            "generated from"
+        )
 
 
 def replay_exploratory_reconstructions(

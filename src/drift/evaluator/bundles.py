@@ -50,6 +50,7 @@ from drift.evaluator.admission import validate_m1e_promotion_evidence
 from drift.evaluator.reconstruction import (
     ExploratoryReconstructionReplay,
     replay_exploratory_reconstructions,
+    require_scheduled_calendar_row,
     verify_exploratory_reconstructions,
 )
 from drift.markets.normalization import (
@@ -59,6 +60,7 @@ from drift.markets.normalization import (
 from drift.markets.observation_validation import (
     M1dResolutionContext,
     m1d_context_descriptor,
+    m1d_context_hash,
 )
 from drift.serialization.canonical import content_hash
 
@@ -163,7 +165,7 @@ def build_evaluation_input_bundle(
     reconstructions are likewise derived here, through the one canonical
     builder, from their declared cohort and replay inputs (issue 55).
     """
-    return assemble_evaluation_input_bundle(
+    bundle = assemble_evaluation_input_bundle(
         evaluation_interval=evaluation_interval,
         session_clock=session_clock,
         security_identities=security_identities,
@@ -175,15 +177,18 @@ def build_evaluation_input_bundle(
             accounting_requests, context
         ),
         exploratory_reconstructed_observations=_replayed_reconstructions(
-            exploratory_cohort, exploratory_reconstruction_replay
+            exploratory_cohort, exploratory_reconstruction_replay, context
         ),
         source_snapshot_hash=source_snapshot_hash,
     )
+    _require_calendar_rows(bundle)
+    return bundle
 
 
 def _replayed_reconstructions(
     cohort: ExploratoryCohortAuthorizationV1 | None,
     replay: ExploratoryReconstructionReplay | None,
+    context: M1dResolutionContext,
 ) -> tuple[ExploratoryReconstructedSessionObservationV1, ...]:
     """Derive reconstructions only from a complete cohort and replay pair."""
     if cohort is None and replay is None:
@@ -193,7 +198,45 @@ def _replayed_reconstructions(
             "exploratory reconstruction replay requires both its declared cohort "
             "and its replay inputs"
         )
+    _require_replay_context(replay, context)
     return replay_exploratory_reconstructions(replay, cohort)
+
+
+def _require_replay_context(
+    replay: ExploratoryReconstructionReplay, context: M1dResolutionContext
+) -> None:
+    """Refuse replay requests resolving against any context but the bundle's.
+
+    Authentic views are replayed against the one context the caller presents
+    here. Reconstructions must be too, or whoever supplies a reconstruction
+    would also supply the source it is checked against. Each builder call
+    already refuses a query whose context hash does not match its own
+    context, so binding every query to this context binds the request too.
+    """
+    expected = m1d_context_hash(context)
+    foreign = tuple(
+        sorted({query.input_context_hash for query, _ in replay.requests} - {expected})
+    )
+    if foreign:
+        raise ValueError(
+            "exploratory reconstruction replay resolves against another M1d "
+            f"context than {expected}: {foreign}"
+        )
+
+
+def _require_calendar_rows(bundle: EvaluationInputBundleV1) -> None:
+    """Bind every reconstruction to the calendar row of a scheduled clock.
+
+    A realized clock does not time decisions on reconstructions, so riding
+    reconstructions there have no scheduled row to bind.
+    """
+    if bundle.session_clock.mode != "scheduled_session_reconstruction":
+        return
+    sessions = {
+        session.session_key: session for session in bundle.session_clock.sessions
+    }
+    for observation in bundle.exploratory_reconstructed_observations:
+        require_scheduled_calendar_row(observation, sessions[observation.session_key])
 
 
 def verify_evaluation_input_bundle(
@@ -244,11 +287,13 @@ def verify_evaluation_input_bundle(
             "and its replay inputs"
         )
     else:
+        _require_replay_context(exploratory_reconstruction_replay, context)
         verify_exploratory_reconstructions(
             bundle.exploratory_reconstructed_observations,
             replay=exploratory_reconstruction_replay,
             cohort=exploratory_cohort,
         )
+        _require_calendar_rows(bundle)
 
     rebuilt = evaluation_input_bundle_hash(bundle)
     if rebuilt != bundle.bundle_hash:

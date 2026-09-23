@@ -113,15 +113,11 @@ def test_a_forged_close_never_reaches_an_exploratory_decision() -> None:
     following = scheduled_session_case(JAN6)
     forged = _with_field(genuine, "close", "250.000")
     bundle = bundle_of(((forged, session), following))
-    strategy = ReconstructedTargetStrategy({})
 
+    # Refused while the engine is built, so no strategy is ever handed it.
     with pytest.raises(ValueError, match=MISMATCH) as error:
-        run_engine(
-            reconstructed_engine(bundle, replay=_genuine_replay(genuine, following[0])),
-            strategy,
-        )
+        reconstructed_engine(bundle, replay=_genuine_replay(genuine, following[0]))
     assert forged.reconstruction_hash in str(error.value)
-    assert strategy.seen == []
 
 
 def test_the_genuine_corpus_still_decides_on_its_source_close() -> None:
@@ -229,7 +225,7 @@ def test_a_request_resolved_against_another_context_fails_closed() -> None:
         requests=((query, other_context), source_request(jan6[0])),
     )
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"context hash mismatch"):
         reconstructed_engine(bundle_of((jan5, jan6)), replay=replay)
 
 

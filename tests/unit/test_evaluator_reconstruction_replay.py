@@ -3,7 +3,8 @@
 Issue 55: the bundle preparation boundary derives reconstructions through the
 one canonical builder rather than accepting them from the caller, and bundle
 verification re-derives them and requires exact equality, as it already did
-for authentic views.
+for authentic views. Both replay every reconstruction against the one context
+they are handed, and bind a scheduled clock's sessions to their calendar rows.
 """
 
 import pytest
@@ -38,7 +39,10 @@ from drift.evaluator.reconstruction import (
     replay_exploratory_reconstructions,
     verify_exploratory_reconstructions,
 )
-from drift.markets.observation_validation import M1dResolutionContext
+from drift.markets.observation_validation import (
+    M1dResolutionContext,
+    m1d_context_hash,
+)
 
 
 def _replay(
@@ -62,11 +66,15 @@ def _context() -> M1dResolutionContext:
 
 
 def _built(**kwargs: object) -> EvaluationInputBundleV1:
-    """The preparation boundary over the JAN5 and JAN6 scheduled sessions."""
-    sessions = (scheduled_session_case(JAN5)[1], scheduled_session_case(JAN6)[1])
+    """The preparation boundary over the JAN5 scheduled session and its context.
+
+    One session, because each fixture session is generated from its own M1d
+    context and the boundary replays every reconstruction against the one
+    context it is handed.
+    """
     return build_evaluation_input_bundle(
         evaluation_interval=interval(),
-        session_clock=merged_scheduled_clock(sessions),
+        session_clock=merged_scheduled_clock((scheduled_session_case(JAN5)[1],)),
         context=_context(),
         security_identities=(
             SecurityV1(schema_version="1", security_id=SEC),
@@ -150,27 +158,24 @@ def test_the_declared_cohort_is_part_of_what_re_derives() -> None:
 
 
 def test_the_preparation_boundary_derives_reconstructions_itself() -> None:
-    jan5, jan6 = _cases()
+    jan5, _ = _cases()
     built = _built(
         exploratory_cohort=cohort_of(),
-        exploratory_reconstruction_replay=_replay(jan5, jan6),
+        exploratory_reconstruction_replay=_replay(jan5),
     )
 
-    assert set(built.exploratory_reconstructed_observations) == {jan5, jan6}
-    # Identical to assembling the genuine reconstructions by hand.
-    assert built == scheduled_bundle(
-        (jan5, jan6),
-        (scheduled_session_case(JAN5)[1], scheduled_session_case(JAN6)[1]),
-    )
+    assert built.exploratory_reconstructed_observations == (jan5,)
+    # Identical to assembling the genuine reconstruction by hand.
+    assert built == scheduled_bundle((jan5,), (scheduled_session_case(JAN5)[1],))
 
 
 @pytest.mark.parametrize("half", ["cohort", "replay"])
 def test_the_preparation_boundary_refuses_half_a_replay(half: str) -> None:
-    jan5, jan6 = _cases()
+    jan5, _ = _cases()
     kwargs: dict[str, object] = (
         {"exploratory_cohort": cohort_of()}
         if half == "cohort"
-        else {"exploratory_reconstruction_replay": _replay(jan5, jan6)}
+        else {"exploratory_reconstruction_replay": _replay(jan5)}
     )
 
     with pytest.raises(
@@ -183,30 +188,65 @@ def test_the_preparation_boundary_refuses_half_a_replay(half: str) -> None:
         _built(**kwargs)
 
 
+def test_the_preparation_boundary_replays_only_against_its_own_context() -> None:
+    """A request resolving against a different M1d context is refused (F1)."""
+    jan5, jan6 = _cases()
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^exploratory reconstruction replay resolves against another M1d "
+            rf"context than {m1d_context_hash(_context())}: "
+            rf"\('{source_request(jan6)[0].input_context_hash}',\)$"
+        ),
+    ):
+        _built(
+            exploratory_cohort=cohort_of(),
+            exploratory_reconstruction_replay=_replay(jan5, jan6),
+        )
+
+
+def test_the_preparation_boundary_binds_each_session_to_its_calendar_row() -> None:
+    """A regular 16:00 bar cannot be paired with a 13:00 early-close session."""
+    regular, _ = scheduled_session_case(JAN6)
+    _, early_session = scheduled_session_case(JAN6, "early_close")
+    context = source_request(regular)[1]
+
+    with pytest.raises(
+        ValueError,
+        match=r"^exploratory reconstruction on XNYS 2026-01-06 does not bind the "
+        r"scheduled calendar row its clock session was generated from$",
+    ):
+        build_evaluation_input_bundle(
+            evaluation_interval=interval(),
+            session_clock=merged_scheduled_clock((early_session,)),
+            context=context,
+            exploratory_cohort=cohort_of(),
+            exploratory_reconstruction_replay=_replay(regular),
+        )
+
+
 # --- bundle verification ----------------------------------------------------------
 
 
 def test_verification_re_derives_the_bundle_reconstructions() -> None:
-    jan5, jan6 = _cases()
+    jan5, _ = _cases()
     built = _built(
         exploratory_cohort=cohort_of(),
-        exploratory_reconstruction_replay=_replay(jan5, jan6),
+        exploratory_reconstruction_replay=_replay(jan5),
     )
 
     verify_evaluation_input_bundle(
         bundle=built,
         context=_context(),
         exploratory_cohort=cohort_of(),
-        exploratory_reconstruction_replay=_replay(jan6, jan5),
+        exploratory_reconstruction_replay=_replay(jan5),
     )
 
 
 def test_verification_refuses_reconstructions_it_cannot_re_derive() -> None:
-    jan5, jan6 = _cases()
-    carrying = scheduled_bundle(
-        (jan5, jan6),
-        (scheduled_session_case(JAN5)[1], scheduled_session_case(JAN6)[1]),
-    )
+    jan5, _ = _cases()
+    carrying = scheduled_bundle((jan5,), (scheduled_session_case(JAN5)[1],))
 
     with pytest.raises(
         ValueError,
@@ -219,12 +259,9 @@ def test_verification_refuses_reconstructions_it_cannot_re_derive() -> None:
 
 
 def test_verification_refuses_a_forged_reconstruction() -> None:
-    jan5, jan6 = _cases()
+    jan5, _ = _cases()
     forged = _forged_close(jan5)
-    carrying = scheduled_bundle(
-        (forged, jan6),
-        (scheduled_session_case(JAN5)[1], scheduled_session_case(JAN6)[1]),
-    )
+    carrying = scheduled_bundle((forged,), (scheduled_session_case(JAN5)[1],))
 
     with pytest.raises(
         ValueError,
@@ -237,21 +274,60 @@ def test_verification_refuses_a_forged_reconstruction() -> None:
             bundle=carrying,
             context=_context(),
             exploratory_cohort=cohort_of(),
-            exploratory_reconstruction_replay=_replay(jan5, jan6),
+            exploratory_reconstruction_replay=_replay(jan5),
+        )
+
+
+def test_verification_replays_only_against_its_own_context() -> None:
+    """The reviewer's context swap: a replay under another context is refused.
+
+    The bundle carries the JAN6 reconstruction and the replay re-derives it
+    exactly, but from JAN6's context, while the verifier holds JAN5's.
+    """
+    _, jan6 = _cases()
+    carrying = scheduled_bundle((jan6,), (scheduled_session_case(JAN6)[1],))
+
+    with pytest.raises(
+        ValueError,
+        match=r"^exploratory reconstruction replay resolves against another M1d ",
+    ):
+        verify_evaluation_input_bundle(
+            bundle=carrying,
+            context=_context(),
+            exploratory_cohort=cohort_of(),
+            exploratory_reconstruction_replay=_replay(jan6),
+        )
+
+
+def test_verification_binds_each_session_to_its_calendar_row() -> None:
+    regular, _ = scheduled_session_case(JAN6)
+    _, early_session = scheduled_session_case(JAN6, "early_close")
+    carrying = scheduled_bundle((regular,), (early_session,))
+
+    with pytest.raises(
+        ValueError,
+        match=r"^exploratory reconstruction on XNYS 2026-01-06 does not bind the "
+        r"scheduled calendar row",
+    ):
+        verify_evaluation_input_bundle(
+            bundle=carrying,
+            context=source_request(regular)[1],
+            exploratory_cohort=cohort_of(),
+            exploratory_reconstruction_replay=_replay(regular),
         )
 
 
 @pytest.mark.parametrize("half", ["cohort", "replay"])
 def test_verification_refuses_half_a_replay(half: str) -> None:
-    jan5, jan6 = _cases()
+    jan5, _ = _cases()
     built = _built(
         exploratory_cohort=cohort_of(),
-        exploratory_reconstruction_replay=_replay(jan5, jan6),
+        exploratory_reconstruction_replay=_replay(jan5),
     )
     kwargs: dict[str, object] = (
         {"exploratory_cohort": cohort_of()}
         if half == "cohort"
-        else {"exploratory_reconstruction_replay": _replay(jan5, jan6)}
+        else {"exploratory_reconstruction_replay": _replay(jan5)}
     )
 
     with pytest.raises(
