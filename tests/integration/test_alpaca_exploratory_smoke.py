@@ -312,13 +312,13 @@ def test_the_bridge_bundle_drives_exploratory_decisions_on_reconstructed_evidenc
 def test_a_trading_target_fails_closed_at_the_next_open(
     intake: AlpacaExploratoryIntakeResult,
 ) -> None:
-    """Deciding on reconstructed evidence is admitted; executing on it is not.
+    """Deciding on the bridge bundle is admitted; executing still halts.
 
-    The first decision stages a buy, and the next open halts INDETERMINATE in
-    the execution phase instead of inventing an execution listing or price
-    the scheduled bundle cannot prove. The cause is pinned so that a
-    different fail-closed path cannot stand in for this one. No fill is
-    minted.
+    Issue 54 prices reconstructed opens and closes, but the bridge supplies no
+    M1b listing role evidence, so the next open halts INDETERMINATE in the
+    execution phase instead of inventing an execution listing. The cause is
+    pinned so that a different fail-closed path cannot stand in for this one.
+    No fill is minted.
     """
     artifacts, strategy = _run(intake, BUY_TEN_AAPL)
     result = artifacts.result

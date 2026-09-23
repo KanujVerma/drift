@@ -22,6 +22,9 @@ from pydantic import Field, field_validator, model_validator
 
 from drift.domain.common import FrozenModel, NonBlankStr, SHA256Hash, UTCDateTime
 from drift.domain.evaluator_execution import ExecutionFillV1, FillRejectionV1
+from drift.domain.evaluator_exploratory_accounting import (
+    ExploratoryReconstructedAccountingPriceV1,
+)
 from drift.domain.evaluator_exploratory_strategy import (
     EXPLORATORY_RECONSTRUCTED_EVIDENCE_GRADE,
     RECONSTRUCTED_DECISION_LIMITATIONS,
@@ -314,6 +317,72 @@ class ExploratoryStrategyDecisionTraceEventV1(_TraceEventBaseV1):
         return self
 
 
+class ExploratoryAccountingPriceTraceEventV1(_TraceEventBaseV1):
+    """The EXPLORATORY reconstructed prices one accounting phase consumed.
+
+    Issue 54: in the reconstructed lane the open execution phase prices fills,
+    and the close mark phase prices holdings, from verified reconstructions.
+    The fill and mark events that follow carry only numbers, so this distinct
+    event names every price record they read, in full, and the weaker grade
+    stays auditable from the trace alone.
+    """
+
+    kind: Literal["exploratory_accounting_price"] = "exploratory_accounting_price"
+    evidence_grade: ExploratoryReconstructedEvidenceGrade = (
+        EXPLORATORY_RECONSTRUCTED_EVIDENCE_GRADE
+    )
+    is_promotion_grade_evidence: Literal[False] = False
+    phase: Literal[EvaluationPhase.OPEN_EXECUTION, EvaluationPhase.CLOSE_MARK]
+    prices: tuple[ExploratoryReconstructedAccountingPriceV1, ...]
+    acknowledged_limitations: tuple[NonBlankStr, ...]
+
+    @field_validator("prices")
+    @classmethod
+    def canonicalize_prices(
+        cls, values: tuple[ExploratoryReconstructedAccountingPriceV1, ...]
+    ) -> tuple[ExploratoryReconstructedAccountingPriceV1, ...]:
+        if not values:
+            raise ValueError(
+                "an exploratory accounting price event must name the prices it read"
+            )
+        securities = tuple(item.security_id for item in values)
+        if len(set(securities)) != len(securities):
+            raise ValueError("exploratory accounting prices must be unique by security")
+        return tuple(sorted(values, key=lambda item: _security_order(item.security_id)))
+
+    @field_validator("acknowledged_limitations")
+    @classmethod
+    def canonicalize_price_limitations(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        return _canonical_digests(values, "acknowledged limitations")
+
+    @model_validator(mode="after")
+    def validate_exploratory_prices(self) -> Self:
+        missing = tuple(
+            sorted(
+                set(RECONSTRUCTED_DECISION_LIMITATIONS)
+                - set(self.acknowledged_limitations)
+            )
+        )
+        if missing:
+            raise ValueError(
+                "an exploratory accounting price event omits required "
+                f"limitations: {missing}"
+            )
+        role = "open" if self.phase is EvaluationPhase.OPEN_EXECUTION else "close"
+        for price in self.prices:
+            if price.field_role != role:
+                raise ValueError(
+                    f"the {self.phase.value} phase reads {role} prices, not "
+                    f"{price.field_role} for security {price.security_id}"
+                )
+            if price.session_key != self.session_key:
+                raise ValueError(
+                    f"an exploratory accounting price for security "
+                    f"{price.security_id} belongs to another session"
+                )
+        return self
+
+
 class IndeterminateCauseTraceEventV1(_TraceEventBaseV1):
     """The exact phase and cause that made an outcome unprovable."""
 
@@ -332,6 +401,7 @@ type EvaluatorTraceEventV1 = Annotated[
     | SessionMarkTraceEventV1
     | StrategyDecisionTraceEventV1
     | ExploratoryStrategyDecisionTraceEventV1
+    | ExploratoryAccountingPriceTraceEventV1
     | IndeterminateCauseTraceEventV1,
     Field(discriminator="kind"),
 ]
