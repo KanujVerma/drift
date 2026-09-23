@@ -55,11 +55,21 @@ in ``.python-version``. ``verify_replay_interpreter`` checks that identity
 before any archive is extracted, and ``verify_replay_child_interpreter`` checks
 it again for the child interpreter that actually recomputes the derivation.
 
+The interpreter is not the whole environment. ``verify_replay_distributions``
+also holds the installed distribution set to ``uv.lock`` before any archive is
+extracted, and ``verify_replay_child_distributions`` holds the replay child to
+it too (issue #53), so a package upgraded or installed outside ``uv sync`` is
+reported as an environment mismatch rather than surfacing later as a semantic
+one. A locked package that is not installed is allowed, because the lock
+resolves every platform and markers exclude some packages from any one of
+them; a missing dependency the replay needs fails loudly on import instead.
+
 Failures fall into exactly four classes, each a direct subclass of
 ``PinnedM1dReplayError`` whose message starts with its code:
 
 * ``PINNED_REPLAY_ENVIRONMENT_MISMATCH``: the running or child interpreter is
-  not the pinned one. The message names the expected and the found identity.
+  not the pinned one, or its installed distributions differ from ``uv.lock``.
+  The message names the expected and the found identity or versions.
 * ``PINNED_REPLAY_ENVIRONMENT_ARTIFACT_UNAVAILABLE``: a required replay
   environment artifact cannot be obtained, such as the pinned interpreter
   executable or the historical Git objects the replay extracts.
@@ -75,6 +85,7 @@ Nothing on this lane skips. Each class is a hard failure.
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
 import os
 import re
@@ -82,7 +93,8 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-from collections.abc import Mapping
+import tomllib
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -98,6 +110,10 @@ PINNED_M1D_GENERATIONS: Mapping[str, str] = {
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PYTHON_PIN_PATH = REPO_ROOT / ".python-version"
 """The single exact interpreter pin, shared with uv and with CI."""
+LOCKFILE_PATH = REPO_ROOT / "uv.lock"
+PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
+"""Declares the dependency groups ``uv sync`` installs by default."""
+"""The locked distribution set every replay environment must be synced to."""
 MATRIX_MODULE = "tests/integration/test_m1d_adversarial_matrix.py"
 M1C_COMPOSITION_NODE = (
     "tests/integration/test_m1d_compatibility.py::"
@@ -297,6 +313,356 @@ def verify_replay_child_interpreter(
             f"{executable}"
         )
     return reported
+
+
+#: Printed by the replay child: its installed distributions, as JSON. A
+#: distribution whose metadata carries no version is reported as "" so the
+#: parent classifies the child's environment exactly as it classifies its own.
+_DISTRIBUTIONS_PROGRAM = (
+    "import importlib.metadata, json, re\n"
+    "found = {}\n"
+    "for item in importlib.metadata.distributions():\n"
+    "    name = item.metadata['Name']\n"
+    "    if name:\n"
+    "        key = re.sub(r'[-_.]+', '-', name).lower()\n"
+    "        found.setdefault(key, set()).add(item.metadata.get('Version') or '')\n"
+    "print(json.dumps({key: sorted(value) for key, value in found.items()}))\n"
+)
+_LOCKFILE_PIN = "uv.lock"
+
+
+def _distribution_name(name: str) -> str:
+    """Normalize a distribution name the way PEP 503 compares names."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+@dataclass(frozen=True, slots=True)
+class LockedEnvironment:
+    """What ``uv.lock`` resolves, and what it requires of this interpreter.
+
+    ``locked`` names every package the lock resolves for any platform, with
+    the versions it admits. ``required`` is the dependency closure of the
+    project and its dev group with every environment marker evaluated for the
+    running interpreter, one exact version per name: what ``uv sync --locked``
+    installs here.
+    """
+
+    locked: Mapping[str, frozenset[str]]
+    required: Mapping[str, str]
+
+
+def _read_lockfile(lock_path: Path, *, authenticate: bool) -> dict[str, object]:
+    """Read the lock, authenticated against its protected pin unless told not to.
+
+    An unauthenticated lock would let an edited lock and a matching drifted
+    environment agree with each other, so the reference the environment is
+    held to is itself held to the pin first.
+    """
+    try:
+        raw = lock_path.read_bytes()
+    except OSError as error:
+        raise PinnedReplayIntegrityFailure(
+            f"cannot read lockfile {lock_path}: {error}"
+        ) from error
+    if authenticate:
+        expected = PROTECTED_M1D_SHA256[_LOCKFILE_PIN]
+        found = hashlib.sha256(raw).hexdigest()
+        if found != expected:
+            raise PinnedReplayIntegrityFailure(
+                f"lockfile {lock_path} sha256 mismatch: expected {expected}, "
+                f"got {found}"
+            )
+    try:
+        document = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        raise PinnedReplayIntegrityFailure(
+            f"cannot read lockfile {lock_path}: {error}"
+        ) from error
+    return document
+
+
+def _default_dependency_groups() -> tuple[str, ...] | None:
+    """The dependency groups ``uv sync`` installs by default, from pyproject.
+
+    ``tool.uv.default-groups`` defaults to ``["dev"]``; ``"all"`` selects every
+    group and is returned as ``None``.
+    """
+    try:
+        document = tomllib.loads(PYPROJECT_PATH.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        raise PinnedReplayIntegrityFailure(
+            f"cannot read {PYPROJECT_PATH}: {error}"
+        ) from error
+    uv = document.get("tool", {}).get("uv", {})
+    groups = uv.get("default-groups", ["dev"]) if isinstance(uv, dict) else ["dev"]
+    if groups == "all":
+        return None
+    if not isinstance(groups, list) or not all(isinstance(g, str) for g in groups):
+        raise PinnedReplayIntegrityFailure(
+            f"{PYPROJECT_PATH} tool.uv.default-groups must be a list of names"
+        )
+    return tuple(groups)
+
+
+def locked_environment(
+    lock_path: Path = LOCKFILE_PATH,
+    *,
+    authenticate: bool = True,
+    default_groups: Collection[str] | None | str = "pyproject",
+) -> LockedEnvironment:
+    """Resolve what the lock requires of this interpreter, failing closed.
+
+    The closure starts at the single project root: its dependencies, plus the
+    dependency groups ``uv sync`` installs by default. A ``virtual`` root is
+    never installed itself, so only an editable root is required.
+    ``default_groups`` defaults to what ``pyproject.toml`` declares; tests pass
+    an explicit collection, or ``None`` for every group.
+    """
+    try:
+        from packaging.markers import (
+            InvalidMarker,
+            Marker,
+            UndefinedComparison,
+            UndefinedEnvironmentName,
+        )
+    except ImportError as error:
+        raise PinnedReplayEnvironmentArtifactUnavailable(
+            f"the marker evaluator the lock requires is unavailable: {error}"
+        ) from error
+
+    document = _read_lockfile(lock_path, authenticate=authenticate)
+
+    def refuse(detail: str) -> PinnedReplayIntegrityFailure:
+        return PinnedReplayIntegrityFailure(
+            f"cannot read lockfile {lock_path}: {detail}"
+        )
+
+    packages = document.get("package")
+    if not isinstance(packages, list) or not packages:
+        raise refuse("it locks no packages")
+    by_name: dict[str, list[dict[str, object]]] = {}
+    roots: list[dict[str, object]] = []
+    for entry in packages:
+        name = entry.get("name") if isinstance(entry, dict) else None
+        version = entry.get("version") if isinstance(entry, dict) else None
+        if not isinstance(name, str) or not isinstance(version, str):
+            raise refuse("a locked package lacks a name or a version")
+        by_name.setdefault(_distribution_name(name), []).append(entry)
+        source = entry.get("source")
+        if isinstance(source, dict) and ("editable" in source or "virtual" in source):
+            roots.append(entry)
+    if len(roots) != 1:
+        raise refuse(f"expected exactly one project package, found {len(roots)}")
+
+    def edges(container: dict[str, object], key: str, owner: str) -> list[object]:
+        value = container.get(key, [])
+        if not isinstance(value, list):
+            raise refuse(f"{owner} {key} is not a list")
+        return value
+
+    def resolve(edge: object) -> dict[str, object] | None:
+        if not isinstance(edge, dict) or not isinstance(edge.get("name"), str):
+            raise refuse("a dependency edge lacks a name")
+        marker = edge.get("marker")
+        if marker is not None:
+            try:
+                if not Marker(str(marker)).evaluate():
+                    return None
+            except (
+                InvalidMarker,
+                UndefinedComparison,
+                UndefinedEnvironmentName,
+            ) as error:
+                raise refuse(f"unevaluable marker {marker!r}: {error}") from error
+        candidates = by_name.get(_distribution_name(str(edge["name"])), [])
+        if edge.get("version") is not None:
+            candidates = [c for c in candidates if c["version"] == edge["version"]]
+        if len(candidates) != 1:
+            raise refuse(
+                f"dependency {edge['name']} resolves to {len(candidates)} locked "
+                "packages"
+            )
+        return candidates[0]
+
+    (root,) = roots
+    root_name = str(root["name"])
+    required: dict[str, str] = {}
+    source = root.get("source")
+    if not (isinstance(source, dict) and "virtual" in source):
+        required[_distribution_name(root_name)] = str(root["version"])
+    pending = list(edges(root, "dependencies", root_name))
+    groups = root.get("dev-dependencies", {})
+    if not isinstance(groups, dict):
+        raise refuse("the project dev-dependencies are not a table")
+    selected = (
+        _default_dependency_groups()
+        if default_groups == "pyproject"
+        else default_groups
+    )
+    for group in sorted(groups):
+        if selected is None or group in selected:
+            pending.extend(edges(groups, group, f"{root_name} dev-dependencies"))
+    expanded: set[tuple[str, str]] = set()
+    visited: set[str] = set()
+    while pending:
+        edge = pending.pop(0)
+        entry = resolve(edge)
+        if entry is None:
+            continue
+        key = _distribution_name(str(entry["name"]))
+        version = str(entry["version"])
+        if key in required and required[key] != version:
+            raise refuse(f"{key} is required at both {required[key]} and {version}")
+        required.setdefault(key, version)
+        if key not in visited:
+            visited.add(key)
+            pending.extend(edges(entry, "dependencies", key))
+        # Extras are expanded per edge, so an extra requested on a later edge
+        # to an already visited package is still honoured.
+        extras = edge.get("extra", []) if isinstance(edge, dict) else []
+        optional = entry.get("optional-dependencies", {})
+        if not isinstance(extras, list) or not isinstance(optional, dict):
+            raise refuse(f"{key} extras or optional-dependencies are malformed")
+        for extra in extras:
+            if (key, str(extra)) not in expanded:
+                expanded.add((key, str(extra)))
+                pending.extend(
+                    edges(optional, str(extra), f"{key} optional-dependencies")
+                )
+    locked = {
+        name: frozenset(str(item["version"]) for item in entries)
+        for name, entries in sorted(by_name.items())
+    }
+    return LockedEnvironment(locked=locked, required=dict(sorted(required.items())))
+
+
+def observed_distribution_versions() -> dict[str, frozenset[str]]:
+    """Return the distributions installed for this interpreter, by name.
+
+    A distribution whose metadata carries no version is reported as "".
+    """
+    found: dict[str, set[str]] = {}
+    for distribution in importlib.metadata.distributions():
+        name = distribution.metadata["Name"]
+        if name:
+            found.setdefault(_distribution_name(name), set()).add(
+                distribution.metadata.get("Version") or ""
+            )
+    return {name: frozenset(versions) for name, versions in sorted(found.items())}
+
+
+def _verify_distributions(
+    installed: Mapping[str, Collection[str]],
+    *,
+    where: str,
+    lock_path: Path,
+    authenticate: bool,
+) -> int:
+    """Hold an installed distribution set to the lock; return how many checked.
+
+    Every difference is an environment mismatch: a package installed without
+    a version, installed but not locked, installed but not required for this
+    interpreter, installed at another version, or required but missing. Only
+    names and versions are compared; a same-version shadow copy of a package
+    is outside what installed metadata can show.
+    """
+    environment = locked_environment(lock_path, authenticate=authenticate)
+    normalized: dict[str, set[str]] = {}
+    for name, versions in installed.items():
+        normalized.setdefault(_distribution_name(name), set()).update(versions)
+    differences: list[str] = []
+    for name, versions in sorted(normalized.items()):
+        found = sorted(versions)
+        if "" in versions:
+            differences.append(f"{name} is installed with no version")
+        elif name not in environment.locked:
+            differences.append(f"{name} {found} is installed but not locked")
+        elif name not in environment.required:
+            differences.append(
+                f"{name} {found} is installed but uv.lock does not require it "
+                "for this interpreter"
+            )
+        elif found != [environment.required[name]]:
+            differences.append(
+                f"{name} found {found} expected {[environment.required[name]]}"
+            )
+    for name in sorted(set(environment.required) - set(normalized)):
+        differences.append(
+            f"{name} is required at {environment.required[name]} but not installed"
+        )
+    if differences:
+        raise PinnedReplayEnvironmentMismatch(
+            f"installed distributions differ from uv.lock in {where}: "
+            + "; ".join(differences)
+        )
+    return len(normalized)
+
+
+def verify_replay_distributions(
+    *,
+    installed: Mapping[str, Collection[str]] | None = None,
+    lock_path: Path = LOCKFILE_PATH,
+    authenticate: bool = True,
+) -> int:
+    """Require this interpreter's installed distributions to match ``uv.lock``.
+
+    ``installed``, ``lock_path`` and ``authenticate`` exist so tests can present
+    another environment or a synthetic lock; production callers leave them
+    unset, so the lock is always authenticated against its protected pin.
+    """
+    return _verify_distributions(
+        observed_distribution_versions() if installed is None else installed,
+        where="running interpreter",
+        lock_path=lock_path,
+        authenticate=authenticate,
+    )
+
+
+def verify_replay_child_distributions(
+    executable: str,
+    *,
+    environment: Mapping[str, str] | None = None,
+    cwd: Path | None = None,
+    lock_path: Path = LOCKFILE_PATH,
+    authenticate: bool = True,
+) -> int:
+    """Require the replay child's installed distributions to match ``uv.lock``."""
+    try:
+        completed = subprocess.run(
+            [executable, "-c", _DISTRIBUTIONS_PROGRAM],
+            cwd=cwd,
+            env=None if environment is None else dict(environment),
+            check=False,
+            capture_output=True,
+            timeout=_CHILD_START_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise PinnedReplayEnvironmentArtifactUnavailable(
+            f"replay child interpreter {executable} could not report its "
+            f"distributions: {error}"
+        ) from error
+    try:
+        reported = json.loads(completed.stdout.decode("utf-8"))
+    except UnicodeDecodeError, ValueError:
+        reported = None
+    well_formed = isinstance(reported, dict) and all(
+        isinstance(name, str)
+        and isinstance(versions, list)
+        and all(isinstance(version, str) for version in versions)
+        for name, versions in reported.items()
+    )
+    if completed.returncode != 0 or not well_formed:
+        raise PinnedReplayEnvironmentArtifactUnavailable(
+            f"replay child interpreter {executable} could not report its "
+            f"distributions (exit {completed.returncode}): "
+            f"{_combined_output(completed)}"
+        )
+    return _verify_distributions(
+        reported,
+        where=f"replay child interpreter {executable}",
+        lock_path=lock_path,
+        authenticate=authenticate,
+    )
 
 
 def _load_inventory() -> dict[str, str]:
@@ -904,6 +1270,7 @@ def extract_m1d_archive(
             f"unapproved M1d interpreter commit: {commit}"
         )
     verify_replay_interpreter(observed=observed_identity)
+    verify_replay_distributions()
     destination.mkdir(parents=True, exist_ok=True)
     _unpack_archive(destination, commit)
     verify_m1d_archive_inputs(root=destination)
@@ -922,6 +1289,7 @@ def extract_m1d_generation_archive(
         return extract_m1d_archive(destination, observed_identity=observed_identity)
     pins = _historical_generation_pins(generation)
     verify_replay_interpreter(observed=observed_identity)
+    verify_replay_distributions()
     destination.mkdir(parents=True, exist_ok=True)
     _unpack_archive(destination, PINNED_M1D_GENERATIONS[generation])
     _verify_pinned_inputs(
@@ -1032,14 +1400,16 @@ def run_replay_child(
 ) -> PinnedM1dReplayResult:
     """Run archived nodes in an authenticated archive and classify any failure.
 
-    Order is load-bearing: interpreter identity, then protected input bytes,
-    then the child interpreter's own identity, then the child import location,
-    and only then the replay itself. A failure of the replay can therefore
-    only be a semantic replay mismatch.
+    Order is load-bearing: interpreter identity and installed distributions,
+    then protected input bytes, then the child interpreter's own identity and
+    distributions, then the child import location, and only then the replay
+    itself. A failure of the replay can therefore only be a semantic replay
+    mismatch.
     """
     if not nodes:
         raise PinnedReplayIntegrityFailure(f"{label} replay declares no nodes")
     expected = verify_replay_interpreter(observed=observed_identity)
+    verify_replay_distributions()
     _verify_pinned_inputs(
         root=archive_root,
         pins=expected_pins,
@@ -1049,6 +1419,9 @@ def run_replay_child(
     environment = _child_environment(archive_root)
     interpreter = sys.executable if executable is None else executable
     verify_replay_child_interpreter(
+        interpreter, environment=environment, cwd=archive_root
+    )
+    verify_replay_child_distributions(
         interpreter, environment=environment, cwd=archive_root
     )
     imported = subprocess.run(
