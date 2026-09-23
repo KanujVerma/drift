@@ -37,6 +37,7 @@ from drift.evaluator.bundles import (
 from drift.evaluator.reconstruction import (
     ExploratoryReconstructionReplay,
     replay_exploratory_reconstructions,
+    require_scheduled_calendar_row,
     verify_exploratory_reconstructions,
 )
 from drift.markets.observation_validation import (
@@ -346,3 +347,39 @@ def test_a_bundle_without_reconstructions_needs_no_replay() -> None:
     assert built.exploratory_reconstructed_observations == ()
 
     verify_evaluation_input_bundle(bundle=built, context=_context())
+
+
+# --- the calendar-row binding, clause by clause ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "dropped", ["scheduled_session_hash", "generated_session_row_hash"]
+)
+def test_each_calendar_row_hash_is_bound_on_its_own(dropped: str) -> None:
+    """A clock session lacking either hash does not time this reconstruction.
+
+    The same scheduled record regenerated under another schedule policy would
+    keep the scheduled session hash and change only the generated row, so each
+    clause must hold by itself.
+    """
+    observation, session = scheduled_session_case(JAN5)
+    require_scheduled_calendar_row(observation, session)
+    missing = getattr(observation, dropped)
+    assert missing in session.authority_record_hashes
+    stripped = session.model_construct(
+        **(
+            dict(session)
+            | {
+                "authority_record_hashes": tuple(
+                    item for item in session.authority_record_hashes if item != missing
+                )
+            }
+        )
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"^exploratory reconstruction on XNYS 2026-01-05 does not bind the "
+        r"scheduled calendar row",
+    ):
+        require_scheduled_calendar_row(observation, stripped)

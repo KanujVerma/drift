@@ -118,6 +118,7 @@ from drift.domain.evaluator_trace import (  # noqa: E402
     EvaluationPhase,
     evaluation_trace_log_hash,
 )
+from drift.evaluator.bundles import verify_evaluation_input_bundle  # noqa: E402
 from drift.evaluator.engine import (  # noqa: E402
     LANE_MARK_GRADE,
     SessionEvaluatorEngine,
@@ -234,6 +235,27 @@ def test_the_smoke_run_seals_a_complete_trace_log(
     # Every trace event binds a session the bridge's own clock contains.
     covered = {item.session_key for item in intake.session_clock.sessions}
     assert {item.session_key for item in trace.events} <= covered
+
+
+def test_the_bridge_bundle_verifies_against_its_own_context(
+    intake: AlpacaExploratoryIntakeResult,
+) -> None:
+    """Issue 55: every bridge reconstruction re-derives under the one context.
+
+    The positive multi-member case at the bundle boundary: two cohort members
+    over every session, all replayed against the bridge's single M1d context
+    and bound to the scheduled clock's calendar rows.
+    """
+    assert len(intake.bundle.exploratory_reconstructed_observations) == 2 * len(
+        SESSION_DATES
+    )
+
+    verify_evaluation_input_bundle(
+        bundle=intake.bundle,
+        context=intake.context,
+        exploratory_cohort=intake.cohort,
+        exploratory_reconstruction_replay=intake.reconstruction_replay,
+    )
 
 
 def test_the_bridge_bundle_drives_exploratory_decisions_on_reconstructed_evidence(
