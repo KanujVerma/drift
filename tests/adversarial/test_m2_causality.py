@@ -391,33 +391,34 @@ def test_a_bundle_refuses_a_forged_acausal_decision_view() -> None:
 
 
 def test_a_post_cutoff_knowledge_clock_on_decision_evidence_fails_loudly() -> None:
-    """Third line of defence: the strategy boundary rechecks the clocks itself.
+    """A bundle that never passed validation is refused when the engine is built.
 
-    Reaching this guard requires a bundle that never passed validation, so the
-    bundle is built with ``model_construct``. Post-cutoff leakage must fail
-    loudly here rather than being silently filtered into a COMPLETE run.
+    The poisoned bundle is assembled with ``model_construct``, past every
+    validator. Since issue 78 the engine revalidates its inputs, so the forged
+    decision query is refused by its own constructor before any session is
+    stepped. The strategy boundary's recheck of the same clocks stays proven
+    directly by ``test_context_rejects_a_forged_knowledge_clock_past_the_cutoff``.
     """
     bundle = _poisoned_decision_bundle(
         _leaky_decision_view(DAY_1, knowledge_cutoff=_close_of(DAY_2))
     )
 
     with pytest.raises(
-        ValidationError,
-        match=r"decision evidence knowledge cutoff follows its decision cutoff",
+        ValidationError, match=r"knowledge cutoff cannot follow decision time"
     ):
-        _run(_engine(bundle=bundle))
+        _engine(bundle=bundle)
 
 
 def test_a_post_cutoff_effective_clock_on_decision_evidence_fails_loudly() -> None:
+    """The effective-clock twin; see the strategy test of the same guard."""
     bundle = _poisoned_decision_bundle(
         _leaky_decision_view(DAY_1, effective_cutoff=_close_of(DAY_2))
     )
 
     with pytest.raises(
-        ValidationError,
-        match=r"decision evidence effective cutoff follows its decision cutoff",
+        ValidationError, match=r"effective cutoff cannot follow decision time"
     ):
-        _run(_engine(bundle=bundle))
+        _engine(bundle=bundle)
 
 
 def test_a_decision_view_sourced_after_its_decision_session_fails_loudly() -> None:

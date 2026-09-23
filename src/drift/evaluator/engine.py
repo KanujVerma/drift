@@ -44,10 +44,12 @@ The realized lane keeps reading authorized accounting views only.
 """
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Any, Literal, cast
 from uuid import UUID
+
+from pydantic import BaseModel
 
 from drift.domain.assertions import ResolutionMode
 from drift.domain.common import UUID7
@@ -171,6 +173,16 @@ LANE_MARK_GRADE: dict[str, MarkEvidenceGrade] = {
 }
 
 
+def _revalidated[M: BaseModel](model: M) -> M:
+    """Re-run a model's validators over its own content (issue 78).
+
+    Pydantic trusts an existing instance placed in a typed field, so an input
+    built with ``model_construct``, or one carrying a foreign payload in a
+    nested field, would otherwise be evaluated as if it had been validated.
+    """
+    return type(model).model_validate(model.model_dump(mode="python", warnings=False))
+
+
 def _security_order(security_id: UUID) -> bytes:
     """Canonical collection order for securities: raw UUID bytes."""
     return security_id.bytes
@@ -250,6 +262,42 @@ class SessionEvaluatorEvidence:
     cash_in_lieu_rates: tuple[CashInLieuRateV1, ...] = ()
     exploratory_cohort: ExploratoryCohortAuthorizationV1 | None = None
     exploratory_reconstruction_replay: ExploratoryReconstructionReplay | None = None
+
+
+def _revalidated_evidence(
+    evidence: SessionEvaluatorEvidence,
+) -> SessionEvaluatorEvidence:
+    """Revalidate every model the evidence carries; contexts validate in M1d."""
+    replay = evidence.exploratory_reconstruction_replay
+    return replace(
+        evidence,
+        listing_role_records=tuple(map(_revalidated, evidence.listing_role_records)),
+        listing_termination_records=tuple(
+            map(_revalidated, evidence.listing_termination_records)
+        ),
+        listing_lifecycle_records=tuple(
+            map(_revalidated, evidence.listing_lifecycle_records)
+        ),
+        economic_outcomes=tuple(map(_revalidated, evidence.economic_outcomes)),
+        tie_breaking_rules=tuple(map(_revalidated, evidence.tie_breaking_rules)),
+        due_bill_rules=tuple(map(_revalidated, evidence.due_bill_rules)),
+        cash_in_lieu_rates=tuple(map(_revalidated, evidence.cash_in_lieu_rates)),
+        exploratory_cohort=(
+            None
+            if evidence.exploratory_cohort is None
+            else _revalidated(evidence.exploratory_cohort)
+        ),
+        exploratory_reconstruction_replay=(
+            None
+            if replay is None
+            else ExploratoryReconstructionReplay(
+                policy=_revalidated(replay.policy),
+                requests=tuple(
+                    (_revalidated(query), context) for query, context in replay.requests
+                ),
+            )
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -459,6 +507,13 @@ class SessionEvaluatorEngine:
         book_currency_namespace: str,
         book_currency_code: str,
     ) -> None:
+        # Issue 78: run only on inputs revalidated through their canonical
+        # boundary, so a stale self-hash or a foreign payload fails closed here.
+        bundle = _revalidated(bundle)
+        admission = _revalidated(admission)
+        protocol = _revalidated(protocol)
+        cost_model = _revalidated(cost_model)
+        evidence = _revalidated_evidence(evidence)
         if admission.input_bundle_hash != bundle.bundle_hash:
             raise ValueError(
                 "the admission must admit this exact bundle: admission binds "
@@ -1003,8 +1058,9 @@ class SessionEvaluatorEngine:
                 MarkPriceV1(
                     security_id=record.security_id,
                     close_price=record.unadjusted_price,
+                    # Structurally exploratory, whatever the lane mapping says.
                     evidence=MarkEvidenceV1(
-                        grade=self._mark_grade, evidence_hash=record.price_hash
+                        grade="exploratory", evidence_hash=record.price_hash
                     ),
                 )
                 for record in records
