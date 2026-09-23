@@ -58,7 +58,7 @@ from drift.domain.evaluator_bundles import (
     EvaluationInputBundleV1,
     EvaluationRunIdentityV1,
 )
-from drift.domain.evaluator_clock import EvaluationSessionV1
+from drift.domain.evaluator_clock import EvaluationSessionV1, SessionClockV1
 from drift.domain.evaluator_corporate_actions import (
     CashInLieuRateV1,
     DueBillRuleV1,
@@ -150,6 +150,7 @@ from drift.domain.securities import (
 from drift.domain.sessions import SessionKeyV1
 from drift.domain.universes import StructuralEligibilityClassification
 from drift.evaluator.bundles import validate_exploratory_admission
+from drift.evaluator.clock import build_scheduled_reconstruction_clock
 from drift.evaluator.corporate_actions import CorporateActionProcessor
 from drift.evaluator.execution import AtomicRebalanceEngine, resolve_execution_listings
 from drift.evaluator.portfolio import (
@@ -410,7 +411,8 @@ class _Loop:
 
     state: PortfolioStateV1
     staged_targets: tuple[SecurityTargetPositionV1, ...] = ()
-    has_staged_decision: bool = False
+    #: The session whose close staged the pending decision, if one is pending.
+    staged_decision_session: EvaluationSessionV1 | None = None
     events: list[EvaluatorTraceEventV1] = field(default_factory=list)
     checkpoints: list[_Checkpoint] = field(default_factory=list)
     gross_traded_notional: Decimal = ZERO
@@ -469,9 +471,10 @@ def _resolve_reconstructed_lane(
     * An exploratory admission over a scheduled-reconstruction clock takes
       the reconstructed lane, and only after proving its admission, its
       cohort, and every reconstruction against the bundle, then re-deriving
-      every reconstruction from its exact source inputs (issue 55). A
-      self-consistent reconstruction no source produces never reaches a
-      decision.
+      every reconstruction from its exact source inputs (issue 55), and every
+      clock session a reconstruction is on from its calendar row (issue 84).
+      A self-consistent reconstruction no source produces never reaches a
+      decision, and neither does a session boundary no row states.
     """
     if isinstance(admission, PromotionEvaluationAdmissionV1):
         if bundle.has_exploratory_reconstructions:
@@ -529,7 +532,65 @@ def _resolve_reconstructed_lane(
     verify_exploratory_reconstructions(
         bundle.exploratory_reconstructed_observations, replay=replay, cohort=cohort
     )
+    _require_replayed_clock_sessions(bundle.session_clock, replay)
     return _ReconstructedDecisionLane(admission=admission, cohort=cohort)
+
+
+def _require_replayed_clock_sessions(
+    clock: SessionClockV1, replay: ExploratoryReconstructionReplay
+) -> None:
+    """Re-derive every clock session a reconstruction is on (issue 84).
+
+    ``require_scheduled_calendar_row`` proves a reconstruction names its clock
+    session's calendar row, not that the session keeps that row's boundaries:
+    a session re-hashed around a forged close under the genuine row hashes
+    would time every decision on it. Each replay request is also exactly an
+    input of the canonical scheduled clock builder, so, as for the
+    reconstructions themselves (issue 55), the session must be what that
+    builder derives. Its selection proofs name the query that selected the
+    row, so among the requests on one session only a request sharing that
+    query can derive it exactly, and one must: the clock is built from the
+    replay's own queries. Every other request on it names the same calendar
+    row, and so the same boundaries. A refusal names what differs: the
+    boundaries, the calendar records (such as a session naming two rows), or
+    only the selection proofs.
+    """
+    derived: dict[SessionKeyV1, list[EvaluationSessionV1]] = {}
+    for query, context in replay.requests:
+        session = build_scheduled_reconstruction_clock((query,), context).sessions[0]
+        derived.setdefault(session.session_key, []).append(session)
+    for session in clock.sessions:
+        candidates = derived.get(session.session_key)
+        if candidates is None or session in candidates:
+            continue
+        key = session.session_key
+        where = f"scheduled clock session on {key.mic} {key.local_date.isoformat()}"
+        bounds = (session.opened_at, session.closed_at)
+        same_bounds = tuple(
+            item for item in candidates if (item.opened_at, item.closed_at) == bounds
+        )
+        if any(
+            item.authority_record_hashes == session.authority_record_hashes
+            for item in same_bounds
+        ):
+            raise ValueError(
+                f"{where} carries selection proofs no replay request on it derives"
+            )
+        if same_bounds:
+            raise ValueError(
+                f"{where} names calendar records no replay request on it derives"
+            )
+        rows = " or ".join(
+            f"{opened.isoformat()} to {closed.isoformat()}"
+            for opened, closed in sorted(
+                {(item.opened_at, item.closed_at) for item in candidates}
+            )
+        )
+        raise ValueError(
+            f"{where} is not the session its calendar row re-derives: the clock "
+            f"states {bounds[0].isoformat()} to {bounds[1].isoformat()}, its "
+            f"replay derives {rows}"
+        )
 
 
 def reconstructed_history_sessions(
@@ -539,14 +600,51 @@ def reconstructed_history_sessions(
 
     History is what the clock has stepped and what had closed by the decision
     cutoff: the stepped sessions whose ``closed_at`` is at or before the
-    decision session's own. The clock orders by open time first, so on a
-    multi-venue clock a same-date session can be stepped earlier while closing
-    later; it has not closed at this cutoff and is not history here (#66).
+    decision session's own (#66). On a clock `SessionClockV1` admits this is
+    the whole stepped prefix, because its non-overlap guard closes every
+    stepped session before the next one opens. The filter is defense in depth
+    behind that guard: a same-date session stepped earlier while closing
+    later is refused by the clock, and would not be history here either.
     """
     cutoff = sessions[index].closed_at
     return frozenset(
         item.session_key for item in sessions[: index + 1] if item.closed_at <= cutoff
     )
+
+
+def require_next_open_execution(
+    decision_session: EvaluationSessionV1, execution_session: EvaluationSessionV1
+) -> None:
+    """Refuse to execute a staged decision anywhere but at a later date's open.
+
+    A decision is taken at its session's close and executes at the next
+    session's open (section 13.1), so that session must open at or after the
+    decision cutoff and carry a later local date. On one venue the clock's own
+    guards (non-overlap, local dates in clock order) already make every next
+    session qualify. This checks the pair directly, so a clock that escaped
+    them cannot execute across a decreasing-date inversion, and a same-date
+    open on another venue is refused rather than read as next, whether or
+    not the decision trades. Neither check proves a session's stamps belong
+    to its local date: a realized clock whose keys lag their stamps passes
+    both, and its boundaries are not re-derived here (section 7.5).
+    """
+    decided = decision_session.session_key
+    executing = execution_session.session_key
+    refused = (
+        f"a decision staged at the {decided.mic} {decided.local_date.isoformat()} "
+        f"close cannot execute at the {executing.mic} "
+        f"{executing.local_date.isoformat()} open"
+    )
+    if execution_session.opened_at < decision_session.closed_at:
+        raise IndeterminateExecutionError(
+            f"{refused}: that session opens at "
+            f"{execution_session.opened_at.isoformat()}, before the decision "
+            f"cutoff {decision_session.closed_at.isoformat()}"
+        )
+    if executing.local_date <= decided.local_date:
+        raise IndeterminateExecutionError(
+            f"{refused}: next-open execution requires a later local date"
+        )
 
 
 def _bind_reconstruction(
@@ -986,8 +1084,10 @@ class SessionEvaluatorEngine:
     def _open_execution(
         self, loop: _Loop, index: int, session: EvaluationSessionV1
     ) -> _Halt | None:
-        if not loop.has_staged_decision:
+        decision_session = loop.staged_decision_session
+        if decision_session is None:
             return None
+        require_next_open_execution(decision_session, session)
         targets = {
             target.security_id: target.target_quantity for target in loop.staged_targets
         }
@@ -1056,7 +1156,7 @@ class SessionEvaluatorEngine:
         # The staged decision is consumed whether or not it executed, so a
         # stale intent can never be executed twice.
         loop.staged_targets = ()
-        loop.has_staged_decision = False
+        loop.staged_decision_session = None
         if outcome.classification == "rejected":
             rejection = outcome.rejection
             if rejection is None:  # pragma: no cover - model invariant
@@ -1333,7 +1433,7 @@ class SessionEvaluatorEngine:
             )
         )
         loop.staged_targets = staged
-        loop.has_staged_decision = True
+        loop.staged_decision_session = session
         return None
 
     def _decision_context(
@@ -1481,7 +1581,7 @@ class SessionEvaluatorEngine:
             )
         )
         loop.staged_targets = staged
-        loop.has_staged_decision = True
+        loop.staged_decision_session = session
         return None
 
     def _reconstructed_decision_context(

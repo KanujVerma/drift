@@ -30,6 +30,18 @@ if str(_UNIT_SUPPORT) not in sys.path:
     sys.path.insert(0, str(_UNIT_SUPPORT))
 
 import pytest
+from exploratory_decision_test_support import (
+    JAN5,
+    JAN6,
+    SEC,
+    ReconstructedTargetStrategy,
+    early_close_sessions,
+    reconstructed_engine,
+    run_engine,
+    scheduled_bundle,
+    three_regular_sessions,
+    utc_close,
+)
 from observation_test_support import NormalizationHarness
 from pydantic import ValidationError
 from session_test_support import boundary_at, revision
@@ -75,6 +87,7 @@ from drift.domain.evaluator_clock import (
     SessionClockV1,
     evaluation_session_hash,
     session_clock_hash,
+    session_order_key,
 )
 from drift.domain.evaluator_execution import IndeterminateExecutionError
 from drift.domain.evaluator_lanes import (
@@ -104,7 +117,12 @@ from drift.domain.universes import (
 )
 from drift.evaluator.bundles import assemble_evaluation_input_bundle
 from drift.evaluator.clock import build_realized_session_clock
-from drift.evaluator.engine import SessionEvaluatorEngine, SessionEvaluatorEvidence
+from drift.evaluator.engine import (
+    SessionEvaluatorEngine,
+    SessionEvaluatorEvidence,
+    reconstructed_history_sessions,
+    require_next_open_execution,
+)
 from drift.evaluator.execution import resolve_execution_listing
 from drift.serialization.canonical import content_hash
 
@@ -148,6 +166,24 @@ def _session_at(
         session_hash=HASH_ZERO,
     )
     return draft.model_copy(update={"session_hash": evaluation_session_hash(draft)})
+
+
+def _resealed(session: EvaluationSessionV1, **update: object) -> EvaluationSessionV1:
+    """One session edited and re-hashed, so only a semantic guard can refuse it."""
+    draft = EvaluationSessionV1.model_construct(**(dict(session) | update))
+    return EvaluationSessionV1.model_validate(
+        dict(draft) | {"session_hash": evaluation_session_hash(draft)}
+    )
+
+
+def _xnas_session(day: date, opens_at: time, closes_at: time) -> EvaluationSessionV1:
+    """A second venue's realized session on one local date."""
+    return _resealed(
+        _session_at(day),
+        session_key=SessionKeyV1(mic="XNAS", session_scope="regular", local_date=day),
+        opened_at=datetime.combine(day, opens_at, tzinfo=UTC),
+        closed_at=datetime.combine(day, closes_at, tzinfo=UTC),
+    )
 
 
 def _clock_of(
@@ -1077,6 +1113,260 @@ def test_a_scheduled_clock_must_acknowledge_its_reconstruction() -> None:
             mode="scheduled_session_reconstruction",
             limitations=(ALPACA_LIMITATION_ABSENT_HALTS,),
         )
+
+
+# --- clock integrity (issue 84) ----------------------------------------------
+
+#: Forged boundaries for the genuine 13:00 New York early close on JAN6. Each
+#: is re-hashed under that session's genuine calendar row hashes (P1).
+FORGED_EARLY_CLOSE_BOUNDARIES: dict[str, dict[str, datetime]] = {
+    "regular-16-00-close-on-a-13-00-row": {"closed_at": utc_close(JAN6, "regular")},
+    "10-00-new-york-cutoff-inside-the-session": {
+        "closed_at": datetime(2026, 1, 6, 15, 0, tzinfo=UTC)
+    },
+    "jan6-boundaries-on-the-jan7-wall-clock": {
+        "opened_at": datetime(2026, 1, 7, 14, 30, tzinfo=UTC),
+        "closed_at": datetime(2026, 1, 7, 21, 0, tzinfo=UTC),
+    },
+}
+
+
+def test_a_genuine_early_close_row_decides_at_its_13_00_close() -> None:
+    """Control for the forgeries below: the genuine session runs at 13:00."""
+    (jan5, jan5_session), (jan6, jan6_session) = early_close_sessions()
+    strategy = ReconstructedTargetStrategy({JAN6: ((SEC, 10),)})
+
+    artifacts = run_engine(
+        reconstructed_engine(
+            scheduled_bundle((jan5, jan6), (jan5_session, jan6_session))
+        ),
+        strategy,
+    )
+
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert [context.decision_cutoff for context in strategy.seen] == [
+        utc_close(JAN5, "regular"),
+        utc_close(JAN6, "early_close"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "update",
+    FORGED_EARLY_CLOSE_BOUNDARIES.values(),
+    ids=FORGED_EARLY_CLOSE_BOUNDARIES,
+)
+def test_a_scheduled_session_cannot_leave_its_calendar_row(
+    update: dict[str, datetime],
+) -> None:
+    """P1: genuine row hashes do not carry forged boundaries into the lane.
+
+    The reconstructions are genuine and name the genuine row, so only the
+    re-derivation of the clock session itself can refuse the forgery.
+    """
+    (jan5, jan5_session), (jan6, jan6_session) = early_close_sessions()
+    forged = _resealed(jan6_session, **update)
+    assert forged.authority_record_hashes == jan6_session.authority_record_hashes
+    bundle = scheduled_bundle((jan5, jan6), (jan5_session, forged))
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^scheduled clock session on XNYS 2026-01-06 is not the session its "
+            r"calendar row re-derives: the clock states "
+            + re.escape(
+                f"{forged.opened_at.isoformat()} to {forged.closed_at.isoformat()}, "
+                f"its replay derives {jan6_session.opened_at.isoformat()} to "
+                f"{jan6_session.closed_at.isoformat()}"
+            )
+            + "$"
+        ),
+    ):
+        reconstructed_engine(bundle)
+
+
+def test_a_scheduled_session_cannot_carry_proofs_its_replay_never_derives() -> None:
+    """Genuine boundaries and records still bind the builder's selection proofs.
+
+    Only the proofs differ, so the refusal names the proofs rather than
+    reporting identical boundaries as a mismatch.
+    """
+    (jan5, jan5_session), (jan6, jan6_session) = early_close_sessions()
+    forged = _resealed(jan6_session, authority_proof_hashes=(HASH_ONE, HASH_TWO))
+    bundle = scheduled_bundle((jan5, jan6), (jan5_session, forged))
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^scheduled clock session on XNYS 2026-01-06 carries selection proofs "
+            r"no replay request on it derives$"
+        ),
+    ):
+        reconstructed_engine(bundle)
+
+
+def test_a_realized_clock_refuses_a_session_stamped_after_a_later_date() -> None:
+    """P3: DAY_1 on DAY_3 times would fill a DAY_2 decision at DAY_1's open."""
+    forged = _resealed(
+        _session_at(DAY_1),
+        opened_at=datetime.combine(DAY_3, REGULAR_OPEN, tzinfo=UTC),
+        closed_at=datetime.combine(DAY_3, REGULAR_CLOSE, tzinfo=UTC),
+    )
+    # Control: the same three dates on their own times form a clock.
+    _clock_of(tuple(_session_at(day) for day in DAYS[:3]))
+
+    with pytest.raises(
+        ValidationError,
+        match=r"session clock local dates must not decrease in clock order",
+    ):
+        _clock_of((_session_at(DAY_0), _session_at(DAY_2), forged))
+
+
+def test_a_scheduled_clock_refuses_a_session_stamped_after_a_later_date() -> None:
+    """P3b: the same inversion on the scheduled lane is refused, not FAILED."""
+    (jan5, jan5_session), (jan6, jan6_session), (jan7, jan7_session) = (
+        three_regular_sessions()
+    )
+    forged = _resealed(
+        jan6_session,
+        opened_at=datetime(2026, 1, 8, 14, 30, tzinfo=UTC),
+        closed_at=datetime(2026, 1, 8, 21, 0, tzinfo=UTC),
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match=r"session clock local dates must not decrease in clock order",
+    ):
+        scheduled_bundle((jan5, jan6, jan7), (jan5_session, jan7_session, forged))
+
+
+def test_a_staged_decision_executes_only_at_a_later_dates_open() -> None:
+    """The engine's own next-open guard, checked on the session pair itself.
+
+    On one venue the clock's guards already make every next session qualify,
+    so the refused pairs here are ones only a clock that escaped them could
+    present. The guard does not rely on them.
+    """
+    decision = _session_at(DAY_1)
+    # Control: the next date's open qualifies, even exactly at the cutoff.
+    require_next_open_execution(decision, _session_at(DAY_2))
+    require_next_open_execution(
+        decision, _resealed(_session_at(DAY_2), opened_at=decision.closed_at)
+    )
+    prefix = "a decision staged at the XNYS 2026-01-06 close cannot execute at the "
+
+    with pytest.raises(
+        IndeterminateExecutionError,
+        match=(
+            "^"
+            + re.escape(
+                f"{prefix}XNYS 2026-01-07 open: that session opens at "
+                "2026-01-06T20:00:00+00:00, before the decision cutoff "
+                "2026-01-06T21:00:00+00:00"
+            )
+            + "$"
+        ),
+    ):
+        require_next_open_execution(
+            decision,
+            _resealed(
+                _session_at(DAY_2), opened_at=datetime(2026, 1, 6, 20, 0, tzinfo=UTC)
+            ),
+        )
+    for execution in (
+        _xnas_session(DAY_1, time(21, 30), time(23, 0)),
+        _resealed(
+            _session_at(DAY_0),
+            opened_at=datetime.combine(DAY_2, REGULAR_OPEN, tzinfo=UTC),
+            closed_at=datetime.combine(DAY_2, REGULAR_CLOSE, tzinfo=UTC),
+        ),
+    ):
+        key = execution.session_key
+        with pytest.raises(
+            IndeterminateExecutionError,
+            match=(
+                "^"
+                + re.escape(
+                    f"{prefix}{key.mic} {key.local_date.isoformat()} open: "
+                    "next-open execution requires a later local date"
+                )
+                + "$"
+            ),
+        ):
+            require_next_open_execution(decision, execution)
+
+
+#: Decisions staged at the XNYS close ahead of a same-date XNAS open: one that
+#: trades there, and one that holds cash and would read no price at all.
+SAME_DATE_TARGETS: dict[str, dict[date, tuple[tuple[UUID, int], ...]]] = {
+    "buys": {DAY_1: ((SEC_A, 10),)},
+    "holds-cash": {},
+}
+
+
+@pytest.mark.parametrize("targets", SAME_DATE_TARGETS.values(), ids=SAME_DATE_TARGETS)
+def test_a_decision_never_fills_at_another_venues_open_on_its_own_date(
+    targets: dict[date, tuple[tuple[UUID, int], ...]],
+) -> None:
+    """A legal two-venue clock whose next open shares the decision's date.
+
+    XNAS opens after the XNYS decision cutoff and without overlap, so the
+    clock admits it. Its open is still on the date the decision was taken,
+    which is not the next-open execution the protocol states. The refusal
+    holds whether or not the staged decision trades, so a same-date
+    multi-venue clock halts at its second session pending an owner ruling.
+    """
+    clock = _clock_of(
+        (_session_at(DAY_1), _xnas_session(DAY_1, time(21, 30), time(23, 0)))
+    )
+    bundle = _bundle_over(
+        clock=clock,
+        decision_views=(_decision_view(SEC_A, DAY_1),),
+        accounting_views=(_accounting_view(SEC_A, DAY_1),),
+    )
+    strategy = FixedTargetStrategy(targets)
+
+    artifacts = _run(_engine(bundle=bundle, protocol=_protocol(warmup=1)), strategy)
+
+    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
+    assert artifacts.result.halted_session_index == 1
+    assert [event for event in artifacts.trace.events if event.kind == "fill"] == []
+    causes = [
+        event for event in artifacts.trace.events if event.kind == "indeterminate_cause"
+    ]
+    assert len(causes) == 1
+    assert causes[0].phase is EvaluationPhase.OPEN_EXECUTION
+    assert causes[0].cause == (
+        "a decision staged at the XNYS 2026-01-06 close cannot execute at the "
+        "XNAS 2026-01-06 open: next-open execution requires a later local date"
+    )
+
+
+def test_the_non_overlap_guard_is_what_keeps_decision_history_closed() -> None:
+    """F7: the #66 history filter sits behind the overlap guard; prove both.
+
+    On any clock the model admits, every stepped session has closed by the
+    next open, so the stepped prefix is the closed history and the filter
+    never drops a session. The #66 inversion itself, XNAS opening first and
+    closing after the XNYS early close, is refused by the clock. Behind that
+    refusal the filter still keeps the later-closing session out of history.
+    """
+    xnas = _xnas_session(DAY_1, time(13, 30), REGULAR_CLOSE)
+    xnys = _session_at(DAY_1, closes_at=EARLY_CLOSE)
+    inverted = tuple(sorted((xnys, xnas), key=session_order_key))
+    assert inverted == (xnas, xnys)
+
+    with pytest.raises(
+        ValidationError, match=r"session clock sessions must not overlap"
+    ):
+        _clock_of(inverted)
+    assert reconstructed_history_sessions(inverted, 1) == {xnys.session_key}
+
+    # Control: on an admitted clock the history is the whole stepped prefix.
+    sessions = _clock_of(tuple(_session_at(day) for day in DAYS)).sessions
+    for index in range(len(sessions)):
+        assert reconstructed_history_sessions(sessions, index) == {
+            item.session_key for item in sessions[: index + 1]
+        }
 
 
 def test_a_missing_bar_on_the_execution_open_fails_closed_to_indeterminate() -> None:

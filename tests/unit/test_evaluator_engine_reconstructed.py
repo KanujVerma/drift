@@ -16,6 +16,7 @@ from exploratory_decision_test_support import (
     JAN5,
     JAN6,
     JAN7,
+    LISTING_OTHER,
     SEC,
     SEC_OTHER,
     DualLaneStrategy,
@@ -33,6 +34,7 @@ from exploratory_decision_test_support import (
 )
 from test_evaluator_engine import FixedTargetStrategy, _buy_ten, _engine, _run
 
+from drift.domain.evaluator_clock import EvaluationSessionV1, evaluation_session_hash
 from drift.domain.evaluator_exploratory_strategy import (
     RECONSTRUCTED_DECISION_LIMITATIONS,
     ExploratoryStrategyDecisionContextV1,
@@ -321,6 +323,110 @@ def test_an_admission_omitting_the_bounded_cohort_is_refused() -> None:
                 bundle, limitations=bundle.required_limitations
             ),
         )
+
+
+PAIR = (SEC, SEC_OTHER)
+
+
+def _resealed(session: EvaluationSessionV1, **update: object) -> EvaluationSessionV1:
+    """One session edited and re-hashed, so only a semantic guard can refuse it."""
+    draft = EvaluationSessionV1.model_construct(**(dict(session) | update))
+    return EvaluationSessionV1.model_validate(
+        dict(draft) | {"session_hash": evaluation_session_hash(draft)}
+    )
+
+
+@pytest.mark.parametrize("built_by", ["SEC", "SEC_OTHER"])
+def test_one_clock_session_serves_every_cohort_member_on_its_calendar_row(
+    built_by: str,
+) -> None:
+    """The lane gate binds a clock session to its builder, not to one query.
+
+    A clock session re-derives exactly only from the request whose query
+    selected it, because its selection proofs name that query (issue 84).
+    Another cohort member's request on the same session names the same
+    calendar row, so it re-derives the same boundaries under its own proofs,
+    and the run proceeds whichever member's query built the clock session.
+    """
+    ours, session = scheduled_session_case(JAN5, cohort_securities=PAIR)
+    other, other_session = scheduled_session_case(
+        JAN5, security_id=SEC_OTHER, listing_id=LISTING_OTHER, cohort_securities=PAIR
+    )
+    later, later_session = scheduled_session_case(JAN6, cohort_securities=PAIR)
+    assert other_session.authority_record_hashes == session.authority_record_hashes
+    assert other_session.authority_proof_hashes != session.authority_proof_hashes
+    clock_session = session if built_by == "SEC" else other_session
+    bundle = scheduled_bundle((ours, other, later), (clock_session, later_session))
+    assert bundle.session_clock.sessions[0] == clock_session
+
+    artifacts = run_engine(
+        reconstructed_engine(bundle, cohort=cohort_of(PAIR)), _hold_cash()
+    )
+
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+
+
+def test_a_scheduled_clock_must_be_built_from_its_replays_own_queries() -> None:
+    """A genuine session selected by a query outside the replay is refused.
+
+    SEC_OTHER's query built the JAN5 clock session on the very row SEC's
+    reconstruction names, so boundaries and records agree. Only its selection
+    proofs differ, and no replay request carries the query they name.
+    """
+    ours, _ = scheduled_session_case(JAN5, cohort_securities=PAIR)
+    _, outside = scheduled_session_case(
+        JAN5, security_id=SEC_OTHER, listing_id=LISTING_OTHER, cohort_securities=PAIR
+    )
+    later, later_session = scheduled_session_case(JAN6, cohort_securities=PAIR)
+    bundle = scheduled_bundle((ours, later), (outside, later_session))
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^scheduled clock session on XNYS 2026-01-05 carries selection proofs "
+            r"no replay request on it derives$"
+        ),
+    ):
+        reconstructed_engine(bundle, cohort=cohort_of(PAIR))
+
+
+def test_a_union_authority_session_cannot_vouch_for_two_calendar_rows() -> None:
+    """One session naming a regular and an early-close row is refused.
+
+    Each member's reconstruction finds its own row among the session's
+    records, so the calendar-row binding passes. The session keeps the
+    regular row's boundaries, so the refusal names the records, not them.
+    """
+    jan5, jan5_session = scheduled_session_case(JAN5, cohort_securities=PAIR)
+    regular, regular_session = scheduled_session_case(JAN6, cohort_securities=PAIR)
+    early, early_session = scheduled_session_case(
+        JAN6,
+        "early_close",
+        security_id=SEC_OTHER,
+        listing_id=LISTING_OTHER,
+        cohort_securities=PAIR,
+    )
+    union = _resealed(
+        regular_session,
+        authority_record_hashes=tuple(
+            sorted(
+                {
+                    *regular_session.authority_record_hashes,
+                    *early_session.authority_record_hashes,
+                }
+            )
+        ),
+    )
+    bundle = scheduled_bundle((jan5, regular, early), (jan5_session, union))
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^scheduled clock session on XNYS 2026-01-06 names calendar records "
+            r"no replay request on it derives$"
+        ),
+    ):
+        reconstructed_engine(bundle, cohort=cohort_of(PAIR))
 
 
 def test_an_exploratory_cohort_is_refused_outside_the_scheduled_lane() -> None:
