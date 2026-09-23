@@ -541,19 +541,23 @@ class SessionEvaluatorEngine:
           have had, so a security that only became eligible afterwards is
           excluded rather than backdated into the universe.
 
-        Among the as-known results the decision could have had, only each
-        listing's latest answer counts (issue 85, spec 9.1), ordered by
-        evaluation time and then knowledge cutoff. M1b answers per security and
-        listing, and marks every non-primary listing INELIGIBLE, so a security
-        is admitted when some listing's latest answer is ELIGIBLE, no listing's
-        latest answer is INDETERMINATE, and no listing has conflicting answers
-        at its latest instant. An INELIGIBLE answer about the listing that made
-        a security eligible therefore removes it.
+        Among the as-known results the decision could have had, only the
+        answers at a security's latest instant count (issue 85, spec 9.1),
+        ordered by evaluation time and then knowledge cutoff, across all its
+        listings. M1b answers every listing of a security at one instant and
+        marks each non-primary listing INELIGIBLE, so at that instant a
+        security is admitted when some listing is ELIGIBLE, none is
+        INDETERMINATE, and no listing has conflicting answers. A listing the
+        latest instant does not answer is not carried forward: an incomplete
+        answer set fails closed rather than keeping a stale admission.
         """
         cutoff = session.closed_at
         latest: dict[
-            tuple[UUID, UUID],
-            tuple[tuple[datetime, datetime], set[StructuralEligibilityClassification]],
+            UUID,
+            tuple[
+                tuple[datetime, datetime],
+                dict[UUID, set[StructuralEligibilityClassification]],
+            ],
         ] = {}
         for result in self._bundle.structural_eligibilities:
             query = result.normalized_query
@@ -564,27 +568,26 @@ class SessionEvaluatorEngine:
             ):
                 continue
             key = (query.evaluation_time, query.knowledge_cutoff)
-            listing = (result.security_id, result.listing_id)
-            known = latest.get(listing)
+            known = latest.get(result.security_id)
             if known is None or key > known[0]:
-                latest[listing] = (key, {result.classification})
+                latest[result.security_id] = (
+                    key,
+                    {result.listing_id: {result.classification}},
+                )
             elif key == known[0]:
-                known[1].add(result.classification)
-        answers_by_security: dict[
-            UUID, list[set[StructuralEligibilityClassification]]
-        ] = {}
-        for (security_id, _), (_, answers) in latest.items():
-            answers_by_security.setdefault(security_id, []).append(answers)
+                known[1].setdefault(result.listing_id, set()).add(result.classification)
         eligible = {StructuralEligibilityClassification.ELIGIBLE}
         indeterminate = {StructuralEligibilityClassification.INDETERMINATE}
         return tuple(
             sorted(
                 (
                     security_id
-                    for security_id, listings in answers_by_security.items()
-                    if any(answers == eligible for answers in listings)
-                    and all(len(answers) == 1 for answers in listings)
-                    and not any(answers == indeterminate for answers in listings)
+                    for security_id, (_, listings) in latest.items()
+                    if any(answers == eligible for answers in listings.values())
+                    and all(len(answers) == 1 for answers in listings.values())
+                    and not any(
+                        answers == indeterminate for answers in listings.values()
+                    )
                 ),
                 key=_security_order,
             )

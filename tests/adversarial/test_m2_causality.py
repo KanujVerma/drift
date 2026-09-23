@@ -723,24 +723,60 @@ def test_an_answer_about_a_later_time_does_not_admit_before_that_time() -> None:
 def test_an_ineligible_secondary_listing_never_removes_an_eligible_primary() -> None:
     """M1b marks every non-primary listing INELIGIBLE; the security stays admitted.
 
-    Judging answers per security rather than per listing would read the two
-    as a conflict, or let a later secondary answer remove the security.
+    Judging answers per security alone would read the primary ELIGIBLE beside
+    the secondary INELIGIBLE, answered at one instant, as a conflict.
     """
-    primary = _eligibility(SEC_A, LISTING_A)
-    secondary_now = _eligibility(
-        SEC_A, LISTING_B, classification=StructuralEligibilityClassification.INELIGIBLE
-    )
-    secondary_later = _eligibility(
-        SEC_A,
-        LISTING_B,
-        classification=StructuralEligibilityClassification.INELIGIBLE,
-        knowledge_cutoff=_close_of(DAY_1),
+    engine, sessions = _universe_engine(
+        _eligibility(SEC_A, LISTING_A),
+        _eligibility(
+            SEC_A,
+            LISTING_B,
+            classification=StructuralEligibilityClassification.INELIGIBLE,
+        ),
     )
 
-    for secondary in (secondary_now, secondary_later):
-        engine, sessions = _universe_engine(primary, secondary)
-        for session in sessions:
-            assert engine.admitted_universe_at(session) == (SEC_A,)
+    for session in sessions:
+        assert engine.admitted_universe_at(session) == (SEC_A,)
+
+
+def test_a_later_answer_about_only_one_listing_fails_closed() -> None:
+    """An incomplete answer set never carries an older admission forward.
+
+    M1b answers every listing of a security at one instant. A later instant
+    that answers only the secondary listing says nothing current about the
+    primary, so the security is not admitted on the stale primary answer.
+    """
+    engine, sessions = _universe_engine(
+        _eligibility(SEC_A, LISTING_A),
+        _eligibility(
+            SEC_A,
+            LISTING_B,
+            classification=StructuralEligibilityClassification.INELIGIBLE,
+            knowledge_cutoff=_close_of(DAY_1),
+        ),
+    )
+
+    assert engine.admitted_universe_at(sessions[0]) == (SEC_A,)
+    for session in sessions[1:]:
+        assert engine.admitted_universe_at(session) == ()
+
+
+def test_a_delisting_after_a_migration_removes_the_security() -> None:
+    """The reviewer's case: the retired listing's old ELIGIBLE answer is stale."""
+    engine, sessions = _universe_engine(
+        _eligibility(SEC_A, LISTING_A),
+        _eligibility(SEC_A, LISTING_B, knowledge_cutoff=_close_of(DAY_1)),
+        _eligibility(
+            SEC_A,
+            LISTING_B,
+            classification=StructuralEligibilityClassification.INELIGIBLE,
+            knowledge_cutoff=_close_of(DAY_2),
+        ),
+    )
+
+    assert engine.admitted_universe_at(sessions[1]) == (SEC_A,)
+    for session in sessions[2:]:
+        assert engine.admitted_universe_at(session) == ()
 
 
 def test_a_listing_migration_keeps_the_security_admitted() -> None:
