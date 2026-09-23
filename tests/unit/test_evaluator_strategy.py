@@ -703,6 +703,28 @@ def test_staging_rejects_a_forged_negative_target() -> None:
         stage_decision_targets(intent, _context())
 
 
+@pytest.mark.parametrize(
+    "quantity", [Decimal("10.5"), 10.5, Decimal("10"), True], ids=repr
+)
+def test_staging_rejects_a_forged_non_integer_target(quantity: object) -> None:
+    """Issue 88: a forged fractional target is REJECTED, not a failed run.
+
+    Whole shares only. A Decimal or float quantity, even an integral one, or a
+    bool, is not an ``int`` share count and is refused at staging.
+    """
+    forged = SecurityTargetPositionV1.model_construct(
+        schema_version="1", security_id=SEC_A, target_quantity=quantity
+    )
+    intent = StrategyDecisionIntentV1.model_construct(
+        schema_version="1",
+        session_key=_key(),
+        decision_time=CUTOFF,
+        targets=(forged,),
+    )
+    with pytest.raises(StrategyIntentRejectedError, match="whole number of shares"):
+        stage_decision_targets(intent, _context())
+
+
 def test_staging_rejects_forged_duplicate_targets() -> None:
     intent = StrategyDecisionIntentV1.model_construct(
         schema_version="1",

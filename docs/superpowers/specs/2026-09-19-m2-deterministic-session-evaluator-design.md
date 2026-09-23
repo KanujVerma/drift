@@ -556,6 +556,8 @@ The regular trading session close is NOT hardcoded to 16:00 ET:
 - `INELIGIBLE` or `INDETERMINATE` removes the security from eligibility.
 - Indeterminate membership is never treated as eligible.
 
+**Amendment, issue 85.** Admission at a decision cutoff reads only the as-known results known by that cutoff and evaluated at or before it, and within them only the answers at the security's latest instant across all its listings, ordered by `(evaluation_time, knowledge_cutoff)`. That order lets an answer about a later time outrank a later restatement about an earlier time. M1b answers every listing of a security at one instant and marks each non-primary listing `INELIGIBLE`, so at that instant a security is admitted when some listing is `ELIGIBLE`, none is `INDETERMINATE`, and no listing has conflicting answers. A listing the latest instant does not answer is not carried forward: an incomplete answer set fails closed, so a retired listing's old `ELIGIBLE` answer never keeps a security admitted, while an `INELIGIBLE` secondary listing answered beside an `ELIGIBLE` primary does not remove it, and a migration answered at one instant keeps it. Results under several universe definitions for one security are not distinguished by definition; conflicting answers across them admit nothing.
+
 ### 9.2 Liquidations Permitted for Excluded Positions
 If a security currently held in the portfolio is removed from the universe (e.g. dropped from an index or becoming `INELIGIBLE`), the strategy is permitted to emit `target_quantity = 0` to liquidate the holding. Target quantities with `target_quantity > 0` (new entries or additions) for non-admitted securities are strictly rejected.
 
@@ -642,6 +644,12 @@ $$\text{Cost Basis Sold} = \Delta q_{\text{sell}} \times \left(\frac{\text{curre
 $$\text{Gross Realized PnL} = (\Delta q_{\text{sell}} \times P_{\text{fill}}) - \text{Cost Basis Sold}$$
 $$\text{Net Realized PnL} = \text{Gross Realized PnL} - \text{Transaction Costs}$$
 
+**Amendment, issue 88 (known bounds, from the #8 final acceptance review).**
+- Staging accepts only an `int` share count, so a forged fractional, Decimal, float, or bool target is REJECTED rather than failing the run.
+- Portfolio arithmetic runs in the pinned 34-digit decimal context. A partial sale's relieved and remaining cost basis therefore conserve the original basis to within that context's last digit, not beyond it.
+- The cost model and protocol hashes are content hashes of their exact decimal spellings, so `1.0` and `1.00` name different identities. Two identities are never equal over different economics, but the same economics must be spelled canonically to share one.
+- Pending claims are valued when staged, at `effective_on`, using the aggregate-sale cash-in-lieu rate and liquidation proceeds the source reports, which may be set later. They enter the net asset value a strategy sees before settlement. This is an accepted limitation of ex-post accounting, recorded for the M3 strategy-interface freeze, which decides whether pending claims are exposed apart from NAV.
+
 ---
 
 ## 12. Corporate Actions as First-Class Accounting Events
@@ -672,6 +680,18 @@ For reverse splits, stock acquisitions, spin-offs, and stock dividends:
 When an overnight split occurs in Phase 1 (Pre-Open), pending staged target positions are translated using the exact same rational ratio:
 $$\text{staged\_target}' = \text{staged\_target} \times \frac{\text{ratio.numerator}}{\text{ratio.denominator}}$$
 If $\text{staged\_target}'$ is non-integral and cannot be resolved by an admitted fraction treatment, the run halts as `INDETERMINATE` due to unsupported corporate-action target translation. Targets are never arbitrarily rounded.
+
+**Amendment, issue 81.** Translation applies to every share-mutating action, not only splits; a target left in pre-action units made the next open trade shares no decision asked for, and the run still read `COMPLETE`. Each action has its own rule:
+- *Splits and `STOCK_DIVIDEND`.* The target is restated through the exact function its holding goes through: the same ratio, `ratio_meaning`, `FractionTreatmentV1`, and tie-breaking rule, with the rule above for a fraction the treatment cannot resolve. Any aggregate-sale residual is dropped, since a target is owed no cash in lieu. A stock dividend therefore multiplies the target by $1 + n/d$, and a split booked as a stock dividend translates identically. This holds with or without a holding behind the target.
+- *`STOCK_ACQUISITION` and `MIXED_ACQUISITION`.* The predecessor target is mapped onto the acquirer through that same function, added to any acquirer target, and the predecessor target is set to 0. The mapping is allowed only for a hold or a sale: the mapped target may not exceed the whole acquirer shares the holding receives, which is 0 when nothing is held. A staged increase or entry would otherwise buy the acquirer at the open, a security no admitted decision named (section 6.4), so it is `INDETERMINATE`. Whether such a buy may ever be carried forward is left to an owner ruling, and the default is fail-closed.
+- *`SPINOFF`.* The child target is not a translation of the parent target. The parent target is unchanged, because parent shares are unchanged. The child target is credited with exactly the whole child shares the holding received, so the child is held rather than traded, and only when the parent carries a staged target, since otherwise no decision is staged. With no parent holding, no child shares are received and no child target changes.
+- *`CASH_ACQUISITION`.* The target is set to 0 once the ended claim is proven, whether or not a holding stands behind it.
+
+Two further rules:
+- A cash or share acquisition of a security with no holding and no positive staged target (no target, or an explicit 0) finds no exposure, so its evidence, such as an unended claim status, cannot halt the run.
+- A spin-off child or acquirer that is already held but has no staged target, while the source target is staged, is `INDETERMINATE`: treating its missing target as 0 would sell a holding no decision named.
+
+`LIQUIDATION` is not yet translated; issue 83 carries its claim-status handling and the zeroing of its target.
 
 ### 12.3 Dividend and Due-Bill Entitlement Logic
 M2 does NOT globally equate ex-date with entitlement:
@@ -832,6 +852,8 @@ An evaluation run is uniquely identified by its canonical evaluation hash:
 $$\text{RunHash} = \text{content\_hash}(\text{strategy\_ref}, \text{params}, \text{input\_bundle\_hash}, \text{protocol\_hash}, \text{cost\_model\_hash}, \text{admission\_hash}, \text{code\_hash}, \text{environment\_hash})$$
 
 Re-executing an evaluation with identical inputs, strategy version, protocol, costs, and software environment produces bitwise-identical trace events, identical accounting numbers, and an identical result hash.
+
+**Amendment, issue 86.** Evidence outside the bundle changes results too, so `EvaluationRunIdentityV1` also binds `evaluator_evidence_hash`, the canonical identity of everything the engine consults beyond its hashed inputs: the book currency, and every `SessionEvaluatorEvidence` member, namely listing role, termination, and lifecycle records, economic outcome records, tie-breaking, due-bill, and cash-in-lieu registries, and the exploratory cohort and replay (each collection by its sorted member content hashes, each replay context by its M1d context hash). The engine refuses a run identity that does not name the evidence it consults or the strategy that runs, and refuses to be built unless the economic outcome records it is handed match the bundle's declared resolutions exactly, so a declared corporate action can never be read as no action by omission. `execute_experiment_run` refuses a specification whose dataset is not the run identity's bundle, or whose running strategy is not the one the identity names.
 
 ---
 

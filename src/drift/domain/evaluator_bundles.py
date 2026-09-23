@@ -214,7 +214,11 @@ class EvaluationRunIdentityV1(FrozenModel):
     """Deterministic semantic identity of one evaluation run.
 
     Two runs share an identity exactly when strategy, protocol, costs, lane
-    admission, input bundle, code version, and environment closure all match.
+    admission, input bundle, evaluator evidence, code version, and environment
+    closure all match. The evaluator evidence (listing records, economic
+    outcome records, interpretation registries, and exploratory cohort and
+    replay) sits outside the bundle but changes results, so it is bound here
+    (issue 86).
     """
 
     schema_version: Literal["1"] = "1"
@@ -223,6 +227,7 @@ class EvaluationRunIdentityV1(FrozenModel):
     cost_model_hash: SHA256Hash
     admission_hash: SHA256Hash
     bundle_hash: SHA256Hash
+    evaluator_evidence_hash: SHA256Hash
     code_version_hash: SHA256Hash
     environment_closure_hash: SHA256Hash
     run_identity_hash: SHA256Hash

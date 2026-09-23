@@ -342,6 +342,13 @@ def _stage_targets(
     staged: dict[UUID, SecurityTargetPositionV1] = {}
     admitted = frozenset(admitted_universe)
     for target in intent.targets:
+        # A forged target can carry any object. Whole shares only: a Decimal,
+        # float, or bool is not a share count, whatever its value (issue 88).
+        if type(target.target_quantity) is not int:
+            raise StrategyIntentRejectedError(
+                "target quantity must be a whole number of shares, got "
+                f"{target.target_quantity!r} for {target.security_id}"
+            )
         if target.target_quantity < 0:
             raise StrategyIntentRejectedError(
                 "target quantity must be non-negative, got "

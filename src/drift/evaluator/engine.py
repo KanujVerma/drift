@@ -45,12 +45,15 @@ The realized lane keeps reading authorized accounting views only.
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal, cast
 from uuid import UUID
 
+from pydantic import BaseModel, TypeAdapter
+
 from drift.domain.assertions import ResolutionMode
-from drift.domain.common import UUID7
+from drift.domain.common import UUID7, SHA256Hash
 from drift.domain.evaluator_bundles import (
     EvaluationInputBundleV1,
     EvaluationRunIdentityV1,
@@ -96,6 +99,7 @@ from drift.domain.evaluator_protocol import EvaluationProtocolV1
 from drift.domain.evaluator_reconstruction import (
     ExploratoryCohortAuthorizationV1,
     ExploratoryReconstructedSessionObservationV1,
+    ExploratoryReconstructionPolicyV1,
     cohort_required_limitations,
 )
 from drift.domain.evaluator_results import (
@@ -134,7 +138,10 @@ from drift.domain.evaluator_trace import (
     seal_evaluation_trace_log,
 )
 from drift.domain.normalization import DerivedObservationViewV1
-from drift.domain.observation_query import ObservationDecisionQueryV1
+from drift.domain.observation_query import (
+    ObservationDecisionQueryV1,
+    ObservationOutcomeQueryV1,
+)
 from drift.domain.securities import (
     ListingLifecycleVersionV1,
     ListingRoleVersionV1,
@@ -154,6 +161,7 @@ from drift.evaluator.reconstruction import (
     require_scheduled_calendar_row,
     verify_exploratory_reconstructions,
 )
+from drift.markets.observation_validation import m1d_context_hash
 from drift.serialization.canonical import content_hash
 
 ZERO = Decimal("0")
@@ -169,6 +177,28 @@ LANE_MARK_GRADE: dict[str, MarkEvidenceGrade] = {
     "exploratory": "exploratory",
     "promotion": "promotion_grade",
 }
+
+
+def _revalidated[M: BaseModel](declared: type[M], model: BaseModel) -> M:
+    """Rebuild ``model`` as a fresh, validated ``declared`` (issue 78).
+
+    Pydantic trusts an existing instance placed in a typed field, so an input
+    built with ``model_construct``, or one carrying a foreign payload in a
+    nested field, would otherwise be evaluated as if it had been validated.
+    Validation runs against the declared type, never the instance's own class,
+    so a subclass overriding a validator cannot excuse itself.
+    """
+    return declared.model_validate(model.model_dump(mode="python", warnings=False))
+
+
+_ADMISSION: TypeAdapter[EvaluationAdmissionV1] = TypeAdapter(EvaluationAdmissionV1)
+
+
+def _revalidated_admission(admission: BaseModel) -> EvaluationAdmissionV1:
+    """Rebuild an admission as a fresh member of the declared lane union."""
+    return _ADMISSION.validate_python(
+        admission.model_dump(mode="python", warnings=False)
+    )
 
 
 def _security_order(security_id: UUID) -> bytes:
@@ -250,6 +280,107 @@ class SessionEvaluatorEvidence:
     cash_in_lieu_rates: tuple[CashInLieuRateV1, ...] = ()
     exploratory_cohort: ExploratoryCohortAuthorizationV1 | None = None
     exploratory_reconstruction_replay: ExploratoryReconstructionReplay | None = None
+
+
+def _revalidated_evidence(
+    evidence: SessionEvaluatorEvidence,
+) -> SessionEvaluatorEvidence:
+    """Rebuild every evidence model as its declared type; contexts validate in M1d."""
+
+    def each[M: BaseModel](
+        declared: type[M], values: Sequence[BaseModel]
+    ) -> tuple[M, ...]:
+        return tuple(_revalidated(declared, value) for value in values)
+
+    replay = evidence.exploratory_reconstruction_replay
+    return SessionEvaluatorEvidence(
+        listing_role_records=each(ListingRoleVersionV1, evidence.listing_role_records),
+        listing_termination_records=each(
+            ListingTerminationVersionV1, evidence.listing_termination_records
+        ),
+        listing_lifecycle_records=each(
+            ListingLifecycleVersionV1, evidence.listing_lifecycle_records
+        ),
+        economic_outcomes=each(SecurityEconomicOutcomeV1, evidence.economic_outcomes),
+        tie_breaking_rules=each(TieBreakingRuleV1, evidence.tie_breaking_rules),
+        due_bill_rules=each(DueBillRuleV1, evidence.due_bill_rules),
+        cash_in_lieu_rates=each(CashInLieuRateV1, evidence.cash_in_lieu_rates),
+        exploratory_cohort=(
+            None
+            if evidence.exploratory_cohort is None
+            else _revalidated(
+                ExploratoryCohortAuthorizationV1, evidence.exploratory_cohort
+            )
+        ),
+        exploratory_reconstruction_replay=(
+            None
+            if replay is None
+            else ExploratoryReconstructionReplay(
+                policy=_revalidated(ExploratoryReconstructionPolicyV1, replay.policy),
+                requests=tuple(
+                    (_revalidated(ObservationOutcomeQueryV1, query), context)
+                    for query, context in replay.requests
+                ),
+            )
+        ),
+    )
+
+
+def evaluator_evidence_hash(
+    evidence: SessionEvaluatorEvidence,
+    *,
+    book_currency_namespace: str,
+    book_currency_code: str,
+) -> SHA256Hash:
+    """The identity of everything a run consults beyond its hashed inputs (#86).
+
+    The bundle, admission, protocol, and cost model carry their own hashes.
+    Every evidence member and the book currency change results too, so they
+    are bound here. Member order carries no meaning, so each collection is
+    identified by the sorted content hashes of its members. A replay context
+    is identified by its M1d context hash, the identity its queries already
+    bind.
+    """
+
+    def members(values: Sequence[object]) -> list[str]:
+        return sorted(content_hash(value) for value in values)
+
+    replay = evidence.exploratory_reconstruction_replay
+    return content_hash(
+        {
+            "book_currency": {
+                "namespace": book_currency_namespace,
+                "code": book_currency_code,
+            },
+            "listing_role_records": members(evidence.listing_role_records),
+            "listing_termination_records": members(
+                evidence.listing_termination_records
+            ),
+            "listing_lifecycle_records": members(evidence.listing_lifecycle_records),
+            "economic_outcomes": members(evidence.economic_outcomes),
+            "tie_breaking_rules": members(evidence.tie_breaking_rules),
+            "due_bill_rules": members(evidence.due_bill_rules),
+            "cash_in_lieu_rates": members(evidence.cash_in_lieu_rates),
+            "exploratory_cohort": (
+                None
+                if evidence.exploratory_cohort is None
+                else content_hash(evidence.exploratory_cohort)
+            ),
+            "exploratory_reconstruction_replay": (
+                None
+                if replay is None
+                else {
+                    "policy": content_hash(replay.policy),
+                    "requests": sorted(
+                        content_hash(
+                            {"query": query, "context": m1d_context_hash(context)}
+                        )
+                        for query, context in replay.requests
+                    ),
+                }
+            ),
+        }
+    )
 
 
 @dataclass(frozen=True)
@@ -459,6 +590,13 @@ class SessionEvaluatorEngine:
         book_currency_namespace: str,
         book_currency_code: str,
     ) -> None:
+        # Issue 78: run only on inputs revalidated through their canonical
+        # boundary, so a stale self-hash or a foreign payload fails closed here.
+        bundle = _revalidated(EvaluationInputBundleV1, bundle)
+        admission = _revalidated_admission(admission)
+        protocol = _revalidated(EvaluationProtocolV1, protocol)
+        cost_model = _revalidated(EvaluationCostModelV1, cost_model)
+        evidence = _revalidated_evidence(evidence)
         if admission.input_bundle_hash != bundle.bundle_hash:
             raise ValueError(
                 "the admission must admit this exact bundle: admission binds "
@@ -482,6 +620,12 @@ class SessionEvaluatorEngine:
             admission=admission,
             cohort=evidence.exploratory_cohort,
             replay=evidence.exploratory_reconstruction_replay,
+        )
+        # After the lane gate, so a malformed replay meets its intended refusal.
+        self._evidence_hash = evaluator_evidence_hash(
+            evidence,
+            book_currency_namespace=book_currency_namespace,
+            book_currency_code=book_currency_code,
         )
         self._accounting_index = self._index_accounting_views(bundle)
         self._book_currency_code = book_currency_code
@@ -507,6 +651,11 @@ class SessionEvaluatorEngine:
     def bundle(self) -> EvaluationInputBundleV1:
         """The immutable input bundle this engine evaluates."""
         return self._bundle
+
+    @property
+    def evaluator_evidence_hash(self) -> SHA256Hash:
+        """The identity of the evidence this engine consults (issue 86)."""
+        return self._evidence_hash
 
     @property
     def admission(self) -> EvaluationAdmissionV1:
@@ -539,19 +688,55 @@ class SessionEvaluatorEngine:
           answered with later knowledge is not information the decision could
           have had, so a security that only became eligible afterwards is
           excluded rather than backdated into the universe.
+
+        Among the as-known results the decision could have had, only the
+        answers at a security's latest instant count (issue 85, spec 9.1),
+        ordered by evaluation time and then knowledge cutoff, across all its
+        listings. M1b answers every listing of a security at one instant and
+        marks each non-primary listing INELIGIBLE, so at that instant a
+        security is admitted when some listing is ELIGIBLE, none is
+        INDETERMINATE, and no listing has conflicting answers. A listing the
+        latest instant does not answer is not carried forward: an incomplete
+        answer set fails closed rather than keeping a stale admission.
         """
         cutoff = session.closed_at
+        latest: dict[
+            UUID,
+            tuple[
+                tuple[datetime, datetime],
+                dict[UUID, set[StructuralEligibilityClassification]],
+            ],
+        ] = {}
+        for result in self._bundle.structural_eligibilities:
+            query = result.normalized_query
+            if (
+                query.resolution_mode is not ResolutionMode.AS_KNOWN
+                or query.knowledge_cutoff > cutoff
+                or query.evaluation_time > cutoff
+            ):
+                continue
+            key = (query.evaluation_time, query.knowledge_cutoff)
+            known = latest.get(result.security_id)
+            if known is None or key > known[0]:
+                latest[result.security_id] = (
+                    key,
+                    {result.listing_id: {result.classification}},
+                )
+            elif key == known[0]:
+                known[1].setdefault(result.listing_id, set()).add(result.classification)
+        eligible = {StructuralEligibilityClassification.ELIGIBLE}
+        indeterminate = {StructuralEligibilityClassification.INDETERMINATE}
         return tuple(
             sorted(
-                {
-                    result.security_id
-                    for result in self._bundle.structural_eligibilities
-                    if result.classification
-                    is StructuralEligibilityClassification.ELIGIBLE
-                    and result.normalized_query.resolution_mode
-                    is ResolutionMode.AS_KNOWN
-                    and result.normalized_query.knowledge_cutoff <= cutoff
-                },
+                (
+                    security_id
+                    for security_id, (_, listings) in latest.items()
+                    if any(answers == eligible for answers in listings.values())
+                    and all(len(answers) == 1 for answers in listings.values())
+                    and not any(
+                        answers == indeterminate for answers in listings.values()
+                    )
+                ),
                 key=_security_order,
             )
         )
@@ -583,6 +768,17 @@ class SessionEvaluatorEngine:
                     "the input bundle does not carry the economic outcome "
                     f"resolution for security {outcome.security_id}"
                 )
+        # Issue 86: an outcome the bundle declares but the engine is not handed
+        # would be read as no corporate action, so the two must match exactly.
+        supplied = {
+            content_hash(item.resolution) for item in evidence.economic_outcomes
+        }
+        omitted = tuple(sorted(declared - supplied))
+        if omitted:
+            raise ValueError(
+                "the engine was not handed the economic outcome records for "
+                f"declared resolutions: {omitted}"
+            )
 
     @staticmethod
     def _index_accounting_views(
@@ -609,7 +805,9 @@ class SessionEvaluatorEngine:
             ).append(observation)
         return index
 
-    def _require_bound_identity(self, run_identity: EvaluationRunIdentityV1) -> None:
+    def _require_bound_identity(
+        self, run_identity: EvaluationRunIdentityV1, strategy: LaneDispatchStrategy
+    ) -> None:
         if (
             run_identity.admission_hash != self._admission.admission_hash
             or run_identity.bundle_hash != self._bundle.bundle_hash
@@ -619,6 +817,20 @@ class SessionEvaluatorEngine:
             raise ValueError(
                 "the run identity must bind this evaluation's admission, "
                 "bundle, protocol, and cost model"
+            )
+        # Issue 86: the evidence outside the bundle and the strategy that runs
+        # both change results, so an identity must name them too.
+        if run_identity.evaluator_evidence_hash != self._evidence_hash:
+            raise ValueError(
+                "the run identity must bind this evaluation's evaluator evidence: "
+                f"identity binds {run_identity.evaluator_evidence_hash}, the "
+                f"engine consults {self._evidence_hash}"
+            )
+        running = strategy.strategy_reference.code_hash
+        if run_identity.strategy_hash != running:
+            raise ValueError(
+                "the run identity must bind the strategy that runs: identity "
+                f"binds {run_identity.strategy_hash}, the strategy is {running}"
             )
 
     # -- run ----------------------------------------------------------------
@@ -631,7 +843,8 @@ class SessionEvaluatorEngine:
         The decision lane was fixed at construction. The strategy is bound to
         that lane's one decision method before any session is stepped.
         """
-        self._require_bound_identity(run_identity)
+        run_identity = _revalidated(EvaluationRunIdentityV1, run_identity)
+        self._require_bound_identity(run_identity, strategy)
         decide = self._lane_decision(strategy)
         sessions = self._bundle.session_clock.sessions
         loop = _Loop(
@@ -1003,8 +1216,9 @@ class SessionEvaluatorEngine:
                 MarkPriceV1(
                     security_id=record.security_id,
                     close_price=record.unadjusted_price,
+                    # Structurally exploratory, whatever the lane mapping says.
                     evidence=MarkEvidenceV1(
-                        grade=self._mark_grade, evidence_hash=record.price_hash
+                        grade="exploratory", evidence_hash=record.price_hash
                     ),
                 )
                 for record in records
