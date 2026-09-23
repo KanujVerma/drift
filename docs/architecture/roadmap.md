@@ -32,7 +32,7 @@ operational authorization.
 | **M1c** | Corporate Actions / Economic Facts | - | **COMPLETE** | Terms, occurred effects, reported settlements, dependent replay. |
 | **M1d** | Observations, Sessions, Normalization | - | **COMPLETE** | Source claims, realized sessions, missingness, split-normalized views. |
 | **M1e** | Real-Source Qualification & Replay | - | **IN PROGRESS / DEFERRED** | Tasks 1-7 complete (offline closure); Task 8 paid promotion qualification deferred. |
-| **M2** | Evaluator / Backtester | Krish | **NEXT** | Deterministic point-in-time strategy evaluation; exploratory lane authorized under ADR 0012. |
+| **M2** | Evaluator / Backtester | Krish | **IN PROGRESS** | Deterministic point-in-time strategy evaluation; exploratory lane authorized under ADR 0012. |
 | **M3** | Deterministic Baselines | Krish | Planned | Passive, factor, and mechanical reference benchmark strategies. |
 | **M4** | Prediction / Outcome Tracking | Krish | Planned | Audited tracking of ex-ante forecasts against realized market facts. |
 | **M5** | Statistical / Model Scorecards | Krish | Planned | Rigorous performance attribution, calibration, and degradation metrics. |
@@ -108,9 +108,9 @@ operational authorization.
 - **Documents**: See [M1e Provider Selection](m1e-provider-selection.md) and
   [ADR 0012](../adr/0012-permit-exploratory-evaluation-before-promotion-grade-source-qualification.md).
 
-### M2: Deterministic Session-Level Evaluator and Portfolio Accounting Kernel (Next Major Milestone)
+### M2: Deterministic Session-Level Evaluator and Portfolio Accounting Kernel (In Progress)
 - **Owner**: Krish. Remaining M2 implementation belongs to workstream `krish`. Historical Task 2A work through `ca055b8011e72b0834075f67a402228df76e18da` was completed under the Kanuj workstream.
-- **Status**: NEXT major milestone (exploratory lane authorized under ADR 0012).
+- **Status**: In progress (exploratory lane authorized under ADR 0012). Live task state is the GitHub M2 milestone and its issues.
 - **Objective**: Implement a single deterministic, provider-neutral evaluator core
   operating across two distinct evaluation lanes:
   - *EXPLORATORY Lane*: Consumes free development data (Alpaca Basic) with known
