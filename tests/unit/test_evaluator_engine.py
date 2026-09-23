@@ -530,6 +530,7 @@ def _run_identity(
     bundle: EvaluationInputBundleV1,
     protocol: EvaluationProtocolV1,
     cost_model: EvaluationCostModelV1,
+    evidence_hash: str,
     strategy_hash: str = STRATEGY_CODE_HASH,
 ) -> EvaluationRunIdentityV1:
     return build_evaluation_run_identity(
@@ -538,6 +539,7 @@ def _run_identity(
         cost_model_hash=cost_model.cost_model_hash,
         admission=admission,
         bundle=bundle,
+        evaluator_evidence_hash=evidence_hash,
         code_version_hash=CODE_VERSION_HASH,
         environment_closure_hash=ENVIRONMENT_HASH,
     )
@@ -625,6 +627,7 @@ def _run(
             bundle=engine.bundle,
             protocol=engine.protocol,
             cost_model=engine.cost_model,
+            evidence_hash=engine.evaluator_evidence_hash,
         ),
     )
 
@@ -752,6 +755,7 @@ def test_engine_requires_a_run_identity_bound_to_its_own_admission() -> None:
         bundle=other_bundle,
         protocol=engine.protocol,
         cost_model=engine.cost_model,
+        evidence_hash=engine.evaluator_evidence_hash,
     )
 
     with pytest.raises(ValueError, match="run identity must bind this evaluation"):
@@ -765,6 +769,7 @@ def test_engine_requires_a_run_identity_bound_to_its_own_cost_model() -> None:
         bundle=engine.bundle,
         protocol=engine.protocol,
         cost_model=_cost_model(model_id="task6-other-cost-v1"),
+        evidence_hash=engine.evaluator_evidence_hash,
     )
 
     with pytest.raises(ValueError, match="run identity must bind this evaluation"):
@@ -1431,6 +1436,7 @@ def test_a_result_run_identity_must_bind_its_own_admission() -> None:
         bundle=other_bundle,
         protocol=engine.protocol,
         cost_model=engine.cost_model,
+        evidence_hash=engine.evaluator_evidence_hash,
     )
 
     with pytest.raises(ValidationError, match="must bind the admission it carries"):

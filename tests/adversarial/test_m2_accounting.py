@@ -22,6 +22,7 @@ from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 from typing import Literal
+from uuid import UUID
 
 _UNIT_SUPPORT = Path(__file__).resolve().parents[1] / "unit"
 if str(_UNIT_SUPPORT) not in sys.path:
@@ -35,7 +36,10 @@ from observation_test_support import NormalizationHarness
 from pydantic import ValidationError
 
 from drift.domain.economic_common import ActionKind
-from drift.domain.evaluator_corporate_actions import cash_in_lieu_component_id
+from drift.domain.evaluator_corporate_actions import (
+    SecurityEconomicOutcomeV1,
+    cash_in_lieu_component_id,
+)
 from drift.domain.evaluator_execution import (
     IndeterminateExecutionError,
     RebalanceOutcomeV1,
@@ -49,11 +53,18 @@ from drift.domain.evaluator_protocol import (
     EvaluationProtocolV1,
     evaluation_protocol_hash,
 )
-from drift.domain.evaluator_results import EvaluationClassification
+from drift.domain.evaluator_results import (
+    EvaluationClassification,
+    EvaluationRunArtifactsV1,
+)
 from drift.domain.evaluator_strategy import SecurityTargetPositionV1
 from drift.domain.evaluator_trace import EvaluationPhase
 from drift.domain.normalization import DerivedObservationViewV1
-from drift.evaluator.engine import source_basis_price
+from drift.evaluator.engine import (
+    SessionEvaluatorEngine,
+    SessionEvaluatorEvidence,
+    source_basis_price,
+)
 from drift.evaluator.execution import AtomicRebalanceEngine
 from drift.evaluator.portfolio import PortfolioAccountingKernel
 from drift.markets.normalization import materialize_observation_outcome
@@ -646,6 +657,384 @@ def test_a_forward_split_creates_no_net_asset_value() -> None:
 
 
 # ==========================================================================
+# Staged target translation through every share action
+# ==========================================================================
+#
+# The overnight-split invariant (a staged target is restated through the
+# action so the intended delta survives) holds for every action that moves
+# shares, not only for splits. Each run below holds ten shares of SEC_A from
+# the session-2 open, with a hold of ten staged for session 3, and the action
+# becomes effective at the session-3 pre-open. A correct translation trades
+# nothing at that open.
+
+_ACTION_AT = "2026-01-08T00:00:00Z"
+
+
+def _share_action_outcome(
+    kind: ActionKind,
+    *,
+    numerator: str,
+    denominator: str,
+    meaning: str,
+    suffix: int,
+    recipient: UUID = eng.SEC_A,
+    claim_status: str = "continuing",
+) -> SecurityEconomicOutcomeV1:
+    component = ca._shares(
+        numerator=numerator,
+        denominator=denominator,
+        component_id="action-shares",
+        recipient=recipient,
+        predecessor=eng.SEC_A,
+        meaning=meaning,
+    )
+    terms = ca._terms(
+        suffix=suffix, action_kind=kind, components=(component,), security_id=eng.SEC_A
+    )
+    effect = ca._effect(
+        suffix=suffix + 1,
+        action_kind=kind,
+        components=(component,),
+        terms=terms,
+        occurrence_id=f"issue-81-{suffix}",
+        effective_at=_ACTION_AT,
+        security_id=eng.SEC_A,
+        claim_status=claim_status,
+    )
+    return ca._outcome(
+        security_id=eng.SEC_A, terms=(terms,), effects=(effect,), action_kinds=(kind,)
+    )
+
+
+def _cash_acquisition_outcome(*, suffix: int) -> SecurityEconomicOutcomeV1:
+    """SEC_A acquired for 150.00 a share, paid and delivered on session 3."""
+    cash = ca._cash(
+        amount="150", component_id="acquisition-cash", predecessor=eng.SEC_A
+    )
+    terms = ca._terms(
+        suffix=suffix,
+        action_kind=ActionKind.CASH_ACQUISITION,
+        components=(cash,),
+        dates=(ca._date_fact("payable", _ACTION_AT),),
+        security_id=eng.SEC_A,
+    )
+    occurrence = f"issue-81-{suffix}"
+    effect = ca._effect(
+        suffix=suffix + 1,
+        action_kind=ActionKind.CASH_ACQUISITION,
+        components=(cash,),
+        terms=terms,
+        occurrence_id=occurrence,
+        effective_at=_ACTION_AT,
+        security_id=eng.SEC_A,
+        claim_status="extinguished",
+    )
+    delivery = ca._delivery(
+        components=(cash,),
+        security_id=eng.SEC_A,
+        occurrence_id=occurrence,
+        settled_at=_ACTION_AT,
+    )
+    return ca._outcome(
+        security_id=eng.SEC_A,
+        terms=(terms,),
+        effects=(effect,),
+        delivery_groups=(delivery,),
+        action_kinds=(ActionKind.CASH_ACQUISITION,),
+    )
+
+
+def _run_action(
+    outcome: SecurityEconomicOutcomeV1,
+    views: tuple[DerivedObservationViewV1, ...],
+    strategy: eng.FixedTargetStrategy | None = None,
+) -> EvaluationRunArtifactsV1:
+    bundle = eng._bundle(
+        accounting_views=views, economic_outcomes=(outcome.resolution,)
+    )
+    engine = SessionEvaluatorEngine(
+        bundle=bundle,
+        admission=eng._admission(bundle),
+        protocol=eng._protocol(),
+        cost_model=eng._cost_model(),
+        evidence=SessionEvaluatorEvidence(
+            listing_role_records=eng.ROLE_RECORDS, economic_outcomes=(outcome,)
+        ),
+        book_currency_namespace=eng.BOOK_NAMESPACE,
+        book_currency_code=eng.BOOK_CODE,
+    )
+    return eng._run(engine, strategy)
+
+
+def _pre_action_views() -> tuple[DerivedObservationViewV1, ...]:
+    return tuple(eng._accounting_view(eng.SEC_A, day) for day in eng.DAYS[:3])
+
+
+def _fills(artifacts: EvaluationRunArtifactsV1) -> list[tuple[int, str, int]]:
+    return [
+        (event.session_index, event.fill.side, event.fill.quantity)
+        for event in artifacts.trace.events
+        if event.kind == "fill"
+    ]
+
+
+def _translated_targets(artifacts: EvaluationRunArtifactsV1) -> dict[UUID, int]:
+    (applied,) = [
+        event
+        for event in artifacts.trace.events
+        if event.kind == "corporate_action_applied"
+    ]
+    assert applied.session_index == 3
+    return {
+        target.security_id: target.target_quantity
+        for target in applied.staged_targets_after
+    }
+
+
+def _held(artifacts: EvaluationRunArtifactsV1) -> dict[UUID, int]:
+    return {
+        holding.security_id: holding.quantity
+        for holding in artifacts.final_state.holdings
+    }
+
+
+def test_an_overnight_stock_dividend_keeps_a_staged_hold_a_hold() -> None:
+    outcome = _share_action_outcome(
+        ActionKind.STOCK_DIVIDEND,
+        numerator="1",
+        denominator="10",
+        meaning="additional_per_predecessor",
+        suffix=8100,
+    )
+    views = _pre_action_views() + (
+        eng._accounting_view(
+            eng.SEC_A, eng.DAY_3, open_price="100.00", close_price="109.10"
+        ),
+    )
+
+    artifacts = _run_action(outcome, views)
+
+    # Before the fix the target stayed at ten and one new share was sold.
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert _fills(artifacts) == [(2, "buy", 10)]
+    assert _translated_targets(artifacts) == {eng.SEC_A: 11}
+    assert _held(artifacts) == {eng.SEC_A: 11}
+    assert artifacts.result.metrics.ending_net_asset_value == Decimal("10200.10")
+
+
+def test_an_overnight_stock_dividend_restates_a_staged_buy() -> None:
+    outcome = _share_action_outcome(
+        ActionKind.STOCK_DIVIDEND,
+        numerator="1",
+        denominator="10",
+        meaning="additional_per_predecessor",
+        suffix=8105,
+    )
+    views = _pre_action_views() + (
+        eng._accounting_view(
+            eng.SEC_A, eng.DAY_3, open_price="90.00", close_price="91.00"
+        ),
+    )
+    buy_ten_more = eng.FixedTargetStrategy(
+        {eng.DAY_1: ((eng.SEC_A, 10),), eng.DAY_2: ((eng.SEC_A, 20),)}
+    )
+
+    artifacts = _run_action(outcome, views, buy_ten_more)
+
+    # A staged buy of ten pre-dividend shares is a buy of eleven afterwards,
+    # on top of the eleven the dividend already delivered.
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert _fills(artifacts) == [(2, "buy", 10), (3, "buy", 11)]
+    assert _translated_targets(artifacts) == {eng.SEC_A: 22}
+    assert _held(artifacts) == {eng.SEC_A: 22}
+    # 10000.00 less 10 at 100.00 and 11 at 90.00, plus 22 marked at 91.00.
+    assert artifacts.final_state.cash_balance == Decimal("8010.00")
+    assert artifacts.result.metrics.ending_net_asset_value == Decimal("10012.00")
+
+
+def test_a_split_booked_as_a_stock_dividend_trades_exactly_like_the_split() -> None:
+    views = _pre_action_views() + (
+        eng._accounting_view(
+            eng.SEC_A, eng.DAY_3, open_price="27.50", close_price="30.00"
+        ),
+    )
+    as_dividend = _run_action(
+        _share_action_outcome(
+            ActionKind.STOCK_DIVIDEND,
+            numerator="3",
+            denominator="1",
+            meaning="additional_per_predecessor",
+            suffix=8110,
+        ),
+        views,
+    )
+    # Control: the same four-for-one booked as a split.
+    as_split = _run_action(
+        _share_action_outcome(
+            ActionKind.FORWARD_SPLIT,
+            numerator="4",
+            denominator="1",
+            meaning="resulting_per_predecessor",
+            suffix=8120,
+        ),
+        views,
+    )
+
+    for artifacts in (as_dividend, as_split):
+        assert artifacts.result.classification is EvaluationClassification.COMPLETE
+        assert _fills(artifacts) == [(2, "buy", 10)]
+        assert _translated_targets(artifacts) == {eng.SEC_A: 40}
+        assert _held(artifacts) == {eng.SEC_A: 40}
+    # Before the fix the dividend sold 30 of the 40 shares at the open. The
+    # two books differ only in the admission that binds their own bundle.
+    economic = ("holdings", "cash_balance", "holdings_market_value")
+    assert [getattr(as_dividend.final_state, name) for name in economic] == [
+        getattr(as_split.final_state, name) for name in economic
+    ]
+    assert (
+        as_dividend.result.metrics.ending_net_asset_value
+        == as_split.result.metrics.ending_net_asset_value
+        == Decimal("10200.00")
+    )
+
+
+def test_an_overnight_spinoff_with_a_staged_hold_completes_without_trading() -> None:
+    outcome = _share_action_outcome(
+        ActionKind.SPINOFF,
+        numerator="1",
+        denominator="2",
+        meaning="additional_per_predecessor",
+        suffix=8130,
+        recipient=eng.SEC_B,
+    )
+    views = tuple(eng._accounting_view(eng.SEC_A, day) for day in eng.DAYS) + (
+        eng._accounting_view(eng.SEC_B, eng.DAY_3, listing_id=eng.LISTING_B),
+    )
+
+    artifacts = _run_action(outcome, views)
+
+    # Before the fix every staged spin-off halted: the child was held with no
+    # target, so the rebalance could not tell a hold from a liquidation.
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert _fills(artifacts) == [(2, "buy", 10)]
+    assert _translated_targets(artifacts) == {eng.SEC_A: 10, eng.SEC_B: 5}
+    assert _held(artifacts) == {eng.SEC_A: 10, eng.SEC_B: 5}
+    # Ten parent shares at 120.00 and five child shares at 50.00.
+    assert artifacts.result.metrics.ending_net_asset_value == Decimal("10450.00")
+
+
+def test_an_overnight_cash_acquisition_never_rebuys_the_ended_security() -> None:
+    artifacts = _run_action(
+        _cash_acquisition_outcome(suffix=8140),
+        tuple(eng._accounting_view(eng.SEC_A, day) for day in eng.DAYS),
+    )
+
+    # Before the fix the kept target re-bought ten extinguished shares at
+    # the session-3 open and reported 10600.00.
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert _fills(artifacts) == [(2, "buy", 10)]
+    assert _translated_targets(artifacts) == {eng.SEC_A: 0}
+    assert _held(artifacts) == {}
+    assert artifacts.final_state.cash_balance == Decimal("10500.00")
+    assert artifacts.result.metrics.ending_net_asset_value == Decimal("10500.00")
+
+
+def test_a_cash_acquisition_needs_no_price_for_the_security_it_ended() -> None:
+    artifacts = _run_action(_cash_acquisition_outcome(suffix=8150), _pre_action_views())
+
+    # Before the fix the re-buy demanded a session-3 open for a security that
+    # no longer trades, and the run halted.
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert _fills(artifacts) == [(2, "buy", 10)]
+    assert artifacts.result.metrics.ending_net_asset_value == Decimal("10500.00")
+
+
+def test_an_overnight_stock_acquisition_maps_a_staged_hold_to_the_acquirer() -> None:
+    outcome = _share_action_outcome(
+        ActionKind.STOCK_ACQUISITION,
+        numerator="3",
+        denominator="2",
+        meaning="resulting_per_predecessor",
+        suffix=8160,
+        recipient=eng.SEC_B,
+        claim_status="converted",
+    )
+    views = _pre_action_views() + (
+        eng._accounting_view(eng.SEC_B, eng.DAY_3, listing_id=eng.LISTING_B),
+    )
+
+    artifacts = _run_action(outcome, views)
+
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert _fills(artifacts) == [(2, "buy", 10)]
+    assert _translated_targets(artifacts) == {eng.SEC_A: 0, eng.SEC_B: 15}
+    assert _held(artifacts) == {eng.SEC_B: 15}
+    # Fifteen acquirer shares at 50.00 on 9000.00 of cash.
+    assert artifacts.result.metrics.ending_net_asset_value == Decimal("9750.00")
+
+
+def _acquisition_into_unadmitted_acquirer(
+    suffix: int, strategy: eng.FixedTargetStrategy
+) -> EvaluationRunArtifactsV1:
+    """SEC_A is acquired 3:2 into SEC_B, which no decision universe admits."""
+    outcome = _share_action_outcome(
+        ActionKind.STOCK_ACQUISITION,
+        numerator="3",
+        denominator="2",
+        meaning="resulting_per_predecessor",
+        suffix=suffix,
+        recipient=eng.SEC_B,
+        claim_status="converted",
+    )
+    views = _pre_action_views() + (
+        eng._accounting_view(eng.SEC_B, eng.DAY_3, listing_id=eng.LISTING_B),
+    )
+    artifacts = _run_action(outcome, views, strategy)
+    assert all(eng.SEC_B not in seen.admitted_universe for seen in strategy.seen)
+    return artifacts
+
+
+def test_a_stock_acquisition_never_turns_a_staged_increase_into_a_buy() -> None:
+    # Control: the staged hold of the test above maps and completes.
+    hold = _acquisition_into_unadmitted_acquirer(
+        8170,
+        eng.FixedTargetStrategy(
+            {eng.DAY_1: ((eng.SEC_A, 10),), eng.DAY_2: ((eng.SEC_A, 10),)}
+        ),
+    )
+    assert hold.result.classification is EvaluationClassification.COMPLETE
+
+    artifacts = _acquisition_into_unadmitted_acquirer(
+        8180,
+        eng.FixedTargetStrategy(
+            {eng.DAY_1: ((eng.SEC_A, 10),), eng.DAY_2: ((eng.SEC_A, 20),)}
+        ),
+    )
+
+    # Before the fix twenty predecessor shares mapped to thirty acquirer
+    # shares, and the open bought fifteen of a security no universe admitted.
+    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
+    assert artifacts.result.halted_session_index == 3
+    assert artifacts.result.halt_reason is not None
+    assert "would buy the acquirer" in artifacts.result.halt_reason
+    assert _fills(artifacts) == [(2, "buy", 10)]
+
+
+def test_a_stock_acquisition_never_turns_a_staged_entry_into_a_buy() -> None:
+    artifacts = _acquisition_into_unadmitted_acquirer(
+        8190, eng.FixedTargetStrategy({eng.DAY_2: ((eng.SEC_A, 10),)})
+    )
+
+    # Before the fix an entry staged into the predecessor bought fifteen
+    # acquirer shares from an empty book.
+    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
+    assert artifacts.result.halted_session_index == 3
+    assert artifacts.result.halt_reason is not None
+    assert "would buy the acquirer" in artifacts.result.halt_reason
+    assert _fills(artifacts) == []
+
+
+# ==========================================================================
 # Execution contract
 # ==========================================================================
 
@@ -684,6 +1073,96 @@ def test_a_negative_target_quantity_is_not_constructible() -> None:
     ]
 
 
+def test_a_costed_run_matches_an_independent_exact_computation() -> None:
+    """Nonzero costs through the whole engine, checked by exact Fractions.
+
+    Commission 0.005 per share, a 1.00 fixed fee, 2.5 bps of the unadjusted
+    open notional, and 7 bps adverse slippage on the fill price (spec 11.4 and
+    14). Every expected number is derived here from the engine's own
+    accounting-view prices, never read back from the engine.
+    """
+    engine = eng._engine(
+        cost_model=eng._cost_model(
+            model_id="costed-v1",
+            commission="0.005",
+            fixed_fee="1.00",
+            notional_bps="2.5",
+            slippage_bps="7",
+        )
+    )
+
+    artifacts = eng._run(engine, eng._buy_ten())
+
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    (fill,) = [event.fill for event in artifacts.trace.events if event.kind == "fill"]
+    fill_session = next(
+        event.session_key for event in artifacts.trace.events if event.kind == "fill"
+    )
+    open_price = Fraction(
+        source_basis_price(
+            next(
+                view
+                for view in engine.bundle.authentic_accounting_views
+                if view.source_session == fill_session
+            ),
+            "open",
+        )
+    )
+    quantity = Fraction(fill.quantity)
+    fill_price = open_price * (1 + Fraction(7, 10_000))
+    costs = (
+        quantity * Fraction("0.005")
+        + Fraction("1.00")
+        + open_price * quantity * Fraction(25, 100_000)
+    )
+    assert Fraction(fill.fill_price) == fill_price
+    assert Fraction(fill.transaction_costs) == costs
+
+    final = artifacts.final_state
+    initial_cash = Fraction(engine.protocol.initial_cash)
+    assert Fraction(final.cash_balance) == initial_cash - fill_price * quantity - costs
+    (holding,) = final.holdings
+    assert Fraction(holding.cost_basis) == fill_price * quantity + costs
+    assert final.mark is not None
+    (mark,) = final.mark.prices
+    market_value = Fraction(mark.close_price) * quantity
+    assert (
+        Fraction(final.net_asset_value) == Fraction(final.cash_balance) + market_value
+    )
+    # NAV identity: the change in NAV is realized net PnL plus unrealized PnL.
+    metrics = artifacts.result.metrics
+    assert Fraction(final.net_asset_value) - initial_cash == (
+        Fraction(metrics.realized_net_pnl) + market_value - Fraction(holding.cost_basis)
+    )
+
+
+def test_a_split_adjusted_field_method_cannot_become_a_reconstructed_price() -> None:
+    """Double adjustment, reconstructed lane (#54): the per-field basis guard.
+
+    The contract is unadjusted but its close method is split adjusted. The
+    contract-level check passes, so only the per-field guard in the canonical
+    builder stands between that close and an exploratory accounting price.
+    """
+    from observation_test_support import ObservationHarness
+    from test_evaluator_reconstruction import build_from_harness
+
+    observed = ObservationHarness(close="100.000")
+    methods = tuple(
+        method.model_copy(update={"adjustment_basis": "split_adjusted"})
+        if method.field_name == "close"
+        else method
+        for method in observed._contract.field_methods
+    )
+    observed._replace_contract(field_methods=methods)
+    observed._records = (observed._reseal_record(observed._records[0]),)
+    observed._rebuild()
+    observed.attach_sessions(schedule_state="regular", realized_outcome="missing")
+    assert observed._contract.adjustment_basis == "unadjusted"
+
+    with pytest.raises(ValueError, match=r"^field close method must be unadjusted$"):
+        build_from_harness(observed)
+
+
 def test_a_fractional_target_quantity_is_not_constructible() -> None:
     for quantity in (1.5, Decimal("1.5"), "1"):
         with pytest.raises(ValidationError) as error:
@@ -694,6 +1173,27 @@ def test_a_fractional_target_quantity_is_not_constructible() -> None:
         assert [item["loc"] for item in error.value.errors(include_url=False)] == [
             ("target_quantity",)
         ]
+
+
+class _ForgedFractionalStrategy(eng.FixedTargetStrategy):
+    """Returns a target that skipped its own contract: 10.5 shares."""
+
+    def decide(self, context):  # type: ignore[no-untyped-def]
+        intent = super().decide(context)
+        forged = SecurityTargetPositionV1.model_construct(
+            schema_version="1", security_id=eng.SEC_A, target_quantity=Decimal("10.5")
+        )
+        return intent.model_construct(**(dict(intent) | {"targets": (forged,)}))
+
+
+def test_a_forged_fractional_target_rejects_the_run() -> None:
+    """Issue 88: whole shares only, and a forged fraction is REJECTED, not FAILED."""
+    strategy = _ForgedFractionalStrategy({eng.DAY_1: ((eng.SEC_A, 10),)})
+
+    artifacts = eng._run(eng._engine(), strategy)
+
+    assert artifacts.result.classification is EvaluationClassification.REJECTED
+    assert artifacts.result.metrics.committed_fill_count == 0
 
 
 def test_a_negative_staged_target_is_refused_by_the_rebalance_engine() -> None:
