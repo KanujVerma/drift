@@ -1132,12 +1132,16 @@ def test_verify_re_derives_a_scheduled_clock_when_its_queries_are_supplied() -> 
 
 
 def test_verify_does_not_re_derive_an_unqueried_scheduled_clock() -> None:
-    """The exploratory boundary, pinned so it cannot widen silently.
+    """A known gap, pinned so it cannot widen, or close, silently.
 
-    A scheduled-reconstruction clock is exploratory by construction and the
-    promotion gate refuses its mode outright, so exploratory callers that hand
-    over no session queries keep working (the Alpaca bridge among them). A
-    realized clock gets no such allowance.
+    Without its session queries a scheduled-reconstruction clock is not
+    re-derived by verification, so its session times are only as trusted as
+    the caller that built it. That is not safe merely because the clock is
+    exploratory; it is left open because requiring those queries overlaps the
+    scheduled-lane clock work of issue 84, and the promotion gate refuses the
+    mode regardless. Minting always supplies the queries, and every other
+    present caller of this verifier is a test; the Alpaca bridge itself never
+    calls it. A realized clock gets no such allowance.
     """
     harness, query, reference, _ = _decision_case()
     bundle = build_evaluation_input_bundle(

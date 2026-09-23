@@ -48,7 +48,7 @@ from drift.domain.replay_provenance import (
     verify_snapshot_binding,
     verify_snapshot_binding_purpose,
 )
-from drift.domain.securities import ListingV1, SecurityV1
+from drift.domain.securities import IdentityAssignmentEffect, ListingV1, SecurityV1
 from drift.domain.source_snapshots import RealSourceSnapshotV1
 from drift.domain.universes import StructuralEligibilityResultV1
 from drift.evaluator.admission import validate_m1e_promotion_evidence
@@ -343,8 +343,11 @@ def verify_evaluation_input_bundle(
     any of them without the request that re-derives it is refused. A realized
     clock is never taken on trust: without its session queries it is refused.
     A scheduled-reconstruction clock is re-derived whenever its queries are
-    supplied; without them it is not re-derived here, because it is exploratory
-    by construction and the promotion gate refuses its mode outright.
+    supplied. Without them it is not re-derived here, and that is a known gap,
+    not a safety argument: its session times are then only as trusted as the
+    caller that built it. The promotion gate refuses the mode, so it cannot
+    reach promotion, and requiring the queries of every scheduled clock is left
+    to the scheduled-lane clock work of issue 84, which it overlaps.
     """
     _require_replayed(
         "decision view",
@@ -449,9 +452,11 @@ def _require_bound_identities(
 
     `SecurityV1` and `ListingV1` are opaque identities that no builder derives,
     so they are bound rather than re-derived: each must equal an identity that
-    the context's validated M1b identity assignments carry, which the replay
-    context identity, and so the snapshot witness, attests. A listing's venue is
-    part of its identity, so a listing id on another venue is not bound.
+    the context's validated M1b identity assignments assign, which the replay
+    context identity, and so the snapshot witness, attests. Only `ASSIGNED`
+    records count: an unassignment names an identity without attesting it. A
+    listing's venue is part of its identity, so a listing id on another venue
+    is not bound.
     """
     members: tuple[SecurityV1 | ListingV1, ...] = (
         *bundle.security_identities,
@@ -468,6 +473,7 @@ def _require_bound_identities(
     attested = {
         content_hash(record.identity)
         for record in structural.universe.assignments.records
+        if record.assignment_effect is IdentityAssignmentEffect.ASSIGNED
     }
     unbound = tuple(
         sorted(

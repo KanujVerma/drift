@@ -89,7 +89,9 @@ class ReplayContextIdentityV1(FrozenModel):
     `schedule_generation_policy_hash` names which supplied artifact the context
     treats as its schedule generation policy (issue 80). The artifact itself is
     already among `supporting_artifact_hashes`; without this field two contexts
-    naming different supplied artifacts as the policy shared one identity.
+    naming different supplied artifacts as the policy shared one identity. The
+    field is construction-additive but hash-changing: it defaults to `None`,
+    and it is covered by `identity_hash`, so every identity hash changes.
     """
 
     schema_version: Literal["1"] = "1"
@@ -226,8 +228,11 @@ class BundleProvenanceProofV1(FrozenModel):
 
     The request hashes name every replay request minting re-derived a member
     from: decision and accounting views, the clock's session queries, and
-    structural eligibility and economic outcome requests (issue 80). They are
-    additive, default to empty, and are covered by `proof_hash`.
+    structural eligibility and economic outcome requests (issue 80). The
+    session, structural and economic fields are construction-additive but
+    hash-changing: they default to empty, so every existing construction still
+    validates, and they are covered by `proof_hash`, so every proof hash
+    changes.
     """
 
     schema_version: Literal["1"] = "1"
@@ -354,7 +359,11 @@ def verify_snapshot_binding(
     Fails closed when the snapshot does not hash to the identity it declares,
     when the witness does not cover the context, when the recorded binding
     digest is stale, when a witness entry names a snapshot entry that does not
-    exist, or when the named entry attests a different artifact.
+    exist, when the named entry attests a different artifact, or when the
+    snapshot attests a witnessed artifact more than once. The last is the
+    binder's own ambiguity rule: without it a witness built by hand could
+    choose among an artifact's entries, for example by purpose, and pass a
+    re-audit of a context the sanctioned binder refuses to qualify.
     """
     _require_self_consistent_snapshot(snapshot)
     if qualified.source_snapshot_hash != snapshot.snapshot_hash:
@@ -383,6 +392,11 @@ def verify_snapshot_binding(
     entries_by_identity = {
         content_hash(entry): entry for entry in snapshot.replay_inputs
     }
+    attesting: dict[str, int] = {}
+    for replay_input in snapshot.replay_inputs:
+        attesting[replay_input.content_hash] = (
+            attesting.get(replay_input.content_hash, 0) + 1
+        )
     for entry in qualified.snapshot_binding_witness:
         resolved = entries_by_identity.get(entry.snapshot_entry_hash)
         if resolved is None:
@@ -394,6 +408,11 @@ def verify_snapshot_binding(
             raise ValueError(
                 f"witness entry {entry.snapshot_entry_hash} does not attest artifact "
                 f"{entry.artifact_hash}"
+            )
+        if attesting[entry.artifact_hash] != 1:
+            raise ValueError(
+                f"replay context artifact {entry.artifact_hash} is ambiguous in "
+                f"source snapshot {snapshot.snapshot_hash}"
             )
 
 
@@ -414,9 +433,12 @@ def verify_snapshot_binding_purpose(
     views (issue 80). The whole context backs every consumer class it serves,
     so every witnessed entry must carry the purpose and profile required.
 
-    Run after `verify_snapshot_binding`, so every witness entry resolves. A
-    missing entry still fails closed here rather than passing unchecked.
+    Run after `verify_snapshot_binding`, so every witness entry resolves. The
+    function is public, so it does not rely on that: it recomputes the
+    snapshot's own hash, and a missing entry still fails closed here rather
+    than passing unchecked.
     """
+    _require_self_consistent_snapshot(snapshot)
     entries_by_identity = {
         content_hash(entry): entry for entry in snapshot.replay_inputs
     }
