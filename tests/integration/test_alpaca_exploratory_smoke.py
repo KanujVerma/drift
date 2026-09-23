@@ -178,6 +178,7 @@ def _run(
         bundle=engine.bundle,
         protocol=engine.protocol,
         cost_model=engine.cost_model,
+        evidence_hash=engine.evaluator_evidence_hash,
     )
     return engine.run(strategy=strategy, run_identity=identity), strategy
 

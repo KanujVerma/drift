@@ -597,6 +597,7 @@ def build_evaluation_run_identity(
     cost_model_hash: SHA256Hash,
     admission: EvaluationAdmissionV1,
     bundle: EvaluationInputBundleV1,
+    evaluator_evidence_hash: SHA256Hash,
     code_version_hash: SHA256Hash,
     environment_closure_hash: SHA256Hash,
 ) -> EvaluationRunIdentityV1:
@@ -620,6 +621,7 @@ def build_evaluation_run_identity(
         cost_model_hash=cost_model_hash,
         admission_hash=admission.admission_hash,
         bundle_hash=bundle.bundle_hash,
+        evaluator_evidence_hash=evaluator_evidence_hash,
         code_version_hash=code_version_hash,
         environment_closure_hash=environment_closure_hash,
         run_identity_hash="0" * 64,
