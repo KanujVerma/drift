@@ -313,7 +313,9 @@ def verify_replay_child_interpreter(
     return reported
 
 
-#: Printed by the replay child: its installed distributions, as JSON.
+#: Printed by the replay child: its installed distributions, as JSON. A
+#: distribution whose metadata carries no version is reported as "" so the
+#: parent classifies the child's environment exactly as it classifies its own.
 _DISTRIBUTIONS_PROGRAM = (
     "import importlib.metadata, json, re\n"
     "found = {}\n"
@@ -321,9 +323,10 @@ _DISTRIBUTIONS_PROGRAM = (
     "    name = item.metadata['Name']\n"
     "    if name:\n"
     "        key = re.sub(r'[-_.]+', '-', name).lower()\n"
-    "        found.setdefault(key, set()).add(item.version)\n"
+    "        found.setdefault(key, set()).add(item.metadata.get('Version') or '')\n"
     "print(json.dumps({key: sorted(value) for key, value in found.items()}))\n"
 )
+_LOCKFILE_PIN = "uv.lock"
 
 
 def _distribution_name(name: str) -> str:
@@ -331,85 +334,222 @@ def _distribution_name(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-def locked_distribution_versions(
-    lock_path: Path = LOCKFILE_PATH,
-) -> dict[str, frozenset[str]]:
-    """Return every locked distribution with the versions the lock admits.
+@dataclass(frozen=True, slots=True)
+class LockedEnvironment:
+    """What ``uv.lock`` resolves, and what it requires of this interpreter.
 
-    The lock may name one package at several versions under different
-    platform markers, so each name maps to the set of admitted versions.
+    ``locked`` names every package the lock resolves for any platform, with
+    the versions it admits. ``required`` is the dependency closure of the
+    project and its dev group with every environment marker evaluated for the
+    running interpreter, one exact version per name: what ``uv sync --locked``
+    installs here.
+    """
+
+    locked: Mapping[str, frozenset[str]]
+    required: Mapping[str, str]
+
+
+def _read_lockfile(lock_path: Path, *, authenticate: bool) -> dict[str, object]:
+    """Read the lock, authenticated against its protected pin unless told not to.
+
+    An unauthenticated lock would let an edited lock and a matching drifted
+    environment agree with each other, so the reference the environment is
+    held to is itself held to the pin first.
     """
     try:
-        document = tomllib.loads(lock_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        raw = lock_path.read_bytes()
+    except OSError as error:
         raise PinnedReplayIntegrityFailure(
             f"cannot read lockfile {lock_path}: {error}"
         ) from error
+    if authenticate:
+        expected = PROTECTED_M1D_SHA256[_LOCKFILE_PIN]
+        found = hashlib.sha256(raw).hexdigest()
+        if found != expected:
+            raise PinnedReplayIntegrityFailure(
+                f"lockfile {lock_path} sha256 mismatch: expected {expected}, "
+                f"got {found}"
+            )
+    try:
+        document = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        raise PinnedReplayIntegrityFailure(
+            f"cannot read lockfile {lock_path}: {error}"
+        ) from error
+    return document
+
+
+def locked_environment(
+    lock_path: Path = LOCKFILE_PATH, *, authenticate: bool = True
+) -> LockedEnvironment:
+    """Resolve what the lock requires of this interpreter, failing closed."""
+    from packaging.markers import InvalidMarker, Marker
+
+    document = _read_lockfile(lock_path, authenticate=authenticate)
+
+    def refuse(detail: str) -> PinnedReplayIntegrityFailure:
+        return PinnedReplayIntegrityFailure(
+            f"cannot read lockfile {lock_path}: {detail}"
+        )
+
     packages = document.get("package")
     if not isinstance(packages, list) or not packages:
-        raise PinnedReplayIntegrityFailure(
-            f"cannot read lockfile {lock_path}: it locks no packages"
-        )
-    versions: dict[str, set[str]] = {}
+        raise refuse("it locks no packages")
+    by_name: dict[str, list[dict[str, object]]] = {}
+    roots: list[dict[str, object]] = []
     for entry in packages:
         name = entry.get("name") if isinstance(entry, dict) else None
         version = entry.get("version") if isinstance(entry, dict) else None
         if not isinstance(name, str) or not isinstance(version, str):
-            raise PinnedReplayIntegrityFailure(
-                f"cannot read lockfile {lock_path}: a locked package lacks a "
-                "name or a version"
+            raise refuse("a locked package lacks a name or a version")
+        by_name.setdefault(_distribution_name(name), []).append(entry)
+        source = entry.get("source")
+        if isinstance(source, dict) and ("editable" in source or "virtual" in source):
+            roots.append(entry)
+    if len(roots) != 1:
+        raise refuse(f"expected exactly one project package, found {len(roots)}")
+
+    def edges(entry: dict[str, object], key: str) -> list[object]:
+        value = entry.get(key, [])
+        if not isinstance(value, list):
+            raise refuse(f"{entry['name']} {key} is not a list")
+        return value
+
+    def resolve(edge: object) -> dict[str, object] | None:
+        if not isinstance(edge, dict) or not isinstance(edge.get("name"), str):
+            raise refuse("a dependency edge lacks a name")
+        marker = edge.get("marker")
+        if marker is not None:
+            try:
+                if not Marker(str(marker)).evaluate():
+                    return None
+            except InvalidMarker as error:
+                raise refuse(f"invalid marker {marker!r}: {error}") from error
+        candidates = by_name.get(_distribution_name(str(edge["name"])), [])
+        if edge.get("version") is not None:
+            candidates = [c for c in candidates if c["version"] == edge["version"]]
+        if len(candidates) != 1:
+            raise refuse(
+                f"dependency {edge['name']} resolves to {len(candidates)} locked "
+                "packages"
             )
-        versions.setdefault(_distribution_name(name), set()).add(version)
-    return {name: frozenset(found) for name, found in sorted(versions.items())}
+        return candidates[0]
+
+    (root,) = roots
+    required: dict[str, str] = {
+        _distribution_name(str(root["name"])): str(root["version"])
+    }
+    pending = list(edges(root, "dependencies"))
+    groups = root.get("dev-dependencies", {})
+    if not isinstance(groups, dict):
+        raise refuse("the project dev-dependencies are not a table")
+    for group in sorted(groups):
+        pending.extend(edges(groups, group))
+    while pending:
+        edge = pending.pop(0)
+        entry = resolve(edge)
+        if entry is None:
+            continue
+        key = _distribution_name(str(entry["name"]))
+        if key in required:
+            if required[key] != entry["version"]:
+                raise refuse(
+                    f"{key} is required at both {required[key]} and {entry['version']}"
+                )
+            continue
+        required[key] = str(entry["version"])
+        pending.extend(edges(entry, "dependencies"))
+        extras = edge.get("extra", []) if isinstance(edge, dict) else []
+        optional = entry.get("optional-dependencies", {})
+        if isinstance(extras, list) and isinstance(optional, dict):
+            for extra in extras:
+                pending.extend(edges(optional, str(extra)))
+    locked = {
+        name: frozenset(str(item["version"]) for item in entries)
+        for name, entries in sorted(by_name.items())
+    }
+    return LockedEnvironment(locked=locked, required=dict(sorted(required.items())))
 
 
 def observed_distribution_versions() -> dict[str, frozenset[str]]:
-    """Return the distributions installed for this interpreter, by name."""
+    """Return the distributions installed for this interpreter, by name.
+
+    A distribution whose metadata carries no version is reported as "".
+    """
     found: dict[str, set[str]] = {}
     for distribution in importlib.metadata.distributions():
         name = distribution.metadata["Name"]
         if name:
-            found.setdefault(_distribution_name(name), set()).add(distribution.version)
+            found.setdefault(_distribution_name(name), set()).add(
+                distribution.metadata.get("Version") or ""
+            )
     return {name: frozenset(versions) for name, versions in sorted(found.items())}
 
 
 def _verify_distributions(
-    installed: Mapping[str, Collection[str]], *, where: str, lock_path: Path
+    installed: Mapping[str, Collection[str]],
+    *,
+    where: str,
+    lock_path: Path,
+    authenticate: bool,
 ) -> int:
-    """Hold an installed distribution set to the lock; return how many checked."""
-    locked = locked_distribution_versions(lock_path)
+    """Hold an installed distribution set to the lock; return how many checked.
+
+    Every difference is an environment mismatch: a package installed without
+    a version, installed but not locked, installed but not required for this
+    interpreter, installed at another version, or required but missing. Only
+    names and versions are compared; a same-version shadow copy of a package
+    is outside what installed metadata can show.
+    """
+    environment = locked_environment(lock_path, authenticate=authenticate)
+    normalized: dict[str, set[str]] = {}
+    for name, versions in installed.items():
+        normalized.setdefault(_distribution_name(name), set()).update(versions)
     differences: list[str] = []
-    for name, versions in sorted(
-        (_distribution_name(name), sorted(set(versions)))
-        for name, versions in installed.items()
-    ):
-        admitted = locked.get(name)
-        if admitted is None:
-            differences.append(f"{name} {versions} is installed but not locked")
-        elif not set(versions) <= admitted:
-            differences.append(f"{name} found {versions} expected {sorted(admitted)}")
+    for name, versions in sorted(normalized.items()):
+        found = sorted(versions)
+        if "" in versions:
+            differences.append(f"{name} is installed with no version")
+        elif name not in environment.locked:
+            differences.append(f"{name} {found} is installed but not locked")
+        elif name not in environment.required:
+            differences.append(
+                f"{name} {found} is installed but uv.lock does not require it "
+                "for this interpreter"
+            )
+        elif found != [environment.required[name]]:
+            differences.append(
+                f"{name} found {found} expected {[environment.required[name]]}"
+            )
+    for name in sorted(set(environment.required) - set(normalized)):
+        differences.append(
+            f"{name} is required at {environment.required[name]} but not installed"
+        )
     if differences:
         raise PinnedReplayEnvironmentMismatch(
             f"installed distributions differ from uv.lock in {where}: "
             + "; ".join(differences)
         )
-    return len(installed)
+    return len(normalized)
 
 
 def verify_replay_distributions(
     *,
     installed: Mapping[str, Collection[str]] | None = None,
     lock_path: Path = LOCKFILE_PATH,
+    authenticate: bool = True,
 ) -> int:
     """Require this interpreter's installed distributions to match ``uv.lock``.
 
-    ``installed`` exists so tests can present another environment without
-    touching the real one; production callers leave it unset.
+    ``installed``, ``lock_path`` and ``authenticate`` exist so tests can present
+    another environment or a synthetic lock; production callers leave them
+    unset, so the lock is always authenticated against its protected pin.
     """
     return _verify_distributions(
         observed_distribution_versions() if installed is None else installed,
         where="running interpreter",
         lock_path=lock_path,
+        authenticate=authenticate,
     )
 
 
@@ -419,6 +559,7 @@ def verify_replay_child_distributions(
     environment: Mapping[str, str] | None = None,
     cwd: Path | None = None,
     lock_path: Path = LOCKFILE_PATH,
+    authenticate: bool = True,
 ) -> int:
     """Require the replay child's installed distributions to match ``uv.lock``."""
     try:
@@ -455,6 +596,7 @@ def verify_replay_child_distributions(
         reported,
         where=f"replay child interpreter {executable}",
         lock_path=lock_path,
+        authenticate=authenticate,
     )
 
 

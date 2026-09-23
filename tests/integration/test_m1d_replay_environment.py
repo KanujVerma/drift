@@ -25,6 +25,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import json
+import os
 import re
 import stat
 import sys
@@ -225,8 +226,23 @@ def _installed(helper: ModuleType) -> dict[str, frozenset[str]]:
 
 
 def _locked_version(helper: ModuleType, name: str) -> str:
-    (version,) = helper.locked_distribution_versions()[name]
-    return str(version)
+    return str(helper.locked_environment().required[name])
+
+
+def _dist_info(root: Path, name: str, version: str | None) -> Path:
+    """Write one minimal installed-distribution record under ``root``."""
+    folder = root / f"{name}-{version or 'unversioned'}.dist-info"
+    folder.mkdir(parents=True)
+    lines = ["Metadata-Version: 2.1", f"Name: {name}"]
+    if version is not None:
+        lines.append(f"Version: {version}")
+    (folder / "METADATA").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return root
+
+
+def _synthetic_lock(path: Path, body: str) -> Path:
+    path.write_text("version = 1\nrevision = 3\n" + body, encoding="utf-8")
+    return path
 
 
 def test_the_installed_distributions_match_the_lock() -> None:
@@ -263,14 +279,132 @@ def test_an_unlocked_distribution_is_an_environment_mismatch() -> None:
     )
 
 
-def test_a_locked_package_excluded_by_platform_markers_may_be_absent() -> None:
-    """The lock resolves every platform; this one need not install all of it."""
+def test_the_required_set_is_the_marker_evaluated_closure_of_the_lock() -> None:
+    """The lock resolves every platform; this interpreter must install its share.
+
+    `colorama` is locked only behind `sys_platform == 'win32'`, so it is
+    required exactly on Windows, and the synced environment is exactly the
+    required set.
+    """
     helper = _load_replay_helper()
-    locked = helper.locked_distribution_versions()
+    environment = helper.locked_environment()
     installed = _installed(helper)
-    absent = sorted(set(locked) - set(installed))
-    assert absent, "the lock should name at least one platform-specific package"
+    assert "colorama" in environment.locked
+    assert ("colorama" in environment.required) is (sys.platform == "win32")
+    assert set(environment.required) == set(installed)
+    assert set(environment.required) <= set(environment.locked)
     assert helper.verify_replay_distributions(installed=installed) == len(installed)
+
+
+def test_a_missing_required_distribution_is_an_environment_mismatch() -> None:
+    """A required package that is absent is the environment, not the replay."""
+    helper = _load_replay_helper()
+    installed = _installed(helper)
+    del installed["pytest"]
+    error = _raised(lambda: helper.verify_replay_distributions(installed=installed))
+    assert type(error) is helper.PinnedReplayEnvironmentMismatch
+    assert str(error) == (
+        "PINNED_REPLAY_ENVIRONMENT_MISMATCH installed distributions differ from "
+        "uv.lock in running interpreter: pytest is required at "
+        f"{_locked_version(helper, 'pytest')} but not installed"
+    )
+
+
+def test_a_locked_but_unrequired_distribution_is_an_environment_mismatch() -> None:
+    """A package the lock resolves only for another platform is drift here."""
+    helper = _load_replay_helper()
+    environment = helper.locked_environment()
+    (extra,) = sorted(set(environment.locked) - set(environment.required))
+    (version,) = sorted(environment.locked[extra])
+    installed = _installed(helper) | {extra: frozenset({version})}
+    error = _raised(lambda: helper.verify_replay_distributions(installed=installed))
+    assert type(error) is helper.PinnedReplayEnvironmentMismatch
+    assert str(error) == (
+        "PINNED_REPLAY_ENVIRONMENT_MISMATCH installed distributions differ from "
+        f"uv.lock in running interpreter: {extra} ['{version}'] is installed but "
+        "uv.lock does not require it for this interpreter"
+    )
+
+
+def test_an_edited_lockfile_is_an_integrity_failure(tmp_path: Path) -> None:
+    """The lock the environment is held to is itself held to its protected pin."""
+    helper = _load_replay_helper()
+    lock = REPO_ROOT / "uv.lock"
+    edited = tmp_path / "uv.lock"
+    edited.write_bytes(
+        lock.read_bytes().replace(
+            b'name = "iniconfig"\nversion = "', b'name = "iniconfig"\nversion = "9.'
+        )
+    )
+    assert edited.read_bytes() != lock.read_bytes()
+    error = _raised(lambda: helper.verify_replay_distributions(lock_path=edited))
+    assert type(error) is helper.PinnedReplayIntegrityFailure
+    assert str(error).startswith(
+        f"PINNED_REPLAY_INTEGRITY_FAILURE lockfile {edited} sha256 mismatch: "
+        f"expected {helper.PROTECTED_M1D_SHA256['uv.lock']}"
+    ), str(error)
+
+
+def test_a_marker_fork_admits_only_this_interpreters_version(tmp_path: Path) -> None:
+    """One name locked at two versions resolves to exactly one here."""
+    helper = _load_replay_helper()
+    lock = _synthetic_lock(
+        tmp_path / "uv.lock",
+        '[[package]]\nname = "demo"\nversion = "1.0"\nsource = { editable = "." }\n'
+        "dependencies = [\n"
+        '    { name = "forked", version = "1.0",'
+        " marker = \"python_version < '3.14'\" },\n"
+        '    { name = "forked", version = "2.0",'
+        " marker = \"python_version >= '3.14'\" },\n"
+        "]\n"
+        '[[package]]\nname = "forked"\nversion = "1.0"\n'
+        '[[package]]\nname = "forked"\nversion = "2.0"\n',
+    )
+    environment = helper.locked_environment(lock, authenticate=False)
+    assert environment.required == {"demo": "1.0", "forked": "2.0"}
+    wrong_fork = {"demo": {"1.0"}, "forked": {"1.0"}}
+    error = _raised(
+        lambda: helper.verify_replay_distributions(
+            installed=wrong_fork, lock_path=lock, authenticate=False
+        )
+    )
+    assert type(error) is helper.PinnedReplayEnvironmentMismatch
+    assert "forked found ['1.0'] expected ['2.0']" in str(error)
+    assert (
+        helper.verify_replay_distributions(
+            installed={"demo": {"1.0"}, "forked": {"2.0"}},
+            lock_path=lock,
+            authenticate=False,
+        )
+        == 2
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "detail"),
+    (
+        ("", "it locks no packages"),
+        ("package = []\n", "it locks no packages"),
+        (
+            '[[package]]\nname = "orphan"\n',
+            "a locked package lacks a name or a version",
+        ),
+        (
+            '[[package]]\nname = "a"\nversion = "1"\n',
+            "expected exactly one project package, found 0",
+        ),
+    ),
+)
+def test_a_malformed_lock_is_an_integrity_failure(
+    tmp_path: Path, body: str, detail: str
+) -> None:
+    helper = _load_replay_helper()
+    lock = _synthetic_lock(tmp_path / "uv.lock", body)
+    error = _raised(lambda: helper.locked_environment(lock, authenticate=False))
+    assert type(error) is helper.PinnedReplayIntegrityFailure
+    assert str(error) == (
+        f"PINNED_REPLAY_INTEGRITY_FAILURE cannot read lockfile {lock}: {detail}"
+    )
 
 
 def test_distribution_drift_is_rejected_before_archive_extraction(
@@ -285,6 +419,82 @@ def test_distribution_drift_is_rejected_before_archive_extraction(
     assert type(error) is helper.PinnedReplayEnvironmentMismatch
     assert "pydantic found ['0.0.1']" in str(error)
     assert not destination.exists()
+
+
+def test_distribution_drift_is_rejected_before_generation_extraction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The historical generation archives are guarded the same way."""
+    helper = _load_replay_helper()
+    drifted = _installed(helper) | {"pydantic": frozenset({"0.0.1"})}
+    monkeypatch.setattr(helper, "observed_distribution_versions", lambda: drifted)
+    destination = tmp_path / "v1"
+    error = _raised(lambda: helper.extract_m1d_generation_archive(destination, "v1"))
+    assert type(error) is helper.PinnedReplayEnvironmentMismatch
+    assert "pydantic found ['0.0.1']" in str(error)
+    assert not destination.exists()
+
+
+def test_distribution_drift_is_rejected_before_archived_inputs_are_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing archive would be integrity; the environment guard fires first."""
+    helper = _load_replay_helper()
+    drifted = _installed(helper) | {"pydantic": frozenset({"0.0.1"})}
+    monkeypatch.setattr(helper, "observed_distribution_versions", lambda: drifted)
+    error = _raised(
+        lambda: helper._run_archived_m1d_node_in_root(
+            tmp_path / "never-extracted", V3_REPLAY_NODE
+        )
+    )
+    assert type(error) is helper.PinnedReplayEnvironmentMismatch
+    assert "in running interpreter: pydantic found ['0.0.1']" in str(error)
+
+
+def test_a_shadowing_distribution_is_caught_in_the_parent_and_the_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second installed copy at another version, seen by the real programs.
+
+    Exercises the parent's own observer and the real child program, with the
+    child's environment passed through, rather than an impostor's report.
+    """
+    helper = _load_replay_helper()
+    shadow = _dist_info(tmp_path / "shadow", "pydantic", "0.0.1")
+    locked = _locked_version(helper, "pydantic")
+    expected = f"pydantic found ['0.0.1', '{locked}'] expected ['{locked}']"
+    child = helper.verify_replay_child_distributions
+    error = _raised(
+        lambda: child(
+            sys.executable, environment={**os.environ, "PYTHONPATH": str(shadow)}
+        )
+    )
+    assert type(error) is helper.PinnedReplayEnvironmentMismatch
+    assert f"in replay child interpreter {sys.executable}: {expected}" in str(error)
+    monkeypatch.syspath_prepend(str(shadow))
+    error = _raised(helper.verify_replay_distributions)
+    assert type(error) is helper.PinnedReplayEnvironmentMismatch
+    assert f"in running interpreter: {expected}" in str(error)
+
+
+def test_an_unversioned_distribution_is_classified_alike_in_parent_and_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Metadata with no version is environment drift wherever it is observed."""
+    helper = _load_replay_helper()
+    shadow = _dist_info(tmp_path / "shadow", "pydantic", None)
+    child = helper.verify_replay_child_distributions
+    error = _raised(
+        lambda: child(
+            sys.executable, environment={**os.environ, "PYTHONPATH": str(shadow)}
+        )
+    )
+    assert type(error) is helper.PinnedReplayEnvironmentMismatch
+    assert "pydantic is installed with no version" in str(error)
+    monkeypatch.syspath_prepend(str(shadow))
+    error = _raised(helper.verify_replay_distributions)
+    assert type(error) is helper.PinnedReplayEnvironmentMismatch
+    assert "pydantic is installed with no version" in str(error)
 
 
 def test_the_replay_child_distributions_are_verified(tmp_path: Path) -> None:
@@ -349,11 +559,84 @@ def test_a_drifted_replay_child_is_refused_before_it_replays(tmp_path: Path) -> 
     ), str(error)
 
 
+def test_a_distribution_visible_only_to_the_replay_child_is_caught(
+    tmp_path: Path,
+) -> None:
+    """The child is asked in its own environment, where the archive is on path.
+
+    A shadow copy placed inside the extracted archive is invisible to this
+    process and visible to the child, so only a child check run with the
+    child's environment and working directory can see it.
+    """
+    helper = _load_replay_helper()
+    archive = helper.extract_m1d_archive(tmp_path / "archive")
+    _dist_info(archive / "src", "pydantic", "0.0.1")
+    assert helper.verify_replay_distributions() == len(_installed(helper))
+    error = _raised(
+        lambda: helper.run_replay_child(
+            archive,
+            (V3_REPLAY_NODE,),
+            commit=helper.PINNED_M1D_COMMIT,
+            expected_pins=helper.PROTECTED_M1D_ARCHIVE_SHA256,
+            label="archived",
+        )
+    )
+    assert type(error) is helper.PinnedReplayEnvironmentMismatch
+    locked = _locked_version(helper, "pydantic")
+    assert (
+        f"in replay child interpreter {sys.executable}: pydantic found "
+        f"['0.0.1', '{locked}'] expected ['{locked}']"
+    ) in str(error)
+
+
+def test_the_child_identity_is_checked_before_its_distributions(
+    tmp_path: Path,
+) -> None:
+    """Wrong interpreter and drifted packages together: the identity is named."""
+    helper = _load_replay_helper()
+    archive = helper.extract_m1d_archive(tmp_path / "archive")
+    impostor = _executable_script(
+        tmp_path / "python",
+        'case "$2" in\n'
+        '  *metadata*) echo \'{"pydantic": ["0.0.1"]}\' ;;\n'
+        "  *) echo cpython-3.14.5 ;;\n"
+        "esac",
+    )
+    error = _raised(
+        lambda: helper.run_replay_child(
+            archive,
+            (V3_REPLAY_NODE,),
+            commit=helper.PINNED_M1D_COMMIT,
+            expected_pins=helper.PROTECTED_M1D_ARCHIVE_SHA256,
+            label="archived",
+            executable=str(impostor),
+        )
+    )
+    assert type(error) is helper.PinnedReplayEnvironmentMismatch
+    assert str(error) == (
+        "PINNED_REPLAY_ENVIRONMENT_MISMATCH expected cpython-3.14.6 found "
+        f"cpython-3.14.5 in replay child interpreter {impostor}"
+    )
+
+
+def test_a_malformed_child_distribution_report_is_an_unavailable_artifact(
+    tmp_path: Path,
+) -> None:
+    helper = _load_replay_helper()
+    impostor = _executable_script(tmp_path / "python", "echo not-json")
+    error = _raised(lambda: helper.verify_replay_child_distributions(str(impostor)))
+    assert type(error) is helper.PinnedReplayEnvironmentArtifactUnavailable
+    assert str(error).startswith(
+        "PINNED_REPLAY_ENVIRONMENT_ARTIFACT_UNAVAILABLE replay child interpreter "
+        f"{impostor} could not report its distributions (exit 0)"
+    ), str(error)
+
+
 def test_an_unreadable_lock_is_an_integrity_failure(tmp_path: Path) -> None:
     helper = _load_replay_helper()
     broken = tmp_path / "uv.lock"
     broken.write_text("[[package]\nname = 1\n", encoding="utf-8")
-    error = _raised(lambda: helper.locked_distribution_versions(broken))
+    error = _raised(lambda: helper.locked_environment(broken, authenticate=False))
     assert type(error) is helper.PinnedReplayIntegrityFailure
     assert str(error).startswith(
         f"PINNED_REPLAY_INTEGRITY_FAILURE cannot read lockfile {broken}"
