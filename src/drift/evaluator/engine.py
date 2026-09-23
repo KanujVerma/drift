@@ -45,6 +45,7 @@ The realized lane keeps reading authorized accounting views only.
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal, cast
 from uuid import UUID
@@ -608,19 +609,55 @@ class SessionEvaluatorEngine:
           answered with later knowledge is not information the decision could
           have had, so a security that only became eligible afterwards is
           excluded rather than backdated into the universe.
+
+        Among the as-known results the decision could have had, only the
+        answers at a security's latest instant count (issue 85, spec 9.1),
+        ordered by evaluation time and then knowledge cutoff, across all its
+        listings. M1b answers every listing of a security at one instant and
+        marks each non-primary listing INELIGIBLE, so at that instant a
+        security is admitted when some listing is ELIGIBLE, none is
+        INDETERMINATE, and no listing has conflicting answers. A listing the
+        latest instant does not answer is not carried forward: an incomplete
+        answer set fails closed rather than keeping a stale admission.
         """
         cutoff = session.closed_at
+        latest: dict[
+            UUID,
+            tuple[
+                tuple[datetime, datetime],
+                dict[UUID, set[StructuralEligibilityClassification]],
+            ],
+        ] = {}
+        for result in self._bundle.structural_eligibilities:
+            query = result.normalized_query
+            if (
+                query.resolution_mode is not ResolutionMode.AS_KNOWN
+                or query.knowledge_cutoff > cutoff
+                or query.evaluation_time > cutoff
+            ):
+                continue
+            key = (query.evaluation_time, query.knowledge_cutoff)
+            known = latest.get(result.security_id)
+            if known is None or key > known[0]:
+                latest[result.security_id] = (
+                    key,
+                    {result.listing_id: {result.classification}},
+                )
+            elif key == known[0]:
+                known[1].setdefault(result.listing_id, set()).add(result.classification)
+        eligible = {StructuralEligibilityClassification.ELIGIBLE}
+        indeterminate = {StructuralEligibilityClassification.INDETERMINATE}
         return tuple(
             sorted(
-                {
-                    result.security_id
-                    for result in self._bundle.structural_eligibilities
-                    if result.classification
-                    is StructuralEligibilityClassification.ELIGIBLE
-                    and result.normalized_query.resolution_mode
-                    is ResolutionMode.AS_KNOWN
-                    and result.normalized_query.knowledge_cutoff <= cutoff
-                },
+                (
+                    security_id
+                    for security_id, (_, listings) in latest.items()
+                    if any(answers == eligible for answers in listings.values())
+                    and all(len(answers) == 1 for answers in listings.values())
+                    and not any(
+                        answers == indeterminate for answers in listings.values()
+                    )
+                ),
                 key=_security_order,
             )
         )
