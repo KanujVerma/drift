@@ -11,10 +11,12 @@ through its canonical validated boundary at construction.
 
 # ruff: noqa: E402
 
+import dataclasses
 import sys
+import typing
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 _UNIT_SUPPORT = Path(__file__).resolve().parents[1] / "unit"
 if str(_UNIT_SUPPORT) not in sys.path:
@@ -22,17 +24,21 @@ if str(_UNIT_SUPPORT) not in sys.path:
 
 import pytest
 import test_evaluator_engine as eng
-from pydantic import ValidationError
+from pydantic import ValidationError, model_validator
+from test_evaluator_reconstruction import make_policy
 
 from drift.domain.evaluator_bundles import (
     EvaluationInputBundleV1,
     evaluation_input_bundle_hash,
 )
+from drift.domain.evaluator_reconstruction import ExploratoryReconstructionPolicyV1
 from drift.domain.normalization import (
     DerivedObservationViewV1,
     derived_view_output_hash,
 )
+from drift.domain.observation_query import ObservationOutcomeQueryV1
 from drift.evaluator.engine import SessionEvaluatorEngine, SessionEvaluatorEvidence
+from drift.evaluator.reconstruction import ExploratoryReconstructionReplay
 
 RAW_VENDOR_BAR = {"t": "2026-01-06T05:00:00Z", "o": 100.0, "c": 100.0, "S": "AAPL"}
 
@@ -158,3 +164,85 @@ def test_genuine_inputs_run_exactly_as_before() -> None:
 
     assert first.result == second.result
     assert first.trace.trace_hash == second.trace.trace_hash
+
+
+def _unvalidated_member(name: str) -> Any:
+    """An empty, never-validated instance of the declared type of one member."""
+    declared = typing.get_type_hints(SessionEvaluatorEvidence)[name]
+    if name == "exploratory_reconstruction_replay":
+        return ExploratoryReconstructionReplay(
+            policy=ExploratoryReconstructionPolicyV1.model_construct(), requests=()
+        )
+    member = next(
+        argument
+        for argument in typing.get_args(declared) or (declared,)
+        if argument not in (type(None), Ellipsis)
+    )
+    empty = member.model_construct()
+    return empty if name == "exploratory_cohort" else (empty,)
+
+
+@pytest.mark.parametrize(
+    "name", [field.name for field in dataclasses.fields(SessionEvaluatorEvidence)]
+)
+def test_every_evidence_member_is_revalidated(name: str) -> None:
+    """Every member, by the dataclass's own field list, so none can be missed."""
+    with pytest.raises(ValidationError):
+        _engine(evidence=SessionEvaluatorEvidence(**{name: _unvalidated_member(name)}))
+
+
+def test_a_replay_query_is_revalidated() -> None:
+    replay = ExploratoryReconstructionReplay(
+        policy=make_policy(),
+        requests=((ObservationOutcomeQueryV1.model_construct(), None),),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(ValidationError):
+        _engine(
+            evidence=SessionEvaluatorEvidence(exploratory_reconstruction_replay=replay)
+        )
+
+
+class _LenientBundle(EvaluationInputBundleV1):
+    """A subclass excusing itself from the bundle-hash validator."""
+
+    @model_validator(mode="after")
+    def validate_bundle(self) -> Self:
+        return self
+
+
+def test_a_subclass_cannot_excuse_itself_from_validation() -> None:
+    """The reviewer's case: validation runs against the declared type."""
+    genuine = eng._bundle()
+    swapped = tuple(
+        eng._accounting_view(eng.SEC_A, day, close_price="240.00")
+        if day == eng.DAY_3
+        else eng._accounting_view(eng.SEC_A, day)
+        for day in eng.DAYS
+    )
+    lenient = _LenientBundle.model_construct(
+        **(dict(genuine) | {"authentic_accounting_views": swapped})
+    )
+
+    with pytest.raises(ValidationError, match=r"bundle hash mismatch"):
+        _engine(bundle=lenient, admission=eng._admission(genuine))
+
+
+def test_a_run_identity_built_without_validation_is_refused_before_any_decision() -> (
+    None
+):
+    engine = _engine()
+    identity = eng._run_identity(
+        admission=engine.admission,
+        bundle=engine.bundle,
+        protocol=engine.protocol,
+        cost_model=engine.cost_model,
+    )
+    forged = type(identity).model_construct(
+        **(dict(identity) | {"run_identity_hash": "e" * 64})
+    )
+    strategy = eng._buy_ten()
+
+    with pytest.raises(ValidationError, match=r"run identity hash mismatch"):
+        engine.run(strategy=strategy, run_identity=forged)
+    assert strategy.seen == []

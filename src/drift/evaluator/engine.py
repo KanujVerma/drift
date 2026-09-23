@@ -44,12 +44,12 @@ The realized lane keeps reading authorized accounting views only.
 """
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Literal, cast
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 
 from drift.domain.assertions import ResolutionMode
 from drift.domain.common import UUID7
@@ -98,6 +98,7 @@ from drift.domain.evaluator_protocol import EvaluationProtocolV1
 from drift.domain.evaluator_reconstruction import (
     ExploratoryCohortAuthorizationV1,
     ExploratoryReconstructedSessionObservationV1,
+    ExploratoryReconstructionPolicyV1,
     cohort_required_limitations,
 )
 from drift.domain.evaluator_results import (
@@ -136,7 +137,10 @@ from drift.domain.evaluator_trace import (
     seal_evaluation_trace_log,
 )
 from drift.domain.normalization import DerivedObservationViewV1
-from drift.domain.observation_query import ObservationDecisionQueryV1
+from drift.domain.observation_query import (
+    ObservationDecisionQueryV1,
+    ObservationOutcomeQueryV1,
+)
 from drift.domain.securities import (
     ListingLifecycleVersionV1,
     ListingRoleVersionV1,
@@ -173,14 +177,26 @@ LANE_MARK_GRADE: dict[str, MarkEvidenceGrade] = {
 }
 
 
-def _revalidated[M: BaseModel](model: M) -> M:
-    """Re-run a model's validators over its own content (issue 78).
+def _revalidated[M: BaseModel](declared: type[M], model: BaseModel) -> M:
+    """Rebuild ``model`` as a fresh, validated ``declared`` (issue 78).
 
     Pydantic trusts an existing instance placed in a typed field, so an input
     built with ``model_construct``, or one carrying a foreign payload in a
     nested field, would otherwise be evaluated as if it had been validated.
+    Validation runs against the declared type, never the instance's own class,
+    so a subclass overriding a validator cannot excuse itself.
     """
-    return type(model).model_validate(model.model_dump(mode="python", warnings=False))
+    return declared.model_validate(model.model_dump(mode="python", warnings=False))
+
+
+_ADMISSION: TypeAdapter[EvaluationAdmissionV1] = TypeAdapter(EvaluationAdmissionV1)
+
+
+def _revalidated_admission(admission: BaseModel) -> EvaluationAdmissionV1:
+    """Rebuild an admission as a fresh member of the declared lane union."""
+    return _ADMISSION.validate_python(
+        admission.model_dump(mode="python", warnings=False)
+    )
 
 
 def _security_order(security_id: UUID) -> bytes:
@@ -267,33 +283,41 @@ class SessionEvaluatorEvidence:
 def _revalidated_evidence(
     evidence: SessionEvaluatorEvidence,
 ) -> SessionEvaluatorEvidence:
-    """Revalidate every model the evidence carries; contexts validate in M1d."""
+    """Rebuild every evidence model as its declared type; contexts validate in M1d."""
+
+    def each[M: BaseModel](
+        declared: type[M], values: Sequence[BaseModel]
+    ) -> tuple[M, ...]:
+        return tuple(_revalidated(declared, value) for value in values)
+
     replay = evidence.exploratory_reconstruction_replay
-    return replace(
-        evidence,
-        listing_role_records=tuple(map(_revalidated, evidence.listing_role_records)),
-        listing_termination_records=tuple(
-            map(_revalidated, evidence.listing_termination_records)
+    return SessionEvaluatorEvidence(
+        listing_role_records=each(ListingRoleVersionV1, evidence.listing_role_records),
+        listing_termination_records=each(
+            ListingTerminationVersionV1, evidence.listing_termination_records
         ),
-        listing_lifecycle_records=tuple(
-            map(_revalidated, evidence.listing_lifecycle_records)
+        listing_lifecycle_records=each(
+            ListingLifecycleVersionV1, evidence.listing_lifecycle_records
         ),
-        economic_outcomes=tuple(map(_revalidated, evidence.economic_outcomes)),
-        tie_breaking_rules=tuple(map(_revalidated, evidence.tie_breaking_rules)),
-        due_bill_rules=tuple(map(_revalidated, evidence.due_bill_rules)),
-        cash_in_lieu_rates=tuple(map(_revalidated, evidence.cash_in_lieu_rates)),
+        economic_outcomes=each(SecurityEconomicOutcomeV1, evidence.economic_outcomes),
+        tie_breaking_rules=each(TieBreakingRuleV1, evidence.tie_breaking_rules),
+        due_bill_rules=each(DueBillRuleV1, evidence.due_bill_rules),
+        cash_in_lieu_rates=each(CashInLieuRateV1, evidence.cash_in_lieu_rates),
         exploratory_cohort=(
             None
             if evidence.exploratory_cohort is None
-            else _revalidated(evidence.exploratory_cohort)
+            else _revalidated(
+                ExploratoryCohortAuthorizationV1, evidence.exploratory_cohort
+            )
         ),
         exploratory_reconstruction_replay=(
             None
             if replay is None
             else ExploratoryReconstructionReplay(
-                policy=_revalidated(replay.policy),
+                policy=_revalidated(ExploratoryReconstructionPolicyV1, replay.policy),
                 requests=tuple(
-                    (_revalidated(query), context) for query, context in replay.requests
+                    (_revalidated(ObservationOutcomeQueryV1, query), context)
+                    for query, context in replay.requests
                 ),
             )
         ),
@@ -509,10 +533,10 @@ class SessionEvaluatorEngine:
     ) -> None:
         # Issue 78: run only on inputs revalidated through their canonical
         # boundary, so a stale self-hash or a foreign payload fails closed here.
-        bundle = _revalidated(bundle)
-        admission = _revalidated(admission)
-        protocol = _revalidated(protocol)
-        cost_model = _revalidated(cost_model)
+        bundle = _revalidated(EvaluationInputBundleV1, bundle)
+        admission = _revalidated_admission(admission)
+        protocol = _revalidated(EvaluationProtocolV1, protocol)
+        cost_model = _revalidated(EvaluationCostModelV1, cost_model)
         evidence = _revalidated_evidence(evidence)
         if admission.input_bundle_hash != bundle.bundle_hash:
             raise ValueError(
@@ -686,6 +710,7 @@ class SessionEvaluatorEngine:
         The decision lane was fixed at construction. The strategy is bound to
         that lane's one decision method before any session is stepped.
         """
+        run_identity = _revalidated(EvaluationRunIdentityV1, run_identity)
         self._require_bound_identity(run_identity)
         decide = self._lane_decision(strategy)
         sessions = self._bundle.session_clock.sessions
