@@ -1,0 +1,89 @@
+# Canonical verification gate (issue #48).
+#
+# CI observes repository truth; it never repairs it. This workflow never
+# regenerates fixtures, never updates replay baselines, never commits and never
+# pushes. The interpreter is read only from .python-version, the same pin uv
+# and the pinned-replay guard in tests/_pinned_m1d.py use locally.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify:
+    name: canonical verification gate
+    runs-on: ubuntu-latest
+    # The full suite takes about 22 minutes on a developer laptop; hosted
+    # runners are slower.
+    timeout-minutes: 120
+    env:
+      # Every uv command must use uv.lock exactly as committed.
+      UV_LOCKED: "1"
+      # Use a uv-managed CPython build, never an ambient system interpreter.
+      UV_PYTHON_PREFERENCE: only-managed
+    steps:
+      - name: Check out the full history
+        # Pinned M1d replay extracts historical commits with git archive.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: false
+
+      - name: Provision the interpreter pinned in .python-version
+        run: |
+          echo "interpreter pin: $(cat .python-version)"
+          if ! uv python install; then
+            echo "PINNED_REPLAY_ENVIRONMENT_ARTIFACT_UNAVAILABLE the interpreter pinned in .python-version could not be provisioned"
+            exit 1
+          fi
+
+      - name: Sync the locked environment without upgrades
+        run: uv sync --locked
+
+      - name: Print and verify interpreter identity
+        run: |
+          uv run python -c "import sys; print(sys.version); print(sys.executable)"
+          uv run python -c "import sys; sys.path.insert(0, 'tests'); import _pinned_m1d as replay; print('pinned replay interpreter', replay.verify_replay_interpreter())"
+
+      - name: uv run pytest
+        run: uv run pytest
+
+      - name: uv run ruff check .
+        run: uv run ruff check .
+
+      - name: uv run ruff format --check .
+        run: uv run ruff format --check .
+
+      - name: uv run mypy src tests
+        run: uv run mypy src tests
+
+      - name: uv build
+        run: uv build
+
+      - name: git diff --check
+        run: git diff --check
+
+      - name: git diff --check against the pull request base
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: git diff --check "$BASE_SHA" HEAD
+
+      - name: Verify CI changed no tracked file
+        run: |
+          git status --porcelain --untracked-files=no
+          test -z "$(git status --porcelain --untracked-files=no)"

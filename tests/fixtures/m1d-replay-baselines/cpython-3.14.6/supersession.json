@@ -1,0 +1,139 @@
+{
+  "record_id": "m1d-replay-baseline-cpython-3.14.6",
+  "role": "current",
+  "issue": 48,
+  "ruling": "https://github.com/KanujVerma/drift/issues/47#issuecomment-5781809109",
+  "minted": "2026-09-22",
+  "baseline": {
+    "baseline_id": "m1d-replay-baseline-cpython-3.14.6",
+    "python_identity": "cpython-3.14.6",
+    "interpreter_pin": ".python-version"
+  },
+  "supersedes": {
+    "baseline_id": "m1d-replay-baseline-cpython-3.14.5",
+    "python_identity": "cpython-3.14.5",
+    "historical_inventory": {
+      "inventory_id": "m1d-v3-protected-sha256",
+      "path": "tests/fixtures/m1e-compatibility/m1d-v3-protected-sha256.json",
+      "file_sha256": "6fb819eb863ebf83e1a3b4e3a7e6af261748116502cdb0ad3603d108d17c2e2b"
+    },
+    "status": "historical, preserved byte-identical for audit at its original paths and source commits and never rewritten. It is superseded because its cpython-3.14.5 interpreter artifact is unavailable in the present development closure, not because it was wrong."
+  },
+  "reason": "Every M1d normalization derivation binds derivation.python_identity at patch granularity. The development interpreter moved from CPython 3.14.5 to 3.14.6, and the cpython-3.14.5 interpreter artifact is not available in the present development closure, whose interpreter is Homebrew CPython 3.14.6. Issue 47 established that python_identity is the only independent input that differs: lockfile_hash, implementation_hash, semantic_algorithm_hash and output_hash are identical. Per the architecture ruling on issue 47, the replay environment is pinned forward to exactly cpython-3.14.6 in .python-version, patch-level identity is kept, and a new baseline is minted from the same source commits that generated the historical one.",
+  "generations": {
+    "v1": {
+      "source_commit": "256154e40121d28cec6a65ebcde223c12563752d",
+      "fixture_root": "tests/fixtures/m1d/v1",
+      "lockfile_identity": {
+        "uv_lock_sha256": "89deeed53d97389c0410a067e2cadacd0270e3130cfb7671a3b3850a4c2b45f4"
+      },
+      "semantic_implementation_identity": {
+        "implementation_hash": "6493f14ae3364fa3afea2b301db671c16c72120a3224a644a11ed3326d2f8ec9",
+        "semantic_algorithm_hash": "f8067b6d565b273f5dd4922bf04eb7757753607321c0cbbea8597f35867235f2"
+      },
+      "superseded_paths": {
+        "tests/fixtures/m1d/v1/expected-decision-result.json": {
+          "historical_sha256": "1b33959a9fa8b56d93c63bf47796e56fc7146b014c57337eedfda33de7e2fd25",
+          "current_sha256": "4ecafbb7c79415baa02b4c522369440120f2def54d2c9525f8803eb03830b35e",
+          "baseline_path": "tests/fixtures/m1d-replay-baselines/cpython-3.14.6/v1/expected-decision-result.json"
+        },
+        "tests/fixtures/m1d/v1/expected-outcome-result.json": {
+          "historical_sha256": "27daf331b9e0be539030196ed3760ac65ecbd3efb8d7f97d05354e2611eb7d3c",
+          "current_sha256": "6a2017374392b9990ac13928e90a85803455e0b987e0275259d78560c8e12c35",
+          "baseline_path": "tests/fixtures/m1d-replay-baselines/cpython-3.14.6/v1/expected-outcome-result.json"
+        },
+        "tests/fixtures/m1d/v1/hash-index.json": {
+          "historical_sha256": "9dee138ff8768bf37f7d78d1204ad4a5c92b223a8f0d39d9462561d51dc57c02",
+          "current_sha256": "0845f0f0a9bf30c47909973d0bd354a3e1861d3b403ebd6f22082ff01251a537",
+          "baseline_path": "tests/fixtures/m1d-replay-baselines/cpython-3.14.6/v1/hash-index.json"
+        },
+        "tests/integration/m1d_fixture_support.py": {
+          "historical_sha256": "f87ebc40b833a5e06a8ca1c864cc0300c779f689be7564b8eab20440617f197e",
+          "current_sha256": "afda342c8c2458877d4e2c2dcfdd9192dade7d5e112ea5a8e128aef5c7dc18ff",
+          "derivation": "the archived loader with its single hash-index.json sha256 literal replaced by the superseding hash-index.json sha256"
+        }
+      }
+    },
+    "v2": {
+      "source_commit": "a909148a941081d8d05c5090794346c5ce54db8c",
+      "fixture_root": "tests/fixtures/m1d/v2",
+      "lockfile_identity": {
+        "uv_lock_sha256": "89deeed53d97389c0410a067e2cadacd0270e3130cfb7671a3b3850a4c2b45f4"
+      },
+      "semantic_implementation_identity": {
+        "implementation_hash": "703fc0a047d7f6bcde4ef5d370c92bd15520451eb84ea3c58ce01663eff92456",
+        "semantic_algorithm_hash": "87310037016526b761ee9789aea37582af831f2f672c8a2311a2a37f35a7d8f1"
+      },
+      "superseded_paths": {
+        "tests/fixtures/m1d/v2/expected-decision-result.json": {
+          "historical_sha256": "083ad734c6b7ff3bfdca16226db7ced417dfc6341e7371124a5c6f3027ce16df",
+          "current_sha256": "a9e39dd3a4f904dd57dfa5b45545f3fe6685994d54d0c2adbc4d4bb864557806",
+          "baseline_path": "tests/fixtures/m1d-replay-baselines/cpython-3.14.6/v2/expected-decision-result.json"
+        },
+        "tests/fixtures/m1d/v2/expected-outcome-result.json": {
+          "historical_sha256": "163a601d2d8b078c0342c155b1d445578dbfe4c55ea630e832a7e2488854d2a0",
+          "current_sha256": "bfa4301044406b84bdf905869538120c485b731f049f8ec65bcf15712e763602",
+          "baseline_path": "tests/fixtures/m1d-replay-baselines/cpython-3.14.6/v2/expected-outcome-result.json"
+        },
+        "tests/fixtures/m1d/v2/hash-index.json": {
+          "historical_sha256": "23dd18f8ba2626c6f68906ec3559d4552e8155be4cdca66ef09a6945ece1f2e6",
+          "current_sha256": "80e3db7c632e7e9940736772ac57ed86a4a3285fb2ee29187778af27dbbae9ae",
+          "baseline_path": "tests/fixtures/m1d-replay-baselines/cpython-3.14.6/v2/hash-index.json"
+        },
+        "tests/integration/m1d_fixture_support.py": {
+          "historical_sha256": "886f5ef3f6ed45c585e4cb2567d050dcbadbe1b3d1efc6688cba59f28a5f34e9",
+          "current_sha256": "694aaed8be9d07df810fb2241612b8b2b16bb373142b95f725cef6a2d78d8b94",
+          "derivation": "the archived loader with its single hash-index.json sha256 literal replaced by the superseding hash-index.json sha256"
+        }
+      }
+    },
+    "v3": {
+      "source_commit": "af75cce0f763de025f8ae3516577a9d0a1acead9",
+      "fixture_root": "tests/fixtures/m1d/v3",
+      "lockfile_identity": {
+        "uv_lock_sha256": "89deeed53d97389c0410a067e2cadacd0270e3130cfb7671a3b3850a4c2b45f4"
+      },
+      "semantic_implementation_identity": {
+        "implementation_hash": "04671fc1a3db3a788489242b73d46289659159eae3680385fc29ce74c20c5807",
+        "semantic_algorithm_hash": "87310037016526b761ee9789aea37582af831f2f672c8a2311a2a37f35a7d8f1"
+      },
+      "superseded_paths": {
+        "tests/fixtures/m1d/v3/expected-decision-result.json": {
+          "historical_sha256": "bdf2bba78f869ce4a69cbb344d85a0682e222ffb76a6bb8d7487a336f6050d24",
+          "current_sha256": "9848565af469340370569168394a7ff9cf53d40e3a27797cabf456fa3c4df62c",
+          "baseline_path": "tests/fixtures/m1d-replay-baselines/cpython-3.14.6/v3/expected-decision-result.json"
+        },
+        "tests/fixtures/m1d/v3/expected-outcome-result.json": {
+          "historical_sha256": "9a3b7faa11f74e35ed7cb4e30f52fd0b42b0c50cd00de129902163866d307c6e",
+          "current_sha256": "f09c97531e43f218a69667e8e45918578c5d8b5c439c8439a707325bc58d26d2",
+          "baseline_path": "tests/fixtures/m1d-replay-baselines/cpython-3.14.6/v3/expected-outcome-result.json"
+        },
+        "tests/fixtures/m1d/v3/hash-index.json": {
+          "historical_sha256": "f57be824420909b7ee07f7c8062d379515b045a4729602533fd08f266e6f47b5",
+          "current_sha256": "5e84eae6997ad8cb383a150eccf8a4f4075a8d33f2b91322089661f28506d54f",
+          "baseline_path": "tests/fixtures/m1d-replay-baselines/cpython-3.14.6/v3/hash-index.json"
+        },
+        "tests/integration/m1d_fixture_support.py": {
+          "historical_sha256": "aa4fbdf0802f1e7f5072f2f570e6d16c257e41565906362e27d22bd93f27c61a",
+          "current_sha256": "5623f5ead933a61c95fa7c743e78332d4191ae01c2a55815143e360739937c42",
+          "derivation": "the archived loader with its single hash-index.json sha256 literal replaced by the superseding hash-index.json sha256"
+        }
+      }
+    }
+  },
+  "reconstruction": "For each generation the replay archive is git archive of source_commit, authenticated against the preserved v3 inventory, with exactly the superseded_paths replaced. Each replaced path must first hold its historical_sha256; fixture paths then take the bytes at baseline_path, and the archived loader takes its historical bytes with the one hash-index.json digest literal swapped. Every result must hash to current_sha256. No path under src/ can be superseded. Enforced at load and at replay time by tests/_pinned_m1d.py.",
+  "verification": {
+    "result": "passed",
+    "python_identity": "cpython-3.14.6",
+    "regenerated_on": "macos arm64, Homebrew CPython 3.14.6; the platform is not part of M1d replay identity",
+    "method": "Each generation was regenerated by its own source commit's generator (write_fixture_v1, write_fixture_v2, write_fixture_v3) from a git archive of that commit under cpython-3.14.6. Of the 160 files in each generation exactly three differ from the historical baseline: the two expected result documents and hash-index.json.",
+    "launder_check": "In each result document the only differing leaves are derivation.python_identity (cpython-3.14.5 to cpython-3.14.6) and its pure digests derivation_hash, view.derivation_hash, reference.derivation_hash and reference.view_hash. Restoring cpython-3.14.5 and recomputing those digests reproduces the historical bytes exactly. hash-index.json differs only in the sha256 entries of the two result documents. lockfile_hash, implementation_hash, semantic_algorithm_hash and output_hash are unchanged.",
+    "replay": "Every archived M1d replay node, including each generation's own generator reproduction node, passes against this baseline under cpython-3.14.6.",
+    "enforced_by": [
+      "tests/integration/test_m1d_replay_baseline.py",
+      "tests/integration/test_m1d_replay_environment.py",
+      "tests/integration/test_m1d_adversarial_matrix.py",
+      "tests/integration/test_m1d_compatibility.py"
+    ]
+  }
+}
