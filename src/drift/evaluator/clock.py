@@ -4,6 +4,7 @@ from datetime import datetime
 
 from drift.domain.evaluator_clock import (
     EvaluationSessionV1,
+    SessionClockMode,
     SessionClockV1,
     evaluation_session_hash,
     session_clock_hash,
@@ -223,6 +224,42 @@ def build_scheduled_reconstruction_clock(
             ALPACA_LIMITATION_ABSENT_HALTS,
         ),
     )
+
+
+def rebuild_session_clock(
+    mode: SessionClockMode,
+    queries: tuple[ObservationQueryV1, ...],
+    context: M1dResolutionContext,
+) -> SessionClockV1:
+    """Re-derive a clock of one mode through that mode's canonical builder."""
+    if mode == "realized_session_authority":
+        return build_realized_session_clock(queries, context)
+    if mode == "scheduled_session_reconstruction":
+        return build_scheduled_reconstruction_clock(queries, context)
+    raise ValueError(f"unknown session clock mode {mode!r}")
+
+
+def verify_session_clock(
+    clock: SessionClockV1,
+    queries: tuple[ObservationQueryV1, ...],
+    context: M1dResolutionContext,
+) -> None:
+    """Require a clock to equal a fresh canonical build over its session queries.
+
+    A clock's own hashes prove only that it is self-consistent, never that a
+    builder produced it, so a clock with invented authority hashes, moved
+    boundaries, or a scheduled calendar row relabelled as realized is fully
+    valid on its own. Rebuilding under the clock's declared mode and requiring
+    exact canonical equality proves every session, boundary, authority record,
+    proof, and limitation at once (issue 80). The mode is re-derived too: the
+    realized builder never emits a scheduled row.
+    """
+    rebuilt = rebuild_session_clock(clock.mode, queries, context)
+    if content_hash(rebuilt) != content_hash(clock):
+        raise ValueError(
+            "session clock does not match its canonical re-derivation: bundle "
+            f"clock {clock.clock_hash}, re-derived {rebuilt.clock_hash}"
+        )
 
 
 def _load_clock_policy(context: M1dResolutionContext) -> ScheduleGenerationPolicyV1:

@@ -20,6 +20,7 @@ only the verdict moved.
 import ast
 import inspect
 import sys
+from datetime import date, timedelta
 from decimal import Decimal
 from functools import cache
 from pathlib import Path
@@ -33,7 +34,11 @@ import pytest
 import test_replay_provenance as rp
 from observation_test_support import NormalizationHarness
 from pydantic import ValidationError
-from replay_provenance_test_support import qualified_snapshot, snapshot_over
+from replay_provenance_test_support import (
+    admission_profile_hashes,
+    qualified_snapshot,
+    snapshot_over,
+)
 from test_evaluator_admission_gatekeeper import (
     copy_constructed,
     make_dimension_result,
@@ -46,9 +51,13 @@ from test_evaluator_bundles import (
     _realized_bundle,
     _scheduled_bundle,
     normalization_realized_clock,
+    normalization_scheduled_clock,
+    normalization_session_queries,
+    resealed_clock,
 )
 from test_evaluator_reconstruction import build_from_harness
 
+from drift.domain.assertions import ResolutionMode
 from drift.domain.evaluator_bundles import (
     EvaluationRunIdentityV1,
     evaluation_input_bundle_hash,
@@ -92,6 +101,7 @@ from drift.domain.replay_provenance import (
     QualifiedReplayContextV1,
     SnapshotBindingEntryV1,
     _build_bundle_provenance_proof,
+    bind_context_identity_to_snapshot,
     bundle_component_hashes,
     bundle_provenance_proof_hash,
     context_supplied_artifact_hashes,
@@ -99,7 +109,10 @@ from drift.domain.replay_provenance import (
     snapshot_binding_witness_hash,
     verify_snapshot_binding,
 )
-from drift.domain.source_snapshots import RealSourceSnapshotV1
+from drift.domain.source_snapshots import (
+    RealSourceSnapshotV1,
+    real_source_snapshot_hash,
+)
 from drift.evaluator.bundles import (
     assemble_evaluation_input_bundle,
     build_evaluation_input_bundle,
@@ -507,6 +520,7 @@ def _cached_admitted_case() -> dict[str, Any]:
         qualified_context=qualified,
         context=harness.context,
         bundle=bundle,
+        session_queries=normalization_session_queries(harness),
         decision_requests=((reference, query),),
     )
     return rp._promotion_case(bundle, proof, snapshot, qualified)
@@ -696,11 +710,25 @@ def test_the_composed_gate_rejects_a_bundle_declaring_any_limitation() -> None:
     )
     assert bundle.has_exploratory_reconstructions is False
     assert bundle.required_limitations == (ALPACA_LIMITATION_ABSENT_HALTS,)
-    proof = mint_bundle_provenance_proof(
-        qualified_context=qualified,
-        context=harness.context,
+    # No canonical builder emits a realized clock declaring limitations, and
+    # minting re-derives the clock (issue 80), so no proof can be minted.
+    with pytest.raises(
+        ValueError,
+        match=r"^session clock does not match its canonical re-derivation",
+    ):
+        mint_bundle_provenance_proof(
+            qualified_context=qualified,
+            context=harness.context,
+            bundle=bundle,
+            session_queries=normalization_session_queries(harness),
+            decision_requests=((reference, query),),
+        )
+
+    # A proof assembled directly still meets the gate's own refusal.
+    proof = _build_bundle_provenance_proof(
+        qualified_context_hash=qualified.qualified_hash,
+        source_snapshot_hash=snapshot.snapshot_hash,
         bundle=bundle,
-        decision_requests=((reference, query),),
     )
     case = rp._promotion_case(bundle, proof, snapshot, qualified)
 
@@ -794,6 +822,7 @@ def test_minting_refuses_a_bundle_whose_views_replay_did_not_produce() -> None:
             qualified_context=qualified,
             context=harness.context,
             bundle=bundle,
+            session_queries=normalization_session_queries(harness),
             decision_requests=((reference, query),),
         )
 
@@ -938,6 +967,7 @@ def test_the_promotion_gate_refuses_a_proof_over_a_forged_qualified_context() ->
         qualified_context=forged,
         context=harness.context,
         bundle=bundle,
+        session_queries=normalization_session_queries(harness),
         decision_requests=((reference, query),),
     )
     case = rp._promotion_case(bundle, proof, foreign, forged)
@@ -1064,3 +1094,250 @@ def test_witness_re_verification_needs_no_m1d_replay() -> None:
         "select_observation_records",
     ):
         assert forbidden not in source
+
+
+# ==========================================================================
+# Closed findings: every authority-bearing input is re-derived or bound
+# (issue 80, the #31 Decision 4 ruling)
+# ==========================================================================
+
+
+@pytest.mark.parametrize(
+    "swap", ["control", "invented_authority_late_close", "scheduled_row_relabelled"]
+)
+def test_the_sanctioned_path_re_derives_the_realized_clock(swap: str) -> None:
+    """Causality F1: the probe that admitted a swapped clock in all three shapes.
+
+    The genuine early-close bundle is rebuilt with its clock swapped: invented
+    authority hashes with the close moved three hours later, and a scheduled
+    calendar row relabelled as realized. Minting used to check neither, and
+    the gate reads only the mode and authority labels. Minting now rebuilds the
+    clock from its session queries, so only the control obtains a proof.
+    """
+    harness, query, reference = _cached_decision_case()
+    snapshot = qualified_snapshot(harness.context)
+    qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
+    genuine = normalization_realized_clock(harness)
+    session = genuine.sessions[0]
+    clock = {
+        "control": genuine,
+        "invented_authority_late_close": resealed_clock(
+            genuine,
+            closed_at=session.closed_at + timedelta(hours=3),
+            authority_record_hashes=(H["e"],),
+            authority_proof_hashes=(H["f"],),
+        ),
+        "scheduled_row_relabelled": resealed_clock(
+            normalization_scheduled_clock(harness),
+            mode="realized_session_authority",
+            acknowledged_limitations=(),
+            authority="realized",
+        ),
+    }[swap]
+    bundle = build_evaluation_input_bundle(
+        evaluation_interval=rp._interval(),
+        session_clock=clock,
+        context=harness.context,
+        decision_requests=((reference, query),),
+        source_snapshot_hash=snapshot.snapshot_hash,
+    )
+
+    def mint() -> BundleProvenanceProofV1:
+        return mint_bundle_provenance_proof(
+            qualified_context=qualified,
+            context=harness.context,
+            bundle=bundle,
+            session_queries=normalization_session_queries(harness),
+            decision_requests=((reference, query),),
+        )
+
+    if swap == "control":
+        validate_promotion_admission(
+            **rp._promotion_case(bundle, mint(), snapshot, qualified)
+        )
+        return
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^session clock does not match its canonical re-derivation: bundle "
+            rf"clock {clock.clock_hash}, re-derived {genuine.clock_hash}$"
+        ),
+    ):
+        mint()
+
+
+def test_the_sanctioned_path_refuses_a_fabricated_universe() -> None:
+    """Lanes F5: build, mint and gate admitted an invented AS_KNOWN universe.
+
+    Spec 7.4 items 4 and 5 require M1b and M1c replay at preparation. The
+    probe's fabricated eligibility carries invented resolution hashes under an
+    AS_KNOWN label, and its clock invented authority hashes. Minting now
+    re-derives both, so neither can obtain a proof, whichever it meets first.
+    """
+    import test_evaluator_engine as eng
+
+    harness, query, reference = _cached_decision_case()
+    snapshot = qualified_snapshot(harness.context)
+    qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
+    fabricated = eng._eligibility(eng.SEC_B, eng.LISTING_B)
+    assert fabricated.normalized_query.resolution_mode is ResolutionMode.AS_KNOWN
+    genuine_clock = normalization_realized_clock(harness)
+    forged_clock = resealed_clock(
+        genuine_clock,
+        authority_record_hashes=(H["1"],),
+        authority_proof_hashes=(H["2"],),
+    )
+
+    for clock, eligibilities, expected in (
+        (
+            forged_clock,
+            (fabricated,),
+            r"^structural eligibility count mismatch against replay: "
+            r"expected 0, bundle carries 1$",
+        ),
+        (
+            forged_clock,
+            (),
+            r"^session clock does not match its canonical re-derivation",
+        ),
+    ):
+        bundle = build_evaluation_input_bundle(
+            evaluation_interval=rp._interval(),
+            session_clock=clock,
+            context=harness.context,
+            decision_requests=((reference, query),),
+            structural_eligibilities=eligibilities,
+            source_snapshot_hash=snapshot.snapshot_hash,
+        )
+        with pytest.raises(ValueError, match=expected):
+            mint_bundle_provenance_proof(
+                qualified_context=qualified,
+                context=harness.context,
+                bundle=bundle,
+                session_queries=normalization_session_queries(harness),
+                decision_requests=((reference, query),),
+            )
+
+
+def test_the_gate_refuses_an_impostor_snapshot_wearing_the_qualified_hash() -> None:
+    """Lanes F2: the issue 31 attack moved one object over.
+
+    Corpus A is genuine and replayable, and unrelated to the qualified corpus
+    Q whose snapshot S the admission names. A snapshot object that keeps S's
+    hash while attesting A used to pass `verify_snapshot_binding`, which read
+    the declared hash and never recomputed it. Both the binder and the gate's
+    re-audit now recompute it.
+    """
+    harness, _, _ = _cached_decision_case()
+    genuine = qualified_snapshot(harness.context)
+    adversary = NormalizationHarness(
+        outer_kind="decision",
+        numeric_values=("900.00", "950.00", "850.00", "925.00", "1000"),
+    )
+    a_query = adversary.normalization_query(
+        "split_normalized", anchor_date=date(2026, 11, 30)
+    )
+    a_reference = adversary.normalize(a_query).reference
+    a_identity = derive_replay_context_identity(adversary.context)
+    with pytest.raises(ValueError, match=r"absent from source snapshot"):
+        qualify_replay_context(context=adversary.context, snapshot=genuine)
+
+    attesting = snapshot_over(context_supplied_artifact_hashes(a_identity))
+    impostor = RealSourceSnapshotV1.model_construct(
+        **(dict(attesting) | {"snapshot_hash": genuine.snapshot_hash})
+    )
+    recomputed = real_source_snapshot_hash(impostor)
+    assert recomputed == attesting.snapshot_hash != genuine.snapshot_hash
+    expected = (
+        r"^source snapshot hash does not match its own contents: declared "
+        rf"{genuine.snapshot_hash}, recomputed {recomputed}$"
+    )
+    # The sanctioned binder refuses the impostor outright.
+    with pytest.raises(ValueError, match=expected):
+        bind_context_identity_to_snapshot(identity=a_identity, snapshot=impostor)
+
+    # A context bound over the attesting snapshot and renamed to S is valid
+    # under its own contract, and minting cannot tell: it never sees a snapshot.
+    honest = bind_context_identity_to_snapshot(identity=a_identity, snapshot=attesting)
+    renamed = QualifiedReplayContextV1.model_validate(
+        rp._rehash_qualified(
+            QualifiedReplayContextV1.model_construct(
+                **(dict(honest) | {"source_snapshot_hash": genuine.snapshot_hash})
+            )
+        ).model_dump()
+    )
+    bundle = rp._promotion_bundle(adversary, a_query, a_reference, impostor)
+    proof = mint_bundle_provenance_proof(
+        qualified_context=renamed,
+        context=adversary.context,
+        bundle=bundle,
+        session_queries=normalization_session_queries(adversary),
+        decision_requests=((a_reference, a_query),),
+    )
+    case = rp._promotion_case(bundle, proof, impostor, renamed)
+
+    with pytest.raises(ValueError, match=expected):
+        validate_promotion_admission(**case)
+
+
+def test_the_gate_refuses_purpose_laundered_decision_evidence() -> None:
+    """Lanes F4: decision views admitted over audit-only, foreign-profile input.
+
+    M1e qualifies each purpose separately. The probe's snapshot attests every
+    context artifact only as retrospective audit input, under a profile of no
+    bound profile set, in a snapshot of a foreign profile set that authorizes
+    neither admission profile. Entries used to be matched by content hash
+    alone. Each binding now refuses on its own: repairing one exposes the next.
+    """
+    harness, query, reference = _cached_decision_case()
+    set_hash, decision_hash, audit_hash = admission_profile_hashes()
+    artifacts = context_supplied_artifact_hashes(
+        derive_replay_context_identity(harness.context)
+    )
+    laundered = {
+        "purpose": ConsumerPurpose.RETROSPECTIVE_AUDIT,
+        "profile_hash": H["e"],
+    }
+    cases: tuple[tuple[dict[str, Any], str], ...] = (
+        (
+            {
+                **laundered,
+                "profile_set_hash": H["0"],
+                "authorized_profile_hashes": (H["3"],),
+            },
+            r"^source snapshot profile set mismatch with admission: snapshot binds "
+            rf"{H['0']}, admission binds {set_hash}$",
+        ),
+        (
+            {**laundered, "authorized_profile_hashes": (H["3"],)},
+            rf"^source snapshot does not authorize the decision profile "
+            rf"{decision_hash}$",
+        ),
+        (
+            {**laundered, "authorized_profile_hashes": (decision_hash,)},
+            rf"^source snapshot does not authorize the audit profile {audit_hash}$",
+        ),
+        (
+            laundered,
+            r"^witness entry [0-9a-f]{64} attests artifact [0-9a-f]{64} for "
+            rf"retrospective_audit under profile {H['e']}, but the bundle's "
+            r"decision views require historical_decision_input under profile "
+            rf"{decision_hash}$",
+        ),
+    )
+    for overrides, expected in cases:
+        snapshot = snapshot_over(artifacts, **overrides)
+        # Every snapshot here is genuinely valid, so its own hash is honest.
+        RealSourceSnapshotV1.model_validate(snapshot.model_dump())
+        qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
+        bundle = rp._promotion_bundle(harness, query, reference, snapshot)
+        proof = mint_bundle_provenance_proof(
+            qualified_context=qualified,
+            context=harness.context,
+            bundle=bundle,
+            session_queries=normalization_session_queries(harness),
+            decision_requests=((reference, query),),
+        )
+        case = rp._promotion_case(bundle, proof, snapshot, qualified)
+        with pytest.raises(ValueError, match=expected):
+            validate_promotion_admission(**case)

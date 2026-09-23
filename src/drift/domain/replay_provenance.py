@@ -28,7 +28,11 @@ from pydantic import field_validator, model_validator
 
 from drift.domain.common import FrozenModel, SHA256Hash
 from drift.domain.evaluator_bundles import EvaluationInputBundleV1
-from drift.domain.source_snapshots import RealSourceSnapshotV1
+from drift.domain.qualification import ConsumerPurpose
+from drift.domain.source_snapshots import (
+    RealSourceSnapshotV1,
+    real_source_snapshot_hash,
+)
 from drift.serialization.canonical import content_hash
 
 BUNDLE_PROVENANCE_PROOF_VERSION = "m2-bundle-provenance-v1"
@@ -81,6 +85,11 @@ class ReplayContextIdentityV1(FrozenModel):
     `M1dResolutionContext` itself is never modified: identity is derived from it
     by a pure function, which keeps this contract additive across every existing
     construction site.
+
+    `schedule_generation_policy_hash` names which supplied artifact the context
+    treats as its schedule generation policy (issue 80). The artifact itself is
+    already among `supporting_artifact_hashes`; without this field two contexts
+    naming different supplied artifacts as the policy shared one identity.
     """
 
     schema_version: Literal["1"] = "1"
@@ -91,6 +100,7 @@ class ReplayContextIdentityV1(FrozenModel):
     supporting_artifact_hashes: tuple[SHA256Hash, ...] = ()
     m1b_context_hash: SHA256Hash | None = None
     m1c_context_hash: SHA256Hash | None = None
+    schedule_generation_policy_hash: SHA256Hash | None = None
     identity_hash: SHA256Hash
 
     @field_validator(
@@ -213,6 +223,11 @@ class BundleProvenanceProofV1(FrozenModel):
     Minting runs the expensive replay verification once. The promotion gate then
     validates this artifact cheaply and fail-closed, so trust never depends on a
     caller remembering to invoke a separate verifier.
+
+    The request hashes name every replay request minting re-derived a member
+    from: decision and accounting views, the clock's session queries, and
+    structural eligibility and economic outcome requests (issue 80). They are
+    additive, default to empty, and are covered by `proof_hash`.
     """
 
     schema_version: Literal["1"] = "1"
@@ -221,6 +236,9 @@ class BundleProvenanceProofV1(FrozenModel):
     source_snapshot_hash: SHA256Hash
     decision_request_hashes: tuple[SHA256Hash, ...] = ()
     accounting_request_hashes: tuple[SHA256Hash, ...] = ()
+    session_request_hashes: tuple[SHA256Hash, ...] = ()
+    structural_request_hashes: tuple[SHA256Hash, ...] = ()
+    economic_request_hashes: tuple[SHA256Hash, ...] = ()
     component_hashes: tuple[SHA256Hash, ...]
     bundle_hash: SHA256Hash
     proof_hash: SHA256Hash
@@ -228,6 +246,9 @@ class BundleProvenanceProofV1(FrozenModel):
     @field_validator(
         "decision_request_hashes",
         "accounting_request_hashes",
+        "session_request_hashes",
+        "structural_request_hashes",
+        "economic_request_hashes",
         "component_hashes",
     )
     @classmethod
@@ -246,6 +267,21 @@ class BundleProvenanceProofV1(FrozenModel):
         return self
 
 
+def _require_self_consistent_snapshot(snapshot: RealSourceSnapshotV1) -> None:
+    """Recompute the snapshot's self-excluding hash rather than trusting it.
+
+    `snapshot_hash` is a declaration. An object assembled without validation
+    can keep a qualified snapshot's hash while its replay inputs attest another
+    corpus entirely, so every check against "the snapshot in hand" begins here.
+    """
+    recomputed = real_source_snapshot_hash(snapshot)
+    if recomputed != snapshot.snapshot_hash:
+        raise ValueError(
+            "source snapshot hash does not match its own contents: declared "
+            f"{snapshot.snapshot_hash}, recomputed {recomputed}"
+        )
+
+
 def bind_context_identity_to_snapshot(
     *,
     identity: ReplayContextIdentityV1,
@@ -255,8 +291,11 @@ def bind_context_identity_to_snapshot(
 
     Verification is total. Each artifact the context supplies must resolve to
     exactly one replay input entry of the snapshot, and the resulting witness
-    records that mapping so it can be re-audited later.
+    records that mapping so it can be re-audited later. The snapshot must hash
+    to the identity it declares, or the binding would name one snapshot while
+    proving containment in another (issue 80).
     """
+    _require_self_consistent_snapshot(snapshot)
     artifacts = context_supplied_artifact_hashes(identity)
     if not artifacts:
         raise ValueError(
@@ -312,10 +351,12 @@ def verify_snapshot_binding(
 ) -> None:
     """Re-audit a retained containment witness against the original snapshot.
 
-    Fails closed when the witness does not cover the context, when the recorded
-    binding digest is stale, when a witness entry names a snapshot entry that
-    does not exist, or when the named entry attests a different artifact.
+    Fails closed when the snapshot does not hash to the identity it declares,
+    when the witness does not cover the context, when the recorded binding
+    digest is stale, when a witness entry names a snapshot entry that does not
+    exist, or when the named entry attests a different artifact.
     """
+    _require_self_consistent_snapshot(snapshot)
     if qualified.source_snapshot_hash != snapshot.snapshot_hash:
         raise ValueError(
             "qualified replay context snapshot hash mismatch: bound to "
@@ -356,6 +397,45 @@ def verify_snapshot_binding(
             )
 
 
+def verify_snapshot_binding_purpose(
+    *,
+    qualified: QualifiedReplayContextV1,
+    snapshot: RealSourceSnapshotV1,
+    purpose: ConsumerPurpose,
+    profile_hash: SHA256Hash,
+    consumer: str,
+) -> None:
+    """Require every witnessed entry to attest its artifact for one purpose.
+
+    M1e qualifies each consumer purpose separately, under its own profile, and
+    each snapshot replay input entry records the purpose and profile it was
+    admitted for. Matching entries by content hash alone let evidence attested
+    only for retrospective audit, or under a foreign profile, back decision
+    views (issue 80). The whole context backs every consumer class it serves,
+    so every witnessed entry must carry the purpose and profile required.
+
+    Run after `verify_snapshot_binding`, so every witness entry resolves. A
+    missing entry still fails closed here rather than passing unchecked.
+    """
+    entries_by_identity = {
+        content_hash(entry): entry for entry in snapshot.replay_inputs
+    }
+    for witnessed in qualified.snapshot_binding_witness:
+        resolved = entries_by_identity.get(witnessed.snapshot_entry_hash)
+        if resolved is None:
+            raise ValueError(
+                f"witness entry {witnessed.snapshot_entry_hash} does not resolve "
+                f"to a snapshot entry of {snapshot.snapshot_hash}"
+            )
+        if resolved.purpose is not purpose or resolved.profile_hash != profile_hash:
+            raise ValueError(
+                f"witness entry {witnessed.snapshot_entry_hash} attests artifact "
+                f"{witnessed.artifact_hash} for {resolved.purpose.value} under "
+                f"profile {resolved.profile_hash}, but the bundle's {consumer} "
+                f"require {purpose.value} under profile {profile_hash}"
+            )
+
+
 def bundle_component_hashes(bundle: EvaluationInputBundleV1) -> tuple[SHA256Hash, ...]:
     """Return the exact hashes of every authority-bearing bundle component.
 
@@ -382,6 +462,9 @@ def _build_bundle_provenance_proof(
     bundle: EvaluationInputBundleV1,
     decision_request_hashes: tuple[SHA256Hash, ...] = (),
     accounting_request_hashes: tuple[SHA256Hash, ...] = (),
+    session_request_hashes: tuple[SHA256Hash, ...] = (),
+    structural_request_hashes: tuple[SHA256Hash, ...] = (),
+    economic_request_hashes: tuple[SHA256Hash, ...] = (),
 ) -> BundleProvenanceProofV1:
     """Assemble a provenance proof over an already-verified bundle.
 
@@ -399,6 +482,9 @@ def _build_bundle_provenance_proof(
         source_snapshot_hash=source_snapshot_hash,
         decision_request_hashes=tuple(sorted(set(decision_request_hashes))),
         accounting_request_hashes=tuple(sorted(set(accounting_request_hashes))),
+        session_request_hashes=tuple(sorted(set(session_request_hashes))),
+        structural_request_hashes=tuple(sorted(set(structural_request_hashes))),
+        economic_request_hashes=tuple(sorted(set(economic_request_hashes))),
         component_hashes=bundle_component_hashes(bundle),
         bundle_hash=bundle.bundle_hash,
         proof_hash="0" * 64,
