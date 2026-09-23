@@ -14,10 +14,7 @@ import json
 import os
 import subprocess
 import sys
-import tarfile
-import tempfile
 import tomllib
-from io import BytesIO
 from pathlib import Path
 from types import ModuleType
 
@@ -177,77 +174,16 @@ def _git_bytes(ref: str, path: str) -> bytes:
     return completed.stdout
 
 
-def _run_archived_m1d_replay(commit: str, node: str, label: str) -> None:
-    with tempfile.TemporaryDirectory(prefix=f"drift-m1d-{label}-replay-") as directory:
-        archive_root = Path(directory)
-        completed = subprocess.run(
-            [
-                "git",
-                "archive",
-                "--format=tar",
-                commit,
-                "--",
-                "src/drift",
-                "tests",
-                "pyproject.toml",
-                "uv.lock",
-            ],
-            cwd=REPO_ROOT,
-            check=False,
-            capture_output=True,
-        )
-        assert completed.returncode == 0, completed.stderr.decode(errors="replace")
-        with tarfile.open(fileobj=BytesIO(completed.stdout), mode="r:") as archive:
-            members = archive.getmembers()
-            assert not any(
-                member.name.startswith("/") or ".." in Path(member.name).parts
-                for member in members
-            )
-            archive.extractall(archive_root, members=members, filter="data")
-        environment = dict(os.environ)
-        environment.pop("PYTEST_ADDOPTS", None)
-        environment["PYTHONPATH"] = os.pathsep.join(
-            (
-                str(archive_root / "src"),
-                str(archive_root / "tests" / "unit"),
-                str(archive_root / "tests" / "integration"),
-            )
-        )
-        environment["PYTHONNOUSERSITE"] = "1"
-        environment["PYTHONDONTWRITEBYTECODE"] = "1"
-        environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
-        imported = subprocess.run(
-            [sys.executable, "-c", "import drift; print(drift.__file__)"],
-            cwd=archive_root,
-            env=environment,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        assert imported.returncode == 0, imported.stdout + imported.stderr
-        assert (
-            Path(imported.stdout.strip())
-            .resolve()
-            .is_relative_to(archive_root.resolve())
-        )
-        replay = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pytest",
-                "-q",
-                "-p",
-                "no:cacheprovider",
-                node,
-            ],
-            cwd=archive_root,
-            env=environment,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        assert replay.returncode == 0, replay.stdout + replay.stderr
-        assert "1 passed" in replay.stdout
+def _run_archived_m1d_replay(generation: str, nodes: tuple[str, ...]) -> None:
+    """Replay nodes under one generation's own source commit.
+
+    The shared pinned-replay helper verifies the exact interpreter identity
+    before extracting anything, authenticates the archive, and classifies any
+    failure as an environment, artifact, semantic, or integrity failure.
+    """
+    helper = _load_module("_task8_pinned_m1d", REPO_ROOT / "tests" / "_pinned_m1d.py")
+    result = helper.run_m1d_generation_replay(generation, nodes)
+    assert result.returncode == 0, result.output
 
 
 def _protected_baseline_paths() -> tuple[str, ...]:
@@ -551,11 +487,19 @@ def test_m1d_v1_bytes_match_task7_and_replay_under_archived_code() -> None:
     )
     for path in paths:
         assert (REPO_ROOT / path).read_bytes() == _git_bytes(TASK7_COMMIT, path)
+    # The replay runs against the cpython-3.14.6 baseline that supersedes these
+    # historical bytes (issue #48); the generator node proves TASK7_COMMIT
+    # itself regenerates that baseline byte-for-byte.
     _run_archived_m1d_replay(
-        TASK7_COMMIT,
-        "tests/integration/test_m1d_adversarial_matrix.py::"
-        "test_task7_expected_decision_and_outcome_bytes_replay",
         "v1",
+        (
+            "tests/integration/test_m1d_adversarial_matrix.py::"
+            "test_task7_v1_fixture_hash_index_is_exact",
+            "tests/integration/test_m1d_adversarial_matrix.py::"
+            "test_task7_v1_generator_reproduces_exact_bytes_and_refuses_overwrite",
+            "tests/integration/test_m1d_adversarial_matrix.py::"
+            "test_task7_expected_decision_and_outcome_bytes_replay",
+        ),
     )
 
 
@@ -571,11 +515,19 @@ def test_m1d_v2_bytes_match_task8_and_replay_under_archived_code() -> None:
     )
     for path in paths:
         assert (REPO_ROOT / path).read_bytes() == _git_bytes(TASK8_COMMIT, path)
+    # The replay runs against the cpython-3.14.6 baseline that supersedes these
+    # historical bytes (issue #48); the generator node proves TASK8_COMMIT
+    # itself regenerates that baseline byte-for-byte.
     _run_archived_m1d_replay(
-        TASK8_COMMIT,
-        "tests/integration/test_m1d_adversarial_matrix.py::"
-        "test_task7_expected_decision_and_outcome_bytes_replay",
         "v2",
+        (
+            "tests/integration/test_m1d_adversarial_matrix.py::"
+            "test_current_v2_fixture_hash_index_is_exact",
+            "tests/integration/test_m1d_adversarial_matrix.py::"
+            "test_v2_generator_reproduces_exact_bytes_and_refuses_both_versions",
+            "tests/integration/test_m1d_adversarial_matrix.py::"
+            "test_task7_expected_decision_and_outcome_bytes_replay",
+        ),
     )
 
 
