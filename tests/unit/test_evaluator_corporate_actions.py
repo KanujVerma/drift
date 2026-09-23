@@ -1995,15 +1995,213 @@ def test_stock_acquisition_adds_the_mapped_target_to_the_acquirers_own() -> None
     assert _quantities(translated) == {SEC_A: 0, SEC_ACQ: 160}
 
 
-def test_stock_acquisition_maps_a_staged_target_without_any_holding() -> None:
+def test_stock_acquisition_staged_entry_without_a_holding_is_indeterminate() -> None:
     outcome = _share_acquisition_case(suffix=1440)
 
-    updated, translated = _processor().apply_pre_open_actions(
-        _state(), (_target(SEC_A, 10),), (outcome,), _key()
+    # The staged entry of ten predecessor shares maps to 15 acquirer shares
+    # while the book receives none, so honouring it would buy an acquirer no
+    # admitted decision named.
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="would buy the acquirer",
+    ):
+        _processor().apply_pre_open_actions(
+            _state(), (_target(SEC_A, 10),), (outcome,), _key()
+        )
+
+
+def test_stock_acquisition_staged_increase_is_indeterminate() -> None:
+    outcome = _share_acquisition_case(suffix=1480)
+    state = _state(holdings=(_holding(quantity=100),))
+
+    # Control: a hold maps to exactly the 150 shares received.
+    _, translated = _processor().apply_pre_open_actions(
+        state, (_target(SEC_A, 100),), (outcome,), _key()
+    )
+    assert _quantities(translated) == {SEC_A: 0, SEC_ACQ: 150}
+
+    # 120 predecessor shares map to 180, more than the 150 received.
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="would buy the acquirer",
+    ):
+        _processor().apply_pre_open_actions(
+            state, (_target(SEC_A, 120),), (outcome,), _key()
+        )
+
+
+def test_mixed_acquisition_staged_increase_is_indeterminate() -> None:
+    outcome = _share_acquisition_case(
+        suffix=1490,
+        numerator="1",
+        denominator="2",
+        action_kind=ActionKind.MIXED_ACQUISITION,
+    )
+    state = _state(holdings=(_holding(quantity=100, basis="900"),))
+
+    # 102 predecessor shares map to 51, more than the 50 received.
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="would buy the acquirer",
+    ):
+        _processor().apply_pre_open_actions(
+            state, (_target(SEC_A, 102),), (outcome,), _key()
+        )
+
+
+def test_share_acquisition_increase_into_a_held_acquirer_is_indeterminate() -> None:
+    outcome = _share_acquisition_case(suffix=1495)
+    state = _state(
+        holdings=(_holding(quantity=100), _holding(SEC_ACQ, quantity=10, basis="80"))
+    )
+    targets = (_target(SEC_A, 102), _target(SEC_ACQ, 10))
+
+    # 102 predecessor shares map to 153, more than the 150 received. The ten
+    # acquirer shares already held do not license the extra three: the bound
+    # is the conversion, not whatever the book happens to hold.
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="would buy the acquirer",
+    ):
+        _processor().apply_pre_open_actions(state, targets, (outcome,), _key())
+
+
+def test_share_acquisition_target_without_an_ended_claim_is_indeterminate() -> None:
+    share = _shares(
+        numerator="3",
+        denominator="2",
+        recipient=SEC_ACQ,
+        treatment=_treatment("round_down"),
+    )
+    outcome = _share_action_case(
+        suffix=1500,
+        action_kind=ActionKind.STOCK_ACQUISITION,
+        components=(share,),
+        claim_status="continuing",
     )
 
-    assert updated.holdings == ()
-    assert _quantities(translated) == {SEC_A: 0, SEC_ACQ: 15}
+    # A staged target alone is exposure, so the claim must be proven ended
+    # before the target is mapped anywhere.
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="acquisition must prove the predecessor claim ended",
+    ):
+        _processor().apply_pre_open_actions(
+            _state(), (_target(SEC_A, 10),), (outcome,), _key()
+        )
+
+
+def test_share_acquisition_zero_target_without_a_holding_has_no_exposure() -> None:
+    share = _shares(
+        numerator="3",
+        denominator="2",
+        recipient=SEC_ACQ,
+        treatment=_treatment("round_down"),
+    )
+    outcome = _share_action_case(
+        suffix=1510,
+        action_kind=ActionKind.STOCK_ACQUISITION,
+        components=(share,),
+        claim_status="continuing",
+    )
+    state = _state()
+    targets = (_target(SEC_A, 0),)
+
+    # Nothing held and nothing to buy: an unproven claim status on a security
+    # the book never touches must not halt the run.
+    updated, translated = _processor().apply_pre_open_actions(
+        state, targets, (outcome,), _key()
+    )
+
+    assert updated is state
+    assert translated == targets
+
+
+def test_cash_acquisition_zero_target_without_a_holding_has_no_exposure() -> None:
+    outcome = _cash_acquisition_case(suffix=1520, claim_status="continuing")
+    state = _state()
+    targets = (_target(SEC_A, 0),)
+
+    updated, translated = _processor().apply_pre_open_actions(
+        state, targets, (outcome,), _key()
+    )
+
+    assert updated is state
+    assert translated == targets
+
+
+def test_share_acquisition_zero_target_into_an_untargeted_holding_fails() -> None:
+    outcome = _share_acquisition_case(suffix=1530)
+    state = _state(
+        holdings=(_holding(quantity=100), _holding(SEC_ACQ, quantity=10, basis="80"))
+    )
+
+    # A staged exit maps to zero acquirer shares, but reading the untargeted
+    # acquirer holding as a zero target would also sell those ten shares.
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="held without a staged target of its own",
+    ):
+        _processor().apply_pre_open_actions(
+            state, (_target(SEC_A, 0),), (outcome,), _key()
+        )
+
+
+@pytest.mark.parametrize(("tie_break", "expected"), [("half_up", 8), ("half_down", 7)])
+def test_stock_dividend_target_follows_the_source_tie_breaking_rule(
+    tie_break: str, expected: int
+) -> None:
+    outcome = _stock_dividend_case(
+        suffix=1540,
+        numerator="1",
+        denominator="2",
+        treatment=_treatment("round_nearest"),
+    )
+    rule = _tie_rule(effect=outcome.effect_records[0], tie_break=tie_break)
+    state = _state(holdings=(_holding(quantity=10),))
+
+    # The holding translates to exactly 15, the target of 5 to a tie at 7.5.
+    processor = _processor(tie_breaking_rules=(rule,))
+    updated, translated = processor.apply_pre_open_actions(
+        state, (_target(SEC_A, 5),), (outcome,), _key()
+    )
+
+    assert _quantities(updated.holdings) == {SEC_A: 15}
+    assert _quantities(translated) == {SEC_A: expected}
+
+
+@pytest.mark.parametrize(("tie_break", "expected"), [("half_up", 8), ("half_down", 7)])
+def test_share_acquisition_target_follows_the_source_tie_breaking_rule(
+    tie_break: str, expected: int
+) -> None:
+    outcome = _share_acquisition_case(
+        suffix=1550, treatment=_treatment("round_nearest")
+    )
+    rule = _tie_rule(effect=outcome.effect_records[0], tie_break=tie_break)
+    state = _state(holdings=(_holding(quantity=10),))
+
+    # The holding converts to exactly 15, the target of 5 to a tie at 7.5.
+    processor = _processor(tie_breaking_rules=(rule,))
+    updated, translated = processor.apply_pre_open_actions(
+        state, (_target(SEC_A, 5),), (outcome,), _key()
+    )
+
+    assert _quantities(updated.holdings) == {SEC_ACQ: 15}
+    assert _quantities(translated) == {SEC_A: 0, SEC_ACQ: expected}
+
+
+def test_spinoff_parent_held_without_a_staged_target_stages_no_child() -> None:
+    outcome = _spinoff_case(suffix=1560)
+    state = _state(holdings=(_holding(quantity=100),))
+    targets = (_target(SEC_OTHER, 7),)
+
+    # Another security's target does not stage a decision for the parent, so
+    # it cannot license a child target either.
+    _, translated = _processor().apply_pre_open_actions(
+        state, targets, (outcome,), _key()
+    )
+
+    assert _quantities(translated) == {SEC_OTHER: 7}
 
 
 def test_stock_acquisition_unresolvable_fractional_target_is_indeterminate() -> None:

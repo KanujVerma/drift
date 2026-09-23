@@ -621,7 +621,7 @@ class CorporateActionProcessor:
         if context.effective_on != session.local_date:
             return
         holding = book.holdings.get(context.security_id)
-        if holding is None and context.security_id not in book.targets:
+        if holding is None and not _stages_a_buy(book, context.security_id):
             return
         _require_ended_claim(context)
         components = _only_cash_components(context, "a cash acquisition")
@@ -649,9 +649,9 @@ class CorporateActionProcessor:
         if context.effective_on != session.local_date:
             return
         holding = book.holdings.get(context.security_id)
-        target = book.targets.get(context.security_id)
-        if holding is None and target is None:
+        if holding is None and not _stages_a_buy(book, context.security_id):
             return
+        target = book.targets.get(context.security_id)
         _require_ended_claim(context)
         component = _single_share_component(
             context,
@@ -672,29 +672,43 @@ class CorporateActionProcessor:
             )
         tie_break = self._tie_break(component.fraction_treatment)
         existing = book.holdings.get(acquirer)
+        whole, residual = 0, Fraction(0)
+        if holding is not None:
+            exact = exact_entitled_shares(holding.quantity, component)
+            whole, residual = resolve_whole_shares(
+                exact, component.fraction_treatment, tie_break=tie_break
+            )
+            if whole <= 0:
+                raise IndeterminateValuationError(
+                    "a share acquisition would extinguish a held position without "
+                    "proven consideration for the remainder"
+                )
         if target is not None:
             # The predecessor target is mapped onto the acquirer through the
             # exact ratio and fraction treatment the holding converts by, so
             # the intended delta survives in acquirer shares.
+            mapped = _translated_quantity(target.target_quantity, component, tie_break)
+            if mapped > whole:
+                # A hold or a sale maps within the shares received. More than
+                # that would buy the acquirer at the open, a security no
+                # admitted decision named. Whether such a buy may be carried
+                # forward awaits an owner ruling, so it fails closed.
+                raise IndeterminateValuationError(
+                    f"a share acquisition would buy the acquirer {acquirer} at "
+                    f"the open: the staged target maps to {mapped} acquirer "
+                    f"shares but the holding receives {whole}, and no admitted "
+                    "decision named the acquirer"
+                )
             _credit_target(
                 book,
                 acquirer,
-                _translated_quantity(target.target_quantity, component, tie_break),
+                mapped,
                 held=existing is not None,
                 label="share acquisition",
             )
             _extinguish_target(book, context.security_id)
         if holding is None:
             return
-        exact = exact_entitled_shares(holding.quantity, component)
-        whole, residual = resolve_whole_shares(
-            exact, component.fraction_treatment, tie_break=tie_break
-        )
-        if whole <= 0:
-            raise IndeterminateValuationError(
-                "a share acquisition would extinguish a held position without "
-                "proven consideration for the remainder"
-            )
         with decimal_context():
             basis = holding.cost_basis + (
                 ZERO if existing is None else existing.cost_basis
@@ -1124,6 +1138,17 @@ def _credit_target(
     book.targets[security_id] = SecurityTargetPositionV1(
         security_id=security_id, target_quantity=base + quantity
     )
+
+
+def _stages_a_buy(book: _Book, security_id: UUID7) -> bool:
+    """Whether a security carries a positive staged target.
+
+    Asked only of a security the book does not hold, where a positive target
+    would buy it at the open. An explicit zero target there trades nothing, so
+    it is no exposure, and halting on the action's evidence would be spurious.
+    """
+    target = book.targets.get(security_id)
+    return target is not None and target.target_quantity > 0
 
 
 def _extinguish_target(book: _Book, security_id: UUID7) -> None:

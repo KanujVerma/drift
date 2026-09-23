@@ -747,6 +747,7 @@ def _cash_acquisition_outcome(*, suffix: int) -> SecurityEconomicOutcomeV1:
 def _run_action(
     outcome: SecurityEconomicOutcomeV1,
     views: tuple[DerivedObservationViewV1, ...],
+    strategy: eng.FixedTargetStrategy | None = None,
 ) -> EvaluationRunArtifactsV1:
     bundle = eng._bundle(
         accounting_views=views, economic_outcomes=(outcome.resolution,)
@@ -762,7 +763,7 @@ def _run_action(
         book_currency_namespace=eng.BOOK_NAMESPACE,
         book_currency_code=eng.BOOK_CODE,
     )
-    return eng._run(engine)
+    return eng._run(engine, strategy)
 
 
 def _pre_action_views() -> tuple[DerivedObservationViewV1, ...]:
@@ -819,6 +820,36 @@ def test_an_overnight_stock_dividend_keeps_a_staged_hold_a_hold() -> None:
     assert _translated_targets(artifacts) == {eng.SEC_A: 11}
     assert _held(artifacts) == {eng.SEC_A: 11}
     assert artifacts.result.metrics.ending_net_asset_value == Decimal("10200.10")
+
+
+def test_an_overnight_stock_dividend_restates_a_staged_buy() -> None:
+    outcome = _share_action_outcome(
+        ActionKind.STOCK_DIVIDEND,
+        numerator="1",
+        denominator="10",
+        meaning="additional_per_predecessor",
+        suffix=8105,
+    )
+    views = _pre_action_views() + (
+        eng._accounting_view(
+            eng.SEC_A, eng.DAY_3, open_price="90.00", close_price="91.00"
+        ),
+    )
+    buy_ten_more = eng.FixedTargetStrategy(
+        {eng.DAY_1: ((eng.SEC_A, 10),), eng.DAY_2: ((eng.SEC_A, 20),)}
+    )
+
+    artifacts = _run_action(outcome, views, buy_ten_more)
+
+    # A staged buy of ten pre-dividend shares is a buy of eleven afterwards,
+    # on top of the eleven the dividend already delivered.
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert _fills(artifacts) == [(2, "buy", 10), (3, "buy", 11)]
+    assert _translated_targets(artifacts) == {eng.SEC_A: 22}
+    assert _held(artifacts) == {eng.SEC_A: 22}
+    # 10000.00 less 10 at 100.00 and 11 at 90.00, plus 22 marked at 91.00.
+    assert artifacts.final_state.cash_balance == Decimal("8010.00")
+    assert artifacts.result.metrics.ending_net_asset_value == Decimal("10012.00")
 
 
 def test_a_split_booked_as_a_stock_dividend_trades_exactly_like_the_split() -> None:
@@ -940,6 +971,67 @@ def test_an_overnight_stock_acquisition_maps_a_staged_hold_to_the_acquirer() -> 
     assert _held(artifacts) == {eng.SEC_B: 15}
     # Fifteen acquirer shares at 50.00 on 9000.00 of cash.
     assert artifacts.result.metrics.ending_net_asset_value == Decimal("9750.00")
+
+
+def _acquisition_into_unadmitted_acquirer(
+    suffix: int, strategy: eng.FixedTargetStrategy
+) -> EvaluationRunArtifactsV1:
+    """SEC_A is acquired 3:2 into SEC_B, which no decision universe admits."""
+    outcome = _share_action_outcome(
+        ActionKind.STOCK_ACQUISITION,
+        numerator="3",
+        denominator="2",
+        meaning="resulting_per_predecessor",
+        suffix=suffix,
+        recipient=eng.SEC_B,
+        claim_status="converted",
+    )
+    views = _pre_action_views() + (
+        eng._accounting_view(eng.SEC_B, eng.DAY_3, listing_id=eng.LISTING_B),
+    )
+    artifacts = _run_action(outcome, views, strategy)
+    assert all(eng.SEC_B not in seen.admitted_universe for seen in strategy.seen)
+    return artifacts
+
+
+def test_a_stock_acquisition_never_turns_a_staged_increase_into_a_buy() -> None:
+    # Control: the staged hold of the test above maps and completes.
+    hold = _acquisition_into_unadmitted_acquirer(
+        8170,
+        eng.FixedTargetStrategy(
+            {eng.DAY_1: ((eng.SEC_A, 10),), eng.DAY_2: ((eng.SEC_A, 10),)}
+        ),
+    )
+    assert hold.result.classification is EvaluationClassification.COMPLETE
+
+    artifacts = _acquisition_into_unadmitted_acquirer(
+        8180,
+        eng.FixedTargetStrategy(
+            {eng.DAY_1: ((eng.SEC_A, 10),), eng.DAY_2: ((eng.SEC_A, 20),)}
+        ),
+    )
+
+    # Before the fix twenty predecessor shares mapped to thirty acquirer
+    # shares, and the open bought fifteen of a security no universe admitted.
+    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
+    assert artifacts.result.halted_session_index == 3
+    assert artifacts.result.halt_reason is not None
+    assert "would buy the acquirer" in artifacts.result.halt_reason
+    assert _fills(artifacts) == [(2, "buy", 10)]
+
+
+def test_a_stock_acquisition_never_turns_a_staged_entry_into_a_buy() -> None:
+    artifacts = _acquisition_into_unadmitted_acquirer(
+        8190, eng.FixedTargetStrategy({eng.DAY_2: ((eng.SEC_A, 10),)})
+    )
+
+    # Before the fix an entry staged into the predecessor bought fifteen
+    # acquirer shares from an empty book.
+    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
+    assert artifacts.result.halted_session_index == 3
+    assert artifacts.result.halt_reason is not None
+    assert "would buy the acquirer" in artifacts.result.halt_reason
+    assert _fills(artifacts) == []
 
 
 # ==========================================================================
