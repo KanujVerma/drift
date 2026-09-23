@@ -42,7 +42,7 @@ execution and marks still read authorized accounting views, which a scheduled
 bundle does not carry, so a held or traded position there fails closed.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Literal, cast
@@ -354,6 +354,23 @@ def _resolve_reconstructed_lane(
     for observation in bundle.exploratory_reconstructed_observations:
         _bind_reconstruction(observation, sessions[observation.session_key], cohort)
     return _ReconstructedDecisionLane(admission=admission, cohort=cohort)
+
+
+def reconstructed_history_sessions(
+    sessions: Sequence[EvaluationSessionV1], index: int
+) -> frozenset[SessionKeyV1]:
+    """The sessions whose reconstructions are history at session ``index``.
+
+    History is what the clock has stepped and what had closed by the decision
+    cutoff: the stepped sessions whose ``closed_at`` is at or before the
+    decision session's own. The clock orders by open time first, so on a
+    multi-venue clock a same-date session can be stepped earlier while closing
+    later; it has not closed at this cutoff and is not history here (#66).
+    """
+    cutoff = sessions[index].closed_at
+    return frozenset(
+        item.session_key for item in sessions[: index + 1] if item.closed_at <= cutoff
+    )
 
 
 def _bind_reconstruction(
@@ -1133,10 +1150,9 @@ class SessionEvaluatorEngine:
         re-checks business-time order on its own, so a broken selection here
         fails loudly rather than leaking the future.
         """
-        stepped = {
-            item.session_key
-            for item in self._bundle.session_clock.sessions[: index + 1]
-        }
+        stepped = reconstructed_history_sessions(
+            self._bundle.session_clock.sessions, index
+        )
         grouped: dict[UUID, list[ExploratoryReconstructedSessionObservationV1]] = {}
         read_current_session = False
         for observation in self._bundle.exploratory_reconstructed_observations:
