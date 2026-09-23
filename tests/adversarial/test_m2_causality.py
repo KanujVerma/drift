@@ -720,6 +720,80 @@ def test_an_answer_about_a_later_time_does_not_admit_before_that_time() -> None:
     assert engine.admitted_universe_at(sessions[2]) == (SEC_A,)
 
 
+def test_an_ineligible_secondary_listing_never_removes_an_eligible_primary() -> None:
+    """M1b marks every non-primary listing INELIGIBLE; the security stays admitted.
+
+    Judging answers per security rather than per listing would read the two
+    as a conflict, or let a later secondary answer remove the security.
+    """
+    primary = _eligibility(SEC_A, LISTING_A)
+    secondary_now = _eligibility(
+        SEC_A, LISTING_B, classification=StructuralEligibilityClassification.INELIGIBLE
+    )
+    secondary_later = _eligibility(
+        SEC_A,
+        LISTING_B,
+        classification=StructuralEligibilityClassification.INELIGIBLE,
+        knowledge_cutoff=_close_of(DAY_1),
+    )
+
+    for secondary in (secondary_now, secondary_later):
+        engine, sessions = _universe_engine(primary, secondary)
+        for session in sessions:
+            assert engine.admitted_universe_at(session) == (SEC_A,)
+
+
+def test_a_listing_migration_keeps_the_security_admitted() -> None:
+    """The old listing turns INELIGIBLE while the new one turns ELIGIBLE."""
+    engine, sessions = _universe_engine(
+        _eligibility(SEC_A, LISTING_A),
+        _eligibility(
+            SEC_A,
+            LISTING_A,
+            classification=StructuralEligibilityClassification.INELIGIBLE,
+            knowledge_cutoff=_close_of(DAY_1),
+        ),
+        _eligibility(SEC_A, LISTING_B, knowledge_cutoff=_close_of(DAY_1)),
+    )
+
+    for session in sessions:
+        assert engine.admitted_universe_at(session) == (SEC_A,)
+
+
+def test_a_conflicted_listing_blocks_admission_beside_an_eligible_one() -> None:
+    """Two answers about one listing at one instant is not an answer."""
+    ineligible = _eligibility(
+        SEC_A, LISTING_B, classification=StructuralEligibilityClassification.INELIGIBLE
+    )
+    conflicting = _rebound(
+        _eligibility(
+            SEC_A,
+            LISTING_B,
+            classification=StructuralEligibilityClassification.INDETERMINATE,
+        ),
+        reasons=("an unresolved second answer",),
+    )
+    engine, sessions = _universe_engine(
+        _eligibility(SEC_A, LISTING_A), ineligible, conflicting
+    )
+
+    assert engine.admitted_universe_at(sessions[0]) == ()
+
+
+def test_an_indeterminate_listing_blocks_admission() -> None:
+    """An unresolved answer about any listing is not an admission."""
+    engine, sessions = _universe_engine(
+        _eligibility(SEC_A, LISTING_A),
+        _eligibility(
+            SEC_A,
+            LISTING_B,
+            classification=StructuralEligibilityClassification.INDETERMINATE,
+        ),
+    )
+
+    assert engine.admitted_universe_at(sessions[0]) == ()
+
+
 def test_an_indeterminate_membership_is_not_an_admission() -> None:
     undecided = _eligibility(
         SEC_B,

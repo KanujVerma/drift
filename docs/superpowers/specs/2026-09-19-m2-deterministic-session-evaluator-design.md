@@ -556,6 +556,8 @@ The regular trading session close is NOT hardcoded to 16:00 ET:
 - `INELIGIBLE` or `INDETERMINATE` removes the security from eligibility.
 - Indeterminate membership is never treated as eligible.
 
+**Amendment, issue 85.** Admission at a decision cutoff reads only the as-known results known by that cutoff and evaluated at or before it, and within them only each listing's latest answer, ordered by `(evaluation_time, knowledge_cutoff)`. That order lets an answer about a later time outrank a later restatement about an earlier time. M1b answers per security and listing and marks every non-primary listing `INELIGIBLE`, so a security is admitted when some listing's latest answer is `ELIGIBLE`, no listing's latest answer is `INDETERMINATE`, and no listing has conflicting answers at its latest instant. An `INELIGIBLE` answer about the listing that made a security eligible removes it; an `INELIGIBLE` secondary listing does not, and a listing migration keeps the security admitted. Results under several universe definitions for one security are not distinguished by definition; conflicting answers across them admit nothing.
+
 ### 9.2 Liquidations Permitted for Excluded Positions
 If a security currently held in the portfolio is removed from the universe (e.g. dropped from an index or becoming `INELIGIBLE`), the strategy is permitted to emit `target_quantity = 0` to liquidate the holding. Target quantities with `target_quantity > 0` (new entries or additions) for non-admitted securities are strictly rejected.
 
