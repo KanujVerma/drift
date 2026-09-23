@@ -305,7 +305,7 @@ class EvaluationRunArtifactsV1(FrozenModel):
         return self
 
     def _bind_decision_evidence_grade(self) -> None:
-        """Refuse a promotion result paired with decisions on weaker evidence.
+        """Refuse a promotion result traced on weaker decisions or prices.
 
         Decisions taken on EXPLORATORY reconstructed evidence are traced under
         their own event kind. A promotion result bound to such a trace would
@@ -326,6 +326,19 @@ class EvaluationRunArtifactsV1(FrozenModel):
                 "a promotion result cannot bind a trace of decisions taken on "
                 f"EXPLORATORY reconstructed evidence: {weaker} "
                 "exploratory_strategy_decision events"
+            )
+        # Issue 54: fills and marks priced from reconstructions are traced under
+        # their own kind too, and a promotion result may not carry that PnL.
+        priced = sum(
+            1
+            for event in self.trace.events
+            if event.kind == "exploratory_accounting_price"
+        )
+        if priced:
+            raise ValueError(
+                "a promotion result cannot bind a trace of accounting priced on "
+                f"EXPLORATORY reconstructed evidence: {priced} "
+                "exploratory_accounting_price events"
             )
 
     def _bind_stepped_sessions(self) -> None:

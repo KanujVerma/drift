@@ -4,10 +4,11 @@ Issue 46 invariant 9 requires that M3 can drive deterministic exploratory
 baselines through this path. These tests run baseline-shaped strategies over a
 genuine scheduled-reconstruction corpus through the public M0 experiment
 runner, the entry point M3 will use, and pin two facts: the path is
-deterministic across experiment runs, and a baseline that trades halts
-honestly at its first execution open, because a scheduled bundle carries no
-authorized accounting evidence and the issue 46 ruling authorizes
-reconstructed evidence for decisions only.
+deterministic across experiment runs, and a baseline that trades executes and
+marks on EXPLORATORY reconstructed prices. Issue 46 authorized reconstructed
+evidence for decisions only, so a trading baseline used to halt at its first
+execution open; the issue 54 ruling (Q2 in #62) admits reconstructed opens as
+exploratory execution prices and closes as exploratory marks.
 """
 
 import sys
@@ -111,37 +112,44 @@ def test_a_baseline_consumes_the_reconstructed_path_deterministically() -> None:
     ]
 
 
-def test_a_trading_baseline_halts_at_its_first_execution_open() -> None:
-    """Honest, not fabricated: no reconstructed fill price is authorized yet.
+def test_a_trading_baseline_executes_and_marks_on_reconstructed_prices() -> None:
+    """The deliberate change the issue 46 version of this test anticipated.
 
-    The decision at the JAN5 scheduled close stages a buy. The next session
-    opens, and the open price for that buy has no authorized accounting
-    evidence in a scheduled bundle, so the run is INDETERMINATE there, having
-    committed no fill. If accounting over reconstructed evidence is later
-    ruled in, this test is the one that must change, deliberately.
+    The decision at the JAN5 scheduled close stages a buy. The JAN6 open fills
+    it at the reconstructed JAN6 open, and every close marks the position at
+    that session's reconstructed close. Each price the fill and the marks read
+    is named in the trace under its own exploratory event kind.
     """
-    strategy = ReconstructedTargetStrategy({JAN5: ((SEC, 10),)})
+    strategy = ReconstructedTargetStrategy({JAN5: ((SEC, 10),), JAN6: ((SEC, 10),)})
 
     artifacts = run_engine(
         reconstructed_engine(bundle_of(three_regular_sessions())), strategy
     )
 
-    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
-    assert artifacts.result.halted_session_index == 1
-    assert artifacts.result.metrics.committed_fill_count == 0
-    causes = [
-        event for event in artifacts.trace.events if event.kind == "indeterminate_cause"
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert artifacts.result.lane == "exploratory"
+    assert artifacts.result.metrics.committed_fill_count == 1
+    fills = [event for event in artifacts.trace.events if event.kind == "fill"]
+    assert [(event.session_index, event.fill.side) for event in fills] == [(1, "buy")]
+    priced = [
+        (event.session_index, event.phase)
+        for event in artifacts.trace.events
+        if event.kind == "exploratory_accounting_price"
     ]
-    assert len(causes) == 1
-    assert causes[0].phase is EvaluationPhase.OPEN_EXECUTION
-    assert causes[0].cause.startswith("no authorized accounting view for security")
+    assert priced == [
+        (1, EvaluationPhase.OPEN_EXECUTION),
+        (1, EvaluationPhase.CLOSE_MARK),
+        (2, EvaluationPhase.CLOSE_MARK),
+    ]
+    assert not any(
+        event.kind == "indeterminate_cause" for event in artifacts.trace.events
+    )
     decisions = [
         event
         for event in artifacts.trace.events
         if event.kind == "exploratory_strategy_decision"
     ]
-    assert [event.session_index for event in decisions] == [0]
-    assert [context.session_key.local_date for context in strategy.seen] == [JAN5]
+    assert [event.session_index for event in decisions] == [0, 1, 2]
 
 
 def test_one_baseline_class_serves_both_lanes_through_their_own_contexts() -> None:

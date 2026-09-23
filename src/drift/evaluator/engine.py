@@ -67,6 +67,11 @@ from drift.domain.evaluator_execution import (
     ListingOpenPriceV1,
     positions_digest,
 )
+from drift.domain.evaluator_exploratory_accounting import (
+    ExploratoryAccountingPriceRole,
+    ExploratoryReconstructedAccountingPriceV1,
+    reconstructed_accounting_price,
+)
 from drift.domain.evaluator_exploratory_strategy import (
     ExploratoryReconstructedDecisionViewV1,
     ExploratoryReconstructedRuntimeStrategy,
@@ -117,6 +122,7 @@ from drift.domain.evaluator_trace import (
     EvaluationPhase,
     EvaluationTraceLogV1,
     EvaluatorTraceEventV1,
+    ExploratoryAccountingPriceTraceEventV1,
     ExploratoryStrategyDecisionTraceEventV1,
     FillRejectionTraceEventV1,
     FillTraceEventV1,
@@ -477,6 +483,11 @@ class SessionEvaluatorEngine:
             replay=evidence.exploratory_reconstruction_replay,
         )
         self._accounting_index = self._index_accounting_views(bundle)
+        self._book_currency_code = book_currency_code
+        # Issue 54: only the reconstructed lane reads this index, and only
+        # after its gate re-derived every reconstruction (issue 55).
+        # Reconstructions riding a realized bundle never price anything.
+        self._reconstructed_prices = self._index_reconstructed_prices(bundle)
         self._corporate_actions = CorporateActionProcessor(
             session_clock=bundle.session_clock,
             book_currency_namespace=book_currency_namespace,
@@ -579,6 +590,22 @@ class SessionEvaluatorEngine:
         index: dict[tuple[UUID, SessionKeyV1], list[DerivedObservationViewV1]] = {}
         for view in bundle.authentic_accounting_views:
             index.setdefault((view.security_id, view.source_session), []).append(view)
+        return index
+
+    @staticmethod
+    def _index_reconstructed_prices(
+        bundle: EvaluationInputBundleV1,
+    ) -> dict[
+        tuple[UUID, SessionKeyV1], list[ExploratoryReconstructedSessionObservationV1]
+    ]:
+        index: dict[
+            tuple[UUID, SessionKeyV1],
+            list[ExploratoryReconstructedSessionObservationV1],
+        ] = {}
+        for observation in bundle.exploratory_reconstructed_observations:
+            index.setdefault(
+                (observation.security_id, observation.session_key), []
+            ).append(observation)
         return index
 
     def _require_bound_identity(self, run_identity: EvaluationRunIdentityV1) -> None:
@@ -775,10 +802,34 @@ class SessionEvaluatorEngine:
             termination_records=self._evidence.listing_termination_records,
             lifecycle_records=self._evidence.listing_lifecycle_records,
         )
-        prices = {
-            security_id: self._open_price(security_id, session)
-            for security_id in trading
-        }
+        if self._reconstructed_lane is None:
+            prices = {
+                security_id: self._open_price(security_id, session)
+                for security_id in trading
+            }
+        else:
+            records = tuple(
+                self._reconstructed_price(security_id, session.session_key, "open")
+                for security_id in trading
+            )
+            prices = {
+                record.security_id: ListingOpenPriceV1(
+                    listing_id=record.listing_id,
+                    venue=record.venue,
+                    unadjusted_open_price=record.unadjusted_price,
+                )
+                for record in records
+            }
+            if records:
+                loop.events.append(
+                    ExploratoryAccountingPriceTraceEventV1(
+                        sequence=len(loop.events),
+                        session_index=index,
+                        session_key=session.session_key,
+                        phase=EvaluationPhase.OPEN_EXECUTION,
+                        prices=records,
+                    )
+                )
         outcome = self._rebalance.rebalance(
             state=loop.state,
             staged_targets=loop.staged_targets,
@@ -842,6 +893,34 @@ class SessionEvaluatorEngine:
             unadjusted_open_price=source_basis_price(view, "open"),
         )
 
+    def _reconstructed_price(
+        self,
+        security_id: UUID7,
+        session_key: SessionKeyV1,
+        field_role: ExploratoryAccountingPriceRole,
+    ) -> ExploratoryReconstructedAccountingPriceV1:
+        """Read one EXPLORATORY accounting price, failing closed on any doubt."""
+        where = f"{session_key.mic} {session_key.local_date}"
+        observations = self._reconstructed_prices.get((security_id, session_key), [])
+        if not observations:
+            raise IndeterminateValuationError(
+                "no exploratory reconstructed accounting price for security "
+                f"{security_id} on {where}"
+            )
+        if len(observations) > 1:
+            raise IndeterminateValuationError(
+                "more than one exploratory reconstruction for security "
+                f"{security_id} on {where}"
+            )
+        price = reconstructed_accounting_price(observations[0], field_role)
+        if price.currency != self._book_currency_code:
+            raise IndeterminateValuationError(
+                f"exploratory reconstructed {field_role} price for security "
+                f"{security_id} on {where} is in {price.currency}, not the book "
+                f"currency {self._book_currency_code}"
+            )
+        return price
+
     def _accounting_view(
         self, security_id: UUID7, session_key: SessionKeyV1
     ) -> DerivedObservationViewV1:
@@ -891,10 +970,38 @@ class SessionEvaluatorEngine:
     def _close_mark(
         self, loop: _Loop, index: int, session: EvaluationSessionV1
     ) -> None:
-        marks = tuple(
-            self._mark_price(holding.security_id, session)
-            for holding in loop.state.holdings
-        )
+        if self._reconstructed_lane is None:
+            marks = tuple(
+                self._mark_price(holding.security_id, session)
+                for holding in loop.state.holdings
+            )
+        else:
+            records = tuple(
+                self._reconstructed_price(
+                    holding.security_id, session.session_key, "close"
+                )
+                for holding in loop.state.holdings
+            )
+            marks = tuple(
+                MarkPriceV1(
+                    security_id=record.security_id,
+                    close_price=record.unadjusted_price,
+                    evidence=MarkEvidenceV1(
+                        grade=self._mark_grade, evidence_hash=record.price_hash
+                    ),
+                )
+                for record in records
+            )
+            if records:
+                loop.events.append(
+                    ExploratoryAccountingPriceTraceEventV1(
+                        sequence=len(loop.events),
+                        session_index=index,
+                        session_key=session.session_key,
+                        phase=EvaluationPhase.CLOSE_MARK,
+                        prices=records,
+                    )
+                )
         kernel = PortfolioAccountingKernel(
             loop.state, session_clock=self._bundle.session_clock
         )
