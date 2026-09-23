@@ -740,44 +740,60 @@ def test_an_ineligible_secondary_listing_never_removes_an_eligible_primary() -> 
         assert engine.admitted_universe_at(session) == (SEC_A,)
 
 
+def _on_both_sides_of(
+    anchor: StructuralEligibilityResultV1, varied: StructuralEligibilityResultV1
+) -> tuple[StructuralEligibilityResultV1, StructuralEligibilityResultV1]:
+    """``varied`` restated so one copy sorts before ``anchor`` and one after.
+
+    The bundle orders results by content hash, so a rule that depended on the
+    order results are read in would pass for one order only. Varying the
+    reasons text changes the hash and nothing the rule reads.
+    """
+    variants = [_rebound(varied, reasons=(f"reason-{index}",)) for index in range(256)]
+    before = next(v for v in variants if content_hash(v) < content_hash(anchor))
+    after = next(v for v in variants if content_hash(v) > content_hash(anchor))
+    return before, after
+
+
 def test_a_later_answer_about_only_one_listing_fails_closed() -> None:
     """An incomplete answer set never carries an older admission forward.
 
     M1b answers every listing of a security at one instant. A later instant
     that answers only the secondary listing says nothing current about the
-    primary, so the security is not admitted on the stale primary answer.
+    primary, so the security is not admitted on the stale primary answer, in
+    either bundle order.
     """
-    engine, sessions = _universe_engine(
-        _eligibility(SEC_A, LISTING_A),
-        _eligibility(
-            SEC_A,
-            LISTING_B,
-            classification=StructuralEligibilityClassification.INELIGIBLE,
-            knowledge_cutoff=_close_of(DAY_1),
-        ),
+    primary = _eligibility(SEC_A, LISTING_A)
+    later = _eligibility(
+        SEC_A,
+        LISTING_B,
+        classification=StructuralEligibilityClassification.INELIGIBLE,
+        knowledge_cutoff=_close_of(DAY_1),
     )
 
-    assert engine.admitted_universe_at(sessions[0]) == (SEC_A,)
-    for session in sessions[1:]:
-        assert engine.admitted_universe_at(session) == ()
+    for secondary in _on_both_sides_of(primary, later):
+        engine, sessions = _universe_engine(primary, secondary)
+        assert engine.admitted_universe_at(sessions[0]) == (SEC_A,)
+        for session in sessions[1:]:
+            assert engine.admitted_universe_at(session) == ()
 
 
 def test_a_delisting_after_a_migration_removes_the_security() -> None:
-    """The reviewer's case: the retired listing's old ELIGIBLE answer is stale."""
-    engine, sessions = _universe_engine(
-        _eligibility(SEC_A, LISTING_A),
-        _eligibility(SEC_A, LISTING_B, knowledge_cutoff=_close_of(DAY_1)),
-        _eligibility(
-            SEC_A,
-            LISTING_B,
-            classification=StructuralEligibilityClassification.INELIGIBLE,
-            knowledge_cutoff=_close_of(DAY_2),
-        ),
+    """The retired listing's old ELIGIBLE answer is stale, in either order."""
+    retired = _eligibility(SEC_A, LISTING_A)
+    migrated = _eligibility(SEC_A, LISTING_B, knowledge_cutoff=_close_of(DAY_1))
+    delisted = _eligibility(
+        SEC_A,
+        LISTING_B,
+        classification=StructuralEligibilityClassification.INELIGIBLE,
+        knowledge_cutoff=_close_of(DAY_2),
     )
 
-    assert engine.admitted_universe_at(sessions[1]) == (SEC_A,)
-    for session in sessions[2:]:
-        assert engine.admitted_universe_at(session) == ()
+    for final in _on_both_sides_of(retired, delisted):
+        engine, sessions = _universe_engine(retired, migrated, final)
+        assert engine.admitted_universe_at(sessions[1]) == (SEC_A,)
+        for session in sessions[2:]:
+            assert engine.admitted_universe_at(session) == ()
 
 
 def test_a_listing_migration_keeps_the_security_admitted() -> None:

@@ -242,6 +242,52 @@ def test_the_result_artifact_carries_no_operational_metadata() -> None:
 # ==========================================================================
 
 
+def test_a_trading_reconstructed_run_is_bitwise_identical_across_runs() -> None:
+    """The reconstructed lane (#46, #54) replays bitwise too, while it trades.
+
+    Two ExperimentRuns with different ids and clocks over one reconstructed
+    evaluation that buys and marks on exploratory reconstructed prices must
+    bind the same result and trace content addresses.
+    """
+    import test_exploratory_reconstructed_experiment_run as reconstructed_runs
+    from exploratory_decision_test_support import (
+        JAN5,
+        JAN6,
+        SEC,
+        ReconstructedTargetStrategy,
+        bundle_of,
+        reconstructed_engine,
+        three_regular_sessions,
+    )
+
+    engine = reconstructed_engine(bundle_of(three_regular_sessions()))
+    targets = {JAN5: ((SEC, 10),), JAN6: ((SEC, 10),)}
+    specification = run_support._specification(dataset_hash=engine.bundle.bundle_hash)
+
+    first = execute_experiment_run(
+        specification,
+        reconstructed_runs._context(engine, ReconstructedTargetStrategy(targets)),
+    )
+    second = execute_experiment_run(
+        specification,
+        reconstructed_runs._context(
+            engine,
+            ReconstructedTargetStrategy(targets),
+            started_at=LATE_START,
+            completed_at=LATE_END,
+        ),
+    )
+
+    for run in (first, second):
+        assert run.status is ExperimentRunStatus.COMPLETED
+        assert run_support._metric(run, "committed_fill_count") == 1
+        assert run_support._metric(run, "lane") == "exploratory"
+    assert first.run_id != second.run_id
+    assert {ref.kind: ref.content_hash for ref in first.artifact_references} == {
+        ref.kind: ref.content_hash for ref in second.artifact_references
+    }
+
+
 def test_every_run_identity_input_moves_the_identity_hash() -> None:
     engine = eng._engine()
     base = _identity_of(engine)
