@@ -391,6 +391,7 @@ def _promotion_artifacts_over_priced_trace() -> dict[str, Any]:
         cost_model_hash=engine.cost_model.cost_model_hash,
         admission=promotion,
         bundle=bundle,
+        evaluator_evidence_hash=engine.evaluator_evidence_hash,
         code_version_hash=CODE_VERSION_HASH,
         environment_closure_hash=ENVIRONMENT_HASH,
     )

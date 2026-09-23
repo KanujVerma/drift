@@ -139,6 +139,22 @@ def _validate_context(
             f"{specification.strategy_reference.code_hash}, run identity binds "
             f"{context.run_identity.strategy_hash}"
         )
+    # Issue 86: the row must also name the strategy that actually runs, and
+    # the dataset must be the bundle the run identity binds.
+    running = context.strategy.strategy_reference.code_hash
+    if running != context.run_identity.strategy_hash:
+        raise ValueError(
+            "the strategy that runs does not match the run identity: the "
+            f"strategy is {running}, run identity binds "
+            f"{context.run_identity.strategy_hash}"
+        )
+    dataset = specification.dataset_reference.content_hash
+    if dataset != context.run_identity.bundle_hash:
+        raise ValueError(
+            "the specification dataset is not the evaluated bundle: "
+            f"specification names {dataset}, run identity binds "
+            f"{context.run_identity.bundle_hash}"
+        )
 
 
 def _record_audit_event(context: ExperimentRunnerContext, run: ExperimentRun) -> None:

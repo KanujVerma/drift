@@ -559,6 +559,7 @@ def _identity_args(**overrides: Any) -> dict[str, Any]:
         "cost_model_hash": H["3"],
         "admission": _exploratory_admission(bundle),
         "bundle": bundle,
+        "evaluator_evidence_hash": H["5"],
         "code_version_hash": H["6"],
         "environment_closure_hash": H["7"],
     }
@@ -579,6 +580,7 @@ def test_run_identity_is_deterministic() -> None:
         "strategy_hash",
         "protocol_hash",
         "cost_model_hash",
+        "evaluator_evidence_hash",
         "code_version_hash",
         "environment_closure_hash",
     ],

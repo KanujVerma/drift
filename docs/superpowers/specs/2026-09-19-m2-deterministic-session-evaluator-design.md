@@ -833,6 +833,8 @@ $$\text{RunHash} = \text{content\_hash}(\text{strategy\_ref}, \text{params}, \te
 
 Re-executing an evaluation with identical inputs, strategy version, protocol, costs, and software environment produces bitwise-identical trace events, identical accounting numbers, and an identical result hash.
 
+**Amendment, issue 86.** Evidence outside the bundle changes results too, so `EvaluationRunIdentityV1` also binds `evaluator_evidence_hash`, the canonical identity of `SessionEvaluatorEvidence`: listing role, termination, and lifecycle records, economic outcome records, tie-breaking, due-bill, and cash-in-lieu registries, and the exploratory cohort and replay (each collection by its sorted member content hashes, each replay context by its M1d context hash). The engine refuses a run identity that does not name the evidence it consults or the strategy that runs, and refuses to be built unless the economic outcome records it is handed match the bundle's declared resolutions exactly, so a declared corporate action can never be read as no action by omission. `execute_experiment_run` refuses a specification whose dataset is not the run identity's bundle, or whose running strategy is not the one the identity names.
+
 ---
 
 ## 19. Exploratory Lane Admission Contracts
