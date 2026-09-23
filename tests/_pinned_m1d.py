@@ -111,6 +111,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PYTHON_PIN_PATH = REPO_ROOT / ".python-version"
 """The single exact interpreter pin, shared with uv and with CI."""
 LOCKFILE_PATH = REPO_ROOT / "uv.lock"
+PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
+"""Declares the dependency groups ``uv sync`` installs by default."""
 """The locked distribution set every replay environment must be synced to."""
 MATRIX_MODULE = "tests/integration/test_m1d_adversarial_matrix.py"
 M1C_COMPOSITION_NODE = (
@@ -379,11 +381,54 @@ def _read_lockfile(lock_path: Path, *, authenticate: bool) -> dict[str, object]:
     return document
 
 
+def _default_dependency_groups() -> tuple[str, ...] | None:
+    """The dependency groups ``uv sync`` installs by default, from pyproject.
+
+    ``tool.uv.default-groups`` defaults to ``["dev"]``; ``"all"`` selects every
+    group and is returned as ``None``.
+    """
+    try:
+        document = tomllib.loads(PYPROJECT_PATH.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        raise PinnedReplayIntegrityFailure(
+            f"cannot read {PYPROJECT_PATH}: {error}"
+        ) from error
+    uv = document.get("tool", {}).get("uv", {})
+    groups = uv.get("default-groups", ["dev"]) if isinstance(uv, dict) else ["dev"]
+    if groups == "all":
+        return None
+    if not isinstance(groups, list) or not all(isinstance(g, str) for g in groups):
+        raise PinnedReplayIntegrityFailure(
+            f"{PYPROJECT_PATH} tool.uv.default-groups must be a list of names"
+        )
+    return tuple(groups)
+
+
 def locked_environment(
-    lock_path: Path = LOCKFILE_PATH, *, authenticate: bool = True
+    lock_path: Path = LOCKFILE_PATH,
+    *,
+    authenticate: bool = True,
+    default_groups: Collection[str] | None | str = "pyproject",
 ) -> LockedEnvironment:
-    """Resolve what the lock requires of this interpreter, failing closed."""
-    from packaging.markers import InvalidMarker, Marker
+    """Resolve what the lock requires of this interpreter, failing closed.
+
+    The closure starts at the single project root: its dependencies, plus the
+    dependency groups ``uv sync`` installs by default. A ``virtual`` root is
+    never installed itself, so only an editable root is required.
+    ``default_groups`` defaults to what ``pyproject.toml`` declares; tests pass
+    an explicit collection, or ``None`` for every group.
+    """
+    try:
+        from packaging.markers import (
+            InvalidMarker,
+            Marker,
+            UndefinedComparison,
+            UndefinedEnvironmentName,
+        )
+    except ImportError as error:
+        raise PinnedReplayEnvironmentArtifactUnavailable(
+            f"the marker evaluator the lock requires is unavailable: {error}"
+        ) from error
 
     document = _read_lockfile(lock_path, authenticate=authenticate)
 
@@ -409,10 +454,10 @@ def locked_environment(
     if len(roots) != 1:
         raise refuse(f"expected exactly one project package, found {len(roots)}")
 
-    def edges(entry: dict[str, object], key: str) -> list[object]:
-        value = entry.get(key, [])
+    def edges(container: dict[str, object], key: str, owner: str) -> list[object]:
+        value = container.get(key, [])
         if not isinstance(value, list):
-            raise refuse(f"{entry['name']} {key} is not a list")
+            raise refuse(f"{owner} {key} is not a list")
         return value
 
     def resolve(edge: object) -> dict[str, object] | None:
@@ -423,8 +468,12 @@ def locked_environment(
             try:
                 if not Marker(str(marker)).evaluate():
                     return None
-            except InvalidMarker as error:
-                raise refuse(f"invalid marker {marker!r}: {error}") from error
+            except (
+                InvalidMarker,
+                UndefinedComparison,
+                UndefinedEnvironmentName,
+            ) as error:
+                raise refuse(f"unevaluable marker {marker!r}: {error}") from error
         candidates = by_name.get(_distribution_name(str(edge["name"])), [])
         if edge.get("version") is not None:
             candidates = [c for c in candidates if c["version"] == edge["version"]]
@@ -436,34 +485,50 @@ def locked_environment(
         return candidates[0]
 
     (root,) = roots
-    required: dict[str, str] = {
-        _distribution_name(str(root["name"])): str(root["version"])
-    }
-    pending = list(edges(root, "dependencies"))
+    root_name = str(root["name"])
+    required: dict[str, str] = {}
+    source = root.get("source")
+    if not (isinstance(source, dict) and "virtual" in source):
+        required[_distribution_name(root_name)] = str(root["version"])
+    pending = list(edges(root, "dependencies", root_name))
     groups = root.get("dev-dependencies", {})
     if not isinstance(groups, dict):
         raise refuse("the project dev-dependencies are not a table")
+    selected = (
+        _default_dependency_groups()
+        if default_groups == "pyproject"
+        else default_groups
+    )
     for group in sorted(groups):
-        pending.extend(edges(groups, group))
+        if selected is None or group in selected:
+            pending.extend(edges(groups, group, f"{root_name} dev-dependencies"))
+    expanded: set[tuple[str, str]] = set()
+    visited: set[str] = set()
     while pending:
         edge = pending.pop(0)
         entry = resolve(edge)
         if entry is None:
             continue
         key = _distribution_name(str(entry["name"]))
-        if key in required:
-            if required[key] != entry["version"]:
-                raise refuse(
-                    f"{key} is required at both {required[key]} and {entry['version']}"
-                )
-            continue
-        required[key] = str(entry["version"])
-        pending.extend(edges(entry, "dependencies"))
+        version = str(entry["version"])
+        if key in required and required[key] != version:
+            raise refuse(f"{key} is required at both {required[key]} and {version}")
+        required.setdefault(key, version)
+        if key not in visited:
+            visited.add(key)
+            pending.extend(edges(entry, "dependencies", key))
+        # Extras are expanded per edge, so an extra requested on a later edge
+        # to an already visited package is still honoured.
         extras = edge.get("extra", []) if isinstance(edge, dict) else []
         optional = entry.get("optional-dependencies", {})
-        if isinstance(extras, list) and isinstance(optional, dict):
-            for extra in extras:
-                pending.extend(edges(optional, str(extra)))
+        if not isinstance(extras, list) or not isinstance(optional, dict):
+            raise refuse(f"{key} extras or optional-dependencies are malformed")
+        for extra in extras:
+            if (key, str(extra)) not in expanded:
+                expanded.add((key, str(extra)))
+                pending.extend(
+                    edges(optional, str(extra), f"{key} optional-dependencies")
+                )
     locked = {
         name: frozenset(str(item["version"]) for item in entries)
         for name, entries in sorted(by_name.items())

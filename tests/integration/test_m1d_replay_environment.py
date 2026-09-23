@@ -310,20 +310,136 @@ def test_a_missing_required_distribution_is_an_environment_mismatch() -> None:
     )
 
 
-def test_a_locked_but_unrequired_distribution_is_an_environment_mismatch() -> None:
-    """A package the lock resolves only for another platform is drift here."""
+ROOT_PACKAGE = (
+    '[[package]]\nname = "demo"\nversion = "1.0"\nsource = { editable = "." }\n'
+)
+
+
+def _package(name: str, version: str = "1.0", extra: str = "") -> str:
+    return f'[[package]]\nname = "{name}"\nversion = "{version}"\n{extra}'
+
+
+def test_a_locked_but_unrequired_distribution_is_an_environment_mismatch(
+    tmp_path: Path,
+) -> None:
+    """A package the lock resolves but does not require here is drift here.
+
+    Built on a synthetic lock so it holds on every platform: `extra-only` is
+    locked, and nothing the project needs pulls it in.
+    """
     helper = _load_replay_helper()
-    environment = helper.locked_environment()
-    (extra,) = sorted(set(environment.locked) - set(environment.required))
-    (version,) = sorted(environment.locked[extra])
-    installed = _installed(helper) | {extra: frozenset({version})}
-    error = _raised(lambda: helper.verify_replay_distributions(installed=installed))
+    lock = _synthetic_lock(
+        tmp_path / "uv.lock",
+        ROOT_PACKAGE
+        + 'dependencies = [{ name = "a" }]\n'
+        + _package("a")
+        + _package("extra-only"),
+    )
+    installed = {"demo": {"1.0"}, "a": {"1.0"}, "extra-only": {"1.0"}}
+    error = _raised(
+        lambda: helper.verify_replay_distributions(
+            installed=installed, lock_path=lock, authenticate=False
+        )
+    )
     assert type(error) is helper.PinnedReplayEnvironmentMismatch
     assert str(error) == (
         "PINNED_REPLAY_ENVIRONMENT_MISMATCH installed distributions differ from "
-        f"uv.lock in running interpreter: {extra} ['{version}'] is installed but "
+        "uv.lock in running interpreter: extra-only ['1.0'] is installed but "
         "uv.lock does not require it for this interpreter"
     )
+
+
+def test_an_extra_requested_on_a_later_edge_is_still_required(tmp_path: Path) -> None:
+    """`a` is reached plainly first, then as `a[x]`; the extra's `c` counts."""
+    helper = _load_replay_helper()
+    lock = _synthetic_lock(
+        tmp_path / "uv.lock",
+        ROOT_PACKAGE
+        + 'dependencies = [{ name = "a" }, { name = "b" }]\n'
+        + _package("a", extra='[package.optional-dependencies]\nx = [{ name = "c" }]\n')
+        + _package("b", extra='dependencies = [{ name = "a", extra = ["x"] }]\n')
+        + _package("c"),
+    )
+    environment = helper.locked_environment(lock, authenticate=False, default_groups=())
+    assert environment.required == {"a": "1.0", "b": "1.0", "c": "1.0", "demo": "1.0"}
+
+
+def test_a_virtual_root_is_not_itself_required(tmp_path: Path) -> None:
+    """uv never installs a virtual project, so only its dependencies count."""
+    helper = _load_replay_helper()
+    lock = _synthetic_lock(
+        tmp_path / "uv.lock",
+        '[[package]]\nname = "demo"\nversion = "1.0"\nsource = { virtual = "." }\n'
+        'dependencies = [{ name = "a" }]\n' + _package("a"),
+    )
+    environment = helper.locked_environment(lock, authenticate=False, default_groups=())
+    assert environment.required == {"a": "1.0"}
+
+
+def test_only_the_default_dependency_groups_are_required(tmp_path: Path) -> None:
+    """A non-default group is locked but not installed by `uv sync`."""
+    helper = _load_replay_helper()
+    lock = _synthetic_lock(
+        tmp_path / "uv.lock",
+        ROOT_PACKAGE
+        + "[package.dev-dependencies]\n"
+        + 'dev = [{ name = "d" }]\ndocs = [{ name = "e" }]\n'
+        + _package("d")
+        + _package("e"),
+    )
+    by_default = helper.locked_environment(lock, authenticate=False)
+    assert by_default.required == {"d": "1.0", "demo": "1.0"}
+    every = helper.locked_environment(lock, authenticate=False, default_groups=None)
+    assert every.required == {"d": "1.0", "demo": "1.0", "e": "1.0"}
+
+
+@pytest.mark.parametrize(
+    "marker",
+    ("'dev' in dependency_groups", "'x' in extras", "python_version >"),
+)
+def test_an_unevaluable_marker_is_an_integrity_failure(
+    tmp_path: Path, marker: str
+) -> None:
+    helper = _load_replay_helper()
+    lock = _synthetic_lock(
+        tmp_path / "uv.lock",
+        ROOT_PACKAGE
+        + f'dependencies = [{{ name = "a", marker = "{marker}" }}]\n'
+        + _package("a"),
+    )
+    error = _raised(lambda: helper.locked_environment(lock, authenticate=False))
+    assert type(error) is helper.PinnedReplayIntegrityFailure
+    assert str(error).startswith(
+        f"PINNED_REPLAY_INTEGRITY_FAILURE cannot read lockfile {lock}: "
+        f"unevaluable marker {marker!r}"
+    ), str(error)
+
+
+def test_a_non_list_dependency_group_is_an_integrity_failure(tmp_path: Path) -> None:
+    helper = _load_replay_helper()
+    lock = _synthetic_lock(
+        tmp_path / "uv.lock",
+        ROOT_PACKAGE + '[package.dev-dependencies]\ndev = "mypy"\n',
+    )
+    error = _raised(lambda: helper.locked_environment(lock, authenticate=False))
+    assert type(error) is helper.PinnedReplayIntegrityFailure
+    assert str(error) == (
+        f"PINNED_REPLAY_INTEGRITY_FAILURE cannot read lockfile {lock}: "
+        "demo dev-dependencies dev is not a list"
+    )
+
+
+def test_a_missing_marker_evaluator_is_an_unavailable_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helper = _load_replay_helper()
+    monkeypatch.setitem(sys.modules, "packaging.markers", None)
+    error = _raised(helper.locked_environment)
+    assert type(error) is helper.PinnedReplayEnvironmentArtifactUnavailable
+    assert str(error).startswith(
+        "PINNED_REPLAY_ENVIRONMENT_ARTIFACT_UNAVAILABLE the marker evaluator the "
+        "lock requires is unavailable"
+    ), str(error)
 
 
 def test_an_edited_lockfile_is_an_integrity_failure(tmp_path: Path) -> None:
