@@ -72,6 +72,7 @@ def _identity_of(engine: Any) -> Any:
         bundle=engine.bundle,
         protocol=engine.protocol,
         cost_model=engine.cost_model,
+        evidence_hash=engine.evaluator_evidence_hash,
     )
 
 
@@ -250,6 +251,7 @@ def test_every_run_identity_input_moves_the_identity_hash() -> None:
             bundle=engine.bundle,
             protocol=engine.protocol,
             cost_model=engine.cost_model,
+            evidence_hash=engine.evaluator_evidence_hash,
             strategy_hash="f" * 64,
         ),
         "protocol": eng._run_identity(
@@ -257,12 +259,14 @@ def test_every_run_identity_input_moves_the_identity_hash() -> None:
             bundle=engine.bundle,
             protocol=eng._protocol(warmup=1),
             cost_model=engine.cost_model,
+            evidence_hash=engine.evaluator_evidence_hash,
         ),
         "cost_model": eng._run_identity(
             admission=engine.admission,
             bundle=engine.bundle,
             protocol=engine.protocol,
             cost_model=eng._cost_model(model_id="other-cost-v1"),
+            evidence_hash=engine.evaluator_evidence_hash,
         ),
         "code_version": build_evaluation_run_identity(
             strategy_hash=eng.STRATEGY_CODE_HASH,
@@ -270,6 +274,7 @@ def test_every_run_identity_input_moves_the_identity_hash() -> None:
             cost_model_hash=engine.cost_model.cost_model_hash,
             admission=engine.admission,
             bundle=engine.bundle,
+            evaluator_evidence_hash=engine.evaluator_evidence_hash,
             code_version_hash="9" * 64,
             environment_closure_hash=eng.ENVIRONMENT_HASH,
         ),
@@ -279,6 +284,7 @@ def test_every_run_identity_input_moves_the_identity_hash() -> None:
             cost_model_hash=engine.cost_model.cost_model_hash,
             admission=engine.admission,
             bundle=engine.bundle,
+            evaluator_evidence_hash=engine.evaluator_evidence_hash,
             code_version_hash=eng.CODE_VERSION_HASH,
             environment_closure_hash="8" * 64,
         ),
@@ -289,14 +295,22 @@ def test_every_run_identity_input_moves_the_identity_hash() -> None:
         bundle=other_bundle,
         protocol=engine.protocol,
         cost_model=engine.cost_model,
+        evidence_hash=engine.evaluator_evidence_hash,
+    )
+    variants["evaluator_evidence"] = eng._run_identity(
+        admission=engine.admission,
+        bundle=engine.bundle,
+        protocol=engine.protocol,
+        cost_model=engine.cost_model,
+        evidence_hash="7" * 64,
     )
 
-    assert len(variants) == 6
+    assert len(variants) == 7
     digests = {base.run_identity_hash}
     for label, identity in variants.items():
         assert identity.run_identity_hash != base.run_identity_hash, label
         digests.add(identity.run_identity_hash)
-    assert len(digests) == 7
+    assert len(digests) == 8
 
 
 def test_a_run_identity_cannot_bind_a_bundle_its_admission_never_admitted() -> None:
@@ -312,6 +326,7 @@ def test_a_run_identity_cannot_bind_a_bundle_its_admission_never_admitted() -> N
             cost_model_hash=engine.cost_model.cost_model_hash,
             admission=engine.admission,
             bundle=other,
+            evaluator_evidence_hash=engine.evaluator_evidence_hash,
             code_version_hash=eng.CODE_VERSION_HASH,
             environment_closure_hash=eng.ENVIRONMENT_HASH,
         )
@@ -443,7 +458,8 @@ def test_a_halted_evaluation_is_still_a_completed_experiment_with_artifacts() ->
     engine = eng._engine(bundle=bundle)
 
     run = execute_experiment_run(
-        run_support._specification(), run_support._context(engine)
+        run_support._specification(dataset_hash=engine.bundle.bundle_hash),
+        run_support._context(engine),
     )
 
     assert run.status is ExperimentRunStatus.COMPLETED

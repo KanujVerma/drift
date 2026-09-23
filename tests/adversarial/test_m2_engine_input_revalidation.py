@@ -237,6 +237,7 @@ def test_a_run_identity_built_without_validation_is_refused_before_any_decision(
         bundle=engine.bundle,
         protocol=engine.protocol,
         cost_model=engine.cost_model,
+        evidence_hash=engine.evaluator_evidence_hash,
     )
     forged = type(identity).model_construct(
         **(dict(identity) | {"run_identity_hash": "e" * 64})

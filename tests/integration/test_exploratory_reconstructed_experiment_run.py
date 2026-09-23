@@ -73,6 +73,7 @@ def _context(
             cost_model_hash=engine.cost_model.cost_model_hash,
             admission=engine.admission,
             bundle=engine.bundle,
+            evaluator_evidence_hash=engine.evaluator_evidence_hash,
             code_version_hash=CODE_VERSION_HASH,
             environment_closure_hash=ENVIRONMENT_HASH,
         ),
@@ -89,9 +90,12 @@ def test_a_baseline_consumes_the_reconstructed_path_deterministically() -> None:
     first_strategy = ReconstructedTargetStrategy({})
     second_strategy = ReconstructedTargetStrategy({})
 
-    first = execute_experiment_run(_specification(), _context(engine, first_strategy))
+    first = execute_experiment_run(
+        _specification(dataset_hash=engine.bundle.bundle_hash),
+        _context(engine, first_strategy),
+    )
     second = execute_experiment_run(
-        _specification(),
+        _specification(dataset_hash=engine.bundle.bundle_hash),
         _context(
             engine, second_strategy, started_at=MUCH_LATER, completed_at=MUCH_LATER
         ),

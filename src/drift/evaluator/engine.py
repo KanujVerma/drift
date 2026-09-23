@@ -52,7 +52,7 @@ from uuid import UUID
 from pydantic import BaseModel, TypeAdapter
 
 from drift.domain.assertions import ResolutionMode
-from drift.domain.common import UUID7
+from drift.domain.common import UUID7, SHA256Hash
 from drift.domain.evaluator_bundles import (
     EvaluationInputBundleV1,
     EvaluationRunIdentityV1,
@@ -160,6 +160,7 @@ from drift.evaluator.reconstruction import (
     require_scheduled_calendar_row,
     verify_exploratory_reconstructions,
 )
+from drift.markets.observation_validation import m1d_context_hash
 from drift.serialization.canonical import content_hash
 
 ZERO = Decimal("0")
@@ -321,6 +322,63 @@ def _revalidated_evidence(
                 ),
             )
         ),
+    )
+
+
+def evaluator_evidence_hash(
+    evidence: SessionEvaluatorEvidence,
+    *,
+    book_currency_namespace: str,
+    book_currency_code: str,
+) -> SHA256Hash:
+    """The identity of everything a run consults beyond its hashed inputs (#86).
+
+    The bundle, admission, protocol, and cost model carry their own hashes.
+    Every evidence member and the book currency change results too, so they
+    are bound here. Member order carries no meaning, so each collection is
+    identified by the sorted content hashes of its members. A replay context
+    is identified by its M1d context hash, the identity its queries already
+    bind.
+    """
+
+    def members(values: Sequence[object]) -> list[str]:
+        return sorted(content_hash(value) for value in values)
+
+    replay = evidence.exploratory_reconstruction_replay
+    return content_hash(
+        {
+            "book_currency": {
+                "namespace": book_currency_namespace,
+                "code": book_currency_code,
+            },
+            "listing_role_records": members(evidence.listing_role_records),
+            "listing_termination_records": members(
+                evidence.listing_termination_records
+            ),
+            "listing_lifecycle_records": members(evidence.listing_lifecycle_records),
+            "economic_outcomes": members(evidence.economic_outcomes),
+            "tie_breaking_rules": members(evidence.tie_breaking_rules),
+            "due_bill_rules": members(evidence.due_bill_rules),
+            "cash_in_lieu_rates": members(evidence.cash_in_lieu_rates),
+            "exploratory_cohort": (
+                None
+                if evidence.exploratory_cohort is None
+                else content_hash(evidence.exploratory_cohort)
+            ),
+            "exploratory_reconstruction_replay": (
+                None
+                if replay is None
+                else {
+                    "policy": content_hash(replay.policy),
+                    "requests": sorted(
+                        content_hash(
+                            {"query": query, "context": m1d_context_hash(context)}
+                        )
+                        for query, context in replay.requests
+                    ),
+                }
+            ),
+        }
     )
 
 
@@ -562,6 +620,12 @@ class SessionEvaluatorEngine:
             cohort=evidence.exploratory_cohort,
             replay=evidence.exploratory_reconstruction_replay,
         )
+        # After the lane gate, so a malformed replay meets its intended refusal.
+        self._evidence_hash = evaluator_evidence_hash(
+            evidence,
+            book_currency_namespace=book_currency_namespace,
+            book_currency_code=book_currency_code,
+        )
         self._accounting_index = self._index_accounting_views(bundle)
         self._book_currency_code = book_currency_code
         # Issue 54: only the reconstructed lane reads this index, and only
@@ -586,6 +650,11 @@ class SessionEvaluatorEngine:
     def bundle(self) -> EvaluationInputBundleV1:
         """The immutable input bundle this engine evaluates."""
         return self._bundle
+
+    @property
+    def evaluator_evidence_hash(self) -> SHA256Hash:
+        """The identity of the evidence this engine consults (issue 86)."""
+        return self._evidence_hash
 
     @property
     def admission(self) -> EvaluationAdmissionV1:
@@ -662,6 +731,17 @@ class SessionEvaluatorEngine:
                     "the input bundle does not carry the economic outcome "
                     f"resolution for security {outcome.security_id}"
                 )
+        # Issue 86: an outcome the bundle declares but the engine is not handed
+        # would be read as no corporate action, so the two must match exactly.
+        supplied = {
+            content_hash(item.resolution) for item in evidence.economic_outcomes
+        }
+        omitted = tuple(sorted(declared - supplied))
+        if omitted:
+            raise ValueError(
+                "the engine was not handed the economic outcome records for "
+                f"declared resolutions: {omitted}"
+            )
 
     @staticmethod
     def _index_accounting_views(
@@ -688,7 +768,9 @@ class SessionEvaluatorEngine:
             ).append(observation)
         return index
 
-    def _require_bound_identity(self, run_identity: EvaluationRunIdentityV1) -> None:
+    def _require_bound_identity(
+        self, run_identity: EvaluationRunIdentityV1, strategy: LaneDispatchStrategy
+    ) -> None:
         if (
             run_identity.admission_hash != self._admission.admission_hash
             or run_identity.bundle_hash != self._bundle.bundle_hash
@@ -698,6 +780,20 @@ class SessionEvaluatorEngine:
             raise ValueError(
                 "the run identity must bind this evaluation's admission, "
                 "bundle, protocol, and cost model"
+            )
+        # Issue 86: the evidence outside the bundle and the strategy that runs
+        # both change results, so an identity must name them too.
+        if run_identity.evaluator_evidence_hash != self._evidence_hash:
+            raise ValueError(
+                "the run identity must bind this evaluation's evaluator evidence: "
+                f"identity binds {run_identity.evaluator_evidence_hash}, the "
+                f"engine consults {self._evidence_hash}"
+            )
+        running = strategy.strategy_reference.code_hash
+        if run_identity.strategy_hash != running:
+            raise ValueError(
+                "the run identity must bind the strategy that runs: identity "
+                f"binds {run_identity.strategy_hash}, the strategy is {running}"
             )
 
     # -- run ----------------------------------------------------------------
@@ -711,7 +807,7 @@ class SessionEvaluatorEngine:
         that lane's one decision method before any session is stepped.
         """
         run_identity = _revalidated(EvaluationRunIdentityV1, run_identity)
-        self._require_bound_identity(run_identity)
+        self._require_bound_identity(run_identity, strategy)
         decide = self._lane_decision(strategy)
         sessions = self._bundle.session_clock.sessions
         loop = _Loop(

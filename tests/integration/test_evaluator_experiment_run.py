@@ -58,7 +58,8 @@ NOW = datetime(2026, 9, 1, 12, tzinfo=UTC)
 LATER = datetime(2026, 9, 1, 12, 5, tzinfo=UTC)
 MUCH_LATER = datetime(2027, 3, 4, 8, tzinfo=UTC)
 
-DATASET_HASH = "d" * 64
+# The dataset an M2 run records is the bundle its run identity binds (#86).
+DATASET_HASH = _bundle().bundle_hash
 SPEC_HASH = "b" * 64
 
 
@@ -71,12 +72,12 @@ def _artifact(kind: ArtifactKind, digest: str) -> ArtifactReference:
     )
 
 
-def _dataset() -> DatasetReference:
+def _dataset(content_hash: str = DATASET_HASH) -> DatasetReference:
     return DatasetReference(
         dataset_id=uuid7(),
         dataset_version="2026.01.08",
         schema_version="1",
-        content_hash=DATASET_HASH,
+        content_hash=content_hash,
         created_at=NOW,
         source="synthetic M2 evaluation corpus",
         temporal_coverage=TemporalCoverage(started_at=NOW, ended_at=NOW),
@@ -87,7 +88,9 @@ def _dataset() -> DatasetReference:
     )
 
 
-def _specification(*, code_hash: str = STRATEGY_CODE_HASH) -> ExperimentSpecification:
+def _specification(
+    *, code_hash: str = STRATEGY_CODE_HASH, dataset_hash: str = DATASET_HASH
+) -> ExperimentSpecification:
     return ExperimentSpecification(
         experiment_id=uuid7(),
         hypothesis_ids=(uuid7(),),
@@ -97,7 +100,7 @@ def _specification(*, code_hash: str = STRATEGY_CODE_HASH) -> ExperimentSpecific
             code_hash=code_hash,
             artifact_reference=_artifact(ArtifactKind.STRATEGY, code_hash),
         ),
-        dataset_reference=_dataset(),
+        dataset_reference=_dataset(dataset_hash),
         parameters={"target_quantity": 10},
         benchmark="Equal-weighted universe return",
         evaluation_protocol={"decision_clock": "post_close_next_open"},
@@ -129,6 +132,7 @@ def _context(
             bundle=engine.bundle,
             protocol=engine.protocol,
             cost_model=engine.cost_model,
+            evidence_hash=engine.evaluator_evidence_hash,
         ),
         result_artifact_id=uuid7(),
         trace_artifact_id=uuid7(),
@@ -260,7 +264,9 @@ def test_indeterminate_evaluation_still_completes_the_experiment_run() -> None:
     views = tuple(_accounting_view(SEC_A, day) for day in DAYS if day != DAY_2)
     engine = _engine(bundle=_bundle(accounting_views=views))
 
-    run = execute_experiment_run(_specification(), _context(engine))
+    run = execute_experiment_run(
+        _specification(dataset_hash=engine.bundle.bundle_hash), _context(engine)
+    )
 
     assert run.status is ExperimentRunStatus.COMPLETED
     assert run.error_details is None
