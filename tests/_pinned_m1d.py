@@ -55,11 +55,21 @@ in ``.python-version``. ``verify_replay_interpreter`` checks that identity
 before any archive is extracted, and ``verify_replay_child_interpreter`` checks
 it again for the child interpreter that actually recomputes the derivation.
 
+The interpreter is not the whole environment. ``verify_replay_distributions``
+also holds the installed distribution set to ``uv.lock`` before any archive is
+extracted, and ``verify_replay_child_distributions`` holds the replay child to
+it too (issue #53), so a package upgraded or installed outside ``uv sync`` is
+reported as an environment mismatch rather than surfacing later as a semantic
+one. A locked package that is not installed is allowed, because the lock
+resolves every platform and markers exclude some packages from any one of
+them; a missing dependency the replay needs fails loudly on import instead.
+
 Failures fall into exactly four classes, each a direct subclass of
 ``PinnedM1dReplayError`` whose message starts with its code:
 
 * ``PINNED_REPLAY_ENVIRONMENT_MISMATCH``: the running or child interpreter is
-  not the pinned one. The message names the expected and the found identity.
+  not the pinned one, or its installed distributions differ from ``uv.lock``.
+  The message names the expected and the found identity or versions.
 * ``PINNED_REPLAY_ENVIRONMENT_ARTIFACT_UNAVAILABLE``: a required replay
   environment artifact cannot be obtained, such as the pinned interpreter
   executable or the historical Git objects the replay extracts.
@@ -75,6 +85,7 @@ Nothing on this lane skips. Each class is a hard failure.
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
 import os
 import re
@@ -82,7 +93,8 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-from collections.abc import Mapping
+import tomllib
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -98,6 +110,8 @@ PINNED_M1D_GENERATIONS: Mapping[str, str] = {
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PYTHON_PIN_PATH = REPO_ROOT / ".python-version"
 """The single exact interpreter pin, shared with uv and with CI."""
+LOCKFILE_PATH = REPO_ROOT / "uv.lock"
+"""The locked distribution set every replay environment must be synced to."""
 MATRIX_MODULE = "tests/integration/test_m1d_adversarial_matrix.py"
 M1C_COMPOSITION_NODE = (
     "tests/integration/test_m1d_compatibility.py::"
@@ -297,6 +311,151 @@ def verify_replay_child_interpreter(
             f"{executable}"
         )
     return reported
+
+
+#: Printed by the replay child: its installed distributions, as JSON.
+_DISTRIBUTIONS_PROGRAM = (
+    "import importlib.metadata, json, re\n"
+    "found = {}\n"
+    "for item in importlib.metadata.distributions():\n"
+    "    name = item.metadata['Name']\n"
+    "    if name:\n"
+    "        key = re.sub(r'[-_.]+', '-', name).lower()\n"
+    "        found.setdefault(key, set()).add(item.version)\n"
+    "print(json.dumps({key: sorted(value) for key, value in found.items()}))\n"
+)
+
+
+def _distribution_name(name: str) -> str:
+    """Normalize a distribution name the way PEP 503 compares names."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def locked_distribution_versions(
+    lock_path: Path = LOCKFILE_PATH,
+) -> dict[str, frozenset[str]]:
+    """Return every locked distribution with the versions the lock admits.
+
+    The lock may name one package at several versions under different
+    platform markers, so each name maps to the set of admitted versions.
+    """
+    try:
+        document = tomllib.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        raise PinnedReplayIntegrityFailure(
+            f"cannot read lockfile {lock_path}: {error}"
+        ) from error
+    packages = document.get("package")
+    if not isinstance(packages, list) or not packages:
+        raise PinnedReplayIntegrityFailure(
+            f"cannot read lockfile {lock_path}: it locks no packages"
+        )
+    versions: dict[str, set[str]] = {}
+    for entry in packages:
+        name = entry.get("name") if isinstance(entry, dict) else None
+        version = entry.get("version") if isinstance(entry, dict) else None
+        if not isinstance(name, str) or not isinstance(version, str):
+            raise PinnedReplayIntegrityFailure(
+                f"cannot read lockfile {lock_path}: a locked package lacks a "
+                "name or a version"
+            )
+        versions.setdefault(_distribution_name(name), set()).add(version)
+    return {name: frozenset(found) for name, found in sorted(versions.items())}
+
+
+def observed_distribution_versions() -> dict[str, frozenset[str]]:
+    """Return the distributions installed for this interpreter, by name."""
+    found: dict[str, set[str]] = {}
+    for distribution in importlib.metadata.distributions():
+        name = distribution.metadata["Name"]
+        if name:
+            found.setdefault(_distribution_name(name), set()).add(distribution.version)
+    return {name: frozenset(versions) for name, versions in sorted(found.items())}
+
+
+def _verify_distributions(
+    installed: Mapping[str, Collection[str]], *, where: str, lock_path: Path
+) -> int:
+    """Hold an installed distribution set to the lock; return how many checked."""
+    locked = locked_distribution_versions(lock_path)
+    differences: list[str] = []
+    for name, versions in sorted(
+        (_distribution_name(name), sorted(set(versions)))
+        for name, versions in installed.items()
+    ):
+        admitted = locked.get(name)
+        if admitted is None:
+            differences.append(f"{name} {versions} is installed but not locked")
+        elif not set(versions) <= admitted:
+            differences.append(f"{name} found {versions} expected {sorted(admitted)}")
+    if differences:
+        raise PinnedReplayEnvironmentMismatch(
+            f"installed distributions differ from uv.lock in {where}: "
+            + "; ".join(differences)
+        )
+    return len(installed)
+
+
+def verify_replay_distributions(
+    *,
+    installed: Mapping[str, Collection[str]] | None = None,
+    lock_path: Path = LOCKFILE_PATH,
+) -> int:
+    """Require this interpreter's installed distributions to match ``uv.lock``.
+
+    ``installed`` exists so tests can present another environment without
+    touching the real one; production callers leave it unset.
+    """
+    return _verify_distributions(
+        observed_distribution_versions() if installed is None else installed,
+        where="running interpreter",
+        lock_path=lock_path,
+    )
+
+
+def verify_replay_child_distributions(
+    executable: str,
+    *,
+    environment: Mapping[str, str] | None = None,
+    cwd: Path | None = None,
+    lock_path: Path = LOCKFILE_PATH,
+) -> int:
+    """Require the replay child's installed distributions to match ``uv.lock``."""
+    try:
+        completed = subprocess.run(
+            [executable, "-c", _DISTRIBUTIONS_PROGRAM],
+            cwd=cwd,
+            env=None if environment is None else dict(environment),
+            check=False,
+            capture_output=True,
+            timeout=_CHILD_START_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise PinnedReplayEnvironmentArtifactUnavailable(
+            f"replay child interpreter {executable} could not report its "
+            f"distributions: {error}"
+        ) from error
+    try:
+        reported = json.loads(completed.stdout.decode("utf-8"))
+    except UnicodeDecodeError, ValueError:
+        reported = None
+    well_formed = isinstance(reported, dict) and all(
+        isinstance(name, str)
+        and isinstance(versions, list)
+        and all(isinstance(version, str) for version in versions)
+        for name, versions in reported.items()
+    )
+    if completed.returncode != 0 or not well_formed:
+        raise PinnedReplayEnvironmentArtifactUnavailable(
+            f"replay child interpreter {executable} could not report its "
+            f"distributions (exit {completed.returncode}): "
+            f"{_combined_output(completed)}"
+        )
+    return _verify_distributions(
+        reported,
+        where=f"replay child interpreter {executable}",
+        lock_path=lock_path,
+    )
 
 
 def _load_inventory() -> dict[str, str]:
@@ -904,6 +1063,7 @@ def extract_m1d_archive(
             f"unapproved M1d interpreter commit: {commit}"
         )
     verify_replay_interpreter(observed=observed_identity)
+    verify_replay_distributions()
     destination.mkdir(parents=True, exist_ok=True)
     _unpack_archive(destination, commit)
     verify_m1d_archive_inputs(root=destination)
@@ -922,6 +1082,7 @@ def extract_m1d_generation_archive(
         return extract_m1d_archive(destination, observed_identity=observed_identity)
     pins = _historical_generation_pins(generation)
     verify_replay_interpreter(observed=observed_identity)
+    verify_replay_distributions()
     destination.mkdir(parents=True, exist_ok=True)
     _unpack_archive(destination, PINNED_M1D_GENERATIONS[generation])
     _verify_pinned_inputs(
@@ -1032,14 +1193,16 @@ def run_replay_child(
 ) -> PinnedM1dReplayResult:
     """Run archived nodes in an authenticated archive and classify any failure.
 
-    Order is load-bearing: interpreter identity, then protected input bytes,
-    then the child interpreter's own identity, then the child import location,
-    and only then the replay itself. A failure of the replay can therefore
-    only be a semantic replay mismatch.
+    Order is load-bearing: interpreter identity and installed distributions,
+    then protected input bytes, then the child interpreter's own identity and
+    distributions, then the child import location, and only then the replay
+    itself. A failure of the replay can therefore only be a semantic replay
+    mismatch.
     """
     if not nodes:
         raise PinnedReplayIntegrityFailure(f"{label} replay declares no nodes")
     expected = verify_replay_interpreter(observed=observed_identity)
+    verify_replay_distributions()
     _verify_pinned_inputs(
         root=archive_root,
         pins=expected_pins,
@@ -1049,6 +1212,9 @@ def run_replay_child(
     environment = _child_environment(archive_root)
     interpreter = sys.executable if executable is None else executable
     verify_replay_child_interpreter(
+        interpreter, environment=environment, cwd=archive_root
+    )
+    verify_replay_child_distributions(
         interpreter, environment=environment, cwd=archive_root
     )
     imported = subprocess.run(
