@@ -308,6 +308,11 @@ def _resolve_reconstructed_lane(
       ``validate_promotion_admission`` already refuses such a bundle; this
       refuses it again here, so an engine built without that gate cannot be
       the seam through which the weaker grade reaches a promotion result.
+    * Every exploratory admission is validated against its bundle, in either
+      lane, so it acknowledges every limitation the bundle's evidence obliges
+      (issue 42 ruling, invariant 4; issue 56). A realized bundle can carry
+      reconstructions too, and their limitations may not be dropped merely
+      because the realized lane does not decide on them.
     * An exploratory admission over a realized clock keeps the realized lane
       exactly as it was. Reconstructions riding such a bundle never become
       decision evidence.
@@ -326,6 +331,7 @@ def _resolve_reconstructed_lane(
                 "a promotion admission cannot evaluate an exploratory cohort"
             )
         return None
+    validate_exploratory_admission(admission=admission, bundle=bundle)
     if bundle.session_clock.mode != "scheduled_session_reconstruction":
         if cohort is not None:
             raise ValueError(
@@ -333,7 +339,6 @@ def _resolve_reconstructed_lane(
                 "reconstruction evaluation"
             )
         return None
-    validate_exploratory_admission(admission=admission, bundle=bundle)
     if cohort is None:
         raise ValueError(
             "a scheduled session reconstruction evaluation requires its "
