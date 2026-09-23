@@ -598,6 +598,100 @@ def test_the_promotion_gate_refuses_the_bundle_an_exploratory_run_completed() ->
         validate_promotion_admission(**attacked)
 
 
+def _paired_artifacts(lane: str) -> dict[str, Any]:
+    """A genuine exploratory run's trace, paired with a result in ``lane``.
+
+    Every binding the artifact checks is kept consistent, so the only
+    difference between the two lanes is the lane itself.
+    """
+    from test_evaluator_engine import (
+        CODE_VERSION_HASH,
+        ENVIRONMENT_HASH,
+        STRATEGY_REFERENCE,
+    )
+
+    from drift.domain.evaluator_portfolio import PortfolioStateV1
+    from drift.domain.evaluator_results import (
+        PromotionEvaluationResultV1,
+        evaluation_result_hash,
+    )
+    from drift.evaluator.bundles import build_evaluation_run_identity
+
+    bundle = bundle_of(three_regular_sessions())
+    engine = reconstructed_engine(bundle)
+    artifacts = run_engine(engine, ReconstructedTargetStrategy({}))
+    assert _exploratory_events(artifacts)
+    if lane == "exploratory":
+        return {
+            "result": artifacts.result,
+            "trace": artifacts.trace,
+            "final_state": artifacts.final_state,
+        }
+    promotion = promotion_admission(bundle)
+    identity = build_evaluation_run_identity(
+        strategy_hash=STRATEGY_REFERENCE.code_hash,
+        protocol_hash=engine.protocol.protocol_hash,
+        cost_model_hash=engine.cost_model.cost_model_hash,
+        admission=promotion,
+        bundle=bundle,
+        code_version_hash=CODE_VERSION_HASH,
+        environment_closure_hash=ENVIRONMENT_HASH,
+    )
+    source = artifacts.result
+    draft = PromotionEvaluationResultV1.model_construct(
+        run_identity=identity,
+        classification=source.classification,
+        halted_session_index=source.halted_session_index,
+        halt_reason=source.halt_reason,
+        metrics=source.metrics,
+        trace_hash=source.trace_hash,
+        admission=promotion,
+        result_hash="0" * 64,
+    )
+    result = PromotionEvaluationResultV1.model_validate(
+        dict(draft) | {"result_hash": evaluation_result_hash(draft)}
+    )
+    state = artifacts.final_state
+    mark = (
+        None
+        if state.mark is None
+        else state.mark.model_copy(update={"lane": "promotion"})
+    )
+    final_state = PortfolioStateV1.model_validate(
+        dict(state)
+        | {
+            "lane": "promotion",
+            "admission_hash": promotion.admission_hash,
+            "mark": mark,
+        }
+    )
+    return {"result": result, "trace": artifacts.trace, "final_state": final_state}
+
+
+def test_a_promotion_result_cannot_bind_a_trace_of_reconstructed_decisions() -> None:
+    """The artifact types refuse the weaker grade under a promotion result.
+
+    The shared trace union can name ``exploratory_strategy_decision``, so
+    without this guard a hand-assembled promotion artifact would validate
+    while its trace records decisions taken on reconstructed bars. The control
+    is the identical trace under its own exploratory result.
+    """
+    from drift.domain.evaluator_results import EvaluationRunArtifactsV1
+
+    control = EvaluationRunArtifactsV1.model_validate(_paired_artifacts("exploratory"))
+    assert control.result.lane == "exploratory"
+    assert _exploratory_events(control)
+
+    with pytest.raises(
+        ValidationError,
+        match=(
+            r"a promotion result cannot bind a trace of decisions taken on "
+            r"EXPLORATORY reconstructed evidence: 3 exploratory_strategy_decision"
+        ),
+    ):
+        EvaluationRunArtifactsV1.model_validate(_paired_artifacts("promotion"))
+
+
 # ==========================================================================
 # Authorization: nothing here reaches promotion, brokers, or capital
 # ==========================================================================

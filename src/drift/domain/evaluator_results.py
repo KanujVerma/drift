@@ -301,7 +301,32 @@ class EvaluationRunArtifactsV1(FrozenModel):
                 "final portfolio state must carry the admitted lane of its result"
             )
         self._bind_stepped_sessions()
+        self._bind_decision_evidence_grade()
         return self
+
+    def _bind_decision_evidence_grade(self) -> None:
+        """Refuse a promotion result paired with decisions on weaker evidence.
+
+        Decisions taken on EXPLORATORY reconstructed evidence are traced under
+        their own event kind. A promotion result bound to such a trace would
+        present decisions made on retrospectively reconstructed bars as
+        promotion-grade, which the Absolute Non-Upgrade Rule forbids. The
+        engine never builds this pairing; refusing it here keeps the artifact
+        types from accepting one that was assembled any other way.
+        """
+        if self.result.lane != "promotion":
+            return
+        weaker = sum(
+            1
+            for event in self.trace.events
+            if event.kind == "exploratory_strategy_decision"
+        )
+        if weaker:
+            raise ValueError(
+                "a promotion result cannot bind a trace of decisions taken on "
+                f"EXPLORATORY reconstructed evidence: {weaker} "
+                "exploratory_strategy_decision events"
+            )
 
     def _bind_stepped_sessions(self) -> None:
         """Bind the last session the trace opened to the result's own account.
