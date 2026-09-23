@@ -12,6 +12,9 @@ from drift.domain.evaluator_exploratory_accounting import (
     exploratory_accounting_price_hash,
     reconstructed_accounting_price,
 )
+from drift.domain.evaluator_exploratory_strategy import (
+    RECONSTRUCTED_DECISION_LIMITATIONS,
+)
 from drift.domain.evaluator_lanes import ALPACA_LIMITATION_UNVERSIONED_BARS
 from drift.domain.evaluator_trace import (
     EvaluationPhase,
@@ -101,7 +104,7 @@ def test_a_price_must_carry_its_retrospective_limitations() -> None:
     [("evidence_grade", "promotion_grade"), ("is_promotion_grade_evidence", True)],
 )
 def test_the_grade_cannot_be_raised(field: str, value: object) -> None:
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match=r"Input should be"):
         ExploratoryReconstructedAccountingPriceV1.model_validate(
             _resealed(_price(), **{field: value})
         )
@@ -111,7 +114,10 @@ def test_the_grade_cannot_be_raised(field: str, value: object) -> None:
 
 
 def _event(
-    phase: EvaluationPhase, prices: tuple[Any, ...], session_key: Any = None
+    phase: EvaluationPhase,
+    prices: tuple[Any, ...],
+    session_key: Any = None,
+    limitations: tuple[str, ...] = RECONSTRUCTED_DECISION_LIMITATIONS,
 ) -> ExploratoryAccountingPriceTraceEventV1:
     return ExploratoryAccountingPriceTraceEventV1(
         sequence=0,
@@ -119,6 +125,7 @@ def _event(
         session_key=prices[0].session_key if session_key is None else session_key,
         phase=phase,  # type: ignore[arg-type]
         prices=prices,
+        acknowledged_limitations=limitations,
     )
 
 
@@ -133,8 +140,16 @@ def test_each_phase_reads_its_own_role() -> None:
 
 
 def test_only_the_open_and_close_phases_read_prices() -> None:
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match=r"literal_error|Input should be"):
         _event(EvaluationPhase.POST_CLOSE_DECISION, (_price("close"),))
+
+
+def test_an_event_states_every_limitation_the_grade_carries() -> None:
+    """Nothing that consumes the reconstructed grade may state fewer."""
+    kept = RECONSTRUCTED_DECISION_LIMITATIONS[1:]
+
+    with pytest.raises(ValidationError, match=r"omits required limitations"):
+        _event(EvaluationPhase.CLOSE_MARK, (_price("close"),), limitations=kept)
 
 
 def test_a_price_from_another_session_is_refused() -> None:
@@ -154,6 +169,7 @@ def test_an_event_names_at_least_one_price_and_each_security_once() -> None:
             session_key=_price().session_key,
             phase=EvaluationPhase.CLOSE_MARK,
             prices=(),
+            acknowledged_limitations=RECONSTRUCTED_DECISION_LIMITATIONS,
         )
     with pytest.raises(ValidationError, match=r"unique by security"):
         _event(EvaluationPhase.CLOSE_MARK, (_price("close"), _price("close")))

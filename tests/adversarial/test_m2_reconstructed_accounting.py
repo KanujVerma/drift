@@ -24,6 +24,8 @@ from exploratory_decision_test_support import (
     JAN5,
     JAN6,
     JAN7,
+    LISTING,
+    LISTING_OTHER,
     SEC,
     ReconstructedTargetStrategy,
     bundle_of,
@@ -237,6 +239,47 @@ def test_two_reconstructions_of_the_execution_session_are_indeterminate() -> Non
     )
 
 
+@pytest.mark.parametrize("close", ["0", "-1.000"])
+def test_a_non_positive_reconstructed_close_is_indeterminate_at_the_mark(
+    close: str,
+) -> None:
+    """A re-derived bar may state any finite close; one that cannot mark halts."""
+    corpus = (
+        scheduled_session_case(JAN5),
+        scheduled_session_case(JAN6, close=close),
+        scheduled_session_case(JAN7),
+    )
+
+    artifacts = run_engine(reconstructed_engine(bundle_of(corpus)), _strategy())
+
+    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
+    assert artifacts.result.halted_session_index == 1
+    cause = _cause(artifacts)
+    assert cause.phase is EvaluationPhase.CLOSE_MARK
+    assert cause.cause == (
+        f"exploratory reconstructed close price for security {SEC} on XNYS "
+        f"2026-01-06 is not strictly positive: {close}"
+    )
+
+
+def test_a_reconstructed_open_from_another_listing_cannot_fill() -> None:
+    """The execution-listing guard still binds a reconstructed open's listing."""
+    corpus = (
+        scheduled_session_case(JAN5),
+        scheduled_session_case(JAN6, listing_id=LISTING_OTHER),
+        scheduled_session_case(JAN7),
+    )
+
+    artifacts = run_engine(reconstructed_engine(bundle_of(corpus)), _strategy())
+
+    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
+    assert artifacts.result.metrics.committed_fill_count == 0
+    assert artifacts.result.halt_reason == (
+        f"unadjusted open price for security {SEC} is bound to listing "
+        f"{LISTING_OTHER}, but execution resolved listing {LISTING}"
+    )
+
+
 def test_a_price_in_another_currency_than_the_book_is_indeterminate() -> None:
     bundle = bundle_of((scheduled_session_case(JAN5), scheduled_session_case(JAN6)))
     engine = SessionEvaluatorEngine(
@@ -268,9 +311,14 @@ def test_a_price_in_another_currency_than_the_book_is_indeterminate() -> None:
 
 
 def test_a_realized_bundle_never_prices_from_a_riding_reconstruction() -> None:
-    """The realized lane keeps pricing from authentic accounting views only."""
+    """The realized lane keeps pricing from authentic accounting views only.
+
+    The riding reconstruction sits on JAN7, the session the realized run fills
+    and first marks, with a close (123.000) the authentic view does not state,
+    so reading it would change the numbers.
+    """
     realized = _bundle()
-    observation, _ = scheduled_session_case(JAN5)
+    observation, _ = scheduled_session_case(JAN7, close="123.000")
     riding = assemble_evaluation_input_bundle(
         evaluation_interval=realized.evaluation_interval,
         session_clock=realized.session_clock,
@@ -291,9 +339,19 @@ def test_a_realized_bundle_never_prices_from_a_riding_reconstruction() -> None:
         _buy_ten(),
     )
 
-    # It trades, on authentic accounting views, and reads no reconstructed price.
-    assert artifacts.result.metrics.committed_fill_count > 0
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
     assert _priced(artifacts) == []
+    (fill,) = [event.fill for event in artifacts.trace.events if event.kind == "fill"]
+    # The authentic view states 100.00 and the riding bar 100.000: equal
+    # numbers, but exact decimals, so the stamped open names its source.
+    assert str(fill.unadjusted_open_price) == "100.00"
+    marks = {
+        event.session_key.local_date: event.holdings_market_value
+        for event in artifacts.trace.events
+        if event.kind == "session_mark"
+    }
+    # Ten shares at the authentic JAN7 close, never at the riding 123.000.
+    assert marks[JAN7] == Decimal("1100")
 
 
 def _promotion_artifacts_over_priced_trace() -> dict[str, Any]:

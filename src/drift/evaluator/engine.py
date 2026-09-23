@@ -37,9 +37,10 @@ a `scheduled_session_reconstruction` clock with its declared cohort, and hands
 an `ExploratoryReconstructedRuntimeStrategy` the weaker
 `ExploratoryStrategyDecisionContextV1` built from reconstructed observations.
 A promotion admission is refused at construction over any bundle carrying
-exploratory reconstructions. Reconstructed evidence drives decisions only:
-execution and marks still read authorized accounting views, which a scheduled
-bundle does not carry, so a held or traded position there fails closed.
+exploratory reconstructions. In the reconstructed lane, execution and marks
+read EXPLORATORY accounting prices from the same re-derived reconstructions
+(issue 54): the execution session's open fills, and each session's close marks.
+The realized lane keeps reading authorized accounting views only.
 """
 
 from collections.abc import Callable, Sequence
@@ -828,6 +829,9 @@ class SessionEvaluatorEngine:
                         session_key=session.session_key,
                         phase=EvaluationPhase.OPEN_EXECUTION,
                         prices=records,
+                        acknowledged_limitations=(
+                            self._reconstructed_lane.admission.acknowledged_limitations
+                        ),
                     )
                 )
         outcome = self._rebalance.rebalance(
@@ -912,7 +916,20 @@ class SessionEvaluatorEngine:
                 "more than one exploratory reconstruction for security "
                 f"{security_id} on {where}"
             )
-        price = reconstructed_accounting_price(observations[0], field_role)
+        observation = observations[0]
+        value = next(
+            item.source_value
+            for item in observation.fields
+            if item.field_name == field_role
+        )
+        # A re-derived reconstruction only guarantees a finite number. A price
+        # that cannot fill or mark is missing evidence, not a failed run.
+        if value <= ZERO:
+            raise IndeterminateValuationError(
+                f"exploratory reconstructed {field_role} price for security "
+                f"{security_id} on {where} is not strictly positive: {value}"
+            )
+        price = reconstructed_accounting_price(observation, field_role)
         if price.currency != self._book_currency_code:
             raise IndeterminateValuationError(
                 f"exploratory reconstructed {field_role} price for security "
@@ -1000,6 +1017,9 @@ class SessionEvaluatorEngine:
                         session_key=session.session_key,
                         phase=EvaluationPhase.CLOSE_MARK,
                         prices=records,
+                        acknowledged_limitations=(
+                            self._reconstructed_lane.admission.acknowledged_limitations
+                        ),
                     )
                 )
         kernel = PortfolioAccountingKernel(

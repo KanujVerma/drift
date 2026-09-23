@@ -334,6 +334,7 @@ class ExploratoryAccountingPriceTraceEventV1(_TraceEventBaseV1):
     is_promotion_grade_evidence: Literal[False] = False
     phase: Literal[EvaluationPhase.OPEN_EXECUTION, EvaluationPhase.CLOSE_MARK]
     prices: tuple[ExploratoryReconstructedAccountingPriceV1, ...]
+    acknowledged_limitations: tuple[NonBlankStr, ...]
 
     @field_validator("prices")
     @classmethod
@@ -349,8 +350,24 @@ class ExploratoryAccountingPriceTraceEventV1(_TraceEventBaseV1):
             raise ValueError("exploratory accounting prices must be unique by security")
         return tuple(sorted(values, key=lambda item: _security_order(item.security_id)))
 
+    @field_validator("acknowledged_limitations")
+    @classmethod
+    def canonicalize_price_limitations(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        return _canonical_digests(values, "acknowledged limitations")
+
     @model_validator(mode="after")
     def validate_exploratory_prices(self) -> Self:
+        missing = tuple(
+            sorted(
+                set(RECONSTRUCTED_DECISION_LIMITATIONS)
+                - set(self.acknowledged_limitations)
+            )
+        )
+        if missing:
+            raise ValueError(
+                "an exploratory accounting price event omits required "
+                f"limitations: {missing}"
+            )
         role = "open" if self.phase is EvaluationPhase.OPEN_EXECUTION else "close"
         for price in self.prices:
             if price.field_role != role:
