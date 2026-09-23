@@ -12,16 +12,23 @@ admission binding all six canonical Alpaca limitations, and drives the real
 ``SessionEvaluatorEngine`` to a sealed ``ExploratoryEvaluationResultV1`` with
 ``is_promotion_grade_evidence=False`` and a complete trace log.
 
-What this module deliberately does NOT prove. It does not exercise strategy
-decisioning, order execution, corporate-action accounting, or portfolio
-valuation. It cannot: Alpaca publishes no realized session telemetry, and
-``bind_observation_session`` classifies an observation as bound only through
-realized open and close evidence, so the exploratory lane can supply no
-``DerivedObservationViewV1`` for the engine to decide or account on. The
-evaluation therefore halts ``INDETERMINATE`` at the first decision cutoff and
-the reference strategy is never consulted. That is the honest fail-closed
-outcome, and the assertions below state it explicitly so a green smoke test
-can never be mistaken for a working evaluation.
+What this module proves about decisions. Since issue 46 (the issue 42
+adjudication of ADR 0012 Option B), the bridge's scheduled-reconstruction
+bundle drives strategy decisions in the EXPLORATORY lane through
+``ExploratoryStrategyDecisionContextV1``, scoped by the bridge's own declared
+cohort. The decisions-only reference strategy is consulted at every
+post-warmup scheduled close and the run completes, every decision recorded
+under its own exploratory event kind with the reconstruction limitations
+attached.
+
+What this module deliberately does NOT prove. It does not exercise order
+execution, corporate-action accounting, or portfolio valuation. It cannot:
+Alpaca publishes no realized session telemetry, and ``bind_observation_session``
+classifies an observation as bound only through realized open and close
+evidence, so the lane supplies no ``DerivedObservationViewV1`` to execute or
+account on. A strategy that asks to trade therefore halts ``INDETERMINATE`` at
+the next open, fail closed, and the assertions below say so explicitly so a
+green smoke test can never be mistaken for a trading evaluation.
 
 Every provider byte is a pinned literal and no test here reads `.env`. The
 credential-leak tests in the redirect section stand up throwaway local HTTP
@@ -57,6 +64,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "unit"))
 
+from exploratory_decision_test_support import (  # noqa: E402
+    ReconstructedTargetStrategy,
+)
 from test_alpaca_exploratory_adapter import (  # noqa: E402
     AAPL_ID,
     LOCKFILE_BYTES,
@@ -75,7 +85,6 @@ from test_alpaca_exploratory_adapter import (  # noqa: E402
     run_pinned_intake,
 )
 from test_evaluator_engine import (  # noqa: E402
-    FixedTargetStrategy,
     _cost_model,
     _protocol,
     _run_identity,
@@ -87,6 +96,10 @@ from drift.adapters.alpaca_exploratory import (  # noqa: E402
     AlpacaIntakeRequest,
 )
 from drift.domain.acquisition import OriginStatus  # noqa: E402
+from drift.domain.evaluator_exploratory_strategy import (  # noqa: E402
+    RECONSTRUCTED_DECISION_LIMITATIONS,
+    ExploratoryStrategyDecisionContextV1,
+)
 from drift.domain.evaluator_portfolio import (  # noqa: E402
     LANE_ADMISSIBLE_MARK_GRADES,
     MarkEvidenceV1,
@@ -111,11 +124,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CLI_PATH = REPO_ROOT / "scripts" / "intake_alpaca_exploratory.py"
 
 WARMUP_SESSIONS = 2
-#: The exact cause the engine must record. It names the missing evidence class
-#: rather than a generic failure, so a different fail-closed path cannot pass.
-EXPECTED_HALT_CAUSE = (
-    "no authorized decision evidence for the decision cutoff 2026-01-06T21:00:00+00:00"
-)
+#: Every scheduled close the reference strategy is consulted at: the first
+#: decision is taken at session ``WARMUP_SESSIONS - 1``.
+DECISION_DATES = SESSION_DATES[WARMUP_SESSIONS - 1 :]
+#: The next open after the first decision, where a trading target fails closed.
+FIRST_EXECUTION_SESSION = WARMUP_SESSIONS
+#: A trading target to exercise the fail-closed execution boundary.
+BUY_TEN_AAPL = {session_date: ((AAPL_ID, 10),) for session_date in SESSION_DATES}
 
 
 @pytest.fixture(scope="module")
@@ -125,12 +140,18 @@ def intake(tmp_path_factory: pytest.TempPathFactory) -> AlpacaExploratoryIntakeR
 
 
 def _engine(intake: AlpacaExploratoryIntakeResult) -> SessionEvaluatorEngine:
+    """The real engine over the bridge bundle, scoped by the bridge's cohort.
+
+    The declared cohort is what opens the EXPLORATORY reconstructed decision
+    lane for a ``scheduled_session_reconstruction`` bundle (issue 46), so it is
+    passed exactly as the bridge minted it.
+    """
     return SessionEvaluatorEngine(
         bundle=intake.bundle,
         admission=intake.admission,
         protocol=_protocol(warmup=WARMUP_SESSIONS),
         cost_model=_cost_model(),
-        evidence=SessionEvaluatorEvidence(),
+        evidence=SessionEvaluatorEvidence(exploratory_cohort=intake.cohort),
         book_currency_namespace="iso4217",
         book_currency_code="USD",
     )
@@ -138,11 +159,11 @@ def _engine(intake: AlpacaExploratoryIntakeResult) -> SessionEvaluatorEngine:
 
 def _run(
     intake: AlpacaExploratoryIntakeResult,
-) -> tuple[Any, FixedTargetStrategy]:
+    targets: Mapping[Any, tuple[tuple[Any, int], ...]] | None = None,
+) -> tuple[Any, ReconstructedTargetStrategy]:
+    """Run the decisions-only reference strategy unless targets are given."""
     engine = _engine(intake)
-    strategy = FixedTargetStrategy(
-        {session_date: ((AAPL_ID, 10),) for session_date in SESSION_DATES}
-    )
+    strategy = ReconstructedTargetStrategy({} if targets is None else targets)
     identity = _run_identity(
         admission=engine.admission,
         bundle=engine.bundle,
@@ -196,32 +217,92 @@ def test_the_smoke_run_seals_a_complete_trace_log(
         range(len(trace.events))
     )
     kinds = [item.kind for item in trace.events]
-    assert kinds.count("session_start") == WARMUP_SESSIONS
-    assert kinds[-1] == "indeterminate_cause"
+    # The decisions-only reference run steps and marks every session and
+    # decides at every post-warmup close.
+    assert kinds.count("session_start") == len(SESSION_DATES)
+    assert kinds.count("session_mark") == len(SESSION_DATES)
+    assert kinds.count("exploratory_strategy_decision") == len(DECISION_DATES)
+    assert kinds[-1] == "exploratory_strategy_decision"
     # Every trace event binds a session the bridge's own clock contains.
     covered = {item.session_key for item in intake.session_clock.sessions}
     assert {item.session_key for item in trace.events} <= covered
 
 
-def test_the_exploratory_lane_supplies_no_decision_evidence_and_halts(
+def test_the_bridge_bundle_drives_exploratory_decisions_on_reconstructed_evidence(
     intake: AlpacaExploratoryIntakeResult,
 ) -> None:
+    """The issue 42 gap, closed for the bridge's own bundle.
+
+    The bundle still carries no authentic view of any kind, so every decision
+    here is taken on reconstructed evidence, under the weaker context type,
+    at each scheduled close, and is traced under its own event kind.
+    """
     artifacts, strategy = _run(intake)
     result = artifacts.result
 
     assert intake.bundle.authentic_decision_views == ()
     assert intake.bundle.authentic_accounting_views == ()
+    assert result.classification is EvaluationClassification.COMPLETE
+    assert result.is_promotion_grade_evidence is False
+
+    closes = {
+        session.session_key.local_date: session.closed_at
+        for session in intake.session_clock.sessions
+    }
+    assert [context.session_key.local_date for context in strategy.seen] == list(
+        DECISION_DATES
+    )
+    for context in strategy.seen:
+        assert isinstance(context, ExploratoryStrategyDecisionContextV1)
+        assert context.lane == "exploratory"
+        assert context.evidence_grade == "exploratory_reconstructed"
+        assert context.is_promotion_grade_evidence is False
+        assert context.decision_session.authority == "scheduled_reconstruction"
+        assert context.decision_cutoff == closes[context.session_key.local_date]
+        assert context.cohort_hash == intake.cohort.cohort_hash
+
+    kinds = {item.kind for item in artifacts.trace.events}
+    assert "strategy_decision" not in kinds
+    decisions = [
+        item
+        for item in artifacts.trace.events
+        if item.kind == "exploratory_strategy_decision"
+    ]
+    reconstructions = {item.reconstruction_hash for item in intake.reconstructions}
+    for event in decisions:
+        assert event.outcome == "staged"
+        assert event.reconstruction_hashes
+        assert set(event.reconstruction_hashes) <= reconstructions
+        assert set(RECONSTRUCTED_DECISION_LIMITATIONS) <= set(
+            event.acknowledged_limitations
+        )
+
+
+def test_a_trading_target_fails_closed_at_the_next_open(
+    intake: AlpacaExploratoryIntakeResult,
+) -> None:
+    """Deciding on reconstructed evidence is admitted; executing on it is not.
+
+    The first decision stages a buy, and the next open halts INDETERMINATE in
+    the execution phase instead of inventing an execution listing or price
+    the scheduled bundle cannot prove. No fill is minted.
+    """
+    artifacts, strategy = _run(intake, BUY_TEN_AAPL)
+    result = artifacts.result
+
     assert result.classification is EvaluationClassification.INDETERMINATE
-    assert result.halted_session_index == WARMUP_SESSIONS - 1
-    assert result.halt_reason == EXPECTED_HALT_CAUSE
-    # Stated rather than hidden: the reference strategy is never consulted,
-    # so this run proves pipeline plumbing and not strategy behaviour.
-    assert strategy.seen == []
+    assert result.halted_session_index == FIRST_EXECUTION_SESSION
+    assert [context.session_key.local_date for context in strategy.seen] == [
+        DECISION_DATES[0]
+    ]
+    kinds = [item.kind for item in artifacts.trace.events]
+    assert "fill" not in kinds
+    assert kinds.count("exploratory_strategy_decision") == 1
     cause = artifacts.trace.events[-1]
     assert cause.kind == "indeterminate_cause"
-    assert cause.phase is EvaluationPhase.POST_CLOSE_DECISION
-    assert cause.cause_kind == "indeterminate_valuation"
-    assert cause.cause == EXPECTED_HALT_CAUSE
+    assert cause.phase is EvaluationPhase.OPEN_EXECUTION
+    assert cause.cause_kind == "indeterminate_execution"
+    assert artifacts.final_state.holdings == ()
 
 
 def test_the_smoke_run_replays_bitwise_identically(
@@ -239,9 +320,10 @@ def test_the_bridges_admission_can_only_produce_inadmissible_promotion_marks(
 ) -> None:
     """The mark-grade half of non-promotability, asserted on the grade itself.
 
-    Stated plainly so the quantifier is honest: this smoke run mints zero
-    marks, because it halts INDETERMINATE before any position exists, so "every
-    valuation is exploratory" would range over an empty set and could not fail.
+    Stated plainly so the quantifier is honest: this smoke run prices zero
+    positions, because the decisions-only reference strategy never holds one,
+    so "every valuation is exploratory" would range over an empty set and could
+    not fail.
     What is checked instead is the mapping the engine reads the grade from, the
     grade the engine actually resolved for this bridge's admission, and a
     `MarkPriceV1` carrying that grade: it is admissible in the exploratory lane
@@ -281,10 +363,10 @@ def test_the_bridges_admission_can_only_produce_inadmissible_promotion_marks(
 NO_DIVIDEND_ACTIONS = (
     b'{"corporate_actions":{"cash_dividends":[]},"next_page_token":null}'
 )
-#: The pinned dividend moved onto 2026-01-06, which is inside the two sessions
-#: the engine actually executes before it halts. With the pinned 2026-01-07 ex
-#: date the engine never reaches the dividend at all, so an assertion about
-#: what it did with it could not fail.
+#: The pinned dividend moved onto 2026-01-06, an early session every run below
+#: executes whatever strategy it is given. It was moved when the engine still
+#: halted at the first decision cutoff, and the placement is kept so the
+#: assertion about what the engine did with the dividend stays unconditional.
 REACHED_DIVIDEND_ACTIONS = (
     PINNED_CORPORATE_ACTIONS.replace(
         b'"ex_date":"2026-01-07"', b'"ex_date":"2026-01-06"'
@@ -1651,7 +1733,10 @@ def test_the_whole_smoke_path_runs_with_every_socket_disabled(
     artifacts, strategy = _run(result)
 
     assert artifacts.result.is_promotion_grade_evidence is False
-    assert strategy.seen == []
+    # The whole decision path ran offline too, not only the intake.
+    assert [context.session_key.local_date for context in strategy.seen] == list(
+        DECISION_DATES
+    )
 
 
 def test_the_bridge_reads_no_credential_even_when_one_is_set(
