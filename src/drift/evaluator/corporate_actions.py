@@ -21,7 +21,7 @@ silently wrong book.
 """
 
 from collections.abc import Collection, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from fractions import Fraction
@@ -82,6 +82,20 @@ CASH_DISTRIBUTION_KINDS = frozenset(
 SHARE_ACQUISITION_KINDS = frozenset(
     {ActionKind.STOCK_ACQUISITION, ActionKind.MIXED_ACQUISITION}
 )
+# Every action that changes a share count, as actor or as recipient. Cash
+# distributions pay on shares without changing them.
+SHARE_MUTATING_KINDS = (
+    SPLIT_KINDS
+    | SHARE_ACQUISITION_KINDS
+    | frozenset(
+        {
+            ActionKind.STOCK_DIVIDEND,
+            ActionKind.SPINOFF,
+            ActionKind.CASH_ACQUISITION,
+            ActionKind.LIQUIDATION,
+        }
+    )
+)
 DUE_BILL_ROLES = frozenset({"due_bill_start", "due_bill_end", "due_bill_redemption"})
 ENDED_CLAIM_STATUSES = frozenset({"converted", "extinguished"})
 
@@ -112,6 +126,7 @@ class _Book:
     targets: dict[UUID, SecurityTargetPositionV1]
     claims: dict[ClaimIdentity, PendingCashClaimV1]
     realized: Decimal = ZERO
+    unmodelled: list[_EffectContext] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -150,6 +165,9 @@ class _EffectContext:
     occurrence_id: str
     effective_on: date
     terms: TermsIndex
+    # M1c places the effect before the outcome's evidence window. Such an
+    # effect is never applied; it can only explain delivered cash.
+    before_window: bool = False
 
     @property
     def security_id(self) -> UUID7:
@@ -305,6 +323,14 @@ class CorporateActionProcessor:
                     "conflicting aggregate-sale cash rates for one component"
                 )
             self._in_lieu_rates[rate_key] = rate
+        # Each session's window is fixed by the clock alone, so it is read
+        # once here rather than rescanned on every pass.
+        self._previous_dates: dict[SessionKeyV1, date | None] = {}
+        previous: date | None = None
+        for session in session_clock.sessions:
+            self._previous_dates[session.session_key] = previous
+            previous = session.session_key.local_date
+        self._first_session_date = session_clock.sessions[0].session_key.local_date
 
     # -- public surface ---------------------------------------------------
 
@@ -340,8 +366,39 @@ class CorporateActionProcessor:
             targets=_unique_targets(staged_targets),
             claims={},
         )
+        supported: list[list[_EffectContext]] = []
+        unsupported: list[SecurityEconomicOutcomeV1] = []
         for outcome in _ordered_outcomes(economic_outcomes):
-            self._apply_outcome(outcome, book, window)
+            if outcome.resolution.support_status == "supported":
+                supported.append(_effect_contexts(outcome))
+            else:
+                unsupported.append(outcome)
+        self._require_one_share_date(
+            [context for contexts in supported for context in contexts],
+            book,
+            window,
+        )
+        for contexts in supported:
+            self._apply_contexts(contexts, book, window)
+        # Exposure to evidence this pass cannot apply is judged against the
+        # book the pass leaves: a holding or positive target credited by an
+        # earlier dispatch, such as a spin-off child, is exposure too.
+        for outcome in unsupported:
+            # An unsupported or indeterminate composition cannot be trusted to
+            # say what happened. It only halts a run that is actually exposed
+            # to the security, so an unmodellable action elsewhere in the
+            # universe does not poison an unrelated book.
+            if self._is_exposed(outcome.security_id, book):
+                raise IndeterminateValuationError(
+                    "economic outcome resolution is not supported evidence for "
+                    f"{outcome.security_id}: {outcome.resolution.support_status}"
+                )
+        for context in book.unmodelled:
+            if self._is_exposed(context.security_id, book):
+                raise IndeterminateValuationError(
+                    f"corporate action kind {context.payload.action_kind.value} "
+                    "has no proven M2 accounting rule"
+                )
         state = portfolio_state
         if book.holdings != opening_holdings:
             state = _replace_holdings(state, book.holdings, book.realized)
@@ -374,6 +431,7 @@ class CorporateActionProcessor:
         }
         settling: dict[SHA256Hash, PendingCashClaimV1] = {}
         for outcome in _ordered_outcomes(economic_outcomes):
+            owed: _OwedIndex | None = None
             resolution = outcome.resolution
             if resolution.support_status != "supported":
                 if any(
@@ -408,8 +466,13 @@ class CorporateActionProcessor:
                         # Unmatched cash is never credited, but an exposed
                         # book halts unless it was provably never owed it.
                         if group.security_id in exposed:
+                            if owed is None:
+                                # Proven once per outcome and pass, not once
+                                # per delivery: every past delivery is read
+                                # again on every session.
+                                owed = _owed_index(outcome)
                             self._require_unowed(
-                                outcome, group, component, current_session
+                                owed, group, component, current_session
                             )
                         continue
                     self._verify_delivery(claim, component, group, current_session)
@@ -424,29 +487,59 @@ class CorporateActionProcessor:
 
     # -- pre-open internals -----------------------------------------------
 
-    def _apply_outcome(
+    def _require_one_share_date(
         self,
-        outcome: SecurityEconomicOutcomeV1,
+        contexts: Iterable[_EffectContext],
         book: _Book,
         window: _SessionWindow,
     ) -> None:
-        resolution = outcome.resolution
-        if resolution.support_status != "supported":
-            # An unsupported or indeterminate composition cannot be trusted to
-            # say what happened. It only halts a run that is actually exposed
-            # to the security, so an unmodellable action elsewhere in the
-            # universe does not poison an unrelated book.
-            if self._is_exposed(outcome.security_id, book):
+        """Refuse a window whose share actions on one security span two dates.
+
+        A window can hold several dates when the clock skips days. The pass
+        applies its share actions by security and by record hash, not by date,
+        so two actions touching one security on two dates would compound in
+        an unproven order: a 1:10 reverse split on Friday and a 3:1 split on
+        Monday turn 105 shares into 30 in date order and into 31 otherwise.
+        One date per security keeps every result independent of that order.
+        Only a book exposed to one of the actions is halted.
+        """
+        dates: dict[UUID, set[date]] = {}
+        members: dict[UUID, list[_EffectContext]] = {}
+        for context in contexts:
+            if context.payload.action_kind not in SHARE_MUTATING_KINDS:
+                continue
+            if not window.contains(context.effective_on):
+                continue
+            for security_id in _touched_securities(context):
+                dates.setdefault(security_id, set()).add(context.effective_on)
+                members.setdefault(security_id, []).append(context)
+        for security_id in sorted(dates, key=_security_order):
+            if len(dates[security_id]) < 2:
+                continue
+            if any(
+                self._is_exposed(touched, book)
+                for member in members[security_id]
+                for touched in _touched_securities(member)
+            ):
+                spelled = ", ".join(str(day) for day in sorted(dates[security_id]))
                 raise IndeterminateValuationError(
-                    "economic outcome resolution is not supported evidence for "
-                    f"{outcome.security_id}: {resolution.support_status}"
+                    f"one pre-open window holds share actions on {spelled} "
+                    f"touching {security_id}, and M2 V1 proves no order between "
+                    "share actions on different dates of one window"
                 )
-            return
-        contexts = _effect_contexts(outcome)
+
+    def _apply_contexts(
+        self,
+        contexts: list[_EffectContext],
+        book: _Book,
+        window: _SessionWindow,
+    ) -> None:
         # Share-mutating actions settle before cash distributions so that a
         # source quoting cash per post-action share is answered against a
-        # share count that has already absorbed this session's splits, rather
-        # than against whichever record sorted first by hash.
+        # share count that has already absorbed this window's share actions.
+        # _require_one_share_date leaves at most one share-action date per
+        # exposed security, so "pre-action" is always the prior close and
+        # "post-action" is after that one date's actions.
         for context in contexts:
             if not _is_cash_distribution(context.payload):
                 self._dispatch(context, book, window)
@@ -472,10 +565,10 @@ class CorporateActionProcessor:
             self._apply_share_acquisition(context, book, window)
         elif kind == ActionKind.LIQUIDATION:
             self._apply_liquidation(context, book, window)
-        elif self._is_exposed(context.security_id, book):
-            raise IndeterminateValuationError(
-                f"corporate action kind {kind.value} has no proven M2 accounting rule"
-            )
+        else:
+            # Judged once every action of the pass has run, against the book
+            # it leaves, like unsupported evidence.
+            book.unmodelled.append(context)
 
     def _apply_split(
         self, context: _EffectContext, book: _Book, window: _SessionWindow
@@ -599,6 +692,14 @@ class CorporateActionProcessor:
         ):
             return
         dates = _date_facts(_terms_payload(context))
+        if (
+            "ex" not in dates
+            and not _has_due_bill_facts(dates)
+            and context.effective_on > window.current
+        ):
+            # Not yet effective, so its missing ex date says nothing about this
+            # book yet. It halts the run once the effect is effective.
+            return
         entitlement_on = self._entitlement_session(context, dates)
         # A cash distribution is recognized on the session its entitlement
         # vests, not on the session the effect was reported. That is what lets
@@ -868,15 +969,14 @@ class CorporateActionProcessor:
 
     def _session_window(self, session: SessionKeyV1) -> _SessionWindow:
         """The window of dates a pre-open pass for ``session`` owns."""
-        keys = [item.session_key for item in self._session_clock.sessions]
-        if session not in keys:
+        if session not in self._previous_dates:
             raise ValueError(
                 f"session {session.local_date} is not a session of the "
                 "processor's clock"
             )
-        index = keys.index(session)
-        previous = keys[index - 1].local_date if index else None
-        return _SessionWindow(previous=previous, current=session.local_date)
+        return _SessionWindow(
+            previous=self._previous_dates[session], current=session.local_date
+        )
 
     def _cash_per_share(
         self, component: CashComponentV1, security_id: UUID7
@@ -1087,7 +1187,7 @@ class CorporateActionProcessor:
 
     def _require_unowed(
         self,
-        outcome: SecurityEconomicOutcomeV1,
+        owed: _OwedIndex,
         group: EconomicDeliveryGroupV1,
         component: CashComponentV1,
         session: SessionKeyV1,
@@ -1104,28 +1204,34 @@ class CorporateActionProcessor:
 
         An entitlement that vested before the clock's first session belongs to
         the opening book, which carries its own pending claims, so it reads as
-        vested here too.
+        vested here too. That is the only thing an effect M1c places before
+        its evidence window can prove: the pre-open pass never applies such
+        an effect, so one that vests inside the clock may be cash the book
+        was owed.
         """
         label = (
             f"{group.source_id}/{group.native_occurrence_id}/{component.component_id}"
         )
-        vesting = [
-            self._vesting_date(context, owed)
-            for context in _effect_contexts(outcome)
-            if (context.source_id, context.occurrence_id)
-            == (group.source_id, group.native_occurrence_id)
-            for owed in context.payload.owed_components
-            if owed.component_id == component.component_id
-        ]
-        if len(vesting) != 1:
+        explaining = owed.get(
+            (group.source_id, group.native_occurrence_id, component.component_id), []
+        )
+        if len(explaining) != 1:
             raise IndeterminateValuationError(
                 f"delivered cash for {group.security_id} matches no pending claim "
                 f"and no proven entitlement: {label}"
             )
-        if vesting[0] > session.local_date:
+        context, owed_component = explaining[0]
+        vesting = self._vesting_date(context, owed_component)
+        if context.before_window and vesting >= self._first_session_date:
+            raise IndeterminateValuationError(
+                f"delivered cash for {group.security_id} is explained only by an "
+                "effect before the evidence window that vests inside the clock, "
+                f"on {vesting}: {label}"
+            )
+        if vesting > session.local_date:
             raise IndeterminateValuationError(
                 f"delivered cash for {group.security_id} arrived before the "
-                f"entitlement it pays vests on {vesting[0]}: {label}"
+                f"entitlement it pays vests on {vesting}: {label}"
             )
 
     def _matched_claim(
@@ -1173,12 +1279,15 @@ class CorporateActionProcessor:
             )
 
 
-def _effect_contexts(outcome: SecurityEconomicOutcomeV1) -> list[_EffectContext]:
+def _effect_contexts(
+    outcome: SecurityEconomicOutcomeV1, *, include_before_window: bool = False
+) -> list[_EffectContext]:
     """Bind every effective occurred effect in a supported outcome to its source.
 
     Both passes read effects through this one proof: the pre-open pass to
     apply them, and the settlement pass to show delivered cash no claim
-    matches was never owed to this book.
+    matches was never owed to this book. Only the settlement pass asks for
+    effects M1c places before the evidence window, marked as such.
     """
     resolution = outcome.resolution
     records = {content_hash(record): record for record in outcome.effect_records}
@@ -1193,7 +1302,10 @@ def _effect_contexts(outcome: SecurityEconomicOutcomeV1) -> list[_EffectContext]
                 "effect projection effectiveness is indeterminate for "
                 f"{outcome.security_id}"
             )
-        if projection.effective_status != "effective":
+        before_window = projection.effective_status == "before_window"
+        if projection.effective_status != "effective" and not (
+            before_window and include_before_window
+        ):
             continue
         record = records[projection.source_record_hash]
         payload = record.payload
@@ -1235,9 +1347,40 @@ def _effect_contexts(outcome: SecurityEconomicOutcomeV1) -> list[_EffectContext]
                     record.effective_time, role="effect effective time"
                 ),
                 terms=terms,
+                before_window=before_window,
             )
         )
     return contexts
+
+
+type _OwedKey = tuple[str, str, str]
+type _OwedIndex = Mapping[_OwedKey, list[tuple[_EffectContext, EconomicComponentV1]]]
+
+
+def _owed_index(outcome: SecurityEconomicOutcomeV1) -> _OwedIndex:
+    """Index what each occurred effect owes, by the identity a delivery names.
+
+    The key is ``(source_id, native_occurrence_id, component_id)``. A
+    cash-in-lieu leg is reported under its share component id, so share
+    components are indexed alongside cash ones.
+    """
+    index: dict[_OwedKey, list[tuple[_EffectContext, EconomicComponentV1]]] = {}
+    for context in _effect_contexts(outcome, include_before_window=True):
+        for component in context.payload.owed_components:
+            key = (context.source_id, context.occurrence_id, component.component_id)
+            index.setdefault(key, []).append((context, component))
+    return index
+
+
+def _touched_securities(context: _EffectContext) -> tuple[UUID7, ...]:
+    """The acted security and every security its share components deliver."""
+    recipients = tuple(
+        component.recipient.security_id
+        for component in context.payload.owed_components
+        if isinstance(component, ShareComponentV1)
+        and component.recipient.security_id is not None
+    )
+    return (context.security_id, *recipients)
 
 
 def _index_pending_claims(
