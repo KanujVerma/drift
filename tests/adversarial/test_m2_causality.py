@@ -121,6 +121,7 @@ from drift.evaluator.engine import (
     SessionEvaluatorEngine,
     SessionEvaluatorEvidence,
     reconstructed_history_sessions,
+    require_next_open_execution,
 )
 from drift.evaluator.execution import resolve_execution_listing
 from drift.serialization.canonical import content_hash
@@ -926,7 +927,7 @@ def test_a_scheduled_session_cannot_leave_its_calendar_row(
             r"calendar row re-derives: the clock states "
             + re.escape(
                 f"{forged.opened_at.isoformat()} to {forged.closed_at.isoformat()}, "
-                f"the row {jan6_session.opened_at.isoformat()} to "
+                f"its replay derives {jan6_session.opened_at.isoformat()} to "
                 f"{jan6_session.closed_at.isoformat()}"
             )
             + "$"
@@ -936,7 +937,11 @@ def test_a_scheduled_session_cannot_leave_its_calendar_row(
 
 
 def test_a_scheduled_session_cannot_carry_proofs_its_replay_never_derives() -> None:
-    """Genuine boundaries still bind the selection proofs the builder derived."""
+    """Genuine boundaries and records still bind the builder's selection proofs.
+
+    Only the proofs differ, so the refusal names the proofs rather than
+    reporting identical boundaries as a mismatch.
+    """
     (jan5, jan5_session), (jan6, jan6_session) = early_close_sessions()
     forged = _resealed(jan6_session, authority_proof_hashes=(HASH_ONE, HASH_TWO))
     bundle = scheduled_bundle((jan5, jan6), (jan5_session, forged))
@@ -944,8 +949,8 @@ def test_a_scheduled_session_cannot_carry_proofs_its_replay_never_derives() -> N
     with pytest.raises(
         ValueError,
         match=(
-            r"^scheduled clock session on XNYS 2026-01-06 is not the session its "
-            r"calendar row re-derives"
+            r"^scheduled clock session on XNYS 2026-01-06 carries selection proofs "
+            r"no replay request on it derives$"
         ),
     ):
         reconstructed_engine(bundle)
@@ -993,8 +998,6 @@ def test_a_staged_decision_executes_only_at_a_later_dates_open() -> None:
     so the refused pairs here are ones only a clock that escaped them could
     present. The guard does not rely on them.
     """
-    from drift.evaluator.engine import require_next_open_execution
-
     decision = _session_at(DAY_1)
     # Control: the next date's open qualifies, even exactly at the cutoff.
     require_next_open_execution(decision, _session_at(DAY_2))
@@ -1044,12 +1047,25 @@ def test_a_staged_decision_executes_only_at_a_later_dates_open() -> None:
             require_next_open_execution(decision, execution)
 
 
-def test_a_decision_never_fills_at_another_venues_open_on_its_own_date() -> None:
+#: Decisions staged at the XNYS close ahead of a same-date XNAS open: one that
+#: trades there, and one that holds cash and would read no price at all.
+SAME_DATE_TARGETS: dict[str, dict[date, tuple[tuple[UUID, int], ...]]] = {
+    "buys": {DAY_1: ((SEC_A, 10),)},
+    "holds-cash": {},
+}
+
+
+@pytest.mark.parametrize("targets", SAME_DATE_TARGETS.values(), ids=SAME_DATE_TARGETS)
+def test_a_decision_never_fills_at_another_venues_open_on_its_own_date(
+    targets: dict[date, tuple[tuple[UUID, int], ...]],
+) -> None:
     """A legal two-venue clock whose next open shares the decision's date.
 
     XNAS opens after the XNYS decision cutoff and without overlap, so the
     clock admits it. Its open is still on the date the decision was taken,
-    which is not the next-open execution the protocol states.
+    which is not the next-open execution the protocol states. The refusal
+    holds whether or not the staged decision trades, so a same-date
+    multi-venue clock halts at its second session pending an owner ruling.
     """
     clock = _clock_of(
         (_session_at(DAY_1), _xnas_session(DAY_1, time(21, 30), time(23, 0)))
@@ -1059,7 +1075,7 @@ def test_a_decision_never_fills_at_another_venues_open_on_its_own_date() -> None
         decision_views=(_decision_view(SEC_A, DAY_1),),
         accounting_views=(_accounting_view(SEC_A, DAY_1),),
     )
-    strategy = FixedTargetStrategy({DAY_1: ((SEC_A, 10),)})
+    strategy = FixedTargetStrategy(targets)
 
     artifacts = _run(_engine(bundle=bundle, protocol=_protocol(warmup=1)), strategy)
 

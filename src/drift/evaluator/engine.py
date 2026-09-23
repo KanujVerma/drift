@@ -418,8 +418,11 @@ def _require_replayed_clock_sessions(
     reconstructions themselves (issue 55), the session must be what that
     builder derives. Its selection proofs name the query that selected the
     row, so among the requests on one session only a request sharing that
-    query can derive it exactly, and one must. Every other request on it names
-    the same calendar row, and so the same boundaries.
+    query can derive it exactly, and one must: the clock is built from the
+    replay's own queries. Every other request on it names the same calendar
+    row, and so the same boundaries. A refusal names what differs: the
+    boundaries, the calendar records (such as a session naming two rows), or
+    only the selection proofs.
     """
     derived: dict[SessionKeyV1, list[EvaluationSessionV1]] = {}
     for query, context in replay.requests:
@@ -430,12 +433,32 @@ def _require_replayed_clock_sessions(
         if candidates is None or session in candidates:
             continue
         key = session.session_key
-        row = candidates[0]
+        where = f"scheduled clock session on {key.mic} {key.local_date.isoformat()}"
+        bounds = (session.opened_at, session.closed_at)
+        same_bounds = tuple(
+            item for item in candidates if (item.opened_at, item.closed_at) == bounds
+        )
+        if any(
+            item.authority_record_hashes == session.authority_record_hashes
+            for item in same_bounds
+        ):
+            raise ValueError(
+                f"{where} carries selection proofs no replay request on it derives"
+            )
+        if same_bounds:
+            raise ValueError(
+                f"{where} names calendar records no replay request on it derives"
+            )
+        rows = " or ".join(
+            f"{opened.isoformat()} to {closed.isoformat()}"
+            for opened, closed in sorted(
+                {(item.opened_at, item.closed_at) for item in candidates}
+            )
+        )
         raise ValueError(
-            f"scheduled clock session on {key.mic} {key.local_date.isoformat()} "
-            "is not the session its calendar row re-derives: the clock states "
-            f"{session.opened_at.isoformat()} to {session.closed_at.isoformat()}, "
-            f"the row {row.opened_at.isoformat()} to {row.closed_at.isoformat()}"
+            f"{where} is not the session its calendar row re-derives: the clock "
+            f"states {bounds[0].isoformat()} to {bounds[1].isoformat()}, its "
+            f"replay derives {rows}"
         )
 
 
@@ -468,8 +491,11 @@ def require_next_open_execution(
     decision cutoff and carry a later local date. On one venue the clock's own
     guards (non-overlap, local dates in clock order) already make every next
     session qualify. This checks the pair directly, so a clock that escaped
-    them cannot fill an intent at a price printed before it was decided, and
-    a same-date open on another venue is refused rather than read as next.
+    them cannot execute across a decreasing-date inversion, and a same-date
+    open on another venue is refused rather than read as next, whether or
+    not the decision trades. Neither check proves a session's stamps belong
+    to its local date: a realized clock whose keys lag their stamps passes
+    both, and its boundaries are not re-derived here (section 7.5).
     """
     decided = decision_session.session_key
     executing = execution_session.session_key
