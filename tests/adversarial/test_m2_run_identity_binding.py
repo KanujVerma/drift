@@ -181,3 +181,44 @@ def test_an_experiment_row_cannot_name_a_strategy_other_than_the_one_run() -> No
         ValueError, match=r"^the strategy that runs does not match the run identity"
     ):
         execute_experiment_run(run_support._specification(), context)
+
+
+def test_the_engine_binds_its_own_book_currency() -> None:
+    """Two engines over one bundle and evidence, USD and EUR books.
+
+    The hash function binds the currency it is handed; this pins that the
+    engine hands it its own, rather than a constant.
+    """
+    usd = eng._engine()
+    eur = SessionEvaluatorEngine(
+        bundle=usd.bundle,
+        admission=usd.admission,
+        protocol=usd.protocol,
+        cost_model=usd.cost_model,
+        evidence=SessionEvaluatorEvidence(listing_role_records=eng.ROLE_RECORDS),
+        book_currency_namespace=eng.BOOK_NAMESPACE,
+        book_currency_code="EUR",
+    )
+
+    assert usd.evaluator_evidence_hash != eur.evaluator_evidence_hash
+
+
+def test_a_replay_request_moves_the_identity() -> None:
+    """The replay's requests are bound, not only its policy."""
+    from exploratory_decision_test_support import (
+        JAN5,
+        scheduled_session_case,
+        source_request,
+    )
+
+    observation, _ = scheduled_session_case(JAN5)
+    empty = ExploratoryReconstructionReplay(policy=make_policy(), requests=())
+    one = ExploratoryReconstructionReplay(
+        policy=make_policy(), requests=(source_request(observation),)
+    )
+
+    assert _evidence_identity(
+        SessionEvaluatorEvidence(exploratory_reconstruction_replay=one)
+    ) != _evidence_identity(
+        SessionEvaluatorEvidence(exploratory_reconstruction_replay=empty)
+    )
