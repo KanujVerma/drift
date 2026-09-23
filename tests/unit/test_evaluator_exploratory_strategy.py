@@ -444,9 +444,34 @@ def test_an_exploratory_context_cannot_drop_the_scheduled_clock_limitations() ->
 # --- issue 46 hardening: history order, calendar binding, cohort ---------
 
 
+def _observations_out_of_hash_order(
+    days: tuple[date, ...],
+) -> tuple[ExploratoryReconstructedSessionObservationV1, ...]:
+    """Reconstructions for ``days`` whose content-hash order is not date order.
+
+    Reconstruction hashes embed the source-tree implementation identity, so
+    their order moves with any edit anywhere in the package (#63). A fixed
+    triple therefore collides with date order on roughly one commit in six.
+    The closes are searched deterministically until the two orders differ, so
+    the precondition holds on every commit rather than by luck.
+    """
+    for step in range(64):
+        closes = (f"{100 + step}.000", "100.000", "100.000")
+        observations = tuple(
+            scheduled_case(session_date=day, close=close)[0]
+            for day, close in zip(days, closes, strict=True)
+        )
+        by_hash = tuple(sorted(observations, key=lambda item: item.reconstruction_hash))
+        if by_hash != observations:
+            return observations
+    raise AssertionError(
+        "no close in the search made hash order differ from date order"
+    )
+
+
 def test_a_reconstructed_decision_view_reads_its_history_in_business_time() -> None:
     days = (date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 7))
-    observations = tuple(scheduled_case(session_date=day)[0] for day in days)
+    observations = _observations_out_of_hash_order(days)
     by_hash = tuple(sorted(observations, key=lambda item: item.reconstruction_hash))
     # Precondition: content-hash order is not business-time order, so the
     # assertion below can tell the two canonical orders apart.
