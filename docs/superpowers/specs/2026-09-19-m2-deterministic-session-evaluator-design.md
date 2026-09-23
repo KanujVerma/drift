@@ -724,6 +724,15 @@ Creates a new `SecurityHoldingV1` in the child security using the exact distribu
 ### 12.6 Terminations and Delistings
 Delisting is NOT zero; bankruptcy is NOT zero. Terminal value requires explicit M1c liquidation terms or realized terminal distributions. If terminal proceeds are unknown, the evaluation outcome becomes `INDETERMINATE`. Zero cannot be fabricated.
 
+**Amendment, issue 83.** Liquidation now reads the occurred effect's `claim_status`, and corporate-action disposals now realize PnL.
+- *Extinguished liquidation.* A `LIQUIDATION` erases shares only when its claim is `extinguished`. The holding is removed for its proven cash claims, and any staged target is set to 0, so the open never re-buys the liquidated shares.
+- *Continuing liquidation.* A liquidation whose claim is `continuing` is a partial liquidating distribution. Every share, its basis, and its target survive, and it is entitled, ordered after same-session share actions, and reconciled exactly as a cash distribution under section 12.3 (its `ex` date governs).
+- *Unproven claim.* A `converted` or `unknown` claim status leaves it unknown whether any share survives, so it is `INDETERMINATE` for an exposed book.
+- *Disposal PnL.* A `CASH_ACQUISITION`, or an extinguished `LIQUIDATION`, is a disposal. The whole basis of the holding is relieved into realized gross and net PnL against the owed proceeds on the effective session. The action fixes the price, so the gain or loss is realized then, although the proceeds are still receivable, and no transaction cost is charged. The realized-PnL identity therefore closes for every book: cash + pending claims + remaining basis = initial cash + realized net PnL + distribution income.
+- *Out of scope, unchanged.* A `MIXED_ACQUISITION` still carries the whole basis into the acquirer, with its cash leg treated as a claim rather than a partial disposal. An aggregate-sale cash-in-lieu fraction still relieves no basis.
+
+Known limitation: section 12.5's indeterminate spin-off child basis is not yet enforced. The child still enters at zero basis, so a later sale of it overstates realized PnL. Carrying an indeterminate basis from the spin-off to a later sale needs a basis-status field on `SecurityHoldingV1` (or an equivalent on `PortfolioStateV1`), and both are M2 contracts under the #50 freeze proposal. That decision is escalated rather than taken here.
+
 ---
 
 ## 13. Deterministic Fill Model (Atomic Plan-Then-Commit)

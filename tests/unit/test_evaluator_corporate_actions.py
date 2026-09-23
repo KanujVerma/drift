@@ -1904,6 +1904,322 @@ def test_liquidation_with_missing_terms_is_indeterminate() -> None:
         _processor().apply_pre_open_actions(state, (), (outcome,), _key())
 
 
+# --------------------------------------------------------------------------
+# liquidation claim status and disposal PnL
+# --------------------------------------------------------------------------
+
+
+def _liquidation_case(
+    *,
+    suffix: int,
+    claim_status: str,
+    amount: str = "7",
+    ex_at: str = EFFECT_AT,
+    effective_at: str = EFFECT_AT,
+    dates: tuple[EconomicDateFactV1, ...] | None = None,
+) -> SecurityEconomicOutcomeV1:
+    return _share_action_case(
+        suffix=suffix,
+        action_kind=ActionKind.LIQUIDATION,
+        components=(_cash(amount=amount),),
+        claim_status=claim_status,
+        dates=(
+            (_date_fact("ex", ex_at), _date_fact("payable", PAYABLE_AT))
+            if dates is None
+            else dates
+        ),
+        effective_at=effective_at,
+    )
+
+
+def test_a_liquidation_that_extinguishes_the_claim_relieves_its_basis() -> None:
+    outcome = _liquidation_case(suffix=1900, claim_status="extinguished")
+    state = _state(holdings=(_holding(quantity=10, basis="100"),), cash="500")
+
+    updated, _ = _processor().apply_pre_open_actions(state, (), (outcome,), _key())
+
+    # Ten shares of basis 100 leave for 70 owed, so 30 is realized as a loss
+    # at the disposal, exactly as a sale at 7.00 would realize it.
+    assert updated.holdings == ()
+    assert updated.pending_cash_claims[0].total_cash_expected == Decimal("70")
+    assert updated.realized_gross_pnl == Decimal("-30")
+    assert updated.realized_net_pnl == Decimal("-30")
+    # The book's value moved from basis to the claim, not out of existence.
+    assert updated.cash_balance + updated.pending_claims_value == Decimal("570")
+    assert updated.net_asset_value == Decimal("570")
+
+
+def test_a_liquidation_that_extinguishes_the_claim_zeroes_its_target() -> None:
+    outcome = _liquidation_case(suffix=1910, claim_status="extinguished")
+    state = _state(holdings=(_holding(quantity=10, basis="100"),))
+
+    _, translated = _processor().apply_pre_open_actions(
+        state, (_target(SEC_A, 10),), (outcome,), _key()
+    )
+
+    # A kept target would re-buy the extinguished security at the open.
+    assert _quantities(translated) == {SEC_A: 0}
+
+
+def test_a_liquidation_zeroes_a_staged_buy_without_any_holding() -> None:
+    outcome = _liquidation_case(suffix=1920, claim_status="extinguished")
+
+    updated, translated = _processor().apply_pre_open_actions(
+        _state(), (_target(SEC_A, 10),), (outcome,), _key()
+    )
+
+    assert updated.pending_cash_claims == ()
+    assert updated.realized_gross_pnl == ZERO
+    assert _quantities(translated) == {SEC_A: 0}
+
+
+def test_a_liquidation_on_a_continuing_claim_is_a_cash_distribution() -> None:
+    outcome = _liquidation_case(suffix=1930, claim_status="continuing")
+    state = _state(holdings=(_holding(quantity=10, basis="100"),), cash="500")
+    targets = (_target(SEC_A, 10),)
+
+    updated, translated = _processor().apply_pre_open_actions(
+        state, targets, (outcome,), _key()
+    )
+
+    # A partial liquidating distribution pays cash on shares that continue:
+    # every share, its basis, and the staged hold all survive.
+    assert _quantities(updated.holdings) == {SEC_A: 10}
+    assert updated.holdings[0].cost_basis == Decimal("100")
+    assert _quantities(translated) == {SEC_A: 10}
+    claim = updated.pending_cash_claims[0]
+    assert claim.action_kind is ActionKind.LIQUIDATION
+    assert claim.total_cash_expected == Decimal("70")
+    assert updated.realized_gross_pnl == ZERO
+
+
+def test_a_continuing_liquidation_vests_on_its_ex_date_like_a_dividend() -> None:
+    outcome = _liquidation_case(
+        suffix=1940, claim_status="continuing", ex_at=ENTITLED_AT
+    )
+    # Bought at the ex-date open: held at the entitlement session's pre-open
+    # only through a staged buy, so the prior close held nothing.
+    at_ex, _ = _processor().apply_pre_open_actions(
+        _state(day=ENTITLED_DAY),
+        (_target(SEC_A, 10),),
+        (outcome,),
+        _key(ENTITLED_DAY),
+    )
+    assert at_ex.pending_cash_claims == ()
+
+    # Control: held at the prior close, the same distribution is owed.
+    held = _state(holdings=(_holding(quantity=10),), day=ENTITLED_DAY)
+    entitled, _ = _processor().apply_pre_open_actions(
+        held, (), (outcome,), _key(ENTITLED_DAY)
+    )
+    assert entitled.pending_cash_claims[0].entitlement_session == ENTITLED_DAY
+
+
+def test_a_continuing_liquidation_without_an_ex_date_is_indeterminate() -> None:
+    outcome = _liquidation_case(
+        suffix=1950,
+        claim_status="continuing",
+        dates=(_date_fact("record", EFFECT_AT), _date_fact("payable", PAYABLE_AT)),
+    )
+    state = _state(holdings=(_holding(quantity=10),))
+
+    with pytest.raises(IndeterminateValuationError, match="requires a source ex date"):
+        _processor().apply_pre_open_actions(state, (), (outcome,), _key())
+
+
+@pytest.mark.parametrize("claim_status", ["unknown", "converted"])
+def test_a_liquidation_without_a_known_claim_outcome_is_indeterminate(
+    claim_status: str,
+) -> None:
+    outcome = _liquidation_case(suffix=1960, claim_status=claim_status)
+    state = _state(holdings=(_holding(quantity=10, basis="100"),))
+
+    # Neither an ended claim nor a continuing one is proven, so whether any
+    # share survives is unknown, and zero is never assumed (spec 12.6).
+    with pytest.raises(
+        IndeterminateValuationError,
+        match=f"liquidation must prove the claim extinguished or continuing, "
+        f"got claim status {claim_status}",
+    ):
+        _processor().apply_pre_open_actions(state, (), (outcome,), _key())
+
+    # Control: a staged buy alone is exposure too.
+    with pytest.raises(IndeterminateValuationError, match="liquidation must prove"):
+        _processor().apply_pre_open_actions(
+            _state(), (_target(SEC_A, 1),), (outcome,), _key()
+        )
+
+
+def test_an_unproven_liquidation_behind_only_a_zero_target_commits_nothing() -> None:
+    outcome = _liquidation_case(suffix=1970, claim_status="unknown")
+    state = _state()
+
+    updated, translated = _processor().apply_pre_open_actions(
+        state, (_target(SEC_A, 0),), (outcome,), _key()
+    )
+
+    assert updated is state
+    assert _quantities(translated) == {SEC_A: 0}
+
+
+def test_a_cash_acquisition_relieves_its_basis_into_realized_pnl() -> None:
+    component = _cash(amount="12")
+    outcome = _share_action_case(
+        suffix=1980,
+        action_kind=ActionKind.CASH_ACQUISITION,
+        components=(component,),
+        claim_status="extinguished",
+        dates=(_date_fact("payable", PAYABLE_AT),),
+    )
+    state = _state(holdings=(_holding(quantity=100, basis="900"),), cash="500")
+
+    updated, _ = _processor().apply_pre_open_actions(state, (), (outcome,), _key())
+
+    # 100 shares of basis 900 leave for 1200 owed: 300 is realized.
+    assert updated.realized_gross_pnl == Decimal("300")
+    assert updated.realized_net_pnl == Decimal("300")
+    # Realized-PnL identity: cash, claims and remaining basis equal the
+    # opening cash and basis plus everything realized.
+    remaining = sum((item.cost_basis for item in updated.holdings), ZERO)
+    assert updated.cash_balance + updated.pending_claims_value + remaining == (
+        Decimal("500") + Decimal("900") + updated.realized_net_pnl
+    )
+
+
+def test_a_continuing_liquidation_delivered_before_its_ex_date_is_indeterminate() -> (
+    None
+):
+    terms = _terms(
+        suffix=1995,
+        action_kind=ActionKind.LIQUIDATION,
+        components=(_cash(amount="7"),),
+        dates=(_date_fact("ex", PAYABLE_AT), _date_fact("payable", PAYABLE_AT)),
+    )
+    effect = _effect(
+        suffix=1996,
+        action_kind=ActionKind.LIQUIDATION,
+        components=(_cash(amount="7"),),
+        terms=terms,
+    )
+    outcome = _outcome(
+        terms=(terms,),
+        effects=(effect,),
+        delivery_groups=(
+            _delivery(components=(_cash(amount="7"),), settled_at=LATER_AT),
+        ),
+        action_kinds=(ActionKind.LIQUIDATION,),
+    )
+    state = _state(holdings=(_holding(quantity=10),), day=LATER_DAY)
+
+    # A continuing liquidation vests on its ex date, like any distribution,
+    # not on the date its effect was reported, so this cash came early.
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="before the entitlement it pays vests",
+    ):
+        _processor().apply_intrasession_settlements(state, (outcome,), _key(LATER_DAY))
+
+
+def test_a_continuing_liquidation_is_counted_after_same_session_splits() -> None:
+    split_component = _shares(
+        numerator="2", denominator="1", component_id="split-shares"
+    )
+    for basis, expected in (
+        ("predecessor_pre_action", Decimal("70")),
+        ("predecessor_post_action", Decimal("140")),
+    ):
+        cash = CashComponentV1(
+            kind="cash",
+            component_id="cash-1",
+            amount="7",
+            currency_namespace=BOOK_NAMESPACE,
+            currency_code=BOOK_CODE,
+            unit_basis=EconomicUnitBasisV1(
+                security_id=SEC_A,
+                denominator=PositiveRatioV1(numerator="1", denominator="1"),
+                share_basis=basis,  # type: ignore[arg-type]
+            ),
+            amount_basis="gross",
+            applicability="ordinary_passive_holder",
+            conditions=(),
+        )
+        split_terms = _terms(
+            suffix=2002,
+            action_kind=ActionKind.FORWARD_SPLIT,
+            components=(split_component,),
+        )
+        split_effect = _effect(
+            suffix=2003,
+            action_kind=ActionKind.FORWARD_SPLIT,
+            components=(split_component,),
+            terms=split_terms,
+            occurrence_id="occ-split",
+        )
+        liquidation_terms = _terms(
+            suffix=2102,
+            action_kind=ActionKind.LIQUIDATION,
+            components=(cash,),
+            dates=(_date_fact("ex", EFFECT_AT), _date_fact("payable", PAYABLE_AT)),
+        )
+        liquidation_effect = _effect(
+            suffix=2103,
+            action_kind=ActionKind.LIQUIDATION,
+            components=(cash,),
+            terms=liquidation_terms,
+            occurrence_id="occ-liquidation",
+        )
+        outcome = _outcome(
+            terms=(split_terms, liquidation_terms),
+            effects=(split_effect, liquidation_effect),
+            action_kinds=(ActionKind.FORWARD_SPLIT, ActionKind.LIQUIDATION),
+        )
+        # The premise that makes the ordering load-bearing.
+        assert content_hash(liquidation_effect) < content_hash(split_effect)
+        state = _state(holdings=(_holding(quantity=10),))
+
+        updated, _ = _processor().apply_pre_open_actions(state, (), (outcome,), _key())
+
+        # The liquidation record sorts before the split by hash, so only the
+        # distribution ordering counts it after the split on the same
+        # session, and a per-post-split-share amount is owed on all twenty.
+        assert _quantities(updated.holdings) == {SEC_A: 20}
+        assert updated.pending_cash_claims[0].total_cash_expected == expected
+
+
+def test_a_disposal_realizes_the_proceeds_of_every_cash_component() -> None:
+    outcome = _share_action_case(
+        suffix=2010,
+        action_kind=ActionKind.CASH_ACQUISITION,
+        components=(
+            _cash(amount="10", component_id="cash-1"),
+            _cash(amount="2", component_id="cash-2"),
+        ),
+        claim_status="extinguished",
+        dates=(_date_fact("payable", PAYABLE_AT),),
+    )
+    state = _state(holdings=(_holding(quantity=100, basis="900"),))
+
+    updated, _ = _processor().apply_pre_open_actions(state, (), (outcome,), _key())
+
+    # 100 shares owed 10.00 and 2.00 each: 1200.00 of proceeds on 900 basis.
+    assert updated.pending_claims_value == Decimal("1200")
+    assert updated.realized_gross_pnl == Decimal("300")
+
+
+def test_realized_disposal_pnl_accumulates_on_the_prior_realized_pnl() -> None:
+    outcome = _liquidation_case(suffix=1990, claim_status="extinguished")
+    prior = _state(holdings=(_holding(quantity=10, basis="100"),))
+    state = PortfolioStateV1.model_validate(
+        dict(prior)
+        | {"realized_gross_pnl": Decimal("12"), "realized_net_pnl": Decimal("10")}
+    )
+
+    updated, _ = _processor().apply_pre_open_actions(state, (), (outcome,), _key())
+
+    assert updated.realized_gross_pnl == Decimal("-18")
+    assert updated.realized_net_pnl == Decimal("-20")
+
+
 def test_unsupported_action_kind_on_a_held_position_is_indeterminate() -> None:
     share = _shares(
         numerator="1",

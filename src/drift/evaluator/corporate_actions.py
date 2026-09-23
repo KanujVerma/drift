@@ -101,12 +101,17 @@ class _Book:
     from ``opening``; one that quotes per *post-action* share is answered from
     ``holdings``. Without both, a dividend declared alongside a split would
     take its share count from whichever record happened to hash first.
+
+    ``realized`` is the PnL this pass realized by disposals: holdings a
+    corporate action extinguished for cash owed, whose basis is relieved
+    exactly as a sale at the owed price would relieve it.
     """
 
     opening: Mapping[UUID, SecurityHoldingV1]
     holdings: dict[UUID, SecurityHoldingV1]
     targets: dict[UUID, SecurityTargetPositionV1]
     claims: dict[ClaimIdentity, PendingCashClaimV1]
+    realized: Decimal = ZERO
 
 
 @dataclass(frozen=True)
@@ -193,13 +198,17 @@ def _unique_targets(
 
 
 def _replace_holdings(
-    state: PortfolioStateV1, holdings: Mapping[UUID, SecurityHoldingV1]
+    state: PortfolioStateV1,
+    holdings: Mapping[UUID, SecurityHoldingV1],
+    realized: Decimal,
 ) -> PortfolioStateV1:
     """Rebuild state around new holdings, discarding any mark.
 
     A mark describes the holdings it was taken against. A corporate action
     replaces those holdings, so carrying the mark forward would value shares
-    that no longer exist.
+    that no longer exist. ``realized`` is the disposal PnL of the same pass;
+    a corporate action carries no transaction cost, so gross and net move
+    together.
     """
     with decimal_context():
         return PortfolioStateV1(
@@ -214,14 +223,27 @@ def _replace_holdings(
             holdings_market_value=ZERO,
             pending_claims_value=state.pending_claims_value,
             net_asset_value=state.cash_balance + state.pending_claims_value,
-            realized_gross_pnl=state.realized_gross_pnl,
-            realized_net_pnl=state.realized_net_pnl,
+            realized_gross_pnl=state.realized_gross_pnl + realized,
+            realized_net_pnl=state.realized_net_pnl + realized,
             cumulative_transaction_costs=state.cumulative_transaction_costs,
         )
 
 
 def _date_facts(payload: TermsPayloadV1) -> dict[str, EconomicDateFactV1]:
     return {fact.role: fact for fact in payload.dates}
+
+
+def _is_cash_distribution(payload: OccurredEffectV1) -> bool:
+    """Whether an effect pays cash on shares that all continue.
+
+    A liquidation whose claim continues is a partial liquidating
+    distribution: it erases no share, so it is entitled, ordered, and
+    reconciled as a cash distribution.
+    """
+    return payload.action_kind in CASH_DISTRIBUTION_KINDS or (
+        payload.action_kind == ActionKind.LIQUIDATION
+        and payload.claim_status == "continuing"
+    )
 
 
 def _has_due_bill_facts(dates: Mapping[str, EconomicDateFactV1]) -> bool:
@@ -322,7 +344,7 @@ class CorporateActionProcessor:
             self._apply_outcome(outcome, book, window)
         state = portfolio_state
         if book.holdings != opening_holdings:
-            state = _replace_holdings(state, book.holdings)
+            state = _replace_holdings(state, book.holdings, book.realized)
         state = self._record_claims(state, book.claims)
         targets = tuple(
             sorted(
@@ -426,24 +448,24 @@ class CorporateActionProcessor:
         # share count that has already absorbed this session's splits, rather
         # than against whichever record sorted first by hash.
         for context in contexts:
-            if context.payload.action_kind not in CASH_DISTRIBUTION_KINDS:
+            if not _is_cash_distribution(context.payload):
                 self._dispatch(context, book, window)
         for context in contexts:
-            if context.payload.action_kind in CASH_DISTRIBUTION_KINDS:
+            if _is_cash_distribution(context.payload):
                 self._dispatch(context, book, window)
 
     def _dispatch(
         self, context: _EffectContext, book: _Book, window: _SessionWindow
     ) -> None:
         kind = context.payload.action_kind
-        if kind in SPLIT_KINDS:
+        if _is_cash_distribution(context.payload):
+            self._apply_cash_distribution(context, book, window)
+        elif kind in SPLIT_KINDS:
             self._apply_split(context, book, window)
         elif kind == ActionKind.STOCK_DIVIDEND:
             self._apply_stock_dividend(context, book, window)
         elif kind == ActionKind.SPINOFF:
             self._apply_spinoff(context, book, window)
-        elif kind in CASH_DISTRIBUTION_KINDS:
-            self._apply_cash_distribution(context, book, window)
         elif kind == ActionKind.CASH_ACQUISITION:
             self._apply_cash_acquisition(context, book, window)
         elif kind in SHARE_ACQUISITION_KINDS:
@@ -633,18 +655,7 @@ class CorporateActionProcessor:
         _extinguish_target(book, context.security_id)
         if holding is None:
             return
-        payable_on = _payable_session(_date_facts(_terms_payload(context)))
-        del book.holdings[context.security_id]
-        for component in components:
-            self._stage_claim(
-                context=context,
-                component_id=component.component_id,
-                quantity=holding.quantity,
-                cash_per_share=self._cash_per_share(component, context.security_id),
-                entitlement_session=context.effective_on,
-                payable_session=payable_on,
-                book=book,
-            )
+        self._dispose(context, holding, components, book)
 
     def _apply_share_acquisition(
         self, context: _EffectContext, book: _Book, window: _SessionWindow
@@ -742,24 +753,30 @@ class CorporateActionProcessor:
     def _apply_liquidation(
         self, context: _EffectContext, book: _Book, window: _SessionWindow
     ) -> None:
+        """Extinguish a liquidated holding for its proven terminal proceeds.
+
+        A liquidation whose claim continues never reaches here: it is a cash
+        distribution (``_is_cash_distribution``). Only a proven extinguished
+        claim erases shares. Any other status leaves it unknown whether shares
+        survive, and zero is never assumed (spec 12.6).
+        """
         if not window.contains(context.effective_on):
             return
         holding = book.holdings.get(context.security_id)
+        if holding is None and not _stages_a_buy(book, context.security_id):
+            return
+        status = context.payload.claim_status
+        if status != "extinguished":
+            raise IndeterminateValuationError(
+                "a liquidation must prove the claim extinguished or continuing, "
+                f"got claim status {status}"
+            )
+        components = _only_cash_components(context, "a liquidation")
+        # The claim ended, so a kept target would re-buy the liquidated shares.
+        _extinguish_target(book, context.security_id)
         if holding is None:
             return
-        components = _only_cash_components(context, "a liquidation")
-        payable_on = _payable_session(_date_facts(_terms_payload(context)))
-        del book.holdings[context.security_id]
-        for component in components:
-            self._stage_claim(
-                context=context,
-                component_id=component.component_id,
-                quantity=holding.quantity,
-                cash_per_share=self._cash_per_share(component, context.security_id),
-                entitlement_session=context.effective_on,
-                payable_session=payable_on,
-                book=book,
-            )
+        self._dispose(context, holding, components, book)
 
     def _scale_target(
         self,
@@ -837,13 +854,13 @@ class CorporateActionProcessor:
     def _vesting_date(self, context: _EffectContext, owed: EconomicComponentV1) -> date:
         """The date the entitlement to one owed component vests on.
 
-        A cash distribution vests under its entitlement rule. Every other cash
-        leg (an acquisition, a liquidation, or the cash in lieu of a share
-        action's fraction) is owed from the effect's own effective date.
+        A cash distribution, including a liquidating distribution on shares
+        that continue, vests under its entitlement rule. Every other cash leg
+        (an acquisition, an extinguishing liquidation, or the cash in lieu of
+        a share action's fraction) is owed from the effect's own effective
+        date.
         """
-        if context.payload.action_kind in CASH_DISTRIBUTION_KINDS and isinstance(
-            owed, CashComponentV1
-        ):
+        if _is_cash_distribution(context.payload) and isinstance(owed, CashComponentV1):
             return self._entitlement_session(
                 context, _date_facts(_terms_payload(context))
             )
@@ -947,7 +964,7 @@ class CorporateActionProcessor:
         entitlement_session: date,
         payable_session: date,
         book: _Book,
-    ) -> None:
+    ) -> PendingCashClaimV1:
         if payable_session < entitlement_session:
             raise IndeterminateValuationError(
                 "a source payable date cannot precede the proven entitlement session"
@@ -967,7 +984,7 @@ class CorporateActionProcessor:
             )
         with decimal_context():
             total = cash_per_share * quantity
-        book.claims[identity] = PendingCashClaimV1(
+        claim = PendingCashClaimV1(
             claim_id=_claim_identity_hash(
                 source_id=context.source_id,
                 security_id=context.security_id,
@@ -986,6 +1003,42 @@ class CorporateActionProcessor:
             entitlement_session=entitlement_session,
             payable_session=payable_session,
         )
+        book.claims[identity] = claim
+        return claim
+
+    def _dispose(
+        self,
+        context: _EffectContext,
+        holding: SecurityHoldingV1,
+        components: Iterable[CashComponentV1],
+        book: _Book,
+    ) -> None:
+        """Extinguish a whole holding for the cash its components owe.
+
+        This is a disposal. The whole basis is relieved into realized PnL
+        against the owed proceeds, exactly as a sale at that price would
+        relieve it, so cash, claims and remaining basis still equal opening
+        cash plus realized PnL. The proceeds are receivable rather than
+        received, but the price is fixed by the action, so the gain or loss
+        is realized now.
+        """
+        payable_on = _payable_session(_date_facts(_terms_payload(context)))
+        del book.holdings[context.security_id]
+        proceeds = ZERO
+        for component in components:
+            claim = self._stage_claim(
+                context=context,
+                component_id=component.component_id,
+                quantity=holding.quantity,
+                cash_per_share=self._cash_per_share(component, context.security_id),
+                entitlement_session=context.effective_on,
+                payable_session=payable_on,
+                book=book,
+            )
+            with decimal_context():
+                proceeds += claim.total_cash_expected
+        with decimal_context():
+            book.realized += proceeds - holding.cost_basis
 
     def _record_claims(
         self,
