@@ -27,8 +27,22 @@ reading `FieldTransformV1.source_value`. M1d materializes a source-basis view
 with `exact_factor = 1/1` and leaves both `exact_transformed_value` and
 `quantized_value` unset, so `source_value` is the only field that carries the
 exact unadjusted native decimal; the other two would be a silent `None`.
+
+Decision lanes (issue 46, the issue 42 adjudication of ADR 0012 Option B).
+The post-close decision phase has exactly two lanes, fixed at construction.
+The realized lane hands a `RuntimeStrategy` the strong
+`StrategyDecisionContextV1` built from authentic decision views, unchanged. The
+EXPLORATORY reconstructed lane is taken only by an exploratory admission over
+a `scheduled_session_reconstruction` clock with its declared cohort, and hands
+an `ExploratoryReconstructedRuntimeStrategy` the weaker
+`ExploratoryStrategyDecisionContextV1` built from reconstructed observations.
+A promotion admission is refused at construction over any bundle carrying
+exploratory reconstructions. Reconstructed evidence drives decisions only:
+execution and marks still read authorized accounting views, which a scheduled
+bundle does not carry, so a held or traded position there fails closed.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Literal, cast
@@ -53,8 +67,15 @@ from drift.domain.evaluator_execution import (
     ListingOpenPriceV1,
     positions_digest,
 )
+from drift.domain.evaluator_exploratory_strategy import (
+    ExploratoryReconstructedDecisionViewV1,
+    ExploratoryReconstructedRuntimeStrategy,
+    ExploratoryStrategyDecisionContextV1,
+    stage_exploratory_decision_targets,
+)
 from drift.domain.evaluator_lanes import (
     EvaluationAdmissionV1,
+    ExploratoryEvaluationAdmissionV1,
     PromotionEvaluationAdmissionV1,
 )
 from drift.domain.evaluator_portfolio import (
@@ -66,6 +87,11 @@ from drift.domain.evaluator_portfolio import (
     decimal_context,
 )
 from drift.domain.evaluator_protocol import EvaluationProtocolV1
+from drift.domain.evaluator_reconstruction import (
+    ExploratoryCohortAuthorizationV1,
+    ExploratoryReconstructedSessionObservationV1,
+    cohort_required_limitations,
+)
 from drift.domain.evaluator_results import (
     EvaluationClassification,
     EvaluationResultV1,
@@ -91,6 +117,7 @@ from drift.domain.evaluator_trace import (
     EvaluationPhase,
     EvaluationTraceLogV1,
     EvaluatorTraceEventV1,
+    ExploratoryStrategyDecisionTraceEventV1,
     FillRejectionTraceEventV1,
     FillTraceEventV1,
     IndeterminateCauseTraceEventV1,
@@ -108,6 +135,7 @@ from drift.domain.securities import (
 )
 from drift.domain.sessions import SessionKeyV1
 from drift.domain.universes import StructuralEligibilityClassification
+from drift.evaluator.bundles import validate_exploratory_admission
 from drift.evaluator.corporate_actions import CorporateActionProcessor
 from drift.evaluator.execution import AtomicRebalanceEngine, resolve_execution_listings
 from drift.evaluator.portfolio import (
@@ -189,6 +217,11 @@ class SessionEvaluatorEvidence:
     listing. The economic outcomes are the record-bound form of the bundle's
     own `EconomicOutcomeResolutionV1` members, and the three interpretation
     registries are human source readings the processor refuses to invent.
+
+    ``exploratory_cohort`` is the predeclared bounded cohort a
+    scheduled-reconstruction evaluation is scoped by, in place of a historical
+    universe. It is required exactly when the EXPLORATORY reconstructed
+    decision lane is taken, and refused everywhere else.
     """
 
     listing_role_records: tuple[ListingRoleVersionV1, ...] = ()
@@ -198,6 +231,7 @@ class SessionEvaluatorEvidence:
     tie_breaking_rules: tuple[TieBreakingRuleV1, ...] = ()
     due_bill_rules: tuple[DueBillRuleV1, ...] = ()
     cash_in_lieu_rates: tuple[CashInLieuRateV1, ...] = ()
+    exploratory_cohort: ExploratoryCohortAuthorizationV1 | None = None
 
 
 @dataclass(frozen=True)
@@ -234,6 +268,130 @@ class _Loop:
     committed_fill_count: int = 0
 
 
+type LaneDispatchStrategy = RuntimeStrategy | ExploratoryReconstructedRuntimeStrategy
+"""What ``SessionEvaluatorEngine.run`` accepts, and the only place both meet.
+
+This is a union of strategy *interfaces* at the lane-dispatch boundary, not a
+union of decision *inputs*. The engine's lane, fixed at construction from the
+admission and the clock, decides which method is called: ``decide`` with a
+strong ``StrategyDecisionContextV1`` in the realized lane, or
+``decide_exploratory`` with an ``ExploratoryStrategyDecisionContextV1`` in the
+EXPLORATORY scheduled-reconstruction lane. The canonical strong decision input
+never admits reconstructed evidence.
+"""
+
+type _DecisionPhase = Callable[[_Loop, int, EvaluationSessionV1], _Halt | None]
+
+
+@dataclass(frozen=True)
+class _ReconstructedDecisionLane:
+    """The admitted EXPLORATORY scheduled-reconstruction decision path.
+
+    It can only be built from an ``ExploratoryEvaluationAdmissionV1``, so no
+    promotion admission can ever stand behind a decision this lane takes.
+    """
+
+    admission: ExploratoryEvaluationAdmissionV1
+    cohort: ExploratoryCohortAuthorizationV1
+
+
+def _resolve_reconstructed_lane(
+    *,
+    bundle: EvaluationInputBundleV1,
+    admission: EvaluationAdmissionV1,
+    cohort: ExploratoryCohortAuthorizationV1 | None,
+) -> _ReconstructedDecisionLane | None:
+    """Fix the decision lane at construction, refusing every upgrade path.
+
+    * A promotion admission never evaluates exploratory reconstructed
+      evidence or an exploratory cohort, whatever clock the bundle carries.
+      ``validate_promotion_admission`` already refuses such a bundle; this
+      refuses it again here, so an engine built without that gate cannot be
+      the seam through which the weaker grade reaches a promotion result.
+    * An exploratory admission over a realized clock keeps the realized lane
+      exactly as it was. Reconstructions riding such a bundle never become
+      decision evidence.
+    * An exploratory admission over a scheduled-reconstruction clock takes
+      the reconstructed lane, and only after proving its admission, its
+      cohort, and every reconstruction against the bundle.
+    """
+    if isinstance(admission, PromotionEvaluationAdmissionV1):
+        if bundle.has_exploratory_reconstructions:
+            raise ValueError(
+                "a promotion admission cannot evaluate exploratory reconstructed "
+                "evidence"
+            )
+        if cohort is not None:
+            raise ValueError(
+                "a promotion admission cannot evaluate an exploratory cohort"
+            )
+        return None
+    if bundle.session_clock.mode != "scheduled_session_reconstruction":
+        if cohort is not None:
+            raise ValueError(
+                "an exploratory cohort scopes only a scheduled session "
+                "reconstruction evaluation"
+            )
+        return None
+    validate_exploratory_admission(admission=admission, bundle=bundle)
+    if cohort is None:
+        raise ValueError(
+            "a scheduled session reconstruction evaluation requires its "
+            "predeclared exploratory cohort"
+        )
+    missing = tuple(
+        limitation
+        for limitation in cohort_required_limitations(cohort)
+        if limitation not in admission.acknowledged_limitations
+    )
+    if missing:
+        raise ValueError(
+            f"exploratory admission omits the bounded cohort limitation: {missing}"
+        )
+    sessions = {
+        session.session_key: session for session in bundle.session_clock.sessions
+    }
+    for observation in bundle.exploratory_reconstructed_observations:
+        _bind_reconstruction(observation, sessions[observation.session_key], cohort)
+    return _ReconstructedDecisionLane(admission=admission, cohort=cohort)
+
+
+def _bind_reconstruction(
+    observation: ExploratoryReconstructedSessionObservationV1,
+    session: EvaluationSessionV1,
+    cohort: ExploratoryCohortAuthorizationV1,
+) -> None:
+    """Bind one reconstruction to the cohort and the clock session it describes.
+
+    The bundle already proves the session is in its clock. That is not enough
+    to let the clock time a decision on this bar: the bar must have been
+    reconstructed against the very scheduled calendar row the clock generated
+    its session from, or a 16:00 row's bar could be read at a 13:00 close.
+    """
+    key = observation.session_key
+    where = f"{key.mic} {key.local_date.isoformat()}"
+    if observation.cohort_hash != cohort.cohort_hash:
+        raise ValueError(
+            f"exploratory reconstruction on {where} binds cohort "
+            f"{observation.cohort_hash}, and does not bind the declared cohort "
+            f"{cohort.cohort_hash}"
+        )
+    if observation.security_id not in cohort.security_ids:
+        raise ValueError(
+            f"exploratory reconstruction on {where} describes security "
+            f"{observation.security_id}, which the declared cohort does not admit"
+        )
+    authority = frozenset(session.authority_record_hashes)
+    if (
+        observation.scheduled_session_hash not in authority
+        or observation.generated_session_row_hash not in authority
+    ):
+        raise ValueError(
+            f"exploratory reconstruction on {where} does not bind the scheduled "
+            "calendar row its clock session was generated from"
+        )
+
+
 class SessionEvaluatorEngine:
     """Runs the canonical five-phase evaluation loop over one input bundle."""
 
@@ -266,6 +424,9 @@ class SessionEvaluatorEngine:
         self._evidence = evidence
         self._mark_grade = LANE_MARK_GRADE[admission.lane]
         self._validate_economic_evidence(evidence, bundle)
+        self._reconstructed_lane = _resolve_reconstructed_lane(
+            bundle=bundle, admission=admission, cohort=evidence.exploratory_cohort
+        )
         self._accounting_index = self._index_accounting_views(bundle)
         self._corporate_actions = CorporateActionProcessor(
             session_clock=bundle.session_clock,
@@ -386,10 +547,15 @@ class SessionEvaluatorEngine:
     # -- run ----------------------------------------------------------------
 
     def run(
-        self, *, strategy: RuntimeStrategy, run_identity: EvaluationRunIdentityV1
+        self, *, strategy: LaneDispatchStrategy, run_identity: EvaluationRunIdentityV1
     ) -> EvaluationRunArtifactsV1:
-        """Step every session through all five phases, halting fail-closed."""
+        """Step every session through all five phases, halting fail-closed.
+
+        The decision lane was fixed at construction. The strategy is bound to
+        that lane's one decision method before any session is stepped.
+        """
         self._require_bound_identity(run_identity)
+        decide = self._lane_decision(strategy)
         sessions = self._bundle.session_clock.sessions
         loop = _Loop(
             state=initial_portfolio_state(
@@ -403,7 +569,7 @@ class SessionEvaluatorEngine:
             if index > 0:
                 loop.state = self._advance(loop.state, session.session_key)
             self._emit_session_start(loop, index, session)
-            halt = self._step_session(loop, index, session, strategy)
+            halt = self._step_session(loop, index, session, decide)
             if halt is not None:
                 break
         trace = seal_evaluation_trace_log(loop.events)
@@ -445,7 +611,7 @@ class SessionEvaluatorEngine:
         loop: _Loop,
         index: int,
         session: EvaluationSessionV1,
-        strategy: RuntimeStrategy,
+        decide: _DecisionPhase,
     ) -> _Halt | None:
         phase = EvaluationPhase.PRE_OPEN_EFFECTS
         try:
@@ -459,7 +625,7 @@ class SessionEvaluatorEngine:
             phase = EvaluationPhase.CLOSE_MARK
             self._close_mark(loop, index, session)
             phase = EvaluationPhase.POST_CLOSE_DECISION
-            return self._post_close_decision(loop, index, session, strategy)
+            return decide(loop, index, session)
         except (IndeterminateValuationError, IndeterminateExecutionError) as error:
             cause = str(error) or type(error).__name__
             kind: Literal["indeterminate_valuation", "indeterminate_execution"] = (
@@ -823,6 +989,191 @@ class SessionEvaluatorEngine:
         return tuple(
             StrategyDecisionViewV1(
                 security_id=security_id, views=tuple(grouped[security_id])
+            )
+            for security_id in sorted(grouped, key=_security_order)
+        )
+
+    def _lane_decision(self, strategy: LaneDispatchStrategy) -> _DecisionPhase:
+        """Bind the strategy to the one decision method this engine's lane allows.
+
+        Checked once, before any session is stepped, so a strategy that cannot
+        answer its lane is a configuration defect rather than a halted run.
+        """
+        lane = self._reconstructed_lane
+        if lane is None:
+            if not isinstance(strategy, RuntimeStrategy):
+                raise TypeError(
+                    "a realized session evaluation hands the strategy strong "
+                    "decision evidence, so its strategy must answer decide"
+                )
+            realized = strategy
+
+            def realized_decision(
+                loop: _Loop, index: int, session: EvaluationSessionV1
+            ) -> _Halt | None:
+                return self._post_close_decision(loop, index, session, realized)
+
+            return realized_decision
+        if not isinstance(strategy, ExploratoryReconstructedRuntimeStrategy):
+            raise TypeError(
+                "a scheduled session reconstruction evaluation supplies only "
+                "EXPLORATORY reconstructed decision evidence, so its strategy "
+                "must answer decide_exploratory"
+            )
+        exploratory = strategy
+
+        def reconstructed_decision(
+            loop: _Loop, index: int, session: EvaluationSessionV1
+        ) -> _Halt | None:
+            return self._post_close_reconstructed_decision(
+                loop, index, session, exploratory, lane
+            )
+
+        return reconstructed_decision
+
+    # -- phase 5, EXPLORATORY scheduled reconstruction ------------------------
+
+    def _post_close_reconstructed_decision(
+        self,
+        loop: _Loop,
+        index: int,
+        session: EvaluationSessionV1,
+        strategy: ExploratoryReconstructedRuntimeStrategy,
+        lane: _ReconstructedDecisionLane,
+    ) -> _Halt | None:
+        """Phase 5 over EXPLORATORY-only reconstructed evidence.
+
+        Mirrors the realized decision step one for one, except that the
+        context is the weaker type, the strategy is asked through
+        ``decide_exploratory``, and the trace records the decision under its
+        own event kind with every reconstruction read and every limitation
+        carried.
+        """
+        if index < self._protocol.warmup_session_count - 1:
+            return None
+        context = self._reconstructed_decision_context(loop.state, index, session, lane)
+        intent = strategy.decide_exploratory(context)
+        common: dict[str, Any] = {
+            "sequence": len(loop.events),
+            "session_index": index,
+            "session_key": session.session_key,
+            "decision_cutoff": context.decision_cutoff,
+            "context_hash": content_hash(context),
+            "intent_hash": content_hash(intent),
+            "reconstruction_hashes": tuple(
+                sorted(
+                    observation.reconstruction_hash
+                    for view in context.reconstructed_decision_views
+                    for observation in view.observations
+                )
+            ),
+            "acknowledged_limitations": context.acknowledged_limitations,
+        }
+        try:
+            staged = stage_exploratory_decision_targets(intent, context)
+        except StrategyIntentRejectedError as error:
+            reason = str(error) or type(error).__name__
+            loop.events.append(
+                ExploratoryStrategyDecisionTraceEventV1(
+                    **common,
+                    outcome="rejected",
+                    staged_targets=(),
+                    rejection_reason=reason,
+                )
+            )
+            return _Halt(index, EvaluationClassification.REJECTED, reason)
+        loop.events.append(
+            ExploratoryStrategyDecisionTraceEventV1(
+                **common,
+                outcome="staged",
+                staged_targets=staged,
+                rejection_reason=None,
+            )
+        )
+        loop.staged_targets = staged
+        loop.has_staged_decision = True
+        return None
+
+    def _reconstructed_decision_context(
+        self,
+        state: PortfolioStateV1,
+        index: int,
+        session: EvaluationSessionV1,
+        lane: _ReconstructedDecisionLane,
+    ) -> ExploratoryStrategyDecisionContextV1:
+        return ExploratoryStrategyDecisionContextV1(
+            session_key=session.session_key,
+            decision_session=session,
+            decision_cutoff=session.closed_at,
+            cohort_hash=lane.cohort.cohort_hash,
+            admitted_cohort=lane.cohort.security_ids,
+            current_holdings=tuple(
+                position_view(holding) for holding in state.holdings
+            ),
+            current_cash=state.cash_balance,
+            portfolio_nav=state.net_asset_value,
+            reconstructed_decision_views=self._reconstructed_decision_views(
+                index, session
+            ),
+            # The admission already acknowledges every limitation the bundle
+            # obliges and the bounded cohort, so the decision carries them all.
+            acknowledged_limitations=lane.admission.acknowledged_limitations,
+        )
+
+    def _reconstructed_decision_views(
+        self, index: int, session: EvaluationSessionV1
+    ) -> tuple[ExploratoryReconstructedDecisionViewV1, ...]:
+        """Select the reconstructed history the scheduled clock has closed.
+
+        Unlike the realized path this must select by session, because a
+        scheduled bundle legitimately carries reconstructions for sessions
+        after this one: they are the evidence for later decisions, not poison
+        to be flagged. What is history at this cutoff is exactly what the
+        clock has already stepped, this session included. The context then
+        re-checks business-time order on its own, so a broken selection here
+        fails loudly rather than leaking the future.
+        """
+        stepped = {
+            item.session_key
+            for item in self._bundle.session_clock.sessions[: index + 1]
+        }
+        grouped: dict[UUID, list[ExploratoryReconstructedSessionObservationV1]] = {}
+        read_current_session = False
+        for observation in self._bundle.exploratory_reconstructed_observations:
+            if observation.session_key not in stepped:
+                continue
+            members = grouped.setdefault(observation.security_id, [])
+            if any(item.session_key == observation.session_key for item in members):
+                # Two admissible answers is not an answer.
+                raise IndeterminateValuationError(
+                    "more than one reconstructed observation for security "
+                    f"{observation.security_id} on {observation.session_key.mic} "
+                    f"{observation.session_key.local_date}"
+                )
+            members.append(observation)
+            if observation.session_key == session.session_key:
+                read_current_session = True
+        if not read_current_session:
+            # A scheduled session expected open whose bar is missing is
+            # unknown. It is never read as a halt and never skipped.
+            raise IndeterminateValuationError(
+                "no reconstructed decision evidence for the scheduled decision "
+                f"session {session.session_key.mic} "
+                f"{session.session_key.local_date.isoformat()}"
+            )
+        return tuple(
+            ExploratoryReconstructedDecisionViewV1(
+                security_id=security_id,
+                observations=tuple(grouped[security_id]),
+                acknowledged_limitations=tuple(
+                    sorted(
+                        {
+                            limitation
+                            for observation in grouped[security_id]
+                            for limitation in observation.acknowledged_limitations
+                        }
+                    )
+                ),
             )
             for security_id in sorted(grouped, key=_security_order)
         )

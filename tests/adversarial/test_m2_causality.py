@@ -860,9 +860,10 @@ def test_a_scheduled_only_corpus_cannot_materialize_any_authentic_view() -> None
     a selected realized session that opened with exact bounds. A
     scheduled-only corpus therefore never materializes a derived view, so no
     scheduled-reconstruction bundle can carry authentic decision or accounting
-    evidence. The Table 22 row that requires an executing
-    ``scheduled_session_reconstruction`` run is not satisfiable under this
-    core, and is recorded as uncovered rather than faked with a hybrid bundle.
+    evidence. That still holds after issue 46: the Table 22 row requiring an
+    executing ``scheduled_session_reconstruction`` run is satisfied by the
+    EXPLORATORY-only reconstructed decision lane in
+    ``test_m2_reconstructed_decisions.py``, never by a hybrid bundle.
     """
     control_harness = NormalizationHarness(source_only=True)
     control = control_harness.normalize(

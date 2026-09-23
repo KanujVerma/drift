@@ -22,6 +22,11 @@ from pydantic import Field, field_validator, model_validator
 
 from drift.domain.common import FrozenModel, NonBlankStr, SHA256Hash, UTCDateTime
 from drift.domain.evaluator_execution import ExecutionFillV1, FillRejectionV1
+from drift.domain.evaluator_exploratory_strategy import (
+    EXPLORATORY_RECONSTRUCTED_EVIDENCE_GRADE,
+    RECONSTRUCTED_DECISION_LIMITATIONS,
+    ExploratoryReconstructedEvidenceGrade,
+)
 from drift.domain.evaluator_portfolio import CanonicalMoney, decimal_context
 from drift.domain.evaluator_strategy import SecurityTargetPositionV1
 from drift.domain.sessions import SessionKeyV1
@@ -239,6 +244,76 @@ class StrategyDecisionTraceEventV1(_TraceEventBaseV1):
         return self
 
 
+class ExploratoryStrategyDecisionTraceEventV1(_TraceEventBaseV1):
+    """One post-close decision taken on EXPLORATORY-only reconstructed evidence.
+
+    A distinct event kind, never a ``StrategyDecisionTraceEventV1``: a trace
+    that recorded both grades under one kind would let a reader take a
+    decision made on retrospectively reconstructed bars for one made on
+    authentic decision evidence. The event names every reconstruction the
+    strategy was shown and every limitation the decision carries, so the
+    weaker grade stays auditable from the trace alone, not only by reopening
+    the context behind ``context_hash``.
+    """
+
+    kind: Literal["exploratory_strategy_decision"] = "exploratory_strategy_decision"
+    evidence_grade: ExploratoryReconstructedEvidenceGrade = (
+        EXPLORATORY_RECONSTRUCTED_EVIDENCE_GRADE
+    )
+    is_promotion_grade_evidence: Literal[False] = False
+    decision_cutoff: UTCDateTime
+    context_hash: SHA256Hash
+    intent_hash: SHA256Hash
+    reconstruction_hashes: tuple[SHA256Hash, ...]
+    acknowledged_limitations: tuple[NonBlankStr, ...]
+    outcome: Literal["staged", "rejected"]
+    staged_targets: tuple[SecurityTargetPositionV1, ...] = ()
+    rejection_reason: NonBlankStr | None = None
+
+    @field_validator("staged_targets")
+    @classmethod
+    def canonicalize_targets(
+        cls, values: tuple[SecurityTargetPositionV1, ...]
+    ) -> tuple[SecurityTargetPositionV1, ...]:
+        return _canonical_targets(values, "staged targets")
+
+    @field_validator("reconstruction_hashes")
+    @classmethod
+    def canonicalize_reconstructions(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if not values:
+            raise ValueError(
+                "an exploratory decision event must name the reconstructions it read"
+            )
+        return _canonical_digests(values, "reconstruction hashes")
+
+    @field_validator("acknowledged_limitations")
+    @classmethod
+    def canonicalize_limitations(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        return _canonical_digests(values, "acknowledged limitations")
+
+    @model_validator(mode="after")
+    def validate_exploratory_decision(self) -> Self:
+        missing = tuple(
+            sorted(
+                set(RECONSTRUCTED_DECISION_LIMITATIONS)
+                - set(self.acknowledged_limitations)
+            )
+        )
+        if missing:
+            raise ValueError(
+                f"an exploratory decision event omits required limitations: {missing}"
+            )
+        if self.outcome == "rejected":
+            if self.rejection_reason is None:
+                raise ValueError("a rejected decision requires its reason")
+            if self.staged_targets:
+                raise ValueError("a rejected decision stages no target")
+            return self
+        if self.rejection_reason is not None:
+            raise ValueError("a staged decision carries no rejection reason")
+        return self
+
+
 class IndeterminateCauseTraceEventV1(_TraceEventBaseV1):
     """The exact phase and cause that made an outcome unprovable."""
 
@@ -256,6 +331,7 @@ type EvaluatorTraceEventV1 = Annotated[
     | ClaimSettledTraceEventV1
     | SessionMarkTraceEventV1
     | StrategyDecisionTraceEventV1
+    | ExploratoryStrategyDecisionTraceEventV1
     | IndeterminateCauseTraceEventV1,
     Field(discriminator="kind"),
 ]
