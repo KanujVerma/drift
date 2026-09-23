@@ -510,21 +510,24 @@ class CorporateActionProcessor:
             label="stock dividend",
         )
         _require_no_cash(context, "a stock dividend")
-        holding = book.holdings.get(context.security_id)
-        if holding is None:
-            return
         tie_break = self._tie_break(component.fraction_treatment)
-        exact = exact_entitled_shares(holding.quantity, component)
-        whole, residual = resolve_whole_shares(
-            exact, component.fraction_treatment, tie_break=tie_break
-        )
-        book.holdings[context.security_id] = SecurityHoldingV1(
-            security_id=context.security_id,
-            quantity=whole,
-            cost_basis=holding.cost_basis,
-        )
-        if residual:
-            self._stage_cash_in_lieu(context, component, residual, book)
+        holding = book.holdings.get(context.security_id)
+        if holding is not None:
+            exact = exact_entitled_shares(holding.quantity, component)
+            whole, residual = resolve_whole_shares(
+                exact, component.fraction_treatment, tie_break=tie_break
+            )
+            book.holdings[context.security_id] = SecurityHoldingV1(
+                security_id=context.security_id,
+                quantity=whole,
+                cost_basis=holding.cost_basis,
+            )
+            if residual:
+                self._stage_cash_in_lieu(context, component, residual, book)
+        # A stock dividend re-denominates the security exactly as a split
+        # does, so a target staged in pre-dividend shares is restated too.
+        # Left alone, a staged hold would sell the new shares at the open.
+        self._scale_target(context, component, book, tie_break)
 
     def _apply_spinoff(
         self, context: _EffectContext, book: _Book, session: SessionKeyV1
@@ -550,10 +553,18 @@ class CorporateActionProcessor:
             exact, component.fraction_treatment, tie_break=tie_break
         )
         if whole > 0:
+            existing = book.holdings.get(child)
+            # Parent shares are unchanged, so the parent target stands. The
+            # child shares received join the child target, so the child is
+            # held rather than traded. Without a staged parent target no
+            # decision is staged, and no child target may be invented.
+            if context.security_id in book.targets:
+                _credit_target(
+                    book, child, whole, held=existing is not None, label="spin-off"
+                )
             # No tax allocation percentage is claimed, so the child enters at a
             # zero basis and the parent keeps its own. Daily marks still value
             # both from their own closing prices.
-            existing = book.holdings.get(child)
             with decimal_context():
                 basis = ZERO if existing is None else existing.cost_basis
             book.holdings[child] = SecurityHoldingV1(
@@ -610,10 +621,15 @@ class CorporateActionProcessor:
         if context.effective_on != session.local_date:
             return
         holding = book.holdings.get(context.security_id)
-        if holding is None:
+        if holding is None and not _stages_a_buy(book, context.security_id):
             return
         _require_ended_claim(context)
         components = _only_cash_components(context, "a cash acquisition")
+        # The claim ended, so no share of it can be traded at the open. A kept
+        # target would re-buy the extinguished security.
+        _extinguish_target(book, context.security_id)
+        if holding is None:
+            return
         payable_on = _payable_session(_date_facts(_terms_payload(context)))
         del book.holdings[context.security_id]
         for component in components:
@@ -633,8 +649,9 @@ class CorporateActionProcessor:
         if context.effective_on != session.local_date:
             return
         holding = book.holdings.get(context.security_id)
-        if holding is None:
+        if holding is None and not _stages_a_buy(book, context.security_id):
             return
+        target = book.targets.get(context.security_id)
         _require_ended_claim(context)
         component = _single_share_component(
             context,
@@ -654,16 +671,44 @@ class CorporateActionProcessor:
                 "a share acquisition requires an acquirer security"
             )
         tie_break = self._tie_break(component.fraction_treatment)
-        exact = exact_entitled_shares(holding.quantity, component)
-        whole, residual = resolve_whole_shares(
-            exact, component.fraction_treatment, tie_break=tie_break
-        )
-        if whole <= 0:
-            raise IndeterminateValuationError(
-                "a share acquisition would extinguish a held position without "
-                "proven consideration for the remainder"
-            )
         existing = book.holdings.get(acquirer)
+        whole, residual = 0, Fraction(0)
+        if holding is not None:
+            exact = exact_entitled_shares(holding.quantity, component)
+            whole, residual = resolve_whole_shares(
+                exact, component.fraction_treatment, tie_break=tie_break
+            )
+            if whole <= 0:
+                raise IndeterminateValuationError(
+                    "a share acquisition would extinguish a held position without "
+                    "proven consideration for the remainder"
+                )
+        if target is not None:
+            # The predecessor target is mapped onto the acquirer through the
+            # exact ratio and fraction treatment the holding converts by, so
+            # the intended delta survives in acquirer shares.
+            mapped = _translated_quantity(target.target_quantity, component, tie_break)
+            if mapped > whole:
+                # A hold or a sale maps within the shares received. More than
+                # that would buy the acquirer at the open, a security no
+                # admitted decision named. Whether such a buy may be carried
+                # forward awaits an owner ruling, so it fails closed.
+                raise IndeterminateValuationError(
+                    f"a share acquisition would buy the acquirer {acquirer} at "
+                    f"the open: the staged target maps to {mapped} acquirer "
+                    f"shares but the holding receives {whole}, and no admitted "
+                    "decision named the acquirer"
+                )
+            _credit_target(
+                book,
+                acquirer,
+                mapped,
+                held=existing is not None,
+                label="share acquisition",
+            )
+            _extinguish_target(book, context.security_id)
+        if holding is None:
+            return
         with decimal_context():
             basis = holding.cost_basis + (
                 ZERO if existing is None else existing.cost_basis
@@ -720,16 +765,20 @@ class CorporateActionProcessor:
         book: _Book,
         tie_break: TieBreak | None,
     ) -> None:
-        """Scale a staged target through a split so the intended delta survives."""
+        """Restate a staged target through a re-denomination of its security.
+
+        A split and a stock dividend move the target through the exact
+        function they move the holding through, so a hold stays a hold and
+        any other intended delta survives in post-action shares.
+        """
         target = book.targets.get(context.security_id)
-        if target is None or target.target_quantity == 0:
+        if target is None:
             return
-        exact = Fraction(target.target_quantity) * ratio_fraction(component.ratio)
-        whole, _ = resolve_whole_shares(
-            exact, component.fraction_treatment, tie_break=tie_break
-        )
         book.targets[context.security_id] = SecurityTargetPositionV1(
-            security_id=context.security_id, target_quantity=whole
+            security_id=context.security_id,
+            target_quantity=_translated_quantity(
+                target.target_quantity, component, tie_break
+            ),
         )
 
     def _entitlement_session(
@@ -1046,6 +1095,68 @@ def _claim_identity_hash(
         occurrence_id=occurrence_id,
         component_id=component_id,
     )
+
+
+def _translated_quantity(
+    quantity: int, component: ShareComponentV1, tie_break: TieBreak | None
+) -> int:
+    """Translate a staged target quantity exactly as a holding of it would be.
+
+    The ratio, its meaning, and the source fraction treatment are the ones the
+    holding goes through. A fraction that treatment cannot resolve fails
+    closed; a target is never rounded by any rule the source did not state.
+    Any aggregate-sale residual is dropped, because a target is an intent and
+    is owed no cash in lieu.
+    """
+    if quantity == 0:
+        return 0
+    whole, _ = resolve_whole_shares(
+        exact_entitled_shares(quantity, component),
+        component.fraction_treatment,
+        tie_break=tie_break,
+    )
+    return whole
+
+
+def _credit_target(
+    book: _Book, security_id: UUID7, quantity: int, *, held: bool, label: str
+) -> None:
+    """Add translated shares to the staged target of the security receiving them.
+
+    ``held`` says whether the receiving security was already held before the
+    action. A staged decision covers every held security, so a held recipient
+    without a target means the staged set was already incomplete. Treating
+    its missing target as zero would sell a holding no decision named.
+    """
+    current = book.targets.get(security_id)
+    if current is None and held:
+        raise IndeterminateValuationError(
+            f"a {label} translates a staged target into {security_id}, which is "
+            "held without a staged target of its own"
+        )
+    base = 0 if current is None else current.target_quantity
+    book.targets[security_id] = SecurityTargetPositionV1(
+        security_id=security_id, target_quantity=base + quantity
+    )
+
+
+def _stages_a_buy(book: _Book, security_id: UUID7) -> bool:
+    """Whether a security carries a positive staged target.
+
+    Asked only of a security the book does not hold, where a positive target
+    would buy it at the open. An explicit zero target there trades nothing, so
+    it is no exposure, and halting on the action's evidence would be spurious.
+    """
+    target = book.targets.get(security_id)
+    return target is not None and target.target_quantity > 0
+
+
+def _extinguish_target(book: _Book, security_id: UUID7) -> None:
+    """Set a staged target to zero once the claim it names has ended."""
+    if security_id in book.targets:
+        book.targets[security_id] = SecurityTargetPositionV1(
+            security_id=security_id, target_quantity=0
+        )
 
 
 def _terms_payload(context: _EffectContext) -> TermsPayloadV1:

@@ -681,6 +681,18 @@ When an overnight split occurs in Phase 1 (Pre-Open), pending staged target posi
 $$\text{staged\_target}' = \text{staged\_target} \times \frac{\text{ratio.numerator}}{\text{ratio.denominator}}$$
 If $\text{staged\_target}'$ is non-integral and cannot be resolved by an admitted fraction treatment, the run halts as `INDETERMINATE` due to unsupported corporate-action target translation. Targets are never arbitrarily rounded.
 
+**Amendment, issue 81.** Translation applies to every share-mutating action, not only splits; a target left in pre-action units made the next open trade shares no decision asked for, and the run still read `COMPLETE`. Each action has its own rule:
+- *Splits and `STOCK_DIVIDEND`.* The target is restated through the exact function its holding goes through: the same ratio, `ratio_meaning`, `FractionTreatmentV1`, and tie-breaking rule, with the rule above for a fraction the treatment cannot resolve. Any aggregate-sale residual is dropped, since a target is owed no cash in lieu. A stock dividend therefore multiplies the target by $1 + n/d$, and a split booked as a stock dividend translates identically. This holds with or without a holding behind the target.
+- *`STOCK_ACQUISITION` and `MIXED_ACQUISITION`.* The predecessor target is mapped onto the acquirer through that same function, added to any acquirer target, and the predecessor target is set to 0. The mapping is allowed only for a hold or a sale: the mapped target may not exceed the whole acquirer shares the holding receives, which is 0 when nothing is held. A staged increase or entry would otherwise buy the acquirer at the open, a security no admitted decision named (section 6.4), so it is `INDETERMINATE`. Whether such a buy may ever be carried forward is left to an owner ruling, and the default is fail-closed.
+- *`SPINOFF`.* The child target is not a translation of the parent target. The parent target is unchanged, because parent shares are unchanged. The child target is credited with exactly the whole child shares the holding received, so the child is held rather than traded, and only when the parent carries a staged target, since otherwise no decision is staged. With no parent holding, no child shares are received and no child target changes.
+- *`CASH_ACQUISITION`.* The target is set to 0 once the ended claim is proven, whether or not a holding stands behind it.
+
+Two further rules:
+- A cash or share acquisition of a security with no holding and no positive staged target (no target, or an explicit 0) finds no exposure, so its evidence, such as an unended claim status, cannot halt the run.
+- A spin-off child or acquirer that is already held but has no staged target, while the source target is staged, is `INDETERMINATE`: treating its missing target as 0 would sell a holding no decision named.
+
+`LIQUIDATION` is not yet translated; issue 83 carries its claim-status handling and the zeroing of its target.
+
 ### 12.3 Dividend and Due-Bill Entitlement Logic
 M2 does NOT globally equate ex-date with entitlement:
 - An economic receivable (`PendingCashClaimV1`) is created ONLY when M1c occurred effect evidence proves that the holding became legally entitled under the event's exact rule.
