@@ -186,6 +186,10 @@ class BridgeCapabilityAllowlist:
     #: Environment variables readable as ``os.environ.get(<one argument>)``.
     environment_reads: frozenset[str]
     dunder_attributes: frozenset[str]
+    #: Builtins this file may not reach at all, even though they are ordinary
+    #: elsewhere. The builtin ``open`` reads any path, including the process
+    #: environment file, so a bridge file that needs none must name none.
+    refused_builtins: frozenset[str] = frozenset()
 
 
 #: Builtins that resolve a module, an attribute, or code from a runtime value,
@@ -224,6 +228,10 @@ CAPABILITY_ATTRIBUTE_NAMES = frozenset(
         "unsetenv",
     }
 )
+#: Substrings that name a file exposing the process environment. Reading one
+#: is an environment read by another route (``/proc/self/environ`` exists on
+#: the Linux CI runner), so no bridge source may name one at all.
+ENVIRONMENT_FILE_MARKERS = ("/proc/", "/environ")
 #: Modules from which ``from X import name`` is held to X's attribute
 #: allowlist, because each imported name is itself a capability.
 NAME_IMPORT_ALLOWLISTED_MODULES = frozenset({"builtins", "importlib", "os", "sys"})
@@ -266,6 +274,7 @@ ALPACA_ADAPTER_ALLOWLIST = BridgeCapabilityAllowlist(
     },
     environment_reads=frozenset(),
     dunder_attributes=frozenset(),
+    refused_builtins=frozenset({"open"}),
 )
 #: Derived from the acquisition CLI's own source. It is the one file allowed a
 #: transport and an environment read, and the read is scoped to exactly the two
@@ -300,6 +309,7 @@ ALPACA_SCRIPT_ALLOWLIST = BridgeCapabilityAllowlist(
     },
     environment_reads=frozenset({"APCA_API_KEY_ID", "APCA_API_SECRET_KEY"}),
     dunder_attributes=frozenset({"__init__", "__name__"}),
+    refused_builtins=frozenset({"open"}),
 )
 
 
@@ -547,7 +557,18 @@ def _bridge_capability_violations(
                 exempt.add(id(environ))
 
     for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if any(marker in node.value for marker in ENVIRONMENT_FILE_MARKERS):
+                violations.append(
+                    f"{label} names the process-environment file "
+                    f"{node.value!r}, an environment read by another route"
+                )
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            if node.id in allowlist.refused_builtins and node.id not in modules:
+                violations.append(
+                    f"{label} reaches the builtin {node.id}, which is outside "
+                    "its allowlist"
+                )
             if node.id in DYNAMIC_ACCESS_NAMES:
                 violations.append(
                     f"{label} reaches {node.id}, a builtin that resolves modules, "
@@ -865,6 +886,14 @@ ALPACA_SCRIPT_PATH = "scripts/intake_alpaca_exploratory.py"
 #: real adapter, plus the three module-reaching routes named alongside them.
 #: Each is paired with the allowlist rule that must name it.
 ADAPTER_BYPASSES: dict[str, tuple[str, str]] = {
+    "proc-environ-via-path": (
+        '_LEAK = Path("/proc/self/environ").read_bytes()\n',
+        "names the process-environment file '/proc/self/environ'",
+    ),
+    "proc-environ-via-open": (
+        '_LEAK = open("/proc/self/environ", "rb").read()\n',
+        "reaches the builtin open, which is outside its allowlist",
+    ),
     "getattr-on-os": (
         '_LEAK = getattr(os, "environ")["APCA_API_SECRET_KEY"]\n',
         "references the module os other than as the owner of an allowlisted",
@@ -958,6 +987,14 @@ def test_every_known_credential_or_network_bypass_is_refused_in_the_adapter(
 #: environment read, and every route to the environment that avoids
 #: ``os.environ.get``, is refused even there.
 SCRIPT_BYPASSES: dict[str, tuple[str, str]] = {
+    "proc-environ-via-path": (
+        '_LEAK = Path("/proc/self/environ").read_bytes()\n',
+        "names the process-environment file '/proc/self/environ'",
+    ),
+    "builtin-open": (
+        '_LEAK = open("/etc/hosts").read()\n',
+        "reaches the builtin open, which is outside its allowlist",
+    ),
     "getenv-of-a-key": (
         '_LEAK = os.getenv("APCA_API_SECRET_KEY")\n',
         "uses os.getenv, which is outside the os allowlist",
@@ -1006,3 +1043,57 @@ def test_the_script_may_read_only_the_two_alpaca_key_variables(bypass: str) -> N
         _assert_m2_bridge_script_allowed(
             ALPACA_SCRIPT_PATH, source + "\n\n" + injection
         )
+
+
+#: The only production module allowed to mint measured-origin records. It is
+#: the one module that performs the transfer the records describe.
+ORIGIN_RECORD_MINTER = "retain_origin_observations"
+ORIGIN_RECORD_MINTING_PATHS = frozenset({ALPACA_SCRIPT_PATH})
+
+
+def _origin_record_minters(root: Path) -> set[str]:
+    """Every production module under ``root`` that references the minter.
+
+    The adapter's own definition is not a reference; any other name, attribute
+    or import of it is.
+    """
+    found: set[str] = set()
+    for base in (root / "src", root / "scripts"):
+        for path in sorted(base.rglob("*.py")) if base.is_dir() else ():
+            tree = ast.parse(path.read_bytes(), str(path))
+            for node in ast.walk(tree):
+                named = (
+                    (isinstance(node, ast.Name) and node.id == ORIGIN_RECORD_MINTER)
+                    or (
+                        isinstance(node, ast.Attribute)
+                        and node.attr == ORIGIN_RECORD_MINTER
+                    )
+                    or (
+                        isinstance(node, ast.alias)
+                        and node.name == ORIGIN_RECORD_MINTER
+                    )
+                )
+                if named:
+                    found.add(path.relative_to(root).as_posix())
+    return found
+
+
+def test_only_the_acquisition_cli_mints_origin_records() -> None:
+    """A measured-origin record is minted only by what performed the transfer.
+
+    `retain_origin_observations` binds a record to any bytes it is handed, so
+    a caller that fetched nothing could certify bytes nothing measured. Only
+    the acquisition CLI may reach it; tests are not production and are exempt.
+    """
+    assert _origin_record_minters(REPO_ROOT) == ORIGIN_RECORD_MINTING_PATHS
+
+
+def test_a_second_origin_record_minter_is_detected(tmp_path: Path) -> None:
+    """The scan is not vacuous: a new production caller is reported."""
+    module = tmp_path / "src" / "drift" / "evaluator" / "sneaky.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        "from drift.adapters.alpaca_exploratory import retain_origin_observations\n",
+        encoding="utf-8",
+    )
+    assert _origin_record_minters(tmp_path) == {"src/drift/evaluator/sneaky.py"}
