@@ -116,9 +116,20 @@ class SessionClockV1(FrozenModel):
             raise ValueError(
                 "session clock requires strict chronological session order"
             )
+        # Clock order is UTC boundary order. Without overlap every stepped
+        # session has closed before the next one opens, so the next session
+        # opens after the decision it executes. The local date is the key
+        # every piece of evidence binds to, so it must follow the same order
+        # (issue 84): a session stamped after a later date would otherwise
+        # fill that later decision at a price printed before it. Unique keys
+        # then make each venue's dates strictly increasing.
         for previous, current in zip(sessions, sessions[1:], strict=False):
             if current.opened_at < previous.closed_at:
                 raise ValueError("session clock sessions must not overlap")
+            if current.session_key.local_date < previous.session_key.local_date:
+                raise ValueError(
+                    "session clock local dates must not decrease in clock order"
+                )
         return tuple(sessions)
 
     @field_validator("acknowledged_limitations")

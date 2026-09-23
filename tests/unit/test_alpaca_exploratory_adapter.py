@@ -2349,3 +2349,22 @@ def test_a_cohort_repeating_one_security_or_listing_is_rejected() -> None:
     with pytest.raises(AlpacaBridgeIncompleteError) as listing_error:
         pinned_request(members=(pinned_cohort()[0], repeated_listing))
     assert "cohort listings must be unique" in str(listing_error.value)
+
+
+def test_every_availability_claim_is_the_measured_acquisition_instant(
+    tmp_path: Path,
+) -> None:
+    """Alpaca publishes no historical vintage, so none may be claimed.
+
+    From the #8 final acceptance review (lanes F12): backdating every mapped
+    availability by ten years passed every adapter and smoke test. Each
+    availability claim the bridge emits is exactly the measured acquisition
+    instant, never earlier.
+    """
+    intake = run_pinned_intake(tmp_path)
+    acquired_at = pinned_request().acquired_at
+    claims = list(intake.context.retained_evidence.values())
+
+    assert claims
+    for claim in claims:
+        assert claim.lower_bound == claim.upper_bound == acquired_at

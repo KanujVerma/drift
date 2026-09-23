@@ -1392,6 +1392,96 @@ def test_a_negative_target_quantity_is_not_constructible() -> None:
     ]
 
 
+def test_a_costed_run_matches_an_independent_exact_computation() -> None:
+    """Nonzero costs through the whole engine, checked by exact Fractions.
+
+    Commission 0.005 per share, a 1.00 fixed fee, 2.5 bps of the unadjusted
+    open notional, and 7 bps adverse slippage on the fill price (spec 11.4 and
+    14). Every expected number is derived here from the engine's own
+    accounting-view prices, never read back from the engine.
+    """
+    engine = eng._engine(
+        cost_model=eng._cost_model(
+            model_id="costed-v1",
+            commission="0.005",
+            fixed_fee="1.00",
+            notional_bps="2.5",
+            slippage_bps="7",
+        )
+    )
+
+    artifacts = eng._run(engine, eng._buy_ten())
+
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    (fill,) = [event.fill for event in artifacts.trace.events if event.kind == "fill"]
+    fill_session = next(
+        event.session_key for event in artifacts.trace.events if event.kind == "fill"
+    )
+    open_price = Fraction(
+        source_basis_price(
+            next(
+                view
+                for view in engine.bundle.authentic_accounting_views
+                if view.source_session == fill_session
+            ),
+            "open",
+        )
+    )
+    quantity = Fraction(fill.quantity)
+    fill_price = open_price * (1 + Fraction(7, 10_000))
+    costs = (
+        quantity * Fraction("0.005")
+        + Fraction("1.00")
+        + open_price * quantity * Fraction(25, 100_000)
+    )
+    assert Fraction(fill.fill_price) == fill_price
+    assert Fraction(fill.transaction_costs) == costs
+
+    final = artifacts.final_state
+    initial_cash = Fraction(engine.protocol.initial_cash)
+    assert Fraction(final.cash_balance) == initial_cash - fill_price * quantity - costs
+    (holding,) = final.holdings
+    assert Fraction(holding.cost_basis) == fill_price * quantity + costs
+    assert final.mark is not None
+    (mark,) = final.mark.prices
+    market_value = Fraction(mark.close_price) * quantity
+    assert (
+        Fraction(final.net_asset_value) == Fraction(final.cash_balance) + market_value
+    )
+    # NAV identity: the change in NAV is realized net PnL plus unrealized PnL.
+    metrics = artifacts.result.metrics
+    assert Fraction(final.net_asset_value) - initial_cash == (
+        Fraction(metrics.realized_net_pnl) + market_value - Fraction(holding.cost_basis)
+    )
+
+
+def test_a_split_adjusted_field_method_cannot_become_a_reconstructed_price() -> None:
+    """Double adjustment, reconstructed lane (#54): the per-field basis guard.
+
+    The contract is unadjusted but its close method is split adjusted. The
+    contract-level check passes, so only the per-field guard in the canonical
+    builder stands between that close and an exploratory accounting price.
+    """
+    from observation_test_support import ObservationHarness
+    from test_evaluator_reconstruction import build_from_harness
+
+    observed = ObservationHarness(close="100.000")
+    methods = tuple(
+        method.model_copy(update={"adjustment_basis": "split_adjusted"})
+        if method.field_name == "close"
+        else method
+        for method in observed._contract.field_methods
+    )
+    observed._replace_contract(field_methods=methods)
+    observed._records = (observed._reseal_record(observed._records[0]),)
+    observed._rebuild()
+    observed.attach_sessions(schedule_state="regular", realized_outcome="missing")
+    assert observed._contract.adjustment_basis == "unadjusted"
+
+    with pytest.raises(ValueError, match=r"^field close method must be unadjusted$"):
+        build_from_harness(observed)
+
+
 def test_a_fractional_target_quantity_is_not_constructible() -> None:
     for quantity in (1.5, Decimal("1.5"), "1"):
         with pytest.raises(ValidationError) as error:

@@ -25,6 +25,8 @@ from drift.domain.sessions import (
     SessionKeyV1,
 )
 from drift.evaluator.clock import (
+    _build_clock,
+    _ensure_ordered_unique,
     build_realized_session_clock,
     build_scheduled_reconstruction_clock,
 )
@@ -313,6 +315,147 @@ def test_clock_accepts_utc_order_when_mic_order_disagrees() -> None:
     )
     with pytest.raises(ValidationError, match="chronological"):
         _validated_scheduled_clock((later, earlier))
+
+
+# --- Non-overlap and local-date coherence (issue 84) ---
+
+
+SCHEDULED_LIMITATIONS = (
+    ALPACA_LIMITATION_SCHEDULED_SESSION_RECONSTRUCTION,
+    ALPACA_LIMITATION_ABSENT_HALTS,
+)
+
+
+def _utc(day: date, hour: int, minute: int = 0) -> datetime:
+    return datetime(day.year, day.month, day.day, hour, minute, tzinfo=UTC)
+
+
+#: Clock-ordered session pairs whose second member opens before the first
+#: closes. The second is the #66 case: XNAS opens first and closes after the
+#: XNYS early close on the same local date.
+OVERLAPPING_PAIRS = {
+    "next-date-opens-inside-the-prior-session": (
+        make_session(),
+        make_session(local_date=JAN6, opened=_utc(JAN5, 20), closed=_utc(JAN6, 21)),
+    ),
+    "same-date-venue-closes-after-the-next-opens": (
+        make_session(
+            mic="XNAS",
+            local_date=JAN6,
+            opened=_utc(JAN6, 13, 30),
+            closed=_utc(JAN6, 21),
+        ),
+        make_session(local_date=JAN6, opened=_utc(JAN6, 14, 30), closed=_utc(JAN6, 18)),
+    ),
+}
+
+#: Clock-ordered session pairs whose local dates run backwards. Each is in
+#: UTC boundary order and does not overlap, so only the date guard refuses it.
+DATE_INVERTED_PAIRS = {
+    "same-venue": (
+        make_session(local_date=JAN6),
+        make_session(local_date=JAN5, opened=_utc(JAN6, 14, 30), closed=_utc(JAN6, 21)),
+    ),
+    "across-venues": (
+        make_session(mic="XNAS", local_date=JAN6),
+        make_session(local_date=JAN5, opened=_utc(JAN6, 14, 30), closed=_utc(JAN6, 21)),
+    ),
+}
+
+
+@pytest.mark.parametrize("pair", OVERLAPPING_PAIRS.values(), ids=OVERLAPPING_PAIRS)
+def test_clock_refuses_a_session_opening_before_the_prior_one_closes(
+    pair: tuple[EvaluationSessionV1, EvaluationSessionV1],
+) -> None:
+    """The non-overlap guard is what makes clock order a causal order.
+
+    With it, every stepped session has closed by the time the next one opens,
+    so the stepped prefix is exactly the closed history (#66) and the next
+    clock session opens after the decision it executes.
+    """
+    with pytest.raises(
+        ValidationError, match="session clock sessions must not overlap"
+    ):
+        _validated_scheduled_clock(pair)
+
+
+def test_clock_accepts_a_session_opening_exactly_at_the_prior_close() -> None:
+    touching = make_session(local_date=JAN6, opened=CLOSE, closed=_utc(JAN6, 21))
+
+    clock = _validated_scheduled_clock((make_session(), touching))
+
+    assert clock.sessions[1].opened_at == clock.sessions[0].closed_at
+
+
+@pytest.mark.parametrize("pair", DATE_INVERTED_PAIRS.values(), ids=DATE_INVERTED_PAIRS)
+def test_clock_refuses_local_dates_running_backwards_in_clock_order(
+    pair: tuple[EvaluationSessionV1, EvaluationSessionV1],
+) -> None:
+    """A session keyed on an earlier date cannot be stamped after a later one."""
+    with pytest.raises(
+        ValidationError,
+        match="session clock local dates must not decrease in clock order",
+    ):
+        _validated_scheduled_clock(pair)
+
+
+def test_clock_accepts_one_local_date_on_two_venues_in_turn() -> None:
+    """Across venues, local dates need only be non-decreasing."""
+    first = make_session(
+        local_date=JAN6, opened=_utc(JAN6, 14, 30), closed=_utc(JAN6, 18)
+    )
+    second = make_session(
+        mic="XNAS", local_date=JAN6, opened=_utc(JAN6, 18, 30), closed=_utc(JAN6, 21)
+    )
+
+    clock = _validated_scheduled_clock((first, second))
+
+    assert [session.session_key.mic for session in clock.sessions] == ["XNYS", "XNAS"]
+
+
+def test_clock_refuses_one_local_date_twice_on_one_venue() -> None:
+    """Per venue, local dates strictly increase, because keys are unique."""
+    first = make_session(
+        local_date=JAN6, opened=_utc(JAN6, 14, 30), closed=_utc(JAN6, 18)
+    )
+    second = make_session(
+        local_date=JAN6, opened=_utc(JAN6, 18, 30), closed=_utc(JAN6, 21)
+    )
+
+    with pytest.raises(ValidationError, match="unique session keys"):
+        _validated_scheduled_clock((first, second))
+
+
+@pytest.mark.parametrize("pair", OVERLAPPING_PAIRS.values(), ids=OVERLAPPING_PAIRS)
+def test_the_clock_builders_refuse_overlapping_sessions(
+    pair: tuple[EvaluationSessionV1, EvaluationSessionV1],
+) -> None:
+    """Both builder layers refuse overlap: their own guard and the model gate."""
+    with pytest.raises(ValueError, match=r"^session clock sessions must not overlap$"):
+        _ensure_ordered_unique(pair)
+    with pytest.raises(
+        ValidationError, match="session clock sessions must not overlap"
+    ):
+        _build_clock(
+            mode="scheduled_session_reconstruction",
+            sessions=pair,
+            limitations=SCHEDULED_LIMITATIONS,
+        )
+
+
+@pytest.mark.parametrize("pair", DATE_INVERTED_PAIRS.values(), ids=DATE_INVERTED_PAIRS)
+def test_the_clock_builders_refuse_local_dates_running_backwards(
+    pair: tuple[EvaluationSessionV1, EvaluationSessionV1],
+) -> None:
+    with pytest.raises(
+        ValidationError,
+        match="session clock local dates must not decrease in clock order",
+    ):
+        _build_clock(
+            mode="scheduled_session_reconstruction",
+            sessions=pair,
+            limitations=SCHEDULED_LIMITATIONS,
+        )
 
 
 def test_scheduled_clock_rejects_selected_source_mismatch(
