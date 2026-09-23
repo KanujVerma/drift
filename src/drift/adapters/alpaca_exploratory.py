@@ -191,9 +191,7 @@ from drift.evaluator.bundles import (
     validate_exploratory_admission,
 )
 from drift.evaluator.clock import build_scheduled_reconstruction_clock
-from drift.evaluator.reconstruction import (
-    build_exploratory_reconstructed_session_observation,
-)
+from drift.evaluator.reconstruction import ExploratoryReconstructionReplay
 from drift.markets.economic_validation import (
     ECONOMIC_VALIDATION_PROFILE_ID,
     economic_role_contract,
@@ -2938,6 +2936,7 @@ class AlpacaExploratoryIntakeResult:
     cohort: ExploratoryCohortAuthorizationV1
     reconstruction_policy: ExploratoryReconstructionPolicyV1
     outcome_queries: tuple[ObservationOutcomeQueryV1, ...]
+    reconstruction_replay: ExploratoryReconstructionReplay
     reconstructions: tuple[ExploratoryReconstructedSessionObservationV1, ...]
     session_clock: SessionClockV1
     bundle: EvaluationInputBundleV1
@@ -3066,11 +3065,9 @@ def run_alpaca_exploratory_intake(
         for member in request.members
         for session_date in session_dates
     )
-    reconstructions = tuple(
-        build_exploratory_reconstructed_session_observation(
-            query, context, cohort, reconstruction_policy
-        )
-        for query in queries
+    reconstruction_replay = ExploratoryReconstructionReplay(
+        policy=reconstruction_policy,
+        requests=tuple((query, context) for query in queries),
     )
 
     clock_queries: tuple[ObservationQueryV1, ...] = tuple(
@@ -3099,7 +3096,8 @@ def run_alpaca_exploratory_intake(
         listing_identities=listings,
         structural_eligibilities=(),
         economic_outcomes=(),
-        exploratory_reconstructed_observations=reconstructions,
+        exploratory_cohort=cohort,
+        exploratory_reconstruction_replay=reconstruction_replay,
         source_snapshot_hash=None,
     )
     admission = build_bridge_admission(bundle=bundle)
@@ -3121,7 +3119,8 @@ def run_alpaca_exploratory_intake(
         cohort=cohort,
         reconstruction_policy=reconstruction_policy,
         outcome_queries=queries,
-        reconstructions=reconstructions,
+        reconstruction_replay=reconstruction_replay,
+        reconstructions=bundle.exploratory_reconstructed_observations,
         session_clock=session_clock,
         bundle=bundle,
         admission=admission,
