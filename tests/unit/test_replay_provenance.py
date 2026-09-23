@@ -7,7 +7,9 @@ proven; provenance was not. Every test below either proves the binding holds
 or proves it fails closed.
 """
 
-from datetime import date
+import inspect
+from dataclasses import replace
+from datetime import date, timedelta
 from typing import Any, Literal, get_args, get_origin
 
 import pytest
@@ -19,23 +21,34 @@ from observation_test_support import (
 )
 from pydantic import ValidationError
 from pydantic_core import PydanticUndefined
-from replay_provenance_test_support import qualified_snapshot, snapshot_over
+from replay_provenance_test_support import (
+    admission_profile_hashes,
+    qualified_snapshot,
+    snapshot_over,
+)
 from test_assertions import exact_boundary
 from test_evaluator_admission_gatekeeper import make_test_fixture, rebind_admission
 from test_evaluator_bundles import (
+    _provenance_context,
+    _provenance_session_queries,
+    _realized_bundle,
     normalization_realized_clock,
     normalization_scheduled_clock,
+    normalization_session_queries,
+    resealed_clock,
 )
 from test_universes import invoke_structural, structural_inputs
 
 from drift.domain import replay_provenance
 from drift.domain.assertions import TemporalIntervalClaimV1
+from drift.domain.economic_results import EconomicOutcomeResolutionV1
 from drift.domain.evaluator_bundles import EvaluationInputBundleV1
 from drift.domain.evaluator_lanes import (
     ExploratoryEvaluationAdmissionV1,
     PromotionEvaluationAdmissionV1,
     exploratory_evaluation_admission_hash,
 )
+from drift.domain.qualification import ConsumerPurpose
 from drift.domain.replay_provenance import (
     BUNDLE_PROVENANCE_PROOF_VERSION,
     BundleProvenanceProofV1,
@@ -50,10 +63,21 @@ from drift.domain.replay_provenance import (
     replay_context_identity_hash,
     snapshot_binding_witness_hash,
     verify_snapshot_binding,
+    verify_snapshot_binding_purpose,
 )
-from drift.domain.securities import ListingV1, ListingVenue, SecurityV1
-from drift.domain.source_snapshots import RealSourceSnapshotV1
+from drift.domain.securities import (
+    IdentityAssignmentEffect,
+    ListingV1,
+    ListingVenue,
+    SecurityV1,
+)
+from drift.domain.source_snapshots import (
+    RealSourceSnapshotV1,
+    real_source_snapshot_hash,
+)
+from drift.domain.universes import StructuralEligibilityResultV1
 from drift.evaluator.bundles import (
+    _require_bound_identities,
     assemble_evaluation_input_bundle,
     build_evaluation_input_bundle,
     derive_replay_context_identity,
@@ -65,10 +89,13 @@ from drift.evaluator.bundles import (
 )
 from drift.markets.economic_outcomes import resolve_economic_facts
 from drift.markets.normalization import (
+    _economic_query,
     materialize_observation_decision,
     materialize_observation_outcome,
 )
+from drift.markets.observation_usability import _structural_query
 from drift.markets.observation_validation import M1dResolutionContext
+from drift.markets.universes import resolve_structural_eligibility
 from drift.serialization.canonical import content_hash
 
 H = {c: c * 64 for c in "0123456789abcdef"}
@@ -330,6 +357,7 @@ def test_mint_rejects_a_qualified_context_from_a_different_replay_context() -> N
             qualified_context=qualified,
             context=unrelated,
             bundle=bundle,
+            session_queries=normalization_session_queries(harness),
             decision_requests=((reference, query),),
         )
 
@@ -493,12 +521,14 @@ def test_proof_identity_is_deterministic_and_versioned() -> None:
         qualified_context=qualified,
         context=harness.context,
         bundle=bundle,
+        session_queries=normalization_session_queries(harness),
         decision_requests=((reference, query),),
     )
     second = mint_bundle_provenance_proof(
         qualified_context=qualified,
         context=harness.context,
         bundle=bundle,
+        session_queries=normalization_session_queries(harness),
         decision_requests=((reference, query),),
     )
     assert first == second
@@ -513,6 +543,15 @@ def test_proof_identity_is_deterministic_and_versioned() -> None:
         content_hash({"reference": reference, "query": query}),
     )
     assert first.accounting_request_hashes == ()
+    # The clock is re-derived at mint, so its session queries are requests too.
+    assert first.session_request_hashes == tuple(
+        sorted(
+            content_hash({"query": item})
+            for item in normalization_session_queries(harness)
+        )
+    )
+    assert first.structural_request_hashes == ()
+    assert first.economic_request_hashes == ()
 
 
 def test_proof_version_is_pinned_and_cannot_be_relabelled() -> None:
@@ -528,6 +567,7 @@ def test_proof_version_is_pinned_and_cannot_be_relabelled() -> None:
         qualified_context=qualified,
         context=harness.context,
         bundle=bundle,
+        session_queries=normalization_session_queries(harness),
         decision_requests=((reference, query),),
     )
     payload = proof.model_dump()
@@ -568,6 +608,7 @@ def test_proof_rejects_tampered_self_hash() -> None:
         qualified_context=qualified,
         context=harness.context,
         bundle=bundle,
+        session_queries=normalization_session_queries(harness),
         decision_requests=((reference, query),),
     )
     payload = proof.model_dump()
@@ -592,6 +633,7 @@ def test_mint_rejects_a_bundle_asserting_a_different_snapshot() -> None:
             qualified_context=qualified,
             context=harness.context,
             bundle=bundle,
+            session_queries=normalization_session_queries(harness),
             decision_requests=((reference, query),),
         )
 
@@ -610,6 +652,7 @@ def test_mint_rejects_a_bundle_whose_views_replay_did_not_produce() -> None:
             qualified_context=qualified,
             context=harness.context,
             bundle=bundle,
+            session_queries=normalization_session_queries(harness),
             decision_requests=((reference, query),),
         )
 
@@ -659,6 +702,7 @@ def test_proof_carrying_a_component_the_bundle_lacks_fails_closed() -> None:
         qualified_context=qualified,
         context=harness.context,
         bundle=bundle,
+        session_queries=normalization_session_queries(harness),
         decision_requests=((reference, query),),
     )
     padded = tuple(sorted({*proof.component_hashes, H["a"]}))
@@ -682,6 +726,7 @@ def test_bundle_member_missing_from_component_hashes_fails_closed() -> None:
         qualified_context=qualified,
         context=harness.context,
         bundle=bundle,
+        session_queries=normalization_session_queries(harness),
         decision_requests=((reference, query),),
     )
 
@@ -709,6 +754,7 @@ def test_swapping_a_single_component_after_minting_invalidates_the_proof() -> No
         qualified_context=qualified,
         context=harness.context,
         bundle=bundle,
+        session_queries=normalization_session_queries(harness),
         decision_requests=((reference, query),),
     )
 
@@ -737,6 +783,7 @@ def test_build_proof_is_pure_assembly_over_the_same_bundle() -> None:
         qualified_context=qualified,
         context=harness.context,
         bundle=bundle,
+        session_queries=normalization_session_queries(harness),
         decision_requests=((reference, query),),
     )
     assembled = _build_bundle_provenance_proof(
@@ -744,6 +791,7 @@ def test_build_proof_is_pure_assembly_over_the_same_bundle() -> None:
         source_snapshot_hash=snapshot.snapshot_hash,
         bundle=bundle,
         decision_request_hashes=minted.decision_request_hashes,
+        session_request_hashes=minted.session_request_hashes,
     )
     assert assembled == minted
 
@@ -777,6 +825,7 @@ def test_promotion_gate_accepts_a_minted_proof() -> None:
         qualified_context=qualified,
         context=harness.context,
         bundle=bundle,
+        session_queries=normalization_session_queries(harness),
         decision_requests=((reference, query),),
     )
     validate_promotion_admission(**_promotion_case(bundle, proof, snapshot, qualified))
@@ -791,6 +840,7 @@ def test_promotion_gate_rejects_a_proof_for_another_bundle() -> None:
         qualified_context=qualified,
         context=harness.context,
         bundle=bundle,
+        session_queries=normalization_session_queries(harness),
         decision_requests=((reference, query),),
     )
     forged = BundleProvenanceProofV1.model_construct(
@@ -813,6 +863,7 @@ def test_promotion_gate_rejects_a_proof_for_another_snapshot() -> None:
         qualified_context=qualified,
         context=harness.context,
         bundle=bundle,
+        session_queries=normalization_session_queries(harness),
         decision_requests=((reference, query),),
     )
     forged = BundleProvenanceProofV1.model_construct(
@@ -835,6 +886,7 @@ def test_promotion_gate_rejects_an_admission_not_bound_to_the_proof() -> None:
         qualified_context=qualified,
         context=harness.context,
         bundle=bundle,
+        session_queries=normalization_session_queries(harness),
         decision_requests=((reference, query),),
     )
     case = _promotion_case(bundle, proof, snapshot, qualified)
@@ -854,6 +906,7 @@ def test_promotion_gate_rejects_a_proof_with_an_inconsistent_self_hash() -> None
         qualified_context=qualified,
         context=harness.context,
         bundle=bundle,
+        session_queries=normalization_session_queries(harness),
         decision_requests=((reference, query),),
     )
     case = _promotion_case(bundle, proof, snapshot, qualified)
@@ -921,6 +974,7 @@ def test_promotion_gate_rejects_a_qualified_context_the_proof_does_not_name() ->
         qualified_context=qualified,
         context=harness.context,
         bundle=bundle,
+        session_queries=normalization_session_queries(harness),
         decision_requests=((reference, query),),
     )
     case = _promotion_case(bundle, proof, shared, foreign)
@@ -984,6 +1038,7 @@ def test_promotion_gate_re_audits_the_containment_witness() -> None:
         qualified_context=forged,
         context=harness.context,
         bundle=bundle,
+        session_queries=normalization_session_queries(harness),
         decision_requests=((reference, query),),
     )
     case = _promotion_case(bundle, proof, snapshot, forged)
@@ -1023,6 +1078,838 @@ def test_promotion_admission_requires_a_provenance_proof_hash() -> None:
     del payload["provenance_proof_hash"]
     with pytest.raises(ValidationError, match="Field required"):
         PromotionEvaluationAdmissionV1.model_validate(payload)
+
+
+# --- issue 80: every authority-bearing input is re-derived or bound ---
+
+
+def _genuine_structural(
+    harness: NormalizationHarness, query: Any
+) -> tuple[StructuralEligibilityResultV1, tuple[ListingV1, Any, Any]]:
+    """A genuine as-known structural eligibility over the harness's M1b evidence.
+
+    The query is the one M1d builds for this observation's own structural
+    admission, so the request is exactly one M1d already resolves.
+    """
+    context = harness.context
+    outer = query.observation
+    listing = ListingV1(
+        schema_version="1", listing_id=outer.listing_id, venue=outer.venue
+    )
+    structural_query = _structural_query(
+        outer, context, normalization_realized_clock(harness).sessions[0].opened_at
+    )
+    assert context.structural_context is not None
+    assert context.research_definition is not None
+    assert context.issuer_id is not None
+    assert context.structural_methodology_id is not None
+    result = resolve_structural_eligibility(
+        context.research_definition,
+        listing,
+        context.issuer_id,
+        outer.security_id,
+        context.structural_methodology_id,
+        structural_query,
+        context.structural_context,
+    )
+    return result, (listing, outer.security_id, structural_query)
+
+
+def _genuine_economic(
+    harness: NormalizationHarness, query: Any
+) -> tuple[EconomicOutcomeResolutionV1, Any]:
+    """A genuine M1c outcome over the harness's own economic evidence."""
+    context = harness.context
+    policy = context.economic_source_policy
+    assert policy is not None
+    assert context.economic_context is not None
+    economic_query = _economic_query(
+        query.observation,
+        context,
+        source_policy=policy,
+        history_start=policy.history_start,
+        through=policy.through,
+    )
+    return (
+        resolve_economic_facts(economic_query, context.economic_context, policy),
+        economic_query,
+    )
+
+
+def _genuine_identities(query: Any) -> tuple[SecurityV1, ListingV1]:
+    """The security and listing the harness's M1b identity bundle assigns."""
+    outer = query.observation
+    return (
+        SecurityV1(schema_version="1", security_id=outer.security_id),
+        ListingV1(schema_version="1", listing_id=outer.listing_id, venue=outer.venue),
+    )
+
+
+def _covered_bundle(
+    harness: NormalizationHarness,
+    query: Any,
+    reference: Any,
+    snapshot: RealSourceSnapshotV1,
+    **members: Any,
+) -> EvaluationInputBundleV1:
+    return build_evaluation_input_bundle(
+        evaluation_interval=_interval(),
+        session_clock=normalization_realized_clock(harness),
+        context=harness.context,
+        decision_requests=((reference, query),),
+        source_snapshot_hash=snapshot.snapshot_hash,
+        **members,
+    )
+
+
+def _mint(
+    harness: NormalizationHarness,
+    query: Any,
+    reference: Any,
+    bundle: EvaluationInputBundleV1,
+    qualified: QualifiedReplayContextV1,
+    **requests: Any,
+) -> BundleProvenanceProofV1:
+    return mint_bundle_provenance_proof(
+        qualified_context=qualified,
+        context=harness.context,
+        bundle=bundle,
+        session_queries=normalization_session_queries(harness),
+        decision_requests=((reference, query),),
+        **requests,
+    )
+
+
+def _decision_artifacts(harness: NormalizationHarness) -> tuple[str, ...]:
+    return context_supplied_artifact_hashes(
+        derive_replay_context_identity(harness.context)
+    )
+
+
+def _reseal_eligibility(
+    result: StructuralEligibilityResultV1, **updates: object
+) -> StructuralEligibilityResultV1:
+    """A structural result edited, then rebound so it is self-consistent."""
+    draft = StructuralEligibilityResultV1.model_construct(**(dict(result) | updates))
+    return StructuralEligibilityResultV1.model_validate(
+        dict(draft)
+        | {
+            "outcome_binding_hash": content_hash(
+                draft.model_dump(mode="python", exclude={"outcome_binding_hash"})
+            )
+        }
+    )
+
+
+def test_context_identity_binds_the_schedule_generation_policy() -> None:
+    """Lanes F13: which supplied artifact is the schedule policy is identity.
+
+    Naming another supplied artifact as the policy leaves every supplied
+    artifact unchanged, so only the identity field can tell the two contexts
+    apart, and a qualification of one must not mint for the other.
+    """
+    harness, query, reference = _decision_case()
+    context = harness.context
+    policy_hash = context.schedule_generation_policy_hash
+    assert policy_hash is not None
+    identity = derive_replay_context_identity(context)
+    assert identity.schedule_generation_policy_hash == policy_hash
+
+    other = next(
+        digest
+        for digest in sorted(context.supporting_artifacts)
+        if digest != policy_hash
+    )
+    repointed = replace(context, schedule_generation_policy_hash=other)
+    repointed_identity = derive_replay_context_identity(repointed)
+    assert context_supplied_artifact_hashes(
+        repointed_identity
+    ) == context_supplied_artifact_hashes(identity)
+    assert repointed_identity.identity_hash != identity.identity_hash
+
+    snapshot = qualified_snapshot(context)
+    qualified = qualify_replay_context(context=context, snapshot=snapshot)
+    bundle = _promotion_bundle(harness, query, reference, snapshot)
+    with pytest.raises(ValueError, match=r"^replay context identity does not match"):
+        mint_bundle_provenance_proof(
+            qualified_context=qualified,
+            context=repointed,
+            bundle=bundle,
+            session_queries=normalization_session_queries(harness),
+            decision_requests=((reference, query),),
+        )
+
+
+def _stale_snapshot(snapshot: RealSourceSnapshotV1) -> RealSourceSnapshotV1:
+    """The same snapshot with one assertion edited and its old hash kept."""
+    return RealSourceSnapshotV1.model_construct(
+        **(dict(snapshot) | {"coverage_assertions": ("coverage-forged",)})
+    )
+
+
+def test_verify_snapshot_binding_recomputes_the_snapshot_hash() -> None:
+    """Lanes F2: the snapshot in hand must hash to the identity it declares."""
+    context = _decision_harness().context
+    snapshot = qualified_snapshot(context)
+    qualified = qualify_replay_context(context=context, snapshot=snapshot)
+    impostor = _stale_snapshot(snapshot)
+    assert impostor.snapshot_hash == snapshot.snapshot_hash
+    assert impostor.replay_inputs == snapshot.replay_inputs
+    recomputed = real_source_snapshot_hash(impostor)
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^source snapshot hash does not match its own contents: declared "
+            rf"{snapshot.snapshot_hash}, recomputed {recomputed}$"
+        ),
+    ):
+        verify_snapshot_binding(qualified=qualified, snapshot=impostor)
+
+
+def test_binding_refuses_a_snapshot_whose_hash_is_stale() -> None:
+    """The sanctioned binder checks the snapshot before proving anything."""
+    context = _decision_harness().context
+    impostor = _stale_snapshot(qualified_snapshot(context))
+    with pytest.raises(
+        ValueError, match=r"^source snapshot hash does not match its own contents"
+    ):
+        qualify_replay_context(context=context, snapshot=impostor)
+
+
+def test_mint_requires_the_session_queries_of_the_bundle_clock() -> None:
+    """No default: a caller cannot mint without handing over the clock inputs."""
+    parameter = inspect.signature(mint_bundle_provenance_proof).parameters[
+        "session_queries"
+    ]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is inspect.Parameter.empty
+
+
+def test_mint_refuses_a_realized_clock_with_invented_authority() -> None:
+    """Causality F1: the clock is re-derived at mint, not read off its labels."""
+    harness, query, reference = _decision_case()
+    snapshot = qualified_snapshot(harness.context)
+    qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
+    genuine = normalization_realized_clock(harness)
+    session = genuine.sessions[0]
+    forged = resealed_clock(
+        genuine,
+        closed_at=session.closed_at + timedelta(hours=3),
+        authority_record_hashes=(H["e"],),
+        authority_proof_hashes=(H["f"],),
+    )
+    bundle = build_evaluation_input_bundle(
+        evaluation_interval=_interval(),
+        session_clock=forged,
+        context=harness.context,
+        decision_requests=((reference, query),),
+        source_snapshot_hash=snapshot.snapshot_hash,
+    )
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^session clock does not match its canonical re-derivation: bundle "
+            rf"clock {forged.clock_hash}, re-derived {genuine.clock_hash}$"
+        ),
+    ):
+        _mint(harness, query, reference, bundle, qualified)
+
+
+def test_mint_refuses_a_structural_eligibility_it_cannot_re_derive() -> None:
+    """Lanes F5: a carried universe without its request is refused, even a
+    genuine one, because nothing else could prove it."""
+    harness, query, reference = _decision_case()
+    snapshot = qualified_snapshot(harness.context)
+    qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
+    eligibility, _ = _genuine_structural(harness, query)
+    bundle = _covered_bundle(
+        harness, query, reference, snapshot, structural_eligibilities=(eligibility,)
+    )
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^structural eligibility count mismatch against replay: expected 0, "
+            r"bundle carries 1$"
+        ),
+    ):
+        _mint(harness, query, reference, bundle, qualified)
+
+
+def test_mint_refuses_a_structural_eligibility_its_request_does_not_produce() -> None:
+    harness, query, reference = _decision_case()
+    snapshot = qualified_snapshot(harness.context)
+    qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
+    genuine, request = _genuine_structural(harness, query)
+    forged = _reseal_eligibility(genuine, reasons=("fabricated-universe",))
+    bundle = _covered_bundle(
+        harness, query, reference, snapshot, structural_eligibilities=(forged,)
+    )
+    with pytest.raises(
+        ValueError,
+        match=r"^structural eligibilities do not match exact upstream replay$",
+    ):
+        _mint(
+            harness, query, reference, bundle, qualified, structural_requests=(request,)
+        )
+
+
+def test_mint_refuses_an_economic_outcome_it_cannot_re_derive() -> None:
+    harness, query, reference = _decision_case()
+    snapshot = qualified_snapshot(harness.context)
+    qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
+    outcome, _ = _genuine_economic(harness, query)
+    bundle = _covered_bundle(
+        harness, query, reference, snapshot, economic_outcomes=(outcome,)
+    )
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^economic outcome count mismatch against replay: expected 0, "
+            r"bundle carries 1$"
+        ),
+    ):
+        _mint(harness, query, reference, bundle, qualified)
+
+
+def test_mint_refuses_an_economic_outcome_its_request_does_not_produce() -> None:
+    harness, query, reference = _decision_case()
+    snapshot = qualified_snapshot(harness.context)
+    qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
+    genuine, request = _genuine_economic(harness, query)
+    forged = EconomicOutcomeResolutionV1.model_validate(
+        dict(genuine) | {"reasons": ("fabricated-outcome",)}
+    )
+    bundle = _covered_bundle(
+        harness, query, reference, snapshot, economic_outcomes=(forged,)
+    )
+    with pytest.raises(
+        ValueError, match=r"^economic outcomes do not match exact upstream replay$"
+    ):
+        _mint(
+            harness, query, reference, bundle, qualified, economic_requests=(request,)
+        )
+
+
+def test_structural_replay_requires_the_context_m1b_evidence() -> None:
+    harness, query, _ = _decision_case()
+    _, request = _genuine_structural(harness, query)
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^structural eligibility replay requires the replay context's M1b "
+            r"evidence$"
+        ),
+    ):
+        verify_evaluation_input_bundle(
+            bundle=_realized_bundle(),
+            context=_provenance_context(),
+            session_queries=_provenance_session_queries(),
+            structural_requests=(request,),
+        )
+
+
+def test_economic_replay_requires_the_context_m1c_evidence() -> None:
+    harness, query, _ = _decision_case()
+    _, request = _genuine_economic(harness, query)
+    with pytest.raises(
+        ValueError,
+        match=r"^economic outcome replay requires the replay context's M1c evidence$",
+    ):
+        verify_evaluation_input_bundle(
+            bundle=_realized_bundle(),
+            context=_provenance_context(),
+            session_queries=_provenance_session_queries(),
+            economic_requests=(request,),
+        )
+
+
+def test_mint_re_derives_every_authority_bearing_class_and_the_gate_admits() -> None:
+    """Control: clock, M1b, M1c and identity, all genuine, all bound, admitted."""
+    harness, query, reference = _decision_case()
+    snapshot = qualified_snapshot(harness.context)
+    qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
+    eligibility, structural_request = _genuine_structural(harness, query)
+    outcome, economic_request = _genuine_economic(harness, query)
+    security, listing = _genuine_identities(query)
+    bundle = _covered_bundle(
+        harness,
+        query,
+        reference,
+        snapshot,
+        security_identities=(security,),
+        listing_identities=(listing,),
+        structural_eligibilities=(eligibility,),
+        economic_outcomes=(outcome,),
+    )
+    proof = _mint(
+        harness,
+        query,
+        reference,
+        bundle,
+        qualified,
+        structural_requests=(structural_request,),
+        economic_requests=(economic_request,),
+    )
+
+    request_listing, security_id, structural_query = structural_request
+    assert proof.structural_request_hashes == (
+        content_hash(
+            {
+                "listing": request_listing,
+                "security_id": security_id,
+                "query": structural_query,
+            }
+        ),
+    )
+    assert proof.economic_request_hashes == (content_hash({"query": economic_request}),)
+    assert set(proof.component_hashes) == set(bundle_component_hashes(bundle))
+    validate_promotion_admission(**_promotion_case(bundle, proof, snapshot, qualified))
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["session_request_hashes", "structural_request_hashes", "economic_request_hashes"],
+)
+def test_proof_hash_covers_every_request_class(field: str) -> None:
+    harness, query, reference = _decision_case()
+    snapshot = qualified_snapshot(harness.context)
+    qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
+    proof = _mint(
+        harness,
+        query,
+        reference,
+        _promotion_bundle(harness, query, reference, snapshot),
+        qualified,
+    )
+    payload = proof.model_dump()
+    payload[field] = (H["a"],)
+    with pytest.raises(ValidationError, match="proof_hash mismatch"):
+        BundleProvenanceProofV1.model_validate(payload)
+
+
+def test_mint_refuses_a_security_identity_m1b_never_assigned() -> None:
+    harness, query, reference = _decision_case()
+    snapshot = qualified_snapshot(harness.context)
+    qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
+    invented = SecurityV1(schema_version="1", security_id=uid(77))
+    bundle = _covered_bundle(
+        harness, query, reference, snapshot, security_identities=(invented,)
+    )
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^bundle identities are not attested by the replay context's M1b "
+            rf"identity assignments: \('{content_hash(invented)}',\)$"
+        ),
+    ):
+        _mint(harness, query, reference, bundle, qualified)
+
+
+def test_mint_refuses_a_listing_identity_on_another_venue() -> None:
+    """The venue is identity: the listing id alone does not bind it."""
+    harness, query, reference = _decision_case()
+    snapshot = qualified_snapshot(harness.context)
+    qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
+    _, listing = _genuine_identities(query)
+    moved = ListingV1(
+        schema_version="1", listing_id=listing.listing_id, venue=ListingVenue.XNAS
+    )
+    assert moved.venue != listing.venue
+    bundle = _covered_bundle(
+        harness, query, reference, snapshot, listing_identities=(moved,)
+    )
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^bundle identities are not attested by the replay context's M1b "
+            rf"identity assignments: \('{content_hash(moved)}',\)$"
+        ),
+    ):
+        _mint(harness, query, reference, bundle, qualified)
+
+
+def test_mint_refuses_identities_without_m1b_evidence() -> None:
+    context = _provenance_context()
+    assert context.structural_context is None
+    snapshot = qualified_snapshot(context)
+    qualified = qualify_replay_context(context=context, snapshot=snapshot)
+    bundle = _realized_bundle(
+        source_snapshot_hash=snapshot.snapshot_hash,
+        security_identities=(SecurityV1(schema_version="1", security_id=uid(41)),),
+    )
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^bundle carries security or listing identities, but the replay "
+            r"context supplies no M1b identity evidence to bind them$"
+        ),
+    ):
+        mint_bundle_provenance_proof(
+            qualified_context=qualified,
+            context=context,
+            bundle=bundle,
+            session_queries=_provenance_session_queries(),
+        )
+
+
+def test_mint_refuses_a_genuine_identity_mixed_with_an_invented_one() -> None:
+    """Every member is bound, not only the first: one invented member is enough."""
+    harness, query, reference = _decision_case()
+    snapshot = qualified_snapshot(harness.context)
+    qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
+    security, listing = _genuine_identities(query)
+    invented = ListingV1(
+        schema_version="1", listing_id=uid(88), venue=ListingVenue.XNAS
+    )
+    bundle = _covered_bundle(
+        harness,
+        query,
+        reference,
+        snapshot,
+        security_identities=(security,),
+        listing_identities=(listing, invented),
+    )
+    # Genuine members come first in canonical member order, so a check that
+    # stops early binds them and never reaches the invented listing.
+    assert bundle.security_identities[0] == security
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^bundle identities are not attested by the replay context's M1b "
+            rf"identity assignments: \('{content_hash(invented)}',\)$"
+        ),
+    ):
+        _mint(harness, query, reference, bundle, qualified)
+
+
+def test_identity_binding_counts_only_assigned_records() -> None:
+    """An unassignment names an identity without attesting it."""
+    harness, query, reference = _decision_case()
+    security, listing = _genuine_identities(query)
+    bundle = _covered_bundle(
+        harness,
+        query,
+        reference,
+        qualified_snapshot(harness.context),
+        security_identities=(security,),
+        listing_identities=(listing,),
+    )
+    context = harness.context
+    structural = context.structural_context
+    assert structural is not None
+    assignments = structural.universe.assignments
+    assert any(record.identity == listing for record in assignments.records)
+    _require_bound_identities(bundle, context)
+
+    # The same records, with the listing's assignment turned into its
+    # withdrawal. Only the identity binding reads the result, so the context
+    # is rebuilt directly rather than through its validators.
+    withdrawn = replace(
+        context,
+        structural_context=replace(
+            structural,
+            universe=replace(
+                structural.universe,
+                assignments=replace(
+                    assignments,
+                    records=tuple(
+                        record.model_copy(
+                            update={
+                                "assignment_effect": IdentityAssignmentEffect.UNASSIGNED
+                            }
+                        )
+                        if record.identity == listing
+                        else record
+                        for record in assignments.records
+                    ),
+                ),
+            ),
+        ),
+    )
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^bundle identities are not attested by the replay context's M1b "
+            rf"identity assignments: \('{content_hash(listing)}',\)$"
+        ),
+    ):
+        _require_bound_identities(bundle, withdrawn)
+
+
+def _snapshot_case(
+    harness: NormalizationHarness,
+    query: Any,
+    reference: Any,
+    snapshot: RealSourceSnapshotV1,
+) -> dict[str, Any]:
+    qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
+    bundle = _promotion_bundle(harness, query, reference, snapshot)
+    proof = _mint(harness, query, reference, bundle, qualified)
+    return _promotion_case(bundle, proof, snapshot, qualified)
+
+
+def test_promotion_gate_refuses_a_snapshot_of_a_foreign_profile_set() -> None:
+    harness, query, reference = _decision_case()
+    set_hash, _, _ = admission_profile_hashes()
+    snapshot = snapshot_over(_decision_artifacts(harness), profile_set_hash=H["e"])
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^source snapshot profile set mismatch with admission: snapshot binds "
+            rf"{H['e']}, admission binds {set_hash}$"
+        ),
+    ):
+        validate_promotion_admission(
+            **_snapshot_case(harness, query, reference, snapshot)
+        )
+
+
+@pytest.mark.parametrize("role", ["decision", "audit"])
+def test_promotion_gate_refuses_a_snapshot_not_authorizing_a_bound_profile(
+    role: str,
+) -> None:
+    harness, query, reference = _decision_case()
+    _, decision_hash, audit_hash = admission_profile_hashes()
+    missing, kept = (
+        (decision_hash, audit_hash)
+        if role == "decision"
+        else (audit_hash, decision_hash)
+    )
+    snapshot = snapshot_over(
+        _decision_artifacts(harness), authorized_profile_hashes=(kept,)
+    )
+    with pytest.raises(
+        ValueError,
+        match=rf"^source snapshot does not authorize the {role} profile {missing}$",
+    ):
+        validate_promotion_admission(
+            **_snapshot_case(harness, query, reference, snapshot)
+        )
+
+
+@pytest.mark.parametrize("breach", ["audit_purpose", "foreign_profile"])
+def test_promotion_gate_binds_decision_views_to_decision_profile_entries(
+    breach: str,
+) -> None:
+    """Lanes F4: entries are matched by purpose and profile, not content alone."""
+    harness, query, reference = _decision_case()
+    _, decision_hash, _ = admission_profile_hashes()
+    purpose, profile_hash = {
+        "audit_purpose": (ConsumerPurpose.RETROSPECTIVE_AUDIT, decision_hash),
+        "foreign_profile": (ConsumerPurpose.HISTORICAL_DECISION_INPUT, H["e"]),
+    }[breach]
+    snapshot = snapshot_over(
+        _decision_artifacts(harness), purpose=purpose, profile_hash=profile_hash
+    )
+    case = _snapshot_case(harness, query, reference, snapshot)
+    entry = case["qualified_context"].snapshot_binding_witness[0]
+    with pytest.raises(
+        ValueError,
+        match=(
+            rf"^witness entry {entry.snapshot_entry_hash} attests artifact "
+            rf"{entry.artifact_hash} for {purpose.value} under profile "
+            rf"{profile_hash}, but the bundle's decision views require "
+            rf"historical_decision_input under profile {decision_hash}$"
+        ),
+    ):
+        validate_promotion_admission(**case)
+
+
+def test_purpose_binding_fails_closed_on_an_unresolved_witness_entry() -> None:
+    """Called alone, the purpose check still refuses a fabricated witness."""
+    context = _decision_harness().context
+    snapshot = qualified_snapshot(context)
+    forged = _forge_witness(qualify_replay_context(context=context, snapshot=snapshot))
+    _, decision_hash, _ = admission_profile_hashes()
+    entry = forged.snapshot_binding_witness[0]
+    with pytest.raises(
+        ValueError,
+        match=(
+            rf"^witness entry {entry.snapshot_entry_hash} does not resolve to a "
+            rf"snapshot entry of {snapshot.snapshot_hash}$"
+        ),
+    ):
+        verify_snapshot_binding_purpose(
+            qualified=forged,
+            snapshot=snapshot,
+            purpose=ConsumerPurpose.HISTORICAL_DECISION_INPUT,
+            profile_hash=decision_hash,
+            consumer="decision views",
+        )
+
+
+def _resealed_snapshot(
+    snapshot: RealSourceSnapshotV1, replay_inputs: tuple[Any, ...]
+) -> RealSourceSnapshotV1:
+    """The snapshot over other replay inputs, with an honest recomputed hash."""
+    draft = RealSourceSnapshotV1.model_construct(
+        **(dict(snapshot) | {"replay_inputs": replay_inputs})
+    )
+    return RealSourceSnapshotV1.model_validate(
+        dict(draft) | {"snapshot_hash": real_source_snapshot_hash(draft)}
+    )
+
+
+def test_promotion_gate_refuses_a_snapshot_mislabelling_only_its_last_entry() -> None:
+    """Every witnessed entry is checked, not only the first: one mislabel refuses."""
+    harness, query, reference = _decision_case()
+    _, decision_hash, _ = admission_profile_hashes()
+    artifacts = _decision_artifacts(harness)
+    assert len(artifacts) > 1
+    last = max(artifacts)
+    honest = snapshot_over(artifacts)
+    partial = _resealed_snapshot(
+        honest,
+        tuple(
+            entry.model_copy(update={"purpose": ConsumerPurpose.RETROSPECTIVE_AUDIT})
+            if entry.content_hash == last
+            else entry
+            for entry in honest.replay_inputs
+        ),
+    )
+    case = _snapshot_case(harness, query, reference, partial)
+    entry = case["qualified_context"].snapshot_binding_witness[-1]
+    assert entry.artifact_hash == last
+    with pytest.raises(
+        ValueError,
+        match=(
+            rf"^witness entry {entry.snapshot_entry_hash} attests artifact {last} "
+            rf"for retrospective_audit under profile {decision_hash}, but the "
+            r"bundle's decision views require historical_decision_input under "
+            rf"profile {decision_hash}$"
+        ),
+    ):
+        validate_promotion_admission(**case)
+
+
+def test_purpose_binding_recomputes_the_snapshot_hash() -> None:
+    """Called alone, the purpose check does not trust a declared hash either."""
+    context = _decision_harness().context
+    snapshot = qualified_snapshot(context)
+    qualified = qualify_replay_context(context=context, snapshot=snapshot)
+    impostor = _stale_snapshot(snapshot)
+    _, decision_hash, _ = admission_profile_hashes()
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^source snapshot hash does not match its own contents: declared "
+            rf"{snapshot.snapshot_hash}, recomputed "
+            rf"{real_source_snapshot_hash(impostor)}$"
+        ),
+    ):
+        verify_snapshot_binding_purpose(
+            qualified=qualified,
+            snapshot=impostor,
+            purpose=ConsumerPurpose.HISTORICAL_DECISION_INPUT,
+            profile_hash=decision_hash,
+            consumer="decision views",
+        )
+
+
+def test_verify_snapshot_binding_refuses_an_artifact_attested_twice() -> None:
+    """The re-audit refuses what the binder refuses: one entry per artifact.
+
+    Every context artifact is attested twice, once per purpose. The binder
+    refuses the context as ambiguous, but a witness built by hand to name the
+    decision entries used to pass the re-audit and the purpose check, so the
+    gate admitted a context the sanctioned path cannot qualify.
+    """
+    harness, query, reference = _decision_case()
+    _, _, audit_hash = admission_profile_hashes()
+    artifacts = _decision_artifacts(harness)
+    decision = snapshot_over(artifacts)
+    dual = _resealed_snapshot(
+        decision,
+        (
+            *decision.replay_inputs,
+            *(
+                entry.model_copy(
+                    update={
+                        "purpose": ConsumerPurpose.RETROSPECTIVE_AUDIT,
+                        "profile_hash": audit_hash,
+                    }
+                )
+                for entry in decision.replay_inputs
+            ),
+        ),
+    )
+    first = min(artifacts)
+    ambiguous = (
+        rf"^replay context artifact {first} is ambiguous in source snapshot "
+        rf"{dual.snapshot_hash}$"
+    )
+    with pytest.raises(ValueError, match=ambiguous):
+        qualify_replay_context(context=harness.context, snapshot=dual)
+
+    decision_entries = {
+        entry.content_hash: content_hash(entry) for entry in decision.replay_inputs
+    }
+    witness = tuple(
+        SnapshotBindingEntryV1(
+            schema_version="1",
+            artifact_hash=artifact,
+            snapshot_entry_hash=decision_entries[artifact],
+        )
+        for artifact in artifacts
+    )
+    draft = QualifiedReplayContextV1.model_construct(
+        schema_version="1",
+        source_snapshot_hash=dual.snapshot_hash,
+        context_identity=derive_replay_context_identity(harness.context),
+        snapshot_binding_witness=witness,
+        snapshot_binding_proof_hash=snapshot_binding_witness_hash(witness),
+        qualified_hash=H["0"],
+    )
+    hand_built = QualifiedReplayContextV1.model_validate(
+        dict(draft) | {"qualified_hash": qualified_replay_context_hash(draft)}
+    )
+    with pytest.raises(ValueError, match=ambiguous):
+        verify_snapshot_binding(qualified=hand_built, snapshot=dual)
+
+    # Minting never sees a snapshot, so only the gate's re-audit can refuse it.
+    bundle = _promotion_bundle(harness, query, reference, dual)
+    proof = _mint(harness, query, reference, bundle, hand_built)
+    with pytest.raises(ValueError, match=ambiguous):
+        validate_promotion_admission(**_promotion_case(bundle, proof, dual, hand_built))
+
+
+def test_promotion_gate_binds_accounting_views_to_audit_profile_entries() -> None:
+    """Accounting views are ex-post evidence: decision attestation is not audit.
+
+    The bundle carries accounting views only, which isolates the clause.
+    """
+    harness = NormalizationHarness()
+    query = harness.normalization_query("source_basis")
+    reference = harness.normalize(query).reference
+    _, decision_hash, audit_hash = admission_profile_hashes()
+    snapshot = qualified_snapshot(harness.context)
+    qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
+    bundle = build_evaluation_input_bundle(
+        evaluation_interval=_interval(),
+        session_clock=normalization_realized_clock(harness),
+        context=harness.context,
+        accounting_requests=((reference, query),),
+        source_snapshot_hash=snapshot.snapshot_hash,
+    )
+    proof = mint_bundle_provenance_proof(
+        qualified_context=qualified,
+        context=harness.context,
+        bundle=bundle,
+        session_queries=normalization_session_queries(harness),
+        accounting_requests=((reference, query),),
+    )
+    case = _promotion_case(bundle, proof, snapshot, qualified)
+    entry = qualified.snapshot_binding_witness[0]
+    with pytest.raises(
+        ValueError,
+        match=(
+            rf"^witness entry {entry.snapshot_entry_hash} attests artifact "
+            rf"{entry.artifact_hash} for historical_decision_input under profile "
+            rf"{decision_hash}, but the bundle's accounting views require "
+            rf"retrospective_audit under profile {audit_hash}$"
+        ),
+    ):
+        validate_promotion_admission(**case)
 
 
 # --- exploratory lane stays unaffected ---
