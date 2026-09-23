@@ -692,6 +692,58 @@ def test_a_promotion_result_cannot_bind_a_trace_of_reconstructed_decisions() -> 
         EvaluationRunArtifactsV1.model_validate(_paired_artifacts("promotion"))
 
 
+def test_a_genuine_realized_promotion_run_still_binds_its_trace() -> None:
+    """Control: the guard refuses the weaker grade, not the promotion lane.
+
+    A real engine run under a promotion admission over a realized bundle
+    traces its decisions as ``strategy_decision`` and must still validate as
+    an artifact, including after a JSON round trip.
+    """
+    from test_evaluator_engine import (
+        BOOK_CODE,
+        BOOK_NAMESPACE,
+        ROLE_RECORDS,
+        _bundle,
+        _buy_ten,
+        _cost_model,
+        _protocol,
+        _run_identity,
+    )
+
+    from drift.domain.evaluator_results import EvaluationRunArtifactsV1
+    from drift.evaluator.engine import SessionEvaluatorEngine, SessionEvaluatorEvidence
+
+    realized = _bundle()
+    admission = promotion_admission(realized)
+    engine = SessionEvaluatorEngine(
+        bundle=realized,
+        admission=admission,
+        protocol=_protocol(),
+        cost_model=_cost_model(),
+        evidence=SessionEvaluatorEvidence(listing_role_records=ROLE_RECORDS),
+        book_currency_namespace=BOOK_NAMESPACE,
+        book_currency_code=BOOK_CODE,
+    )
+    artifacts = engine.run(
+        strategy=_buy_ten(),
+        run_identity=_run_identity(
+            admission=admission,
+            bundle=realized,
+            protocol=engine.protocol,
+            cost_model=engine.cost_model,
+        ),
+    )
+    kinds = [event.kind for event in artifacts.trace.events]
+    assert artifacts.result.lane == "promotion"
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert kinds.count("strategy_decision") >= 1
+    assert "exploratory_strategy_decision" not in kinds
+
+    rebound = EvaluationRunArtifactsV1.model_validate_json(artifacts.model_dump_json())
+    assert rebound.result.lane == "promotion"
+    assert rebound.trace.trace_hash == artifacts.trace.trace_hash
+
+
 # ==========================================================================
 # Authorization: nothing here reaches promotion, brokers, or capital
 # ==========================================================================

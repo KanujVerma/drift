@@ -22,13 +22,18 @@ under its own exploratory event kind with the reconstruction limitations
 attached.
 
 What this module deliberately does NOT prove. It does not exercise order
-execution, corporate-action accounting, or portfolio valuation. It cannot:
-Alpaca publishes no realized session telemetry, and ``bind_observation_session``
-classifies an observation as bound only through realized open and close
-evidence, so the lane supplies no ``DerivedObservationViewV1`` to execute or
-account on. A strategy that asks to trade therefore halts ``INDETERMINATE`` at
-the next open, fail closed, and the assertions below say so explicitly so a
-green smoke test can never be mistaken for a trading evaluation.
+execution, corporate-action accounting, or portfolio valuation. The bridge
+bundle cannot support them: Alpaca publishes no realized session telemetry,
+and ``bind_observation_session`` classifies an observation as bound only
+through realized open and close evidence, so the bundle carries no
+``DerivedObservationViewV1`` to execute, price, or account on, and the smoke
+engine is given no listing-role evidence to resolve an execution listing from.
+A strategy that asks to trade therefore halts ``INDETERMINATE`` at the next
+open. In this module it halts at execution-listing resolution, the first of
+those missing proofs it reaches; the missing-price halt is pinned separately
+in ``tests/integration/test_exploratory_reconstructed_experiment_run.py``. The
+assertions below say so explicitly, so a green smoke test can never be
+mistaken for a trading evaluation.
 
 Every provider byte is a pinned literal and no test here reads `.env`. The
 credential-leak tests in the redirect section stand up throwaway local HTTP
@@ -269,6 +274,7 @@ def test_the_bridge_bundle_drives_exploratory_decisions_on_reconstructed_evidenc
         if item.kind == "exploratory_strategy_decision"
     ]
     reconstructions = {item.reconstruction_hash for item in intake.reconstructions}
+    assert len(decisions) == len(DECISION_DATES)
     for event in decisions:
         assert event.outcome == "staged"
         assert event.reconstruction_hashes
@@ -285,7 +291,9 @@ def test_a_trading_target_fails_closed_at_the_next_open(
 
     The first decision stages a buy, and the next open halts INDETERMINATE in
     the execution phase instead of inventing an execution listing or price
-    the scheduled bundle cannot prove. No fill is minted.
+    the scheduled bundle cannot prove. The cause is pinned so that a
+    different fail-closed path cannot stand in for this one. No fill is
+    minted.
     """
     artifacts, strategy = _run(intake, BUY_TEN_AAPL)
     result = artifacts.result
@@ -302,6 +310,9 @@ def test_a_trading_target_fails_closed_at_the_next_open(
     assert cause.kind == "indeterminate_cause"
     assert cause.phase is EvaluationPhase.OPEN_EXECUTION
     assert cause.cause_kind == "indeterminate_execution"
+    assert cause.cause.startswith(
+        f"no active primary listing for security {AAPL_ID} at "
+    ), cause.cause
     assert artifacts.final_state.holdings == ()
 
 
