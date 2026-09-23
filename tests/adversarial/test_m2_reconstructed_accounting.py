@@ -158,6 +158,38 @@ def test_every_mark_is_graded_exploratory_and_bound_to_its_price_record() -> Non
     assert record.field_role == "close"
 
 
+def test_every_price_event_states_exactly_the_admission_limitations() -> None:
+    """A price event carries the run's own limitations, not merely the minimum.
+
+    The admission here acknowledges one limitation beyond what the grade
+    requires, so an event that stated only the minimum would drop it.
+    """
+    bundle = bundle_of(
+        (
+            scheduled_session_case(JAN5),
+            scheduled_session_case(JAN6),
+            scheduled_session_case(JAN7),
+        )
+    )
+    admission = exploratory_admission(
+        bundle,
+        limitations=(
+            *exploratory_admission(bundle).acknowledged_limitations,
+            "an additional acknowledged limitation",
+        ),
+    )
+
+    artifacts = run_engine(
+        reconstructed_engine(bundle, admission=admission), _strategy()
+    )
+
+    priced = _priced(artifacts)
+    assert priced
+    for event in priced:
+        assert event.acknowledged_limitations == admission.acknowledged_limitations
+    assert "an additional acknowledged limitation" in admission.acknowledged_limitations
+
+
 def test_a_non_trading_baseline_reads_no_price() -> None:
     """Control: holding cash consumes no reconstructed price at all."""
     artifacts = run_engine(
