@@ -10,8 +10,11 @@ could name a dataset or strategy other than the one evaluated.
 
 # ruff: noqa: E402
 
+import dataclasses
 import sys
+import typing
 from pathlib import Path
+from typing import Any
 from uuid import uuid7
 
 _SUPPORT = Path(__file__).resolve().parents[1]
@@ -22,6 +25,7 @@ for folder in (_SUPPORT / "unit", _SUPPORT / "integration"):
 import pytest
 import test_evaluator_engine as eng
 import test_evaluator_experiment_run as run_support
+from test_evaluator_reconstruction import make_policy
 
 from drift.domain.strategies import StrategyReference
 from drift.evaluator.engine import (
@@ -30,6 +34,7 @@ from drift.evaluator.engine import (
     evaluator_evidence_hash,
 )
 from drift.evaluator.experiment_runner import execute_experiment_run
+from drift.evaluator.reconstruction import ExploratoryReconstructionReplay
 
 
 def _rebuilt(
@@ -90,7 +95,46 @@ def test_the_evidence_identity_ignores_member_order() -> None:
     )
     assert len(eng.ROLE_RECORDS) > 1
 
-    assert evaluator_evidence_hash(forward) == evaluator_evidence_hash(backward)
+    assert _evidence_identity(forward) == _evidence_identity(backward)
+
+
+def _evidence_identity(evidence: SessionEvaluatorEvidence, code: str = "USD") -> str:
+    return evaluator_evidence_hash(
+        evidence, book_currency_namespace=eng.BOOK_NAMESPACE, book_currency_code=code
+    )
+
+
+def _one_member(name: str) -> Any:
+    """A single, never-validated instance of one evidence member's type."""
+    if name == "exploratory_reconstruction_replay":
+        return ExploratoryReconstructionReplay(policy=make_policy(), requests=())
+    declared = typing.get_type_hints(SessionEvaluatorEvidence)[name]
+    member = next(
+        argument
+        for argument in typing.get_args(declared) or (declared,)
+        if argument not in (type(None), Ellipsis)
+    )
+    empty = member.model_construct()
+    return empty if name == "exploratory_cohort" else (empty,)
+
+
+@pytest.mark.parametrize(
+    "name", [field.name for field in dataclasses.fields(SessionEvaluatorEvidence)]
+)
+def test_every_evidence_member_moves_the_identity(name: str) -> None:
+    """Completeness: no member, including a future one, escapes the identity."""
+    empty = SessionEvaluatorEvidence()
+
+    assert _evidence_identity(
+        SessionEvaluatorEvidence(**{name: _one_member(name)})
+    ) != _evidence_identity(empty)
+
+
+def test_the_book_currency_moves_the_identity() -> None:
+    """The reviewer's case: USD and EUR books over one bundle and evidence."""
+    empty = SessionEvaluatorEvidence()
+
+    assert _evidence_identity(empty, "USD") != _evidence_identity(empty, "EUR")
 
 
 class _ImpostorStrategy(eng.FixedTargetStrategy):

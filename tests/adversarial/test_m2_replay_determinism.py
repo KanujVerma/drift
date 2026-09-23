@@ -297,13 +297,20 @@ def test_every_run_identity_input_moves_the_identity_hash() -> None:
         cost_model=engine.cost_model,
         evidence_hash=engine.evaluator_evidence_hash,
     )
+    variants["evaluator_evidence"] = eng._run_identity(
+        admission=engine.admission,
+        bundle=engine.bundle,
+        protocol=engine.protocol,
+        cost_model=engine.cost_model,
+        evidence_hash="7" * 64,
+    )
 
-    assert len(variants) == 6
+    assert len(variants) == 7
     digests = {base.run_identity_hash}
     for label, identity in variants.items():
         assert identity.run_identity_hash != base.run_identity_hash, label
         digests.add(identity.run_identity_hash)
-    assert len(digests) == 7
+    assert len(digests) == 8
 
 
 def test_a_run_identity_cannot_bind_a_bundle_its_admission_never_admitted() -> None:

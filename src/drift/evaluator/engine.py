@@ -253,12 +253,20 @@ class SessionEvaluatorEvidence:
     exploratory_reconstruction_replay: ExploratoryReconstructionReplay | None = None
 
 
-def evaluator_evidence_hash(evidence: SessionEvaluatorEvidence) -> SHA256Hash:
-    """The canonical identity of every evidence member a run consults (issue 86).
+def evaluator_evidence_hash(
+    evidence: SessionEvaluatorEvidence,
+    *,
+    book_currency_namespace: str,
+    book_currency_code: str,
+) -> SHA256Hash:
+    """The identity of everything a run consults beyond its hashed inputs (#86).
 
-    Member order carries no meaning, so each collection is identified by the
-    sorted content hashes of its members. A replay context is identified by
-    its M1d context hash, the identity its queries already bind.
+    The bundle, admission, protocol, and cost model carry their own hashes.
+    Every evidence member and the book currency change results too, so they
+    are bound here. Member order carries no meaning, so each collection is
+    identified by the sorted content hashes of its members. A replay context
+    is identified by its M1d context hash, the identity its queries already
+    bind.
     """
 
     def members(values: Sequence[object]) -> list[str]:
@@ -267,6 +275,10 @@ def evaluator_evidence_hash(evidence: SessionEvaluatorEvidence) -> SHA256Hash:
     replay = evidence.exploratory_reconstruction_replay
     return content_hash(
         {
+            "book_currency": {
+                "namespace": book_currency_namespace,
+                "code": book_currency_code,
+            },
             "listing_role_records": members(evidence.listing_role_records),
             "listing_termination_records": members(
                 evidence.listing_termination_records
@@ -521,7 +533,6 @@ class SessionEvaluatorEngine:
         self._protocol = protocol
         self._cost_model = cost_model
         self._evidence = evidence
-        self._evidence_hash = evaluator_evidence_hash(evidence)
         self._mark_grade = LANE_MARK_GRADE[admission.lane]
         self._validate_economic_evidence(evidence, bundle)
         self._reconstructed_lane = _resolve_reconstructed_lane(
@@ -529,6 +540,12 @@ class SessionEvaluatorEngine:
             admission=admission,
             cohort=evidence.exploratory_cohort,
             replay=evidence.exploratory_reconstruction_replay,
+        )
+        # After the lane gate, so a malformed replay meets its intended refusal.
+        self._evidence_hash = evaluator_evidence_hash(
+            evidence,
+            book_currency_namespace=book_currency_namespace,
+            book_currency_code=book_currency_code,
         )
         self._accounting_index = self._index_accounting_views(bundle)
         self._book_currency_code = book_currency_code
