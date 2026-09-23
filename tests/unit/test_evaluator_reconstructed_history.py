@@ -2,9 +2,13 @@
 
 The EXPLORATORY reconstructed lane decides at a scheduled close on the
 reconstructions the clock has already stepped. The clock orders sessions by
-open time first, so on a multi-venue clock a same-date session can open
+open time first, so on a multi-venue clock a same-date session could open
 earlier than an early-closing session and still close after it. Such a
 session has not closed at the earlier cutoff and must not be history there.
+
+`SessionClockV1` refuses such a sequence outright, because the sessions
+overlap (issue 84), so these ordering stand-ins exercise the filter as defense
+in depth behind that guard. ``test_m2_causality`` proves both together.
 """
 
 from datetime import UTC, date, datetime

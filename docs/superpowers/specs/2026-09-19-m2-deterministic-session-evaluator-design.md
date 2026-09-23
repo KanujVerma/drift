@@ -485,6 +485,8 @@ class SessionClockV1(FrozenModel):
   - If a scheduled session is expected open but required market observations fail to materialize, later evaluation is `INDETERMINATE`; the clock records neither `did_not_open` nor a halt cause.
 - **Anti-Laundering Gate**: Promotion admission strictly rejects any bundle configured with `scheduled_session_reconstruction`.
 
+**Amendment, issue 84 (clock integrity).** `SessionClockV1` orders sessions by their UTC boundaries (`session_order_key`) and refuses any session that opens before its predecessor closes. It now also requires local dates to be non-decreasing in clock order; with unique (MIC, local date) keys, each venue's dates then strictly increase. Together these carry the ordering guarantee: every stepped session has closed by the next open, so the stepped prefix is exactly the history closed at a decision cutoff, and the issue 66 history filter in `reconstructed_history_sessions` is defense in depth behind the non-overlap guard. Restriction: a multi-venue clock whose sessions overlap in UTC (including the issue 66 case, a same-date session opening first and closing after an early close), or whose later local date precedes an earlier one in UTC, is out of scope for M2 and refused. In the EXPLORATORY reconstructed lane the issue 55 principle now covers clock sessions as well: after re-deriving the reconstructions, the lane gate rebuilds each replay request's session with `build_scheduled_reconstruction_clock((query,), context)` and requires every clock session a reconstruction is on to equal one of the sessions re-derived for it exactly. The selection proofs a session carries name the query that selected its row, so only a request sharing that query can reproduce them; every other request on the session names the same calendar row through `require_scheduled_calendar_row`, and so the same boundaries. Clock sessions no reconstruction is on are not re-derived here: nothing in that lane reads them, and a decision or trade on one is `INDETERMINATE` under the missing-bar rule above. Re-deriving a realized clock for promotion is issue 80.
+
 ### 7.6 No False Halt Syntheses
 M2 removes artificial boolean flags like `is_halted: bool = False`. If an observation source (such as Alpaca) does not provide authenticated halt telemetry, halt status is `UNKNOWN`. The evaluator core relies on M1d realized session facts (`outcome="opened"` vs `"did_not_open"`) rather than inventing "not halted" claims.
 
@@ -701,6 +703,8 @@ Delisting is NOT zero; bankruptcy is NOT zero. Terminal value requires explicit 
 
 ### 13.1 Next-Open Execution Policy
 All target deltas execute at session $D+1$ regular session open.
+
+**Amendment, issue 84.** The engine records the session whose close staged the pending decision, and Phase 2 refuses to execute that decision unless the execution session opens at or after the decision cutoff (the decision session's close) and carries a later local date. A refusal halts the run `INDETERMINATE` with an `indeterminate_execution` cause in `OPEN_EXECUTION`, whether or not the staged targets trade. On a single venue the clock guards of section 7.5 already make every next session qualify; the check does not rely on them, and on a legal multi-venue clock a same-date open on another venue is refused rather than read as the next open.
 
 ### 13.2 Atomic Plan-Then-Commit Rebalance
 To eliminate order-dependent partial fills and portfolio corruption:
