@@ -634,6 +634,7 @@ def _paired_artifacts(lane: str) -> dict[str, Any]:
         cost_model_hash=engine.cost_model.cost_model_hash,
         admission=promotion,
         bundle=bundle,
+        evaluator_evidence_hash=engine.evaluator_evidence_hash,
         code_version_hash=CODE_VERSION_HASH,
         environment_closure_hash=ENVIRONMENT_HASH,
     )
@@ -731,6 +732,7 @@ def test_a_genuine_realized_promotion_run_still_binds_its_trace() -> None:
             bundle=realized,
             protocol=engine.protocol,
             cost_model=engine.cost_model,
+            evidence_hash=engine.evaluator_evidence_hash,
         ),
     )
     kinds = [event.kind for event in artifacts.trace.events]
