@@ -696,6 +696,27 @@ def test_a_fractional_target_quantity_is_not_constructible() -> None:
         ]
 
 
+class _ForgedFractionalStrategy(eng.FixedTargetStrategy):
+    """Returns a target that skipped its own contract: 10.5 shares."""
+
+    def decide(self, context):  # type: ignore[no-untyped-def]
+        intent = super().decide(context)
+        forged = SecurityTargetPositionV1.model_construct(
+            schema_version="1", security_id=eng.SEC_A, target_quantity=Decimal("10.5")
+        )
+        return intent.model_construct(**(dict(intent) | {"targets": (forged,)}))
+
+
+def test_a_forged_fractional_target_rejects_the_run() -> None:
+    """Issue 88: whole shares only, and a forged fraction is REJECTED, not FAILED."""
+    strategy = _ForgedFractionalStrategy({eng.DAY_1: ((eng.SEC_A, 10),)})
+
+    artifacts = eng._run(eng._engine(), strategy)
+
+    assert artifacts.result.classification is EvaluationClassification.REJECTED
+    assert artifacts.result.metrics.committed_fill_count == 0
+
+
 def test_a_negative_staged_target_is_refused_by_the_rebalance_engine() -> None:
     """A forged target that skipped its own contract still fails closed."""
     forged = SecurityTargetPositionV1.model_construct(

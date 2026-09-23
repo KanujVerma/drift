@@ -642,6 +642,12 @@ $$\text{Cost Basis Sold} = \Delta q_{\text{sell}} \times \left(\frac{\text{curre
 $$\text{Gross Realized PnL} = (\Delta q_{\text{sell}} \times P_{\text{fill}}) - \text{Cost Basis Sold}$$
 $$\text{Net Realized PnL} = \text{Gross Realized PnL} - \text{Transaction Costs}$$
 
+**Amendment, issue 88 (known bounds, from the #8 final acceptance review).**
+- Staging accepts only an `int` share count, so a forged fractional, Decimal, float, or bool target is REJECTED rather than failing the run.
+- Portfolio arithmetic runs in the pinned 34-digit decimal context. A partial sale's relieved and remaining cost basis therefore conserve the original basis to within that context's last digit, not beyond it.
+- The cost model and protocol hashes are content hashes of their exact decimal spellings, so `1.0` and `1.00` name different identities. Two identities are never equal over different economics, but the same economics must be spelled canonically to share one.
+- Pending claims are valued when staged, at `effective_on`, using the aggregate-sale cash-in-lieu rate and liquidation proceeds the source reports, which may be set later. They enter the net asset value a strategy sees before settlement. This is an accepted limitation of ex-post accounting, recorded for the M3 strategy-interface freeze, which decides whether pending claims are exposed apart from NAV.
+
 ---
 
 ## 12. Corporate Actions as First-Class Accounting Events
