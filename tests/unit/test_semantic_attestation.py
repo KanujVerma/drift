@@ -721,6 +721,19 @@ whose semantics M1d does not execute. The bridge authors a schedule generation
 policy that ``drift.markets.session_generation`` (a seed) executes, and binds its
 own lineage separately, so it is classified here instead of being a seed."""
 
+_M1D_EVIDENCE_IDENTITY_DEFINERS = frozenset({"drift.domain.semantic_attestation"})
+"""The module that defines the attestation behind the identity. It declares the
+closure rather than deriving evidence, and it is itself a declared module."""
+
+_M1D_EVIDENCE_IDENTITY_NAMES = frozenset(
+    {
+        "m1d_evidence_attestation",
+        "m1d_evidence_attestation_hash",
+        "m1d_implementation_hash",
+    }
+)
+"""Every public name that yields the M1d evidence identity."""
+
 
 def _package_root() -> Path:
     return Path(semantic_attestation.__file__).resolve().parents[1]
@@ -742,7 +755,7 @@ def _modules_binding_the_m1d_evidence_identity() -> frozenset[str]:
                 if isinstance(node, ast.FunctionDef | ast.alias)
                 else ()
             )
-            if "m1d_implementation_hash" in names:
+            if _M1D_EVIDENCE_IDENTITY_NAMES.intersection(names):
                 parts = list(path.relative_to(root).with_suffix("").parts)
                 if parts[-1] == "__init__":
                     parts.pop()
@@ -850,10 +863,12 @@ def test_every_module_binding_the_m1d_evidence_identity_is_a_seed() -> None:
     """A new producer or validator cannot bind the identity outside the closure."""
     binding = _modules_binding_the_m1d_evidence_identity()
     seeds = frozenset(semantic_attestation.M1D_EVIDENCE_SEEDS)
-    assert binding == seeds | _M1D_EVIDENCE_POLICY_AUTHORS
-    assert not _M1D_EVIDENCE_POLICY_AUTHORS & set(
-        semantic_attestation.M1D_EVIDENCE_SEMANTIC_MODULES
+    assert binding == (
+        seeds | _M1D_EVIDENCE_POLICY_AUTHORS | _M1D_EVIDENCE_IDENTITY_DEFINERS
     )
+    declared = set(semantic_attestation.M1D_EVIDENCE_SEMANTIC_MODULES)
+    assert not _M1D_EVIDENCE_POLICY_AUTHORS & declared
+    assert _M1D_EVIDENCE_IDENTITY_DEFINERS <= declared
 
 
 def test_every_m1d_evidence_closure_module_is_byte_pinned_by_the_current_freeze() -> (
