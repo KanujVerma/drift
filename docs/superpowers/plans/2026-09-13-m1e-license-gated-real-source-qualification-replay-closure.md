@@ -62,6 +62,8 @@ decision input.
 | M1d v3 compatibility | `m1d_implementation_hash()` delegates to the whole-installed-package fingerprint; any new `src/drift/**/*.py` changes it | Task 1 pins genuine v3 execution at `af75cce`. Old fixture bytes and source fingerprints are never rebound to M1e code. |
 | Unknown provider schema | Exact provider-native layers and mappings do not exist until a product and delivered schema are evidenced | Tasks 1-7 freeze the boundary. Task 8 implements one fixed `pilot_adapter.py` only after the exact profile/schema gate. |
 
+> **Note (2026-09-24, #108).** The "M1d v3 compatibility" row describes the repository when this plan was written. Since #63 stage 1 (PR #106, merge `10c7ea1`), `m1d_implementation_hash()` returns the versioned `m1d-evidence-v1` semantic attestation over the declared M1d evidence closure (`src/drift/domain/semantic_attestation.py`). A new source file outside that closure no longer changes it. The whole-installed-package fingerprint is now `drift_source_inventory_hash()`, which is build and repository provenance only. See "Amendment, issue 63" in `docs/superpowers/specs/2026-09-19-m2-deterministic-session-evaluator-design.md`. The Task 1 ruling still holds: historical M1d fixtures keep replaying under their original identity from their archived source commits, and are never rebound. When Task 8 resumes, it must re-read the M1d identity from `main`.
+
 ### 1.2 Execution and external pause flow
 
 ```text
