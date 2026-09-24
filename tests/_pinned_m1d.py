@@ -1,30 +1,40 @@
 """Authenticated, byte-pinned M1d replay support used only by pytest tests.
 
-Two pin inventories live side by side and they are not interchangeable.
+Three pin inventories live side by side and they are not interchangeable.
 
 ``m1d-v3-protected-sha256.json`` is the HISTORICAL inventory. It records the
 protected paths exactly as they stand at ``PINNED_M1D_COMMIT`` (af75cce), and
 it authenticates the archive extracted from that commit. It is preserved
 byte-identical for audit and is never regenerated.
 
-``m1d-v4-protected-sha256.json`` is the CURRENT inventory. It records the
-protected paths as they must stand in the live working tree, and it supersedes
-v3 for that one role only. Under issue #32 the M1d validator run identity moved
-from the whole-tree ``economic_implementation_hash()`` to the versioned
-semantic attestation, which changed the bytes of the two M1d validation entry
-points and introduced the module that now defines the identity. v4 carries two
-explicit, separately justified deltas over v3 and nothing else:
+The working-tree freeze is a chain of links over v3, each preserved
+byte-identical once superseded:
 
-* ``superseded_paths`` names a path v3 already pins whose working-tree bytes
-  moved, and records both the historical digest it replaces and the current
-  one.
-* ``added_paths`` names a path v3 does not pin at all and brings it under the
-  freeze, with its own issue reference and justification. An addition may not
-  shadow a path v3 already pins; that is what ``superseded_paths`` is for.
+* ``m1d-v4-protected-sha256.json`` (issue #32) supersedes v3. The M1d validator
+  run identity moved from the whole-tree ``economic_implementation_hash()`` to
+  the versioned semantic attestation, which changed the bytes of the two M1d
+  validation entry points and introduced the module that now defines the
+  identity. v4 exactly describes commit 4ad90aa, the commit that last wrote it.
+* ``m1d-v5-protected-sha256.json`` (issue #63) supersedes v4 and is the CURRENT
+  inventory: the protected paths as they must stand in the live working tree.
+  The M1d evidence identity moved from the whole-tree inventory to the
+  ``m1d-evidence-v1`` semantic attestation, which changed the bytes of the
+  identity accessor and of the attestation module.
 
-``_validated_current_pins`` re-derives the whole reconstruction on every load,
-so a pin can be neither silently re-signed nor silently introduced for any path
-the inventory does not declare.
+Each link carries two explicit, separately justified deltas over the inventory
+it supersedes and nothing else:
+
+* ``superseded_paths`` names a path the superseded inventory already pins whose
+  bytes moved, and records both the digest it replaces and the current one.
+* ``added_paths`` names a path the superseded inventory does not pin at all and
+  brings it under the freeze, with the link's issue and its own justification.
+  An addition may not shadow a path already pinned; that is what
+  ``superseded_paths`` is for.
+
+``_validated_previous_pins`` and ``_validated_current_pins`` re-derive every
+link on every load, so a pin can be neither silently re-signed nor silently
+introduced for any path a link does not declare, and no link can be edited
+without breaking its byte pin.
 
 Replay baseline supersession (issue #48)
 ----------------------------------------
@@ -125,15 +135,25 @@ _INVENTORY_PATH = (
 _EXPECTED_INVENTORY_SHA256 = (
     "6fb819eb863ebf83e1a3b4e3a7e6af261748116502cdb0ad3603d108d17c2e2b"
 )
-_CURRENT_INVENTORY_PATH = (
+_HISTORICAL_INVENTORY_ID = "m1d-v3-protected-sha256"
+_PREVIOUS_INVENTORY_PATH = (
     REPO_ROOT / "tests/fixtures/m1e-compatibility/m1d-v4-protected-sha256.json"
 )
-_EXPECTED_CURRENT_INVENTORY_SHA256 = (
+_EXPECTED_PREVIOUS_INVENTORY_SHA256 = (
     "4af2e06734e8fadde2002d69fe9d48bd5eca369e771862f2e09df150238d76d2"
 )
-_CURRENT_INVENTORY_ID = "m1d-v4-protected-sha256"
-_SUPERSEDED_INVENTORY_ID = "m1d-v3-protected-sha256"
-_SUPERSESSION_ISSUE = 32
+_PREVIOUS_INVENTORY_ID = "m1d-v4-protected-sha256"
+_PREVIOUS_SUPERSESSION_ISSUE = 32
+_PREVIOUS_INVENTORY_COMMIT = "4ad90aa97da677386ac212c3596703fccb309f3b"
+"""The commit that last wrote v4; every v4 pin describes that commit exactly."""
+_CURRENT_INVENTORY_PATH = (
+    REPO_ROOT / "tests/fixtures/m1e-compatibility/m1d-v5-protected-sha256.json"
+)
+_EXPECTED_CURRENT_INVENTORY_SHA256 = (
+    "a4610db34e6588ee7e0f232f39f2a50a98109f0299533f2509f5963b16200710"
+)
+_CURRENT_INVENTORY_ID = "m1d-v5-protected-sha256"
+_SUPERSESSION_ISSUE = 63
 _REPLAY_BASELINE_DIRECTORY = "tests/fixtures/m1d-replay-baselines/cpython-3.14.6"
 _REPLAY_BASELINE_PATH = REPO_ROOT / _REPLAY_BASELINE_DIRECTORY / "supersession.json"
 _EXPECTED_REPLAY_BASELINE_SHA256 = (
@@ -700,25 +720,76 @@ PROTECTED_M1D_ARCHIVE_SHA256 = _load_inventory()
 """Historical pins: the protected paths exactly as they stand at af75cce."""
 
 
-def _superseded_source_pins(document: object) -> dict[str, dict[str, str]]:
+def _is_digest(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _is_nonblank(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+@dataclass(frozen=True, slots=True)
+class _FreezeLink:
+    """One working-tree freeze link and the inventory it supersedes."""
+
+    label: str
+    inventory_id: str
+    issue: int
+    requires_current_role: bool
+    superseded_id: str
+    superseded_path: str
+    superseded_file_sha256: str
+    superseded_commit: str
+
+
+_PREVIOUS_LINK = _FreezeLink(
+    label="previous",
+    inventory_id=_PREVIOUS_INVENTORY_ID,
+    issue=_PREVIOUS_SUPERSESSION_ISSUE,
+    # v4 still calls itself current; history is superseded, never rewritten.
+    requires_current_role=False,
+    superseded_id=_HISTORICAL_INVENTORY_ID,
+    superseded_path=_INVENTORY_PATH.relative_to(REPO_ROOT).as_posix(),
+    superseded_file_sha256=_EXPECTED_INVENTORY_SHA256,
+    superseded_commit=PINNED_M1D_COMMIT,
+)
+"""v4 (issue #32) over the historical v3 inventory."""
+
+_CURRENT_LINK = _FreezeLink(
+    label="current",
+    inventory_id=_CURRENT_INVENTORY_ID,
+    issue=_SUPERSESSION_ISSUE,
+    requires_current_role=True,
+    superseded_id=_PREVIOUS_INVENTORY_ID,
+    superseded_path=_PREVIOUS_INVENTORY_PATH.relative_to(REPO_ROOT).as_posix(),
+    superseded_file_sha256=_EXPECTED_PREVIOUS_INVENTORY_SHA256,
+    superseded_commit=_PREVIOUS_INVENTORY_COMMIT,
+)
+"""v5 (issue #63) over v4, as v4 describes commit 4ad90aa."""
+
+
+def _superseded_source_pins(
+    document: object, link: _FreezeLink
+) -> dict[str, dict[str, str]]:
     """Return the declared supersessions, rejecting a malformed declaration."""
     if not isinstance(document, dict):
-        raise PinnedReplayIntegrityFailure("current M1d inventory is malformed")
+        raise PinnedReplayIntegrityFailure(f"{link.label} M1d inventory is malformed")
     supersedes = document.get("supersedes")
     superseded = document.get("superseded_paths")
     if (
         not isinstance(supersedes, dict)
         or not isinstance(superseded, dict)
         or not superseded
-        or supersedes.get("inventory_id") != _SUPERSEDED_INVENTORY_ID
-        or supersedes.get("commit") != PINNED_M1D_COMMIT
-        or supersedes.get("file_sha256") != _EXPECTED_INVENTORY_SHA256
-        or supersedes.get("issue") != _SUPERSESSION_ISSUE
-        or not isinstance(supersedes.get("reason"), str)
-        or not supersedes["reason"].strip()
+        or supersedes.get("inventory_id") != link.superseded_id
+        or supersedes.get("path") != link.superseded_path
+        or supersedes.get("commit") != link.superseded_commit
+        or supersedes.get("file_sha256") != link.superseded_file_sha256
+        or supersedes.get("issue") != link.issue
+        or not _is_nonblank(supersedes.get("status"))
+        or not _is_nonblank(supersedes.get("reason"))
     ):
         raise PinnedReplayIntegrityFailure(
-            "current M1d inventory supersession is malformed"
+            f"{link.label} M1d inventory supersession is malformed"
         )
     for path, record in superseded.items():
         if (
@@ -732,23 +803,26 @@ def _superseded_source_pins(document: object) -> dict[str, dict[str, str]]:
             or record["historical_sha256"] == record["current_sha256"]
         ):
             raise PinnedReplayIntegrityFailure(
-                f"current M1d inventory supersession is malformed for {path}"
+                f"{link.label} M1d inventory supersession is malformed for {path}"
             )
     return dict(superseded)
 
 
-def _added_source_pins(document: Mapping[str, object]) -> dict[str, dict[str, object]]:
+def _added_source_pins(
+    document: Mapping[str, object], link: _FreezeLink
+) -> dict[str, dict[str, object]]:
     """Return the declared additions, rejecting a malformed declaration.
 
-    An addition widens the freeze onto a path v3 never pinned, so it has to
-    stand on its own justification rather than on the key sets merely
-    differing. Declaring no additions at all is allowed; what is not allowed
-    is a pin that no declaration accounts for.
+    An addition widens the freeze onto a path the superseded inventory never
+    pinned, so it has to stand on its own justification and on its own link's
+    issue rather than on the key sets merely differing. Declaring no additions
+    at all is allowed; what is not allowed is a pin that no declaration
+    accounts for.
     """
     added = document.get("added_paths", {})
     if not isinstance(added, dict):
         raise PinnedReplayIntegrityFailure(
-            "current M1d inventory addition block is malformed"
+            f"{link.label} M1d inventory addition block is malformed"
         )
     for path, record in added.items():
         justification = (
@@ -760,92 +834,125 @@ def _added_source_pins(document: Mapping[str, object]) -> dict[str, dict[str, ob
             or set(record) != {"current_sha256", "issue", "justification"}
             or not isinstance(record["current_sha256"], str)
             or len(record["current_sha256"]) != 64
-            or record["issue"] != _SUPERSESSION_ISSUE
+            or record["issue"] != link.issue
             or not isinstance(justification, str)
             or not justification.strip()
         ):
             raise PinnedReplayIntegrityFailure(
-                f"current M1d inventory addition is malformed for {path}"
+                f"{link.label} M1d inventory addition is malformed for {path}"
             )
     return dict(added)
 
 
-def _validated_current_pins(document: object) -> dict[str, str]:
-    """Re-derive the current pins from the historical pins plus the delta.
+def _validated_link_pins(
+    document: object, link: _FreezeLink, parent: Mapping[str, str]
+) -> dict[str, str]:
+    """Re-derive one link's pins from its parent's pins plus its declared delta.
 
-    The current inventory is only allowed to differ from the preserved v3
-    inventory on the paths its own ``superseded_paths`` and ``added_paths``
-    blocks declare. A superseded path must already be pinned by v3 and must
-    carry the historical digest it replaces; an added path must not be pinned
-    by v3 at all and must carry its own justification. Anything else is a
-    silent re-signing or a silent widening and fails closed here.
+    A link is only allowed to differ from the inventory it supersedes on the
+    paths its own ``superseded_paths`` and ``added_paths`` blocks declare. A
+    superseded path must already be pinned by the parent and must carry the
+    digest it replaces; an added path must not be pinned by the parent at all
+    and must carry its own justification. Anything else is a silent re-signing
+    or a silent widening and fails closed here.
     """
     if not isinstance(document, dict):
-        raise PinnedReplayIntegrityFailure("current M1d inventory is malformed")
+        raise PinnedReplayIntegrityFailure(f"{link.label} M1d inventory is malformed")
     pins = document.get("sha256")
-    superseded = _superseded_source_pins(document)
-    added = _added_source_pins(document)
+    superseded = _superseded_source_pins(document, link)
+    added = _added_source_pins(document, link)
     if (
         not isinstance(pins, dict)
-        or document.get("inventory_id") != _CURRENT_INVENTORY_ID
+        or document.get("inventory_id") != link.inventory_id
         or document.get("baseline_commit") != PINNED_M1D_COMMIT
+        or (link.requires_current_role and document.get("role") != "current")
         or any(
             not isinstance(digest, str) or len(digest) != 64 for digest in pins.values()
         )
     ):
-        raise PinnedReplayIntegrityFailure("current M1d inventory is malformed")
-    expected = dict(PROTECTED_M1D_ARCHIVE_SHA256)
+        raise PinnedReplayIntegrityFailure(f"{link.label} M1d inventory is malformed")
+    expected = dict(parent)
     for path, record in superseded.items():
         if path not in expected:
             raise PinnedReplayIntegrityFailure(
-                f"current M1d inventory supersedes an unpinned path: {path}"
+                f"{link.label} M1d inventory supersedes an unpinned path: {path}"
             )
         if record["historical_sha256"] != expected[path]:
             raise PinnedReplayIntegrityFailure(
-                f"current M1d inventory misstates the historical pin for {path}"
+                f"{link.label} M1d inventory misstates the superseded pin for {path}"
             )
         expected[path] = record["current_sha256"]
     for path, addition in added.items():
-        if path in PROTECTED_M1D_ARCHIVE_SHA256:
+        if path in parent:
             raise PinnedReplayIntegrityFailure(
-                "current M1d inventory declares an addition the historical "
-                f"inventory already pins: {path}"
+                f"{link.label} M1d inventory declares an addition the inventory "
+                f"it supersedes already pins: {path}"
             )
         expected[path] = str(addition["current_sha256"])
     undeclared = sorted(set(pins) - set(expected))
     if undeclared:
         raise PinnedReplayIntegrityFailure(
-            f"current M1d inventory pins an undeclared added path: {undeclared}"
+            f"{link.label} M1d inventory pins an undeclared added path: {undeclared}"
         )
     omitted = sorted(set(expected) - set(pins))
     if omitted:
         raise PinnedReplayIntegrityFailure(
-            f"current M1d inventory omits a required protected path: {omitted}"
+            f"{link.label} M1d inventory omits a required protected path: {omitted}"
         )
     if pins != expected:
         drifted = sorted(path for path in pins if pins[path] != expected[path])
         raise PinnedReplayIntegrityFailure(
-            f"current M1d inventory re-signs undeclared protected paths: {drifted}"
+            f"{link.label} M1d inventory re-signs undeclared protected paths: {drifted}"
         )
     return dict(pins)
 
 
-def _load_current_inventory() -> dict[str, str]:
+def _read_link_document(path: Path, expected_sha256: str, label: str) -> object:
+    """Read one link's bytes, authenticated against its literal file pin."""
     try:
-        raw = _CURRENT_INVENTORY_PATH.read_bytes()
+        raw = path.read_bytes()
     except OSError as error:
         raise PinnedReplayIntegrityFailure(
-            f"cannot read current M1d inventory: {error}"
+            f"cannot read {label} M1d inventory: {error}"
         ) from error
-    if hashlib.sha256(raw).hexdigest() != _EXPECTED_CURRENT_INVENTORY_SHA256:
-        raise PinnedReplayIntegrityFailure("current M1d inventory sha256 mismatch")
+    if hashlib.sha256(raw).hexdigest() != expected_sha256:
+        raise PinnedReplayIntegrityFailure(f"{label} M1d inventory sha256 mismatch")
     try:
-        document = json.loads(raw)
+        return json.loads(raw)
     except json.JSONDecodeError as error:
         raise PinnedReplayIntegrityFailure(
-            f"cannot parse current M1d inventory: {error}"
+            f"cannot parse {label} M1d inventory: {error}"
         ) from error
-    return _validated_current_pins(document)
+
+
+def _validated_previous_pins(document: object) -> dict[str, str]:
+    """Re-derive the v4 pins from the historical v3 pins plus the v4 delta."""
+    return _validated_link_pins(document, _PREVIOUS_LINK, PROTECTED_M1D_ARCHIVE_SHA256)
+
+
+def _load_previous_inventory() -> dict[str, str]:
+    return _validated_previous_pins(
+        _read_link_document(
+            _PREVIOUS_INVENTORY_PATH, _EXPECTED_PREVIOUS_INVENTORY_SHA256, "previous"
+        )
+    )
+
+
+PREVIOUS_M1D_SHA256 = _load_previous_inventory()
+"""Superseded working-tree pins: v4, exactly as it describes commit 4ad90aa."""
+
+
+def _validated_current_pins(document: object) -> dict[str, str]:
+    """Re-derive the v5 pins from the re-derived v4 pins plus the v5 delta."""
+    return _validated_link_pins(document, _CURRENT_LINK, PREVIOUS_M1D_SHA256)
+
+
+def _load_current_inventory() -> dict[str, str]:
+    return _validated_current_pins(
+        _read_link_document(
+            _CURRENT_INVENTORY_PATH, _EXPECTED_CURRENT_INVENTORY_SHA256, "current"
+        )
+    )
 
 
 PROTECTED_M1D_SHA256 = _load_current_inventory()
@@ -905,14 +1012,6 @@ class ReplayBaselineGeneration:
     source_commit: str
     overlays: tuple[ReplayOverlay, ...]
     pins: Mapping[str, str]
-
-
-def _is_digest(value: object) -> bool:
-    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
-
-
-def _is_nonblank(value: object) -> bool:
-    return isinstance(value, str) and bool(value.strip())
 
 
 def _validated_baseline_hash_index(
@@ -1085,7 +1184,7 @@ def _validated_replay_baseline(document: object) -> dict[str, ReplayBaselineGene
         supersedes.get("baseline_id") != _SUPERSEDED_REPLAY_BASELINE_ID
         or supersedes.get("historical_inventory")
         != {
-            "inventory_id": _SUPERSEDED_INVENTORY_ID,
+            "inventory_id": _HISTORICAL_INVENTORY_ID,
             "path": _INVENTORY_PATH.relative_to(REPO_ROOT).as_posix(),
             "file_sha256": _EXPECTED_INVENTORY_SHA256,
         }
@@ -1167,9 +1266,10 @@ def verify_m1d_protected_inputs(
 ) -> None:
     """Reject a changed M1d source, fixture, or environment input in the tree.
 
-    This is the CURRENT freeze. It uses the v4 pins, which supersede v3 on the
-    paths issue #32 moved, add the module that now defines the M1d replay
-    identity, and reproduce v3 everywhere else.
+    This is the CURRENT freeze. It uses the v5 pins: v3, then the v4 delta
+    (the paths issue #32 moved, plus the module that defines the M1d replay
+    identities), then the v5 delta (the identity accessor and attestation
+    module issue #63 moved), reproducing v3 everywhere else.
     """
     pins = PROTECTED_M1D_SHA256 if expected is None else expected
     _verify_pinned_inputs(

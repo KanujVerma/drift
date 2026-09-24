@@ -14,6 +14,7 @@ from drift.domain.observations import (
     ObservationInputRecordV1,
 )
 from drift.domain.securities import ListingVenue
+from drift.domain.semantic_attestation import m1d_evidence_attestation_hash
 from drift.domain.temporal import (
     AvailabilityChannelV1,
     CutoffEligibility,
@@ -360,9 +361,23 @@ def observation_horizon(query: ObservationQueryV1) -> datetime:
     return query.economic_horizon
 
 
-def m1d_implementation_hash() -> str:
-    """Identify the whole installed Drift Python source inventory."""
+def drift_source_inventory_hash() -> str:
+    """Identify the whole installed Drift Python source inventory.
+
+    This is build and repository provenance: it answers which repository state
+    ran, so every Python file in the package moves it. It is never an M1d
+    evidence identity (issue #63).
+    """
     return economic_implementation_hash()
+
+
+def m1d_implementation_hash() -> str:
+    """Identify the code that derives M1d evidence.
+
+    This is the ``m1d-evidence-v1`` semantic attestation, not the whole source
+    inventory, so an edit outside its declared closure cannot move it.
+    """
+    return m1d_evidence_attestation_hash()
 
 
 def _binding_authority_key(binding: ObservationSourceBindingV1) -> tuple[object, ...]:
