@@ -1,6 +1,6 @@
 """Unit tests for M2 Task 2B input bundle, lane gates, and run identity."""
 
-from datetime import date
+from datetime import date, timedelta
 from functools import cache
 from typing import Any, Literal
 
@@ -23,7 +23,10 @@ from drift.domain.evaluator_bundles import (
     evaluation_run_identity_hash,
 )
 from drift.domain.evaluator_clock import (
+    EvaluationSessionV1,
+    SessionClockMode,
     SessionClockV1,
+    evaluation_session_hash,
     session_clock_hash,
     session_order_key,
 )
@@ -116,6 +119,15 @@ def _normalization_session_query(harness: NormalizationHarness) -> Any:
     )
 
 
+def normalization_session_queries(harness: NormalizationHarness) -> tuple[Any, ...]:
+    """The session queries both normalization clocks are built from.
+
+    Minting and verification re-derive the bundle clock from exactly these
+    (issue 80), so a test hands them over rather than rebuilding them.
+    """
+    return (_normalization_session_query(harness),)
+
+
 def normalization_realized_clock(harness: NormalizationHarness) -> Any:
     """Realized clock over the session the normalization views actually bind.
 
@@ -123,14 +135,14 @@ def normalization_realized_clock(harness: NormalizationHarness) -> Any:
     from a normalization harness needs a clock built from that same corpus.
     """
     return build_realized_session_clock(
-        (_normalization_session_query(harness),), harness.context
+        normalization_session_queries(harness), harness.context
     )
 
 
 def normalization_scheduled_clock(harness: NormalizationHarness) -> Any:
     """Scheduled-reconstruction clock over the normalization corpus's session."""
     return build_scheduled_reconstruction_clock(
-        (_normalization_session_query(harness),), harness.context
+        normalization_session_queries(harness), harness.context
     )
 
 
@@ -154,6 +166,37 @@ def _merged_realized_clock(harness: NormalizationHarness) -> SessionClockV1:
     )
     return SessionClockV1.model_validate(
         draft.model_copy(update={"clock_hash": session_clock_hash(draft)}).model_dump()
+    )
+
+
+def resealed_clock(
+    clock: SessionClockV1,
+    *,
+    mode: SessionClockMode | None = None,
+    acknowledged_limitations: tuple[str, ...] | None = None,
+    **session_updates: object,
+) -> SessionClockV1:
+    """Edit every session of a clock, then reseal it so only the edit remains.
+
+    The result is fully valid under `SessionClockV1`: its own hashes prove only
+    that it is self-consistent, never that a builder produced it.
+    """
+    sessions = []
+    for session in clock.sessions:
+        draft = EvaluationSessionV1.model_construct(**(dict(session) | session_updates))
+        sessions.append(
+            EvaluationSessionV1.model_validate(
+                dict(draft) | {"session_hash": evaluation_session_hash(draft)}
+            )
+        )
+    clock_updates: dict[str, object] = {"sessions": tuple(sessions)}
+    if mode is not None:
+        clock_updates["mode"] = mode
+    if acknowledged_limitations is not None:
+        clock_updates["acknowledged_limitations"] = acknowledged_limitations
+    draft_clock = SessionClockV1.model_construct(**(dict(clock) | clock_updates))
+    return SessionClockV1.model_validate(
+        dict(draft_clock) | {"clock_hash": session_clock_hash(draft_clock)}
     )
 
 
@@ -310,14 +353,24 @@ def test_exploratory_gate_rejects_dropped_limitation() -> None:
 
 
 @cache
-def _provenance_context() -> Any:
-    """A real M1d resolution context for bundles that carry no replayed view.
+def _provenance_harness() -> ObservationHarness:
+    """The corpus behind `_realized_clock`, for bundles that replay no view.
 
     Cached so that the snapshot a test asserts on its bundle and the snapshot
     the case qualifies against are the same artifact rather than two
     independently rebuilt ones that merely ought to agree.
     """
-    return _harness(realized_outcome="opened").context
+    return _harness(realized_outcome="opened")
+
+
+def _provenance_context() -> Any:
+    """A real M1d resolution context for bundles that carry no replayed view."""
+    return _provenance_harness().context
+
+
+def _provenance_session_queries() -> tuple[ObservationOutcomeQueryV1, ...]:
+    """The session queries `_realized_clock` is built from."""
+    return _queries(_provenance_harness())
 
 
 @cache
@@ -337,6 +390,7 @@ def _promotion_case(
     bundle: EvaluationInputBundleV1,
     *,
     context: Any | None = None,
+    session_queries: tuple[Any, ...] | None = None,
     decision_requests: DecisionReplayRequests = (),
     accounting_requests: OutcomeReplayRequests = (),
     handoff_snapshot_hash: str | None = None,
@@ -346,14 +400,19 @@ def _promotion_case(
     The proof is minted from a genuinely qualified replay context over a real
     source snapshot, because the gate now re-audits the containment witness.
     Assembling a proof directly would no longer reach any gate under test.
+    Minting re-derives the bundle clock (issue 80), so a case over another
+    context must name that context's own session queries.
     """
     replay_context = context if context is not None else _provenance_context()
+    if session_queries is None:
+        session_queries = _provenance_session_queries() if context is None else ()
     snapshot = _promotion_snapshot(context)
     qualified = qualify_replay_context(context=replay_context, snapshot=snapshot)
     proof = mint_bundle_provenance_proof(
         qualified_context=qualified,
         context=replay_context,
         bundle=bundle,
+        session_queries=session_queries,
         decision_requests=decision_requests,
         accounting_requests=accounting_requests,
     )
@@ -387,6 +446,7 @@ def test_promotion_gate_accepts_realized_snapshot_bound_bundle() -> None:
                 authentic_decision_views=(decision_view,),
             ),
             context=harness.context,
+            session_queries=normalization_session_queries(harness),
             decision_requests=((reference, query),),
         )
     )
@@ -394,8 +454,16 @@ def test_promotion_gate_accepts_realized_snapshot_bound_bundle() -> None:
 
 def test_promotion_gate_rejects_exploratory_reconstruction_clock() -> None:
     snapshot = _promotion_snapshot()
+    # Minting re-derives the clock (issue 80), so the scheduled clock must come
+    # from the corpus the case replays against. It is genuine, and the gate
+    # still refuses its mode.
+    genuine = build_scheduled_reconstruction_clock(
+        _provenance_session_queries(), _provenance_context()
+    )
     case = _promotion_case(
-        _scheduled_bundle(source_snapshot_hash=snapshot.snapshot_hash)
+        _scheduled_bundle(
+            session_clock=genuine, source_snapshot_hash=snapshot.snapshot_hash
+        )
     )
     with pytest.raises(ValueError, match="cannot consume exploratory reconstructed"):
         validate_promotion_admission(**case)
@@ -460,6 +528,7 @@ def test_minting_refuses_a_bundle_that_asserts_no_snapshot() -> None:
             qualified_context=qualified,
             context=replay_context,
             bundle=_realized_bundle(),
+            session_queries=_provenance_session_queries(),
         )
 
 
@@ -682,6 +751,7 @@ def test_verify_accepts_genuinely_replayed_bundle() -> None:
     verify_evaluation_input_bundle(
         bundle=bundle,
         context=harness.context,
+        session_queries=normalization_session_queries(harness),
         decision_requests=((reference, query),),
     )
 
@@ -725,6 +795,7 @@ def test_verify_rejects_bundle_whose_hash_does_not_match_contents() -> None:
         verify_evaluation_input_bundle(
             bundle=broken,
             context=harness.context,
+            session_queries=normalization_session_queries(harness),
             decision_requests=((reference, query),),
         )
 
@@ -844,10 +915,41 @@ def test_promotion_gate_rejects_clock_declaring_exploratory_limitations() -> Non
     )
     assert bundle.has_exploratory_reconstructions is False
     assert bundle.required_limitations == (ALPACA_LIMITATION_ABSENT_HALTS,)
+    # No canonical builder emits a realized clock declaring limitations, so
+    # minting, which re-derives the clock (issue 80), refuses it first.
+    with pytest.raises(
+        ValueError,
+        match=r"^session clock does not match its canonical re-derivation",
+    ):
+        _promotion_case(
+            bundle,
+            context=normalization.context,
+            session_queries=normalization_session_queries(normalization),
+            decision_requests=((reference, query),),
+        )
+
+    # A proof assembled directly still meets the gate's own refusal.
     case = _promotion_case(
-        bundle,
+        _realized_bundle(
+            session_clock=normalization_realized_clock(normalization),
+            source_snapshot_hash=snapshot.snapshot_hash,
+            authentic_decision_views=(decision_view,),
+        ),
         context=normalization.context,
+        session_queries=normalization_session_queries(normalization),
         decision_requests=((reference, query),),
+    )
+    proof = _build_bundle_provenance_proof(
+        qualified_context_hash=case["proof"].qualified_context_hash,
+        source_snapshot_hash=snapshot.snapshot_hash,
+        bundle=bundle,
+    )
+    case["bundle"] = bundle
+    case["proof"] = proof
+    case["admission"] = rebind_admission(
+        case,
+        input_bundle_hash=bundle.bundle_hash,
+        provenance_proof_hash=proof.proof_hash,
     )
     with pytest.raises(
         ValueError,
@@ -894,5 +996,163 @@ def test_build_and_verify_accounting_views_through_replay() -> None:
     verify_evaluation_input_bundle(
         bundle=bundle,
         context=harness.context,
+        session_queries=normalization_session_queries(harness),
         accounting_requests=((reference, query),),
+    )
+
+
+# --- the bundle clock is re-derived, never trusted (issue 80) ---
+
+
+def test_verify_refuses_a_realized_clock_without_its_session_queries() -> None:
+    """Realized authority is re-derived or refused, never taken on trust."""
+    harness, query, reference, _ = _decision_case()
+    bundle = build_evaluation_input_bundle(
+        evaluation_interval=_interval(),
+        session_clock=normalization_realized_clock(harness),
+        context=harness.context,
+        decision_requests=((reference, query),),
+    )
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^bundle carries a realized session clock without the session "
+            r"queries to re-derive it$"
+        ),
+    ):
+        verify_evaluation_input_bundle(
+            bundle=bundle,
+            context=harness.context,
+            decision_requests=((reference, query),),
+        )
+
+
+@pytest.mark.parametrize(
+    "edit",
+    ["later_close", "invented_records", "invented_proofs"],
+)
+def test_verify_refuses_a_realized_clock_edited_after_its_build(edit: str) -> None:
+    """Each session field is bound, not only the authority hashes."""
+    harness, query, reference, view = _decision_case()
+    genuine = normalization_realized_clock(harness)
+    session = genuine.sessions[0]
+    updates: dict[str, Any] = {
+        "later_close": {"closed_at": session.closed_at + timedelta(hours=3)},
+        "invented_records": {"authority_record_hashes": (H["e"],)},
+        "invented_proofs": {"authority_proof_hashes": (H["f"],)},
+    }[edit]
+    forged = resealed_clock(genuine, **updates)
+    bundle = assemble_evaluation_input_bundle(
+        evaluation_interval=_interval(),
+        session_clock=forged,
+        authentic_decision_views=(view,),
+    )
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^session clock does not match its canonical re-derivation: bundle "
+            rf"clock {forged.clock_hash}, re-derived {genuine.clock_hash}$"
+        ),
+    ):
+        verify_evaluation_input_bundle(
+            bundle=bundle,
+            context=harness.context,
+            session_queries=normalization_session_queries(harness),
+            decision_requests=((reference, query),),
+        )
+
+
+def test_verify_refuses_a_scheduled_row_relabelled_as_realized() -> None:
+    """The mode is re-derived too: a calendar row is not realized authority."""
+    harness, query, reference, view = _decision_case()
+    relabelled = resealed_clock(
+        normalization_scheduled_clock(harness),
+        mode="realized_session_authority",
+        acknowledged_limitations=(),
+        authority="realized",
+    )
+    genuine = normalization_realized_clock(harness)
+    assert relabelled.sessions[0].session_key == genuine.sessions[0].session_key
+    bundle = assemble_evaluation_input_bundle(
+        evaluation_interval=_interval(),
+        session_clock=relabelled,
+        authentic_decision_views=(view,),
+    )
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^session clock does not match its canonical re-derivation: bundle "
+            rf"clock {relabelled.clock_hash}, re-derived {genuine.clock_hash}$"
+        ),
+    ):
+        verify_evaluation_input_bundle(
+            bundle=bundle,
+            context=harness.context,
+            session_queries=normalization_session_queries(harness),
+            decision_requests=((reference, query),),
+        )
+
+
+def test_verify_re_derives_a_scheduled_clock_when_its_queries_are_supplied() -> None:
+    harness, query, reference, view = _decision_case()
+    genuine = normalization_scheduled_clock(harness)
+    bundle = build_evaluation_input_bundle(
+        evaluation_interval=_interval(),
+        session_clock=genuine,
+        context=harness.context,
+        decision_requests=((reference, query),),
+    )
+    verify_evaluation_input_bundle(
+        bundle=bundle,
+        context=harness.context,
+        session_queries=normalization_session_queries(harness),
+        decision_requests=((reference, query),),
+    )
+
+    session = genuine.sessions[0]
+    moved = resealed_clock(genuine, closed_at=session.closed_at + timedelta(hours=3))
+    forged = assemble_evaluation_input_bundle(
+        evaluation_interval=_interval(),
+        session_clock=moved,
+        authentic_decision_views=(view,),
+    )
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^session clock does not match its canonical re-derivation: bundle "
+            rf"clock {moved.clock_hash}, re-derived {genuine.clock_hash}$"
+        ),
+    ):
+        verify_evaluation_input_bundle(
+            bundle=forged,
+            context=harness.context,
+            session_queries=normalization_session_queries(harness),
+            decision_requests=((reference, query),),
+        )
+
+
+def test_verify_does_not_re_derive_an_unqueried_scheduled_clock() -> None:
+    """A known gap, pinned so it cannot widen, or close, silently.
+
+    Without its session queries a scheduled-reconstruction clock is not
+    re-derived by verification, so its session times are only as trusted as
+    the caller that built it. That is not safe merely because the clock is
+    exploratory; it is left open because requiring those queries overlaps the
+    scheduled-lane clock work of issue 84, and the promotion gate refuses the
+    mode regardless. Minting always supplies the queries, and every other
+    present caller of this verifier is a test; the Alpaca bridge itself never
+    calls it. A realized clock gets no such allowance.
+    """
+    harness, query, reference, _ = _decision_case()
+    bundle = build_evaluation_input_bundle(
+        evaluation_interval=_interval(),
+        session_clock=normalization_scheduled_clock(harness),
+        context=harness.context,
+        decision_requests=((reference, query),),
+    )
+    assert bundle.has_exploratory_reconstructions is True
+    verify_evaluation_input_bundle(
+        bundle=bundle,
+        context=harness.context,
+        decision_requests=((reference, query),),
     )

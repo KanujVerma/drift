@@ -1,7 +1,8 @@
 """Admission-to-bundle lane gates and deterministic evaluation run identity."""
 
-from drift.domain.assertions import TemporalIntervalClaimV1
-from drift.domain.common import SHA256Hash
+from drift.domain.assertions import NormalizedSelectionQueryV1, TemporalIntervalClaimV1
+from drift.domain.common import UUID7, SHA256Hash
+from drift.domain.economic_queries import MarketSelectionQueryV1
 from drift.domain.economic_results import EconomicOutcomeResolutionV1
 from drift.domain.evaluator_bundles import (
     EvaluationInputBundleV1,
@@ -25,11 +26,14 @@ from drift.domain.normalization import (
     ObservationDecisionReferenceV1,
     ObservationOutcomeReferenceV1,
 )
+from drift.domain.observation_query import ObservationQueryV1
 from drift.domain.qualification import (
+    ConsumerPurpose,
     M1eCompletionRecordV1,
     PilotProfileSetV1,
     PurposeQualificationReportV1,
     QualificationProfileV1,
+    qualification_profile_hash,
 )
 from drift.domain.qualification_adapters import QualifiedSourceHandoffV1
 from drift.domain.replay_provenance import (
@@ -42,17 +46,20 @@ from drift.domain.replay_provenance import (
     replay_context_identity_hash,
     validate_bundle_component_coverage,
     verify_snapshot_binding,
+    verify_snapshot_binding_purpose,
 )
-from drift.domain.securities import ListingV1, SecurityV1
+from drift.domain.securities import IdentityAssignmentEffect, ListingV1, SecurityV1
 from drift.domain.source_snapshots import RealSourceSnapshotV1
 from drift.domain.universes import StructuralEligibilityResultV1
 from drift.evaluator.admission import validate_m1e_promotion_evidence
+from drift.evaluator.clock import verify_session_clock
 from drift.evaluator.reconstruction import (
     ExploratoryReconstructionReplay,
     replay_exploratory_reconstructions,
     require_scheduled_calendar_row,
     verify_exploratory_reconstructions,
 )
+from drift.markets.economic_outcomes import resolve_economic_facts
 from drift.markets.normalization import (
     materialize_observation_decision,
     materialize_observation_outcome,
@@ -62,6 +69,7 @@ from drift.markets.observation_validation import (
     m1d_context_descriptor,
     m1d_context_hash,
 )
+from drift.markets.universes import resolve_structural_eligibility
 from drift.serialization.canonical import content_hash
 
 type DecisionReplayRequests = tuple[
@@ -70,6 +78,20 @@ type DecisionReplayRequests = tuple[
 type OutcomeReplayRequests = tuple[
     tuple[ObservationOutcomeReferenceV1, NormalizationQueryV1], ...
 ]
+type SessionReplayQueries = tuple[ObservationQueryV1, ...]
+"""The session queries a bundle clock is built from, in either mode."""
+type StructuralReplayRequests = tuple[
+    tuple[ListingV1, UUID7, NormalizedSelectionQueryV1], ...
+]
+"""One `(listing, security_id, query)` per structural eligibility.
+
+The research definition, issuer, methodology and M1b evidence come from the
+replay context, where its identity binds them, exactly as M1d resolves an
+observation's own structural admission; only the per-listing subject and the
+query are requested.
+"""
+type EconomicReplayRequests = tuple[MarketSelectionQueryV1, ...]
+"""One M1c query per economic outcome, resolved over the context's M1c evidence."""
 
 
 def _ordered[T](members: tuple[T, ...]) -> tuple[T, ...]:
@@ -139,6 +161,61 @@ def replay_accounting_views(
     return tuple(
         materialize_observation_outcome(reference, query, context)
         for reference, query in requests
+    )
+
+
+def replay_structural_eligibilities(
+    requests: StructuralReplayRequests, context: M1dResolutionContext
+) -> tuple[StructuralEligibilityResultV1, ...]:
+    """Resolve each structural eligibility over the context's own M1b evidence.
+
+    Uses the one canonical M1b resolver with the research definition, issuer,
+    methodology and structural context the replay context carries, so no
+    requested input can substitute evidence the context identity does not bind.
+    """
+    if not requests:
+        return ()
+    structural = context.structural_context
+    definition = context.research_definition
+    issuer_id = context.issuer_id
+    methodology_id = context.structural_methodology_id
+    if (
+        structural is None
+        or definition is None
+        or issuer_id is None
+        or methodology_id is None
+    ):
+        raise ValueError(
+            "structural eligibility replay requires the replay context's M1b evidence"
+        )
+    return tuple(
+        resolve_structural_eligibility(
+            definition,
+            listing,
+            issuer_id,
+            security_id,
+            methodology_id,
+            query,
+            structural,
+        )
+        for listing, security_id, query in requests
+    )
+
+
+def replay_economic_outcomes(
+    requests: EconomicReplayRequests, context: M1dResolutionContext
+) -> tuple[EconomicOutcomeResolutionV1, ...]:
+    """Resolve each economic outcome over the context's own M1c evidence."""
+    if not requests:
+        return ()
+    economic = context.economic_context
+    source_policy = context.economic_source_policy
+    if economic is None or source_policy is None:
+        raise ValueError(
+            "economic outcome replay requires the replay context's M1c evidence"
+        )
+    return tuple(
+        resolve_economic_facts(query, economic, source_policy) for query in requests
     )
 
 
@@ -243,12 +320,15 @@ def verify_evaluation_input_bundle(
     *,
     bundle: EvaluationInputBundleV1,
     context: M1dResolutionContext,
+    session_queries: SessionReplayQueries | None = None,
     decision_requests: DecisionReplayRequests = (),
     accounting_requests: OutcomeReplayRequests = (),
+    structural_requests: StructuralReplayRequests = (),
+    economic_requests: EconomicReplayRequests = (),
     exploratory_cohort: ExploratoryCohortAuthorizationV1 | None = None,
     exploratory_reconstruction_replay: ExploratoryReconstructionReplay | None = None,
 ) -> None:
-    """Verify every stored view against exact upstream replay.
+    """Verify every stored member against exact upstream replay.
 
     Re-materializes the declared views and requires exact equality with what
     the bundle carries. A forged, hand-constructed, or exploratory-derived view
@@ -256,24 +336,43 @@ def verify_evaluation_input_bundle(
     rather than merely self-declared. Exploratory reconstructions are
     re-derived the same way; a bundle carrying any without the inputs to
     re-derive them is refused.
-    """
-    expected_decision = replay_decision_views(decision_requests, context)
-    expected_accounting = replay_accounting_views(accounting_requests, context)
 
-    for label, expected, stored in (
-        ("decision", expected_decision, bundle.authentic_decision_views),
-        ("accounting", expected_accounting, bundle.authentic_accounting_views),
-    ):
-        if len(expected) != len(stored):
-            raise ValueError(
-                f"{label} view count mismatch against replay: "
-                f"expected {len(expected)}, bundle carries {len(stored)}"
-            )
-        # Both sides are canonically ordered by content hash, so compare digests.
-        expected_digests = sorted(content_hash(view) for view in expected)
-        stored_digests = sorted(content_hash(view) for view in stored)
-        if expected_digests != stored_digests:
-            raise ValueError(f"{label} views do not match exact upstream replay")
+    Structural eligibilities and economic outcomes are re-derived the same way
+    from their requests over the context's M1b and M1c evidence, and the clock
+    from its session queries under its own mode (issue 80). A bundle carrying
+    any of them without the request that re-derives it is refused. A realized
+    clock is never taken on trust: without its session queries it is refused.
+    A scheduled-reconstruction clock is re-derived whenever its queries are
+    supplied. Without them it is not re-derived here, and that is a known gap,
+    not a safety argument: its session times are then only as trusted as the
+    caller that built it. The promotion gate refuses the mode, so it cannot
+    reach promotion, and requiring the queries of every scheduled clock is left
+    to the scheduled-lane clock work of issue 84, which it overlaps.
+    """
+    _require_replayed(
+        "decision view",
+        "decision views",
+        replay_decision_views(decision_requests, context),
+        bundle.authentic_decision_views,
+    )
+    _require_replayed(
+        "accounting view",
+        "accounting views",
+        replay_accounting_views(accounting_requests, context),
+        bundle.authentic_accounting_views,
+    )
+    _require_replayed(
+        "structural eligibility",
+        "structural eligibilities",
+        replay_structural_eligibilities(structural_requests, context),
+        bundle.structural_eligibilities,
+    )
+    _require_replayed(
+        "economic outcome",
+        "economic outcomes",
+        replay_economic_outcomes(economic_requests, context),
+        bundle.economic_outcomes,
+    )
 
     if exploratory_cohort is None and exploratory_reconstruction_replay is None:
         if bundle.exploratory_reconstructed_observations:
@@ -295,14 +394,99 @@ def verify_evaluation_input_bundle(
         )
         _require_calendar_rows(bundle)
 
+    if session_queries is not None:
+        verify_session_clock(bundle.session_clock, session_queries, context)
+    elif bundle.session_clock.mode == "realized_session_authority":
+        raise ValueError(
+            "bundle carries a realized session clock without the session queries "
+            "to re-derive it"
+        )
+
     rebuilt = evaluation_input_bundle_hash(bundle)
     if rebuilt != bundle.bundle_hash:
         raise ValueError("bundle hash does not match its own contents")
 
 
+def _require_replayed[T](
+    singular: str,
+    plural: str,
+    expected: tuple[T, ...],
+    stored: tuple[T, ...],
+) -> None:
+    """Require the stored members to equal their replay as an exact multiset."""
+    if len(expected) != len(stored):
+        raise ValueError(
+            f"{singular} count mismatch against replay: "
+            f"expected {len(expected)}, bundle carries {len(stored)}"
+        )
+    # Both sides are canonically ordered by content hash, so compare digests.
+    expected_digests = sorted(content_hash(member) for member in expected)
+    stored_digests = sorted(content_hash(member) for member in stored)
+    if expected_digests != stored_digests:
+        raise ValueError(f"{plural} do not match exact upstream replay")
+
+
 def _request_hash(reference: object, query: object) -> SHA256Hash:
     """Exact identity of one replay request as a reference/query pair."""
     return content_hash({"reference": reference, "query": query})
+
+
+def _query_request_hash(query: object) -> SHA256Hash:
+    """Exact identity of one replay request that is a query alone."""
+    return content_hash({"query": query})
+
+
+def _structural_request_hash(
+    listing: ListingV1, security_id: UUID7, query: NormalizedSelectionQueryV1
+) -> SHA256Hash:
+    """Exact identity of one structural eligibility replay request."""
+    return content_hash(
+        {"listing": listing, "security_id": security_id, "query": query}
+    )
+
+
+def _require_bound_identities(
+    bundle: EvaluationInputBundleV1, context: M1dResolutionContext
+) -> None:
+    """Bind every security and listing identity to the context's M1b evidence.
+
+    `SecurityV1` and `ListingV1` are opaque identities that no builder derives,
+    so they are bound rather than re-derived: each must equal an identity that
+    the context's validated M1b identity assignments assign, which the replay
+    context identity, and so the snapshot witness, attests. Only `ASSIGNED`
+    records count: an unassignment names an identity without attesting it. A
+    listing's venue is part of its identity, so a listing id on another venue
+    is not bound.
+    """
+    members: tuple[SecurityV1 | ListingV1, ...] = (
+        *bundle.security_identities,
+        *bundle.listing_identities,
+    )
+    if not members:
+        return
+    structural = context.structural_context
+    if structural is None:
+        raise ValueError(
+            "bundle carries security or listing identities, but the replay "
+            "context supplies no M1b identity evidence to bind them"
+        )
+    attested = {
+        content_hash(record.identity)
+        for record in structural.universe.assignments.records
+        if record.assignment_effect is IdentityAssignmentEffect.ASSIGNED
+    }
+    unbound = tuple(
+        sorted(
+            digest
+            for digest in (content_hash(member) for member in members)
+            if digest not in attested
+        )
+    )
+    if unbound:
+        raise ValueError(
+            "bundle identities are not attested by the replay context's M1b "
+            f"identity assignments: {unbound}"
+        )
 
 
 def derive_replay_context_identity(
@@ -348,6 +532,7 @@ def derive_replay_context_identity(
         supporting_artifact_hashes=tuple(sorted(set(context.supporting_artifacts))),
         m1b_context_hash=content_hash(m1b) if m1b is not None else None,
         m1c_context_hash=content_hash(m1c) if m1c is not None else None,
+        schedule_generation_policy_hash=context.schedule_generation_policy_hash,
         identity_hash="0" * 64,
     )
     candidate = draft.model_copy(
@@ -377,8 +562,11 @@ def mint_bundle_provenance_proof(
     qualified_context: QualifiedReplayContextV1,
     context: M1dResolutionContext,
     bundle: EvaluationInputBundleV1,
+    session_queries: SessionReplayQueries,
     decision_requests: DecisionReplayRequests = (),
     accounting_requests: OutcomeReplayRequests = (),
+    structural_requests: StructuralReplayRequests = (),
+    economic_requests: EconomicReplayRequests = (),
 ) -> BundleProvenanceProofV1:
     """Run replay verification once and mint the proof the gate validates.
 
@@ -386,6 +574,12 @@ def mint_bundle_provenance_proof(
     to mint unless the replay context presented here is the very context the
     qualified snapshot binding was proven over, and unless the bundle asserts
     that same snapshot.
+
+    Coverage is every authority-bearing input the issue 31 Decision 4 ruling
+    names (issue 80): views, structural eligibility, and economic outcomes are
+    re-derived from their requests, the clock from its session queries, which
+    have no default, and security and listing identity is bound to the
+    context's M1b evidence. The proof records every request hash.
     """
     identity = derive_replay_context_identity(context)
     if identity.identity_hash != qualified_context.context_identity.identity_hash:
@@ -404,9 +598,13 @@ def mint_bundle_provenance_proof(
     verify_evaluation_input_bundle(
         bundle=bundle,
         context=context,
+        session_queries=session_queries,
         decision_requests=decision_requests,
         accounting_requests=accounting_requests,
+        structural_requests=structural_requests,
+        economic_requests=economic_requests,
     )
+    _require_bound_identities(bundle, context)
 
     return _build_bundle_provenance_proof(
         qualified_context_hash=qualified_context.qualified_hash,
@@ -417,6 +615,16 @@ def mint_bundle_provenance_proof(
         ),
         accounting_request_hashes=tuple(
             _request_hash(reference, query) for reference, query in accounting_requests
+        ),
+        session_request_hashes=tuple(
+            _query_request_hash(query) for query in session_queries
+        ),
+        structural_request_hashes=tuple(
+            _structural_request_hash(listing, security_id, query)
+            for listing, security_id, query in structural_requests
+        ),
+        economic_request_hashes=tuple(
+            _query_request_hash(query) for query in economic_requests
         ),
     )
 
@@ -458,6 +666,63 @@ def validate_exploratory_admission(
         )
 
 
+def _require_snapshot_purposes(
+    *,
+    admission: PromotionEvaluationAdmissionV1,
+    bundle: EvaluationInputBundleV1,
+    decision_profile: QualificationProfileV1,
+    audit_profile: QualificationProfileV1,
+    qualified_context: QualifiedReplayContextV1,
+    snapshot: RealSourceSnapshotV1,
+) -> None:
+    """Bind the snapshot to the admission's M1e profiles and purposes.
+
+    Containment alone matched entries by content hash, so decision evidence
+    attested only as retrospective-audit input, under a profile of no bound
+    profile set, was admitted (issue 80). The snapshot must belong to the
+    admission's profile set and authorize both of its profiles, and every
+    witnessed entry must attest its artifact for the purpose each view class
+    the bundle carries requires, under that purpose's own profile.
+
+    One qualified context holds one witness entry per artifact, and one M1d
+    context backs both view classes, so a bundle carrying both decision and
+    accounting views cannot satisfy both purposes and fails closed here.
+    """
+    if snapshot.profile_set_hash != admission.m1e_profile_set_hash:
+        raise ValueError(
+            "source snapshot profile set mismatch with admission: snapshot binds "
+            f"{snapshot.profile_set_hash}, admission binds "
+            f"{admission.m1e_profile_set_hash}"
+        )
+    decision_profile_hash = qualification_profile_hash(decision_profile)
+    audit_profile_hash = qualification_profile_hash(audit_profile)
+    authorized = set(snapshot.authorized_profile_hashes)
+    for role, profile_hash in (
+        ("decision", decision_profile_hash),
+        ("audit", audit_profile_hash),
+    ):
+        if profile_hash not in authorized:
+            raise ValueError(
+                f"source snapshot does not authorize the {role} profile {profile_hash}"
+            )
+    if bundle.authentic_decision_views:
+        verify_snapshot_binding_purpose(
+            qualified=qualified_context,
+            snapshot=snapshot,
+            purpose=ConsumerPurpose.HISTORICAL_DECISION_INPUT,
+            profile_hash=decision_profile_hash,
+            consumer="decision views",
+        )
+    if bundle.authentic_accounting_views:
+        verify_snapshot_binding_purpose(
+            qualified=qualified_context,
+            snapshot=snapshot,
+            purpose=ConsumerPurpose.RETROSPECTIVE_AUDIT,
+            profile_hash=audit_profile_hash,
+            consumer="accounting views",
+        )
+
+
 def validate_promotion_admission(
     *,
     admission: PromotionEvaluationAdmissionV1,
@@ -492,6 +757,8 @@ def validate_promotion_admission(
     No full M1d replay runs here. Replay verification already ran once at mint
     time, and re-auditing the witness is only `content_hash` recomputation and
     dictionary lookups over `snapshot.replay_inputs`, so this gate stays cheap.
+    The same holds for the snapshot's own hash and for its profile set, profile
+    authorization, and per-entry purpose bindings (issue 80).
     """
     validate_m1e_promotion_evidence(
         admission=admission,
@@ -550,6 +817,14 @@ def validate_promotion_admission(
     # never sees one. Re-audit it here against the snapshot in hand, which is
     # the check that refuses a hand-built witness naming a foreign corpus.
     verify_snapshot_binding(qualified=qualified_context, snapshot=snapshot)
+    _require_snapshot_purposes(
+        admission=admission,
+        bundle=bundle,
+        decision_profile=decision_profile,
+        audit_profile=audit_profile,
+        qualified_context=qualified_context,
+        snapshot=snapshot,
+    )
 
     validate_bundle_component_coverage(proof=proof, bundle=bundle)
     if admission.provenance_proof_hash != proof.proof_hash:

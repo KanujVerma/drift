@@ -9,12 +9,14 @@ other way, would either drift apart or cycle.
 """
 
 from datetime import UTC, datetime
+from functools import cache
 from uuid import UUID
 
 from observation_test_support import uid
+from test_evaluator_admission_gatekeeper import make_test_fixture
 
 from drift.domain.artifacts import ArtifactKind, ArtifactReference
-from drift.domain.qualification import ConsumerPurpose
+from drift.domain.qualification import ConsumerPurpose, qualification_profile_hash
 from drift.domain.replay_provenance import context_supplied_artifact_hashes
 from drift.domain.source_snapshots import (
     CanonicalReplayInputEntryV1,
@@ -29,11 +31,29 @@ from drift.domain.source_snapshots import (
 )
 from drift.evaluator.bundles import derive_replay_context_identity
 from drift.markets.observation_validation import M1dResolutionContext
+from drift.serialization.canonical import content_hash
 
 H = {c: c * 64 for c in "0123456789abcdef"}
 NOW = datetime(2026, 9, 14, 12, 0, tzinfo=UTC)
 SNAPSHOT_ID = UUID("019c0000-0000-7000-8000-000000000001")
 DECISION_ID = UUID("019c0000-0000-7000-8000-000000000002")
+
+
+@cache
+def admission_profile_hashes() -> tuple[str, str, str]:
+    """The profile set, decision profile, and audit profile the admission binds.
+
+    The promotion gate requires the snapshot to belong to the admission's M1e
+    profile set, to authorize both of its profiles, and to attest decision
+    evidence under the decision profile (issue 80), so a snapshot fixture that
+    invents its own profile identities could never reach the gate.
+    """
+    fixture = make_test_fixture()
+    return (
+        content_hash(fixture["profile_set"]),
+        qualification_profile_hash(fixture["decision_profile"]),
+        qualification_profile_hash(fixture["audit_profile"]),
+    )
 
 
 def _replay_entry(digest: str, index: int) -> CanonicalReplayInputEntryV1:
@@ -50,14 +70,28 @@ def _replay_entry(digest: str, index: int) -> CanonicalReplayInputEntryV1:
         model_type="ReplayContextArtifact",
         model_version="1",
         purpose=ConsumerPurpose.HISTORICAL_DECISION_INPUT,
-        profile_hash=H["3"],
+        profile_hash=admission_profile_hashes()[1],
         component_role=SourceComponentRole.OBSERVATIONS,
         original_identity=digest,
     )
 
 
-def snapshot_over(digests: tuple[str, ...]) -> RealSourceSnapshotV1:
-    """Build a real snapshot that attests exactly the given artifact hashes."""
+def snapshot_over(
+    digests: tuple[str, ...],
+    *,
+    purpose: ConsumerPurpose | None = None,
+    profile_hash: str | None = None,
+    profile_set_hash: str | None = None,
+    authorized_profile_hashes: tuple[str, ...] | None = None,
+) -> RealSourceSnapshotV1:
+    """Build a real snapshot that attests exactly the given artifact hashes.
+
+    By default every entry attests its artifact as historical decision input
+    under the admission's decision profile, and the snapshot belongs to the
+    admission's profile set and authorizes both of its profiles. Each keyword
+    overrides one of those bindings, so a test can break exactly one of them.
+    """
+    set_hash, decision_hash, audit_hash = admission_profile_hashes()
     decision_draft = CrossComponentConsistencyDecisionV1.model_construct(
         schema_version="1",
         component_release_hashes=(),
@@ -78,14 +112,26 @@ def snapshot_over(digests: tuple[str, ...]) -> RealSourceSnapshotV1:
         _replay_entry(digest, index)
         for index, digest in enumerate(sorted(set(digests)))
     )
+    overrides: dict[str, object] = {}
+    if purpose is not None:
+        overrides["purpose"] = purpose
+    if profile_hash is not None:
+        overrides["profile_hash"] = profile_hash
+    if overrides:
+        entries = tuple(entry.model_copy(update=overrides) for entry in entries)
+    authorized = (
+        (decision_hash, audit_hash)
+        if authorized_profile_hashes is None
+        else authorized_profile_hashes
+    )
     draft = RealSourceSnapshotV1.model_construct(
         schema_version="1",
         snapshot_id=SNAPSHOT_ID,
         snapshot_version="1",
         created_at=NOW,
-        profile_set_hash=H["0"],
-        profile_hashes=(H["3"],),
-        authorized_profile_hashes=(H["3"],),
+        profile_set_hash=set_hash if profile_set_hash is None else profile_set_hash,
+        profile_hashes=tuple(sorted({decision_hash, audit_hash, *authorized})),
+        authorized_profile_hashes=tuple(sorted(authorized)),
         rights_assessment_hashes=(H["4"],),
         receipt_hashes=(H["5"],),
         native_artifact_hashes=(),
