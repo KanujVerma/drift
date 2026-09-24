@@ -176,6 +176,10 @@ class _EffectContext:
     occurrence_id: str
     effective_on: date
     terms: TermsIndex
+    # The claim status M1c composes across every effect of the outcome. One
+    # effect may read cleanly while the composition cannot order it against
+    # another, so an action that ends or pays out the claim reads both.
+    composed_claim_status: str
     # M1c places the effect before the outcome's evidence window. Such an
     # effect is never applied; it can only explain delivered cash.
     before_window: bool = False
@@ -704,6 +708,9 @@ class CorporateActionProcessor:
         # the clock vests at the next pre-open, against the same prior close.
         if not window.contains(entitlement_on):
             return
+        liquidating = context.payload.action_kind == ActionKind.LIQUIDATION
+        if liquidating:
+            _require_composed_claim(context)
         if entitlement_on != window.current and _has_due_bill_facts(dates):
             # A proven due-bill rule names the session holders are entitled
             # on. When the clock holds no such session, no M2 V1 rule says
@@ -718,7 +725,10 @@ class CorporateActionProcessor:
                 "a cash entitlement cannot vest before the occurrence that proves it"
             )
         payable_on = _payable_session(dates)
-        components = _only_cash_components(context, "a cash distribution")
+        components = _only_cash_components(
+            context,
+            "a liquidating distribution" if liquidating else "a cash distribution",
+        )
         for component in components:
             source = (
                 book.opening
@@ -747,6 +757,7 @@ class CorporateActionProcessor:
         if holding is None and not _stages_a_buy(book, context.security_id):
             return
         _require_ended_claim(context)
+        _require_composed_claim(context)
         components = _only_cash_components(context, "a cash acquisition")
         # The claim ended, so no share of it can be traded at the open. A kept
         # target would re-buy the extinguished security.
@@ -765,6 +776,7 @@ class CorporateActionProcessor:
             return
         target = book.targets.get(context.security_id)
         _require_ended_claim(context)
+        _require_composed_claim(context)
         component = _single_share_component(
             context,
             same_recipient=False,
@@ -863,6 +875,7 @@ class CorporateActionProcessor:
         holding = book.holdings.get(context.security_id)
         if holding is None and not _stages_a_buy(book, context.security_id):
             return
+        _require_composed_claim(context)
         status = context.payload.claim_status
         if status != "extinguished":
             raise IndeterminateValuationError(
@@ -1117,7 +1130,8 @@ class CorporateActionProcessor:
         relieve it, so cash, claims and remaining basis still equal opening
         cash plus realized PnL. The proceeds are receivable rather than
         received, but the price is fixed by the action, so the gain or loss
-        is realized now.
+        is realized now: in the pass of the first clock session on or after
+        the effective date.
         """
         payable_on = _payable_session(_date_facts(_terms_payload(context)))
         del book.holdings[context.security_id]
@@ -1309,7 +1323,9 @@ def _effect_contexts(
             )
         record = records[projection.source_record_hash]
         if projection.effective_status == "effective":
-            context = _proven_context(record, terms, before_window=False)
+            context = _proven_context(
+                record, terms, resolution.claim_status, before_window=False
+            )
             marker = (context.occurrence_id, context.payload.action_kind)
             if marker in applied:
                 # Two reports of one occurrence would apply one split twice.
@@ -1321,7 +1337,11 @@ def _effect_contexts(
             contexts.append(context)
         elif projection.effective_status == "before_window" and include_before_window:
             try:
-                earlier.append(_proven_context(record, terms, before_window=True))
+                earlier.append(
+                    _proven_context(
+                        record, terms, resolution.claim_status, before_window=True
+                    )
+                )
             except IndeterminateValuationError:
                 continue
     markers = [
@@ -1336,7 +1356,11 @@ def _effect_contexts(
 
 
 def _proven_context(
-    record: EconomicEffectVersionV1, terms: TermsIndex, *, before_window: bool
+    record: EconomicEffectVersionV1,
+    terms: TermsIndex,
+    composed_claim_status: str,
+    *,
+    before_window: bool,
 ) -> _EffectContext:
     """Prove one occurred effect is safe to read, and bind it to its source."""
     payload = record.payload
@@ -1369,6 +1393,7 @@ def _proven_context(
             record.effective_time, role="effect effective time"
         ),
         terms=terms,
+        composed_claim_status=composed_claim_status,
         before_window=before_window,
     )
 
@@ -1619,6 +1644,22 @@ def _require_no_cash(context: _EffectContext, label: str) -> None:
     if _cash_components(context):
         raise IndeterminateValuationError(
             f"{label} carries no source cash component in M1c terms"
+        )
+
+
+def _require_composed_claim(context: _EffectContext) -> None:
+    """Refuse to end or pay out a claim M1c cannot compose.
+
+    Two liquidations at one instant with conflicting claim statuses, or a
+    continuing effect after an extinguishing one, each read cleanly alone,
+    while M1c composes the claim as ``unknown``: whether any share survives
+    is then unproven, whichever single effect is read.
+    """
+    if context.composed_claim_status == "unknown":
+        raise IndeterminateValuationError(
+            f"M1c composes the claim of {context.security_id} as unknown, so "
+            f"whether it survives the {context.payload.action_kind.value} is "
+            "not proven"
         )
 
 

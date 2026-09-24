@@ -448,8 +448,11 @@ def _outcome(
     delivery_groups: tuple[EconomicDeliveryGroupV1, ...] = (),
     support_status: str = "supported",
     action_kinds: tuple[ActionKind, ...] = (ActionKind.REGULAR_CASH_DIVIDEND,),
+    claim_status: str = "continuing",
 ) -> SecurityEconomicOutcomeV1:
     effect_statuses = ("effective",) * len(effects) if statuses is None else statuses
+    # A composed claim status M1c cannot resolve marks the evidence partial.
+    composed_unknown = claim_status == "unknown"
     query = _query(security_id, action_kinds)
     resolution = EconomicOutcomeResolutionV1(
         schema_version="1",
@@ -475,10 +478,14 @@ def _outcome(
         coverage_results=(),
         residual_resolutions=(),
         safe_projection_hashes=(),
-        claim_status="continuing",
-        evidence_completeness="known",
+        claim_status=claim_status,  # type: ignore[arg-type]
+        evidence_completeness="partial" if composed_unknown else "known",
         support_status=support_status,  # type: ignore[arg-type]
-        reasons=() if support_status == "supported" else ("synthetic gap",),
+        reasons=(
+            ("claim_effect_chronology_conflicting",)
+            if composed_unknown
+            else (() if support_status == "supported" else ("synthetic gap",))
+        ),
     )
     return SecurityEconomicOutcomeV1(
         security_id=security_id,
@@ -1997,22 +2004,22 @@ def test_a_continuing_liquidation_vests_on_its_ex_date_like_a_dividend() -> None
     outcome = _liquidation_case(
         suffix=1940, claim_status="continuing", ex_at=ENTITLED_AT
     )
-    # Bought at the ex-date open: held at the entitlement session's pre-open
-    # only through a staged buy, so the prior close held nothing.
-    at_ex, _ = _processor().apply_pre_open_actions(
-        _state(day=ENTITLED_DAY),
-        (_target(SEC_A, 10),),
-        (outcome,),
-        _key(ENTITLED_DAY),
-    )
-    assert at_ex.pending_cash_claims == ()
-
-    # Control: held at the prior close, the same distribution is owed.
+    # Held at the ex date's prior close: the distribution is owed at the ex
+    # date's pre-open.
     held = _state(holdings=(_holding(quantity=10),), day=ENTITLED_DAY)
     entitled, _ = _processor().apply_pre_open_actions(
         held, (), (outcome,), _key(ENTITLED_DAY)
     )
     assert entitled.pending_cash_claims[0].entitlement_session == ENTITLED_DAY
+
+    # Bought at the ex-date open instead: the shares are first held at the
+    # next session's pre-open, which owns no date on or before the ex date,
+    # so nothing is owed on them.
+    bought = _state(holdings=(_holding(quantity=10),), day=PAYABLE_DAY)
+    after, _ = _processor().apply_pre_open_actions(
+        bought, (), (outcome,), _key(PAYABLE_DAY)
+    )
+    assert after is bought
 
 
 def test_a_continuing_liquidation_without_an_ex_date_is_indeterminate() -> None:
@@ -2218,6 +2225,367 @@ def test_realized_disposal_pnl_accumulates_on_the_prior_realized_pnl() -> None:
 
     assert updated.realized_gross_pnl == Decimal("-18")
     assert updated.realized_net_pnl == Decimal("-20")
+
+
+def _conflicting_liquidations(
+    suffix: int, *, composed: str, continuing_at: str = EFFECT_AT
+) -> SecurityEconomicOutcomeV1:
+    """An extinguishing and a continuing liquidation of SEC_A.
+
+    ``composed`` is the claim status M1c composes across the two effects:
+    for effects at one instant with conflicting statuses, or a continuing
+    effect after an extinguishing one, M1c composes ``unknown``.
+    """
+    final = _cash(amount="15", component_id="liquidation-final")
+    instalment = _cash(amount="3", component_id="liquidation-instalment")
+    final_terms = _terms(
+        suffix=suffix,
+        action_kind=ActionKind.LIQUIDATION,
+        components=(final,),
+        dates=(_date_fact("payable", PAYABLE_AT),),
+    )
+    final_effect = _effect(
+        suffix=suffix + 1,
+        action_kind=ActionKind.LIQUIDATION,
+        components=(final,),
+        terms=final_terms,
+        occurrence_id="occ-final",
+        claim_status="extinguished",
+    )
+    instalment_terms = _terms(
+        suffix=suffix + 10,
+        action_kind=ActionKind.LIQUIDATION,
+        components=(instalment,),
+        dates=(_date_fact("ex", continuing_at), _date_fact("payable", PAYABLE_AT)),
+    )
+    instalment_effect = _effect(
+        suffix=suffix + 11,
+        action_kind=ActionKind.LIQUIDATION,
+        components=(instalment,),
+        terms=instalment_terms,
+        occurrence_id="occ-instalment",
+        effective_at=continuing_at,
+    )
+    return _outcome(
+        terms=(final_terms, instalment_terms),
+        effects=(final_effect, instalment_effect),
+        action_kinds=(ActionKind.LIQUIDATION,),
+        claim_status=composed,
+    )
+
+
+def test_a_liquidation_m1c_composes_as_unknown_is_indeterminate() -> None:
+    # S11: an extinguishing and a continuing liquidation at one instant. Each
+    # effect reads cleanly on its own, but M1c composes the claim as unknown:
+    # whether any share survives is not proven.
+    outcome = _conflicting_liquidations(2900, composed="unknown")
+    state = _state(holdings=(_holding(quantity=10, basis="100"),), cash="0")
+
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="M1c composes the claim of .* as unknown",
+    ):
+        _processor().apply_pre_open_actions(state, (), (outcome,), _key())
+
+    # Control: a book exposed to nothing in SEC_A is not halted.
+    elsewhere = _state(holdings=(_holding(SEC_OTHER, quantity=5),))
+    unchanged, _ = _processor().apply_pre_open_actions(
+        elsewhere, (), (outcome,), _key()
+    )
+    assert unchanged is elsewhere
+
+
+def test_an_extinguishing_liquidation_m1c_composes_as_unknown_halts_alone() -> None:
+    # Only the extinguishing effect is in this window; M1c still cannot
+    # compose the claim (say an indeterminate chronology constraint), so the
+    # disposal itself must refuse to erase the shares.
+    outcome = _liquidation_case(
+        suffix=2930,
+        claim_status="extinguished",
+        dates=(_date_fact("payable", PAYABLE_AT),),
+    )
+    unknown = _outcome(
+        terms=outcome.terms_records,
+        effects=outcome.effect_records,
+        action_kinds=(ActionKind.LIQUIDATION,),
+        claim_status="unknown",
+    )
+    state = _state(holdings=(_holding(quantity=10, basis="100"),))
+
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="M1c composes the claim of .* as unknown",
+    ):
+        _processor().apply_pre_open_actions(state, (), (unknown,), _key())
+
+
+def test_a_resurrected_liquidation_claim_is_indeterminate() -> None:
+    # A continuing instalment after the extinguishing one: M1c composes the
+    # terminal state as resurrected, so unknown. At the continuing effect's
+    # own session it is the distribution path that must refuse it.
+    outcome = _conflicting_liquidations(
+        2920, composed="unknown", continuing_at=LATER_AT
+    )
+    state = _state(holdings=(_holding(quantity=10, basis="100"),), day=LATER_DAY)
+
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="M1c composes the claim of .* as unknown",
+    ):
+        _processor().apply_pre_open_actions(state, (), (outcome,), _key(LATER_DAY))
+
+
+def test_a_liquidation_m1c_composes_as_ended_or_continuing_applies() -> None:
+    # Control for the composed-status gate: the identical effects compose
+    # cleanly when M1c can order them, and each then applies by its own rule.
+    outcome = _conflicting_liquidations(2940, composed="extinguished")
+    state = _state(holdings=(_holding(quantity=10, basis="100"),), cash="0")
+
+    updated, _ = _processor().apply_pre_open_actions(state, (), (outcome,), _key())
+
+    assert updated.holdings == ()
+    assert updated.pending_claims_value == Decimal("180")
+
+
+@pytest.mark.parametrize("kind", ["cash", "stock"])
+def test_an_acquisition_m1c_composes_as_unknown_is_indeterminate(kind: str) -> None:
+    # The same gap for acquisitions: the effect says the claim ended, but M1c
+    # cannot compose the claim's chronology, so the conversion is unproven.
+    if kind == "cash":
+        components: tuple[EconomicComponentV1, ...] = (_cash(amount="12"),)
+        action_kind = ActionKind.CASH_ACQUISITION
+        dates: tuple[EconomicDateFactV1, ...] = (_date_fact("payable", PAYABLE_AT),)
+    else:
+        components = (_shares(numerator="3", denominator="2", recipient=SEC_ACQ),)
+        action_kind = ActionKind.STOCK_ACQUISITION
+        dates = ()
+    terms = _terms(
+        suffix=2960, action_kind=action_kind, components=components, dates=dates
+    )
+    effect = _effect(
+        suffix=2961,
+        action_kind=action_kind,
+        components=components,
+        terms=terms,
+        claim_status="converted" if kind == "stock" else "extinguished",
+    )
+    state = _state(holdings=(_holding(quantity=100),))
+    for composed, halts in (("unknown", True), ("converted", False)):
+        outcome = _outcome(
+            terms=(terms,),
+            effects=(effect,),
+            action_kinds=(action_kind,),
+            claim_status=composed,
+        )
+        if halts:
+            with pytest.raises(
+                IndeterminateValuationError,
+                match="M1c composes the claim of .* as unknown",
+            ):
+                _processor().apply_pre_open_actions(state, (), (outcome,), _key())
+        else:
+            updated, _ = _processor().apply_pre_open_actions(
+                state, (), (outcome,), _key()
+            )
+            assert SEC_A not in _quantities(updated.holdings)
+
+
+def test_two_disposals_in_one_pass_both_realize() -> None:
+    # S8: a cash acquisition of SEC_A and a liquidation of SEC_OTHER on one
+    # session. Each relieves its own basis: 1200 - 900 and 30 - 50.
+    acquisition = _share_action_case(
+        suffix=2980,
+        action_kind=ActionKind.CASH_ACQUISITION,
+        components=(_cash(amount="12"),),
+        claim_status="extinguished",
+        dates=(_date_fact("payable", PAYABLE_AT),),
+    )
+    other_cash = _cash(amount="3", predecessor=SEC_OTHER)
+    other_terms = _terms(
+        suffix=2990,
+        action_kind=ActionKind.LIQUIDATION,
+        components=(other_cash,),
+        dates=(_date_fact("payable", PAYABLE_AT),),
+        security_id=SEC_OTHER,
+    )
+    other_effect = _effect(
+        suffix=2991,
+        action_kind=ActionKind.LIQUIDATION,
+        components=(other_cash,),
+        terms=other_terms,
+        occurrence_id="occ-other",
+        claim_status="extinguished",
+        security_id=SEC_OTHER,
+    )
+    liquidation = _outcome(
+        security_id=SEC_OTHER,
+        terms=(other_terms,),
+        effects=(other_effect,),
+        action_kinds=(ActionKind.LIQUIDATION,),
+    )
+    state = _state(
+        holdings=(
+            _holding(quantity=100, basis="900"),
+            _holding(SEC_OTHER, quantity=10, basis="50"),
+        ),
+        cash="0",
+    )
+
+    updated, _ = _processor().apply_pre_open_actions(
+        state, (), (acquisition, liquidation), _key()
+    )
+
+    assert updated.holdings == ()
+    assert updated.pending_claims_value == Decimal("1230")
+    assert updated.realized_gross_pnl == Decimal("280")
+    assert updated.realized_net_pnl == Decimal("280")
+
+
+def test_an_extinguishing_liquidation_beside_a_split_on_another_date_halts() -> None:
+    # S12: an extinguishing liquidation on Friday and a split on Monday, one
+    # window. Unlike a continuing one, it changes the share count, so it is a
+    # share action for the multi-date window rule.
+    split_terms, split_effect = _split_effect(
+        SEC_A, ActionKind.FORWARD_SPLIT, "2", "1", LATER_AT, 3000
+    )
+    liquidation_terms = _terms(
+        suffix=3010,
+        action_kind=ActionKind.LIQUIDATION,
+        components=(_cash(amount="7"),),
+        dates=(_date_fact("payable", PAYABLE_AT),),
+    )
+    liquidation_effect = _effect(
+        suffix=3011,
+        action_kind=ActionKind.LIQUIDATION,
+        components=(_cash(amount="7"),),
+        terms=liquidation_terms,
+        occurrence_id="occ-liquidation",
+        effective_at=BETWEEN_AT,
+        claim_status="extinguished",
+    )
+    outcome = _outcome(
+        terms=(split_terms, liquidation_terms),
+        effects=(split_effect, liquidation_effect),
+        action_kinds=(ActionKind.FORWARD_SPLIT, ActionKind.LIQUIDATION),
+    )
+    state = _state(holdings=(_holding(quantity=100),), day=LATER_DAY)
+
+    with pytest.raises(
+        IndeterminateValuationError, match=r"share actions on 2020-06-05, 2020-06-08"
+    ):
+        _processor().apply_pre_open_actions(state, (), (outcome,), _key(LATER_DAY))
+
+
+def test_a_continuing_liquidation_owes_nothing_before_its_ex_date() -> None:
+    # The effect is effective on EFFECT_DAY, but its ex date is ENTITLED_DAY.
+    outcome = _liquidation_case(
+        suffix=3020, claim_status="continuing", ex_at=ENTITLED_AT
+    )
+
+    # Held on the effect's own session: the ex date is still ahead, so no
+    # claim is recorded yet.
+    held = _state(holdings=(_holding(quantity=10),))
+    at_effect, _ = _processor().apply_pre_open_actions(held, (), (outcome,), _key())
+    assert at_effect is held
+
+    # Sold before the ex date: the ex date's pre-open holds nothing, so
+    # nothing is ever owed.
+    sold = _state(day=ENTITLED_DAY)
+    at_ex, _ = _processor().apply_pre_open_actions(
+        sold, (), (outcome,), _key(ENTITLED_DAY)
+    )
+    assert at_ex is sold
+
+
+@pytest.mark.parametrize("missing", ["terms", "payable"])
+def test_a_disposal_without_its_terms_or_payable_date_is_indeterminate(
+    missing: str,
+) -> None:
+    component = _cash(amount="7")
+    terms = _terms(
+        suffix=3030,
+        action_kind=ActionKind.LIQUIDATION,
+        components=(component,),
+        dates=() if missing == "payable" else (_date_fact("payable", PAYABLE_AT),),
+    )
+    effect = _effect(
+        suffix=3031,
+        action_kind=ActionKind.LIQUIDATION,
+        components=(component,),
+        terms=None if missing == "terms" else terms,
+        claim_status="extinguished",
+    )
+    outcome = _outcome(
+        terms=() if missing == "terms" else (terms,),
+        effects=(effect,),
+        action_kinds=(ActionKind.LIQUIDATION,),
+    )
+    state = _state(holdings=(_holding(quantity=10),))
+
+    # The proceeds are owed from the terms' payable date. Without it the
+    # claim cannot be dated, so the disposal cannot be booked.
+    with pytest.raises(
+        IndeterminateValuationError,
+        match=(
+            "requires identified source terms"
+            if missing == "terms"
+            else "requires a source payable date"
+        ),
+    ):
+        _processor().apply_pre_open_actions(state, (), (outcome,), _key())
+
+
+def test_an_extinguishing_liquidation_delivery_vests_on_its_effect_date() -> None:
+    # Its cash is owed from the effective date, not under a distribution's ex
+    # rule; its terms carry no ex date at all. A book exposed on the payable
+    # session that holds no claim for it was not owed it.
+    component = _cash(amount="7")
+    terms = _terms(
+        suffix=3040,
+        action_kind=ActionKind.LIQUIDATION,
+        components=(component,),
+        dates=(_date_fact("payable", PAYABLE_AT),),
+    )
+    effect = _effect(
+        suffix=3041,
+        action_kind=ActionKind.LIQUIDATION,
+        components=(component,),
+        terms=terms,
+        claim_status="extinguished",
+    )
+    outcome = _outcome(
+        terms=(terms,),
+        effects=(effect,),
+        delivery_groups=(_delivery(components=(component,)),),
+        action_kinds=(ActionKind.LIQUIDATION,),
+    )
+    state = _state(holdings=(_holding(quantity=10),), cash="1000", day=PAYABLE_DAY)
+
+    settled = _processor().apply_intrasession_settlements(
+        state, (outcome,), _key(PAYABLE_DAY)
+    )
+
+    assert settled is state
+
+
+def test_a_continuing_liquidation_with_a_share_component_names_itself() -> None:
+    outcome = _share_action_case(
+        suffix=3050,
+        action_kind=ActionKind.LIQUIDATION,
+        components=(
+            _cash(amount="3"),
+            _shares(numerator="1", denominator="1", recipient=SEC_ACQ),
+        ),
+        claim_status="continuing",
+        dates=(_date_fact("ex", EFFECT_AT), _date_fact("payable", PAYABLE_AT)),
+    )
+    state = _state(holdings=(_holding(quantity=10),))
+
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="a liquidating distribution requires proven source cash components",
+    ):
+        _processor().apply_pre_open_actions(state, (), (outcome,), _key())
 
 
 def test_unsupported_action_kind_on_a_held_position_is_indeterminate() -> None:

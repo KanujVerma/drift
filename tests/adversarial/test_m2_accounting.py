@@ -516,14 +516,20 @@ def test_terms_without_an_occurred_effect_commit_no_mutation() -> None:
     assert updated.pending_cash_claims == ()
 
 
-def test_a_liquidation_without_source_terms_fails_closed() -> None:
-    """A delisting whose settlement is unprovable is never invented."""
+@pytest.mark.parametrize("claim_status", ["extinguished", "continuing"])
+def test_a_liquidation_without_source_terms_fails_closed(claim_status: str) -> None:
+    """A delisting whose settlement is unprovable is never invented.
+
+    Both liquidation paths need the terms: an extinguishing one to date its
+    terminal claims, a continuing one to find the ex date it vests on.
+    """
     component = ca._cash(amount="3")
     effect = ca._effect(
         suffix=9710,
         action_kind=ActionKind.LIQUIDATION,
         components=(component,),
         terms=None,
+        claim_status=claim_status,
     )
     outcome = ca._outcome(
         terms=(), effects=(effect,), action_kinds=(ActionKind.LIQUIDATION,)
