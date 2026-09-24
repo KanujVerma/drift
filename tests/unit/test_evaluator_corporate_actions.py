@@ -105,6 +105,12 @@ ENTITLED_DAY = date(2020, 6, 9)
 EFFECT_AT = "2020-06-01T00:00:00Z"
 PAYABLE_AT = "2020-06-15T00:00:00Z"
 LATER_AT = "2020-06-08T00:00:00Z"
+ENTITLED_AT = "2020-06-09T00:00:00Z"
+# Dates the clock below does not contain: one between its first two sessions,
+# and one before its first session.
+BETWEEN_DAY = date(2020, 6, 5)
+BETWEEN_AT = "2020-06-05T00:00:00Z"
+BEFORE_CLOCK_AT = "2020-05-29T00:00:00Z"
 
 ZERO = Decimal("0")
 ZERO_HASH = "0" * 64
@@ -676,7 +682,11 @@ def _dividend_case(
         amount=amount, namespace=namespace, code=code, amount_basis=amount_basis
     )
     date_facts = (
-        (_date_fact("record", EFFECT_AT), _date_fact("payable", PAYABLE_AT))
+        (
+            _date_fact("ex", EFFECT_AT),
+            _date_fact("record", EFFECT_AT),
+            _date_fact("payable", PAYABLE_AT),
+        )
         if dates is None
         else dates
     )
@@ -1231,17 +1241,205 @@ def _payable_state(state: PortfolioStateV1) -> PortfolioStateV1:
     return kernel.state
 
 
-def test_delivered_cash_without_a_pending_claim_commits_zero_cash() -> None:
+def test_delivered_cash_without_a_proven_entitlement_is_indeterminate() -> None:
     delivered = _outcome(
         effects=(),
         delivery_groups=(_delivery(components=(_cash(amount="0.5"),)),),
     )
     state = _state(holdings=(_holding(quantity=100),), cash="1000", day=PAYABLE_DAY)
+
+    # Cash was delivered on a security the book holds, and no occurred effect
+    # says what it was owed for, so the book cannot show it was not owed.
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="matches no pending claim and no proven entitlement",
+    ):
+        _processor().apply_intrasession_settlements(
+            state, (delivered,), _key(PAYABLE_DAY)
+        )
+
+
+def test_delivered_cash_on_an_unexposed_security_commits_nothing() -> None:
+    delivered = _outcome(
+        effects=(),
+        delivery_groups=(_delivery(components=(_cash(amount="0.5"),)),),
+    )
+    state = _state(cash="1000", day=PAYABLE_DAY)
+
     settled = _processor().apply_intrasession_settlements(
         state, (delivered,), _key(PAYABLE_DAY)
     )
+
+    # Delivered cash that no proven entitlement claims commits nothing.
+    # Crediting it would create money from an unmatched report.
     assert settled is state
     assert settled.cash_balance == Decimal("1000")
+
+
+def _delivered_dividend(
+    *,
+    suffix: int,
+    ex_at: str = EFFECT_AT,
+    settled_at: str = PAYABLE_AT,
+    delivered_component: str = "cash-1",
+    delivered_occurrence: str = "occ-1",
+) -> SecurityEconomicOutcomeV1:
+    """A 0.50 dividend whose full evidence rides with its delivered report."""
+    terms, effect, _ = _dividend_case(
+        amount="0.5",
+        suffix=suffix,
+        dates=(
+            _date_fact("ex", ex_at),
+            _date_fact("payable", PAYABLE_AT),
+        ),
+    )
+    delivery = _delivery(
+        components=(_cash(amount="0.5", component_id=delivered_component),),
+        settled_at=settled_at,
+        occurrence_id=delivered_occurrence,
+    )
+    return _outcome(terms=(terms,), effects=(effect,), delivery_groups=(delivery,))
+
+
+def test_delivered_cash_the_ex_date_rule_proves_unowed_commits_nothing() -> None:
+    outcome = _delivered_dividend(suffix=1600)
+    # Held on the payable session but not at the ex date's prior close, as a
+    # buy on or after the ex date is. The entitlement vested on the ex date
+    # with nothing to pay, so the delivery owes this book nothing.
+    state = _state(holdings=(_holding(quantity=100),), cash="1000", day=PAYABLE_DAY)
+
+    settled = _processor().apply_intrasession_settlements(
+        state, (outcome,), _key(PAYABLE_DAY)
+    )
+
+    assert settled is state
+    assert settled.cash_balance == Decimal("1000")
+
+
+def test_delivered_cash_on_the_day_its_entitlement_vests_can_be_unowed() -> None:
+    outcome = _delivered_dividend(suffix=1605, ex_at=LATER_AT, settled_at=LATER_AT)
+    # Bought at the ex-date open, and paid on the same session: the ex date
+    # vested this morning against a prior close that held nothing.
+    state = _state(holdings=(_holding(quantity=100),), cash="1000", day=LATER_DAY)
+
+    settled = _processor().apply_intrasession_settlements(
+        state, (outcome,), _key(LATER_DAY)
+    )
+
+    assert settled is state
+
+
+def test_delivered_cash_for_another_occurrence_is_indeterminate() -> None:
+    # The effect proves occ-1, but the delivered report names occ-2, so no
+    # proven entitlement explains it.
+    outcome = _delivered_dividend(suffix=1615, delivered_occurrence="occ-2")
+    state = _state(holdings=(_holding(quantity=100),), cash="1000", day=PAYABLE_DAY)
+
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="matches no pending claim and no proven entitlement",
+    ):
+        _processor().apply_intrasession_settlements(
+            state, (outcome,), _key(PAYABLE_DAY)
+        )
+
+
+def test_delivered_cash_two_effects_could_explain_is_indeterminate() -> None:
+    terms, regular, _ = _dividend_case(
+        amount="0.5",
+        suffix=1625,
+        dates=(_date_fact("ex", EFFECT_AT), _date_fact("payable", PAYABLE_AT)),
+    )
+    special_terms, special, _ = _dividend_case(
+        action_kind=ActionKind.SPECIAL_CASH_DISTRIBUTION,
+        amount="0.5",
+        suffix=1627,
+        dates=(_date_fact("ex", LATER_AT), _date_fact("payable", PAYABLE_AT)),
+    )
+    # Two effective reports of one occurrence, of different kinds, both owe
+    # cash-1. The delivered report cannot say which one it pays.
+    outcome = _outcome(
+        terms=(terms, special_terms),
+        effects=(regular, special),
+        delivery_groups=(_delivery(components=(_cash(amount="0.5"),)),),
+        action_kinds=(
+            ActionKind.REGULAR_CASH_DIVIDEND,
+            ActionKind.SPECIAL_CASH_DISTRIBUTION,
+        ),
+    )
+    state = _state(holdings=(_holding(quantity=100),), cash="1000", day=PAYABLE_DAY)
+
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="matches no pending claim and no proven entitlement",
+    ):
+        _processor().apply_intrasession_settlements(
+            state, (outcome,), _key(PAYABLE_DAY)
+        )
+
+
+def test_delivered_cash_before_its_entitlement_vests_is_indeterminate() -> None:
+    outcome = _delivered_dividend(suffix=1610, ex_at=PAYABLE_AT, settled_at=LATER_AT)
+    state = _state(holdings=(_holding(quantity=100),), cash="1000", day=LATER_DAY)
+
+    # The ex date is still ahead, so no entitlement could have been recorded
+    # yet, and the delivery cannot be shown to be owed to someone else.
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="before the entitlement it pays vests",
+    ):
+        _processor().apply_intrasession_settlements(state, (outcome,), _key(LATER_DAY))
+
+
+def test_delivered_cash_for_a_component_never_owed_is_indeterminate() -> None:
+    outcome = _delivered_dividend(suffix=1620, delivered_component="cash-9")
+    state = _state(holdings=(_holding(quantity=100),), cash="1000", day=PAYABLE_DAY)
+
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="matches no pending claim and no proven entitlement",
+    ):
+        _processor().apply_intrasession_settlements(
+            state, (outcome,), _key(PAYABLE_DAY)
+        )
+
+
+def test_delivered_cash_seen_again_after_settlement_commits_nothing() -> None:
+    outcome = _delivered_dividend(suffix=1630)
+    state = _state(holdings=(_holding(quantity=100),), cash="1000")
+    staged, _ = _processor().apply_pre_open_actions(state, (), (outcome,), _key())
+    settled = _processor().apply_intrasession_settlements(
+        _payable_state(staged), (outcome,), _key(PAYABLE_DAY)
+    )
+    assert settled.cash_balance == Decimal("1050.0")
+
+    # The same delivered report is read again once its claim is settled.
+    again = _processor().apply_intrasession_settlements(
+        settled, (outcome,), _key(PAYABLE_DAY)
+    )
+
+    assert again is settled
+
+
+def test_unmatched_delivery_with_only_a_pending_claim_is_indeterminate() -> None:
+    # The book sold after an entitlement, so it holds nothing but a claim on
+    # the security. A delivery for an occurrence no evidence explains is still
+    # exposure: it may be the cash that claim was owed, reported differently.
+    state = _state(claims=(_manual_claim(payable=PAYABLE_DAY),), day=PAYABLE_DAY)
+    delivered = _outcome(
+        effects=(),
+        delivery_groups=(
+            _delivery(components=(_cash(amount="0.5"),), occurrence_id="occ-2"),
+        ),
+    )
+
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="matches no pending claim and no proven entitlement",
+    ):
+        _processor().apply_intrasession_settlements(
+            state, (delivered,), _key(PAYABLE_DAY)
+        )
 
 
 def test_delivered_amount_that_contradicts_the_claim_is_indeterminate() -> None:
@@ -1314,20 +1512,148 @@ def test_unknown_amount_basis_dividend_is_indeterminate() -> None:
         _processor().apply_pre_open_actions(state, (), (outcome,), _key())
 
 
-def test_dividend_without_a_source_record_date_is_indeterminate() -> None:
+def test_dividend_without_a_source_ex_date_is_indeterminate() -> None:
     _, _, outcome = _dividend_case(
-        amount="2", suffix=370, dates=(_date_fact("payable", PAYABLE_AT),)
+        amount="2",
+        suffix=370,
+        dates=(_date_fact("record", EFFECT_AT), _date_fact("payable", PAYABLE_AT)),
     )
     state = _state(holdings=(_holding(quantity=100),))
-    with pytest.raises(
-        IndeterminateValuationError, match="requires a source record date"
-    ):
+    # The record date is present, but entitlement follows the ex-date rule,
+    # and no record date may stand in for a missing ex date.
+    with pytest.raises(IndeterminateValuationError, match="requires a source ex date"):
         _processor().apply_pre_open_actions(state, (), (outcome,), _key())
+
+
+def test_dividend_needs_no_source_record_date() -> None:
+    _, _, outcome = _dividend_case(
+        amount="2",
+        suffix=375,
+        dates=(_date_fact("ex", EFFECT_AT), _date_fact("payable", PAYABLE_AT)),
+    )
+    state = _state(holdings=(_holding(quantity=100),))
+
+    updated, _ = _processor().apply_pre_open_actions(state, (), (outcome,), _key())
+
+    assert updated.pending_cash_claims[0].total_cash_expected == Decimal("200")
+    assert updated.pending_cash_claims[0].entitlement_session == EFFECT_DAY
+
+
+def _t2_dividend(*, suffix: int) -> SecurityEconomicOutcomeV1:
+    """A T+2-era dividend: ex on LATER_DAY, record one session later."""
+    _, _, outcome = _dividend_case(
+        amount="0.5",
+        suffix=suffix,
+        dates=(
+            _date_fact("ex", LATER_AT),
+            _date_fact("record", ENTITLED_AT),
+            _date_fact("payable", PAYABLE_AT),
+        ),
+    )
+    return outcome
+
+
+def test_dividend_vests_on_its_ex_date_against_the_prior_close() -> None:
+    outcome = _t2_dividend(suffix=1640)
+    state = _state(holdings=(_holding(quantity=100),), day=LATER_DAY)
+
+    entitled, _ = _processor().apply_pre_open_actions(
+        state, (), (outcome,), _key(LATER_DAY)
+    )
+
+    assert len(entitled.pending_cash_claims) == 1
+    claim = entitled.pending_cash_claims[0]
+    assert claim.entitlement_session == LATER_DAY
+    assert claim.total_cash_expected == Decimal("50.0")
+
+
+def test_dividend_is_not_owed_on_shares_bought_at_the_ex_date_open() -> None:
+    outcome = _t2_dividend(suffix=1650)
+    processor = _processor()
+
+    # At the ex-date pre-open the prior close held nothing; only a buy is
+    # staged for the open.
+    at_ex, _ = processor.apply_pre_open_actions(
+        _state(day=LATER_DAY), (_target(SEC_A, 100),), (outcome,), _key(LATER_DAY)
+    )
+    assert at_ex.pending_cash_claims == ()
+
+    # On the record date the book holds the shares it bought at the ex-date
+    # open. Under the record-date shortcut they would be credited.
+    bought = _state(holdings=(_holding(quantity=100),), day=ENTITLED_DAY)
+    at_record, _ = processor.apply_pre_open_actions(
+        bought, (), (outcome,), _key(ENTITLED_DAY)
+    )
+    assert at_record is bought
+    assert at_record.pending_cash_claims == ()
+
+
+def test_dividend_with_a_holiday_record_date_vests_on_its_ex_date() -> None:
+    _, _, outcome = _dividend_case(
+        amount="0.5",
+        suffix=1660,
+        dates=(
+            _date_fact("ex", LATER_AT),
+            _date_fact("record", "2020-06-13T00:00:00Z"),
+            _date_fact("payable", PAYABLE_AT),
+        ),
+    )
+    state = _state(holdings=(_holding(quantity=100),), day=LATER_DAY)
+
+    entitled, _ = _processor().apply_pre_open_actions(
+        state, (), (outcome,), _key(LATER_DAY)
+    )
+
+    assert entitled.pending_cash_claims[0].total_cash_expected == Decimal("50.0")
+
+
+def test_dividend_with_an_ex_date_off_the_clock_vests_at_the_next_pre_open() -> None:
+    _, _, outcome = _dividend_case(
+        amount="0.5",
+        suffix=1670,
+        dates=(_date_fact("ex", BETWEEN_AT), _date_fact("payable", PAYABLE_AT)),
+    )
+    state = _state(holdings=(_holding(quantity=100),), day=LATER_DAY)
+
+    entitled, _ = _processor().apply_pre_open_actions(
+        state, (), (outcome,), _key(LATER_DAY)
+    )
+
+    # Nothing trades between the prior session's close and this pre-open, so
+    # the prior close's holdings are the ones the ex date pays.
+    claim = entitled.pending_cash_claims[0]
+    assert claim.entitlement_session == BETWEEN_DAY
+    assert claim.total_cash_expected == Decimal("50.0")
+
+    # Control: the next session does not vest it a second time.
+    later = _state(holdings=(_holding(quantity=100),), day=ENTITLED_DAY)
+    again, _ = _processor().apply_pre_open_actions(
+        later, (), (outcome,), _key(ENTITLED_DAY)
+    )
+    assert again is later
+
+
+def test_due_bill_entitlement_off_the_clock_is_indeterminate() -> None:
+    terms, _, outcome = _due_bill_terms()
+    rule = _due_bill_rule(terms, entitlement=BETWEEN_DAY, redemption=BETWEEN_DAY)
+    state = _state(holdings=(_holding(quantity=100),), day=LATER_DAY)
+
+    # The executable rule names a session the clock does not contain, and no
+    # rule says which session such an entitlement moves to.
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="due-bill entitlement session 2020-06-05 is not a session",
+    ):
+        _processor(due_bill_rules=(rule,)).apply_pre_open_actions(
+            state, (), (outcome,), _key(LATER_DAY)
+        )
 
 
 def test_dividend_without_a_source_payable_date_is_indeterminate() -> None:
     _, _, outcome = _dividend_case(
-        amount="2", suffix=380, dates=(_date_fact("record", EFFECT_AT),)
+        amount="2",
+        suffix=380,
+        dates=(_date_fact("ex", EFFECT_AT), _date_fact("record", EFFECT_AT)),
     )
     state = _state(holdings=(_holding(quantity=100),))
     with pytest.raises(
@@ -1642,6 +1968,7 @@ def _share_action_case(
     components: tuple[EconomicComponentV1, ...],
     claim_status: str = "continuing",
     dates: tuple[EconomicDateFactV1, ...] = (),
+    effective_at: str = EFFECT_AT,
 ) -> SecurityEconomicOutcomeV1:
     terms = _terms(
         suffix=suffix, action_kind=action_kind, components=components, dates=dates
@@ -1652,6 +1979,7 @@ def _share_action_case(
         components=components,
         terms=terms,
         claim_status=claim_status,
+        effective_at=effective_at,
     )
     return _outcome(terms=(terms,), effects=(effect,), action_kinds=(action_kind,))
 
@@ -2362,6 +2690,1012 @@ def test_split_effective_on_another_session_commits_no_mutation() -> None:
     assert updated.holdings[0].quantity == 100
 
 
+# --------------------------------------------------------------------------
+# effects dated off the clock
+# --------------------------------------------------------------------------
+
+
+def _off_clock_action(kind: ActionKind, suffix: int) -> SecurityEconomicOutcomeV1:
+    """One share action on SEC_A, effective on a date the clock skips."""
+    payable = (_date_fact("payable", PAYABLE_AT),)
+    cases: dict[
+        ActionKind,
+        tuple[tuple[EconomicComponentV1, ...], str, tuple[EconomicDateFactV1, ...]],
+    ] = {
+        ActionKind.FORWARD_SPLIT: (
+            (_shares(numerator="2", denominator="1"),),
+            "continuing",
+            (),
+        ),
+        ActionKind.STOCK_DIVIDEND: (
+            (
+                _shares(
+                    numerator="1",
+                    denominator="10",
+                    meaning="additional_per_predecessor",
+                ),
+            ),
+            "continuing",
+            (),
+        ),
+        ActionKind.SPINOFF: (
+            (
+                _shares(
+                    numerator="1",
+                    denominator="2",
+                    recipient=SEC_CHILD,
+                    meaning="additional_per_predecessor",
+                ),
+            ),
+            "continuing",
+            (),
+        ),
+        ActionKind.CASH_ACQUISITION: ((_cash(amount="12"),), "extinguished", payable),
+        ActionKind.STOCK_ACQUISITION: (
+            (_shares(numerator="3", denominator="2", recipient=SEC_ACQ),),
+            "converted",
+            (),
+        ),
+        ActionKind.LIQUIDATION: ((_cash(amount="7"),), "extinguished", payable),
+    }
+    components, claim_status, dates = cases[kind]
+    return _share_action_case(
+        suffix=suffix,
+        action_kind=kind,
+        components=components,
+        claim_status=claim_status,
+        dates=dates,
+        effective_at=BETWEEN_AT,
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "suffix", "held_after", "owed"),
+    [
+        (ActionKind.FORWARD_SPLIT, 1700, {SEC_A: 200}, None),
+        (ActionKind.STOCK_DIVIDEND, 1710, {SEC_A: 110}, None),
+        (ActionKind.SPINOFF, 1720, {SEC_A: 100, SEC_CHILD: 50}, None),
+        (ActionKind.CASH_ACQUISITION, 1730, {}, Decimal("1200")),
+        (ActionKind.STOCK_ACQUISITION, 1740, {SEC_ACQ: 150}, None),
+        (ActionKind.LIQUIDATION, 1750, {}, Decimal("700")),
+    ],
+)
+def test_a_share_action_dated_off_the_clock_applies_at_the_next_pre_open(
+    kind: ActionKind,
+    suffix: int,
+    held_after: dict[UUID, int],
+    owed: Decimal | None,
+) -> None:
+    outcome = _off_clock_action(kind, suffix)
+    state = _state(holdings=(_holding(quantity=100),), day=LATER_DAY)
+
+    # BETWEEN_DAY falls after EFFECT_DAY and before LATER_DAY, so LATER_DAY is
+    # the first pre-open that can see the action.
+    updated, _ = _processor().apply_pre_open_actions(
+        state, (), (outcome,), _key(LATER_DAY)
+    )
+    assert _quantities(updated.holdings) == held_after
+    # A disposal off the clock still owes its proceeds, vested on the date the
+    # claim actually ended rather than on the session that recognized it.
+    if owed is None:
+        assert updated.pending_cash_claims == ()
+    else:
+        (claim,) = updated.pending_cash_claims
+        assert claim.total_cash_expected == owed
+        assert claim.entitlement_session == BETWEEN_DAY
+
+    # Control: the following session owns only the dates after LATER_DAY, so
+    # the same action is never applied a second time.
+    later = _state(holdings=(_holding(quantity=100),), day=ENTITLED_DAY)
+    again, _ = _processor().apply_pre_open_actions(
+        later, (), (outcome,), _key(ENTITLED_DAY)
+    )
+    assert again is later
+
+
+def test_a_split_off_the_clock_translates_the_staged_target_too() -> None:
+    outcome = _off_clock_action(ActionKind.FORWARD_SPLIT, 1760)
+    state = _state(holdings=(_holding(quantity=100),), day=LATER_DAY)
+
+    updated, translated = _processor().apply_pre_open_actions(
+        state, (_target(SEC_A, 100),), (outcome,), _key(LATER_DAY)
+    )
+
+    assert _quantities(updated.holdings) == {SEC_A: 200}
+    assert _quantities(translated) == {SEC_A: 200}
+
+
+def test_an_effect_dated_after_the_session_waits_for_its_own_pre_open() -> None:
+    future = _share_action_case(
+        suffix=1770,
+        action_kind=ActionKind.FORWARD_SPLIT,
+        components=(_shares(numerator="2", denominator="1"),),
+        effective_at=ENTITLED_AT,
+    )
+    early = _state(holdings=(_holding(quantity=100),), day=LATER_DAY)
+
+    unchanged, _ = _processor().apply_pre_open_actions(
+        early, (), (future,), _key(LATER_DAY)
+    )
+    assert unchanged is early
+
+    # Control: its own session applies it.
+    due = _state(holdings=(_holding(quantity=100),), day=ENTITLED_DAY)
+    applied, _ = _processor().apply_pre_open_actions(
+        due, (), (future,), _key(ENTITLED_DAY)
+    )
+    assert _quantities(applied.holdings) == {SEC_A: 200}
+
+
+def test_an_effect_dated_before_the_clock_is_the_opening_books_history() -> None:
+    component = _shares(numerator="2", denominator="1")
+    outcome = _share_action_case(
+        suffix=1780,
+        action_kind=ActionKind.FORWARD_SPLIT,
+        components=(component,),
+        effective_at=BEFORE_CLOCK_AT,
+    )
+    state = _state(holdings=(_holding(quantity=100),))
+
+    # The first session has no prior session inside the evaluation, so it
+    # owns only its own date. The opening book already reflects anything
+    # earlier, and re-applying history would split it again.
+    updated, _ = _processor().apply_pre_open_actions(state, (), (outcome,), _key())
+
+    assert updated is state
+
+
+def test_a_pre_open_pass_for_a_session_off_the_clock_is_refused() -> None:
+    state = _state(day=BETWEEN_DAY)
+
+    with pytest.raises(ValueError, match="is not a session of the processor's clock"):
+        _processor().apply_pre_open_actions(state, (), (), _key(BETWEEN_DAY))
+
+
+def test_unsupported_evidence_behind_only_a_zero_target_commits_nothing() -> None:
+    _, _, outcome = _split_case(
+        numerator="2",
+        denominator="1",
+        treatment=_treatment("round_down"),
+        action_kind=ActionKind.FORWARD_SPLIT,
+        suffix=1790,
+    )
+    unsupported = _outcome(
+        terms=outcome.terms_records,
+        effects=outcome.effect_records,
+        support_status="indeterminate",
+        action_kinds=(ActionKind.FORWARD_SPLIT,),
+    )
+    state = _state()
+
+    # An explicit zero target on an unheld security trades nothing, so the
+    # book is not exposed to evidence it cannot trust.
+    updated, translated = _processor().apply_pre_open_actions(
+        state, (_target(SEC_A, 0),), (unsupported,), _key()
+    )
+    assert updated is state
+    assert _quantities(translated) == {SEC_A: 0}
+
+    # Control: a staged buy is exposure.
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="economic outcome resolution is not supported evidence",
+    ):
+        _processor().apply_pre_open_actions(
+            state, (_target(SEC_A, 1),), (unsupported,), _key()
+        )
+
+
+def test_an_unmodelled_action_behind_only_a_zero_target_commits_nothing() -> None:
+    share = _shares(numerator="1", denominator="1", recipient=SEC_ACQ)
+    outcome = _share_action_case(
+        suffix=1800,
+        action_kind=ActionKind.CONVERSION,
+        components=(share,),
+        claim_status="converted",
+    )
+    state = _state()
+
+    updated, _ = _processor().apply_pre_open_actions(
+        state, (_target(SEC_A, 0),), (outcome,), _key()
+    )
+    assert updated is state
+
+    # Control: a staged buy is exposure.
+    with pytest.raises(IndeterminateValuationError, match="no proven M2 accounting"):
+        _processor().apply_pre_open_actions(
+            state, (_target(SEC_A, 1),), (outcome,), _key()
+        )
+
+
+# --------------------------------------------------------------------------
+# windows spanning several dates
+# --------------------------------------------------------------------------
+
+
+def _split_effect(
+    security_id: UUID,
+    kind: ActionKind,
+    numerator: str,
+    denominator: str,
+    effective_at: str,
+    suffix: int,
+) -> tuple[CorporateActionTermsVersionV1, EconomicEffectVersionV1]:
+    component = _shares(
+        numerator=numerator,
+        denominator=denominator,
+        recipient=security_id,
+        predecessor=security_id,
+        component_id=f"shares-{suffix}",
+    )
+    terms = _terms(
+        suffix=suffix,
+        action_kind=kind,
+        components=(component,),
+        security_id=security_id,
+    )
+    effect = _effect(
+        suffix=suffix + 1,
+        action_kind=kind,
+        components=(component,),
+        terms=terms,
+        occurrence_id=f"occ-{suffix}",
+        effective_at=effective_at,
+        security_id=security_id,
+    )
+    return terms, effect
+
+
+@pytest.mark.parametrize(("reverse", "forward"), [(2100, 2150), (2150, 2100)])
+def test_two_share_actions_on_two_dates_in_one_window_are_indeterminate(
+    reverse: int, forward: int
+) -> None:
+    # A 1:10 reverse split on Friday and a 3:1 split on Monday both land in
+    # Monday's window. In date order 105 shares become 10 and then 30; in the
+    # other order they become 315 and then 31. Nothing orders them by date.
+    first = _split_effect(
+        SEC_A, ActionKind.REVERSE_SPLIT, "1", "10", BETWEEN_AT, reverse
+    )
+    second = _split_effect(SEC_A, ActionKind.FORWARD_SPLIT, "3", "1", LATER_AT, forward)
+    outcome = _outcome(
+        terms=(first[0], second[0]),
+        effects=(first[1], second[1]),
+        action_kinds=(ActionKind.REVERSE_SPLIT, ActionKind.FORWARD_SPLIT),
+    )
+    state = _state(holdings=(_holding(quantity=105),), day=LATER_DAY)
+
+    with pytest.raises(
+        IndeterminateValuationError,
+        match=r"share actions on 2020-06-05, 2020-06-08 touching",
+    ):
+        _processor().apply_pre_open_actions(state, (), (outcome,), _key(LATER_DAY))
+
+    # Control: a book exposed to neither date's action is not halted.
+    elsewhere = _state(holdings=(_holding(SEC_OTHER, quantity=5),), day=LATER_DAY)
+    unchanged, _ = _processor().apply_pre_open_actions(
+        elsewhere, (), (outcome,), _key(LATER_DAY)
+    )
+    assert unchanged is elsewhere
+
+
+def test_an_acquirer_split_and_an_acquisition_on_two_dates_are_indeterminate() -> None:
+    # The acquirer splits 2:1 on Friday, and SEC_A converts 1:1 into it on
+    # Monday. The two actions touch one security, the acquirer, on two dates
+    # of one window, and the processor would apply them by security order.
+    split_terms, split_effect = _split_effect(
+        SEC_ACQ, ActionKind.FORWARD_SPLIT, "2", "1", BETWEEN_AT, 2200
+    )
+    split = _outcome(
+        security_id=SEC_ACQ,
+        terms=(split_terms,),
+        effects=(split_effect,),
+        action_kinds=(ActionKind.FORWARD_SPLIT,),
+    )
+    acquisition = _share_action_case(
+        suffix=2210,
+        action_kind=ActionKind.STOCK_ACQUISITION,
+        components=(_shares(numerator="1", denominator="1", recipient=SEC_ACQ),),
+        claim_status="converted",
+        effective_at=LATER_AT,
+    )
+    state = _state(holdings=(_holding(quantity=100),), day=LATER_DAY)
+
+    with pytest.raises(
+        IndeterminateValuationError, match=r"share actions on 2020-06-05, 2020-06-08"
+    ):
+        _processor().apply_pre_open_actions(
+            state, (), (acquisition, split), _key(LATER_DAY)
+        )
+
+    # Control: on a single date there is no date order to lose, so the guard
+    # stays silent and the pass completes. How same-date actions are ordered
+    # is a separate question this test does not pin.
+    same_day = _share_action_case(
+        suffix=2220,
+        action_kind=ActionKind.STOCK_ACQUISITION,
+        components=(_shares(numerator="1", denominator="1", recipient=SEC_ACQ),),
+        claim_status="converted",
+        effective_at=BETWEEN_AT,
+    )
+    _processor().apply_pre_open_actions(state, (), (same_day, split), _key(LATER_DAY))
+
+
+def _conversion(
+    source: UUID, acquirer: UUID, effective_at: str, suffix: int
+) -> SecurityEconomicOutcomeV1:
+    """``source`` converts one for one into ``acquirer``."""
+    share = _shares(
+        numerator="1",
+        denominator="1",
+        recipient=acquirer,
+        predecessor=source,
+        component_id=f"acq-{suffix}",
+    )
+    terms = _terms(
+        suffix=suffix,
+        action_kind=ActionKind.STOCK_ACQUISITION,
+        components=(share,),
+        security_id=source,
+    )
+    effect = _effect(
+        suffix=suffix + 1,
+        action_kind=ActionKind.STOCK_ACQUISITION,
+        components=(share,),
+        terms=terms,
+        occurrence_id=f"acq-{suffix}",
+        effective_at=effective_at,
+        security_id=source,
+        claim_status="converted",
+    )
+    return _outcome(
+        security_id=source,
+        terms=(terms,),
+        effects=(effect,),
+        action_kinds=(ActionKind.STOCK_ACQUISITION,),
+    )
+
+
+def test_a_two_hop_conversion_into_a_split_on_another_date_is_indeterminate() -> None:
+    # The book holds only SEC_A. On Monday SEC_A converts into SEC_ACQ and
+    # SEC_ACQ into SEC_OTHER; SEC_OTHER split 2:1 on Friday. In date order 105
+    # SEC_A shares end as 105 SEC_OTHER; applied by security order they end
+    # as 210. SEC_OTHER is two hops from anything the book held at the prior
+    # close, so only the book the pass leaves shows the exposure.
+    split_terms, split_effect = _split_effect(
+        SEC_OTHER, ActionKind.FORWARD_SPLIT, "2", "1", BETWEEN_AT, 2320
+    )
+    split = _outcome(
+        security_id=SEC_OTHER,
+        terms=(split_terms,),
+        effects=(split_effect,),
+        action_kinds=(ActionKind.FORWARD_SPLIT,),
+    )
+    outcomes = (
+        _conversion(SEC_A, SEC_ACQ, LATER_AT, 2330),
+        _conversion(SEC_ACQ, SEC_OTHER, LATER_AT, 2340),
+        split,
+    )
+    state = _state(holdings=(_holding(quantity=105),), day=LATER_DAY)
+
+    with pytest.raises(
+        IndeterminateValuationError, match=r"share actions on 2020-06-05, 2020-06-08"
+    ):
+        _processor().apply_pre_open_actions(state, (), outcomes, _key(LATER_DAY))
+
+
+def test_a_conversion_into_a_security_then_disposed_is_still_caught() -> None:
+    # SEC_A converts into SEC_ACQ on Monday; SEC_ACQ split on Friday and is
+    # cash-acquired on Monday. The pass leaves no SEC_ACQ, and the prior
+    # close held no SEC_ACQ, yet the book is exposed through SEC_A, which one
+    # of the conflicting actions delivers from.
+    split_terms, split_effect = _split_effect(
+        SEC_ACQ, ActionKind.FORWARD_SPLIT, "2", "1", BETWEEN_AT, 2370
+    )
+    cash_terms = _terms(
+        suffix=2380,
+        action_kind=ActionKind.CASH_ACQUISITION,
+        components=(_cash(amount="12", predecessor=SEC_ACQ),),
+        dates=(_date_fact("payable", PAYABLE_AT),),
+        security_id=SEC_ACQ,
+    )
+    cash_effect = _effect(
+        suffix=2381,
+        action_kind=ActionKind.CASH_ACQUISITION,
+        components=(_cash(amount="12", predecessor=SEC_ACQ),),
+        terms=cash_terms,
+        occurrence_id="occ-cash",
+        effective_at=LATER_AT,
+        claim_status="extinguished",
+        security_id=SEC_ACQ,
+    )
+    acquirer = _outcome(
+        security_id=SEC_ACQ,
+        terms=(split_terms, cash_terms),
+        effects=(split_effect, cash_effect),
+        action_kinds=(ActionKind.FORWARD_SPLIT, ActionKind.CASH_ACQUISITION),
+    )
+    outcomes = (_conversion(SEC_A, SEC_ACQ, LATER_AT, 2390), acquirer)
+    state = _state(holdings=(_holding(quantity=100),), day=LATER_DAY)
+
+    with pytest.raises(
+        IndeterminateValuationError, match=r"share actions on 2020-06-05, 2020-06-08"
+    ):
+        _processor().apply_pre_open_actions(state, (), outcomes, _key(LATER_DAY))
+
+
+def test_a_disposal_beside_a_split_on_another_date_is_indeterminate() -> None:
+    # SEC_A splits on Friday and is cash-acquired on Monday. The pass leaves
+    # no SEC_A at all, so only the book at the prior close shows exposure.
+    split_terms, split_effect = _split_effect(
+        SEC_A, ActionKind.FORWARD_SPLIT, "2", "1", BETWEEN_AT, 2350
+    )
+    acquisition_terms = _terms(
+        suffix=2360,
+        action_kind=ActionKind.CASH_ACQUISITION,
+        components=(_cash(amount="12"),),
+        dates=(_date_fact("payable", PAYABLE_AT),),
+    )
+    acquisition_effect = _effect(
+        suffix=2361,
+        action_kind=ActionKind.CASH_ACQUISITION,
+        components=(_cash(amount="12"),),
+        terms=acquisition_terms,
+        occurrence_id="occ-acquisition",
+        effective_at=LATER_AT,
+        claim_status="extinguished",
+    )
+    outcome = _outcome(
+        terms=(split_terms, acquisition_terms),
+        effects=(split_effect, acquisition_effect),
+        action_kinds=(ActionKind.FORWARD_SPLIT, ActionKind.CASH_ACQUISITION),
+    )
+    state = _state(holdings=(_holding(quantity=100),), day=LATER_DAY)
+
+    with pytest.raises(
+        IndeterminateValuationError, match=r"share actions on 2020-06-05, 2020-06-08"
+    ):
+        _processor().apply_pre_open_actions(state, (), (outcome,), _key(LATER_DAY))
+
+
+def test_share_actions_on_dates_in_different_windows_apply_one_by_one() -> None:
+    # A split on EFFECT_DAY and another on LATER_DAY: two dates, but each in
+    # its own session's window, so each window holds a single date.
+    first = _split_effect(SEC_A, ActionKind.FORWARD_SPLIT, "2", "1", EFFECT_AT, 2230)
+    second = _split_effect(SEC_A, ActionKind.FORWARD_SPLIT, "3", "1", LATER_AT, 2240)
+    outcome = _outcome(
+        terms=(first[0], second[0]),
+        effects=(first[1], second[1]),
+        action_kinds=(ActionKind.FORWARD_SPLIT,),
+    )
+    state = _state(holdings=(_holding(quantity=200),), day=LATER_DAY)
+
+    updated, _ = _processor().apply_pre_open_actions(
+        state, (), (outcome,), _key(LATER_DAY)
+    )
+
+    assert _quantities(updated.holdings) == {SEC_A: 600}
+
+
+def test_a_distribution_beside_a_share_action_on_another_date_applies() -> None:
+    # Friday's dividend pays on no share change, so it and Monday's split
+    # share one window without an order to lose: the dividend is owed on the
+    # prior close, the split doubles the holding.
+    split_terms, split_effect = _split_effect(
+        SEC_A, ActionKind.FORWARD_SPLIT, "2", "1", LATER_AT, 2250
+    )
+    dividend_terms, dividend_effect, _ = _dividend_case(
+        amount="0.5",
+        suffix=2260,
+        dates=(_date_fact("ex", BETWEEN_AT), _date_fact("payable", PAYABLE_AT)),
+    )
+    dividend_effect = _effect(
+        suffix=2261,
+        action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
+        components=(_cash(amount="0.5"),),
+        terms=dividend_terms,
+        occurrence_id="occ-dividend",
+        effective_at=BETWEEN_AT,
+    )
+    outcome = _outcome(
+        terms=(split_terms, dividend_terms),
+        effects=(split_effect, dividend_effect),
+        action_kinds=(ActionKind.FORWARD_SPLIT, ActionKind.REGULAR_CASH_DIVIDEND),
+    )
+    state = _state(holdings=(_holding(quantity=100),), day=LATER_DAY)
+
+    updated, _ = _processor().apply_pre_open_actions(
+        state, (), (outcome,), _key(LATER_DAY)
+    )
+
+    assert _quantities(updated.holdings) == {SEC_A: 200}
+    assert updated.pending_cash_claims[0].total_cash_expected == Decimal("50.0")
+
+
+def test_a_before_window_effect_is_never_applied() -> None:
+    _, _, outcome = _split_case(
+        numerator="2",
+        denominator="1",
+        treatment=_treatment("round_down"),
+        action_kind=ActionKind.FORWARD_SPLIT,
+        suffix=2270,
+    )
+    before = _outcome(
+        terms=outcome.terms_records,
+        effects=outcome.effect_records,
+        statuses=("before_window",),
+        action_kinds=(ActionKind.FORWARD_SPLIT,),
+    )
+    state = _state(holdings=(_holding(quantity=100),))
+
+    # Dated on this session, but M1c places it before its evidence window.
+    # It can explain delivered cash; it never moves shares.
+    updated, _ = _processor().apply_pre_open_actions(state, (), (before,), _key())
+
+    assert updated is state
+
+
+def test_unsupported_evidence_is_judged_against_the_book_the_pass_leaves() -> None:
+    # The parent spins off into SEC_A, which sorts first. The child's own
+    # outcome is unsupported, and the staged target of 0 alone is no
+    # exposure, but the spin-off credits the child during the same pass.
+    component = _shares(
+        numerator="1",
+        denominator="2",
+        recipient=SEC_A,
+        predecessor=SEC_ACQ,
+        meaning="additional_per_predecessor",
+    )
+    terms = _terms(
+        suffix=2300,
+        action_kind=ActionKind.SPINOFF,
+        components=(component,),
+        security_id=SEC_ACQ,
+    )
+    effect = _effect(
+        suffix=2301,
+        action_kind=ActionKind.SPINOFF,
+        components=(component,),
+        terms=terms,
+        occurrence_id="spin-1",
+        security_id=SEC_ACQ,
+    )
+    spin = _outcome(
+        security_id=SEC_ACQ,
+        terms=(terms,),
+        effects=(effect,),
+        action_kinds=(ActionKind.SPINOFF,),
+    )
+    child = _outcome(
+        security_id=SEC_A,
+        support_status="indeterminate",
+        action_kinds=(ActionKind.FORWARD_SPLIT,),
+    )
+    state = _state(holdings=(_holding(SEC_ACQ, quantity=100),))
+    targets = (_target(SEC_ACQ, 100), _target(SEC_A, 0))
+
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="economic outcome resolution is not supported evidence",
+    ):
+        _processor().apply_pre_open_actions(state, targets, (spin, child), _key())
+
+
+def test_an_unmodelled_action_is_judged_against_the_book_the_pass_leaves() -> None:
+    component = _shares(
+        numerator="1",
+        denominator="2",
+        recipient=SEC_A,
+        predecessor=SEC_ACQ,
+        meaning="additional_per_predecessor",
+    )
+    terms = _terms(
+        suffix=2310,
+        action_kind=ActionKind.SPINOFF,
+        components=(component,),
+        security_id=SEC_ACQ,
+    )
+    effect = _effect(
+        suffix=2311,
+        action_kind=ActionKind.SPINOFF,
+        components=(component,),
+        terms=terms,
+        occurrence_id="spin-2",
+        security_id=SEC_ACQ,
+    )
+    spin = _outcome(
+        security_id=SEC_ACQ,
+        terms=(terms,),
+        effects=(effect,),
+        action_kinds=(ActionKind.SPINOFF,),
+    )
+    conversion = _share_action_case(
+        suffix=2320,
+        action_kind=ActionKind.CONVERSION,
+        components=(_shares(numerator="1", denominator="1", recipient=SEC_OTHER),),
+        claim_status="converted",
+    )
+    state = _state(holdings=(_holding(SEC_ACQ, quantity=100),))
+    targets = (_target(SEC_ACQ, 100), _target(SEC_A, 0))
+
+    # The conversion of SEC_A is read before the spin-off credits SEC_A.
+    with pytest.raises(IndeterminateValuationError, match="no proven M2 accounting"):
+        _processor().apply_pre_open_actions(state, targets, (conversion, spin), _key())
+
+
+def test_a_future_dividend_without_an_ex_date_waits_until_it_is_effective() -> None:
+    _, _, outcome = _dividend_case(
+        amount="0.5",
+        suffix=2400,
+        dates=(_date_fact("record", ENTITLED_AT), _date_fact("payable", PAYABLE_AT)),
+    )
+    effect = _effect(
+        suffix=2401,
+        action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
+        components=(_cash(amount="0.5"),),
+        terms=outcome.terms_records[0],
+        effective_at=ENTITLED_AT,
+    )
+    future = _outcome(terms=outcome.terms_records, effects=(effect,))
+    early = _state(holdings=(_holding(quantity=100),), day=LATER_DAY)
+
+    # The effect is not yet effective, so its missing ex date cannot yet say
+    # anything about this book.
+    unchanged, _ = _processor().apply_pre_open_actions(
+        early, (), (future,), _key(LATER_DAY)
+    )
+    assert unchanged is early
+
+    # Control: once effective, the missing ex date halts the run.
+    due = _state(holdings=(_holding(quantity=100),), day=ENTITLED_DAY)
+    with pytest.raises(IndeterminateValuationError, match="requires a source ex date"):
+        _processor().apply_pre_open_actions(due, (), (future,), _key(ENTITLED_DAY))
+
+
+def test_a_dividend_effective_after_its_ex_date_is_indeterminate() -> None:
+    _, _, outcome = _dividend_case(
+        amount="0.5",
+        suffix=2410,
+        dates=(_date_fact("ex", BETWEEN_AT), _date_fact("payable", PAYABLE_AT)),
+    )
+    effect = _effect(
+        suffix=2411,
+        action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
+        components=(_cash(amount="0.5"),),
+        terms=outcome.terms_records[0],
+        effective_at=ENTITLED_AT,
+    )
+    late = _outcome(terms=outcome.terms_records, effects=(effect,))
+    state = _state(holdings=(_holding(quantity=100),), day=LATER_DAY)
+
+    # The ex date falls in this window, but the occurrence proving the
+    # entitlement is effective only later. An entitlement never vests before
+    # the evidence that proves it (spec 12.3, issue 82).
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="cannot vest before the occurrence that proves it",
+    ):
+        _processor().apply_pre_open_actions(state, (), (late,), _key(LATER_DAY))
+
+
+def test_delivered_cash_from_another_source_is_indeterminate() -> None:
+    # The effect proves synthetic-a's occ-1. A delivery from synthetic-b that
+    # reuses the occurrence id is another source's report, which no proven
+    # entitlement of this book explains.
+    terms, effect, _ = _dividend_case(
+        amount="0.5",
+        suffix=2500,
+        dates=(_date_fact("ex", EFFECT_AT), _date_fact("payable", PAYABLE_AT)),
+    )
+    delivery = _delivery(components=(_cash(amount="0.5"),), source_id=SOURCE_B)
+    outcome = _outcome(terms=(terms,), effects=(effect,), delivery_groups=(delivery,))
+    state = _state(holdings=(_holding(quantity=100),), cash="1000", day=PAYABLE_DAY)
+
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="matches no pending claim and no proven entitlement",
+    ):
+        _processor().apply_intrasession_settlements(
+            state, (outcome,), _key(PAYABLE_DAY)
+        )
+
+
+def test_cash_in_lieu_delivered_to_a_whole_share_holder_commits_nothing() -> None:
+    # A 1:8 reverse split pays aggregate-sale cash for fractions, reported
+    # under the share component id. Sixteen shares become exactly two, so
+    # this book is owed no fraction: the delivery pays other holders.
+    terms, effect, _ = _split_case(
+        numerator="1",
+        denominator="8",
+        treatment=_treatment("aggregate_sale_cash"),
+        suffix=2510,
+        dates=(_date_fact("payable", PAYABLE_AT),),
+    )
+    delivery = _delivery(components=(_cash(amount="4", component_id="shares-1"),))
+    outcome = _outcome(
+        terms=(terms,),
+        effects=(effect,),
+        delivery_groups=(delivery,),
+        action_kinds=(ActionKind.REVERSE_SPLIT,),
+    )
+    state = _state(holdings=(_holding(quantity=2),), cash="1000", day=PAYABLE_DAY)
+
+    settled = _processor().apply_intrasession_settlements(
+        state, (outcome,), _key(PAYABLE_DAY)
+    )
+
+    assert settled is state
+
+
+def test_a_delivery_is_reconciled_against_one_proof_per_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import drift.evaluator.corporate_actions as module
+
+    terms, effects, deliveries = [], [], []
+    for index in range(6):
+        dividend_terms, _, _ = _dividend_case(
+            amount="0.5",
+            suffix=2600 + 10 * index,
+            dates=(_date_fact("ex", EFFECT_AT), _date_fact("payable", PAYABLE_AT)),
+        )
+        terms.append(dividend_terms)
+        effects.append(
+            _effect(
+                suffix=2601 + 10 * index,
+                action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
+                components=(_cash(amount="0.5"),),
+                terms=dividend_terms,
+                occurrence_id=f"occ-{index}",
+            )
+        )
+        deliveries.append(
+            _delivery(components=(_cash(amount="0.5"),), occurrence_id=f"occ-{index}")
+        )
+    outcome = _outcome(
+        terms=tuple(terms), effects=tuple(effects), delivery_groups=tuple(deliveries)
+    )
+    state = _state(holdings=(_holding(quantity=100),), cash="1000", day=PAYABLE_DAY)
+    proofs: list[object] = []
+    real = module._effect_contexts
+
+    def counted(*args: object, **kwargs: object) -> object:
+        proofs.append(args)
+        return real(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(module, "_effect_contexts", counted)
+
+    # Six unmatched deliveries, all unowed, re-read every session: proving
+    # the outcome once per delivery made each pass quadratic.
+    settled = _processor().apply_intrasession_settlements(
+        state, (outcome,), _key(PAYABLE_DAY)
+    )
+
+    assert settled is state
+    assert len(proofs) == 1
+
+
+def _with_an_incomplete_pre_window_record(
+    suffix: int,
+) -> SecurityEconomicOutcomeV1:
+    """A dividend on EFFECT_DAY, beside an old record M1c places before the window.
+
+    The old record is a split with no proven consideration: fine to ignore,
+    since it is never applied, and it must not halt a run by being read.
+    """
+    terms, effect, _ = _dividend_case(
+        amount="0.5",
+        suffix=suffix,
+        dates=(_date_fact("ex", EFFECT_AT), _date_fact("payable", PAYABLE_AT)),
+    )
+    old_terms = _terms(
+        suffix=suffix + 10,
+        action_kind=ActionKind.FORWARD_SPLIT,
+        components=(_shares(numerator="2", denominator="1", component_id="old"),),
+    )
+    old = _effect(
+        suffix=suffix + 11,
+        action_kind=ActionKind.FORWARD_SPLIT,
+        components=(),
+        terms=old_terms,
+        occurrence_id="old-1",
+        effective_at="2019-06-03T00:00:00Z",
+        consideration_status="unknown",
+    )
+    return _outcome(
+        terms=(terms, old_terms),
+        effects=(effect, old),
+        statuses=("effective", "before_window"),
+        delivery_groups=(_delivery(components=(_cash(amount="0.5"),)),),
+        action_kinds=(ActionKind.REGULAR_CASH_DIVIDEND, ActionKind.FORWARD_SPLIT),
+    )
+
+
+def test_an_incomplete_pre_window_record_never_halts_a_paid_dividend() -> None:
+    # The dividend is owed, recorded, delivered and settled. Every later
+    # session reads that delivery again, finds no pending claim, and checks
+    # the evidence explains it. Reading the old incomplete record must not
+    # halt the run the session after the dividend is paid.
+    outcome = _with_an_incomplete_pre_window_record(2720)
+    state = _state(holdings=(_holding(quantity=100),), cash="1000")
+    staged, _ = _processor().apply_pre_open_actions(state, (), (outcome,), _key())
+    settled = _processor().apply_intrasession_settlements(
+        _payable_state(staged), (outcome,), _key(PAYABLE_DAY)
+    )
+    assert settled.cash_balance == Decimal("1050.0")
+
+    again = _processor().apply_intrasession_settlements(
+        settled, (outcome,), _key(PAYABLE_DAY)
+    )
+
+    assert again is settled
+
+
+def test_an_incomplete_pre_window_record_never_halts_an_unowed_delivery() -> None:
+    outcome = _with_an_incomplete_pre_window_record(2740)
+    # Bought after the ex date, so owed nothing.
+    state = _state(holdings=(_holding(quantity=100),), cash="1000", day=PAYABLE_DAY)
+
+    settled = _processor().apply_intrasession_settlements(
+        state, (outcome,), _key(PAYABLE_DAY)
+    )
+
+    assert settled is state
+
+
+def test_an_incomplete_pre_window_record_explains_nothing() -> None:
+    # Control: a delivery that only the incomplete record could explain is
+    # still unexplained, so the run halts rather than taking it as unowed.
+    outcome = _with_an_incomplete_pre_window_record(2760)
+    unexplained = _outcome(
+        terms=outcome.terms_records,
+        effects=outcome.effect_records,
+        statuses=("effective", "before_window"),
+        delivery_groups=(
+            _delivery(
+                components=(_cash(amount="1", component_id="old"),),
+                occurrence_id="old-1",
+            ),
+        ),
+        action_kinds=(ActionKind.REGULAR_CASH_DIVIDEND, ActionKind.FORWARD_SPLIT),
+    )
+    state = _state(holdings=(_holding(quantity=100),), cash="1000", day=PAYABLE_DAY)
+
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="matches no pending claim and no proven entitlement",
+    ):
+        _processor().apply_intrasession_settlements(
+            state, (unexplained,), _key(PAYABLE_DAY)
+        )
+
+
+def test_a_duplicated_pre_window_record_explains_nothing() -> None:
+    # Two reports M1c places before the window, of one occurrence and kind,
+    # that disagree on what is owed: cash-1 against cash-2. Neither can be
+    # taken as proof, so a delivery of cash-1 is not explained by either.
+    terms, first, _ = _dividend_case(
+        amount="0.5",
+        suffix=2780,
+        dates=(_date_fact("ex", BEFORE_CLOCK_AT), _date_fact("payable", PAYABLE_AT)),
+    )
+    first = _effect(
+        suffix=2781,
+        action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
+        components=(_cash(amount="0.5"),),
+        terms=terms,
+        effective_at=BEFORE_CLOCK_AT,
+    )
+    second = _effect(
+        suffix=2782,
+        action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
+        components=(_cash(amount="0.5", component_id="cash-2"),),
+        terms=terms,
+        effective_at=BEFORE_CLOCK_AT,
+    )
+    delivery = _delivery(components=(_cash(amount="0.5"),))
+    state = _state(holdings=(_holding(quantity=100),), cash="1000", day=PAYABLE_DAY)
+
+    # Control: one such report explains the delivery.
+    single = _outcome(
+        terms=(terms,),
+        effects=(first,),
+        statuses=("before_window",),
+        delivery_groups=(delivery,),
+    )
+    assert (
+        _processor().apply_intrasession_settlements(state, (single,), _key(PAYABLE_DAY))
+        is state
+    )
+
+    duplicated = _outcome(
+        terms=(terms,),
+        effects=(first, second),
+        statuses=("before_window", "before_window"),
+        delivery_groups=(delivery,),
+    )
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="matches no pending claim and no proven entitlement",
+    ):
+        _processor().apply_intrasession_settlements(
+            state, (duplicated,), _key(PAYABLE_DAY)
+        )
+
+
+def test_a_pre_window_copy_of_an_effective_report_adds_no_explanation() -> None:
+    # One occurrence reported twice: once effective, once before the window.
+    # The effective report alone explains the delivery; the old copy must not
+    # become a second explanation that makes the delivery ambiguous.
+    terms, effective, _ = _dividend_case(
+        amount="0.5",
+        suffix=2800,
+        dates=(_date_fact("ex", EFFECT_AT), _date_fact("payable", PAYABLE_AT)),
+    )
+    copy = _effect(
+        suffix=2802,
+        action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
+        components=(_cash(amount="0.5"),),
+        terms=terms,
+        effective_at=BEFORE_CLOCK_AT,
+    )
+    outcome = _outcome(
+        terms=(terms,),
+        effects=(effective, copy),
+        statuses=("effective", "before_window"),
+        delivery_groups=(_delivery(components=(_cash(amount="0.5"),)),),
+    )
+    # Bought after the ex date, so owed nothing.
+    state = _state(holdings=(_holding(quantity=100),), cash="1000", day=PAYABLE_DAY)
+
+    settled = _processor().apply_intrasession_settlements(
+        state, (outcome,), _key(PAYABLE_DAY)
+    )
+
+    assert settled is state
+
+
+def test_a_before_window_effect_explains_only_a_pre_clock_entitlement() -> None:
+    # M1c reports the effect as occurring before its evidence window, and the
+    # delivered cash lands inside the clock. It is proof only of an
+    # entitlement that vested before the clock's first session, which the
+    # opening book already carries.
+    delivery = _delivery(components=(_cash(amount="0.5"),))
+    state = _state(holdings=(_holding(quantity=100),), cash="1000", day=PAYABLE_DAY)
+    for ex_at, vests_before_the_clock in ((BEFORE_CLOCK_AT, True), (EFFECT_AT, False)):
+        terms, effect, _ = _dividend_case(
+            amount="0.5",
+            suffix=2700 if vests_before_the_clock else 2710,
+            dates=(_date_fact("ex", ex_at), _date_fact("payable", PAYABLE_AT)),
+        )
+        effect = _effect(
+            suffix=2701 if vests_before_the_clock else 2711,
+            action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
+            components=(_cash(amount="0.5"),),
+            terms=terms,
+            effective_at=ex_at,
+        )
+        outcome = _outcome(
+            terms=(terms,),
+            effects=(effect,),
+            statuses=("before_window",),
+            delivery_groups=(delivery,),
+        )
+        if vests_before_the_clock:
+            settled = _processor().apply_intrasession_settlements(
+                state, (outcome,), _key(PAYABLE_DAY)
+            )
+            assert settled is state
+        else:
+            # Vested on the clock's first session, which the pre-open pass
+            # never saw, so the book may well have been owed it.
+            with pytest.raises(
+                IndeterminateValuationError, match="before the evidence window"
+            ):
+                _processor().apply_intrasession_settlements(
+                    state, (outcome,), _key(PAYABLE_DAY)
+                )
+
+
 def test_effect_without_an_identified_occurrence_is_indeterminate() -> None:
     component = _shares(
         numerator="2", denominator="1", treatment=_treatment("round_down")
@@ -2442,7 +3776,11 @@ def test_effect_asserting_another_terms_version_is_indeterminate() -> None:
         suffix=720,
         action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
         components=(component,),
-        dates=(_date_fact("record", EFFECT_AT), _date_fact("payable", PAYABLE_AT)),
+        dates=(
+            _date_fact("ex", EFFECT_AT),
+            _date_fact("record", EFFECT_AT),
+            _date_fact("payable", PAYABLE_AT),
+        ),
     )
     effect = _effect(
         suffix=721,
@@ -2507,7 +3845,11 @@ def test_two_sources_reporting_one_occurrence_fail_closed_on_identity() -> None:
         suffix=610,
         action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
         components=(component,),
-        dates=(_date_fact("record", EFFECT_AT), _date_fact("payable", PAYABLE_AT)),
+        dates=(
+            _date_fact("ex", EFFECT_AT),
+            _date_fact("record", EFFECT_AT),
+            _date_fact("payable", PAYABLE_AT),
+        ),
         source_id="synthetic-b",
     )
     effect_b = _effect(
@@ -2664,6 +4006,7 @@ def test_dividend_share_basis_selects_pre_or_post_split_quantity() -> None:
             action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
             components=(cash_component,),
             dates=(
+                _date_fact("ex", EFFECT_AT),
                 _date_fact("record", EFFECT_AT),
                 _date_fact("payable", PAYABLE_AT),
             ),
@@ -2758,7 +4101,11 @@ def test_source_date_that_pins_no_session_is_indeterminate() -> None:
     _, _, outcome = _dividend_case(
         amount="2",
         suffix=710,
-        dates=(_date_fact("record", EFFECT_AT), interval),
+        dates=(
+            _date_fact("ex", EFFECT_AT),
+            _date_fact("record", EFFECT_AT),
+            interval,
+        ),
     )
     state = _state(holdings=(_holding(quantity=100),))
     with pytest.raises(
@@ -2786,7 +4133,11 @@ def test_cash_amount_is_divided_by_its_source_unit_denominator() -> None:
         suffix=730,
         action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
         components=(component,),
-        dates=(_date_fact("record", EFFECT_AT), _date_fact("payable", PAYABLE_AT)),
+        dates=(
+            _date_fact("ex", EFFECT_AT),
+            _date_fact("record", EFFECT_AT),
+            _date_fact("payable", PAYABLE_AT),
+        ),
     )
     effect = _effect(
         suffix=731,
@@ -2830,6 +4181,7 @@ def test_payable_date_before_the_entitlement_session_is_indeterminate() -> None:
         amount="2",
         suffix=750,
         dates=(
+            _date_fact("ex", PAYABLE_AT),
             _date_fact("record", PAYABLE_AT),
             _date_fact("payable", EFFECT_AT),
         ),
@@ -2858,7 +4210,11 @@ def test_entitlement_before_the_proven_occurrence_is_indeterminate() -> None:
         suffix=770,
         action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
         components=(component,),
-        dates=(_date_fact("record", EFFECT_AT), _date_fact("payable", PAYABLE_AT)),
+        dates=(
+            _date_fact("ex", EFFECT_AT),
+            _date_fact("record", EFFECT_AT),
+            _date_fact("payable", PAYABLE_AT),
+        ),
     )
     effect = _effect(
         suffix=771,
