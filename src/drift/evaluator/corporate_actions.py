@@ -534,8 +534,8 @@ class CorporateActionProcessor:
         # Share-mutating actions settle before cash distributions so that a
         # source quoting cash per post-action share is answered against a
         # share count that has already absorbed this window's share actions.
-        # _require_one_share_date leaves at most one share-action date per
-        # exposed security, so "pre-action" is always the prior close and
+        # _require_no_exposed_conflict leaves at most one share-action date
+        # per exposed security, so "pre-action" is always the prior close and
         # "post-action" is after that one date's actions.
         for context in contexts:
             if not _is_cash_distribution(context.payload):
