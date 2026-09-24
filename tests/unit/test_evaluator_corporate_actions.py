@@ -3392,6 +3392,41 @@ def test_a_distribution_beside_a_share_action_on_another_date_applies() -> None:
     assert updated.pending_cash_claims[0].total_cash_expected == Decimal("50.0")
 
 
+def test_a_continuing_liquidation_beside_a_share_action_on_another_date() -> None:
+    # A liquidating distribution on a continuing claim erases no share, so it
+    # shares a window with Monday's split exactly as a dividend does.
+    split_terms, split_effect = _split_effect(
+        SEC_A, ActionKind.FORWARD_SPLIT, "2", "1", LATER_AT, 2280
+    )
+    liquidation_terms = _terms(
+        suffix=2290,
+        action_kind=ActionKind.LIQUIDATION,
+        components=(_cash(amount="7"),),
+        dates=(_date_fact("ex", BETWEEN_AT), _date_fact("payable", PAYABLE_AT)),
+    )
+    liquidation_effect = _effect(
+        suffix=2291,
+        action_kind=ActionKind.LIQUIDATION,
+        components=(_cash(amount="7"),),
+        terms=liquidation_terms,
+        occurrence_id="occ-liquidation",
+        effective_at=BETWEEN_AT,
+    )
+    outcome = _outcome(
+        terms=(split_terms, liquidation_terms),
+        effects=(split_effect, liquidation_effect),
+        action_kinds=(ActionKind.FORWARD_SPLIT, ActionKind.LIQUIDATION),
+    )
+    state = _state(holdings=(_holding(quantity=100),), day=LATER_DAY)
+
+    updated, _ = _processor().apply_pre_open_actions(
+        state, (), (outcome,), _key(LATER_DAY)
+    )
+
+    assert _quantities(updated.holdings) == {SEC_A: 200}
+    assert updated.pending_cash_claims[0].total_cash_expected == Decimal("700")
+
+
 def test_a_before_window_effect_is_never_applied() -> None:
     _, _, outcome = _split_case(
         numerator="2",

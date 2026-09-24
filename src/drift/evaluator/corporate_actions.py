@@ -83,7 +83,8 @@ SHARE_ACQUISITION_KINDS = frozenset(
     {ActionKind.STOCK_ACQUISITION, ActionKind.MIXED_ACQUISITION}
 )
 # Every action that changes a share count, as actor or as recipient. Cash
-# distributions pay on shares without changing them.
+# distributions pay on shares without changing them, and so does a
+# liquidation on a continuing claim (see _is_cash_distribution).
 SHARE_MUTATING_KINDS = (
     SPLIT_KINDS
     | SHARE_ACQUISITION_KINDS
@@ -507,6 +508,9 @@ class CorporateActionProcessor:
         members: dict[UUID, list[_EffectContext]] = {}
         for context in contexts:
             if context.payload.action_kind not in SHARE_MUTATING_KINDS:
+                continue
+            if _is_cash_distribution(context.payload):
+                # A liquidation on a continuing claim changes no share count.
                 continue
             if not window.contains(context.effective_on):
                 continue
