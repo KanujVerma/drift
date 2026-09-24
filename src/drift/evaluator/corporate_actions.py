@@ -158,12 +158,25 @@ class _SessionWindow:
 
 
 @dataclass(frozen=True)
-class _ShareDateConflict:
-    """Share actions touching one security on two or more dates of a window."""
+class _ShareActionConflict:
+    """Two or more share actions touching one security in one window."""
 
     security_id: UUID7
     dates: tuple[date, ...]
+    # The conflicting actions' kinds, in their reported order.
+    actions: tuple[str, ...]
     # Every security any of those actions acts on or delivers into.
+    touched: frozenset[UUID7]
+
+
+@dataclass(frozen=True)
+class _UnknownClaim:
+    """An outcome whose composed claim status is unknown, live in this window."""
+
+    security_id: UUID7
+    # The live effects' kinds, and every security any effect acts on or
+    # delivers into.
+    actions: tuple[str, ...]
     touched: frozenset[UUID7]
 
 
@@ -176,10 +189,6 @@ class _EffectContext:
     occurrence_id: str
     effective_on: date
     terms: TermsIndex
-    # The claim status M1c composes across every effect of the outcome. One
-    # effect may read cleanly while the composition cannot order it against
-    # another, so an action that ends or pays out the claim reads both.
-    composed_claim_status: str
     # M1c places the effect before the outcome's evidence window. Such an
     # effect is never applied; it can only explain delivered cash.
     before_window: bool = False
@@ -381,23 +390,27 @@ class CorporateActionProcessor:
             targets=_unique_targets(staged_targets),
             claims={},
         )
-        supported: list[list[_EffectContext]] = []
+        supported: list[tuple[SecurityEconomicOutcomeV1, list[_EffectContext]]] = []
         unsupported: list[SecurityEconomicOutcomeV1] = []
         for outcome in _ordered_outcomes(economic_outcomes):
             if outcome.resolution.support_status == "supported":
-                supported.append(_effect_contexts(outcome))
+                supported.append((outcome, _effect_contexts(outcome)))
             else:
                 unsupported.append(outcome)
-        conflicts = _share_date_conflicts(
-            [context for contexts in supported for context in contexts], window
+        conflicts = _share_action_conflicts(
+            [context for _, contexts in supported for context in contexts], window
         )
-        # Judged against the prior close's book here, and again against the
-        # book the pass leaves below: a disposal may empty the first, and a
-        # chain of conversions may reach a security only in the second.
+        unknown = self._unknown_claims(supported, window)
+        # Both rules are judged against the prior close's book here, and
+        # again against the book the pass leaves below: a disposal may empty
+        # the first, and a chain of conversions may reach a security only in
+        # the second.
         self._require_no_exposed_conflict(conflicts, book)
-        for contexts in supported:
+        self._require_no_exposed_unknown_claim(unknown, book)
+        for _, contexts in supported:
             self._apply_contexts(contexts, book, window)
         self._require_no_exposed_conflict(conflicts, book)
+        self._require_no_exposed_unknown_claim(unknown, book)
         # Exposure to evidence this pass cannot apply is judged against the
         # book the pass leaves: a holding or positive target credited by an
         # earlier dispatch, such as a spin-off child, is exposure too.
@@ -506,27 +519,105 @@ class CorporateActionProcessor:
     # -- pre-open internals -----------------------------------------------
 
     def _require_no_exposed_conflict(
-        self, conflicts: Iterable[_ShareDateConflict], book: _Book
+        self, conflicts: Iterable[_ShareActionConflict], book: _Book
     ) -> None:
-        """Refuse a window whose share actions on one security span two dates.
+        """Refuse a window in which two share actions touch one security.
 
-        A window can hold several dates when the clock skips days. The pass
-        applies its share actions by security and by record hash, not by date,
-        so two actions touching one security on two dates would compound in
-        an unproven order: a 1:10 reverse split on Friday and a 3:1 split on
-        Monday turn 105 shares into 30 in date order and into 31 otherwise.
-        One date per security keeps every result independent of that order.
-        Only a book exposed to one of the conflicting actions is halted.
-        Raising after dispatch is safe, because a pass that raises is
-        discarded whole.
+        The pass applies share actions by security id and record hash, never
+        by time, so two actions touching one security compound in an unproven
+        order, on one date or several. A 1:10 reverse split on Friday and a
+        3:1 split on Monday turn 105 shares into 30 in date order and into 31
+        otherwise; a split at 10:00 and a cash acquisition at 15:00 of one
+        date owe 2400 in time order and 1200 otherwise. At most one share
+        action per security keeps every result independent of that order.
+        Proving a same-date order from the effects' intraday instants is not
+        done in M2 V1. Only a book exposed to a security one of the
+        conflicting actions touches is halted. Raising after dispatch is safe,
+        because a pass that raises is discarded whole.
         """
         for conflict in conflicts:
             if any(self._is_exposed(touched, book) for touched in conflict.touched):
                 spelled = ", ".join(str(day) for day in conflict.dates)
                 raise IndeterminateValuationError(
                     f"one pre-open window holds share actions on {spelled} "
-                    f"touching {conflict.security_id}, and M2 V1 proves no order "
-                    "between share actions on different dates of one window"
+                    f"touching {conflict.security_id} "
+                    f"({', '.join(conflict.actions)}), and M2 V1 proves no order "
+                    "between share actions on one security in one window"
+                )
+
+    def _unknown_claims(
+        self,
+        supported: Iterable[tuple[SecurityEconomicOutcomeV1, list[_EffectContext]]],
+        window: _SessionWindow,
+    ) -> tuple[_UnknownClaim, ...]:
+        """Every outcome M1c composes as unknown that acts in this window."""
+        found: list[_UnknownClaim] = []
+        for outcome, contexts in supported:
+            if outcome.resolution.claim_status != "unknown":
+                continue
+            live = [context for context in contexts if self._is_live(context, window)]
+            if not live:
+                continue
+            found.append(
+                _UnknownClaim(
+                    security_id=outcome.security_id,
+                    actions=tuple(
+                        sorted({context.payload.action_kind.value for context in live})
+                    ),
+                    touched=frozenset(
+                        {outcome.security_id}
+                        | {
+                            touched
+                            for context in contexts
+                            for touched in _touched_securities(context)
+                        }
+                    ),
+                )
+            )
+        return tuple(found)
+
+    def _is_live(self, context: _EffectContext, window: _SessionWindow) -> bool:
+        """Whether an effect can commit anything in this window.
+
+        A share action or disposal commits on its effective date. A cash
+        distribution commits on its entitlement date, which may fall in a
+        window later than its effect; one whose entitlement cannot be dated
+        counts as live once it is effective, since it could vest now.
+        """
+        if window.contains(context.effective_on):
+            return True
+        if not _is_cash_distribution(context.payload):
+            return False
+        if context.effective_on > window.current:
+            return False
+        try:
+            vests = self._entitlement_session(
+                context, _date_facts(_terms_payload(context))
+            )
+        except IndeterminateValuationError:
+            return True
+        return window.contains(vests)
+
+    def _require_no_exposed_unknown_claim(
+        self, claims: Iterable[_UnknownClaim], book: _Book
+    ) -> None:
+        """Refuse a window acting on a claim M1c composes as unknown.
+
+        Two liquidations at one instant with conflicting statuses, or any
+        continuing effect after an extinguishing one, each read cleanly
+        alone, while M1c composes the claim as ``unknown``: whether the claim
+        survives is unproven. Any effect of that outcome that commits in this
+        window (a split, a dividend, a spin-off, a stock dividend, an
+        acquisition or a liquidation) then builds on an unproven claim, so an
+        exposed book halts, judged against the prior close's book and the
+        book the pass leaves.
+        """
+        for claim in claims:
+            if any(self._is_exposed(touched, book) for touched in claim.touched):
+                raise IndeterminateValuationError(
+                    f"M1c composes the claim of {claim.security_id} as unknown, so "
+                    f"whether it survives this window's {', '.join(claim.actions)} "
+                    "is not proven"
                 )
 
     def _apply_contexts(
@@ -538,9 +629,9 @@ class CorporateActionProcessor:
         # Share-mutating actions settle before cash distributions so that a
         # source quoting cash per post-action share is answered against a
         # share count that has already absorbed this window's share actions.
-        # _require_no_exposed_conflict leaves at most one share-action date
-        # per exposed security, so "pre-action" is always the prior close and
-        # "post-action" is after that one date's actions.
+        # _require_no_exposed_conflict leaves at most one share action per
+        # exposed security, so "pre-action" is always the prior close and
+        # "post-action" is after that one action.
         for context in contexts:
             if not _is_cash_distribution(context.payload):
                 self._dispatch(context, book, window)
@@ -709,8 +800,6 @@ class CorporateActionProcessor:
         if not window.contains(entitlement_on):
             return
         liquidating = context.payload.action_kind == ActionKind.LIQUIDATION
-        if liquidating:
-            _require_composed_claim(context)
         if entitlement_on != window.current and _has_due_bill_facts(dates):
             # A proven due-bill rule names the session holders are entitled
             # on. When the clock holds no such session, no M2 V1 rule says
@@ -757,7 +846,6 @@ class CorporateActionProcessor:
         if holding is None and not _stages_a_buy(book, context.security_id):
             return
         _require_ended_claim(context)
-        _require_composed_claim(context)
         components = _only_cash_components(context, "a cash acquisition")
         # The claim ended, so no share of it can be traded at the open. A kept
         # target would re-buy the extinguished security.
@@ -776,7 +864,6 @@ class CorporateActionProcessor:
             return
         target = book.targets.get(context.security_id)
         _require_ended_claim(context)
-        _require_composed_claim(context)
         component = _single_share_component(
             context,
             same_recipient=False,
@@ -875,7 +962,6 @@ class CorporateActionProcessor:
         holding = book.holdings.get(context.security_id)
         if holding is None and not _stages_a_buy(book, context.security_id):
             return
-        _require_composed_claim(context)
         status = context.payload.claim_status
         if status != "extinguished":
             raise IndeterminateValuationError(
@@ -1323,9 +1409,7 @@ def _effect_contexts(
             )
         record = records[projection.source_record_hash]
         if projection.effective_status == "effective":
-            context = _proven_context(
-                record, terms, resolution.claim_status, before_window=False
-            )
+            context = _proven_context(record, terms, before_window=False)
             marker = (context.occurrence_id, context.payload.action_kind)
             if marker in applied:
                 # Two reports of one occurrence would apply one split twice.
@@ -1337,11 +1421,7 @@ def _effect_contexts(
             contexts.append(context)
         elif projection.effective_status == "before_window" and include_before_window:
             try:
-                earlier.append(
-                    _proven_context(
-                        record, terms, resolution.claim_status, before_window=True
-                    )
-                )
+                earlier.append(_proven_context(record, terms, before_window=True))
             except IndeterminateValuationError:
                 continue
     markers = [
@@ -1356,11 +1436,7 @@ def _effect_contexts(
 
 
 def _proven_context(
-    record: EconomicEffectVersionV1,
-    terms: TermsIndex,
-    composed_claim_status: str,
-    *,
-    before_window: bool,
+    record: EconomicEffectVersionV1, terms: TermsIndex, *, before_window: bool
 ) -> _EffectContext:
     """Prove one occurred effect is safe to read, and bind it to its source."""
     payload = record.payload
@@ -1393,7 +1469,6 @@ def _proven_context(
             record.effective_time, role="effect effective time"
         ),
         terms=terms,
-        composed_claim_status=composed_claim_status,
         before_window=before_window,
     )
 
@@ -1417,12 +1492,15 @@ def _owed_index(outcome: SecurityEconomicOutcomeV1) -> _OwedIndex:
     return index
 
 
-def _share_date_conflicts(
+def _share_action_conflicts(
     contexts: Iterable[_EffectContext], window: _SessionWindow
-) -> tuple[_ShareDateConflict, ...]:
-    """Every security the window's share actions touch on more than one date."""
-    dates: dict[UUID7, set[date]] = {}
-    touched: dict[UUID7, set[UUID7]] = {}
+) -> tuple[_ShareActionConflict, ...]:
+    """Every security two or more of the window's share actions touch.
+
+    Actions are counted across every outcome of the pass, so a chain in
+    which one outcome's acquirer is another outcome's subject counts too.
+    """
+    members: dict[UUID7, list[_EffectContext]] = {}
     for context in contexts:
         if context.payload.action_kind not in SHARE_MUTATING_KINDS:
             continue
@@ -1431,19 +1509,32 @@ def _share_date_conflicts(
             continue
         if not window.contains(context.effective_on):
             continue
-        securities = _touched_securities(context)
-        for security_id in securities:
-            dates.setdefault(security_id, set()).add(context.effective_on)
-            touched.setdefault(security_id, set()).update(securities)
-    return tuple(
-        _ShareDateConflict(
-            security_id=security_id,
-            dates=tuple(sorted(dates[security_id])),
-            touched=frozenset(touched[security_id]),
+        # A split delivers into its own security; count each action once.
+        for security_id in dict.fromkeys(_touched_securities(context)):
+            members.setdefault(security_id, []).append(context)
+    conflicts: list[_ShareActionConflict] = []
+    for security_id in sorted(members, key=_security_order):
+        found = members[security_id]
+        if len(found) < 2:
+            continue
+        ordered = sorted(
+            found,
+            key=lambda item: (
+                item.record.effective_time.lower_bound,
+                item.payload.action_kind.value,
+            ),
         )
-        for security_id in sorted(dates, key=_security_order)
-        if len(dates[security_id]) > 1
-    )
+        conflicts.append(
+            _ShareActionConflict(
+                security_id=security_id,
+                dates=tuple(sorted({item.effective_on for item in found})),
+                actions=tuple(item.payload.action_kind.value for item in ordered),
+                touched=frozenset(
+                    touched for item in found for touched in _touched_securities(item)
+                ),
+            )
+        )
+    return tuple(conflicts)
 
 
 def _touched_securities(context: _EffectContext) -> tuple[UUID7, ...]:
@@ -1644,22 +1735,6 @@ def _require_no_cash(context: _EffectContext, label: str) -> None:
     if _cash_components(context):
         raise IndeterminateValuationError(
             f"{label} carries no source cash component in M1c terms"
-        )
-
-
-def _require_composed_claim(context: _EffectContext) -> None:
-    """Refuse to end or pay out a claim M1c cannot compose.
-
-    Two liquidations at one instant with conflicting claim statuses, or a
-    continuing effect after an extinguishing one, each read cleanly alone,
-    while M1c composes the claim as ``unknown``: whether any share survives
-    is then unproven, whichever single effect is read.
-    """
-    if context.composed_claim_status == "unknown":
-        raise IndeterminateValuationError(
-            f"M1c composes the claim of {context.security_id} as unknown, so "
-            f"whether it survives the {context.payload.action_kind.value} is "
-            "not proven"
         )
 
 

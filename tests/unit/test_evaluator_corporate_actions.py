@@ -2228,7 +2228,11 @@ def test_realized_disposal_pnl_accumulates_on_the_prior_realized_pnl() -> None:
 
 
 def _conflicting_liquidations(
-    suffix: int, *, composed: str, continuing_at: str = EFFECT_AT
+    suffix: int,
+    *,
+    composed: str,
+    continuing_at: str = EFFECT_AT,
+    final_at: str = EFFECT_AT,
 ) -> SecurityEconomicOutcomeV1:
     """An extinguishing and a continuing liquidation of SEC_A.
 
@@ -2251,6 +2255,7 @@ def _conflicting_liquidations(
         terms=final_terms,
         occurrence_id="occ-final",
         claim_status="extinguished",
+        effective_at=final_at,
     )
     instalment_terms = _terms(
         suffix=suffix + 10,
@@ -2336,9 +2341,16 @@ def test_a_resurrected_liquidation_claim_is_indeterminate() -> None:
 
 
 def test_a_liquidation_m1c_composes_as_ended_or_continuing_applies() -> None:
-    # Control for the composed-status gate: the identical effects compose
-    # cleanly when M1c can order them, and each then applies by its own rule.
-    outcome = _conflicting_liquidations(2940, composed="extinguished")
+    # Control for the composed-status rule: the same two effects, with the
+    # instalment at 10:00 and the final liquidation at 15:00 of one date, are
+    # ones M1c can order, and it composes them as extinguished. Each then
+    # applies by its own rule: 30 for the instalment, 150 for the final.
+    outcome = _conflicting_liquidations(
+        2940,
+        composed="extinguished",
+        continuing_at="2020-06-01T10:00:00Z",
+        final_at="2020-06-01T15:00:00Z",
+    )
     state = _state(holdings=(_holding(quantity=10, basis="100"),), cash="0")
 
     updated, _ = _processor().apply_pre_open_actions(state, (), (outcome,), _key())
@@ -2388,6 +2400,311 @@ def test_an_acquisition_m1c_composes_as_unknown_is_indeterminate(kind: str) -> N
                 state, (), (outcome,), _key()
             )
             assert SEC_A not in _quantities(updated.holdings)
+
+
+def _resurrected_after(
+    terminal_at: str,
+    later: tuple[CorporateActionTermsVersionV1, EconomicEffectVersionV1],
+    *,
+    terminal_before_window: bool = False,
+) -> SecurityEconomicOutcomeV1:
+    """An extinguishing cash acquisition of SEC_A, then a continuing effect.
+
+    M1c composes that chronology as ``claim_terminal_state_resurrected``,
+    so ``unknown``. The continuing effect is a kind with no gate of its own.
+    """
+    cash_terms, cash_effect = _same_date_effect(
+        3400,
+        ActionKind.CASH_ACQUISITION,
+        (_cash(amount="12", component_id="terminal"),),
+        at=terminal_at,
+        claim_status="extinguished",
+        occurrence="occ-terminal",
+        dates=(_date_fact("payable", PAYABLE_AT),),
+    )
+    later_terms, later_effect = later
+    payload = later_effect.payload
+    assert isinstance(payload, OccurredEffectV1)
+    return _outcome(
+        terms=(cash_terms, later_terms),
+        effects=(cash_effect, later_effect),
+        statuses=(
+            ("before_window" if terminal_before_window else "effective"),
+            "effective",
+        ),
+        action_kinds=(ActionKind.CASH_ACQUISITION, payload.action_kind),
+        claim_status="unknown",
+    )
+
+
+def _continuing(
+    kind: str, at: str
+) -> tuple[CorporateActionTermsVersionV1, EconomicEffectVersionV1]:
+    if kind == "split":
+        return _same_date_effect(
+            3410,
+            ActionKind.FORWARD_SPLIT,
+            (_shares(numerator="2", denominator="1", component_id="split"),),
+            at=at,
+            claim_status="continuing",
+            occurrence="occ-later",
+        )
+    if kind == "dividend":
+        return _same_date_effect(
+            3410,
+            ActionKind.REGULAR_CASH_DIVIDEND,
+            (_cash(amount="1", component_id="dividend"),),
+            at=at,
+            claim_status="continuing",
+            occurrence="occ-later",
+            dates=(_date_fact("ex", at), _date_fact("payable", PAYABLE_AT)),
+        )
+    if kind == "spinoff":
+        return _same_date_effect(
+            3410,
+            ActionKind.SPINOFF,
+            (
+                _shares(
+                    numerator="1",
+                    denominator="2",
+                    component_id="spin",
+                    recipient=SEC_CHILD,
+                    meaning="additional_per_predecessor",
+                ),
+            ),
+            at=at,
+            claim_status="continuing",
+            occurrence="occ-later",
+        )
+    return _same_date_effect(
+        3410,
+        ActionKind.STOCK_DIVIDEND,
+        (
+            _shares(
+                numerator="1",
+                denominator="10",
+                component_id="stock-dividend",
+                meaning="additional_per_predecessor",
+            ),
+        ),
+        at=at,
+        claim_status="continuing",
+        occurrence="occ-later",
+    )
+
+
+@pytest.mark.parametrize("kind", ["split", "dividend"])
+def test_a_resurrected_claim_halts_an_ungated_kind_once_exposed(kind: str) -> None:
+    # C1: the extinguishing acquisition on EFFECT_DAY finds the book not
+    # exposed; the continuing split or dividend on LATER_DAY finds it
+    # holding SEC_A. Before the fix the split doubled the holding, or the
+    # dividend recorded a claim of 100, on a claim M1c could not compose.
+    outcome = _resurrected_after(EFFECT_AT, _continuing(kind, LATER_AT))
+    processor = _processor()
+    flat = _state(cash="10000")
+    first, _ = processor.apply_pre_open_actions(flat, (), (outcome,), _key())
+    assert first is flat
+
+    held = _state(holdings=(_holding(quantity=100),), day=LATER_DAY)
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="M1c composes the claim of .* as unknown",
+    ):
+        processor.apply_pre_open_actions(held, (), (outcome,), _key(LATER_DAY))
+
+
+@pytest.mark.parametrize("kind", ["split", "dividend", "spinoff", "stock_dividend"])
+def test_a_resurrected_claim_halts_when_the_terminal_predates_the_window(
+    kind: str,
+) -> None:
+    # C2: M1c places the extinguishing acquisition before its evidence
+    # window, so the pre-open pass never reads it; the in-window continuing
+    # effect still sits on a claim M1c composes as unknown.
+    outcome = _resurrected_after(
+        BEFORE_CLOCK_AT, _continuing(kind, EFFECT_AT), terminal_before_window=True
+    )
+    state = _state(holdings=(_holding(quantity=100),))
+
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="M1c composes the claim of .* as unknown",
+    ):
+        _processor().apply_pre_open_actions(state, (), (outcome,), _key())
+
+    # Control: a book exposed to nothing the outcome touches is not halted.
+    elsewhere = _state(holdings=(_holding(SEC_OTHER, quantity=5),))
+    unchanged, _ = _processor().apply_pre_open_actions(
+        elsewhere, (), (outcome,), _key()
+    )
+    assert unchanged is elsewhere
+
+
+def test_a_split_with_its_own_unknown_claim_status_halts() -> None:
+    # C3: M1c composes one split whose own claim status is unknown as
+    # unknown. The pass-level rule halts it too.
+    terms, effect = _same_date_effect(
+        3420,
+        ActionKind.FORWARD_SPLIT,
+        (_shares(numerator="2", denominator="1", component_id="split"),),
+        at=EFFECT_AT,
+        claim_status="unknown",
+        occurrence="occ-split",
+    )
+    outcome = _outcome(
+        terms=(terms,),
+        effects=(effect,),
+        action_kinds=(ActionKind.FORWARD_SPLIT,),
+        claim_status="unknown",
+    )
+    state = _state(holdings=(_holding(quantity=100),))
+
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="M1c composes the claim of .* as unknown",
+    ):
+        _processor().apply_pre_open_actions(state, (), (outcome,), _key())
+
+
+def test_an_unknown_claim_halts_a_dividend_that_vests_in_the_window() -> None:
+    # The dividend's effect is dated before this window, but its ex date is
+    # in it, so this pass is the one that records the claim. The rule reads
+    # the entitlement date too, not only the effective date.
+    terms, effect = _same_date_effect(
+        3430,
+        ActionKind.REGULAR_CASH_DIVIDEND,
+        (_cash(amount="1", component_id="dividend"),),
+        at=EFFECT_AT,
+        claim_status="continuing",
+        occurrence="occ-dividend",
+        dates=(_date_fact("ex", LATER_AT), _date_fact("payable", PAYABLE_AT)),
+    )
+    outcome = _outcome(
+        terms=(terms,),
+        effects=(effect,),
+        claim_status="unknown",
+    )
+    state = _state(holdings=(_holding(quantity=100),), day=LATER_DAY)
+
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="M1c composes the claim of .* as unknown",
+    ):
+        _processor().apply_pre_open_actions(state, (), (outcome,), _key(LATER_DAY))
+
+    # Control: once the window holds neither its effect nor its ex date, the
+    # composed unknown has nothing to act on and the pass completes.
+    later = _state(holdings=(_holding(quantity=100),), day=ENTITLED_DAY)
+    unchanged, _ = _processor().apply_pre_open_actions(
+        later, (), (outcome,), _key(ENTITLED_DAY)
+    )
+    assert unchanged is later
+
+
+def test_an_unknown_claim_with_an_undatable_dividend_counts_as_live() -> None:
+    # The dividend is effective and has no ex date, so when it vests cannot
+    # be said: it could vest in this window. The book stages a buy of SEC_A
+    # and holds none, which the dividend path ignores, so only the
+    # pass-level rule sees that the claim it builds on is unknown.
+    terms, effect = _same_date_effect(
+        3470,
+        ActionKind.REGULAR_CASH_DIVIDEND,
+        (_cash(amount="1", component_id="dividend"),),
+        at=EFFECT_AT,
+        claim_status="continuing",
+        occurrence="occ-dividend",
+        dates=(_date_fact("payable", PAYABLE_AT),),
+    )
+    outcome = _outcome(terms=(terms,), effects=(effect,), claim_status="unknown")
+    state = _state(day=LATER_DAY)
+
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="M1c composes the claim of .* as unknown",
+    ):
+        _processor().apply_pre_open_actions(
+            state, (_target(SEC_A, 10),), (outcome,), _key(LATER_DAY)
+        )
+
+
+def test_an_unknown_claim_counts_exposure_to_the_securities_it_delivers() -> None:
+    # SEC_A's outcome composes unknown, with a conversion into SEC_ACQ in
+    # this window. The book holds only SEC_ACQ, the security it delivers
+    # into, which is exposure to that outcome too.
+    terms, effect = _same_date_effect(
+        3460,
+        ActionKind.STOCK_ACQUISITION,
+        (_shares(numerator="1", denominator="1", recipient=SEC_ACQ),),
+        at=EFFECT_AT,
+        claim_status="converted",
+        occurrence="occ-conversion",
+    )
+    outcome = _outcome(
+        terms=(terms,),
+        effects=(effect,),
+        action_kinds=(ActionKind.STOCK_ACQUISITION,),
+        claim_status="unknown",
+    )
+    state = _state(holdings=(_holding(SEC_ACQ, quantity=10, basis="80"),))
+
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="M1c composes the claim of .* as unknown",
+    ):
+        _processor().apply_pre_open_actions(state, (), (outcome,), _key())
+
+
+def test_an_unknown_claim_is_judged_against_the_book_the_pass_leaves() -> None:
+    # The parent SEC_ACQ spins off into SEC_A, which sorts first. SEC_A's own
+    # outcome composes unknown with a dividend vesting now; at the prior
+    # close the book held no SEC_A, but the pass leaves it holding 50.
+    spin_component = _shares(
+        numerator="1",
+        denominator="2",
+        recipient=SEC_A,
+        predecessor=SEC_ACQ,
+        meaning="additional_per_predecessor",
+    )
+    spin_terms = _terms(
+        suffix=3440,
+        action_kind=ActionKind.SPINOFF,
+        components=(spin_component,),
+        security_id=SEC_ACQ,
+    )
+    spin_effect = _effect(
+        suffix=3441,
+        action_kind=ActionKind.SPINOFF,
+        components=(spin_component,),
+        terms=spin_terms,
+        occurrence_id="occ-spin",
+        security_id=SEC_ACQ,
+    )
+    spin = _outcome(
+        security_id=SEC_ACQ,
+        terms=(spin_terms,),
+        effects=(spin_effect,),
+        action_kinds=(ActionKind.SPINOFF,),
+    )
+    dividend_terms, dividend_effect = _same_date_effect(
+        3450,
+        ActionKind.REGULAR_CASH_DIVIDEND,
+        (_cash(amount="1", component_id="dividend"),),
+        at=EFFECT_AT,
+        claim_status="continuing",
+        occurrence="occ-child-dividend",
+        dates=(_date_fact("ex", EFFECT_AT), _date_fact("payable", PAYABLE_AT)),
+    )
+    child = _outcome(
+        terms=(dividend_terms,),
+        effects=(dividend_effect,),
+        claim_status="unknown",
+    )
+    state = _state(holdings=(_holding(SEC_ACQ, quantity=100),))
+
+    with pytest.raises(
+        IndeterminateValuationError,
+        match="M1c composes the claim of .* as unknown",
+    ):
+        _processor().apply_pre_open_actions(state, (), (child, spin), _key())
 
 
 def test_two_disposals_in_one_pass_both_realize() -> None:
@@ -3691,9 +4008,9 @@ def test_an_acquirer_split_and_an_acquisition_on_two_dates_are_indeterminate() -
             state, (), (acquisition, split), _key(LATER_DAY)
         )
 
-    # Control: on a single date there is no date order to lose, so the guard
-    # stays silent and the pass completes. How same-date actions are ordered
-    # is a separate question this test does not pin.
+    # On a single date the two actions still touch the acquirer twice, and
+    # nothing orders them either: the pass would apply them by security id.
+    # Issue 83 (round 3) refuses that too; it is no longer a control.
     same_day = _share_action_case(
         suffix=2220,
         action_kind=ActionKind.STOCK_ACQUISITION,
@@ -3701,7 +4018,12 @@ def test_an_acquirer_split_and_an_acquisition_on_two_dates_are_indeterminate() -
         claim_status="converted",
         effective_at=BETWEEN_AT,
     )
-    _processor().apply_pre_open_actions(state, (), (same_day, split), _key(LATER_DAY))
+    with pytest.raises(
+        IndeterminateValuationError, match=r"share actions on 2020-06-05 touching"
+    ):
+        _processor().apply_pre_open_actions(
+            state, (), (same_day, split), _key(LATER_DAY)
+        )
 
 
 def _conversion(
@@ -3743,8 +4065,10 @@ def test_a_two_hop_conversion_into_a_split_on_another_date_is_indeterminate() ->
     # The book holds only SEC_A. On Monday SEC_A converts into SEC_ACQ and
     # SEC_ACQ into SEC_OTHER; SEC_OTHER split 2:1 on Friday. In date order 105
     # SEC_A shares end as 105 SEC_OTHER; applied by security order they end
-    # as 210. SEC_OTHER is two hops from anything the book held at the prior
-    # close, so only the book the pass leaves shows the exposure.
+    # as 210. Issue 83 (round 3) refuses the chain one hop earlier: SEC_ACQ
+    # is touched by both Monday conversions, two share actions on one
+    # security in one window, and the book holds SEC_A, which one of them
+    # acts on. The prior close's book already shows that exposure.
     split_terms, split_effect = _split_effect(
         SEC_OTHER, ActionKind.FORWARD_SPLIT, "2", "1", BETWEEN_AT, 2320
     )
@@ -3762,7 +4086,11 @@ def test_a_two_hop_conversion_into_a_split_on_another_date_is_indeterminate() ->
     state = _state(holdings=(_holding(quantity=105),), day=LATER_DAY)
 
     with pytest.raises(
-        IndeterminateValuationError, match=r"share actions on 2020-06-05, 2020-06-08"
+        IndeterminateValuationError,
+        match=(
+            r"share actions on 2020-06-08 touching \S+ "
+            r"\(stock_acquisition, stock_acquisition\)"
+        ),
     ):
         _processor().apply_pre_open_actions(state, (), outcomes, _key(LATER_DAY))
 
@@ -3839,6 +4167,175 @@ def test_a_disposal_beside_a_split_on_another_date_is_indeterminate() -> None:
         IndeterminateValuationError, match=r"share actions on 2020-06-05, 2020-06-08"
     ):
         _processor().apply_pre_open_actions(state, (), (outcome,), _key(LATER_DAY))
+
+
+def _same_date_effect(
+    suffix: int,
+    kind: ActionKind,
+    components: tuple[EconomicComponentV1, ...],
+    *,
+    at: str,
+    claim_status: str,
+    occurrence: str,
+    security_id: UUID = SEC_A,
+    dates: tuple[EconomicDateFactV1, ...] = (),
+) -> tuple[CorporateActionTermsVersionV1, EconomicEffectVersionV1]:
+    terms = _terms(
+        suffix=suffix,
+        action_kind=kind,
+        components=components,
+        dates=dates,
+        security_id=security_id,
+    )
+    effect = _effect(
+        suffix=suffix + 1,
+        action_kind=kind,
+        components=components,
+        terms=terms,
+        occurrence_id=occurrence,
+        effective_at=at,
+        claim_status=claim_status,
+        security_id=security_id,
+    )
+    return terms, effect
+
+
+@pytest.mark.parametrize(("split", "acquisition"), [(3100, 3150), (3150, 3100)])
+def test_a_split_then_a_cash_acquisition_on_one_date_is_indeterminate(
+    split: int, acquisition: int
+) -> None:
+    # D1: a 2:1 split at 10:00 and a cash acquisition at 15:00 of one date.
+    # Split first owes 2400 and realizes 1500; acquisition first owes 1200
+    # and realizes 300. The pass applies them in record-hash order, and M2
+    # V1 does not yet prove a same-date order from intraday effect times.
+    split_terms, split_effect = _same_date_effect(
+        split,
+        ActionKind.FORWARD_SPLIT,
+        (_shares(numerator="2", denominator="1", component_id="split"),),
+        at="2020-06-01T10:00:00Z",
+        claim_status="continuing",
+        occurrence="occ-split",
+    )
+    cash_terms, cash_effect = _same_date_effect(
+        acquisition,
+        ActionKind.CASH_ACQUISITION,
+        (_cash(amount="12", component_id="acquisition"),),
+        at="2020-06-01T15:00:00Z",
+        claim_status="extinguished",
+        occurrence="occ-acquisition",
+        dates=(_date_fact("payable", PAYABLE_AT),),
+    )
+    outcome = _outcome(
+        terms=(split_terms, cash_terms),
+        effects=(split_effect, cash_effect),
+        action_kinds=(ActionKind.FORWARD_SPLIT, ActionKind.CASH_ACQUISITION),
+        claim_status="extinguished",
+    )
+    state = _state(holdings=(_holding(quantity=100, basis="900"),), cash="0")
+
+    with pytest.raises(
+        IndeterminateValuationError,
+        match=r"share actions on 2020-06-01 touching .*forward_split.*cash_acquisition",
+    ):
+        _processor().apply_pre_open_actions(state, (), (outcome,), _key())
+
+
+def test_two_claim_ending_actions_on_one_date_are_indeterminate() -> None:
+    # D3: a cash acquisition (converted) at 10:00 and a liquidation
+    # (extinguished) at 15:00 of one date. Each order owes a different claim,
+    # 1200 or 1500, and nothing orders them.
+    cash_terms, cash_effect = _same_date_effect(
+        3200,
+        ActionKind.CASH_ACQUISITION,
+        (_cash(amount="12", component_id="acquisition"),),
+        at="2020-06-01T10:00:00Z",
+        claim_status="converted",
+        occurrence="occ-acquisition",
+        dates=(_date_fact("payable", PAYABLE_AT),),
+    )
+    liquidation_terms, liquidation_effect = _same_date_effect(
+        3210,
+        ActionKind.LIQUIDATION,
+        (_cash(amount="15", component_id="liquidation"),),
+        at="2020-06-01T15:00:00Z",
+        claim_status="extinguished",
+        occurrence="occ-liquidation",
+        dates=(_date_fact("payable", PAYABLE_AT),),
+    )
+    outcome = _outcome(
+        terms=(cash_terms, liquidation_terms),
+        effects=(cash_effect, liquidation_effect),
+        action_kinds=(ActionKind.CASH_ACQUISITION, ActionKind.LIQUIDATION),
+        claim_status="extinguished",
+    )
+    state = _state(holdings=(_holding(quantity=100, basis="900"),), cash="0")
+
+    with pytest.raises(
+        IndeterminateValuationError, match=r"share actions on 2020-06-01 touching"
+    ):
+        _processor().apply_pre_open_actions(state, (), (outcome,), _key())
+
+
+@pytest.mark.parametrize("predecessor", [SEC_A, SEC_OTHER])
+def test_a_conversion_and_the_acquirers_disposal_on_one_date_are_indeterminate(
+    predecessor: UUID,
+) -> None:
+    # D2: the predecessor converts 1:1 into SEC_ACQ at 10:00, and SEC_ACQ is
+    # cash-acquired at 15:00, in two outcomes applied by security id. SEC_A
+    # sorts before SEC_ACQ, SEC_OTHER after it. With SEC_ACQ first, the book
+    # kept 100 SEC_ACQ after SEC_ACQ was cashed out and lost the 2000 owed.
+    share = _shares(
+        numerator="1",
+        denominator="1",
+        component_id="to-acquirer",
+        recipient=SEC_ACQ,
+        predecessor=predecessor,
+    )
+    conversion_terms, conversion_effect = _same_date_effect(
+        3300,
+        ActionKind.STOCK_ACQUISITION,
+        (share,),
+        at="2020-06-01T10:00:00Z",
+        claim_status="converted",
+        occurrence="occ-conversion",
+        security_id=predecessor,
+    )
+    conversion = _outcome(
+        security_id=predecessor,
+        terms=(conversion_terms,),
+        effects=(conversion_effect,),
+        action_kinds=(ActionKind.STOCK_ACQUISITION,),
+        claim_status="converted",
+    )
+    cash = _cash(amount="20", component_id="acquirer-cash", predecessor=SEC_ACQ)
+    cash_terms, cash_effect = _same_date_effect(
+        3310,
+        ActionKind.CASH_ACQUISITION,
+        (cash,),
+        at="2020-06-01T15:00:00Z",
+        claim_status="extinguished",
+        occurrence="occ-acquirer-cash",
+        security_id=SEC_ACQ,
+        dates=(_date_fact("payable", PAYABLE_AT),),
+    )
+    disposal = _outcome(
+        security_id=SEC_ACQ,
+        terms=(cash_terms,),
+        effects=(cash_effect,),
+        action_kinds=(ActionKind.CASH_ACQUISITION,),
+        claim_status="extinguished",
+    )
+    state = _state(
+        holdings=(_holding(predecessor, quantity=100, basis="900"),), cash="0"
+    )
+
+    with pytest.raises(
+        IndeterminateValuationError,
+        match=r"share actions on 2020-06-01 touching .*stock_acquisition",
+    ):
+        _processor().apply_pre_open_actions(
+            state, (_target(predecessor, 100),), (conversion, disposal), _key()
+        )
 
 
 def test_share_actions_on_dates_in_different_windows_apply_one_by_one() -> None:
