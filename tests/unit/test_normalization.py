@@ -15,12 +15,14 @@ from observation_test_support import NormalizationHarness
 from pydantic import ValidationError
 
 from drift.datasets.resolver import VerifiedArtifactBytes
+from drift.domain.dataset_validation import DatasetValidationError
 from drift.domain.economic_common import ActionKind, economic_implementation_hash
 from drift.domain.normalization import (
     DerivedObservationViewV1,
     ExactRatioV1,
     FieldTransformV1,
     NormalizationPolicyV1,
+    NormalizationQueryV1,
     NormalizationResultV1,
     ObservationDecisionReferenceV1,
     normalization_algorithm_hash,
@@ -34,6 +36,7 @@ from drift.markets.normalization import (
     quantize_exact_ratio,
     verify_normalization,
 )
+from drift.markets.observation_validation import M1dResolutionContext
 from drift.serialization.canonical import content_hash
 
 COPRIME_RATIOS = tuple(
@@ -897,38 +900,92 @@ def test_p03_both_materializers_reject_opposite_role_reference_and_query() -> No
         )
 
 
-def test_p08_unimported_python_changes_nested_and_joined_lineage_only() -> None:
-    before = NormalizationHarness()
-    before_query = before.normalization_query(
+def _materialize_retained(
+    result: NormalizationResultV1,
+    query: NormalizationQueryV1,
+    context: M1dResolutionContext,
+) -> DerivedObservationViewV1:
+    """Materialize a retained reference through its role's public boundary."""
+    reference = result.reference
+    assert reference is not None
+    if isinstance(reference, ObservationDecisionReferenceV1):
+        return materialize_observation_decision(reference, query, context)
+    return materialize_observation_outcome(reference, query, context)
+
+
+def test_p08_unimported_python_moves_provenance_but_not_m1d_evidence_identity() -> None:
+    """An unimported module is build provenance, not M1d evidence (issue 63).
+
+    ``m1d_implementation_hash`` is attested once per process, so the evidence
+    identity is re-attested here from disk over its declared closure; the
+    cross-process form of this property is
+    ``tests/integration/test_m1d_semantic_identity.py``. Split-normalized
+    evidence still binds the M1c whole-tree identities of the economic history
+    it composes, so it still moves: that is the stage 2 residual of issue 63,
+    pinned here so that stage 2 has to flip it deliberately.
+    """
+    from drift.domain.observation_query import drift_source_inventory_hash
+    from drift.domain.semantic_attestation import (
+        M1D_EVIDENCE_CLOSURE_ID,
+        M1D_EVIDENCE_SEMANTIC_MODULES,
+        build_semantic_attestation,
+    )
+
+    def evidence_identity() -> str:
+        return build_semantic_attestation(
+            closure_id=M1D_EVIDENCE_CLOSURE_ID, modules=M1D_EVIDENCE_SEMANTIC_MODULES
+        ).attestation_hash
+
+    source = NormalizationHarness()
+    source_query = source.normalization_query("source_basis")
+    source_result = source.normalize(source_query)
+    assert source_result.classification == "materialized"
+    split = NormalizationHarness()
+    split_query = split.normalization_query(
         "split_normalized", anchor_date=date(2026, 11, 30)
     )
-    before_result = before.normalize(before_query)
-    before_package_hash = m1d_implementation_hash()
+    split_result = split.normalize(split_query)
+    assert split_result.view is not None
+    before_inventory_hash = drift_source_inventory_hash()
     before_economic_hash = economic_implementation_hash()
-    before_source_record = before.context.observation_datasets[0].records[0]
+    before_evidence_hash = evidence_identity()
+    assert before_evidence_hash == m1d_implementation_hash()
+    before_source_record = split.context.observation_datasets[0].records[0]
     before_source_hash = content_hash(before_source_record)
-    before_numbers = (
-        tuple(
-            (item.field_name, item.source_value, item.exact_transformed_value)
-            for item in before_result.view.fields
-        )
-        if before_result.view is not None
-        else ()
+    before_numbers = tuple(
+        (item.field_name, item.source_value, item.exact_transformed_value)
+        for item in split_result.view.fields
     )
     probe = Path(__file__).parents[2] / "src" / "drift" / "_m1d_p08_probe.py"
     assert not probe.exists()
     try:
         probe.write_text("PROBE = 'unimported implementation identity input'\n")
-        assert m1d_implementation_hash() != before_package_hash
+        # Build provenance sees the unimported module; M1d evidence does not.
+        assert drift_source_inventory_hash() != before_inventory_hash
         assert economic_implementation_hash() != before_economic_hash
-        with pytest.raises((ValidationError, ValueError)):
-            assert before_result.reference is not None
-            materialize_observation_outcome(
-                before_result.reference,
-                before_query,
-                before.context,
-            )
+        assert evidence_identity() == before_evidence_hash
 
+        # Source-basis evidence: the retained reference still materializes and
+        # a fresh derivation reproduces it exactly.
+        retained_view = _materialize_retained(
+            source_result, source_query, source.context
+        )
+        assert retained_view == source_result.view
+        rederived = NormalizationHarness()
+        rederived_result = rederived.normalize(
+            rederived.normalization_query("source_basis")
+        )
+        assert rederived_result.derivation_hash == source_result.derivation_hash
+        assert rederived_result.reference == source_result.reference
+
+        # Stage 2 residual: split-normalized evidence still moves through the
+        # M1c whole-tree identities, while its numbers and sources do not. The
+        # retained reference now refuses on the M1c validator identity, not on
+        # the M1d one.
+        with pytest.raises(
+            DatasetValidationError, match="economic_validation_run_mismatch"
+        ):
+            _materialize_retained(split_result, split_query, split.context)
         changed = NormalizationHarness()
         changed_result = changed.normalize(
             changed.normalization_query(
@@ -944,18 +1001,18 @@ def test_p08_unimported_python_changes_nested_and_joined_lineage_only() -> None:
         changed_source_record = changed.context.observation_datasets[0].records[0]
         assert content_hash(changed_source_record) == before_source_hash
         assert (
-            changed_result.selected_action_hashes
-            == before_result.selected_action_hashes
+            changed_result.selected_action_hashes == split_result.selected_action_hashes
         )
         assert (
-            changed_result.action_mapping_hashes != before_result.action_mapping_hashes
+            changed_result.action_mapping_hashes != split_result.action_mapping_hashes
         )
-        assert changed_result.derivation_hash != before_result.derivation_hash
-        assert changed_result.reference != before_result.reference
+        assert changed_result.derivation_hash != split_result.derivation_hash
+        assert changed_result.reference != split_result.reference
     finally:
         probe.unlink(missing_ok=True)
-    assert m1d_implementation_hash() == before_package_hash
+    assert drift_source_inventory_hash() == before_inventory_hash
     assert economic_implementation_hash() == before_economic_hash
+    assert evidence_identity() == before_evidence_hash
 
 
 def test_finite_ratio_scale_product_covers_exact_laws_without_filtering() -> None:

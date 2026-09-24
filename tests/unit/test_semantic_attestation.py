@@ -1,8 +1,12 @@
 """Unit tests for the versioned semantic attestation and its closure guard."""
 
+import ast
 import hashlib
+import importlib.util
+import sys
 from collections.abc import Mapping
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 from pydantic import ValidationError
@@ -707,3 +711,175 @@ def test_whole_tree_provenance_hash_is_retained() -> None:
     digest = economic_implementation_hash()
     assert len(digest) == 64
     assert digest == economic_implementation_hash()
+
+
+# --- M1d evidence identity (issue 63, stage 1) --------------------------------
+
+_M1D_EVIDENCE_POLICY_AUTHORS = frozenset({"drift.adapters.alpaca_exploratory"})
+"""Modules that stamp the M1d evidence identity into a policy they author but
+whose semantics M1d does not execute. The bridge authors a schedule generation
+policy that ``drift.markets.session_generation`` (a seed) executes, and binds its
+own lineage separately, so it is classified here instead of being a seed."""
+
+_M1D_EVIDENCE_IDENTITY_DEFINERS = frozenset({"drift.domain.semantic_attestation"})
+"""The module that defines the attestation behind the identity. It declares the
+closure rather than deriving evidence, and it is itself a declared module."""
+
+_M1D_EVIDENCE_IDENTITY_NAMES = frozenset(
+    {
+        "m1d_evidence_attestation",
+        "m1d_evidence_attestation_hash",
+        "m1d_implementation_hash",
+    }
+)
+"""Every public name that yields the M1d evidence identity."""
+
+
+def _package_root() -> Path:
+    return Path(semantic_attestation.__file__).resolve().parents[1]
+
+
+def _modules_binding_the_m1d_evidence_identity() -> frozenset[str]:
+    """Every installed module that defines, stamps or checks the identity."""
+    root = _package_root()
+    found: set[str] = set()
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_bytes())
+        for node in ast.walk(tree):
+            names = (
+                (node.id,)
+                if isinstance(node, ast.Name)
+                else (node.attr,)
+                if isinstance(node, ast.Attribute)
+                else (node.name,)
+                if isinstance(node, ast.FunctionDef | ast.alias)
+                else ()
+            )
+            if _M1D_EVIDENCE_IDENTITY_NAMES.intersection(names):
+                parts = list(path.relative_to(root).with_suffix("").parts)
+                if parts[-1] == "__init__":
+                    parts.pop()
+                found.add(".".join(("drift", *parts)))
+                break
+    return frozenset(found)
+
+
+def _load_pinned_m1d() -> ModuleType:
+    helper = Path(__file__).resolve().parents[1] / "_pinned_m1d.py"
+    spec = importlib.util.spec_from_file_location("_attestation_pinned_m1d", helper)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_declared_m1d_evidence_closure_is_exactly_the_resolved_closure() -> None:
+    assert resolve_semantic_closure(
+        seeds=semantic_attestation.M1D_EVIDENCE_SEEDS
+    ) == tuple(semantic_attestation.M1D_EVIDENCE_SEMANTIC_MODULES)
+
+
+def test_m1d_evidence_closure_guard_accepts_the_installed_package() -> None:
+    verify_semantic_closure(
+        modules=semantic_attestation.M1D_EVIDENCE_SEMANTIC_MODULES,
+        seeds=semantic_attestation.M1D_EVIDENCE_SEEDS,
+    )
+
+
+def test_m1d_evidence_attestation_is_bounded_and_versioned() -> None:
+    attestation = semantic_attestation.m1d_evidence_attestation()
+    assert attestation.algorithm_id == SEMANTIC_ATTESTATION_ALGORITHM_V1
+    assert attestation.schema_version == "1"
+    assert attestation.closure_id == "m1d-evidence-v1"
+    assert attestation.closure_id == semantic_attestation.M1D_EVIDENCE_CLOSURE_ID
+    assert attestation.declared_modules == tuple(
+        semantic_attestation.M1D_EVIDENCE_SEMANTIC_MODULES
+    )
+    assert (
+        semantic_attestation.m1d_evidence_attestation_hash()
+        == attestation.attestation_hash
+    )
+    rebuilt = build_semantic_attestation(
+        closure_id=semantic_attestation.M1D_EVIDENCE_CLOSURE_ID,
+        modules=semantic_attestation.M1D_EVIDENCE_SEMANTIC_MODULES,
+    )
+    assert rebuilt == attestation
+
+
+def test_m1d_evidence_closure_excludes_evaluator_adapter_ledger_and_qualification() -> (
+    None
+):
+    """Consumers, collectors and storage cannot move the M1d evidence identity."""
+    for module in semantic_attestation.M1D_EVIDENCE_SEMANTIC_MODULES:
+        assert not module.startswith(
+            (
+                "drift.adapters",
+                "drift.config",
+                "drift.evaluator",
+                "drift.ledger",
+                "drift.qualification",
+            )
+        ), module
+    declared = set(semantic_attestation.M1D_EVIDENCE_SEMANTIC_MODULES)
+    assert "drift.evaluator.engine" not in declared
+    assert "drift.domain.evaluator_bundles" not in declared
+
+
+def test_m1d_evidence_identity_is_distinct_from_validation_and_whole_tree() -> None:
+    evidence = semantic_attestation.m1d_evidence_attestation_hash()
+    assert evidence != m1d_semantic_attestation_hash()
+    assert evidence != economic_implementation_hash()
+    assert semantic_attestation.M1D_EVIDENCE_CLOSURE_ID != M1D_VALIDATION_CLOSURE_ID
+    # The validation closure is part of what the evidence depends on.
+    assert set(M1D_VALIDATION_SEMANTIC_MODULES) < set(
+        semantic_attestation.M1D_EVIDENCE_SEMANTIC_MODULES
+    )
+
+
+def test_m1d_evidence_attestation_fails_closed_on_an_incomplete_declaration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The accessor runs the closure guard; it never attests a leaky declaration."""
+    declared = tuple(
+        module
+        for module in semantic_attestation.M1D_EVIDENCE_SEMANTIC_MODULES
+        if module != "drift.domain.economic_results"
+    )
+    semantic_attestation.m1d_evidence_attestation.cache_clear()
+    monkeypatch.setattr(semantic_attestation, "M1D_EVIDENCE_SEMANTIC_MODULES", declared)
+    try:
+        with pytest.raises(
+            SemanticClosureError,
+            match=r"escaped the declared attestation closure: .*"
+            r"-> drift\.domain\.economic_results",
+        ):
+            semantic_attestation.m1d_evidence_attestation()
+    finally:
+        semantic_attestation.m1d_evidence_attestation.cache_clear()
+
+
+def test_every_module_binding_the_m1d_evidence_identity_is_a_seed() -> None:
+    """A new producer or validator cannot bind the identity outside the closure."""
+    binding = _modules_binding_the_m1d_evidence_identity()
+    seeds = frozenset(semantic_attestation.M1D_EVIDENCE_SEEDS)
+    assert binding == (
+        seeds | _M1D_EVIDENCE_POLICY_AUTHORS | _M1D_EVIDENCE_IDENTITY_DEFINERS
+    )
+    declared = set(semantic_attestation.M1D_EVIDENCE_SEMANTIC_MODULES)
+    assert not _M1D_EVIDENCE_POLICY_AUTHORS & declared
+    assert _M1D_EVIDENCE_IDENTITY_DEFINERS <= declared
+
+
+def test_every_m1d_evidence_closure_module_is_byte_pinned_by_the_current_freeze() -> (
+    None
+):
+    """No declared module can move the identity while every byte freeze is green."""
+    pins = _load_pinned_m1d().PROTECTED_M1D_SHA256
+    root = _package_root()
+    repository = root.parents[1]
+    for module in semantic_attestation.M1D_EVIDENCE_SEMANTIC_MODULES:
+        path = semantic_attestation._declared_module_path(root, module)
+        relative = path.relative_to(repository).as_posix()
+        assert relative in pins, module
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == pins[relative], module

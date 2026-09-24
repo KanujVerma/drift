@@ -875,8 +875,16 @@ def test_source_policy_allows_same_inventory_partitions_and_sorts_bindings() -> 
     assert policy.bindings == (earlier, later)
 
 
-def test_m1d_fingerprint_delegates_to_whole_installed_package_inventory() -> None:
-    assert m1d_implementation_hash() == economic_implementation_hash()
+def test_m1d_fingerprint_is_the_m1d_evidence_attestation_not_the_source_inventory() -> (
+    None
+):
+    """Issue 63: evidence identity is semantic; the whole tree is provenance."""
+    from drift.domain.observation_query import drift_source_inventory_hash
+    from drift.domain.semantic_attestation import m1d_evidence_attestation_hash
+
+    assert m1d_implementation_hash() == m1d_evidence_attestation_hash()
+    assert m1d_implementation_hash() != drift_source_inventory_hash()
+    assert drift_source_inventory_hash() == economic_implementation_hash()
 
 
 def test_selection_proof_binds_query_context_and_classification() -> None:
