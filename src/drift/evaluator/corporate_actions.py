@@ -158,6 +158,16 @@ class _SessionWindow:
 
 
 @dataclass(frozen=True)
+class _ShareDateConflict:
+    """Share actions touching one security on two or more dates of a window."""
+
+    security_id: UUID7
+    dates: tuple[date, ...]
+    # Every security any of those actions acts on or delivers into.
+    touched: frozenset[UUID7]
+
+
+@dataclass(frozen=True)
 class _EffectContext:
     """One proven occurred effect, already bound to its source identity."""
 
@@ -374,13 +384,16 @@ class CorporateActionProcessor:
                 supported.append(_effect_contexts(outcome))
             else:
                 unsupported.append(outcome)
-        self._require_one_share_date(
-            [context for contexts in supported for context in contexts],
-            book,
-            window,
+        conflicts = _share_date_conflicts(
+            [context for contexts in supported for context in contexts], window
         )
+        # Judged against the prior close's book here, and again against the
+        # book the pass leaves below: a disposal may empty the first, and a
+        # chain of conversions may reach a security only in the second.
+        self._require_no_exposed_conflict(conflicts, book)
         for contexts in supported:
             self._apply_contexts(contexts, book, window)
+        self._require_no_exposed_conflict(conflicts, book)
         # Exposure to evidence this pass cannot apply is judged against the
         # book the pass leaves: a holding or positive target credited by an
         # earlier dispatch, such as a spin-off child, is exposure too.
@@ -488,11 +501,8 @@ class CorporateActionProcessor:
 
     # -- pre-open internals -----------------------------------------------
 
-    def _require_one_share_date(
-        self,
-        contexts: Iterable[_EffectContext],
-        book: _Book,
-        window: _SessionWindow,
+    def _require_no_exposed_conflict(
+        self, conflicts: Iterable[_ShareDateConflict], book: _Book
     ) -> None:
         """Refuse a window whose share actions on one security span two dates.
 
@@ -502,34 +512,17 @@ class CorporateActionProcessor:
         an unproven order: a 1:10 reverse split on Friday and a 3:1 split on
         Monday turn 105 shares into 30 in date order and into 31 otherwise.
         One date per security keeps every result independent of that order.
-        Only a book exposed to one of the actions is halted.
+        Only a book exposed to one of the conflicting actions is halted.
+        Raising after dispatch is safe, because a pass that raises is
+        discarded whole.
         """
-        dates: dict[UUID, set[date]] = {}
-        members: dict[UUID, list[_EffectContext]] = {}
-        for context in contexts:
-            if context.payload.action_kind not in SHARE_MUTATING_KINDS:
-                continue
-            if _is_cash_distribution(context.payload):
-                # A liquidation on a continuing claim changes no share count.
-                continue
-            if not window.contains(context.effective_on):
-                continue
-            for security_id in _touched_securities(context):
-                dates.setdefault(security_id, set()).add(context.effective_on)
-                members.setdefault(security_id, []).append(context)
-        for security_id in sorted(dates, key=_security_order):
-            if len(dates[security_id]) < 2:
-                continue
-            if any(
-                self._is_exposed(touched, book)
-                for member in members[security_id]
-                for touched in _touched_securities(member)
-            ):
-                spelled = ", ".join(str(day) for day in sorted(dates[security_id]))
+        for conflict in conflicts:
+            if any(self._is_exposed(touched, book) for touched in conflict.touched):
+                spelled = ", ".join(str(day) for day in conflict.dates)
                 raise IndeterminateValuationError(
                     f"one pre-open window holds share actions on {spelled} "
-                    f"touching {security_id}, and M2 V1 proves no order between "
-                    "share actions on different dates of one window"
+                    f"touching {conflict.security_id}, and M2 V1 proves no order "
+                    "between share actions on different dates of one window"
                 )
 
     def _apply_contexts(
@@ -1292,12 +1285,20 @@ def _effect_contexts(
     apply them, and the settlement pass to show delivered cash no claim
     matches was never owed to this book. Only the settlement pass asks for
     effects M1c places before the evidence window, marked as such.
+
+    An effective effect that fails the proof halts the run. A before-window
+    effect is never applied, so one that fails it (or duplicates another
+    report of its occurrence) is dropped instead: it proves nothing and so
+    explains nothing, and a delivery that needed it still halts for want of
+    an explanation. Halting on it would let one incomplete old record stop
+    every later session that re-reads a delivered dividend.
     """
     resolution = outcome.resolution
     records = {content_hash(record): record for record in outcome.effect_records}
     terms: TermsIndex = {record.source_key: record for record in outcome.terms_records}
     applied: set[tuple[str, ActionKind]] = set()
     contexts: list[_EffectContext] = []
+    earlier: list[_EffectContext] = []
     for projection in sorted(
         resolution.effect_projections, key=lambda item: item.source_record_hash
     ):
@@ -1306,55 +1307,70 @@ def _effect_contexts(
                 "effect projection effectiveness is indeterminate for "
                 f"{outcome.security_id}"
             )
-        before_window = projection.effective_status == "before_window"
-        if projection.effective_status != "effective" and not (
-            before_window and include_before_window
-        ):
-            continue
         record = records[projection.source_record_hash]
-        payload = record.payload
-        if not isinstance(payload, OccurredEffectV1):
-            raise IndeterminateValuationError(
-                "an effective economic projection requires an occurred effect payload"
-            )
-        occurrence_id = record.occurrence.native_occurrence_id
-        if record.occurrence.kind != "identified" or occurrence_id is None:
-            raise IndeterminateValuationError(
-                "applying an occurred effect requires an identified source occurrence"
-            )
-        marker = (occurrence_id, payload.action_kind)
-        if marker in applied:
-            # Two reports of one occurrence would apply one split twice.
-            raise IndeterminateValuationError(
-                "economic outcome carries more than one effective report "
-                f"for one occurrence: {occurrence_id}"
-            )
-        applied.add(marker)
-        if payload.consideration_status != "components":
-            raise IndeterminateValuationError(
-                "occurred effect does not prove its consideration: "
-                f"{payload.consideration_status}"
-            )
-        if any(
-            isinstance(item, UnsupportedPropertyComponentV1)
-            for item in payload.owed_components
-        ):
-            raise IndeterminateValuationError(
-                "occurred effect carries an unvalued property component"
-            )
-        contexts.append(
-            _EffectContext(
-                record=record,
-                payload=payload,
-                occurrence_id=occurrence_id,
-                effective_on=boundary_session_date(
-                    record.effective_time, role="effect effective time"
-                ),
-                terms=terms,
-                before_window=before_window,
-            )
-        )
+        if projection.effective_status == "effective":
+            context = _proven_context(record, terms, before_window=False)
+            marker = (context.occurrence_id, context.payload.action_kind)
+            if marker in applied:
+                # Two reports of one occurrence would apply one split twice.
+                raise IndeterminateValuationError(
+                    "economic outcome carries more than one effective report "
+                    f"for one occurrence: {context.occurrence_id}"
+                )
+            applied.add(marker)
+            contexts.append(context)
+        elif projection.effective_status == "before_window" and include_before_window:
+            try:
+                earlier.append(_proven_context(record, terms, before_window=True))
+            except IndeterminateValuationError:
+                continue
+    markers = [
+        (context.occurrence_id, context.payload.action_kind) for context in earlier
+    ]
+    contexts.extend(
+        context
+        for context, marker in zip(earlier, markers, strict=True)
+        if markers.count(marker) == 1 and marker not in applied
+    )
     return contexts
+
+
+def _proven_context(
+    record: EconomicEffectVersionV1, terms: TermsIndex, *, before_window: bool
+) -> _EffectContext:
+    """Prove one occurred effect is safe to read, and bind it to its source."""
+    payload = record.payload
+    if not isinstance(payload, OccurredEffectV1):
+        raise IndeterminateValuationError(
+            "an effective economic projection requires an occurred effect payload"
+        )
+    occurrence_id = record.occurrence.native_occurrence_id
+    if record.occurrence.kind != "identified" or occurrence_id is None:
+        raise IndeterminateValuationError(
+            "applying an occurred effect requires an identified source occurrence"
+        )
+    if payload.consideration_status != "components":
+        raise IndeterminateValuationError(
+            "occurred effect does not prove its consideration: "
+            f"{payload.consideration_status}"
+        )
+    if any(
+        isinstance(item, UnsupportedPropertyComponentV1)
+        for item in payload.owed_components
+    ):
+        raise IndeterminateValuationError(
+            "occurred effect carries an unvalued property component"
+        )
+    return _EffectContext(
+        record=record,
+        payload=payload,
+        occurrence_id=occurrence_id,
+        effective_on=boundary_session_date(
+            record.effective_time, role="effect effective time"
+        ),
+        terms=terms,
+        before_window=before_window,
+    )
 
 
 type _OwedKey = tuple[str, str, str]
@@ -1374,6 +1390,35 @@ def _owed_index(outcome: SecurityEconomicOutcomeV1) -> _OwedIndex:
             key = (context.source_id, context.occurrence_id, component.component_id)
             index.setdefault(key, []).append((context, component))
     return index
+
+
+def _share_date_conflicts(
+    contexts: Iterable[_EffectContext], window: _SessionWindow
+) -> tuple[_ShareDateConflict, ...]:
+    """Every security the window's share actions touch on more than one date."""
+    dates: dict[UUID7, set[date]] = {}
+    touched: dict[UUID7, set[UUID7]] = {}
+    for context in contexts:
+        if context.payload.action_kind not in SHARE_MUTATING_KINDS:
+            continue
+        if _is_cash_distribution(context.payload):
+            # A liquidation on a continuing claim changes no share count.
+            continue
+        if not window.contains(context.effective_on):
+            continue
+        securities = _touched_securities(context)
+        for security_id in securities:
+            dates.setdefault(security_id, set()).add(context.effective_on)
+            touched.setdefault(security_id, set()).update(securities)
+    return tuple(
+        _ShareDateConflict(
+            security_id=security_id,
+            dates=tuple(sorted(dates[security_id])),
+            touched=frozenset(touched[security_id]),
+        )
+        for security_id in sorted(dates, key=_security_order)
+        if len(dates[security_id]) > 1
+    )
 
 
 def _touched_securities(context: _EffectContext) -> tuple[UUID7, ...]:
