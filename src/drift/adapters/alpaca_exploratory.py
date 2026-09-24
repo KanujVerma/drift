@@ -145,6 +145,7 @@ from drift.domain.observation_query import (
     ObservationQueryV1,
     ObservationSourceBindingV1,
     ObservationSourceSelectionPolicyV1,
+    drift_source_inventory_hash,
     m1d_implementation_hash,
 )
 from drift.domain.observations import (
@@ -1779,13 +1780,15 @@ def build_alpaca_acquisition_evidence(
         request.request_start,
         None,
     )
+    # Which code collected is build provenance. The collector sits outside the
+    # M1d evidence closure, so only the whole source inventory attests it.
     execution = AcquisitionExecutionContextV1(
         schema_version="1",
         collector_id=BRIDGE_COLLECTOR_ID,
         collector_version=BRIDGE_COLLECTOR_VERSION,
-        collector_source_hash=m1d_implementation_hash(),
+        collector_source_hash=drift_source_inventory_hash(),
         invocation_id=_derived_uuid7("invocation", request.cohort_id, authorization),
-        executable_evidence_hashes=(m1d_implementation_hash(),),
+        executable_evidence_hashes=(drift_source_inventory_hash(),),
         receipt_id=_derived_uuid7("receipt", request.cohort_id, authorization),
         receipt_version="1",
         creation_time=request.request_end,

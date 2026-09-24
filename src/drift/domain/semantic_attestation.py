@@ -21,6 +21,14 @@ declaration. Every remaining way to reach a module that cannot be bound to an
 exact name statically -- dynamic code evaluation, a ``getattr`` aimed at the
 import machinery, and indexing ``sys.modules`` or a module ``__dict__`` -- fails
 closed instead of being ignored.
+
+Two closures are declared here. ``m1d-source-validation-v1`` identifies the M1d
+validator runs (issue #32). ``m1d-evidence-v1`` identifies the code that
+derives, stamps and checks M1d evidence (issue #63, stage 1): every M1d
+normalization, action-session, session-binding, session-generation, selection
+and usability record binds it as ``implementation_hash``. Values that arrive as
+data, such as the M1c whole-tree identities inside composed economic history,
+are not attested by either closure.
 """
 
 import ast
@@ -88,6 +96,73 @@ M1D_VALIDATION_SEMANTIC_MODULES: tuple[str, ...] = (
     "drift.serialization.canonical",
 )
 """The declared semantic closure of the M1d validation entry points."""
+
+M1D_EVIDENCE_CLOSURE_ID = "m1d-evidence-v1"
+"""Identifier for the M1d evidence identity closure."""
+
+M1D_EVIDENCE_SEEDS: tuple[str, ...] = (
+    "drift.domain.action_sessions",
+    "drift.domain.normalization",
+    "drift.domain.observation_query",
+    "drift.markets.action_sessions",
+    "drift.markets.normalization",
+    "drift.markets.observation_selection",
+    "drift.markets.observation_usability",
+    "drift.markets.session_binding",
+    "drift.markets.session_generation",
+)
+"""Every module that defines, stamps or checks the M1d evidence identity."""
+
+M1D_EVIDENCE_SEMANTIC_MODULES: tuple[str, ...] = (
+    "drift",
+    "drift.datasets",
+    "drift.datasets.assertions",
+    "drift.datasets.hashing",
+    "drift.datasets.resolver",
+    "drift.domain",
+    "drift.domain.action_sessions",
+    "drift.domain.artifacts",
+    "drift.domain.assertions",
+    "drift.domain.common",
+    "drift.domain.dataset_validation",
+    "drift.domain.datasets",
+    "drift.domain.economic_common",
+    "drift.domain.economic_coverage",
+    "drift.domain.economic_events",
+    "drift.domain.economic_queries",
+    "drift.domain.economic_results",
+    "drift.domain.manifests",
+    "drift.domain.normalization",
+    "drift.domain.observation_query",
+    "drift.domain.observation_usability",
+    "drift.domain.observations",
+    "drift.domain.provenance_references",
+    "drift.domain.revisions",
+    "drift.domain.securities",
+    "drift.domain.semantic_attestation",
+    "drift.domain.sessions",
+    "drift.domain.temporal",
+    "drift.domain.universes",
+    "drift.errors",
+    "drift.markets",
+    "drift.markets.action_sessions",
+    "drift.markets.economic_outcomes",
+    "drift.markets.economic_selection",
+    "drift.markets.economic_validation",
+    "drift.markets.identity",
+    "drift.markets.normalization",
+    "drift.markets.observation_selection",
+    "drift.markets.observation_usability",
+    "drift.markets.observation_validation",
+    "drift.markets.session_binding",
+    "drift.markets.session_generation",
+    "drift.markets.session_validation",
+    "drift.markets.universes",
+    "drift.markets.validation",
+    "drift.serialization",
+    "drift.serialization.canonical",
+)
+"""The declared semantic closure of the M1d evidence identity."""
 
 _MODULE_NAME_PATTERN = re.compile(r"^drift(\.[A-Za-z_][A-Za-z0-9_]*)*$")
 _DYNAMIC_IMPORT_NAMES = frozenset({"__import__", "import_module"})
@@ -298,6 +373,23 @@ def m1d_semantic_attestation() -> SemanticAttestationV1:
 def m1d_semantic_attestation_hash() -> SHA256Hash:
     """Return the M1d semantic replay identity as a bare content hash."""
     return m1d_semantic_attestation().attestation_hash
+
+
+@cache
+def m1d_evidence_attestation() -> SemanticAttestationV1:
+    """Return the guarded, bounded identity of the code deriving M1d evidence."""
+    verify_semantic_closure(
+        modules=M1D_EVIDENCE_SEMANTIC_MODULES, seeds=M1D_EVIDENCE_SEEDS
+    )
+    return build_semantic_attestation(
+        closure_id=M1D_EVIDENCE_CLOSURE_ID,
+        modules=M1D_EVIDENCE_SEMANTIC_MODULES,
+    )
+
+
+def m1d_evidence_attestation_hash() -> SHA256Hash:
+    """Return the M1d evidence identity as a bare content hash."""
+    return m1d_evidence_attestation().attestation_hash
 
 
 def _canonical_declaration(modules: Sequence[str]) -> tuple[str, ...]:
