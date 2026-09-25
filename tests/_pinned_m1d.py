@@ -165,6 +165,8 @@ _REMINTED_FIXTURE_NAMES = (
 )
 _ARCHIVE_PATHS = ("src/drift", "tests", "pyproject.toml", "uv.lock")
 _PIN_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
+_GIT_SHA = re.compile(r"[0-9a-f]{7,40}")
+"""A superseded link commit is an abbreviated or full lowercase-hex git SHA."""
 _IDENTITY_PROGRAM = (
     "import sys; print(f'{sys.implementation.name}-{sys.version_info.major}."
     "{sys.version_info.minor}.{sys.version_info.micro}')"
@@ -764,7 +766,7 @@ _FREEZE_INVENTORIES: tuple[_FreezeInventory, ...] = (
         label="v6",
         inventory_id="m1d-v6-protected-sha256",
         path=_FREEZE_FIXTURES / "m1d-v6-protected-sha256.json",
-        file_sha256="3112e0baf5c99f3d49e531250887d96d8cef67fa2caa0f3b53ada396afe81ae8",
+        file_sha256="bf3392f8e4f206a1f275c6edb361e1b3d1020bac8d9ecccca50249f1a84e8b3f",
         issue=107,
         commit=None,
     ),
@@ -802,12 +804,15 @@ def _chain_links(inventories: Sequence[_FreezeInventory]) -> tuple[_FreezeLink, 
     """
     if not inventories or inventories[0].inventory_id != _HISTORICAL_INVENTORY_ID:
         raise PinnedReplayIntegrityFailure("M1d freeze chain must start at v3")
+    if len(inventories) < 2:
+        raise PinnedReplayIntegrityFailure("M1d freeze chain needs at least one link")
     tip = len(inventories) - 1
     links: list[_FreezeLink] = []
     for index in range(1, len(inventories)):
         superseded, inventory = inventories[index - 1], inventories[index]
         if (
             superseded.commit is None
+            or not _GIT_SHA.fullmatch(superseded.commit)
             or inventory.issue is None
             or (inventory.commit is None) != (index == tip)
         ):

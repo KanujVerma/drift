@@ -178,6 +178,55 @@ def test_freeze_chain_shape_fails_closed_and_grows_by_appending_one_link() -> No
     ]
 
 
+def test_freeze_chain_requires_a_hex_superseded_commit_and_a_link(
+    tmp_path: Path,
+) -> None:
+    """A chain of only v3 raises, and a non-hex superseded commit fails closed."""
+    helper = _load_replay_helper()
+    inventories = helper._FREEZE_INVENTORIES
+    with pytest.raises(
+        helper.PinnedM1dReplayError, match="chain needs at least one link"
+    ):
+        helper._chain_links(inventories[:1])
+    # A superseded commit that is not a git SHA is rejected, not trusted. A
+    # shorter or longer hex string is accepted by shape; only non-hex, too
+    # short, or too long fails.
+    for junk in ("not-a-sha", "0" * 41, "XYZ123", "200bfe", ""):
+        broken = (
+            dataclasses.replace(inventories[2], commit=junk),
+            *inventories[3:],
+        )
+        with pytest.raises(
+            helper.PinnedM1dReplayError, match="v6 M1d freeze link is malformed"
+        ):
+            helper._chain_links((*inventories[:2], *broken))
+
+
+def test_freeze_link_rejects_an_empty_or_no_op_supersession() -> None:
+    """A link must move at least one pin, and never to the digest it replaces."""
+    helper = _load_replay_helper()
+    for label in FREEZE_LINK_ISSUES:
+        empty = _link_document(helper, label)
+        empty["superseded_paths"] = {}
+        with pytest.raises(
+            helper.PinnedM1dReplayError, match="inventory supersession is malformed"
+        ):
+            helper._validated_chain_pins(label, empty)
+
+        no_op = _link_document(helper, label)
+        path, record = next(iter(no_op["superseded_paths"].items()))
+        no_op["superseded_paths"][path] = {
+            "historical_sha256": record["historical_sha256"],
+            "current_sha256": record["historical_sha256"],
+        }
+        no_op["sha256"][path] = record["historical_sha256"]
+        with pytest.raises(
+            helper.PinnedM1dReplayError,
+            match=f"inventory supersession is malformed for {path}",
+        ):
+            helper._validated_chain_pins(label, no_op)
+
+
 def test_archived_replay_still_authenticates_against_the_historical_pins() -> None:
     """Superseding the working-tree pins must not re-sign the af75cce archive."""
     helper = _load_replay_helper()
