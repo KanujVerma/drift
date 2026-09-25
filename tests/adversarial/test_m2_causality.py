@@ -1595,9 +1595,9 @@ def test_the_non_overlap_guard_is_what_keeps_decision_history_closed() -> None:
 
 
 def _f4_run(
-    other_days: tuple[date, ...],
+    other_days: tuple[date, ...], target_day: date = JAN6
 ) -> tuple[EvaluationRunArtifactsV1, ReconstructedTargetStrategy]:
-    """SEC on every day, SEC_OTHER on its own days; JAN6 targets SEC_OTHER."""
+    """SEC on every day, SEC_OTHER on its own days; ``target_day`` buys SEC_OTHER."""
     pair = (SEC, SEC_OTHER)
     ours = tuple(
         scheduled_session_case(day, cohort_securities=pair)
@@ -1616,7 +1616,7 @@ def _f4_run(
         (*(observation for observation, _ in ours), *theirs),
         tuple(session for _, session in ours),
     )
-    strategy = ReconstructedTargetStrategy({JAN6: ((SEC_OTHER, 1),)})
+    strategy = ReconstructedTargetStrategy({target_day: ((SEC_OTHER, 1),)})
     engine = reconstructed_engine(bundle, cohort=cohort_of(pair))
     return run_engine(engine, strategy), strategy
 
@@ -1659,6 +1659,54 @@ def test_a_member_missing_its_decision_bar_halts_before_it_can_be_traded() -> No
     control, _ = _f4_run((JAN5, JAN6, JAN7))
 
     assert control.result.classification is EvaluationClassification.COMPLETE
+    fills = [event for event in control.trace.events if event.kind == "fill"]
+    assert [
+        (event.session_key.local_date, event.fill.security_id) for event in fills
+    ] == [(JAN7, SEC_OTHER)]
+
+
+def test_a_member_without_decision_time_history_cannot_be_entered_blind() -> None:
+    """F2 (issue 130): a cohort chosen after the fact must not leak a member's future.
+
+    SEC_OTHER's first reconstruction is JAN6, so the JAN5 decision holds no
+    evidence for it at all. Before issue 130 the JAN5 context still admitted
+    it, a JAN5 target staged, and it filled at the JAN6 open, its first-ever
+    reconstructed open: the run was COMPLETE on a blind entry whose only
+    support was that the cohort lists a security that will trade later. Each
+    decision now admits only the members with reconstructed history at or
+    before its cutoff, so the target is REJECTED at staging with the
+    unadmitted-target cause, and nothing fills. Control: from its first
+    reconstructed session the same member is admitted, and a JAN6 target
+    fills at the JAN7 open.
+    """
+    artifacts, strategy = _f4_run((JAN6, JAN7), target_day=JAN5)
+
+    reason = f"a positive target requires an admitted security: {SEC_OTHER}"
+    assert artifacts.result.classification is EvaluationClassification.REJECTED
+    assert artifacts.result.halted_session_index == 0
+    assert artifacts.result.halt_reason == reason
+    decisions = [
+        event
+        for event in artifacts.trace.events
+        if event.kind == "exploratory_strategy_decision"
+    ]
+    assert [
+        (event.session_key.local_date, event.outcome, event.staged_targets)
+        for event in decisions
+    ] == [(JAN5, "rejected", ())]
+    assert decisions[0].rejection_reason == reason
+    assert [context.admitted_cohort for context in strategy.seen] == [(SEC,)]
+    assert not [event for event in artifacts.trace.events if event.kind == "fill"]
+    assert artifacts.final_state.holdings == ()
+
+    control, admitted = _f4_run((JAN6, JAN7))
+
+    assert control.result.classification is EvaluationClassification.COMPLETE
+    assert [set(context.admitted_cohort) for context in admitted.seen] == [
+        {SEC},
+        {SEC, SEC_OTHER},
+        {SEC, SEC_OTHER},
+    ]
     fills = [event for event in control.trace.events if event.kind == "fill"]
     assert [
         (event.session_key.local_date, event.fill.security_id) for event in fills
