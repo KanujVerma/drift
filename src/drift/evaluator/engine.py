@@ -50,7 +50,7 @@ from decimal import Decimal
 from typing import Any, Literal, cast
 from uuid import UUID
 
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from drift.domain.assertions import ResolutionMode
 from drift.domain.common import UUID7, SHA256Hash
@@ -116,6 +116,7 @@ from drift.domain.evaluator_strategy import (
     RuntimeStrategy,
     SecurityTargetPositionV1,
     StrategyDecisionContextV1,
+    StrategyDecisionIntentV1,
     StrategyDecisionViewV1,
     StrategyIntentRejectedError,
     position_view,
@@ -149,6 +150,7 @@ from drift.domain.securities import (
 )
 from drift.domain.sessions import SessionKeyV1
 from drift.domain.universes import StructuralEligibilityClassification
+from drift.errors import CanonicalSerializationError
 from drift.evaluator.bundles import validate_exploratory_admission
 from drift.evaluator.clock import build_scheduled_reconstruction_clock
 from drift.evaluator.corporate_actions import CorporateActionProcessor
@@ -200,6 +202,60 @@ def _revalidated_admission(admission: BaseModel) -> EvaluationAdmissionV1:
     return _ADMISSION.validate_python(
         admission.model_dump(mode="python", warnings=False)
     )
+
+
+def _revalidated_intent(returned: object) -> StrategyDecisionIntentV1:
+    """Rebuild the intent a strategy returned before staging it (issue 111).
+
+    The strategy's answer is revalidated like every engine input (issue 78),
+    never trusted as returned. It must be exactly a `StrategyDecisionIntentV1`,
+    because a subclass can declare fields the frozen schema does not have. It
+    must pass the declared type's validation. And it must already be the
+    intent that validation rebuilds, so an unsorted target set, or state set
+    past the frozen guard, is refused rather than silently repaired. Every
+    refusal is a `StrategyIntentRejectedError`, so the run halts `REJECTED`
+    before any fill, exactly as a staging refusal does.
+    """
+    if type(returned) is not StrategyDecisionIntentV1:
+        raise StrategyIntentRejectedError(
+            f"strategy returned {type(returned).__qualname__}, "
+            "not a StrategyDecisionIntentV1"
+        )
+    try:
+        rebuilt = _revalidated(StrategyDecisionIntentV1, returned)
+    except ValidationError as error:
+        causes = "; ".join(
+            f"{'.'.join(str(part) for part in item['loc'])}: {item['msg']}"
+            for item in error.errors(include_url=False)
+        )
+        raise StrategyIntentRejectedError(
+            f"strategy returned an invalid decision intent: {causes}"
+        ) from error
+    # Pydantic equality also compares the extra and private slots; the
+    # instance dictionaries catch an attribute the schema does not declare.
+    if rebuilt != returned or vars(rebuilt) != vars(returned):
+        raise StrategyIntentRejectedError(
+            "strategy returned a non-canonical decision intent: "
+            "revalidating it builds a different intent"
+        )
+    return rebuilt
+
+
+def _returned_intent_hash(returned: object) -> SHA256Hash:
+    """Content hash of what a strategy returned, for a refused decision event.
+
+    A refused return need not have a canonical form: a forged naive decision
+    time or an arbitrary object has none. The event then hashes the name of
+    the returned type instead, so the refusal is still traced and the run
+    still halts `REJECTED` rather than failing.
+    """
+    try:
+        return content_hash(returned)
+    except CanonicalSerializationError:
+        kind = type(returned)
+        return content_hash(
+            {"uncanonical_return_type": f"{kind.__module__}.{kind.__qualname__}"}
+        )
 
 
 def _security_order(security_id: UUID) -> bytes:
@@ -1398,10 +1454,10 @@ class SessionEvaluatorEngine:
         if index < self._protocol.warmup_session_count - 1:
             return None
         context = self._decision_context(loop.state, session)
-        intent = strategy.decide(context)
+        returned = strategy.decide(context)
         context_hash = content_hash(context)
-        intent_hash = content_hash(intent)
         try:
+            intent = _revalidated_intent(returned)
             staged = stage_decision_targets(intent, context)
         except StrategyIntentRejectedError as error:
             reason = str(error) or type(error).__name__
@@ -1412,7 +1468,7 @@ class SessionEvaluatorEngine:
                     session_key=session.session_key,
                     decision_cutoff=session.closed_at,
                     context_hash=context_hash,
-                    intent_hash=intent_hash,
+                    intent_hash=_returned_intent_hash(returned),
                     outcome="rejected",
                     staged_targets=(),
                     rejection_reason=reason,
@@ -1426,7 +1482,7 @@ class SessionEvaluatorEngine:
                 session_key=session.session_key,
                 decision_cutoff=session.closed_at,
                 context_hash=context_hash,
-                intent_hash=intent_hash,
+                intent_hash=content_hash(intent),
                 outcome="staged",
                 staged_targets=staged,
                 rejection_reason=None,
@@ -1542,14 +1598,13 @@ class SessionEvaluatorEngine:
         if index < self._protocol.warmup_session_count - 1:
             return None
         context = self._reconstructed_decision_context(loop.state, index, session, lane)
-        intent = strategy.decide_exploratory(context)
+        returned = strategy.decide_exploratory(context)
         common: dict[str, Any] = {
             "sequence": len(loop.events),
             "session_index": index,
             "session_key": session.session_key,
             "decision_cutoff": context.decision_cutoff,
             "context_hash": content_hash(context),
-            "intent_hash": content_hash(intent),
             "reconstruction_hashes": tuple(
                 sorted(
                     observation.reconstruction_hash
@@ -1560,12 +1615,14 @@ class SessionEvaluatorEngine:
             "acknowledged_limitations": context.acknowledged_limitations,
         }
         try:
+            intent = _revalidated_intent(returned)
             staged = stage_exploratory_decision_targets(intent, context)
         except StrategyIntentRejectedError as error:
             reason = str(error) or type(error).__name__
             loop.events.append(
                 ExploratoryStrategyDecisionTraceEventV1(
                     **common,
+                    intent_hash=_returned_intent_hash(returned),
                     outcome="rejected",
                     staged_targets=(),
                     rejection_reason=reason,
@@ -1575,6 +1632,7 @@ class SessionEvaluatorEngine:
         loop.events.append(
             ExploratoryStrategyDecisionTraceEventV1(
                 **common,
+                intent_hash=content_hash(intent),
                 outcome="staged",
                 staged_targets=staged,
                 rejection_reason=None,
