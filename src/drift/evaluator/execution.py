@@ -30,7 +30,11 @@ from drift.domain.evaluator_execution import (
     canonical_fill_order,
     positions_digest,
 )
-from drift.domain.evaluator_portfolio import PortfolioStateV2, decimal_context
+from drift.domain.evaluator_portfolio import (
+    IndeterminateBasisError,
+    PortfolioStateV2,
+    decimal_context,
+)
 from drift.domain.evaluator_strategy import SecurityTargetPositionV1
 from drift.domain.securities import (
     ListingLifecycleEventKind,
@@ -312,6 +316,31 @@ def resolve_execution_listings(
     }
 
 
+def _require_determinate_sells(
+    *, state: PortfolioStateV2, plan: RebalancePlanV1
+) -> None:
+    """Refuse a funded plan that sells a holding whose basis is indeterminate.
+
+    A sale relieves basis into realized PnL, and an indeterminate basis has
+    none to relieve, so the sale fails closed (spec 12.5, issue 103). This is
+    judged after funding, so an unfunded plan is still a fully evidenced
+    rejection, and before commit: raised inside the commit, the kernel's
+    refusal would surface as ``AtomicRebalanceCommitError`` and crash the run
+    rather than classify it INDETERMINATE.
+    """
+    held = {holding.security_id: holding for holding in state.holdings}
+    for fill in plan.planned_fills:
+        holding = held.get(fill.security_id)
+        if fill.side != "sell" or holding is None or holding.cost_basis is not None:
+            continue
+        raise IndeterminateBasisError(
+            f"the rebalance sells {fill.quantity} of {fill.security_id}, whose "
+            "cost basis is indeterminate, caused by "
+            f"{', '.join(holding.basis_indeterminate_by)}, so the realized PnL "
+            "of the sale is not proven"
+        )
+
+
 class AtomicRebalanceEngine:
     """Plans and atomically commits one next-open rebalance.
 
@@ -536,6 +565,7 @@ class AtomicRebalanceEngine:
             )
         if not plan.is_funded:
             return self._reject(state=state, plan=plan)
+        _require_determinate_sells(state=state, plan=plan)
         return self._commit(state=state, plan=plan)
 
     @staticmethod

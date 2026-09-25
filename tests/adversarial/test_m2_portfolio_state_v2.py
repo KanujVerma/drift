@@ -27,6 +27,7 @@ if str(_UNIT_SUPPORT) not in sys.path:
 
 import json
 from collections.abc import Callable
+from datetime import date
 from decimal import Decimal
 from uuid import UUID
 
@@ -339,7 +340,9 @@ def aggregate_sale_residual_run() -> EvaluationRunArtifactsV2:
 # ==========================================================================
 
 #: ``(classification, trace_hash, result_hash)`` of each run, taken at main
-#: 5dd05cd before any V2 model existed.
+#: 5dd05cd before any V2 model existed. The V2 switch and the replay record
+#: moved none of them. Each later move is recorded at its pin, with the only
+#: leaves a field-by-field diff of the run's trace and result shows moving.
 RUN_PINS: dict[str, tuple[EvaluationClassification, str, str]] = {
     "forward-split": (
         EvaluationClassification.COMPLETE,
@@ -371,10 +374,13 @@ RUN_PINS: dict[str, tuple[EvaluationClassification, str, str]] = {
         "3a751f13f36a76fbc602ebbff92e46572158819a910c000efa2a37b3d0fdbb27",
         "0a86c7b3bb01a6ca19dc08fe75d9a9ce46c22ef1d1f9e25bbd0d0f4fadb44c63",
     ),
+    # Issue 103: the session-3 decision sees both sides of the spin-off with
+    # an indeterminate basis, so its context hash moves (41ce3853 to
+    # 3a99b693), and with it the trace and result hashes. Nothing else does.
     "spinoff": (
         EvaluationClassification.COMPLETE,
-        "9c459d2228778d7a1842987b91ff6549c60edb83a2161febc3d05e14a8e1cf0c",
-        "9874513e520e695ed7f423e73640c2f73cd46a8d440f14559312f90df0a04094",
+        "4298dd0a38d6dde2f2198b01682cdb97b40b38dd0a71341b256a2b545cedca3d",
+        "02fc965d2710dcb1b925fee17b71cb532340a2efc58a78afa49d8065ccd30180",
     ),
     "continuing-instalment": (
         EvaluationClassification.COMPLETE,
@@ -517,3 +523,161 @@ def test_every_run_records_the_share_actions_it_absorbed() -> None:
     for name in RUNS:
         if name not in {"cash-dividend", "continuing-instalment"}:
             assert len(recorded[name]) == 1, name
+
+
+# ==========================================================================
+# An indeterminate basis fails closed when realized (issue 103)
+# ==========================================================================
+
+DAY_4 = date(2026, 1, 9)
+FIVE_DAYS = (*eng.DAYS, DAY_4)
+
+
+def _run_five_sessions(
+    outcome: SecurityEconomicOutcomeV1,
+    strategy: eng.FixedTargetStrategy,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    rates: tuple[CashInLieuRateV1, ...] = (),
+) -> EvaluationRunArtifactsV2:
+    """The engine fixture plus a session 4, with SEC_B admitted and priced."""
+    monkeypatch.setitem(eng.PRICES[eng.SEC_A], DAY_4, ("120.00", "121.00"))
+    monkeypatch.setitem(eng.PRICES[eng.SEC_B], DAY_4, ("50.00", "51.00"))
+    views = tuple(eng._accounting_view(eng.SEC_A, day) for day in FIVE_DAYS) + tuple(
+        eng._accounting_view(eng.SEC_B, day, listing_id=eng.LISTING_B)
+        for day in (eng.DAY_3, DAY_4)
+    )
+    bundle = eng._bundle(
+        days=FIVE_DAYS,
+        accounting_views=views,
+        eligibilities=(
+            eng._eligibility(eng.SEC_A, eng.LISTING_A),
+            eng._eligibility(eng.SEC_B, eng.LISTING_B),
+        ),
+        economic_outcomes=(outcome.resolution,),
+    )
+    engine = SessionEvaluatorEngine(
+        bundle=bundle,
+        admission=eng._admission(bundle),
+        protocol=eng._protocol(),
+        cost_model=eng._cost_model(),
+        evidence=SessionEvaluatorEvidence(
+            listing_role_records=eng.ROLE_RECORDS,
+            economic_outcomes=(outcome,),
+            cash_in_lieu_rates=rates,
+        ),
+        book_currency_namespace=eng.BOOK_NAMESPACE,
+        book_currency_code=eng.BOOK_CODE,
+    )
+    return eng._run(engine, strategy)
+
+
+def _spinoff() -> SecurityEconomicOutcomeV1:
+    _, outcome = _action(
+        ActionKind.SPINOFF,
+        suffix=5000,
+        components=(
+            _shares(
+                numerator="1",
+                denominator="2",
+                meaning="additional_per_predecessor",
+                recipient=eng.SEC_B,
+            ),
+        ),
+    )
+    return outcome
+
+
+def _then_at_session_3(
+    targets: tuple[tuple[UUID, int], ...],
+) -> eng.FixedTargetStrategy:
+    return eng.FixedTargetStrategy(
+        {
+            eng.DAY_1: ((eng.SEC_A, 10),),
+            eng.DAY_2: ((eng.SEC_A, 10),),
+            eng.DAY_3: targets,
+        }
+    )
+
+
+def _halt(artifacts: EvaluationRunArtifactsV2) -> tuple[int | None, str]:
+    (cause,) = [
+        event for event in artifacts.trace.events if event.kind == "indeterminate_cause"
+    ]
+    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
+    return artifacts.result.halted_session_index, f"{cause.phase}: {cause.cause}"
+
+
+@pytest.mark.parametrize(
+    ("sold", "targets"),
+    [
+        ("child", ((eng.SEC_A, 10), (eng.SEC_B, 0))),
+        ("parent", ((eng.SEC_A, 4), (eng.SEC_B, 5))),
+    ],
+)
+def test_selling_either_side_of_a_spinoff_halts_instead_of_inventing_pnl(
+    sold: str,
+    targets: tuple[tuple[UUID, int], ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifacts = _run_five_sessions(_spinoff(), _then_at_session_3(targets), monkeypatch)
+
+    # Before the fix the child's five shares sold for 250.00 of pure realized
+    # gain on a zero basis, and the parent's sale relieved its whole basis.
+    session, cause = _halt(artifacts)
+    assert session == 4
+    assert cause.startswith("open_execution: the rebalance sells")
+    assert "whose cost basis is indeterminate" in cause
+    security = eng.SEC_B if sold == "child" else eng.SEC_A
+    assert str(security) in cause
+    # The book as of its last mark: both sides held, neither sold.
+    assert [(holding.quantity) for holding in artifacts.final_state.holdings] == [
+        10,
+        5,
+    ]
+    assert artifacts.result.metrics.realized_gross_pnl == Decimal("0")
+
+
+def test_holding_both_sides_of_a_spinoff_marks_a_complete_nav(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifacts = _run_five_sessions(
+        _spinoff(),
+        _then_at_session_3(((eng.SEC_A, 10), (eng.SEC_B, 5))),
+        monkeypatch,
+    )
+
+    # NAV never reads basis status: ten parents at 121.00 and five children
+    # at 51.00, on the 9000.00 of cash left after the session-2 buy.
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert artifacts.result.metrics.ending_net_asset_value == Decimal("10465.00")
+    statuses = {
+        holding.security_id: holding.basis_status
+        for holding in artifacts.final_state.holdings
+    }
+    assert statuses == {eng.SEC_A: "indeterminate", eng.SEC_B: "indeterminate"}
+
+
+def test_a_decision_sees_an_indeterminate_basis_as_unknown() -> None:
+    strategy = eng._buy_ten()
+    _, outcome = _action(
+        ActionKind.SPINOFF,
+        suffix=4960,
+        components=(
+            _shares(
+                numerator="1",
+                denominator="2",
+                meaning="additional_per_predecessor",
+                recipient=eng.SEC_B,
+            ),
+        ),
+    )
+    _run(outcome, _views(child=True), strategy=strategy)
+
+    views = {view.security_id: view for view in strategy.seen[-1].current_holdings}
+    for security in (eng.SEC_A, eng.SEC_B):
+        assert views[security].cost_basis is None
+        assert views[security].average_cost_per_share is None
+    # Control: the decision before the spin-off saw the known basis.
+    (before,) = strategy.seen[-2].current_holdings
+    assert before.cost_basis == Decimal("1000.00")

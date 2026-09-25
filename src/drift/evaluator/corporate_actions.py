@@ -72,7 +72,12 @@ from drift.domain.evaluator_portfolio import (
 )
 from drift.domain.evaluator_strategy import SecurityTargetPositionV1
 from drift.domain.sessions import SessionKeyV1
-from drift.evaluator.portfolio import PortfolioAccountingKernel, known_cost_basis
+from drift.evaluator.portfolio import (
+    PortfolioAccountingKernel,
+    indeterminate_holding,
+    known_cost_basis,
+    pooled_holding,
+)
 from drift.serialization.canonical import content_hash
 
 ZERO = Decimal("0")
@@ -951,6 +956,15 @@ class CorporateActionProcessor:
         whole, residual = resolve_whole_shares(
             exact, component.fraction_treatment, tie_break=tie_break
         )
+        # No M1c field allocates the parent's basis between parent and child
+        # (issue 103). Keeping the parent whole would overstate its basis and
+        # a zero child basis would book the child's sale as pure gain, so
+        # both are indeterminate, caused by this spin-off. That holds whatever
+        # child quantity the holding receives: the distribution happened on
+        # the parent either way. Daily marks still value both from their own
+        # closing prices.
+        cause = _applied_effect_id(context)
+        book.holdings[context.security_id] = indeterminate_holding(holding, cause)
         if whole > 0:
             existing = book.holdings.get(child)
             # Parent shares are unchanged, so the parent target stands. The
@@ -961,16 +975,15 @@ class CorporateActionProcessor:
                 _credit_target(
                     book, child, whole, held=existing is not None, label="spin-off"
                 )
-            # No tax allocation percentage is claimed, so the child enters at a
-            # zero basis and the parent keeps its own. Daily marks still value
-            # both from their own closing prices.
-            with decimal_context():
-                basis = ZERO if existing is None else known_cost_basis(existing)
-            book.holdings[child] = SecurityHoldingV2(
-                security_id=child,
-                quantity=whole + (0 if existing is None else existing.quantity),
-                basis_status="known",
-                cost_basis=basis,
+            book.holdings[child] = pooled_holding(
+                existing,
+                SecurityHoldingV2(
+                    security_id=child,
+                    quantity=whole,
+                    basis_status="indeterminate",
+                    cost_basis=None,
+                    basis_indeterminate_by=(cause,),
+                ),
             )
             book.delivered.setdefault(child, context)
         if residual:
@@ -1122,17 +1135,19 @@ class CorporateActionProcessor:
             _extinguish_target(book, context.security_id)
         if holding is None:
             return
-        with decimal_context():
-            basis = known_cost_basis(holding) + (
-                ZERO if existing is None else known_cost_basis(existing)
-            )
         del book.holdings[context.security_id]
         book.removed[context.security_id] = context
-        book.holdings[acquirer] = SecurityHoldingV2(
-            security_id=acquirer,
-            quantity=whole + (0 if existing is None else existing.quantity),
-            basis_status="known",
-            cost_basis=basis,
+        # The predecessor's basis, known or not, carries into the acquirer
+        # shares it converts into, pooled with any acquirer already held.
+        book.holdings[acquirer] = pooled_holding(
+            existing,
+            SecurityHoldingV2(
+                security_id=acquirer,
+                quantity=whole,
+                basis_status=holding.basis_status,
+                cost_basis=holding.cost_basis,
+                basis_indeterminate_by=holding.basis_indeterminate_by,
+            ),
         )
         book.delivered.setdefault(acquirer, context)
         if cash or residual:

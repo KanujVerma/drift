@@ -1110,9 +1110,14 @@ def test_spinoff_creates_child_holding_and_marks_nav_cleanly() -> None:
     updated, _ = _processor().apply_pre_open_actions(state, (), (outcome,), _key())
     by_security = {item.security_id: item for item in updated.holdings}
     assert by_security[SEC_A].quantity == 100
-    assert by_security[SEC_A].cost_basis == Decimal("1000")
     assert by_security[SEC_CHILD].quantity == 50
-    assert by_security[SEC_CHILD].cost_basis == ZERO
+    # Issue 103: no source allocates the basis between parent and child, so
+    # both are indeterminate. The child no longer enters at a zero basis, nor
+    # does the parent keep its whole 1000.
+    assert by_security[SEC_A].basis_status == "indeterminate"
+    assert by_security[SEC_A].cost_basis is None
+    assert by_security[SEC_CHILD].basis_status == "indeterminate"
+    assert by_security[SEC_CHILD].cost_basis is None
 
     kernel = PortfolioAccountingKernel(updated, session_clock=CLOCK)
     kernel.mark_close((_mark_price(SEC_A, "10"), _mark_price(SEC_CHILD, "4")))

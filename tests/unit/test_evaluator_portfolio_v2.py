@@ -15,6 +15,7 @@ from uuid import UUID
 
 import pytest
 import test_evaluator_corporate_actions as ca
+import test_evaluator_execution as ex
 from observation_test_support import uid
 from pydantic import BaseModel, ValidationError, create_model
 
@@ -44,8 +45,13 @@ from drift.domain.evaluator_portfolio import (
     applied_economic_effect_id,
     pending_cash_claim_id,
 )
-from drift.domain.evaluator_strategy import PositionViewV1, SecurityTargetPositionV1
+from drift.domain.evaluator_strategy import (
+    PositionViewV1,
+    SecurityTargetPositionV1,
+    position_view,
+)
 from drift.domain.sessions import SessionKeyV1
+from drift.evaluator.execution import AtomicRebalanceEngine
 from drift.evaluator.portfolio import PortfolioAccountingKernel
 from drift.serialization.canonical import content_hash
 
@@ -842,3 +848,322 @@ def test_a_replayed_dividend_stays_idempotent_by_claim_identity() -> None:
 
     assert again == once
     assert len(again.pending_cash_claims) == 1
+
+
+# ==========================================================================
+# Indeterminate basis (issue 103)
+# ==========================================================================
+#
+# No M1c field allocates basis between a spin-off parent and its child, so
+# both become indeterminate: the child is never booked at zero, and the
+# parent never keeps a basis that overstates it. Splits, stock dividends and
+# share acquisitions carry the status forward, a pooled basis is known only
+# if both sides are, and realizing an indeterminate basis fails closed.
+
+
+def _spinoff(
+    suffix: int,
+    *,
+    numerator: str = "1",
+    denominator: str = "2",
+    occurrence: str = "occ-spin",
+) -> SecurityEconomicOutcomeV1:
+    component = ca._shares(
+        numerator=numerator,
+        denominator=denominator,
+        recipient=ca.SEC_CHILD,
+        meaning="additional_per_predecessor",
+    )
+    terms = ca._terms(
+        suffix=suffix, action_kind=ActionKind.SPINOFF, components=(component,)
+    )
+    effect = ca._effect(
+        suffix=suffix + 1,
+        action_kind=ActionKind.SPINOFF,
+        components=(component,),
+        terms=terms,
+        occurrence_id=occurrence,
+    )
+    return ca._outcome(
+        terms=(terms,), effects=(effect,), action_kinds=(ActionKind.SPINOFF,)
+    )
+
+
+SPIN = _effect_id(occurrence="occ-spin")
+
+
+def _by_security(state: PortfolioStateV2) -> dict[UUID, SecurityHoldingV2]:
+    return {holding.security_id: holding for holding in state.holdings}
+
+
+def test_a_spinoff_makes_the_parent_and_the_child_indeterminate() -> None:
+    state = ca._state(holdings=(ca._holding(quantity=100, basis="1000"),), cash="500")
+
+    updated, _ = _pass(state, (_spinoff(4200),))
+
+    held = _by_security(updated)
+    # Before the fix the child entered at a zero basis and the parent kept
+    # its whole 1000.
+    assert (held[ca.SEC_A].quantity, held[ca.SEC_CHILD].quantity) == (100, 50)
+    for security in (ca.SEC_A, ca.SEC_CHILD):
+        assert held[security].basis_status == "indeterminate"
+        assert held[security].cost_basis is None
+        assert held[security].basis_indeterminate_by == (SPIN,)
+    assert updated.applied_effect_ids == (SPIN,)
+    # Marks price quantities only, so NAV is still complete.
+    kernel = PortfolioAccountingKernel(updated, session_clock=ca.CLOCK)
+    kernel.mark_close(
+        (ca._mark_price(ca.SEC_A, "10"), ca._mark_price(ca.SEC_CHILD, "4"))
+    )
+    assert kernel.state.net_asset_value == Decimal("1700")
+
+
+def test_a_spinoff_into_a_held_child_pools_an_indeterminate_basis() -> None:
+    state = ca._state(
+        holdings=(
+            ca._holding(quantity=100, basis="1000"),
+            ca._holding(ca.SEC_CHILD, quantity=4, basis="40"),
+        )
+    )
+    targets = (
+        SecurityTargetPositionV1(security_id=ca.SEC_A, target_quantity=100),
+        SecurityTargetPositionV1(security_id=ca.SEC_CHILD, target_quantity=4),
+    )
+
+    updated, _ = _pass(state, (_spinoff(4210),), targets=targets)
+
+    child = _by_security(updated)[ca.SEC_CHILD]
+    assert (child.quantity, child.basis_status, child.cost_basis) == (
+        54,
+        "indeterminate",
+        None,
+    )
+
+
+def test_a_spinoff_leaves_the_parent_indeterminate_even_without_child_shares() -> None:
+    # One parent share, one child per ten, rounded down: no child share is
+    # received, yet the distribution still happened on the parent.
+    state = ca._state(holdings=(ca._holding(quantity=1, basis="10"),))
+
+    updated, _ = _pass(state, (_spinoff(4220, denominator="10"),))
+
+    (parent,) = updated.holdings
+    assert (parent.quantity, parent.basis_status) == (1, "indeterminate")
+
+
+def test_an_unheld_parent_leaves_the_book_known() -> None:
+    state = ca._state(holdings=(ca._holding(ca.SEC_OTHER, quantity=5),))
+
+    updated, _ = _pass(state, (_spinoff(4230),))
+
+    assert [holding.basis_status for holding in updated.holdings] == ["known"]
+
+
+def _indeterminate_book(
+    *holdings: SecurityHoldingV2, cash: str = "10000"
+) -> PortfolioStateV2:
+    causes = sorted(
+        {cause for item in holdings for cause in item.basis_indeterminate_by}
+    )
+    return ca._state(cash=cash).model_copy(
+        update={"holdings": holdings, "applied_effect_ids": tuple(causes)}
+    )
+
+
+def _spun(security_id: UUID = ca.SEC_A, quantity: int = 100) -> SecurityHoldingV2:
+    return SecurityHoldingV2(
+        security_id=security_id,
+        quantity=quantity,
+        basis_status="indeterminate",
+        cost_basis=None,
+        basis_indeterminate_by=(SPIN,),
+    )
+
+
+def test_a_split_carries_an_indeterminate_basis_forward() -> None:
+    updated, _ = _pass(
+        _indeterminate_book(_spun()), (_share_outcome(4240, occurrence="occ-2"),)
+    )
+
+    (holding,) = updated.holdings
+    assert (holding.quantity, holding.basis_status) == (200, "indeterminate")
+    assert holding.basis_indeterminate_by == (SPIN,)
+
+
+def _stock_acquisition(suffix: int) -> SecurityEconomicOutcomeV1:
+    component = ca._shares(
+        numerator="1",
+        denominator="1",
+        recipient=ca.SEC_ACQ,
+        component_id="to-acquirer",
+    )
+    terms = ca._terms(
+        suffix=suffix,
+        action_kind=ActionKind.STOCK_ACQUISITION,
+        components=(component,),
+        dates=(ca._date_fact("payable", ca.PAYABLE_AT),),
+    )
+    effect = ca._effect(
+        suffix=suffix + 1,
+        action_kind=ActionKind.STOCK_ACQUISITION,
+        components=(component,),
+        terms=terms,
+        occurrence_id="occ-acq",
+        claim_status="converted",
+    )
+    return ca._outcome(
+        terms=(terms,),
+        effects=(effect,),
+        action_kinds=(ActionKind.STOCK_ACQUISITION,),
+        claim_status="converted",
+    )
+
+
+def test_a_share_acquisition_carries_the_basis_status_into_the_acquirer() -> None:
+    # An indeterminate predecessor into a known held acquirer: the pooled
+    # acquirer basis is known only if both sides are, so it is not.
+    book = _indeterminate_book(
+        _spun(), ca._holding(ca.SEC_ACQ, quantity=10, basis="100")
+    )
+    targets = (
+        SecurityTargetPositionV1(security_id=ca.SEC_A, target_quantity=100),
+        SecurityTargetPositionV1(security_id=ca.SEC_ACQ, target_quantity=10),
+    )
+
+    updated, _ = _pass(book, (_stock_acquisition(4250),), targets=targets)
+
+    (acquirer,) = updated.holdings
+    assert (acquirer.security_id, acquirer.quantity) == (ca.SEC_ACQ, 110)
+    assert acquirer.basis_status == "indeterminate"
+    assert acquirer.basis_indeterminate_by == (SPIN,)
+
+    # Control: a known predecessor pools into a known acquirer basis.
+    known = ca._state(
+        holdings=(
+            ca._holding(quantity=100, basis="900"),
+            ca._holding(ca.SEC_ACQ, quantity=10, basis="100"),
+        )
+    )
+    pooled, _ = _pass(known, (_stock_acquisition(4260),), targets=targets)
+    (acquirer,) = pooled.holdings
+    assert (acquirer.basis_status, acquirer.cost_basis) == ("known", Decimal("1000"))
+
+
+def test_a_disposal_of_an_indeterminate_holding_fails_closed() -> None:
+    # A cash acquisition relieves the whole basis against its proceeds.
+    cash = ca._cash(amount="12", component_id="acquisition-cash")
+    terms = ca._terms(
+        suffix=4270,
+        action_kind=ActionKind.CASH_ACQUISITION,
+        components=(cash,),
+        dates=(ca._date_fact("payable", ca.PAYABLE_AT),),
+    )
+    effect = ca._effect(
+        suffix=4271,
+        action_kind=ActionKind.CASH_ACQUISITION,
+        components=(cash,),
+        terms=terms,
+        occurrence_id="occ-cash",
+        claim_status="extinguished",
+    )
+    outcome = ca._outcome(
+        terms=(terms,),
+        effects=(effect,),
+        action_kinds=(ActionKind.CASH_ACQUISITION,),
+        claim_status="extinguished",
+    )
+
+    with pytest.raises(IndeterminateBasisError, match="is indeterminate"):
+        _pass(_indeterminate_book(_spun()), (outcome,))
+
+    # Control: a known basis is disposed and its gain realized.
+    disposed, _ = _pass(ca._state(holdings=(ca._holding(quantity=100),)), (outcome,))
+    assert disposed.realized_gross_pnl == Decimal("200")
+
+
+def test_the_kernel_refuses_to_sell_an_indeterminate_basis() -> None:
+    book = _indeterminate_book(_spun(quantity=10))
+    kernel = PortfolioAccountingKernel(book, session_clock=ca.CLOCK)
+    sell = PortfolioFillV1(
+        security_id=ca.SEC_A, side="sell", quantity=4, fill_price=Decimal("10")
+    )
+
+    with pytest.raises(IndeterminateBasisError, match="is indeterminate"):
+        kernel.apply_fill(sell)
+
+    assert kernel.state == book
+
+
+def test_a_buy_into_an_indeterminate_basis_keeps_it_indeterminate() -> None:
+    book = _indeterminate_book(_spun(quantity=10))
+    kernel = PortfolioAccountingKernel(book, session_clock=ca.CLOCK)
+
+    kernel.apply_fill(
+        PortfolioFillV1(
+            security_id=ca.SEC_A, side="buy", quantity=5, fill_price=Decimal("10")
+        )
+    )
+
+    (holding,) = kernel.state.holdings
+    assert (holding.quantity, holding.basis_status, holding.cost_basis) == (
+        15,
+        "indeterminate",
+        None,
+    )
+    assert kernel.state.cash_balance == Decimal("9950")
+
+
+def test_a_position_view_shows_an_indeterminate_basis_as_unknown() -> None:
+    view = position_view(_spun(quantity=10))
+    assert (view.quantity, view.cost_basis, view.average_cost_per_share) == (
+        10,
+        None,
+        None,
+    )
+
+
+def _rebalance(
+    state: PortfolioStateV2, target: int, *, cash_price: str = "10.00"
+) -> RebalanceOutcomeV2:
+    engine = AtomicRebalanceEngine(session_clock=ex.EXEC_CLOCK, cost_model=ex.ZERO_COST)
+    return engine.rebalance(
+        state=state,
+        staged_targets=(ex._target(ex.SEC_A, target),),
+        open_prices={ex.SEC_A: ex._price(cash_price)},
+        execution_listings=ex._listings_for(ex.SEC_A),
+    )
+
+
+def _execution_book(cash: str = "1000.00") -> PortfolioStateV2:
+    return ex._state(cash=cash).model_copy(
+        update={
+            "holdings": (_spun(ex.SEC_A, quantity=10),),
+            "applied_effect_ids": (SPIN,),
+        }
+    )
+
+
+def test_a_funded_sale_of_an_indeterminate_basis_halts_before_commit() -> None:
+    # Inside the commit the kernel's refusal would surface as
+    # AtomicRebalanceCommitError and crash the run instead of classifying it.
+    with pytest.raises(IndeterminateBasisError, match="sells 4 of"):
+        _rebalance(_execution_book(), 6)
+
+    # Control: holding or adding to it books normally.
+    held = _rebalance(_execution_book(), 10)
+    assert held.classification == "executed"
+    added = _rebalance(_execution_book(), 12)
+    assert added.state.holdings[0].quantity == 12
+
+
+def test_an_unfunded_rebalance_is_rejected_before_the_basis_is_judged() -> None:
+    # Funding is judged first: the unfunded plan is fully evidenced.
+    book = _execution_book(cash="0")
+    engine = AtomicRebalanceEngine(session_clock=ex.EXEC_CLOCK, cost_model=ex.FEE_ONLY)
+    outcome = engine.rebalance(
+        state=book,
+        staged_targets=(ex._target(ex.SEC_A, 9),),
+        open_prices={ex.SEC_A: ex._price("0.01")},
+        execution_listings=ex._listings_for(ex.SEC_A),
+    )
+    assert outcome.classification == "rejected"

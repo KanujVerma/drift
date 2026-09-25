@@ -79,6 +79,58 @@ def known_cost_basis(holding: SecurityHoldingV2) -> Decimal:
     return holding.cost_basis
 
 
+def pooled_holding(
+    existing: SecurityHoldingV2 | None, received: SecurityHoldingV2
+) -> SecurityHoldingV2:
+    """Pool shares received into a holding of the same security.
+
+    The pooled basis is known only if both sides are known, and is then their
+    exact sum. Otherwise it is indeterminate and names every cause either
+    side carried, so pooling can never turn an unknown basis into a known one.
+    """
+    if existing is None:
+        return received
+    if existing.security_id != received.security_id:
+        raise ValueError("only holdings of one security can be pooled")
+    quantity = existing.quantity + received.quantity
+    if existing.cost_basis is not None and received.cost_basis is not None:
+        with decimal_context():
+            basis = existing.cost_basis + received.cost_basis
+        return SecurityHoldingV2(
+            security_id=existing.security_id,
+            quantity=quantity,
+            basis_status="known",
+            cost_basis=basis,
+        )
+    return SecurityHoldingV2(
+        security_id=existing.security_id,
+        quantity=quantity,
+        basis_status="indeterminate",
+        cost_basis=None,
+        basis_indeterminate_by=tuple(
+            sorted(
+                set(existing.basis_indeterminate_by)
+                | set(received.basis_indeterminate_by)
+            )
+        ),
+    )
+
+
+def indeterminate_holding(
+    holding: SecurityHoldingV2, cause: SHA256Hash
+) -> SecurityHoldingV2:
+    """The same shares, with a basis ``cause`` left without proven allocation."""
+    return SecurityHoldingV2(
+        security_id=holding.security_id,
+        quantity=holding.quantity,
+        basis_status="indeterminate",
+        cost_basis=None,
+        basis_indeterminate_by=tuple(
+            sorted(set(holding.basis_indeterminate_by) | {cause})
+        ),
+    )
+
+
 def _ordered_claims(
     claims: Mapping[SHA256Hash, PendingCashClaimV1],
 ) -> tuple[PendingCashClaimV1, ...]:
@@ -243,20 +295,16 @@ class PortfolioAccountingKernel:
                 f"insufficient cash for fill: requires {required}, holds {self._cash}"
             )
         self._cash -= required
-        existing = self._holdings.get(fill.security_id)
-        if existing is None:
-            self._holdings[fill.security_id] = SecurityHoldingV2(
+        # A buy costs exactly what it paid, but pooled into an indeterminate
+        # basis it leaves the pool indeterminate.
+        self._holdings[fill.security_id] = pooled_holding(
+            self._holdings.get(fill.security_id),
+            SecurityHoldingV2(
                 security_id=fill.security_id,
                 quantity=fill.quantity,
                 basis_status="known",
                 cost_basis=required,
-            )
-            return
-        self._holdings[fill.security_id] = SecurityHoldingV2(
-            security_id=fill.security_id,
-            quantity=existing.quantity + fill.quantity,
-            basis_status="known",
-            cost_basis=known_cost_basis(existing) + required,
+            ),
         )
 
     def _apply_sell(self, fill: PortfolioFillV1) -> None:
