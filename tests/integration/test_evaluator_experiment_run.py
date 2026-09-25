@@ -46,6 +46,7 @@ from test_evaluator_engine import (  # noqa: E402
 from drift.domain.artifacts import ArtifactKind, ArtifactReference  # noqa: E402
 from drift.domain.common import ImmutableJSONValue  # noqa: E402
 from drift.domain.datasets import DatasetReference, TemporalCoverage  # noqa: E402
+from drift.domain.evaluator_bundles import EvaluationRunIdentityV1  # noqa: E402
 from drift.domain.evaluator_portfolio import PortfolioStateV1  # noqa: E402
 from drift.domain.evaluator_results import (  # noqa: E402
     EvaluationClassification,
@@ -797,7 +798,6 @@ def test_the_summary_projection_refuses_a_promotion_result() -> None:
 # --- the returned run must be this run (issue 124) -------------------------
 
 FOREIGN_RUN = r"^the returned run is not this run: "
-FOREIGN_BUNDLE = r"^the returned result was evaluated over bundle "
 OTHER_STRATEGY_HASH = "d" * 64
 OTHER_CODE_VERSION_HASH = "9" * 64
 
@@ -919,12 +919,15 @@ def test_runner_refuses_a_genuine_run_of_this_bundle_under_another_identity(
 def test_runner_refuses_a_result_over_another_bundle_whatever_the_context_claims(
     tmp_path: Path,
 ) -> None:
-    """The row's dataset is checked against the result itself, not only its identity.
+    """No claim in the context can pair the row with a result over another bundle.
 
     The context names the foreign run's identity, except that its bundle hash
     equals every string, so it matches the specification's dataset and the
-    foreign result's bundle alike. The result's own bundle is still not the
-    dataset the M0 row records.
+    foreign result's bundle alike. Before issue 123 the runner compared that
+    object as given, and only the dataset check on the result itself refused
+    it (``FOREIGN_BUNDLE``). The runner now compares only a canonical copy of
+    the context's identity, whose bundle hash is the text it spells, so the
+    copy fails its own identity hash and is refused before the engine runs.
     """
     foreign = _run_of(_engine(bundle=_bundle(days=DAYS[:3])), FixedTargetStrategy({}))
     identity = foreign.result.run_identity
@@ -936,9 +939,224 @@ def test_runner_refuses_a_result_over_another_bundle_whatever_the_context_claims
     assert identity == claimed
     assert identity.bundle_hash != DATASET_HASH
 
-    with pytest.raises(ForeignRunArtifactsError, match=FOREIGN_BUNDLE):
+    with pytest.raises(ValidationError, match=r"run identity hash mismatch"):
         execute_experiment_run(_specification(), context)
 
+    assert ledger.verified_events() == ()
+
+
+# --- the runner compares only canonical caller inputs (issue 123) -------------
+
+
+class _IdentityEqualToEveryIdentity(EvaluationRunIdentityV1):
+    """A genuine run identity whose equality is forged."""
+
+    __hash__ = EvaluationRunIdentityV1.__hash__
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+
+def _identity_equal_to_every_identity(
+    context: ExperimentRunnerContext,
+) -> EvaluationRunIdentityV1:
+    return _IdentityEqualToEveryIdentity.model_validate(
+        context.run_identity.model_dump()
+    )
+
+
+def _identity_of_text_equal_to_every_text(
+    context: ExperimentRunnerContext,
+) -> EvaluationRunIdentityV1:
+    forged: dict[str, Any] = {
+        name: _EqualToEveryText(value)
+        for name, value in dict(context.run_identity).items()
+    }
+    return EvaluationRunIdentityV1.model_construct(**forged)
+
+
+def _specification_of_a_dataset_equal_to_every_dataset() -> ExperimentSpecification:
+    honest = _specification()
+    dataset = honest.dataset_reference.model_construct(
+        **(
+            dict(honest.dataset_reference)
+            | {"content_hash": _EqualToEveryText(DATASET_HASH)}
+        )
+    )
+    return honest.model_construct(**(dict(honest) | {"dataset_reference": dataset}))
+
+
+type _CallerForgery = Callable[
+    [ExperimentRunnerContext], tuple[ExperimentRunnerContext, ExperimentSpecification]
+]
+
+#: The residual probe of the PR 126 review, cases A0 to A1b. A stand-in engine
+#: returns a genuine run over another bundle. One lying caller input was caught
+#: by the other comparison, but a lying identity together with a lying dataset
+#: reference recorded a misattributed row.
+CALLER_FORGERIES: dict[str, _CallerForgery] = {
+    "A0 identity equal to every identity": lambda context: (
+        replace(context, run_identity=_identity_equal_to_every_identity(context)),
+        _specification(),
+    ),
+    "A0b identity of text equal to every text": lambda context: (
+        replace(context, run_identity=_identity_of_text_equal_to_every_text(context)),
+        _specification(),
+    ),
+    "A0c dataset equal to every dataset": lambda context: (
+        context,
+        _specification_of_a_dataset_equal_to_every_dataset(),
+    ),
+    "A1 identity and dataset equal to every one": lambda context: (
+        replace(context, run_identity=_identity_equal_to_every_identity(context)),
+        _specification_of_a_dataset_equal_to_every_dataset(),
+    ),
+    "A1b identity text and dataset equal to every one": lambda context: (
+        replace(context, run_identity=_identity_of_text_equal_to_every_text(context)),
+        _specification_of_a_dataset_equal_to_every_dataset(),
+    ),
+}
+
+
+@pytest.mark.parametrize("forgery", sorted(CALLER_FORGERIES), ids=lambda name: name)
+def test_runner_compares_only_canonical_copies_of_its_caller_inputs(
+    tmp_path: Path, forgery: str
+) -> None:
+    """Forged equality in a caller input compares as the text it spells."""
+    foreign = _run_of(_engine(bundle=_bundle(days=DAYS[:3])), FixedTargetStrategy({}))
+    ledger, genuine_context = _stand_in_context(tmp_path, foreign)
+    context, specification = CALLER_FORGERIES[forgery](genuine_context)
+
+    with pytest.raises(ForeignRunArtifactsError, match=FOREIGN_RUN):
+        execute_experiment_run(specification, context)
+
+    assert ledger.verified_events() == ()
+
+
+class _PrecedingNothing(datetime):
+    """An instant that precedes no instant, whenever it is."""
+
+    def __lt__(self, other: date, /) -> bool:
+        return False
+
+
+class _FollowingNothing(datetime):
+    """An instant that follows no instant, whenever it is."""
+
+    def __gt__(self, other: date, /) -> bool:
+        return False
+
+
+def _instant(kind: type[datetime], moment: datetime) -> datetime:
+    return kind(
+        moment.year, moment.month, moment.day, moment.hour, moment.minute, tzinfo=UTC
+    )
+
+
+def _forged_strategy_reference() -> StrategyReference:
+    """Another strategy version, whose declared code hash equals every text."""
+    return StrategyReference.model_construct(
+        strategy_id=uuid7(),
+        strategy_version="2",
+        code_hash=_EqualToEveryText(OTHER_STRATEGY_HASH),
+        artifact_reference=_artifact(ArtifactKind.STRATEGY, OTHER_STRATEGY_HASH),
+    )
+
+
+class _StrategyOfForgedReference(FixedTargetStrategy):
+    """The same targets, declared under a forged strategy reference."""
+
+    @property
+    def strategy_reference(self) -> StrategyReference:
+        return _forged_strategy_reference()
+
+
+def _specification_with(**changes: object) -> ExperimentSpecification:
+    honest = _specification()
+    return honest.model_construct(**(dict(honest) | changes))
+
+
+def _dataset_of_another_bundle() -> DatasetReference:
+    honest = _dataset()
+    return honest.model_construct(
+        **(dict(honest) | {"content_hash": _EqualToEveryText("f" * 64)})
+    )
+
+
+type _InputForgery = Callable[
+    [ExperimentRunnerContext], tuple[ExperimentRunnerContext, ExperimentSpecification]
+]
+
+#: Each caller input ``_validate_context`` compares, forged to pass its check,
+#: over the real engine, and the refusal its canonical copy meets instead.
+#: Before issue 123 each was recorded as a COMPLETED run.
+COMPARED_INPUT_FORGERIES: dict[str, tuple[_InputForgery, str]] = {
+    "a completion before its start that precedes nothing": (
+        lambda context: (
+            replace(
+                context,
+                completed_at=_instant(_PrecedingNothing, NOW - timedelta(minutes=5)),
+            ),
+            _specification(),
+        ),
+        r"^an experiment run completion cannot precede its start",
+    ),
+    "a start after its completion that follows nothing": (
+        lambda context: (
+            replace(
+                context,
+                started_at=_instant(_FollowingNothing, LATER + timedelta(minutes=5)),
+            ),
+            _specification(),
+        ),
+        r"^an experiment run completion cannot precede its start",
+    ),
+    "a running strategy of another code hash equal to every text": (
+        lambda context: (
+            replace(
+                context,
+                strategy=_StrategyOfForgedReference(_buy_ten().targets),
+            ),
+            _specification(),
+        ),
+        r"^the strategy that runs does not match the run identity",
+    ),
+    "a specified strategy of another code hash equal to every text": (
+        lambda context: (
+            context,
+            _specification_with(strategy_reference=_forged_strategy_reference()),
+        ),
+        r"^the specification strategy does not match the evaluated run identity",
+    ),
+    "a dataset of another bundle hash equal to every text": (
+        lambda context: (
+            context,
+            _specification_with(dataset_reference=_dataset_of_another_bundle()),
+        ),
+        r"^the specification dataset is not the evaluated bundle",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "forgery", sorted(COMPARED_INPUT_FORGERIES), ids=lambda name: name
+)
+def test_runner_refuses_a_compared_input_whatever_its_comparisons_say(
+    tmp_path: Path, forgery: str
+) -> None:
+    """Each check reads the canonical copy, so nothing runs and nothing records."""
+    ledger = SQLiteLedger(tmp_path / "audit.sqlite3")
+    forge, refusal = COMPARED_INPUT_FORGERIES[forgery]
+    context, specification = forge(_context(_engine(), ledger=ledger))
+    strategy = cast(FixedTargetStrategy, context.strategy)
+
+    with pytest.raises(ValueError, match=refusal):
+        execute_experiment_run(specification, context)
+
+    assert strategy.seen == []
     assert ledger.verified_events() == ()
 
 

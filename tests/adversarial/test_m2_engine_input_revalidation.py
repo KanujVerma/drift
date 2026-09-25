@@ -19,9 +19,10 @@ forged or non-intent return halts the run ``REJECTED`` before any fill.
 import dataclasses
 import sys
 import typing
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
+from enum import Enum
 from pathlib import Path
 from typing import Any, Self
 from uuid import UUID
@@ -41,11 +42,13 @@ from exploratory_decision_test_support import (
     SEC_OTHER,
     ReconstructedTargetStrategy,
     bundle_of,
+    cohort_of,
     reconstructed_engine,
+    replay_of,
     run_engine,
     three_regular_sessions,
 )
-from pydantic import ValidationError, model_validator
+from pydantic import BaseModel, ValidationError, model_validator
 from test_evaluator_reconstruction import make_policy
 
 from drift.domain.evaluator_bundles import (
@@ -514,6 +517,17 @@ def _uuid_int(offset: int) -> _Forgery:
     return forge
 
 
+def _uuid_int_of(value: int) -> _Forgery:
+    """An exact UUID whose integer slot is set to ``value``, past its guard."""
+
+    def forge(intent: StrategyDecisionIntentV1) -> object:
+        identifier = UUID(int=intent.targets[0].security_id.int)
+        _smuggled(identifier, "int", value)
+        return _with_target(intent, security_id=identifier)
+
+    return forge
+
+
 class _KeyStr(str):
     """A str subclass equal to, and hashing as, the name it spells."""
 
@@ -684,6 +698,11 @@ FORGERIES: dict[str, tuple[_Forgery, str]] = {
     ),
     "uuid-int-below-zero": (
         _uuid_int(-(1 << 128)),
+        WITH + "targets.0.security_id.int outside the 128-bit range",
+    ),
+    # The bound itself is outside the range (#119 round 3, mutant X04).
+    "uuid-int-of-exactly-2-to-the-128": (
+        _uuid_int_of(1 << 128),
         WITH + "targets.0.security_id.int outside the 128-bit range",
     ),
     "lone-surrogate-venue-code": (
@@ -909,6 +928,54 @@ def test_a_refused_return_is_traced_under_the_hash_of_what_it_is(
     assert hashes == [REFUSED_INTENT_HASHES[forgery]]
 
 
+#: A genuine UUIDv7 whose top bit is set, as every identifier minted after
+#: its 48-bit millisecond clock passes 2**47 will be (#119 round 3, mutant X03).
+TOP_BIT_UUID7 = UUID("ffffffff-ffff-7fff-bfff-ffffffffffff")
+
+
+def _liquidating_a_top_bit_security(intent: StrategyDecisionIntentV1) -> object:
+    zero = SecurityTargetPositionV1(security_id=TOP_BIT_UUID7, target_quantity=0)
+    return StrategyDecisionIntentV1(
+        session_key=intent.session_key,
+        decision_time=intent.decision_time,
+        targets=(*intent.targets, zero),
+    )
+
+
+@pytest.mark.parametrize("lane", LANES)
+def test_a_genuine_uuid7_with_its_top_bit_set_is_staged(lane: str) -> None:
+    """The 128-bit range admits every genuine identifier, the top bit included."""
+    assert TOP_BIT_UUID7.version == 7
+    assert TOP_BIT_UUID7.int >= 1 << 127
+
+    artifacts = LANES[lane].run(_liquidating_a_top_bit_security)
+
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert artifacts.result.metrics.committed_fill_count == 1
+    staged = [
+        {target.security_id for target in event.staged_targets}
+        for event in artifacts.trace.events
+        if isinstance(event, LANES[lane].decision_event)
+    ]
+    assert staged
+    assert all(TOP_BIT_UUID7 in targets for targets in staged)
+
+
+@pytest.mark.parametrize("lane", LANES)
+def test_a_non_intent_return_whose_hashing_raises_fails_the_run(lane: str) -> None:
+    """#113 D6 (a): the run fails, never halts REJECTED (#119 round 3, X06).
+
+    A refused return that is not an intent is content hashed for its decision
+    event, which can run its own code (here its ``repr``). If that code
+    raises, the exception propagates, as one raised inside the decision
+    method does, so the M0 run records FAILED.
+    """
+    with pytest.raises(
+        RuntimeError, match=r"^strategy code ran while its answer was inspected$"
+    ):
+        LANES[lane].run(lambda intent: _Loud())
+
+
 def _rewriting_earlier_answers() -> _Forgery:
     """Answer genuinely, then rewrite the previous answer past its guard."""
     answered: list[StrategyDecisionIntentV1] = []
@@ -1048,3 +1115,482 @@ def test_a_genuine_intent_runs_byte_identically_to_before_issue_111(
         artifacts.trace.trace_hash,
         artifacts.result.result_hash,
     ) == GENUINE_RUN_HASHES[name]
+
+
+# --- subclassed leaves in engine inputs (issue 123) ---------------------------
+#
+# Strict validation keeps an instance of a `UUID`, `datetime` or `date`
+# subclass, and a python-mode dump hands back the same leaf, so the issue 78
+# rebuild shared every such leaf with the forged input. Each forgery below
+# keeps the genuine string form, so every content hash over it, the bundle,
+# cohort and evidence hashes included, is the genuine one: only equality and
+# hashing are forged. The engine must run each input exactly as its canonical
+# value, byte for byte, and keep none of the forged leaves.
+
+
+class _ForgedUUID(UUID):
+    """An identifier equal to every identifier, hashing as ``hashes_as``."""
+
+    hashes_as: UUID
+
+    def __hash__(self) -> int:
+        return hash(self.hashes_as)
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+
+def _forged_uuid(value: UUID, *, hashes_as: UUID) -> UUID:
+    forged = _ForgedUUID(int=value.int)
+    object.__setattr__(forged, "hashes_as", hashes_as)
+    return forged
+
+
+class _DayBeforeHashingDate(date):
+    """A session date equal to every date, hashing as the day before it."""
+
+    def __hash__(self) -> int:
+        return hash(date.fromordinal(self.toordinal() - 1))
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+
+def _replaced(model: Any, **changes: Any) -> Any:
+    """``model`` with ``changes``, built without validation."""
+    return type(model).model_construct(**(dict(model) | changes))
+
+
+def _hash_invisible(bundle: EvaluationInputBundleV1) -> EvaluationInputBundleV1:
+    """The forged bundle, whose content hash is still its genuine bundle hash."""
+    assert evaluation_input_bundle_hash(bundle) == bundle.bundle_hash
+    return bundle
+
+
+def _bundle_admitting_every_security() -> EvaluationInputBundleV1:
+    """Its one eligible security equals every identifier, hashing as SEC_OTHER."""
+    genuine = eng._bundle()
+    (eligible,) = genuine.structural_eligibilities
+    forged = _replaced(
+        eligible,
+        security_id=_forged_uuid(eligible.security_id, hashes_as=SEC_OTHER),
+    )
+    return _hash_invisible(_replaced(genuine, structural_eligibilities=(forged,)))
+
+
+def _bundle_with_a_decision_time_equal_to_every_cutoff() -> EvaluationInputBundleV1:
+    """The last decision view is timed at an instant equal to every instant."""
+    genuine = eng._bundle()
+    last = eng._close_of(eng.DAY_3)
+
+    def forge(view: DerivedObservationViewV1) -> DerivedObservationViewV1:
+        observation: Any = view.query.observation
+        if observation.decision_time != last:
+            return view
+        moment = observation.decision_time
+        timed = _replaced(
+            observation,
+            decision_time=_AlwaysEqualDateTime(
+                moment.year,
+                moment.month,
+                moment.day,
+                moment.hour,
+                moment.minute,
+                moment.second,
+                moment.microsecond,
+                tzinfo=moment.tzinfo,
+            ),
+        )
+        forged: DerivedObservationViewV1 = _replaced(
+            view, query=_replaced(view.query, observation=timed)
+        )
+        return forged
+
+    views = tuple(forge(view) for view in genuine.authentic_decision_views)
+    return _hash_invisible(_replaced(genuine, authentic_decision_views=views))
+
+
+def _bundle_with_a_session_date_hashing_as_the_day_before() -> EvaluationInputBundleV1:
+    """The last accounting view's session date hashes as the day before it."""
+    genuine = eng._bundle()
+
+    def forge(view: DerivedObservationViewV1) -> DerivedObservationViewV1:
+        session = view.source_session
+        if session.local_date != eng.DAY_3:
+            return view
+        day = session.local_date
+        dated = _replaced(
+            session, local_date=_DayBeforeHashingDate(day.year, day.month, day.day)
+        )
+        forged: DerivedObservationViewV1 = _replaced(view, source_session=dated)
+        return forged
+
+    views = tuple(forge(view) for view in genuine.authentic_accounting_views)
+    return _hash_invisible(_replaced(genuine, authentic_accounting_views=views))
+
+
+def _role_records_naming_every_security() -> tuple[Any, ...]:
+    """SEC_OTHER's primary listing record names a security equal to every one."""
+    kept, other = eng.ROLE_RECORDS
+    forged = _replaced(
+        other,
+        security_id=_forged_uuid(other.security_id, hashes_as=other.security_id),
+    )
+    assert content_hash(forged) == content_hash(other)
+    return (kept, forged)
+
+
+def _cohort_admitting_every_security() -> Any:
+    """The cohort's one member equals every identifier, hashing as SEC_OTHER."""
+    genuine = cohort_of()
+    (member,) = genuine.security_ids
+    forged = _replaced(
+        genuine, security_ids=(_forged_uuid(member, hashes_as=SEC_OTHER),)
+    )
+    assert content_hash(forged) == content_hash(genuine)
+    return forged
+
+
+def _replay_querying_every_security() -> ExploratoryReconstructionReplay:
+    """The first replay query names a security equal to every one."""
+    bundle = bundle_of(three_regular_sessions())
+    genuine = replay_of(bundle.exploratory_reconstructed_observations)
+    (query, context), *rest = genuine.requests
+    forged = _replaced(
+        query, security_id=_forged_uuid(query.security_id, hashes_as=query.security_id)
+    )
+    assert content_hash(forged) == content_hash(query)
+    return ExploratoryReconstructionReplay(
+        policy=genuine.policy, requests=((forged, context), *rest)
+    )
+
+
+def _texts_equal_to_every_text(values: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(_AlwaysEqualStr(value) for value in values)
+
+
+def _admission_of_forged_text() -> Any:
+    admission = eng._admission(eng._bundle())
+    return _replaced(
+        admission,
+        acknowledged_limitations=_texts_equal_to_every_text(
+            admission.acknowledged_limitations
+        ),
+    )
+
+
+def _protocol_of_forged_text() -> Any:
+    protocol = eng._protocol()
+    return _replaced(protocol, protocol_id=_AlwaysEqualStr(protocol.protocol_id))
+
+
+def _cost_model_of_forged_text() -> Any:
+    cost_model = eng._cost_model()
+    return _replaced(cost_model, model_id=_AlwaysEqualStr(cost_model.model_id))
+
+
+type _InputForgery = tuple[
+    Callable[[], SessionEvaluatorEngine],
+    Callable[[], eng.FixedTargetStrategy | ReconstructedTargetStrategy],
+    str,
+]
+
+#: Each forged input, as the engine it builds and the strategy it runs, and the
+#: genuine run it must reproduce byte for byte. Before issue 123 the UUID,
+#: datetime and date forgeries in the bundle, the role records and the cohort
+#: each ran otherwise: an unadmitted security was staged and halted the run
+#: INDETERMINATE; a later decision view was read at an earlier cutoff, whose
+#: context then refused it, failing the run; one session was priced from two
+#: views; one security resolved two primary listings; or the admitted
+#: security fell out of the cohort, failing the run. The replay query forgery
+#: already ran as genuine, but kept its forged leaf in engine state. The text
+#: forgeries are controls: a python-mode rebuild already normalized a ``str``
+#: subclass to an exact ``str``, and still must.
+INPUT_FORGERIES: dict[str, _InputForgery] = {
+    "bundle-uuid-equal-to-every-security": (
+        lambda: _engine(bundle=_bundle_admitting_every_security()),
+        lambda: eng.FixedTargetStrategy({eng.DAY_1: ((eng.SEC_B, 1),)}),
+        "realized-refused-by-staging",
+    ),
+    "bundle-datetime-equal-to-every-cutoff": (
+        lambda: _engine(bundle=_bundle_with_a_decision_time_equal_to_every_cutoff()),
+        eng._buy_ten,
+        "realized-staged",
+    ),
+    "bundle-date-hashing-as-the-day-before": (
+        lambda: _engine(bundle=_bundle_with_a_session_date_hashing_as_the_day_before()),
+        eng._buy_ten,
+        "realized-staged",
+    ),
+    "evidence-role-record-uuid-equal-to-every-security": (
+        lambda: _engine(
+            evidence=SessionEvaluatorEvidence(
+                listing_role_records=_role_records_naming_every_security()
+            )
+        ),
+        eng._buy_ten,
+        "realized-staged",
+    ),
+    "evidence-cohort-uuid-equal-to-every-security": (
+        lambda: reconstructed_engine(
+            bundle_of(three_regular_sessions()),
+            cohort=_cohort_admitting_every_security(),
+        ),
+        lambda: ReconstructedTargetStrategy({JAN5: ((SEC_OTHER, 1),)}),
+        "reconstructed-refused-by-staging",
+    ),
+    "evidence-replay-query-uuid-equal-to-every-security": (
+        lambda: reconstructed_engine(
+            bundle_of(three_regular_sessions()),
+            replay=_replay_querying_every_security(),
+        ),
+        lambda: ReconstructedTargetStrategy({JAN5: ((SEC, 1),), JAN6: ((SEC, 1),)}),
+        "reconstructed-staged",
+    ),
+    "admission-text-equal-to-every-text": (
+        lambda: _engine(admission=_admission_of_forged_text()),
+        eng._buy_ten,
+        "realized-staged",
+    ),
+    "protocol-text-equal-to-every-text": (
+        lambda: _engine(protocol=_protocol_of_forged_text()),
+        eng._buy_ten,
+        "realized-staged",
+    ),
+    "cost-model-text-equal-to-every-text": (
+        lambda: _engine(cost_model=_cost_model_of_forged_text()),
+        eng._buy_ten,
+        "realized-staged",
+    ),
+}
+
+#: Every forged leaf type these tests build.
+_FORGED_LEAF_TYPES = (
+    _ForgedUUID,
+    _DayBeforeHashingDate,
+    _AlwaysEqualDateTime,
+    _AlwaysEqualDate,
+    _AlwaysEqualStr,
+)
+
+
+def _reachable(*roots: object) -> list[object]:
+    """Every object reachable from ``roots``, each once.
+
+    Walks model and dataclass fields, container members, and the instance
+    state of ``drift`` objects such as the engine itself.
+    """
+    seen: dict[int, object] = {}
+    pending = list(roots)
+    while pending:
+        item = pending.pop()
+        if id(item) in seen:
+            continue
+        seen[id(item)] = item
+        if isinstance(item, BaseModel):
+            pending.extend(vars(item).values())
+        elif dataclasses.is_dataclass(item) and not isinstance(item, type):
+            pending.extend(
+                getattr(item, name.name) for name in dataclasses.fields(item)
+            )
+        elif isinstance(item, Mapping):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif isinstance(item, tuple | list | set | frozenset):
+            pending.extend(item)
+        elif type(item).__module__.startswith("drift.") and hasattr(item, "__dict__"):
+            pending.extend(vars(item).values())
+    return list(seen.values())
+
+
+def _forged_leaves(*roots: object) -> list[str]:
+    return [
+        type(item).__name__
+        for item in _reachable(*roots)
+        if isinstance(item, _FORGED_LEAF_TYPES)
+    ]
+
+
+@pytest.mark.parametrize("forgery", INPUT_FORGERIES)
+def test_an_input_leaf_with_forged_equality_runs_as_its_canonical_value(
+    forgery: str,
+) -> None:
+    """Every comparison and every hash reads the canonical value (issue 123)."""
+    build, strategy, genuine = INPUT_FORGERIES[forgery]
+    artifacts = run_engine(build(), strategy())
+
+    assert (
+        artifacts.trace.trace_hash,
+        artifacts.result.result_hash,
+    ) == GENUINE_RUN_HASHES[genuine]
+
+
+@pytest.mark.parametrize("forgery", INPUT_FORGERIES)
+def test_no_forged_input_leaf_survives_into_engine_state(forgery: str) -> None:
+    """Each input is rebuilt through canonical JSON into exact built-in leaves."""
+    build, strategy, _ = INPUT_FORGERIES[forgery]
+    engine = build()
+    artifacts = run_engine(engine, strategy())
+
+    assert _forged_leaves(engine, artifacts) == []
+
+
+def test_a_run_identity_of_forged_text_runs_as_its_canonical_value() -> None:
+    """Control: every run-identity leaf is a string, normalized as before."""
+    engine = _engine()
+    identity = eng._run_identity(
+        admission=engine.admission,
+        bundle=engine.bundle,
+        protocol=engine.protocol,
+        cost_model=engine.cost_model,
+        evidence_hash=engine.evaluator_evidence_hash,
+    )
+    forged = _replaced(
+        identity, code_version_hash=_AlwaysEqualStr(identity.code_version_hash)
+    )
+
+    artifacts = engine.run(strategy=eng._buy_ten(), run_identity=forged)
+
+    assert (
+        artifacts.trace.trace_hash,
+        artifacts.result.result_hash,
+    ) == GENUINE_RUN_HASHES["realized-staged"]
+    assert _forged_leaves(engine, artifacts) == []
+
+
+# --- the strategy's decision context (issue 123) ------------------------------
+#
+# The engine handed each strategy a context built from its own objects: the
+# admitted universe and the holdings held the very `UUID` instances of the
+# bundle and the book (#119 review R2-F2, R3-F1). A strategy rewriting one in
+# place rewrote the engine's state, and the run could end COMPLETE with a
+# trace naming an unadmitted security. Each strategy now gets a canonical
+# JSON-rebuilt copy of its context, sharing no object with the engine.
+
+#: A UUIDv7 no input names: every identifier a strategy rewrites becomes it.
+_ELSEWHERE = UUID("01990000-0000-7000-8000-0000000009ff")
+
+
+def _defaced(value: object) -> object:
+    """Another value of the same kind, for a field rewritten in place."""
+    if value is None or isinstance(value, bool | Enum):
+        return value
+    if isinstance(value, date):
+        return value + timedelta(days=1)
+    if isinstance(value, Decimal | int):
+        return value + 1
+    if isinstance(value, str):
+        return f"{value}-defaced"
+    if isinstance(value, tuple):
+        return ()
+    return value
+
+
+def _vandalize(*roots: object) -> None:
+    """Rewrite every object reachable from ``roots`` in place, past every guard.
+
+    Every identifier's integer slot is moved to ``_ELSEWHERE``, then every
+    field of every model is replaced by another value of its kind.
+    """
+    reachable = _reachable(*roots)
+    for item in reachable:
+        if isinstance(item, UUID):
+            object.__setattr__(item, "int", _ELSEWHERE.int)
+    for item in reachable:
+        if isinstance(item, BaseModel):
+            for name, value in list(vars(item).items()):
+                object.__setattr__(item, name, _defaced(value))
+
+
+def _detached(intent: StrategyDecisionIntentV1) -> StrategyDecisionIntentV1:
+    """The answer rebuilt, so it shares no object with the context it read."""
+    return StrategyDecisionIntentV1.model_validate_json(intent.model_dump_json())
+
+
+class _VandalRealizedStrategy(eng.FixedTargetStrategy):
+    """Answers as asked, then rewrites every context it was ever handed."""
+
+    def decide(self, context: StrategyDecisionContextV1) -> StrategyDecisionIntentV1:
+        answer = _detached(super().decide(context))
+        _vandalize(*self.seen)
+        return answer
+
+
+class _VandalReconstructedStrategy(ReconstructedTargetStrategy):
+    """Answers as asked, then rewrites every context it was ever handed."""
+
+    def decide_exploratory(
+        self, context: ExploratoryStrategyDecisionContextV1
+    ) -> StrategyDecisionIntentV1:
+        answer = _detached(super().decide_exploratory(context))
+        _vandalize(*self.seen)
+        return answer
+
+
+def _fresh[M: BaseModel](model: M) -> M:
+    """A copy sharing no object with ``model``, so no rewrite leaves this test."""
+    return type(model).model_validate_json(model.model_dump_json())
+
+
+def _context_runs(
+    lane: str,
+) -> tuple[
+    EvaluationRunArtifactsV1,
+    EvaluationRunArtifactsV1,
+    Sequence[StrategyDecisionContextV1 | ExploratoryStrategyDecisionContextV1],
+    Sequence[StrategyDecisionContextV1 | ExploratoryStrategyDecisionContextV1],
+]:
+    """A control run and a vandal run, each over inputs shared with nothing."""
+    if lane == "realized":
+        targets = dict.fromkeys(eng.DAYS, REQUESTED)
+        control = eng.FixedTargetStrategy(targets)
+        vandal = _VandalRealizedStrategy(targets)
+        runs = [
+            eng._run(eng._engine(bundle=_fresh(eng._bundle())), strategy)
+            for strategy in (control, vandal)
+        ]
+        return runs[0], runs[1], control.seen, vandal.seen
+    exploratory = dict.fromkeys((JAN5, JAN6, JAN7), REQUESTED)
+    control_x = ReconstructedTargetStrategy(exploratory)
+    vandal_x = _VandalReconstructedStrategy(exploratory)
+    runs = [
+        run_engine(
+            reconstructed_engine(
+                _fresh(bundle_of(three_regular_sessions())), cohort=_fresh(cohort_of())
+            ),
+            strategy,
+        )
+        for strategy in (control_x, vandal_x)
+    ]
+    return runs[0], runs[1], control_x.seen, vandal_x.seen
+
+
+@pytest.mark.parametrize("lane", LANES)
+def test_a_strategy_rewriting_its_contexts_changes_nothing_the_engine_records(
+    lane: str,
+) -> None:
+    """No context object a strategy can reach is engine state (issue 123)."""
+    control, vandal, genuine_contexts, rewritten_contexts = _context_runs(lane)
+
+    # The rewrite really ran: every context the vandal saw was moved.
+    assert len(rewritten_contexts) == len(genuine_contexts) >= 2
+    assert all(
+        rewritten.decision_cutoff > genuine.decision_cutoff
+        for rewritten, genuine in zip(rewritten_contexts, genuine_contexts, strict=True)
+    )
+    assert vandal.result.classification is EvaluationClassification.COMPLETE
+    fills = [
+        [content_hash(event) for event in run.trace.events if event.kind == "fill"]
+        for run in (control, vandal)
+    ]
+    assert fills[0]
+    assert fills[1] == fills[0]
+    assert vandal.trace.trace_hash == control.trace.trace_hash
+    assert vandal.result.result_hash == control.result.result_hash
+    assert content_hash(vandal.final_state) == content_hash(control.final_state)

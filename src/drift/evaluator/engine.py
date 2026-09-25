@@ -228,25 +228,42 @@ def refuse_promotion_lane(subject: object, *, site: str) -> None:
 
 
 def _revalidated[M: BaseModel](declared: type[M], model: BaseModel) -> M:
-    """Rebuild ``model`` as a fresh, validated ``declared`` (issue 78).
+    """Rebuild ``model`` as a fresh, validated ``declared`` (issues 78, 123).
 
     Pydantic trusts an existing instance placed in a typed field, so an input
     built with ``model_construct``, or one carrying a foreign payload in a
     nested field, would otherwise be evaluated as if it had been validated.
     Validation runs against the declared type, never the instance's own class,
     so a subclass overriding a validator cannot excuse itself.
+
+    That validation alone is not a canonical rebuild (issue 123). Strict
+    validation keeps an instance of a ``UUID``, ``datetime`` or ``date``
+    subclass, and a python-mode dump hands back that same leaf, so its forged
+    ``__eq__``, ``__hash__`` or ``__str__`` would reach every comparison, and
+    canonical hashing (which reads the string form) could disagree with them.
+    The validated model is therefore rebuilt once more through canonical JSON,
+    and only that rebuild is kept: every leaf is a fresh, exact built-in
+    value, every later comparison and hash reads the one canonical value, and
+    the declared type's own hash validators check it again. Validating in
+    python mode first keeps every issue 78 and 111 refusal exactly as it was.
     """
-    return declared.model_validate(model.model_dump(mode="python", warnings=False))
+    validated = declared.model_validate(model.model_dump(mode="python", warnings=False))
+    return declared.model_validate_json(validated.model_dump_json())
 
 
 _ADMISSION: TypeAdapter[EvaluationAdmissionV1] = TypeAdapter(EvaluationAdmissionV1)
 
 
 def _revalidated_admission(admission: BaseModel) -> EvaluationAdmissionV1:
-    """Rebuild an admission as a fresh member of the declared lane union."""
-    return _ADMISSION.validate_python(
+    """Rebuild an admission as a fresh member of the declared lane union.
+
+    Validated in python mode, then rebuilt through canonical JSON, as every
+    engine input is (``_revalidated``, issue 123).
+    """
+    validated = _ADMISSION.validate_python(
         admission.model_dump(mode="python", warnings=False)
     )
+    return _ADMISSION.validate_json(_ADMISSION.dump_json(validated))
 
 
 #: The exact type each declared field of a returned intent must hold, per model.
@@ -529,7 +546,12 @@ class SessionEvaluatorEvidence:
 def _revalidated_evidence(
     evidence: SessionEvaluatorEvidence,
 ) -> SessionEvaluatorEvidence:
-    """Rebuild every evidence model as its declared type; contexts validate in M1d."""
+    """Rebuild every evidence model as its declared type; contexts validate in M1d.
+
+    Each model is rebuilt through canonical JSON (issue 123). A replay
+    request's M1d resolution context is not a model and has no canonical JSON
+    form: it is kept as given and re-derived against by M1d itself.
+    """
 
     def each[M: BaseModel](
         declared: type[M], values: Sequence[BaseModel]
@@ -1658,7 +1680,10 @@ class SessionEvaluatorEngine:
         if index < self._protocol.warmup_session_count - 1:
             return None
         context = self._decision_context(loop.state, session)
-        returned = strategy.decide(context)
+        # Issue 123: the strategy is handed a canonical JSON-rebuilt copy that
+        # shares no object with engine state, so rewriting anything it can
+        # reach (a UUID in place, say) cannot change what the engine records.
+        returned = strategy.decide(_revalidated(StrategyDecisionContextV1, context))
         context_hash = content_hash(context)
         try:
             intent = _revalidated_intent(returned)
@@ -1802,7 +1827,10 @@ class SessionEvaluatorEngine:
         if index < self._protocol.warmup_session_count - 1:
             return None
         context = self._reconstructed_decision_context(loop.state, index, session, lane)
-        returned = strategy.decide_exploratory(context)
+        # Issue 123: a canonical copy sharing no object with engine state.
+        returned = strategy.decide_exploratory(
+            _revalidated(ExploratoryStrategyDecisionContextV1, context)
+        )
         common: dict[str, Any] = {
             "sequence": len(loop.events),
             "session_index": index,
