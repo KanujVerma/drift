@@ -23,7 +23,6 @@ from drift.domain.economic_common import (
     EconomicComponentV1,
     ShareComponentV1,
     UnsupportedPropertyComponentV1,
-    economic_implementation_hash,
 )
 from drift.domain.economic_coverage import (
     EconomicInputRecordV1,
@@ -58,6 +57,7 @@ from drift.domain.securities import (
     IdentityAssignmentVersionV1,
     identity_reference,
 )
+from drift.domain.semantic_attestation import m1c_evidence_attestation_hash
 from drift.domain.temporal import CutoffEligibility, evaluate_availability
 from drift.markets.economic_validation import (
     EconomicDatasetInput,
@@ -195,7 +195,7 @@ def _selection_pipeline(
         source_selection_policy_hash=query.source_selection_policy_hash,
         selection_algorithm="drift-m1c-economic-selection-v1",
         selection_algorithm_spec_hash=content_hash(_SELECTION_SPEC),
-        selection_implementation_hash=economic_implementation_hash(),
+        selection_implementation_hash=m1c_evidence_attestation_hash(),
         dataset_proofs=dataset_proofs,
         identity_proofs=tuple(
             sorted(
@@ -801,7 +801,7 @@ def _project_record(
             sorted(content_hash(item) for item in dependencies.values())
         ),
         projection_algorithm_spec_hash=content_hash(_PROJECTION_SPEC),
-        projection_implementation_hash=economic_implementation_hash(),
+        projection_implementation_hash=m1c_evidence_attestation_hash(),
     )
 
 

@@ -16,7 +16,6 @@ from drift.domain.economic_common import (
     FractionTreatmentV1,
     ShareComponentV1,
     UnsupportedPropertyComponentV1,
-    economic_implementation_hash,
 )
 from drift.domain.economic_coverage import (
     EconomicCoverageVersionV1,
@@ -60,6 +59,7 @@ from drift.domain.economic_results import (
     SettlementEconomicPayloadV1,
     ShareEconomicValueV1,
 )
+from drift.domain.semantic_attestation import m1c_evidence_attestation_hash
 from drift.markets.economic_selection import project_market_facts, select_market_records
 from drift.markets.economic_validation import (
     EconomicDatasetInput,
@@ -1323,7 +1323,7 @@ def resolve_economic_facts(
         input_context_hash=query.input_context_hash,
         composition_algorithm="drift-m1c-economic-composition-v1",
         composition_algorithm_spec_hash=content_hash(_COMPOSITION_SPEC),
-        composition_implementation_hash=economic_implementation_hash(),
+        composition_implementation_hash=m1c_evidence_attestation_hash(),
         selected_terms_hashes=selected_terms,
         upcoming_terms_hashes=upcoming_terms,
         effect_projections=effect_projections,

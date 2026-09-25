@@ -31,10 +31,7 @@ from drift.domain.dataset_validation import (
     ValidationRunContextV1,
     ValidationScope,
 )
-from drift.domain.economic_common import (
-    EconomicSourceKeyV1,
-    economic_implementation_hash,
-)
+from drift.domain.economic_common import EconomicSourceKeyV1
 from drift.domain.economic_coverage import (
     EconomicCoverageVersionV1,
     EconomicInputRecordV1,
@@ -55,6 +52,7 @@ from drift.domain.manifests import (
     SchemaDescriptorV1,
 )
 from drift.domain.securities import IdentityAssignmentVersionV1
+from drift.domain.semantic_attestation import m1c_validation_attestation_hash
 from drift.domain.temporal import (
     AvailabilityChannelV1,
     AvailabilityEvidenceV1,
@@ -94,8 +92,13 @@ def economic_validation_profile_hash() -> str:
 
 
 def economic_validator_implementation_hash() -> str:
-    """Return the exact installed Drift Python source-inventory hash."""
-    return economic_implementation_hash()
+    """Return the M1c validator run identity.
+
+    It is the versioned ``m1c-source-validation-v1`` semantic attestation over
+    the declared closure of this validator (issue 63, stage 2), not the whole
+    installed source inventory, which stays build provenance only.
+    """
+    return m1c_validation_attestation_hash()
 
 
 def economic_coverage_methodology_supported(

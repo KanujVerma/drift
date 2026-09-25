@@ -12,9 +12,10 @@ Each scenario runs in a fresh interpreter over its own copy of the installed
 in-process edit could never show that the identity ignores it. The unrelated
 edit is a comment in ``drift/evaluator/engine.py``; the declared edit is the
 same comment in ``drift/markets/normalization.py``, which the closure declares.
-Only source-basis evidence is claimed stable here: split-normalized evidence
-still binds M1c whole-tree identities until stage 2 (see
-``tests/unit/test_normalization.py``).
+Only source-basis evidence is exercised here. Split-normalized evidence
+composes M1c history, whose identities stage 2 moved onto the M1c semantic
+attestations; its stability is proved in
+``tests/integration/test_m1c_semantic_identity.py``.
 """
 
 from __future__ import annotations
