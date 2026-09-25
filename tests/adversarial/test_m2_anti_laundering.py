@@ -25,6 +25,7 @@ gate tests above keep exercising the gate directly.
 
 import ast
 import inspect
+import json
 import sys
 from datetime import date, timedelta
 from decimal import Decimal
@@ -87,11 +88,14 @@ from drift.domain.evaluator_portfolio import (
     MarkEvidenceV1,
     MarkPriceV1,
     PortfolioMarkV1,
+    PortfolioStateV1,
 )
 from drift.domain.evaluator_reconstruction import (
     ExploratoryReconstructedSessionObservationV1,
 )
 from drift.domain.evaluator_results import (
+    LANE_GRANTED_MARK_GRADE,
+    EvaluationRunArtifactsV1,
     ExploratoryEvaluationResultV1,
     PromotionEvaluationResultV1,
 )
@@ -424,6 +428,85 @@ def test_an_exploratory_run_grades_every_mark_from_its_own_admission() -> None:
     ]
     assert marked, "the run must actually mark a position"
     assert artifacts.result.is_promotion_grade_evidence is False
+
+
+def test_the_granted_mark_grade_table_is_the_engine_table() -> None:
+    """The artifact type pairs a book with the grade its lane's run grants."""
+    from drift.evaluator.engine import LANE_MARK_GRADE
+
+    assert LANE_GRANTED_MARK_GRADE == LANE_MARK_GRADE
+    assert LANE_GRANTED_MARK_GRADE == {
+        "exploratory": "exploratory",
+        "promotion": "promotion_grade",
+    }
+
+
+def _genuine_pair_json(*, trade: bool = True) -> dict[str, Any]:
+    """One genuine exploratory run's artifacts as canonical JSON data."""
+    import test_evaluator_engine as eng
+
+    strategy = eng._buy_ten() if trade else eng.FixedTargetStrategy({})
+    loaded: dict[str, Any] = json.loads(
+        eng._run(eng._engine(), strategy).model_dump_json()
+    )
+    return loaded
+
+
+@pytest.mark.parametrize("trade", [True, False], ids=["priced", "unpriced"])
+def test_run_artifacts_refuse_a_final_state_in_another_lane(trade: bool) -> None:
+    """Issue 124 (#120 review R5): the final book is paired by lane, not hash.
+
+    The exploratory result keeps its own admission hash in the book, so the
+    hash binding holds, while the book names the promotion lane and grades
+    its marks promotion-grade. The book validates on its own. Unpriced, the
+    book carries no graded mark, so only the lane pairing can refuse it.
+    """
+    data = _genuine_pair_json(trade=trade)
+    state = data["final_state"]
+    assert state["lane"] == "exploratory"
+    state["lane"] = "promotion"
+    state["mark"]["lane"] = "promotion"
+    for price in state["mark"]["prices"]:
+        price["evidence"]["grade"] = "promotion_grade"
+    assert bool(state["mark"]["prices"]) is trade
+    assert PortfolioStateV1.model_validate_json(json.dumps(state)).lane == "promotion"
+
+    with pytest.raises(
+        ValidationError,
+        match=r"final portfolio state is in the promotion lane, its result is in "
+        r"the exploratory lane",
+    ):
+        EvaluationRunArtifactsV1.model_validate_json(json.dumps(data))
+
+
+def test_run_artifacts_refuse_a_final_state_marked_above_its_result_lane() -> None:
+    """The exploratory lane admits promotion-grade evidence; its run grants none.
+
+    Only the grade is raised, so the lane pairing holds and the book is valid
+    on its own, yet it would present an exploratory run's valuation as
+    promotion-grade.
+    """
+    data = _genuine_pair_json()
+    state = data["final_state"]
+    assert state["lane"] == state["mark"]["lane"] == "exploratory"
+    assert state["mark"]["prices"]
+    for price in state["mark"]["prices"]:
+        assert price["evidence"]["grade"] == "exploratory"
+        price["evidence"]["grade"] = "promotion_grade"
+    assert PortfolioStateV1.model_validate_json(json.dumps(state)).lane == (
+        "exploratory"
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match=r"a result in the exploratory lane grants exploratory marks, its "
+        r"final state marks security \S+ promotion_grade",
+    ):
+        EvaluationRunArtifactsV1.model_validate_json(json.dumps(data))
+
+    # Control: the genuine pair validates.
+    genuine = _genuine_pair_json()
+    assert EvaluationRunArtifactsV1.model_validate_json(json.dumps(genuine))
 
 
 # ==========================================================================

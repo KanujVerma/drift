@@ -8,7 +8,8 @@ byte-identical result and trace hashes.
 """
 
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -21,18 +22,21 @@ from pydantic import ValidationError
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "unit"))
 
 from test_evaluator_engine import (  # noqa: E402
+    BOOK_NAMESPACE,
     CODE_VERSION_HASH,
     DAY_1,
     DAY_2,
     DAY_3,
     DAYS,
     ENVIRONMENT_HASH,
+    ROLE_RECORDS,
     SEC_A,
     STRATEGY_CODE_HASH,
     FixedTargetStrategy,
     _accounting_view,
     _bundle,
     _bypassed_promotion_engine,
+    _cost_model,
     _engine,
     _promotion_admission,
     _protocol,
@@ -65,12 +69,15 @@ from drift.domain.experiments import (  # noqa: E402
     ExperimentSpecification,
 )
 from drift.domain.strategies import StrategyReference  # noqa: E402
+from drift.evaluator.bundles import build_evaluation_run_identity  # noqa: E402
 from drift.evaluator.engine import (  # noqa: E402
     PromotionLaneDisabledError,
     SessionEvaluatorEngine,
+    SessionEvaluatorEvidence,
 )
 from drift.evaluator.experiment_runner import (  # noqa: E402
     ExperimentRunnerContext,
+    ForeignRunArtifactsError,
     execute_experiment_run,
     summary_metrics_payload,
 )
@@ -582,6 +589,30 @@ def test_runner_refuses_an_exploratory_result_claiming_promotion_grade(
     assert ledger.verified_events() == ()
 
 
+def test_runner_refuses_a_truthy_non_bool_promotion_grade_claim(
+    tmp_path: Path,
+) -> None:
+    """Issue 124 (#120 review N2): anything but exactly ``False`` is refused.
+
+    ``1`` is not ``True``, so a flag check weakened to ``is True`` lets it
+    through to the rebuild, which fails it only as a literal mismatch. The
+    named refusal must come first.
+    """
+    forged = _with_result(_genuine_artifacts(), is_promotion_grade_evidence=1)
+    assert forged.result.lane == "exploratory"
+    assert forged.result.is_promotion_grade_evidence is not True
+    ledger, context = _stand_in_context(tmp_path, forged)
+
+    with pytest.raises(
+        PromotionLaneDisabledError,
+        match=PROMOTION_LANE_DISABLED
+        + "the experiment runner on the returned result refuses",
+    ):
+        execute_experiment_run(_specification(), context)
+
+    assert ledger.verified_events() == ()
+
+
 def test_runner_refuses_a_result_whose_lane_equals_nothing(tmp_path: Path) -> None:
     """Issue 120 review, S2: a lying lane cannot hide a promotion-grade claim."""
     forged = _with_result(
@@ -761,6 +792,154 @@ def test_the_summary_projection_refuses_a_promotion_result() -> None:
     assert summary_metrics_payload(_genuine_artifacts().result)["lane"] == (
         "exploratory"
     )
+
+
+# --- the returned run must be this run (issue 124) -------------------------
+
+FOREIGN_RUN = r"^the returned run is not this run: "
+FOREIGN_BUNDLE = r"^the returned result was evaluated over bundle "
+OTHER_STRATEGY_HASH = "d" * 64
+OTHER_CODE_VERSION_HASH = "9" * 64
+
+
+class _EqualToEveryText(str):
+    """A hash equal to every string, as a context identity could carry one."""
+
+    __hash__ = str.__hash__
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+
+class _OtherStrategy(FixedTargetStrategy):
+    """The same targets under another strategy version."""
+
+    @property
+    def strategy_reference(self) -> StrategyReference:
+        return StrategyReference(
+            strategy_id=uuid7(),
+            strategy_version="2",
+            code_hash=OTHER_STRATEGY_HASH,
+            artifact_reference=_artifact(ArtifactKind.STRATEGY, OTHER_STRATEGY_HASH),
+        )
+
+
+def _run_of(
+    engine: SessionEvaluatorEngine,
+    strategy: FixedTargetStrategy | None = None,
+    *,
+    strategy_hash: str = STRATEGY_CODE_HASH,
+    code_version_hash: str = CODE_VERSION_HASH,
+) -> EvaluationRunArtifactsV1:
+    """A genuine run of ``engine``, sealed under the identity it names."""
+    return engine.run(
+        strategy=_buy_ten() if strategy is None else strategy,
+        run_identity=build_evaluation_run_identity(
+            strategy_hash=strategy_hash,
+            protocol_hash=engine.protocol.protocol_hash,
+            cost_model_hash=engine.cost_model.cost_model_hash,
+            admission=engine.admission,
+            bundle=engine.bundle,
+            evaluator_evidence_hash=engine.evaluator_evidence_hash,
+            code_version_hash=code_version_hash,
+            environment_closure_hash=ENVIRONMENT_HASH,
+        ),
+    )
+
+
+def _euro_book_engine() -> SessionEvaluatorEngine:
+    base = _engine()
+    return SessionEvaluatorEngine(
+        bundle=base.bundle,
+        admission=base.admission,
+        protocol=base.protocol,
+        cost_model=base.cost_model,
+        evidence=SessionEvaluatorEvidence(listing_role_records=ROLE_RECORDS),
+        book_currency_namespace=BOOK_NAMESPACE,
+        book_currency_code="EUR",
+    )
+
+
+def test_runner_refuses_a_genuine_run_over_another_bundle(tmp_path: Path) -> None:
+    """Issue 124 (#120 review R3): the misattribution probe.
+
+    A stand-in engine returns a genuine exploratory run over a three-session
+    bundle. It rebuilds cleanly, and was recorded COMPLETED under an M0 row
+    naming the four-session dataset.
+    """
+    foreign = _run_of(_engine(bundle=_bundle(days=DAYS[:3])), FixedTargetStrategy({}))
+    ledger, context = _stand_in_context(tmp_path, foreign)
+    assert foreign.result.run_identity.bundle_hash != DATASET_HASH
+    assert foreign.result.run_identity != context.run_identity
+
+    with pytest.raises(ForeignRunArtifactsError, match=FOREIGN_RUN):
+        execute_experiment_run(_specification(), context)
+
+    assert ledger.verified_events() == ()
+
+
+FOREIGN_RUNS_OVER_THIS_BUNDLE: dict[str, Callable[[], EvaluationRunArtifactsV1]] = {
+    "protocol": lambda: _run_of(_engine(protocol=_protocol(cash="20000.00"))),
+    "cost model": lambda: _run_of(_engine(cost_model=_cost_model(commission="0.01"))),
+    "strategy": lambda: _run_of(
+        _engine(),
+        _OtherStrategy(_buy_ten().targets),
+        strategy_hash=OTHER_STRATEGY_HASH,
+    ),
+    "evaluator evidence": lambda: _run_of(_euro_book_engine()),
+    "code version": lambda: _run_of(
+        _engine(), code_version_hash=OTHER_CODE_VERSION_HASH
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "variant", sorted(FOREIGN_RUNS_OVER_THIS_BUNDLE), ids=lambda name: name
+)
+def test_runner_refuses_a_genuine_run_of_this_bundle_under_another_identity(
+    tmp_path: Path, variant: str
+) -> None:
+    """The run identity binds more than the bundle, and all of it must match."""
+    foreign = FOREIGN_RUNS_OVER_THIS_BUNDLE[variant]()
+    ledger, context = _stand_in_context(tmp_path, foreign)
+    identity = foreign.result.run_identity
+    assert identity.bundle_hash == context.run_identity.bundle_hash == DATASET_HASH
+    assert identity.admission_hash == context.run_identity.admission_hash
+    assert identity != context.run_identity
+
+    with pytest.raises(ForeignRunArtifactsError, match=FOREIGN_RUN):
+        execute_experiment_run(_specification(), context)
+
+    assert ledger.verified_events() == ()
+
+
+def test_runner_refuses_a_result_over_another_bundle_whatever_the_context_claims(
+    tmp_path: Path,
+) -> None:
+    """The row's dataset is checked against the result itself, not only its identity.
+
+    The context names the foreign run's identity, except that its bundle hash
+    equals every string, so it matches the specification's dataset and the
+    foreign result's bundle alike. The result's own bundle is still not the
+    dataset the M0 row records.
+    """
+    foreign = _run_of(_engine(bundle=_bundle(days=DAYS[:3])), FixedTargetStrategy({}))
+    identity = foreign.result.run_identity
+    claimed = identity.model_construct(
+        **(dict(identity) | {"bundle_hash": _EqualToEveryText(DATASET_HASH)})
+    )
+    ledger, genuine_context = _stand_in_context(tmp_path, foreign)
+    context = replace(genuine_context, run_identity=claimed)
+    assert identity == claimed
+    assert identity.bundle_hash != DATASET_HASH
+
+    with pytest.raises(ForeignRunArtifactsError, match=FOREIGN_BUNDLE):
+        execute_experiment_run(_specification(), context)
+
+    assert ledger.verified_events() == ()
 
 
 # --- protocol coupling -----------------------------------------------------

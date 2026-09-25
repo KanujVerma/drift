@@ -17,7 +17,10 @@ a promotion result before recording, so no M0 experiment run and no audit
 event ever records ``lane=promotion``. The runner trusts no object an engine
 returns: it rebuilds the artifacts through canonical JSON, refuses the rebuilt
 result if it is in the promotion lane or claims promotion-grade evidence, and
-records only from the rebuilt objects (issue 120 review, F-A).
+records only from the rebuilt objects (issue 120 review, F-A). A valid rebuild
+is not proof the artifacts are this run's, so the rebuilt result must also
+carry the context's run identity over the dataset the M0 row records (issue
+124).
 """
 
 from collections.abc import Mapping
@@ -39,6 +42,7 @@ from drift.domain.experiments import (
     ExperimentRunStatus,
     ExperimentSpecification,
 )
+from drift.errors import DriftError
 from drift.evaluator.engine import (
     LaneDispatchStrategy,
     PromotionLaneDisabledError,
@@ -51,6 +55,16 @@ from drift.serialization.canonical import content_hash
 EXPERIMENT_RUN_EVENT_TYPE = "m2.evaluation.run.recorded"
 EXPERIMENT_RUN_ENTITY_TYPE = "experiment_run"
 EXPERIMENT_RUN_EVENT_SCHEMA_VERSION = "1"
+
+
+class ForeignRunArtifactsError(DriftError, ValueError):
+    """Raised when an engine returns artifacts that are not this run's (#124).
+
+    A canonical rebuild proves the returned artifacts are valid, not that they
+    came from the run the context names. A genuine run over another bundle,
+    protocol, cost model, strategy or evaluator evidence would otherwise be
+    recorded under this run's M0 row. Nothing is recorded when this is raised.
+    """
 
 
 @dataclass(frozen=True)
@@ -133,6 +147,34 @@ def _rebuilt_artifacts(artifacts: EvaluationRunArtifactsV1) -> EvaluationRunArti
         rebuilt.result, site="the experiment runner on the rebuilt result"
     )
     return rebuilt
+
+
+def _refuse_foreign_run(
+    context: ExperimentRunnerContext,
+    recorded: EvaluationRunArtifactsV1,
+    dataset_hash: str,
+) -> None:
+    """Refuse rebuilt artifacts that are not this run's (issue 124).
+
+    The run identity binds everything that changes results (issue 86): the
+    bundle, protocol, cost model, strategy, admission, evaluator evidence,
+    code version and environment closure. The rebuilt result must carry
+    exactly the identity the engine was asked to run. Its bundle must also be
+    the dataset the M0 row records, checked against the result itself, so the
+    row never names one dataset over a result evaluated on another.
+    """
+    identity = recorded.result.run_identity
+    if identity != context.run_identity:
+        raise ForeignRunArtifactsError(
+            "the returned run is not this run: its run identity is "
+            f"{identity.run_identity_hash}, this run is "
+            f"{context.run_identity.run_identity_hash}"
+        )
+    if identity.bundle_hash != dataset_hash:
+        raise ForeignRunArtifactsError(
+            f"the returned result was evaluated over bundle {identity.bundle_hash}, "
+            f"not the dataset this run records, {dataset_hash}"
+        )
 
 
 def _artifact_references(
@@ -238,10 +280,12 @@ def execute_experiment_run(
     ruling): it raises `PromotionLaneDisabledError` and records nothing, and
     so does that error raised from inside the engine run. Returned artifacts
     that fail their canonical rebuild are not recorded either; the validation
-    error propagates.
+    error propagates. Nor are rebuilt artifacts of another run (issue 124):
+    they raise `ForeignRunArtifactsError`.
     """
     refuse_promotion_lane(context.engine.admission, site="the experiment runner")
     _validate_context(specification, context)
+    dataset_hash = specification.dataset_reference.content_hash
     common: dict[str, object] = {
         "run_id": context.run_id,
         "experiment_id": specification.experiment_id,
@@ -249,7 +293,7 @@ def execute_experiment_run(
         "completed_at": context.completed_at,
         "code_hash": context.run_identity.code_version_hash,
         "environment_hash": context.run_identity.environment_closure_hash,
-        "dataset_hash": specification.dataset_reference.content_hash,
+        "dataset_hash": dataset_hash,
         "parameters_hash": content_hash(specification.parameters),
     }
     try:
@@ -276,6 +320,7 @@ def execute_experiment_run(
         _record_audit_event(context, run)
         return run
     recorded = _rebuilt_artifacts(artifacts)
+    _refuse_foreign_run(context, recorded, dataset_hash)
     run = ExperimentRun.model_validate(
         common
         | {
