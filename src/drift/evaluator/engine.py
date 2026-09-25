@@ -236,10 +236,20 @@ _EXACT_MEMBER_TYPES: dict[tuple[type[BaseModel], str], type[BaseModel]] = {
 _TYPE_QUALNAME = vars(type)["__qualname__"]
 _TYPE_MODULE = vars(type)["__module__"]
 _ABSENT = object()
+#: Stands in for a type name that is not exactly `str`, whose formatting
+#: would otherwise run the strategy's own `__format__`.
+_UNNAMED = "<unnamed>"
+
+#: One more than the largest integer a UUID holds.
+_UUID_INT_BOUND = 1 << 128
+
+
+def _exact_name(name: object) -> str:
+    return name if type(name) is str else _UNNAMED
 
 
 def _type_name(kind: type) -> str:
-    return cast(str, _TYPE_QUALNAME.__get__(kind))
+    return _exact_name(_TYPE_QUALNAME.__get__(kind))
 
 
 def _refuse_intent(problem: str) -> StrategyIntentRejectedError:
@@ -269,6 +279,8 @@ def _require_exact_node(value: object, expected: type, path: str) -> None:
             raise _refuse_intent(
                 f"{path}.int of type {_type_name(type(number))}, not int"
             )
+        if not 0 <= number < _UUID_INT_BOUND:
+            raise _refuse_intent(f"{path}.int outside the 128-bit range")
     if actual in _EXACT_FIELD_TYPES:
         _require_exact_model(cast(BaseModel, value), path)
 
@@ -278,6 +290,10 @@ def _require_exact_model(model: BaseModel, path: str) -> None:
     kind = type(model)
     where = f"{path}." if path else ""
     state = vars(model)
+    # Pydantic reads the raw storage of the instance dictionary, while a dict
+    # subclass could show this walk other values through its own methods.
+    if type(state) is not dict:
+        raise _refuse_intent(f"a {where}__dict__ that is not exactly a dict")
     declared = kind.model_fields
     if not all(type(name) is str for name in state) or not (
         state.keys() <= declared.keys()
@@ -319,8 +335,12 @@ def _revalidated_intent(returned: object) -> StrategyDecisionIntentV1:
     one's, so an unsorted target set or any other value a validator would
     normalize is refused rather than silently repaired. Every refusal is a
     `StrategyIntentRejectedError`, so the run halts `REJECTED` before any
-    fill, exactly as a staging refusal does. Staging reads only the rebuilt
-    intent, never an object the strategy still holds.
+    fill, exactly as a staging refusal does.
+
+    The accepted intent is then rebuilt once more through JSON, so staging
+    holds only fresh objects. A python-mode rebuild keeps the strategy's own
+    `uuid.UUID` instances, whose value a strategy that kept them could still
+    rewrite after the decision was staged, traced and filled.
     """
     if type(returned) is not StrategyDecisionIntentV1:
         raise StrategyIntentRejectedError(
@@ -345,7 +365,14 @@ def _revalidated_intent(returned: object) -> StrategyDecisionIntentV1:
             "strategy returned a non-canonical decision intent: "
             "revalidating it builds a different intent"
         )
-    return rebuilt
+    return StrategyDecisionIntentV1.model_validate_json(rebuilt.model_dump_json())
+
+
+def _uncanonical_return_hash(returned: object) -> SHA256Hash:
+    """Hash naming the type of a return whose content is not hashed."""
+    kind = type(returned)
+    module = _exact_name(_TYPE_MODULE.__get__(kind))
+    return content_hash({"uncanonical_return_type": f"{module}.{_type_name(kind)}"})
 
 
 def _returned_intent_hash(returned: object) -> SHA256Hash:
@@ -353,16 +380,24 @@ def _returned_intent_hash(returned: object) -> SHA256Hash:
 
     A refused return need not have a canonical form: a forged naive decision
     time or an arbitrary object has none. The event then hashes the name of
-    the returned type instead. Hashing a refused return can still run its own
-    code (a serializer, iteration, or ``repr``); if that raises, the exception
-    propagates and the run records FAILED, as a strategy that raises does.
+    the returned type instead. An intent is content hashed only once the
+    exact-type walk accepts it, so hashing it runs no strategy code, and a
+    value that still cannot be serialized (a lone surrogate in a string) is
+    named by type too. Any other return can still run its own code while it
+    is hashed (a serializer, iteration, or ``repr``); if that raises, the
+    exception propagates and the run records FAILED, as a strategy that
+    raises does.
     """
+    if type(returned) is StrategyDecisionIntentV1:
+        try:
+            _require_exact_model(returned, "")
+            return content_hash(returned)
+        except StrategyIntentRejectedError, CanonicalSerializationError, UnicodeError:
+            return _uncanonical_return_hash(returned)
     try:
         return content_hash(returned)
     except CanonicalSerializationError:
-        kind = type(returned)
-        module = cast(str, _TYPE_MODULE.__get__(kind))
-        return content_hash({"uncanonical_return_type": f"{module}.{_type_name(kind)}"})
+        return _uncanonical_return_hash(returned)
 
 
 def _security_order(security_id: UUID) -> bytes:

@@ -466,6 +466,114 @@ def _target_fields_set(intent: StrategyDecisionIntentV1) -> object:
     return _unvalidated(intent, targets=(emptied, *rest))
 
 
+class _LyingDict(dict[str, object]):
+    """Raw storage holds a forgery; Python-level views show the genuine state.
+
+    Pydantic reads the raw storage of an instance dictionary (#119 round 2).
+    """
+
+    def __init__(self, raw: dict[str, object], shown: dict[str, object]) -> None:
+        super().__init__(raw)
+        self.shown = dict(shown)
+
+    def items(self) -> Any:
+        return self.shown.items()
+
+    def keys(self) -> Any:
+        return self.shown.keys()
+
+    def values(self) -> Any:
+        return self.shown.values()
+
+    def __iter__(self) -> Any:
+        return iter(self.shown)
+
+
+def _lying_instance_dict(intent: StrategyDecisionIntentV1) -> object:
+    shown = dict(vars(intent))
+    raw = shown | {"targets": vars(_renaming_uuid(intent))["targets"]}
+    return _smuggled(intent, "__dict__", _LyingDict(raw, shown))
+
+
+def _lying_session_key_dict(intent: StrategyDecisionIntentV1) -> object:
+    key = intent.session_key.model_copy()
+    shown = dict(vars(key))
+    earlier = _AlwaysEqualDate.fromordinal(key.local_date.toordinal() - 30)
+    _smuggled(key, "__dict__", _LyingDict(shown | {"local_date": earlier}, shown))
+    return _unvalidated(intent, session_key=key)
+
+
+def _uuid_int(offset: int) -> _Forgery:
+    """An exact UUID whose integer slot is moved by ``offset``, past its guard."""
+
+    def forge(intent: StrategyDecisionIntentV1) -> object:
+        identifier = UUID(int=intent.targets[0].security_id.int)
+        _smuggled(identifier, "int", identifier.int + offset)
+        return _with_target(intent, security_id=identifier)
+
+    return forge
+
+
+class _KeyStr(str):
+    """A str subclass equal to, and hashing as, the name it spells."""
+
+
+def _str_subclass_key(intent: StrategyDecisionIntentV1) -> object:
+    state = vars(intent)
+    state[_KeyStr("targets")] = state.pop("targets")
+    return intent
+
+
+class _FieldsSet(set[str]):
+    """A set subclass able to carry state of its own."""
+
+
+def _loud(*_: object) -> str:
+    raise RuntimeError("strategy code ran while its answer was inspected")
+
+
+class _LoudStr(str):
+    """A str subclass that runs strategy code when formatted or printed."""
+
+    __format__ = _loud
+    __str__ = _loud
+
+
+class _Loud:
+    """An object that runs strategy code when formatted, printed or shown."""
+
+    __format__ = _loud
+    __str__ = _loud
+    __repr__ = _loud
+
+
+class _GuardedNames(type):
+    """A metaclass that runs strategy code when a class name is read."""
+
+    def __getattribute__(cls, name: str) -> Any:
+        if name in ("__qualname__", "__module__"):
+            _loud()
+        return super().__getattribute__(name)
+
+
+class _GuardedReturn(metaclass=_GuardedNames):
+    """Neither name may be read through the class itself."""
+
+
+class _LoudlyNamed:
+    """A class whose qualified name is a str subclass."""
+
+
+_LoudlyNamed.__qualname__ = _LoudStr("_LoudlyNamed")
+
+
+class _OddlyHoused:
+    """A class whose module is not a string at all."""
+
+
+_OddlyHoused.__module__ = _Loud()  # type: ignore[assignment]
+
+
 #: Each forgery of the genuine intent, and the exact refusal it must meet.
 #: Before issue 111, every one but four is staged or fails the run. The
 #: duplicate and the padded venue code were already refused by staging, and
@@ -508,6 +616,32 @@ FORGERIES: dict[str, tuple[_Forgery, str]] = {
         _target_fields_set,
         WITH + "a tampered targets.0.__pydantic_fields_set__",
     ),
+    "fields-set-of-a-set-subclass": (
+        lambda intent: _smuggled(
+            intent, "__pydantic_fields_set__", _FieldsSet(intent.model_fields_set)
+        ),
+        WITH + "a tampered __pydantic_fields_set__",
+    ),
+    "fields-set-with-a-str-subclass-member": (
+        lambda intent: _smuggled(
+            intent,
+            "__pydantic_fields_set__",
+            {_KeyStr(name) for name in intent.model_fields_set},
+        ),
+        WITH + "a tampered __pydantic_fields_set__",
+    ),
+    "str-subclass-key-in-the-instance-dict": (
+        _str_subclass_key,
+        WITH + "undeclared state in __dict__",
+    ),
+    "lying-instance-dict": (
+        _lying_instance_dict,
+        WITH + "a __dict__ that is not exactly a dict",
+    ),
+    "lying-session-key-dict": (
+        _lying_session_key_dict,
+        WITH + "a session_key.__dict__ that is not exactly a dict",
+    ),
     "targets-as-a-list": (
         lambda intent: _unvalidated(intent, targets=list(intent.targets)),
         WITH + "targets of type list, not tuple",
@@ -543,6 +677,20 @@ FORGERIES: dict[str, tuple[_Forgery, str]] = {
     "uuid-holding-an-int-subclass": (
         _uuid_holding_a_forged_int,
         WITH + "targets.0.security_id.int of type _ForgedInt, not int",
+    ),
+    "uuid-int-past-128-bits": (
+        _uuid_int(1 << 128),
+        WITH + "targets.0.security_id.int outside the 128-bit range",
+    ),
+    "uuid-int-below-zero": (
+        _uuid_int(-(1 << 128)),
+        WITH + "targets.0.security_id.int outside the 128-bit range",
+    ),
+    "lone-surrogate-venue-code": (
+        lambda intent: _with_session_key(intent, mic="\ud800" * 4),
+        INVALID
+        + "session_key.mic: Input should be a valid string, "
+        + "unable to parse raw data as a unicode string",
     ),
     "int-subclass-quantity": (
         lambda intent: _with_target(intent, target_quantity=_ForgedInt(1)),
@@ -602,6 +750,18 @@ FORGERIES: dict[str, tuple[_Forgery, str]] = {
     "an-arbitrary-object": (
         lambda intent: object(),
         "strategy returned object, not a StrategyDecisionIntentV1",
+    ),
+    "an-object-whose-metaclass-guards-its-names": (
+        lambda intent: _GuardedReturn(),
+        "strategy returned _GuardedReturn, not a StrategyDecisionIntentV1",
+    ),
+    "an-object-whose-type-name-is-a-str-subclass": (
+        lambda intent: _LoudlyNamed(),
+        "strategy returned <unnamed>, not a StrategyDecisionIntentV1",
+    ),
+    "an-object-whose-type-module-is-not-a-str": (
+        lambda intent: _OddlyHoused(),
+        "strategy returned _OddlyHoused, not a StrategyDecisionIntentV1",
     ),
 }
 
@@ -709,15 +869,28 @@ def _uncanonical(qualified_type: str) -> str:
     return content_hash({"uncanonical_return_type": qualified_type})
 
 
+_INTENT_TYPE = "drift.domain.evaluator_strategy.StrategyDecisionIntentV1"
+
 #: The intent hash each refused return is traced under: the content hash of
 #: what the strategy returned, or, for a return with no canonical form, the
-#: hash of this exact payload naming its type.
+#: hash of this exact payload naming its type. An intent the exact-type walk
+#: refuses is never content hashed, since hashing it would run its leaves'
+#: own code, and a type name that is not exactly a str is never formatted.
 REFUSED_INTENT_HASHES = {
     "none": content_hash(None),
     "an-arbitrary-object": _uncanonical("builtins.object"),
-    "naive-decision-time": _uncanonical(
-        "drift.domain.evaluator_strategy.StrategyDecisionIntentV1"
+    "naive-decision-time": _uncanonical(_INTENT_TYPE),
+    "uuid-subclass-naming-another-security": _uncanonical(_INTENT_TYPE),
+    "lying-instance-dict": _uncanonical(_INTENT_TYPE),
+    "uuid-int-past-128-bits": _uncanonical(_INTENT_TYPE),
+    "lone-surrogate-venue-code": _uncanonical(_INTENT_TYPE),
+    "an-object-whose-metaclass-guards-its-names": _uncanonical(
+        f"{__name__}._GuardedReturn"
     ),
+    "an-object-whose-type-name-is-a-str-subclass": _uncanonical(
+        f"{__name__}.<unnamed>"
+    ),
+    "an-object-whose-type-module-is-not-a-str": _uncanonical("<unnamed>._OddlyHoused"),
 }
 
 
@@ -763,6 +936,60 @@ def test_a_strategy_cannot_rewrite_an_intent_after_it_is_staged(lane: str) -> No
 
     assert rewritten.trace.trace_hash == control.trace.trace_hash
     assert rewritten.result.result_hash == control.result.result_hash
+
+
+#: The last decision date of each lane, whose intent is staged but never run.
+FINAL_DECISION_DATES = {"realized": eng.DAYS[-1], "reconstructed": JAN7}
+
+
+def _rewriting_kept_identifiers(rewrite_on: date | None) -> _Forgery:
+    """Answer on UUIDs the strategy keeps, then rewrite them past their guard.
+
+    With ``rewrite_on`` unset, each decision rewrites the identifiers it
+    returned at the previous one. Otherwise every kept identifier is rewritten
+    at once, at the decision on that date. Only the strategy's own UUIDs are
+    rewritten, never a shared constant.
+    """
+    kept: list[UUID] = []
+
+    def forge(intent: StrategyDecisionIntentV1) -> object:
+        if rewrite_on is None or intent.session_key.local_date == rewrite_on:
+            for identifier in kept:
+                _smuggled(identifier, "int", SEC_OTHER.int)
+            kept.clear()
+        first, *rest = intent.targets
+        mine = UUID(int=first.security_id.int)
+        kept.append(mine)
+        target = SecurityTargetPositionV1(
+            security_id=mine, target_quantity=first.target_quantity
+        )
+        return StrategyDecisionIntentV1(
+            session_key=intent.session_key,
+            decision_time=intent.decision_time,
+            targets=(target, *rest),
+        )
+
+    return forge
+
+
+@pytest.mark.parametrize("final", [False, True], ids=["next-decision", "final"])
+@pytest.mark.parametrize("lane", LANES)
+def test_a_strategy_cannot_rewrite_a_uuid_it_kept_after_the_intent_is_staged(
+    lane: str, final: bool
+) -> None:
+    """Staging holds only fresh objects the strategy never saw (#119 round 2).
+
+    A python-mode rebuild keeps the strategy's own ``uuid.UUID`` instances, so
+    one the strategy kept could rewrite what was staged, traced and filled.
+    """
+    control = LANES[lane].run(lambda intent: intent)
+    rewrite_on = FINAL_DECISION_DATES[lane] if final else None
+    rewritten = LANES[lane].run(_rewriting_kept_identifiers(rewrite_on))
+
+    assert rewritten.result.classification is EvaluationClassification.COMPLETE
+    assert rewritten.trace.trace_hash == control.trace.trace_hash
+    assert rewritten.result.result_hash == control.result.result_hash
+    assert content_hash(rewritten.final_state) == content_hash(control.final_state)
 
 
 #: Trace and result hashes of genuine runs, pinned from a run at 19c15f8, the
