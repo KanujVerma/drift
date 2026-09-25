@@ -6,6 +6,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import typing
 from collections.abc import Mapping
 from pathlib import Path
 from types import ModuleType
@@ -83,6 +84,7 @@ _OUTSIDE_DRIFT = "dynamically imports a module outside the drift package"
 _RELATIVE_DYNAMIC = "performs a relative dynamic import"
 _DYNAMIC_ARGUMENTS = "passes dynamic import arguments the closure guard cannot bind"
 _NAMESPACE = "reaches a module namespace indirectly"
+_PRIVATE = "reaches a private member of a non-drift module"
 
 
 def _package(tmp_path: Path, files: Mapping[str, str]) -> Path:
@@ -750,7 +752,7 @@ _ISSUE_107_EVASION_ROUTES = (
             "\n"
             'MODULE = functools.partial(__import__, "drift.markets.extra")()\n'
         ),
-        _LOADER_VALUE,
+        _MACHINERY_REFERENCE,
         id="3-functools-partial-over-a-loader",
     ),
     pytest.param(
@@ -912,13 +914,14 @@ _FURTHER_MACHINERY_REACH = (
     ),
     pytest.param(
         _with_entry("import sys\n\nFRAME = sys._getframe(0)\n"),
-        _MACHINERY_REFERENCE,
+        _PRIVATE,
         id="sys-frame",
     ),
     # A guarded namespace reached through an object that happens to hold it.
     pytest.param(
         _with_entry(
-            'import pathlib\n\nMODULE = pathlib.os.sys.modules["drift.markets.extra"]\n'
+            "def run(holder: object) -> object:\n"
+            '    return holder.sys.modules["drift.markets.extra"]\n'
         ),
         _MACHINERY_ATTRIBUTE,
         id="machinery-attribute-of-a-module",
@@ -1103,7 +1106,7 @@ _FURTHER_MACHINERY_REACH = (
         id="object-graph-dunder",
     ),
     pytest.param(
-        _with_entry("import pathlib\n\nNAMESPACE = pathlib.__dict__\n"),
+        _with_entry("import pathlib\n\npathlib.__dict__\n"),
         _DUNDER,
         id="module-dict-dunder",
     ),
@@ -1113,7 +1116,7 @@ _FURTHER_MACHINERY_REACH = (
         id="globals-dunder-attribute",
     ),
     pytest.param(
-        _with_entry("import pathlib\n\nCLS = pathlib.__class__\n"),
+        _with_entry("import pathlib\n\npathlib.__class__\n"),
         _DUNDER,
         id="class-dunder-attribute",
     ),
@@ -1295,7 +1298,7 @@ _MODULE_REBINDINGS = (
         "\n"
         "def reach(name: str) -> object:\n"
         "    return getattr(_alias, name)\n",
-        id="rebind-an-unguarded-module",
+        id="rebind-a-module-for-a-computed-getattr",
     ),
     pytest.param("import drift\n\n_pkg = drift\n", id="rebind-the-drift-package"),
     pytest.param(
@@ -1323,16 +1326,32 @@ def test_closure_guard_refuses_binding_a_module_to_another_name(
 
 _STRING_IMPORT_REACHES = (
     pytest.param(
-        "import pydantic\n\nLOADER = pydantic.ImportString\n",
+        "import pydantic\n\npydantic.ImportString\n",
         _STRING_IMPORT_REACH,
         id="import-string-attribute",
     ),
     pytest.param(
-        "import pydantic as pyd\n\nLOADER = pyd.ImportString\n",
+        "import pydantic as pyd\n\npyd.ImportString\n",
         _STRING_IMPORT_REACH,
         id="import-string-aliased-attribute",
     ),
 )
+
+
+def _list_every_member(
+    monkeypatch: pytest.MonkeyPatch, module: str, members: frozenset[str]
+) -> None:
+    """Make every given member of an allowlisted module listed and bindable."""
+    names = dict(semantic_attestation._ALLOWED_IMPORT_NAMES)
+    names[module] = names[module] | members
+    monkeypatch.setattr(semantic_attestation, "_ALLOWED_IMPORT_NAMES", names)
+    monkeypatch.setattr(
+        semantic_attestation,
+        "_BINDABLE_MACHINERY_PATHS",
+        semantic_attestation._BINDABLE_MACHINERY_PATHS
+        | {f"{module}.{member}" for member in members},
+    )
+
 
 _TYPING_STRING_EVALUATORS = (
     "ForwardRef",
@@ -1358,19 +1377,12 @@ def test_closure_guard_refuses_typing_string_evaluators_either_way(
 ) -> None:
     """Each typing string evaluator is refused with or without name granularity.
 
-    With ``name_granular=False`` the ``typing`` entries are removed from the
-    name-granular surfaces and the guarded roots, so the only thing left to
-    refuse these names is the string-evaluation denial itself.
+    With ``name_granular=False`` every ``typing`` member, evaluators included,
+    is made listed and bindable, so the only thing left to refuse these names
+    is the string-evaluation denial itself.
     """
     if not name_granular:
-        names = dict(semantic_attestation._ALLOWED_IMPORT_NAMES)
-        del names["typing"]
-        monkeypatch.setattr(semantic_attestation, "_ALLOWED_IMPORT_NAMES", names)
-        monkeypatch.setattr(
-            semantic_attestation,
-            "_IMPORT_MACHINERY_ROOTS",
-            semantic_attestation._IMPORT_MACHINERY_ROOTS - {"typing"},
-        )
+        _list_every_member(monkeypatch, "typing", frozenset(dir(typing)))
     assert name in semantic_attestation._STRING_EVALUATION_NAMES["typing"]
     from_import = _package(
         tmp_path / "from", _with_entry(f"from typing import {name}\n")
@@ -1383,6 +1395,152 @@ def test_closure_guard_refuses_typing_string_evaluators_either_way(
     lookup = _package(
         tmp_path / "lookup",
         _with_entry(f'import typing\n\ngetattr(typing, "{name}")\n'),
+    )
+    _assert_refused(lookup, _NAMESPACE)
+
+
+# #121 round 3 (R3-F1): every allowlisted module is name-granular, because a
+# harmless module can still hold a dangerous member, and every single-underscore
+# member of a non-drift module is refused on its own rule.
+_UNUSED_PUBLIC_MEMBERS = (
+    # One unused public member of each module that used to be allowlisted
+    # module-wide, refused as a from-import.
+    "from __future__ import division",
+    "from ast import literal_eval",
+    "from collections import OrderedDict",
+    "from collections.abc import Hashable",
+    "from copy import Error",
+    "from dataclasses import field",
+    "from datetime import tzinfo",
+    "from decimal import getcontext",
+    "from enum import IntEnum",
+    "from fractions import Decimal",
+    "from functools import partial",
+    "from functools import singledispatch",
+    "from hashlib import md5",
+    "from io import StringIO",
+    "from json import JSONEncoder",
+    "from math import floor",
+    "from pathlib import PurePath",
+    "from pydantic import TypeAdapter",
+    "from re import sub",
+    "from stat import S_ISDIR",
+    "from types import CodeType",
+    "from types import FunctionType",
+    "from types import ModuleType",
+    "from urllib.parse import quote",
+    "from uuid import uuid4",
+    "from zoneinfo import available_timezones",
+)
+
+
+@pytest.mark.parametrize("statement", _UNUSED_PUBLIC_MEMBERS)
+def test_closure_guard_refuses_unused_members_of_every_allowlisted_module(
+    tmp_path: Path, statement: str
+) -> None:
+    """No allowlisted module is module-wide any more: unused members fail closed."""
+    _assert_refused(_package(tmp_path, _with_entry(statement + "\n")), _ALLOWLIST_NAME)
+
+
+_DANGEROUS_MEMBER_REACH = (
+    pytest.param(
+        "import types\n\ntypes.CodeType\n", _MACHINERY_REFERENCE, id="code-type"
+    ),
+    pytest.param(
+        "import types\n\ntypes.FunctionType\n",
+        _MACHINERY_REFERENCE,
+        id="function-type",
+    ),
+    pytest.param(
+        "import functools\n\nfunctools.singledispatch\n",
+        _MACHINERY_REFERENCE,
+        id="singledispatch",
+    ),
+    pytest.param(
+        "import dataclasses\n\ndataclasses._FuncBuilder\n",
+        _PRIVATE,
+        id="dataclasses-func-builder-attribute",
+    ),
+    pytest.param(
+        "from dataclasses import _FuncBuilder\n",
+        _PRIVATE,
+        id="dataclasses-func-builder-from-import",
+    ),
+    pytest.param(
+        'import dataclasses\n\ngetattr(dataclasses, "_FuncBuilder")\n',
+        _NAMESPACE,
+        id="dataclasses-func-builder-literal-getattr",
+    ),
+    pytest.param(
+        'import types\n\ngetattr(types, "CodeType")\n',
+        _NAMESPACE,
+        id="code-type-literal-getattr",
+    ),
+    pytest.param("from os import _exit\n", _PRIVATE, id="private-from-import"),
+    pytest.param("import os\n\nos._exit(0)\n", _PRIVATE, id="private-attribute"),
+    pytest.param(
+        "import sys\n\nsys.implementation._multiarch\n",
+        _PRIVATE,
+        id="private-member-under-a-listed-member",
+    ),
+    pytest.param(
+        "import json\n\njson._default_encoder\n",
+        _PRIVATE,
+        id="private-member-of-a-harmless-module",
+    ),
+)
+
+
+@pytest.mark.parametrize(("source", "message"), _DANGEROUS_MEMBER_REACH)
+def test_closure_guard_refuses_dangerous_members_of_allowlisted_modules(
+    tmp_path: Path, source: str, message: str
+) -> None:
+    """CodeType, FunctionType, singledispatch and private builders fail closed."""
+    _assert_refused(_package(tmp_path, _with_entry(source)), message)
+
+
+def test_closure_guard_keeps_a_listed_member_named_like_a_guarded_root(
+    tmp_path: Path,
+) -> None:
+    """``datetime.datetime`` is a listed member, not a re-imported namespace.
+
+    Its name is also a guarded root, so the re-import rules must still let it
+    bind as a from-import, as an attribute and as a literal getattr.
+    """
+    from_import = _package(
+        tmp_path / "from",
+        _with_entry("from datetime import UTC, datetime\n\nNOW = datetime.now(UTC)\n"),
+    )
+    verify_semantic_closure(
+        modules=_BASE_DECLARED, seeds=_BASE_SEEDS, package_root=from_import
+    )
+    attribute = _package(
+        tmp_path / "attribute",
+        _with_entry(
+            "import datetime\n"
+            "\n"
+            "NOW = datetime.datetime.now(datetime.UTC)\n"
+            'KIND = getattr(datetime, "datetime")\n'
+        ),
+    )
+    verify_semantic_closure(
+        modules=_BASE_DECLARED, seeds=_BASE_SEEDS, package_root=attribute
+    )
+
+
+def test_closure_guard_refuses_a_private_member_even_if_it_were_listed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The private-member rule holds on its own, whatever the member lists say."""
+    _list_every_member(monkeypatch, "os", frozenset({"_exit"}))
+    from_import = _package(tmp_path / "from", _with_entry("from os import _exit\n"))
+    _assert_refused(from_import, _PRIVATE)
+    attribute = _package(
+        tmp_path / "attribute", _with_entry("import os\n\nos._exit(0)\n")
+    )
+    _assert_refused(attribute, _PRIVATE)
+    lookup = _package(
+        tmp_path / "lookup", _with_entry('import os\n\ngetattr(os, "_exit")\n')
     )
     _assert_refused(lookup, _NAMESPACE)
 
@@ -1459,12 +1617,14 @@ def test_closure_guard_keeps_the_machinery_uses_it_can_bind(tmp_path: Path) -> N
             "from dataclasses import dataclass\n"
             "from os import fstat\n"
             "from pathlib import Path\n"
+            "from datetime import UTC, datetime\n"
             "from pydantic import BaseModel, Field\n"
             "from typing import Annotated, Any, Literal, cast\n"
             "\n"
             'VALUE = __import__("drift.domain.core", fromlist=["VALUE"]).VALUE\n'
             "IDENTITY = (sys.implementation.name, sys.version_info.major)\n"
             "FLAGS = getattr(os, 'O_NOFOLLOW', 0)\n"
+            "STAMP = datetime.now(UTC)\n"
             "\n"
             "\n"
             "def read(path: str) -> bytes:\n"

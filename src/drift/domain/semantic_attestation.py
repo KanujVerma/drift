@@ -27,21 +27,25 @@ A denylist of import spellings cannot be complete, because dozens of standard
 modules import a module from a string (``pydoc``, ``logging.config``,
 ``unittest``, ``pickle``, ``marshal``, ``ctypes``, ``timeit``, ``code``,
 ``gc``, ``warnings``, ``runpy``, ``zipimport``, ``pkgutil`` and more), so the
-guard instead names what a declared module may import (``_ALLOWED_IMPORT_MODULES``,
-``_ALLOWED_IMPORT_NAMES``) and refuses every other ``import``. Relative imports,
-star imports and a ``fromlist`` of ``"*"`` fail closed. A name that imports a
-module from a string, or evaluates a string as code, fails closed even from an
-allowlisted module (``_STRING_IMPORT_NAMES``, pydantic ``ImportString``;
+guard instead names what a declared module may import and, within each module,
+which members it may bind or reach (``_ALLOWED_IMPORT_NAMES``); it refuses every
+other ``import`` and every other member. Every allowlisted module is
+name-granular, because a harmless module can still hold a dangerous member
+(``types.CodeType``, ``functools.singledispatch``, ``dataclasses``'s private
+source builder). A single-underscore member of any non-``drift`` module fails
+closed on its own rule, even if it were ever listed. Relative imports, star
+imports and a ``fromlist`` of ``"*"`` fail closed. A name that imports a module
+from a string, or evaluates a string as code, fails closed by name as well
+(``_STRING_IMPORT_NAMES``, pydantic ``ImportString``;
 ``_STRING_EVALUATION_NAMES``, the ``typing`` forward reference evaluators).
-``typing`` is name-granular as well, so only the eleven inert names the closures
-use are bindable. Out-of-process execution is refused the same way:
-``subprocess`` is not allowlisted, and ``os`` is name-granular, so
-``os.system``, ``os.exec*``, ``os.spawn*``, ``os.popen`` and ``os.fork`` fail
-closed as imports, as attributes and as literal ``getattr`` names.
+Out-of-process execution is refused the same way: ``subprocess`` is not
+allowlisted, and ``os`` binds only descriptor-level reads, so ``os.system``,
+``os.exec*``, ``os.spawn*``, ``os.popen`` and ``os.fork`` fail closed as
+imports, as attributes and as literal ``getattr`` names.
 
 Once only the allowlist is importable, the guarded namespaces still reachable
-are the few members of ``os``, ``sys``, ``typing`` and ``importlib`` and the
-ambient builtins, so those are bound name by name:
+are the listed members of the allowlisted modules, the loader member of
+``importlib`` and the ambient builtins, so those are bound name by name:
 
 * a loader (``import_module``, ``__import__``) only as the callee of a call
   whose target is one literal absolute ``drift`` name, plus at most a literal
@@ -49,16 +53,16 @@ ambient builtins, so those are bound name by name:
   ``functools.partial`` over it fails closed; the reach builtins (``eval``,
   ``exec``, ``compile``, ``getattr``, ``vars``, ``globals``, ``locals``)
   likewise;
-* of ``builtins``, ``importlib``, ``os``, ``sys`` and ``typing`` only the
-  members in ``_BINDABLE_MACHINERY_PATHS``, so ``importlib.util``,
-  ``importlib.machinery``, metadata entry points, ``sys.modules``, the ``os``
-  process launchers and every ``typing`` member outside ``_TYPING_MEMBERS`` fail
-  closed;
-* a guarded namespace (``os``, ``sys``, ``importlib``, ``builtins``,
-  ``pydantic``, ``typing``) only under its own imported name: from-importing it
-  from another module, ``drift`` or not (``from os import sys``, ``from
-  drift.domain.core import importlib``), or reading it as an attribute of any
-  object (``pathlib.os``), fails closed;
+* of every guarded root only the members in ``_BINDABLE_MACHINERY_PATHS``, so
+  ``importlib.util``, ``importlib.machinery``, metadata entry points,
+  ``sys.modules``, the ``os`` process launchers, ``types.CodeType`` and every
+  other unlisted member fail closed;
+* a guarded namespace (every allowlisted root, ``importlib`` and ``builtins``)
+  only under its own imported name: from-importing it from another module,
+  ``drift`` or not (``from os import sys``, ``from drift.domain.core import
+  importlib``), or reading it as an attribute of any object (``pathlib.os``),
+  fails closed unless the name is a listed member of that object's own module
+  (``from datetime import datetime``);
 * only the dunder names in ``_BINDABLE_DUNDER_ATTRIBUTES`` and
   ``_BINDABLE_DUNDER_NAMES``, from any base, so ``__builtins__``, ``__spec__``,
   ``__loader__``, ``__dict__``, ``__globals__``, ``__class__`` and object-graph
@@ -239,49 +243,6 @@ As above, only the bare names are reachable; ``builtins`` cannot be imported."""
 _WHOLE_NAMESPACE_READS = frozenset({"globals", "locals"})
 """Namespace lookups that hand out every name a module or frame binds."""
 
-_ALLOWED_IMPORT_MODULES = frozenset(
-    {
-        "__future__",
-        "ast",
-        "collections",
-        "collections.abc",
-        "copy",
-        "dataclasses",
-        "datetime",
-        "decimal",
-        "enum",
-        "fractions",
-        "functools",
-        "hashlib",
-        "importlib.metadata",
-        "io",
-        "json",
-        "math",
-        "os",
-        "pathlib",
-        "pydantic",
-        "re",
-        "stat",
-        "sys",
-        "types",
-        "typing",
-        "urllib.parse",
-        "uuid",
-        "zoneinfo",
-    }
-)
-"""Every non-``drift`` module a declared closure module may import.
-
-Derived from what the M1d validation and evidence closures actually import (the
-27 distinct non-``drift`` targets). A ``from X import Y`` base or a plain
-``import X`` target whose root is not ``drift`` must be one of these, or a
-name-granular surface below. Everything else fails closed by construction: a
-denylist can never enumerate every module that can import (``pydoc``,
-``logging.config``, ``unittest``, ``pickle``, ``marshal``, ``ctypes``,
-``timeit``, ``code``, ``gc``, ``warnings``, ``runpy``, ``zipimport``,
-``pkgutil``, ``_frozen_importlib``, ``_imp`` and more), so the guard names what
-is allowed instead. A new declared import needs an entry here, justified."""
-
 _OS_MEMBERS = frozenset(
     {
         "O_DIRECTORY",
@@ -326,18 +287,121 @@ returns its value unchanged. Everything else in ``typing`` fails closed, so a
 new string evaluator cannot slip in under an unlisted name."""
 
 _ALLOWED_IMPORT_NAMES: dict[str, frozenset[str]] = {
+    # Future statements: postponed evaluation of annotations, used by
+    # drift.domain.observations. A compiler directive, not a run-time import.
+    "__future__": frozenset({"annotations"}),
+    # The closure guard itself: node classes, parse and walk. Nothing that
+    # compiles or evaluates (``compile`` over a tree is refused as a builtin).
+    "ast": frozenset(
+        {
+            "AST",
+            "AnnAssign",
+            "Assign",
+            "Attribute",
+            "Call",
+            "Constant",
+            "Import",
+            "ImportFrom",
+            "List",
+            "Load",
+            "Name",
+            "NamedExpr",
+            "Subscript",
+            "Tuple",
+            "alias",
+            "expr",
+            "parse",
+            "walk",
+        }
+    ),
+    # Plain containers.
+    "collections": frozenset({"Counter", "defaultdict"}),
+    # Abstract base classes used in annotations and isinstance checks.
+    "collections.abc": frozenset(
+        {"Callable", "Iterable", "Mapping", "Sequence", "Set"}
+    ),
+    # Value copying.
+    "copy": frozenset({"deepcopy"}),
+    # The dataclass decorator and replace. ``make_dataclass`` and the private
+    # source builder that runs ``exec`` are not bindable.
+    "dataclasses": frozenset({"dataclass", "replace"}),
+    # Date and time value types.
+    "datetime": frozenset({"UTC", "date", "datetime", "time", "timedelta"}),
+    # Exact decimal and rational arithmetic.
+    "decimal": frozenset({"Decimal"}),
+    "fractions": frozenset({"Fraction"}),
+    # Enumeration bases.
+    "enum": frozenset({"Enum", "StrEnum"}),
+    # Memoization. ``singledispatch`` evaluates string annotations through
+    # ``get_type_hints`` and is not bindable.
+    "functools": frozenset({"cache"}),
+    # Content hashing.
+    "hashlib": frozenset({"sha256"}),
+    # The installed package version for ``drift/__init__``.
     "importlib.metadata": frozenset({"version"}),
+    # In-memory byte buffers.
+    "io": frozenset({"BytesIO"}),
+    # JSON encoding and decoding.
+    "json": frozenset({"JSONDecodeError", "dumps", "loads"}),
+    # Integer and float helpers.
+    "math": frozenset({"gcd", "isfinite"}),
+    # Descriptor-level reads only; see ``_OS_MEMBERS``.
     "os": _OS_MEMBERS,
+    # Path values.
+    "pathlib": frozenset({"Path"}),
+    # The model and validation names the closures declare with. ``ImportString``
+    # and every other unlisted name, including ``TypeAdapter`` and
+    # ``create_model``, which resolve types from strings, are not bindable.
+    "pydantic": frozenset(
+        {
+            "AfterValidator",
+            "BaseModel",
+            "BeforeValidator",
+            "ConfigDict",
+            "Field",
+            "PlainSerializer",
+            "PlainValidator",
+            "StringConstraints",
+            "ValidationError",
+            "ValidationInfo",
+            "field_validator",
+            "model_validator",
+        }
+    ),
+    # Regular expressions.
+    "re": frozenset({"compile", "fullmatch"}),
+    # File mode tests.
+    "stat": frozenset({"S_ISREG"}),
+    # The interpreter identity bound into M1d normalization derivations.
     "sys": frozenset({"implementation", "version_info"}),
+    # A read-only mapping view. ``CodeType``, ``FunctionType`` and the other
+    # constructors that build and run a code object are not bindable.
+    "types": frozenset({"MappingProxyType"}),
+    # Inert static typing names; see ``_TYPING_MEMBERS``.
     "typing": _TYPING_MEMBERS,
+    # URL parsing.
+    "urllib.parse": frozenset({"parse_qsl", "urlsplit"}),
+    # UUID values.
+    "uuid": frozenset({"UUID"}),
+    # Time zone lookup.
+    "zoneinfo": frozenset({"ZoneInfo", "ZoneInfoNotFoundError"}),
 }
-"""From-import surfaces allowed only at name granularity.
+"""Every non-``drift`` module a declared closure module may import, and the
+members it may bind from each.
 
-``importlib.metadata``, ``os``, ``sys`` and ``typing`` can reach the import
-machinery, start a process or evaluate a string, so a plain ``import`` of them
-is allowed (their member use is then policed by the reference rules, member by
-member), but a ``from`` import may bind only these members, never a loader, a
-registry, a namespace, a process launcher or a string evaluator."""
+Derived from what the M1d validation and evidence closures actually use: the 27
+distinct non-``drift`` modules, and within each only the members the closures
+import or reach. A plain ``import X`` or a ``from X import`` whose root is not
+``drift`` must name one of these modules, and every member it binds or reaches
+must be listed for that module. Everything else fails closed by construction: a
+denylist can never enumerate every module that can import (``pydoc``,
+``logging.config``, ``unittest``, ``pickle``, ``marshal``, ``ctypes``,
+``timeit``, ``code``, ``gc``, ``warnings``, ``runpy``, ``zipimport``,
+``pkgutil``, ``_frozen_importlib``, ``_imp`` and more), nor every dangerous
+member of a module that is itself harmless (``types.CodeType``,
+``functools.singledispatch``, ``dataclasses``'s private source builder), so the
+guard names what is allowed instead. A new declared import or member needs an
+entry here, justified."""
 
 _STRING_IMPORT_NAMES: dict[str, frozenset[str]] = {
     "pydantic": frozenset({"ImportString"}),
@@ -385,51 +449,47 @@ _STRING_EVALUATION_PATHS = frozenset(
 )
 """The dotted paths of the string-evaluation names, refused as an attribute too."""
 
-_IMPORT_MACHINERY_ROOTS = frozenset({"builtins", "importlib", "os", "sys", "typing"})
+_IMPORT_MACHINERY_ROOTS = frozenset(
+    {"builtins", "importlib"} | {name.split(".")[0] for name in _ALLOWED_IMPORT_NAMES}
+)
 """Guarded roots whose members are bound one by one.
 
-``import`` of the wider machinery (``pkgutil``, ``runpy``, ``zipimport`` and the
-rest) and of ``subprocess`` is already refused by the allowlist, so only the
-roots that a declared module legitimately imports (``os``, ``sys``, ``typing``),
-that a bound member can re-expose (``importlib`` through ``importlib.metadata``),
-or that are ambient (``builtins``) can still be reached, and their non-bindable
-members fail closed. ``os`` is guarded because it launches processes and exposes
-``os.sys``; ``typing`` because several of its members evaluate strings."""
+Every allowlisted module's root is guarded, so only its listed members are
+reachable as an attribute chain, not only as a from-import. ``importlib`` is
+guarded as the root that ``importlib.metadata`` re-exposes, and ``builtins``
+because it is ambient; ``import`` of either is refused by the allowlist."""
 
-_REIMPORT_GUARDED_NAMES = (
-    _IMPORT_MACHINERY_ROOTS
-    | frozenset(_STRING_IMPORT_NAMES)
-    | frozenset(_STRING_EVALUATION_NAMES)
-)
+_REIMPORT_GUARDED_NAMES = _IMPORT_MACHINERY_ROOTS
 """Namespaces that may be reached only under their own imported name.
 
-Once ``os``, ``sys``, ``importlib``, ``builtins``, ``pydantic`` or ``typing`` is
-bound under another object's name (``from os import sys``, ``from
-drift.domain.core import typing``, ``pathlib.os``), the member rules above would
-judge the path by that object instead. So from-importing one of these names from
-any module, or reading it as an attribute of any object, fails closed."""
+Once a guarded namespace is bound under another object's name (``from os import
+sys``, ``from drift.domain.core import typing``, ``pathlib.os``), the member
+rules would judge the path by that object instead. So from-importing one of
+these names from a ``drift`` module, or from a module that does not list it as
+a member, or reading it as an attribute that is not itself a bindable member
+path, fails closed. ``from datetime import datetime`` stays bound: there the
+name is a listed member of its own module."""
 
 _BINDABLE_MACHINERY_PATHS = frozenset(
     {
         "importlib.import_module",
-        "importlib.metadata.PackageNotFoundError",
-        "importlib.metadata.version",
-        "sys.implementation",
-        "sys.version_info",
-        *(f"os.{member}" for member in _OS_MEMBERS),
-        *(f"typing.{member}" for member in _TYPING_MEMBERS),
+        *(
+            f"{module}.{member}"
+            for module, members in _ALLOWED_IMPORT_NAMES.items()
+            for member in members
+        ),
     }
 )
 """The only members of the guarded roots a declared module may reach.
 
-The literal loader call is resolved to its target; the metadata version lookup,
-the interpreter identity and the descriptor-level ``os`` reads cannot load a
-module. Everything else under those roots can find, load, execute or hand out a
-module from a name the guard cannot read, or start a process that can, so it
-fails closed: ``importlib.util``, ``importlib.machinery``,
-``importlib.resources``, metadata entry points, ``sys.modules``, frame access,
-``os.system`` and the other process launchers, and all of ``builtins``, whose
-reach functions are ambient anyway."""
+Every listed member of every allowlisted module, and the literal loader call,
+which is resolved to its target. Everything else under a guarded root can find,
+load, execute or hand out a module from a name the guard cannot read, start a
+process that can, or build and run code, so it fails closed:
+``importlib.util``, ``importlib.machinery``, ``importlib.resources``, metadata
+entry points, ``sys.modules``, frame access, ``os.system`` and the other
+process launchers, ``types.CodeType``, ``functools.singledispatch``, and all of
+``builtins``, whose reach functions are ambient anyway."""
 
 _BINDABLE_DUNDER_ATTRIBUTES = frozenset(
     {"__import__", "__init__", "__name__", "__setattr__"}
@@ -772,7 +832,6 @@ def _semantic_references(
         ) from error
     aliases = _module_aliases(tree)
     module_bound = _module_bound_names(tree, aliases)
-    imported_modules = _imported_module_names(tree, aliases, installed)
     callees = frozenset(
         id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)
     )
@@ -795,7 +854,7 @@ def _semantic_references(
         elif isinstance(node, ast.ImportFrom):
             found |= _import_from_references(node, module, installed)
         elif isinstance(node, ast.Assign | ast.AnnAssign | ast.NamedExpr):
-            _reject_module_rebinding(node, module, aliases, installed, imported_modules)
+            _reject_module_rebinding(node, module, aliases, installed)
         elif isinstance(node, ast.Call):
             found |= _call_references(node, module, installed, aliases, module_bound)
         elif isinstance(node, ast.Subscript):
@@ -880,6 +939,15 @@ def _is_machinery_path(path: str) -> bool:
     return path.split(".")[0] in _IMPORT_MACHINERY_ROOTS
 
 
+def _is_private(name: str) -> bool:
+    return name.startswith("_") and not _is_dunder(name)
+
+
+def _names_a_private_member(path: str) -> bool:
+    """Whether any member segment of a dotted path is a single-underscore name."""
+    return any(_is_private(segment) for segment in path.split(".")[1:])
+
+
 def _is_bindable_machinery_path(path: str) -> bool:
     """Whether a machinery path is a bindable member or lies inside one."""
     return any(
@@ -933,34 +1001,11 @@ def _reject_disallowed_import(node: ast.Import, module: str) -> None:
         name = alias.name
         if name.split(".")[0] == "drift":
             continue
-        if name not in _ALLOWED_IMPORT_MODULES and name not in _ALLOWED_IMPORT_NAMES:
+        if name not in _ALLOWED_IMPORT_NAMES:
             raise _closure_error(
                 module,
                 f"imports a module outside the closure import allowlist: {name}",
             )
-
-
-def _imported_module_names(
-    tree: ast.AST, aliases: dict[str, str], installed: frozenset[str]
-) -> frozenset[str]:
-    """Every local name that is bound to a module object by an import.
-
-    ``import X``/``import X.Y``/``import X as Z`` always bind a module; a
-    ``from P import M`` binds a module only when ``P.M`` is an installed
-    ``drift`` module. This is narrower than ``_module_bound_names``, which also
-    tracks non-module names such as ``version`` or ``BaseModel``.
-    """
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            names.update(
-                alias.asname or alias.name.split(".")[0] for alias in node.names
-            )
-        elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
-            for alias in node.names:
-                if f"{node.module}.{alias.name}" in installed:
-                    names.add(alias.asname or alias.name)
-    return frozenset(names)
 
 
 def _reject_module_rebinding(
@@ -968,20 +1013,19 @@ def _reject_module_rebinding(
     module: str,
     aliases: dict[str, str],
     installed: frozenset[str],
-    imported_modules: frozenset[str],
 ) -> None:
     """Fail closed on binding a module object or a loaded module to another name.
 
     ``_alias = os`` or ``_pkg = drift`` would let a later ``getattr`` or an
     attribute chain reach the machinery, or a ``drift`` submodule, under a name
     the traversal rules cannot follow. No declared module rebinds a module, so
-    binding an imported module, an installed ``drift`` module, an import-machinery
-    path, or the result of a loader call to a name fails closed.
+    binding the ``drift`` package, an installed ``drift`` module, a guarded
+    namespace or any non-member path under it (which covers every importable
+    non-``drift`` module, since each is allowlisted and guarded), or the result
+    of a loader call to a name fails closed.
     """
     value = node.value
-    if value is None or not _is_module_valued(
-        value, aliases, installed, imported_modules
-    ):
+    if value is None or not _is_module_valued(value, aliases, installed):
         return
     targets: list[ast.expr] = (
         list(node.targets) if isinstance(node, ast.Assign) else [node.target]
@@ -991,15 +1035,10 @@ def _reject_module_rebinding(
 
 
 def _is_module_valued(
-    value: ast.expr,
-    aliases: dict[str, str],
-    installed: frozenset[str],
-    imported_modules: frozenset[str],
+    value: ast.expr, aliases: dict[str, str], installed: frozenset[str]
 ) -> bool:
     """Whether an expression evaluates to a module object the guard tracks."""
     if _is_loader_call(value, aliases):
-        return True
-    if isinstance(value, ast.Name) and value.id in imported_modules:
         return True
     if not isinstance(value, ast.Name | ast.Attribute):
         return False
@@ -1030,9 +1069,14 @@ def _reject_machinery_reference(
     ``vars`` call is exempt from the guarded-path check alone, because the
     namespace lookup rule judges that owner together with its attribute (so
     ``getattr(os, "O_NOFOLLOW", 0)`` is bound, and ``getattr(os, name)`` is not).
+    A single-underscore member of a guarded (non-``drift``) namespace fails
+    closed on its own rule, even if it were ever listed.
     """
+    path = _dotted_path(node, aliases)
     if isinstance(node, ast.Attribute):
-        if node.attr in _REIMPORT_GUARDED_NAMES:
+        if node.attr in _REIMPORT_GUARDED_NAMES and not (
+            path is not None and _is_bindable_machinery_path(path)
+        ):
             raise _closure_error(
                 module,
                 f"reaches a guarded namespace through another object: .{node.attr}",
@@ -1046,7 +1090,6 @@ def _reject_machinery_reference(
         raise _closure_error(
             module, f"reaches interpreter internals through a dunder name: {node.id}"
         )
-    path = _dotted_path(node, aliases)
     if path in _STRING_IMPORT_PATHS:
         raise _closure_error(
             module, f"reaches a name that imports a module from a string: {path}"
@@ -1064,6 +1107,10 @@ def _reject_machinery_reference(
             path is None and _terminal_name(node) in _CODE_EVALUATION_TARGETS
         ):
             raise _closure_error(module, "uses a dynamic reach builtin as a value")
+    if path is not None and _is_machinery_path(path) and _names_a_private_member(path):
+        raise _closure_error(
+            module, f"reaches a private member of a non-drift module: {path}"
+        )
     if (
         path is not None
         and not lookup_owner
@@ -1188,19 +1235,20 @@ def _reject_import_machinery_lookup(
     reads_whole_namespace = (
         function.split(".")[-1] in _WHOLE_NAMESPACE_READS or owner_node is None
     )
+    binds_a_member = (
+        owner is not None
+        and literal is not None
+        and _is_bindable_machinery_path(f"{owner}.{literal}")
+    )
     names_machinery = literal is not None and (
         literal in _DYNAMIC_IMPORT_NAMES
-        or literal in _REIMPORT_GUARDED_NAMES
+        or (literal in _REIMPORT_GUARDED_NAMES and not binds_a_member)
         or (_is_dunder(literal) and literal not in _BINDABLE_DUNDER_ATTRIBUTES)
         or (
             owner is not None
             and f"{owner}.{literal}" in _STRING_IMPORT_PATHS | _STRING_EVALUATION_PATHS
         )
-    )
-    binds_a_member = (
-        owner is not None
-        and literal is not None
-        and _is_bindable_machinery_path(f"{owner}.{literal}")
+        or (owner is not None and _is_machinery_path(owner) and _is_private(literal))
     )
     owns_import_machinery = owner is not None and (
         (_is_machinery_path(owner) and not binds_a_member)
@@ -1256,16 +1304,21 @@ def _reject_unbindable_imported_name(base: str, alias: ast.alias, module: str) -
     """Fail closed on a from-imported name no base, ``drift`` or not, may bind.
 
     A star binds names the guard cannot read. A guarded namespace name (``sys``,
-    ``os``, ``importlib``, ``builtins``, ``pydantic``, ``typing``) bound from
-    another module (``from os import sys``, ``from drift.domain.core import
-    importlib``) would hide that root behind the other module's path, where the
-    member rules no longer see it. An unbindable dunder (``__builtins__``) hands
-    out interpreter internals, and every module has one. None of these depends
-    on whether the base is allowlisted, so this runs for every base.
+    ``os``, ``typing`` and every other allowlisted root) bound from another
+    module (``from os import sys``, ``from drift.domain.core import importlib``)
+    would hide that root behind the other module's path, where the member rules
+    no longer see it; the only exception is a name its own non-``drift`` base
+    lists as a member (``from datetime import datetime``). An unbindable dunder
+    (``__builtins__``) hands out interpreter internals, and every module has
+    one. None of these depends on whether the base is allowlisted, so this runs
+    for every base.
     """
     if alias.name == "*":
         raise _closure_error(module, f"performs a star import from {base}")
-    if alias.name in _REIMPORT_GUARDED_NAMES:
+    listed_member = base.split(".")[0] != "drift" and alias.name in (
+        _ALLOWED_IMPORT_NAMES.get(base, frozenset())
+    )
+    if alias.name in _REIMPORT_GUARDED_NAMES and not listed_member:
         raise _closure_error(
             module,
             f"reaches a guarded namespace through another object: {base}.{alias.name}",
@@ -1284,13 +1337,11 @@ def _reject_disallowed_from_import(
 
     A name that imports a module from a string (pydantic ``ImportString``) or
     evaluates a string as code (the ``typing`` forward reference evaluators) is
-    refused first, whether or not its module is also name-granular. A
-    name-granular surface (``sys``, ``os``, ``typing``, ``importlib.metadata``)
-    then admits only its listed members, so a loader, a registry, a namespace,
-    a process launcher or a string evaluator cannot be bound. A fully
-    allowlisted module admits any other member. Any other base fails closed,
-    which is what refuses ``pkgutil``, ``importlib.util``, ``builtins``,
-    ``pydoc`` and every other importer.
+    refused first, whatever the member list says. The base must then be an
+    allowlisted module, which is what refuses ``pkgutil``, ``importlib.util``,
+    ``builtins``, ``pydoc`` and every other importer. A single-underscore member
+    is refused next, even if it were ever listed. Last, every allowlisted
+    module is name-granular: it admits only the members the closures use.
     """
     denied = _STRING_IMPORT_NAMES.get(base, frozenset())
     evaluating = _STRING_EVALUATION_NAMES.get(base, frozenset())
@@ -1307,19 +1358,22 @@ def _reject_disallowed_from_import(
                 f"imports a name that evaluates a string as code: {base}.{alias.name}",
             )
     allowed_names = _ALLOWED_IMPORT_NAMES.get(base)
-    if allowed_names is not None:
-        for alias in names:
-            if alias.name not in allowed_names:
-                raise _closure_error(
-                    module,
-                    "imports a name outside the closure import allowlist: "
-                    f"{base}.{alias.name}",
-                )
-        return
-    if base not in _ALLOWED_IMPORT_MODULES:
+    if allowed_names is None:
         raise _closure_error(
             module, f"imports a module outside the closure import allowlist: {base}"
         )
+    for alias in names:
+        if _is_private(alias.name):
+            raise _closure_error(
+                module,
+                f"reaches a private member of a non-drift module: {base}.{alias.name}",
+            )
+        if alias.name not in allowed_names:
+            raise _closure_error(
+                module,
+                "imports a name outside the closure import allowlist: "
+                f"{base}.{alias.name}",
+            )
 
 
 def _dynamic_import_references(
