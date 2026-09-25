@@ -26,6 +26,8 @@ from drift.domain.evaluator_lanes import (
 )
 from drift.domain.evaluator_portfolio import (
     CanonicalMoney,
+    EvaluationLane,
+    MarkEvidenceGrade,
     PortfolioStateV1,
     decimal_context,
 )
@@ -34,6 +36,16 @@ from drift.domain.sessions import SessionKeyV1
 from drift.serialization.canonical import content_hash
 
 ZERO = Decimal("0")
+
+#: The mark grade a run in each lane grants its valuations. The engine reads a
+#: mark's grade from its admission (``LANE_MARK_GRADE`` in the engine), so an
+#: exploratory run never marks promotion-grade, although the exploratory lane
+#: admits promotion-grade evidence. A result's final book may carry no other
+#: grade (issue 124).
+LANE_GRANTED_MARK_GRADE: dict[EvaluationLane, MarkEvidenceGrade] = {
+    "exploratory": "exploratory",
+    "promotion": "promotion_grade",
+}
 
 
 class EvaluationClassification(StrEnum):
@@ -300,9 +312,35 @@ class EvaluationRunArtifactsV1(FrozenModel):
             raise ValueError(
                 "final portfolio state must carry the admitted lane of its result"
             )
+        self._bind_final_state_lane()
         self._bind_stepped_sessions()
         self._bind_decision_evidence_grade()
         return self
+
+    def _bind_final_state_lane(self) -> None:
+        """Pair the final book with its result's lane, not only its hash (#124).
+
+        The admission hash alone leaves the book free to name another lane,
+        or to grade its marks above what its result's run grants, so an
+        exploratory result could travel with a book reading promotion-grade.
+        """
+        lane = self.result.lane
+        if self.final_state.lane != lane:
+            raise ValueError(
+                f"final portfolio state is in the {self.final_state.lane} lane, "
+                f"its result is in the {lane} lane"
+            )
+        mark = self.final_state.mark
+        if mark is None:
+            return
+        granted = LANE_GRANTED_MARK_GRADE[lane]
+        for price in mark.prices:
+            if price.evidence.grade != granted:
+                raise ValueError(
+                    f"a result in the {lane} lane grants {granted} marks, its "
+                    f"final state marks security {price.security_id} "
+                    f"{price.evidence.grade}"
+                )
 
     def _bind_decision_evidence_grade(self) -> None:
         """Refuse a promotion result traced on weaker decisions or prices.
