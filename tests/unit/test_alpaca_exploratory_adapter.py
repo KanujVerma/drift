@@ -69,6 +69,7 @@ from drift.adapters.alpaca_exploratory import (
 from drift.domain.acquisition import AcquisitionCompleteness, OriginStatus
 from drift.domain.economic_common import CashComponentV1
 from drift.domain.economic_events import CorporateActionTermsVersionV1
+from drift.domain.evaluator_bundles import EvaluationInputBundleV1
 from drift.domain.evaluator_lanes import (
     ALPACA_LIMITATION_ABSENT_HALTS,
     ALPACA_LIMITATION_BOUNDED_COHORT,
@@ -76,6 +77,8 @@ from drift.domain.evaluator_lanes import (
     ALPACA_LIMITATION_SCHEDULED_SESSION_RECONSTRUCTION,
     ALPACA_LIMITATION_TRUNCATED_CA,
     ALPACA_LIMITATION_UNVERSIONED_BARS,
+    ExploratoryEvaluationAdmissionV1,
+    exploratory_evaluation_admission_hash,
 )
 from drift.domain.normalization import DerivedObservationViewV1
 from drift.domain.securities import ListingVenue
@@ -1397,6 +1400,74 @@ def test_admission_covers_every_limitation_the_bundle_evidence_requires(
 
     assert required
     assert required <= set(intake.admission.acknowledged_limitations)
+
+
+def hand_minted_admission(
+    bundle: EvaluationInputBundleV1, limitations: tuple[str, ...]
+) -> ExploratoryEvaluationAdmissionV1:
+    """Mint an exploratory admission outside the bridge, as any caller can.
+
+    It binds the exact bundle and is fully self-consistent, so only the bundle
+    gate can decide whether the limitations it acknowledges are enough.
+    """
+    draft = ExploratoryEvaluationAdmissionV1.model_construct(
+        schema_version="1",
+        lane="exploratory",
+        input_bundle_hash=bundle.bundle_hash,
+        acknowledged_limitations=tuple(sorted(limitations)),
+        admission_hash="0" * 64,
+    )
+    return ExploratoryEvaluationAdmissionV1.model_validate(
+        dict(draft) | {"admission_hash": exploratory_evaluation_admission_hash(draft)}
+    )
+
+
+def test_the_bridge_bundle_declares_exactly_its_truncated_window_limitation(
+    intake: AlpacaExploratoryIntakeResult,
+) -> None:
+    # Issue 92: the corporate-action window is a property of the bridge's
+    # dataset, not of any evidence member, so the bundle declares it itself.
+    # Spelled independently of the module constant the bridge declares it by.
+    assert intake.bundle.dataset_limitations == (
+        "corporate-action-mutation-replay-truncated-to-approx-72-days",
+    )
+    # Every Alpaca limitation but the bounded cohort is now obliged by the
+    # bundle; the cohort's own is obliged by the engine's cohort gate.
+    assert set(intake.bundle.required_limitations) == {
+        ALPACA_LIMITATION_TRUNCATED_CA,
+        ALPACA_LIMITATION_UNVERSIONED_BARS,
+        ALPACA_LIMITATION_ABSENT_HALTS,
+        ALPACA_LIMITATION_SCHEDULED_SESSION_RECONSTRUCTION,
+        ALPACA_LIMITATION_RETROSPECTIVE_RECONSTRUCTION,
+    }
+
+
+def test_a_hand_minted_admission_omitting_the_truncated_window_is_refused(
+    intake: AlpacaExploratoryIntakeResult,
+) -> None:
+    omitted = tuple(
+        item
+        for item in ALPACA_EXPLORATORY_LIMITATIONS
+        if item != ALPACA_LIMITATION_TRUNCATED_CA
+    )
+    assert len(omitted) == 5
+    admission = hand_minted_admission(intake.bundle, omitted)
+    assert admission.input_bundle_hash == intake.bundle.bundle_hash
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^exploratory admission omits required bundle limitations: "
+            r"\('corporate-action-mutation-replay-truncated-to-approx-72-days',\)$"
+        ),
+    ):
+        validate_exploratory_admission(admission=admission, bundle=intake.bundle)
+
+    # Control: the same hand-minted admission acknowledging all six is admitted.
+    validate_exploratory_admission(
+        admission=hand_minted_admission(intake.bundle, ALPACA_EXPLORATORY_LIMITATIONS),
+        bundle=intake.bundle,
+    )
 
 
 # --- adversarial: the four layering prohibitions --------------------------------------
