@@ -1539,6 +1539,25 @@ REALIZED_RESULT_HASH_SINCE_ISSUE_92 = (
 RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_92 = (
     "4ed8488ff7e2b63922cb574ae35db959a1f6d49cd273337f9007a908366cd240"
 )
+# Issue 107 edits `semantic_attestation.py`, a declared module of the
+# `m1d-evidence-v1` closure, so the M1d evidence identity moves by design and,
+# with it, every identity-bearing hash of runs over M1d evidence (session,
+# reconstruction, context, mark and price hashes, then the trace and result).
+# No quantity, price, cash, NAV or classification changes. These are the same
+# two runs' hashes since that recorded change; each later declared-closure
+# edit (issue 63 stage 2, issue 71) re-pins them the same way.
+REALIZED_TRACE_HASH_SINCE_ISSUE_107 = (
+    "ccba690be67b4e2296fc5a7187011a8af7d3cf26e6a8eb8514ec4b64880199a4"
+)
+REALIZED_RESULT_HASH_SINCE_ISSUE_107 = (
+    "9c9c90774f128b6684c72b326b856c818e22a5abb00eed8a491ab1511664f546"
+)
+RECONSTRUCTED_TRACE_HASH_SINCE_ISSUE_107 = (
+    "2aa1e3553f020d61fca2b948e76f73dc1a2f480eb71cffdf3d11ebefe2c31913"
+)
+RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_107 = (
+    "81031d35feeaa7436884c259f4cef598689f764f51ab8e7418057caad8589e0c"
+)
 
 
 def _promotion_engine(bundle: Any, admission: Any) -> SessionEvaluatorEngine:
@@ -1726,8 +1745,8 @@ def test_disabling_promotion_leaves_the_realized_lane_byte_identical() -> None:
 
     assert artifacts.result.lane == "exploratory"
     assert artifacts.result.metrics.committed_fill_count == 1
-    assert artifacts.trace.trace_hash == REALIZED_TRACE_HASH_AT_19C15F8
-    assert artifacts.result.result_hash == REALIZED_RESULT_HASH_SINCE_ISSUE_92
+    assert artifacts.trace.trace_hash == REALIZED_TRACE_HASH_SINCE_ISSUE_107
+    assert artifacts.result.result_hash == REALIZED_RESULT_HASH_SINCE_ISSUE_107
 
 
 def test_disabling_promotion_leaves_the_reconstructed_lane_byte_identical() -> None:
@@ -1753,5 +1772,5 @@ def test_disabling_promotion_leaves_the_reconstructed_lane_byte_identical() -> N
         event.kind == "exploratory_strategy_decision"
         for event in artifacts.trace.events
     )
-    assert artifacts.trace.trace_hash == RECONSTRUCTED_TRACE_HASH_AT_19C15F8
-    assert artifacts.result.result_hash == RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_92
+    assert artifacts.trace.trace_hash == RECONSTRUCTED_TRACE_HASH_SINCE_ISSUE_107
+    assert artifacts.result.result_hash == RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_107
