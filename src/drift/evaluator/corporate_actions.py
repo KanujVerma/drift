@@ -99,6 +99,10 @@ SHARE_MUTATING_KINDS = (
 )
 DUE_BILL_ROLES = frozenset({"due_bill_start", "due_bill_end", "due_bill_redemption"})
 ENDED_CLAIM_STATUSES = frozenset({"converted", "extinguished"})
+# Share actions that act on a claim that continues (issue 117).
+CONTINUING_SHARE_KINDS = SPLIT_KINDS | frozenset(
+    {ActionKind.STOCK_DIVIDEND, ActionKind.SPINOFF}
+)
 
 type ClaimIdentity = tuple[str, UUID, ActionKind, str, str]
 type TermsIndex = Mapping[EconomicSourceKeyV1, CorporateActionTermsVersionV1]
@@ -124,8 +128,8 @@ class _Book:
     ``delivered`` and ``removed`` record, by security, the share action of
     this pass that delivered shares into its holding from another security
     (a spin-off child, an acquirer), and the one that removed its holding
-    (a disposal, a conversion). Neither leaves a post-action count the
-    prior close's holders are proven entitled on
+    (a disposal, a share acquisition). Neither leaves a post-action count
+    the prior close's holders are proven entitled on
     (``_require_proven_post_action_count``).
     """
 
@@ -187,6 +191,19 @@ class _UnknownClaim:
     # delivers into.
     actions: tuple[str, ...]
     touched: frozenset[UUID7]
+
+
+@dataclass(frozen=True)
+class _EndedClaimAction:
+    """A continuing share action, live in this window, on a claim M1c ends.
+
+    ``composed`` says whose status ends the claim: the effect's own when
+    false, the status M1c composes across the outcome when true.
+    """
+
+    context: _EffectContext
+    status: str
+    composed: bool
 
 
 @dataclass(frozen=True)
@@ -409,7 +426,8 @@ class CorporateActionProcessor:
         every_context = [context for _, contexts in supported for context in contexts]
         conflicts = _share_action_conflicts(every_context, window)
         unknown = self._unknown_claims(supported, window)
-        # Both rules are judged against the prior close's book here, before
+        ended = self._ended_claim_actions(supported, window)
+        # Every rule is judged against the prior close's book here, before
         # any dispatch, and again against the book the pass leaves below. An
         # unknown claim needs both: a disposal may empty the book the pass
         # leaves, and a spin-off or conversion may reach a security only in
@@ -418,9 +436,14 @@ class CorporateActionProcessor:
         # exposed, itself a share action touching both, so exposure the pass
         # gains to a conflict implies exposure at the prior close to that
         # conflict or to one on the chain that reached it. The second
-        # conflict check is defense in depth.
+        # conflict check is defense in depth. A share action on an ended
+        # claim needs the first too, since a reverse split may restate a
+        # staged buy as 0. Its second check is defense in depth for the same
+        # reason: the pass reaches its security only through another share
+        # action touching it, which conflicts with this one.
         self._require_no_exposed_conflict(conflicts, book)
         self._require_no_exposed_unknown_claim(unknown, book)
+        self._require_no_exposed_ended_claim(ended, book)
         exposed_at_close = {
             security_id
             for security_id in (*book.holdings, *book.targets)
@@ -431,6 +454,7 @@ class CorporateActionProcessor:
         self._apply_contexts(every_context, book, window)
         self._require_no_exposed_conflict(conflicts, book)
         self._require_no_exposed_unknown_claim(unknown, book)
+        self._require_no_exposed_ended_claim(ended, book)
         # Exposure to evidence this pass cannot apply is judged against the
         # book the pass leaves: a holding or positive target credited by an
         # earlier dispatch, such as a spin-off child, is exposure too.
@@ -649,6 +673,68 @@ class CorporateActionProcessor:
                     "is not proven"
                 )
 
+    def _ended_claim_actions(
+        self,
+        supported: Iterable[tuple[SecurityEconomicOutcomeV1, list[_EffectContext]]],
+        window: _SessionWindow,
+    ) -> tuple[_EndedClaimAction, ...]:
+        """Every continuing share action of this window on a claim M1c ends.
+
+        A split, a reverse split, a stock dividend and a spin-off each act on
+        a claim that continues. One whose own claim status is ``extinguished``
+        or ``converted`` contradicts itself. So does one on a claim M1c
+        composes as ended when no ending effect of the outcome definitely
+        follows it: M1c composes the status of the claim's latest effect, so
+        the claim had then ended by the action. An end that follows the
+        action (a split, then a later acquisition) is the history of a live
+        claim, and the action applies.
+        """
+        found: list[_EndedClaimAction] = []
+        for outcome, contexts in supported:
+            composed = outcome.resolution.claim_status
+            for context in contexts:
+                if context.payload.action_kind not in CONTINUING_SHARE_KINDS:
+                    continue
+                if not self._is_live(context, window):
+                    continue
+                own = context.payload.claim_status
+                if own in ENDED_CLAIM_STATUSES:
+                    found.append(_EndedClaimAction(context, own, composed=False))
+                elif composed in ENDED_CLAIM_STATUSES and not any(
+                    later.payload.claim_status in ENDED_CLAIM_STATUSES
+                    and _definitely_precedes(context, later)
+                    for later in contexts
+                ):
+                    found.append(_EndedClaimAction(context, composed, composed=True))
+        return tuple(found)
+
+    def _require_no_exposed_ended_claim(
+        self, actions: Iterable[_EndedClaimAction], book: _Book
+    ) -> None:
+        """Refuse a continuing share action on a claim M1c says ended.
+
+        Such evidence contradicts itself, so it halts a book exposed to the
+        security it acts on, judged against the prior close's book and the
+        book the pass leaves. For any other book it is unrelated evidence,
+        and the action has nothing of the book's to act on.
+        """
+        for action in actions:
+            context = action.context
+            if not self._is_exposed(context.security_id, book):
+                continue
+            reason = (
+                f"M1c composes the claim as {action.status} and no later effect "
+                "of the outcome ends it"
+                if action.composed
+                else f"its own claim status is {action.status}"
+            )
+            raise IndeterminateValuationError(
+                f"the {context.payload.action_kind.value} {context.occurrence_id} "
+                f"on {context.security_id} needs a continuing claim, but {reason}, "
+                "so the evidence contradicts itself and the shares it acts on "
+                "are not proven"
+            )
+
     def _apply_contexts(
         self,
         contexts: list[_EffectContext],
@@ -663,9 +749,10 @@ class CorporateActionProcessor:
         # security the book is exposed to (_require_no_exposed_conflict), so
         # "pre-action" is always the prior close and "post-action" is after
         # that one action. Only the security's own continuing action (a
-        # split, a reverse split, a stock dividend) leaves a post-action
-        # count the prior close's holders are entitled on; a delivery into
-        # the holding or its removal halts (_require_proven_post_action_count).
+        # split, a reverse split, a stock dividend, the parent's own
+        # spin-off) leaves a post-action count the prior close's holders are
+        # entitled on; a delivery into the holding or its removal halts
+        # (_require_proven_post_action_count).
         for context in contexts:
             if not _is_cash_distribution(context.payload):
                 self._dispatch(context, book, window)
@@ -854,10 +941,11 @@ class CorporateActionProcessor:
             "a liquidating distribution" if liquidating else "a cash distribution",
         )
         for component in components:
-            if component.unit_basis.share_basis == "predecessor_pre_action":
+            share_basis = component.unit_basis.share_basis
+            if share_basis == "predecessor_pre_action":
                 holding = book.opening.get(context.security_id)
             else:
-                _require_proven_post_action_count(context, book)
+                _require_proven_post_action_count(context, book, share_basis)
                 holding = book.holdings.get(context.security_id)
             if holding is None:
                 continue
@@ -1585,6 +1673,16 @@ def _touched_securities(context: _EffectContext) -> tuple[UUID7, ...]:
     return (context.security_id, *recipients)
 
 
+def _definitely_precedes(earlier: _EffectContext, later: _EffectContext) -> bool:
+    """Whether one effect's instant is proven wholly before another's.
+
+    This is the reading M1c's claim composition orders effects by.
+    """
+    upper = earlier.record.effective_time.upper_bound
+    lower = later.record.effective_time.lower_bound
+    return upper is not None and lower is not None and upper < lower
+
+
 def _index_pending_claims(
     state: PortfolioStateV1,
 ) -> dict[_ClaimIndexKey, dict[SHA256Hash, PendingCashClaimV1]]:
@@ -1709,23 +1807,34 @@ def _extinguish_target(book: _Book, security_id: UUID7) -> None:
         )
 
 
-def _require_proven_post_action_count(context: _EffectContext, book: _Book) -> None:
+def _require_proven_post_action_count(
+    context: _EffectContext, book: _Book, share_basis: str
+) -> None:
     """Refuse a post-action share count the ex-date rule cannot prove entitled.
 
     The ex-date rule entitles the prior close's holdings, and M1c's share
     basis says only which share count the source divides its cash by. The
     count after the security's own continuing share action (a split, a
-    reverse split, a stock dividend) re-denominates those same holdings, so
-    it is proven. Shares another outcome's action delivered in this window
-    (into a spin-off child, or an acquirer) were not held at the prior
-    close, so whether the source counts them is not proven. A holding the
-    security's own disposal or conversion removed in this window leaves no
-    post-action count at all, and dropping the distribution would be a
-    guess too. Each halts the run; a pre-action quote is never asked.
+    reverse split, a stock dividend, or the parent's own spin-off, which
+    leaves the parent's count unchanged) re-denominates those same
+    holdings, so it is proven. Shares another outcome's action delivered in
+    this window (into a spin-off child, or an acquirer) were not held at the
+    prior close, so whether the source counts them is not proven. A holding
+    the security's own disposal or share acquisition removed in this window
+    leaves no post-action count at all, and dropping the distribution would
+    be a guess too. Each halts the run; a pre-action quote is never asked.
+    A quote whose basis the source did not state (``as_reported_unknown``)
+    may be a post-action one, so it is asked too, and the halt names that
+    basis.
     """
+    quoted = (
+        "per post-action share"
+        if share_basis == "predecessor_post_action"
+        else f"per share on the {share_basis} share basis"
+    )
     label = (
         f"the {context.payload.action_kind.value} {context.occurrence_id} on "
-        f"{context.security_id} quotes cash per post-action share"
+        f"{context.security_id} quotes cash {quoted}"
     )
     delivering = book.delivered.get(context.security_id)
     if delivering is not None:

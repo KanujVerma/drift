@@ -3000,6 +3000,267 @@ def test_unsupported_action_kind_without_exposure_commits_nothing() -> None:
 
 
 # --------------------------------------------------------------------------
+# continuing share actions on an ended claim (issue 117)
+# --------------------------------------------------------------------------
+
+CONTINUING_SHARE_ACTIONS = (
+    ActionKind.FORWARD_SPLIT,
+    ActionKind.REVERSE_SPLIT,
+    ActionKind.STOCK_DIVIDEND,
+    ActionKind.SPINOFF,
+)
+
+
+def _continuing_share_action(
+    kind: ActionKind, status: str, *, at: str = EFFECT_AT, suffix: int = 3800
+) -> tuple[CorporateActionTermsVersionV1, EconomicEffectVersionV1]:
+    """One continuing-claim share action on SEC_A with its own claim status.
+
+    A 2:1 split, a 1:20 reverse split, a 1-for-10 stock dividend, or a
+    spin-off of one SEC_CHILD per two shares, every fraction rounded down.
+    """
+    if kind == ActionKind.FORWARD_SPLIT:
+        component = _shares(numerator="2", denominator="1", component_id="action")
+    elif kind == ActionKind.REVERSE_SPLIT:
+        component = _shares(numerator="1", denominator="20", component_id="action")
+    elif kind == ActionKind.STOCK_DIVIDEND:
+        component = _shares(
+            numerator="1",
+            denominator="10",
+            component_id="action",
+            meaning="additional_per_predecessor",
+        )
+    else:
+        component = _shares(
+            numerator="1",
+            denominator="2",
+            component_id="action",
+            recipient=SEC_CHILD,
+            meaning="additional_per_predecessor",
+        )
+    return _same_date_effect(
+        suffix,
+        kind,
+        (component,),
+        at=at,
+        claim_status=status,
+        occurrence="occ-share-action",
+    )
+
+
+def _ended_claim_share_action(
+    kind: ActionKind, *, own: str, composed: str
+) -> SecurityEconomicOutcomeV1:
+    terms, effect = _continuing_share_action(kind, own)
+    return _outcome(
+        terms=(terms,), effects=(effect,), action_kinds=(kind,), claim_status=composed
+    )
+
+
+def _ended_claim_message(kind: ActionKind, status: str) -> str:
+    return (
+        rf"the {kind.value} occ-share-action on {SEC_A} needs a continuing "
+        rf"claim, but .*{status}"
+    )
+
+
+@pytest.mark.parametrize("kind", CONTINUING_SHARE_ACTIONS, ids=lambda kind: kind.value)
+@pytest.mark.parametrize("status", ["extinguished", "converted"])
+@pytest.mark.parametrize(
+    ("own_ended", "composed_ended"),
+    [(True, True), (True, False), (False, True)],
+    ids=["own-and-composed", "own-only", "composed-only"],
+)
+def test_a_continuing_share_action_on_an_ended_claim_halts_an_exposed_book(
+    kind: ActionKind, status: str, own_ended: bool, composed_ended: bool
+) -> None:
+    # N4 (issue 117): a split, reverse split, stock dividend or spin-off acts
+    # on a continuing claim, yet its own claim status, or the status M1c
+    # composes with no later effect ending the claim, says the claim ended
+    # or was converted. The evidence contradicts itself. Before the fix the
+    # action applied: 100 shares became 200 on a claim that had ended.
+    outcome = _ended_claim_share_action(
+        kind,
+        own=status if own_ended else "continuing",
+        composed=status if composed_ended else "continuing",
+    )
+    state = _state(holdings=(_holding(quantity=100),))
+
+    with pytest.raises(
+        IndeterminateValuationError, match=_ended_claim_message(kind, status)
+    ):
+        _processor().apply_pre_open_actions(
+            state, (_target(SEC_A, 100),), (outcome,), _key()
+        )
+
+    # Control: unrelated evidence does not poison a book exposed to nothing
+    # in SEC_A.
+    elsewhere = _state(holdings=(_holding(SEC_OTHER, quantity=5),))
+    unchanged, targets = _processor().apply_pre_open_actions(
+        elsewhere, (_target(SEC_OTHER, 5),), (outcome,), _key()
+    )
+    assert unchanged is elsewhere
+    assert _quantities(targets) == {SEC_OTHER: 5}
+
+
+@pytest.mark.parametrize("kind", CONTINUING_SHARE_ACTIONS, ids=lambda kind: kind.value)
+def test_a_continuing_share_action_on_an_ended_claim_halts_a_staged_buy(
+    kind: ActionKind,
+) -> None:
+    # A positive staged target on an unheld SEC_A is exposure too. The 1:20
+    # reverse split restates the target of 10 as 0, so only the prior
+    # close's book shows the exposure; the book the pass leaves has none.
+    outcome = _ended_claim_share_action(
+        kind, own="extinguished", composed="extinguished"
+    )
+    state = _state()
+
+    with pytest.raises(
+        IndeterminateValuationError, match=_ended_claim_message(kind, "extinguished")
+    ):
+        _processor().apply_pre_open_actions(
+            state, (_target(SEC_A, 10),), (outcome,), _key()
+        )
+
+    # Control: an explicit zero target on an unheld SEC_A trades nothing.
+    unchanged, targets = _processor().apply_pre_open_actions(
+        state, (_target(SEC_A, 0),), (outcome,), _key()
+    )
+    assert unchanged is state
+    assert _quantities(targets) == {SEC_A: 0}
+
+
+def test_a_share_action_on_an_ended_claim_commits_nothing_outside_its_window() -> None:
+    # The rule judges an action in the window its effective date falls in,
+    # the one pass that would apply it. A book first exposed a window later
+    # is not acted on by it.
+    outcome = _ended_claim_share_action(
+        ActionKind.FORWARD_SPLIT, own="extinguished", composed="extinguished"
+    )
+    later = _state(holdings=(_holding(quantity=100),), day=LATER_DAY)
+
+    unchanged, _ = _processor().apply_pre_open_actions(
+        later, (), (outcome,), _key(LATER_DAY)
+    )
+
+    assert unchanged is later
+
+
+_CONTINUING_RESULT = {
+    ActionKind.FORWARD_SPLIT: {SEC_A: 200},
+    ActionKind.REVERSE_SPLIT: {SEC_A: 5},
+    ActionKind.STOCK_DIVIDEND: {SEC_A: 110},
+    ActionKind.SPINOFF: {SEC_A: 100, SEC_CHILD: 50},
+}
+
+
+@pytest.mark.parametrize("kind", CONTINUING_SHARE_ACTIONS, ids=lambda kind: kind.value)
+def test_a_continuing_share_action_on_a_continuing_claim_applies(
+    kind: ActionKind,
+) -> None:
+    # Control: with its own and its composed claim status continuing, each
+    # action applies as before.
+    outcome = _ended_claim_share_action(kind, own="continuing", composed="continuing")
+    state = _state(holdings=(_holding(quantity=100),))
+
+    updated, _ = _processor().apply_pre_open_actions(state, (), (outcome,), _key())
+
+    assert _quantities(updated.holdings) == _CONTINUING_RESULT[kind]
+
+
+@pytest.mark.parametrize("kind", CONTINUING_SHARE_ACTIONS, ids=lambda kind: kind.value)
+def test_a_share_action_before_a_later_acquisition_still_applies(
+    kind: ActionKind,
+) -> None:
+    # Control: the action on EFFECT_DAY, then a cash acquisition on
+    # LATER_DAY. M1c composes the claim as extinguished, the status of its
+    # latest effect, and the acquisition that ends it definitely follows the
+    # action. The action acted on a live claim, so it applies in its own
+    # window, and the acquisition disposes of the holding in the next.
+    action_terms, action_effect = _continuing_share_action(kind, "continuing")
+    acquisition_terms, acquisition_effect = _same_date_effect(
+        3810,
+        ActionKind.CASH_ACQUISITION,
+        (_cash(amount="12", component_id="acquisition"),),
+        at=LATER_AT,
+        claim_status="extinguished",
+        occurrence="occ-acquisition",
+        dates=(_date_fact("payable", PAYABLE_AT),),
+    )
+    outcome = _outcome(
+        terms=(action_terms, acquisition_terms),
+        effects=(action_effect, acquisition_effect),
+        action_kinds=(kind, ActionKind.CASH_ACQUISITION),
+        claim_status="extinguished",
+    )
+    state = _state(holdings=(_holding(quantity=100),))
+
+    updated, _ = _processor().apply_pre_open_actions(state, (), (outcome,), _key())
+    assert _quantities(updated.holdings) == _CONTINUING_RESULT[kind]
+
+    later = _state(
+        holdings=(_holding(quantity=_CONTINUING_RESULT[kind][SEC_A]),), day=LATER_DAY
+    )
+    disposed, _ = _processor().apply_pre_open_actions(
+        later, (), (outcome,), _key(LATER_DAY)
+    )
+    assert SEC_A not in _quantities(disposed.holdings)
+
+
+@pytest.mark.parametrize("ending", ["none", "earlier"])
+def test_a_composed_end_no_later_effect_explains_halts_the_share_action(
+    ending: str,
+) -> None:
+    # M1c's composed status is the status of the claim's latest effect, so a
+    # composed end with a continuing split is explained only by an ending
+    # effect that definitely follows the split. A later effect that ends
+    # nothing, or an ending effect before the split, explains nothing: the
+    # claim had ended by the split.
+    split_at, other_at = EFFECT_AT, LATER_AT
+    if ending == "earlier":
+        split_at, other_at = other_at, split_at
+    split_terms, split_effect = _continuing_share_action(
+        ActionKind.FORWARD_SPLIT, "continuing", at=split_at
+    )
+    if ending == "none":
+        other_terms, other_effect = _same_date_effect(
+            3820,
+            ActionKind.REGULAR_CASH_DIVIDEND,
+            (_cash(amount="1", component_id="dividend"),),
+            at=other_at,
+            claim_status="continuing",
+            occurrence="occ-dividend",
+            dates=(_date_fact("ex", other_at), _date_fact("payable", PAYABLE_AT)),
+        )
+    else:
+        other_terms, other_effect = _same_date_effect(
+            3820,
+            ActionKind.CASH_ACQUISITION,
+            (_cash(amount="12", component_id="acquisition"),),
+            at=other_at,
+            claim_status="extinguished",
+            occurrence="occ-acquisition",
+            dates=(_date_fact("payable", PAYABLE_AT),),
+        )
+    other_payload = other_effect.payload
+    assert isinstance(other_payload, OccurredEffectV1)
+    outcome = _outcome(
+        terms=(split_terms, other_terms),
+        effects=(split_effect, other_effect),
+        action_kinds=(ActionKind.FORWARD_SPLIT, other_payload.action_kind),
+        claim_status="extinguished",
+    )
+    day = EFFECT_DAY if ending == "none" else LATER_DAY
+    state = _state(holdings=(_holding(quantity=100),), day=day)
+
+    with pytest.raises(
+        IndeterminateValuationError,
+        match=_ended_claim_message(ActionKind.FORWARD_SPLIT, "extinguished"),
+    ):
+        _processor().apply_pre_open_actions(state, (), (outcome,), _key(day))
+
+
+# --------------------------------------------------------------------------
 # staged target translation through every share action
 # --------------------------------------------------------------------------
 
@@ -5026,6 +5287,96 @@ def test_an_undated_distribution_on_a_spin_off_child_halts_in_either_order(
 
     with pytest.raises(IndeterminateValuationError, match="requires a source ex date"):
         _processor().apply_pre_open_actions(state, (), outcomes, _key())
+
+
+@pytest.mark.parametrize("shape", ["delivered", "removed"])
+def test_an_unknown_basis_distribution_halt_names_the_basis_it_quotes(
+    shape: str,
+) -> None:
+    # N1 (issue 117): a distribution quoted on the as_reported_unknown share
+    # basis beside a delivery into its holding, or a removal of it, halts,
+    # and the halt names the basis actually quoted. It used to say the
+    # source quotes cash per post-action share, which it does not.
+    if shape == "delivered":
+        state, targets, outcomes = _delivery_case(
+            SEC_A, 10, share_basis="as_reported_unknown"
+        )
+        security, action = SEC_ACQ, "stock_acquisition occ-conversion"
+    else:
+        removing_terms, removing_effect = _same_date_effect(
+            3700,
+            ActionKind.CASH_ACQUISITION,
+            (_cash(amount="12", component_id="acquisition"),),
+            at="2020-06-01T15:00:00Z",
+            claim_status="extinguished",
+            occurrence="occ-removal",
+            dates=(_date_fact("payable", PAYABLE_AT),),
+        )
+        terms, effect = _distribution_effect(
+            SEC_A,
+            3710,
+            share_basis="as_reported_unknown",
+            at="2020-06-01T09:00:00Z",
+        )
+        outcomes = (
+            _outcome(
+                terms=(terms, removing_terms),
+                effects=(effect, removing_effect),
+                action_kinds=(
+                    ActionKind.REGULAR_CASH_DIVIDEND,
+                    ActionKind.CASH_ACQUISITION,
+                ),
+                claim_status="extinguished",
+            ),
+        )
+        state = _state(holdings=(_holding(quantity=100, basis="900"),), cash="0")
+        targets = (_target(SEC_A, 100),)
+        security, action = SEC_A, "cash_acquisition occ-removal"
+
+    with pytest.raises(IndeterminateValuationError) as raised:
+        _processor().apply_pre_open_actions(state, targets, outcomes, _key())
+
+    message = str(raised.value)
+    assert message.startswith(
+        f"the regular_cash_dividend occ-distribution on {security} quotes cash "
+        "per share on the as_reported_unknown share basis, and the "
+        f"{action} "
+    )
+    assert "per post-action share" not in message
+
+
+@pytest.mark.parametrize(
+    "parent", [SEC_A, SEC_OTHER], ids=["parent-first", "child-first"]
+)
+def test_a_spin_off_delivering_no_whole_child_share_leaves_its_count_proven(
+    parent: UUID,
+) -> None:
+    # N2 (issue 117): one parent share, one child per two, rounded down, so
+    # the spin-off delivers no child share. The child's post-action count is
+    # then the prior close's 4, and its post-action dividend is owed on
+    # them. Recording a delivery that never happened would halt it.
+    state = _state(
+        holdings=(
+            _holding(parent, quantity=1, basis="9"),
+            _holding(SEC_CHILD, quantity=4, basis="40"),
+        ),
+        cash="0",
+    )
+    targets = (_target(parent, 1), _target(SEC_CHILD, 4))
+    outcomes = (_spin_off_to_child(parent), _distribution(SEC_CHILD, 3720))
+
+    updated, translated = _processor().apply_pre_open_actions(
+        state, targets, outcomes, _key()
+    )
+
+    assert _quantities(updated.holdings) == {parent: 1, SEC_CHILD: 4}
+    assert _quantities(translated) == {parent: 1, SEC_CHILD: 4}
+    (claim,) = updated.pending_cash_claims
+    assert (claim.security_id, claim.entitled_quantity, claim.total_cash_expected) == (
+        SEC_CHILD,
+        4,
+        Decimal("4"),
+    )
 
 
 def test_share_actions_on_dates_in_different_windows_apply_one_by_one() -> None:
