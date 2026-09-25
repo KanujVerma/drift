@@ -103,6 +103,10 @@ ENDED_CLAIM_STATUSES = frozenset({"converted", "extinguished"})
 CONTINUING_SHARE_KINDS = SPLIT_KINDS | frozenset(
     {ActionKind.STOCK_DIVIDEND, ActionKind.SPINOFF}
 )
+# Every kind whose own ended claim status contradicts it (issue 117): those
+# share actions, and cash distributions paid on shares that all continue. A
+# liquidation keeps its own claim-status rules (issue 83).
+CONTINUING_CLAIM_KINDS = CONTINUING_SHARE_KINDS | CASH_DISTRIBUTION_KINDS
 
 type ClaimIdentity = tuple[str, UUID, ActionKind, str, str]
 type TermsIndex = Mapping[EconomicSourceKeyV1, CorporateActionTermsVersionV1]
@@ -195,7 +199,7 @@ class _UnknownClaim:
 
 @dataclass(frozen=True)
 class _EndedClaimAction:
-    """A continuing share action, live in this window, on a claim M1c ends.
+    """An effect on a continuing claim, live in this window, that M1c ends.
 
     ``composed`` says whose status ends the claim: the effect's own when
     false, the status M1c composes across the outcome when true.
@@ -436,11 +440,13 @@ class CorporateActionProcessor:
         # exposed, itself a share action touching both, so exposure the pass
         # gains to a conflict implies exposure at the prior close to that
         # conflict or to one on the chain that reached it. The second
-        # conflict check is defense in depth. A share action on an ended
-        # claim needs the first too, since a reverse split may restate a
-        # staged buy as 0. Its second check is defense in depth for the same
-        # reason: the pass reaches its security only through another share
-        # action touching it, which conflicts with this one.
+        # conflict check is defense in depth. An effect on an ended claim
+        # needs both: a reverse split may restate a staged buy as 0, and a
+        # spin-off or conversion may deliver the security a distribution on
+        # an ended claim pays on. For a share action on an ended claim the
+        # second check is defense in depth, as for a conflict: the pass
+        # reaches its security only through another share action touching
+        # it, which conflicts with this one.
         self._require_no_exposed_conflict(conflicts, book)
         self._require_no_exposed_unknown_claim(unknown, book)
         self._require_no_exposed_ended_claim(ended, book)
@@ -678,7 +684,7 @@ class CorporateActionProcessor:
         supported: Iterable[tuple[SecurityEconomicOutcomeV1, list[_EffectContext]]],
         window: _SessionWindow,
     ) -> tuple[_EndedClaimAction, ...]:
-        """Every continuing share action of this window on a claim M1c ends.
+        """Every effect of this window on a continuing claim that M1c ends.
 
         A split, a reverse split, a stock dividend and a spin-off each act on
         a claim that continues. One whose own claim status is ``extinguished``
@@ -687,23 +693,37 @@ class CorporateActionProcessor:
         follows it: M1c composes the status of the claim's latest effect, so
         the claim had then ended by the action. An end that follows the
         action (a split, then a later acquisition) is the history of a live
-        claim, and the action applies.
+        claim, and the action applies. M1c never composes an end for a
+        continuing action without an ending effect strictly after it, so that
+        branch is defense in depth.
+
+        A dividend or special distribution pays on shares that all continue,
+        so one whose own claim status ends the claim contradicts itself too.
+        It is judged in every window it commits in (``_is_live``). A
+        liquidation keeps its own claim-status rules: an extinguished one is
+        a disposal, and a continuing one is a distribution
+        (``_is_cash_distribution``).
         """
         found: list[_EndedClaimAction] = []
         for outcome, contexts in supported:
             composed = outcome.resolution.claim_status
             for context in contexts:
-                if context.payload.action_kind not in CONTINUING_SHARE_KINDS:
+                kind = context.payload.action_kind
+                if kind not in CONTINUING_CLAIM_KINDS:
                     continue
                 if not self._is_live(context, window):
                     continue
                 own = context.payload.claim_status
                 if own in ENDED_CLAIM_STATUSES:
                     found.append(_EndedClaimAction(context, own, composed=False))
-                elif composed in ENDED_CLAIM_STATUSES and not any(
-                    later.payload.claim_status in ENDED_CLAIM_STATUSES
-                    and _definitely_precedes(context, later)
-                    for later in contexts
+                elif (
+                    kind in CONTINUING_SHARE_KINDS
+                    and composed in ENDED_CLAIM_STATUSES
+                    and not any(
+                        later.payload.claim_status in ENDED_CLAIM_STATUSES
+                        and _definitely_precedes(context, later)
+                        for later in contexts
+                    )
                 ):
                     found.append(_EndedClaimAction(context, composed, composed=True))
         return tuple(found)
@@ -711,12 +731,15 @@ class CorporateActionProcessor:
     def _require_no_exposed_ended_claim(
         self, actions: Iterable[_EndedClaimAction], book: _Book
     ) -> None:
-        """Refuse a continuing share action on a claim M1c says ended.
+        """Refuse an effect on a continuing claim that M1c says ended.
 
         Such evidence contradicts itself, so it halts a book exposed to the
         security it acts on, judged against the prior close's book and the
-        book the pass leaves. For any other book it is unrelated evidence,
-        and the action has nothing of the book's to act on.
+        book the pass leaves. Unlike the composed-unknown rule, which judges
+        every security the outcome touches, only the acted security counts:
+        a spin-off child held without its parent receives nothing from the
+        spin-off. For any other book the evidence is unrelated, and the
+        effect has nothing of the book's to act on.
         """
         for action in actions:
             context = action.context
@@ -1024,8 +1047,9 @@ class CorporateActionProcessor:
             if mapped > whole:
                 # A hold or a sale maps within the shares received. More than
                 # that would buy the acquirer at the open, a security no
-                # admitted decision named. Whether such a buy may be carried
-                # forward awaits an owner ruling, so it fails closed.
+                # admitted decision named. The owner ruled that such a buy is
+                # never carried forward: it stays INDETERMINATE (issue 97,
+                # item 1, 2026-09-24).
                 raise IndeterminateValuationError(
                     f"a share acquisition would buy the acquirer {acquirer} at "
                     f"the open: the staged target maps to {mapped} acquirer "

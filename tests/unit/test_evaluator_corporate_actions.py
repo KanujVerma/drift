@@ -3079,6 +3079,9 @@ def test_a_continuing_share_action_on_an_ended_claim_halts_an_exposed_book(
     # composes with no later effect ending the claim, says the claim ended
     # or was converted. The evidence contradicts itself. Before the fix the
     # action applied: 100 shares became 200 on a claim that had ended.
+    # Only own-and-composed is a state M1c composes: M1c composes a lone
+    # effect's own status. Own-only and composed-only are states it cannot
+    # produce, pinned as defense in depth against evidence it did not compose.
     outcome = _ended_claim_share_action(
         kind,
         own=status if own_ended else "continuing",
@@ -3215,7 +3218,10 @@ def test_a_composed_end_no_later_effect_explains_halts_the_share_action(
     # composed end with a continuing split is explained only by an ending
     # effect that definitely follows the split. A later effect that ends
     # nothing, or an ending effect before the split, explains nothing: the
-    # claim had ended by the split.
+    # claim had ended by the split. M1c cannot compose either state: it
+    # composes the first as continuing and the second as resurrected, so
+    # unknown. Both are pinned as defense in depth against evidence M1c did
+    # not compose.
     split_at, other_at = EFFECT_AT, LATER_AT
     if ending == "earlier":
         split_at, other_at = other_at, split_at
@@ -3258,6 +3264,189 @@ def test_a_composed_end_no_later_effect_explains_halts_the_share_action(
         match=_ended_claim_message(ActionKind.FORWARD_SPLIT, "extinguished"),
     ):
         _processor().apply_pre_open_actions(state, (), (outcome,), _key(day))
+
+
+def _ended_distribution(
+    kind: ActionKind, status: str, *, at: str = EFFECT_AT, suffix: int = 3830
+) -> tuple[CorporateActionTermsVersionV1, EconomicEffectVersionV1]:
+    """One cash distribution on SEC_A, ex on ``at``, with its own claim status."""
+    return _same_date_effect(
+        suffix,
+        kind,
+        (_cash(amount="1", component_id="distribution"),),
+        at=at,
+        claim_status=status,
+        occurrence="occ-ended-distribution",
+        dates=(_date_fact("ex", at), _date_fact("payable", PAYABLE_AT)),
+    )
+
+
+def _ended_distribution_message(kind: ActionKind, status: str) -> str:
+    return (
+        rf"the {kind.value} occ-ended-distribution on {SEC_A} needs a continuing "
+        rf"claim, but its own claim status is {status}"
+    )
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [ActionKind.REGULAR_CASH_DIVIDEND, ActionKind.SPECIAL_CASH_DISTRIBUTION],
+    ids=lambda kind: kind.value,
+)
+@pytest.mark.parametrize("status", ["extinguished", "converted"])
+def test_a_cash_distribution_on_an_ended_claim_halts_an_exposed_book(
+    kind: ActionKind, status: str
+) -> None:
+    # F1 of the PR #125 review: a dividend or special distribution pays on
+    # shares that continue, yet its own claim status says the claim ended or
+    # was converted. M1c classifies it supported and composes that status.
+    # Before the fix it was paid as an ordinary distribution, 100 on the 100
+    # shares, and the shares were kept on an ended claim.
+    terms, effect = _ended_distribution(kind, status)
+    outcome = _outcome(
+        terms=(terms,), effects=(effect,), action_kinds=(kind,), claim_status=status
+    )
+    message = _ended_distribution_message(kind, status)
+
+    held = _state(holdings=(_holding(quantity=100),))
+    with pytest.raises(IndeterminateValuationError, match=message):
+        _processor().apply_pre_open_actions(held, (), (outcome,), _key())
+    # A staged buy of the unheld security is exposure too.
+    with pytest.raises(IndeterminateValuationError, match=message):
+        _processor().apply_pre_open_actions(
+            _state(), (_target(SEC_A, 10),), (outcome,), _key()
+        )
+
+    # Control: unrelated evidence does not poison a book exposed to nothing
+    # in SEC_A.
+    elsewhere = _state(holdings=(_holding(SEC_OTHER, quantity=5),))
+    unchanged, _ = _processor().apply_pre_open_actions(
+        elsewhere, (), (outcome,), _key()
+    )
+    assert unchanged is elsewhere
+
+    # Control: the same distribution on a continuing claim is owed on 100.
+    terms, effect = _ended_distribution(kind, "continuing")
+    continuing = _outcome(terms=(terms,), effects=(effect,), action_kinds=(kind,))
+    paid, _ = _processor().apply_pre_open_actions(held, (), (continuing,), _key())
+    (claim,) = paid.pending_cash_claims
+    assert (claim.entitled_quantity, claim.total_cash_expected) == (100, Decimal("100"))
+
+
+@pytest.mark.parametrize(
+    ("split_suffix", "distribution_suffix", "split_first"),
+    [(3800, 3830, True), (3840, 3870, False)],
+    ids=["split-record-first", "distribution-record-first"],
+)
+@pytest.mark.parametrize("exposed", [True, False], ids=["exposed", "unexposed"])
+def test_a_split_then_an_ended_claim_dividend_halts_at_the_dividend(
+    split_suffix: int, distribution_suffix: int, split_first: bool, exposed: bool
+) -> None:
+    # F1 chain: a split on EFFECT_DAY, then a dividend whose own claim status
+    # is extinguished on LATER_DAY. M1c composes the claim as extinguished,
+    # and the dividend is the ending effect that follows the split, so the
+    # split applies in its own window. Before the fix the dividend was then
+    # paid on the 200 shares and nothing ever removed them; now it halts in
+    # its own window. Both record orders are covered.
+    split_terms, split_effect = _continuing_share_action(
+        ActionKind.FORWARD_SPLIT, "continuing", suffix=split_suffix
+    )
+    dividend_terms, dividend_effect = _ended_distribution(
+        ActionKind.REGULAR_CASH_DIVIDEND,
+        "extinguished",
+        at=LATER_AT,
+        suffix=distribution_suffix,
+    )
+    assert (content_hash(split_effect) < content_hash(dividend_effect)) is split_first
+    outcome = _outcome(
+        terms=(split_terms, dividend_terms),
+        effects=(split_effect, dividend_effect),
+        action_kinds=(ActionKind.FORWARD_SPLIT, ActionKind.REGULAR_CASH_DIVIDEND),
+        claim_status="extinguished",
+    )
+
+    if not exposed:
+        for day in (EFFECT_DAY, LATER_DAY):
+            elsewhere = _state(holdings=(_holding(SEC_OTHER, quantity=5),), day=day)
+            unchanged, _ = _processor().apply_pre_open_actions(
+                elsewhere, (), (outcome,), _key(day)
+            )
+            assert unchanged is elsewhere
+        return
+
+    first = _state(holdings=(_holding(quantity=100),))
+    split, _ = _processor().apply_pre_open_actions(first, (), (outcome,), _key())
+    assert _quantities(split.holdings) == {SEC_A: 200}
+    assert split.pending_cash_claims == ()
+
+    later = _state(holdings=(_holding(quantity=200),), day=LATER_DAY)
+    with pytest.raises(
+        IndeterminateValuationError,
+        match=_ended_distribution_message(
+            ActionKind.REGULAR_CASH_DIVIDEND, "extinguished"
+        ),
+    ):
+        _processor().apply_pre_open_actions(later, (), (outcome,), _key(LATER_DAY))
+
+
+@pytest.mark.parametrize(
+    "parent", [uid(11), SEC_OTHER], ids=["parent-first", "child-first"]
+)
+def test_an_ended_claim_dividend_on_a_delivered_security_halts(parent: UUID) -> None:
+    # The book holds no SEC_A at the prior close, but the parent's spin-off
+    # delivers 50 in this pass, and SEC_A's dividend, quoted per pre-action
+    # share, says its own claim ended. Only the book the pass leaves shows
+    # the exposure: a distribution is no share action, so no conflict halts
+    # it first. Both dispatch orders halt.
+    spin_terms, spin_effect = _same_date_effect(
+        3750,
+        ActionKind.SPINOFF,
+        (
+            _shares(
+                numerator="1",
+                denominator="2",
+                component_id="spin",
+                recipient=SEC_A,
+                predecessor=parent,
+                meaning="additional_per_predecessor",
+            ),
+        ),
+        at=EFFECT_AT,
+        claim_status="continuing",
+        occurrence="occ-spin",
+        security_id=parent,
+    )
+    spin = _outcome(
+        security_id=parent,
+        terms=(spin_terms,),
+        effects=(spin_effect,),
+        action_kinds=(ActionKind.SPINOFF,),
+    )
+
+    def dividend(status: str) -> SecurityEconomicOutcomeV1:
+        terms, effect = _ended_distribution(ActionKind.REGULAR_CASH_DIVIDEND, status)
+        return _outcome(terms=(terms,), effects=(effect,), claim_status=status)
+
+    state = _state(holdings=(_holding(parent, quantity=100, basis="900"),))
+    targets = (_target(parent, 100),)
+
+    with pytest.raises(
+        IndeterminateValuationError,
+        match=_ended_distribution_message(
+            ActionKind.REGULAR_CASH_DIVIDEND, "extinguished"
+        ),
+    ):
+        _processor().apply_pre_open_actions(
+            state, targets, (spin, dividend("extinguished")), _key()
+        )
+
+    # Control: on a continuing claim the pre-action dividend is owed on the
+    # prior close's SEC_A, which is none.
+    updated, _ = _processor().apply_pre_open_actions(
+        state, targets, (spin, dividend("continuing")), _key()
+    )
+    assert _quantities(updated.holdings) == {parent: 100, SEC_A: 50}
+    assert updated.pending_cash_claims == ()
 
 
 # --------------------------------------------------------------------------
@@ -5371,6 +5560,58 @@ def test_a_spin_off_delivering_no_whole_child_share_leaves_its_count_proven(
 
     assert _quantities(updated.holdings) == {parent: 1, SEC_CHILD: 4}
     assert _quantities(translated) == {parent: 1, SEC_CHILD: 4}
+    (claim,) = updated.pending_cash_claims
+    assert (claim.security_id, claim.entitled_quantity, claim.total_cash_expected) == (
+        SEC_CHILD,
+        4,
+        Decimal("4"),
+    )
+
+
+@pytest.mark.parametrize(
+    "parent", [SEC_A, SEC_OTHER], ids=["parent-first", "child-first"]
+)
+def test_an_ended_claim_spin_off_leaves_a_child_only_book_alone(
+    parent: UUID,
+) -> None:
+    # F3 of the PR #125 review: the ended-claim rule judges exposure to the
+    # acted security, not to every security the action touches. The parent's
+    # spin-off says its own claim ended, but the book holds only 4 SEC_CHILD
+    # and no parent, so the spin-off delivers it nothing. The child's
+    # post-action dividend is owed on those 4, and the pass completes.
+    spin_terms, spin_effect = _same_date_effect(
+        3730,
+        ActionKind.SPINOFF,
+        (
+            _shares(
+                numerator="1",
+                denominator="2",
+                component_id="spin",
+                recipient=SEC_CHILD,
+                predecessor=parent,
+                meaning="additional_per_predecessor",
+            ),
+        ),
+        at=EFFECT_AT,
+        claim_status="extinguished",
+        occurrence="occ-spin",
+        security_id=parent,
+    )
+    spin = _outcome(
+        security_id=parent,
+        terms=(spin_terms,),
+        effects=(spin_effect,),
+        action_kinds=(ActionKind.SPINOFF,),
+        claim_status="extinguished",
+    )
+    state = _state(holdings=(_holding(SEC_CHILD, quantity=4, basis="40"),), cash="0")
+    targets = (_target(SEC_CHILD, 4),)
+
+    updated, _ = _processor().apply_pre_open_actions(
+        state, targets, (spin, _distribution(SEC_CHILD, 3740)), _key()
+    )
+
+    assert _quantities(updated.holdings) == {SEC_CHILD: 4}
     (claim,) = updated.pending_cash_claims
     assert (claim.security_id, claim.entitled_quantity, claim.total_cash_expected) == (
         SEC_CHILD,
