@@ -868,6 +868,14 @@ _FORBIDDEN_FROM_IMPORTS = (
         id="typing-evaluate-forward-ref",
     ),
     pytest.param("from typing import _eval_type", _STRING_EVAL_FROM, id="typing-eval"),
+    # typing is name-granular: a name the closures do not use is refused even
+    # when it evaluates nothing.
+    pytest.param(
+        "from typing import NamedTuple", _ALLOWLIST_NAME, id="typing-unused-name"
+    ),
+    pytest.param(
+        "from typing import get_origin", _ALLOWLIST_NAME, id="typing-unused-helper"
+    ),
     pytest.param(
         "from typing import _type_convert", _STRING_EVAL_FROM, id="typing-type-convert"
     ),
@@ -930,6 +938,13 @@ _FURTHER_MACHINERY_REACH = (
         ),
         _MACHINERY_ATTRIBUTE,
         id="typing-attribute-of-a-drift-module",
+    ),
+    pytest.param(
+        _with_entry(
+            "import drift.domain.core\n\ndrift.domain.core.pydantic.ImportString\n"
+        ),
+        _MACHINERY_ATTRIBUTE,
+        id="pydantic-attribute-of-a-drift-module",
     ),
     # #121 round 2 (R2-F1): a guarded namespace from-imported from another
     # module, allowlisted or drift, is refused where it is bound, so the member
@@ -1062,6 +1077,18 @@ _FURTHER_MACHINERY_REACH = (
         _with_entry('import typing\n\nFN = getattr(typing, "get_type_hints")\n'),
         _NAMESPACE,
         id="typing-evaluator-literal-getattr",
+    ),
+    # typing is name-granular, so an unused member is refused as an attribute
+    # and as a literal getattr too, not only as a from-import.
+    pytest.param(
+        _with_entry('import typing\n\ntyping.NamedTuple("Point", [])\n'),
+        _MACHINERY_REFERENCE,
+        id="typing-unused-name-attribute",
+    ),
+    pytest.param(
+        _with_entry('import typing\n\ngetattr(typing, "NamedTuple")\n'),
+        _NAMESPACE,
+        id="typing-unused-name-literal-getattr",
     ),
     pytest.param(
         _with_entry('import pydantic\n\nLOADER = getattr(pydantic, "ImportString")\n'),
@@ -1306,6 +1333,58 @@ _STRING_IMPORT_REACHES = (
         id="import-string-aliased-attribute",
     ),
 )
+
+_TYPING_STRING_EVALUATORS = (
+    "ForwardRef",
+    "_LazyAnnotationLib",
+    "_eval_type",
+    "_lazy_annotationlib",
+    "_make_forward_ref",
+    "_type_check",
+    "_type_convert",
+    "evaluate_forward_ref",
+    "get_type_hints",
+)
+"""Belt-and-braces set, stated independently of the guard's own constant."""
+
+
+@pytest.mark.parametrize("name", _TYPING_STRING_EVALUATORS)
+@pytest.mark.parametrize("name_granular", (True, False), ids=("granular", "plain"))
+def test_closure_guard_refuses_typing_string_evaluators_either_way(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    name_granular: bool,
+) -> None:
+    """Each typing string evaluator is refused with or without name granularity.
+
+    With ``name_granular=False`` the ``typing`` entries are removed from the
+    name-granular surfaces and the guarded roots, so the only thing left to
+    refuse these names is the string-evaluation denial itself.
+    """
+    if not name_granular:
+        names = dict(semantic_attestation._ALLOWED_IMPORT_NAMES)
+        del names["typing"]
+        monkeypatch.setattr(semantic_attestation, "_ALLOWED_IMPORT_NAMES", names)
+        monkeypatch.setattr(
+            semantic_attestation,
+            "_IMPORT_MACHINERY_ROOTS",
+            semantic_attestation._IMPORT_MACHINERY_ROOTS - {"typing"},
+        )
+    assert name in semantic_attestation._STRING_EVALUATION_NAMES["typing"]
+    from_import = _package(
+        tmp_path / "from", _with_entry(f"from typing import {name}\n")
+    )
+    _assert_refused(from_import, _STRING_EVAL_FROM)
+    attribute = _package(
+        tmp_path / "attribute", _with_entry(f"import typing\n\ntyping.{name}\n")
+    )
+    _assert_refused(attribute, _STRING_EVAL_REACH)
+    lookup = _package(
+        tmp_path / "lookup",
+        _with_entry(f'import typing\n\ngetattr(typing, "{name}")\n'),
+    )
+    _assert_refused(lookup, _NAMESPACE)
 
 
 @pytest.mark.parametrize(("source", "message"), _STRING_IMPORT_REACHES)

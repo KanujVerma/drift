@@ -15,7 +15,7 @@
   "superseded_paths": {
     "src/drift/domain/semantic_attestation.py": {
       "historical_sha256": "c40b52f5e2d6728b0ea0408b7cfa2f98583584828beb38ff88644cf9f14b4b42",
-      "current_sha256": "6ff53b066e296c709a10b87b13bd33cf6c543c15ffa25683090fe244c004778a"
+      "current_sha256": "37b5a6d8933ec2c2e8ed4dd6cc14788b7bf3d7f749a2d781555ddaa627cb5faa"
     }
   },
   "added_paths": {},
@@ -57,7 +57,7 @@
     "src/drift/domain/provenance_references.py": "63f096f60fcb329666200c29c80f8a8faa2056aa523954116faba9a1e327749a",
     "src/drift/domain/revisions.py": "742f0486120629e84392a30835ee33da762787ccf0a867e85e66829d7fa452f3",
     "src/drift/domain/securities.py": "8e660c61cb43f6f290a3d208075a624fa0f9344f15915318ab3241cef74d00e0",
-    "src/drift/domain/semantic_attestation.py": "6ff53b066e296c709a10b87b13bd33cf6c543c15ffa25683090fe244c004778a",
+    "src/drift/domain/semantic_attestation.py": "37b5a6d8933ec2c2e8ed4dd6cc14788b7bf3d7f749a2d781555ddaa627cb5faa",
     "src/drift/domain/sessions.py": "5606e141dace4ef8b201568d5b48ab72c74df9ea4b122fed1ec416291b6f3092",
     "src/drift/domain/strategies.py": "bd1eb14f4b1637d91c53b81266cc7f451e8fb19915f20cf6adb003e7e107e137",
     "src/drift/domain/temporal.py": "28313896efa1e84709f9234dbb9ba2d111775ff93358615b62a314ca740cde43",
