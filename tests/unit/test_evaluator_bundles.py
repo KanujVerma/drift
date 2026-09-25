@@ -1,6 +1,6 @@
 """Unit tests for M2 Task 2B input bundle, lane gates, and run identity."""
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from functools import cache
 from typing import Any, Literal
 
@@ -34,6 +34,8 @@ from drift.domain.evaluator_lanes import (
     ALPACA_LIMITATION_ABSENT_HALTS,
     ALPACA_LIMITATION_BOUNDED_COHORT,
     ALPACA_LIMITATION_SCHEDULED_SESSION_RECONSTRUCTION,
+    ALPACA_LIMITATION_TRUNCATED_CA,
+    ALPACA_LIMITATION_UNVERSIONED_BARS,
     ExploratoryEvaluationAdmissionV1,
     exploratory_evaluation_admission_hash,
 )
@@ -200,6 +202,32 @@ def resealed_clock(
     )
 
 
+def with_session_clock(
+    bundle: EvaluationInputBundleV1, clock: SessionClockV1
+) -> EvaluationInputBundleV1:
+    """Re-assemble a built bundle around another clock, which only a test does.
+
+    The builder refuses a realized clock its session queries do not derive
+    (issue 96), so a forged clock reaches the later boundaries, verification,
+    minting and the gate, only through direct assembly.
+    """
+    return assemble_evaluation_input_bundle(
+        evaluation_interval=bundle.evaluation_interval,
+        session_clock=clock,
+        security_identities=bundle.security_identities,
+        listing_identities=bundle.listing_identities,
+        structural_eligibilities=bundle.structural_eligibilities,
+        economic_outcomes=bundle.economic_outcomes,
+        authentic_decision_views=bundle.authentic_decision_views,
+        authentic_accounting_views=bundle.authentic_accounting_views,
+        exploratory_reconstructed_observations=(
+            bundle.exploratory_reconstructed_observations
+        ),
+        source_snapshot_hash=bundle.source_snapshot_hash,
+        dataset_limitations=bundle.dataset_limitations,
+    )
+
+
 def _realized_bundle(**overrides: Any) -> EvaluationInputBundleV1:
     kwargs: dict[str, Any] = {
         "evaluation_interval": _interval(),
@@ -290,6 +318,66 @@ def test_bundle_hash_changes_when_a_member_changes() -> None:
     assert base.bundle_hash != with_security.bundle_hash
 
 
+# --- producer-declared dataset limitations (issue 92) ---
+
+
+def test_bundle_declares_no_dataset_limitation_by_default() -> None:
+    bundle = _realized_bundle()
+    assert bundle.dataset_limitations == ()
+    assert bundle.required_limitations == ()
+
+
+def test_bundle_hash_covers_dataset_limitations() -> None:
+    base = _realized_bundle()
+    declared = _realized_bundle(dataset_limitations=(ALPACA_LIMITATION_TRUNCATED_CA,))
+    assert declared.dataset_limitations == (ALPACA_LIMITATION_TRUNCATED_CA,)
+    assert declared.bundle_hash == evaluation_input_bundle_hash(declared)
+    assert declared.bundle_hash != base.bundle_hash
+
+    # The declaration cannot ride under the hash of a bundle without it...
+    forged = declared.model_dump()
+    forged["bundle_hash"] = base.bundle_hash
+    with pytest.raises(ValidationError, match="bundle hash mismatch"):
+        EvaluationInputBundleV1.model_validate(forged)
+
+    # ...and cannot be stripped from a bundle that keeps its declared hash.
+    stripped = declared.model_dump()
+    stripped["dataset_limitations"] = ()
+    with pytest.raises(ValidationError, match="bundle hash mismatch"):
+        EvaluationInputBundleV1.model_validate(stripped)
+
+
+def test_dataset_limitations_canonicalize_like_sibling_limitations() -> None:
+    first, second = sorted(
+        (ALPACA_LIMITATION_TRUNCATED_CA, ALPACA_LIMITATION_UNVERSIONED_BARS)
+    )
+    forward = _realized_bundle(dataset_limitations=(first, second))
+    reverse = _realized_bundle(dataset_limitations=(second, first))
+    assert forward.dataset_limitations == (first, second)
+    assert reverse.dataset_limitations == (first, second)
+    assert forward.bundle_hash == reverse.bundle_hash
+
+    # The model itself sorts, so an unsorted payload validates to canonical
+    # order under the canonical hash rather than depending on the assembler.
+    payload = forward.model_dump()
+    payload["dataset_limitations"] = (second, first)
+    assert EvaluationInputBundleV1.model_validate(payload) == forward
+
+    with pytest.raises(ValidationError, match="dataset limitations must be unique"):
+        _realized_bundle(dataset_limitations=(first, first))
+    with pytest.raises(ValidationError):
+        _realized_bundle(dataset_limitations=("   ",))
+
+
+def test_dataset_limitations_merge_into_required_limitations() -> None:
+    bundle = _scheduled_bundle(dataset_limitations=(ALPACA_LIMITATION_TRUNCATED_CA,))
+    assert set(bundle.required_limitations) == {
+        ALPACA_LIMITATION_TRUNCATED_CA,
+        *bundle.session_clock.acknowledged_limitations,
+    }
+    assert list(bundle.required_limitations) == sorted(bundle.required_limitations)
+
+
 # --- exploratory reconstruction detection ---
 
 
@@ -347,6 +435,46 @@ def test_exploratory_gate_rejects_dropped_limitation() -> None:
     admission = _exploratory_admission(bundle, limitations=kept)
     with pytest.raises(ValueError, match="omits required bundle limitations"):
         validate_exploratory_admission(admission=admission, bundle=bundle)
+
+
+def test_exploratory_gate_rejects_an_admission_omitting_a_dataset_limitation() -> None:
+    bundle = _scheduled_bundle(dataset_limitations=(ALPACA_LIMITATION_TRUNCATED_CA,))
+    kept = tuple(
+        item
+        for item in bundle.required_limitations
+        if item != ALPACA_LIMITATION_TRUNCATED_CA
+    )
+    assert kept
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^exploratory admission omits required bundle limitations: "
+            rf"\('{ALPACA_LIMITATION_TRUNCATED_CA}',\)$"
+        ),
+    ):
+        validate_exploratory_admission(
+            admission=_exploratory_admission(bundle, limitations=kept), bundle=bundle
+        )
+
+    # Control: acknowledging it too is admitted.
+    validate_exploratory_admission(
+        admission=_exploratory_admission(bundle), bundle=bundle
+    )
+
+
+def test_build_bundle_carries_declared_dataset_limitations() -> None:
+    harness, query, reference, view = _decision_case()
+    bundle = build_evaluation_input_bundle(
+        evaluation_interval=_interval(),
+        session_clock=normalization_realized_clock(harness),
+        context=harness.context,
+        session_queries=normalization_session_queries(harness),
+        decision_requests=((reference, query),),
+        dataset_limitations=(ALPACA_LIMITATION_TRUNCATED_CA,),
+    )
+    assert bundle.authentic_decision_views == (view,)
+    assert bundle.dataset_limitations == (ALPACA_LIMITATION_TRUNCATED_CA,)
+    assert ALPACA_LIMITATION_TRUNCATED_CA in bundle.required_limitations
 
 
 # --- promotion lane gate (anti-laundering) ---
@@ -735,6 +863,7 @@ def test_build_bundle_materializes_views_through_replay() -> None:
         evaluation_interval=_interval(),
         session_clock=normalization_realized_clock(harness),
         context=harness.context,
+        session_queries=normalization_session_queries(harness),
         decision_requests=((reference, query),),
     )
     assert bundle.authentic_decision_views == (view,)
@@ -746,6 +875,7 @@ def test_verify_accepts_genuinely_replayed_bundle() -> None:
         evaluation_interval=_interval(),
         session_clock=normalization_realized_clock(harness),
         context=harness.context,
+        session_queries=normalization_session_queries(harness),
         decision_requests=((reference, query),),
     )
     verify_evaluation_input_bundle(
@@ -786,6 +916,7 @@ def test_verify_rejects_bundle_whose_hash_does_not_match_contents() -> None:
         evaluation_interval=_interval(),
         session_clock=normalization_realized_clock(harness),
         context=harness.context,
+        session_queries=normalization_session_queries(harness),
         decision_requests=((reference, query),),
     )
     broken = EvaluationInputBundleV1.model_construct(
@@ -990,6 +1121,7 @@ def test_build_and_verify_accounting_views_through_replay() -> None:
         evaluation_interval=_interval(),
         session_clock=normalization_realized_clock(harness),
         context=harness.context,
+        session_queries=normalization_session_queries(harness),
         accounting_requests=((reference, query),),
     )
     assert bundle.authentic_accounting_views == (view,)
@@ -1011,6 +1143,7 @@ def test_verify_refuses_a_realized_clock_without_its_session_queries() -> None:
         evaluation_interval=_interval(),
         session_clock=normalization_realized_clock(harness),
         context=harness.context,
+        session_queries=normalization_session_queries(harness),
         decision_requests=((reference, query),),
     )
     with pytest.raises(
@@ -1156,3 +1289,257 @@ def test_verify_does_not_re_derive_an_unqueried_scheduled_clock() -> None:
         context=harness.context,
         decision_requests=((reference, query),),
     )
+
+
+# --- the realized clock is derived where the bundle is built (issue 96) ---
+
+#: The open dates of the prior-open action corpus, each with a realized record:
+#: a regular session, the 2026-11-27 early close, and another regular session.
+REALIZED_CORPUS_DATES = (date(2026, 11, 25), date(2026, 11, 27), date(2026, 11, 30))
+#: The next business date, for which the corpus holds no realized record.
+LAG_DATE = date(2026, 12, 1)
+
+
+@cache
+def realized_corpus() -> NormalizationHarness:
+    """A genuine M1d corpus whose realized sessions span three open dates.
+
+    Cached because it is only read, so every clock and bundle a test compares
+    comes from one corpus rather than from several rebuilt ones that merely
+    ought to agree.
+    """
+    return NormalizationHarness(include_prior_open=True)
+
+
+def realized_corpus_queries(*dates: date) -> tuple[Any, ...]:
+    """One session query per requested date over the realized corpus."""
+    harness = realized_corpus()
+    return tuple(
+        harness.source.outcome(
+            economic_horizon="2026-12-02T00:00:00Z",
+            evidence_vintage_cutoff="2026-12-02T00:00:00Z",
+            session_date=day.isoformat(),
+        ).model_copy(
+            update={
+                "source_selection_policy_hash": harness._source_policy_hash,
+                "input_context_hash": m1d_context_hash(harness.context),
+            }
+        )
+        for day in dates
+    )
+
+
+def realized_corpus_clock(*dates: date) -> SessionClockV1:
+    """The canonical realized clock over the requested corpus dates."""
+    clock: SessionClockV1 = build_realized_session_clock(
+        realized_corpus_queries(*dates), realized_corpus().context
+    )
+    return clock
+
+
+def _restamped(
+    session: EvaluationSessionV1, *, opened_at: datetime, closed_at: datetime
+) -> EvaluationSessionV1:
+    """One session moved to other UTC stamps, resealed so only the move remains."""
+    draft = EvaluationSessionV1.model_construct(
+        **(dict(session) | {"opened_at": opened_at, "closed_at": closed_at})
+    )
+    return EvaluationSessionV1.model_validate(
+        dict(draft) | {"session_hash": evaluation_session_hash(draft)}
+    )
+
+
+def _resealed_sessions(
+    clock: SessionClockV1, sessions: tuple[EvaluationSessionV1, ...]
+) -> SessionClockV1:
+    """A clock carrying other sessions, resealed so it is valid on its own."""
+    draft = SessionClockV1.model_construct(**(dict(clock) | {"sessions": sessions}))
+    return SessionClockV1.model_validate(
+        dict(draft) | {"clock_hash": session_clock_hash(draft)}
+    )
+
+
+def lagged_realized_clock() -> SessionClockV1:
+    """The issue 95 review probe, over genuine realized authority.
+
+    DAY_0 keeps its own times, DAY_1 carries DAY_2's, and DAY_2 carries the
+    next business date's. Every session keeps its genuine authority records and
+    proofs, so only the UTC stamps lag behind the local dates.
+    """
+    genuine = realized_corpus_clock(*REALIZED_CORPUS_DATES)
+    day_0, day_1, day_2 = genuine.sessions
+    return _resealed_sessions(
+        genuine,
+        (
+            day_0,
+            _restamped(day_1, opened_at=day_2.opened_at, closed_at=day_2.closed_at),
+            _restamped(
+                day_2,
+                opened_at=datetime.combine(LAG_DATE, time(14, 30), tzinfo=UTC),
+                closed_at=datetime.combine(LAG_DATE, time(21, 0), tzinfo=UTC),
+            ),
+        ),
+    )
+
+
+def build_over_realized_corpus(
+    clock: SessionClockV1, session_queries: tuple[Any, ...] | None
+) -> EvaluationInputBundleV1:
+    """Build a bundle carrying only a clock over the realized corpus."""
+    return build_evaluation_input_bundle(
+        evaluation_interval=_interval(),
+        session_clock=clock,
+        context=realized_corpus().context,
+        session_queries=session_queries,
+    )
+
+
+def _realized_clock_forgery(
+    forgery: str,
+) -> tuple[SessionClockV1, tuple[date, ...], SessionClockV1]:
+    """A forged realized clock, the dates it is built over, and their true clock."""
+    every = REALIZED_CORPUS_DATES
+    genuine = realized_corpus_clock(*every)
+    match forgery:
+        case "lagged":
+            return lagged_realized_clock(), every, genuine
+        case "invented_authority":
+            invented = resealed_clock(
+                genuine,
+                authority_record_hashes=(H["e"],),
+                authority_proof_hashes=(H["f"],),
+            )
+            return invented, every, genuine
+        case "scheduled_row_relabelled":
+            scheduled = build_scheduled_reconstruction_clock(
+                realized_corpus_queries(*every), realized_corpus().context
+            )
+            relabelled = resealed_clock(
+                scheduled,
+                mode="realized_session_authority",
+                acknowledged_limitations=(),
+                authority="realized",
+            )
+            return relabelled, every, genuine
+        case "limitation_added":
+            # Canonical realized clocks declare no limitation, so a clock that
+            # adds one differs from its derivation in that field alone.
+            added = resealed_clock(
+                genuine, acknowledged_limitations=("invented-clock-limitation",)
+            )
+            return added, every, genuine
+        case "session_added":
+            return genuine, every[:2], realized_corpus_clock(*every[:2])
+        case "session_omitted":
+            return realized_corpus_clock(every[0], every[2]), every, genuine
+    raise AssertionError(f"unknown forgery {forgery!r}")
+
+
+def test_build_carries_a_genuine_realized_clock_unchanged() -> None:
+    """Control: the canonical clock builds into exactly the bundle assembly makes."""
+    genuine = realized_corpus_clock(*REALIZED_CORPUS_DATES)
+    bundle = build_over_realized_corpus(
+        genuine, realized_corpus_queries(*REALIZED_CORPUS_DATES)
+    )
+    assert bundle.session_clock == genuine
+    assert bundle == assemble_evaluation_input_bundle(
+        evaluation_interval=_interval(), session_clock=genuine
+    )
+
+
+@pytest.mark.parametrize(
+    "forgery",
+    [
+        "lagged",
+        "invented_authority",
+        "scheduled_row_relabelled",
+        "limitation_added",
+        "session_added",
+        "session_omitted",
+    ],
+)
+def test_build_refuses_a_realized_clock_its_queries_do_not_derive(
+    forgery: str,
+) -> None:
+    """Each forgery is valid on its own; only its re-derivation refuses it.
+
+    The lagged clock keeps every session key and authority hash, and the
+    relabelled calendar keeps every key and, on these dates, every boundary.
+    """
+    forged, dates, rederived = _realized_clock_forgery(forgery)
+    assert forged.mode == "realized_session_authority"
+    assert forged != rederived
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^session clock does not match its canonical re-derivation: bundle "
+            rf"clock {forged.clock_hash}, re-derived {rederived.clock_hash}$"
+        ),
+    ):
+        build_over_realized_corpus(forged, realized_corpus_queries(*dates))
+
+
+def test_build_refuses_a_realized_clock_without_its_session_queries() -> None:
+    """A realized clock is derived at the build boundary or refused there."""
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^bundle carries a realized session clock without the session "
+            r"queries to re-derive it$"
+        ),
+    ):
+        build_over_realized_corpus(realized_corpus_clock(*REALIZED_CORPUS_DATES), None)
+
+
+def test_build_takes_exactly_the_sessions_its_queries_request() -> None:
+    """A session the request omits is omitted from the clock, never forged.
+
+    The builder derives exactly the sessions its queries select, as
+    verification does (issue 80), so a clock missing a requested session, or
+    carrying an unrequested one, is refused above. Which sessions a caller
+    requests is request coverage, which issue 101 owns as a prerequisite for
+    re-enabling the promotion lane.
+    """
+    requested = (REALIZED_CORPUS_DATES[0], REALIZED_CORPUS_DATES[2])
+    bundle = build_over_realized_corpus(
+        realized_corpus_clock(*requested), realized_corpus_queries(*requested)
+    )
+    dates = tuple(
+        session.session_key.local_date for session in bundle.session_clock.sessions
+    )
+    assert dates == requested
+
+
+def test_build_re_derives_a_scheduled_clock_when_its_queries_are_supplied() -> None:
+    """The one clock rule is verification's: queries supplied are always used.
+
+    Without them a scheduled clock still builds unchanged, which the Alpaca
+    bridge relies on; the lane gate re-derives the sessions its reconstructions
+    sit on (issue 84).
+    """
+    queries = realized_corpus_queries(*REALIZED_CORPUS_DATES)
+    genuine = build_scheduled_reconstruction_clock(queries, realized_corpus().context)
+    bundle = build_over_realized_corpus(genuine, queries)
+    assert bundle.session_clock == genuine
+    assert build_over_realized_corpus(genuine, None) == bundle
+
+    last = genuine.sessions[-1]
+    moved = _resealed_sessions(
+        genuine,
+        (
+            *genuine.sessions[:-1],
+            _restamped(
+                last,
+                opened_at=last.opened_at,
+                closed_at=last.closed_at + timedelta(hours=1),
+            ),
+        ),
+    )
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^session clock does not match its canonical re-derivation: bundle "
+            rf"clock {moved.clock_hash}, re-derived {genuine.clock_hash}$"
+        ),
+    ):
+        build_over_realized_corpus(moved, queries)

@@ -35,10 +35,12 @@ from exploratory_decision_test_support import (
     DualLaneStrategy,
     ReconstructedTargetStrategy,
     bundle_of,
+    cohort_of,
     early_close_sessions,
     merged_scheduled_clock,
     promotion_admission,
     reconstructed_engine,
+    replay_of,
     run_engine,
     scheduled_bundle,
     scheduled_session_case,
@@ -69,6 +71,10 @@ from drift.domain.evaluator_trace import (
     StrategyDecisionTraceEventV1,
 )
 from drift.domain.normalization import DerivedObservationViewV1
+from drift.evaluator.engine import (
+    PromotionLaneDisabledError,
+    _resolve_reconstructed_lane,
+)
 
 NEW_YORK = ZoneInfo("America/New_York")
 SRC = Path(__file__).resolve().parents[2] / "src" / "drift"
@@ -498,16 +504,22 @@ def test_no_seam_converts_reconstructed_evidence_into_strong_or_promotion_types(
 # Promotion: the weaker type and path are refused structurally
 # ==========================================================================
 
+# Issue 79 ruling: the engine refuses every promotion admission first, before
+# the reconstruction, cohort, and replay guards behind it. Those guards stay
+# for the day issue 115 re-enables the lane; until then these attacks meet the
+# lane refusal.
+PROMOTION_LANE_DISABLED = (
+    r"^the promotion lane is disabled \(issue 79 ruling\): engine construction "
+    r"refuses"
+)
+
 
 def test_a_promotion_admission_cannot_evaluate_a_scheduled_reconstruction() -> None:
     bundle = bundle_of(early_close_sessions())
     admission = promotion_admission(bundle)
     assert admission.input_bundle_hash == bundle.bundle_hash
 
-    with pytest.raises(
-        ValueError,
-        match=r"^a promotion admission cannot evaluate exploratory reconstructed",
-    ):
+    with pytest.raises(PromotionLaneDisabledError, match=PROMOTION_LANE_DISABLED):
         reconstructed_engine(bundle, admission=admission, with_cohort=False)
 
     # Control: the exploratory admission of the same bundle is admitted.
@@ -538,18 +550,20 @@ def test_a_promotion_admission_refuses_reconstructions_on_a_realized_clock() -> 
     )
     assert riding.has_exploratory_reconstructions is True
 
-    with pytest.raises(
-        ValueError,
-        match=r"^a promotion admission cannot evaluate exploratory reconstructed",
-    ):
+    with pytest.raises(PromotionLaneDisabledError, match=PROMOTION_LANE_DISABLED):
         reconstructed_engine(
             riding, admission=promotion_admission(riding), with_cohort=False
         )
 
-    # Control: the same realized bundle without the reconstruction is admitted.
-    reconstructed_engine(
-        realized, admission=promotion_admission(realized), with_cohort=False
-    )
+    # The same realized bundle without the reconstruction, admitted at
+    # 19c15f8, is refused too: the lane is disabled, not only its weaker path.
+    with pytest.raises(PromotionLaneDisabledError, match=PROMOTION_LANE_DISABLED):
+        reconstructed_engine(
+            realized, admission=promotion_admission(realized), with_cohort=False
+        )
+
+    # Control: the exploratory admission of the riding bundle is admitted.
+    reconstructed_engine(riding, with_cohort=False)
 
 
 def test_a_promotion_admission_cannot_carry_an_exploratory_cohort() -> None:
@@ -557,11 +571,86 @@ def test_a_promotion_admission_cannot_carry_an_exploratory_cohort() -> None:
 
     realized = _bundle()
 
+    with pytest.raises(PromotionLaneDisabledError, match=PROMOTION_LANE_DISABLED):
+        reconstructed_engine(realized, admission=promotion_admission(realized))
+
+
+# The guards the lane refusal stands in front of, exercised directly (issue 120
+# review, F-C). Construction never reaches them while the lane is disabled, so
+# each is called as the engine will call it once issue 115 re-enables the lane.
+
+
+def test_the_retained_guard_refuses_reconstructions_under_promotion() -> None:
+    bundle = bundle_of(early_close_sessions())
+    assert bundle.has_exploratory_reconstructions is True
+
     with pytest.raises(
         ValueError,
-        match=r"^a promotion admission cannot evaluate an exploratory cohort",
+        match=(
+            r"^a promotion admission cannot evaluate exploratory reconstructed "
+            r"evidence$"
+        ),
     ):
-        reconstructed_engine(realized, admission=promotion_admission(realized))
+        _resolve_reconstructed_lane(
+            bundle=bundle,
+            admission=promotion_admission(bundle),
+            cohort=None,
+            replay=None,
+        )
+
+
+def test_the_retained_guard_refuses_a_cohort_under_promotion() -> None:
+    from test_evaluator_engine import _bundle
+
+    realized = _bundle()
+
+    with pytest.raises(
+        ValueError,
+        match=r"^a promotion admission cannot evaluate an exploratory cohort$",
+    ):
+        _resolve_reconstructed_lane(
+            bundle=realized,
+            admission=promotion_admission(realized),
+            cohort=cohort_of(),
+            replay=None,
+        )
+
+
+def test_the_retained_guard_refuses_replay_evidence_under_promotion() -> None:
+    from test_evaluator_engine import _bundle
+
+    realized = _bundle()
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^a promotion admission cannot evaluate exploratory reconstruction "
+            r"replay evidence$"
+        ),
+    ):
+        _resolve_reconstructed_lane(
+            bundle=realized,
+            admission=promotion_admission(realized),
+            cohort=None,
+            replay=replay_of(()),
+        )
+
+
+def test_the_retained_guards_admit_a_clean_realized_promotion_bundle() -> None:
+    """Control: with nothing weaker present, no reconstructed lane is resolved."""
+    from test_evaluator_engine import _bundle
+
+    realized = _bundle()
+
+    assert (
+        _resolve_reconstructed_lane(
+            bundle=realized,
+            admission=promotion_admission(realized),
+            cohort=None,
+            replay=None,
+        )
+        is None
+    )
 
 
 def test_the_promotion_gate_refuses_the_bundle_an_exploratory_run_completed() -> None:
@@ -604,6 +693,25 @@ def _paired_artifacts(lane: str) -> dict[str, Any]:
     Every binding the artifact checks is kept consistent, so the only
     difference between the two lanes is the lane itself.
     """
+    bundle = bundle_of(three_regular_sessions())
+    engine = reconstructed_engine(bundle)
+    artifacts = run_engine(engine, ReconstructedTargetStrategy({}))
+    assert _exploratory_events(artifacts)
+    if lane == "exploratory":
+        return {
+            "result": artifacts.result,
+            "trace": artifacts.trace,
+            "final_state": artifacts.final_state,
+        }
+    return _as_promotion(engine, artifacts)
+
+
+def _as_promotion(engine: Any, artifacts: Any) -> dict[str, Any]:
+    """Relabel one exploratory run's result and final state into the promotion lane.
+
+    The engine no longer builds a promotion result (issue 79 ruling), so any
+    promotion pairing is assembled by hand, keeping every binding consistent.
+    """
     from test_evaluator_engine import (
         CODE_VERSION_HASH,
         ENVIRONMENT_HASH,
@@ -617,16 +725,7 @@ def _paired_artifacts(lane: str) -> dict[str, Any]:
     )
     from drift.evaluator.bundles import build_evaluation_run_identity
 
-    bundle = bundle_of(three_regular_sessions())
-    engine = reconstructed_engine(bundle)
-    artifacts = run_engine(engine, ReconstructedTargetStrategy({}))
-    assert _exploratory_events(artifacts)
-    if lane == "exploratory":
-        return {
-            "result": artifacts.result,
-            "trace": artifacts.trace,
-            "final_state": artifacts.final_state,
-        }
+    bundle = engine.bundle
     promotion = promotion_admission(bundle)
     identity = build_evaluation_run_identity(
         strategy_hash=STRATEGY_REFERENCE.code_hash,
@@ -693,57 +792,54 @@ def test_a_promotion_result_cannot_bind_a_trace_of_reconstructed_decisions() -> 
         EvaluationRunArtifactsV1.model_validate(_paired_artifacts("promotion"))
 
 
-def test_a_genuine_realized_promotion_run_still_binds_its_trace() -> None:
-    """Control: the guard refuses the weaker grade, not the promotion lane.
+def test_a_realized_promotion_run_is_refused_and_its_pairing_still_binds() -> None:
+    """The engine refuses the run; the artifact guard refuses only the grade.
 
-    A real engine run under a promotion admission over a realized bundle
-    traces its decisions as ``strategy_decision`` and must still validate as
-    an artifact, including after a JSON round trip.
+    At 19c15f8 a real engine run under a promotion admission over a realized
+    bundle completed with a promotion result. The issue 79 ruling disables
+    that lane, so the engine refuses it. The control for the guard above then
+    needs a hand-assembled pairing: a promotion result over a realized trace,
+    whose decisions are ``strategy_decision``, still validates as an
+    artifact, including after a JSON round trip.
     """
     from test_evaluator_engine import (
         BOOK_CODE,
         BOOK_NAMESPACE,
         ROLE_RECORDS,
+        FixedTargetStrategy,
         _bundle,
-        _buy_ten,
         _cost_model,
+        _engine,
         _protocol,
-        _run_identity,
     )
 
     from drift.domain.evaluator_results import EvaluationRunArtifactsV1
     from drift.evaluator.engine import SessionEvaluatorEngine, SessionEvaluatorEvidence
 
     realized = _bundle()
-    admission = promotion_admission(realized)
-    engine = SessionEvaluatorEngine(
-        bundle=realized,
-        admission=admission,
-        protocol=_protocol(),
-        cost_model=_cost_model(),
-        evidence=SessionEvaluatorEvidence(listing_role_records=ROLE_RECORDS),
-        book_currency_namespace=BOOK_NAMESPACE,
-        book_currency_code=BOOK_CODE,
-    )
-    artifacts = engine.run(
-        strategy=_buy_ten(),
-        run_identity=_run_identity(
-            admission=admission,
+    with pytest.raises(PromotionLaneDisabledError, match=PROMOTION_LANE_DISABLED):
+        SessionEvaluatorEngine(
             bundle=realized,
-            protocol=engine.protocol,
-            cost_model=engine.cost_model,
-            evidence_hash=engine.evaluator_evidence_hash,
-        ),
-    )
-    kinds = [event.kind for event in artifacts.trace.events]
-    assert artifacts.result.lane == "promotion"
-    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+            admission=promotion_admission(realized),
+            protocol=_protocol(),
+            cost_model=_cost_model(),
+            evidence=SessionEvaluatorEvidence(listing_role_records=ROLE_RECORDS),
+            book_currency_namespace=BOOK_NAMESPACE,
+            book_currency_code=BOOK_CODE,
+        )
+
+    engine = _engine(bundle=realized)
+    run = run_engine(engine, FixedTargetStrategy({}))
+    kinds = [event.kind for event in run.trace.events]
+    assert run.result.classification is EvaluationClassification.COMPLETE
     assert kinds.count("strategy_decision") >= 1
     assert "exploratory_strategy_decision" not in kinds
 
+    artifacts = EvaluationRunArtifactsV1.model_validate(_as_promotion(engine, run))
+    assert artifacts.result.lane == "promotion"
     rebound = EvaluationRunArtifactsV1.model_validate_json(artifacts.model_dump_json())
     assert rebound.result.lane == "promotion"
-    assert rebound.trace.trace_hash == artifacts.trace.trace_hash
+    assert rebound.trace.trace_hash == run.trace.trace_hash
 
 
 # ==========================================================================

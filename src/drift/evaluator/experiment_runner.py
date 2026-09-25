@@ -10,6 +10,14 @@ caller through `ExperimentRunnerContext`.
 That keeps replay honest. Running one evaluation twice under two different
 `ExperimentRun` identifiers and two different clocks produces two experiment
 rows whose bound artifact hashes are byte-identical.
+
+The promotion lane is disabled (the issue 79 ruling). Behind the engine's own
+refusal, the runner refuses a promotion admission before running, and refuses
+a promotion result before recording, so no M0 experiment run and no audit
+event ever records ``lane=promotion``. The runner trusts no object an engine
+returns: it rebuilds the artifacts through canonical JSON, refuses the rebuilt
+result if it is in the promotion lane or claims promotion-grade evidence, and
+records only from the rebuilt objects (issue 120 review, F-A).
 """
 
 from collections.abc import Mapping
@@ -31,7 +39,12 @@ from drift.domain.experiments import (
     ExperimentRunStatus,
     ExperimentSpecification,
 )
-from drift.evaluator.engine import LaneDispatchStrategy, SessionEvaluatorEngine
+from drift.evaluator.engine import (
+    LaneDispatchStrategy,
+    PromotionLaneDisabledError,
+    SessionEvaluatorEngine,
+    refuse_promotion_lane,
+)
 from drift.ledger.interface import AuditEventDraft, Ledger
 from drift.serialization.canonical import content_hash
 
@@ -69,7 +82,9 @@ def summary_metrics_payload(
 
     Exact decimals are carried as their canonical text. Rendering them as
     floats would make a metrics row disagree with the book it summarizes.
+    A promotion result is refused, never projected (issue 79 ruling).
     """
+    refuse_promotion_lane(result, site="the summary metrics projection")
     metrics: EvaluationSummaryMetricsV1 = result.metrics
     payload: dict[str, ImmutableJSONValue] = {
         "lane": result.lane,
@@ -95,6 +110,29 @@ def summary_metrics_payload(
     }
     payload.update({name: str(value) for name, value in exact.items()})
     return payload
+
+
+def _rebuilt_artifacts(artifacts: EvaluationRunArtifactsV1) -> EvaluationRunArtifactsV1:
+    """Rebuild what an engine returned before any of it is recorded (#120 F-A).
+
+    The returned object is refused first if it names the promotion lane or
+    claims promotion-grade evidence. It is then rebuilt through canonical
+    JSON, not a python-mode dump: a python-mode rebuild keeps subclassed leaf
+    values and so any attacker-defined equality inside them (issue 123), while
+    a JSON rebuild validates every member as its declared type over exact
+    built-in leaves. The rebuilt result is refused in turn, and only the
+    rebuilt objects are recorded.
+    """
+    refuse_promotion_lane(
+        artifacts.result, site="the experiment runner on the returned result"
+    )
+    rebuilt = EvaluationRunArtifactsV1.model_validate_json(
+        artifacts.model_dump_json(warnings=False)
+    )
+    refuse_promotion_lane(
+        rebuilt.result, site="the experiment runner on the rebuilt result"
+    )
+    return rebuilt
 
 
 def _artifact_references(
@@ -195,7 +233,14 @@ def execute_experiment_run(
     `REJECTED` are scientific answers, and the run records them with its
     artifacts bound. Only an unhandled defect produces `FAILED`, and it binds
     no artifacts because the evaluation produced none that can be trusted.
+
+    A promotion admission or result is not a defect but a refusal (issue 79
+    ruling): it raises `PromotionLaneDisabledError` and records nothing, and
+    so does that error raised from inside the engine run. Returned artifacts
+    that fail their canonical rebuild are not recorded either; the validation
+    error propagates.
     """
+    refuse_promotion_lane(context.engine.admission, site="the experiment runner")
     _validate_context(specification, context)
     common: dict[str, object] = {
         "run_id": context.run_id,
@@ -211,6 +256,10 @@ def execute_experiment_run(
         artifacts = context.engine.run(
             strategy=context.strategy, run_identity=context.run_identity
         )
+    except PromotionLaneDisabledError:
+        # A refusal from inside the run is still a refusal (issue 120 review,
+        # F-B): it is never laundered into a recorded FAILED run.
+        raise
     except Exception as error:
         detail = (
             f"{type(error).__name__}: {error}" if str(error) else type(error).__name__
@@ -226,12 +275,13 @@ def execute_experiment_run(
         )
         _record_audit_event(context, run)
         return run
+    recorded = _rebuilt_artifacts(artifacts)
     run = ExperimentRun.model_validate(
         common
         | {
             "status": ExperimentRunStatus.COMPLETED,
-            "metrics": summary_metrics_payload(artifacts.result),
-            "artifact_references": _artifact_references(context, artifacts),
+            "metrics": summary_metrics_payload(recorded.result),
+            "artifact_references": _artifact_references(context, recorded),
         }
     )
     _record_audit_event(context, run)
