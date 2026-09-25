@@ -19,7 +19,7 @@ import ast
 import re
 import sys
 from collections.abc import Sequence
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
@@ -33,12 +33,17 @@ import pytest
 from exploratory_decision_test_support import (
     JAN5,
     JAN6,
+    JAN7,
+    LISTING_OTHER,
     SEC,
+    SEC_OTHER,
     ReconstructedTargetStrategy,
+    cohort_of,
     early_close_sessions,
     reconstructed_engine,
     run_engine,
     scheduled_bundle,
+    scheduled_session_case,
     three_regular_sessions,
     utc_close,
 )
@@ -104,7 +109,10 @@ from drift.domain.evaluator_lanes import (
     ALPACA_LIMITATION_ABSENT_HALTS,
     ALPACA_LIMITATION_SCHEDULED_SESSION_RECONSTRUCTION,
 )
-from drift.domain.evaluator_results import EvaluationClassification
+from drift.domain.evaluator_results import (
+    EvaluationClassification,
+    EvaluationRunArtifactsV1,
+)
 from drift.domain.evaluator_strategy import (
     SecurityTargetPositionV1,
     StrategyDecisionContextV1,
@@ -129,7 +137,10 @@ from drift.evaluator.bundles import (
     assemble_evaluation_input_bundle,
     verify_evaluation_input_bundle,
 )
-from drift.evaluator.clock import build_realized_session_clock
+from drift.evaluator.clock import (
+    SameDateMultiVenueClockError,
+    build_realized_session_clock,
+)
 from drift.evaluator.engine import (
     SessionEvaluatorEngine,
     SessionEvaluatorEvidence,
@@ -1357,30 +1368,189 @@ SAME_DATE_TARGETS: dict[str, dict[date, tuple[tuple[UUID, int], ...]]] = {
     "holds-cash": {},
 }
 
+#: The exact issue 97 refusal of an XNYS DAY_1 session then an XNAS DAY_1 one.
+SAME_DATE_CLOCK_REFUSAL = (
+    "^"
+    + re.escape(
+        "the session clock steps two sessions on local date 2026-01-06, "
+        "XNYS then XNAS: next-open execution requires a later local date, so "
+        "a same-date multi-venue clock is refused at engine construction "
+        "(issue 97 ruling)"
+    )
+    + "$"
+)
+
+
+def _same_date_two_venue_bundle() -> Any:
+    """XNAS opens after the XNYS DAY_1 decision cutoff, on DAY_1 too."""
+    return _bundle_over(
+        clock=_clock_of(
+            (_session_at(DAY_1), _xnas_session(DAY_1, time(21, 30), time(23, 0)))
+        ),
+        decision_views=(_decision_view(SEC_A, DAY_1),),
+        accounting_views=(_accounting_view(SEC_A, DAY_1),),
+    )
+
+
+def test_a_same_date_multi_venue_clock_is_refused_at_engine_construction() -> None:
+    """Issue 97 ruling, option A: no engine is built over such a clock.
+
+    XNAS opens after the XNYS decision cutoff and without overlap, so the
+    clock admits it. Its open is still on the date the decision was taken,
+    which is not the next-open execution the protocol states. Until the
+    ruling this built an engine that halted at its second session; the issue
+    84 runtime-halt test for this shape is converted into this refusal.
+    Control: the same XNAS session one date later builds an engine.
+    """
+    with pytest.raises(SameDateMultiVenueClockError, match=SAME_DATE_CLOCK_REFUSAL):
+        _engine(bundle=_same_date_two_venue_bundle(), protocol=_protocol(warmup=1))
+
+    later = _bundle_over(
+        clock=_clock_of(
+            (_session_at(DAY_1), _xnas_session(DAY_2, time(14, 30), time(21, 0)))
+        ),
+        decision_views=(_decision_view(SEC_A, DAY_1),),
+        accounting_views=(_accounting_view(SEC_A, DAY_1),),
+    )
+    _engine(bundle=later, protocol=_protocol(warmup=1))
+
+
+class _LyingHashDate(date):
+    """Equal in value, but hashes and compares equal to nothing else."""
+
+    def __hash__(self) -> int:
+        return date.__hash__(self) ^ 0x5A5A
+
+    def __eq__(self, other: object) -> bool:
+        return self is other
+
+    def __ne__(self, other: object) -> bool:
+        return self is not other
+
+
+class _LyingOrderDate(_LyingHashDate):
+    """Also claims to follow every other date, so the next-open guard passes."""
+
+    def __lt__(self, other: date, /) -> bool:
+        return False
+
+    def __le__(self, other: date, /) -> bool:
+        return False
+
+    def __gt__(self, other: date, /) -> bool:
+        return True
+
+    def __ge__(self, other: date, /) -> bool:
+        return True
+
+
+class _LyingFormDate(_LyingOrderDate):
+    """Also reports another ordinal and another ISO form than its value's."""
+
+    def toordinal(self) -> int:
+        return date.toordinal(self) + 1
+
+    def isoformat(self) -> str:
+        return date.isoformat(self + timedelta(days=1))
+
+
+LYING_DATES: dict[str, type[date]] = {
+    "hash-and-equality": _LyingHashDate,
+    "and-order": _LyingOrderDate,
+    "and-ordinal-and-iso-form": _LyingFormDate,
+}
+
+
+@pytest.mark.parametrize("lying", LYING_DATES.values(), ids=LYING_DATES)
+def test_a_subclassed_date_cannot_slip_a_same_date_clock_past_construction(
+    lying: type[date],
+) -> None:
+    """#127 review F3: the refusal reads each date through the base type.
+
+    Revalidation keeps a ``date`` subclass on ``local_date`` (issue 123), so
+    the XNAS DAY_1 session can carry one whose own methods say it is another
+    date. Keyed on the value, the refusal was bypassed, and the lying order
+    passes the next-open guard too. Through ``date.toordinal`` and
+    ``date.isoformat`` no subclass method runs, so the forged clock is
+    refused exactly as the genuine one.
+    """
+    forged = lying(DAY_1.year, DAY_1.month, DAY_1.day)
+    xnas = _resealed(
+        _xnas_session(DAY_1, time(21, 30), time(23, 0)),
+        session_key=SessionKeyV1(
+            mic="XNAS", session_scope="regular", local_date=forged
+        ),
+    )
+    bundle = _bundle_over(
+        clock=_clock_of((_session_at(DAY_1), xnas)),
+        decision_views=(_decision_view(SEC_A, DAY_1),),
+        accounting_views=(_accounting_view(SEC_A, DAY_1),),
+    )
+    assert type(bundle.session_clock.sessions[1].session_key.local_date) is lying
+
+    with pytest.raises(SameDateMultiVenueClockError, match=SAME_DATE_CLOCK_REFUSAL):
+        _engine(bundle=bundle, protocol=_protocol(warmup=1))
+
+
+def test_a_same_date_multi_venue_scheduled_clock_is_refused_at_construction() -> None:
+    """The same refusal in the EXPLORATORY reconstructed lane.
+
+    A scheduled XNYS JAN6 session is followed by an XNAS JAN6 one that no
+    reconstruction is on, so the lane gate never re-derives it. Without the
+    issue 97 refusal the engine was built and halted at runtime.
+    """
+    cases = three_regular_sessions()
+    xnys = cases[1][1]
+    xnas = _resealed(
+        xnys,
+        session_key=SessionKeyV1(mic="XNAS", session_scope="regular", local_date=JAN6),
+        opened_at=utc_close(JAN6, "regular") + timedelta(minutes=30),
+        closed_at=utc_close(JAN6, "regular") + timedelta(hours=2),
+    )
+    bundle = scheduled_bundle(
+        tuple(observation for observation, _ in cases),
+        (*(session for _, session in cases), xnas),
+    )
+    assert bundle.session_clock.mode == "scheduled_session_reconstruction"
+    assert [session.session_key.mic for session in bundle.session_clock.sessions] == [
+        "XNYS",
+        "XNYS",
+        "XNAS",
+        "XNYS",
+    ]
+
+    with pytest.raises(SameDateMultiVenueClockError, match=SAME_DATE_CLOCK_REFUSAL):
+        reconstructed_engine(bundle)
+    # Control: without the XNAS session the same lane builds an engine.
+    reconstructed_engine(
+        scheduled_bundle(
+            tuple(observation for observation, _ in cases),
+            tuple(session for _, session in cases),
+        )
+    )
+
 
 @pytest.mark.parametrize("targets", SAME_DATE_TARGETS.values(), ids=SAME_DATE_TARGETS)
 def test_a_decision_never_fills_at_another_venues_open_on_its_own_date(
     targets: dict[date, tuple[tuple[UUID, int], ...]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A legal two-venue clock whose next open shares the decision's date.
+    """Defense in depth: the next-open guard still halts such a clock.
 
-    XNAS opens after the XNYS decision cutoff and without overlap, so the
-    clock admits it. Its open is still on the date the decision was taken,
-    which is not the next-open execution the protocol states. The refusal
-    holds whether or not the staged decision trades, so a same-date
-    multi-venue clock halts at its second session pending an owner ruling.
+    With the issue 97 construction refusal switched off, the run reaches the
+    XNAS open on the date the decision was taken, and the issue 84 guard
+    refuses it whether or not the staged decision trades.
     """
-    clock = _clock_of(
-        (_session_at(DAY_1), _xnas_session(DAY_1, time(21, 30), time(23, 0)))
-    )
-    bundle = _bundle_over(
-        clock=clock,
-        decision_views=(_decision_view(SEC_A, DAY_1),),
-        accounting_views=(_accounting_view(SEC_A, DAY_1),),
+    monkeypatch.setattr(
+        "drift.evaluator.engine.refuse_same_date_multi_venue_clock",
+        lambda clock: None,
     )
     strategy = FixedTargetStrategy(targets)
 
-    artifacts = _run(_engine(bundle=bundle, protocol=_protocol(warmup=1)), strategy)
+    artifacts = _run(
+        _engine(bundle=_same_date_two_venue_bundle(), protocol=_protocol(warmup=1)),
+        strategy,
+    )
 
     assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
     assert artifacts.result.halted_session_index == 1
@@ -1422,6 +1592,77 @@ def test_the_non_overlap_guard_is_what_keeps_decision_history_closed() -> None:
         assert reconstructed_history_sessions(sessions, index) == {
             item.session_key for item in sessions[: index + 1]
         }
+
+
+def _f4_run(
+    other_days: tuple[date, ...],
+) -> tuple[EvaluationRunArtifactsV1, ReconstructedTargetStrategy]:
+    """SEC on every day, SEC_OTHER on its own days; JAN6 targets SEC_OTHER."""
+    pair = (SEC, SEC_OTHER)
+    ours = tuple(
+        scheduled_session_case(day, cohort_securities=pair)
+        for day in (JAN5, JAN6, JAN7)
+    )
+    theirs = tuple(
+        scheduled_session_case(
+            day,
+            security_id=SEC_OTHER,
+            listing_id=LISTING_OTHER,
+            cohort_securities=pair,
+        )[0]
+        for day in other_days
+    )
+    bundle = scheduled_bundle(
+        (*(observation for observation, _ in ours), *theirs),
+        tuple(session for _, session in ours),
+    )
+    strategy = ReconstructedTargetStrategy({JAN6: ((SEC_OTHER, 1),)})
+    engine = reconstructed_engine(bundle, cohort=cohort_of(pair))
+    return run_engine(engine, strategy), strategy
+
+
+def test_a_member_missing_its_decision_bar_halts_before_it_can_be_traded() -> None:
+    """F4 (issue 87): a member missing its decision bar is never read as current.
+
+    SEC_OTHER has no JAN6 bar. Before issue 87 the JAN6 context showed its
+    history ending JAN5 as if it were current, the target filled at the JAN7
+    open, and the run was COMPLETE. The decision now halts INDETERMINATE at
+    the JAN6 close, before the strategy is asked, naming the member and the
+    session. Control: with the JAN6 bar present the same target fills.
+    """
+    artifacts, strategy = _f4_run((JAN5, JAN7))
+
+    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
+    assert artifacts.result.halted_session_index == 1
+    causes = [
+        event for event in artifacts.trace.events if event.kind == "indeterminate_cause"
+    ]
+    assert len(causes) == 1
+    assert causes[0].phase is EvaluationPhase.POST_CLOSE_DECISION
+    assert causes[0].cause_kind == "indeterminate_valuation"
+    assert causes[0].cause == (
+        "incomplete reconstructed decision context at the scheduled decision "
+        f"session XNYS 2026-01-06: cohort security {SEC_OTHER} has reconstructed "
+        "history from XNYS 2026-01-05 but no reconstruction for XNYS 2026-01-06"
+    )
+    assert artifacts.result.halt_reason == causes[0].cause
+    assert [context.session_key.local_date for context in strategy.seen] == [JAN5]
+    decisions = [
+        event
+        for event in artifacts.trace.events
+        if event.kind == "exploratory_strategy_decision"
+    ]
+    assert [event.session_key.local_date for event in decisions] == [JAN5]
+    assert not [event for event in artifacts.trace.events if event.kind == "fill"]
+    assert artifacts.final_state.holdings == ()
+
+    control, _ = _f4_run((JAN5, JAN6, JAN7))
+
+    assert control.result.classification is EvaluationClassification.COMPLETE
+    fills = [event for event in control.trace.events if event.kind == "fill"]
+    assert [
+        (event.session_key.local_date, event.fill.security_id) for event in fills
+    ] == [(JAN7, SEC_OTHER)]
 
 
 def test_a_missing_bar_on_the_execution_open_fails_closed_to_indeterminate() -> None:
