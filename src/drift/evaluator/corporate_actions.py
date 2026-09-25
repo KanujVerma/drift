@@ -120,6 +120,13 @@ class _Book:
     ``realized`` is the PnL this pass realized by disposals: holdings a
     corporate action extinguished for cash owed, whose basis is relieved
     exactly as a sale at the owed price would relieve it.
+
+    ``delivered`` and ``removed`` record, by security, the share action of
+    this pass that delivered shares into its holding from another security
+    (a spin-off child, an acquirer), and the one that removed its holding
+    (a disposal, a conversion). Neither leaves a post-action count the
+    prior close's holders are proven entitled on
+    (``_require_proven_post_action_count``).
     """
 
     opening: Mapping[UUID, SecurityHoldingV1]
@@ -128,6 +135,8 @@ class _Book:
     claims: dict[ClaimIdentity, PendingCashClaimV1]
     realized: Decimal = ZERO
     unmodelled: list[_EffectContext] = field(default_factory=list)
+    delivered: dict[UUID, _EffectContext] = field(default_factory=dict)
+    removed: dict[UUID, _EffectContext] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -648,13 +657,15 @@ class CorporateActionProcessor:
     ) -> None:
         # Called once per pass, with the effects of every outcome. Every share
         # action is dispatched before any cash distribution, so a source
-        # quoting cash per post-action share is answered against a share
-        # count that has already absorbed this window's share actions,
-        # whichever outcome each is in: a split of the security, or a
-        # spin-off or conversion delivering into it. A pass that completes
-        # leaves at most one share action touching each security the book is
-        # exposed to (_require_no_exposed_conflict), so "pre-action" is always
-        # the prior close and "post-action" is after that one action.
+        # quoting cash per post-action share is answered after every share
+        # action touching the security has run, whichever outcome it is in.
+        # A pass that completes leaves at most one share action touching each
+        # security the book is exposed to (_require_no_exposed_conflict), so
+        # "pre-action" is always the prior close and "post-action" is after
+        # that one action. Only the security's own continuing action (a
+        # split, a reverse split, a stock dividend) leaves a post-action
+        # count the prior close's holders are entitled on; a delivery into
+        # the holding or its removal halts (_require_proven_post_action_count).
         for context in contexts:
             if not _is_cash_distribution(context.payload):
                 self._dispatch(context, book, window)
@@ -795,6 +806,7 @@ class CorporateActionProcessor:
                 quantity=whole + (0 if existing is None else existing.quantity),
                 cost_basis=basis,
             )
+            book.delivered.setdefault(child, context)
         if residual:
             self._stage_cash_in_lieu(context, component, residual, book)
 
@@ -842,12 +854,11 @@ class CorporateActionProcessor:
             "a liquidating distribution" if liquidating else "a cash distribution",
         )
         for component in components:
-            source = (
-                book.opening
-                if component.unit_basis.share_basis == "predecessor_pre_action"
-                else book.holdings
-            )
-            holding = source.get(context.security_id)
+            if component.unit_basis.share_basis == "predecessor_pre_action":
+                holding = book.opening.get(context.security_id)
+            else:
+                _require_proven_post_action_count(context, book)
+                holding = book.holdings.get(context.security_id)
             if holding is None:
                 continue
             self._stage_claim(
@@ -948,11 +959,13 @@ class CorporateActionProcessor:
                 ZERO if existing is None else existing.cost_basis
             )
         del book.holdings[context.security_id]
+        book.removed[context.security_id] = context
         book.holdings[acquirer] = SecurityHoldingV1(
             security_id=acquirer,
             quantity=whole + (0 if existing is None else existing.quantity),
             cost_basis=basis,
         )
+        book.delivered.setdefault(acquirer, context)
         if cash or residual:
             payable_on = _payable_session(_date_facts(_terms_payload(context)))
             for component_cash in cash:
@@ -1244,6 +1257,7 @@ class CorporateActionProcessor:
         """
         payable_on = _payable_session(_date_facts(_terms_payload(context)))
         del book.holdings[context.security_id]
+        book.removed[context.security_id] = context
         proceeds = ZERO
         for component in components:
             claim = self._stage_claim(
@@ -1692,6 +1706,41 @@ def _extinguish_target(book: _Book, security_id: UUID7) -> None:
     if security_id in book.targets:
         book.targets[security_id] = SecurityTargetPositionV1(
             security_id=security_id, target_quantity=0
+        )
+
+
+def _require_proven_post_action_count(context: _EffectContext, book: _Book) -> None:
+    """Refuse a post-action share count the ex-date rule cannot prove entitled.
+
+    The ex-date rule entitles the prior close's holdings, and M1c's share
+    basis says only which share count the source divides its cash by. The
+    count after the security's own continuing share action (a split, a
+    reverse split, a stock dividend) re-denominates those same holdings, so
+    it is proven. Shares another outcome's action delivered in this window
+    (into a spin-off child, or an acquirer) were not held at the prior
+    close, so whether the source counts them is not proven. A holding the
+    security's own disposal or conversion removed in this window leaves no
+    post-action count at all, and dropping the distribution would be a
+    guess too. Each halts the run; a pre-action quote is never asked.
+    """
+    label = (
+        f"the {context.payload.action_kind.value} {context.occurrence_id} on "
+        f"{context.security_id} quotes cash per post-action share"
+    )
+    delivering = book.delivered.get(context.security_id)
+    if delivering is not None:
+        raise IndeterminateValuationError(
+            f"{label}, and the {delivering.payload.action_kind.value} "
+            f"{delivering.occurrence_id} of {delivering.security_id} delivered "
+            "shares into it in this window that the prior close did not hold, "
+            "so whether they are entitled is not proven"
+        )
+    removing = book.removed.get(context.security_id)
+    if removing is not None:
+        raise IndeterminateValuationError(
+            f"{label}, and the {removing.payload.action_kind.value} "
+            f"{removing.occurrence_id} removed the holding in this window, so "
+            "no post-action count is defined"
         )
 
 
