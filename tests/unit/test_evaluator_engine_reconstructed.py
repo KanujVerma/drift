@@ -606,6 +606,40 @@ def test_every_lacking_member_is_named_in_canonical_order() -> None:
     )
 
 
+def test_the_cause_names_members_in_canonical_order_not_bundle_order() -> None:
+    """The bundle holds SEC_THIRD's bars first; the cause still names SEC_OTHER first.
+
+    A bundle orders its reconstructions by content hash, so reading members in
+    the order their bars appear would name them in hash order. SEC_OTHER starts
+    late at JAN6, and in this layout SEC_THIRD's bars precede it in the bundle,
+    which the first assertion pins so the test cannot pass vacuously. Both
+    members stop after JAN6, so the JAN7 decision names both.
+    """
+    strategy = _hold_cash()
+    bundle = _cohort_bundle(
+        {SEC_THIRD: (JAN5, JAN6), SEC: _ALL_DAYS, SEC_OTHER: (JAN6,)},
+        cohort=TRIO,
+    )
+    in_bundle_order = list(
+        dict.fromkeys(
+            observation.security_id
+            for observation in bundle.exploratory_reconstructed_observations
+            if observation.security_id != SEC
+        )
+    )
+    assert in_bundle_order == [SEC_THIRD, SEC_OTHER]
+
+    artifacts = run_engine(
+        reconstructed_engine(bundle, cohort=cohort_of(TRIO)), strategy
+    )
+
+    _halted_at_decision(
+        artifacts,
+        2,
+        _incomplete(JAN7, (SEC_OTHER, JAN6, (JAN7,)), (SEC_THIRD, JAN5, (JAN7,))),
+    )
+
+
 def test_a_member_whose_bars_stop_halts_at_the_next_decision() -> None:
     strategy = _hold_cash()
     bundle = _cohort_bundle({SEC: _ALL_DAYS, SEC_OTHER: (JAN5,)})
