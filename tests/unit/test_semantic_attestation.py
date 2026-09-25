@@ -3,6 +3,8 @@
 import ast
 import hashlib
 import importlib.util
+import json
+import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -61,6 +63,23 @@ _ESCAPE_TO_EXTRA = (
 )
 """Full escape sentence, so no tmp_path component can satisfy the matcher."""
 
+# Refusal sentences the closure guard adds under issue 107, one per rule, so a
+# test names the exact rule that refused and a removed rule cannot hide behind
+# another one that happens to fire too.
+_LOADER_VALUE = "uses a dynamic import loader as a value"
+_REACH_VALUE = "uses a dynamic reach builtin as a value"
+_MACHINERY_IMPORT = "imports the import machinery beyond what the closure guard binds"
+_MACHINERY_REFERENCE = (
+    "reaches the import machinery beyond what the closure guard binds"
+)
+_MACHINERY_RENAME = "binds the import machinery under another name"
+_MACHINERY_ATTRIBUTE = "reaches an import machinery namespace through another object"
+_DUNDER = "reaches interpreter internals through a dunder name"
+_OUTSIDE_DRIFT = "dynamically imports a module outside the drift package"
+_RELATIVE_DYNAMIC = "performs a relative dynamic import"
+_DYNAMIC_ARGUMENTS = "passes dynamic import arguments the closure guard cannot bind"
+_NAMESPACE = "reaches a module namespace indirectly"
+
 
 def _package(tmp_path: Path, files: Mapping[str, str]) -> Path:
     """Write a synthetic installed ``drift`` package and return its root."""
@@ -75,6 +94,13 @@ def _package(tmp_path: Path, files: Mapping[str, str]) -> Path:
 def _with_entry(source: str) -> dict[str, str]:
     files = dict(_BASE_FILES)
     files["markets/entry.py"] = source
+    return files
+
+
+def _with_core_and_entry(core: str, entry: str) -> dict[str, str]:
+    """Two declared modules, so a binding in one can be reached from the other."""
+    files = _with_entry(entry)
+    files["domain/core.py"] = core
     return files
 
 
@@ -363,7 +389,13 @@ def test_closure_guard_detects_importlib_expansion(tmp_path: Path) -> None:
 def test_closure_guard_detects_aliased_import_module_expansion(
     tmp_path: Path,
 ) -> None:
-    """An alias for importlib.import_module cannot hide the imported module."""
+    """An alias for importlib.import_module cannot hide the imported module.
+
+    Issue 107: the alias used to be resolved inside the importing module only.
+    Another declared module could import the alias and call it under a name
+    the guard did not know was a loader, so a renamed loader now fails closed
+    where it is bound.
+    """
     root = _package(
         tmp_path,
         _with_entry(
@@ -371,7 +403,7 @@ def test_closure_guard_detects_aliased_import_module_expansion(
             'MODULE = _im("drift.markets.extra")\n'
         ),
     )
-    with pytest.raises(SemanticClosureError, match=_ESCAPE_TO_EXTRA):
+    with pytest.raises(SemanticClosureError, match=_MACHINERY_RENAME):
         verify_semantic_closure(
             modules=_BASE_DECLARED, seeds=_BASE_SEEDS, package_root=root
         )
@@ -666,6 +698,557 @@ def test_resolved_closure_walks_transitively(tmp_path: Path) -> None:
         "drift.markets.entry",
         "drift.markets.extra",
     )
+
+
+# --- Closure guard hardening (issue 107, #106 review F2) ----------------------
+
+
+def _assert_refused(root: Path, message: str) -> None:
+    with pytest.raises(SemanticClosureError, match=message):
+        verify_semantic_closure(
+            modules=_BASE_DECLARED, seeds=_BASE_SEEDS, package_root=root
+        )
+
+
+_ISSUE_107_EVASION_ROUTES = (
+    pytest.param(
+        _with_entry(
+            "import importlib\n"
+            "\n"
+            "_loader = importlib.import_module\n"
+            'MODULE = _loader("drift.markets.extra")\n'
+        ),
+        _LOADER_VALUE,
+        id="1-aliased-loader",
+    ),
+    pytest.param(
+        _with_entry(
+            'import pkgutil\n\nMODULE = pkgutil.resolve_name("drift.markets.extra")\n'
+        ),
+        _MACHINERY_IMPORT,
+        id="2-pkgutil-resolve-name",
+    ),
+    pytest.param(
+        _with_entry(
+            "from pkgutil import resolve_name\n"
+            "\n"
+            'MODULE = resolve_name("drift.markets.extra")\n'
+        ),
+        _MACHINERY_IMPORT,
+        id="2-pkgutil-resolve-name-from-import",
+    ),
+    pytest.param(
+        _with_entry(
+            "import functools\n"
+            "import importlib\n"
+            "\n"
+            "MODULE = functools.partial(\n"
+            '    importlib.import_module, "drift.markets.extra"\n'
+            ")()\n"
+        ),
+        _LOADER_VALUE,
+        id="3-functools-partial-over-a-loader",
+    ),
+    pytest.param(
+        _with_entry(
+            "import importlib.util\n"
+            "\n"
+            'SPEC = importlib.util.find_spec("drift.markets.extra")\n'
+            "assert SPEC is not None and SPEC.loader is not None\n"
+            "MODULE = importlib.util.module_from_spec(SPEC)\n"
+            "SPEC.loader.exec_module(MODULE)\n"
+        ),
+        _MACHINERY_IMPORT,
+        id="4-find-spec-and-exec-module",
+    ),
+    pytest.param(
+        _with_entry(
+            "import importlib\n"
+            "\n"
+            'SPEC = importlib.util.find_spec("drift.markets.extra")\n'
+            "assert SPEC is not None and SPEC.loader is not None\n"
+            "MODULE = importlib.util.module_from_spec(SPEC)\n"
+            "SPEC.loader.exec_module(MODULE)\n"
+        ),
+        _MACHINERY_REFERENCE,
+        id="4-find-spec-through-the-importlib-root",
+    ),
+    pytest.param(
+        _with_entry(
+            "import importlib\n"
+            "\n"
+            "\n"
+            "def load(name: str) -> object:\n"
+            '    return getattr(importlib, "import_" + "module")(name)\n'
+        ),
+        _NAMESPACE,
+        id="5-computed-getattr-on-importlib",
+    ),
+    pytest.param(
+        _with_entry(
+            "LOADER = __builtins__['__imp' + 'ort__']\n"
+            'MODULE = LOADER("drift.markets.extra")\n'
+        ),
+        _DUNDER,
+        id="5-computed-lookup-on-builtins",
+    ),
+    pytest.param(
+        _with_entry(
+            "import os\n"
+            "\n"
+            "\n"
+            "def load(name: str) -> object:\n"
+            "    return getattr(os, name)\n"
+        ),
+        _NAMESPACE,
+        id="5-computed-getattr-on-an-imported-module",
+    ),
+    pytest.param(
+        _with_entry(
+            "import importlib\n"
+            "\n"
+            'CORE = importlib.import_module("drift.domain.core")\n'
+            "\n"
+            "\n"
+            "def load(name: str) -> object:\n"
+            "    return getattr(CORE, name)\n"
+        ),
+        _NAMESPACE,
+        id="5-computed-getattr-on-a-loaded-module",
+    ),
+)
+
+
+@pytest.mark.parametrize(("files", "message"), _ISSUE_107_EVASION_ROUTES)
+def test_closure_guard_rejects_the_issue_107_evasion_routes(
+    tmp_path: Path, files: dict[str, str], message: str
+) -> None:
+    """Every route the #106 review F2 probe reached an undeclared module by."""
+    _assert_refused(_package(tmp_path, files), message)
+
+
+_FURTHER_MACHINERY_REACH = (
+    # A renamed loader or namespace would reach another declared module under a
+    # name the guard does not know, so a rename fails closed where it is bound.
+    pytest.param(
+        _with_core_and_entry(
+            "from importlib import import_module as load\n",
+            "from drift.domain.core import load\n"
+            "\n"
+            'MODULE = load("drift.markets.extra")\n',
+        ),
+        _MACHINERY_RENAME,
+        id="renamed-loader-reexported",
+    ),
+    pytest.param(
+        _with_core_and_entry(
+            "import importlib as loader\n",
+            "from drift.domain.core import loader\n"
+            "\n"
+            'SPEC = loader.util.find_spec("drift.markets.extra")\n',
+        ),
+        _MACHINERY_RENAME,
+        id="renamed-namespace-reexported",
+    ),
+    pytest.param(
+        _with_core_and_entry(
+            "from importlib import import_module\n",
+            "from drift.domain.core import import_module as load\n"
+            "\n"
+            'MODULE = load("drift.markets.extra")\n',
+        ),
+        _MACHINERY_RENAME,
+        id="loader-renamed-on-reimport",
+    ),
+    # A from-import binds a machinery member under a plain name another module
+    # can import, so only the members the guard binds may be from-imported.
+    pytest.param(
+        _with_core_and_entry(
+            "from importlib.util import find_spec\n",
+            "from drift.domain.core import find_spec\n"
+            "\n"
+            'SPEC = find_spec("drift.markets.extra")\n',
+        ),
+        _MACHINERY_IMPORT,
+        id="importlib-util-member-reexported",
+    ),
+    pytest.param(
+        _with_core_and_entry(
+            "from sys import modules\n",
+            "from drift.domain.core import modules\n"
+            "\n"
+            'MODULE = modules["drift.markets.extra"]\n',
+        ),
+        _MACHINERY_IMPORT,
+        id="module-registry-reexported",
+    ),
+    pytest.param(
+        _with_core_and_entry(
+            "from builtins import exec\n",
+            "from drift.domain.core import exec\n"
+            "\n"
+            'exec("import drift.markets.extra")\n',
+        ),
+        _MACHINERY_IMPORT,
+        id="builtin-exec-reexported",
+    ),
+    pytest.param(
+        _with_entry("import pkgutil\n"), _MACHINERY_IMPORT, id="pkgutil-imported"
+    ),
+    pytest.param(
+        _with_entry("import importlib.util\n"),
+        _MACHINERY_IMPORT,
+        id="importlib-util-imported",
+    ),
+    pytest.param(
+        _with_entry("import builtins\n\n_run = builtins.exec\n"),
+        _MACHINERY_IMPORT,
+        id="builtins-imported",
+    ),
+    # A machinery namespace reached through a reference the guard can read.
+    pytest.param(
+        _with_entry('import sys\n\nMODULE = sys.modules.get("drift.markets.extra")\n'),
+        _MACHINERY_REFERENCE,
+        id="module-registry-method",
+    ),
+    pytest.param(
+        _with_entry(
+            "import sys\n"
+            "\n"
+            "_state = sys\n"
+            'MODULE = _state.modules["drift.markets.extra"]\n'
+        ),
+        _MACHINERY_REFERENCE,
+        id="sys-as-a-value",
+    ),
+    pytest.param(
+        _with_entry("import sys\n\nFRAME = sys._getframe(0)\n"),
+        _MACHINERY_REFERENCE,
+        id="sys-frame",
+    ),
+    pytest.param(
+        _with_entry(
+            "import importlib\n"
+            "\n"
+            "_machinery = importlib\n"
+            'SPEC = _machinery.util.find_spec("drift.markets.extra")\n'
+        ),
+        _MACHINERY_REFERENCE,
+        id="importlib-as-a-value",
+    ),
+    pytest.param(
+        _with_entry(
+            "import importlib.metadata\n"
+            "\n"
+            'POINTS = importlib.metadata.entry_points(group="drift")\n'
+        ),
+        _MACHINERY_REFERENCE,
+        id="metadata-entry-points",
+    ),
+    # A machinery namespace reached through an object that happens to hold it.
+    pytest.param(
+        _with_entry('import os\n\nMODULE = os.sys.modules["drift.markets.extra"]\n'),
+        _MACHINERY_ATTRIBUTE,
+        id="machinery-attribute-of-a-module",
+    ),
+    pytest.param(
+        _with_core_and_entry(
+            "import importlib\n",
+            "from drift.domain.core import importlib\n"
+            "\n"
+            'SPEC = importlib.util.find_spec("drift.markets.extra")\n',
+        ),
+        _MACHINERY_ATTRIBUTE,
+        id="machinery-namespace-reimported",
+    ),
+    pytest.param(
+        _with_core_and_entry(
+            "from os import __builtins__ as namespace\n",
+            "from drift.domain.core import namespace\n"
+            "\n"
+            'MODULE = namespace["__import__"]("drift.markets.extra")\n',
+        ),
+        _DUNDER,
+        id="dunder-reexported",
+    ),
+    pytest.param(_with_entry("SPEC = __spec__\n"), _DUNDER, id="module-spec-dunder"),
+    pytest.param(
+        _with_entry("LOADERS = object.__subclasses__()\n"),
+        _DUNDER,
+        id="object-graph-dunder",
+    ),
+    pytest.param(
+        _with_entry("import os\n\nNAMESPACE = os.__dict__\n"),
+        _DUNDER,
+        id="module-dict-dunder",
+    ),
+    # Loaders and reach builtins are only bindable as the callee of a call.
+    pytest.param(
+        _with_entry(
+            "LOADERS = [__import__]\nMODULE = LOADERS[0]('drift.markets.extra')\n"
+        ),
+        _LOADER_VALUE,
+        id="builtin-loader-as-a-value",
+    ),
+    pytest.param(
+        _with_entry('_run = exec\n_run("import drift.markets.extra")\n'),
+        _REACH_VALUE,
+        id="exec-as-a-value",
+    ),
+    pytest.param(
+        _with_entry('import os\n\n_lookup = getattr\nSYS = _lookup(os, "sys")\n'),
+        _REACH_VALUE,
+        id="getattr-as-a-value",
+    ),
+    # Namespace reads that hand out every module a namespace holds.
+    pytest.param(_with_entry("NAMESPACE = globals()\n"), _NAMESPACE, id="globals"),
+    pytest.param(_with_entry("NAMESPACE = vars()\n"), _NAMESPACE, id="bare-vars"),
+    pytest.param(
+        _with_entry("import os\n\nNAMESPACE = vars(os)\n"),
+        _NAMESPACE,
+        id="vars-of-an-imported-module",
+    ),
+    pytest.param(
+        _with_entry('import os\n\nSYS = getattr(os, "sys")\n'),
+        _NAMESPACE,
+        id="getattr-names-a-machinery-namespace",
+    ),
+    pytest.param(
+        _with_entry('import os\n\nNAMESPACE = getattr(os, "__dict__")\n'),
+        _NAMESPACE,
+        id="getattr-names-a-dunder",
+    ),
+    pytest.param(
+        _with_entry(
+            "import importlib\n"
+            "\n"
+            "\n"
+            "def load(name: str) -> object:\n"
+            '    return getattr(importlib.import_module("drift.domain.core"), name)\n'
+        ),
+        _NAMESPACE,
+        id="computed-getattr-on-a-loader-call",
+    ),
+    # Dynamic import calls whose target the guard cannot bind exactly.
+    pytest.param(
+        _with_entry(
+            "MODULE = __import__(\n"
+            '    "importlib.util", fromlist=["find_spec"]\n'
+            ').find_spec("drift.markets.extra")\n'
+        ),
+        _OUTSIDE_DRIFT,
+        id="dynamic-import-of-importlib-util",
+    ),
+    pytest.param(
+        _with_entry(
+            "import importlib\n"
+            "\n"
+            'MODULE = importlib.import_module("pkgutil").resolve_name(\n'
+            '    "drift.markets.extra"\n'
+            ")\n"
+        ),
+        _OUTSIDE_DRIFT,
+        id="dynamic-import-of-pkgutil",
+    ),
+    pytest.param(
+        _with_entry(
+            "import importlib\n"
+            "\n"
+            'MODULE = importlib.import_module(".extra", "drift.markets")\n'
+        ),
+        _RELATIVE_DYNAMIC,
+        id="relative-dynamic-import",
+    ),
+    pytest.param(
+        _with_entry(
+            "import importlib\n"
+            "\n"
+            'MODULE = importlib.import_module("drift.markets", package="drift")\n'
+        ),
+        _DYNAMIC_ARGUMENTS,
+        id="package-anchored-dynamic-import",
+    ),
+    pytest.param(
+        _with_entry(
+            "import importlib\n"
+            "\n"
+            'MODULE = importlib.import_module("drift.markets", fromlist=["extra"])\n'
+        ),
+        _DYNAMIC_ARGUMENTS,
+        id="import-module-given-a-fromlist",
+    ),
+    pytest.param(
+        _with_entry('MODULE = __import__("drift.markets", locals=["extra"])\n'),
+        _DYNAMIC_ARGUMENTS,
+        id="dynamic-import-keyword-besides-fromlist",
+    ),
+    pytest.param(
+        _with_entry('MODULE = __import__("drift.markets", None, None, ["extra"])\n'),
+        _DYNAMIC_ARGUMENTS,
+        id="positional-fromlist",
+    ),
+    pytest.param(
+        _with_entry(
+            'NAMES = ["extra"]\nMODULE = __import__("drift.markets", fromlist=NAMES)\n'
+        ),
+        _DYNAMIC_ARGUMENTS,
+        id="computed-fromlist",
+    ),
+    pytest.param(
+        _with_entry(
+            'NAME = "extra"\nMODULE = __import__("drift.markets", fromlist=[NAME])\n'
+        ),
+        _DYNAMIC_ARGUMENTS,
+        id="computed-fromlist-member",
+    ),
+    pytest.param(
+        _with_entry(
+            'OPTIONS = {"fromlist": ["extra"]}\n'
+            'MODULE = __import__("drift.markets", **OPTIONS)\n'
+        ),
+        _DYNAMIC_ARGUMENTS,
+        id="unpacked-dynamic-import-options",
+    ),
+)
+
+
+@pytest.mark.parametrize(("files", "message"), _FURTHER_MACHINERY_REACH)
+def test_closure_guard_rejects_further_import_machinery_reach(
+    tmp_path: Path, files: dict[str, str], message: str
+) -> None:
+    """The same reach under other spellings fails closed on its own rule."""
+    _assert_refused(_package(tmp_path, files), message)
+
+
+def test_closure_guard_still_refuses_literal_and_non_literal_loader_calls(
+    tmp_path: Path,
+) -> None:
+    """Hardening must not turn the original loader refusals into acceptances."""
+    literal = _package(
+        tmp_path / "literal",
+        _with_entry(
+            "import importlib\n"
+            "\n"
+            'MODULE = importlib.import_module("drift.markets.extra")\n'
+        ),
+    )
+    _assert_refused(literal, _ESCAPE_TO_EXTRA)
+    canonical = _package(
+        tmp_path / "canonical",
+        _with_core_and_entry(
+            "from importlib import import_module\n",
+            "from drift.domain.core import import_module\n"
+            "\n"
+            'MODULE = import_module("drift.markets.extra")\n',
+        ),
+    )
+    _assert_refused(canonical, _ESCAPE_TO_EXTRA)
+    non_literal = _package(
+        tmp_path / "non-literal",
+        _with_entry(
+            "import importlib\n"
+            "\n"
+            "\n"
+            "def load(name: str) -> object:\n"
+            "    return importlib.import_module(name)\n"
+        ),
+    )
+    _assert_refused(non_literal, "non-literal dynamic import")
+
+
+def test_closure_guard_keeps_the_machinery_uses_it_can_bind(tmp_path: Path) -> None:
+    """The shapes declared modules rely on stay accepted after the hardening.
+
+    ``drift/__init__`` reads its version through ``importlib.metadata``;
+    ``drift.markets.economic_validation`` imports ``drift.markets.validation``
+    through a literal ``__import__`` with a literal ``fromlist``; M1d
+    normalization reads the interpreter identity from ``sys``.
+    """
+    root = _package(
+        tmp_path,
+        _with_entry(
+            "import importlib\n"
+            "import importlib.metadata\n"
+            "import sys\n"
+            "from importlib import import_module\n"
+            "from importlib.metadata import PackageNotFoundError, version\n"
+            "\n"
+            'CORE = importlib.import_module("drift.domain.core")\n'
+            'SAME = import_module("drift.domain.core")\n'
+            'VALUE = __import__("drift.domain.core", fromlist=["VALUE"]).VALUE\n'
+            "IDENTITY = (sys.implementation.name, sys.version_info.major)\n"
+            "\n"
+            "\n"
+            "class Box:\n"
+            "    def __init__(self) -> None:\n"
+            '        object.__setattr__(self, "value", 1)\n'
+            "\n"
+            "\n"
+            "def describe() -> tuple[str, str, str]:\n"
+            "    try:\n"
+            '        release = importlib.metadata.version("drift")\n'
+            "    except PackageNotFoundError:\n"
+            '        release = version("drift")\n'
+            "    return release, type(Box()).__name__, __file__\n"
+        ),
+    )
+    verify_semantic_closure(
+        modules=_BASE_DECLARED, seeds=_BASE_SEEDS, package_root=root
+    )
+
+
+_IMPORT_TRACE_PROGRAM = """\
+import importlib
+import json
+import sys
+
+for seed in json.loads(sys.argv[1]):
+    importlib.import_module(seed)
+import drift
+
+loaded = sorted(
+    name for name in sys.modules if name == "drift" or name.startswith("drift.")
+)
+print(json.dumps({"package": drift.__file__, "loaded": loaded}))
+"""
+
+
+@pytest.mark.parametrize(
+    ("seeds", "declared"),
+    (
+        pytest.param(
+            M1D_VALIDATION_SEEDS,
+            M1D_VALIDATION_SEMANTIC_MODULES,
+            id="m1d-source-validation-v1",
+        ),
+        pytest.param(
+            semantic_attestation.M1D_EVIDENCE_SEEDS,
+            semantic_attestation.M1D_EVIDENCE_SEMANTIC_MODULES,
+            id="m1d-evidence-v1",
+        ),
+    ),
+)
+def test_importing_a_closure_loads_only_its_declared_drift_modules(
+    seeds: tuple[str, ...], declared: tuple[str, ...]
+) -> None:
+    """Dynamic backstop: a fresh interpreter importing the seeds stays inside.
+
+    The static guard reads source; this runs it. Any module-level route to an
+    undeclared ``drift`` module that the guard failed to see, however it is
+    spelled, shows up here as a loaded module outside the declaration.
+    """
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", _IMPORT_TRACE_PROGRAM, json.dumps(seeds)],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    report = json.loads(completed.stdout)
+    assert Path(report["package"]).resolve() == (_package_root() / "__init__.py")
+    loaded = set(report["loaded"])
+    assert set(seeds) <= loaded
+    assert loaded <= set(declared), sorted(loaded - set(declared))
 
 
 def test_declared_m1d_closure_is_exactly_the_resolved_closure() -> None:

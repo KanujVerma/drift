@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import importlib.util
 import json
@@ -86,7 +87,19 @@ def test_re_signed_or_incomplete_inventory_is_rejected(tmp_path: Path) -> None:
 
 ATTESTATION_SOURCE_PATH = "src/drift/domain/semantic_attestation.py"
 IDENTITY_ACCESSOR_PATH = "src/drift/domain/observation_query.py"
-PREVIOUS_INVENTORY_COMMIT = "4ad90aa97da677386ac212c3596703fccb309f3b"
+V4_INVENTORY_COMMIT = "4ad90aa97da677386ac212c3596703fccb309f3b"
+V5_INVENTORY_COMMIT = "200bfebaf04c5c1e171db029547a75187d2ef665"
+FREEZE_LINK_ISSUES = {"v4": 32, "v5": 63, "v6": 107}
+"""Every freeze link, in chain order, with the issue that minted it."""
+FREEZE_LINK_SUPERSESSIONS = {
+    "v4": {
+        "src/drift/markets/observation_validation.py",
+        "src/drift/markets/session_validation.py",
+    },
+    "v5": {IDENTITY_ACCESSOR_PATH, ATTESTATION_SOURCE_PATH},
+    "v6": {ATTESTATION_SOURCE_PATH},
+}
+"""The paths each link supersedes, stated independently of the helper."""
 
 
 def _document(path: Path) -> dict[str, Any]:
@@ -95,18 +108,89 @@ def _document(path: Path) -> dict[str, Any]:
     return document
 
 
+def _link_document(helper: ModuleType, label: str) -> dict[str, Any]:
+    return _document(helper._freeze_link(label).path)
+
+
+def test_freeze_chain_is_v4_then_v5_then_v6_over_the_historical_v3() -> None:
+    """The chain is ordered, each link names its predecessor, and v6 is the tip."""
+    helper = _load_replay_helper()
+    assert [link.label for link in helper.FREEZE_LINKS] == list(FREEZE_LINK_ISSUES)
+    assert {link.label: link.issue for link in helper.FREEZE_LINKS} == (
+        FREEZE_LINK_ISSUES
+    )
+    assert list(helper.FREEZE_CHAIN_SHA256) == list(FREEZE_LINK_ISSUES)
+    assert [link.superseded_commit for link in helper.FREEZE_LINKS] == [
+        helper.PINNED_M1D_COMMIT,
+        V4_INVENTORY_COMMIT,
+        V5_INVENTORY_COMMIT,
+    ]
+    parents = [helper._INVENTORY_PATH, *(link.path for link in helper.FREEZE_LINKS)]
+    for link, parent in zip(helper.FREEZE_LINKS, parents[:-1], strict=True):
+        assert link.superseded_path == parent.relative_to(helper.REPO_ROOT).as_posix()
+        assert (
+            link.superseded_file_sha256
+            == hashlib.sha256(parent.read_bytes()).hexdigest()
+        )
+        assert link.file_sha256 == hashlib.sha256(link.path.read_bytes()).hexdigest()
+    assert [link.requires_current_role for link in helper.FREEZE_LINKS] == [
+        False,
+        False,
+        True,
+    ]
+    assert helper.PROTECTED_M1D_SHA256 == helper.FREEZE_CHAIN_SHA256["v6"]
+
+
+def test_freeze_chain_shape_fails_closed_and_grows_by_appending_one_link() -> None:
+    """Only the tip leaves its commit open; the next link only appends."""
+    helper = _load_replay_helper()
+    inventories = helper._FREEZE_INVENTORIES
+    tip = inventories[-1]
+    with pytest.raises(helper.PinnedM1dReplayError, match="v6 M1d freeze link"):
+        helper._chain_links(
+            (*inventories[:-1], dataclasses.replace(tip, commit="0" * 40))
+        )
+    with pytest.raises(helper.PinnedM1dReplayError, match="v5 M1d freeze link"):
+        helper._chain_links(
+            (*inventories[:-2], dataclasses.replace(inventories[-2], commit=None), tip)
+        )
+    with pytest.raises(helper.PinnedM1dReplayError, match="must start at v3"):
+        helper._chain_links(inventories[1:])
+
+    # Appending v7 without recording the commit that last wrote v6 fails ...
+    v7 = dataclasses.replace(
+        tip, label="v7", inventory_id="m1d-v7-protected-sha256", issue=999
+    )
+    with pytest.raises(helper.PinnedM1dReplayError, match="v6 M1d freeze link"):
+        helper._chain_links((*inventories, v7))
+    # ... and once it is recorded, v7 supersedes v6 and nothing else moves.
+    grown = helper._chain_links(
+        (*inventories[:-1], dataclasses.replace(tip, commit="1" * 40), v7)
+    )
+    assert grown[:-2] == helper.FREEZE_LINKS[:-1]
+    assert grown[-1].superseded_id == "m1d-v6-protected-sha256"
+    assert grown[-1].superseded_commit == "1" * 40
+    assert [link.requires_current_role for link in grown] == [
+        False,
+        False,
+        False,
+        True,
+    ]
+
+
 def test_archived_replay_still_authenticates_against_the_historical_pins() -> None:
     """Superseding the working-tree pins must not re-sign the af75cce archive."""
     helper = _load_replay_helper()
     historical = helper.PROTECTED_M1D_ARCHIVE_SHA256
-    previous = helper.PREVIOUS_M1D_SHA256
     current = helper.PROTECTED_M1D_SHA256
-    v4 = _document(helper._PREVIOUS_INVENTORY_PATH)
-    v5 = _document(helper._CURRENT_INVENTORY_PATH)
-    assert set(previous) == set(historical) | set(v4["added_paths"])
-    assert set(current) == set(previous) | set(v5["added_paths"])
-    assert not set(v4["added_paths"]) & set(historical)
-    assert not set(v5["added_paths"]) & set(previous)
+    parent = historical
+    for label, paths in FREEZE_LINK_SUPERSESSIONS.items():
+        link = _link_document(helper, label)
+        pins = helper.FREEZE_CHAIN_SHA256[label]
+        assert set(pins) == set(parent) | set(link["added_paths"]), label
+        assert not set(link["added_paths"]) & set(parent), label
+        assert set(link["superseded_paths"]) == paths, label
+        parent = pins
     superseded = {
         path
         for path in historical
@@ -117,18 +201,15 @@ def test_archived_replay_still_authenticates_against_the_historical_pins() -> No
         "src/drift/markets/session_validation.py",
         IDENTITY_ACCESSOR_PATH,
     }
-    assert set(v4["superseded_paths"]) == {
-        "src/drift/markets/observation_validation.py",
-        "src/drift/markets/session_validation.py",
-    }
-    assert set(v5["superseded_paths"]) == {
-        IDENTITY_ACCESSOR_PATH,
-        ATTESTATION_SOURCE_PATH,
-    }
+    v4 = _link_document(helper, "v4")
     assert v4["supersedes"]["commit"] == helper.PINNED_M1D_COMMIT
     assert v4["supersedes"]["file_sha256"] == helper._EXPECTED_INVENTORY_SHA256
-    assert v5["supersedes"]["commit"] == PREVIOUS_INVENTORY_COMMIT
-    assert v5["supersedes"]["file_sha256"] == helper._EXPECTED_PREVIOUS_INVENTORY_SHA256
+    v5 = _link_document(helper, "v5")
+    assert v5["supersedes"]["commit"] == V4_INVENTORY_COMMIT
+    assert v5["supersedes"]["file_sha256"] == helper._freeze_link("v4").file_sha256
+    v6 = _link_document(helper, "v6")
+    assert v6["supersedes"]["commit"] == V5_INVENTORY_COMMIT
+    assert v6["supersedes"]["file_sha256"] == helper._freeze_link("v5").file_sha256
 
 
 def test_current_inventory_pins_the_identity_defining_modules() -> None:
@@ -139,14 +220,19 @@ def test_current_inventory_pins_the_identity_defining_modules() -> None:
         live = (helper.REPO_ROOT / path).read_bytes()
         assert helper.PROTECTED_M1D_SHA256[path] == hashlib.sha256(live).hexdigest()
 
-    v4 = _document(helper._PREVIOUS_INVENTORY_PATH)
+    v4 = _link_document(helper, "v4")
     added = v4["added_paths"][ATTESTATION_SOURCE_PATH]
     assert added["issue"] == 32
     assert added["justification"].strip()
-    v5 = _document(helper._CURRENT_INVENTORY_PATH)
+    v5 = _link_document(helper, "v5")
     assert v5["supersedes"]["issue"] == 63
-    record = v5["superseded_paths"][ATTESTATION_SOURCE_PATH]
-    assert record["historical_sha256"] == added["current_sha256"]
+    v5_record = v5["superseded_paths"][ATTESTATION_SOURCE_PATH]
+    assert v5_record["historical_sha256"] == added["current_sha256"]
+    v6 = _link_document(helper, "v6")
+    assert v6["supersedes"]["issue"] == 107
+    record = v6["superseded_paths"][ATTESTATION_SOURCE_PATH]
+    assert record["historical_sha256"] == v5_record["current_sha256"]
+    assert record["historical_sha256"] == v5["sha256"][ATTESTATION_SOURCE_PATH]
     pinned = helper.PROTECTED_M1D_SHA256[ATTESTATION_SOURCE_PATH]
     assert record["current_sha256"] == pinned
 
@@ -160,11 +246,11 @@ def test_current_inventory_pins_the_identity_defining_modules() -> None:
 
 
 def test_current_pins_are_re_derived_through_every_link() -> None:
-    """v3, then the issue 32 delta, then the issue 63 delta, and nothing else."""
+    """v3, then the issue 32, 63 and 107 deltas in order, and nothing else."""
     helper = _load_replay_helper()
     expected = dict(helper.PROTECTED_M1D_ARCHIVE_SHA256)
-    for path in (helper._PREVIOUS_INVENTORY_PATH, helper._CURRENT_INVENTORY_PATH):
-        link = _document(path)
+    for label in FREEZE_LINK_ISSUES:
+        link = _link_document(helper, label)
         for relative, record in link["superseded_paths"].items():
             assert expected[relative] == record["historical_sha256"], relative
             expected[relative] = record["current_sha256"]
@@ -172,37 +258,36 @@ def test_current_pins_are_re_derived_through_every_link() -> None:
             assert relative not in expected, relative
             expected[relative] = record["current_sha256"]
         assert link["sha256"] == expected
+        assert helper._validated_chain_pins(label, link) == expected, label
+        assert helper.FREEZE_CHAIN_SHA256[label] == expected, label
     assert expected == helper.PROTECTED_M1D_SHA256
-    v4 = _document(helper._PREVIOUS_INVENTORY_PATH)
-    assert helper._validated_previous_pins(v4) == helper.PREVIOUS_M1D_SHA256
-    v5 = _document(helper._CURRENT_INVENTORY_PATH)
-    assert helper._validated_current_pins(v5) == helper.PROTECTED_M1D_SHA256
 
 
 def test_current_inventory_cannot_pin_an_undeclared_added_path() -> None:
     """A new path may only enter the current pins through an explicit addition."""
     helper = _load_replay_helper()
-    document = _document(helper._CURRENT_INVENTORY_PATH)
+    document = _link_document(helper, "v6")
 
     smuggled = json.loads(json.dumps(document))
     smuggled["sha256"]["src/drift/domain/replay_provenance.py"] = "0" * 64
     with pytest.raises(
         helper.PinnedM1dReplayError, match="pins an undeclared added path"
     ):
-        helper._validated_current_pins(smuggled)
+        helper._validated_chain_pins("v6", smuggled)
 
-    dropped = json.loads(json.dumps(document))
-    del dropped["sha256"][ATTESTATION_SOURCE_PATH]
-    with pytest.raises(
-        helper.PinnedM1dReplayError, match="omits a required protected path"
-    ):
-        helper._validated_current_pins(dropped)
+    for dropped_path in (ATTESTATION_SOURCE_PATH, IDENTITY_ACCESSOR_PATH):
+        dropped = json.loads(json.dumps(document))
+        del dropped["sha256"][dropped_path]
+        with pytest.raises(
+            helper.PinnedM1dReplayError, match="omits a required protected path"
+        ):
+            helper._validated_chain_pins("v6", dropped)
 
 
 def test_inventory_additions_require_their_own_link_justification() -> None:
     """An addition is admitted by declaration, not merely by being different."""
     helper = _load_replay_helper()
-    document = _document(helper._PREVIOUS_INVENTORY_PATH)
+    document = _link_document(helper, "v4")
 
     mutations: tuple[dict[str, object], ...] = (
         {"justification": "   "},
@@ -215,48 +300,52 @@ def test_inventory_additions_require_their_own_link_justification() -> None:
         broken = json.loads(json.dumps(document))
         broken["added_paths"][ATTESTATION_SOURCE_PATH].update(mutation)
         with pytest.raises(helper.PinnedM1dReplayError, match="addition is malformed"):
-            helper._validated_previous_pins(broken)
+            helper._validated_chain_pins("v4", broken)
 
     stripped = json.loads(json.dumps(document))
     del stripped["added_paths"][ATTESTATION_SOURCE_PATH]["justification"]
     with pytest.raises(helper.PinnedM1dReplayError, match="addition is malformed"):
-        helper._validated_previous_pins(stripped)
+        helper._validated_chain_pins("v4", stripped)
 
     listed = json.loads(json.dumps(document))
     listed["added_paths"] = [ATTESTATION_SOURCE_PATH]
     with pytest.raises(
         helper.PinnedM1dReplayError, match="addition block is malformed"
     ):
-        helper._validated_previous_pins(listed)
+        helper._validated_chain_pins("v4", listed)
 
-    # A v5 addition is admitted only under issue 63, with its own justification.
-    current = _document(helper._CURRENT_INVENTORY_PATH)
+    # A later link's addition is admitted only under that link's own issue,
+    # with its own justification, never under its predecessor's issue.
     target = "src/drift/domain/replay_provenance.py"
-    addition = {"current_sha256": "0" * 64, "issue": 63, "justification": "pinned"}
-    widened = json.loads(json.dumps(current))
-    widened["added_paths"][target] = dict(addition)
-    widened["sha256"][target] = "0" * 64
-    assert target in helper._validated_current_pins(widened)
-    link_mutations: tuple[dict[str, object], ...] = (
-        {"issue": 32},
-        {"justification": ""},
-    )
-    for link_mutation in link_mutations:
-        broken = json.loads(json.dumps(widened))
-        broken["added_paths"][target].update(link_mutation)
-        with pytest.raises(helper.PinnedM1dReplayError, match="addition is malformed"):
-            helper._validated_current_pins(broken)
+    for label, issue, predecessor_issue in (("v5", 63, 32), ("v6", 107, 63)):
+        addition = {
+            "current_sha256": "0" * 64,
+            "issue": issue,
+            "justification": "pinned",
+        }
+        widened = json.loads(json.dumps(_link_document(helper, label)))
+        widened["added_paths"][target] = dict(addition)
+        widened["sha256"][target] = "0" * 64
+        assert target in helper._validated_chain_pins(label, widened)
+        link_mutations: tuple[dict[str, object], ...] = (
+            {"issue": predecessor_issue},
+            {"justification": ""},
+        )
+        for link_mutation in link_mutations:
+            broken = json.loads(json.dumps(widened))
+            broken["added_paths"][target].update(link_mutation)
+            with pytest.raises(
+                helper.PinnedM1dReplayError, match="addition is malformed"
+            ):
+                helper._validated_chain_pins(label, broken)
 
 
 def test_inventory_addition_cannot_shadow_a_pin_of_the_superseded_inventory() -> None:
     """The addition channel must not become a second way to re-sign history."""
     helper = _load_replay_helper()
     target = "src/drift/domain/temporal.py"
-    for path, validate, issue in (
-        (helper._PREVIOUS_INVENTORY_PATH, helper._validated_previous_pins, 32),
-        (helper._CURRENT_INVENTORY_PATH, helper._validated_current_pins, 63),
-    ):
-        shadowed = _document(path)
+    for label, issue in FREEZE_LINK_ISSUES.items():
+        shadowed = _link_document(helper, label)
         shadowed["added_paths"][target] = {
             "current_sha256": "0" * 64,
             "issue": issue,
@@ -267,44 +356,45 @@ def test_inventory_addition_cannot_shadow_a_pin_of_the_superseded_inventory() ->
             helper.PinnedM1dReplayError,
             match="an addition the inventory it supersedes already pins",
         ):
-            validate(shadowed)
+            helper._validated_chain_pins(label, shadowed)
 
 
 def test_current_inventory_cannot_re_sign_an_undeclared_protected_path() -> None:
     """Only the paths a link's supersession names may differ from its parent."""
     helper = _load_replay_helper()
-    for path, validate, target in (
-        (
-            helper._PREVIOUS_INVENTORY_PATH,
-            helper._validated_previous_pins,
-            "src/drift/markets/session_validation.py",
-        ),
-        (
-            helper._CURRENT_INVENTORY_PATH,
-            helper._validated_current_pins,
-            IDENTITY_ACCESSOR_PATH,
-        ),
+    for label, target in (
+        ("v4", "src/drift/markets/session_validation.py"),
+        ("v5", IDENTITY_ACCESSOR_PATH),
+        ("v6", ATTESTATION_SOURCE_PATH),
     ):
-        document = _document(path)
+        document = _link_document(helper, label)
         smuggled = json.loads(json.dumps(document))
         smuggled["sha256"]["src/drift/domain/temporal.py"] = "0" * 64
         with pytest.raises(
             helper.PinnedM1dReplayError, match="re-signs undeclared protected paths"
         ):
-            validate(smuggled)
+            helper._validated_chain_pins(label, smuggled)
 
         misstated = json.loads(json.dumps(document))
         misstated["superseded_paths"][target]["historical_sha256"] = "1" * 64
         with pytest.raises(
             helper.PinnedM1dReplayError, match="misstates the superseded pin"
         ):
-            validate(misstated)
+            helper._validated_chain_pins(label, misstated)
+
+        # Editing a declared pin without its supersession record is a re-sign.
+        edited = json.loads(json.dumps(document))
+        edited["sha256"][target] = "2" * 64
+        with pytest.raises(
+            helper.PinnedM1dReplayError, match="re-signs undeclared protected paths"
+        ):
+            helper._validated_chain_pins(label, edited)
 
 
 def test_current_inventory_cannot_supersede_a_path_its_parent_does_not_pin() -> None:
     """A path the previous link never pinned enters only as an addition."""
     helper = _load_replay_helper()
-    document = _document(helper._CURRENT_INVENTORY_PATH)
+    document = _link_document(helper, "v6")
     target = "src/drift/domain/replay_provenance.py"
     document["superseded_paths"][target] = {
         "historical_sha256": "1" * 64,
@@ -312,57 +402,77 @@ def test_current_inventory_cannot_supersede_a_path_its_parent_does_not_pin() -> 
     }
     document["sha256"][target] = "2" * 64
     with pytest.raises(helper.PinnedM1dReplayError, match="supersedes an unpinned"):
-        helper._validated_current_pins(document)
+        helper._validated_chain_pins("v6", document)
 
 
 def test_current_inventory_must_name_the_exact_inventory_it_supersedes() -> None:
-    """v5 is a link from v4 at 4ad90aa under issue 63, and says so."""
+    """Each link names its exact predecessor; naming an older one fails.
+
+    v5 is a link from v4 at 4ad90aa under issue 63, and v6 is a link from v5
+    at 200bfeb under issue 107.
+    """
     helper = _load_replay_helper()
-    document = _document(helper._CURRENT_INVENTORY_PATH)
-    supersession_mutations: tuple[dict[str, object], ...] = (
-        {"inventory_id": "m1d-v3-protected-sha256"},
-        {"path": "tests/fixtures/m1e-compatibility/m1d-v3-protected-sha256.json"},
-        {"file_sha256": helper._EXPECTED_INVENTORY_SHA256},
-        {"commit": helper.PINNED_M1D_COMMIT},
-        {"issue": 32},
-        {"reason": "  "},
-        {"status": ""},
-    )
-    for mutation in supersession_mutations:
-        broken = json.loads(json.dumps(document))
-        broken["supersedes"].update(mutation)
-        with pytest.raises(
-            helper.PinnedM1dReplayError, match="inventory supersession is malformed"
+    v3_path = helper._INVENTORY_PATH.relative_to(helper.REPO_ROOT).as_posix()
+    v4 = helper._freeze_link("v4")
+    v4_path = v4.path.relative_to(helper.REPO_ROOT).as_posix()
+    wrong_predecessors: dict[str, tuple[dict[str, object], ...]] = {
+        "v5": (
+            {"inventory_id": "m1d-v3-protected-sha256"},
+            {"path": v3_path},
+            {"file_sha256": helper._EXPECTED_INVENTORY_SHA256},
+            {"commit": helper.PINNED_M1D_COMMIT},
+            {"issue": 32},
+        ),
+        "v6": (
+            {"inventory_id": "m1d-v4-protected-sha256"},
+            {"path": v4_path},
+            {"file_sha256": v4.file_sha256},
+            {"commit": V4_INVENTORY_COMMIT},
+            {"issue": 63},
+        ),
+    }
+    for label, supersession_mutations in wrong_predecessors.items():
+        document = _link_document(helper, label)
+        for mutation in (*supersession_mutations, {"reason": "  "}, {"status": ""}):
+            broken = json.loads(json.dumps(document))
+            broken["supersedes"].update(mutation)
+            with pytest.raises(
+                helper.PinnedM1dReplayError,
+                match="inventory supersession is malformed",
+            ):
+                helper._validated_chain_pins(label, broken)
+        predecessor_id = helper._freeze_link(label).superseded_id
+        for key, value in (
+            ("inventory_id", predecessor_id),
+            ("baseline_commit", "0" * 40),
         ):
-            helper._validated_current_pins(broken)
-    for key, value in (
-        ("inventory_id", "m1d-v4-protected-sha256"),
-        ("role", "historical"),
-        ("baseline_commit", "0" * 40),
-    ):
-        broken = json.loads(json.dumps(document))
-        broken[key] = value
-        with pytest.raises(helper.PinnedM1dReplayError, match="inventory is malformed"):
-            helper._validated_current_pins(broken)
+            broken = json.loads(json.dumps(document))
+            broken[key] = value
+            with pytest.raises(
+                helper.PinnedM1dReplayError, match="inventory is malformed"
+            ):
+                helper._validated_chain_pins(label, broken)
+    # Only the tip must still call itself current.
+    tip = _link_document(helper, "v6")
+    tip["role"] = "historical"
+    with pytest.raises(helper.PinnedM1dReplayError, match="inventory is malformed"):
+        helper._validated_chain_pins("v6", tip)
 
 
-def test_an_edited_superseded_inventory_is_rejected_although_v5_is_current(
+def test_an_edited_link_inventory_is_rejected_although_v6_is_current(
     tmp_path: Path,
 ) -> None:
-    """History stays byte-identical: an edited v4 cannot anchor the chain."""
+    """History stays byte-identical: an edited link cannot anchor the chain."""
     helper = _load_replay_helper()
-    edited = tmp_path / "m1d-v4-protected-sha256.json"
-    edited.write_bytes(helper._PREVIOUS_INVENTORY_PATH.read_bytes() + b"\n")
-    original = helper._PREVIOUS_INVENTORY_PATH
-    helper._PREVIOUS_INVENTORY_PATH = edited  # type: ignore[attr-defined]
-    try:
+    for label in FREEZE_LINK_ISSUES:
+        link = helper._freeze_link(label)
+        edited = tmp_path / link.path.name
+        edited.write_bytes(link.path.read_bytes() + b"\n")
         with pytest.raises(
             helper.PinnedM1dReplayError,
-            match="previous M1d inventory sha256 mismatch",
+            match=f"{label} M1d inventory sha256 mismatch",
         ):
-            helper._load_previous_inventory()
-    finally:
-        helper._PREVIOUS_INVENTORY_PATH = original  # type: ignore[attr-defined]
+            helper._load_link_document(dataclasses.replace(link, path=edited))
 
 
 def test_wrong_commit_and_missing_archived_node_fail_closed() -> None:
