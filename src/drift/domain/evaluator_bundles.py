@@ -31,6 +31,25 @@ def evaluation_run_identity_hash(identity: EvaluationRunIdentityV1) -> SHA256Has
     return content_hash(dump)
 
 
+def require_reconstructions_on_scheduled_clock(
+    clock: SessionClockV1,
+    reconstructions: tuple[ExploratoryReconstructedSessionObservationV1, ...],
+) -> None:
+    """Refuse exploratory reconstructions on any but a scheduled clock (issue 72).
+
+    Only the scheduled session reconstruction lane re-derives reconstructions
+    before anything reads them (issue 55). One riding any other clock would
+    reach a later reader without re-derivation, and no producer builds that
+    shape, so it is refused wherever a bundle is formed or verified.
+    """
+    if reconstructions and clock.mode != "scheduled_session_reconstruction":
+        raise ValueError(
+            f"a bundle on a {clock.mode} clock cannot carry exploratory "
+            "reconstructions (issue 72): only the scheduled session "
+            "reconstruction lane re-derives them"
+        )
+
+
 def _canonicalize[T](members: tuple[T, ...], label: str) -> tuple[T, ...]:
     """Order members by exact content hash and reject duplicates."""
     paired = tuple((content_hash(member), member) for member in members)
@@ -149,6 +168,9 @@ class EvaluationInputBundleV1(FrozenModel):
         if not self.session_clock.sessions:
             raise ValueError("bundle requires a nonempty session clock")
         self._validate_session_coherence()
+        require_reconstructions_on_scheduled_clock(
+            self.session_clock, self.exploratory_reconstructed_observations
+        )
         expected = evaluation_input_bundle_hash(self)
         if self.bundle_hash != expected:
             raise ValueError(
