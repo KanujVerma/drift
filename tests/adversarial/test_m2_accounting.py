@@ -1500,6 +1500,46 @@ def test_a_liquidation_without_a_proven_claim_outcome_halts() -> None:
     assert "liquidation must prove the claim" in artifacts.result.halt_reason
 
 
+@pytest.mark.parametrize("claim_status", ["extinguished", "converted"])
+def test_an_overnight_split_on_an_ended_claim_halts_the_run(claim_status: str) -> None:
+    views = _pre_action_views() + (
+        eng._accounting_view(
+            eng.SEC_A, eng.DAY_3, open_price="55.00", close_price="60.00"
+        ),
+    )
+
+    def split(status: str, suffix: int) -> EvaluationRunArtifactsV1:
+        return _run_action(
+            _share_action_outcome(
+                ActionKind.FORWARD_SPLIT,
+                numerator="2",
+                denominator="1",
+                meaning="resulting_per_predecessor",
+                suffix=suffix,
+                claim_status=status,
+            ),
+            views,
+        )
+
+    ended = split(claim_status, 8400)
+
+    # Issue 117: the split's own claim status says the claim ended or was
+    # converted, which contradicts a split. Before the fix the ten shares
+    # became twenty and the run read COMPLETE.
+    assert ended.result.classification is EvaluationClassification.INDETERMINATE
+    assert ended.result.halted_session_index == 3
+    assert ended.result.halt_reason is not None
+    assert "needs a continuing claim" in ended.result.halt_reason
+    assert claim_status in ended.result.halt_reason
+
+    # Control: the same split on a continuing claim holds twenty at 60.00.
+    continuing = split("continuing", 8410)
+    assert continuing.result.classification is EvaluationClassification.COMPLETE
+    assert _fills(continuing) == [(2, "buy", 10)]
+    assert _held(continuing) == {eng.SEC_A: 20}
+    assert continuing.result.metrics.ending_net_asset_value == Decimal("10200.00")
+
+
 # ==========================================================================
 # Execution contract
 # ==========================================================================
