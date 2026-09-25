@@ -64,6 +64,9 @@ ALLOWED_TASK1_PINNED_LANE_ADDITIONS = frozenset(
         # v5 supersedes v4 under issue #63.  v4 stays above, unedited, as the
         # inventory that exactly describes commit 4ad90aa.
         "tests/fixtures/m1e-compatibility/m1d-v5-protected-sha256.json",
+        # v6 supersedes v5 under issue #107.  v5 stays above, unedited, as the
+        # inventory that exactly describes commit 200bfeb.
+        "tests/fixtures/m1e-compatibility/m1d-v6-protected-sha256.json",
     }
 )
 HISTORICAL_M1D_INVENTORY = (
@@ -72,8 +75,11 @@ HISTORICAL_M1D_INVENTORY = (
 PREVIOUS_M1D_INVENTORY = (
     REPO_ROOT / "tests/fixtures/m1e-compatibility/m1d-v4-protected-sha256.json"
 )
-CURRENT_M1D_INVENTORY = (
+V5_M1D_INVENTORY = (
     REPO_ROOT / "tests/fixtures/m1e-compatibility/m1d-v5-protected-sha256.json"
+)
+CURRENT_M1D_INVENTORY = (
+    REPO_ROOT / "tests/fixtures/m1e-compatibility/m1d-v6-protected-sha256.json"
 )
 HISTORICAL_M1D_INVENTORY_SHA256 = (
     "6fb819eb863ebf83e1a3b4e3a7e6af261748116502cdb0ad3603d108d17c2e2b"
@@ -83,6 +89,11 @@ PREVIOUS_M1D_INVENTORY_SHA256 = (
 )
 PREVIOUS_M1D_INVENTORY_COMMIT = "4ad90aa97da677386ac212c3596703fccb309f3b"
 """The commit that last wrote v4; every v4 pin describes that commit exactly."""
+V5_M1D_INVENTORY_SHA256 = (
+    "a4610db34e6588ee7e0f232f39f2a50a98109f0299533f2509f5963b16200710"
+)
+V5_M1D_INVENTORY_COMMIT = "200bfebaf04c5c1e171db029547a75187d2ef665"
+"""The commit that last wrote v5; every v5 pin describes that commit exactly."""
 
 FORBIDDEN_IMPORT_ROOTS = frozenset(
     {
@@ -344,6 +355,12 @@ def _previous_m1d_inventory() -> dict[str, object]:
     return document
 
 
+def _v5_m1d_inventory() -> dict[str, object]:
+    document = json.loads(V5_M1D_INVENTORY.read_text(encoding="utf-8"))
+    assert isinstance(document, dict)
+    return document
+
+
 def _superseded_m1d_source_pins() -> dict[str, str]:
     """Return the accepted current sha256 of each superseded M1d source path.
 
@@ -351,8 +368,9 @@ def _superseded_m1d_source_pins() -> dict[str, str]:
     differ from ``PINNED_M1D_COMMIT``.  Each one still has to match an exact
     pinned digest recorded in the current inventory, so the byte freeze is
     moved forward rather than relaxed.  A path can be superseded by any link
-    of the chain (v4 under issue #32, v5 under issue #63); the latest link
-    that names it carries the digest the working tree must match.
+    of the chain (v4 under issue #32, v5 under issue #63, v6 under issue
+    #107); the latest link that names it carries the digest the working tree
+    must match.
     """
     current = _current_m1d_inventory()
     pins = current["sha256"]
@@ -361,7 +379,7 @@ def _superseded_m1d_source_pins() -> dict[str, str]:
         "sha256"
     ]
     latest: dict[str, str] = {}
-    for document in (_previous_m1d_inventory(), current):
+    for document in (_previous_m1d_inventory(), _v5_m1d_inventory(), current):
         superseded = document["superseded_paths"]
         assert isinstance(superseded, dict) and superseded
         for path, record in superseded.items():
@@ -588,8 +606,8 @@ def test_c03_forbidden_runtime_capabilities_and_dependencies_remain_absent() -> 
     for relative in _accepted_m1d_source_paths():
         path = REPO_ROOT / relative
         if relative in superseded:
-            # Superseded under issue #32 or #63: still byte-pinned, but against
-            # the current inventory instead of PINNED_M1D_COMMIT.
+            # Superseded under issue #32, #63 or #107: still byte-pinned, but
+            # against the current inventory instead of PINNED_M1D_COMMIT.
             assert (
                 hashlib.sha256(path.read_bytes()).hexdigest() == superseded[relative]
             ), relative
@@ -726,14 +744,23 @@ def test_v4_source_pins_are_superseded_by_v5_without_rewriting_history() -> None
     """v5 is v4 with exactly the paths issue #63 moved, and nothing else.
 
     The historical side of every superseded path is the byte content at the
-    commit v4 describes; the current side is the working tree.
+    commit v4 describes. v5 is itself superseded by v6 under issue #107, so
+    its current side is the byte content at 200bfeb, the commit that last
+    wrote v5, rather than the working tree.
     """
     previous = _previous_m1d_inventory()
-    current = _current_m1d_inventory()
-    assert current["inventory_id"] == "m1d-v5-protected-sha256"
-    assert current["role"] == "current"
-    assert current["baseline_commit"] == PINNED_M1D_COMMIT
-    supersedes = current["supersedes"]
+    v5_raw = V5_M1D_INVENTORY.read_bytes()
+    assert hashlib.sha256(v5_raw).hexdigest() == V5_M1D_INVENTORY_SHA256
+    assert v5_raw == _git_bytes(
+        V5_M1D_INVENTORY_COMMIT, V5_M1D_INVENTORY.relative_to(REPO_ROOT).as_posix()
+    ), "v5 must stay byte-identical to the commit that last wrote it"
+    assert _git("merge-base", "--is-ancestor", V5_M1D_INVENTORY_COMMIT, "HEAD") == ""
+    v5 = json.loads(v5_raw)
+    assert v5["inventory_id"] == "m1d-v5-protected-sha256"
+    # v5 still calls itself current: history is superseded, never rewritten.
+    assert v5["role"] == "current"
+    assert v5["baseline_commit"] == PINNED_M1D_COMMIT
+    supersedes = v5["supersedes"]
     assert isinstance(supersedes, dict)
     assert supersedes["inventory_id"] == "m1d-v4-protected-sha256"
     assert (
@@ -744,13 +771,13 @@ def test_v4_source_pins_are_superseded_by_v5_without_rewriting_history() -> None
     assert supersedes["issue"] == 63
     assert "semantic attestation" in supersedes["reason"]
 
-    superseded = current["superseded_paths"]
+    superseded = v5["superseded_paths"]
     assert isinstance(superseded, dict)
     assert set(superseded) == {
         "src/drift/domain/observation_query.py",
         "src/drift/domain/semantic_attestation.py",
     }
-    assert current["added_paths"] == {}
+    assert v5["added_paths"] == {}
 
     previous_pins = previous["sha256"]
     assert isinstance(previous_pins, dict)
@@ -761,6 +788,48 @@ def test_v4_source_pins_are_superseded_by_v5_without_rewriting_history() -> None
             hashlib.sha256(recorded).hexdigest()
             == record["historical_sha256"]
             == previous_pins[relative]
+        ), relative
+        written = _git_bytes(V5_M1D_INVENTORY_COMMIT, relative)
+        assert hashlib.sha256(written).hexdigest() == record["current_sha256"], relative
+        assert record["current_sha256"] != record["historical_sha256"], relative
+        expected[relative] = record["current_sha256"]
+    assert v5["sha256"] == expected
+
+
+def test_v5_source_pins_are_superseded_by_v6_without_rewriting_history() -> None:
+    """v6 is v5 with exactly the path issue #107 moved, and nothing else.
+
+    The historical side of the superseded path is the byte content at 200bfeb,
+    the commit v5 describes; the current side is the working tree.
+    """
+    v5 = _v5_m1d_inventory()
+    current = _current_m1d_inventory()
+    assert current["inventory_id"] == "m1d-v6-protected-sha256"
+    assert current["role"] == "current"
+    assert current["baseline_commit"] == PINNED_M1D_COMMIT
+    supersedes = current["supersedes"]
+    assert isinstance(supersedes, dict)
+    assert supersedes["inventory_id"] == "m1d-v5-protected-sha256"
+    assert supersedes["path"] == V5_M1D_INVENTORY.relative_to(REPO_ROOT).as_posix()
+    assert supersedes["file_sha256"] == V5_M1D_INVENTORY_SHA256
+    assert supersedes["commit"] == V5_M1D_INVENTORY_COMMIT
+    assert supersedes["issue"] == 107
+    assert "closure guard" in supersedes["reason"]
+
+    superseded = current["superseded_paths"]
+    assert isinstance(superseded, dict)
+    assert set(superseded) == {"src/drift/domain/semantic_attestation.py"}
+    assert current["added_paths"] == {}
+
+    v5_pins = v5["sha256"]
+    assert isinstance(v5_pins, dict)
+    expected = dict(v5_pins)
+    for relative, record in superseded.items():
+        recorded = _git_bytes(V5_M1D_INVENTORY_COMMIT, relative)
+        assert (
+            hashlib.sha256(recorded).hexdigest()
+            == record["historical_sha256"]
+            == v5_pins[relative]
         ), relative
         live = (REPO_ROOT / relative).read_bytes()
         assert hashlib.sha256(live).hexdigest() == record["current_sha256"], relative

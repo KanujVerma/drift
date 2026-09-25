@@ -7,22 +7,27 @@ protected paths exactly as they stand at ``PINNED_M1D_COMMIT`` (af75cce), and
 it authenticates the archive extracted from that commit. It is preserved
 byte-identical for audit and is never regenerated.
 
-The working-tree freeze is a chain of links over v3, each preserved
-byte-identical once superseded:
+The working-tree freeze is an ordered chain of links over v3
+(``_FREEZE_INVENTORIES``), each preserved byte-identical once superseded:
 
 * ``m1d-v4-protected-sha256.json`` (issue #32) supersedes v3. The M1d validator
   run identity moved from the whole-tree ``economic_implementation_hash()`` to
   the versioned semantic attestation, which changed the bytes of the two M1d
   validation entry points and introduced the module that now defines the
   identity. v4 exactly describes commit 4ad90aa, the commit that last wrote it.
-* ``m1d-v5-protected-sha256.json`` (issue #63) supersedes v4 and is the CURRENT
+* ``m1d-v5-protected-sha256.json`` (issue #63) supersedes v4. The M1d evidence
+  identity moved from the whole-tree inventory to the ``m1d-evidence-v1``
+  semantic attestation, which changed the bytes of the identity accessor and of
+  the attestation module. v5 exactly describes commit 200bfeb, the commit that
+  last wrote it.
+* ``m1d-v6-protected-sha256.json`` (issue #107) supersedes v5 and is the CURRENT
   inventory: the protected paths as they must stand in the live working tree.
-  The M1d evidence identity moved from the whole-tree inventory to the
-  ``m1d-evidence-v1`` semantic attestation, which changed the bytes of the
-  identity accessor and of the attestation module.
+  The semantic closure guard was hardened against aliased and indirect dynamic
+  imports, which changed the bytes of the attestation module.
 
-Each link carries two explicit, separately justified deltas over the inventory
-it supersedes and nothing else:
+A later link is appended to ``_FREEZE_INVENTORIES``; the entry it supersedes
+then records the commit that last wrote it. Each link carries two explicit,
+separately justified deltas over the inventory it supersedes and nothing else:
 
 * ``superseded_paths`` names a path the superseded inventory already pins whose
   bytes moved, and records both the digest it replaces and the current one.
@@ -31,10 +36,10 @@ it supersedes and nothing else:
   An addition may not shadow a path already pinned; that is what
   ``superseded_paths`` is for.
 
-``_validated_previous_pins`` and ``_validated_current_pins`` re-derive every
-link on every load, so a pin can be neither silently re-signed nor silently
-introduced for any path a link does not declare, and no link can be edited
-without breaking its byte pin.
+``_load_freeze_chain`` re-derives every link on every load, each over the
+re-derived pins of the link it supersedes, so a pin can be neither silently
+re-signed nor silently introduced for any path a link does not declare, and no
+link can be edited without breaking its byte pin.
 
 Replay baseline supersession (issue #48)
 ----------------------------------------
@@ -104,7 +109,7 @@ import sys
 import tarfile
 import tempfile
 import tomllib
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -136,24 +141,6 @@ _EXPECTED_INVENTORY_SHA256 = (
     "6fb819eb863ebf83e1a3b4e3a7e6af261748116502cdb0ad3603d108d17c2e2b"
 )
 _HISTORICAL_INVENTORY_ID = "m1d-v3-protected-sha256"
-_PREVIOUS_INVENTORY_PATH = (
-    REPO_ROOT / "tests/fixtures/m1e-compatibility/m1d-v4-protected-sha256.json"
-)
-_EXPECTED_PREVIOUS_INVENTORY_SHA256 = (
-    "4af2e06734e8fadde2002d69fe9d48bd5eca369e771862f2e09df150238d76d2"
-)
-_PREVIOUS_INVENTORY_ID = "m1d-v4-protected-sha256"
-_PREVIOUS_SUPERSESSION_ISSUE = 32
-_PREVIOUS_INVENTORY_COMMIT = "4ad90aa97da677386ac212c3596703fccb309f3b"
-"""The commit that last wrote v4; every v4 pin describes that commit exactly."""
-_CURRENT_INVENTORY_PATH = (
-    REPO_ROOT / "tests/fixtures/m1e-compatibility/m1d-v5-protected-sha256.json"
-)
-_EXPECTED_CURRENT_INVENTORY_SHA256 = (
-    "a4610db34e6588ee7e0f232f39f2a50a98109f0299533f2509f5963b16200710"
-)
-_CURRENT_INVENTORY_ID = "m1d-v5-protected-sha256"
-_SUPERSESSION_ISSUE = 63
 _REPLAY_BASELINE_DIRECTORY = "tests/fixtures/m1d-replay-baselines/cpython-3.14.6"
 _REPLAY_BASELINE_PATH = REPO_ROOT / _REPLAY_BASELINE_DIRECTORY / "supersession.json"
 _EXPECTED_REPLAY_BASELINE_SHA256 = (
@@ -178,6 +165,8 @@ _REMINTED_FIXTURE_NAMES = (
 )
 _ARCHIVE_PATHS = ("src/drift", "tests", "pyproject.toml", "uv.lock")
 _PIN_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
+_GIT_SHA = re.compile(r"[0-9a-f]{7,40}")
+"""A superseded link commit is an abbreviated or full lowercase-hex git SHA."""
 _IDENTITY_PROGRAM = (
     "import sys; print(f'{sys.implementation.name}-{sys.version_info.major}."
     "{sys.version_info.minor}.{sys.version_info.micro}')"
@@ -729,11 +718,74 @@ def _is_nonblank(value: object) -> bool:
 
 
 @dataclass(frozen=True, slots=True)
+class _FreezeInventory:
+    """One inventory of the working-tree freeze chain, bound to its exact bytes."""
+
+    label: str
+    inventory_id: str
+    path: Path
+    file_sha256: str
+    issue: int | None
+    """The issue whose link introduced it; ``None`` only for the v3 root."""
+    commit: str | None
+    """The commit whose tree every pin describes exactly.
+
+    For a link that is the commit that last wrote it. It is ``None`` only for
+    the current tip, which describes the live working tree and cannot name the
+    commit that will contain it.
+    """
+
+
+_FREEZE_FIXTURES = REPO_ROOT / "tests/fixtures/m1e-compatibility"
+_FREEZE_INVENTORIES: tuple[_FreezeInventory, ...] = (
+    _FreezeInventory(
+        label="v3",
+        inventory_id=_HISTORICAL_INVENTORY_ID,
+        path=_INVENTORY_PATH,
+        file_sha256=_EXPECTED_INVENTORY_SHA256,
+        issue=None,
+        commit=PINNED_M1D_COMMIT,
+    ),
+    _FreezeInventory(
+        label="v4",
+        inventory_id="m1d-v4-protected-sha256",
+        path=_FREEZE_FIXTURES / "m1d-v4-protected-sha256.json",
+        file_sha256="4af2e06734e8fadde2002d69fe9d48bd5eca369e771862f2e09df150238d76d2",
+        issue=32,
+        commit="4ad90aa97da677386ac212c3596703fccb309f3b",
+    ),
+    _FreezeInventory(
+        label="v5",
+        inventory_id="m1d-v5-protected-sha256",
+        path=_FREEZE_FIXTURES / "m1d-v5-protected-sha256.json",
+        file_sha256="a4610db34e6588ee7e0f232f39f2a50a98109f0299533f2509f5963b16200710",
+        issue=63,
+        commit="200bfebaf04c5c1e171db029547a75187d2ef665",
+    ),
+    _FreezeInventory(
+        label="v6",
+        inventory_id="m1d-v6-protected-sha256",
+        path=_FREEZE_FIXTURES / "m1d-v6-protected-sha256.json",
+        file_sha256="b99a435fd6f420ec7427a49c0fce877fd5b369ce51b98e09e90d3585e9cf252e",
+        issue=107,
+        commit=None,
+    ),
+)
+"""The freeze chain, root first; each entry supersedes the one before it.
+
+To supersede the tip, append the new link here and record on the entry it
+supersedes the commit that last wrote that entry. Nothing else changes: every
+link is re-derived over the re-derived pins of its predecessor."""
+
+
+@dataclass(frozen=True, slots=True)
 class _FreezeLink:
     """One working-tree freeze link and the inventory it supersedes."""
 
     label: str
     inventory_id: str
+    path: Path
+    file_sha256: str
     issue: int
     requires_current_role: bool
     superseded_id: str
@@ -742,30 +794,50 @@ class _FreezeLink:
     superseded_commit: str
 
 
-_PREVIOUS_LINK = _FreezeLink(
-    label="previous",
-    inventory_id=_PREVIOUS_INVENTORY_ID,
-    issue=_PREVIOUS_SUPERSESSION_ISSUE,
-    # v4 still calls itself current; history is superseded, never rewritten.
-    requires_current_role=False,
-    superseded_id=_HISTORICAL_INVENTORY_ID,
-    superseded_path=_INVENTORY_PATH.relative_to(REPO_ROOT).as_posix(),
-    superseded_file_sha256=_EXPECTED_INVENTORY_SHA256,
-    superseded_commit=PINNED_M1D_COMMIT,
-)
-"""v4 (issue #32) over the historical v3 inventory."""
+def _chain_links(inventories: Sequence[_FreezeInventory]) -> tuple[_FreezeLink, ...]:
+    """Pair every link with the inventory it supersedes, checking the shape.
 
-_CURRENT_LINK = _FreezeLink(
-    label="current",
-    inventory_id=_CURRENT_INVENTORY_ID,
-    issue=_SUPERSESSION_ISSUE,
-    requires_current_role=True,
-    superseded_id=_PREVIOUS_INVENTORY_ID,
-    superseded_path=_PREVIOUS_INVENTORY_PATH.relative_to(REPO_ROOT).as_posix(),
-    superseded_file_sha256=_EXPECTED_PREVIOUS_INVENTORY_SHA256,
-    superseded_commit=_PREVIOUS_INVENTORY_COMMIT,
-)
-"""v5 (issue #63) over v4, as v4 describes commit 4ad90aa."""
+    The chain starts at the historical v3 inventory. Only the tip may leave its
+    commit open and only the tip must still call itself current: a superseded
+    link keeps the role it was minted with, because history is superseded,
+    never rewritten.
+    """
+    if not inventories or inventories[0].inventory_id != _HISTORICAL_INVENTORY_ID:
+        raise PinnedReplayIntegrityFailure("M1d freeze chain must start at v3")
+    if len(inventories) < 2:
+        raise PinnedReplayIntegrityFailure("M1d freeze chain needs at least one link")
+    tip = len(inventories) - 1
+    links: list[_FreezeLink] = []
+    for index in range(1, len(inventories)):
+        superseded, inventory = inventories[index - 1], inventories[index]
+        if (
+            superseded.commit is None
+            or not _GIT_SHA.fullmatch(superseded.commit)
+            or inventory.issue is None
+            or (inventory.commit is None) != (index == tip)
+        ):
+            raise PinnedReplayIntegrityFailure(
+                f"{inventory.label} M1d freeze link is malformed"
+            )
+        links.append(
+            _FreezeLink(
+                label=inventory.label,
+                inventory_id=inventory.inventory_id,
+                path=inventory.path,
+                file_sha256=inventory.file_sha256,
+                issue=inventory.issue,
+                requires_current_role=index == tip,
+                superseded_id=superseded.inventory_id,
+                superseded_path=superseded.path.relative_to(REPO_ROOT).as_posix(),
+                superseded_file_sha256=superseded.file_sha256,
+                superseded_commit=superseded.commit,
+            )
+        )
+    return tuple(links)
+
+
+FREEZE_LINKS = _chain_links(_FREEZE_INVENTORIES)
+"""v4 (issue #32) over v3, v5 (issue #63) over v4, v6 (issue #107) over v5."""
 
 
 def _superseded_source_pins(
@@ -925,37 +997,49 @@ def _read_link_document(path: Path, expected_sha256: str, label: str) -> object:
         ) from error
 
 
-def _validated_previous_pins(document: object) -> dict[str, str]:
-    """Re-derive the v4 pins from the historical v3 pins plus the v4 delta."""
-    return _validated_link_pins(document, _PREVIOUS_LINK, PROTECTED_M1D_ARCHIVE_SHA256)
+def _load_link_document(link: _FreezeLink) -> object:
+    """Read one link's document, authenticated against its literal file pin."""
+    return _read_link_document(link.path, link.file_sha256, link.label)
 
 
-def _load_previous_inventory() -> dict[str, str]:
-    return _validated_previous_pins(
-        _read_link_document(
-            _PREVIOUS_INVENTORY_PATH, _EXPECTED_PREVIOUS_INVENTORY_SHA256, "previous"
-        )
+def _freeze_link(label: str) -> _FreezeLink:
+    for link in FREEZE_LINKS:
+        if link.label == label:
+            return link
+    raise PinnedReplayIntegrityFailure(f"unknown M1d freeze link: {label}")
+
+
+def _load_freeze_chain() -> dict[str, dict[str, str]]:
+    """Re-derive every link, root first, over its predecessor's re-derived pins."""
+    chain: dict[str, dict[str, str]] = {}
+    parent = PROTECTED_M1D_ARCHIVE_SHA256
+    for link in FREEZE_LINKS:
+        parent = _validated_link_pins(_load_link_document(link), link, parent)
+        chain[link.label] = parent
+    return chain
+
+
+FREEZE_CHAIN_SHA256 = _load_freeze_chain()
+"""Re-derived pins of every freeze link, by label, in chain order.
+
+Every superseded link still describes exactly the commit that last wrote it
+(``FREEZE_LINKS[i + 1].superseded_commit``); only the tip describes the live
+working tree."""
+
+
+def _validated_chain_pins(label: str, document: object) -> dict[str, str]:
+    """Re-derive one link's pins from its predecessor's pins plus its delta."""
+    link = _freeze_link(label)
+    index = FREEZE_LINKS.index(link)
+    parent = (
+        FREEZE_CHAIN_SHA256[FREEZE_LINKS[index - 1].label]
+        if index
+        else PROTECTED_M1D_ARCHIVE_SHA256
     )
+    return _validated_link_pins(document, link, parent)
 
 
-PREVIOUS_M1D_SHA256 = _load_previous_inventory()
-"""Superseded working-tree pins: v4, exactly as it describes commit 4ad90aa."""
-
-
-def _validated_current_pins(document: object) -> dict[str, str]:
-    """Re-derive the v5 pins from the re-derived v4 pins plus the v5 delta."""
-    return _validated_link_pins(document, _CURRENT_LINK, PREVIOUS_M1D_SHA256)
-
-
-def _load_current_inventory() -> dict[str, str]:
-    return _validated_current_pins(
-        _read_link_document(
-            _CURRENT_INVENTORY_PATH, _EXPECTED_CURRENT_INVENTORY_SHA256, "current"
-        )
-    )
-
-
-PROTECTED_M1D_SHA256 = _load_current_inventory()
+PROTECTED_M1D_SHA256 = FREEZE_CHAIN_SHA256[FREEZE_LINKS[-1].label]
 """Current pins: the protected paths as they must stand in the working tree."""
 
 _REQUIRED_PROTECTED_PATHS = frozenset(PROTECTED_M1D_SHA256)
@@ -1266,10 +1350,11 @@ def verify_m1d_protected_inputs(
 ) -> None:
     """Reject a changed M1d source, fixture, or environment input in the tree.
 
-    This is the CURRENT freeze. It uses the v5 pins: v3, then the v4 delta
-    (the paths issue #32 moved, plus the module that defines the M1d replay
-    identities), then the v5 delta (the identity accessor and attestation
-    module issue #63 moved), reproducing v3 everywhere else.
+    This is the CURRENT freeze. It uses the pins of the chain tip: v3, then
+    the v4 delta (the paths issue #32 moved, plus the module that defines the
+    M1d replay identities), then the v5 delta (the identity accessor and
+    attestation module issue #63 moved), then the v6 delta (the attestation
+    module issue #107 hardened), reproducing v3 everywhere else.
     """
     pins = PROTECTED_M1D_SHA256 if expected is None else expected
     _verify_pinned_inputs(
