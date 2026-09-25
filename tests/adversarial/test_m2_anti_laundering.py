@@ -89,14 +89,14 @@ from drift.domain.evaluator_portfolio import (
     MarkEvidenceV1,
     MarkPriceV1,
     PortfolioMarkV1,
-    PortfolioStateV1,
+    PortfolioStateV2,
 )
 from drift.domain.evaluator_reconstruction import (
     ExploratoryReconstructedSessionObservationV1,
 )
 from drift.domain.evaluator_results import (
     LANE_GRANTED_MARK_GRADE,
-    EvaluationRunArtifactsV1,
+    EvaluationRunArtifactsV2,
     ExploratoryEvaluationResultV1,
     PromotionEvaluationResultV1,
 )
@@ -470,14 +470,14 @@ def test_run_artifacts_refuse_a_final_state_in_another_lane(trade: bool) -> None
     for price in state["mark"]["prices"]:
         price["evidence"]["grade"] = "promotion_grade"
     assert bool(state["mark"]["prices"]) is trade
-    assert PortfolioStateV1.model_validate_json(json.dumps(state)).lane == "promotion"
+    assert PortfolioStateV2.model_validate_json(json.dumps(state)).lane == "promotion"
 
     with pytest.raises(
         ValidationError,
         match=r"final portfolio state is in the promotion lane, its result is in "
         r"the exploratory lane",
     ):
-        EvaluationRunArtifactsV1.model_validate_json(json.dumps(data))
+        EvaluationRunArtifactsV2.model_validate_json(json.dumps(data))
 
 
 def test_run_artifacts_refuse_a_final_state_marked_above_its_result_lane() -> None:
@@ -494,7 +494,7 @@ def test_run_artifacts_refuse_a_final_state_marked_above_its_result_lane() -> No
     for price in state["mark"]["prices"]:
         assert price["evidence"]["grade"] == "exploratory"
         price["evidence"]["grade"] = "promotion_grade"
-    assert PortfolioStateV1.model_validate_json(json.dumps(state)).lane == (
+    assert PortfolioStateV2.model_validate_json(json.dumps(state)).lane == (
         "exploratory"
     )
 
@@ -503,11 +503,11 @@ def test_run_artifacts_refuse_a_final_state_marked_above_its_result_lane() -> No
         match=r"a result in the exploratory lane grants exploratory marks, its "
         r"final state marks security \S+ promotion_grade",
     ):
-        EvaluationRunArtifactsV1.model_validate_json(json.dumps(data))
+        EvaluationRunArtifactsV2.model_validate_json(json.dumps(data))
 
     # Control: the genuine pair validates.
     genuine = _genuine_pair_json()
-    assert EvaluationRunArtifactsV1.model_validate_json(json.dumps(genuine))
+    assert EvaluationRunArtifactsV2.model_validate_json(json.dumps(genuine))
 
 
 # ==========================================================================
@@ -1698,7 +1698,7 @@ def _promotion_evidence_sites(path: Path) -> tuple[list[str], int]:
     that type, or a literal stating ``lane`` as ``"promotion"`` or
     ``is_promotion_grade_evidence`` as true. The lane literal is what selects
     the promotion member when a result is built through ``EvaluationResultV1``
-    or ``EvaluationRunArtifactsV1``. An ``isinstance`` test names the type
+    or ``EvaluationRunArtifactsV2``. An ``isinstance`` test names the type
     without building one, so it is not a site.
     """
     sites: list[str] = []

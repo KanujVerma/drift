@@ -46,10 +46,10 @@ from test_evaluator_engine import (  # noqa: E402
 from drift.domain.artifacts import ArtifactKind, ArtifactReference  # noqa: E402
 from drift.domain.common import ImmutableJSONValue  # noqa: E402
 from drift.domain.datasets import DatasetReference, TemporalCoverage  # noqa: E402
-from drift.domain.evaluator_portfolio import PortfolioStateV1  # noqa: E402
+from drift.domain.evaluator_portfolio import PortfolioStateV2  # noqa: E402
 from drift.domain.evaluator_results import (  # noqa: E402
     EvaluationClassification,
-    EvaluationRunArtifactsV1,
+    EvaluationRunArtifactsV2,
     ExploratoryEvaluationResultV1,
     PromotionEvaluationResultV1,
     evaluation_result_hash,
@@ -419,7 +419,7 @@ def test_runner_refuses_a_promotion_admission_and_records_nothing(
     assert ledger.verified_events() == ()
 
 
-def _promotion_artifacts(engine: SessionEvaluatorEngine) -> EvaluationRunArtifactsV1:
+def _promotion_artifacts(engine: SessionEvaluatorEngine) -> EvaluationRunArtifactsV2:
     """A valid promotion pair over a genuine exploratory run's own trace.
 
     The artifact types accept this (finding F9, tracked as P9 on issue 115):
@@ -456,7 +456,7 @@ def _promotion_artifacts(engine: SessionEvaluatorEngine) -> EvaluationRunArtifac
     )
     state = genuine.final_state
     assert state.mark is not None and state.mark.prices == ()
-    final_state = PortfolioStateV1.model_validate(
+    final_state = PortfolioStateV2.model_validate(
         dict(state)
         | {
             "lane": "promotion",
@@ -464,7 +464,7 @@ def _promotion_artifacts(engine: SessionEvaluatorEngine) -> EvaluationRunArtifac
             "mark": state.mark.model_copy(update={"lane": "promotion"}),
         }
     )
-    return EvaluationRunArtifactsV1.model_validate(
+    return EvaluationRunArtifactsV2.model_validate(
         {"result": result, "trace": genuine.trace, "final_state": final_state}
     )
 
@@ -532,7 +532,7 @@ def _stand_in_context(
     return ledger, _context(engine, ledger=ledger)
 
 
-def _genuine_artifacts() -> EvaluationRunArtifactsV1:
+def _genuine_artifacts() -> EvaluationRunArtifactsV2:
     engine = _engine()
     return engine.run(
         strategy=_buy_ten(),
@@ -547,13 +547,13 @@ def _genuine_artifacts() -> EvaluationRunArtifactsV1:
 
 
 def _with_result(
-    artifacts: EvaluationRunArtifactsV1, **changes: object
-) -> EvaluationRunArtifactsV1:
+    artifacts: EvaluationRunArtifactsV2, **changes: object
+) -> EvaluationRunArtifactsV2:
     """The pair with a hand-built result; nothing here is revalidated."""
     result = ExploratoryEvaluationResultV1.model_construct(
         **(dict(artifacts.result) | changes)
     )
-    return EvaluationRunArtifactsV1.model_construct(
+    return EvaluationRunArtifactsV2.model_construct(
         **(dict(artifacts) | {"result": result})
     )
 
@@ -730,10 +730,10 @@ def test_runner_records_nothing_that_validates_only_through_forged_equality(
     result = unsealed.model_construct(
         **(dict(unsealed) | {"result_hash": evaluation_result_hash(unsealed)})
     )
-    forged = EvaluationRunArtifactsV1.model_construct(
+    forged = EvaluationRunArtifactsV2.model_construct(
         **(dict(genuine) | {"result": result, "trace": trace})
     )
-    admitted = EvaluationRunArtifactsV1.model_validate(
+    admitted = EvaluationRunArtifactsV2.model_validate(
         forged.model_dump(mode="python", warnings=False)
     )
     assert admitted.trace.trace_hash == trace.trace_hash
@@ -833,7 +833,7 @@ def _run_of(
     *,
     strategy_hash: str = STRATEGY_CODE_HASH,
     code_version_hash: str = CODE_VERSION_HASH,
-) -> EvaluationRunArtifactsV1:
+) -> EvaluationRunArtifactsV2:
     """A genuine run of ``engine``, sealed under the identity it names."""
     return engine.run(
         strategy=_buy_ten() if strategy is None else strategy,
@@ -881,7 +881,7 @@ def test_runner_refuses_a_genuine_run_over_another_bundle(tmp_path: Path) -> Non
     assert ledger.verified_events() == ()
 
 
-FOREIGN_RUNS_OVER_THIS_BUNDLE: dict[str, Callable[[], EvaluationRunArtifactsV1]] = {
+FOREIGN_RUNS_OVER_THIS_BUNDLE: dict[str, Callable[[], EvaluationRunArtifactsV2]] = {
     "protocol": lambda: _run_of(_engine(protocol=_protocol(cash="20000.00"))),
     "cost model": lambda: _run_of(_engine(cost_model=_cost_model(commission="0.01"))),
     "strategy": lambda: _run_of(

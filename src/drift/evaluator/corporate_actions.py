@@ -63,14 +63,14 @@ from drift.domain.evaluator_corporate_actions import (
 from drift.domain.evaluator_portfolio import (
     IndeterminateValuationError,
     PendingCashClaimV1,
-    PortfolioStateV1,
-    SecurityHoldingV1,
+    PortfolioStateV2,
+    SecurityHoldingV2,
     decimal_context,
     pending_cash_claim_id,
 )
 from drift.domain.evaluator_strategy import SecurityTargetPositionV1
 from drift.domain.sessions import SessionKeyV1
-from drift.evaluator.portfolio import PortfolioAccountingKernel
+from drift.evaluator.portfolio import PortfolioAccountingKernel, known_cost_basis
 from drift.serialization.canonical import content_hash
 
 ZERO = Decimal("0")
@@ -137,8 +137,8 @@ class _Book:
     (``_require_proven_post_action_count``).
     """
 
-    opening: Mapping[UUID, SecurityHoldingV1]
-    holdings: dict[UUID, SecurityHoldingV1]
+    opening: Mapping[UUID, SecurityHoldingV2]
+    holdings: dict[UUID, SecurityHoldingV2]
     targets: dict[UUID, SecurityTargetPositionV1]
     claims: dict[ClaimIdentity, PendingCashClaimV1]
     realized: Decimal = ZERO
@@ -238,7 +238,7 @@ def _security_order(security_id: UUID) -> bytes:
     return security_id.bytes
 
 
-def _require_positioned(state: PortfolioStateV1, session: SessionKeyV1) -> None:
+def _require_positioned(state: PortfolioStateV2, session: SessionKeyV1) -> None:
     if state.session_key != session:
         raise ValueError(
             "portfolio state must already be positioned at the current session: "
@@ -270,10 +270,10 @@ def _unique_targets(
 
 
 def _replace_holdings(
-    state: PortfolioStateV1,
-    holdings: Mapping[UUID, SecurityHoldingV1],
+    state: PortfolioStateV2,
+    holdings: Mapping[UUID, SecurityHoldingV2],
     realized: Decimal,
-) -> PortfolioStateV1:
+) -> PortfolioStateV2:
     """Rebuild state around new holdings, discarding any mark.
 
     A mark describes the holdings it was taken against. A corporate action
@@ -283,12 +283,13 @@ def _replace_holdings(
     together.
     """
     with decimal_context():
-        return PortfolioStateV1(
+        return PortfolioStateV2(
             session_key=state.session_key,
             cash_balance=state.cash_balance,
             holdings=tuple(holdings[key] for key in sorted(holdings, key=str)),
             pending_cash_claims=state.pending_cash_claims,
             settled_claim_ids=state.settled_claim_ids,
+            applied_effect_ids=state.applied_effect_ids,
             lane=state.lane,
             admission_hash=state.admission_hash,
             mark=None,
@@ -299,6 +300,17 @@ def _replace_holdings(
             realized_net_pnl=state.realized_net_pnl + realized,
             cumulative_transaction_costs=state.cumulative_transaction_costs,
         )
+
+
+def _requantified(holding: SecurityHoldingV2, quantity: int) -> SecurityHoldingV2:
+    """Re-denominate a holding in place: same basis, same basis status."""
+    return SecurityHoldingV2(
+        security_id=holding.security_id,
+        quantity=quantity,
+        basis_status=holding.basis_status,
+        cost_basis=holding.cost_basis,
+        basis_indeterminate_by=holding.basis_indeterminate_by,
+    )
 
 
 def _date_facts(payload: TermsPayloadV1) -> dict[str, EconomicDateFactV1]:
@@ -390,11 +402,11 @@ class CorporateActionProcessor:
 
     def apply_pre_open_actions(
         self,
-        portfolio_state: PortfolioStateV1,
+        portfolio_state: PortfolioStateV2,
         staged_targets: Iterable[SecurityTargetPositionV1],
         economic_outcomes: Iterable[SecurityEconomicOutcomeV1],
         current_session: SessionKeyV1,
-    ) -> tuple[PortfolioStateV1, tuple[SecurityTargetPositionV1, ...]]:
+    ) -> tuple[PortfolioStateV2, tuple[SecurityTargetPositionV1, ...]]:
         """Fold this session's proven corporate actions into book and targets.
 
         Call this exactly once per session, for every session of the clock in
@@ -503,10 +515,10 @@ class CorporateActionProcessor:
 
     def apply_intrasession_settlements(
         self,
-        portfolio_state: PortfolioStateV1,
+        portfolio_state: PortfolioStateV2,
         economic_outcomes: Iterable[SecurityEconomicOutcomeV1],
         current_session: SessionKeyV1,
-    ) -> PortfolioStateV1:
+    ) -> PortfolioStateV2:
         """Settle only the entitlements a delivered settlement actually proves.
 
         Delivered cash that matches no pending claim is not simply dropped
@@ -833,11 +845,7 @@ class CorporateActionProcessor:
                     "a split would extinguish a held position without proven "
                     "consideration for the remainder"
                 )
-            book.holdings[context.security_id] = SecurityHoldingV1(
-                security_id=context.security_id,
-                quantity=whole,
-                cost_basis=holding.cost_basis,
-            )
+            book.holdings[context.security_id] = _requantified(holding, whole)
             if residual:
                 self._stage_cash_in_lieu(context, component, residual, book)
         self._scale_target(context, component, book, tie_break)
@@ -861,11 +869,7 @@ class CorporateActionProcessor:
             whole, residual = resolve_whole_shares(
                 exact, component.fraction_treatment, tie_break=tie_break
             )
-            book.holdings[context.security_id] = SecurityHoldingV1(
-                security_id=context.security_id,
-                quantity=whole,
-                cost_basis=holding.cost_basis,
-            )
+            book.holdings[context.security_id] = _requantified(holding, whole)
             if residual:
                 self._stage_cash_in_lieu(context, component, residual, book)
         # A stock dividend re-denominates the security exactly as a split
@@ -910,10 +914,11 @@ class CorporateActionProcessor:
             # zero basis and the parent keeps its own. Daily marks still value
             # both from their own closing prices.
             with decimal_context():
-                basis = ZERO if existing is None else existing.cost_basis
-            book.holdings[child] = SecurityHoldingV1(
+                basis = ZERO if existing is None else known_cost_basis(existing)
+            book.holdings[child] = SecurityHoldingV2(
                 security_id=child,
                 quantity=whole + (0 if existing is None else existing.quantity),
+                basis_status="known",
                 cost_basis=basis,
             )
             book.delivered.setdefault(child, context)
@@ -1067,14 +1072,15 @@ class CorporateActionProcessor:
         if holding is None:
             return
         with decimal_context():
-            basis = holding.cost_basis + (
-                ZERO if existing is None else existing.cost_basis
+            basis = known_cost_basis(holding) + (
+                ZERO if existing is None else known_cost_basis(existing)
             )
         del book.holdings[context.security_id]
         book.removed[context.security_id] = context
-        book.holdings[acquirer] = SecurityHoldingV1(
+        book.holdings[acquirer] = SecurityHoldingV2(
             security_id=acquirer,
             quantity=whole + (0 if existing is None else existing.quantity),
+            basis_status="known",
             cost_basis=basis,
         )
         book.delivered.setdefault(acquirer, context)
@@ -1353,7 +1359,7 @@ class CorporateActionProcessor:
     def _dispose(
         self,
         context: _EffectContext,
-        holding: SecurityHoldingV1,
+        holding: SecurityHoldingV2,
         components: Iterable[CashComponentV1],
         book: _Book,
     ) -> None:
@@ -1367,6 +1373,7 @@ class CorporateActionProcessor:
         is realized now: in the pass of the first clock session on or after
         the effective date.
         """
+        basis = known_cost_basis(holding)
         payable_on = _payable_session(_date_facts(_terms_payload(context)))
         del book.holdings[context.security_id]
         book.removed[context.security_id] = context
@@ -1384,13 +1391,13 @@ class CorporateActionProcessor:
             with decimal_context():
                 proceeds += claim.total_cash_expected
         with decimal_context():
-            book.realized += proceeds - holding.cost_basis
+            book.realized += proceeds - basis
 
     def _record_claims(
         self,
-        state: PortfolioStateV1,
+        state: PortfolioStateV2,
         claims: Mapping[ClaimIdentity, PendingCashClaimV1],
-    ) -> PortfolioStateV1:
+    ) -> PortfolioStateV2:
         if not claims:
             return state
         # A claim already pending or already settled is the same entitlement.
@@ -1708,7 +1715,7 @@ def _definitely_precedes(earlier: _EffectContext, later: _EffectContext) -> bool
 
 
 def _index_pending_claims(
-    state: PortfolioStateV1,
+    state: PortfolioStateV2,
 ) -> dict[_ClaimIndexKey, dict[SHA256Hash, PendingCashClaimV1]]:
     """Index pending claims by the identity a delivery group can name.
 

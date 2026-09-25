@@ -18,7 +18,7 @@ from drift.domain.evaluator_portfolio import (
     PortfolioFillV1,
     PortfolioStateV1,
     PortfolioStateV2,
-    SecurityHoldingV1,
+    SecurityHoldingV2,
     decimal_context,
 )
 from drift.domain.securities import ListingVenue
@@ -55,12 +55,13 @@ def _security_order(security_id: UUID) -> bytes:
     return security_id.bytes
 
 
-def positions_digest(holdings: Sequence[SecurityHoldingV1]) -> SHA256Hash:
+def positions_digest(holdings: Sequence[SecurityHoldingV2]) -> SHA256Hash:
     """Digest the share counts a rebalance plan was computed against.
 
     Quantities only. Cost basis does not change any delta, and hashing an
     exact Decimal would make two economically identical books disagree over
-    trailing zeros.
+    trailing zeros. A basis status is no share count either, so an
+    indeterminate basis leaves the digest where a known one would.
     """
     return content_hash(
         {str(holding.security_id): holding.quantity for holding in holdings}

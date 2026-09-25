@@ -58,7 +58,7 @@ from drift.domain.evaluator_exploratory_strategy import (
 from drift.domain.evaluator_reconstruction import ExploratoryReconstructionPolicyV1
 from drift.domain.evaluator_results import (
     EvaluationClassification,
-    EvaluationRunArtifactsV1,
+    EvaluationRunArtifactsV2,
 )
 from drift.domain.evaluator_strategy import (
     SecurityTargetPositionV1,
@@ -784,11 +784,11 @@ class _ForgingReconstructedStrategy(ReconstructedTargetStrategy):
         return self.forge(super().decide_exploratory(context))
 
 
-def _run_realized(forge: _Forgery) -> EvaluationRunArtifactsV1:
+def _run_realized(forge: _Forgery) -> EvaluationRunArtifactsV2:
     return eng._run(eng._engine(), _ForgingRealizedStrategy(forge))
 
 
-def _run_reconstructed(forge: _Forgery) -> EvaluationRunArtifactsV1:
+def _run_reconstructed(forge: _Forgery) -> EvaluationRunArtifactsV2:
     return run_engine(
         reconstructed_engine(bundle_of(three_regular_sessions())),
         _ForgingReconstructedStrategy(forge),
@@ -797,7 +797,7 @@ def _run_reconstructed(forge: _Forgery) -> EvaluationRunArtifactsV1:
 
 @dataclasses.dataclass(frozen=True)
 class _Lane:
-    run: Callable[[_Forgery], EvaluationRunArtifactsV1]
+    run: Callable[[_Forgery], EvaluationRunArtifactsV2]
     decision_event: (
         type[StrategyDecisionTraceEventV1]
         | type[ExploratoryStrategyDecisionTraceEventV1]
@@ -1030,7 +1030,7 @@ GENUINE_RUN_HASHES = {
     ),
 }
 
-GENUINE_RUNS: dict[str, Callable[[], EvaluationRunArtifactsV1]] = {
+GENUINE_RUNS: dict[str, Callable[[], EvaluationRunArtifactsV2]] = {
     "realized-staged": lambda: eng._run(eng._engine()),
     "realized-refused-by-staging": lambda: eng._run(
         eng._engine(), eng.FixedTargetStrategy({eng.DAY_1: ((eng.SEC_B, 1),)})

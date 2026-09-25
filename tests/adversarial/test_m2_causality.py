@@ -111,7 +111,7 @@ from drift.domain.evaluator_lanes import (
 )
 from drift.domain.evaluator_results import (
     EvaluationClassification,
-    EvaluationRunArtifactsV1,
+    EvaluationRunArtifactsV2,
 )
 from drift.domain.evaluator_strategy import (
     SecurityTargetPositionV1,
@@ -1596,7 +1596,7 @@ def test_the_non_overlap_guard_is_what_keeps_decision_history_closed() -> None:
 
 def _f4_run(
     other_days: tuple[date, ...], target_day: date = JAN6
-) -> tuple[EvaluationRunArtifactsV1, ReconstructedTargetStrategy]:
+) -> tuple[EvaluationRunArtifactsV2, ReconstructedTargetStrategy]:
     """SEC on every day, SEC_OTHER on its own days; ``target_day`` buys SEC_OTHER."""
     pair = (SEC, SEC_OTHER)
     ours = tuple(

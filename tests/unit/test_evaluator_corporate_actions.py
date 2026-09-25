@@ -79,8 +79,8 @@ from drift.domain.evaluator_portfolio import (
     MarkEvidenceV1,
     MarkPriceV1,
     PendingCashClaimV1,
-    PortfolioStateV1,
-    SecurityHoldingV1,
+    PortfolioStateV2,
+    SecurityHoldingV2,
     pending_cash_claim_id,
 )
 from drift.domain.evaluator_strategy import SecurityTargetPositionV1
@@ -507,23 +507,33 @@ def _mark_price(security_id: UUID, price: str) -> MarkPriceV1:
 
 def _holding(
     security_id: UUID = SEC_A, quantity: int = 100, basis: str = "1000"
-) -> SecurityHoldingV1:
-    return SecurityHoldingV1(
-        security_id=security_id, quantity=quantity, cost_basis=Decimal(basis)
+) -> SecurityHoldingV2:
+    return SecurityHoldingV2(
+        security_id=security_id,
+        quantity=quantity,
+        basis_status="known",
+        cost_basis=Decimal(basis),
     )
+
+
+def _known_basis(holding: SecurityHoldingV2) -> Decimal:
+    """The exact basis of a holding the test expects to be known."""
+    assert holding.basis_status == "known"
+    assert holding.cost_basis is not None
+    return holding.cost_basis
 
 
 def _state(
     *,
-    holdings: tuple[SecurityHoldingV1, ...] = (),
+    holdings: tuple[SecurityHoldingV2, ...] = (),
     cash: str = "10000",
     claims: tuple[PendingCashClaimV1, ...] = (),
     settled: tuple[str, ...] = (),
     day: date = EFFECT_DAY,
-) -> PortfolioStateV1:
+) -> PortfolioStateV2:
     claims_value = sum((claim.total_cash_expected for claim in claims), ZERO)
     cash_value = Decimal(cash)
-    return PortfolioStateV1(
+    return PortfolioStateV2(
         lane="exploratory",
         admission_hash=EXPLORATORY.admission_hash,
         session_key=_key(day),
@@ -1243,7 +1253,7 @@ def test_cash_dividend_creates_claim_and_settles_on_delivered_evidence() -> None
     assert settled.settled_claim_ids == (claim.claim_id,)
 
 
-def _payable_state(state: PortfolioStateV1) -> PortfolioStateV1:
+def _payable_state(state: PortfolioStateV2) -> PortfolioStateV2:
     kernel = PortfolioAccountingKernel(state, session_clock=CLOCK)
     kernel.advance_session(_key(PAYABLE_DAY))
     return kernel.state
@@ -2170,7 +2180,7 @@ def test_a_cash_acquisition_relieves_its_basis_into_realized_pnl() -> None:
     assert updated.realized_net_pnl == Decimal("300")
     # Realized-PnL identity: cash, claims and remaining basis equal the
     # opening cash and basis plus everything realized.
-    remaining = sum((item.cost_basis for item in updated.holdings), ZERO)
+    remaining = sum((_known_basis(item) for item in updated.holdings), ZERO)
     assert updated.cash_balance + updated.pending_claims_value + remaining == (
         Decimal("500") + Decimal("900") + updated.realized_net_pnl
     )
@@ -2299,7 +2309,7 @@ def test_a_disposal_realizes_the_proceeds_of_every_cash_component() -> None:
 def test_realized_disposal_pnl_accumulates_on_the_prior_realized_pnl() -> None:
     outcome = _liquidation_case(suffix=1990, claim_status="extinguished")
     prior = _state(holdings=(_holding(quantity=10, basis="100"),))
-    state = PortfolioStateV1.model_validate(
+    state = PortfolioStateV2.model_validate(
         dict(prior)
         | {"realized_gross_pnl": Decimal("12"), "realized_net_pnl": Decimal("10")}
     )
@@ -3787,7 +3797,7 @@ def _target(security_id: UUID, quantity: int) -> SecurityTargetPositionV1:
 
 
 def _quantities(
-    items: tuple[SecurityTargetPositionV1, ...] | tuple[SecurityHoldingV1, ...],
+    items: tuple[SecurityTargetPositionV1, ...] | tuple[SecurityHoldingV2, ...],
 ) -> dict[UUID, int]:
     return {
         item.security_id: (
@@ -5377,7 +5387,7 @@ def _delivery_case(
     amount: str = "1",
     share_basis: str,
 ) -> tuple[
-    PortfolioStateV1,
+    PortfolioStateV2,
     tuple[SecurityTargetPositionV1, ...],
     tuple[SecurityEconomicOutcomeV1, ...],
 ]:
@@ -5414,7 +5424,7 @@ def _delivery_case(
     distribution = _distribution(
         SEC_ACQ, 3630, kind=kind, amount=amount, share_basis=share_basis
     )
-    holdings: tuple[SecurityHoldingV1, ...] = (
+    holdings: tuple[SecurityHoldingV2, ...] = (
         _holding(predecessor, quantity=100, basis="900"),
     )
     targets: tuple[SecurityTargetPositionV1, ...] = (_target(predecessor, 100),)
@@ -5589,7 +5599,7 @@ def test_a_post_action_distribution_on_a_spin_off_child_halts(
     # both orders halt. It used to be owed on 50 or 54 parent first, and on
     # nothing or 4 child first.
     assert (parent.bytes < SEC_CHILD.bytes) is (parent == SEC_A)
-    holdings: tuple[SecurityHoldingV1, ...] = (
+    holdings: tuple[SecurityHoldingV2, ...] = (
         _holding(parent, quantity=100, basis="900"),
     )
     if child_held:

@@ -42,7 +42,7 @@ from drift.domain.evaluator_corporate_actions import (
 )
 from drift.domain.evaluator_execution import (
     IndeterminateExecutionError,
-    RebalanceOutcomeV1,
+    RebalanceOutcomeV2,
 )
 from drift.domain.evaluator_portfolio import (
     IndeterminateValuationError,
@@ -55,7 +55,7 @@ from drift.domain.evaluator_protocol import (
 )
 from drift.domain.evaluator_results import (
     EvaluationClassification,
-    EvaluationRunArtifactsV1,
+    EvaluationRunArtifactsV2,
 )
 from drift.domain.evaluator_strategy import SecurityTargetPositionV1
 from drift.domain.evaluator_trace import EvaluationPhase
@@ -759,7 +759,7 @@ def _run_action(
     outcome: SecurityEconomicOutcomeV1,
     views: tuple[DerivedObservationViewV1, ...],
     strategy: eng.FixedTargetStrategy | None = None,
-) -> EvaluationRunArtifactsV1:
+) -> EvaluationRunArtifactsV2:
     bundle = eng._bundle(
         accounting_views=views, economic_outcomes=(outcome.resolution,)
     )
@@ -781,7 +781,7 @@ def _pre_action_views() -> tuple[DerivedObservationViewV1, ...]:
     return tuple(eng._accounting_view(eng.SEC_A, day) for day in eng.DAYS[:3])
 
 
-def _fills(artifacts: EvaluationRunArtifactsV1) -> list[tuple[int, str, int]]:
+def _fills(artifacts: EvaluationRunArtifactsV2) -> list[tuple[int, str, int]]:
     return [
         (event.session_index, event.fill.side, event.fill.quantity)
         for event in artifacts.trace.events
@@ -789,7 +789,7 @@ def _fills(artifacts: EvaluationRunArtifactsV1) -> list[tuple[int, str, int]]:
     ]
 
 
-def _translated_targets(artifacts: EvaluationRunArtifactsV1) -> dict[UUID, int]:
+def _translated_targets(artifacts: EvaluationRunArtifactsV2) -> dict[UUID, int]:
     (applied,) = [
         event
         for event in artifacts.trace.events
@@ -802,7 +802,7 @@ def _translated_targets(artifacts: EvaluationRunArtifactsV1) -> dict[UUID, int]:
     }
 
 
-def _held(artifacts: EvaluationRunArtifactsV1) -> dict[UUID, int]:
+def _held(artifacts: EvaluationRunArtifactsV2) -> dict[UUID, int]:
     return {
         holding.security_id: holding.quantity
         for holding in artifacts.final_state.holdings
@@ -986,7 +986,7 @@ def test_an_overnight_stock_acquisition_maps_a_staged_hold_to_the_acquirer() -> 
 
 def _acquisition_into_unadmitted_acquirer(
     suffix: int, strategy: eng.FixedTargetStrategy
-) -> EvaluationRunArtifactsV1:
+) -> EvaluationRunArtifactsV2:
     """SEC_A is acquired 3:2 into SEC_B, which no decision universe admits."""
     outcome = _share_action_outcome(
         ActionKind.STOCK_ACQUISITION,
@@ -1073,7 +1073,7 @@ def _run_over(
     strategy: eng.FixedTargetStrategy,
     views: tuple[DerivedObservationViewV1, ...] | None = None,
     warmup: int = 2,
-) -> EvaluationRunArtifactsV1:
+) -> EvaluationRunArtifactsV2:
     bundle = eng._bundle(
         days=days,
         decision_views=tuple(eng._decision_view(eng.SEC_A, day) for day in days),
@@ -1160,7 +1160,7 @@ def _dividend_outcome(
     )
 
 
-def _applied_sessions(artifacts: EvaluationRunArtifactsV1) -> list[int]:
+def _applied_sessions(artifacts: EvaluationRunArtifactsV2) -> list[int]:
     return [
         event.session_index
         for event in artifacts.trace.events
@@ -1168,7 +1168,7 @@ def _applied_sessions(artifacts: EvaluationRunArtifactsV1) -> list[int]:
     ]
 
 
-def _settled(artifacts: EvaluationRunArtifactsV1) -> list[tuple[int, Decimal]]:
+def _settled(artifacts: EvaluationRunArtifactsV2) -> list[tuple[int, Decimal]]:
     return [
         (event.session_index, event.settled_cash)
         for event in artifacts.trace.events
@@ -1378,10 +1378,10 @@ _INITIAL_CASH = Decimal("10000.00")
 
 
 def _assert_realized_identity(
-    artifacts: EvaluationRunArtifactsV1, *, income: Decimal = ZERO
+    artifacts: EvaluationRunArtifactsV2, *, income: Decimal = ZERO
 ) -> None:
     state = artifacts.final_state
-    basis = sum((holding.cost_basis for holding in state.holdings), ZERO)
+    basis = sum((ca._known_basis(holding) for holding in state.holdings), ZERO)
     assert state.cash_balance + state.pending_claims_value + basis == (
         _INITIAL_CASH + state.realized_net_pnl + income
     )
@@ -1508,7 +1508,7 @@ def test_an_overnight_split_on_an_ended_claim_halts_the_run(claim_status: str) -
         ),
     )
 
-    def split(status: str, suffix: int) -> EvaluationRunArtifactsV1:
+    def split(status: str, suffix: int) -> EvaluationRunArtifactsV2:
         return _run_action(
             _share_action_outcome(
                 ActionKind.FORWARD_SPLIT,
@@ -1628,7 +1628,7 @@ def test_a_costed_run_matches_an_independent_exact_computation() -> None:
     initial_cash = Fraction(engine.protocol.initial_cash)
     assert Fraction(final.cash_balance) == initial_cash - fill_price * quantity - costs
     (holding,) = final.holdings
-    assert Fraction(holding.cost_basis) == fill_price * quantity + costs
+    assert Fraction(ca._known_basis(holding)) == fill_price * quantity + costs
     assert final.mark is not None
     (mark,) = final.mark.prices
     market_value = Fraction(mark.close_price) * quantity
@@ -1638,7 +1638,9 @@ def test_a_costed_run_matches_an_independent_exact_computation() -> None:
     # NAV identity: the change in NAV is realized net PnL plus unrealized PnL.
     metrics = artifacts.result.metrics
     assert Fraction(final.net_asset_value) - initial_cash == (
-        Fraction(metrics.realized_net_pnl) + market_value - Fraction(holding.cost_basis)
+        Fraction(metrics.realized_net_pnl)
+        + market_value
+        - Fraction(ca._known_basis(holding))
     )
 
 
@@ -1754,7 +1756,7 @@ def test_a_rejected_rebalance_cannot_be_relabelled_with_committed_fills() -> Non
     with pytest.raises(
         ValidationError, match=r"a rejected rebalance must commit zero fills"
     ):
-        RebalanceOutcomeV1.model_validate(
+        RebalanceOutcomeV2.model_validate(
             dict(outcome) | {"committed_fills": outcome.plan.planned_fills}
         )
 

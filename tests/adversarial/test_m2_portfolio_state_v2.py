@@ -25,12 +25,15 @@ _UNIT_SUPPORT = Path(__file__).resolve().parents[1] / "unit"
 if str(_UNIT_SUPPORT) not in sys.path:
     sys.path.insert(0, str(_UNIT_SUPPORT))
 
+import json
 from collections.abc import Callable
+from decimal import Decimal
 from uuid import UUID
 
 import pytest
 import test_evaluator_corporate_actions as ca
 import test_evaluator_engine as eng
+from pydantic import ValidationError
 
 from drift.domain.economic_common import (
     ActionKind,
@@ -43,9 +46,14 @@ from drift.domain.evaluator_corporate_actions import (
     CashInLieuRateV1,
     SecurityEconomicOutcomeV1,
 )
+from drift.domain.evaluator_portfolio import (
+    PortfolioStateV1,
+    PortfolioStateV2,
+    SecurityHoldingV2,
+)
 from drift.domain.evaluator_results import (
     EvaluationClassification,
-    EvaluationRunArtifactsV1,
+    EvaluationRunArtifactsV2,
 )
 from drift.domain.normalization import DerivedObservationViewV1
 from drift.evaluator.engine import SessionEvaluatorEngine, SessionEvaluatorEvidence
@@ -128,7 +136,7 @@ def _run(
     *,
     rates: tuple[CashInLieuRateV1, ...] = (),
     strategy: eng.FixedTargetStrategy | None = None,
-) -> EvaluationRunArtifactsV1:
+) -> EvaluationRunArtifactsV2:
     bundle = eng._bundle(
         accounting_views=views, economic_outcomes=(outcome.resolution,)
     )
@@ -181,7 +189,7 @@ def _pre_action_views_and_child() -> tuple[DerivedObservationViewV1, ...]:
 # --- runs whose basis stays known ------------------------------------------
 
 
-def forward_split_run() -> EvaluationRunArtifactsV1:
+def forward_split_run() -> EvaluationRunArtifactsV2:
     _, outcome = _action(
         ActionKind.FORWARD_SPLIT,
         suffix=4900,
@@ -194,7 +202,7 @@ def forward_split_run() -> EvaluationRunArtifactsV1:
     return _run(outcome, _views(session_3=("55.00", "60.00")))
 
 
-def stock_dividend_run() -> EvaluationRunArtifactsV1:
+def stock_dividend_run() -> EvaluationRunArtifactsV2:
     _, outcome = _action(
         ActionKind.STOCK_DIVIDEND,
         suffix=4910,
@@ -207,7 +215,7 @@ def stock_dividend_run() -> EvaluationRunArtifactsV1:
     return _run(outcome, _views(session_3=("100.00", "109.10")))
 
 
-def stock_acquisition_run() -> EvaluationRunArtifactsV1:
+def stock_acquisition_run() -> EvaluationRunArtifactsV2:
     _, outcome = _action(
         ActionKind.STOCK_ACQUISITION,
         suffix=4920,
@@ -224,7 +232,7 @@ def stock_acquisition_run() -> EvaluationRunArtifactsV1:
     return _run(outcome, _pre_action_views_and_child())
 
 
-def extinguishing_liquidation_run() -> EvaluationRunArtifactsV1:
+def extinguishing_liquidation_run() -> EvaluationRunArtifactsV2:
     _, outcome = _action(
         ActionKind.LIQUIDATION,
         suffix=4930,
@@ -235,7 +243,7 @@ def extinguishing_liquidation_run() -> EvaluationRunArtifactsV1:
     return _run(outcome, _views())
 
 
-def cash_acquisition_run() -> EvaluationRunArtifactsV1:
+def cash_acquisition_run() -> EvaluationRunArtifactsV2:
     _, outcome = _action(
         ActionKind.CASH_ACQUISITION,
         suffix=4940,
@@ -246,7 +254,7 @@ def cash_acquisition_run() -> EvaluationRunArtifactsV1:
     return _run(outcome, _views())
 
 
-def cash_dividend_run() -> EvaluationRunArtifactsV1:
+def cash_dividend_run() -> EvaluationRunArtifactsV2:
     _, outcome = _action(
         ActionKind.REGULAR_CASH_DIVIDEND,
         suffix=4950,
@@ -259,7 +267,7 @@ def cash_dividend_run() -> EvaluationRunArtifactsV1:
 # --- runs that expose an indeterminate or relieved basis --------------------
 
 
-def spinoff_run() -> EvaluationRunArtifactsV1:
+def spinoff_run() -> EvaluationRunArtifactsV2:
     _, outcome = _action(
         ActionKind.SPINOFF,
         suffix=4960,
@@ -275,7 +283,7 @@ def spinoff_run() -> EvaluationRunArtifactsV1:
     return _run(outcome, _views(child=True))
 
 
-def continuing_instalment_run() -> EvaluationRunArtifactsV1:
+def continuing_instalment_run() -> EvaluationRunArtifactsV2:
     _, outcome = _action(
         ActionKind.LIQUIDATION,
         suffix=4970,
@@ -285,7 +293,7 @@ def continuing_instalment_run() -> EvaluationRunArtifactsV1:
     return _run(outcome, _views())
 
 
-def mixed_acquisition_run() -> EvaluationRunArtifactsV1:
+def mixed_acquisition_run() -> EvaluationRunArtifactsV2:
     _, outcome = _action(
         ActionKind.MIXED_ACQUISITION,
         suffix=4980,
@@ -304,7 +312,7 @@ def mixed_acquisition_run() -> EvaluationRunArtifactsV1:
     return _run(outcome, _pre_action_views_and_child())
 
 
-def aggregate_sale_residual_run() -> EvaluationRunArtifactsV1:
+def aggregate_sale_residual_run() -> EvaluationRunArtifactsV2:
     effect, outcome = _action(
         ActionKind.REVERSE_SPLIT,
         suffix=4990,
@@ -381,7 +389,7 @@ RUN_PINS: dict[str, tuple[EvaluationClassification, str, str]] = {
     ),
 }
 
-RUNS: dict[str, Callable[[], EvaluationRunArtifactsV1]] = {
+RUNS: dict[str, Callable[[], EvaluationRunArtifactsV2]] = {
     "forward-split": forward_split_run,
     "stock-dividend": stock_dividend_run,
     "stock-acquisition": stock_acquisition_run,
@@ -404,3 +412,42 @@ def test_a_corporate_action_run_keeps_its_recorded_hashes(name: str) -> None:
         artifacts.trace.trace_hash,
         artifacts.result.result_hash,
     ) == RUN_PINS[name]
+
+
+# ==========================================================================
+# One accounting truth
+# ==========================================================================
+
+
+def test_the_engine_books_every_run_into_a_v2_book() -> None:
+    artifacts = forward_split_run()
+
+    assert type(artifacts) is EvaluationRunArtifactsV2
+    assert type(artifacts.final_state) is PortfolioStateV2
+    (holding,) = artifacts.final_state.holdings
+    assert type(holding) is SecurityHoldingV2
+    assert (holding.quantity, holding.basis_status, holding.cost_basis) == (
+        20,
+        "known",
+        Decimal("1000"),
+    )
+
+
+def test_run_artifacts_never_pair_a_result_with_a_v1_book() -> None:
+    artifacts = forward_split_run()
+    data = json.loads(artifacts.model_dump_json())
+    # The same book spelled as V1: no basis status, and a V1 schema version.
+    book = data["final_state"]
+    book["schema_version"] = "1"
+    del book["applied_effect_ids"]
+    for holding in book["holdings"]:
+        holding["schema_version"] = "1"
+        del holding["basis_status"]
+        del holding["basis_indeterminate_by"]
+    assert PortfolioStateV1.model_validate_json(json.dumps(book))
+
+    with pytest.raises(ValidationError):
+        EvaluationRunArtifactsV2.model_validate_json(json.dumps(data))
+    # Control: the V2 book the run produced rebuilds exactly.
+    rebuilt = EvaluationRunArtifactsV2.model_validate_json(artifacts.model_dump_json())
+    assert rebuilt == artifacts

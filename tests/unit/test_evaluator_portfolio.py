@@ -35,6 +35,7 @@ from drift.domain.evaluator_portfolio import (
     PortfolioFillV1,
     PortfolioMarkV1,
     PortfolioStateV1,
+    PortfolioStateV2,
     SecurityHoldingV1,
     canonical_money,
     pending_cash_claim_id,
@@ -168,7 +169,7 @@ def _state(
     cash: str = "10000.00",
     day: date = FRI,
     admission: EvaluationAdmissionV1 = EXPLORATORY,
-) -> PortfolioStateV1:
+) -> PortfolioStateV2:
     return initial_portfolio_state(
         session_key=_key(day), initial_cash=Decimal(cash), admission=admission
     )
@@ -1112,7 +1113,7 @@ def test_mark_cannot_be_reused_under_a_later_persisted_session() -> None:
     persisted = kernel.state.model_dump(mode="python")
     persisted["session_key"] = _key(MON).model_dump(mode="python")
     with pytest.raises((ValidationError, ValueError), match="mark belongs to session"):
-        PortfolioStateV1.model_validate(persisted)
+        PortfolioStateV2.model_validate(persisted)
 
 
 # --- mark invalidation (value-creation guard) ---
@@ -1339,7 +1340,9 @@ def test_non_terminating_basis_relief_is_deterministic() -> None:
         kernel = _kernel("10000.00")
         kernel.apply_fill(_buy(3, "33.33"))
         kernel.apply_fill(_sell(1, "40.00"))
-        return kernel.state.holdings[0].cost_basis
+        basis = kernel.state.holdings[0].cost_basis
+        assert basis is not None
+        return basis
 
     first = run()
     with localcontext() as ctx:
@@ -1598,6 +1601,6 @@ def test_monetary_fields_round_trip_through_json() -> None:
     kernel.apply_fill(_buy(10, "20.00"))
     kernel.mark_close((_mark("21.37"),))
     payload = kernel.state.model_dump_json()
-    restored = PortfolioStateV1.model_validate_json(payload)
+    restored = PortfolioStateV2.model_validate_json(payload)
     assert restored == kernel.state
     assert content_hash(restored) == content_hash(kernel.state)

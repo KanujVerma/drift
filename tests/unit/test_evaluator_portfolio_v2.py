@@ -202,9 +202,22 @@ def test_a_known_position_view_dumps_exactly_as_before() -> None:
 
 
 def test_the_positions_digest_stays_quantity_only() -> None:
+    # Pinned over V1 holdings before the switch; the V2 digest is identical,
+    # whatever the basis status.
     holdings = (
-        SecurityHoldingV1(security_id=SEC_A, quantity=8, cost_basis=Decimal("1")),
-        SecurityHoldingV1(security_id=SEC_B, quantity=3, cost_basis=Decimal("0")),
+        SecurityHoldingV2(
+            security_id=SEC_A,
+            quantity=8,
+            basis_status="known",
+            cost_basis=Decimal("1"),
+        ),
+        SecurityHoldingV2(
+            security_id=SEC_B,
+            quantity=3,
+            basis_status="indeterminate",
+            cost_basis=None,
+            basis_indeterminate_by=(SPINOFF_ID,),
+        ),
     )
     assert positions_digest(holdings) == (
         "8a2d1319a0a7eaca6b22ccecaee4216abe042942eacdaa21f39abe4a435fc149"

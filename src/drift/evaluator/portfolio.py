@@ -10,14 +10,15 @@ from drift.domain.evaluator_lanes import EvaluationAdmissionV1
 from drift.domain.evaluator_portfolio import (
     LANE_ADMISSIBLE_MARK_GRADES,
     EvaluationLane,
+    IndeterminateBasisError,
     IndeterminateValuationError,
     LaneAdmissibilityError,
     MarkPriceV1,
     PendingCashClaimV1,
     PortfolioFillV1,
     PortfolioMarkV1,
-    PortfolioStateV1,
-    SecurityHoldingV1,
+    PortfolioStateV2,
+    SecurityHoldingV2,
     decimal_context,
 )
 from drift.domain.sessions import SessionKeyV1
@@ -30,7 +31,7 @@ def initial_portfolio_state(
     session_key: SessionKeyV1,
     initial_cash: Decimal,
     admission: EvaluationAdmissionV1,
-) -> PortfolioStateV1:
+) -> PortfolioStateV2:
     """Build the opening state for an evaluation run in an admitted lane.
 
     The lane is taken from the admission rather than passed alongside it, so a
@@ -38,7 +39,7 @@ def initial_portfolio_state(
     """
     if initial_cash <= ZERO:
         raise ValueError("initial cash must be strictly positive")
-    return PortfolioStateV1(
+    return PortfolioStateV2(
         lane=admission.lane,
         admission_hash=admission.admission_hash,
         session_key=session_key,
@@ -46,6 +47,7 @@ def initial_portfolio_state(
         holdings=(),
         pending_cash_claims=(),
         settled_claim_ids=(),
+        applied_effect_ids=(),
         mark=None,
         holdings_market_value=ZERO,
         pending_claims_value=ZERO,
@@ -57,9 +59,24 @@ def initial_portfolio_state(
 
 
 def _ordered_holdings(
-    holdings: Mapping[UUID7, SecurityHoldingV1],
-) -> tuple[SecurityHoldingV1, ...]:
+    holdings: Mapping[UUID7, SecurityHoldingV2],
+) -> tuple[SecurityHoldingV2, ...]:
     return tuple(holdings[key] for key in sorted(holdings, key=str))
+
+
+def known_cost_basis(holding: SecurityHoldingV2) -> Decimal:
+    """The exact cost basis of a holding, refusing one that is indeterminate.
+
+    Realized PnL is relieved from this basis, so an indeterminate one fails
+    closed rather than reading as zero (spec 12.5).
+    """
+    if holding.cost_basis is None:
+        raise IndeterminateBasisError(
+            f"the cost basis of {holding.security_id} is indeterminate, caused by "
+            f"{', '.join(holding.basis_indeterminate_by)}, so realizing it "
+            "would invent realized PnL"
+        )
+    return holding.cost_basis
 
 
 def _ordered_claims(
@@ -81,7 +98,7 @@ class PortfolioAccountingKernel:
     """
 
     def __init__(
-        self, state: PortfolioStateV1, *, session_clock: SessionClockV1
+        self, state: PortfolioStateV2, *, session_clock: SessionClockV1
     ) -> None:
         self._clock = session_clock
         self._session_positions: dict[SessionKeyV1, int] = {
@@ -96,7 +113,7 @@ class PortfolioAccountingKernel:
             )
         self._state = state
         self._lane: EvaluationLane = state.lane
-        self._holdings: dict[UUID7, SecurityHoldingV1] = {
+        self._holdings: dict[UUID7, SecurityHoldingV2] = {
             holding.security_id: holding for holding in state.holdings
         }
         self._claims: dict[SHA256Hash, PendingCashClaimV1] = {
@@ -105,13 +122,16 @@ class PortfolioAccountingKernel:
         self._cash = state.cash_balance
         self._mark: PortfolioMarkV1 | None = state.mark
         self._settled: set[SHA256Hash] = set(state.settled_claim_ids)
+        # The kernel applies no economic effect itself, so it carries the
+        # book's applied effects through every mutation unchanged.
+        self._applied = state.applied_effect_ids
         self._realized_gross = state.realized_gross_pnl
         self._realized_net = state.realized_net_pnl
         self._costs = state.cumulative_transaction_costs
         self._session = state.session_key
 
     @property
-    def state(self) -> PortfolioStateV1:
+    def state(self) -> PortfolioStateV2:
         """Current immutable state."""
         return self._state
 
@@ -182,7 +202,7 @@ class PortfolioAccountingKernel:
             (claim.total_cash_expected for claim in self._claims.values()), ZERO
         )
         market_value = self._marked_value()
-        self._state = PortfolioStateV1(
+        self._state = PortfolioStateV2(
             lane=self._lane,
             admission_hash=self._state.admission_hash,
             session_key=self._session,
@@ -190,6 +210,7 @@ class PortfolioAccountingKernel:
             holdings=_ordered_holdings(self._holdings),
             pending_cash_claims=_ordered_claims(self._claims),
             settled_claim_ids=tuple(sorted(self._settled)),
+            applied_effect_ids=self._applied,
             mark=self._mark,
             holdings_market_value=market_value,
             pending_claims_value=claims_value,
@@ -224,16 +245,18 @@ class PortfolioAccountingKernel:
         self._cash -= required
         existing = self._holdings.get(fill.security_id)
         if existing is None:
-            self._holdings[fill.security_id] = SecurityHoldingV1(
+            self._holdings[fill.security_id] = SecurityHoldingV2(
                 security_id=fill.security_id,
                 quantity=fill.quantity,
+                basis_status="known",
                 cost_basis=required,
             )
             return
-        self._holdings[fill.security_id] = SecurityHoldingV1(
+        self._holdings[fill.security_id] = SecurityHoldingV2(
             security_id=fill.security_id,
             quantity=existing.quantity + fill.quantity,
-            cost_basis=existing.cost_basis + required,
+            basis_status="known",
+            cost_basis=known_cost_basis(existing) + required,
         )
 
     def _apply_sell(self, fill: PortfolioFillV1) -> None:
@@ -250,7 +273,8 @@ class PortfolioAccountingKernel:
                 f"insufficient cash for sell costs: proceeds {proceeds}, "
                 f"costs {fill.transaction_costs}, holds {self._cash}"
             )
-        relieved = existing.cost_basis * fill.quantity / existing.quantity
+        basis = known_cost_basis(existing)
+        relieved = basis * fill.quantity / existing.quantity
         self._cash += net_proceeds
         self._realized_gross += proceeds - relieved
         self._realized_net += proceeds - relieved - fill.transaction_costs
@@ -258,10 +282,11 @@ class PortfolioAccountingKernel:
         if remaining == 0:
             del self._holdings[fill.security_id]
             return
-        self._holdings[fill.security_id] = SecurityHoldingV1(
+        self._holdings[fill.security_id] = SecurityHoldingV2(
             security_id=fill.security_id,
             quantity=remaining,
-            cost_basis=existing.cost_basis - relieved,
+            basis_status="known",
+            cost_basis=basis - relieved,
         )
 
     def record_claim(self, claim: PendingCashClaimV1) -> None:
