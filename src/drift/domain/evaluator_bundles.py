@@ -5,7 +5,7 @@ from typing import Literal, Self
 from pydantic import field_validator, model_validator
 
 from drift.domain.assertions import TemporalIntervalClaimV1
-from drift.domain.common import FrozenModel, SHA256Hash
+from drift.domain.common import FrozenModel, NonBlankStr, SHA256Hash
 from drift.domain.economic_results import EconomicOutcomeResolutionV1
 from drift.domain.evaluator_clock import SessionClockV1
 from drift.domain.evaluator_reconstruction import (
@@ -62,6 +62,9 @@ class EvaluationInputBundleV1(FrozenModel):
     exploratory_reconstructed_observations: tuple[
         ExploratoryReconstructedSessionObservationV1, ...
     ] = ()
+    # Limitations of the producer's dataset itself, which no evidence member
+    # declares, such as a truncated corporate-action window (issue 92).
+    dataset_limitations: tuple[NonBlankStr, ...] = ()
     bundle_hash: SHA256Hash
 
     @field_validator("security_identities")
@@ -131,6 +134,15 @@ class EvaluationInputBundleV1(FrozenModel):
         cls, members: tuple[ExploratoryReconstructedSessionObservationV1, ...]
     ) -> tuple[ExploratoryReconstructedSessionObservationV1, ...]:
         return _canonicalize(members, "exploratory reconstructions")
+
+    @field_validator("dataset_limitations")
+    @classmethod
+    def canonicalize_dataset_limitations(
+        cls, values: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        if len(set(values)) != len(values):
+            raise ValueError("bundle dataset limitations must be unique")
+        return tuple(sorted(values))
 
     @model_validator(mode="after")
     def validate_bundle(self) -> Self:
@@ -203,8 +215,13 @@ class EvaluationInputBundleV1(FrozenModel):
 
     @property
     def required_limitations(self) -> tuple[str, ...]:
-        """Every limitation this bundle's evidence obliges an admission to carry."""
+        """Every limitation this bundle obliges an admission to carry.
+
+        That is every limitation its evidence carries and every limitation its
+        producer declares of the dataset itself.
+        """
         required = set(self.session_clock.acknowledged_limitations)
+        required.update(self.dataset_limitations)
         for observation in self.exploratory_reconstructed_observations:
             required.update(observation.acknowledged_limitations)
         return tuple(sorted(required))

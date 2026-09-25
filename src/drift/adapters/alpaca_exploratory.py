@@ -3102,6 +3102,9 @@ def run_alpaca_exploratory_intake(
         exploratory_cohort=cohort,
         exploratory_reconstruction_replay=reconstruction_replay,
         source_snapshot_hash=None,
+        # The corporate-action window is a property of this dataset, which no
+        # evidence member declares, so the bundle itself obliges it (issue 92).
+        dataset_limitations=(ALPACA_LIMITATION_TRUNCATED_CA,),
     )
     admission = build_bridge_admission(bundle=bundle)
 
