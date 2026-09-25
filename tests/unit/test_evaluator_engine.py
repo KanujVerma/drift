@@ -877,7 +877,10 @@ def test_engine_refuses_a_promotion_admission_disguised_as_exploratory() -> None
 
     with pytest.raises(
         PromotionLaneDisabledError,
-        match=PROMOTION_LANE_DISABLED + "engine construction refuses",
+        match=(
+            PROMOTION_LANE_DISABLED
+            + "engine construction on the revalidated admission refuses"
+        ),
     ):
         _construct(bundle, disguised)
 

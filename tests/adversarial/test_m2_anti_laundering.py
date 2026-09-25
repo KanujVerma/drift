@@ -1488,15 +1488,25 @@ def test_no_public_engine_or_runner_entry_yields_promotion_evidence(
 
 
 def _promotion_evidence_sites(path: Path) -> tuple[list[str], int]:
-    """Calls that build a promotion result or assert promotion-grade evidence.
+    """Source text that looks like building promotion evidence.
 
-    An ``isinstance`` test names the type without building one, so it is not
-    a site.
+    A site is a call naming ``PromotionEvaluationResultV1``, a plain alias of
+    that type, or a literal stating ``lane`` as ``"promotion"`` or
+    ``is_promotion_grade_evidence`` as true. The lane literal is what selects
+    the promotion member when a result is built through ``EvaluationResultV1``
+    or ``EvaluationRunArtifactsV1``. An ``isinstance`` test names the type
+    without building one, so it is not a site.
     """
     sites: list[str] = []
     calls = 0
     for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
         pairs: list[tuple[object, ast.expr]]
+        if isinstance(node, ast.Assign | ast.AnnAssign) and (
+            isinstance(node.value, ast.Name | ast.Attribute)
+            and ast.unparse(node.value).endswith("PromotionEvaluationResultV1")
+        ):
+            sites.append(f"{path.name}:{node.lineno} aliases the promotion result")
+            continue
         if isinstance(node, ast.Call):
             calls += 1
             if ast.unparse(node.func) != "isinstance" and any(
@@ -1514,22 +1524,25 @@ def _promotion_evidence_sites(path: Path) -> tuple[list[str], int]:
         else:
             continue
         for name, value in pairs:
-            if (
-                name == "is_promotion_grade_evidence"
-                and isinstance(value, ast.Constant)
-                and value.value is True
-            ):
+            if not isinstance(value, ast.Constant):
+                continue
+            if name == "is_promotion_grade_evidence" and value.value is True:
                 sites.append(f"{path.name}:{node.lineno} asserts promotion grade")
+            if name == "lane" and value.value == "promotion":
+                sites.append(f"{path.name}:{node.lineno} states the promotion lane")
     return sites, calls
 
 
 def test_no_production_source_builds_a_promotion_result() -> None:
-    """Statically, no production code path can yield promotion evidence.
+    """A tripwire, not a proof: no production text looks like promotion evidence.
 
-    A promotion result exists only by constructing, validating, or sealing
-    ``PromotionEvaluationResultV1``, or by stating
-    ``is_promotion_grade_evidence`` true. The engine sealed one at 19c15f8;
-    now no production call does either. The model and the gate stay.
+    The engine sealed a promotion result at 19c15f8 with
+    ``_seal(PromotionEvaluationResultV1, ...)`` and a promotion lane literal;
+    this scan would flag that text, a plain alias of the type, or a literal
+    lane or promotion-grade flag. It reads source text only, so indirection
+    it does not model (a computed lane, a type reached through a container)
+    escapes it. The behavioural refusal tests above are the proof; this only
+    catches the obvious regression early. The model and the gate stay.
     """
     root = Path(__file__).resolve().parents[2]
     sources = sorted(

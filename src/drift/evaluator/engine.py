@@ -206,12 +206,16 @@ def refuse_promotion_lane(subject: object, *, site: str) -> None:
 
     The type is checked, and so is the lane an object declares, so neither a
     promotion model relabelled by ``model_construct`` nor a duck-typed object
-    naming the promotion lane slips past. ``site`` names the guard refusing.
+    naming the promotion lane slips past. So is any promotion-grade claim:
+    anything whose ``is_promotion_grade_evidence`` is not exactly ``False``
+    is refused, whatever lane it names (issue 120 review, F-A). ``site``
+    names the guard refusing.
     """
     promotion_types = PromotionEvaluationAdmissionV1 | PromotionEvaluationResultV1
     if (
         isinstance(subject, promotion_types)
         or getattr(subject, "lane", None) == "promotion"
+        or getattr(subject, "is_promotion_grade_evidence", False) is not False
     ):
         raise PromotionLaneDisabledError(
             f"the promotion lane is disabled (issue 79 ruling): {site} refuses "
@@ -739,7 +743,9 @@ class SessionEvaluatorEngine:
         bundle = _revalidated(EvaluationInputBundleV1, bundle)
         admission = _revalidated_admission(admission)
         # Again on the rebuilt admission: a dump may rebuild into promotion.
-        refuse_promotion_lane(admission, site="engine construction")
+        refuse_promotion_lane(
+            admission, site="engine construction on the revalidated admission"
+        )
         protocol = _revalidated(EvaluationProtocolV1, protocol)
         cost_model = _revalidated(EvaluationCostModelV1, cost_model)
         evidence = _revalidated_evidence(evidence)

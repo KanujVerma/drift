@@ -35,10 +35,12 @@ from exploratory_decision_test_support import (
     DualLaneStrategy,
     ReconstructedTargetStrategy,
     bundle_of,
+    cohort_of,
     early_close_sessions,
     merged_scheduled_clock,
     promotion_admission,
     reconstructed_engine,
+    replay_of,
     run_engine,
     scheduled_bundle,
     scheduled_session_case,
@@ -69,7 +71,10 @@ from drift.domain.evaluator_trace import (
     StrategyDecisionTraceEventV1,
 )
 from drift.domain.normalization import DerivedObservationViewV1
-from drift.evaluator.engine import PromotionLaneDisabledError
+from drift.evaluator.engine import (
+    PromotionLaneDisabledError,
+    _resolve_reconstructed_lane,
+)
 
 NEW_YORK = ZoneInfo("America/New_York")
 SRC = Path(__file__).resolve().parents[2] / "src" / "drift"
@@ -568,6 +573,84 @@ def test_a_promotion_admission_cannot_carry_an_exploratory_cohort() -> None:
 
     with pytest.raises(PromotionLaneDisabledError, match=PROMOTION_LANE_DISABLED):
         reconstructed_engine(realized, admission=promotion_admission(realized))
+
+
+# The guards the lane refusal stands in front of, exercised directly (issue 120
+# review, F-C). Construction never reaches them while the lane is disabled, so
+# each is called as the engine will call it once issue 115 re-enables the lane.
+
+
+def test_the_retained_guard_refuses_reconstructions_under_promotion() -> None:
+    bundle = bundle_of(early_close_sessions())
+    assert bundle.has_exploratory_reconstructions is True
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^a promotion admission cannot evaluate exploratory reconstructed "
+            r"evidence$"
+        ),
+    ):
+        _resolve_reconstructed_lane(
+            bundle=bundle,
+            admission=promotion_admission(bundle),
+            cohort=None,
+            replay=None,
+        )
+
+
+def test_the_retained_guard_refuses_a_cohort_under_promotion() -> None:
+    from test_evaluator_engine import _bundle
+
+    realized = _bundle()
+
+    with pytest.raises(
+        ValueError,
+        match=r"^a promotion admission cannot evaluate an exploratory cohort$",
+    ):
+        _resolve_reconstructed_lane(
+            bundle=realized,
+            admission=promotion_admission(realized),
+            cohort=cohort_of(),
+            replay=None,
+        )
+
+
+def test_the_retained_guard_refuses_replay_evidence_under_promotion() -> None:
+    from test_evaluator_engine import _bundle
+
+    realized = _bundle()
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^a promotion admission cannot evaluate exploratory reconstruction "
+            r"replay evidence$"
+        ),
+    ):
+        _resolve_reconstructed_lane(
+            bundle=realized,
+            admission=promotion_admission(realized),
+            cohort=None,
+            replay=replay_of(()),
+        )
+
+
+def test_the_retained_guards_admit_a_clean_realized_promotion_bundle() -> None:
+    """Control: with nothing weaker present, no reconstructed lane is resolved."""
+    from test_evaluator_engine import _bundle
+
+    realized = _bundle()
+
+    assert (
+        _resolve_reconstructed_lane(
+            bundle=realized,
+            admission=promotion_admission(realized),
+            cohort=None,
+            replay=None,
+        )
+        is None
+    )
 
 
 def test_the_promotion_gate_refuses_the_bundle_an_exploratory_run_completed() -> None:
