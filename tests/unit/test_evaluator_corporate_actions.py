@@ -3267,24 +3267,41 @@ def test_a_composed_end_no_later_effect_explains_halts_the_share_action(
 
 
 def _ended_distribution(
-    kind: ActionKind, status: str, *, at: str = EFFECT_AT, suffix: int = 3830
+    kind: ActionKind,
+    status: str,
+    *,
+    at: str = EFFECT_AT,
+    ex_at: str | None = None,
+    with_ex_date: bool = True,
+    suffix: int = 3830,
+    security_id: UUID = SEC_A,
 ) -> tuple[CorporateActionTermsVersionV1, EconomicEffectVersionV1]:
-    """One cash distribution on SEC_A, ex on ``at``, with its own claim status."""
+    """One pre-action cash distribution with its own claim status.
+
+    It is effective at ``at`` and ex at ``ex_at`` (``at`` unless given), or
+    has no ex date at all when ``with_ex_date`` is false.
+    """
+    dates: tuple[EconomicDateFactV1, ...] = (_date_fact("payable", PAYABLE_AT),)
+    if with_ex_date:
+        dates = (_date_fact("ex", at if ex_at is None else ex_at), *dates)
     return _same_date_effect(
         suffix,
         kind,
-        (_cash(amount="1", component_id="distribution"),),
+        (_cash(amount="1", component_id="distribution", predecessor=security_id),),
         at=at,
         claim_status=status,
         occurrence="occ-ended-distribution",
-        dates=(_date_fact("ex", at), _date_fact("payable", PAYABLE_AT)),
+        security_id=security_id,
+        dates=dates,
     )
 
 
-def _ended_distribution_message(kind: ActionKind, status: str) -> str:
+def _ended_distribution_message(
+    kind: ActionKind, status: str, security_id: UUID = SEC_A
+) -> str:
     return (
-        rf"the {kind.value} occ-ended-distribution on {SEC_A} needs a continuing "
-        rf"claim, but its own claim status is {status}"
+        rf"the {kind.value} occ-ended-distribution on {security_id} needs a "
+        rf"continuing claim, but its own claim status is {status}"
     )
 
 
@@ -3447,6 +3464,145 @@ def test_an_ended_claim_dividend_on_a_delivered_security_halts(parent: UUID) -> 
     )
     assert _quantities(updated.holdings) == {parent: 100, SEC_A: 50}
     assert updated.pending_cash_claims == ()
+
+
+# An ended-claim distribution is judged in every window it commits in: that
+# of its effective date, that of its entitlement date, and, when that date
+# cannot be resolved, every window from its effective one onward. Each case
+# runs its passes in clock order through one processor, as the evaluator does.
+
+_ENDED_DIVIDEND = _ended_distribution_message(
+    ActionKind.REGULAR_CASH_DIVIDEND, "extinguished"
+)
+
+
+def _ended_dividend_outcome(
+    *,
+    at: str = EFFECT_AT,
+    ex_at: str | None = None,
+    with_ex_date: bool = True,
+    security_id: UUID = SEC_A,
+) -> SecurityEconomicOutcomeV1:
+    terms, effect = _ended_distribution(
+        ActionKind.REGULAR_CASH_DIVIDEND,
+        "extinguished",
+        at=at,
+        ex_at=ex_at,
+        with_ex_date=with_ex_date,
+        security_id=security_id,
+    )
+    return _outcome(
+        security_id=security_id,
+        terms=(terms,),
+        effects=(effect,),
+        claim_status="extinguished",
+    )
+
+
+def test_an_ended_claim_dividend_effective_before_the_clock_halts_where_it_vests() -> (
+    None
+):
+    # Y1: effective before the clock's first session, so in no window of
+    # the clock, and ex on the first session, which it vests in. Judged
+    # only in its effective window, it was paid on the 100 shares and they
+    # were kept.
+    outcome = _ended_dividend_outcome(at=BEFORE_CLOCK_AT, ex_at=EFFECT_AT)
+    state = _state(holdings=(_holding(quantity=100, basis="900"),), cash="0")
+
+    with pytest.raises(IndeterminateValuationError, match=_ENDED_DIVIDEND):
+        _processor().apply_pre_open_actions(
+            state, (_target(SEC_A, 100),), (outcome,), _key()
+        )
+
+
+@pytest.mark.parametrize(
+    "parent", [uid(11), SEC_OTHER], ids=["parent-first", "child-first"]
+)
+def test_an_ended_claim_dividend_halts_in_its_entitlement_window(
+    parent: UUID,
+) -> None:
+    # Y1: the child's dividend is effective on EFFECT_DAY and ex on
+    # LATER_DAY, and the parent spins the child off on LATER_DAY. The first
+    # window finds the book exposed to no child; the second, the window it
+    # vests in, leaves it holding 50. Judged only in its effective window,
+    # the pass completed with the child held.
+    spin_terms, spin_effect = _same_date_effect(
+        3760,
+        ActionKind.SPINOFF,
+        (
+            _shares(
+                numerator="1",
+                denominator="2",
+                component_id="spin",
+                recipient=SEC_CHILD,
+                predecessor=parent,
+                meaning="additional_per_predecessor",
+            ),
+        ),
+        at=LATER_AT,
+        claim_status="continuing",
+        occurrence="occ-spin",
+        security_id=parent,
+    )
+    spin = _outcome(
+        security_id=parent,
+        terms=(spin_terms,),
+        effects=(spin_effect,),
+        action_kinds=(ActionKind.SPINOFF,),
+    )
+    dividend = _ended_dividend_outcome(ex_at=LATER_AT, security_id=SEC_CHILD)
+    outcomes = (spin, dividend)
+    targets = (_target(parent, 100),)
+    processor = _processor()
+
+    first = _state(holdings=(_holding(parent, quantity=100, basis="900"),))
+    unchanged, _ = processor.apply_pre_open_actions(first, targets, outcomes, _key())
+    assert unchanged is first
+
+    second = _state(
+        holdings=(_holding(parent, quantity=100, basis="900"),), day=LATER_DAY
+    )
+    with pytest.raises(
+        IndeterminateValuationError,
+        match=_ended_distribution_message(
+            ActionKind.REGULAR_CASH_DIVIDEND, "extinguished", SEC_CHILD
+        ),
+    ):
+        processor.apply_pre_open_actions(second, targets, outcomes, _key(LATER_DAY))
+
+
+def test_an_ended_claim_dividend_halts_in_its_effective_window() -> None:
+    # Y2: effective on EFFECT_DAY and ex on LATER_DAY. The book holds 100 at
+    # EFFECT_DAY's prior close and stages a sale of all of it, so it holds
+    # nothing by the window the dividend vests in. Judged only in its
+    # entitlement window, the run completed.
+    outcome = _ended_dividend_outcome(ex_at=LATER_AT)
+    processor = _processor()
+    held = _state(holdings=(_holding(quantity=100, basis="900"),), cash="0")
+
+    with pytest.raises(IndeterminateValuationError, match=_ENDED_DIVIDEND):
+        processor.apply_pre_open_actions(held, (_target(SEC_A, 0),), (outcome,), _key())
+
+
+def test_an_undatable_ended_claim_dividend_halts_a_later_staged_buy() -> None:
+    # Y3: effective on EFFECT_DAY with no ex date, so it could vest in any
+    # window from then on. The book is flat for two windows and first
+    # stages a buy of SEC_A in the third. Judged only in its effective
+    # window, the buy went ahead.
+    outcome = _ended_dividend_outcome(with_ex_date=False)
+    processor = _processor()
+    for day in (EFFECT_DAY, LATER_DAY):
+        flat = _state(cash="1000", day=day)
+        unchanged, _ = processor.apply_pre_open_actions(flat, (), (outcome,), _key(day))
+        assert unchanged is flat
+
+    with pytest.raises(IndeterminateValuationError, match=_ENDED_DIVIDEND):
+        processor.apply_pre_open_actions(
+            _state(cash="1000", day=ENTITLED_DAY),
+            (_target(SEC_A, 10),),
+            (outcome,),
+            _key(ENTITLED_DAY),
+        )
 
 
 # --------------------------------------------------------------------------
