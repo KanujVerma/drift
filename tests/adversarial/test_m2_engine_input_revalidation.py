@@ -997,23 +997,26 @@ def test_a_strategy_cannot_rewrite_a_uuid_it_kept_after_the_intent_is_staged(
 #: of any trace or result, whether the intent stages or staging refuses it.
 #: Re-pin only for a change that deliberately moves these runs. The realized
 #: runs also bind the repository ``uv.lock`` through M1d normalization, so a
-#: lock change moves them as well.
+#: lock change moves them as well. The result hashes were re-pinned once for
+#: issue 92, whose hash-covered bundle field moves every bundle hash and,
+#: through the run identity, every result hash; the trace hashes are still the
+#: 19c15f8 values.
 GENUINE_RUN_HASHES = {
     "realized-staged": (
         "80720399a140980ab0bc99b3d145a92b80e3aa7a907d097a8e6168178b46dd41",
-        "f37b894459102c54ea8f5a36f457a338f8063ef77f5b9bc0084e3b1a270bd126",
+        "152c914fa55c910437a2baf1e153db9e9d41fd0cbaa9dc0e14134bbaec51b0a4",
     ),
     "realized-refused-by-staging": (
         "cb9a40abeb9d39c1275c10a9f217d40fb378a5b45e22460aa333a633bb1f407a",
-        "abd2066a9a315e794ea806a1e691bcf75887499ca5b90190c1fba3bba34d3a0f",
+        "6d7e4aacd73021544aae7243fadf5035d4d9c5fdc2ec03f5d563deda80772198",
     ),
     "reconstructed-staged": (
         "3efa93f66379367fb02ad96ad3958c04d8c4e1196af3e84d67ede6a091d94906",
-        "b8b95f4bb2005ec16a77814ceaf80b9504f75b6cafff432985f26971b1ef550f",
+        "f08c116140e66106823d6eabb3ee9f0aaab7a4e129c47d30f9fac0a0dd342c3a",
     ),
     "reconstructed-refused-by-staging": (
         "a9c99b30489a2e0ace15690752167c8b896de6367386d32536d83dec6c81bc13",
-        "a26ad49f4cd184c48439d6dc1898e935085283f567e09ee18fcb99551aa0828c",
+        "0599a14c37e37290a7eb44d95bf6ab692b6eff4411309776c51a26bff48cd268",
     ),
 }
 
