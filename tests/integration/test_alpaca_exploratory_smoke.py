@@ -83,6 +83,7 @@ from test_alpaca_exploratory_adapter import (  # noqa: E402
     PRODUCER_SOURCE_BYTES,
     SESSION_DATES,
     assert_private_bytes_are_locked_down,
+    hand_minted_admission,
     measured_over,
     pinned_request,
     pinned_tzif_bytes,
@@ -96,6 +97,7 @@ from test_evaluator_engine import (  # noqa: E402
 )
 
 from drift.adapters.alpaca_exploratory import (  # noqa: E402
+    ALPACA_EXPLORATORY_LIMITATIONS,
     AlpacaBridgeIncompleteError,
     AlpacaExploratoryIntakeResult,
     AlpacaIntakeRequest,
@@ -105,6 +107,7 @@ from drift.domain.evaluator_exploratory_strategy import (  # noqa: E402
     RECONSTRUCTED_DECISION_LIMITATIONS,
     ExploratoryStrategyDecisionContextV1,
 )
+from drift.domain.evaluator_lanes import ALPACA_LIMITATION_TRUNCATED_CA  # noqa: E402
 from drift.domain.evaluator_portfolio import (  # noqa: E402
     LANE_ADMISSIBLE_MARK_GRADES,
     MarkEvidenceV1,
@@ -212,6 +215,69 @@ def test_the_quiet_window_smoke_run_yields_exploratory_evidence_only(
     assert result.is_promotion_grade_evidence is False
     assert result.admission.admission_hash == intake.admission.admission_hash
     assert result.run_identity.bundle_hash == intake.bundle.bundle_hash
+
+
+def test_the_engine_refuses_an_admission_omitting_the_truncated_window(
+    intake: AlpacaExploratoryIntakeResult,
+) -> None:
+    """Issue 92: a run over the exact bridge bundle must state the window.
+
+    An admission minted outside the bridge binds the same bundle, so before
+    the bundle declared the window such a run completed without stating it.
+    """
+    omitted = tuple(
+        item
+        for item in ALPACA_EXPLORATORY_LIMITATIONS
+        if item != ALPACA_LIMITATION_TRUNCATED_CA
+    )
+    with pytest.raises(
+        ValueError, match=r"^exploratory admission omits required bundle limitations"
+    ):
+        SessionEvaluatorEngine(
+            bundle=intake.bundle,
+            admission=hand_minted_admission(intake.bundle, omitted),
+            protocol=_protocol(warmup=WARMUP_SESSIONS),
+            cost_model=_cost_model(),
+            evidence=SessionEvaluatorEvidence(
+                exploratory_cohort=intake.cohort,
+                exploratory_reconstruction_replay=intake.reconstruction_replay,
+            ),
+            book_currency_namespace="iso4217",
+            book_currency_code="USD",
+        )
+
+
+def test_the_engine_refuses_a_bridge_bundle_stripped_of_its_declaration(
+    intake: AlpacaExploratoryIntakeResult,
+) -> None:
+    """Stripping the declaration while keeping the bridge's bundle hash fails.
+
+    The declaration is covered by the bundle hash, so a bundle that drops it
+    but keeps the hash the admission binds is refused by the engine's own
+    revalidation before any lane gate runs.
+    """
+    stripped = type(intake.bundle).model_construct(
+        **(dict(intake.bundle) | {"dataset_limitations": ()})
+    )
+    assert ALPACA_LIMITATION_TRUNCATED_CA not in stripped.required_limitations
+    omitted = tuple(
+        item
+        for item in ALPACA_EXPLORATORY_LIMITATIONS
+        if item != ALPACA_LIMITATION_TRUNCATED_CA
+    )
+    with pytest.raises(ValueError, match="bundle hash mismatch"):
+        SessionEvaluatorEngine(
+            bundle=stripped,
+            admission=hand_minted_admission(stripped, omitted),
+            protocol=_protocol(warmup=WARMUP_SESSIONS),
+            cost_model=_cost_model(),
+            evidence=SessionEvaluatorEvidence(
+                exploratory_cohort=intake.cohort,
+                exploratory_reconstruction_replay=intake.reconstruction_replay,
+            ),
+            book_currency_namespace="iso4217",
+            book_currency_code="USD",
+        )
 
 
 def test_the_smoke_run_seals_a_complete_trace_log(
