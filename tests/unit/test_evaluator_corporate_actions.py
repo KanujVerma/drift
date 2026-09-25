@@ -1291,9 +1291,11 @@ def _delivered_dividend(
     settled_at: str = PAYABLE_AT,
     delivered_component: str = "cash-1",
     delivered_occurrence: str = "occ-1",
+    action_kind: ActionKind = ActionKind.REGULAR_CASH_DIVIDEND,
 ) -> SecurityEconomicOutcomeV1:
     """A 0.50 dividend whose full evidence rides with its delivered report."""
     terms, effect, _ = _dividend_case(
+        action_kind=action_kind,
         amount="0.5",
         suffix=suffix,
         dates=(
@@ -1306,7 +1308,12 @@ def _delivered_dividend(
         settled_at=settled_at,
         occurrence_id=delivered_occurrence,
     )
-    return _outcome(terms=(terms,), effects=(effect,), delivery_groups=(delivery,))
+    return _outcome(
+        terms=(terms,),
+        effects=(effect,),
+        delivery_groups=(delivery,),
+        action_kinds=(action_kind,),
+    )
 
 
 def test_delivered_cash_the_ex_date_rule_proves_unowed_commits_nothing() -> None:
@@ -1397,6 +1404,40 @@ def test_delivered_cash_before_its_entitlement_vests_is_indeterminate() -> None:
         match="before the entitlement it pays vests",
     ):
         _processor().apply_intrasession_settlements(state, (outcome,), _key(LATER_DAY))
+
+
+def test_unowed_special_cash_without_due_bill_facts_vests_on_its_ex_date() -> None:
+    """Issue 97 ruling, item 4, on the settlement path (#127 review F2).
+
+    Delivered cash no claim matches is proven unowed through the vesting
+    date of the effect that explains it. A special without due-bill facts
+    vests on its ex date there too: paid on its ex-date session to a book
+    that bought at that open, it commits nothing, and paid before its ex
+    date it is ``INDETERMINATE``, naming the ex date rather than the
+    effect's own effective date.
+    """
+    special = ActionKind.SPECIAL_CASH_DISTRIBUTION
+    on_ex = _delivered_dividend(
+        suffix=1690, ex_at=LATER_AT, settled_at=LATER_AT, action_kind=special
+    )
+    state = _state(holdings=(_holding(quantity=100),), cash="1000", day=LATER_DAY)
+
+    settled = _processor().apply_intrasession_settlements(
+        state, (on_ex,), _key(LATER_DAY)
+    )
+
+    assert settled is state
+    early = _delivered_dividend(
+        suffix=1695, ex_at=PAYABLE_AT, settled_at=LATER_AT, action_kind=special
+    )
+    with pytest.raises(
+        IndeterminateValuationError,
+        match=(
+            r"^delivered cash for \S+ arrived before the entitlement it pays "
+            r"vests on 2020-06-15: synthetic-a/occ-1/cash-1$"
+        ),
+    ):
+        _processor().apply_intrasession_settlements(state, (early,), _key(LATER_DAY))
 
 
 def test_delivered_cash_for_a_component_never_owed_is_indeterminate() -> None:

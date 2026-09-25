@@ -470,13 +470,38 @@ def _clock_in(
     return SessionClockV1.model_validate(hashed.model_dump(mode="python"))
 
 
-#: XNYS on JAN5 and JAN6, then XNAS on JAN6 after the XNYS close: the shape
-#: `SessionClockV1` admits (above), and the issue 97 ruling refuses to run.
-SAME_DATE_TWO_VENUE_ROWS = (
-    ("XNYS", JAN5, OPEN, CLOSE),
-    ("XNYS", JAN6, _utc(JAN6, 14, 30), _utc(JAN6, 18)),
-    ("XNAS", JAN6, _utc(JAN6, 18, 30), _utc(JAN6, 21)),
-)
+#: Clocks `SessionClockV1` admits (above) with two or more venues trading on
+#: one local date, which the issue 97 ruling refuses to run. Each names the
+#: pair the refusal reports: the first session on the date, then the second.
+#: The venue order varies, so no MIC ordering can stand in for the date.
+SAME_DATE_MULTI_VENUE_ROWS: dict[
+    str, tuple[tuple[tuple[str, date, datetime, datetime], ...], tuple[str, str]]
+] = {
+    "xnys-then-xnas": (
+        (
+            ("XNYS", JAN5, OPEN, CLOSE),
+            ("XNYS", JAN6, _utc(JAN6, 14, 30), _utc(JAN6, 18)),
+            ("XNAS", JAN6, _utc(JAN6, 18, 30), _utc(JAN6, 21)),
+        ),
+        ("XNYS", "XNAS"),
+    ),
+    "xnas-then-xnys": (
+        (
+            ("XNYS", JAN5, OPEN, CLOSE),
+            ("XNAS", JAN6, _utc(JAN6, 14, 30), _utc(JAN6, 18)),
+            ("XNYS", JAN6, _utc(JAN6, 18, 30), _utc(JAN6, 21)),
+        ),
+        ("XNAS", "XNYS"),
+    ),
+    "three-venues-on-one-date": (
+        (
+            ("XNAS", JAN6, _utc(JAN6, 13), _utc(JAN6, 14)),
+            ("XNYS", JAN6, _utc(JAN6, 14, 30), _utc(JAN6, 18)),
+            ("ARCX", JAN6, _utc(JAN6, 18, 30), _utc(JAN6, 21)),
+        ),
+        ("XNAS", "XNYS"),
+    ),
+}
 
 #: Clocks with one session per local date, which the ruling leaves unchanged.
 ONE_SESSION_PER_DATE_ROWS = {
@@ -492,20 +517,23 @@ ONE_SESSION_PER_DATE_ROWS = {
 }
 
 
+@pytest.mark.parametrize(
+    "case", SAME_DATE_MULTI_VENUE_ROWS.values(), ids=SAME_DATE_MULTI_VENUE_ROWS
+)
 @pytest.mark.parametrize("mode_case", CLOCK_MODES.values(), ids=CLOCK_MODES)
 def test_a_same_date_multi_venue_clock_is_refused_for_evaluation(
     mode_case: tuple[SessionClockMode, str, tuple[str, ...]],
+    case: tuple[tuple[tuple[str, date, datetime, datetime], ...], tuple[str, str]],
 ) -> None:
     """Issue 97 ruling, option A: refused by name, in either clock mode.
 
     The clock model admits the shape; only the evaluation guard refuses it.
     Dates are compared across venues: on one venue they already differ.
     """
-    clock = _clock_in(mode_case, SAME_DATE_TWO_VENUE_ROWS)
+    rows, (first_mic, second_mic) = case
+    clock = _clock_in(mode_case, rows)
     assert [session.session_key.mic for session in clock.sessions] == [
-        "XNYS",
-        "XNYS",
-        "XNAS",
+        mic for mic, *_ in rows
     ]
 
     with pytest.raises(
@@ -514,9 +542,9 @@ def test_a_same_date_multi_venue_clock_is_refused_for_evaluation(
             "^"
             + re.escape(
                 "the session clock steps two sessions on local date 2026-01-06, "
-                "XNYS then XNAS: next-open execution requires a later local "
-                "date, so a same-date multi-venue clock is refused at engine "
-                "construction (issue 97 ruling)"
+                f"{first_mic} then {second_mic}: next-open execution requires a "
+                "later local date, so a same-date multi-venue clock is refused "
+                "at engine construction (issue 97 ruling)"
             )
             + "$"
         ),

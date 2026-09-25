@@ -1407,6 +1407,83 @@ def test_a_same_date_multi_venue_clock_is_refused_at_engine_construction() -> No
     _engine(bundle=later, protocol=_protocol(warmup=1))
 
 
+class _LyingHashDate(date):
+    """Equal in value, but hashes and compares equal to nothing else."""
+
+    def __hash__(self) -> int:
+        return date.__hash__(self) ^ 0x5A5A
+
+    def __eq__(self, other: object) -> bool:
+        return self is other
+
+    def __ne__(self, other: object) -> bool:
+        return self is not other
+
+
+class _LyingOrderDate(_LyingHashDate):
+    """Also claims to follow every other date, so the next-open guard passes."""
+
+    def __lt__(self, other: date, /) -> bool:
+        return False
+
+    def __le__(self, other: date, /) -> bool:
+        return False
+
+    def __gt__(self, other: date, /) -> bool:
+        return True
+
+    def __ge__(self, other: date, /) -> bool:
+        return True
+
+
+class _LyingFormDate(_LyingOrderDate):
+    """Also reports another ordinal and another ISO form than its value's."""
+
+    def toordinal(self) -> int:
+        return date.toordinal(self) + 1
+
+    def isoformat(self) -> str:
+        return date.isoformat(self + timedelta(days=1))
+
+
+LYING_DATES: dict[str, type[date]] = {
+    "hash-and-equality": _LyingHashDate,
+    "and-order": _LyingOrderDate,
+    "and-ordinal-and-iso-form": _LyingFormDate,
+}
+
+
+@pytest.mark.parametrize("lying", LYING_DATES.values(), ids=LYING_DATES)
+def test_a_subclassed_date_cannot_slip_a_same_date_clock_past_construction(
+    lying: type[date],
+) -> None:
+    """#127 review F3: the refusal reads each date through the base type.
+
+    Revalidation keeps a ``date`` subclass on ``local_date`` (issue 123), so
+    the XNAS DAY_1 session can carry one whose own methods say it is another
+    date. Keyed on the value, the refusal was bypassed, and the lying order
+    passes the next-open guard too. Through ``date.toordinal`` and
+    ``date.isoformat`` no subclass method runs, so the forged clock is
+    refused exactly as the genuine one.
+    """
+    forged = lying(DAY_1.year, DAY_1.month, DAY_1.day)
+    xnas = _resealed(
+        _xnas_session(DAY_1, time(21, 30), time(23, 0)),
+        session_key=SessionKeyV1(
+            mic="XNAS", session_scope="regular", local_date=forged
+        ),
+    )
+    bundle = _bundle_over(
+        clock=_clock_of((_session_at(DAY_1), xnas)),
+        decision_views=(_decision_view(SEC_A, DAY_1),),
+        accounting_views=(_accounting_view(SEC_A, DAY_1),),
+    )
+    assert type(bundle.session_clock.sessions[1].session_key.local_date) is lying
+
+    with pytest.raises(SameDateMultiVenueClockError, match=SAME_DATE_CLOCK_REFUSAL):
+        _engine(bundle=bundle, protocol=_protocol(warmup=1))
+
+
 def test_a_same_date_multi_venue_scheduled_clock_is_refused_at_construction() -> None:
     """The same refusal in the EXPLORATORY reconstructed lane.
 

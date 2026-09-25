@@ -247,20 +247,25 @@ def refuse_same_date_multi_venue_clock(clock: SessionClockV1) -> None:
     already strictly increase and every single-venue clock passes unchanged,
     as does a venue change across dates. The next-open guard in the engine
     stays behind this refusal as defense in depth.
+
+    Dates are read through the base ``date`` methods, never the value's own:
+    revalidation keeps a ``date`` subclass (issue 123), whose equality, hash
+    and string form could otherwise hide a second session on one date.
     """
-    first_on: dict[date, SessionKeyV1] = {}
+    first_on: dict[int, SessionKeyV1] = {}
     for session in clock.sessions:
         key = session.session_key
-        first = first_on.get(key.local_date)
+        ordinal = date.toordinal(key.local_date)
+        first = first_on.get(ordinal)
         if first is not None:
             raise SameDateMultiVenueClockError(
                 "the session clock steps two sessions on local date "
-                f"{key.local_date.isoformat()}, {first.mic} then {key.mic}: "
+                f"{date.isoformat(key.local_date)}, {first.mic} then {key.mic}: "
                 "next-open execution requires a later local date, so a "
                 "same-date multi-venue clock is refused at engine construction "
                 "(issue 97 ruling)"
             )
-        first_on[key.local_date] = key
+        first_on[ordinal] = key
 
 
 def rebuild_session_clock(
