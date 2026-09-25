@@ -855,42 +855,46 @@ def reconstructed_history_sessions(
     )
 
 
-def _require_current_members(
-    session: EvaluationSessionV1,
+def _require_contiguous_members(
+    clock_history: Sequence[SessionKeyV1],
     history: dict[UUID, list[ExploratoryReconstructedSessionObservationV1]],
-    current: set[UUID],
 ) -> None:
-    """Refuse a reconstructed decision context holding a stale cohort member.
+    """Refuse a reconstructed decision context holding a gapped cohort member.
 
-    Issue 87, owner ruling A. A cohort member with reconstructed history at
-    this cutoff but no reconstruction for the decision session itself would
-    reach the strategy with history ending at an earlier session, as though
-    it were current: a lookback indexed by position would span misaligned
-    sessions, and a target for it would trade on stale evidence. The context
+    Issue 87, owner ruling A, extended by the orchestrator to contiguity.
+    ``clock_history`` is the decision's history in clock order, ending at the
+    decision session. A cohort member with reconstructed history must have a
+    reconstruction for every one of those sessions from its first through
+    the decision session. Otherwise it would reach the strategy with history
+    ending early, as though it were current, or with a hole a lookback
+    indexed by position would silently span, and a target for it would
+    trade on that evidence. A warmup session takes no decision, so its gap
+    is refused at the first decision whose history contains it. The context
     is incomplete whether or not the strategy would trade the member, so the
-    decision halts INDETERMINATE, naming every such member in canonical order
-    and the session. A member with no reconstructed history at this cutoff
-    has no view and is left to the existing rules.
+    decision halts INDETERMINATE, naming the decision session and, in
+    canonical order, every such member with its first reconstructed session
+    and each session it lacks. A member with no reconstructed history at
+    this cutoff has no view and is left to the existing rules.
     """
-    lacking = tuple(
-        security_id
-        for security_id in sorted(history, key=_security_order)
-        if security_id not in current
-    )
-    if not lacking:
-        return
-    decided = session.session_key
     clauses: list[str] = []
-    for security_id in lacking:
-        through = max(
-            (observation.session_key for observation in history[security_id]),
-            key=lambda key: (key.local_date, key.mic),
+    for security_id in sorted(history, key=_security_order):
+        held = {observation.session_key for observation in history[security_id]}
+        first = next(
+            position for position, key in enumerate(clock_history) if key in held
         )
+        missing = tuple(key for key in clock_history[first:] if key not in held)
+        if not missing:
+            continue
+        start = clock_history[first]
         clauses.append(
-            f"cohort security {security_id} has reconstructed history through "
-            f"{through.mic} {through.local_date.isoformat()} but no "
-            "reconstruction for that session"
+            f"cohort security {security_id} has reconstructed history from "
+            f"{start.mic} {start.local_date.isoformat()} but no reconstruction "
+            "for "
+            + ", ".join(f"{key.mic} {key.local_date.isoformat()}" for key in missing)
         )
+    if not clauses:
+        return
+    decided = clock_history[-1]
     raise IndeterminateValuationError(
         "incomplete reconstructed decision context at the scheduled decision "
         f"session {decided.mic} {decided.local_date.isoformat()}: " + "; ".join(clauses)
@@ -1921,15 +1925,15 @@ class SessionEvaluatorEngine:
         re-checks business-time order on its own, so a broken selection here
         fails loudly rather than leaking the future.
 
-        Every cohort member with reconstructed history must also be current
-        (issue 87, owner ruling A): its history must include this decision
-        session. A member with no reconstructed history yet has no view.
+        Every cohort member with reconstructed history must also be
+        contiguous and current (issue 87): its history must include every
+        history session from its first through this decision session. A
+        member with no reconstructed history yet has no view.
         """
-        stepped = reconstructed_history_sessions(
-            self._bundle.session_clock.sessions, index
-        )
+        sessions = self._bundle.session_clock.sessions
+        stepped = reconstructed_history_sessions(sessions, index)
         grouped: dict[UUID, list[ExploratoryReconstructedSessionObservationV1]] = {}
-        current: set[UUID] = set()
+        read_current_session = False
         for observation in self._bundle.exploratory_reconstructed_observations:
             if observation.session_key not in stepped:
                 continue
@@ -1943,8 +1947,8 @@ class SessionEvaluatorEngine:
                 )
             members.append(observation)
             if observation.session_key == session.session_key:
-                current.add(observation.security_id)
-        if not current:
+                read_current_session = True
+        if not read_current_session:
             # A scheduled session expected open whose bar is missing is
             # unknown. It is never read as a halt and never skipped.
             raise IndeterminateValuationError(
@@ -1952,7 +1956,14 @@ class SessionEvaluatorEngine:
                 f"session {session.session_key.mic} "
                 f"{session.session_key.local_date.isoformat()}"
             )
-        _require_current_members(session, grouped, current)
+        _require_contiguous_members(
+            tuple(
+                item.session_key
+                for item in sessions[: index + 1]
+                if item.session_key in stepped
+            ),
+            grouped,
+        )
         return tuple(
             ExploratoryReconstructedDecisionViewV1(
                 security_id=security_id,

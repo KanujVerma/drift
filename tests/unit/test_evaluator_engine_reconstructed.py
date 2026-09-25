@@ -37,7 +37,13 @@ from exploratory_decision_test_support import (
     utc_close,
 )
 from observation_test_support import market_uid
-from test_evaluator_engine import FixedTargetStrategy, _buy_ten, _engine, _run
+from test_evaluator_engine import (
+    FixedTargetStrategy,
+    _buy_ten,
+    _engine,
+    _protocol,
+    _run,
+)
 
 from drift.domain.evaluator_bundles import EvaluationInputBundleV1
 from drift.domain.evaluator_clock import EvaluationSessionV1, evaluation_session_hash
@@ -473,13 +479,15 @@ def test_an_exploratory_cohort_is_refused_outside_the_scheduled_lane() -> None:
         )
 
 
-# --- every member with history is current at its decision (issue 87) --------
+# --- every member with history is contiguous and current (issue 87) ---------
 
 SEC_THIRD = market_uid(400)
 LISTING_THIRD = market_uid(401)
 TRIO = (SEC, SEC_OTHER, SEC_THIRD)
 _LISTING_OF = {SEC: LISTING, SEC_OTHER: LISTING_OTHER, SEC_THIRD: LISTING_THIRD}
 _ALL_DAYS = (JAN5, JAN6, JAN7)
+JAN8 = date(2026, 1, 8)
+JAN9 = date(2026, 1, 9)
 
 
 def _cohort_bundle(
@@ -523,17 +531,35 @@ def _visible(
     ]
 
 
-def _incomplete(*members: tuple[UUID, date]) -> str:
-    """The issue 87 halt cause at the JAN6 decision, member by member."""
+def _incomplete(decision: date, *members: tuple[UUID, date, tuple[date, ...]]) -> str:
+    """The issue 87 halt cause: each member's first bar and every missing one."""
     return (
         "incomplete reconstructed decision context at the scheduled decision "
-        "session XNYS 2026-01-06: "
+        f"session XNYS {decision.isoformat()}: "
         + "; ".join(
-            f"cohort security {security_id} has reconstructed history through "
-            f"XNYS {through.isoformat()} but no reconstruction for that session"
-            for security_id, through in members
+            f"cohort security {security_id} has reconstructed history from "
+            f"XNYS {first.isoformat()} but no reconstruction for "
+            + ", ".join(f"XNYS {day.isoformat()}" for day in missing)
+            for security_id, first, missing in members
         )
     )
+
+
+def _halted_at_decision(
+    artifacts: EvaluationRunArtifactsV1, index: int, cause: str
+) -> None:
+    """One INDETERMINATE halt at this session's decision, with exactly this cause."""
+    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
+    assert artifacts.result.halted_session_index == index
+    causes = [
+        event for event in artifacts.trace.events if event.kind == "indeterminate_cause"
+    ]
+    assert len(causes) == 1
+    assert causes[0].phase is EvaluationPhase.POST_CLOSE_DECISION
+    assert causes[0].cause_kind == "indeterminate_valuation"
+    assert causes[0].cause == cause
+    assert artifacts.result.halt_reason == cause
+    assert not [event for event in artifacts.trace.events if event.kind == "fill"]
 
 
 @pytest.mark.parametrize("lacking", [SEC, SEC_OTHER], ids=["first", "second"])
@@ -544,8 +570,8 @@ def test_a_member_lacking_its_decision_session_halts_even_if_never_traded(
 
     The strategy holds cash throughout, so no execution or mark could catch
     the gap later. Either member, first or second in canonical order, halts
-    the JAN6 decision before the strategy is asked, naming itself and the
-    session, and its history ending JAN5.
+    the JAN6 decision before the strategy is asked, naming itself, its first
+    bar JAN5, and the missing JAN6.
     """
     present = SEC_OTHER if lacking == SEC else SEC
     strategy = _hold_cash()
@@ -555,16 +581,7 @@ def test_a_member_lacking_its_decision_session_halts_even_if_never_traded(
         reconstructed_engine(bundle, cohort=cohort_of(PAIR)), strategy
     )
 
-    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
-    assert artifacts.result.halted_session_index == 1
-    causes = [
-        event for event in artifacts.trace.events if event.kind == "indeterminate_cause"
-    ]
-    assert len(causes) == 1
-    assert causes[0].phase is EvaluationPhase.POST_CLOSE_DECISION
-    assert causes[0].cause_kind == "indeterminate_valuation"
-    assert causes[0].cause == _incomplete((lacking, JAN5))
-    assert artifacts.result.halt_reason == causes[0].cause
+    _halted_at_decision(artifacts, 1, _incomplete(JAN6, (lacking, JAN5, (JAN6,))))
     assert [context.session_key.local_date for context in strategy.seen] == [JAN5]
     assert [
         event.session_key.local_date for event in _exploratory_events(artifacts)
@@ -582,11 +599,89 @@ def test_every_lacking_member_is_named_in_canonical_order() -> None:
         reconstructed_engine(bundle, cohort=cohort_of(TRIO)), strategy
     )
 
-    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
-    assert artifacts.result.halted_session_index == 1
-    assert artifacts.result.halt_reason == _incomplete(
-        (SEC_OTHER, JAN5), (SEC_THIRD, JAN5)
+    _halted_at_decision(
+        artifacts,
+        1,
+        _incomplete(JAN6, (SEC_OTHER, JAN5, (JAN6,)), (SEC_THIRD, JAN5, (JAN6,))),
     )
+
+
+def test_a_member_whose_bars_stop_halts_at_the_next_decision() -> None:
+    strategy = _hold_cash()
+    bundle = _cohort_bundle({SEC: _ALL_DAYS, SEC_OTHER: (JAN5,)})
+
+    artifacts = run_engine(
+        reconstructed_engine(bundle, cohort=cohort_of(PAIR)), strategy
+    )
+
+    _halted_at_decision(artifacts, 1, _incomplete(JAN6, (SEC_OTHER, JAN5, (JAN6,))))
+
+
+def test_a_gap_on_a_warmup_session_halts_the_first_decision_holding_it() -> None:
+    """No decision is taken at JAN6, so its gap halts the JAN7 decision instead.
+
+    SEC_OTHER is current at JAN7, so only contiguity refuses the context: its
+    history would read JAN5 then JAN7, one position short of the clock.
+    """
+    strategy = ReconstructedTargetStrategy({JAN7: ((SEC_OTHER, 1),)})
+    bundle = _cohort_bundle({SEC: (*_ALL_DAYS, JAN8), SEC_OTHER: (JAN5, JAN7, JAN8)})
+
+    artifacts = run_engine(
+        reconstructed_engine(
+            bundle, cohort=cohort_of(PAIR), protocol=_protocol(warmup=3)
+        ),
+        strategy,
+    )
+
+    _halted_at_decision(artifacts, 2, _incomplete(JAN7, (SEC_OTHER, JAN5, (JAN6,))))
+    assert strategy.seen == []
+    assert _exploratory_events(artifacts) == []
+
+
+@pytest.mark.parametrize(
+    ("days", "missing"),
+    [
+        ((JAN5, JAN6, JAN8, JAN9), (JAN7,)),
+        ((JAN5, JAN8, JAN9), (JAN6, JAN7)),
+    ],
+    ids=["one-session-gap", "two-session-gap"],
+)
+def test_a_gap_in_the_middle_of_a_long_history_names_every_missing_session(
+    days: tuple[date, ...], missing: tuple[date, ...]
+) -> None:
+    strategy = _hold_cash()
+    bundle = _cohort_bundle({SEC: (*_ALL_DAYS, JAN8, JAN9), SEC_OTHER: days})
+
+    artifacts = run_engine(
+        reconstructed_engine(
+            bundle, cohort=cohort_of(PAIR), protocol=_protocol(warmup=4)
+        ),
+        strategy,
+    )
+
+    _halted_at_decision(artifacts, 3, _incomplete(JAN8, (SEC_OTHER, JAN5, missing)))
+    assert strategy.seen == []
+
+
+@pytest.mark.parametrize("first", [JAN6, JAN7], ids=["mid-warmup", "at-decision"])
+def test_a_member_starting_late_is_contiguous_from_its_first_bar(first: date) -> None:
+    """Sessions before a member's first reconstruction are not gaps."""
+    strategy = _hold_cash()
+    later = tuple(day for day in (*_ALL_DAYS, JAN8) if day >= first)
+    bundle = _cohort_bundle({SEC: (*_ALL_DAYS, JAN8), SEC_OTHER: later})
+
+    artifacts = run_engine(
+        reconstructed_engine(
+            bundle, cohort=cohort_of(PAIR), protocol=_protocol(warmup=3)
+        ),
+        strategy,
+    )
+
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert _visible(strategy) == [
+        {SEC: [JAN5, JAN6, JAN7], SEC_OTHER: [day for day in later if day <= JAN7]},
+        {SEC: [JAN5, JAN6, JAN7, JAN8], SEC_OTHER: list(later)},
+    ]
 
 
 def test_a_member_with_no_reconstructed_history_is_absent_and_never_halts() -> None:

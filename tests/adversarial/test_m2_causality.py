@@ -1481,7 +1481,7 @@ def test_a_member_missing_its_decision_bar_halts_before_it_can_be_traded() -> No
     assert causes[0].cause == (
         "incomplete reconstructed decision context at the scheduled decision "
         f"session XNYS 2026-01-06: cohort security {SEC_OTHER} has reconstructed "
-        "history through XNYS 2026-01-05 but no reconstruction for that session"
+        "history from XNYS 2026-01-05 but no reconstruction for XNYS 2026-01-06"
     )
     assert artifacts.result.halt_reason == causes[0].cause
     assert [context.session_key.local_date for context in strategy.seen] == [JAN5]
