@@ -78,6 +78,10 @@ from drift.evaluator.engine import (
 
 NEW_YORK = ZoneInfo("America/New_York")
 SRC = Path(__file__).resolve().parents[2] / "src" / "drift"
+RIDING_REFUSED = (
+    r"a bundle on a realized_session_authority clock cannot carry exploratory "
+    r"reconstructions \(issue 72\)"
+)
 
 
 def _exploratory_events(
@@ -301,10 +305,11 @@ def test_relabelling_the_clock_realized_turns_no_reconstruction_into_evidence() 
     """The laundering attack on the clock gains nothing.
 
     Resealing every scheduled session as realized makes a self-consistent
-    realized clock. The reconstructions riding in the bundle still never
-    become decision evidence: the strong lane reads only authentic views, so
-    the run halts exactly as the realized lane always halts without them, and
-    the exploratory method is never called.
+    realized clock. A realized clock carries no reconstruction (issue 72), so
+    the reconstructions cannot ride along at all. The relabelled clock alone
+    buys nothing either: the strong lane reads only authentic views, so the
+    run halts exactly as the realized lane always halts without them, and the
+    exploratory method is never called.
     """
     cases = three_regular_sessions()
     relabelled = merged_scheduled_clock(
@@ -312,11 +317,13 @@ def test_relabelling_the_clock_realized_turns_no_reconstruction_into_evidence() 
         limitations=(),
         mode="realized_session_authority",
     )
-    bundle = scheduled_bundle(
-        tuple(observation for observation, _ in cases),
-        tuple(session for _, session in cases),
-        clock=relabelled,
-    )
+    with pytest.raises(ValueError, match=RIDING_REFUSED):
+        scheduled_bundle(
+            tuple(observation for observation, _ in cases),
+            tuple(session for _, session in cases),
+            clock=relabelled,
+        )
+    bundle = scheduled_bundle((), (), clock=relabelled)
     dual = DualLaneStrategy({})
 
     artifacts = run_engine(reconstructed_engine(bundle, with_cohort=False), dual)
@@ -527,7 +534,11 @@ def test_a_promotion_admission_cannot_evaluate_a_scheduled_reconstruction() -> N
 
 
 def test_a_promotion_admission_refuses_reconstructions_on_a_realized_clock() -> None:
-    """Reconstructions riding a realized bundle are refused, not ignored."""
+    """Reconstructions riding a realized bundle are refused, not ignored.
+
+    Issue 72 refuses the riding bundle itself, before an admission of either
+    lane can bind it.
+    """
     from test_evaluator_engine import _bundle
 
     realized = _bundle()
@@ -537,22 +548,17 @@ def test_a_promotion_admission_refuses_reconstructions_on_a_realized_clock() -> 
     }
     from drift.evaluator.bundles import assemble_evaluation_input_bundle
 
-    riding = assemble_evaluation_input_bundle(
-        evaluation_interval=realized.evaluation_interval,
-        session_clock=realized.session_clock,
-        security_identities=realized.security_identities,
-        listing_identities=realized.listing_identities,
-        structural_eligibilities=realized.structural_eligibilities,
-        economic_outcomes=realized.economic_outcomes,
-        authentic_decision_views=realized.authentic_decision_views,
-        authentic_accounting_views=realized.authentic_accounting_views,
-        exploratory_reconstructed_observations=(observation,),
-    )
-    assert riding.has_exploratory_reconstructions is True
-
-    with pytest.raises(PromotionLaneDisabledError, match=PROMOTION_LANE_DISABLED):
-        reconstructed_engine(
-            riding, admission=promotion_admission(riding), with_cohort=False
+    with pytest.raises(ValueError, match=RIDING_REFUSED):
+        assemble_evaluation_input_bundle(
+            evaluation_interval=realized.evaluation_interval,
+            session_clock=realized.session_clock,
+            security_identities=realized.security_identities,
+            listing_identities=realized.listing_identities,
+            structural_eligibilities=realized.structural_eligibilities,
+            economic_outcomes=realized.economic_outcomes,
+            authentic_decision_views=realized.authentic_decision_views,
+            authentic_accounting_views=realized.authentic_accounting_views,
+            exploratory_reconstructed_observations=(observation,),
         )
 
     # The same realized bundle without the reconstruction, admitted at
@@ -562,8 +568,8 @@ def test_a_promotion_admission_refuses_reconstructions_on_a_realized_clock() -> 
             realized, admission=promotion_admission(realized), with_cohort=False
         )
 
-    # Control: the exploratory admission of the riding bundle is admitted.
-    reconstructed_engine(riding, with_cohort=False)
+    # Control: the exploratory admission of that realized bundle is admitted.
+    reconstructed_engine(realized, with_cohort=False)
 
 
 def test_a_promotion_admission_cannot_carry_an_exploratory_cohort() -> None:
