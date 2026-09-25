@@ -1421,6 +1421,13 @@ def _realized_clock_forgery(
                 authority="realized",
             )
             return relabelled, every, genuine
+        case "limitation_added":
+            # Canonical realized clocks declare no limitation, so a clock that
+            # adds one differs from its derivation in that field alone.
+            added = resealed_clock(
+                genuine, acknowledged_limitations=("invented-clock-limitation",)
+            )
+            return added, every, genuine
         case "session_added":
             return genuine, every[:2], realized_corpus_clock(*every[:2])
         case "session_omitted":
@@ -1446,6 +1453,7 @@ def test_build_carries_a_genuine_realized_clock_unchanged() -> None:
         "lagged",
         "invented_authority",
         "scheduled_row_relabelled",
+        "limitation_added",
         "session_added",
         "session_omitted",
     ],
