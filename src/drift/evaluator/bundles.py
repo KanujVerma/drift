@@ -9,6 +9,7 @@ from drift.domain.evaluator_bundles import (
     EvaluationRunIdentityV1,
     evaluation_input_bundle_hash,
     evaluation_run_identity_hash,
+    require_reconstructions_on_scheduled_clock,
 )
 from drift.domain.evaluator_clock import SessionClockV1
 from drift.domain.evaluator_lanes import (
@@ -344,9 +345,13 @@ def _require_replay_context(
 def _require_calendar_rows(bundle: EvaluationInputBundleV1) -> None:
     """Bind every reconstruction to the calendar row of a scheduled clock.
 
-    A realized clock does not time decisions on reconstructions, so riding
-    reconstructions there have no scheduled row to bind.
+    Any other clock carries no reconstruction at all (issue 72). Bundle
+    validation already refuses one that does; this refuses it again, so a
+    bundle built past validation cannot verify against genuine replay either.
     """
+    require_reconstructions_on_scheduled_clock(
+        bundle.session_clock, bundle.exploratory_reconstructed_observations
+    )
     if bundle.session_clock.mode != "scheduled_session_reconstruction":
         return
     sessions = {
@@ -375,7 +380,8 @@ def verify_evaluation_input_bundle(
     cannot survive this check, so it is what makes a bundle's contents trusted
     rather than merely self-declared. Exploratory reconstructions are
     re-derived the same way; a bundle carrying any without the inputs to
-    re-derive them is refused.
+    re-derive them is refused, and so is one carrying any on a clock that is
+    not a scheduled session reconstruction (issue 72).
 
     Structural eligibilities and economic outcomes are re-derived the same way
     from their requests over the context's M1b and M1c evidence, and the clock

@@ -708,12 +708,10 @@ def _resolve_reconstructed_lane(
       stays for the day issue 115 re-enables the lane.
     * Every exploratory admission is validated against its bundle, in either
       lane, so it acknowledges every limitation the bundle's evidence obliges
-      (issue 42 ruling, invariant 4; issue 56). A realized bundle can carry
-      reconstructions too, and their limitations may not be dropped merely
-      because the realized lane does not decide on them.
+      (issue 42 ruling, invariant 4; issue 56).
     * An exploratory admission over a realized clock keeps the realized lane
-      exactly as it was. Reconstructions riding such a bundle never become
-      decision evidence.
+      exactly as it was. Such a bundle carries no reconstruction: bundle
+      validation, which construction reruns, refuses one (issue 72).
     * An exploratory admission over a scheduled-reconstruction clock takes
       the reconstructed lane, and only after proving its admission, its
       cohort, and every reconstruction against the bundle, then re-deriving

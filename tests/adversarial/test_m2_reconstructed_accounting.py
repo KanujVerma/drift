@@ -4,8 +4,8 @@ Issue 54, adjudicated in #62 (Q2, option C): in the EXPLORATORY reconstructed
 lane only, a verified reconstruction's open is an exploratory execution price
 and its close is an exploratory mark, read through the dedicated
 ``ExploratoryReconstructedAccountingPriceV1`` record. Missing or ambiguous
-evidence stays INDETERMINATE, a realized bundle never prices from a riding
-reconstruction, and no promotion artifact may carry the resulting PnL.
+evidence stays INDETERMINATE, a realized bundle cannot carry a reconstruction
+to price from (issue 72), and no promotion artifact may carry the resulting PnL.
 """
 
 # ruff: noqa: E402
@@ -342,39 +342,43 @@ def test_a_price_in_another_currency_than_the_book_is_indeterminate() -> None:
 # --- the grade never leaves its lane -----------------------------------------------
 
 
-def test_a_realized_bundle_never_prices_from_a_riding_reconstruction() -> None:
-    """The realized lane keeps pricing from authentic accounting views only.
+def test_a_realized_bundle_cannot_carry_a_reconstruction_to_price_from() -> None:
+    """The realized lane prices from authentic accounting views only.
 
-    The riding reconstruction sits on JAN7, the session the realized run fills
+    The reconstruction would sit on JAN7, the session the realized run fills
     and first marks, with a close (123.000) the authentic view does not state,
-    so reading it would change the numbers.
+    so reading it would change the numbers. Issue 72 refuses it entry to a
+    realized-clock bundle at all, and the realized run prices as it always did.
     """
     realized = _bundle()
     observation, _ = scheduled_session_case(JAN7, close="123.000")
-    riding = assemble_evaluation_input_bundle(
-        evaluation_interval=realized.evaluation_interval,
-        session_clock=realized.session_clock,
-        security_identities=realized.security_identities,
-        listing_identities=realized.listing_identities,
-        structural_eligibilities=realized.structural_eligibilities,
-        economic_outcomes=realized.economic_outcomes,
-        authentic_decision_views=realized.authentic_decision_views,
-        authentic_accounting_views=realized.authentic_accounting_views,
-        exploratory_reconstructed_observations=(observation,),
-    )
-    admission = exploratory_admission(riding, limitations=riding.required_limitations)
-
-    artifacts = run_engine(
-        reconstructed_engine(
-            riding, admission=admission, protocol=_protocol(), with_cohort=False
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"a bundle on a realized_session_authority clock cannot carry "
+            r"exploratory reconstructions \(issue 72\)"
         ),
+    ):
+        assemble_evaluation_input_bundle(
+            evaluation_interval=realized.evaluation_interval,
+            session_clock=realized.session_clock,
+            security_identities=realized.security_identities,
+            listing_identities=realized.listing_identities,
+            structural_eligibilities=realized.structural_eligibilities,
+            economic_outcomes=realized.economic_outcomes,
+            authentic_decision_views=realized.authentic_decision_views,
+            authentic_accounting_views=realized.authentic_accounting_views,
+            exploratory_reconstructed_observations=(observation,),
+        )
+    artifacts = run_engine(
+        reconstructed_engine(realized, protocol=_protocol(), with_cohort=False),
         _buy_ten(),
     )
 
     assert artifacts.result.classification is EvaluationClassification.COMPLETE
     assert _priced(artifacts) == []
     (fill,) = [event.fill for event in artifacts.trace.events if event.kind == "fill"]
-    # The authentic view states 100.00 and the riding bar 100.000: equal
+    # The authentic view states 100.00 and the refused bar 100.000: equal
     # numbers, but exact decimals, so the stamped open names its source.
     assert str(fill.unadjusted_open_price) == "100.00"
     marks = {
@@ -382,7 +386,7 @@ def test_a_realized_bundle_never_prices_from_a_riding_reconstruction() -> None:
         for event in artifacts.trace.events
         if event.kind == "session_mark"
     }
-    # Ten shares at the authentic JAN7 close, never at the riding 123.000.
+    # Ten shares at the authentic JAN7 close, never at the refused 123.000.
     assert marks[JAN7] == Decimal("1100")
 
 

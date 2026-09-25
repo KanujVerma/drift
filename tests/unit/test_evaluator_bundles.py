@@ -14,7 +14,7 @@ from pydantic import ValidationError
 from replay_provenance_test_support import qualified_snapshot
 from test_assertions import exact_boundary
 from test_evaluator_admission_gatekeeper import make_test_fixture, rebind_admission
-from test_evaluator_reconstruction import build_from_harness
+from test_evaluator_reconstruction import build_from_harness, make_cohort, make_policy
 
 from drift.domain.assertions import TemporalIntervalClaimV1
 from drift.domain.evaluator_bundles import (
@@ -60,6 +60,7 @@ from drift.evaluator.clock import (
     build_realized_session_clock,
     build_scheduled_reconstruction_clock,
 )
+from drift.evaluator.reconstruction import ExploratoryReconstructionReplay
 from drift.markets.normalization import (
     materialize_observation_decision,
     materialize_observation_outcome,
@@ -958,21 +959,93 @@ def test_accounting_bucket_requires_unadjusted_source_basis() -> None:
         _realized_bundle(authentic_accounting_views=(view,))
 
 
-# --- exploratory reconstruction carried on a realized clock ---
+# --- exploratory reconstruction refused on a realized clock (issue 72) ---
+
+RIDING_RECONSTRUCTION_REFUSED = (
+    r"a bundle on a realized_session_authority clock cannot carry exploratory "
+    r"reconstructions \(issue 72\)"
+)
 
 
-def test_reconstructed_observations_mark_bundle_exploratory_on_realized_clock() -> None:
-    harness = _harness()
-    observation = build_from_harness(harness)
-    bundle = _realized_bundle(exploratory_reconstructed_observations=(observation,))
-    assert bundle.session_clock.mode == "realized_session_authority"
-    assert bundle.has_exploratory_reconstructions is True
+def _unvalidated_riding_bundle(
+    observation: Any, **overrides: Any
+) -> EvaluationInputBundleV1:
+    """The refused shape, self-consistently hashed, built past validation."""
+    fields = dict(_realized_bundle(**overrides)) | {
+        "exploratory_reconstructed_observations": (observation,)
+    }
+    draft = EvaluationInputBundleV1.model_construct(**fields)
+    return EvaluationInputBundleV1.model_construct(
+        **(fields | {"bundle_hash": evaluation_input_bundle_hash(draft)})
+    )
+
+
+def test_a_realized_clock_bundle_refuses_a_riding_reconstruction() -> None:
+    observation = build_from_harness(_harness())
+    with pytest.raises(
+        (ValidationError, ValueError), match=RIDING_RECONSTRUCTION_REFUSED
+    ):
+        _realized_bundle(exploratory_reconstructed_observations=(observation,))
+
+
+def test_build_refuses_reconstructions_replayed_onto_a_realized_clock() -> None:
+    """The preparation boundary refuses the shape even from genuine replay.
+
+    The same cohort and replay inputs build over the scheduled clock of the
+    same corpus, so the refusal is the clock mode and nothing else.
+    """
+    harness = _provenance_harness()
+    queries = _provenance_session_queries()
+    inputs: dict[str, Any] = {
+        "evaluation_interval": _interval(),
+        "context": harness.context,
+        "session_queries": queries,
+        "exploratory_cohort": make_cohort(harness.security_id),
+        "exploratory_reconstruction_replay": ExploratoryReconstructionReplay(
+            policy=make_policy(), requests=((queries[0], harness.context),)
+        ),
+    }
+    scheduled = build_evaluation_input_bundle(
+        session_clock=build_scheduled_reconstruction_clock(queries, harness.context),
+        **inputs,
+    )
+    assert len(scheduled.exploratory_reconstructed_observations) == 1
+
+    with pytest.raises(
+        (ValidationError, ValueError), match=RIDING_RECONSTRUCTION_REFUSED
+    ):
+        build_evaluation_input_bundle(session_clock=_realized_clock(), **inputs)
+
+
+def test_verify_refuses_an_unvalidated_realized_bundle_despite_genuine_replay() -> None:
+    """Verification holds the rule itself, not only through bundle validation.
+
+    Built past validation, a realized bundle carrying a genuine reconstruction
+    re-derives exactly from its cohort and replay, so only the clock-mode rule
+    can refuse it here.
+    """
+    harness = _provenance_harness()
+    queries = _provenance_session_queries()
+    cohort = make_cohort(harness.security_id)
+    replay = ExploratoryReconstructionReplay(
+        policy=make_policy(), requests=((queries[0], harness.context),)
+    )
+    poisoned = _unvalidated_riding_bundle(build_from_harness(harness, cohort))
+
+    with pytest.raises(ValueError, match=RIDING_RECONSTRUCTION_REFUSED):
+        verify_evaluation_input_bundle(
+            bundle=poisoned,
+            context=harness.context,
+            session_queries=queries,
+            exploratory_cohort=cohort,
+            exploratory_reconstruction_replay=replay,
+        )
 
 
 def test_reconstruction_limitations_merge_into_required_limitations() -> None:
     harness = _harness()
     observation = build_from_harness(harness)
-    bundle = _realized_bundle(exploratory_reconstructed_observations=(observation,))
+    bundle = _scheduled_bundle(exploratory_reconstructed_observations=(observation,))
     for limitation in observation.acknowledged_limitations:
         assert limitation in bundle.required_limitations
 
@@ -981,12 +1054,20 @@ def test_promotion_gate_rejects_reconstructions_on_realized_clock() -> None:
     harness = _harness()
     observation = build_from_harness(harness)
     snapshot = _promotion_snapshot()
-    poisoned = _realized_bundle(
-        source_snapshot_hash=snapshot.snapshot_hash,
-        exploratory_reconstructed_observations=(observation,),
+    # The shape cannot be constructed at all (issue 72).
+    with pytest.raises(
+        (ValidationError, ValueError), match=RIDING_RECONSTRUCTION_REFUSED
+    ):
+        _realized_bundle(
+            source_snapshot_hash=snapshot.snapshot_hash,
+            exploratory_reconstructed_observations=(observation,),
+        )
+    # Built past validation, it still meets every later refusal. The only
+    # production path to a proof re-derives every reconstruction, and it takes
+    # no replay inputs, so it can never cover one (issue 55).
+    poisoned = _unvalidated_riding_bundle(
+        observation, source_snapshot_hash=snapshot.snapshot_hash
     )
-    # The only production path to a proof re-derives every reconstruction, and
-    # it takes no replay inputs, so it can never cover one (issue 55).
     with pytest.raises(
         ValueError,
         match=r"^bundle carries exploratory reconstructions without the replay",
