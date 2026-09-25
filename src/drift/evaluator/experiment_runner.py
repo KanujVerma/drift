@@ -10,6 +10,11 @@ caller through `ExperimentRunnerContext`.
 That keeps replay honest. Running one evaluation twice under two different
 `ExperimentRun` identifiers and two different clocks produces two experiment
 rows whose bound artifact hashes are byte-identical.
+
+The promotion lane is disabled (the issue 79 ruling). Behind the engine's own
+refusal, the runner refuses a promotion admission before running, and refuses
+a promotion result before recording, so no M0 experiment run and no audit
+event ever records ``lane=promotion``.
 """
 
 from collections.abc import Mapping
@@ -31,7 +36,11 @@ from drift.domain.experiments import (
     ExperimentRunStatus,
     ExperimentSpecification,
 )
-from drift.evaluator.engine import LaneDispatchStrategy, SessionEvaluatorEngine
+from drift.evaluator.engine import (
+    LaneDispatchStrategy,
+    SessionEvaluatorEngine,
+    refuse_promotion_lane,
+)
 from drift.ledger.interface import AuditEventDraft, Ledger
 from drift.serialization.canonical import content_hash
 
@@ -195,7 +204,11 @@ def execute_experiment_run(
     `REJECTED` are scientific answers, and the run records them with its
     artifacts bound. Only an unhandled defect produces `FAILED`, and it binds
     no artifacts because the evaluation produced none that can be trusted.
+
+    A promotion admission or result is not a defect but a refusal (issue 79
+    ruling): it raises `PromotionLaneDisabledError` and records nothing.
     """
+    refuse_promotion_lane(context.engine.admission, site="the experiment runner")
     _validate_context(specification, context)
     common: dict[str, object] = {
         "run_id": context.run_id,
@@ -226,6 +239,8 @@ def execute_experiment_run(
         )
         _record_audit_event(context, run)
         return run
+    # Whatever engine produced it, a promotion result is never recorded.
+    refuse_promotion_lane(artifacts.result, site="the experiment runner")
     run = ExperimentRun.model_validate(
         common
         | {

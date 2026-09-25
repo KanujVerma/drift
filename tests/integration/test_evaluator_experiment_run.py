@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any, cast
 from uuid import UUID, uuid7
 
 import pytest
@@ -30,7 +31,9 @@ from test_evaluator_engine import (  # noqa: E402
     FixedTargetStrategy,
     _accounting_view,
     _bundle,
+    _bypassed_promotion_engine,
     _engine,
+    _promotion_admission,
     _protocol,
     _run_identity,
 )
@@ -38,7 +41,13 @@ from test_evaluator_engine import (  # noqa: E402
 from drift.domain.artifacts import ArtifactKind, ArtifactReference  # noqa: E402
 from drift.domain.common import ImmutableJSONValue  # noqa: E402
 from drift.domain.datasets import DatasetReference, TemporalCoverage  # noqa: E402
-from drift.domain.evaluator_results import EvaluationClassification  # noqa: E402
+from drift.domain.evaluator_portfolio import PortfolioStateV1  # noqa: E402
+from drift.domain.evaluator_results import (  # noqa: E402
+    EvaluationClassification,
+    EvaluationRunArtifactsV1,
+    PromotionEvaluationResultV1,
+    evaluation_result_hash,
+)
 from drift.domain.events import AuditEvent  # noqa: E402
 from drift.domain.experiments import (  # noqa: E402
     ExperimentRun,
@@ -46,7 +55,10 @@ from drift.domain.experiments import (  # noqa: E402
     ExperimentSpecification,
 )
 from drift.domain.strategies import StrategyReference  # noqa: E402
-from drift.evaluator.engine import SessionEvaluatorEngine  # noqa: E402
+from drift.evaluator.engine import (  # noqa: E402
+    PromotionLaneDisabledError,
+    SessionEvaluatorEngine,
+)
 from drift.evaluator.experiment_runner import (  # noqa: E402
     ExperimentRunnerContext,
     execute_experiment_run,
@@ -358,6 +370,118 @@ def test_runner_writes_no_audit_event_without_a_ledger() -> None:
     run = execute_experiment_run(_specification(), _context(_engine()))
 
     assert run.status is ExperimentRunStatus.COMPLETED
+
+
+# --- the promotion lane is disabled (issue 79 ruling) ----------------------
+
+PROMOTION_LANE_DISABLED = r"^the promotion lane is disabled \(issue 79 ruling\): "
+
+
+def test_runner_refuses_a_promotion_admission_and_records_nothing(
+    tmp_path: Path,
+) -> None:
+    """Defense in depth behind the engine: refused before the engine runs.
+
+    The engine is in the state 19c15f8 built for a promotion admission, which
+    construction now refuses. The runner refuses it before running, so no
+    session is stepped, no experiment run is returned, and the audit ledger
+    stays empty.
+    """
+    ledger = SQLiteLedger(tmp_path / "audit.sqlite3")
+    strategy = _buy_ten()
+    context = _context(_bypassed_promotion_engine(), strategy=strategy, ledger=ledger)
+
+    with pytest.raises(
+        PromotionLaneDisabledError,
+        match=PROMOTION_LANE_DISABLED + "the experiment runner refuses",
+    ):
+        execute_experiment_run(_specification(), context)
+
+    assert strategy.seen == []
+    assert ledger.verified_events() == ()
+
+
+def _promotion_artifacts(engine: SessionEvaluatorEngine) -> EvaluationRunArtifactsV1:
+    """A valid promotion pair over a genuine exploratory run's own trace.
+
+    The artifact types accept this (finding F9, tracked as P9 on issue 115):
+    the result binds its trace by hash only, and the realized trace carries no
+    reconstructed-evidence event for the pairing to refuse.
+    """
+    genuine = engine.run(
+        strategy=FixedTargetStrategy({}),
+        run_identity=_run_identity(
+            admission=engine.admission,
+            bundle=engine.bundle,
+            protocol=engine.protocol,
+            cost_model=engine.cost_model,
+            evidence_hash=engine.evaluator_evidence_hash,
+        ),
+    )
+    promotion = _promotion_admission(engine.bundle)
+    draft = PromotionEvaluationResultV1.model_construct(
+        run_identity=_run_identity(
+            admission=promotion,
+            bundle=engine.bundle,
+            protocol=engine.protocol,
+            cost_model=engine.cost_model,
+            evidence_hash=engine.evaluator_evidence_hash,
+        ),
+        classification=genuine.result.classification,
+        metrics=genuine.result.metrics,
+        trace_hash=genuine.result.trace_hash,
+        admission=promotion,
+        result_hash="0" * 64,
+    )
+    result = PromotionEvaluationResultV1.model_validate(
+        dict(draft) | {"result_hash": evaluation_result_hash(draft)}
+    )
+    state = genuine.final_state
+    assert state.mark is not None and state.mark.prices == ()
+    final_state = PortfolioStateV1.model_validate(
+        dict(state)
+        | {
+            "lane": "promotion",
+            "admission_hash": promotion.admission_hash,
+            "mark": state.mark.model_copy(update={"lane": "promotion"}),
+        }
+    )
+    return EvaluationRunArtifactsV1.model_validate(
+        {"result": result, "trace": genuine.trace, "final_state": final_state}
+    )
+
+
+class _PromotionResultEngine:
+    """An engine stand-in admitting exploratory, whose run returns promotion.
+
+    No production engine can do this now. The runner does not rely on that:
+    it never records a promotion result, whatever engine produced it.
+    """
+
+    def __init__(self, engine: SessionEvaluatorEngine) -> None:
+        self._engine = engine
+        self._artifacts = _promotion_artifacts(engine)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._engine, name)
+
+    def run(self, **_: object) -> EvaluationRunArtifactsV1:
+        return self._artifacts
+
+
+def test_runner_never_records_a_promotion_result(tmp_path: Path) -> None:
+    ledger = SQLiteLedger(tmp_path / "audit.sqlite3")
+    engine = cast(SessionEvaluatorEngine, _PromotionResultEngine(_engine()))
+    assert engine.admission.lane == "exploratory"
+    context = _context(engine, ledger=ledger)
+
+    with pytest.raises(
+        PromotionLaneDisabledError,
+        match=PROMOTION_LANE_DISABLED + "the experiment runner refuses",
+    ):
+        execute_experiment_run(_specification(), context)
+
+    assert ledger.verified_events() == ()
 
 
 # --- protocol coupling -----------------------------------------------------

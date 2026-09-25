@@ -52,6 +52,7 @@ from drift.domain.evaluator_lanes import (
     ALPACA_LIMITATION_BOUNDED_COHORT,
     EvaluationAdmissionV1,
     ExploratoryEvaluationAdmissionV1,
+    PromotionEvaluationAdmissionV1,
     exploratory_evaluation_admission_hash,
 )
 from drift.domain.evaluator_portfolio import (
@@ -100,6 +101,7 @@ from drift.evaluator.bundles import (
     build_evaluation_run_identity,
 )
 from drift.evaluator.engine import (
+    PromotionLaneDisabledError,
     SessionEvaluatorEngine,
     SessionEvaluatorEvidence,
     source_basis_price,
@@ -774,6 +776,183 @@ def test_engine_requires_a_run_identity_bound_to_its_own_cost_model() -> None:
 
     with pytest.raises(ValueError, match="run identity must bind this evaluation"):
         engine.run(strategy=_buy_ten(), run_identity=foreign)
+
+
+# --- the promotion lane is disabled (issue 79 ruling) --------------------
+
+PROMOTION_LANE_DISABLED = r"^the promotion lane is disabled \(issue 79 ruling\): "
+
+
+def _promotion_admission(
+    bundle: EvaluationInputBundleV1,
+) -> PromotionEvaluationAdmissionV1:
+    """The F1 admission: invented M1e and proof hashes, bound to this bundle."""
+    from exploratory_decision_test_support import promotion_admission
+
+    return promotion_admission(bundle)
+
+
+def _construct(
+    bundle: EvaluationInputBundleV1,
+    admission: EvaluationAdmissionV1,
+    *,
+    protocol: EvaluationProtocolV1 | None = None,
+) -> SessionEvaluatorEngine:
+    return SessionEvaluatorEngine(
+        bundle=bundle,
+        admission=admission,
+        protocol=_protocol() if protocol is None else protocol,
+        cost_model=_cost_model(),
+        evidence=SessionEvaluatorEvidence(listing_role_records=ROLE_RECORDS),
+        book_currency_namespace=BOOK_NAMESPACE,
+        book_currency_code=BOOK_CODE,
+    )
+
+
+def _bypassed_promotion_engine() -> SessionEvaluatorEngine:
+    """An engine in exactly the state 19c15f8 built for a promotion admission.
+
+    Construction refuses one now, so the state is reached by swapping the
+    admitted lane of a genuine exploratory engine over the same realized
+    bundle. Nothing else differs: over a bundle without reconstructions both
+    lanes resolve no reconstructed lane, and only the mark grade follows the
+    admission.
+    """
+    engine = _engine()
+    engine._admission = _promotion_admission(engine.bundle)
+    engine._mark_grade = "promotion_grade"
+    return engine
+
+
+def test_engine_refuses_a_promotion_admission_at_construction() -> None:
+    bundle = _bundle()
+
+    with pytest.raises(
+        PromotionLaneDisabledError,
+        match=PROMOTION_LANE_DISABLED + "engine construction refuses",
+    ):
+        _construct(bundle, _promotion_admission(bundle))
+
+    # Control: the exploratory admission of the same bundle constructs.
+    assert _construct(bundle, _admission(bundle)).admission.lane == "exploratory"
+
+
+def test_the_promotion_refusal_precedes_every_other_construction_guard() -> None:
+    """The refusal reads the admission alone, never the bundle it names.
+
+    The bundle here fails its own revalidation, and the admission binds a
+    different bundle. Either would be refused on its own; the promotion lane
+    is refused first.
+    """
+    bundle = _bundle()
+    corrupt = EvaluationInputBundleV1.model_construct(
+        **(dict(bundle) | {"bundle_hash": "0" * 64})
+    )
+    with pytest.raises(ValidationError):
+        _construct(corrupt, _admission(bundle))
+
+    with pytest.raises(
+        PromotionLaneDisabledError,
+        match=PROMOTION_LANE_DISABLED + "engine construction refuses",
+    ):
+        _construct(corrupt, _promotion_admission(_bundle(days=DAYS[:3])))
+
+
+def test_engine_refuses_a_promotion_admission_disguised_as_exploratory() -> None:
+    """Revalidation cannot turn an admitted exploratory object into promotion.
+
+    The disguised object is an exploratory admission by class and by lane, so
+    only the refusal after revalidation can see the promotion admission its
+    dump rebuilds into.
+    """
+    bundle = _bundle()
+    promotion = _promotion_admission(bundle)
+
+    class _Disguised(ExploratoryEvaluationAdmissionV1):
+        def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            return promotion.model_dump(*args, **kwargs)
+
+    disguised = _Disguised.model_construct(**dict(_admission(bundle)))
+    assert disguised.lane == "exploratory"
+
+    with pytest.raises(
+        PromotionLaneDisabledError,
+        match=PROMOTION_LANE_DISABLED + "engine construction refuses",
+    ):
+        _construct(bundle, disguised)
+
+
+def test_engine_refuses_the_promotion_lane_by_type_and_by_declared_lane() -> None:
+    """A relabelled object meets the named refusal, not a later validation error.
+
+    One is a promotion admission declaring the exploratory lane, the other an
+    exploratory admission declaring the promotion lane. Revalidation would
+    refuse either with a validation error; the lane refusal names them first.
+    """
+    bundle = _bundle()
+    by_type = PromotionEvaluationAdmissionV1.model_construct(
+        **(dict(_promotion_admission(bundle)) | {"lane": "exploratory"})
+    )
+    by_lane = ExploratoryEvaluationAdmissionV1.model_construct(
+        **(dict(_admission(bundle)) | {"lane": "promotion"})
+    )
+
+    for relabelled in (by_type, by_lane):
+        with pytest.raises(
+            PromotionLaneDisabledError,
+            match=PROMOTION_LANE_DISABLED + "engine construction refuses",
+        ):
+            _construct(bundle, relabelled)
+
+
+def test_an_engine_run_refuses_a_promotion_admission_before_any_session() -> None:
+    engine = _bypassed_promotion_engine()
+    strategy = _buy_ten()
+
+    with pytest.raises(
+        PromotionLaneDisabledError,
+        match=PROMOTION_LANE_DISABLED + "an engine run refuses",
+    ):
+        _run(engine, strategy)
+
+    # No session was stepped, so no decision was taken and nothing filled.
+    assert strategy.seen == []
+
+
+def test_result_sealing_refuses_a_promotion_admission() -> None:
+    """The last guard: no promotion result is sealed even past the run guard."""
+    genuine = _run(_engine())
+    engine = _bypassed_promotion_engine()
+    identity = _run_identity(
+        admission=engine.admission,
+        bundle=engine.bundle,
+        protocol=engine.protocol,
+        cost_model=engine.cost_model,
+        evidence_hash=engine.evaluator_evidence_hash,
+    )
+
+    with pytest.raises(
+        PromotionLaneDisabledError,
+        match=PROMOTION_LANE_DISABLED + "result sealing refuses",
+    ):
+        engine._seal_result(
+            run_identity=identity,
+            halt=None,
+            metrics=genuine.result.metrics,
+            trace=genuine.trace,
+        )
+
+
+def test_the_promotion_lane_error_is_a_value_error_naming_its_prerequisites() -> None:
+    engine = _bypassed_promotion_engine()
+
+    with pytest.raises(ValueError) as error:
+        _run(engine)
+
+    assert isinstance(error.value, PromotionLaneDisabledError)
+    assert str(error.value).endswith(
+        "re-enabling it requires every prerequisite in issue 115"
+    )
 
 
 # --- complete five-phase run --------------------------------------------

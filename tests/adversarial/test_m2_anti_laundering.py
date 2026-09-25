@@ -13,6 +13,12 @@ sees. It used to be admitted. The gate now takes the qualified context and the
 snapshot and re-audits the witness, so the same construction is refused, and
 each of those tests keeps its original attack so the coverage is unchanged and
 only the verdict moved.
+
+The final section carries the issue 79 ruling (option 1). The engine never ran
+the gate, so a hand-made promotion admission produced promotion-grade results.
+The promotion lane is now disabled: the engine and the experiment runner refuse
+every ``PromotionEvaluationAdmissionV1``, a gate-valid one included, while the
+gate tests above keep exercising the gate directly.
 """
 
 # ruff: noqa: E402
@@ -29,6 +35,9 @@ from typing import Any
 _UNIT_SUPPORT = Path(__file__).resolve().parents[1] / "unit"
 if str(_UNIT_SUPPORT) not in sys.path:
     sys.path.insert(0, str(_UNIT_SUPPORT))
+_INTEGRATION_SUPPORT = Path(__file__).resolve().parents[1] / "integration"
+if str(_INTEGRATION_SUPPORT) not in sys.path:
+    sys.path.insert(0, str(_INTEGRATION_SUPPORT))
 
 import pytest
 import test_replay_provenance as rp
@@ -123,10 +132,17 @@ from drift.evaluator.bundles import (
     validate_promotion_admission,
     verify_evaluation_input_bundle,
 )
+from drift.evaluator.engine import (
+    PromotionLaneDisabledError,
+    SessionEvaluatorEngine,
+    SessionEvaluatorEvidence,
+)
+from drift.evaluator.experiment_runner import execute_experiment_run
 from drift.evaluator.portfolio import (
     PortfolioAccountingKernel,
     initial_portfolio_state,
 )
+from drift.ledger.sqlite import SQLiteLedger
 from drift.markets.normalization import (
     materialize_observation_decision,
     materialize_observation_outcome,
@@ -1341,3 +1357,228 @@ def test_the_gate_refuses_purpose_laundered_decision_evidence() -> None:
         case = rp._promotion_case(bundle, proof, snapshot, qualified)
         with pytest.raises(ValueError, match=expected):
             validate_promotion_admission(**case)
+
+
+# ==========================================================================
+# The promotion lane is disabled (issue 79 ruling, option 1)
+# ==========================================================================
+
+PROMOTION_LANE_DISABLED = r"^the promotion lane is disabled \(issue 79 ruling\): "
+
+# Computed on unmodified main at 19c15f8, before the promotion lane was
+# disabled. Disabling it must leave both exploratory lanes byte-identical.
+REALIZED_TRACE_HASH_AT_19C15F8 = (
+    "80720399a140980ab0bc99b3d145a92b80e3aa7a907d097a8e6168178b46dd41"
+)
+REALIZED_RESULT_HASH_AT_19C15F8 = (
+    "f37b894459102c54ea8f5a36f457a338f8063ef77f5b9bc0084e3b1a270bd126"
+)
+RECONSTRUCTED_TRACE_HASH_AT_19C15F8 = (
+    "9224bab85f14f287e42448fa1c202a4321c1c6572565c0b708c2d8db7514c692"
+)
+RECONSTRUCTED_RESULT_HASH_AT_19C15F8 = (
+    "32423c7459cfb9cd1a5087b0315fc8d6bca37be88260416fec868661f6f235c0"
+)
+
+
+def _promotion_engine(bundle: Any, admission: Any) -> SessionEvaluatorEngine:
+    import test_evaluator_engine as eng
+
+    return SessionEvaluatorEngine(
+        bundle=bundle,
+        admission=admission,
+        protocol=eng._protocol(),
+        cost_model=eng._cost_model(),
+        evidence=SessionEvaluatorEvidence(),
+        book_currency_namespace=eng.BOOK_NAMESPACE,
+        book_currency_code=eng.BOOK_CODE,
+    )
+
+
+def test_the_engine_refuses_a_promotion_case_the_gate_genuinely_admits() -> None:
+    """Gate validity grants no evaluation: the lane itself is disabled.
+
+    This is the most genuine promotion case the suite builds: a replay-minted
+    proof, a qualified context, a re-audited snapshot, and positive M1e
+    evidence. The gate admits it, and the engine still refuses it.
+    """
+    case = _admitted_case()
+    validate_promotion_admission(**case)
+    admission = case["admission"]
+    assert isinstance(admission, PromotionEvaluationAdmissionV1)
+    assert admission.input_bundle_hash == case["bundle"].bundle_hash
+
+    with pytest.raises(
+        PromotionLaneDisabledError,
+        match=PROMOTION_LANE_DISABLED + "engine construction refuses",
+    ):
+        _promotion_engine(case["bundle"], admission)
+
+
+def test_the_engine_refuses_the_forged_admission_of_finding_f1() -> None:
+    """F1: invented M1e and proof hashes over an exploratory, unsnapshotted bundle.
+
+    At 19c15f8 this admission ran to a COMPLETE promotion-grade result, and
+    the experiment runner recorded it as ``lane=promotion``.
+    """
+    import test_evaluator_engine as eng
+    from exploratory_decision_test_support import promotion_admission
+
+    bundle = eng._bundle()
+    assert bundle.source_snapshot_hash is None
+    forged = promotion_admission(bundle)
+    assert forged.m1e_completion_record_hash == H["1"]
+    assert forged.provenance_proof_hash == H["5"]
+
+    with pytest.raises(
+        PromotionLaneDisabledError,
+        match=PROMOTION_LANE_DISABLED + "engine construction refuses",
+    ):
+        _promotion_engine(bundle, forged)
+
+    # Control: the exploratory admission of the same bundle still runs.
+    assert eng._run(eng._engine(bundle=bundle)).result.lane == "exploratory"
+
+
+def test_no_public_engine_or_runner_entry_yields_promotion_evidence(
+    tmp_path: Path,
+) -> None:
+    """Every public entry refuses a promotion admission, and records nothing.
+
+    Construction refuses both the genuine and the forged admission. Past
+    construction, in the state 19c15f8 built for a promotion admission, the
+    run refuses, and so does the experiment runner, before any session is
+    stepped and before anything reaches M0 or the audit ledger.
+    """
+    import test_evaluator_engine as eng
+    import test_evaluator_experiment_run as run_support
+    from exploratory_decision_test_support import promotion_admission
+
+    genuine = _admitted_case()
+    forged_bundle = eng._bundle()
+    for bundle, admission in (
+        (genuine["bundle"], genuine["admission"]),
+        (forged_bundle, promotion_admission(forged_bundle)),
+    ):
+        with pytest.raises(
+            PromotionLaneDisabledError,
+            match=PROMOTION_LANE_DISABLED + "engine construction refuses",
+        ):
+            _promotion_engine(bundle, admission)
+
+    strategy = eng._buy_ten()
+    with pytest.raises(
+        PromotionLaneDisabledError,
+        match=PROMOTION_LANE_DISABLED + "an engine run refuses",
+    ):
+        eng._run(eng._bypassed_promotion_engine(), strategy)
+
+    ledger = SQLiteLedger(tmp_path / "audit.sqlite3")
+    context = run_support._context(
+        eng._bypassed_promotion_engine(), strategy=strategy, ledger=ledger
+    )
+    with pytest.raises(
+        PromotionLaneDisabledError,
+        match=PROMOTION_LANE_DISABLED + "the experiment runner refuses",
+    ):
+        execute_experiment_run(run_support._specification(), context)
+
+    assert strategy.seen == []
+    assert ledger.verified_events() == ()
+
+
+def _promotion_evidence_sites(path: Path) -> tuple[list[str], int]:
+    """Calls that build a promotion result or assert promotion-grade evidence.
+
+    An ``isinstance`` test names the type without building one, so it is not
+    a site.
+    """
+    sites: list[str] = []
+    calls = 0
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        pairs: list[tuple[object, ast.expr]]
+        if isinstance(node, ast.Call):
+            calls += 1
+            if ast.unparse(node.func) != "isinstance" and any(
+                "PromotionEvaluationResultV1" in ast.unparse(part)
+                for part in (node.func, *node.args)
+            ):
+                sites.append(f"{path.name}:{node.lineno} builds a promotion result")
+            pairs = [(keyword.arg, keyword.value) for keyword in node.keywords]
+        elif isinstance(node, ast.Dict):
+            pairs = [
+                (key.value, value)
+                for key, value in zip(node.keys, node.values, strict=True)
+                if isinstance(key, ast.Constant) and isinstance(key.value, str)
+            ]
+        else:
+            continue
+        for name, value in pairs:
+            if (
+                name == "is_promotion_grade_evidence"
+                and isinstance(value, ast.Constant)
+                and value.value is True
+            ):
+                sites.append(f"{path.name}:{node.lineno} asserts promotion grade")
+    return sites, calls
+
+
+def test_no_production_source_builds_a_promotion_result() -> None:
+    """Statically, no production code path can yield promotion evidence.
+
+    A promotion result exists only by constructing, validating, or sealing
+    ``PromotionEvaluationResultV1``, or by stating
+    ``is_promotion_grade_evidence`` true. The engine sealed one at 19c15f8;
+    now no production call does either. The model and the gate stay.
+    """
+    root = Path(__file__).resolve().parents[2]
+    sources = sorted(
+        (*(root / "src" / "drift").rglob("*.py"), *(root / "scripts").glob("*.py"))
+    )
+    offending: list[str] = []
+    inspected = 0
+    for path in sources:
+        sites, calls = _promotion_evidence_sites(path)
+        offending.extend(sites)
+        inspected += calls
+
+    assert inspected >= 1000, "the promotion-evidence scan inspected nothing"
+    assert offending == []
+
+
+def test_disabling_promotion_leaves_the_realized_lane_byte_identical() -> None:
+    import test_evaluator_engine as eng
+
+    artifacts = eng._run(eng._engine())
+
+    assert artifacts.result.lane == "exploratory"
+    assert artifacts.result.metrics.committed_fill_count == 1
+    assert artifacts.trace.trace_hash == REALIZED_TRACE_HASH_AT_19C15F8
+    assert artifacts.result.result_hash == REALIZED_RESULT_HASH_AT_19C15F8
+
+
+def test_disabling_promotion_leaves_the_reconstructed_lane_byte_identical() -> None:
+    from exploratory_decision_test_support import (
+        JAN5,
+        JAN6,
+        SEC,
+        ReconstructedTargetStrategy,
+        bundle_of,
+        reconstructed_engine,
+        run_engine,
+        three_regular_sessions,
+    )
+
+    artifacts = run_engine(
+        reconstructed_engine(bundle_of(three_regular_sessions())),
+        ReconstructedTargetStrategy({JAN5: ((SEC, 10),), JAN6: ((SEC, 10),)}),
+    )
+
+    assert artifacts.result.lane == "exploratory"
+    assert artifacts.result.metrics.committed_fill_count == 1
+    assert any(
+        event.kind == "exploratory_strategy_decision"
+        for event in artifacts.trace.events
+    )
+    assert artifacts.trace.trace_hash == RECONSTRUCTED_TRACE_HASH_AT_19C15F8
+    assert artifacts.result.result_hash == RECONSTRUCTED_RESULT_HASH_AT_19C15F8
