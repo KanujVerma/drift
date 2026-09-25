@@ -11,11 +11,15 @@ Every ``pytest.raises`` names text unique to the guard under test, so an
 earlier guard firing first fails the test instead of satisfying it.
 """
 
+from datetime import date
+from uuid import UUID
+
 import pytest
 from exploratory_decision_test_support import (
     JAN5,
     JAN6,
     JAN7,
+    LISTING,
     LISTING_OTHER,
     SEC,
     SEC_OTHER,
@@ -32,8 +36,10 @@ from exploratory_decision_test_support import (
     three_regular_sessions,
     utc_close,
 )
+from observation_test_support import market_uid
 from test_evaluator_engine import FixedTargetStrategy, _buy_ten, _engine, _run
 
+from drift.domain.evaluator_bundles import EvaluationInputBundleV1
 from drift.domain.evaluator_clock import EvaluationSessionV1, evaluation_session_hash
 from drift.domain.evaluator_exploratory_strategy import (
     RECONSTRUCTED_DECISION_LIMITATIONS,
@@ -347,16 +353,24 @@ def test_one_clock_session_serves_every_cohort_member_on_its_calendar_row(
     Another cohort member's request on the same session names the same
     calendar row, so it re-derives the same boundaries under its own proofs,
     and the run proceeds whichever member's query built the clock session.
+
+    SEC_OTHER carries its JAN6 bar too. Without it the JAN6 context would be
+    incomplete and halt (issue 87), which is not the binding under test.
     """
     ours, session = scheduled_session_case(JAN5, cohort_securities=PAIR)
     other, other_session = scheduled_session_case(
         JAN5, security_id=SEC_OTHER, listing_id=LISTING_OTHER, cohort_securities=PAIR
     )
     later, later_session = scheduled_session_case(JAN6, cohort_securities=PAIR)
+    other_later, _ = scheduled_session_case(
+        JAN6, security_id=SEC_OTHER, listing_id=LISTING_OTHER, cohort_securities=PAIR
+    )
     assert other_session.authority_record_hashes == session.authority_record_hashes
     assert other_session.authority_proof_hashes != session.authority_proof_hashes
     clock_session = session if built_by == "SEC" else other_session
-    bundle = scheduled_bundle((ours, other, later), (clock_session, later_session))
+    bundle = scheduled_bundle(
+        (ours, other, later, other_later), (clock_session, later_session)
+    )
     assert bundle.session_clock.sessions[0] == clock_session
 
     artifacts = run_engine(
@@ -457,6 +471,201 @@ def test_an_exploratory_cohort_is_refused_outside_the_scheduled_lane() -> None:
             book_currency_namespace=BOOK_NAMESPACE,
             book_currency_code=BOOK_CODE,
         )
+
+
+# --- every member with history is current at its decision (issue 87) --------
+
+SEC_THIRD = market_uid(400)
+LISTING_THIRD = market_uid(401)
+TRIO = (SEC, SEC_OTHER, SEC_THIRD)
+_LISTING_OF = {SEC: LISTING, SEC_OTHER: LISTING_OTHER, SEC_THIRD: LISTING_THIRD}
+_ALL_DAYS = (JAN5, JAN6, JAN7)
+
+
+def _cohort_bundle(
+    bars: dict[UUID, tuple[date, ...]], cohort: tuple[UUID, ...] = PAIR
+) -> EvaluationInputBundleV1:
+    """Genuine reconstructions of each member on exactly the days it names.
+
+    Each clock session is the one the first member carrying that day built, so
+    every clock session re-derives from a replay request actually in the run.
+    """
+    cases = {
+        (security_id, day): scheduled_session_case(
+            day,
+            security_id=security_id,
+            listing_id=_LISTING_OF[security_id],
+            cohort_securities=cohort,
+        )
+        for security_id, days in bars.items()
+        for day in days
+    }
+    clock: dict[date, EvaluationSessionV1] = {}
+    for (_, day), (_, session) in cases.items():
+        clock.setdefault(day, session)
+    return scheduled_bundle(
+        tuple(observation for observation, _ in cases.values()), tuple(clock.values())
+    )
+
+
+def _visible(
+    strategy: ReconstructedTargetStrategy,
+) -> list[dict[UUID, list[date]]]:
+    """Per decision, each member's reconstructed history as the context shows it."""
+    return [
+        {
+            view.security_id: [
+                observation.session_key.local_date for observation in view.observations
+            ]
+            for view in context.reconstructed_decision_views
+        }
+        for context in strategy.seen
+    ]
+
+
+def _incomplete(*members: tuple[UUID, date]) -> str:
+    """The issue 87 halt cause at the JAN6 decision, member by member."""
+    return (
+        "incomplete reconstructed decision context at the scheduled decision "
+        "session XNYS 2026-01-06: "
+        + "; ".join(
+            f"cohort security {security_id} has reconstructed history through "
+            f"XNYS {through.isoformat()} but no reconstruction for that session"
+            for security_id, through in members
+        )
+    )
+
+
+@pytest.mark.parametrize("lacking", [SEC, SEC_OTHER], ids=["first", "second"])
+def test_a_member_lacking_its_decision_session_halts_even_if_never_traded(
+    lacking: UUID,
+) -> None:
+    """The context is incomplete whether or not the strategy would trade it.
+
+    The strategy holds cash throughout, so no execution or mark could catch
+    the gap later. Either member, first or second in canonical order, halts
+    the JAN6 decision before the strategy is asked, naming itself and the
+    session, and its history ending JAN5.
+    """
+    present = SEC_OTHER if lacking == SEC else SEC
+    strategy = _hold_cash()
+    bundle = _cohort_bundle({present: _ALL_DAYS, lacking: (JAN5, JAN7)})
+
+    artifacts = run_engine(
+        reconstructed_engine(bundle, cohort=cohort_of(PAIR)), strategy
+    )
+
+    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
+    assert artifacts.result.halted_session_index == 1
+    causes = [
+        event for event in artifacts.trace.events if event.kind == "indeterminate_cause"
+    ]
+    assert len(causes) == 1
+    assert causes[0].phase is EvaluationPhase.POST_CLOSE_DECISION
+    assert causes[0].cause_kind == "indeterminate_valuation"
+    assert causes[0].cause == _incomplete((lacking, JAN5))
+    assert artifacts.result.halt_reason == causes[0].cause
+    assert [context.session_key.local_date for context in strategy.seen] == [JAN5]
+    assert [
+        event.session_key.local_date for event in _exploratory_events(artifacts)
+    ] == [JAN5]
+
+
+def test_every_lacking_member_is_named_in_canonical_order() -> None:
+    strategy = _hold_cash()
+    bundle = _cohort_bundle(
+        {SEC_THIRD: (JAN5, JAN7), SEC: _ALL_DAYS, SEC_OTHER: (JAN5, JAN7)},
+        cohort=TRIO,
+    )
+
+    artifacts = run_engine(
+        reconstructed_engine(bundle, cohort=cohort_of(TRIO)), strategy
+    )
+
+    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
+    assert artifacts.result.halted_session_index == 1
+    assert artifacts.result.halt_reason == _incomplete(
+        (SEC_OTHER, JAN5), (SEC_THIRD, JAN5)
+    )
+
+
+def test_a_member_with_no_reconstructed_history_is_absent_and_never_halts() -> None:
+    """The existing rule: no history is no view, and the cohort still admits it."""
+    strategy = _hold_cash()
+    bundle = _cohort_bundle({SEC: _ALL_DAYS})
+
+    artifacts = run_engine(
+        reconstructed_engine(bundle, cohort=cohort_of(PAIR)), strategy
+    )
+
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert _visible(strategy) == [
+        {SEC: [JAN5]},
+        {SEC: [JAN5, JAN6]},
+        {SEC: [JAN5, JAN6, JAN7]},
+    ]
+    assert all(set(context.admitted_cohort) == set(PAIR) for context in strategy.seen)
+
+
+def test_a_member_whose_history_starts_later_joins_the_context_when_it_starts() -> None:
+    """Before its first reconstruction a member has no history, so no halt."""
+    strategy = _hold_cash()
+    bundle = _cohort_bundle({SEC: _ALL_DAYS, SEC_OTHER: (JAN6, JAN7)})
+
+    artifacts = run_engine(
+        reconstructed_engine(bundle, cohort=cohort_of(PAIR)), strategy
+    )
+
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert _visible(strategy) == [
+        {SEC: [JAN5]},
+        {SEC: [JAN5, JAN6], SEC_OTHER: [JAN6]},
+        {SEC: [JAN5, JAN6, JAN7], SEC_OTHER: [JAN6, JAN7]},
+    ]
+
+
+def test_trading_a_member_without_history_still_fails_closed_at_the_open() -> None:
+    """The existing rule is unchanged: no reconstructed open, no fill."""
+    strategy = ReconstructedTargetStrategy({JAN5: ((SEC_OTHER, 1),)})
+    bundle = _cohort_bundle({SEC: _ALL_DAYS})
+
+    artifacts = run_engine(
+        reconstructed_engine(bundle, cohort=cohort_of(PAIR)), strategy
+    )
+
+    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
+    assert artifacts.result.halted_session_index == 1
+    causes = [
+        event for event in artifacts.trace.events if event.kind == "indeterminate_cause"
+    ]
+    assert len(causes) == 1
+    assert causes[0].phase is EvaluationPhase.OPEN_EXECUTION
+    assert causes[0].cause == (
+        "no exploratory reconstructed accounting price for security "
+        f"{SEC_OTHER} on XNYS 2026-01-06"
+    )
+    assert not [event for event in artifacts.trace.events if event.kind == "fill"]
+
+
+def test_a_complete_cohort_context_carries_every_members_full_history() -> None:
+    """Control: with every bar present the run completes and trades as before."""
+    strategy = ReconstructedTargetStrategy({JAN6: ((SEC_OTHER, 1),)})
+    bundle = _cohort_bundle({SEC: _ALL_DAYS, SEC_OTHER: _ALL_DAYS})
+
+    artifacts = run_engine(
+        reconstructed_engine(bundle, cohort=cohort_of(PAIR)), strategy
+    )
+
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert _visible(strategy) == [
+        {SEC: [JAN5], SEC_OTHER: [JAN5]},
+        {SEC: [JAN5, JAN6], SEC_OTHER: [JAN5, JAN6]},
+        {SEC: [JAN5, JAN6, JAN7], SEC_OTHER: [JAN5, JAN6, JAN7]},
+    ]
+    fills = [event for event in artifacts.trace.events if event.kind == "fill"]
+    assert [
+        (event.session_key.local_date, event.fill.security_id) for event in fills
+    ] == [(JAN7, SEC_OTHER)]
 
 
 # --- the realized lane is untouched -----------------------------------------

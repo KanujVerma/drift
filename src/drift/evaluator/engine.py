@@ -855,6 +855,48 @@ def reconstructed_history_sessions(
     )
 
 
+def _require_current_members(
+    session: EvaluationSessionV1,
+    history: dict[UUID, list[ExploratoryReconstructedSessionObservationV1]],
+    current: set[UUID],
+) -> None:
+    """Refuse a reconstructed decision context holding a stale cohort member.
+
+    Issue 87, owner ruling A. A cohort member with reconstructed history at
+    this cutoff but no reconstruction for the decision session itself would
+    reach the strategy with history ending at an earlier session, as though
+    it were current: a lookback indexed by position would span misaligned
+    sessions, and a target for it would trade on stale evidence. The context
+    is incomplete whether or not the strategy would trade the member, so the
+    decision halts INDETERMINATE, naming every such member in canonical order
+    and the session. A member with no reconstructed history at this cutoff
+    has no view and is left to the existing rules.
+    """
+    lacking = tuple(
+        security_id
+        for security_id in sorted(history, key=_security_order)
+        if security_id not in current
+    )
+    if not lacking:
+        return
+    decided = session.session_key
+    clauses: list[str] = []
+    for security_id in lacking:
+        through = max(
+            (observation.session_key for observation in history[security_id]),
+            key=lambda key: (key.local_date, key.mic),
+        )
+        clauses.append(
+            f"cohort security {security_id} has reconstructed history through "
+            f"{through.mic} {through.local_date.isoformat()} but no "
+            "reconstruction for that session"
+        )
+    raise IndeterminateValuationError(
+        "incomplete reconstructed decision context at the scheduled decision "
+        f"session {decided.mic} {decided.local_date.isoformat()}: " + "; ".join(clauses)
+    )
+
+
 def require_next_open_execution(
     decision_session: EvaluationSessionV1, execution_session: EvaluationSessionV1
 ) -> None:
@@ -1878,12 +1920,16 @@ class SessionEvaluatorEngine:
         clock has already stepped, this session included. The context then
         re-checks business-time order on its own, so a broken selection here
         fails loudly rather than leaking the future.
+
+        Every cohort member with reconstructed history must also be current
+        (issue 87, owner ruling A): its history must include this decision
+        session. A member with no reconstructed history yet has no view.
         """
         stepped = reconstructed_history_sessions(
             self._bundle.session_clock.sessions, index
         )
         grouped: dict[UUID, list[ExploratoryReconstructedSessionObservationV1]] = {}
-        read_current_session = False
+        current: set[UUID] = set()
         for observation in self._bundle.exploratory_reconstructed_observations:
             if observation.session_key not in stepped:
                 continue
@@ -1897,8 +1943,8 @@ class SessionEvaluatorEngine:
                 )
             members.append(observation)
             if observation.session_key == session.session_key:
-                read_current_session = True
-        if not read_current_session:
+                current.add(observation.security_id)
+        if not current:
             # A scheduled session expected open whose bar is missing is
             # unknown. It is never read as a halt and never skipped.
             raise IndeterminateValuationError(
@@ -1906,6 +1952,7 @@ class SessionEvaluatorEngine:
                 f"session {session.session_key.mic} "
                 f"{session.session_key.local_date.isoformat()}"
             )
+        _require_current_members(session, grouped, current)
         return tuple(
             ExploratoryReconstructedDecisionViewV1(
                 security_id=security_id,
