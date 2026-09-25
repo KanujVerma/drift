@@ -999,24 +999,26 @@ def test_a_strategy_cannot_rewrite_a_uuid_it_kept_after_the_intent_is_staged(
 #: runs also bind the repository ``uv.lock`` through M1d normalization, so a
 #: lock change moves them as well. The result hashes were re-pinned once for
 #: issue 92, whose hash-covered bundle field moves every bundle hash and,
-#: through the run identity, every result hash; the trace hashes are still the
-#: 19c15f8 values.
+#: through the run identity, every result hash. They were re-pinned again,
+#: trace and result, for issue 107, which edits a declared module of the
+#: m1d-evidence-v1 closure and so moves the M1d evidence identity and every
+#: identity-bearing hash of these runs by design (no economic field changes).
 GENUINE_RUN_HASHES = {
     "realized-staged": (
-        "80720399a140980ab0bc99b3d145a92b80e3aa7a907d097a8e6168178b46dd41",
-        "152c914fa55c910437a2baf1e153db9e9d41fd0cbaa9dc0e14134bbaec51b0a4",
+        "ccba690be67b4e2296fc5a7187011a8af7d3cf26e6a8eb8514ec4b64880199a4",
+        "9c9c90774f128b6684c72b326b856c818e22a5abb00eed8a491ab1511664f546",
     ),
     "realized-refused-by-staging": (
-        "cb9a40abeb9d39c1275c10a9f217d40fb378a5b45e22460aa333a633bb1f407a",
-        "6d7e4aacd73021544aae7243fadf5035d4d9c5fdc2ec03f5d563deda80772198",
+        "ef221989c2555f089710f22c6492362e112f165f492dc2bd59e557f328176384",
+        "306c817ecebb6a8f729f73f4f7a323cae4640d5e798ffe016515ea574ae32f70",
     ),
     "reconstructed-staged": (
-        "3efa93f66379367fb02ad96ad3958c04d8c4e1196af3e84d67ede6a091d94906",
-        "f08c116140e66106823d6eabb3ee9f0aaab7a4e129c47d30f9fac0a0dd342c3a",
+        "f221a736f48b5187ab8ea05522cfd05d2b56bc9d25270181e29d4bff1d7caf52",
+        "6d76abfd27c4d8fe9d19b5e01ece78fc2073eb49ed3bb2b2f83ee2b5518e6da1",
     ),
     "reconstructed-refused-by-staging": (
-        "a9c99b30489a2e0ace15690752167c8b896de6367386d32536d83dec6c81bc13",
-        "0599a14c37e37290a7eb44d95bf6ab692b6eff4411309776c51a26bff48cd268",
+        "df89356c989ba064a79d6e9f5487542304c79c83a00ccd411f060684a5be5f38",
+        "ba2a177117db21bb81bef35f20fb2927bcce9624d9a821d9fb9096b2147392c6",
     ),
 }
 
