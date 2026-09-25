@@ -10,10 +10,10 @@ byte-identical result and trace hashes.
 import sys
 from collections.abc import Callable, Mapping
 from dataclasses import replace
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, tzinfo
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Self, cast
 from uuid import UUID, uuid7
 
 import pytest
@@ -1158,6 +1158,121 @@ def test_runner_refuses_a_compared_input_whatever_its_comparisons_say(
 
     assert strategy.seen == []
     assert ledger.verified_events() == ()
+
+
+# --- the runner records only canonical caller values (#123 review) -----------
+
+#: What every misspelled caller value below spells, whatever it holds.
+MISSPELLED_INSTANT = datetime(2000, 1, 1, tzinfo=UTC)
+MISSPELLED_ID = UUID("01990000-0000-7000-8000-00000000dead")
+
+
+class _MisspelledInstant(datetime):
+    """Holds its own instant, but spells and converts as ``MISSPELLED_INSTANT``."""
+
+    def isoformat(self, sep: str = "T", timespec: str = "auto") -> str:
+        return MISSPELLED_INSTANT.isoformat(sep, timespec)
+
+    def strftime(self, format: str) -> str:
+        return MISSPELLED_INSTANT.strftime(format)
+
+    def astimezone(self, tz: tzinfo | None = None) -> Self:
+        return self
+
+    def __str__(self) -> str:
+        return str(MISSPELLED_INSTANT)
+
+
+class _MisspelledIdentifier(UUID):
+    """Holds its own identifier, but spells ``MISSPELLED_ID``."""
+
+    def __str__(self) -> str:
+        return str(MISSPELLED_ID)
+
+
+def _misspelled_instant(value: datetime) -> datetime:
+    return _MisspelledInstant.fromtimestamp(value.timestamp(), UTC)
+
+
+def _misspelled_id(value: UUID | None) -> UUID:
+    assert value is not None
+    return _MisspelledIdentifier(int=value.int)
+
+
+type _Misspelling = Callable[
+    [ExperimentRunnerContext, ExperimentSpecification],
+    tuple[ExperimentRunnerContext, ExperimentSpecification],
+]
+
+#: Each caller value the runner records, misspelled. The row and the audit
+#: event validate in python mode, which keeps a `datetime` or `UUID` subclass,
+#: so a raw value would be recorded under the form it spells.
+MISSPELLINGS: dict[str, _Misspelling] = {
+    "start": lambda context, specification: (
+        replace(context, started_at=_misspelled_instant(context.started_at)),
+        specification,
+    ),
+    "completion": lambda context, specification: (
+        replace(context, completed_at=_misspelled_instant(context.completed_at)),
+        specification,
+    ),
+    "run id": lambda context, specification: (
+        replace(context, run_id=_misspelled_id(context.run_id)),
+        specification,
+    ),
+    "experiment id": lambda context, specification: (
+        context,
+        specification.model_construct(
+            **(
+                dict(specification)
+                | {"experiment_id": _misspelled_id(specification.experiment_id)}
+            )
+        ),
+    ),
+    "audit event id": lambda context, specification: (
+        replace(context, audit_event_id=_misspelled_id(context.audit_event_id)),
+        specification,
+    ),
+    "result artifact id": lambda context, specification: (
+        replace(context, result_artifact_id=_misspelled_id(context.result_artifact_id)),
+        specification,
+    ),
+    "trace artifact id": lambda context, specification: (
+        replace(context, trace_artifact_id=_misspelled_id(context.trace_artifact_id)),
+        specification,
+    ),
+}
+
+
+@pytest.mark.parametrize("misspelled", sorted(MISSPELLINGS), ids=lambda name: name)
+def test_runner_records_a_misspelled_caller_value_as_the_value_it_holds(
+    tmp_path: Path, misspelled: str
+) -> None:
+    """The M0 row and its audit event are those of the honest caller.
+
+    Before the #123 review the audit event was stamped with the raw completion
+    instant and the raw audit event, run and experiment identifiers, and the
+    row kept the raw identifiers, so each was recorded as the form it spells
+    (an audit event of 2000-01-01, before the run's checked start, or a run
+    named ``...dead``).
+    """
+    honest_ledger = SQLiteLedger(tmp_path / "honest.sqlite3")
+    forged_ledger = SQLiteLedger(tmp_path / "forged.sqlite3")
+    honest = _context(_engine(), ledger=honest_ledger)
+    specification = _specification()
+    context, forged_specification = MISSPELLINGS[misspelled](
+        replace(honest, strategy=_buy_ten(), ledger=forged_ledger), specification
+    )
+
+    recorded = execute_experiment_run(forged_specification, context)
+    expected = execute_experiment_run(specification, honest)
+
+    assert content_hash(recorded) == content_hash(expected)
+    forged_events = forged_ledger.verified_events()
+    honest_events = honest_ledger.verified_events()
+    assert len(forged_events) == len(honest_events) == 1
+    assert content_hash(forged_events[0]) == content_hash(honest_events[0])
+    assert forged_events[0].timestamp == LATER
 
 
 # --- protocol coupling -----------------------------------------------------

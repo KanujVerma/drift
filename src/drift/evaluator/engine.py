@@ -51,11 +51,24 @@ run, and again at the result sealing site, so no production path seals a
 refusal stay for the day issue 115 re-enables the lane.
 """
 
-from collections.abc import Callable, Sequence
+import dataclasses
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Any, Literal, cast
+from functools import cache
+from types import NoneType, UnionType
+from typing import (
+    Any,
+    Literal,
+    TypeAliasType,
+    TypeVar,
+    Union,
+    cast,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 from uuid import UUID
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
@@ -175,7 +188,10 @@ from drift.evaluator.reconstruction import (
     require_scheduled_calendar_row,
     verify_exploratory_reconstructions,
 )
-from drift.markets.observation_validation import m1d_context_hash
+from drift.markets.observation_validation import (
+    M1dResolutionContext,
+    m1d_context_hash,
+)
 from drift.serialization.canonical import content_hash
 
 ZERO = Decimal("0")
@@ -543,20 +559,200 @@ class SessionEvaluatorEvidence:
     exploratory_reconstruction_replay: ExploratoryReconstructionReplay | None = None
 
 
+_ADAPTERS: dict[int, tuple[object, TypeAdapter[Any]]] = {}
+
+
+def _adapter(declared: object) -> TypeAdapter[Any]:
+    """One cached adapter per declared scalar hint."""
+    cached = _ADAPTERS.get(id(declared))
+    if cached is None or cached[0] is not declared:
+        cached = (declared, TypeAdapter(declared))
+        _ADAPTERS[id(declared)] = cached
+    return cached[1]
+
+
+@cache
+def _field_hints(kind: type) -> dict[str, Any]:
+    return get_type_hints(kind)
+
+
+def _unaliased(declared: object) -> object:
+    while isinstance(declared, TypeAliasType):
+        declared = declared.__value__
+    return declared
+
+
+def _union_members(declared: object) -> tuple[object, ...]:
+    shape = _unaliased(declared)
+    if get_origin(shape) in (Union, UnionType):
+        return tuple(
+            member for item in get_args(shape) for member in _union_members(item)
+        )
+    return (declared,)
+
+
+def _dataclass_origin(declared: object) -> type | None:
+    shape = _unaliased(declared)
+    origin = get_origin(shape) or shape
+    if isinstance(origin, type) and dataclasses.is_dataclass(origin):
+        return origin
+    return None
+
+
+def _model_class(declared: object) -> type[BaseModel] | None:
+    shape = _unaliased(declared)
+    if isinstance(shape, type) and issubclass(shape, BaseModel):
+        return shape
+    return None
+
+
+def _refuse_member(value: object, expected: str) -> TypeError:
+    return TypeError(
+        f"an M1d context member of type {_type_name(type(value))} is not {expected}"
+    )
+
+
+def _canonical_member(
+    declared: object, value: object, bindings: dict[Any, object]
+) -> object:
+    """Rebuild one M1d context member as its declared type (issue 123 review).
+
+    Models are rebuilt as ``_revalidated`` rebuilds every engine input, as the
+    declared model the value is an instance of, never its own class.
+    Dataclasses are rebuilt field by field from their declared hints, tuples
+    and mappings member by member, and every other scalar through canonical
+    JSON under its declared hint. Anything else is refused.
+    """
+    if isinstance(declared, TypeVar):
+        bound = bindings.get(declared, declared.__bound__)
+        if bound is None:
+            raise TypeError(f"an M1d context member has an unbound {declared}")
+        declared = bound
+    members = _union_members(declared)
+    if len(members) > 1:
+        if value is None and NoneType in members:
+            return None
+        for member in members:
+            kind = _dataclass_origin(member) or _model_class(member)
+            if kind is not None and isinstance(value, kind):
+                return _canonical_member(member, value, bindings)
+        if any(_dataclass_origin(member) or _model_class(member) for member in members):
+            raise _refuse_member(value, "one its declaration admits")
+        return _canonical_scalar(declared, value)
+    shape = _unaliased(declared)
+    model = _model_class(shape)
+    if model is not None:
+        if not isinstance(value, model):
+            raise _refuse_member(value, f"a {_type_name(model)}")
+        return _revalidated(model, value)
+    if _dataclass_origin(shape) is not None:
+        return _canonical_dataclass(shape, value, bindings)
+    origin = get_origin(shape)
+    if origin is tuple:
+        if not isinstance(value, tuple):
+            raise _refuse_member(value, "a tuple")
+        arguments = get_args(shape)
+        if len(arguments) == 2 and arguments[1] is Ellipsis:
+            return tuple(
+                _canonical_member(arguments[0], item, bindings) for item in value
+            )
+        if len(arguments) != len(value):
+            raise _refuse_member(value, f"a tuple of {len(arguments)} members")
+        return tuple(
+            _canonical_member(argument, item, bindings)
+            for argument, item in zip(arguments, value, strict=True)
+        )
+    if origin is Mapping:
+        if not isinstance(value, Mapping):
+            raise _refuse_member(value, "a mapping")
+        key_type, value_type = get_args(shape)
+        entries = cast(Mapping[object, object], value)
+        rebuilt = {
+            _canonical_member(key_type, key, bindings): _canonical_member(
+                value_type, item, bindings
+            )
+            for key, item in entries.items()
+        }
+        if len(rebuilt) != len(entries):
+            raise ValueError("an M1d context mapping holds two keys that are one")
+        return rebuilt
+    if shape is bytes:
+        if type(value) is not bytes:
+            raise _refuse_member(value, "exactly bytes")
+        return value
+    return _canonical_scalar(declared, value)
+
+
+def _canonical_scalar(declared: object, value: object) -> object:
+    """A scalar rebuilt through canonical JSON under its declared hint."""
+    adapter = _adapter(declared)
+    validated = adapter.validate_python(value, strict=True)
+    return adapter.validate_json(adapter.dump_json(validated, warnings=False))
+
+
+def _canonical_dataclass(
+    declared: object, value: object, bindings: dict[Any, object]
+) -> object:
+    """A dataclass rebuilt as its declared class from its rebuilt fields."""
+    origin = cast(type, _dataclass_origin(declared))
+    if not isinstance(value, origin):
+        raise _refuse_member(value, f"a {_type_name(origin)}")
+    arguments = get_args(_unaliased(declared))
+    parameters = getattr(origin, "__parameters__", ())
+    bound = bindings | dict(zip(parameters, arguments, strict=False))
+    hints = _field_hints(origin)
+    return origin(
+        **{
+            item.name: _canonical_member(
+                hints[item.name], getattr(value, item.name), bound
+            )
+            for item in dataclasses.fields(origin)
+            if item.init
+        }
+    )
+
+
+def _canonical_m1d_context(context: object) -> M1dResolutionContext:
+    """Rebuild a replay request's M1d resolution context (issue 123 review).
+
+    M1d replay compares the records it parses from a context's artifact bytes
+    with the records the context holds, so a record leaf with forged equality
+    could pass that check while a re-derivation read the value it holds, a
+    price its bytes never stated. Every model the context holds, at any
+    depth, is therefore rebuilt through canonical JSON, and the context and
+    every dataclass inside it are rebuilt from those members as their
+    declared classes.
+    """
+    return cast(
+        M1dResolutionContext,
+        _canonical_dataclass(M1dResolutionContext, context, {}),
+    )
+
+
 def _revalidated_evidence(
     evidence: SessionEvaluatorEvidence,
 ) -> SessionEvaluatorEvidence:
     """Rebuild every evidence model as its declared type; contexts validate in M1d.
 
-    Each model is rebuilt through canonical JSON (issue 123). A replay
-    request's M1d resolution context is not a model and has no canonical JSON
-    form: it is kept as given and re-derived against by M1d itself.
+    Each model is rebuilt through canonical JSON (issue 123), and so is every
+    model inside each replay request's M1d resolution context, which is then
+    rebuilt from those members. A context shared by several requests is
+    rebuilt once and stays shared.
     """
 
     def each[M: BaseModel](
         declared: type[M], values: Sequence[BaseModel]
     ) -> tuple[M, ...]:
         return tuple(_revalidated(declared, value) for value in values)
+
+    contexts: dict[int, tuple[object, M1dResolutionContext]] = {}
+
+    def context_of(context: object) -> M1dResolutionContext:
+        known = contexts.get(id(context))
+        if known is None or known[0] is not context:
+            known = (context, _canonical_m1d_context(context))
+            contexts[id(context)] = known
+        return known[1]
 
     replay = evidence.exploratory_reconstruction_replay
     return SessionEvaluatorEvidence(
@@ -584,7 +780,10 @@ def _revalidated_evidence(
             else ExploratoryReconstructionReplay(
                 policy=_revalidated(ExploratoryReconstructionPolicyV1, replay.policy),
                 requests=tuple(
-                    (_revalidated(ObservationOutcomeQueryV1, query), context)
+                    (
+                        _revalidated(ObservationOutcomeQueryV1, query),
+                        context_of(context),
+                    )
                     for query, context in replay.requests
                 ),
             )

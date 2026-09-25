@@ -46,6 +46,9 @@ from exploratory_decision_test_support import (
     reconstructed_engine,
     replay_of,
     run_engine,
+    scheduled_bundle,
+    scheduled_session_case,
+    source_request,
     three_regular_sessions,
 )
 from pydantic import BaseModel, ValidationError, model_validator
@@ -79,7 +82,10 @@ from drift.domain.normalization import (
 from drift.domain.observation_query import ObservationOutcomeQueryV1
 from drift.domain.sessions import SessionKeyV1
 from drift.evaluator.engine import SessionEvaluatorEngine, SessionEvaluatorEvidence
-from drift.evaluator.reconstruction import ExploratoryReconstructionReplay
+from drift.evaluator.reconstruction import (
+    ExploratoryReconstructionReplay,
+    build_exploratory_reconstructed_session_observation,
+)
 from drift.serialization.canonical import content_hash
 
 RAW_VENDOR_BAR = {"t": "2026-01-06T05:00:00Z", "o": 100.0, "c": 100.0, "S": "AAPL"}
@@ -1271,6 +1277,72 @@ def _replay_querying_every_security() -> ExploratoryReconstructionReplay:
     )
 
 
+def _with_daily_records(context: Any, forge: Callable[[Any], Any]) -> Any:
+    """``context`` whose daily source observations are each passed to ``forge``."""
+    return dataclasses.replace(
+        context,
+        observation_datasets=tuple(
+            dataclasses.replace(
+                dataset,
+                records=tuple(
+                    forge(record)
+                    if type(record).__name__ == "DailySourceObservationVersionV1"
+                    else record
+                    for record in dataset.records
+                ),
+            )
+            for dataset in context.observation_datasets
+        ),
+    )
+
+
+def _replay_context_naming_every_security() -> ExploratoryReconstructionReplay:
+    """The first request's M1d context holds a record naming every security."""
+    bundle = bundle_of(three_regular_sessions())
+    genuine = replay_of(bundle.exploratory_reconstructed_observations)
+    (query, context), *rest = genuine.requests
+
+    def forge(record: Any) -> Any:
+        forged = _replaced(
+            record,
+            security_id=_forged_uuid(record.security_id, hashes_as=record.security_id),
+        )
+        assert content_hash(forged) == content_hash(record)
+        return forged
+
+    return ExploratoryReconstructionReplay(
+        policy=genuine.policy,
+        requests=((query, _with_daily_records(context, forge)), *rest),
+    )
+
+
+def _replay_context_of_artifact_hashes_equal_to_every_text() -> (
+    ExploratoryReconstructionReplay
+):
+    """The first request's M1d context states each artifact hash as forged text.
+
+    An artifact hash is a scalar field of a dataclass, not a model field.
+    """
+    bundle = bundle_of(three_regular_sessions())
+    genuine = replay_of(bundle.exploratory_reconstructed_observations)
+    (query, context), *rest = genuine.requests
+    first, *others = context.observation_datasets
+    artifacts = {
+        name: dataclasses.replace(
+            artifact, content_hash=_AlwaysEqualStr(artifact.content_hash)
+        )
+        for name, artifact in first.artifacts.items()
+    }
+    assert artifacts
+    forged = dataclasses.replace(
+        context,
+        observation_datasets=(dataclasses.replace(first, artifacts=artifacts), *others),
+    )
+    return ExploratoryReconstructionReplay(
+        policy=genuine.policy, requests=((query, forged), *rest)
+    )
+
+
 def _texts_equal_to_every_text(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(_AlwaysEqualStr(value) for value in values)
 
@@ -1308,10 +1380,12 @@ type _InputForgery = tuple[
 #: INDETERMINATE; a later decision view was read at an earlier cutoff, whose
 #: context then refused it, failing the run; one session was priced from two
 #: views; one security resolved two primary listings; or the admitted
-#: security fell out of the cohort, failing the run. The replay query forgery
-#: already ran as genuine, but kept its forged leaf in engine state. The text
-#: forgeries are controls: a python-mode rebuild already normalized a ``str``
-#: subclass to an exact ``str``, and still must.
+#: security fell out of the cohort, failing the run. The replay query and
+#: replay context forgeries already ran as genuine, but kept their forged
+#: leaves in engine state; the context one until the #123 review, since the
+#: M1d resolution context was kept as given. The text forgeries are controls:
+#: a python-mode rebuild already normalized a ``str`` subclass to an exact
+#: ``str``, and still must.
 INPUT_FORGERIES: dict[str, _InputForgery] = {
     "bundle-uuid-equal-to-every-security": (
         lambda: _engine(bundle=_bundle_admitting_every_security()),
@@ -1349,6 +1423,22 @@ INPUT_FORGERIES: dict[str, _InputForgery] = {
         lambda: reconstructed_engine(
             bundle_of(three_regular_sessions()),
             replay=_replay_querying_every_security(),
+        ),
+        lambda: ReconstructedTargetStrategy({JAN5: ((SEC, 1),), JAN6: ((SEC, 1),)}),
+        "reconstructed-staged",
+    ),
+    "evidence-replay-context-uuid-equal-to-every-security": (
+        lambda: reconstructed_engine(
+            bundle_of(three_regular_sessions()),
+            replay=_replay_context_naming_every_security(),
+        ),
+        lambda: ReconstructedTargetStrategy({JAN5: ((SEC, 1),), JAN6: ((SEC, 1),)}),
+        "reconstructed-staged",
+    ),
+    "evidence-replay-context-artifact-hash-equal-to-every-text": (
+        lambda: reconstructed_engine(
+            bundle_of(three_regular_sessions()),
+            replay=_replay_context_of_artifact_hashes_equal_to_every_text(),
         ),
         lambda: ReconstructedTargetStrategy({JAN5: ((SEC, 1),), JAN6: ((SEC, 1),)}),
         "reconstructed-staged",
@@ -1462,6 +1552,80 @@ def test_a_run_identity_of_forged_text_runs_as_its_canonical_value() -> None:
         artifacts.result.result_hash,
     ) == GENUINE_RUN_HASHES["realized-staged"]
     assert _forged_leaves(engine, artifacts) == []
+
+
+class _SpelledDecimal(Decimal):
+    """A price holding its own digits, spelling ``spelled``, equal to every value."""
+
+    spelled: str
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+    __hash__ = Decimal.__hash__
+
+    def __str__(self) -> str:
+        return self.spelled
+
+    def __repr__(self) -> str:
+        return f"Decimal('{self.spelled}')"
+
+
+def _spelled_decimal(digits: str, spelled: str) -> Decimal:
+    value = _SpelledDecimal(digits)
+    value.spelled = spelled
+    return value
+
+
+def _with_open_of(context: Any, digits: str, spelled: str) -> Any:
+    """``context`` whose daily open holds ``digits`` while spelling ``spelled``."""
+
+    def forge(record: Any) -> Any:
+        fields = tuple(
+            _replaced(item, value=_spelled_decimal(digits, spelled))
+            if item.field_name == "open"
+            else item
+            for item in record.fields
+        )
+        return _replaced(record, fields=fields)
+
+    return _with_daily_records(context, forge)
+
+
+def test_an_m1d_context_record_cannot_launder_a_price_it_never_stated() -> None:
+    """#123 review F1: the replay's M1d context is rebuilt canonically too.
+
+    The JAN6 source record holds an open of 500.000 that spells 100.000, the
+    form its bytes and payload hash state, and equals every value. M1d replay
+    compared it with the record its bytes parse to and accepted it, the
+    canonical builder re-derived 500.000 from it, and the bundle's
+    self-consistent 500 reconstruction then passed verification: the engine
+    filled a buy at 500 and ended COMPLETE. Rebuilt canonically, the record
+    holds its real digits, which its payload hash does not state.
+    """
+    cases = [scheduled_session_case(day) for day in (JAN5, JAN6, JAN7)]
+    requests = [source_request(observation) for observation, _ in cases]
+    query, context = requests[1]
+    forged = _with_open_of(context, "500.000", "100.000")
+    derived = build_exploratory_reconstructed_session_observation(
+        query, forged, cohort_of(), make_policy()
+    )
+    prices = {item.field_name: item.source_value for item in derived.fields}
+    genuine = {item.field_name: item.source_value for item in cases[1][0].fields}
+    assert (prices["open"], genuine["open"]) == (Decimal("500"), Decimal("100"))
+
+    bundle = scheduled_bundle(
+        (cases[0][0], derived, cases[2][0]), tuple(session for _, session in cases)
+    )
+    replay = ExploratoryReconstructionReplay(
+        policy=make_policy(), requests=(requests[0], (query, forged), requests[2])
+    )
+
+    with pytest.raises(ValidationError, match=r"observation payload hash mismatch"):
+        reconstructed_engine(bundle, replay=replay)
 
 
 # --- the strategy's decision context (issue 123) ------------------------------

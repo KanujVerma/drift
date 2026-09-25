@@ -29,6 +29,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+from uuid import UUID
 
 from pydantic import TypeAdapter
 
@@ -97,7 +98,11 @@ class ExperimentRunnerContext:
 
 @dataclass(frozen=True)
 class _CallerInputs:
-    """Canonical copies of every caller input the runner compares (issue 123)."""
+    """Canonical copies of every caller input the runner compares or records.
+
+    Issue 123 and its review: nothing the caller supplied is compared or
+    recorded as given.
+    """
 
     run_identity: EvaluationRunIdentityV1
     dataset_hash: str
@@ -105,6 +110,11 @@ class _CallerInputs:
     running_strategy_hash: str
     started_at: datetime
     completed_at: datetime
+    run_id: UUID
+    experiment_id: UUID
+    result_artifact_id: UUID
+    trace_artifact_id: UUID
+    audit_event_id: UUID | None
 
 
 _RUN_IDENTITY: TypeAdapter[EvaluationRunIdentityV1] = TypeAdapter(
@@ -113,6 +123,8 @@ _RUN_IDENTITY: TypeAdapter[EvaluationRunIdentityV1] = TypeAdapter(
 _DATASET: TypeAdapter[DatasetReference] = TypeAdapter(DatasetReference)
 _STRATEGY: TypeAdapter[StrategyReference] = TypeAdapter(StrategyReference)
 _INSTANT: TypeAdapter[datetime] = TypeAdapter(datetime)
+_IDENTIFIER: TypeAdapter[UUID] = TypeAdapter(UUID)
+_OPTIONAL_IDENTIFIER: TypeAdapter[UUID | None] = TypeAdapter(UUID | None)
 
 
 def _canonical[T](declared: TypeAdapter[T], value: T) -> T:
@@ -134,7 +146,10 @@ def _caller_inputs(
 
     Comparing a rebuilt value with a caller's object is not enough: Python
     asks a right operand that subclasses the left one first, so a forged
-    ``__eq__`` answers whichever side it is on.
+    ``__eq__`` answers whichever side it is on. Recording one is not enough
+    either: python-mode validation of the M0 row and the audit event keeps a
+    ``UUID`` or ``datetime`` subclass, whose string forms can name another
+    run or another instant.
     """
     return _CallerInputs(
         run_identity=_canonical(_RUN_IDENTITY, context.run_identity),
@@ -147,6 +162,11 @@ def _caller_inputs(
         ).code_hash,
         started_at=_canonical(_INSTANT, context.started_at),
         completed_at=_canonical(_INSTANT, context.completed_at),
+        run_id=_canonical(_IDENTIFIER, context.run_id),
+        experiment_id=_canonical(_IDENTIFIER, specification.experiment_id),
+        result_artifact_id=_canonical(_IDENTIFIER, context.result_artifact_id),
+        trace_artifact_id=_canonical(_IDENTIFIER, context.trace_artifact_id),
+        audit_event_id=_canonical(_OPTIONAL_IDENTIFIER, context.audit_event_id),
     )
 
 
@@ -238,19 +258,21 @@ def _refuse_foreign_run(
 
 
 def _artifact_references(
-    context: ExperimentRunnerContext, artifacts: EvaluationRunArtifactsV1
+    context: ExperimentRunnerContext,
+    inputs: _CallerInputs,
+    artifacts: EvaluationRunArtifactsV1,
 ) -> tuple[ArtifactReference, ...]:
     result: EvaluationResultV1 = artifacts.result
     trace: EvaluationTraceLogV1 = artifacts.trace
     return (
         ArtifactReference(
-            artifact_id=context.result_artifact_id,
+            artifact_id=inputs.result_artifact_id,
             kind=ArtifactKind.RESULT,
             content_hash=result.result_hash,
             location=context.result_artifact_location,
         ),
         ArtifactReference(
-            artifact_id=context.trace_artifact_id,
+            artifact_id=inputs.trace_artifact_id,
             kind=ArtifactKind.LOG,
             content_hash=trace.trace_hash,
             location=context.trace_artifact_location,
@@ -295,17 +317,20 @@ def _validate_context(inputs: _CallerInputs) -> None:
         )
 
 
-def _record_audit_event(context: ExperimentRunnerContext, run: ExperimentRun) -> None:
+def _record_audit_event(
+    context: ExperimentRunnerContext, inputs: _CallerInputs, run: ExperimentRun
+) -> None:
+    """Append the run's audit event, from canonical values only (issue 123)."""
     ledger = context.ledger
     if ledger is None:
         return
-    if context.audit_event_id is None:
+    if inputs.audit_event_id is None:
         raise ValueError("recording an experiment run requires an audit event id")
     ledger.append(
         AuditEventDraft(
-            event_id=context.audit_event_id,
+            event_id=inputs.audit_event_id,
             event_type=EXPERIMENT_RUN_EVENT_TYPE,
-            timestamp=context.completed_at,
+            timestamp=inputs.completed_at,
             entity_type=EXPERIMENT_RUN_ENTITY_TYPE,
             entity_id=run.run_id,
             payload={
@@ -341,18 +366,20 @@ def execute_experiment_run(
     error propagates. Nor are rebuilt artifacts of another run (issue 124):
     they raise `ForeignRunArtifactsError`.
 
-    Every caller input the runner compares (the run identity, the dataset and
-    strategy references, and the start and completion instants) is rebuilt
+    Every caller input the runner compares or records (the run identity, the
+    dataset and strategy references, the start and completion instants, and
+    the run, experiment, artifact and audit event identifiers) is rebuilt
     through canonical JSON before any comparison, and only the canonical
-    copies are compared, run and recorded (issue 123). An input that fails
-    its rebuild raises its validation error and records nothing.
+    copies are compared, run and recorded, in the M0 row and in its audit
+    event (issue 123). An input that fails its rebuild raises its validation
+    error and records nothing.
     """
     refuse_promotion_lane(context.engine.admission, site="the experiment runner")
     inputs = _caller_inputs(specification, context)
     _validate_context(inputs)
     common: dict[str, object] = {
-        "run_id": context.run_id,
-        "experiment_id": specification.experiment_id,
+        "run_id": inputs.run_id,
+        "experiment_id": inputs.experiment_id,
         "started_at": inputs.started_at,
         "completed_at": inputs.completed_at,
         "code_hash": inputs.run_identity.code_version_hash,
@@ -381,7 +408,7 @@ def execute_experiment_run(
                 "error_details": detail,
             }
         )
-        _record_audit_event(context, run)
+        _record_audit_event(context, inputs, run)
         return run
     recorded = _rebuilt_artifacts(artifacts)
     _refuse_foreign_run(inputs, recorded)
@@ -390,8 +417,8 @@ def execute_experiment_run(
         | {
             "status": ExperimentRunStatus.COMPLETED,
             "metrics": summary_metrics_payload(recorded.result),
-            "artifact_references": _artifact_references(context, recorded),
+            "artifact_references": _artifact_references(context, inputs, recorded),
         }
     )
-    _record_audit_event(context, run)
+    _record_audit_event(context, inputs, run)
     return run
