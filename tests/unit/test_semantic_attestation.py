@@ -70,14 +70,14 @@ _ALLOWLIST_MODULE = "imports a module outside the closure import allowlist"
 _ALLOWLIST_NAME = "imports a name outside the closure import allowlist"
 _STRING_IMPORT_FROM = "imports a name that imports a module from a string"
 _STRING_IMPORT_REACH = "reaches a name that imports a module from a string"
+_STRING_EVAL_FROM = "imports a name that evaluates a string as code"
+_STRING_EVAL_REACH = "reaches a name that evaluates a string as code"
 _STAR_IMPORT = "performs a star"
 _REBIND = "binds a module object to another name"
 _LOADER_VALUE = "uses a dynamic import loader as a value"
 _REACH_VALUE = "uses a dynamic reach builtin as a value"
-_MACHINERY_REFERENCE = (
-    "reaches the import machinery beyond what the closure guard binds"
-)
-_MACHINERY_ATTRIBUTE = "reaches an import machinery namespace through another object"
+_MACHINERY_REFERENCE = "reaches a guarded namespace beyond what the closure guard binds"
+_MACHINERY_ATTRIBUTE = "reaches a guarded namespace through another object"
 _DUNDER = "reaches interpreter internals through a dunder name"
 _OUTSIDE_DRIFT = "dynamically imports a module outside the drift package"
 _RELATIVE_DYNAMIC = "performs a relative dynamic import"
@@ -855,6 +855,22 @@ _FORBIDDEN_FROM_IMPORTS = (
     pytest.param(
         "from os import __builtins__ as namespace", _DUNDER, id="dunder-from-import"
     ),
+    # typing is allowlisted, but its string evaluators are not.
+    pytest.param(
+        "from typing import get_type_hints", _STRING_EVAL_FROM, id="typing-hints"
+    ),
+    pytest.param(
+        "from typing import ForwardRef", _STRING_EVAL_FROM, id="typing-forward-ref"
+    ),
+    pytest.param(
+        "from typing import evaluate_forward_ref",
+        _STRING_EVAL_FROM,
+        id="typing-evaluate-forward-ref",
+    ),
+    pytest.param("from typing import _eval_type", _STRING_EVAL_FROM, id="typing-eval"),
+    pytest.param(
+        "from typing import _type_convert", _STRING_EVAL_FROM, id="typing-type-convert"
+    ),
     # A star import is refused whatever the base.
     pytest.param("from drift.markets import *", _STAR_IMPORT, id="star-from-drift"),
     pytest.param("from os import *", _STAR_IMPORT, id="star-from-stdlib"),
@@ -891,11 +907,166 @@ _FURTHER_MACHINERY_REACH = (
         _MACHINERY_REFERENCE,
         id="sys-frame",
     ),
-    # A machinery namespace reached through an object that happens to hold it.
+    # A guarded namespace reached through an object that happens to hold it.
     pytest.param(
-        _with_entry('import os\n\nMODULE = os.sys.modules["drift.markets.extra"]\n'),
+        _with_entry(
+            'import pathlib\n\nMODULE = pathlib.os.sys.modules["drift.markets.extra"]\n'
+        ),
         _MACHINERY_ATTRIBUTE,
         id="machinery-attribute-of-a-module",
+    ),
+    pytest.param(
+        _with_entry(
+            'import drift.domain.core\n\ndrift.domain.core.os.system("true")\n'
+        ),
+        _MACHINERY_ATTRIBUTE,
+        id="os-attribute-of-a-drift-module",
+    ),
+    pytest.param(
+        _with_entry(
+            "import drift.domain.core\n"
+            "\n"
+            "HINTS = drift.domain.core.typing.get_type_hints(object)\n"
+        ),
+        _MACHINERY_ATTRIBUTE,
+        id="typing-attribute-of-a-drift-module",
+    ),
+    # #121 round 2 (R2-F1): a guarded namespace from-imported from another
+    # module, allowlisted or drift, is refused where it is bound, so the member
+    # rules can never be judged against the other module's path instead.
+    pytest.param(
+        _with_core_and_entry(
+            "import importlib.metadata\n",
+            "from drift.domain.core import importlib\n"
+            "\n"
+            'SPEC = importlib.util.find_spec("drift.markets.extra")\n',
+        ),
+        _MACHINERY_ATTRIBUTE,
+        id="machinery-namespace-reimported",
+    ),
+    pytest.param(
+        _with_core_and_entry(
+            "import sys\n",
+            "from drift.domain.core import sys\n"
+            "\n"
+            'MODULE = sys.modules["drift.markets.extra"]\n',
+        ),
+        _MACHINERY_ATTRIBUTE,
+        id="sys-reimported-from-a-drift-module",
+    ),
+    pytest.param(
+        _with_core_and_entry(
+            "import typing\n",
+            "from drift.domain.core import typing\n"
+            "\n"
+            "HINTS = typing.get_type_hints(object)\n",
+        ),
+        _MACHINERY_ATTRIBUTE,
+        id="typing-reimported-from-a-drift-module",
+    ),
+    pytest.param(
+        _with_core_and_entry(
+            "import pydantic\n",
+            "from drift.domain.core import pydantic\n"
+            "\n"
+            "LOADER = pydantic.ImportString\n",
+        ),
+        _MACHINERY_ATTRIBUTE,
+        id="pydantic-reimported-from-a-drift-module",
+    ),
+    pytest.param(
+        _with_core_and_entry(
+            "VALUE = 1\n",
+            "from drift.domain.core import __builtins__ as namespace\n"
+            "\n"
+            'MODULE = namespace["__import__"]("drift.markets.extra")\n',
+        ),
+        _DUNDER,
+        id="dunder-reexported-from-a-drift-module",
+    ),
+    pytest.param(
+        _with_entry(
+            'from os import sys\n\nMODULE = sys.modules["drift.markets.extra"]\n'
+        ),
+        _MACHINERY_ATTRIBUTE,
+        id="sys-from-os",
+    ),
+    pytest.param(
+        _with_entry(
+            'from os import sys as s\n\nMODULE = s.modules["drift.markets.extra"]\n'
+        ),
+        _MACHINERY_ATTRIBUTE,
+        id="sys-from-os-renamed",
+    ),
+    pytest.param(
+        _with_entry('from pathlib import os\n\nos.system("true")\n'),
+        _MACHINERY_ATTRIBUTE,
+        id="os-from-pathlib",
+    ),
+    # #121 round 2 (R2-F2): os is name-granular, so a process launcher or any
+    # other unused member is refused as an attribute, a from-import or a
+    # literal getattr, while the descriptor reads the closures use stay bound.
+    pytest.param(
+        _with_entry('import os\n\nos.system("true")\n'),
+        _MACHINERY_REFERENCE,
+        id="os-system",
+    ),
+    pytest.param(
+        _with_entry('import os\n\nos.execv("/bin/true", ["true"])\n'),
+        _MACHINERY_REFERENCE,
+        id="os-execv",
+    ),
+    pytest.param(
+        _with_entry('import os\n\nos.popen("true")\n'),
+        _MACHINERY_REFERENCE,
+        id="os-popen",
+    ),
+    pytest.param(
+        _with_entry('import os\n\nos.spawnlp(0, "true", "true")\n'),
+        _MACHINERY_REFERENCE,
+        id="os-spawnlp",
+    ),
+    pytest.param(
+        _with_entry("import os\n\nPID = os.fork()\n"),
+        _MACHINERY_REFERENCE,
+        id="os-fork",
+    ),
+    pytest.param(
+        _with_entry("import os as platform\n\nplatform.system('true')\n"),
+        _MACHINERY_REFERENCE,
+        id="os-system-aliased",
+    ),
+    pytest.param(
+        _with_entry("from os import system\n\nsystem('true')\n"),
+        _ALLOWLIST_NAME,
+        id="os-system-from-import",
+    ),
+    pytest.param(
+        _with_entry('import os\n\nRUN = getattr(os, "system")\n'),
+        _NAMESPACE,
+        id="os-system-literal-getattr",
+    ),
+    # #121 round 2 (R2-F2): the typing string evaluators are refused by name, as
+    # a from-import, as an attribute and as a literal getattr.
+    pytest.param(
+        _with_entry("import typing\n\nHINTS = typing.get_type_hints(object)\n"),
+        _STRING_EVAL_REACH,
+        id="typing-get-type-hints-attribute",
+    ),
+    pytest.param(
+        _with_entry("import typing as t\n\nREF = t.ForwardRef('object')\n"),
+        _STRING_EVAL_REACH,
+        id="typing-forward-ref-aliased-attribute",
+    ),
+    pytest.param(
+        _with_entry('import typing\n\nFN = getattr(typing, "get_type_hints")\n'),
+        _NAMESPACE,
+        id="typing-evaluator-literal-getattr",
+    ),
+    pytest.param(
+        _with_entry('import pydantic\n\nLOADER = getattr(pydantic, "ImportString")\n'),
+        _NAMESPACE,
+        id="pydantic-import-string-literal-getattr",
     ),
     # Dunder reach fails closed even for a plain-imported module.
     pytest.param(_with_entry("SPEC = __spec__\n"), _DUNDER, id="module-spec-dunder"),
@@ -905,7 +1076,7 @@ _FURTHER_MACHINERY_REACH = (
         id="object-graph-dunder",
     ),
     pytest.param(
-        _with_entry("import os\n\nNAMESPACE = os.__dict__\n"),
+        _with_entry("import pathlib\n\nNAMESPACE = pathlib.__dict__\n"),
         _DUNDER,
         id="module-dict-dunder",
     ),
@@ -915,7 +1086,7 @@ _FURTHER_MACHINERY_REACH = (
         id="globals-dunder-attribute",
     ),
     pytest.param(
-        _with_entry("import os\n\nCLS = os.__class__\n"),
+        _with_entry("import pathlib\n\nCLS = pathlib.__class__\n"),
         _DUNDER,
         id="class-dunder-attribute",
     ),
@@ -1089,6 +1260,16 @@ def test_closure_guard_rejects_further_import_machinery_reach(
 
 _MODULE_REBINDINGS = (
     pytest.param("import os\n\n_alias = os\n", id="rebind-a-stdlib-module"),
+    pytest.param(
+        "import pathlib\n"
+        "\n"
+        "_alias = pathlib\n"
+        "\n"
+        "\n"
+        "def reach(name: str) -> object:\n"
+        "    return getattr(_alias, name)\n",
+        id="rebind-an-unguarded-module",
+    ),
     pytest.param("import drift\n\n_pkg = drift\n", id="rebind-the-drift-package"),
     pytest.param(
         "import drift.markets.extra\n\n_m = drift.markets.extra\n",
@@ -1181,8 +1362,10 @@ def test_closure_guard_keeps_the_machinery_uses_it_can_bind(tmp_path: Path) -> N
     ``drift/__init__`` reads its version through ``importlib.metadata``;
     ``drift.markets.economic_validation`` imports ``drift.markets.validation``
     through a literal ``__import__`` with a literal ``fromlist``; M1d
-    normalization reads the interpreter identity from ``sys``; and the allowlist
-    admits every non-drift module the closures actually import.
+    normalization reads the interpreter identity from ``sys``; the byte readers
+    use only descriptor-level ``os`` members; and the allowlist admits every
+    non-drift module the closures actually import, including the ``typing``
+    names they use.
     """
     root = _package(
         tmp_path,
@@ -1190,16 +1373,38 @@ def test_closure_guard_keeps_the_machinery_uses_it_can_bind(tmp_path: Path) -> N
             "import ast\n"
             "import json\n"
             "import os\n"
+            "import stat\n"
             "import sys\n"
             "from importlib.metadata import version\n"
             "from collections.abc import Mapping\n"
             "from dataclasses import dataclass\n"
+            "from os import fstat\n"
             "from pathlib import Path\n"
             "from pydantic import BaseModel, Field\n"
+            "from typing import Annotated, Any, Literal, cast\n"
             "\n"
             'VALUE = __import__("drift.domain.core", fromlist=["VALUE"]).VALUE\n'
             "IDENTITY = (sys.implementation.name, sys.version_info.major)\n"
             "FLAGS = getattr(os, 'O_NOFOLLOW', 0)\n"
+            "\n"
+            "\n"
+            "def read(path: str) -> bytes:\n"
+            "    flags = os.O_RDONLY | os.O_NONBLOCK | FLAGS\n"
+            "    descriptor = os.open(path, flags)\n"
+            "    try:\n"
+            "        if not stat.S_ISREG(fstat(descriptor).st_mode):\n"
+            "            return b''\n"
+            "        with os.fdopen(descriptor, 'rb', closefd=False) as source:\n"
+            "            return source.read()\n"
+            "    finally:\n"
+            "        os.close(descriptor)\n"
+            "\n"
+            "\n"
+            "def names(directory: str) -> list[str]:\n"
+            "    handle = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)\n"
+            "    os.close(handle)\n"
+            "    with os.scandir(directory) as scanner:\n"
+            "        return [entry.name for entry in scanner]\n"
             "\n"
             "\n"
             "class Box:\n"

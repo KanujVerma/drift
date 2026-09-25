@@ -30,12 +30,17 @@ modules import a module from a string (``pydoc``, ``logging.config``,
 guard instead names what a declared module may import (``_ALLOWED_IMPORT_MODULES``,
 ``_ALLOWED_IMPORT_NAMES``) and refuses every other ``import``. Relative imports,
 star imports and a ``fromlist`` of ``"*"`` fail closed. A name that imports a
-module from a string even from an allowlisted module fails closed too
-(``_STRING_IMPORT_NAMES``, pydantic ``ImportString``).
+module from a string, or evaluates a string as code, fails closed even from an
+allowlisted module (``_STRING_IMPORT_NAMES``, pydantic ``ImportString``;
+``_STRING_EVALUATION_NAMES``, the ``typing`` forward reference evaluators).
+Out-of-process execution is refused the same way: ``subprocess`` is not
+allowlisted, and ``os`` is name-granular, so ``os.system``, ``os.exec*``,
+``os.spawn*``, ``os.popen`` and ``os.fork`` fail closed as imports, as
+attributes and as literal ``getattr`` names.
 
-Once only the allowlist is importable, the machinery still reachable is the few
-members of ``sys`` and ``importlib`` and the ambient builtins, so those are
-bound name by name:
+Once only the allowlist is importable, the guarded namespaces still reachable
+are the few members of ``os``, ``sys`` and ``importlib`` and the ambient
+builtins, so those are bound name by name:
 
 * a loader (``import_module``, ``__import__``) only as the callee of a call
   whose target is one literal absolute ``drift`` name, plus at most a literal
@@ -43,12 +48,17 @@ bound name by name:
   ``functools.partial`` over it fails closed; the reach builtins (``eval``,
   ``exec``, ``compile``, ``getattr``, ``vars``, ``globals``, ``locals``)
   likewise;
-* of ``builtins``, ``importlib`` and ``sys`` only the members in
+* of ``builtins``, ``importlib``, ``os`` and ``sys`` only the members in
   ``_BINDABLE_MACHINERY_PATHS``, so ``importlib.util``, ``importlib.machinery``,
-  metadata entry points and ``sys.modules`` fail closed, none of them read as an
-  attribute of another object;
+  metadata entry points, ``sys.modules`` and the ``os`` process launchers fail
+  closed;
+* a guarded namespace (``os``, ``sys``, ``importlib``, ``builtins``,
+  ``pydantic``, ``typing``) only under its own imported name: from-importing it
+  from another module, ``drift`` or not (``from os import sys``, ``from
+  drift.domain.core import importlib``), or reading it as an attribute of any
+  object (``pathlib.os``), fails closed;
 * only the dunder names in ``_BINDABLE_DUNDER_ATTRIBUTES`` and
-  ``_BINDABLE_DUNDER_NAMES``, so ``__builtins__``, ``__spec__``,
+  ``_BINDABLE_DUNDER_NAMES``, from any base, so ``__builtins__``, ``__spec__``,
   ``__loader__``, ``__dict__``, ``__globals__``, ``__class__`` and object-graph
   reflection fail closed;
 * no ``getattr`` with a computed attribute, and no ``vars``, over an imported,
@@ -56,14 +66,15 @@ bound name by name:
 * binding a module object or the ``drift`` package to another name fails
   closed, so a rebound alias cannot launder a later traversal or lookup.
 
-Residual, and covered otherwise: a module object passed as an ordinary argument
-into a computed ``getattr`` that some other module performs, reflection helpers
-over such a value (``operator.attrgetter``, ``inspect``, frame introspection),
-and annotation strings that ``typing`` or pydantic evaluate. Two things back
-the guard up there: the byte freeze over every declared module, whose links are
-reviewed, and the import-trace test, which runs each closure's seeds in a fresh
-interpreter and checks that no undeclared ``drift`` module is loaded at import
-time.
+Residual, exactly: pydantic evaluates string annotations internally when it
+builds a model, so a forward reference string in a model annotation is code the
+guard does not read (no closure module has one today); and a computed
+``getattr`` over a function parameter or an ordinary local is allowed, because
+the guard cannot type the value, so a module object that another module passes
+in as an argument is not seen. Two things back the guard up there: the byte
+freeze over every declared module, whose links are reviewed, and the
+import-trace test, which runs each closure's seeds in a fresh interpreter and
+checks that no undeclared ``drift`` module is loaded at import time.
 
 Two closures are declared here. ``m1d-source-validation-v1`` identifies the M1d
 validator runs (issue #32). ``m1d-evidence-v1`` identifies the code that
@@ -269,16 +280,37 @@ denylist can never enumerate every module that can import (``pydoc``,
 ``pkgutil``, ``_frozen_importlib``, ``_imp`` and more), so the guard names what
 is allowed instead. A new declared import needs an entry here, justified."""
 
+_OS_MEMBERS = frozenset(
+    {
+        "O_DIRECTORY",
+        "O_NOFOLLOW",
+        "O_NONBLOCK",
+        "O_RDONLY",
+        "close",
+        "fdopen",
+        "fstat",
+        "open",
+        "scandir",
+    }
+)
+"""The ``os`` members the closures actually use: descriptor-level reads.
+
+Everything else in ``os`` fails closed, notably process execution (``system``,
+``exec*``, ``spawn*``, ``popen``, ``fork``, ``posix_spawn``), which can start an
+interpreter that imports anything, and ``os.sys``."""
+
 _ALLOWED_IMPORT_NAMES: dict[str, frozenset[str]] = {
     "importlib.metadata": frozenset({"version"}),
+    "os": _OS_MEMBERS,
     "sys": frozenset({"implementation", "version_info"}),
 }
 """From-import surfaces allowed only at name granularity.
 
-``importlib.metadata`` and ``sys`` sit under the import machinery, so a plain
-``import`` of them is allowed (their member use is then policed by the reference
-rules), but a ``from`` import may bind only these members, never a loader, a
-registry or a namespace."""
+``importlib.metadata``, ``os`` and ``sys`` can reach the import machinery or
+start a process, so a plain ``import`` of them is allowed (their member use is
+then policed by the reference rules, member by member), but a ``from`` import
+may bind only these members, never a loader, a registry, a namespace or a
+process launcher."""
 
 _STRING_IMPORT_NAMES: dict[str, frozenset[str]] = {
     "pydantic": frozenset({"ImportString"}),
@@ -293,15 +325,60 @@ _STRING_IMPORT_PATHS = frozenset(
 )
 """The dotted paths of the string-import names, refused as an attribute too."""
 
-_IMPORT_MACHINERY_ROOTS = frozenset({"builtins", "importlib", "sys"})
-"""Roots the guard must still recognize once bound or reached as an attribute.
+_STRING_EVALUATION_NAMES: dict[str, frozenset[str]] = {
+    "typing": frozenset(
+        {
+            "ForwardRef",
+            "_LazyAnnotationLib",
+            "_eval_type",
+            "_lazy_annotationlib",
+            "_make_forward_ref",
+            "_type_check",
+            "_type_convert",
+            "evaluate_forward_ref",
+            "get_type_hints",
+        }
+    ),
+}
+"""Names an allowlisted module exposes that evaluate a string as code.
+
+``typing`` evaluates a forward reference string with ``eval``, which can import
+anything. Its public evaluators (``ForwardRef``, ``get_type_hints``,
+``evaluate_forward_ref``), its private evaluator ``_eval_type``, the factories
+that turn a string into an evaluable ``ForwardRef`` (``_type_check``,
+``_type_convert``, ``_make_forward_ref``) and its gateway to ``annotationlib``
+fail closed. The closures use none of them."""
+
+_STRING_EVALUATION_PATHS = frozenset(
+    f"{owner}.{name}"
+    for owner, names in _STRING_EVALUATION_NAMES.items()
+    for name in names
+)
+"""The dotted paths of the string-evaluation names, refused as an attribute too."""
+
+_IMPORT_MACHINERY_ROOTS = frozenset({"builtins", "importlib", "os", "sys"})
+"""Guarded roots whose members are bound one by one.
 
 ``import`` of the wider machinery (``pkgutil``, ``runpy``, ``zipimport`` and the
-rest) is already refused by the allowlist, so only the roots that a declared
-module legitimately imports (``sys``), that a bound member can re-expose
-(``importlib`` through ``importlib.metadata``), or that are ambient
-(``builtins``) can still be reached, and their non-bindable members fail
-closed."""
+rest) and of ``subprocess`` is already refused by the allowlist, so only the
+roots that a declared module legitimately imports (``os``, ``sys``), that a bound
+member can re-expose (``importlib`` through ``importlib.metadata``), or that are
+ambient (``builtins``) can still be reached, and their non-bindable members
+fail closed. ``os`` is guarded because it launches processes and exposes
+``os.sys``."""
+
+_REIMPORT_GUARDED_NAMES = (
+    _IMPORT_MACHINERY_ROOTS
+    | frozenset(_STRING_IMPORT_NAMES)
+    | frozenset(_STRING_EVALUATION_NAMES)
+)
+"""Namespaces that may be reached only under their own imported name.
+
+Once ``os``, ``sys``, ``importlib``, ``builtins``, ``pydantic`` or ``typing`` is
+bound under another object's name (``from os import sys``, ``from
+drift.domain.core import typing``, ``pathlib.os``), the member rules above would
+judge the path by that object instead. So from-importing one of these names from
+any module, or reading it as an attribute of any object, fails closed."""
 
 _BINDABLE_MACHINERY_PATHS = frozenset(
     {
@@ -310,16 +387,18 @@ _BINDABLE_MACHINERY_PATHS = frozenset(
         "importlib.metadata.version",
         "sys.implementation",
         "sys.version_info",
+        *(f"os.{member}" for member in _OS_MEMBERS),
     }
 )
-"""The only members of the import machinery roots a declared module may reach.
+"""The only members of the guarded roots a declared module may reach.
 
-The literal loader call is resolved to its target; the metadata version lookup
-and the interpreter identity cannot load a module. Everything else under those
-roots can find, load, execute or hand out a module from a name the guard cannot
-read, so it fails closed: ``importlib.util``, ``importlib.machinery``,
-``importlib.resources``, metadata entry points, ``pkgutil``, ``runpy``,
-``zipimport``, ``sys.modules``, frame access and all of ``builtins``, whose
+The literal loader call is resolved to its target; the metadata version lookup,
+the interpreter identity and the descriptor-level ``os`` reads cannot load a
+module. Everything else under those roots can find, load, execute or hand out a
+module from a name the guard cannot read, or start a process that can, so it
+fails closed: ``importlib.util``, ``importlib.machinery``,
+``importlib.resources``, metadata entry points, ``sys.modules``, frame access,
+``os.system`` and the other process launchers, and all of ``builtins``, whose
 reach functions are ambient anyway."""
 
 _BINDABLE_DUNDER_ATTRIBUTES = frozenset(
@@ -670,6 +749,13 @@ def _semantic_references(
     owners = frozenset(
         id(node.value) for node in ast.walk(tree) if isinstance(node, ast.Attribute)
     )
+    lookup_owners = frozenset(
+        id(node.args[0])
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and node.args
+        and _dotted_path(node.func, aliases) in _NAMESPACE_LOOKUP_TARGETS
+    )
     found: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -695,6 +781,7 @@ def _semantic_references(
                 aliases,
                 callee=id(node) in callees,
                 owner=id(node) in owners,
+                lookup_owner=id(node) in lookup_owners,
             )
     return frozenset(found)
 
@@ -901,21 +988,24 @@ def _reject_machinery_reference(
     *,
     callee: bool,
     owner: bool,
+    lookup_owner: bool,
 ) -> None:
-    """Fail closed on a loaded name that reaches the import machinery.
+    """Fail closed on a loaded name that reaches a guarded namespace.
 
-    Every attribute is checked for a machinery namespace or an unbindable
-    dunder, wherever it sits in a chain. The rest applies to the whole chain
-    only, so ``importlib.util.find_spec`` is judged as that full path, and a
-    loader or reach builtin is accepted only as the callee of a call, whose
-    target the call guards resolve or refuse.
+    Every attribute is checked for a guarded namespace or an unbindable dunder,
+    wherever it sits in a chain. The rest applies to the whole chain only, so
+    ``importlib.util.find_spec`` is judged as that full path, and a loader or
+    reach builtin is accepted only as the callee of a call, whose target the
+    call guards resolve or refuse. The owner argument of a ``getattr`` or
+    ``vars`` call is exempt from the guarded-path check alone, because the
+    namespace lookup rule judges that owner together with its attribute (so
+    ``getattr(os, "O_NOFOLLOW", 0)`` is bound, and ``getattr(os, name)`` is not).
     """
     if isinstance(node, ast.Attribute):
-        if node.attr in _IMPORT_MACHINERY_ROOTS:
+        if node.attr in _REIMPORT_GUARDED_NAMES:
             raise _closure_error(
                 module,
-                "reaches an import machinery namespace through another object: "
-                f".{node.attr}",
+                f"reaches a guarded namespace through another object: .{node.attr}",
             )
         if _is_dunder(node.attr) and node.attr not in _BINDABLE_DUNDER_ATTRIBUTES:
             raise _closure_error(
@@ -931,6 +1021,10 @@ def _reject_machinery_reference(
         raise _closure_error(
             module, f"reaches a name that imports a module from a string: {path}"
         )
+    if path in _STRING_EVALUATION_PATHS:
+        raise _closure_error(
+            module, f"reaches a name that evaluates a string as code: {path}"
+        )
     if owner:
         return
     if not callee:
@@ -942,12 +1036,13 @@ def _reject_machinery_reference(
             raise _closure_error(module, "uses a dynamic reach builtin as a value")
     if (
         path is not None
+        and not lookup_owner
         and _is_machinery_path(path)
         and not _is_bindable_machinery_path(path)
     ):
         raise _closure_error(
             module,
-            f"reaches the import machinery beyond what the closure guard binds: {path}",
+            f"reaches a guarded namespace beyond what the closure guard binds: {path}",
         )
 
 
@@ -1042,12 +1137,15 @@ def _reject_import_machinery_lookup(
 ) -> None:
     """Fail closed on ``getattr``/``vars`` aimed at an importable namespace.
 
-    ``getattr(item, name)`` over an ordinary object stays allowed. A lookup
-    fails closed when it reads a whole namespace (``globals``, ``locals``,
-    ``vars()``); when its owner resolves to the import machinery or to an
-    installed ``drift`` module; when its literal attribute names a loader, a
-    machinery namespace or an unbindable dunder; or when its attribute is
-    computed, or it is ``vars``, over an imported or dynamically loaded name.
+    ``getattr(item, name)`` over an ordinary object stays allowed, and so does a
+    literal ``getattr`` of a bindable member of a guarded root, such as
+    ``getattr(os, "O_NOFOLLOW", 0)``, which is the attribute ``os.O_NOFOLLOW``. A
+    lookup fails closed when it reads a whole namespace (``globals``,
+    ``locals``, ``vars()``); when its owner resolves to any other member of a
+    guarded root or to an installed ``drift`` module; when its literal attribute
+    names a loader, a guarded namespace, an unbindable dunder or a string-import
+    or string-evaluation name; or when its attribute is computed, or it is
+    ``vars``, over an imported or dynamically loaded name.
     """
     owner_node = node.args[0] if node.args else None
     owner = _dotted_path(owner_node, aliases) if owner_node is not None else None
@@ -1062,11 +1160,21 @@ def _reject_import_machinery_lookup(
     )
     names_machinery = literal is not None and (
         literal in _DYNAMIC_IMPORT_NAMES
-        or literal in _IMPORT_MACHINERY_ROOTS
+        or literal in _REIMPORT_GUARDED_NAMES
         or (_is_dunder(literal) and literal not in _BINDABLE_DUNDER_ATTRIBUTES)
+        or (
+            owner is not None
+            and f"{owner}.{literal}" in _STRING_IMPORT_PATHS | _STRING_EVALUATION_PATHS
+        )
+    )
+    binds_a_member = (
+        owner is not None
+        and literal is not None
+        and _is_bindable_machinery_path(f"{owner}.{literal}")
     )
     owns_import_machinery = owner is not None and (
-        _is_machinery_path(owner) or bool(_ancestor_modules(owner, installed))
+        (_is_machinery_path(owner) and not binds_a_member)
+        or bool(_ancestor_modules(owner, installed))
     )
     computed_over_module = (
         literal is None
@@ -1105,8 +1213,7 @@ def _import_from_references(
         )
     base = node.module or ""
     for alias in node.names:
-        if alias.name == "*":
-            raise _closure_error(module, f"performs a star import from {base}")
+        _reject_unbindable_imported_name(base, alias, module)
     if base.split(".")[0] != "drift":
         _reject_disallowed_from_import(base, node.names, module)
     found = set(_ancestor_modules(base, installed))
@@ -1115,17 +1222,44 @@ def _import_from_references(
     return frozenset(found)
 
 
+def _reject_unbindable_imported_name(base: str, alias: ast.alias, module: str) -> None:
+    """Fail closed on a from-imported name no base, ``drift`` or not, may bind.
+
+    A star binds names the guard cannot read. A guarded namespace name (``sys``,
+    ``os``, ``importlib``, ``builtins``, ``pydantic``, ``typing``) bound from
+    another module (``from os import sys``, ``from drift.domain.core import
+    importlib``) would hide that root behind the other module's path, where the
+    member rules no longer see it. An unbindable dunder (``__builtins__``) hands
+    out interpreter internals, and every module has one. None of these depends
+    on whether the base is allowlisted, so this runs for every base.
+    """
+    if alias.name == "*":
+        raise _closure_error(module, f"performs a star import from {base}")
+    if alias.name in _REIMPORT_GUARDED_NAMES:
+        raise _closure_error(
+            module,
+            f"reaches a guarded namespace through another object: {base}.{alias.name}",
+        )
+    if _is_dunder(alias.name) and alias.name not in _BINDABLE_DUNDER_ATTRIBUTES:
+        raise _closure_error(
+            module,
+            f"reaches interpreter internals through a dunder name: {base}.{alias.name}",
+        )
+
+
 def _reject_disallowed_from_import(
     base: str, names: Sequence[ast.alias], module: str
 ) -> None:
     """Fail closed on a ``from`` import outside the allowlist.
 
-    A name-granular surface (``sys``, ``importlib.metadata``) admits only its
-    listed members, so a loader, a registry or a namespace cannot be bound. A
-    fully allowlisted module admits any member except one that itself imports a
-    module from a string (pydantic ``ImportString``). Any other base fails
-    closed, which is what refuses ``pkgutil``, ``importlib.util``, ``builtins``,
-    ``pydoc`` and every other importer.
+    A name-granular surface (``sys``, ``os``, ``importlib.metadata``) admits only
+    its listed members, so a loader, a registry, a namespace or a process
+    launcher cannot be bound. A fully allowlisted module admits any member
+    except one that itself imports a module from a string (pydantic
+    ``ImportString``) or evaluates a string as code (the ``typing`` forward
+    reference evaluators). Any other base fails closed, which is what refuses
+    ``pkgutil``, ``importlib.util``, ``builtins``, ``pydoc`` and every other
+    importer.
     """
     allowed_names = _ALLOWED_IMPORT_NAMES.get(base)
     if allowed_names is not None:
@@ -1142,6 +1276,7 @@ def _reject_disallowed_from_import(
             module, f"imports a module outside the closure import allowlist: {base}"
         )
     denied = _STRING_IMPORT_NAMES.get(base, frozenset())
+    evaluating = _STRING_EVALUATION_NAMES.get(base, frozenset())
     for alias in names:
         if alias.name in denied:
             raise _closure_error(
@@ -1149,11 +1284,10 @@ def _reject_disallowed_from_import(
                 "imports a name that imports a module from a string: "
                 f"{base}.{alias.name}",
             )
-        if _is_dunder(alias.name) and alias.name not in _BINDABLE_DUNDER_ATTRIBUTES:
+        if alias.name in evaluating:
             raise _closure_error(
                 module,
-                "reaches interpreter internals through a dunder name: "
-                f"{base}.{alias.name}",
+                f"imports a name that evaluates a string as code: {base}.{alias.name}",
             )
 
 

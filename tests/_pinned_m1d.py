@@ -766,7 +766,7 @@ _FREEZE_INVENTORIES: tuple[_FreezeInventory, ...] = (
         label="v6",
         inventory_id="m1d-v6-protected-sha256",
         path=_FREEZE_FIXTURES / "m1d-v6-protected-sha256.json",
-        file_sha256="bf3392f8e4f206a1f275c6edb361e1b3d1020bac8d9ecccca50249f1a84e8b3f",
+        file_sha256="8f07e48f6cf0552da0b542368263971468e5c517e7ddb99592519643cb4f6665",
         issue=107,
         commit=None,
     ),
