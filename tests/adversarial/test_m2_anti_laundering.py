@@ -553,8 +553,9 @@ def test_an_outcome_role_view_cannot_enter_the_decision_bucket() -> None:
 
 
 def test_a_reconstruction_always_carries_its_retrospective_limitations() -> None:
+    # A reconstruction rides only a scheduled clock (issue 72).
     observation = build_from_harness(_harness())
-    bundle = _realized_bundle(exploratory_reconstructed_observations=(observation,))
+    bundle = _scheduled_bundle(exploratory_reconstructed_observations=(observation,))
 
     assert observation.acknowledged_limitations
     for limitation in observation.acknowledged_limitations:
@@ -562,8 +563,9 @@ def test_a_reconstruction_always_carries_its_retrospective_limitations() -> None
 
 
 def test_an_exploratory_admission_cannot_drop_a_reconstruction_limitation() -> None:
+    # A reconstruction rides only a scheduled clock (issue 72).
     observation = build_from_harness(_harness())
-    bundle = _realized_bundle(exploratory_reconstructed_observations=(observation,))
+    bundle = _scheduled_bundle(exploratory_reconstructed_observations=(observation,))
     dropped = tuple(
         item
         for item in bundle.required_limitations
