@@ -33,12 +33,17 @@ import pytest
 from exploratory_decision_test_support import (
     JAN5,
     JAN6,
+    JAN7,
+    LISTING_OTHER,
     SEC,
+    SEC_OTHER,
     ReconstructedTargetStrategy,
+    cohort_of,
     early_close_sessions,
     reconstructed_engine,
     run_engine,
     scheduled_bundle,
+    scheduled_session_case,
     three_regular_sessions,
     utc_close,
 )
@@ -104,7 +109,10 @@ from drift.domain.evaluator_lanes import (
     ALPACA_LIMITATION_ABSENT_HALTS,
     ALPACA_LIMITATION_SCHEDULED_SESSION_RECONSTRUCTION,
 )
-from drift.domain.evaluator_results import EvaluationClassification
+from drift.domain.evaluator_results import (
+    EvaluationClassification,
+    EvaluationRunArtifactsV1,
+)
 from drift.domain.evaluator_strategy import (
     SecurityTargetPositionV1,
     StrategyDecisionContextV1,
@@ -1584,6 +1592,77 @@ def test_the_non_overlap_guard_is_what_keeps_decision_history_closed() -> None:
         assert reconstructed_history_sessions(sessions, index) == {
             item.session_key for item in sessions[: index + 1]
         }
+
+
+def _f4_run(
+    other_days: tuple[date, ...],
+) -> tuple[EvaluationRunArtifactsV1, ReconstructedTargetStrategy]:
+    """SEC on every day, SEC_OTHER on its own days; JAN6 targets SEC_OTHER."""
+    pair = (SEC, SEC_OTHER)
+    ours = tuple(
+        scheduled_session_case(day, cohort_securities=pair)
+        for day in (JAN5, JAN6, JAN7)
+    )
+    theirs = tuple(
+        scheduled_session_case(
+            day,
+            security_id=SEC_OTHER,
+            listing_id=LISTING_OTHER,
+            cohort_securities=pair,
+        )[0]
+        for day in other_days
+    )
+    bundle = scheduled_bundle(
+        (*(observation for observation, _ in ours), *theirs),
+        tuple(session for _, session in ours),
+    )
+    strategy = ReconstructedTargetStrategy({JAN6: ((SEC_OTHER, 1),)})
+    engine = reconstructed_engine(bundle, cohort=cohort_of(pair))
+    return run_engine(engine, strategy), strategy
+
+
+def test_a_member_missing_its_decision_bar_halts_before_it_can_be_traded() -> None:
+    """F4 (issue 87): a member missing its decision bar is never read as current.
+
+    SEC_OTHER has no JAN6 bar. Before issue 87 the JAN6 context showed its
+    history ending JAN5 as if it were current, the target filled at the JAN7
+    open, and the run was COMPLETE. The decision now halts INDETERMINATE at
+    the JAN6 close, before the strategy is asked, naming the member and the
+    session. Control: with the JAN6 bar present the same target fills.
+    """
+    artifacts, strategy = _f4_run((JAN5, JAN7))
+
+    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
+    assert artifacts.result.halted_session_index == 1
+    causes = [
+        event for event in artifacts.trace.events if event.kind == "indeterminate_cause"
+    ]
+    assert len(causes) == 1
+    assert causes[0].phase is EvaluationPhase.POST_CLOSE_DECISION
+    assert causes[0].cause_kind == "indeterminate_valuation"
+    assert causes[0].cause == (
+        "incomplete reconstructed decision context at the scheduled decision "
+        f"session XNYS 2026-01-06: cohort security {SEC_OTHER} has reconstructed "
+        "history from XNYS 2026-01-05 but no reconstruction for XNYS 2026-01-06"
+    )
+    assert artifacts.result.halt_reason == causes[0].cause
+    assert [context.session_key.local_date for context in strategy.seen] == [JAN5]
+    decisions = [
+        event
+        for event in artifacts.trace.events
+        if event.kind == "exploratory_strategy_decision"
+    ]
+    assert [event.session_key.local_date for event in decisions] == [JAN5]
+    assert not [event for event in artifacts.trace.events if event.kind == "fill"]
+    assert artifacts.final_state.holdings == ()
+
+    control, _ = _f4_run((JAN5, JAN6, JAN7))
+
+    assert control.result.classification is EvaluationClassification.COMPLETE
+    fills = [event for event in control.trace.events if event.kind == "fill"]
+    assert [
+        (event.session_key.local_date, event.fill.security_id) for event in fills
+    ] == [(JAN7, SEC_OTHER)]
 
 
 def test_a_missing_bar_on_the_execution_open_fails_closed_to_indeterminate() -> None:

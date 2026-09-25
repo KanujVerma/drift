@@ -856,6 +856,52 @@ def reconstructed_history_sessions(
     )
 
 
+def _require_contiguous_members(
+    clock_history: Sequence[SessionKeyV1],
+    history: dict[UUID, list[ExploratoryReconstructedSessionObservationV1]],
+) -> None:
+    """Refuse a reconstructed decision context holding a gapped cohort member.
+
+    Issue 87, owner ruling A, extended by the orchestrator to contiguity.
+    ``clock_history`` is the decision's history in clock order, ending at the
+    decision session. A cohort member with reconstructed history must have a
+    reconstruction for every one of those sessions from its first through
+    the decision session. Otherwise it would reach the strategy with history
+    ending early, as though it were current, or with a hole a lookback
+    indexed by position would silently span, and a target for it would
+    trade on that evidence. A warmup session takes no decision, so its gap
+    is refused at the first decision whose history contains it. The context
+    is incomplete whether or not the strategy would trade the member, so the
+    decision halts INDETERMINATE, naming the decision session and, in
+    canonical order, every such member with its first reconstructed session
+    and each session it lacks. A member with no reconstructed history at
+    this cutoff has no view and is left to the existing rules.
+    """
+    clauses: list[str] = []
+    for security_id in sorted(history, key=_security_order):
+        held = {observation.session_key for observation in history[security_id]}
+        first = next(
+            position for position, key in enumerate(clock_history) if key in held
+        )
+        missing = tuple(key for key in clock_history[first:] if key not in held)
+        if not missing:
+            continue
+        start = clock_history[first]
+        clauses.append(
+            f"cohort security {security_id} has reconstructed history from "
+            f"{start.mic} {start.local_date.isoformat()} but no reconstruction "
+            "for "
+            + ", ".join(f"{key.mic} {key.local_date.isoformat()}" for key in missing)
+        )
+    if not clauses:
+        return
+    decided = clock_history[-1]
+    raise IndeterminateValuationError(
+        "incomplete reconstructed decision context at the scheduled decision "
+        f"session {decided.mic} {decided.local_date.isoformat()}: " + "; ".join(clauses)
+    )
+
+
 def require_next_open_execution(
     decision_session: EvaluationSessionV1, execution_session: EvaluationSessionV1
 ) -> None:
@@ -1882,10 +1928,14 @@ class SessionEvaluatorEngine:
         clock has already stepped, this session included. The context then
         re-checks business-time order on its own, so a broken selection here
         fails loudly rather than leaking the future.
+
+        Every cohort member with reconstructed history must also be
+        contiguous and current (issue 87): its history must include every
+        history session from its first through this decision session. A
+        member with no reconstructed history yet has no view.
         """
-        stepped = reconstructed_history_sessions(
-            self._bundle.session_clock.sessions, index
-        )
+        sessions = self._bundle.session_clock.sessions
+        stepped = reconstructed_history_sessions(sessions, index)
         grouped: dict[UUID, list[ExploratoryReconstructedSessionObservationV1]] = {}
         read_current_session = False
         for observation in self._bundle.exploratory_reconstructed_observations:
@@ -1910,6 +1960,14 @@ class SessionEvaluatorEngine:
                 f"session {session.session_key.mic} "
                 f"{session.session_key.local_date.isoformat()}"
             )
+        _require_contiguous_members(
+            tuple(
+                item.session_key
+                for item in sessions[: index + 1]
+                if item.session_key in stepped
+            ),
+            grouped,
+        )
         return tuple(
             ExploratoryReconstructedDecisionViewV1(
                 security_id=security_id,
