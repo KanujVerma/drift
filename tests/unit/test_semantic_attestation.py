@@ -1788,6 +1788,11 @@ def _package_root() -> Path:
 
 def _modules_binding_the_m1d_evidence_identity() -> frozenset[str]:
     """Every installed module that defines, stamps or checks the identity."""
+    return _modules_naming(_M1D_EVIDENCE_IDENTITY_NAMES)
+
+
+def _modules_naming(identity_names: frozenset[str]) -> frozenset[str]:
+    """Every installed module that defines, imports, reads or calls a name."""
     root = _package_root()
     found: set[str] = set()
     for path in sorted(root.rglob("*.py")):
@@ -1802,7 +1807,7 @@ def _modules_binding_the_m1d_evidence_identity() -> frozenset[str]:
                 if isinstance(node, ast.FunctionDef | ast.alias)
                 else ()
             )
-            if _M1D_EVIDENCE_IDENTITY_NAMES.intersection(names):
+            if identity_names.intersection(names):
                 parts = list(path.relative_to(root).with_suffix("").parts)
                 if parts[-1] == "__init__":
                     parts.pop()
@@ -1930,3 +1935,302 @@ def test_every_m1d_evidence_closure_module_is_byte_pinned_by_the_current_freeze(
         relative = path.relative_to(repository).as_posix()
         assert relative in pins, module
         assert hashlib.sha256(path.read_bytes()).hexdigest() == pins[relative], module
+
+
+# --- M1c identities (issue 63, stage 2) ---------------------------------------
+
+_M1C_BASELINE_COMMIT = "aecee94207dbd64aa5154fe03295f35566ec7268"
+"""The commit the M1c byte freeze was drawn at (the M1c v2 inventory)."""
+
+_M1C_VALIDATION_IDENTITY_NAMES = frozenset(
+    {
+        "economic_validator_implementation_hash",
+        "m1c_validation_attestation",
+        "m1c_validation_attestation_hash",
+    }
+)
+"""Every public name that yields the M1c validator run identity."""
+
+_M1C_EVIDENCE_IDENTITY_NAMES = frozenset(
+    {"m1c_evidence_attestation", "m1c_evidence_attestation_hash"}
+)
+"""Every public name that yields the M1c evidence identity."""
+
+_M1C_VALIDATION_RUN_AUTHORS = frozenset({"drift.adapters.alpaca_exploratory"})
+"""Modules that stamp the M1c validator run identity into a validation run they
+author, outside the closure. The bridge validates its Alpaca terms dataset with
+``validate_economic_dataset`` (a seed) and stamps the run with the unchanged
+``economic_validator_implementation_hash()`` accessor, so it is classified here
+instead of being a seed."""
+
+_WHOLE_TREE_PROVENANCE_MODULES = frozenset(
+    {"drift.domain.economic_common", "drift.domain.observation_query"}
+)
+"""The definer of the whole-tree inventory and its one named provenance accessor
+(``drift_source_inventory_hash``). No other module may reach it, so no M1c or
+M1d identity can silently fall back to whole-tree provenance."""
+
+_M1D_ONLY_MODULES = frozenset(
+    {
+        "drift.domain.action_sessions",
+        "drift.domain.normalization",
+        "drift.domain.observation_query",
+        "drift.domain.observation_usability",
+        "drift.domain.observations",
+        "drift.domain.sessions",
+        "drift.markets.action_sessions",
+        "drift.markets.identity",
+        "drift.markets.normalization",
+        "drift.markets.observation_selection",
+        "drift.markets.observation_usability",
+        "drift.markets.observation_validation",
+        "drift.markets.session_binding",
+        "drift.markets.session_generation",
+        "drift.markets.session_validation",
+        "drift.markets.universes",
+    }
+)
+"""Modules the M1d closures declare that M1c code never executes."""
+
+
+def _m1c_closures() -> dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]]:
+    """Both M1c closures by id: (id, seeds, declared modules)."""
+    return {
+        "m1c-source-validation-v1": (
+            semantic_attestation.M1C_VALIDATION_CLOSURE_ID,
+            semantic_attestation.M1C_VALIDATION_SEEDS,
+            semantic_attestation.M1C_VALIDATION_SEMANTIC_MODULES,
+        ),
+        "m1c-evidence-v1": (
+            semantic_attestation.M1C_EVIDENCE_CLOSURE_ID,
+            semantic_attestation.M1C_EVIDENCE_SEEDS,
+            semantic_attestation.M1C_EVIDENCE_SEMANTIC_MODULES,
+        ),
+    }
+
+
+def _load_pinned_m1c() -> ModuleType:
+    helper = Path(__file__).resolve().parents[1] / "_pinned_m1c.py"
+    spec = importlib.util.spec_from_file_location("_attestation_pinned_m1c", helper)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("closure", ("m1c-source-validation-v1", "m1c-evidence-v1"))
+def test_declared_m1c_closure_is_exactly_the_resolved_closure(closure: str) -> None:
+    closure_id, seeds, declared = _m1c_closures()[closure]
+    assert closure_id == closure
+    assert resolve_semantic_closure(seeds=seeds) == tuple(declared)
+
+
+@pytest.mark.parametrize("closure", ("m1c-source-validation-v1", "m1c-evidence-v1"))
+def test_m1c_closure_guard_accepts_the_installed_package(closure: str) -> None:
+    _closure_id, seeds, declared = _m1c_closures()[closure]
+    verify_semantic_closure(modules=declared, seeds=seeds)
+
+
+def test_m1c_attestations_are_bounded_and_versioned() -> None:
+    """Each accessor returns its own versioned closure, rebuilt identically."""
+    closures = _m1c_closures()
+    assert semantic_attestation.M1C_VALIDATION_SEEDS == (
+        "drift.markets.economic_validation",
+    )
+    assert semantic_attestation.M1C_EVIDENCE_SEEDS == (
+        "drift.markets.economic_outcomes",
+        "drift.markets.economic_selection",
+        "drift.markets.economic_validation",
+    )
+    for closure, accessor, hash_accessor in (
+        (
+            "m1c-source-validation-v1",
+            semantic_attestation.m1c_validation_attestation,
+            semantic_attestation.m1c_validation_attestation_hash,
+        ),
+        (
+            "m1c-evidence-v1",
+            semantic_attestation.m1c_evidence_attestation,
+            semantic_attestation.m1c_evidence_attestation_hash,
+        ),
+    ):
+        closure_id, _seeds, declared = closures[closure]
+        attestation = accessor()
+        assert attestation.algorithm_id == SEMANTIC_ATTESTATION_ALGORITHM_V1
+        assert attestation.schema_version == "1"
+        assert attestation.closure_id == closure == closure_id
+        assert attestation.declared_modules == tuple(declared)
+        assert hash_accessor() == attestation.attestation_hash
+        assert accessor() is attestation
+        rebuilt = build_semantic_attestation(closure_id=closure_id, modules=declared)
+        assert rebuilt == attestation
+
+
+def test_m1c_closures_exclude_consumers_collectors_storage_and_m1d_only_code() -> None:
+    """Only M1c code can move an M1c identity."""
+    for closure, (_closure_id, _seeds, declared) in _m1c_closures().items():
+        for module in declared:
+            assert not module.startswith(
+                (
+                    "drift.adapters",
+                    "drift.config",
+                    "drift.evaluator",
+                    "drift.ledger",
+                    "drift.qualification",
+                )
+            ), (closure, module)
+        assert not _M1D_ONLY_MODULES & set(declared), closure
+        assert "drift.domain.observation_query" not in declared, closure
+    assert _M1D_ONLY_MODULES <= set(semantic_attestation.M1D_EVIDENCE_SEMANTIC_MODULES)
+
+
+def test_m1c_identities_are_distinct_from_each_other_m1d_and_whole_tree() -> None:
+    """Four versioned identities and the whole-tree provenance, all distinct."""
+    identities = (
+        semantic_attestation.m1c_validation_attestation_hash(),
+        semantic_attestation.m1c_evidence_attestation_hash(),
+        m1d_semantic_attestation_hash(),
+        semantic_attestation.m1d_evidence_attestation_hash(),
+        economic_implementation_hash(),
+    )
+    assert len(set(identities)) == len(identities)
+    closure_ids = {closure_id for closure_id, _, _ in _m1c_closures().values()}
+    assert len(closure_ids | {M1D_VALIDATION_CLOSURE_ID, "m1d-evidence-v1"}) == 4
+    # The validator is part of what the evidence depends on.
+    assert set(semantic_attestation.M1C_VALIDATION_SEMANTIC_MODULES) < set(
+        semantic_attestation.M1C_EVIDENCE_SEMANTIC_MODULES
+    )
+
+
+def test_each_m1c_closure_is_a_strict_subset_of_the_matching_m1d_closure() -> None:
+    """M1d executes M1c code in process, so an M1c edit moves M1d, not back."""
+    assert set(semantic_attestation.M1C_VALIDATION_SEMANTIC_MODULES) < set(
+        M1D_VALIDATION_SEMANTIC_MODULES
+    )
+    assert set(semantic_attestation.M1C_EVIDENCE_SEMANTIC_MODULES) < set(
+        semantic_attestation.M1D_EVIDENCE_SEMANTIC_MODULES
+    )
+
+
+@pytest.mark.parametrize(
+    ("accessor_name", "constant", "dropped"),
+    (
+        (
+            "m1c_validation_attestation",
+            "M1C_VALIDATION_SEMANTIC_MODULES",
+            "drift.markets.validation",
+        ),
+        (
+            "m1c_evidence_attestation",
+            "M1C_EVIDENCE_SEMANTIC_MODULES",
+            "drift.domain.economic_results",
+        ),
+    ),
+)
+def test_m1c_attestation_fails_closed_on_an_incomplete_declaration(
+    monkeypatch: pytest.MonkeyPatch, accessor_name: str, constant: str, dropped: str
+) -> None:
+    """Each accessor runs the closure guard; it never attests a leaky declaration."""
+    accessor = getattr(semantic_attestation, accessor_name)
+    declared = tuple(
+        module
+        for module in getattr(semantic_attestation, constant)
+        if module != dropped
+    )
+    accessor.cache_clear()
+    monkeypatch.setattr(semantic_attestation, constant, declared)
+    try:
+        with pytest.raises(
+            SemanticClosureError,
+            match=r"escaped the declared attestation closure: .*-> "
+            + dropped.replace(".", r"\."),
+        ):
+            accessor()
+    finally:
+        accessor.cache_clear()
+
+
+def test_every_module_binding_an_m1c_identity_is_a_seed_and_provenance_apart() -> None:
+    """No module outside the seeds stamps or checks an M1c identity.
+
+    The whole-tree inventory is reached only by its definer and its one named
+    provenance accessor, so no stamp site can fall back to it unseen.
+    """
+    validation = _modules_naming(_M1C_VALIDATION_IDENTITY_NAMES)
+    assert validation == (
+        frozenset(semantic_attestation.M1C_VALIDATION_SEEDS)
+        | _M1D_EVIDENCE_IDENTITY_DEFINERS
+        | _M1C_VALIDATION_RUN_AUTHORS
+    )
+    evidence = _modules_naming(_M1C_EVIDENCE_IDENTITY_NAMES)
+    assert (
+        evidence
+        == (
+            frozenset(semantic_attestation.M1C_EVIDENCE_SEEDS)
+            - frozenset(semantic_attestation.M1C_VALIDATION_SEEDS)
+        )
+        | _M1D_EVIDENCE_IDENTITY_DEFINERS
+    )
+    assert not _M1C_VALIDATION_RUN_AUTHORS & set(
+        semantic_attestation.M1C_EVIDENCE_SEMANTIC_MODULES
+    )
+    assert _modules_naming(frozenset({"economic_implementation_hash"})) == (
+        _WHOLE_TREE_PROVENANCE_MODULES
+    )
+
+
+@pytest.mark.parametrize("closure", ("m1c-source-validation-v1", "m1c-evidence-v1"))
+def test_importing_an_m1c_closure_loads_only_its_declared_drift_modules(
+    closure: str,
+) -> None:
+    """The import-trace backstop of issue 107, for both M1c closures."""
+    _closure_id, seeds, declared = _m1c_closures()[closure]
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", _IMPORT_TRACE_PROGRAM, json.dumps(seeds)],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    report = json.loads(completed.stdout)
+    assert Path(report["package"]).resolve() == (_package_root() / "__init__.py")
+    loaded = set(report["loaded"])
+    assert set(seeds) <= loaded
+    assert loaded <= set(declared), sorted(loaded - set(declared))
+
+
+def test_every_m1c_closure_module_is_byte_pinned_by_the_current_freezes() -> None:
+    """Every M1c closure module is M1d-pinned; every aecee94-era one M1c-pinned.
+
+    ``semantic_attestation.py`` postdates the M1c freeze, so it is pinned by
+    the M1d chain only (plan decision D8).
+    """
+    m1d_pins = _load_pinned_m1d().PROTECTED_M1D_SHA256
+    m1c_pins = _load_pinned_m1c().PROTECTED_SHA256
+    root = _package_root()
+    repository = root.parents[1]
+    listed = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", _M1C_BASELINE_COMMIT, "--", "src"],
+        cwd=repository,
+        capture_output=True,
+        check=True,
+        text=True,
+    ).stdout.split()
+    assert listed
+    baseline = frozenset(listed)
+    declared = set(semantic_attestation.M1C_EVIDENCE_SEMANTIC_MODULES) | set(
+        semantic_attestation.M1C_VALIDATION_SEMANTIC_MODULES
+    )
+    outside_m1c_freeze = set()
+    for module in sorted(declared):
+        path = semantic_attestation._declared_module_path(root, module)
+        relative = path.relative_to(repository).as_posix()
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        assert m1d_pins.get(relative) == digest, module
+        if relative in baseline:
+            assert m1c_pins.get(relative) == digest, module
+        else:
+            outside_m1c_freeze.add(relative)
+    assert outside_m1c_freeze == {"src/drift/domain/semantic_attestation.py"}
+    assert "src/drift/domain/semantic_attestation.py" not in m1c_pins
