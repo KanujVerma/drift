@@ -41,16 +41,24 @@ exploratory reconstructions. In the reconstructed lane, execution and marks
 read EXPLORATORY accounting prices from the same re-derived reconstructions
 (issue 54): the execution session's open fills, and each session's close marks.
 The realized lane keeps reading authorized accounting views only.
+
+The promotion lane is disabled (the issue 79 ruling, option 1). The engine
+never ran the promotion gate, so it now refuses every
+`PromotionEvaluationAdmissionV1`, a gate-valid one included, with
+`PromotionLaneDisabledError`: first at construction, then at the start of a
+run, and again at the result sealing site, so no production path seals a
+`PromotionEvaluationResultV1`. The promotion guards behind the construction
+refusal stay for the day issue 115 re-enables the lane.
 """
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Literal, cast
 from uuid import UUID
 
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from drift.domain.assertions import ResolutionMode
 from drift.domain.common import UUID7, SHA256Hash
@@ -116,6 +124,7 @@ from drift.domain.evaluator_strategy import (
     RuntimeStrategy,
     SecurityTargetPositionV1,
     StrategyDecisionContextV1,
+    StrategyDecisionIntentV1,
     StrategyDecisionViewV1,
     StrategyIntentRejectedError,
     position_view,
@@ -149,6 +158,7 @@ from drift.domain.securities import (
 )
 from drift.domain.sessions import SessionKeyV1
 from drift.domain.universes import StructuralEligibilityClassification
+from drift.errors import CanonicalSerializationError, DriftError
 from drift.evaluator.bundles import validate_exploratory_admission
 from drift.evaluator.clock import build_scheduled_reconstruction_clock
 from drift.evaluator.corporate_actions import CorporateActionProcessor
@@ -180,6 +190,40 @@ LANE_MARK_GRADE: dict[str, MarkEvidenceGrade] = {
 }
 
 
+class PromotionLaneDisabledError(DriftError, ValueError):
+    """Raised when anything asks the evaluator for the disabled promotion lane.
+
+    The issue 79 ruling (option 1) disables the promotion lane: the engine
+    never ran the promotion gate, so a hand-made admission could seal a
+    promotion-grade result. Every ``PromotionEvaluationAdmissionV1`` is
+    refused, a gate-valid one included. The gate, the proofs, and the
+    admission and result types stay; re-enabling the lane requires every
+    prerequisite tracked in issue 115 and a fresh owner decision.
+    """
+
+
+def refuse_promotion_lane(subject: object, *, site: str) -> None:
+    """Fail closed on a promotion admission or result (issue 79 ruling).
+
+    The type is checked, and so is the lane an object declares, so neither a
+    promotion model relabelled by ``model_construct`` nor a duck-typed object
+    naming the promotion lane slips past. So is any promotion-grade claim:
+    anything whose ``is_promotion_grade_evidence`` is not exactly ``False``
+    is refused, whatever lane it names (issue 120 review, F-A). ``site``
+    names the guard refusing.
+    """
+    promotion_types = PromotionEvaluationAdmissionV1 | PromotionEvaluationResultV1
+    if (
+        isinstance(subject, promotion_types)
+        or getattr(subject, "lane", None) == "promotion"
+        or getattr(subject, "is_promotion_grade_evidence", False) is not False
+    ):
+        raise PromotionLaneDisabledError(
+            f"the promotion lane is disabled (issue 79 ruling): {site} refuses "
+            "it; re-enabling it requires every prerequisite in issue 115"
+        )
+
+
 def _revalidated[M: BaseModel](declared: type[M], model: BaseModel) -> M:
     """Rebuild ``model`` as a fresh, validated ``declared`` (issue 78).
 
@@ -200,6 +244,202 @@ def _revalidated_admission(admission: BaseModel) -> EvaluationAdmissionV1:
     return _ADMISSION.validate_python(
         admission.model_dump(mode="python", warnings=False)
     )
+
+
+#: The exact type each declared field of a returned intent must hold, per model.
+#: Strict validation accepts an instance of a subclass and keeps it, so a
+#: subclassed leaf would reach staging with its own comparisons (#119 review).
+_EXACT_FIELD_TYPES: dict[type[BaseModel], dict[str, type]] = {
+    StrategyDecisionIntentV1: {
+        "schema_version": str,
+        "session_key": SessionKeyV1,
+        "decision_time": datetime,
+        "targets": tuple,
+    },
+    SessionKeyV1: {
+        "schema_version": str,
+        "mic": str,
+        "session_scope": str,
+        "local_date": date,
+    },
+    SecurityTargetPositionV1: {
+        "schema_version": str,
+        "security_id": UUID,
+        "target_quantity": int,
+    },
+}
+
+#: The exact model every member of a tuple field must be.
+_EXACT_MEMBER_TYPES: dict[tuple[type[BaseModel], str], type[BaseModel]] = {
+    (StrategyDecisionIntentV1, "targets"): SecurityTargetPositionV1,
+}
+
+#: Read a type's names through `type` itself, so a metaclass cannot run.
+_TYPE_QUALNAME = vars(type)["__qualname__"]
+_TYPE_MODULE = vars(type)["__module__"]
+_ABSENT = object()
+#: Stands in for a type name that is not exactly `str`, whose formatting
+#: would otherwise run the strategy's own `__format__`.
+_UNNAMED = "<unnamed>"
+
+#: One more than the largest integer a UUID holds.
+_UUID_INT_BOUND = 1 << 128
+
+
+def _exact_name(name: object) -> str:
+    return name if type(name) is str else _UNNAMED
+
+
+def _type_name(kind: type) -> str:
+    return _exact_name(_TYPE_QUALNAME.__get__(kind))
+
+
+def _refuse_intent(problem: str) -> StrategyIntentRejectedError:
+    return StrategyIntentRejectedError(
+        f"strategy returned a decision intent with {problem}"
+    )
+
+
+def _require_exact_node(value: object, expected: type, path: str) -> None:
+    """Refuse ``value`` unless it is exactly ``expected``, walked to its leaves.
+
+    Reads only type identity and the models' own field state, so no method a
+    strategy could define runs while its answer is inspected.
+    """
+    actual = type(value)
+    if actual is not expected:
+        raise _refuse_intent(
+            f"{path} of type {_type_name(actual)}, not {_type_name(expected)}"
+        )
+    if actual is datetime and cast(datetime, value).tzinfo is not UTC:
+        # `UTCDateTime` validation always yields the `datetime.UTC` singleton,
+        # so any other zone, even at an equal instant, is not its output.
+        raise _refuse_intent(f"{path} whose tzinfo is not datetime.UTC")
+    if actual is UUID:
+        number = getattr(value, "int", _ABSENT)
+        if type(number) is not int:
+            raise _refuse_intent(
+                f"{path}.int of type {_type_name(type(number))}, not int"
+            )
+        if not 0 <= number < _UUID_INT_BOUND:
+            raise _refuse_intent(f"{path}.int outside the 128-bit range")
+    if actual in _EXACT_FIELD_TYPES:
+        _require_exact_model(cast(BaseModel, value), path)
+
+
+def _require_exact_model(model: BaseModel, path: str) -> None:
+    """Refuse any state beside a model's declared fields, then walk each field."""
+    kind = type(model)
+    where = f"{path}." if path else ""
+    state = vars(model)
+    # Pydantic reads the raw storage of the instance dictionary, while a dict
+    # subclass could show this walk other values through its own methods.
+    if type(state) is not dict:
+        raise _refuse_intent(f"a {where}__dict__ that is not exactly a dict")
+    declared = kind.model_fields
+    if not all(type(name) is str for name in state) or not (
+        state.keys() <= declared.keys()
+    ):
+        raise _refuse_intent(f"undeclared state in {where}__dict__")
+    for slot in ("__pydantic_extra__", "__pydantic_private__"):
+        if getattr(model, slot, _ABSENT) is not None:
+            raise _refuse_intent(f"undeclared state in {where}{slot}")
+    # Construction records exactly the fields it was given, which always
+    # include every required one; a missing field is left to validation.
+    fields_set = getattr(model, "__pydantic_fields_set__", _ABSENT)
+    required = {name for name, info in declared.items() if info.is_required()}
+    if (
+        type(fields_set) is not set
+        or not all(type(name) is str for name in fields_set)
+        or not fields_set <= state.keys()
+        or not required & state.keys() <= fields_set
+    ):
+        raise _refuse_intent(f"a tampered {where}__pydantic_fields_set__")
+    shapes = _EXACT_FIELD_TYPES[kind]
+    for name, value in state.items():
+        field_path = f"{where}{name}"
+        _require_exact_node(value, shapes[name], field_path)
+        if shapes[name] is tuple:
+            member = _EXACT_MEMBER_TYPES[(kind, name)]
+            for position, item in enumerate(cast(tuple[object, ...], value)):
+                _require_exact_node(item, member, f"{field_path}.{position}")
+
+
+def _revalidated_intent(returned: object) -> StrategyDecisionIntentV1:
+    """Rebuild the intent a strategy returned before staging it (issue 111).
+
+    The strategy's answer is revalidated like every engine input (issue 78),
+    never trusted as returned, in three steps that each refuse rather than
+    repair. Its structure must be exactly the frozen schema's: every model,
+    container and leaf exactly its declared type, with no state beside its
+    declared fields. It must pass the declared type's strict validation. And
+    the canonical content of the rebuilt intent must equal the returned
+    one's, so an unsorted target set or any other value a validator would
+    normalize is refused rather than silently repaired. Every refusal is a
+    `StrategyIntentRejectedError`, so the run halts `REJECTED` before any
+    fill, exactly as a staging refusal does.
+
+    The accepted intent is then rebuilt once more through JSON, so staging
+    holds only fresh objects. A python-mode rebuild keeps the strategy's own
+    `uuid.UUID` instances, whose value a strategy that kept them could still
+    rewrite after the decision was staged, traced and filled.
+    """
+    if type(returned) is not StrategyDecisionIntentV1:
+        raise StrategyIntentRejectedError(
+            f"strategy returned {_type_name(type(returned))}, "
+            "not a StrategyDecisionIntentV1"
+        )
+    _require_exact_model(returned, "")
+    try:
+        rebuilt = _revalidated(StrategyDecisionIntentV1, returned)
+    except ValidationError as error:
+        causes = "; ".join(
+            f"{'.'.join(str(part) for part in item['loc'])}: {item['msg']}"
+            for item in error.errors(include_url=False)
+        )
+        raise StrategyIntentRejectedError(
+            f"strategy returned an invalid decision intent: {causes}"
+        ) from error
+    # Every node is now an exact Drift or builtin type, so hashing the
+    # returned intent runs no strategy code.
+    if content_hash(rebuilt) != content_hash(returned):
+        raise StrategyIntentRejectedError(
+            "strategy returned a non-canonical decision intent: "
+            "revalidating it builds a different intent"
+        )
+    return StrategyDecisionIntentV1.model_validate_json(rebuilt.model_dump_json())
+
+
+def _uncanonical_return_hash(returned: object) -> SHA256Hash:
+    """Hash naming the type of a return whose content is not hashed."""
+    kind = type(returned)
+    module = _exact_name(_TYPE_MODULE.__get__(kind))
+    return content_hash({"uncanonical_return_type": f"{module}.{_type_name(kind)}"})
+
+
+def _returned_intent_hash(returned: object) -> SHA256Hash:
+    """Content hash of what a strategy returned, for a refused decision event.
+
+    A refused return need not have a canonical form: a forged naive decision
+    time or an arbitrary object has none. The event then hashes the name of
+    the returned type instead. An intent is content hashed only once the
+    exact-type walk accepts it, so hashing it runs no strategy code, and a
+    value that still cannot be serialized (a lone surrogate in a string) is
+    named by type too. Any other return can still run its own code while it
+    is hashed (a serializer, iteration, or ``repr``); if that raises, the
+    exception propagates and the run records FAILED, as a strategy that
+    raises does.
+    """
+    if type(returned) is StrategyDecisionIntentV1:
+        try:
+            _require_exact_model(returned, "")
+            return content_hash(returned)
+        except StrategyIntentRejectedError, CanonicalSerializationError, UnicodeError:
+            return _uncanonical_return_hash(returned)
+    try:
+        return content_hash(returned)
+    except CanonicalSerializationError:
+        return _uncanonical_return_hash(returned)
 
 
 def _security_order(security_id: UUID) -> bytes:
@@ -460,6 +700,9 @@ def _resolve_reconstructed_lane(
       ``validate_promotion_admission`` already refuses such a bundle; this
       refuses it again here, so an engine built without that gate cannot be
       the seam through which the weaker grade reaches a promotion result.
+      While the promotion lane is disabled (issue 79 ruling), construction
+      refuses every promotion admission before this is reached; the guard
+      stays for the day issue 115 re-enables the lane.
     * Every exploratory admission is validated against its bundle, in either
       lane, so it acknowledges every limitation the bundle's evidence obliges
       (issue 42 ruling, invariant 4; issue 56). A realized bundle can carry
@@ -688,10 +931,18 @@ class SessionEvaluatorEngine:
         book_currency_namespace: str,
         book_currency_code: str,
     ) -> None:
+        # Issue 79 ruling: the promotion lane is disabled. The refusal reads
+        # the admission alone, before anything else, so no bundle, evidence,
+        # or gate validity can change the answer.
+        refuse_promotion_lane(admission, site="engine construction")
         # Issue 78: run only on inputs revalidated through their canonical
         # boundary, so a stale self-hash or a foreign payload fails closed here.
         bundle = _revalidated(EvaluationInputBundleV1, bundle)
         admission = _revalidated_admission(admission)
+        # Again on the rebuilt admission: a dump may rebuild into promotion.
+        refuse_promotion_lane(
+            admission, site="engine construction on the revalidated admission"
+        )
         protocol = _revalidated(EvaluationProtocolV1, protocol)
         cost_model = _revalidated(EvaluationCostModelV1, cost_model)
         evidence = _revalidated_evidence(evidence)
@@ -941,6 +1192,9 @@ class SessionEvaluatorEngine:
         The decision lane was fixed at construction. The strategy is bound to
         that lane's one decision method before any session is stepped.
         """
+        # Issue 79 ruling, at use: construction already refused a promotion
+        # admission, and nothing past it is stepped under one either.
+        refuse_promotion_lane(self._admission, site="an engine run")
         run_identity = _revalidated(EvaluationRunIdentityV1, run_identity)
         self._require_bound_identity(run_identity, strategy)
         decide = self._lane_decision(strategy)
@@ -1398,10 +1652,10 @@ class SessionEvaluatorEngine:
         if index < self._protocol.warmup_session_count - 1:
             return None
         context = self._decision_context(loop.state, session)
-        intent = strategy.decide(context)
+        returned = strategy.decide(context)
         context_hash = content_hash(context)
-        intent_hash = content_hash(intent)
         try:
+            intent = _revalidated_intent(returned)
             staged = stage_decision_targets(intent, context)
         except StrategyIntentRejectedError as error:
             reason = str(error) or type(error).__name__
@@ -1412,7 +1666,7 @@ class SessionEvaluatorEngine:
                     session_key=session.session_key,
                     decision_cutoff=session.closed_at,
                     context_hash=context_hash,
-                    intent_hash=intent_hash,
+                    intent_hash=_returned_intent_hash(returned),
                     outcome="rejected",
                     staged_targets=(),
                     rejection_reason=reason,
@@ -1426,7 +1680,7 @@ class SessionEvaluatorEngine:
                 session_key=session.session_key,
                 decision_cutoff=session.closed_at,
                 context_hash=context_hash,
-                intent_hash=intent_hash,
+                intent_hash=content_hash(intent),
                 outcome="staged",
                 staged_targets=staged,
                 rejection_reason=None,
@@ -1542,14 +1796,13 @@ class SessionEvaluatorEngine:
         if index < self._protocol.warmup_session_count - 1:
             return None
         context = self._reconstructed_decision_context(loop.state, index, session, lane)
-        intent = strategy.decide_exploratory(context)
+        returned = strategy.decide_exploratory(context)
         common: dict[str, Any] = {
             "sequence": len(loop.events),
             "session_index": index,
             "session_key": session.session_key,
             "decision_cutoff": context.decision_cutoff,
             "context_hash": content_hash(context),
-            "intent_hash": content_hash(intent),
             "reconstruction_hashes": tuple(
                 sorted(
                     observation.reconstruction_hash
@@ -1560,12 +1813,14 @@ class SessionEvaluatorEngine:
             "acknowledged_limitations": context.acknowledged_limitations,
         }
         try:
+            intent = _revalidated_intent(returned)
             staged = stage_exploratory_decision_targets(intent, context)
         except StrategyIntentRejectedError as error:
             reason = str(error) or type(error).__name__
             loop.events.append(
                 ExploratoryStrategyDecisionTraceEventV1(
                     **common,
+                    intent_hash=_returned_intent_hash(returned),
                     outcome="rejected",
                     staged_targets=(),
                     rejection_reason=reason,
@@ -1575,6 +1830,7 @@ class SessionEvaluatorEngine:
         loop.events.append(
             ExploratoryStrategyDecisionTraceEventV1(
                 **common,
+                intent_hash=content_hash(intent),
                 outcome="staged",
                 staged_targets=staged,
                 rejection_reason=None,
@@ -1727,16 +1983,11 @@ class SessionEvaluatorEngine:
             "trace_hash": trace.trace_hash,
             "result_hash": "0" * 64,
         }
-        if isinstance(self._admission, PromotionEvaluationAdmissionV1):
-            return _seal(
-                PromotionEvaluationResultV1,
-                common
-                | {
-                    "lane": "promotion",
-                    "is_promotion_grade_evidence": True,
-                    "admission": self._admission,
-                },
-            )
+        # Issue 79 ruling: this site sealed a promotion-grade
+        # `PromotionEvaluationResultV1` without the gate ever having run. It
+        # now refuses, so no production path reaches a promotion result.
+        # Re-enabling it requires every prerequisite in issue 115.
+        refuse_promotion_lane(self._admission, site="result sealing")
         return _seal(
             ExploratoryEvaluationResultV1,
             common

@@ -10,6 +10,17 @@ caller through `ExperimentRunnerContext`.
 That keeps replay honest. Running one evaluation twice under two different
 `ExperimentRun` identifiers and two different clocks produces two experiment
 rows whose bound artifact hashes are byte-identical.
+
+The promotion lane is disabled (the issue 79 ruling). Behind the engine's own
+refusal, the runner refuses a promotion admission before running, and refuses
+a promotion result before recording, so no M0 experiment run and no audit
+event ever records ``lane=promotion``. The runner trusts no object an engine
+returns: it rebuilds the artifacts through canonical JSON, refuses the rebuilt
+result if it is in the promotion lane or claims promotion-grade evidence, and
+records only from the rebuilt objects (issue 120 review, F-A). A valid rebuild
+is not proof the artifacts are this run's, so the rebuilt result must also
+carry the context's run identity over the dataset the M0 row records (issue
+124).
 """
 
 from collections.abc import Mapping
@@ -31,13 +42,29 @@ from drift.domain.experiments import (
     ExperimentRunStatus,
     ExperimentSpecification,
 )
-from drift.evaluator.engine import LaneDispatchStrategy, SessionEvaluatorEngine
+from drift.errors import DriftError
+from drift.evaluator.engine import (
+    LaneDispatchStrategy,
+    PromotionLaneDisabledError,
+    SessionEvaluatorEngine,
+    refuse_promotion_lane,
+)
 from drift.ledger.interface import AuditEventDraft, Ledger
 from drift.serialization.canonical import content_hash
 
 EXPERIMENT_RUN_EVENT_TYPE = "m2.evaluation.run.recorded"
 EXPERIMENT_RUN_ENTITY_TYPE = "experiment_run"
 EXPERIMENT_RUN_EVENT_SCHEMA_VERSION = "1"
+
+
+class ForeignRunArtifactsError(DriftError, ValueError):
+    """Raised when an engine returns artifacts that are not this run's (#124).
+
+    A canonical rebuild proves the returned artifacts are valid, not that they
+    came from the run the context names. A genuine run over another bundle,
+    protocol, cost model, strategy or evaluator evidence would otherwise be
+    recorded under this run's M0 row. Nothing is recorded when this is raised.
+    """
 
 
 @dataclass(frozen=True)
@@ -69,7 +96,9 @@ def summary_metrics_payload(
 
     Exact decimals are carried as their canonical text. Rendering them as
     floats would make a metrics row disagree with the book it summarizes.
+    A promotion result is refused, never projected (issue 79 ruling).
     """
+    refuse_promotion_lane(result, site="the summary metrics projection")
     metrics: EvaluationSummaryMetricsV1 = result.metrics
     payload: dict[str, ImmutableJSONValue] = {
         "lane": result.lane,
@@ -95,6 +124,57 @@ def summary_metrics_payload(
     }
     payload.update({name: str(value) for name, value in exact.items()})
     return payload
+
+
+def _rebuilt_artifacts(artifacts: EvaluationRunArtifactsV1) -> EvaluationRunArtifactsV1:
+    """Rebuild what an engine returned before any of it is recorded (#120 F-A).
+
+    The returned object is refused first if it names the promotion lane or
+    claims promotion-grade evidence. It is then rebuilt through canonical
+    JSON, not a python-mode dump: a python-mode rebuild keeps subclassed leaf
+    values and so any attacker-defined equality inside them (issue 123), while
+    a JSON rebuild validates every member as its declared type over exact
+    built-in leaves. The rebuilt result is refused in turn, and only the
+    rebuilt objects are recorded.
+    """
+    refuse_promotion_lane(
+        artifacts.result, site="the experiment runner on the returned result"
+    )
+    rebuilt = EvaluationRunArtifactsV1.model_validate_json(
+        artifacts.model_dump_json(warnings=False)
+    )
+    refuse_promotion_lane(
+        rebuilt.result, site="the experiment runner on the rebuilt result"
+    )
+    return rebuilt
+
+
+def _refuse_foreign_run(
+    context: ExperimentRunnerContext,
+    recorded: EvaluationRunArtifactsV1,
+    dataset_hash: str,
+) -> None:
+    """Refuse rebuilt artifacts that are not this run's (issue 124).
+
+    The run identity binds everything that changes results (issue 86): the
+    bundle, protocol, cost model, strategy, admission, evaluator evidence,
+    code version and environment closure. The rebuilt result must carry
+    exactly the identity the engine was asked to run. Its bundle must also be
+    the dataset the M0 row records, checked against the result itself, so the
+    row never names one dataset over a result evaluated on another.
+    """
+    identity = recorded.result.run_identity
+    if identity != context.run_identity:
+        raise ForeignRunArtifactsError(
+            "the returned run is not this run: its run identity is "
+            f"{identity.run_identity_hash}, this run is "
+            f"{context.run_identity.run_identity_hash}"
+        )
+    if identity.bundle_hash != dataset_hash:
+        raise ForeignRunArtifactsError(
+            f"the returned result was evaluated over bundle {identity.bundle_hash}, "
+            f"not the dataset this run records, {dataset_hash}"
+        )
 
 
 def _artifact_references(
@@ -195,8 +275,17 @@ def execute_experiment_run(
     `REJECTED` are scientific answers, and the run records them with its
     artifacts bound. Only an unhandled defect produces `FAILED`, and it binds
     no artifacts because the evaluation produced none that can be trusted.
+
+    A promotion admission or result is not a defect but a refusal (issue 79
+    ruling): it raises `PromotionLaneDisabledError` and records nothing, and
+    so does that error raised from inside the engine run. Returned artifacts
+    that fail their canonical rebuild are not recorded either; the validation
+    error propagates. Nor are rebuilt artifacts of another run (issue 124):
+    they raise `ForeignRunArtifactsError`.
     """
+    refuse_promotion_lane(context.engine.admission, site="the experiment runner")
     _validate_context(specification, context)
+    dataset_hash = specification.dataset_reference.content_hash
     common: dict[str, object] = {
         "run_id": context.run_id,
         "experiment_id": specification.experiment_id,
@@ -204,13 +293,17 @@ def execute_experiment_run(
         "completed_at": context.completed_at,
         "code_hash": context.run_identity.code_version_hash,
         "environment_hash": context.run_identity.environment_closure_hash,
-        "dataset_hash": specification.dataset_reference.content_hash,
+        "dataset_hash": dataset_hash,
         "parameters_hash": content_hash(specification.parameters),
     }
     try:
         artifacts = context.engine.run(
             strategy=context.strategy, run_identity=context.run_identity
         )
+    except PromotionLaneDisabledError:
+        # A refusal from inside the run is still a refusal (issue 120 review,
+        # F-B): it is never laundered into a recorded FAILED run.
+        raise
     except Exception as error:
         detail = (
             f"{type(error).__name__}: {error}" if str(error) else type(error).__name__
@@ -226,12 +319,14 @@ def execute_experiment_run(
         )
         _record_audit_event(context, run)
         return run
+    recorded = _rebuilt_artifacts(artifacts)
+    _refuse_foreign_run(context, recorded, dataset_hash)
     run = ExperimentRun.model_validate(
         common
         | {
             "status": ExperimentRunStatus.COMPLETED,
-            "metrics": summary_metrics_payload(artifacts.result),
-            "artifact_references": _artifact_references(context, artifacts),
+            "metrics": summary_metrics_payload(recorded.result),
+            "artifact_references": _artifact_references(context, recorded),
         }
     )
     _record_audit_event(context, run)

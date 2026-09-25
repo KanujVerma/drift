@@ -114,6 +114,7 @@ def assemble_evaluation_input_bundle(
         ExploratoryReconstructedSessionObservationV1, ...
     ] = (),
     source_snapshot_hash: SHA256Hash | None = None,
+    dataset_limitations: tuple[str, ...] = (),
 ) -> EvaluationInputBundleV1:
     """Assemble a bundle with canonical member ordering and an exact bundle hash.
 
@@ -136,6 +137,7 @@ def assemble_evaluation_input_bundle(
         exploratory_reconstructed_observations=_ordered(
             exploratory_reconstructed_observations
         ),
+        dataset_limitations=tuple(sorted(dataset_limitations)),
         bundle_hash="0" * 64,
     )
     candidate = draft.model_copy(
@@ -224,6 +226,7 @@ def build_evaluation_input_bundle(
     evaluation_interval: TemporalIntervalClaimV1,
     session_clock: SessionClockV1,
     context: M1dResolutionContext,
+    session_queries: SessionReplayQueries | None = None,
     decision_requests: DecisionReplayRequests = (),
     accounting_requests: OutcomeReplayRequests = (),
     security_identities: tuple[SecurityV1, ...] = (),
@@ -233,6 +236,7 @@ def build_evaluation_input_bundle(
     exploratory_cohort: ExploratoryCohortAuthorizationV1 | None = None,
     exploratory_reconstruction_replay: ExploratoryReconstructionReplay | None = None,
     source_snapshot_hash: SHA256Hash | None = None,
+    dataset_limitations: tuple[str, ...] = (),
 ) -> EvaluationInputBundleV1:
     """Prepare a bundle whose views come from exact upstream Drift replay.
 
@@ -241,7 +245,22 @@ def build_evaluation_input_bundle(
     produces cannot enter a bundle built through this path. Exploratory
     reconstructions are likewise derived here, through the one canonical
     builder, from their declared cohort and replay inputs (issue 55).
+
+    The clock is held to verification's rule, through the same re-derivation
+    (issue 96): a realized clock is derived here from its session queries,
+    and one that differs from that derivation in any session, boundary,
+    authority record, proof, or limitation is refused, as is one without its
+    queries. So a lagged realized clock, whose later UTC stamps no clock
+    guard can see, cannot enter a bundle built through this path. A
+    scheduled-reconstruction clock is re-derived whenever its queries are
+    supplied. The caller still names the clock it expects, so a bundle built
+    here carries exactly that clock, now proven equal to its derivation.
+
+    `dataset_limitations` are the producer's declarations about its dataset
+    itself (issue 92). Nothing re-derives them; the bundle hash binds them,
+    and every admission of the bundle must acknowledge them.
     """
+    _require_derived_clock(session_clock, session_queries, context)
     bundle = assemble_evaluation_input_bundle(
         evaluation_interval=evaluation_interval,
         session_clock=session_clock,
@@ -257,6 +276,7 @@ def build_evaluation_input_bundle(
             exploratory_cohort, exploratory_reconstruction_replay, context
         ),
         source_snapshot_hash=source_snapshot_hash,
+        dataset_limitations=dataset_limitations,
     )
     _require_calendar_rows(bundle)
     return bundle
@@ -277,6 +297,26 @@ def _replayed_reconstructions(
         )
     _require_replay_context(replay, context)
     return replay_exploratory_reconstructions(replay, cohort)
+
+
+def _require_derived_clock(
+    clock: SessionClockV1,
+    session_queries: SessionReplayQueries | None,
+    context: M1dResolutionContext,
+) -> None:
+    """Hold a clock to its canonical re-derivation at either bundle boundary.
+
+    The one rule for building and for verifying a bundle: supplied session
+    queries always re-derive the clock under its own mode, and a realized
+    clock is never taken on trust, so without its queries it is refused.
+    """
+    if session_queries is not None:
+        verify_session_clock(clock, session_queries, context)
+    elif clock.mode == "realized_session_authority":
+        raise ValueError(
+            "bundle carries a realized session clock without the session queries "
+            "to re-derive it"
+        )
 
 
 def _require_replay_context(
@@ -394,13 +434,7 @@ def verify_evaluation_input_bundle(
         )
         _require_calendar_rows(bundle)
 
-    if session_queries is not None:
-        verify_session_clock(bundle.session_clock, session_queries, context)
-    elif bundle.session_clock.mode == "realized_session_authority":
-        raise ValueError(
-            "bundle carries a realized session clock without the session queries "
-            "to re-derive it"
-        )
+    _require_derived_clock(bundle.session_clock, session_queries, context)
 
     rebuilt = evaluation_input_bundle_hash(bundle)
     if rebuilt != bundle.bundle_hash:
@@ -638,7 +672,8 @@ def validate_exploratory_admission(
 
     Binds the admission to the exact bundle, refuses any promotion snapshot
     binding on exploratory evidence, and requires the admission to acknowledge
-    every limitation the bundle's own evidence carries.
+    every limitation the bundle's own evidence carries and every dataset
+    limitation its producer declares (issue 92).
     """
     if admission.lane != "exploratory":
         raise ValueError("admission lane must be exploratory")

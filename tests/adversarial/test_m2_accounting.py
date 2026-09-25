@@ -516,14 +516,20 @@ def test_terms_without_an_occurred_effect_commit_no_mutation() -> None:
     assert updated.pending_cash_claims == ()
 
 
-def test_a_liquidation_without_source_terms_fails_closed() -> None:
-    """A delisting whose settlement is unprovable is never invented."""
+@pytest.mark.parametrize("claim_status", ["extinguished", "continuing"])
+def test_a_liquidation_without_source_terms_fails_closed(claim_status: str) -> None:
+    """A delisting whose settlement is unprovable is never invented.
+
+    Both liquidation paths need the terms: an extinguishing one to date its
+    terminal claims, a continuing one to find the ex date it vests on.
+    """
     component = ca._cash(amount="3")
     effect = ca._effect(
         suffix=9710,
         action_kind=ActionKind.LIQUIDATION,
         components=(component,),
         terms=None,
+        claim_status=claim_status,
     )
     outcome = ca._outcome(
         terms=(), effects=(effect,), action_kinds=(ActionKind.LIQUIDATION,)
@@ -1351,6 +1357,187 @@ def test_delivered_cash_no_evidence_explains_halts_a_held_position() -> None:
     # Control: a book that never holds SEC_A is not exposed to the report.
     flat = _run_over(unexplained, days=eng.DAYS, strategy=eng.FixedTargetStrategy({}))
     assert flat.result.classification is EvaluationClassification.COMPLETE
+
+
+# ==========================================================================
+# Liquidation claim status and corporate-action disposal PnL
+# ==========================================================================
+#
+# A corporate action that extinguishes a holding for cash is a disposal. Its
+# basis is relieved into realized PnL exactly as a sale at the owed price
+# would relieve it, so the realized-PnL identity below closes for every book:
+#
+#     cash + pending claims + remaining basis
+#         == initial cash + realized net PnL + distribution income
+#
+# Buy costs are capitalized into basis and sell costs are charged to realized
+# net PnL, so the identity holds under any cost model. A distribution on
+# shares that continue is income, not a disposal.
+
+_INITIAL_CASH = Decimal("10000.00")
+
+
+def _assert_realized_identity(
+    artifacts: EvaluationRunArtifactsV1, *, income: Decimal = ZERO
+) -> None:
+    state = artifacts.final_state
+    basis = sum((holding.cost_basis for holding in state.holdings), ZERO)
+    assert state.cash_balance + state.pending_claims_value + basis == (
+        _INITIAL_CASH + state.realized_net_pnl + income
+    )
+
+
+def _liquidation_outcome(
+    *, suffix: int, claim_status: str, amount: str
+) -> SecurityEconomicOutcomeV1:
+    """A SEC_A liquidation, paid and delivered on session 3."""
+    cash = ca._cash(
+        amount=amount, component_id="liquidation-cash", predecessor=eng.SEC_A
+    )
+    payable = ca._date_fact("payable", _ACTION_AT)
+    dates = (
+        (ca._date_fact("ex", _ACTION_AT), payable)
+        if claim_status == "continuing"
+        else (payable,)
+    )
+    terms = ca._terms(
+        suffix=suffix,
+        action_kind=ActionKind.LIQUIDATION,
+        components=(cash,),
+        dates=dates,
+        security_id=eng.SEC_A,
+    )
+    occurrence = f"issue-83-{suffix}"
+    effect = ca._effect(
+        suffix=suffix + 1,
+        action_kind=ActionKind.LIQUIDATION,
+        components=(cash,),
+        terms=terms,
+        occurrence_id=occurrence,
+        effective_at=_ACTION_AT,
+        security_id=eng.SEC_A,
+        claim_status=claim_status,
+    )
+    delivery = ca._delivery(
+        components=(cash,),
+        security_id=eng.SEC_A,
+        occurrence_id=occurrence,
+        settled_at=_ACTION_AT,
+    )
+    return ca._outcome(
+        security_id=eng.SEC_A,
+        terms=(terms,),
+        effects=(effect,),
+        delivery_groups=(delivery,),
+        action_kinds=(ActionKind.LIQUIDATION,),
+    )
+
+
+def _all_views() -> tuple[DerivedObservationViewV1, ...]:
+    return tuple(eng._accounting_view(eng.SEC_A, day) for day in eng.DAYS)
+
+
+def test_an_extinguishing_liquidation_never_rebuys_and_books_its_gain() -> None:
+    outcome = _liquidation_outcome(
+        suffix=8300, claim_status="extinguished", amount="150"
+    )
+
+    artifacts = _run_action(outcome, _all_views())
+
+    # Before the fix the kept target re-bought ten extinguished shares at
+    # 110.00, NAV read 10600.00, and the disposal realized nothing.
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert _fills(artifacts) == [(2, "buy", 10)]
+    assert _translated_targets(artifacts) == {eng.SEC_A: 0}
+    assert _held(artifacts) == {}
+    assert artifacts.final_state.cash_balance == Decimal("10500.00")
+    assert artifacts.result.metrics.ending_net_asset_value == Decimal("10500.00")
+    # Ten shares of basis 1000.00 liquidated for 1500.00.
+    assert artifacts.final_state.realized_gross_pnl == Decimal("500.00")
+    assert artifacts.final_state.realized_net_pnl == Decimal("500.00")
+    _assert_realized_identity(artifacts)
+
+
+def test_a_cash_acquisition_books_the_gain_it_realizes() -> None:
+    artifacts = _run_action(_cash_acquisition_outcome(suffix=8310), _all_views())
+
+    # Before the fix the acquisition removed 1000.00 of basis for 1500.00 of
+    # proceeds and reported realized 0, so the identity missed by 500.00.
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert artifacts.final_state.realized_gross_pnl == Decimal("500.00")
+    assert artifacts.final_state.realized_net_pnl == Decimal("500.00")
+    assert artifacts.result.metrics.ending_net_asset_value == Decimal("10500.00")
+    _assert_realized_identity(artifacts)
+
+
+def test_a_partial_liquidating_distribution_keeps_the_shares_that_continue() -> None:
+    outcome = _liquidation_outcome(suffix=8320, claim_status="continuing", amount="3")
+
+    artifacts = _run_action(outcome, _all_views())
+
+    # Before the fix a continuing claim was erased like an extinguished one,
+    # and the staged hold re-bought the ten shares that in fact continued.
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert _fills(artifacts) == [(2, "buy", 10)]
+    assert _held(artifacts) == {eng.SEC_A: 10}
+    assert artifacts.final_state.cash_balance == Decimal("9030.00")
+    # Ten shares at the 120.00 close on 9030.00 of cash.
+    assert artifacts.result.metrics.ending_net_asset_value == Decimal("10230.00")
+    assert artifacts.final_state.realized_gross_pnl == ZERO
+    _assert_realized_identity(artifacts, income=Decimal("30.00"))
+
+
+def test_a_liquidation_without_a_proven_claim_outcome_halts() -> None:
+    outcome = _liquidation_outcome(suffix=8330, claim_status="unknown", amount="150")
+
+    artifacts = _run_action(outcome, _all_views())
+
+    # Before the fix the unknown claim was erased as if extinguished and the
+    # run read COMPLETE. The control is the extinguishing case above.
+    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
+    assert artifacts.result.halted_session_index == 3
+    assert artifacts.result.halt_reason is not None
+    assert "liquidation must prove the claim" in artifacts.result.halt_reason
+
+
+@pytest.mark.parametrize("claim_status", ["extinguished", "converted"])
+def test_an_overnight_split_on_an_ended_claim_halts_the_run(claim_status: str) -> None:
+    views = _pre_action_views() + (
+        eng._accounting_view(
+            eng.SEC_A, eng.DAY_3, open_price="55.00", close_price="60.00"
+        ),
+    )
+
+    def split(status: str, suffix: int) -> EvaluationRunArtifactsV1:
+        return _run_action(
+            _share_action_outcome(
+                ActionKind.FORWARD_SPLIT,
+                numerator="2",
+                denominator="1",
+                meaning="resulting_per_predecessor",
+                suffix=suffix,
+                claim_status=status,
+            ),
+            views,
+        )
+
+    ended = split(claim_status, 8400)
+
+    # Issue 117: the split's own claim status says the claim ended or was
+    # converted, which contradicts a split. Before the fix the ten shares
+    # became twenty and the run read COMPLETE.
+    assert ended.result.classification is EvaluationClassification.INDETERMINATE
+    assert ended.result.halted_session_index == 3
+    assert ended.result.halt_reason is not None
+    assert "needs a continuing claim" in ended.result.halt_reason
+    assert claim_status in ended.result.halt_reason
+
+    # Control: the same split on a continuing claim holds twenty at 60.00.
+    continuing = split("continuing", 8410)
+    assert continuing.result.classification is EvaluationClassification.COMPLETE
+    assert _fills(continuing) == [(2, "buy", 10)]
+    assert _held(continuing) == {eng.SEC_A: 20}
+    assert continuing.result.metrics.ending_net_asset_value == Decimal("10200.00")
 
 
 # ==========================================================================

@@ -43,6 +43,7 @@ from drift.domain.evaluator_reconstruction import (
     ExploratoryReconstructedSessionObservationV1,
     exploratory_reconstruction_hash,
 )
+from drift.evaluator.engine import PromotionLaneDisabledError
 from drift.evaluator.reconstruction import ExploratoryReconstructionReplay
 
 MISMATCH = r"^exploratory reconstructions do not match canonical re-derivation: "
@@ -320,13 +321,14 @@ def test_replay_evidence_is_refused_on_the_realized_lane() -> None:
 
 
 def test_replay_evidence_is_refused_under_a_promotion_admission() -> None:
+    """The issue 79 lane refusal fires before the replay guard behind it."""
     realized = _bundle()
 
     with pytest.raises(
-        ValueError,
+        PromotionLaneDisabledError,
         match=(
-            r"^a promotion admission cannot evaluate exploratory reconstruction "
-            r"replay evidence$"
+            r"^the promotion lane is disabled \(issue 79 ruling\): engine "
+            r"construction refuses"
         ),
     ):
         reconstructed_engine(

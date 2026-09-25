@@ -8,29 +8,37 @@ byte-identical result and trace hashes.
 """
 
 import sys
-from collections.abc import Mapping
-from datetime import UTC, datetime
+from collections.abc import Callable, Mapping
+from dataclasses import replace
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any, cast
 from uuid import UUID, uuid7
 
 import pytest
+from pydantic import ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "unit"))
 
 from test_evaluator_engine import (  # noqa: E402
+    BOOK_NAMESPACE,
     CODE_VERSION_HASH,
     DAY_1,
     DAY_2,
     DAY_3,
     DAYS,
     ENVIRONMENT_HASH,
+    ROLE_RECORDS,
     SEC_A,
     STRATEGY_CODE_HASH,
     FixedTargetStrategy,
     _accounting_view,
     _bundle,
+    _bypassed_promotion_engine,
+    _cost_model,
     _engine,
+    _promotion_admission,
     _protocol,
     _run_identity,
 )
@@ -38,7 +46,22 @@ from test_evaluator_engine import (  # noqa: E402
 from drift.domain.artifacts import ArtifactKind, ArtifactReference  # noqa: E402
 from drift.domain.common import ImmutableJSONValue  # noqa: E402
 from drift.domain.datasets import DatasetReference, TemporalCoverage  # noqa: E402
-from drift.domain.evaluator_results import EvaluationClassification  # noqa: E402
+from drift.domain.evaluator_portfolio import PortfolioStateV1  # noqa: E402
+from drift.domain.evaluator_results import (  # noqa: E402
+    EvaluationClassification,
+    EvaluationRunArtifactsV1,
+    ExploratoryEvaluationResultV1,
+    PromotionEvaluationResultV1,
+    evaluation_result_hash,
+)
+from drift.domain.evaluator_strategy import (  # noqa: E402
+    StrategyDecisionContextV1,
+    StrategyDecisionIntentV1,
+)
+from drift.domain.evaluator_trace import (  # noqa: E402
+    EvaluationTraceLogV1,
+    evaluation_trace_log_hash,
+)
 from drift.domain.events import AuditEvent  # noqa: E402
 from drift.domain.experiments import (  # noqa: E402
     ExperimentRun,
@@ -46,10 +69,17 @@ from drift.domain.experiments import (  # noqa: E402
     ExperimentSpecification,
 )
 from drift.domain.strategies import StrategyReference  # noqa: E402
-from drift.evaluator.engine import SessionEvaluatorEngine  # noqa: E402
+from drift.evaluator.bundles import build_evaluation_run_identity  # noqa: E402
+from drift.evaluator.engine import (  # noqa: E402
+    PromotionLaneDisabledError,
+    SessionEvaluatorEngine,
+    SessionEvaluatorEvidence,
+)
 from drift.evaluator.experiment_runner import (  # noqa: E402
     ExperimentRunnerContext,
+    ForeignRunArtifactsError,
     execute_experiment_run,
+    summary_metrics_payload,
 )
 from drift.ledger.sqlite import SQLiteLedger  # noqa: E402
 from drift.serialization.canonical import content_hash  # noqa: E402
@@ -358,6 +388,558 @@ def test_runner_writes_no_audit_event_without_a_ledger() -> None:
     run = execute_experiment_run(_specification(), _context(_engine()))
 
     assert run.status is ExperimentRunStatus.COMPLETED
+
+
+# --- the promotion lane is disabled (issue 79 ruling) ----------------------
+
+PROMOTION_LANE_DISABLED = r"^the promotion lane is disabled \(issue 79 ruling\): "
+
+
+def test_runner_refuses_a_promotion_admission_and_records_nothing(
+    tmp_path: Path,
+) -> None:
+    """Defense in depth behind the engine: refused before the engine runs.
+
+    The engine is in the state 19c15f8 built for a promotion admission, which
+    construction now refuses. The runner refuses it before running, so no
+    session is stepped, no experiment run is returned, and the audit ledger
+    stays empty.
+    """
+    ledger = SQLiteLedger(tmp_path / "audit.sqlite3")
+    strategy = _buy_ten()
+    context = _context(_bypassed_promotion_engine(), strategy=strategy, ledger=ledger)
+
+    with pytest.raises(
+        PromotionLaneDisabledError,
+        match=PROMOTION_LANE_DISABLED + "the experiment runner refuses",
+    ):
+        execute_experiment_run(_specification(), context)
+
+    assert strategy.seen == []
+    assert ledger.verified_events() == ()
+
+
+def _promotion_artifacts(engine: SessionEvaluatorEngine) -> EvaluationRunArtifactsV1:
+    """A valid promotion pair over a genuine exploratory run's own trace.
+
+    The artifact types accept this (finding F9, tracked as P9 on issue 115):
+    the result binds its trace by hash only, and the realized trace carries no
+    reconstructed-evidence event for the pairing to refuse.
+    """
+    genuine = engine.run(
+        strategy=FixedTargetStrategy({}),
+        run_identity=_run_identity(
+            admission=engine.admission,
+            bundle=engine.bundle,
+            protocol=engine.protocol,
+            cost_model=engine.cost_model,
+            evidence_hash=engine.evaluator_evidence_hash,
+        ),
+    )
+    promotion = _promotion_admission(engine.bundle)
+    draft = PromotionEvaluationResultV1.model_construct(
+        run_identity=_run_identity(
+            admission=promotion,
+            bundle=engine.bundle,
+            protocol=engine.protocol,
+            cost_model=engine.cost_model,
+            evidence_hash=engine.evaluator_evidence_hash,
+        ),
+        classification=genuine.result.classification,
+        metrics=genuine.result.metrics,
+        trace_hash=genuine.result.trace_hash,
+        admission=promotion,
+        result_hash="0" * 64,
+    )
+    result = PromotionEvaluationResultV1.model_validate(
+        dict(draft) | {"result_hash": evaluation_result_hash(draft)}
+    )
+    state = genuine.final_state
+    assert state.mark is not None and state.mark.prices == ()
+    final_state = PortfolioStateV1.model_validate(
+        dict(state)
+        | {
+            "lane": "promotion",
+            "admission_hash": promotion.admission_hash,
+            "mark": state.mark.model_copy(update={"lane": "promotion"}),
+        }
+    )
+    return EvaluationRunArtifactsV1.model_validate(
+        {"result": result, "trace": genuine.trace, "final_state": final_state}
+    )
+
+
+class _StandInEngine:
+    """An engine stand-in admitting exploratory, whose run returns ``artifacts``.
+
+    No production engine returns anything but its own sealed artifacts. The
+    runner does not rely on that: it refuses and rebuilds whatever comes back,
+    and never records a promotion result or a promotion-grade claim.
+    """
+
+    def __init__(self, engine: SessionEvaluatorEngine, artifacts: object) -> None:
+        self._engine = engine
+        self._artifacts = artifacts
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._engine, name)
+
+    def run(self, **_: object) -> Any:
+        return self._artifacts
+
+
+class _Proxy:
+    """Delegates to ``inner``, except for the attributes it lies about."""
+
+    def __init__(self, inner: object, **lies: object) -> None:
+        self.__dict__.update(lies)
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+class _Liar(str):
+    """A lane equal to nothing, so ``lane == "promotion"`` is always False."""
+
+    __hash__ = str.__hash__
+
+    def __eq__(self, other: object) -> bool:
+        return False
+
+    def __ne__(self, other: object) -> bool:
+        return True
+
+
+class _EqualToEveryDate(date):
+    """A date equal to every date: python-mode revalidation keeps it (#123)."""
+
+    __hash__ = date.__hash__
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+
+def _stand_in_context(
+    tmp_path: Path, artifacts: object
+) -> tuple[SQLiteLedger, ExperimentRunnerContext]:
+    ledger = SQLiteLedger(tmp_path / "audit.sqlite3")
+    engine = cast(SessionEvaluatorEngine, _StandInEngine(_engine(), artifacts))
+    assert engine.admission.lane == "exploratory"
+    return ledger, _context(engine, ledger=ledger)
+
+
+def _genuine_artifacts() -> EvaluationRunArtifactsV1:
+    engine = _engine()
+    return engine.run(
+        strategy=_buy_ten(),
+        run_identity=_run_identity(
+            admission=engine.admission,
+            bundle=engine.bundle,
+            protocol=engine.protocol,
+            cost_model=engine.cost_model,
+            evidence_hash=engine.evaluator_evidence_hash,
+        ),
+    )
+
+
+def _with_result(
+    artifacts: EvaluationRunArtifactsV1, **changes: object
+) -> EvaluationRunArtifactsV1:
+    """The pair with a hand-built result; nothing here is revalidated."""
+    result = ExploratoryEvaluationResultV1.model_construct(
+        **(dict(artifacts.result) | changes)
+    )
+    return EvaluationRunArtifactsV1.model_construct(
+        **(dict(artifacts) | {"result": result})
+    )
+
+
+def test_runner_never_records_a_promotion_result(tmp_path: Path) -> None:
+    ledger, context = _stand_in_context(tmp_path, _promotion_artifacts(_engine()))
+
+    with pytest.raises(
+        PromotionLaneDisabledError,
+        match=PROMOTION_LANE_DISABLED
+        + "the experiment runner on the returned result refuses",
+    ):
+        execute_experiment_run(_specification(), context)
+
+    assert ledger.verified_events() == ()
+
+
+def test_runner_refuses_an_exploratory_result_claiming_promotion_grade(
+    tmp_path: Path,
+) -> None:
+    """Issue 120 review, S1: the flag is refused whatever lane is named."""
+    forged = _with_result(_genuine_artifacts(), is_promotion_grade_evidence=True)
+    assert forged.result.lane == "exploratory"
+    ledger, context = _stand_in_context(tmp_path, forged)
+
+    with pytest.raises(
+        PromotionLaneDisabledError,
+        match=PROMOTION_LANE_DISABLED
+        + "the experiment runner on the returned result refuses",
+    ):
+        execute_experiment_run(_specification(), context)
+
+    assert ledger.verified_events() == ()
+
+
+def test_runner_refuses_a_truthy_non_bool_promotion_grade_claim(
+    tmp_path: Path,
+) -> None:
+    """Issue 124 (#120 review N2): anything but exactly ``False`` is refused.
+
+    ``1`` is not ``True``, so a flag check weakened to ``is True`` lets it
+    through to the rebuild, which fails it only as a literal mismatch. The
+    named refusal must come first.
+    """
+    forged = _with_result(_genuine_artifacts(), is_promotion_grade_evidence=1)
+    assert forged.result.lane == "exploratory"
+    assert forged.result.is_promotion_grade_evidence is not True
+    ledger, context = _stand_in_context(tmp_path, forged)
+
+    with pytest.raises(
+        PromotionLaneDisabledError,
+        match=PROMOTION_LANE_DISABLED
+        + "the experiment runner on the returned result refuses",
+    ):
+        execute_experiment_run(_specification(), context)
+
+    assert ledger.verified_events() == ()
+
+
+def test_runner_refuses_a_result_whose_lane_equals_nothing(tmp_path: Path) -> None:
+    """Issue 120 review, S2: a lying lane cannot hide a promotion-grade claim."""
+    forged = _with_result(
+        _genuine_artifacts(),
+        lane=_Liar("promotion"),
+        is_promotion_grade_evidence=True,
+    )
+    assert forged.result.lane != "promotion"
+    ledger, context = _stand_in_context(tmp_path, forged)
+
+    with pytest.raises(
+        PromotionLaneDisabledError,
+        match=PROMOTION_LANE_DISABLED
+        + "the experiment runner on the returned result refuses",
+    ):
+        execute_experiment_run(_specification(), context)
+
+    assert ledger.verified_events() == ()
+
+
+def test_runner_refuses_a_promotion_result_behind_a_lane_lying_proxy(
+    tmp_path: Path,
+) -> None:
+    """Issue 120 review, S3: the proxy says exploratory; the claim still shows."""
+    promotion = _promotion_artifacts(_engine())
+    proxy = _Proxy(promotion, result=_Proxy(promotion.result, lane="exploratory"))
+    ledger, context = _stand_in_context(tmp_path, proxy)
+
+    with pytest.raises(
+        PromotionLaneDisabledError,
+        match=PROMOTION_LANE_DISABLED
+        + "the experiment runner on the returned result refuses",
+    ):
+        execute_experiment_run(_specification(), context)
+
+    assert ledger.verified_events() == ()
+
+
+def test_runner_refuses_the_promotion_result_its_rebuild_reveals(
+    tmp_path: Path,
+) -> None:
+    """Every attribute the runner reads lies; only the rebuild sees promotion."""
+    promotion = _promotion_artifacts(_engine())
+    disguise = _Proxy(
+        promotion.result, lane="exploratory", is_promotion_grade_evidence=False
+    )
+    ledger, context = _stand_in_context(tmp_path, _Proxy(promotion, result=disguise))
+
+    with pytest.raises(
+        PromotionLaneDisabledError,
+        match=PROMOTION_LANE_DISABLED
+        + "the experiment runner on the rebuilt result refuses",
+    ):
+        execute_experiment_run(_specification(), context)
+
+    assert ledger.verified_events() == ()
+
+
+def test_runner_records_only_from_the_rebuilt_artifacts(tmp_path: Path) -> None:
+    """What the returned object claims is never what the runner records."""
+    genuine = _genuine_artifacts()
+    claimed = "f" * 64
+    proxy = _Proxy(genuine, result=_Proxy(genuine.result, result_hash=claimed))
+    ledger, context = _stand_in_context(tmp_path, proxy)
+
+    run = execute_experiment_run(_specification(), context)
+
+    assert run.status is ExperimentRunStatus.COMPLETED
+    assert _metric(run, "result_hash") == genuine.result.result_hash
+    assert [ref.content_hash for ref in run.artifact_references] == [
+        genuine.result.result_hash,
+        genuine.trace.trace_hash,
+    ]
+    (event,) = ledger.verified_events()
+    payload = event.payload
+    assert isinstance(payload, Mapping)
+    assert payload["artifact_hashes"] == (
+        genuine.result.result_hash,
+        genuine.trace.trace_hash,
+    )
+
+
+def test_runner_records_nothing_that_validates_only_through_forged_equality(
+    tmp_path: Path,
+) -> None:
+    """The rebuild is canonical JSON, not python mode (issue 123).
+
+    One trace event is moved to the next day under a date equal to every
+    date, and the trace and result are resealed over it. Its validators pass
+    under that equality, so a python-mode rebuild admits the pair and would
+    record it. The JSON rebuild compares real dates and refuses it.
+    """
+    genuine = _genuine_artifacts()
+    events = list(genuine.trace.events)
+    event = events[-1]
+    assert event.kind != "session_start"
+    key = event.session_key
+    later = key.local_date + timedelta(days=1)
+    moved = key.model_construct(
+        **(
+            dict(key)
+            | {"local_date": _EqualToEveryDate(later.year, later.month, later.day)}
+        )
+    )
+    events[-1] = event.model_construct(**(dict(event) | {"session_key": moved}))
+    draft = EvaluationTraceLogV1.model_construct(
+        schema_version="1", events=tuple(events), trace_hash="0" * 64
+    )
+    trace = draft.model_construct(
+        **(dict(draft) | {"trace_hash": evaluation_trace_log_hash(draft)})
+    )
+    unsealed = ExploratoryEvaluationResultV1.model_construct(
+        **(dict(genuine.result) | {"trace_hash": trace.trace_hash})
+    )
+    result = unsealed.model_construct(
+        **(dict(unsealed) | {"result_hash": evaluation_result_hash(unsealed)})
+    )
+    forged = EvaluationRunArtifactsV1.model_construct(
+        **(dict(genuine) | {"result": result, "trace": trace})
+    )
+    admitted = EvaluationRunArtifactsV1.model_validate(
+        forged.model_dump(mode="python", warnings=False)
+    )
+    assert admitted.trace.trace_hash == trace.trace_hash
+    ledger, context = _stand_in_context(tmp_path, forged)
+
+    with pytest.raises(
+        ValidationError, match="a trace event session key must match its open"
+    ):
+        execute_experiment_run(_specification(), context)
+
+    assert ledger.verified_events() == ()
+
+
+def test_a_refusal_raised_inside_the_run_is_never_recorded(tmp_path: Path) -> None:
+    """Issue 120 review, F-B: a mid-run refusal is not a recorded FAILED run.
+
+    The strategy swaps the engine's admission for a promotion admission while
+    the run is under way, past the runner's own refusal, so the engine's
+    sealing site refuses from inside the run.
+    """
+    engine = _engine()
+    promotion = _promotion_admission(engine.bundle)
+
+    class _Swapping(FixedTargetStrategy):
+        def decide(
+            self, context: StrategyDecisionContextV1
+        ) -> StrategyDecisionIntentV1:
+            engine._admission = promotion
+            return super().decide(context)
+
+    strategy = _Swapping({DAY_1: ((SEC_A, 10),)})
+    ledger = SQLiteLedger(tmp_path / "audit.sqlite3")
+    context = _context(engine, strategy=strategy, ledger=ledger)
+
+    with pytest.raises(
+        PromotionLaneDisabledError,
+        match=PROMOTION_LANE_DISABLED + "result sealing refuses",
+    ):
+        execute_experiment_run(_specification(), context)
+
+    assert strategy.seen
+    assert ledger.verified_events() == ()
+
+
+def test_the_summary_projection_refuses_a_promotion_result() -> None:
+    """Issue 120 review, F-E: nothing projects a promotion result into metrics."""
+    promotion = _promotion_artifacts(_engine())
+
+    with pytest.raises(
+        PromotionLaneDisabledError,
+        match=PROMOTION_LANE_DISABLED + "the summary metrics projection refuses",
+    ):
+        summary_metrics_payload(promotion.result)
+
+    # Control: an exploratory result projects.
+    assert summary_metrics_payload(_genuine_artifacts().result)["lane"] == (
+        "exploratory"
+    )
+
+
+# --- the returned run must be this run (issue 124) -------------------------
+
+FOREIGN_RUN = r"^the returned run is not this run: "
+FOREIGN_BUNDLE = r"^the returned result was evaluated over bundle "
+OTHER_STRATEGY_HASH = "d" * 64
+OTHER_CODE_VERSION_HASH = "9" * 64
+
+
+class _EqualToEveryText(str):
+    """A hash equal to every string, as a context identity could carry one."""
+
+    __hash__ = str.__hash__
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+
+class _OtherStrategy(FixedTargetStrategy):
+    """The same targets under another strategy version."""
+
+    @property
+    def strategy_reference(self) -> StrategyReference:
+        return StrategyReference(
+            strategy_id=uuid7(),
+            strategy_version="2",
+            code_hash=OTHER_STRATEGY_HASH,
+            artifact_reference=_artifact(ArtifactKind.STRATEGY, OTHER_STRATEGY_HASH),
+        )
+
+
+def _run_of(
+    engine: SessionEvaluatorEngine,
+    strategy: FixedTargetStrategy | None = None,
+    *,
+    strategy_hash: str = STRATEGY_CODE_HASH,
+    code_version_hash: str = CODE_VERSION_HASH,
+) -> EvaluationRunArtifactsV1:
+    """A genuine run of ``engine``, sealed under the identity it names."""
+    return engine.run(
+        strategy=_buy_ten() if strategy is None else strategy,
+        run_identity=build_evaluation_run_identity(
+            strategy_hash=strategy_hash,
+            protocol_hash=engine.protocol.protocol_hash,
+            cost_model_hash=engine.cost_model.cost_model_hash,
+            admission=engine.admission,
+            bundle=engine.bundle,
+            evaluator_evidence_hash=engine.evaluator_evidence_hash,
+            code_version_hash=code_version_hash,
+            environment_closure_hash=ENVIRONMENT_HASH,
+        ),
+    )
+
+
+def _euro_book_engine() -> SessionEvaluatorEngine:
+    base = _engine()
+    return SessionEvaluatorEngine(
+        bundle=base.bundle,
+        admission=base.admission,
+        protocol=base.protocol,
+        cost_model=base.cost_model,
+        evidence=SessionEvaluatorEvidence(listing_role_records=ROLE_RECORDS),
+        book_currency_namespace=BOOK_NAMESPACE,
+        book_currency_code="EUR",
+    )
+
+
+def test_runner_refuses_a_genuine_run_over_another_bundle(tmp_path: Path) -> None:
+    """Issue 124 (#120 review R3): the misattribution probe.
+
+    A stand-in engine returns a genuine exploratory run over a three-session
+    bundle. It rebuilds cleanly, and was recorded COMPLETED under an M0 row
+    naming the four-session dataset.
+    """
+    foreign = _run_of(_engine(bundle=_bundle(days=DAYS[:3])), FixedTargetStrategy({}))
+    ledger, context = _stand_in_context(tmp_path, foreign)
+    assert foreign.result.run_identity.bundle_hash != DATASET_HASH
+    assert foreign.result.run_identity != context.run_identity
+
+    with pytest.raises(ForeignRunArtifactsError, match=FOREIGN_RUN):
+        execute_experiment_run(_specification(), context)
+
+    assert ledger.verified_events() == ()
+
+
+FOREIGN_RUNS_OVER_THIS_BUNDLE: dict[str, Callable[[], EvaluationRunArtifactsV1]] = {
+    "protocol": lambda: _run_of(_engine(protocol=_protocol(cash="20000.00"))),
+    "cost model": lambda: _run_of(_engine(cost_model=_cost_model(commission="0.01"))),
+    "strategy": lambda: _run_of(
+        _engine(),
+        _OtherStrategy(_buy_ten().targets),
+        strategy_hash=OTHER_STRATEGY_HASH,
+    ),
+    "evaluator evidence": lambda: _run_of(_euro_book_engine()),
+    "code version": lambda: _run_of(
+        _engine(), code_version_hash=OTHER_CODE_VERSION_HASH
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "variant", sorted(FOREIGN_RUNS_OVER_THIS_BUNDLE), ids=lambda name: name
+)
+def test_runner_refuses_a_genuine_run_of_this_bundle_under_another_identity(
+    tmp_path: Path, variant: str
+) -> None:
+    """The run identity binds more than the bundle, and all of it must match."""
+    foreign = FOREIGN_RUNS_OVER_THIS_BUNDLE[variant]()
+    ledger, context = _stand_in_context(tmp_path, foreign)
+    identity = foreign.result.run_identity
+    assert identity.bundle_hash == context.run_identity.bundle_hash == DATASET_HASH
+    assert identity.admission_hash == context.run_identity.admission_hash
+    assert identity != context.run_identity
+
+    with pytest.raises(ForeignRunArtifactsError, match=FOREIGN_RUN):
+        execute_experiment_run(_specification(), context)
+
+    assert ledger.verified_events() == ()
+
+
+def test_runner_refuses_a_result_over_another_bundle_whatever_the_context_claims(
+    tmp_path: Path,
+) -> None:
+    """The row's dataset is checked against the result itself, not only its identity.
+
+    The context names the foreign run's identity, except that its bundle hash
+    equals every string, so it matches the specification's dataset and the
+    foreign result's bundle alike. The result's own bundle is still not the
+    dataset the M0 row records.
+    """
+    foreign = _run_of(_engine(bundle=_bundle(days=DAYS[:3])), FixedTargetStrategy({}))
+    identity = foreign.result.run_identity
+    claimed = identity.model_construct(
+        **(dict(identity) | {"bundle_hash": _EqualToEveryText(DATASET_HASH)})
+    )
+    ledger, genuine_context = _stand_in_context(tmp_path, foreign)
+    context = replace(genuine_context, run_identity=claimed)
+    assert identity == claimed
+    assert identity.bundle_hash != DATASET_HASH
+
+    with pytest.raises(ForeignRunArtifactsError, match=FOREIGN_BUNDLE):
+        execute_experiment_run(_specification(), context)
+
+    assert ledger.verified_events() == ()
 
 
 # --- protocol coupling -----------------------------------------------------

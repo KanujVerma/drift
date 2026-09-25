@@ -36,6 +36,7 @@ from test_evaluator_bundles import (
     normalization_scheduled_clock,
     normalization_session_queries,
     resealed_clock,
+    with_session_clock,
 )
 from test_universes import invoke_structural, structural_inputs
 
@@ -147,6 +148,7 @@ def _promotion_bundle(
         evaluation_interval=_interval(),
         session_clock=normalization_realized_clock(harness),
         context=harness.context,
+        session_queries=normalization_session_queries(harness),
         decision_requests=((reference, query),),
         source_snapshot_hash=snapshot.snapshot_hash,
     )
@@ -625,6 +627,7 @@ def test_mint_rejects_a_bundle_asserting_a_different_snapshot() -> None:
         evaluation_interval=_interval(),
         session_clock=normalization_realized_clock(harness),
         context=harness.context,
+        session_queries=normalization_session_queries(harness),
         decision_requests=((reference, query),),
         source_snapshot_hash=H["7"],
     )
@@ -1156,6 +1159,7 @@ def _covered_bundle(
         evaluation_interval=_interval(),
         session_clock=normalization_realized_clock(harness),
         context=harness.context,
+        session_queries=normalization_session_queries(harness),
         decision_requests=((reference, query),),
         source_snapshot_hash=snapshot.snapshot_hash,
         **members,
@@ -1298,12 +1302,10 @@ def test_mint_refuses_a_realized_clock_with_invented_authority() -> None:
         authority_record_hashes=(H["e"],),
         authority_proof_hashes=(H["f"],),
     )
-    bundle = build_evaluation_input_bundle(
-        evaluation_interval=_interval(),
-        session_clock=forged,
-        context=harness.context,
-        decision_requests=((reference, query),),
-        source_snapshot_hash=snapshot.snapshot_hash,
+    # The builder refuses this clock itself (issue 96), so the forgery reaches
+    # minting's own re-derivation only in a bundle re-assembled by hand.
+    bundle = with_session_clock(
+        _promotion_bundle(harness, query, reference, snapshot), forged
     )
     with pytest.raises(
         ValueError,
@@ -1888,6 +1890,7 @@ def test_promotion_gate_binds_accounting_views_to_audit_profile_entries() -> Non
         evaluation_interval=_interval(),
         session_clock=normalization_realized_clock(harness),
         context=harness.context,
+        session_queries=normalization_session_queries(harness),
         accounting_requests=((reference, query),),
         source_snapshot_hash=snapshot.snapshot_hash,
     )

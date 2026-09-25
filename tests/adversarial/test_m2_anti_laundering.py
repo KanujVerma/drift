@@ -13,12 +13,19 @@ sees. It used to be admitted. The gate now takes the qualified context and the
 snapshot and re-audits the witness, so the same construction is refused, and
 each of those tests keeps its original attack so the coverage is unchanged and
 only the verdict moved.
+
+The final section carries the issue 79 ruling (option 1). The engine never ran
+the gate, so a hand-made promotion admission produced promotion-grade results.
+The promotion lane is now disabled: the engine and the experiment runner refuse
+every ``PromotionEvaluationAdmissionV1``, a gate-valid one included, while the
+gate tests above keep exercising the gate directly.
 """
 
 # ruff: noqa: E402
 
 import ast
 import inspect
+import json
 import sys
 from datetime import date, timedelta
 from decimal import Decimal
@@ -29,6 +36,9 @@ from typing import Any
 _UNIT_SUPPORT = Path(__file__).resolve().parents[1] / "unit"
 if str(_UNIT_SUPPORT) not in sys.path:
     sys.path.insert(0, str(_UNIT_SUPPORT))
+_INTEGRATION_SUPPORT = Path(__file__).resolve().parents[1] / "integration"
+if str(_INTEGRATION_SUPPORT) not in sys.path:
+    sys.path.insert(0, str(_INTEGRATION_SUPPORT))
 
 import pytest
 import test_replay_provenance as rp
@@ -54,11 +64,13 @@ from test_evaluator_bundles import (
     normalization_scheduled_clock,
     normalization_session_queries,
     resealed_clock,
+    with_session_clock,
 )
 from test_evaluator_reconstruction import build_from_harness
 
 from drift.domain.assertions import ResolutionMode
 from drift.domain.evaluator_bundles import (
+    EvaluationInputBundleV1,
     EvaluationRunIdentityV1,
     evaluation_input_bundle_hash,
     evaluation_run_identity_hash,
@@ -67,6 +79,7 @@ from drift.domain.evaluator_clock import SessionClockV1, session_clock_hash
 from drift.domain.evaluator_lanes import (
     ALPACA_LIMITATION_ABSENT_HALTS,
     ALPACA_LIMITATION_BOUNDED_COHORT,
+    ALPACA_LIMITATION_TRUNCATED_CA,
     ExploratoryEvaluationAdmissionV1,
     PromotionEvaluationAdmissionV1,
 )
@@ -76,11 +89,14 @@ from drift.domain.evaluator_portfolio import (
     MarkEvidenceV1,
     MarkPriceV1,
     PortfolioMarkV1,
+    PortfolioStateV1,
 )
 from drift.domain.evaluator_reconstruction import (
     ExploratoryReconstructedSessionObservationV1,
 )
 from drift.domain.evaluator_results import (
+    LANE_GRANTED_MARK_GRADE,
+    EvaluationRunArtifactsV1,
     ExploratoryEvaluationResultV1,
     PromotionEvaluationResultV1,
 )
@@ -123,10 +139,17 @@ from drift.evaluator.bundles import (
     validate_promotion_admission,
     verify_evaluation_input_bundle,
 )
+from drift.evaluator.engine import (
+    PromotionLaneDisabledError,
+    SessionEvaluatorEngine,
+    SessionEvaluatorEvidence,
+)
+from drift.evaluator.experiment_runner import execute_experiment_run
 from drift.evaluator.portfolio import (
     PortfolioAccountingKernel,
     initial_portfolio_state,
 )
+from drift.ledger.sqlite import SQLiteLedger
 from drift.markets.normalization import (
     materialize_observation_decision,
     materialize_observation_outcome,
@@ -406,6 +429,85 @@ def test_an_exploratory_run_grades_every_mark_from_its_own_admission() -> None:
     ]
     assert marked, "the run must actually mark a position"
     assert artifacts.result.is_promotion_grade_evidence is False
+
+
+def test_the_granted_mark_grade_table_is_the_engine_table() -> None:
+    """The artifact type pairs a book with the grade its lane's run grants."""
+    from drift.evaluator.engine import LANE_MARK_GRADE
+
+    assert LANE_GRANTED_MARK_GRADE == LANE_MARK_GRADE
+    assert LANE_GRANTED_MARK_GRADE == {
+        "exploratory": "exploratory",
+        "promotion": "promotion_grade",
+    }
+
+
+def _genuine_pair_json(*, trade: bool = True) -> dict[str, Any]:
+    """One genuine exploratory run's artifacts as canonical JSON data."""
+    import test_evaluator_engine as eng
+
+    strategy = eng._buy_ten() if trade else eng.FixedTargetStrategy({})
+    loaded: dict[str, Any] = json.loads(
+        eng._run(eng._engine(), strategy).model_dump_json()
+    )
+    return loaded
+
+
+@pytest.mark.parametrize("trade", [True, False], ids=["priced", "unpriced"])
+def test_run_artifacts_refuse_a_final_state_in_another_lane(trade: bool) -> None:
+    """Issue 124 (#120 review R5): the final book is paired by lane, not hash.
+
+    The exploratory result keeps its own admission hash in the book, so the
+    hash binding holds, while the book names the promotion lane and grades
+    its marks promotion-grade. The book validates on its own. Unpriced, the
+    book carries no graded mark, so only the lane pairing can refuse it.
+    """
+    data = _genuine_pair_json(trade=trade)
+    state = data["final_state"]
+    assert state["lane"] == "exploratory"
+    state["lane"] = "promotion"
+    state["mark"]["lane"] = "promotion"
+    for price in state["mark"]["prices"]:
+        price["evidence"]["grade"] = "promotion_grade"
+    assert bool(state["mark"]["prices"]) is trade
+    assert PortfolioStateV1.model_validate_json(json.dumps(state)).lane == "promotion"
+
+    with pytest.raises(
+        ValidationError,
+        match=r"final portfolio state is in the promotion lane, its result is in "
+        r"the exploratory lane",
+    ):
+        EvaluationRunArtifactsV1.model_validate_json(json.dumps(data))
+
+
+def test_run_artifacts_refuse_a_final_state_marked_above_its_result_lane() -> None:
+    """The exploratory lane admits promotion-grade evidence; its run grants none.
+
+    Only the grade is raised, so the lane pairing holds and the book is valid
+    on its own, yet it would present an exploratory run's valuation as
+    promotion-grade.
+    """
+    data = _genuine_pair_json()
+    state = data["final_state"]
+    assert state["lane"] == state["mark"]["lane"] == "exploratory"
+    assert state["mark"]["prices"]
+    for price in state["mark"]["prices"]:
+        assert price["evidence"]["grade"] == "exploratory"
+        price["evidence"]["grade"] = "promotion_grade"
+    assert PortfolioStateV1.model_validate_json(json.dumps(state)).lane == (
+        "exploratory"
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match=r"a result in the exploratory lane grants exploratory marks, its "
+        r"final state marks security \S+ promotion_grade",
+    ):
+        EvaluationRunArtifactsV1.model_validate_json(json.dumps(data))
+
+    # Control: the genuine pair validates.
+    genuine = _genuine_pair_json()
+    assert EvaluationRunArtifactsV1.model_validate_json(json.dumps(genuine))
 
 
 # ==========================================================================
@@ -701,12 +803,10 @@ def test_the_composed_gate_rejects_a_bundle_declaring_any_limitation() -> None:
     limited = SessionClockV1.model_validate(
         dict(draft) | {"clock_hash": session_clock_hash(draft)}
     )
-    bundle = build_evaluation_input_bundle(
-        evaluation_interval=rp._interval(),
-        session_clock=limited,
-        context=harness.context,
-        decision_requests=((reference, query),),
-        source_snapshot_hash=snapshot.snapshot_hash,
+    # The builder refuses this clock itself (issue 96), so it reaches minting
+    # and the gate only in a bundle re-assembled by hand.
+    bundle = with_session_clock(
+        rp._promotion_bundle(harness, query, reference, snapshot), limited
     )
     assert bundle.has_exploratory_reconstructions is False
     assert bundle.required_limitations == (ALPACA_LIMITATION_ABSENT_HALTS,)
@@ -735,6 +835,47 @@ def test_the_composed_gate_rejects_a_bundle_declaring_any_limitation() -> None:
     with pytest.raises(
         ValueError,
         match=(r"^promotion evaluation cannot consume evidence declaring limitations"),
+    ):
+        validate_promotion_admission(**case)
+
+
+def test_the_composed_gate_rejects_a_bundle_declaring_a_dataset_limitation() -> None:
+    """Issue 92: a producer-declared dataset limitation is still a limitation.
+
+    Nothing re-derives a producer's declaration, so unlike a limited clock a
+    bundle declaring one builds and mints genuinely. It differs from the
+    admitted control case only in that declaration, and the gate's own
+    limitation refusal is what keeps it out of promotion.
+    """
+    harness, query, reference = _cached_decision_case()
+    snapshot = qualified_snapshot(harness.context)
+    qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
+    bundle = build_evaluation_input_bundle(
+        evaluation_interval=rp._interval(),
+        session_clock=normalization_realized_clock(harness),
+        context=harness.context,
+        session_queries=normalization_session_queries(harness),
+        decision_requests=((reference, query),),
+        source_snapshot_hash=snapshot.snapshot_hash,
+        dataset_limitations=(ALPACA_LIMITATION_TRUNCATED_CA,),
+    )
+    assert bundle.has_exploratory_reconstructions is False
+    assert bundle.required_limitations == (ALPACA_LIMITATION_TRUNCATED_CA,)
+    proof = mint_bundle_provenance_proof(
+        qualified_context=qualified,
+        context=harness.context,
+        bundle=bundle,
+        session_queries=normalization_session_queries(harness),
+        decision_requests=((reference, query),),
+    )
+    case = rp._promotion_case(bundle, proof, snapshot, qualified)
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^promotion evaluation cannot consume evidence declaring limitations: "
+            rf"\('{ALPACA_LIMITATION_TRUNCATED_CA}',\)$"
+        ),
     ):
         validate_promotion_admission(**case)
 
@@ -798,6 +939,21 @@ def test_a_self_consistent_fabricated_view_is_refused_by_replay_verification() -
             context=harness.context,
             decision_requests=((reference, query),),
         )
+
+
+def test_a_stripped_dataset_limitation_is_refused_by_hash_verification() -> None:
+    """Issue 92: dropping a declared dataset limitation breaks the bundle hash."""
+    declared = _scheduled_bundle(dataset_limitations=(ALPACA_LIMITATION_TRUNCATED_CA,))
+    stripped = EvaluationInputBundleV1.model_construct(
+        **(dict(declared) | {"dataset_limitations": ()})
+    )
+    assert stripped.bundle_hash == declared.bundle_hash
+    assert ALPACA_LIMITATION_TRUNCATED_CA not in stripped.required_limitations
+
+    with pytest.raises(ValueError, match=r"^bundle hash does not match its own"):
+        verify_evaluation_input_bundle(bundle=stripped, context=_harness().context)
+    with pytest.raises(ValidationError, match="bundle hash mismatch"):
+        EvaluationInputBundleV1.model_validate(stripped.model_dump())
 
 
 def test_minting_refuses_a_bundle_whose_views_replay_did_not_produce() -> None:
@@ -1112,7 +1268,8 @@ def test_the_sanctioned_path_re_derives_the_realized_clock(swap: str) -> None:
     authority hashes with the close moved three hours later, and a scheduled
     calendar row relabelled as realized. Minting used to check neither, and
     the gate reads only the mode and authority labels. Minting now rebuilds the
-    clock from its session queries, so only the control obtains a proof.
+    clock from its session queries, and so does the build that precedes it
+    (issue 96), so only the control obtains a bundle and a proof.
     """
     harness, query, reference = _cached_decision_case()
     snapshot = qualified_snapshot(harness.context)
@@ -1134,15 +1291,18 @@ def test_the_sanctioned_path_re_derives_the_realized_clock(swap: str) -> None:
             authority="realized",
         ),
     }[swap]
-    bundle = build_evaluation_input_bundle(
-        evaluation_interval=rp._interval(),
-        session_clock=clock,
-        context=harness.context,
-        decision_requests=((reference, query),),
-        source_snapshot_hash=snapshot.snapshot_hash,
-    )
 
-    def mint() -> BundleProvenanceProofV1:
+    def build(session_clock: SessionClockV1) -> EvaluationInputBundleV1:
+        return build_evaluation_input_bundle(
+            evaluation_interval=rp._interval(),
+            session_clock=session_clock,
+            context=harness.context,
+            session_queries=normalization_session_queries(harness),
+            decision_requests=((reference, query),),
+            source_snapshot_hash=snapshot.snapshot_hash,
+        )
+
+    def mint(bundle: EvaluationInputBundleV1) -> BundleProvenanceProofV1:
         return mint_bundle_provenance_proof(
             qualified_context=qualified,
             context=harness.context,
@@ -1152,18 +1312,20 @@ def test_the_sanctioned_path_re_derives_the_realized_clock(swap: str) -> None:
         )
 
     if swap == "control":
+        bundle = build(clock)
         validate_promotion_admission(
-            **rp._promotion_case(bundle, mint(), snapshot, qualified)
+            **rp._promotion_case(bundle, mint(bundle), snapshot, qualified)
         )
         return
-    with pytest.raises(
-        ValueError,
-        match=(
-            r"^session clock does not match its canonical re-derivation: bundle "
-            rf"clock {clock.clock_hash}, re-derived {genuine.clock_hash}$"
-        ),
-    ):
-        mint()
+    refusal = (
+        r"^session clock does not match its canonical re-derivation: bundle "
+        rf"clock {clock.clock_hash}, re-derived {genuine.clock_hash}$"
+    )
+    with pytest.raises(ValueError, match=refusal):
+        build(clock)
+    # Minting still refuses the clock in a bundle re-assembled by hand.
+    with pytest.raises(ValueError, match=refusal):
+        mint(with_session_clock(build(genuine), clock))
 
 
 def test_the_sanctioned_path_refuses_a_fabricated_universe() -> None:
@@ -1201,14 +1363,18 @@ def test_the_sanctioned_path_refuses_a_fabricated_universe() -> None:
             r"^session clock does not match its canonical re-derivation",
         ),
     ):
-        bundle = build_evaluation_input_bundle(
+        built = build_evaluation_input_bundle(
             evaluation_interval=rp._interval(),
-            session_clock=clock,
+            session_clock=genuine_clock,
             context=harness.context,
+            session_queries=normalization_session_queries(harness),
             decision_requests=((reference, query),),
             structural_eligibilities=eligibilities,
             source_snapshot_hash=snapshot.snapshot_hash,
         )
+        # The builder refuses the forged clock itself (issue 96), so it reaches
+        # minting only in a bundle re-assembled by hand.
+        bundle = with_session_clock(built, clock)
         with pytest.raises(ValueError, match=expected):
             mint_bundle_provenance_proof(
                 qualified_context=qualified,
@@ -1341,3 +1507,251 @@ def test_the_gate_refuses_purpose_laundered_decision_evidence() -> None:
         case = rp._promotion_case(bundle, proof, snapshot, qualified)
         with pytest.raises(ValueError, match=expected):
             validate_promotion_admission(**case)
+
+
+# ==========================================================================
+# The promotion lane is disabled (issue 79 ruling, option 1)
+# ==========================================================================
+
+PROMOTION_LANE_DISABLED = r"^the promotion lane is disabled \(issue 79 ruling\): "
+
+# Computed on unmodified main at 19c15f8, before the promotion lane was
+# disabled. Disabling it must leave both exploratory lanes byte-identical.
+REALIZED_TRACE_HASH_AT_19C15F8 = (
+    "80720399a140980ab0bc99b3d145a92b80e3aa7a907d097a8e6168178b46dd41"
+)
+REALIZED_RESULT_HASH_AT_19C15F8 = (
+    "f37b894459102c54ea8f5a36f457a338f8063ef77f5b9bc0084e3b1a270bd126"
+)
+RECONSTRUCTED_TRACE_HASH_AT_19C15F8 = (
+    "9224bab85f14f287e42448fa1c202a4321c1c6572565c0b708c2d8db7514c692"
+)
+RECONSTRUCTED_RESULT_HASH_AT_19C15F8 = (
+    "32423c7459cfb9cd1a5087b0315fc8d6bca37be88260416fec868661f6f235c0"
+)
+# Issue 92 adds a hash-covered `dataset_limitations` field to every bundle, so
+# every bundle hash moves once and, through the run identity that binds it,
+# every result hash. Trace hashes do not bind the bundle and stay at 19c15f8.
+# These are the same two runs' result hashes after that recorded change.
+REALIZED_RESULT_HASH_SINCE_ISSUE_92 = (
+    "152c914fa55c910437a2baf1e153db9e9d41fd0cbaa9dc0e14134bbaec51b0a4"
+)
+RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_92 = (
+    "4ed8488ff7e2b63922cb574ae35db959a1f6d49cd273337f9007a908366cd240"
+)
+
+
+def _promotion_engine(bundle: Any, admission: Any) -> SessionEvaluatorEngine:
+    import test_evaluator_engine as eng
+
+    return SessionEvaluatorEngine(
+        bundle=bundle,
+        admission=admission,
+        protocol=eng._protocol(),
+        cost_model=eng._cost_model(),
+        evidence=SessionEvaluatorEvidence(),
+        book_currency_namespace=eng.BOOK_NAMESPACE,
+        book_currency_code=eng.BOOK_CODE,
+    )
+
+
+def test_the_engine_refuses_a_promotion_case_the_gate_genuinely_admits() -> None:
+    """Gate validity grants no evaluation: the lane itself is disabled.
+
+    This is the most genuine promotion case the suite builds: a replay-minted
+    proof, a qualified context, a re-audited snapshot, and positive M1e
+    evidence. The gate admits it, and the engine still refuses it.
+    """
+    case = _admitted_case()
+    validate_promotion_admission(**case)
+    admission = case["admission"]
+    assert isinstance(admission, PromotionEvaluationAdmissionV1)
+    assert admission.input_bundle_hash == case["bundle"].bundle_hash
+
+    with pytest.raises(
+        PromotionLaneDisabledError,
+        match=PROMOTION_LANE_DISABLED + "engine construction refuses",
+    ):
+        _promotion_engine(case["bundle"], admission)
+
+
+def test_the_engine_refuses_the_forged_admission_of_finding_f1() -> None:
+    """F1: invented M1e and proof hashes over an exploratory, unsnapshotted bundle.
+
+    At 19c15f8 this admission ran to a COMPLETE promotion-grade result, and
+    the experiment runner recorded it as ``lane=promotion``.
+    """
+    import test_evaluator_engine as eng
+    from exploratory_decision_test_support import promotion_admission
+
+    bundle = eng._bundle()
+    assert bundle.source_snapshot_hash is None
+    forged = promotion_admission(bundle)
+    assert forged.m1e_completion_record_hash == H["1"]
+    assert forged.provenance_proof_hash == H["5"]
+
+    with pytest.raises(
+        PromotionLaneDisabledError,
+        match=PROMOTION_LANE_DISABLED + "engine construction refuses",
+    ):
+        _promotion_engine(bundle, forged)
+
+    # Control: the exploratory admission of the same bundle still runs.
+    assert eng._run(eng._engine(bundle=bundle)).result.lane == "exploratory"
+
+
+def test_no_public_engine_or_runner_entry_yields_promotion_evidence(
+    tmp_path: Path,
+) -> None:
+    """Every public entry refuses a promotion admission, and records nothing.
+
+    Construction refuses both the genuine and the forged admission. Past
+    construction, in the state 19c15f8 built for a promotion admission, the
+    run refuses, and so does the experiment runner, before any session is
+    stepped and before anything reaches M0 or the audit ledger.
+    """
+    import test_evaluator_engine as eng
+    import test_evaluator_experiment_run as run_support
+    from exploratory_decision_test_support import promotion_admission
+
+    genuine = _admitted_case()
+    forged_bundle = eng._bundle()
+    for bundle, admission in (
+        (genuine["bundle"], genuine["admission"]),
+        (forged_bundle, promotion_admission(forged_bundle)),
+    ):
+        with pytest.raises(
+            PromotionLaneDisabledError,
+            match=PROMOTION_LANE_DISABLED + "engine construction refuses",
+        ):
+            _promotion_engine(bundle, admission)
+
+    strategy = eng._buy_ten()
+    with pytest.raises(
+        PromotionLaneDisabledError,
+        match=PROMOTION_LANE_DISABLED + "an engine run refuses",
+    ):
+        eng._run(eng._bypassed_promotion_engine(), strategy)
+
+    ledger = SQLiteLedger(tmp_path / "audit.sqlite3")
+    context = run_support._context(
+        eng._bypassed_promotion_engine(), strategy=strategy, ledger=ledger
+    )
+    with pytest.raises(
+        PromotionLaneDisabledError,
+        match=PROMOTION_LANE_DISABLED + "the experiment runner refuses",
+    ):
+        execute_experiment_run(run_support._specification(), context)
+
+    assert strategy.seen == []
+    assert ledger.verified_events() == ()
+
+
+def _promotion_evidence_sites(path: Path) -> tuple[list[str], int]:
+    """Source text that looks like building promotion evidence.
+
+    A site is a call naming ``PromotionEvaluationResultV1``, a plain alias of
+    that type, or a literal stating ``lane`` as ``"promotion"`` or
+    ``is_promotion_grade_evidence`` as true. The lane literal is what selects
+    the promotion member when a result is built through ``EvaluationResultV1``
+    or ``EvaluationRunArtifactsV1``. An ``isinstance`` test names the type
+    without building one, so it is not a site.
+    """
+    sites: list[str] = []
+    calls = 0
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        pairs: list[tuple[object, ast.expr]]
+        if isinstance(node, ast.Assign | ast.AnnAssign) and (
+            isinstance(node.value, ast.Name | ast.Attribute)
+            and ast.unparse(node.value).endswith("PromotionEvaluationResultV1")
+        ):
+            sites.append(f"{path.name}:{node.lineno} aliases the promotion result")
+            continue
+        if isinstance(node, ast.Call):
+            calls += 1
+            if ast.unparse(node.func) != "isinstance" and any(
+                "PromotionEvaluationResultV1" in ast.unparse(part)
+                for part in (node.func, *node.args)
+            ):
+                sites.append(f"{path.name}:{node.lineno} builds a promotion result")
+            pairs = [(keyword.arg, keyword.value) for keyword in node.keywords]
+        elif isinstance(node, ast.Dict):
+            pairs = [
+                (key.value, value)
+                for key, value in zip(node.keys, node.values, strict=True)
+                if isinstance(key, ast.Constant) and isinstance(key.value, str)
+            ]
+        else:
+            continue
+        for name, value in pairs:
+            if not isinstance(value, ast.Constant):
+                continue
+            if name == "is_promotion_grade_evidence" and value.value is True:
+                sites.append(f"{path.name}:{node.lineno} asserts promotion grade")
+            if name == "lane" and value.value == "promotion":
+                sites.append(f"{path.name}:{node.lineno} states the promotion lane")
+    return sites, calls
+
+
+def test_no_production_source_builds_a_promotion_result() -> None:
+    """A tripwire, not a proof: no production text looks like promotion evidence.
+
+    The engine sealed a promotion result at 19c15f8 with
+    ``_seal(PromotionEvaluationResultV1, ...)`` and a promotion lane literal;
+    this scan would flag that text, a plain alias of the type, or a literal
+    lane or promotion-grade flag. It reads source text only, so indirection
+    it does not model (a computed lane, a type reached through a container)
+    escapes it. The behavioural refusal tests above are the proof; this only
+    catches the obvious regression early. The model and the gate stay.
+    """
+    root = Path(__file__).resolve().parents[2]
+    sources = sorted(
+        (*(root / "src" / "drift").rglob("*.py"), *(root / "scripts").glob("*.py"))
+    )
+    offending: list[str] = []
+    inspected = 0
+    for path in sources:
+        sites, calls = _promotion_evidence_sites(path)
+        offending.extend(sites)
+        inspected += calls
+
+    assert inspected >= 1000, "the promotion-evidence scan inspected nothing"
+    assert offending == []
+
+
+def test_disabling_promotion_leaves_the_realized_lane_byte_identical() -> None:
+    import test_evaluator_engine as eng
+
+    artifacts = eng._run(eng._engine())
+
+    assert artifacts.result.lane == "exploratory"
+    assert artifacts.result.metrics.committed_fill_count == 1
+    assert artifacts.trace.trace_hash == REALIZED_TRACE_HASH_AT_19C15F8
+    assert artifacts.result.result_hash == REALIZED_RESULT_HASH_SINCE_ISSUE_92
+
+
+def test_disabling_promotion_leaves_the_reconstructed_lane_byte_identical() -> None:
+    from exploratory_decision_test_support import (
+        JAN5,
+        JAN6,
+        SEC,
+        ReconstructedTargetStrategy,
+        bundle_of,
+        reconstructed_engine,
+        run_engine,
+        three_regular_sessions,
+    )
+
+    artifacts = run_engine(
+        reconstructed_engine(bundle_of(three_regular_sessions())),
+        ReconstructedTargetStrategy({JAN5: ((SEC, 10),), JAN6: ((SEC, 10),)}),
+    )
+
+    assert artifacts.result.lane == "exploratory"
+    assert artifacts.result.metrics.committed_fill_count == 1
+    assert any(
+        event.kind == "exploratory_strategy_decision"
+        for event in artifacts.trace.events
+    )
+    assert artifacts.trace.trace_hash == RECONSTRUCTED_TRACE_HASH_AT_19C15F8
+    assert artifacts.result.result_hash == RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_92
