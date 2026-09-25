@@ -54,11 +54,13 @@ from test_evaluator_bundles import (
     normalization_scheduled_clock,
     normalization_session_queries,
     resealed_clock,
+    with_session_clock,
 )
 from test_evaluator_reconstruction import build_from_harness
 
 from drift.domain.assertions import ResolutionMode
 from drift.domain.evaluator_bundles import (
+    EvaluationInputBundleV1,
     EvaluationRunIdentityV1,
     evaluation_input_bundle_hash,
     evaluation_run_identity_hash,
@@ -701,12 +703,10 @@ def test_the_composed_gate_rejects_a_bundle_declaring_any_limitation() -> None:
     limited = SessionClockV1.model_validate(
         dict(draft) | {"clock_hash": session_clock_hash(draft)}
     )
-    bundle = build_evaluation_input_bundle(
-        evaluation_interval=rp._interval(),
-        session_clock=limited,
-        context=harness.context,
-        decision_requests=((reference, query),),
-        source_snapshot_hash=snapshot.snapshot_hash,
+    # The builder refuses this clock itself (issue 96), so it reaches minting
+    # and the gate only in a bundle re-assembled by hand.
+    bundle = with_session_clock(
+        rp._promotion_bundle(harness, query, reference, snapshot), limited
     )
     assert bundle.has_exploratory_reconstructions is False
     assert bundle.required_limitations == (ALPACA_LIMITATION_ABSENT_HALTS,)
@@ -1112,7 +1112,8 @@ def test_the_sanctioned_path_re_derives_the_realized_clock(swap: str) -> None:
     authority hashes with the close moved three hours later, and a scheduled
     calendar row relabelled as realized. Minting used to check neither, and
     the gate reads only the mode and authority labels. Minting now rebuilds the
-    clock from its session queries, so only the control obtains a proof.
+    clock from its session queries, and so does the build that precedes it
+    (issue 96), so only the control obtains a bundle and a proof.
     """
     harness, query, reference = _cached_decision_case()
     snapshot = qualified_snapshot(harness.context)
@@ -1134,15 +1135,18 @@ def test_the_sanctioned_path_re_derives_the_realized_clock(swap: str) -> None:
             authority="realized",
         ),
     }[swap]
-    bundle = build_evaluation_input_bundle(
-        evaluation_interval=rp._interval(),
-        session_clock=clock,
-        context=harness.context,
-        decision_requests=((reference, query),),
-        source_snapshot_hash=snapshot.snapshot_hash,
-    )
 
-    def mint() -> BundleProvenanceProofV1:
+    def build(session_clock: SessionClockV1) -> EvaluationInputBundleV1:
+        return build_evaluation_input_bundle(
+            evaluation_interval=rp._interval(),
+            session_clock=session_clock,
+            context=harness.context,
+            session_queries=normalization_session_queries(harness),
+            decision_requests=((reference, query),),
+            source_snapshot_hash=snapshot.snapshot_hash,
+        )
+
+    def mint(bundle: EvaluationInputBundleV1) -> BundleProvenanceProofV1:
         return mint_bundle_provenance_proof(
             qualified_context=qualified,
             context=harness.context,
@@ -1152,18 +1156,20 @@ def test_the_sanctioned_path_re_derives_the_realized_clock(swap: str) -> None:
         )
 
     if swap == "control":
+        bundle = build(clock)
         validate_promotion_admission(
-            **rp._promotion_case(bundle, mint(), snapshot, qualified)
+            **rp._promotion_case(bundle, mint(bundle), snapshot, qualified)
         )
         return
-    with pytest.raises(
-        ValueError,
-        match=(
-            r"^session clock does not match its canonical re-derivation: bundle "
-            rf"clock {clock.clock_hash}, re-derived {genuine.clock_hash}$"
-        ),
-    ):
-        mint()
+    refusal = (
+        r"^session clock does not match its canonical re-derivation: bundle "
+        rf"clock {clock.clock_hash}, re-derived {genuine.clock_hash}$"
+    )
+    with pytest.raises(ValueError, match=refusal):
+        build(clock)
+    # Minting still refuses the clock in a bundle re-assembled by hand.
+    with pytest.raises(ValueError, match=refusal):
+        mint(with_session_clock(build(genuine), clock))
 
 
 def test_the_sanctioned_path_refuses_a_fabricated_universe() -> None:
@@ -1201,14 +1207,18 @@ def test_the_sanctioned_path_refuses_a_fabricated_universe() -> None:
             r"^session clock does not match its canonical re-derivation",
         ),
     ):
-        bundle = build_evaluation_input_bundle(
+        built = build_evaluation_input_bundle(
             evaluation_interval=rp._interval(),
-            session_clock=clock,
+            session_clock=genuine_clock,
             context=harness.context,
+            session_queries=normalization_session_queries(harness),
             decision_requests=((reference, query),),
             structural_eligibilities=eligibilities,
             source_snapshot_hash=snapshot.snapshot_hash,
         )
+        # The builder refuses the forged clock itself (issue 96), so it reaches
+        # minting only in a bundle re-assembled by hand.
+        bundle = with_session_clock(built, clock)
         with pytest.raises(ValueError, match=expected):
             mint_bundle_provenance_proof(
                 qualified_context=qualified,

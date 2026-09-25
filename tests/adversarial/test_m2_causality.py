@@ -45,7 +45,17 @@ from exploratory_decision_test_support import (
 from observation_test_support import NormalizationHarness
 from pydantic import ValidationError
 from session_test_support import boundary_at, revision
-from test_evaluator_bundles import _harness, _queries, _scheduled_bundle
+from test_evaluator_bundles import (
+    REALIZED_CORPUS_DATES,
+    _harness,
+    _queries,
+    _scheduled_bundle,
+    build_over_realized_corpus,
+    lagged_realized_clock,
+    realized_corpus,
+    realized_corpus_clock,
+    realized_corpus_queries,
+)
 from test_evaluator_engine import (
     BOOK_CODE,
     BOOK_NAMESPACE,
@@ -115,7 +125,10 @@ from drift.domain.universes import (
     StructuralEligibilityClassification,
     StructuralEligibilityResultV1,
 )
-from drift.evaluator.bundles import assemble_evaluation_input_bundle
+from drift.evaluator.bundles import (
+    assemble_evaluation_input_bundle,
+    verify_evaluation_input_bundle,
+)
 from drift.evaluator.clock import build_realized_session_clock
 from drift.evaluator.engine import (
     SessionEvaluatorEngine,
@@ -1237,6 +1250,48 @@ def test_a_scheduled_clock_refuses_a_session_stamped_after_a_later_date() -> Non
         match=r"session clock local dates must not decrease in clock order",
     ):
         scheduled_bundle((jan5, jan6, jan7), (jan5_session, jan7_session, forged))
+
+
+def test_a_lagged_realized_clock_is_refused_where_bundles_are_prepared() -> None:
+    """Issue 96, the #95 review probe: a lag that no issue 84 guard can see.
+
+    DAY_0 keeps its own times, DAY_1 carries DAY_2's, and DAY_2 carries the
+    next business date's, each session keeping its genuine authority records.
+    Local dates never decrease and sessions never overlap, so the clock is
+    valid, and the engine's next-open guard passes the DAY_1 decision to the
+    DAY_2 open, which in truth printed before that decision's cutoff. The
+    engine does not re-derive a realized clock. The preparation boundary does,
+    from the session queries, so a lagged clock reaches an engine only in a
+    bundle assembled by hand, which only a test does.
+    """
+    queries = realized_corpus_queries(*REALIZED_CORPUS_DATES)
+    genuine = realized_corpus_clock(*REALIZED_CORPUS_DATES)
+    lagged = lagged_realized_clock()
+    _, day_1, day_2 = lagged.sessions
+    assert [session.session_key for session in lagged.sessions] == [
+        session.session_key for session in genuine.sessions
+    ]
+    require_next_open_execution(day_1, day_2)
+    assert genuine.sessions[2].opened_at < day_1.closed_at
+    # Control: the genuine clock is prepared, and verifies.
+    prepared = build_over_realized_corpus(genuine, queries)
+    verify_evaluation_input_bundle(
+        bundle=prepared, context=realized_corpus().context, session_queries=queries
+    )
+
+    refusal = (
+        r"^session clock does not match its canonical re-derivation: bundle "
+        rf"clock {lagged.clock_hash}, re-derived {genuine.clock_hash}$"
+    )
+    with pytest.raises(ValueError, match=refusal):
+        build_over_realized_corpus(lagged, queries)
+    assembled = assemble_evaluation_input_bundle(
+        evaluation_interval=prepared.evaluation_interval, session_clock=lagged
+    )
+    with pytest.raises(ValueError, match=refusal):
+        verify_evaluation_input_bundle(
+            bundle=assembled, context=realized_corpus().context, session_queries=queries
+        )
 
 
 def test_a_staged_decision_executes_only_at_a_later_dates_open() -> None:
