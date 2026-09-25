@@ -397,18 +397,29 @@ class CorporateActionProcessor:
                 supported.append((outcome, _effect_contexts(outcome)))
             else:
                 unsupported.append(outcome)
-        conflicts = _share_action_conflicts(
-            [context for _, contexts in supported for context in contexts], window
-        )
+        every_context = [context for _, contexts in supported for context in contexts]
+        conflicts = _share_action_conflicts(every_context, window)
         unknown = self._unknown_claims(supported, window)
-        # Both rules are judged against the prior close's book here, and
-        # again against the book the pass leaves below: a disposal may empty
-        # the first, and a chain of conversions may reach a security only in
-        # the second.
+        # Both rules are judged against the prior close's book here, before
+        # any dispatch, and again against the book the pass leaves below. An
+        # unknown claim needs both: a disposal may empty the book the pass
+        # leaves, and a spin-off or conversion may reach a security only in
+        # it. A conflict needs only the first. The pass reaches a new security
+        # only through a spin-off or share acquisition from one already
+        # exposed, itself a share action touching both, so exposure the pass
+        # gains to a conflict implies exposure at the prior close to that
+        # conflict or to one on the chain that reached it. The second
+        # conflict check is defense in depth.
         self._require_no_exposed_conflict(conflicts, book)
         self._require_no_exposed_unknown_claim(unknown, book)
-        for _, contexts in supported:
-            self._apply_contexts(contexts, book, window)
+        exposed_at_close = {
+            security_id
+            for security_id in (*book.holdings, *book.targets)
+            if self._is_exposed(security_id, book)
+        }
+        # One dispatch over every outcome, so every share action of the pass
+        # runs before any cash distribution, whichever outcome each is in.
+        self._apply_contexts(every_context, book, window)
         self._require_no_exposed_conflict(conflicts, book)
         self._require_no_exposed_unknown_claim(unknown, book)
         # Exposure to evidence this pass cannot apply is judged against the
@@ -418,14 +429,23 @@ class CorporateActionProcessor:
             # An unsupported or indeterminate composition cannot be trusted to
             # say what happened. It only halts a run that is actually exposed
             # to the security, so an unmodellable action elsewhere in the
-            # universe does not poison an unrelated book.
+            # universe does not poison an unrelated book. It is never
+            # applied, and only a security's own outcome removes its holding
+            # or zeroes its target, so the book the pass leaves is exposed to
+            # it whenever the prior close's book was.
             if self._is_exposed(outcome.security_id, book):
                 raise IndeterminateValuationError(
                     "economic outcome resolution is not supported evidence for "
                     f"{outcome.security_id}: {outcome.resolution.support_status}"
                 )
+        # An action with no accounting rule is judged against the prior
+        # close's book too: a disposal in its own outcome may empty the book
+        # the pass leaves, and would then realize PnL on shares whose fate
+        # the unmodelled action leaves unproven.
         for context in book.unmodelled:
-            if self._is_exposed(context.security_id, book):
+            if context.security_id in exposed_at_close or self._is_exposed(
+                context.security_id, book
+            ):
                 raise IndeterminateValuationError(
                     f"corporate action kind {context.payload.action_kind.value} "
                     "has no proven M2 accounting rule"
@@ -626,12 +646,15 @@ class CorporateActionProcessor:
         book: _Book,
         window: _SessionWindow,
     ) -> None:
-        # Share-mutating actions settle before cash distributions so that a
-        # source quoting cash per post-action share is answered against a
-        # share count that has already absorbed this window's share actions.
-        # _require_no_exposed_conflict leaves at most one share action per
-        # exposed security, so "pre-action" is always the prior close and
-        # "post-action" is after that one action.
+        # Called once per pass, with the effects of every outcome. Every share
+        # action is dispatched before any cash distribution, so a source
+        # quoting cash per post-action share is answered against a share
+        # count that has already absorbed this window's share actions,
+        # whichever outcome each is in: a split of the security, or a
+        # spin-off or conversion delivering into it. A pass that completes
+        # leaves at most one share action touching each security the book is
+        # exposed to (_require_no_exposed_conflict), so "pre-action" is always
+        # the prior close and "post-action" is after that one action.
         for context in contexts:
             if not _is_cash_distribution(context.payload):
                 self._dispatch(context, book, window)
@@ -658,8 +681,8 @@ class CorporateActionProcessor:
         elif kind == ActionKind.LIQUIDATION:
             self._apply_liquidation(context, book, window)
         else:
-            # Judged once every action of the pass has run, against the book
-            # it leaves, like unsupported evidence.
+            # Judged once every action of the pass has run, against both the
+            # prior close's book and the book the pass leaves.
             book.unmodelled.append(context)
 
     def _apply_split(
