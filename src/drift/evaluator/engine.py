@@ -45,7 +45,7 @@ The realized lane keeps reading authorized accounting views only.
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Literal, cast
 from uuid import UUID
@@ -204,23 +204,130 @@ def _revalidated_admission(admission: BaseModel) -> EvaluationAdmissionV1:
     )
 
 
+#: The exact type each declared field of a returned intent must hold, per model.
+#: Strict validation accepts an instance of a subclass and keeps it, so a
+#: subclassed leaf would reach staging with its own comparisons (#119 review).
+_EXACT_FIELD_TYPES: dict[type[BaseModel], dict[str, type]] = {
+    StrategyDecisionIntentV1: {
+        "schema_version": str,
+        "session_key": SessionKeyV1,
+        "decision_time": datetime,
+        "targets": tuple,
+    },
+    SessionKeyV1: {
+        "schema_version": str,
+        "mic": str,
+        "session_scope": str,
+        "local_date": date,
+    },
+    SecurityTargetPositionV1: {
+        "schema_version": str,
+        "security_id": UUID,
+        "target_quantity": int,
+    },
+}
+
+#: The exact model every member of a tuple field must be.
+_EXACT_MEMBER_TYPES: dict[tuple[type[BaseModel], str], type[BaseModel]] = {
+    (StrategyDecisionIntentV1, "targets"): SecurityTargetPositionV1,
+}
+
+#: Read a type's names through `type` itself, so a metaclass cannot run.
+_TYPE_QUALNAME = vars(type)["__qualname__"]
+_TYPE_MODULE = vars(type)["__module__"]
+_ABSENT = object()
+
+
+def _type_name(kind: type) -> str:
+    return cast(str, _TYPE_QUALNAME.__get__(kind))
+
+
+def _refuse_intent(problem: str) -> StrategyIntentRejectedError:
+    return StrategyIntentRejectedError(
+        f"strategy returned a decision intent with {problem}"
+    )
+
+
+def _require_exact_node(value: object, expected: type, path: str) -> None:
+    """Refuse ``value`` unless it is exactly ``expected``, walked to its leaves.
+
+    Reads only type identity and the models' own field state, so no method a
+    strategy could define runs while its answer is inspected.
+    """
+    actual = type(value)
+    if actual is not expected:
+        raise _refuse_intent(
+            f"{path} of type {_type_name(actual)}, not {_type_name(expected)}"
+        )
+    if actual is datetime and cast(datetime, value).tzinfo is not UTC:
+        # `UTCDateTime` validation always yields the `datetime.UTC` singleton,
+        # so any other zone, even at an equal instant, is not its output.
+        raise _refuse_intent(f"{path} whose tzinfo is not datetime.UTC")
+    if actual is UUID:
+        number = getattr(value, "int", _ABSENT)
+        if type(number) is not int:
+            raise _refuse_intent(
+                f"{path}.int of type {_type_name(type(number))}, not int"
+            )
+    if actual in _EXACT_FIELD_TYPES:
+        _require_exact_model(cast(BaseModel, value), path)
+
+
+def _require_exact_model(model: BaseModel, path: str) -> None:
+    """Refuse any state beside a model's declared fields, then walk each field."""
+    kind = type(model)
+    where = f"{path}." if path else ""
+    state = vars(model)
+    declared = kind.model_fields
+    if not all(type(name) is str for name in state) or not (
+        state.keys() <= declared.keys()
+    ):
+        raise _refuse_intent(f"undeclared state in {where}__dict__")
+    for slot in ("__pydantic_extra__", "__pydantic_private__"):
+        if getattr(model, slot, _ABSENT) is not None:
+            raise _refuse_intent(f"undeclared state in {where}{slot}")
+    # Construction records exactly the fields it was given, which always
+    # include every required one; a missing field is left to validation.
+    fields_set = getattr(model, "__pydantic_fields_set__", _ABSENT)
+    required = {name for name, info in declared.items() if info.is_required()}
+    if (
+        type(fields_set) is not set
+        or not all(type(name) is str for name in fields_set)
+        or not fields_set <= state.keys()
+        or not required & state.keys() <= fields_set
+    ):
+        raise _refuse_intent(f"a tampered {where}__pydantic_fields_set__")
+    shapes = _EXACT_FIELD_TYPES[kind]
+    for name, value in state.items():
+        field_path = f"{where}{name}"
+        _require_exact_node(value, shapes[name], field_path)
+        if shapes[name] is tuple:
+            member = _EXACT_MEMBER_TYPES[(kind, name)]
+            for position, item in enumerate(cast(tuple[object, ...], value)):
+                _require_exact_node(item, member, f"{field_path}.{position}")
+
+
 def _revalidated_intent(returned: object) -> StrategyDecisionIntentV1:
     """Rebuild the intent a strategy returned before staging it (issue 111).
 
     The strategy's answer is revalidated like every engine input (issue 78),
-    never trusted as returned. It must be exactly a `StrategyDecisionIntentV1`,
-    because a subclass can declare fields the frozen schema does not have. It
-    must pass the declared type's validation. And it must already be the
-    intent that validation rebuilds, so an unsorted target set, or state set
-    past the frozen guard, is refused rather than silently repaired. Every
-    refusal is a `StrategyIntentRejectedError`, so the run halts `REJECTED`
-    before any fill, exactly as a staging refusal does.
+    never trusted as returned, in three steps that each refuse rather than
+    repair. Its structure must be exactly the frozen schema's: every model,
+    container and leaf exactly its declared type, with no state beside its
+    declared fields. It must pass the declared type's strict validation. And
+    the canonical content of the rebuilt intent must equal the returned
+    one's, so an unsorted target set or any other value a validator would
+    normalize is refused rather than silently repaired. Every refusal is a
+    `StrategyIntentRejectedError`, so the run halts `REJECTED` before any
+    fill, exactly as a staging refusal does. Staging reads only the rebuilt
+    intent, never an object the strategy still holds.
     """
     if type(returned) is not StrategyDecisionIntentV1:
         raise StrategyIntentRejectedError(
-            f"strategy returned {type(returned).__qualname__}, "
+            f"strategy returned {_type_name(type(returned))}, "
             "not a StrategyDecisionIntentV1"
         )
+    _require_exact_model(returned, "")
     try:
         rebuilt = _revalidated(StrategyDecisionIntentV1, returned)
     except ValidationError as error:
@@ -231,9 +338,9 @@ def _revalidated_intent(returned: object) -> StrategyDecisionIntentV1:
         raise StrategyIntentRejectedError(
             f"strategy returned an invalid decision intent: {causes}"
         ) from error
-    # Pydantic equality also compares the extra and private slots; the
-    # instance dictionaries catch an attribute the schema does not declare.
-    if rebuilt != returned or vars(rebuilt) != vars(returned):
+    # Every node is now an exact Drift or builtin type, so hashing the
+    # returned intent runs no strategy code.
+    if content_hash(rebuilt) != content_hash(returned):
         raise StrategyIntentRejectedError(
             "strategy returned a non-canonical decision intent: "
             "revalidating it builds a different intent"
@@ -246,16 +353,16 @@ def _returned_intent_hash(returned: object) -> SHA256Hash:
 
     A refused return need not have a canonical form: a forged naive decision
     time or an arbitrary object has none. The event then hashes the name of
-    the returned type instead, so the refusal is still traced and the run
-    still halts `REJECTED` rather than failing.
+    the returned type instead. Hashing a refused return can still run its own
+    code (a serializer, iteration, or ``repr``); if that raises, the exception
+    propagates and the run records FAILED, as a strategy that raises does.
     """
     try:
         return content_hash(returned)
     except CanonicalSerializationError:
         kind = type(returned)
-        return content_hash(
-            {"uncanonical_return_type": f"{kind.__module__}.{kind.__qualname__}"}
-        )
+        module = cast(str, _TYPE_MODULE.__get__(kind))
+        return content_hash({"uncanonical_return_type": f"{module}.{_type_name(kind)}"})
 
 
 def _security_order(security_id: UUID) -> bytes:

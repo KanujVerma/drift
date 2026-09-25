@@ -20,9 +20,12 @@ import dataclasses
 import sys
 import typing
 from collections.abc import Callable
+from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Self
+from uuid import UUID
+from zoneinfo import ZoneInfo
 
 _UNIT_SUPPORT = Path(__file__).resolve().parents[1] / "unit"
 if str(_UNIT_SUPPORT) not in sys.path:
@@ -71,8 +74,10 @@ from drift.domain.normalization import (
     derived_view_output_hash,
 )
 from drift.domain.observation_query import ObservationOutcomeQueryV1
+from drift.domain.sessions import SessionKeyV1
 from drift.evaluator.engine import SessionEvaluatorEngine, SessionEvaluatorEvidence
 from drift.evaluator.reconstruction import ExploratoryReconstructionReplay
+from drift.serialization.canonical import content_hash
 
 RAW_VENDOR_BAR = {"t": "2026-01-06T05:00:00Z", "o": 100.0, "c": 100.0, "S": "AAPL"}
 
@@ -295,6 +300,8 @@ NON_CANONICAL = (
     "strategy returned a non-canonical decision intent: "
     "revalidating it builds a different intent"
 )
+WITH = "strategy returned a decision intent with "
+NOT_UTC = WITH + "decision_time whose tzinfo is not datetime.UTC"
 
 type _Forgery = Callable[[StrategyDecisionIntentV1], object]
 
@@ -306,26 +313,33 @@ def _unvalidated(
     return StrategyDecisionIntentV1.model_construct(**(dict(intent) | changes))
 
 
-def _smuggled(
-    intent: StrategyDecisionIntentV1, name: str, value: object
+def _with_target(
+    intent: StrategyDecisionIntentV1, **changes: Any
 ) -> StrategyDecisionIntentV1:
-    """``intent`` carrying state its schema does not declare.
+    """``intent`` whose first target has ``changes``, built without validation."""
+    first, *rest = intent.targets
+    forged = SecurityTargetPositionV1.model_construct(**(dict(first) | changes))
+    return _unvalidated(intent, targets=(forged, *rest))
+
+
+def _with_session_key(
+    intent: StrategyDecisionIntentV1, **changes: Any
+) -> StrategyDecisionIntentV1:
+    """``intent`` whose session key has ``changes``, built without validation."""
+    key = SessionKeyV1.model_construct(**(dict(intent.session_key) | changes))
+    return _unvalidated(intent, session_key=key)
+
+
+def _smuggled(model: Any, name: str, value: object) -> Any:
+    """``model`` carrying state its schema does not declare.
 
     Pydantic's ``model_construct`` silently drops an undeclared key under
     ``extra="forbid"``, so the #111 probe's ``extra_field`` never reached the
     instance. An extra field is carried only by a subclass that declares it,
     or by state set on the instance past its frozen guard, as here.
     """
-    object.__setattr__(intent, name, value)
-    return intent
-
-
-def _forged_target_schema(intent: StrategyDecisionIntentV1) -> object:
-    first, *rest = intent.targets
-    forged = SecurityTargetPositionV1.model_construct(
-        **(dict(first) | {"schema_version": "9"})
-    )
-    return _unvalidated(intent, targets=(forged, *rest))
+    object.__setattr__(model, name, value)
+    return model
 
 
 class _WidenedIntent(StrategyDecisionIntentV1):
@@ -334,9 +348,129 @@ class _WidenedIntent(StrategyDecisionIntentV1):
     extra_field: str = "x"
 
 
+# Strict pydantic validation accepts an instance of a subclass and keeps it,
+# so each leaf below would reach staging with its own comparisons (#119, F1).
+
+
+class _RenamingUUID(UUID):
+    """Compares and hashes as its value, but names another security."""
+
+    def __str__(self) -> str:
+        return str(SEC_OTHER)
+
+
+class _ForgedInt(int):
+    """An int subclass: the issue 88 whole-share rule is on exact ``int``."""
+
+
+class _AlwaysEqualDateTime(datetime):
+    """A decision time equal to every cutoff, whatever instant it holds."""
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+    __hash__ = datetime.__hash__
+
+
+class _AlwaysEqualDate(date):
+    """A session date equal to every date, whatever day it holds."""
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+    __hash__ = date.__hash__
+
+
+class _AlwaysEqualStr(str):
+    """A venue code equal to every string, whatever venue it names."""
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+    __hash__ = str.__hash__
+
+
+class _StatefulTuple(tuple[SecurityTargetPositionV1, ...]):
+    """A tuple subclass able to carry state of its own."""
+
+
+class _AlwaysEqualSessionKey(SessionKeyV1):
+    """A session key equal to every key, whatever session it names."""
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    __hash__ = SessionKeyV1.__hash__
+
+
+class _AlwaysEqualWideTarget(SecurityTargetPositionV1):
+    """A target subclass with an undeclared field, equal to every target."""
+
+    note: str = "smuggled"
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    __hash__ = SecurityTargetPositionV1.__hash__
+
+
+def _renaming_uuid(intent: StrategyDecisionIntentV1) -> object:
+    identifier = intent.targets[0].security_id
+    return _with_target(intent, security_id=_RenamingUUID(int=identifier.int))
+
+
+def _uuid_holding_a_forged_int(intent: StrategyDecisionIntentV1) -> object:
+    identifier = UUID(int=intent.targets[0].security_id.int)
+    _smuggled(identifier, "int", _ForgedInt(identifier.int))
+    return _with_target(intent, security_id=identifier)
+
+
+def _date_thirty_days_earlier(intent: StrategyDecisionIntentV1) -> object:
+    earlier = intent.session_key.local_date.toordinal() - 30
+    return _with_session_key(intent, local_date=_AlwaysEqualDate.fromordinal(earlier))
+
+
+def _stateful_targets(intent: StrategyDecisionIntentV1) -> object:
+    targets = _StatefulTuple(intent.targets)
+    _smuggled(targets, "smuggled", "x")
+    return _unvalidated(intent, targets=targets)
+
+
+def _session_key_of_another_day(intent: StrategyDecisionIntentV1) -> object:
+    key = intent.session_key
+    other = _AlwaysEqualSessionKey(
+        mic=key.mic,
+        session_scope=key.session_scope,
+        local_date=date.fromordinal(key.local_date.toordinal() - 30),
+    )
+    return _unvalidated(intent, session_key=other)
+
+
+def _wide_target(intent: StrategyDecisionIntentV1) -> object:
+    first, *rest = intent.targets
+    return _unvalidated(intent, targets=(_AlwaysEqualWideTarget(**dict(first)), *rest))
+
+
+def _target_fields_set(intent: StrategyDecisionIntentV1) -> object:
+    first, *rest = intent.targets
+    emptied = _smuggled(first.model_copy(), "__pydantic_fields_set__", set())
+    return _unvalidated(intent, targets=(emptied, *rest))
+
+
 #: Each forgery of the genuine intent, and the exact refusal it must meet.
-#: Every one but the duplicate is staged or fails the run before issue 111;
-#: the duplicate was already refused by staging, under a different cause.
+#: Before issue 111, every one but four is staged or fails the run. The
+#: duplicate and the padded venue code were already refused by staging, and
+#: the bool and int-subclass quantities by the issue 88 rule, each under a
+#: different cause.
 FORGERIES: dict[str, tuple[_Forgery, str]] = {
     "forged-schema-version": (
         lambda intent: _unvalidated(intent, schema_version="9"),
@@ -348,18 +482,46 @@ FORGERIES: dict[str, tuple[_Forgery, str]] = {
     ),
     "extra-field-in-the-extra-slot": (
         lambda intent: _smuggled(intent, "__pydantic_extra__", {"extra_field": "x"}),
-        NON_CANONICAL,
+        WITH + "undeclared state in __pydantic_extra__",
     ),
     "extra-field-in-the-instance-dict": (
         lambda intent: _smuggled(intent, "extra_field", "x"),
-        NON_CANONICAL,
+        WITH + "undeclared state in __dict__",
+    ),
+    "private-state": (
+        lambda intent: _smuggled(intent, "__pydantic_private__", {"note": "x"}),
+        WITH + "undeclared state in __pydantic_private__",
+    ),
+    "tampered-fields-set": (
+        lambda intent: _smuggled(intent, "__pydantic_fields_set__", {"garbage"}),
+        WITH + "a tampered __pydantic_fields_set__",
+    ),
+    "fields-set-naming-an-undeclared-field": (
+        lambda intent: _smuggled(
+            intent,
+            "__pydantic_fields_set__",
+            {"garbage", *intent.model_fields_set},
+        ),
+        WITH + "a tampered __pydantic_fields_set__",
+    ),
+    "tampered-target-fields-set": (
+        _target_fields_set,
+        WITH + "a tampered targets.0.__pydantic_fields_set__",
     ),
     "targets-as-a-list": (
         lambda intent: _unvalidated(intent, targets=list(intent.targets)),
-        INVALID + "targets: Input should be a valid tuple",
+        WITH + "targets of type list, not tuple",
+    ),
+    "tuple-subclass-with-state": (
+        _stateful_targets,
+        WITH + "targets of type _StatefulTuple, not tuple",
     ),
     "unsorted-targets": (
         lambda intent: _unvalidated(intent, targets=intent.targets[::-1]),
+        NON_CANONICAL,
+    ),
+    "padded-venue-code": (
+        lambda intent: _with_session_key(intent, mic=f" {intent.session_key.mic}"),
         NON_CANONICAL,
     ),
     "duplicate-targets": (
@@ -367,14 +529,67 @@ FORGERIES: dict[str, tuple[_Forgery, str]] = {
         INVALID + "targets: Value error, targets must be unique by security",
     ),
     "forged-target-schema-version": (
-        _forged_target_schema,
+        lambda intent: _with_target(intent, schema_version="9"),
         INVALID + "targets.0.schema_version: Input should be '1'",
+    ),
+    "target-subclass-with-an-extra-field": (
+        _wide_target,
+        WITH + "targets.0 of type _AlwaysEqualWideTarget, not SecurityTargetPositionV1",
+    ),
+    "uuid-subclass-naming-another-security": (
+        _renaming_uuid,
+        WITH + "targets.0.security_id of type _RenamingUUID, not UUID",
+    ),
+    "uuid-holding-an-int-subclass": (
+        _uuid_holding_a_forged_int,
+        WITH + "targets.0.security_id.int of type _ForgedInt, not int",
+    ),
+    "int-subclass-quantity": (
+        lambda intent: _with_target(intent, target_quantity=_ForgedInt(1)),
+        WITH + "targets.0.target_quantity of type _ForgedInt, not int",
+    ),
+    "bool-quantity": (
+        lambda intent: _with_target(intent, target_quantity=True),
+        WITH + "targets.0.target_quantity of type bool, not int",
+    ),
+    "session-key-subclass-of-another-day": (
+        _session_key_of_another_day,
+        WITH + "session_key of type _AlwaysEqualSessionKey, not SessionKeyV1",
+    ),
+    "date-subclass-thirty-days-earlier": (
+        _date_thirty_days_earlier,
+        WITH + "session_key.local_date of type _AlwaysEqualDate, not date",
+    ),
+    "str-subclass-venue-code": (
+        lambda intent: _with_session_key(intent, mic=_AlwaysEqualStr("XNAS")),
+        WITH + "session_key.mic of type _AlwaysEqualStr, not str",
+    ),
+    "datetime-subclass-in-2020": (
+        lambda intent: _unvalidated(
+            intent, decision_time=_AlwaysEqualDateTime(2020, 1, 1, tzinfo=UTC)
+        ),
+        WITH + "decision_time of type _AlwaysEqualDateTime, not datetime",
+    ),
+    "non-utc-zone-at-the-same-instant": (
+        lambda intent: _unvalidated(
+            intent,
+            decision_time=intent.decision_time.astimezone(
+                timezone(timedelta(hours=-5))
+            ),
+        ),
+        NOT_UTC,
+    ),
+    "zoneinfo-utc-at-the-same-instant": (
+        lambda intent: _unvalidated(
+            intent, decision_time=intent.decision_time.replace(tzinfo=ZoneInfo("UTC"))
+        ),
+        NOT_UTC,
     ),
     "naive-decision-time": (
         lambda intent: _unvalidated(
             intent, decision_time=intent.decision_time.replace(tzinfo=None)
         ),
-        INVALID + "decision_time: Value error, timestamps must be timezone-aware",
+        NOT_UTC,
     ),
     "none": (
         lambda intent: None,
@@ -474,8 +689,8 @@ def test_a_strategy_raising_inside_its_decision_still_propagates(lane: str) -> N
     """Issue 111 revalidates what a strategy returns, never what it raises.
 
     A ``ValidationError`` raised inside the decision method still propagates,
-    so the M0 run records FAILED. Whether it should be REJECTED instead is
-    decision D6 of the strategy-surface contract (#113), not decided here.
+    so the M0 run records FAILED, as D6 (a) of the strategy-surface contract
+    (#113) rules for a strategy that raises.
     """
 
     def construct_invalid(intent: StrategyDecisionIntentV1) -> object:
@@ -488,6 +703,66 @@ def test_a_strategy_raising_inside_its_decision_still_propagates(lane: str) -> N
         match=r"for StrategyDecisionIntentV1\ntargets\n  Input should be a valid tuple",
     ):
         LANES[lane].run(construct_invalid)
+
+
+def _uncanonical(qualified_type: str) -> str:
+    return content_hash({"uncanonical_return_type": qualified_type})
+
+
+#: The intent hash each refused return is traced under: the content hash of
+#: what the strategy returned, or, for a return with no canonical form, the
+#: hash of this exact payload naming its type.
+REFUSED_INTENT_HASHES = {
+    "none": content_hash(None),
+    "an-arbitrary-object": _uncanonical("builtins.object"),
+    "naive-decision-time": _uncanonical(
+        "drift.domain.evaluator_strategy.StrategyDecisionIntentV1"
+    ),
+}
+
+
+@pytest.mark.parametrize("forgery", REFUSED_INTENT_HASHES)
+@pytest.mark.parametrize("lane", LANES)
+def test_a_refused_return_is_traced_under_the_hash_of_what_it_is(
+    lane: str, forgery: str
+) -> None:
+    artifacts = LANES[lane].run(FORGERIES[forgery][0])
+
+    hashes = [
+        event.intent_hash
+        for event in artifacts.trace.events
+        if isinstance(event, LANES[lane].decision_event)
+    ]
+    assert hashes == [REFUSED_INTENT_HASHES[forgery]]
+
+
+def _rewriting_earlier_answers() -> _Forgery:
+    """Answer genuinely, then rewrite the previous answer past its guard."""
+    answered: list[StrategyDecisionIntentV1] = []
+
+    def forge(intent: StrategyDecisionIntentV1) -> object:
+        while answered:
+            earlier = answered.pop()
+            _smuggled(earlier.targets[0], "target_quantity", 0)
+            _smuggled(earlier, "targets", ())
+        answered.append(intent)
+        return intent
+
+    return forge
+
+
+@pytest.mark.parametrize("lane", LANES)
+def test_a_strategy_cannot_rewrite_an_intent_after_it_is_staged(lane: str) -> None:
+    """Staging keeps the rebuilt intent, never an object the strategy still holds.
+
+    Each later decision rewrites the models it returned earlier. Had the engine
+    staged those objects, the recorded decisions would change after the fact.
+    """
+    control = LANES[lane].run(lambda intent: intent)
+    rewritten = LANES[lane].run(_rewriting_earlier_answers())
+
+    assert rewritten.trace.trace_hash == control.trace.trace_hash
+    assert rewritten.result.result_hash == control.result.result_hash
 
 
 #: Trace and result hashes of genuine runs, pinned from a run at 19c15f8, the
