@@ -1560,6 +1560,29 @@ RECONSTRUCTED_TRACE_HASH_SINCE_ISSUE_107 = (
 RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_107 = (
     "81031d35feeaa7436884c259f4cef598689f764f51ab8e7418057caad8589e0c"
 )
+# Issue 63 stage 2 moves the M1c identities onto the M1c semantic attestations.
+# It edits `semantic_attestation.py` and the three M1c stamp-site modules, all
+# declared by `m1d-evidence-v1`, so the M1d evidence identity moves by design
+# (7295dd32 to 011cf2f5), and the M1c validator identity bound into every M1d
+# context hash moves with it (whole tree to 84b494ff). A field-by-field diff of
+# both runs against main e9e2724 shows only identity-bearing hashes moved:
+# context, mark, session, reconstruction, price and generated-row hashes, the
+# evaluator evidence hash, and the bundle, admission, run-identity, trace and
+# result chain. No quantity, price, cash, NAV, classification, count, status,
+# reason, lane or kind leaf changes. These are the same two runs' hashes since
+# that recorded change; issue 71 re-pins them the same way.
+REALIZED_TRACE_HASH_SINCE_ISSUE_63_STAGE_2 = (
+    "5fd254552ea73effee84de6f84d9e5d132c1990d485e53dfccd7860308ea3e9b"
+)
+REALIZED_RESULT_HASH_SINCE_ISSUE_63_STAGE_2 = (
+    "395b1912df800fe5f918db02473d05def981385bc59a83f90f76b5686be67ff3"
+)
+RECONSTRUCTED_TRACE_HASH_SINCE_ISSUE_63_STAGE_2 = (
+    "3657c71bc13e2fad2ccd7f321e88413afcc3f4c4a06f4f323e2c2f468ca84ea4"
+)
+RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_63_STAGE_2 = (
+    "4853de62f54c764aa163449c2c0b9c67527df2bb02fe10dcb1df35116652ddee"
+)
 
 
 def _promotion_engine(bundle: Any, admission: Any) -> SessionEvaluatorEngine:
@@ -1747,8 +1770,8 @@ def test_disabling_promotion_leaves_the_realized_lane_byte_identical() -> None:
 
     assert artifacts.result.lane == "exploratory"
     assert artifacts.result.metrics.committed_fill_count == 1
-    assert artifacts.trace.trace_hash == REALIZED_TRACE_HASH_SINCE_ISSUE_107
-    assert artifacts.result.result_hash == REALIZED_RESULT_HASH_SINCE_ISSUE_107
+    assert artifacts.trace.trace_hash == REALIZED_TRACE_HASH_SINCE_ISSUE_63_STAGE_2
+    assert artifacts.result.result_hash == REALIZED_RESULT_HASH_SINCE_ISSUE_63_STAGE_2
 
 
 def test_disabling_promotion_leaves_the_reconstructed_lane_byte_identical() -> None:
@@ -1774,5 +1797,7 @@ def test_disabling_promotion_leaves_the_reconstructed_lane_byte_identical() -> N
         event.kind == "exploratory_strategy_decision"
         for event in artifacts.trace.events
     )
-    assert artifacts.trace.trace_hash == RECONSTRUCTED_TRACE_HASH_SINCE_ISSUE_107
-    assert artifacts.result.result_hash == RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_107
+    assert artifacts.trace.trace_hash == RECONSTRUCTED_TRACE_HASH_SINCE_ISSUE_63_STAGE_2
+    assert (
+        artifacts.result.result_hash == RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_63_STAGE_2
+    )

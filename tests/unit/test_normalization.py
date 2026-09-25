@@ -15,7 +15,6 @@ from observation_test_support import NormalizationHarness
 from pydantic import ValidationError
 
 from drift.datasets.resolver import VerifiedArtifactBytes
-from drift.domain.dataset_validation import DatasetValidationError
 from drift.domain.economic_common import ActionKind, economic_implementation_hash
 from drift.domain.normalization import (
     DerivedObservationViewV1,
@@ -913,22 +912,26 @@ def _materialize_retained(
     return materialize_observation_outcome(reference, query, context)
 
 
-def test_p08_unimported_python_moves_provenance_but_not_m1d_evidence_identity() -> None:
-    """An unimported module is build provenance, not M1d evidence (issue 63).
+def test_p08_unimported_python_moves_provenance_but_no_evidence_identity() -> None:
+    """An unimported module is build provenance, not evidence (issue 63).
 
-    ``m1d_implementation_hash`` is attested once per process, so the evidence
-    identity is re-attested here from disk over its declared closure; the
-    cross-process form of this property is
-    ``tests/integration/test_m1d_semantic_identity.py``. Split-normalized
-    evidence still binds the M1c whole-tree identities of the economic history
-    it composes, so it still moves: that is the stage 2 residual of issue 63,
-    pinned here so that stage 2 has to flip it deliberately.
+    Every attestation is computed once per process, so the M1d evidence
+    identity and both M1c identities are re-attested here from disk over their
+    declared closures; the cross-process forms of this property are
+    ``tests/integration/test_m1d_semantic_identity.py`` (stage 1) and
+    ``tests/integration/test_m1c_semantic_identity.py`` (stage 2). Stage 2
+    deliberately flipped the split-normalized block below: split-normalized
+    evidence composes M1c history, whose identities are semantic attestations
+    now too, so it no longer moves either.
     """
     from drift.domain.observation_query import drift_source_inventory_hash
     from drift.domain.semantic_attestation import (
         M1D_EVIDENCE_CLOSURE_ID,
         M1D_EVIDENCE_SEMANTIC_MODULES,
         build_semantic_attestation,
+    )
+    from drift.markets.economic_validation import (
+        economic_validator_implementation_hash,
     )
 
     def evidence_identity() -> str:
@@ -950,6 +953,7 @@ def test_p08_unimported_python_moves_provenance_but_not_m1d_evidence_identity() 
     before_economic_hash = economic_implementation_hash()
     before_evidence_hash = evidence_identity()
     assert before_evidence_hash == m1d_implementation_hash()
+    before_validator_hash = economic_validator_implementation_hash()
     before_source_record = split.context.observation_datasets[0].records[0]
     before_source_hash = content_hash(before_source_record)
     before_numbers = tuple(
@@ -960,7 +964,7 @@ def test_p08_unimported_python_moves_provenance_but_not_m1d_evidence_identity() 
     assert not probe.exists()
     try:
         probe.write_text("PROBE = 'unimported implementation identity input'\n")
-        # Build provenance sees the unimported module; M1d evidence does not.
+        # Build provenance sees the unimported module; evidence does not.
         assert drift_source_inventory_hash() != before_inventory_hash
         assert economic_implementation_hash() != before_economic_hash
         assert evidence_identity() == before_evidence_hash
@@ -978,14 +982,13 @@ def test_p08_unimported_python_moves_provenance_but_not_m1d_evidence_identity() 
         assert rederived_result.derivation_hash == source_result.derivation_hash
         assert rederived_result.reference == source_result.reference
 
-        # Stage 2 residual: split-normalized evidence still moves through the
-        # M1c whole-tree identities, while its numbers and sources do not. The
-        # retained reference now refuses on the M1c validator identity, not on
-        # the M1d one.
-        with pytest.raises(
-            DatasetValidationError, match="economic_validation_run_mismatch"
-        ):
-            _materialize_retained(split_result, split_query, split.context)
+        # Split-normalized evidence (issue 63 stage 2): the retained reference
+        # still materializes, and a fresh derivation reproduces its lineage,
+        # numbers and sources exactly.
+        retained_split_view = _materialize_retained(
+            split_result, split_query, split.context
+        )
+        assert retained_split_view == split_result.view
         changed = NormalizationHarness()
         changed_result = changed.normalize(
             changed.normalization_query(
@@ -1004,15 +1007,53 @@ def test_p08_unimported_python_moves_provenance_but_not_m1d_evidence_identity() 
             changed_result.selected_action_hashes == split_result.selected_action_hashes
         )
         assert (
-            changed_result.action_mapping_hashes != split_result.action_mapping_hashes
+            changed_result.action_mapping_hashes == split_result.action_mapping_hashes
         )
-        assert changed_result.derivation_hash != split_result.derivation_hash
-        assert changed_result.reference != split_result.reference
+        assert changed_result.derivation_hash == split_result.derivation_hash
+        assert changed_result.reference == split_result.reference
+
+        # Both M1c identities, re-attested from disk with the probe present,
+        # equal the values the split harness bound before the probe existed.
+        m1c_with_probe = _m1c_identities()
+        assert m1c_with_probe == (
+            before_validator_hash,
+            _cached_m1c_evidence_identity(),
+        )
+        assert economic_validator_implementation_hash() == before_validator_hash
     finally:
         probe.unlink(missing_ok=True)
     assert drift_source_inventory_hash() == before_inventory_hash
     assert economic_implementation_hash() == before_economic_hash
     assert evidence_identity() == before_evidence_hash
+    assert _m1c_identities() == m1c_with_probe
+
+
+def _m1c_identities() -> tuple[str, str]:
+    """Re-attest both M1c closures from disk, bypassing the per-process cache."""
+    from drift.domain.semantic_attestation import (
+        M1C_EVIDENCE_CLOSURE_ID,
+        M1C_EVIDENCE_SEMANTIC_MODULES,
+        M1C_VALIDATION_CLOSURE_ID,
+        M1C_VALIDATION_SEMANTIC_MODULES,
+        build_semantic_attestation,
+    )
+
+    return (
+        build_semantic_attestation(
+            closure_id=M1C_VALIDATION_CLOSURE_ID,
+            modules=M1C_VALIDATION_SEMANTIC_MODULES,
+        ).attestation_hash,
+        build_semantic_attestation(
+            closure_id=M1C_EVIDENCE_CLOSURE_ID, modules=M1C_EVIDENCE_SEMANTIC_MODULES
+        ).attestation_hash,
+    )
+
+
+def _cached_m1c_evidence_identity() -> str:
+    """The cached M1c evidence identity this process has been binding."""
+    from drift.domain import semantic_attestation
+
+    return semantic_attestation.m1c_evidence_attestation_hash()
 
 
 def test_finite_ratio_scale_product_covers_exact_laws_without_filtering() -> None:

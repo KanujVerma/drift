@@ -20,10 +20,17 @@ The working-tree freeze is an ordered chain of links over v3
   semantic attestation, which changed the bytes of the identity accessor and of
   the attestation module. v5 exactly describes commit 200bfeb, the commit that
   last wrote it.
-* ``m1d-v6-protected-sha256.json`` (issue #107) supersedes v5 and is the CURRENT
-  inventory: the protected paths as they must stand in the live working tree.
-  The semantic closure guard was hardened against aliased and indirect dynamic
-  imports, which changed the bytes of the attestation module.
+* ``m1d-v6-protected-sha256.json`` (issue #107) supersedes v5. The semantic
+  closure guard was hardened against aliased and indirect dynamic imports,
+  which changed the bytes of the attestation module. v6 exactly describes
+  commit a906ab2, the commit that last wrote it.
+* ``m1d-v7-protected-sha256.json`` (issue #63, stage 2) supersedes v6 and is
+  the CURRENT inventory: the protected paths as they must stand in the live
+  working tree. The M1c identities moved from the whole-tree inventory to the
+  ``m1c-source-validation-v1`` and ``m1c-evidence-v1`` semantic attestations,
+  which changed the bytes of the attestation module and of the three M1c
+  stamp-site modules (``tests/_pinned_m1c.py`` moves the M1c freeze forward
+  by its own first link, m1c-v3, for the same three modules).
 
 A later link is appended to ``_FREEZE_INVENTORIES``; the entry it supersedes
 then records the commit that last wrote it. Each link carries two explicit,
@@ -768,6 +775,14 @@ _FREEZE_INVENTORIES: tuple[_FreezeInventory, ...] = (
         path=_FREEZE_FIXTURES / "m1d-v6-protected-sha256.json",
         file_sha256="b99a435fd6f420ec7427a49c0fce877fd5b369ce51b98e09e90d3585e9cf252e",
         issue=107,
+        commit="a906ab293d5690084bb82415c7dcb09cc14903f3",
+    ),
+    _FreezeInventory(
+        label="v7",
+        inventory_id="m1d-v7-protected-sha256",
+        path=_FREEZE_FIXTURES / "m1d-v7-protected-sha256.json",
+        file_sha256="39f410117f36d2094771d4b21b8cfc3db7d53f03deb2feee8529861303b69505",
+        issue=63,
         commit=None,
     ),
 )
@@ -837,7 +852,8 @@ def _chain_links(inventories: Sequence[_FreezeInventory]) -> tuple[_FreezeLink, 
 
 
 FREEZE_LINKS = _chain_links(_FREEZE_INVENTORIES)
-"""v4 (issue #32) over v3, v5 (issue #63) over v4, v6 (issue #107) over v5."""
+"""v4 (issue #32) over v3, v5 (issue #63) over v4, v6 (issue #107) over v5, v7
+(issue #63 stage 2) over v6."""
 
 
 def _superseded_source_pins(
