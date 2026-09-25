@@ -11,13 +11,16 @@ child carries (#103) as a known one.
 from datetime import date
 from decimal import Decimal
 from typing import Any
+from uuid import UUID
 
 import pytest
+import test_evaluator_corporate_actions as ca
 from observation_test_support import uid
 from pydantic import BaseModel, ValidationError, create_model
 
 import drift.errors
 from drift.domain.economic_common import ActionKind
+from drift.domain.evaluator_corporate_actions import SecurityEconomicOutcomeV1
 from drift.domain.evaluator_execution import (
     RebalanceOutcomeV1,
     RebalanceOutcomeV2,
@@ -41,8 +44,9 @@ from drift.domain.evaluator_portfolio import (
     applied_economic_effect_id,
     pending_cash_claim_id,
 )
-from drift.domain.evaluator_strategy import PositionViewV1
+from drift.domain.evaluator_strategy import PositionViewV1, SecurityTargetPositionV1
 from drift.domain.sessions import SessionKeyV1
+from drift.evaluator.portfolio import PortfolioAccountingKernel
 from drift.serialization.canonical import content_hash
 
 SEC_A = uid(21)
@@ -616,3 +620,225 @@ def test_a_v2_outcome_keeps_the_all_or_nothing_shape() -> None:
             state=_v2_book(),
             halt_stepping=True,
         )
+
+
+# ==========================================================================
+# The replay gate (issue 49)
+# ==========================================================================
+#
+# A pass records the applied-effect identity of every share-mutating effect
+# it owns, exposed or not, and refuses one the book already absorbed when the
+# book is exposed to a security it touches. Staged targets are not state, so
+# a replay cannot be proven a no-op for a staged buy: it fails closed.
+
+
+def _share_outcome(
+    suffix: int,
+    *,
+    security_id: UUID = ca.SEC_A,
+    occurrence: str = "occ-1",
+    kind: ActionKind = ActionKind.FORWARD_SPLIT,
+    effective_at: str = ca.EFFECT_AT,
+    numerator: str = "2",
+    denominator: str = "1",
+    meaning: str = "resulting_per_predecessor",
+    source_id: str = ca.SOURCE_A,
+) -> SecurityEconomicOutcomeV1:
+    component = ca._shares(
+        numerator=numerator,
+        denominator=denominator,
+        recipient=security_id,
+        predecessor=security_id,
+        meaning=meaning,
+    )
+    terms = ca._terms(
+        suffix=suffix,
+        action_kind=kind,
+        components=(component,),
+        security_id=security_id,
+        source_id=source_id,
+    )
+    effect = ca._effect(
+        suffix=suffix + 1,
+        action_kind=kind,
+        components=(component,),
+        terms=terms,
+        occurrence_id=occurrence,
+        effective_at=effective_at,
+        security_id=security_id,
+        source_id=source_id,
+    )
+    return ca._outcome(
+        security_id=security_id, terms=(terms,), effects=(effect,), action_kinds=(kind,)
+    )
+
+
+def _effect_id(
+    security_id: UUID = ca.SEC_A,
+    occurrence: str = "occ-1",
+    source_id: str = ca.SOURCE_A,
+) -> str:
+    return applied_economic_effect_id(
+        source_id=source_id, security_id=security_id, occurrence_id=occurrence
+    )
+
+
+def _pass(
+    state: PortfolioStateV2,
+    outcomes: tuple[SecurityEconomicOutcomeV1, ...],
+    *,
+    day: date = ca.EFFECT_DAY,
+    targets: tuple[SecurityTargetPositionV1, ...] = (),
+) -> tuple[PortfolioStateV2, tuple[SecurityTargetPositionV1, ...]]:
+    return ca._processor().apply_pre_open_actions(
+        state, targets, outcomes, ca._key(day)
+    )
+
+
+def test_a_pass_records_every_share_mutation_it_owns_exposed_or_not() -> None:
+    held = _share_outcome(4000)
+    elsewhere = _share_outcome(4010, security_id=ca.SEC_OTHER, occurrence="occ-2")
+    state = ca._state(holdings=(ca._holding(quantity=100),))
+
+    updated, _ = _pass(state, (held, elsewhere))
+
+    assert updated.holdings[0].quantity == 200
+    assert updated.applied_effect_ids == tuple(
+        sorted((_effect_id(), _effect_id(ca.SEC_OTHER, "occ-2")))
+    )
+
+
+def test_a_pass_records_nothing_it_does_not_own() -> None:
+    # Not yet effective, and a cash distribution: neither is recorded.
+    later = _share_outcome(4020, security_id=ca.SEC_OTHER, effective_at=ca.LATER_AT)
+    _, _, dividend = ca._dividend_case(suffix=4030)
+    state = ca._state(holdings=(ca._holding(quantity=100),))
+
+    updated, _ = _pass(state, (later, dividend))
+
+    assert updated.holdings[0].quantity == 100
+    assert updated.applied_effect_ids == ()
+    assert len(updated.pending_cash_claims) == 1
+
+
+def test_recording_an_unexposed_effect_keeps_the_mark_and_the_book() -> None:
+    state = ca._state(holdings=(ca._holding(quantity=100),))
+    kernel = PortfolioAccountingKernel(state, session_clock=ca.CLOCK)
+    kernel.mark_close((ca._mark_price(ca.SEC_A, "10"),))
+    marked = kernel.state
+
+    updated, _ = _pass(marked, (_share_outcome(4040, security_id=ca.SEC_OTHER),))
+
+    assert updated.applied_effect_ids == (_effect_id(ca.SEC_OTHER),)
+    assert updated.model_dump(exclude={"applied_effect_ids"}) == marked.model_dump(
+        exclude={"applied_effect_ids"}
+    )
+
+
+def test_a_replayed_pass_is_refused_rather_than_splitting_twice() -> None:
+    outcome = _share_outcome(4050)
+    state = ca._state(holdings=(ca._holding(quantity=100),))
+    once, _ = _pass(state, (outcome,))
+    assert once.holdings[0].quantity == 200
+
+    # A checkpoint taken after the pre-open, then replayed (#20 Q3). Before
+    # the fix this split the split position again, to 400 shares.
+    with pytest.raises(
+        EffectAlreadyAppliedError,
+        match=(
+            r"^the forward_split occ-1 of synthetic-a on .* was already applied "
+            r"to this book"
+        ),
+    ):
+        _pass(once, (outcome,))
+
+
+def test_a_replay_exposed_only_by_a_staged_buy_is_refused() -> None:
+    # Staged targets are not state, so no replay of them can be proven a no-op.
+    outcome = _share_outcome(4060)
+    book = ca._state()
+    once, _ = _pass(book, (outcome,))
+    assert once.applied_effect_ids == (_effect_id(),)
+    buy = (SecurityTargetPositionV1(security_id=ca.SEC_A, target_quantity=5),)
+
+    with pytest.raises(EffectAlreadyAppliedError):
+        _pass(once, (outcome,), targets=buy)
+
+    # Control: a zero target trades nothing, so the replay is not exposed.
+    zero = (SecurityTargetPositionV1(security_id=ca.SEC_A, target_quantity=0),)
+    again, targets = _pass(once, (outcome,), targets=zero)
+    assert again == once
+    assert targets == zero
+
+
+def test_a_replay_on_an_unexposed_book_changes_nothing() -> None:
+    outcome = _share_outcome(4070, security_id=ca.SEC_OTHER)
+    state = ca._state(holdings=(ca._holding(quantity=100),))
+    once, _ = _pass(state, (outcome,))
+
+    again, _ = _pass(once, (outcome,))
+
+    assert again == once
+
+
+def test_a_reclassifying_revision_cannot_mutate_one_occurrence_twice() -> None:
+    # The occurrence first reads as a split, then as a stock dividend a week
+    # later. Action kind and dates are revisable, so identity ignores both.
+    state = ca._state(holdings=(ca._holding(quantity=100),))
+    split, _ = _pass(state, (_share_outcome(4080, occurrence="occ-9"),))
+    advanced = PortfolioAccountingKernel(split, session_clock=ca.CLOCK)
+    advanced.advance_session(ca._key(ca.LATER_DAY))
+    revised = _share_outcome(
+        4090,
+        occurrence="occ-9",
+        kind=ActionKind.STOCK_DIVIDEND,
+        effective_at=ca.LATER_AT,
+        numerator="1",
+        denominator="10",
+        meaning="additional_per_predecessor",
+    )
+
+    with pytest.raises(EffectAlreadyAppliedError, match="stock_dividend occ-9"):
+        _pass(advanced.state, (revised,), day=ca.LATER_DAY)
+
+    # Control: a distinct occurrence applies on top of the split.
+    other = _share_outcome(
+        4100,
+        occurrence="occ-10",
+        kind=ActionKind.STOCK_DIVIDEND,
+        effective_at=ca.LATER_AT,
+        numerator="1",
+        denominator="10",
+        meaning="additional_per_predecessor",
+    )
+    applied, _ = _pass(advanced.state, (other,), day=ca.LATER_DAY)
+    assert applied.holdings[0].quantity == 220
+
+
+def test_one_occurrence_reported_by_two_sources_is_two_effects() -> None:
+    # Identity is source-scoped, as M1c occurrence identity is.
+    state = ca._state(holdings=(ca._holding(quantity=100),))
+    first, _ = _pass(state, (_share_outcome(4110, security_id=ca.SEC_OTHER),))
+    second, _ = _pass(
+        first,
+        (_share_outcome(4120, security_id=ca.SEC_OTHER, source_id=ca.SOURCE_B),),
+    )
+    assert second.applied_effect_ids == tuple(
+        sorted(
+            (
+                _effect_id(ca.SEC_OTHER),
+                _effect_id(ca.SEC_OTHER, source_id=ca.SOURCE_B),
+            )
+        )
+    )
+
+
+def test_a_replayed_dividend_stays_idempotent_by_claim_identity() -> None:
+    _, _, dividend = ca._dividend_case(suffix=4130)
+    state = ca._state(holdings=(ca._holding(quantity=100),))
+    once, _ = _pass(state, (dividend,))
+
+    again, _ = _pass(once, (dividend,))
+
+    assert again == once
+    assert len(again.pending_cash_claims) == 1

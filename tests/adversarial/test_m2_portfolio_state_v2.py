@@ -47,15 +47,19 @@ from drift.domain.evaluator_corporate_actions import (
     SecurityEconomicOutcomeV1,
 )
 from drift.domain.evaluator_portfolio import (
+    EffectAlreadyAppliedError,
     PortfolioStateV1,
     PortfolioStateV2,
     SecurityHoldingV2,
+    applied_economic_effect_id,
 )
 from drift.domain.evaluator_results import (
     EvaluationClassification,
     EvaluationRunArtifactsV2,
 )
+from drift.domain.evaluator_strategy import SecurityTargetPositionV1
 from drift.domain.normalization import DerivedObservationViewV1
+from drift.evaluator.corporate_actions import CorporateActionProcessor
 from drift.evaluator.engine import SessionEvaluatorEngine, SessionEvaluatorEvidence
 
 #: The session-3 pre-open of the shared engine clock.
@@ -451,3 +455,65 @@ def test_run_artifacts_never_pair_a_result_with_a_v1_book() -> None:
     # Control: the V2 book the run produced rebuilds exactly.
     rebuilt = EvaluationRunArtifactsV2.model_validate_json(artifacts.model_dump_json())
     assert rebuilt == artifacts
+
+
+# ==========================================================================
+# A replayed pre-open fails closed (issue 49)
+# ==========================================================================
+
+
+def _engine_processor() -> CorporateActionProcessor:
+    return CorporateActionProcessor(
+        session_clock=eng._clock(),
+        book_currency_namespace=eng.BOOK_NAMESPACE,
+        book_currency_code=eng.BOOK_CODE,
+    )
+
+
+def _forward_split() -> SecurityEconomicOutcomeV1:
+    _, outcome = _action(
+        ActionKind.FORWARD_SPLIT,
+        suffix=4900,
+        components=(
+            _shares(
+                numerator="2", denominator="1", meaning="resulting_per_predecessor"
+            ),
+        ),
+    )
+    return outcome
+
+
+def test_a_book_replayed_through_its_own_pre_open_is_refused() -> None:
+    # The final book of the forward-split run already absorbed the split at
+    # the session-3 pre-open. Replaying that pre-open on it, as a rebuilt M12
+    # checkpoint would (#20 Q3), must not split the twenty shares again.
+    book = forward_split_run().final_state
+    assert [holding.quantity for holding in book.holdings] == [20]
+    effect_id = applied_economic_effect_id(
+        source_id=ca.SOURCE_A, security_id=eng.SEC_A, occurrence_id="issue-49-4900"
+    )
+    assert book.applied_effect_ids == (effect_id,)
+    hold = (SecurityTargetPositionV1(security_id=eng.SEC_A, target_quantity=20),)
+
+    with pytest.raises(EffectAlreadyAppliedError, match=effect_id):
+        _engine_processor().apply_pre_open_actions(
+            book, hold, (_forward_split(),), eng._key(eng.DAY_3)
+        )
+
+    # Control: the same book without its record is split a second time, to
+    # forty shares. That is the defect the record exists to refuse.
+    unrecorded = book.model_copy(update={"applied_effect_ids": ()})
+    doubled, _ = _engine_processor().apply_pre_open_actions(
+        unrecorded, hold, (_forward_split(),), eng._key(eng.DAY_3)
+    )
+    assert [holding.quantity for holding in doubled.holdings] == [40]
+
+
+def test_every_run_records_the_share_actions_it_absorbed() -> None:
+    recorded = {name: RUNS[name]().final_state.applied_effect_ids for name in RUNS}
+    # A cash dividend and a continuing instalment move no share.
+    assert recorded["cash-dividend"] == ()
+    assert recorded["continuing-instalment"] == ()
+    for name in RUNS:
+        if name not in {"cash-dividend", "continuing-instalment"}:
+            assert len(recorded[name]) == 1, name

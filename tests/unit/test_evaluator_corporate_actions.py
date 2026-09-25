@@ -516,6 +516,18 @@ def _holding(
     )
 
 
+def _moved_nothing(updated: PortfolioStateV2, state: PortfolioStateV2) -> bool:
+    """Whether a pass left the book as it was, apart from what it recorded.
+
+    A pass records every share action it owns, exposed or not (issue 49), so
+    a book no action touches can still gain applied effects, and only those.
+    """
+    recorded = set(updated.applied_effect_ids)
+    return recorded >= set(state.applied_effect_ids) and updated.model_dump(
+        exclude={"applied_effect_ids"}
+    ) == state.model_dump(exclude={"applied_effect_ids"})
+
+
 def _known_basis(holding: SecurityHoldingV2) -> Decimal:
     """The exact basis of a holding the test expects to be known."""
     assert holding.basis_status == "known"
@@ -2158,7 +2170,7 @@ def test_an_unproven_liquidation_behind_only_a_zero_target_commits_nothing() -> 
         state, (_target(SEC_A, 0),), (outcome,), _key()
     )
 
-    assert updated is state
+    assert _moved_nothing(updated, state)
     assert _quantities(translated) == {SEC_A: 0}
 
 
@@ -2390,7 +2402,7 @@ def test_a_liquidation_m1c_composes_as_unknown_is_indeterminate() -> None:
     unchanged, _ = _processor().apply_pre_open_actions(
         elsewhere, (), (outcome,), _key()
     )
-    assert unchanged is elsewhere
+    assert _moved_nothing(unchanged, elsewhere)
 
 
 def test_an_extinguishing_liquidation_m1c_composes_as_unknown_halts_alone() -> None:
@@ -2602,7 +2614,7 @@ def test_a_resurrected_claim_halts_an_ungated_kind_once_exposed(
     processor = _processor()
     flat = _state(cash="10000")
     first, _ = processor.apply_pre_open_actions(flat, (), (outcome,), _key())
-    assert first is flat
+    assert _moved_nothing(first, flat)
 
     held = _state(holdings=(_holding(quantity=100),), day=LATER_DAY)
     with pytest.raises(
@@ -2635,7 +2647,7 @@ def test_a_resurrected_claim_halts_when_the_terminal_predates_the_window(
     unchanged, _ = _processor().apply_pre_open_actions(
         elsewhere, (), (outcome,), _key()
     )
-    assert unchanged is elsewhere
+    assert _moved_nothing(unchanged, elsewhere)
 
 
 def test_a_split_with_its_own_unknown_claim_status_halts() -> None:
@@ -3194,7 +3206,7 @@ def test_a_continuing_share_action_on_an_ended_claim_halts_an_exposed_book(
     unchanged, targets = _processor().apply_pre_open_actions(
         elsewhere, (_target(SEC_OTHER, 5),), (outcome,), _key()
     )
-    assert unchanged is elsewhere
+    assert _moved_nothing(unchanged, elsewhere)
     assert _quantities(targets) == {SEC_OTHER: 5}
 
 
@@ -3221,7 +3233,7 @@ def test_a_continuing_share_action_on_an_ended_claim_halts_a_staged_buy(
     unchanged, targets = _processor().apply_pre_open_actions(
         state, (_target(SEC_A, 0),), (outcome,), _key()
     )
-    assert unchanged is state
+    assert _moved_nothing(unchanged, state)
     assert _quantities(targets) == {SEC_A: 0}
 
 
@@ -3480,7 +3492,7 @@ def test_a_split_then_an_ended_claim_dividend_halts_at_the_dividend(
             unchanged, _ = _processor().apply_pre_open_actions(
                 elsewhere, (), (outcome,), _key(day)
             )
-            assert unchanged is elsewhere
+            assert _moved_nothing(unchanged, elsewhere)
         return
 
     first = _state(holdings=(_holding(quantity=100),))
@@ -4201,7 +4213,7 @@ def test_share_acquisition_zero_target_without_a_holding_has_no_exposure() -> No
         state, targets, (outcome,), _key()
     )
 
-    assert updated is state
+    assert _moved_nothing(updated, state)
     assert translated == targets
 
 
@@ -4214,7 +4226,7 @@ def test_cash_acquisition_zero_target_without_a_holding_has_no_exposure() -> Non
         state, targets, (outcome,), _key()
     )
 
-    assert updated is state
+    assert _moved_nothing(updated, state)
     assert translated == targets
 
 
@@ -4735,7 +4747,7 @@ def test_two_share_actions_on_two_dates_in_one_window_are_indeterminate(
     unchanged, _ = _processor().apply_pre_open_actions(
         elsewhere, (), (outcome,), _key(LATER_DAY)
     )
-    assert unchanged is elsewhere
+    assert _moved_nothing(unchanged, elsewhere)
 
 
 def test_an_acquirer_split_and_an_acquisition_on_two_dates_are_indeterminate() -> None:
@@ -5304,7 +5316,7 @@ def test_share_actions_on_an_unheld_security_halt_a_staged_buy_of_it() -> None:
     unchanged, translated = _processor().apply_pre_open_actions(
         state, (_target(SEC_A, 0),), (outcome,), _key(LATER_DAY)
     )
-    assert unchanged is state
+    assert _moved_nothing(unchanged, state)
     assert _quantities(translated) == {SEC_A: 0}
 
 
@@ -6195,7 +6207,7 @@ def test_an_unmodelled_action_beside_a_disposal_of_its_security_halts(
     unchanged, translated = _processor().apply_pre_open_actions(
         unheld, targets, (disposed,), _key(day)
     )
-    assert unchanged is unheld
+    assert _moved_nothing(unchanged, unheld)
     assert _quantities(translated) == {SEC_A: 0}
 
 

@@ -61,10 +61,12 @@ from drift.domain.evaluator_corporate_actions import (
     resolve_whole_shares,
 )
 from drift.domain.evaluator_portfolio import (
+    EffectAlreadyAppliedError,
     IndeterminateValuationError,
     PendingCashClaimV1,
     PortfolioStateV2,
     SecurityHoldingV2,
+    applied_economic_effect_id,
     decimal_context,
     pending_cash_claim_id,
 )
@@ -273,6 +275,7 @@ def _replace_holdings(
     state: PortfolioStateV2,
     holdings: Mapping[UUID, SecurityHoldingV2],
     realized: Decimal,
+    applied_effect_ids: tuple[SHA256Hash, ...],
 ) -> PortfolioStateV2:
     """Rebuild state around new holdings, discarding any mark.
 
@@ -280,7 +283,7 @@ def _replace_holdings(
     replaces those holdings, so carrying the mark forward would value shares
     that no longer exist. ``realized`` is the disposal PnL of the same pass;
     a corporate action carries no transaction cost, so gross and net move
-    together.
+    together. ``applied_effect_ids`` is the book's record after the pass.
     """
     with decimal_context():
         return PortfolioStateV2(
@@ -289,7 +292,7 @@ def _replace_holdings(
             holdings=tuple(holdings[key] for key in sorted(holdings, key=str)),
             pending_cash_claims=state.pending_cash_claims,
             settled_claim_ids=state.settled_claim_ids,
-            applied_effect_ids=state.applied_effect_ids,
+            applied_effect_ids=applied_effect_ids,
             lane=state.lane,
             admission_hash=state.admission_hash,
             mark=None,
@@ -414,12 +417,16 @@ class CorporateActionProcessor:
         (see ``_SessionWindow``), so an effect dated on a weekend or a
         did-not-open day is applied at the next pre-open rather than dropped.
         Cash entitlements are idempotent, because a claim already pending or
-        already in ``settled_claim_ids`` is recognized and skipped. Share
-        mutations are NOT: a second call for the same session would split an
-        already split position again. ``PortfolioStateV1`` carries no
-        applied-occurrence ledger to make that detectable from state alone,
-        and that model is outside this task's write-set. The fix is an
-        ``applied_occurrence_ids`` field there.
+        already in ``settled_claim_ids`` is recognized and skipped.
+
+        Share mutations are not idempotent, so a replay of one fails closed
+        (issue 49). The pass records the applied-effect identity of every
+        share-mutating effect it owns in ``applied_effect_ids``, whether or
+        not the book is exposed to it, and refuses with
+        ``EffectAlreadyAppliedError`` any it owns that the book already
+        absorbed, when the book is exposed to a security the effect touches.
+        That is a refusal, not a proven no-op: staged targets are not state,
+        so whether a staged buy was already restated cannot be told.
         """
         _require_positioned(portfolio_state, current_session)
         window = self._session_window(current_session)
@@ -440,9 +447,21 @@ class CorporateActionProcessor:
             else:
                 unsupported.append(outcome)
         every_context = [context for _, contexts in supported for context in contexts]
-        conflicts = _share_action_conflicts(every_context, window)
+        mutations = _window_share_mutations(every_context, window)
+        already = frozenset(portfolio_state.applied_effect_ids)
+        replayed = tuple(
+            context for context in mutations if _applied_effect_id(context) in already
+        )
+        conflicts = _share_action_conflicts(mutations)
         unknown = self._unknown_claims(supported, window)
         ended = self._ended_claim_actions(supported, window)
+        # A replay is judged first: the book already reflects the effect, so
+        # every other rule would be judged against shares it moved once.
+        # Exposure the pass gains to a replayed effect comes only through
+        # another share action touching its security, which conflicts with
+        # it, so the second replay check below is defense in depth, as for a
+        # conflict.
+        self._require_no_exposed_replay(replayed, book)
         # Every rule is judged against the prior close's book here, before
         # any dispatch, and again against the book the pass leaves below. An
         # unknown claim needs both: a disposal may empty the book the pass
@@ -470,6 +489,7 @@ class CorporateActionProcessor:
         # One dispatch over every outcome, so every share action of the pass
         # runs before any cash distribution, whichever outcome each is in.
         self._apply_contexts(every_context, book, window)
+        self._require_no_exposed_replay(replayed, book)
         self._require_no_exposed_conflict(conflicts, book)
         self._require_no_exposed_unknown_claim(unknown, book)
         self._require_no_exposed_ended_claim(ended, book)
@@ -501,9 +521,16 @@ class CorporateActionProcessor:
                     f"corporate action kind {context.payload.action_kind.value} "
                     "has no proven M2 accounting rule"
                 )
+        applied = tuple(
+            sorted(already | {_applied_effect_id(context) for context in mutations})
+        )
         state = portfolio_state
         if book.holdings != opening_holdings:
-            state = _replace_holdings(state, book.holdings, book.realized)
+            state = _replace_holdings(state, book.holdings, book.realized, applied)
+        elif applied != state.applied_effect_ids:
+            # Holdings the pass left alone keep their mark: it still prices
+            # exactly the shares it was taken against.
+            state = state.model_copy(update={"applied_effect_ids": applied})
         state = self._record_claims(state, book.claims)
         targets = tuple(
             sorted(
@@ -588,6 +615,30 @@ class CorporateActionProcessor:
         return kernel.state
 
     # -- pre-open internals -----------------------------------------------
+
+    def _require_no_exposed_replay(
+        self, replayed: Iterable[_EffectContext], book: _Book
+    ) -> None:
+        """Refuse a share-mutating effect the book has already absorbed.
+
+        The book's ``applied_effect_ids`` say the effect already moved its
+        shares, so applying it again would move them twice: a checkpoint taken
+        after a pre-open and then replayed would split a split position again
+        (issue 49). Only a book exposed to a security the effect touches is
+        halted; for any other book the effect acts on nothing of its own.
+        """
+        for context in replayed:
+            if any(
+                self._is_exposed(touched, book)
+                for touched in _touched_securities(context)
+            ):
+                raise EffectAlreadyAppliedError(
+                    f"the {context.payload.action_kind.value} "
+                    f"{context.occurrence_id} of {context.source_id} on "
+                    f"{context.security_id} was already applied to this book as "
+                    f"effect {_applied_effect_id(context)}, and applying it again "
+                    "would move the shares it moved twice"
+                )
 
     def _require_no_exposed_conflict(
         self, conflicts: Iterable[_ShareActionConflict], book: _Book
@@ -1648,8 +1699,35 @@ def _owed_index(outcome: SecurityEconomicOutcomeV1) -> _OwedIndex:
     return index
 
 
-def _share_action_conflicts(
+def _applied_effect_id(context: _EffectContext) -> SHA256Hash:
+    """The applied-effect identity of one occurred effect (issue 49)."""
+    return applied_economic_effect_id(
+        source_id=context.source_id,
+        security_id=context.security_id,
+        occurrence_id=context.occurrence_id,
+    )
+
+
+def _window_share_mutations(
     contexts: Iterable[_EffectContext], window: _SessionWindow
+) -> tuple[_EffectContext, ...]:
+    """Every share action this window owns, across every outcome of the pass.
+
+    A share action changes a share count on its effective date, so it is
+    owned by the one window that contains that date. A liquidation on a
+    continuing claim changes no share count, so it is not one.
+    """
+    return tuple(
+        context
+        for context in contexts
+        if context.payload.action_kind in SHARE_MUTATING_KINDS
+        and not _is_cash_distribution(context.payload)
+        and window.contains(context.effective_on)
+    )
+
+
+def _share_action_conflicts(
+    mutations: Iterable[_EffectContext],
 ) -> tuple[_ShareActionConflict, ...]:
     """Every security two or more of the window's share actions touch.
 
@@ -1657,14 +1735,7 @@ def _share_action_conflicts(
     which one outcome's acquirer is another outcome's subject counts too.
     """
     members: dict[UUID7, list[_EffectContext]] = {}
-    for context in contexts:
-        if context.payload.action_kind not in SHARE_MUTATING_KINDS:
-            continue
-        if _is_cash_distribution(context.payload):
-            # A liquidation on a continuing claim changes no share count.
-            continue
-        if not window.contains(context.effective_on):
-            continue
+    for context in mutations:
         # A split delivers into its own security; count each action once.
         for security_id in dict.fromkeys(_touched_securities(context)):
             members.setdefault(security_id, []).append(context)
