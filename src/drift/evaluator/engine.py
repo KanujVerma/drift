@@ -159,7 +159,10 @@ from drift.domain.sessions import SessionKeyV1
 from drift.domain.universes import StructuralEligibilityClassification
 from drift.errors import DriftError
 from drift.evaluator.bundles import validate_exploratory_admission
-from drift.evaluator.clock import build_scheduled_reconstruction_clock
+from drift.evaluator.clock import (
+    build_scheduled_reconstruction_clock,
+    refuse_same_date_multi_venue_clock,
+)
 from drift.evaluator.corporate_actions import CorporateActionProcessor
 from drift.evaluator.execution import AtomicRebalanceEngine, resolve_execution_listings
 from drift.evaluator.portfolio import (
@@ -760,6 +763,9 @@ class SessionEvaluatorEngine:
                 f"clock holds {len(bundle.session_clock.sessions)} sessions for "
                 f"a warmup of {protocol.warmup_session_count}"
             )
+        # Issue 97 ruling: a same-date multi-venue clock is refused here, in
+        # every lane and either clock mode, rather than halted at runtime.
+        refuse_same_date_multi_venue_clock(bundle.session_clock)
         self._bundle = bundle
         self._admission = admission
         self._protocol = protocol

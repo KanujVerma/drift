@@ -1,6 +1,6 @@
 """Session clock builders for the M2 evaluator (realized and scheduled modes)."""
 
-from datetime import datetime
+from datetime import date, datetime
 
 from drift.domain.evaluator_clock import (
     EvaluationSessionV1,
@@ -23,6 +23,7 @@ from drift.domain.sessions import (
     ScheduleGenerationPolicyV1,
     SessionKeyV1,
 )
+from drift.errors import DriftError
 from drift.markets.observation_selection import select_observation_records
 from drift.markets.observation_validation import (
     M1dResolutionContext,
@@ -224,6 +225,42 @@ def build_scheduled_reconstruction_clock(
             ALPACA_LIMITATION_ABSENT_HALTS,
         ),
     )
+
+
+class SameDateMultiVenueClockError(DriftError, ValueError):
+    """Raised when an evaluation clock steps two sessions on one local date.
+
+    Issue 97 ruling, option A. ``SessionClockV1`` admits a non-overlapping
+    multi-venue clock whose second venue trades on the same local date, for
+    example XNYS on day D then XNAS on day D. Next-open execution needs a
+    later local date (section 13.1), so no decision staged before such a
+    session could execute there, and the engine refuses the clock at
+    construction instead of halting ``INDETERMINATE`` at runtime.
+    """
+
+
+def refuse_same_date_multi_venue_clock(clock: SessionClockV1) -> None:
+    """Refuse to evaluate a clock with two sessions on one local date (issue 97).
+
+    Dates are compared across the whole clock, whatever the venue and in
+    either mode. Session keys are unique per venue, so on one venue the dates
+    already strictly increase and every single-venue clock passes unchanged,
+    as does a venue change across dates. The next-open guard in the engine
+    stays behind this refusal as defense in depth.
+    """
+    first_on: dict[date, SessionKeyV1] = {}
+    for session in clock.sessions:
+        key = session.session_key
+        first = first_on.get(key.local_date)
+        if first is not None:
+            raise SameDateMultiVenueClockError(
+                "the session clock steps two sessions on local date "
+                f"{key.local_date.isoformat()}, {first.mic} then {key.mic}: "
+                "next-open execution requires a later local date, so a "
+                "same-date multi-venue clock is refused at engine construction "
+                "(issue 97 ruling)"
+            )
+        first_on[key.local_date] = key
 
 
 def rebuild_session_clock(

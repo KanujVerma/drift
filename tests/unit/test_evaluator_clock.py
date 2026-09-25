@@ -1,5 +1,6 @@
 """Unit tests for M2 evaluation session and clock contracts/builders."""
 
+import re
 from datetime import UTC, date, datetime
 from typing import Literal
 
@@ -9,6 +10,7 @@ from pydantic import ValidationError
 
 from drift.domain.evaluator_clock import (
     EvaluationSessionV1,
+    SessionClockMode,
     SessionClockV1,
     evaluation_session_hash,
     session_clock_hash,
@@ -25,10 +27,12 @@ from drift.domain.sessions import (
     SessionKeyV1,
 )
 from drift.evaluator.clock import (
+    SameDateMultiVenueClockError,
     _build_clock,
     _ensure_ordered_unique,
     build_realized_session_clock,
     build_scheduled_reconstruction_clock,
+    refuse_same_date_multi_venue_clock,
 )
 from drift.markets.observation_validation import M1dResolutionContext
 from drift.markets.session_generation import generate_schedule
@@ -424,6 +428,113 @@ def test_clock_refuses_one_local_date_twice_on_one_venue() -> None:
 
     with pytest.raises(ValidationError, match="unique session keys"):
         _validated_scheduled_clock((first, second))
+
+
+# --- Same-date multi-venue clocks are not evaluated (issue 97) ---
+
+
+#: Each clock mode with the session authority and limitations it requires.
+CLOCK_MODES: dict[str, tuple[SessionClockMode, str, tuple[str, ...]]] = {
+    "realized": ("realized_session_authority", "realized", ()),
+    "scheduled": (
+        "scheduled_session_reconstruction",
+        "scheduled_reconstruction",
+        SCHEDULED_LIMITATIONS,
+    ),
+}
+
+
+def _clock_in(
+    mode_case: tuple[SessionClockMode, str, tuple[str, ...]],
+    sessions: tuple[tuple[str, date, datetime, datetime], ...],
+) -> SessionClockV1:
+    """A validated clock of one mode over (MIC, local date, open, close) rows."""
+    mode, authority, limitations = mode_case
+    draft = SessionClockV1.model_construct(
+        schema_version="1",
+        mode=mode,
+        sessions=tuple(
+            make_session(
+                mic=mic,
+                local_date=day,
+                opened=opened,
+                closed=closed,
+                authority=authority,
+            )
+            for mic, day, opened, closed in sessions
+        ),
+        acknowledged_limitations=tuple(sorted(limitations)),
+        clock_hash=H0,
+    )
+    hashed = draft.model_copy(update={"clock_hash": session_clock_hash(draft)})
+    return SessionClockV1.model_validate(hashed.model_dump(mode="python"))
+
+
+#: XNYS on JAN5 and JAN6, then XNAS on JAN6 after the XNYS close: the shape
+#: `SessionClockV1` admits (above), and the issue 97 ruling refuses to run.
+SAME_DATE_TWO_VENUE_ROWS = (
+    ("XNYS", JAN5, OPEN, CLOSE),
+    ("XNYS", JAN6, _utc(JAN6, 14, 30), _utc(JAN6, 18)),
+    ("XNAS", JAN6, _utc(JAN6, 18, 30), _utc(JAN6, 21)),
+)
+
+#: Clocks with one session per local date, which the ruling leaves unchanged.
+ONE_SESSION_PER_DATE_ROWS = {
+    "one-session": (("XNYS", JAN5, OPEN, CLOSE),),
+    "one-venue": (
+        ("XNYS", JAN5, OPEN, CLOSE),
+        ("XNYS", JAN6, _utc(JAN6, 14, 30), _utc(JAN6, 21)),
+    ),
+    "two-venues-on-distinct-dates": (
+        ("XNYS", JAN5, OPEN, CLOSE),
+        ("XNAS", JAN6, _utc(JAN6, 14, 30), _utc(JAN6, 21)),
+    ),
+}
+
+
+@pytest.mark.parametrize("mode_case", CLOCK_MODES.values(), ids=CLOCK_MODES)
+def test_a_same_date_multi_venue_clock_is_refused_for_evaluation(
+    mode_case: tuple[SessionClockMode, str, tuple[str, ...]],
+) -> None:
+    """Issue 97 ruling, option A: refused by name, in either clock mode.
+
+    The clock model admits the shape; only the evaluation guard refuses it.
+    Dates are compared across venues: on one venue they already differ.
+    """
+    clock = _clock_in(mode_case, SAME_DATE_TWO_VENUE_ROWS)
+    assert [session.session_key.mic for session in clock.sessions] == [
+        "XNYS",
+        "XNYS",
+        "XNAS",
+    ]
+
+    with pytest.raises(
+        SameDateMultiVenueClockError,
+        match=(
+            "^"
+            + re.escape(
+                "the session clock steps two sessions on local date 2026-01-06, "
+                "XNYS then XNAS: next-open execution requires a later local "
+                "date, so a same-date multi-venue clock is refused at engine "
+                "construction (issue 97 ruling)"
+            )
+            + "$"
+        ),
+    ):
+        refuse_same_date_multi_venue_clock(clock)
+    assert issubclass(SameDateMultiVenueClockError, ValueError)
+
+
+@pytest.mark.parametrize(
+    "rows", ONE_SESSION_PER_DATE_ROWS.values(), ids=ONE_SESSION_PER_DATE_ROWS
+)
+@pytest.mark.parametrize("mode_case", CLOCK_MODES.values(), ids=CLOCK_MODES)
+def test_a_clock_with_one_session_per_local_date_is_evaluated(
+    mode_case: tuple[SessionClockMode, str, tuple[str, ...]],
+    rows: tuple[tuple[str, date, datetime, datetime], ...],
+) -> None:
+    """Control: single-venue clocks, and a venue change across dates, pass."""
+    refuse_same_date_multi_venue_clock(_clock_in(mode_case, rows))
 
 
 @pytest.mark.parametrize("pair", OVERLAPPING_PAIRS.values(), ids=OVERLAPPING_PAIRS)

@@ -19,7 +19,7 @@ import ast
 import re
 import sys
 from collections.abc import Sequence
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
@@ -129,7 +129,10 @@ from drift.evaluator.bundles import (
     assemble_evaluation_input_bundle,
     verify_evaluation_input_bundle,
 )
-from drift.evaluator.clock import build_realized_session_clock
+from drift.evaluator.clock import (
+    SameDateMultiVenueClockError,
+    build_realized_session_clock,
+)
 from drift.evaluator.engine import (
     SessionEvaluatorEngine,
     SessionEvaluatorEvidence,
@@ -1357,30 +1360,112 @@ SAME_DATE_TARGETS: dict[str, dict[date, tuple[tuple[UUID, int], ...]]] = {
     "holds-cash": {},
 }
 
+#: The exact issue 97 refusal of an XNYS DAY_1 session then an XNAS DAY_1 one.
+SAME_DATE_CLOCK_REFUSAL = (
+    "^"
+    + re.escape(
+        "the session clock steps two sessions on local date 2026-01-06, "
+        "XNYS then XNAS: next-open execution requires a later local date, so "
+        "a same-date multi-venue clock is refused at engine construction "
+        "(issue 97 ruling)"
+    )
+    + "$"
+)
+
+
+def _same_date_two_venue_bundle() -> Any:
+    """XNAS opens after the XNYS DAY_1 decision cutoff, on DAY_1 too."""
+    return _bundle_over(
+        clock=_clock_of(
+            (_session_at(DAY_1), _xnas_session(DAY_1, time(21, 30), time(23, 0)))
+        ),
+        decision_views=(_decision_view(SEC_A, DAY_1),),
+        accounting_views=(_accounting_view(SEC_A, DAY_1),),
+    )
+
+
+def test_a_same_date_multi_venue_clock_is_refused_at_engine_construction() -> None:
+    """Issue 97 ruling, option A: no engine is built over such a clock.
+
+    XNAS opens after the XNYS decision cutoff and without overlap, so the
+    clock admits it. Its open is still on the date the decision was taken,
+    which is not the next-open execution the protocol states. Until the
+    ruling this built an engine that halted at its second session; the issue
+    84 runtime-halt test for this shape is converted into this refusal.
+    Control: the same XNAS session one date later builds an engine.
+    """
+    with pytest.raises(SameDateMultiVenueClockError, match=SAME_DATE_CLOCK_REFUSAL):
+        _engine(bundle=_same_date_two_venue_bundle(), protocol=_protocol(warmup=1))
+
+    later = _bundle_over(
+        clock=_clock_of(
+            (_session_at(DAY_1), _xnas_session(DAY_2, time(14, 30), time(21, 0)))
+        ),
+        decision_views=(_decision_view(SEC_A, DAY_1),),
+        accounting_views=(_accounting_view(SEC_A, DAY_1),),
+    )
+    _engine(bundle=later, protocol=_protocol(warmup=1))
+
+
+def test_a_same_date_multi_venue_scheduled_clock_is_refused_at_construction() -> None:
+    """The same refusal in the EXPLORATORY reconstructed lane.
+
+    A scheduled XNYS JAN6 session is followed by an XNAS JAN6 one that no
+    reconstruction is on, so the lane gate never re-derives it. Without the
+    issue 97 refusal the engine was built and halted at runtime.
+    """
+    cases = three_regular_sessions()
+    xnys = cases[1][1]
+    xnas = _resealed(
+        xnys,
+        session_key=SessionKeyV1(mic="XNAS", session_scope="regular", local_date=JAN6),
+        opened_at=utc_close(JAN6, "regular") + timedelta(minutes=30),
+        closed_at=utc_close(JAN6, "regular") + timedelta(hours=2),
+    )
+    bundle = scheduled_bundle(
+        tuple(observation for observation, _ in cases),
+        (*(session for _, session in cases), xnas),
+    )
+    assert bundle.session_clock.mode == "scheduled_session_reconstruction"
+    assert [session.session_key.mic for session in bundle.session_clock.sessions] == [
+        "XNYS",
+        "XNYS",
+        "XNAS",
+        "XNYS",
+    ]
+
+    with pytest.raises(SameDateMultiVenueClockError, match=SAME_DATE_CLOCK_REFUSAL):
+        reconstructed_engine(bundle)
+    # Control: without the XNAS session the same lane builds an engine.
+    reconstructed_engine(
+        scheduled_bundle(
+            tuple(observation for observation, _ in cases),
+            tuple(session for _, session in cases),
+        )
+    )
+
 
 @pytest.mark.parametrize("targets", SAME_DATE_TARGETS.values(), ids=SAME_DATE_TARGETS)
 def test_a_decision_never_fills_at_another_venues_open_on_its_own_date(
     targets: dict[date, tuple[tuple[UUID, int], ...]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A legal two-venue clock whose next open shares the decision's date.
+    """Defense in depth: the next-open guard still halts such a clock.
 
-    XNAS opens after the XNYS decision cutoff and without overlap, so the
-    clock admits it. Its open is still on the date the decision was taken,
-    which is not the next-open execution the protocol states. The refusal
-    holds whether or not the staged decision trades, so a same-date
-    multi-venue clock halts at its second session pending an owner ruling.
+    With the issue 97 construction refusal switched off, the run reaches the
+    XNAS open on the date the decision was taken, and the issue 84 guard
+    refuses it whether or not the staged decision trades.
     """
-    clock = _clock_of(
-        (_session_at(DAY_1), _xnas_session(DAY_1, time(21, 30), time(23, 0)))
-    )
-    bundle = _bundle_over(
-        clock=clock,
-        decision_views=(_decision_view(SEC_A, DAY_1),),
-        accounting_views=(_accounting_view(SEC_A, DAY_1),),
+    monkeypatch.setattr(
+        "drift.evaluator.engine.refuse_same_date_multi_venue_clock",
+        lambda clock: None,
     )
     strategy = FixedTargetStrategy(targets)
 
-    artifacts = _run(_engine(bundle=bundle, protocol=_protocol(warmup=1)), strategy)
+    artifacts = _run(
+        _engine(bundle=_same_date_two_venue_bundle(), protocol=_protocol(warmup=1)),
+        strategy,
+    )
 
     assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
     assert artifacts.result.halted_session_index == 1

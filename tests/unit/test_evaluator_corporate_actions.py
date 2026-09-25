@@ -1596,6 +1596,47 @@ def test_dividend_is_not_owed_on_shares_bought_at_the_ex_date_open() -> None:
     assert at_record.pending_cash_claims == ()
 
 
+def test_special_distribution_without_due_bill_facts_vests_on_its_ex_date() -> None:
+    """Issue 97 ruling, item 4: a special without due-bill facts is no exception.
+
+    It follows the ex-date rule of an ordinary dividend rather than halting:
+    it vests at its ex-date pre-open against the prior close's holding, and
+    shares bought at the ex-date open are not owed it by the T+2 record date.
+    """
+    _, _, outcome = _dividend_case(
+        action_kind=ActionKind.SPECIAL_CASH_DISTRIBUTION,
+        amount="0.5",
+        suffix=1680,
+        dates=(
+            _date_fact("ex", LATER_AT),
+            _date_fact("record", ENTITLED_AT),
+            _date_fact("payable", PAYABLE_AT),
+        ),
+    )
+    processor = _processor()
+    held = _state(holdings=(_holding(quantity=100),), day=LATER_DAY)
+
+    entitled, _ = processor.apply_pre_open_actions(
+        held, (), (outcome,), _key(LATER_DAY)
+    )
+
+    assert len(entitled.pending_cash_claims) == 1
+    claim = entitled.pending_cash_claims[0]
+    assert claim.action_kind == ActionKind.SPECIAL_CASH_DISTRIBUTION
+    assert claim.entitlement_session == LATER_DAY
+    assert claim.total_cash_expected == Decimal("50.0")
+
+    at_ex, _ = processor.apply_pre_open_actions(
+        _state(day=LATER_DAY), (_target(SEC_A, 100),), (outcome,), _key(LATER_DAY)
+    )
+    assert at_ex.pending_cash_claims == ()
+    bought = _state(holdings=(_holding(quantity=100),), day=ENTITLED_DAY)
+    at_record, _ = processor.apply_pre_open_actions(
+        bought, (), (outcome,), _key(ENTITLED_DAY)
+    )
+    assert at_record is bought
+
+
 def test_dividend_with_a_holiday_record_date_vests_on_its_ex_date() -> None:
     _, _, outcome = _dividend_case(
         amount="0.5",
@@ -3246,6 +3287,25 @@ def test_spinoff_adds_received_shares_to_an_existing_child_target() -> None:
     # The staged child sale of six survives the 50 shares received.
     assert _quantities(updated.holdings) == {SEC_A: 100, SEC_CHILD: 60}
     assert _quantities(translated) == {SEC_A: 100, SEC_CHILD: 54}
+
+
+def test_spinoff_credits_only_whole_child_shares_under_a_staged_increase() -> None:
+    """Issue 97 ruling, item 2: the child target is what the holding received.
+
+    101 parent shares entitle the book to 50.5 child shares, of which
+    round-down delivers 50. The staged parent increase to 200 stands, but the
+    child target is the 50 received, not the 100 the parent target times the
+    ratio would stage: that would buy 50 shares of a child no decision named.
+    """
+    outcome = _spinoff_case(suffix=1250)
+    state = _state(holdings=(_holding(quantity=101),))
+
+    updated, translated = _processor().apply_pre_open_actions(
+        state, (_target(SEC_A, 200),), (outcome,), _key()
+    )
+
+    assert _quantities(updated.holdings) == {SEC_A: 101, SEC_CHILD: 50}
+    assert _quantities(translated) == {SEC_A: 200, SEC_CHILD: 50}
 
 
 def test_spinoff_without_a_staged_parent_target_stages_no_child_target() -> None:
