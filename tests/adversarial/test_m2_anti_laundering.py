@@ -69,6 +69,7 @@ from drift.domain.evaluator_clock import SessionClockV1, session_clock_hash
 from drift.domain.evaluator_lanes import (
     ALPACA_LIMITATION_ABSENT_HALTS,
     ALPACA_LIMITATION_BOUNDED_COHORT,
+    ALPACA_LIMITATION_TRUNCATED_CA,
     ExploratoryEvaluationAdmissionV1,
     PromotionEvaluationAdmissionV1,
 )
@@ -739,6 +740,47 @@ def test_the_composed_gate_rejects_a_bundle_declaring_any_limitation() -> None:
         validate_promotion_admission(**case)
 
 
+def test_the_composed_gate_rejects_a_bundle_declaring_a_dataset_limitation() -> None:
+    """Issue 92: a producer-declared dataset limitation is still a limitation.
+
+    Nothing re-derives a producer's declaration, so unlike a limited clock a
+    bundle declaring one builds and mints genuinely. It differs from the
+    admitted control case only in that declaration, and the gate's own
+    limitation refusal is what keeps it out of promotion.
+    """
+    harness, query, reference = _cached_decision_case()
+    snapshot = qualified_snapshot(harness.context)
+    qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
+    bundle = build_evaluation_input_bundle(
+        evaluation_interval=rp._interval(),
+        session_clock=normalization_realized_clock(harness),
+        context=harness.context,
+        session_queries=normalization_session_queries(harness),
+        decision_requests=((reference, query),),
+        source_snapshot_hash=snapshot.snapshot_hash,
+        dataset_limitations=(ALPACA_LIMITATION_TRUNCATED_CA,),
+    )
+    assert bundle.has_exploratory_reconstructions is False
+    assert bundle.required_limitations == (ALPACA_LIMITATION_TRUNCATED_CA,)
+    proof = mint_bundle_provenance_proof(
+        qualified_context=qualified,
+        context=harness.context,
+        bundle=bundle,
+        session_queries=normalization_session_queries(harness),
+        decision_requests=((reference, query),),
+    )
+    case = rp._promotion_case(bundle, proof, snapshot, qualified)
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^promotion evaluation cannot consume evidence declaring limitations: "
+            rf"\('{ALPACA_LIMITATION_TRUNCATED_CA}',\)$"
+        ),
+    ):
+        validate_promotion_admission(**case)
+
+
 def test_a_promotion_admission_cannot_omit_its_provenance_proof_hash() -> None:
     admission = make_test_fixture()["admission"]
     payload = dict(admission)
@@ -798,6 +840,21 @@ def test_a_self_consistent_fabricated_view_is_refused_by_replay_verification() -
             context=harness.context,
             decision_requests=((reference, query),),
         )
+
+
+def test_a_stripped_dataset_limitation_is_refused_by_hash_verification() -> None:
+    """Issue 92: dropping a declared dataset limitation breaks the bundle hash."""
+    declared = _scheduled_bundle(dataset_limitations=(ALPACA_LIMITATION_TRUNCATED_CA,))
+    stripped = EvaluationInputBundleV1.model_construct(
+        **(dict(declared) | {"dataset_limitations": ()})
+    )
+    assert stripped.bundle_hash == declared.bundle_hash
+    assert ALPACA_LIMITATION_TRUNCATED_CA not in stripped.required_limitations
+
+    with pytest.raises(ValueError, match=r"^bundle hash does not match its own"):
+        verify_evaluation_input_bundle(bundle=stripped, context=_harness().context)
+    with pytest.raises(ValidationError, match="bundle hash mismatch"):
+        EvaluationInputBundleV1.model_validate(stripped.model_dump())
 
 
 def test_minting_refuses_a_bundle_whose_views_replay_did_not_produce() -> None:

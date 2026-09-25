@@ -114,6 +114,7 @@ def assemble_evaluation_input_bundle(
         ExploratoryReconstructedSessionObservationV1, ...
     ] = (),
     source_snapshot_hash: SHA256Hash | None = None,
+    dataset_limitations: tuple[str, ...] = (),
 ) -> EvaluationInputBundleV1:
     """Assemble a bundle with canonical member ordering and an exact bundle hash.
 
@@ -136,6 +137,7 @@ def assemble_evaluation_input_bundle(
         exploratory_reconstructed_observations=_ordered(
             exploratory_reconstructed_observations
         ),
+        dataset_limitations=tuple(sorted(dataset_limitations)),
         bundle_hash="0" * 64,
     )
     candidate = draft.model_copy(
@@ -234,6 +236,7 @@ def build_evaluation_input_bundle(
     exploratory_cohort: ExploratoryCohortAuthorizationV1 | None = None,
     exploratory_reconstruction_replay: ExploratoryReconstructionReplay | None = None,
     source_snapshot_hash: SHA256Hash | None = None,
+    dataset_limitations: tuple[str, ...] = (),
 ) -> EvaluationInputBundleV1:
     """Prepare a bundle whose views come from exact upstream Drift replay.
 
@@ -252,6 +255,10 @@ def build_evaluation_input_bundle(
     scheduled-reconstruction clock is re-derived whenever its queries are
     supplied. The caller still names the clock it expects, so a bundle built
     here carries exactly that clock, now proven equal to its derivation.
+
+    `dataset_limitations` are the producer's declarations about its dataset
+    itself (issue 92). Nothing re-derives them; the bundle hash binds them,
+    and every admission of the bundle must acknowledge them.
     """
     _require_derived_clock(session_clock, session_queries, context)
     bundle = assemble_evaluation_input_bundle(
@@ -269,6 +276,7 @@ def build_evaluation_input_bundle(
             exploratory_cohort, exploratory_reconstruction_replay, context
         ),
         source_snapshot_hash=source_snapshot_hash,
+        dataset_limitations=dataset_limitations,
     )
     _require_calendar_rows(bundle)
     return bundle
@@ -664,7 +672,8 @@ def validate_exploratory_admission(
 
     Binds the admission to the exact bundle, refuses any promotion snapshot
     binding on exploratory evidence, and requires the admission to acknowledge
-    every limitation the bundle's own evidence carries.
+    every limitation the bundle's own evidence carries and every dataset
+    limitation its producer declares (issue 92).
     """
     if admission.lane != "exploratory":
         raise ValueError("admission lane must be exploratory")

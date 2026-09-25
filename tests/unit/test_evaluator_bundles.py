@@ -34,6 +34,8 @@ from drift.domain.evaluator_lanes import (
     ALPACA_LIMITATION_ABSENT_HALTS,
     ALPACA_LIMITATION_BOUNDED_COHORT,
     ALPACA_LIMITATION_SCHEDULED_SESSION_RECONSTRUCTION,
+    ALPACA_LIMITATION_TRUNCATED_CA,
+    ALPACA_LIMITATION_UNVERSIONED_BARS,
     ExploratoryEvaluationAdmissionV1,
     exploratory_evaluation_admission_hash,
 )
@@ -222,6 +224,7 @@ def with_session_clock(
             bundle.exploratory_reconstructed_observations
         ),
         source_snapshot_hash=bundle.source_snapshot_hash,
+        dataset_limitations=bundle.dataset_limitations,
     )
 
 
@@ -315,6 +318,66 @@ def test_bundle_hash_changes_when_a_member_changes() -> None:
     assert base.bundle_hash != with_security.bundle_hash
 
 
+# --- producer-declared dataset limitations (issue 92) ---
+
+
+def test_bundle_declares_no_dataset_limitation_by_default() -> None:
+    bundle = _realized_bundle()
+    assert bundle.dataset_limitations == ()
+    assert bundle.required_limitations == ()
+
+
+def test_bundle_hash_covers_dataset_limitations() -> None:
+    base = _realized_bundle()
+    declared = _realized_bundle(dataset_limitations=(ALPACA_LIMITATION_TRUNCATED_CA,))
+    assert declared.dataset_limitations == (ALPACA_LIMITATION_TRUNCATED_CA,)
+    assert declared.bundle_hash == evaluation_input_bundle_hash(declared)
+    assert declared.bundle_hash != base.bundle_hash
+
+    # The declaration cannot ride under the hash of a bundle without it...
+    forged = declared.model_dump()
+    forged["bundle_hash"] = base.bundle_hash
+    with pytest.raises(ValidationError, match="bundle hash mismatch"):
+        EvaluationInputBundleV1.model_validate(forged)
+
+    # ...and cannot be stripped from a bundle that keeps its declared hash.
+    stripped = declared.model_dump()
+    stripped["dataset_limitations"] = ()
+    with pytest.raises(ValidationError, match="bundle hash mismatch"):
+        EvaluationInputBundleV1.model_validate(stripped)
+
+
+def test_dataset_limitations_canonicalize_like_sibling_limitations() -> None:
+    first, second = sorted(
+        (ALPACA_LIMITATION_TRUNCATED_CA, ALPACA_LIMITATION_UNVERSIONED_BARS)
+    )
+    forward = _realized_bundle(dataset_limitations=(first, second))
+    reverse = _realized_bundle(dataset_limitations=(second, first))
+    assert forward.dataset_limitations == (first, second)
+    assert reverse.dataset_limitations == (first, second)
+    assert forward.bundle_hash == reverse.bundle_hash
+
+    # The model itself sorts, so an unsorted payload validates to canonical
+    # order under the canonical hash rather than depending on the assembler.
+    payload = forward.model_dump()
+    payload["dataset_limitations"] = (second, first)
+    assert EvaluationInputBundleV1.model_validate(payload) == forward
+
+    with pytest.raises(ValidationError, match="dataset limitations must be unique"):
+        _realized_bundle(dataset_limitations=(first, first))
+    with pytest.raises(ValidationError):
+        _realized_bundle(dataset_limitations=("   ",))
+
+
+def test_dataset_limitations_merge_into_required_limitations() -> None:
+    bundle = _scheduled_bundle(dataset_limitations=(ALPACA_LIMITATION_TRUNCATED_CA,))
+    assert set(bundle.required_limitations) == {
+        ALPACA_LIMITATION_TRUNCATED_CA,
+        *bundle.session_clock.acknowledged_limitations,
+    }
+    assert list(bundle.required_limitations) == sorted(bundle.required_limitations)
+
+
 # --- exploratory reconstruction detection ---
 
 
@@ -372,6 +435,46 @@ def test_exploratory_gate_rejects_dropped_limitation() -> None:
     admission = _exploratory_admission(bundle, limitations=kept)
     with pytest.raises(ValueError, match="omits required bundle limitations"):
         validate_exploratory_admission(admission=admission, bundle=bundle)
+
+
+def test_exploratory_gate_rejects_an_admission_omitting_a_dataset_limitation() -> None:
+    bundle = _scheduled_bundle(dataset_limitations=(ALPACA_LIMITATION_TRUNCATED_CA,))
+    kept = tuple(
+        item
+        for item in bundle.required_limitations
+        if item != ALPACA_LIMITATION_TRUNCATED_CA
+    )
+    assert kept
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^exploratory admission omits required bundle limitations: "
+            rf"\('{ALPACA_LIMITATION_TRUNCATED_CA}',\)$"
+        ),
+    ):
+        validate_exploratory_admission(
+            admission=_exploratory_admission(bundle, limitations=kept), bundle=bundle
+        )
+
+    # Control: acknowledging it too is admitted.
+    validate_exploratory_admission(
+        admission=_exploratory_admission(bundle), bundle=bundle
+    )
+
+
+def test_build_bundle_carries_declared_dataset_limitations() -> None:
+    harness, query, reference, view = _decision_case()
+    bundle = build_evaluation_input_bundle(
+        evaluation_interval=_interval(),
+        session_clock=normalization_realized_clock(harness),
+        context=harness.context,
+        session_queries=normalization_session_queries(harness),
+        decision_requests=((reference, query),),
+        dataset_limitations=(ALPACA_LIMITATION_TRUNCATED_CA,),
+    )
+    assert bundle.authentic_decision_views == (view,)
+    assert bundle.dataset_limitations == (ALPACA_LIMITATION_TRUNCATED_CA,)
+    assert ALPACA_LIMITATION_TRUNCATED_CA in bundle.required_limitations
 
 
 # --- promotion lane gate (anti-laundering) ---
