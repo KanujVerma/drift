@@ -1446,6 +1446,16 @@ RECONSTRUCTED_TRACE_HASH_AT_19C15F8 = (
 RECONSTRUCTED_RESULT_HASH_AT_19C15F8 = (
     "32423c7459cfb9cd1a5087b0315fc8d6bca37be88260416fec868661f6f235c0"
 )
+# Issue 92 adds a hash-covered `dataset_limitations` field to every bundle, so
+# every bundle hash moves once and, through the run identity that binds it,
+# every result hash. Trace hashes do not bind the bundle and stay at 19c15f8.
+# These are the same two runs' result hashes after that recorded change.
+REALIZED_RESULT_HASH_SINCE_ISSUE_92 = (
+    "152c914fa55c910437a2baf1e153db9e9d41fd0cbaa9dc0e14134bbaec51b0a4"
+)
+RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_92 = (
+    "4ed8488ff7e2b63922cb574ae35db959a1f6d49cd273337f9007a908366cd240"
+)
 
 
 def _promotion_engine(bundle: Any, admission: Any) -> SessionEvaluatorEngine:
@@ -1634,7 +1644,7 @@ def test_disabling_promotion_leaves_the_realized_lane_byte_identical() -> None:
     assert artifacts.result.lane == "exploratory"
     assert artifacts.result.metrics.committed_fill_count == 1
     assert artifacts.trace.trace_hash == REALIZED_TRACE_HASH_AT_19C15F8
-    assert artifacts.result.result_hash == REALIZED_RESULT_HASH_AT_19C15F8
+    assert artifacts.result.result_hash == REALIZED_RESULT_HASH_SINCE_ISSUE_92
 
 
 def test_disabling_promotion_leaves_the_reconstructed_lane_byte_identical() -> None:
@@ -1661,4 +1671,4 @@ def test_disabling_promotion_leaves_the_reconstructed_lane_byte_identical() -> N
         for event in artifacts.trace.events
     )
     assert artifacts.trace.trace_hash == RECONSTRUCTED_TRACE_HASH_AT_19C15F8
-    assert artifacts.result.result_hash == RECONSTRUCTED_RESULT_HASH_AT_19C15F8
+    assert artifacts.result.result_hash == RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_92
