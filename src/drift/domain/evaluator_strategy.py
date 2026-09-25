@@ -44,13 +44,19 @@ def _security_order(security_id: UUID) -> bytes:
 
 
 class PositionViewV1(FrozenModel):
-    """Causal, point-in-time view of one existing portfolio holding."""
+    """Causal, point-in-time view of one existing portfolio holding.
+
+    ``cost_basis`` and ``average_cost_per_share`` are both ``None`` exactly
+    when the holding's basis is indeterminate (issue 103): no source evidence
+    allocates it, and a strategy is never shown an invented number. A view of
+    a known basis dumps exactly as it did before the fields became nullable.
+    """
 
     schema_version: Literal["1"] = "1"
     security_id: UUID7
     quantity: int = Field(gt=0)
-    cost_basis: Decimal
-    average_cost_per_share: Decimal
+    cost_basis: Decimal | None
+    average_cost_per_share: Decimal | None
 
     @model_validator(mode="after")
     def validate_position_view(self) -> Self:
@@ -58,6 +64,13 @@ class PositionViewV1(FrozenModel):
             return self._validate_under_pinned_context()
 
     def _validate_under_pinned_context(self) -> Self:
+        if self.cost_basis is None or self.average_cost_per_share is None:
+            if self.cost_basis is not None or self.average_cost_per_share is not None:
+                raise ValueError(
+                    "an indeterminate basis leaves both the cost basis and the "
+                    "average cost per share unset"
+                )
+            return self
         if self.cost_basis < Decimal("0"):
             raise ValueError("cost basis must be non-negative")
         # A view that disagrees with its own basis would let a strategy see a

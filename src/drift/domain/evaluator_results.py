@@ -29,6 +29,7 @@ from drift.domain.evaluator_portfolio import (
     EvaluationLane,
     MarkEvidenceGrade,
     PortfolioStateV1,
+    PortfolioStateV2,
     decimal_context,
 )
 from drift.domain.evaluator_trace import EvaluationTraceLogV1
@@ -303,107 +304,140 @@ class EvaluationRunArtifactsV1(FrozenModel):
 
     @model_validator(mode="after")
     def bind_trace(self) -> Self:
-        if self.result.trace_hash != self.trace.trace_hash:
-            raise ValueError(
-                "result must bind the trace it is paired with: result holds "
-                f"{self.result.trace_hash}, trace is {self.trace.trace_hash}"
-            )
-        if self.final_state.admission_hash != self.result.admission.admission_hash:
-            raise ValueError(
-                "final portfolio state must carry the admitted lane of its result"
-            )
-        self._bind_final_state_lane()
-        self._bind_stepped_sessions()
-        self._bind_decision_evidence_grade()
+        _bind_run_artifacts(self)
         return self
 
-    def _bind_final_state_lane(self) -> None:
-        """Pair the final book with its result's lane, not only its hash (#124).
 
-        The admission hash alone leaves the book free to name another lane,
-        or to grade its marks above what its result's run grants, so an
-        exploratory result could travel with a book reading promotion-grade.
-        """
-        lane = self.result.lane
-        if self.final_state.lane != lane:
-            raise ValueError(
-                f"final portfolio state is in the {self.final_state.lane} lane, "
-                f"its result is in the {lane} lane"
-            )
-        mark = self.final_state.mark
-        if mark is None:
-            return
-        granted = LANE_GRANTED_MARK_GRADE[lane]
-        for price in mark.prices:
-            if price.evidence.grade != granted:
-                raise ValueError(
-                    f"a result in the {lane} lane grants {granted} marks, its "
-                    f"final state marks security {price.security_id} "
-                    f"{price.evidence.grade}"
-                )
+class EvaluationRunArtifactsV2(FrozenModel):
+    """The complete deterministic output of one run over a V2 book.
 
-    def _bind_decision_evidence_grade(self) -> None:
-        """Refuse a promotion result traced on weaker decisions or prices.
+    A successor, not a subclass: the engine books into ``PortfolioStateV2``
+    (issues 49, 103, 105), so its final state is one. The result and trace
+    are unchanged, and every binding of ``EvaluationRunArtifactsV1`` holds.
+    """
 
-        Decisions taken on EXPLORATORY reconstructed evidence are traced under
-        their own event kind. A promotion result bound to such a trace would
-        present decisions made on retrospectively reconstructed bars as
-        promotion-grade, which the Absolute Non-Upgrade Rule forbids. The
-        engine never builds this pairing; refusing it here keeps the artifact
-        types from accepting one that was assembled any other way.
-        """
-        if self.result.lane != "promotion":
-            return
-        weaker = sum(
-            1
-            for event in self.trace.events
-            if event.kind == "exploratory_strategy_decision"
+    schema_version: Literal["2"] = "2"
+    result: EvaluationResultV1
+    trace: EvaluationTraceLogV1
+    final_state: PortfolioStateV2
+
+    @model_validator(mode="after")
+    def bind_trace(self) -> Self:
+        _bind_run_artifacts(self)
+        return self
+
+
+type _RunArtifacts = EvaluationRunArtifactsV1 | EvaluationRunArtifactsV2
+
+
+def _bind_run_artifacts(artifacts: _RunArtifacts) -> None:
+    """Prove the result, trace and final book of one run belong together."""
+    if artifacts.result.trace_hash != artifacts.trace.trace_hash:
+        raise ValueError(
+            "result must bind the trace it is paired with: result holds "
+            f"{artifacts.result.trace_hash}, trace is {artifacts.trace.trace_hash}"
         )
-        if weaker:
-            raise ValueError(
-                "a promotion result cannot bind a trace of decisions taken on "
-                f"EXPLORATORY reconstructed evidence: {weaker} "
-                "exploratory_strategy_decision events"
-            )
-        # Issue 54: fills and marks priced from reconstructions are traced under
-        # their own kind too, and a promotion result may not carry that PnL.
-        priced = sum(
-            1
-            for event in self.trace.events
-            if event.kind == "exploratory_accounting_price"
+    if (
+        artifacts.final_state.admission_hash
+        != artifacts.result.admission.admission_hash
+    ):
+        raise ValueError(
+            "final portfolio state must carry the admitted lane of its result"
         )
-        if priced:
+    _bind_final_state_lane(artifacts)
+    _bind_stepped_sessions(artifacts)
+    _bind_decision_evidence_grade(artifacts)
+
+
+def _bind_final_state_lane(artifacts: _RunArtifacts) -> None:
+    """Pair the final book with its result's lane, not only its hash (#124).
+
+    The admission hash alone leaves the book free to name another lane,
+    or to grade its marks above what its result's run grants, so an
+    exploratory result could travel with a book reading promotion-grade.
+    """
+    lane = artifacts.result.lane
+    if artifacts.final_state.lane != lane:
+        raise ValueError(
+            f"final portfolio state is in the {artifacts.final_state.lane} lane, "
+            f"its result is in the {lane} lane"
+        )
+    mark = artifacts.final_state.mark
+    if mark is None:
+        return
+    granted = LANE_GRANTED_MARK_GRADE[lane]
+    for price in mark.prices:
+        if price.evidence.grade != granted:
             raise ValueError(
-                "a promotion result cannot bind a trace of accounting priced on "
-                f"EXPLORATORY reconstructed evidence: {priced} "
-                "exploratory_accounting_price events"
+                f"a result in the {lane} lane grants {granted} marks, its "
+                f"final state marks security {price.security_id} "
+                f"{price.evidence.grade}"
             )
 
-    def _bind_stepped_sessions(self) -> None:
-        """Bind the last session the trace opened to the result's own account.
 
-        The result states how far the run got; the trace shows it. Checking
-        the hash alone leaves the two free to disagree about that, so a result
-        could claim a clean four-session run while carrying the trace of a run
-        that halted on session one.
-        """
-        last_opened = max(
-            (
-                event.session_index
-                for event in self.trace.events
-                if event.kind == "session_start"
-            ),
-            default=-1,
+def _bind_decision_evidence_grade(artifacts: _RunArtifacts) -> None:
+    """Refuse a promotion result traced on weaker decisions or prices.
+
+    Decisions taken on EXPLORATORY reconstructed evidence are traced under
+    their own event kind. A promotion result bound to such a trace would
+    present decisions made on retrospectively reconstructed bars as
+    promotion-grade, which the Absolute Non-Upgrade Rule forbids. The
+    engine never builds this pairing; refusing it here keeps the artifact
+    types from accepting one that was assembled any other way.
+    """
+    if artifacts.result.lane != "promotion":
+        return
+    weaker = sum(
+        1
+        for event in artifacts.trace.events
+        if event.kind == "exploratory_strategy_decision"
+    )
+    if weaker:
+        raise ValueError(
+            "a promotion result cannot bind a trace of decisions taken on "
+            f"EXPLORATORY reconstructed evidence: {weaker} "
+            "exploratory_strategy_decision events"
         )
-        halted = self.result.halted_session_index
-        expected = (
-            halted
-            if halted is not None
-            else self.result.metrics.evaluated_session_count - 1
+    # Issue 54: fills and marks priced from reconstructions are traced under
+    # their own kind too, and a promotion result may not carry that PnL.
+    priced = sum(
+        1
+        for event in artifacts.trace.events
+        if event.kind == "exploratory_accounting_price"
+    )
+    if priced:
+        raise ValueError(
+            "a promotion result cannot bind a trace of accounting priced on "
+            f"EXPLORATORY reconstructed evidence: {priced} "
+            "exploratory_accounting_price events"
         )
-        if last_opened != expected:
-            raise ValueError(
-                "the trace must open exactly the sessions the result accounts "
-                f"for: trace reached session {last_opened}, result states "
-                f"{expected}"
-            )
+
+
+def _bind_stepped_sessions(artifacts: _RunArtifacts) -> None:
+    """Bind the last session the trace opened to the result's own account.
+
+    The result states how far the run got; the trace shows it. Checking
+    the hash alone leaves the two free to disagree about that, so a result
+    could claim a clean four-session run while carrying the trace of a run
+    that halted on session one.
+    """
+    last_opened = max(
+        (
+            event.session_index
+            for event in artifacts.trace.events
+            if event.kind == "session_start"
+        ),
+        default=-1,
+    )
+    halted = artifacts.result.halted_session_index
+    expected = (
+        halted
+        if halted is not None
+        else artifacts.result.metrics.evaluated_session_count - 1
+    )
+    if last_opened != expected:
+        raise ValueError(
+            "the trace must open exactly the sessions the result accounts "
+            f"for: trace reached session {last_opened}, result states "
+            f"{expected}"
+        )

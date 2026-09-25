@@ -10,21 +10,35 @@ child carries (#103) as a known one.
 
 from datetime import date
 from decimal import Decimal
+from typing import Any
 
 import pytest
 from observation_test_support import uid
-from pydantic import BaseModel, create_model
+from pydantic import BaseModel, ValidationError, create_model
 
+import drift.errors
 from drift.domain.economic_common import ActionKind
-from drift.domain.evaluator_execution import RebalanceOutcomeV1, positions_digest
+from drift.domain.evaluator_execution import (
+    RebalanceOutcomeV1,
+    RebalanceOutcomeV2,
+    RebalancePlanV1,
+    positions_digest,
+)
 from drift.domain.evaluator_portfolio import (
+    APPLIED_EFFECT_ID_PROFILE,
+    EffectAlreadyAppliedError,
+    IndeterminateBasisError,
+    IndeterminateValuationError,
     MarkEvidenceV1,
     MarkPriceV1,
     PendingCashClaimV1,
     PortfolioFillV1,
     PortfolioMarkV1,
     PortfolioStateV1,
+    PortfolioStateV2,
     SecurityHoldingV1,
+    SecurityHoldingV2,
+    applied_economic_effect_id,
     pending_cash_claim_id,
 )
 from drift.domain.evaluator_strategy import PositionViewV1
@@ -36,6 +50,13 @@ SEC_B = uid(22)
 DAY = date(2026, 1, 2)
 ADMISSION_HASH = "a" * 64
 EVIDENCE_HASH = "b" * 64
+
+SPINOFF_ID = applied_economic_effect_id(
+    source_id="source-a", security_id=SEC_A, occurrence_id="spin-1"
+)
+SPLIT_ID = applied_economic_effect_id(
+    source_id="source-a", security_id=SEC_A, occurrence_id="split-1"
+)
 
 
 def _key(day: date = DAY) -> SessionKeyV1:
@@ -188,3 +209,397 @@ def test_the_positions_digest_stays_quantity_only() -> None:
     assert positions_digest(holdings) == (
         "8a2d1319a0a7eaca6b22ccecaee4216abe042942eacdaa21f39abe4a435fc149"
     )
+
+
+# ==========================================================================
+# Applied-effect identity (issue 49)
+# ==========================================================================
+
+
+def test_applied_effect_identity_is_a_versioned_content_hash() -> None:
+    assert APPLIED_EFFECT_ID_PROFILE == "drift-applied-economic-effect-v1"
+    assert SPINOFF_ID == content_hash(
+        {
+            "profile": "drift-applied-economic-effect-v1",
+            "source_id": "source-a",
+            "security_id": str(SEC_A),
+            "occurrence_id": "spin-1",
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"source_id": "source-b"},
+        {"security_id": SEC_B},
+        {"occurrence_id": "spin-2"},
+    ],
+)
+def test_applied_effect_identity_depends_on_every_identity_input(
+    changed: dict[str, Any],
+) -> None:
+    values: dict[str, Any] = {
+        "source_id": "source-a",
+        "security_id": SEC_A,
+        "occurrence_id": "spin-1",
+    }
+    assert applied_economic_effect_id(**(values | changed)) != SPINOFF_ID
+
+
+def test_applied_effect_identity_never_collides_with_a_claim_identity() -> None:
+    # Same source, security and occurrence: the profiles keep the spaces apart.
+    claim = pending_cash_claim_id(
+        source_id="source-a",
+        security_id=SEC_A,
+        action_kind=ActionKind.SPINOFF,
+        occurrence_id="spin-1",
+        component_id="shares-1",
+    )
+    assert claim != SPINOFF_ID
+
+
+def test_the_v2_errors_fail_closed_as_indeterminate_valuations() -> None:
+    # The engine classifies an IndeterminateValuationError as INDETERMINATE,
+    # and neither error lives in drift.errors, which both M1d closures hold.
+    for error in (EffectAlreadyAppliedError, IndeterminateBasisError):
+        assert issubclass(error, IndeterminateValuationError)
+        assert not hasattr(drift.errors, error.__name__)
+
+
+# ==========================================================================
+# SecurityHoldingV2: basis status (issues 103 and 105)
+# ==========================================================================
+
+
+def _known(quantity: int = 10, basis: str = "100") -> SecurityHoldingV2:
+    return SecurityHoldingV2(
+        security_id=SEC_A,
+        quantity=quantity,
+        basis_status="known",
+        cost_basis=Decimal(basis),
+    )
+
+
+def _indeterminate(
+    *causes: str, security_id: Any = SEC_A, quantity: int = 10
+) -> SecurityHoldingV2:
+    return SecurityHoldingV2(
+        security_id=security_id,
+        quantity=quantity,
+        basis_status="indeterminate",
+        cost_basis=None,
+        basis_indeterminate_by=tuple(sorted(causes)) or (SPINOFF_ID,),
+    )
+
+
+def test_a_known_holding_carries_its_exact_basis() -> None:
+    holding = _known(quantity=8, basis="100")
+    assert holding.schema_version == "2"
+    assert holding.basis_indeterminate_by == ()
+    assert holding.average_cost_per_share == Decimal("12.5")
+
+
+def test_an_indeterminate_holding_carries_no_basis_at_all() -> None:
+    holding = _indeterminate(SPINOFF_ID)
+    assert holding.cost_basis is None
+    assert holding.average_cost_per_share is None
+    assert holding.basis_indeterminate_by == (SPINOFF_ID,)
+
+
+@pytest.mark.parametrize(
+    ("values", "message"),
+    [
+        (
+            {"basis_status": "known", "cost_basis": None},
+            "a known basis requires an exact cost basis",
+        ),
+        (
+            {"basis_status": "known", "cost_basis": Decimal("-1")},
+            "cost basis must be non-negative",
+        ),
+        (
+            {
+                "basis_status": "known",
+                "cost_basis": Decimal("1"),
+                "basis_indeterminate_by": (SPINOFF_ID,),
+            },
+            "a known basis cannot name an indeterminacy cause",
+        ),
+        (
+            {
+                "basis_status": "indeterminate",
+                "cost_basis": Decimal("0"),
+                "basis_indeterminate_by": (SPINOFF_ID,),
+            },
+            "an indeterminate basis cannot carry a cost basis",
+        ),
+        (
+            {"basis_status": "indeterminate", "cost_basis": None},
+            "an indeterminate basis must name the effects that made it so",
+        ),
+        (
+            {
+                "basis_status": "indeterminate",
+                "cost_basis": None,
+                "basis_indeterminate_by": (SPINOFF_ID, SPINOFF_ID),
+            },
+            "indeterminacy causes must be unique",
+        ),
+        (
+            {
+                "basis_status": "indeterminate",
+                "cost_basis": None,
+                "basis_indeterminate_by": tuple(
+                    sorted((SPINOFF_ID, SPLIT_ID), reverse=True)
+                ),
+            },
+            "indeterminacy causes must be canonically sorted",
+        ),
+        (
+            {"basis_status": "unknown", "cost_basis": Decimal("1")},
+            "basis_status",
+        ),
+    ],
+)
+def test_a_holding_refuses_every_inconsistent_basis_status(
+    values: dict[str, Any], message: str
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        SecurityHoldingV2(security_id=SEC_A, quantity=10, **values)
+
+
+def test_a_holding_states_its_basis_status_explicitly() -> None:
+    # No default: a holding never becomes known by omission.
+    with pytest.raises(ValidationError, match="basis_status"):
+        SecurityHoldingV2(security_id=SEC_A, quantity=10, cost_basis=Decimal("1"))  # type: ignore[call-arg]
+
+
+def test_a_holding_refuses_a_non_positive_quantity() -> None:
+    with pytest.raises(ValidationError):
+        _known(quantity=0)
+
+
+def test_a_v1_holding_is_not_a_v2_holding() -> None:
+    # No lift: a V1 holding cannot say whether its basis is known.
+    v1 = SecurityHoldingV1(security_id=SEC_A, quantity=10, cost_basis=Decimal("0"))
+    with pytest.raises(ValidationError):
+        SecurityHoldingV2.model_validate(v1.model_dump())
+
+
+# ==========================================================================
+# PortfolioStateV2
+# ==========================================================================
+
+
+def _v2_book(
+    *,
+    holdings: tuple[SecurityHoldingV2, ...] = (),
+    applied: tuple[str, ...] = (),
+    cash: str = "880",
+) -> PortfolioStateV2:
+    return PortfolioStateV2(
+        lane="exploratory",
+        admission_hash=ADMISSION_HASH,
+        session_key=_key(),
+        cash_balance=Decimal(cash),
+        holdings=holdings,
+        pending_cash_claims=(),
+        settled_claim_ids=(),
+        applied_effect_ids=applied,
+        mark=None,
+        holdings_market_value=Decimal("0"),
+        pending_claims_value=Decimal("0"),
+        net_asset_value=Decimal(cash),
+        realized_gross_pnl=Decimal("0"),
+        realized_net_pnl=Decimal("0"),
+        cumulative_transaction_costs=Decimal("0"),
+    )
+
+
+def test_a_v2_book_records_the_effects_it_absorbed() -> None:
+    book = _v2_book(
+        holdings=(_indeterminate(SPINOFF_ID),),
+        applied=tuple(sorted((SPINOFF_ID, SPLIT_ID))),
+    )
+    assert book.schema_version == "2"
+    assert set(book.applied_effect_ids) == {SPINOFF_ID, SPLIT_ID}
+
+
+def test_an_empty_v2_book_has_applied_nothing() -> None:
+    assert _v2_book().applied_effect_ids == ()
+
+
+@pytest.mark.parametrize(
+    ("applied", "message"),
+    [
+        ((SPLIT_ID, SPLIT_ID), "applied effect ids must be unique"),
+        (
+            tuple(sorted((SPINOFF_ID, SPLIT_ID), reverse=True)),
+            "applied effect ids must be canonically sorted",
+        ),
+    ],
+)
+def test_a_v2_book_keeps_its_applied_effects_canonical(
+    applied: tuple[str, ...], message: str
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        _v2_book(applied=applied)
+
+
+def test_an_indeterminate_holding_names_only_effects_the_book_applied() -> None:
+    with pytest.raises(
+        ValidationError, match="names an indeterminacy cause the book never applied"
+    ):
+        _v2_book(holdings=(_indeterminate(SPINOFF_ID),), applied=(SPLIT_ID,))
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"cash_balance": Decimal("-1")}, "cash balance must be non-negative"),
+        ({"net_asset_value": Decimal("1")}, "net asset value must reconcile"),
+        (
+            {"holdings_market_value": Decimal("5"), "net_asset_value": Decimal("885")},
+            "state without holdings cannot carry a market value",
+        ),
+        ({"settled_claim_ids": ("b" * 64, "a" * 64)}, "canonically sorted"),
+    ],
+)
+def test_a_v2_book_holds_every_invariant_a_v1_book_holds(
+    changes: dict[str, Any], message: str
+) -> None:
+    values = _v2_book().model_dump(mode="python") | changes
+    with pytest.raises(ValidationError, match=message):
+        PortfolioStateV2.model_validate(values)
+
+
+def test_a_v2_book_refuses_two_holdings_of_one_security() -> None:
+    with pytest.raises(ValidationError, match="at most one entry per security"):
+        _v2_book(holdings=(_known(), _known(quantity=2)))
+
+
+def test_a_mark_never_reads_the_basis_status() -> None:
+    # NAV is priced from quantities and closes alone, known or not.
+    prices = (
+        MarkPriceV1(
+            security_id=SEC_A,
+            close_price=Decimal("12"),
+            evidence=MarkEvidenceV1(grade="exploratory", evidence_hash=EVIDENCE_HASH),
+        ),
+    )
+    mark = PortfolioMarkV1(session_key=_key(), lane="exploratory", prices=prices)
+    for holding in (_known(), _indeterminate(SPINOFF_ID)):
+        values = _v2_book(holdings=(holding,), applied=(SPINOFF_ID,)).model_dump(
+            mode="python"
+        ) | {
+            "mark": mark,
+            "holdings_market_value": Decimal("120"),
+            "net_asset_value": Decimal("1000"),
+        }
+        assert PortfolioStateV2.model_validate(values).net_asset_value == Decimal(
+            "1000"
+        )
+
+
+def test_a_v1_book_is_never_lifted_into_v2() -> None:
+    with pytest.raises(ValidationError):
+        PortfolioStateV2.model_validate(_v1_book().model_dump(mode="python"))
+
+
+def test_a_v2_book_round_trips_through_json() -> None:
+    book = _v2_book(holdings=(_indeterminate(SPINOFF_ID),), applied=(SPINOFF_ID,))
+    assert PortfolioStateV2.model_validate_json(book.model_dump_json()) == book
+
+
+# ==========================================================================
+# Nullable position view basis (issue 103)
+# ==========================================================================
+
+
+def test_a_position_view_of_an_indeterminate_basis_shows_no_number() -> None:
+    view = PositionViewV1(
+        security_id=SEC_A, quantity=5, cost_basis=None, average_cost_per_share=None
+    )
+    assert view.cost_basis is None
+    assert view.average_cost_per_share is None
+
+
+@pytest.mark.parametrize(
+    ("basis", "average"),
+    [(Decimal("100"), None), (None, Decimal("20"))],
+)
+def test_a_position_view_refuses_a_half_indeterminate_basis(
+    basis: Decimal | None, average: Decimal | None
+) -> None:
+    with pytest.raises(ValidationError, match="leaves both the cost basis and"):
+        PositionViewV1(
+            security_id=SEC_A,
+            quantity=5,
+            cost_basis=basis,
+            average_cost_per_share=average,
+        )
+
+
+# ==========================================================================
+# RebalanceOutcomeV2
+# ==========================================================================
+
+
+def _empty_plan() -> RebalancePlanV1:
+    return RebalancePlanV1(
+        session_key=_key(),
+        planned_fills=(),
+        opening_positions_hash=positions_digest(()),
+        current_cash=Decimal("880"),
+        gross_sell_proceeds=Decimal("0"),
+        sell_transaction_costs=Decimal("0"),
+        required_cash=Decimal("0"),
+        projected_cash=Decimal("880"),
+    )
+
+
+def test_a_v2_outcome_carries_a_v2_book() -> None:
+    outcome = RebalanceOutcomeV2(
+        classification="executed",
+        plan=_empty_plan(),
+        committed_fills=(),
+        rejection=None,
+        state=_v2_book(),
+        halt_stepping=False,
+    )
+    assert outcome.schema_version == "2"
+    assert outcome.state == _v2_book()
+
+
+def test_a_v2_outcome_refuses_a_v1_book() -> None:
+    with pytest.raises(ValidationError):
+        RebalanceOutcomeV2(
+            classification="executed",
+            plan=_empty_plan(),
+            committed_fills=(),
+            rejection=None,
+            state=_v1_book(),  # type: ignore[arg-type]
+            halt_stepping=False,
+        )
+
+
+def test_a_v2_outcome_keeps_the_all_or_nothing_shape() -> None:
+    with pytest.raises(ValidationError, match="must not halt session stepping"):
+        RebalanceOutcomeV2(
+            classification="executed",
+            plan=_empty_plan(),
+            committed_fills=(),
+            rejection=None,
+            state=_v2_book(),
+            halt_stepping=True,
+        )
+    with pytest.raises(ValidationError, match="requires its rejection"):
+        RebalanceOutcomeV2(
+            classification="rejected",
+            plan=_empty_plan(),
+            committed_fills=(),
+            rejection=None,
+            state=_v2_book(),
+            halt_stepping=True,
+        )

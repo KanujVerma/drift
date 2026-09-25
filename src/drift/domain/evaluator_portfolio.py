@@ -362,92 +362,266 @@ class PortfolioStateV1(FrozenModel):
             return self._validate_under_pinned_context()
 
     def _validate_under_pinned_context(self) -> Self:
-        if self.cash_balance < Decimal("0"):
-            raise ValueError("cash balance must be non-negative")
-        if self.holdings_market_value < Decimal("0"):
-            raise ValueError("holdings market value must be non-negative")
-        if self.cumulative_transaction_costs < Decimal("0"):
-            raise ValueError("cumulative transaction costs must be non-negative")
-
-        securities = tuple(holding.security_id for holding in self.holdings)
-        if len(set(securities)) != len(securities):
-            raise ValueError("holdings must carry at most one entry per security")
-        claim_ids = tuple(claim.claim_id for claim in self.pending_cash_claims)
-        if len(set(claim_ids)) != len(claim_ids):
-            raise ValueError("pending claims must be unique by claim id")
-
-        # A settled claim must never reappear as pending. Claim identity is
-        # derived from the source-scoped economic occurrence and is independent
-        # of every revisable date, so the same id is the same entitlement and
-        # paying it twice creates cash from nothing.
-        if len(set(self.settled_claim_ids)) != len(self.settled_claim_ids):
-            raise ValueError("settled claim ids must be unique")
-        if tuple(sorted(self.settled_claim_ids)) != self.settled_claim_ids:
-            raise ValueError("settled claim ids must be canonically sorted")
-        replayed = set(self.settled_claim_ids) & set(claim_ids)
-        if replayed:
-            raise ValueError(
-                f"claim already settled cannot be pending again: {sorted(replayed)[0]}"
-            )
-
-        expected_claims = sum(
-            (claim.total_cash_expected for claim in self.pending_cash_claims),
-            Decimal("0"),
-        )
-        if self.pending_claims_value != expected_claims:
-            raise ValueError(
-                f"pending claims value must equal {expected_claims}, "
-                f"got {self.pending_claims_value}"
-            )
-
-        self._validate_mark()
-
-        expected_nav = (
-            self.cash_balance + self.holdings_market_value + self.pending_claims_value
-        )
-        if self.net_asset_value != expected_nav:
-            raise ValueError(
-                f"net asset value must reconcile to {expected_nav}, "
-                f"got {self.net_asset_value}"
-            )
+        _validate_book(self)
         return self
 
-    def _validate_mark(self) -> None:
-        # A mark is only meaningful for the holdings it was taken against, in
-        # the session it was taken in, under the lane that admitted it. Coupling
-        # all three here stops a stale mark surviving a fill or a rehydration
-        # into another session and inventing net asset value nothing backs.
-        if not self.holdings and self.holdings_market_value != Decimal("0"):
-            raise ValueError("state without holdings cannot carry a market value")
-        if self.mark is None:
-            if self.holdings_market_value != Decimal("0"):
-                raise ValueError("unmarked state cannot carry a holdings market value")
-            return
-        if self.mark.session_key != self.session_key:
-            raise ValueError(
-                "mark belongs to session "
-                f"{self.mark.session_key.mic}/{self.mark.session_key.local_date}, "
-                f"state is session {self.session_key.mic}/{self.session_key.local_date}"
-            )
-        if self.mark.lane != self.lane:
-            raise ValueError(
-                f"mark was admitted under the {self.mark.lane} lane, "
-                f"state is in the {self.lane} lane"
-            )
-        priced = {price.security_id: price.close_price for price in self.mark.prices}
-        if set(priced) != set(holding.security_id for holding in self.holdings):
-            raise ValueError("mark must price exactly the held securities")
-        expected_value = sum(
-            (
-                priced[holding.security_id] * holding.quantity
-                for holding in self.holdings
-            ),
-            Decimal("0"),
+
+def _validate_book(state: PortfolioStateV1 | PortfolioStateV2) -> None:
+    """Hold the cash, claim, mark and NAV invariants every book version shares.
+
+    Called under the pinned decimal context. Both state versions validate
+    through this one function, so V2 cannot drift from V1 on anything the
+    two have in common.
+    """
+    if state.cash_balance < Decimal("0"):
+        raise ValueError("cash balance must be non-negative")
+    if state.holdings_market_value < Decimal("0"):
+        raise ValueError("holdings market value must be non-negative")
+    if state.cumulative_transaction_costs < Decimal("0"):
+        raise ValueError("cumulative transaction costs must be non-negative")
+
+    securities = tuple(holding.security_id for holding in state.holdings)
+    if len(set(securities)) != len(securities):
+        raise ValueError("holdings must carry at most one entry per security")
+    claim_ids = tuple(claim.claim_id for claim in state.pending_cash_claims)
+    if len(set(claim_ids)) != len(claim_ids):
+        raise ValueError("pending claims must be unique by claim id")
+
+    # A settled claim must never reappear as pending. Claim identity is
+    # derived from the source-scoped economic occurrence and is independent
+    # of every revisable date, so the same id is the same entitlement and
+    # paying it twice creates cash from nothing.
+    if len(set(state.settled_claim_ids)) != len(state.settled_claim_ids):
+        raise ValueError("settled claim ids must be unique")
+    if tuple(sorted(state.settled_claim_ids)) != state.settled_claim_ids:
+        raise ValueError("settled claim ids must be canonically sorted")
+    replayed = set(state.settled_claim_ids) & set(claim_ids)
+    if replayed:
+        raise ValueError(
+            f"claim already settled cannot be pending again: {sorted(replayed)[0]}"
         )
-        if self.holdings_market_value != expected_value:
+
+    expected_claims = sum(
+        (claim.total_cash_expected for claim in state.pending_cash_claims),
+        Decimal("0"),
+    )
+    if state.pending_claims_value != expected_claims:
+        raise ValueError(
+            f"pending claims value must equal {expected_claims}, "
+            f"got {state.pending_claims_value}"
+        )
+
+    _validate_book_mark(state)
+
+    expected_nav = (
+        state.cash_balance + state.holdings_market_value + state.pending_claims_value
+    )
+    if state.net_asset_value != expected_nav:
+        raise ValueError(
+            f"net asset value must reconcile to {expected_nav}, "
+            f"got {state.net_asset_value}"
+        )
+
+
+def _validate_book_mark(state: PortfolioStateV1 | PortfolioStateV2) -> None:
+    # A mark is only meaningful for the holdings it was taken against, in
+    # the session it was taken in, under the lane that admitted it. Coupling
+    # all three here stops a stale mark surviving a fill or a rehydration
+    # into another session and inventing net asset value nothing backs. A
+    # mark reads quantities and prices only, never a basis status.
+    if not state.holdings and state.holdings_market_value != Decimal("0"):
+        raise ValueError("state without holdings cannot carry a market value")
+    if state.mark is None:
+        if state.holdings_market_value != Decimal("0"):
+            raise ValueError("unmarked state cannot carry a holdings market value")
+        return
+    if state.mark.session_key != state.session_key:
+        raise ValueError(
+            "mark belongs to session "
+            f"{state.mark.session_key.mic}/{state.mark.session_key.local_date}, "
+            f"state is session {state.session_key.mic}/{state.session_key.local_date}"
+        )
+    if state.mark.lane != state.lane:
+        raise ValueError(
+            f"mark was admitted under the {state.mark.lane} lane, "
+            f"state is in the {state.lane} lane"
+        )
+    priced = {price.security_id: price.close_price for price in state.mark.prices}
+    if set(priced) != set(holding.security_id for holding in state.holdings):
+        raise ValueError("mark must price exactly the held securities")
+    expected_value = sum(
+        (priced[holding.security_id] * holding.quantity for holding in state.holdings),
+        Decimal("0"),
+    )
+    if state.holdings_market_value != expected_value:
+        raise ValueError(
+            f"holdings market value must equal {expected_value}, "
+            f"got {state.holdings_market_value}"
+        )
+    if state.holdings and state.holdings_market_value <= Decimal("0"):
+        raise ValueError("marked holdings must carry a positive market value")
+
+
+# ==========================================================================
+# Version 2: applied-effect identity and basis status (issues 49, 103, 105)
+# ==========================================================================
+#
+# The V1 models above are frozen (#50): every field is dumped by
+# ``content_hash``, so even a defaulted field would move their bytes. The V2
+# models are successors, not subclasses, and no function lifts a V1 book into
+# V2: a V1 holding cannot say whether its basis is known, and a lift would
+# launder the zero basis a V1 spin-off child carries (#103) as a known one.
+
+# Version 1 of the applied-effect preimage. Revisable fields stay out of it:
+# the effective time, the ratio and components, the record version and its
+# hash, and the action kind. A revision that reclassifies an occurrence must
+# not mint a fresh identity and re-apply, which is the double-pay defect of
+# the claim identity (#4) in share form. The cost is that two share mutations
+# of one occurrence on one security share an identity, and that collision
+# fails closed.
+APPLIED_EFFECT_ID_PROFILE = "drift-applied-economic-effect-v1"
+
+type BasisStatus = Literal["known", "indeterminate"]
+"""Whether a holding's cost basis is exactly known.
+
+``indeterminate`` means no source evidence allocates the basis, so any
+realized PnL computed from it would be invented. It is never zero.
+"""
+
+
+class EffectAlreadyAppliedError(IndeterminateValuationError):
+    """Raised when a share-mutating effect the book already absorbed recurs.
+
+    Re-applying a split to a book that already reflects it doubles the
+    position. The book records every share-mutating effect it absorbed, so a
+    replay is refused rather than applied twice (issue 49).
+    """
+
+
+class IndeterminateBasisError(IndeterminateValuationError):
+    """Raised when realizing a holding whose cost basis is indeterminate.
+
+    A sale or disposal relieves basis into realized PnL. With no proven
+    basis there is no proven PnL, so the run fails closed (spec 12.5).
+    """
+
+
+def applied_economic_effect_id(
+    *, source_id: str, security_id: UUID7, occurrence_id: str
+) -> SHA256Hash:
+    """Derive the identity of one economic effect a book absorbed.
+
+    Source-scoped and date-independent, as claim identity is (spec 11.3).
+    The action kind is excluded because it is revisable (see
+    ``APPLIED_EFFECT_ID_PROFILE``).
+    """
+    return content_hash(
+        {
+            "profile": APPLIED_EFFECT_ID_PROFILE,
+            "source_id": source_id,
+            "security_id": str(security_id),
+            "occurrence_id": occurrence_id,
+        }
+    )
+
+
+def _require_canonical_ids(values: tuple[str, ...], label: str) -> None:
+    if len(set(values)) != len(values):
+        raise ValueError(f"{label} must be unique")
+    if tuple(sorted(values)) != values:
+        raise ValueError(f"{label} must be canonically sorted")
+
+
+class SecurityHoldingV2(FrozenModel):
+    """One long, whole-share position whose cost basis is known or not.
+
+    A known basis is exact and non-negative. An indeterminate basis carries
+    no amount at all, and names the applied effects that made it
+    indeterminate, so the cause travels with the holding to the sale that
+    would realize it.
+    """
+
+    schema_version: Literal["2"] = "2"
+    security_id: UUID7
+    quantity: int = Field(gt=0)
+    basis_status: BasisStatus
+    cost_basis: CanonicalMoney | None
+    basis_indeterminate_by: tuple[SHA256Hash, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_holding(self) -> Self:
+        if self.basis_status == "known":
+            if self.cost_basis is None:
+                raise ValueError("a known basis requires an exact cost basis")
+            if self.cost_basis < Decimal("0"):
+                raise ValueError("cost basis must be non-negative")
+            if self.basis_indeterminate_by:
+                raise ValueError("a known basis cannot name an indeterminacy cause")
+            return self
+        if self.cost_basis is not None:
+            raise ValueError("an indeterminate basis cannot carry a cost basis")
+        if not self.basis_indeterminate_by:
             raise ValueError(
-                f"holdings market value must equal {expected_value}, "
-                f"got {self.holdings_market_value}"
+                "an indeterminate basis must name the effects that made it so"
             )
-        if self.holdings and self.holdings_market_value <= Decimal("0"):
-            raise ValueError("marked holdings must carry a positive market value")
+        _require_canonical_ids(self.basis_indeterminate_by, "indeterminacy causes")
+        return self
+
+    @property
+    def average_cost_per_share(self) -> Decimal | None:
+        """Per-share cost under the pinned decimal context, if the basis is known.
+
+        Not exact in general, as for ``SecurityHoldingV1``. ``None`` exactly
+        when the basis is indeterminate.
+        """
+        if self.cost_basis is None:
+            return None
+        with decimal_context():
+            return self.cost_basis / self.quantity
+
+
+class PortfolioStateV2(FrozenModel):
+    """Immutable portfolio state carrying applied effects and basis status.
+
+    ``applied_effect_ids`` records every share-mutating economic effect the
+    book has absorbed, so a replay is detectable from the state alone (issue
+    49), exactly as ``settled_claim_ids`` makes cash entitlements idempotent.
+    Each indeterminate holding names only effects recorded here.
+    """
+
+    schema_version: Literal["2"] = "2"
+    lane: EvaluationLane
+    admission_hash: SHA256Hash
+    session_key: SessionKeyV1
+    cash_balance: CanonicalMoney
+    holdings: tuple[SecurityHoldingV2, ...]
+    pending_cash_claims: tuple[PendingCashClaimV1, ...]
+    settled_claim_ids: tuple[SHA256Hash, ...] = ()
+    applied_effect_ids: tuple[SHA256Hash, ...] = ()
+    mark: PortfolioMarkV1 | None = None
+    holdings_market_value: CanonicalMoney
+    pending_claims_value: CanonicalMoney
+    net_asset_value: CanonicalMoney
+    realized_gross_pnl: CanonicalMoney
+    realized_net_pnl: CanonicalMoney
+    cumulative_transaction_costs: CanonicalMoney
+
+    @property
+    def is_marked(self) -> bool:
+        """Whether this state carries a mark taken in its own session."""
+        return self.mark is not None
+
+    @model_validator(mode="after")
+    def validate_state(self) -> Self:
+        with decimal_context():
+            _validate_book(self)
+        _require_canonical_ids(self.applied_effect_ids, "applied effect ids")
+        applied = frozenset(self.applied_effect_ids)
+        for holding in self.holdings:
+            unrecorded = sorted(set(holding.basis_indeterminate_by) - applied)
+            if unrecorded:
+                raise ValueError(
+                    f"holding {holding.security_id} names an indeterminacy cause "
+                    f"the book never applied: {unrecorded[0]}"
+                )
+        return self
