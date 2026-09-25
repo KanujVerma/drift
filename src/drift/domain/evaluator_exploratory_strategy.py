@@ -391,8 +391,10 @@ def stage_exploratory_decision_targets(
     The staging contract is identical to the realized path's, because it is a
     property of the intent rather than of the evidence grade: whole shares,
     non-negative, no unadmitted entries, and an explicit zero for any held
-    security the intent omits. The admitted set is the declared cohort, never
-    a historical universe.
+    security the intent omits. The admitted set is the context's
+    ``admitted_cohort``, never a historical universe: the engine builds it as
+    the declared cohort restricted to the members with reconstructed history
+    at the decision cutoff (issue 130).
     """
     return _stage_targets(
         intent=intent,

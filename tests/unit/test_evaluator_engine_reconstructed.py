@@ -12,6 +12,7 @@ earlier guard firing first fails the test instead of satisfying it.
 """
 
 from datetime import date
+from decimal import Decimal
 from uuid import UUID
 
 import pytest
@@ -50,6 +51,7 @@ from drift.domain.evaluator_clock import EvaluationSessionV1, evaluation_session
 from drift.domain.evaluator_exploratory_strategy import (
     RECONSTRUCTED_DECISION_LIMITATIONS,
     ExploratoryStrategyDecisionContextV1,
+    stage_exploratory_decision_targets,
 )
 from drift.domain.evaluator_lanes import (
     ALPACA_LIMITATION_BOUNDED_COHORT,
@@ -60,6 +62,11 @@ from drift.domain.evaluator_results import (
     EvaluationClassification,
     EvaluationRunArtifactsV1,
     ExploratoryEvaluationResultV1,
+)
+from drift.domain.evaluator_strategy import (
+    PositionViewV1,
+    SecurityTargetPositionV1,
+    StrategyDecisionIntentV1,
 )
 from drift.domain.evaluator_trace import (
     EvaluationPhase,
@@ -718,8 +725,30 @@ def test_a_member_starting_late_is_contiguous_from_its_first_bar(first: date) ->
     ]
 
 
+def _admitted(strategy: ReconstructedTargetStrategy) -> list[tuple[UUID, ...]]:
+    """Per decision, the cohort members the context admits, in canonical order."""
+    return [context.admitted_cohort for context in strategy.seen]
+
+
+def _canonical(*securities: UUID) -> tuple[UUID, ...]:
+    return tuple(sorted(securities, key=lambda security_id: security_id.bytes))
+
+
+def _fills(artifacts: EvaluationRunArtifactsV1) -> list[tuple[date, UUID, str, int]]:
+    return [
+        (
+            event.session_key.local_date,
+            event.fill.security_id,
+            event.fill.side,
+            event.fill.quantity,
+        )
+        for event in artifacts.trace.events
+        if event.kind == "fill"
+    ]
+
+
 def test_a_member_with_no_reconstructed_history_is_absent_and_never_halts() -> None:
-    """The existing rule: no history is no view, and the cohort still admits it."""
+    """No history is no view and, since issue 130, no admission either."""
     strategy = _hold_cash()
     bundle = _cohort_bundle({SEC: _ALL_DAYS})
 
@@ -733,11 +762,14 @@ def test_a_member_with_no_reconstructed_history_is_absent_and_never_halts() -> N
         {SEC: [JAN5, JAN6]},
         {SEC: [JAN5, JAN6, JAN7]},
     ]
-    assert all(set(context.admitted_cohort) == set(PAIR) for context in strategy.seen)
+    assert _admitted(strategy) == [(SEC,), (SEC,), (SEC,)]
 
 
 def test_a_member_whose_history_starts_later_joins_the_context_when_it_starts() -> None:
-    """Before its first reconstruction a member has no history, so no halt."""
+    """Before its first reconstruction a member has no history, so no halt.
+
+    It joins the admitted cohort at the same decision its view appears.
+    """
     strategy = _hold_cash()
     bundle = _cohort_bundle({SEC: _ALL_DAYS, SEC_OTHER: (JAN6, JAN7)})
 
@@ -751,29 +783,152 @@ def test_a_member_whose_history_starts_later_joins_the_context_when_it_starts() 
         {SEC: [JAN5, JAN6], SEC_OTHER: [JAN6]},
         {SEC: [JAN5, JAN6, JAN7], SEC_OTHER: [JAN6, JAN7]},
     ]
+    assert _admitted(strategy) == [(SEC,), _canonical(*PAIR), _canonical(*PAIR)]
 
 
-def test_trading_a_member_without_history_still_fails_closed_at_the_open() -> None:
-    """The existing rule is unchanged: no reconstructed open, no fill."""
-    strategy = ReconstructedTargetStrategy({JAN5: ((SEC_OTHER, 1),)})
+# --- a target needs decision-time history (issue 130) -------------------------
+
+
+@pytest.mark.parametrize(
+    ("other_days", "decided", "index"),
+    [
+        ((), JAN5, 0),
+        ((JAN6, JAN7), JAN5, 0),
+        ((JAN7,), JAN6, 1),
+    ],
+    ids=["never-reconstructed", "first-bar-at-the-next-open", "first-bar-later"],
+)
+def test_targeting_a_member_without_decision_time_history_is_rejected(
+    other_days: tuple[date, ...], decided: date, index: int
+) -> None:
+    """A member with no reconstruction at or before the cutoff is unadmitted.
+
+    Before issue 130 the declared cohort admitted it at every decision, so a
+    target staged blind and, when the member's first bar followed, filled at
+    that first-ever reconstructed open. The target is now refused at staging
+    with the existing unadmitted-target cause. Nothing is staged, nothing
+    fills, and no execution or mark ever looks for the member's price.
+    """
+    strategy = ReconstructedTargetStrategy({decided: ((SEC_OTHER, 1),)})
+    bundle = _cohort_bundle({SEC: _ALL_DAYS, SEC_OTHER: other_days})
+
+    artifacts = run_engine(
+        reconstructed_engine(bundle, cohort=cohort_of(PAIR)), strategy
+    )
+
+    reason = f"a positive target requires an admitted security: {SEC_OTHER}"
+    assert artifacts.result.classification is EvaluationClassification.REJECTED
+    assert artifacts.result.halted_session_index == index
+    assert artifacts.result.halt_reason == reason
+    events = _exploratory_events(artifacts)
+    assert len(events) == index + 1
+    assert (
+        events[-1].session_key.local_date,
+        events[-1].outcome,
+        events[-1].staged_targets,
+        events[-1].rejection_reason,
+    ) == (decided, "rejected", (), reason)
+    assert _admitted(strategy)[-1] == (SEC,)
+    assert not [
+        event for event in artifacts.trace.events if event.kind == "indeterminate_cause"
+    ]
+    assert _fills(artifacts) == []
+    assert artifacts.final_state.holdings == ()
+
+
+@pytest.mark.parametrize(
+    ("first", "warmup", "decided", "fills"),
+    [
+        (JAN6, 1, JAN6, [(JAN7, SEC_OTHER, "buy", 1), (JAN8, SEC_OTHER, "sell", 1)]),
+        (JAN6, 3, JAN7, [(JAN8, SEC_OTHER, "buy", 1)]),
+        (JAN7, 3, JAN7, [(JAN8, SEC_OTHER, "buy", 1)]),
+    ],
+    ids=[
+        "first-bar-at-a-later-decision",
+        "first-bar-in-the-warmup",
+        "first-bar-at-the-first-decision",
+    ],
+)
+def test_a_late_starter_is_targetable_from_its_first_reconstructed_session(
+    first: date,
+    warmup: int,
+    decided: date,
+    fills: list[tuple[date, UUID, str, int]],
+) -> None:
+    """A member is admitted from the first decision whose history holds its bar.
+
+    Every decision admits exactly the members it carries a view for, so the
+    member joins the admitted cohort with its first view and not before.
+    """
+    strategy = ReconstructedTargetStrategy({decided: ((SEC_OTHER, 1),)})
+    later = tuple(day for day in (*_ALL_DAYS, JAN8) if day >= first)
+    bundle = _cohort_bundle({SEC: (*_ALL_DAYS, JAN8), SEC_OTHER: later})
+
+    artifacts = run_engine(
+        reconstructed_engine(
+            bundle, cohort=cohort_of(PAIR), protocol=_protocol(warmup=warmup)
+        ),
+        strategy,
+    )
+
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert _fills(artifacts) == fills
+    staged = [
+        event.staged_targets
+        for event in _exploratory_events(artifacts)
+        if event.session_key.local_date == decided
+    ]
+    assert staged == [
+        (SecurityTargetPositionV1(security_id=SEC_OTHER, target_quantity=1),)
+    ]
+    assert _admitted(strategy) == [
+        _canonical(*PAIR) if context.session_key.local_date >= first else (SEC,)
+        for context in strategy.seen
+    ]
+    assert all(
+        set(context.admitted_cohort)
+        == {view.security_id for view in context.reconstructed_decision_views}
+        for context in strategy.seen
+    )
+
+
+def test_a_zero_target_is_never_refused_for_want_of_history() -> None:
+    """Only a positive target needs admission, so exits are never blocked.
+
+    A member without history cannot be held in this lane, so the exit case is
+    proven on a context the engine built, carrying a holding of a member it
+    does not admit: an explicit zero and an omission both stage its zero.
+    """
+    strategy = ReconstructedTargetStrategy({JAN5: ((SEC_OTHER, 0),)})
     bundle = _cohort_bundle({SEC: _ALL_DAYS})
 
     artifacts = run_engine(
         reconstructed_engine(bundle, cohort=cohort_of(PAIR)), strategy
     )
 
-    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
-    assert artifacts.result.halted_session_index == 1
-    causes = [
-        event for event in artifacts.trace.events if event.kind == "indeterminate_cause"
-    ]
-    assert len(causes) == 1
-    assert causes[0].phase is EvaluationPhase.OPEN_EXECUTION
-    assert causes[0].cause == (
-        "no exploratory reconstructed accounting price for security "
-        f"{SEC_OTHER} on XNYS 2026-01-06"
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert _exploratory_events(artifacts)[0].staged_targets == (
+        SecurityTargetPositionV1(security_id=SEC_OTHER, target_quantity=0),
     )
-    assert not [event for event in artifacts.trace.events if event.kind == "fill"]
+    assert _fills(artifacts) == []
+
+    built = strategy.seen[0]
+    assert built.admitted_cohort == (SEC,)
+    holding = PositionViewV1(
+        security_id=SEC_OTHER,
+        quantity=2,
+        cost_basis=Decimal("200"),
+        average_cost_per_share=Decimal("100"),
+    )
+    holding_context = built.model_copy(update={"current_holdings": (holding,)})
+    exit_to = SecurityTargetPositionV1(security_id=SEC_OTHER, target_quantity=0)
+    for targets in ((exit_to,), ()):
+        intent = StrategyDecisionIntentV1(
+            session_key=built.session_key,
+            decision_time=built.decision_cutoff,
+            targets=targets,
+        )
+        assert stage_exploratory_decision_targets(intent, holding_context) == (exit_to,)
 
 
 def test_a_complete_cohort_context_carries_every_members_full_history() -> None:

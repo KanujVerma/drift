@@ -1897,20 +1897,30 @@ class SessionEvaluatorEngine:
         session: EvaluationSessionV1,
         lane: _ReconstructedDecisionLane,
     ) -> ExploratoryStrategyDecisionContextV1:
+        views = self._reconstructed_decision_views(index, session)
+        # Issue 130: the decision admits only the declared members with
+        # reconstructed history at or before its cutoff, which are exactly the
+        # members it holds a view for. A member first reconstructed later has
+        # no decision-time evidence, and admitting it would let a cohort chosen
+        # after the fact disclose that the security will trade, so a positive
+        # target for it is refused at staging as unadmitted.
+        with_history = frozenset(view.security_id for view in views)
         return ExploratoryStrategyDecisionContextV1(
             session_key=session.session_key,
             decision_session=session,
             decision_cutoff=session.closed_at,
             cohort_hash=lane.cohort.cohort_hash,
-            admitted_cohort=lane.cohort.security_ids,
+            admitted_cohort=tuple(
+                security_id
+                for security_id in lane.cohort.security_ids
+                if security_id in with_history
+            ),
             current_holdings=tuple(
                 position_view(holding) for holding in state.holdings
             ),
             current_cash=state.cash_balance,
             portfolio_nav=state.net_asset_value,
-            reconstructed_decision_views=self._reconstructed_decision_views(
-                index, session
-            ),
+            reconstructed_decision_views=views,
             # The admission already acknowledges every limitation the bundle
             # obliges and the bounded cohort, so the decision carries them all.
             acknowledged_limitations=lane.admission.acknowledged_limitations,
