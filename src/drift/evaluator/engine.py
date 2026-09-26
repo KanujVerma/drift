@@ -72,6 +72,7 @@ from typing import (
 from uuid import UUID
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic_core import PydanticSerializationError
 
 from drift.domain.assertions import ResolutionMode
 from drift.domain.common import UUID7, SHA256Hash
@@ -175,6 +176,7 @@ from drift.domain.securities import (
     ListingTerminationVersionV1,
 )
 from drift.domain.sessions import SessionKeyV1
+from drift.domain.strategies import StrategyReference
 from drift.domain.universes import StructuralEligibilityClassification
 from drift.errors import CanonicalSerializationError, DriftError
 from drift.evaluator.bundles import validate_exploratory_admission
@@ -267,6 +269,33 @@ def _exact_text(value: object, name: str) -> str:
     return value
 
 
+_STRATEGY_REFERENCE: TypeAdapter[StrategyReference] = TypeAdapter(StrategyReference)
+
+
+def _canonical_code_hash(reference: object) -> str:
+    """The code hash of one strategy reference, rebuilt canonically.
+
+    Issue 112 review, F5 (the issue 123 residual). The reference, which the
+    caller reads from the strategy exactly once, is rebuilt through canonical
+    JSON as its declared type, as the experiment runner rebuilds it (issue
+    123), and only the rebuild's ``code_hash`` is returned. A ``code_hash``
+    of a ``str`` subclass then compares as the text it spells, so its
+    reflected ``__eq__`` or ``__ne__`` cannot answer the strategy binding. A
+    reference with no canonical form as a ``StrategyReference`` raises
+    ``NonCanonicalEngineInputError``.
+    """
+    try:
+        rebuilt = _STRATEGY_REFERENCE.validate_json(
+            _STRATEGY_REFERENCE.dump_json(reference, warnings=False)  # type: ignore[arg-type]
+        )
+    except (ValidationError, PydanticSerializationError) as error:
+        raise NonCanonicalEngineInputError(
+            "the strategy's strategy_reference has no canonical form as a "
+            f"StrategyReference: {error}"
+        ) from error
+    return rebuilt.code_hash
+
+
 def _revalidated[M: BaseModel](declared: type[M], model: BaseModel) -> M:
     """Rebuild ``model`` as a fresh, validated ``declared`` (issues 78, 123).
 
@@ -338,8 +367,10 @@ def require_bound_strategy_parameters(
     anything that is not exactly canonical JSON data, must equal it. The
     identity is rebuilt canonically first and the digest is a fresh
     ``hexdigest``, so both sides of the comparison are exact ``str`` and no
-    forged comparison can answer it. The engine calls this before any session
-    is stepped, and the experiment runner before the engine runs.
+    forged comparison can answer it. The engine calls this once per run,
+    before any session is stepped, so a run reads the strategy's parameters
+    exactly once; the experiment runner re-raises its refusal without
+    recording anything (issue 112 review, F2).
     """
     rebuilt = _revalidated_run_identity(identity)
     if type(rebuilt) is not EvaluationRunIdentityV2:
@@ -1534,7 +1565,9 @@ class SessionEvaluatorEngine:
                 f"identity binds {run_identity.evaluator_evidence_hash}, the "
                 f"engine consults {self._evidence_hash}"
             )
-        running = strategy.strategy_reference.code_hash
+        # Issue 112 review, F5: the reference is read once and only its
+        # canonical rebuild is compared, so no forged comparison answers.
+        running = _canonical_code_hash(strategy.strategy_reference)
         if run_identity.strategy_hash != running:
             raise ValueError(
                 "the run identity must bind the strategy that runs: identity "

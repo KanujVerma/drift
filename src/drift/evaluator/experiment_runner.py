@@ -61,7 +61,6 @@ from drift.evaluator.engine import (
     PromotionLaneDisabledError,
     SessionEvaluatorEngine,
     refuse_promotion_lane,
-    require_bound_strategy_parameters,
 )
 from drift.ledger.interface import AuditEventDraft, Ledger
 from drift.serialization.canonical import content_hash
@@ -322,26 +321,26 @@ def _validate_context(inputs: _CallerInputs) -> None:
         )
 
 
-def _require_bound_parameters(
-    specification: ExperimentSpecification,
-    context: ExperimentRunnerContext,
-    inputs: _CallerInputs,
-) -> None:
-    """Bind a V2 run's strategy parameters before the engine runs (issue 112).
+def _bound_parameters_hash(
+    specification: ExperimentSpecification, inputs: _CallerInputs
+) -> str:
+    """The M0 row's ``parameters_hash``, from one read of the parameters.
 
-    A V2 identity binds ``strategy_parameters_hash``. The specification's
-    parameters must hash to it, so the M0 row's ``parameters_hash`` names the
-    parameters the identity binds. So must the parameters the running
-    strategy exposes, checked here exactly as the engine checks them, so a
-    strategy running other parameters is refused before anything runs or is
-    recorded, not recorded as a FAILED run. Each digest is a fresh ``str``
-    over an exact copy of canonical JSON data, and the identity is the
-    canonical copy, so no forged comparison answers. A V1 identity binds no
-    parameters, and neither side is read under one.
+    Under a V1 identity it is ``content_hash(specification.parameters)``, as
+    it always was. Under a V2 identity (issue 112) the specification's
+    parameters are read exactly once, into one exact canonical copy
+    (``strategy_parameters_hash``), and that one digest is both compared with
+    the identity's ``strategy_parameters_hash`` and returned for the M0 row,
+    so the row always names the parameters the identity binds. A second,
+    differently implemented read could see other contents, as a mapping proxy
+    over a dict whose ``items()`` and storage disagree does (issue 112 review,
+    F1). The digest is a fresh ``str`` and the identity is the canonical copy,
+    so no forged comparison answers. The running strategy's parameters are
+    bound by the engine, which reads them once before any session.
     """
     identity = inputs.run_identity
     if type(identity) is not EvaluationRunIdentityV2:
-        return
+        return content_hash(specification.parameters)
     specified = strategy_parameters_hash(
         specification.parameters, label="the specification parameters"
     )
@@ -351,7 +350,7 @@ def _require_bound_parameters(
             f"identity: specification parameters hash to {specified}, run "
             f"identity binds {identity.strategy_parameters_hash}"
         )
-    require_bound_strategy_parameters(identity, context.strategy)
+    return specified
 
 
 def _record_audit_event(
@@ -412,15 +411,18 @@ def execute_experiment_run(
     error and records nothing.
 
     Under an ``EvaluationRunIdentityV2`` (issue 112), the specification's
-    parameters and the parameters the running strategy exposes must both hash
-    to the identity's ``strategy_parameters_hash``, or
-    ``StrategyParametersBindingError`` is raised and nothing is recorded. A V1
-    run is unchanged.
+    parameters, read once, must hash to the identity's
+    ``strategy_parameters_hash``, and that one digest is the M0 row's
+    ``parameters_hash``. The engine binds the running strategy's parameters,
+    read once, before any session. Either refusal raises
+    ``StrategyParametersBindingError`` and records nothing: the engine's is
+    re-raised exactly as ``PromotionLaneDisabledError`` is, never recorded as
+    a FAILED run. A V1 run is unchanged.
     """
     refuse_promotion_lane(context.engine.admission, site="the experiment runner")
     inputs = _caller_inputs(specification, context)
     _validate_context(inputs)
-    _require_bound_parameters(specification, context, inputs)
+    parameters_hash = _bound_parameters_hash(specification, inputs)
     common: dict[str, object] = {
         "run_id": inputs.run_id,
         "experiment_id": inputs.experiment_id,
@@ -429,15 +431,19 @@ def execute_experiment_run(
         "code_hash": inputs.run_identity.code_version_hash,
         "environment_hash": inputs.run_identity.environment_closure_hash,
         "dataset_hash": inputs.dataset_hash,
-        "parameters_hash": content_hash(specification.parameters),
+        "parameters_hash": parameters_hash,
     }
     try:
         artifacts = context.engine.run(
             strategy=context.strategy, run_identity=inputs.run_identity
         )
-    except PromotionLaneDisabledError:
+    except PromotionLaneDisabledError, StrategyParametersBindingError:
         # A refusal from inside the run is still a refusal (issue 120 review,
-        # F-B): it is never laundered into a recorded FAILED run.
+        # F-B): it is never laundered into a recorded FAILED run. The engine
+        # raises a parameters binding refusal only before any session (issue
+        # 112 review, F2). A strategy that raises either error itself from its
+        # decision method is likewise not recorded; strategy code is trusted
+        # at the process level (#113 freeze note).
         raise
     except Exception as error:
         detail = (

@@ -66,14 +66,16 @@ def _parameters_path(path: str, step: str | int) -> str:
 def _exact_parameters(value: object, path: str, label: str) -> JSONValue:
     """Copy canonical JSON data out of ``value``, refusing anything else.
 
-    Each node is accepted on its exact type alone, so no method a key or leaf
-    defines runs. A subclassed leaf or key is refused rather than trusted: a
-    key equal to every key could collapse two parameters into one while the
-    hash was taken, and a leaf equal to every value would answer any
-    comparison. A dict subclass is refused because its own methods could show
-    other contents than its storage. A mapping proxy, the form a specification
-    holds, is read once, through the mapping it wraps, and a key it names
-    twice is refused.
+    Every key, leaf, list, tuple and dict is accepted on its exact type alone,
+    so a subclass of any of them is refused and none of their own methods
+    runs: a key equal to every key could collapse two parameters into one, a
+    leaf equal to every value would answer any comparison, and a dict, list or
+    tuple subclass could show other contents than its storage. A mapping
+    proxy, the form a specification holds, is accepted whatever it wraps. It
+    is read once, through the wrapped mapping's ``items()``, which is caller
+    or strategy code when that mapping is not exactly a dict, and a key that
+    read yields twice is refused. The copy holds exactly what that one read
+    yielded, so what is hashed is what was read.
     """
     kind = type(value)
     if value is None or kind is str or kind is int or kind is bool:
@@ -123,12 +125,27 @@ def strategy_parameters_hash(
     whether the data is a literal or the frozen form a specification holds.
     Anything that is not exactly canonical JSON data is refused with a
     ``StrategyParametersBindingError`` naming ``label`` and the offending path,
-    never repaired, so no forged comparison can reach the digest.
+    never repaired, so no forged comparison can reach the digest. So are
+    parameters nested too deeply to copy, and ones with no canonical JSON
+    form, such as a string with no UTF-8 form or an integer longer than the
+    interpreter will write.
+
+    ``parameters`` is read exactly once. A caller that records or compares a
+    parameters hash must use this one digest and never hash the parameters
+    again: a second read, above all a differently implemented one such as
+    ``content_hash``, can see other contents (issue 112 review, F1).
     """
-    copy = _exact_parameters(parameters, "$", label)
     try:
+        copy = _exact_parameters(parameters, "$", label)
         return content_hash(copy)
-    except UnicodeError as error:
+    except StrategyParametersBindingError:
+        raise
+    except RecursionError as error:
+        raise StrategyParametersBindingError(
+            f"{label} must be canonical JSON data (issue 112): they nest too "
+            "deeply to copy"
+        ) from error
+    except ValueError as error:
         raise StrategyParametersBindingError(
             f"{label} must be canonical JSON data (issue 112): they have no "
             f"canonical form: {error}"

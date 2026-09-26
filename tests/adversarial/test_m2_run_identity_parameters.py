@@ -48,11 +48,14 @@ from drift.domain.evaluator_bundles import (
 )
 from drift.domain.evaluator_results import EvaluationRunArtifactsV1
 from drift.domain.evaluator_strategy import ParameterizedStrategy, RuntimeStrategy
+from drift.domain.experiments import ExperimentSpecification
+from drift.domain.strategies import StrategyReference
 from drift.evaluator.bundles import (
     build_evaluation_run_identity,
     build_evaluation_run_identity_v2,
 )
 from drift.evaluator.engine import (
+    NonCanonicalEngineInputError,
     SessionEvaluatorEngine,
     require_bound_strategy_parameters,
 )
@@ -85,6 +88,14 @@ EXPOSED_NOT_CANONICAL = (
 SPECIFICATION_NOT_CANONICAL = (
     r"^the specification parameters must be canonical JSON data \(issue 112\): "
 )
+DEFAULT_NOT_CANONICAL = (
+    r"^strategy parameters must be canonical JSON data \(issue 112\): "
+)
+STRATEGY_NOT_BOUND = (
+    r"^the run identity must bind the strategy that runs: identity binds "
+    r"a{64}, the strategy is 9{64}$"
+)
+NON_CANONICAL_REFERENCE = r"^the strategy's strategy_reference "
 
 #: `EvaluationRunIdentityV1`, frozen by the issue 112 ruling. Computed at
 #: 7213c67, before `EvaluationRunIdentityV2` existed, over the pinned
@@ -108,6 +119,12 @@ V1_IDENTITY_FIELDS = (
 #: It pins the V1 hash function's bytes independently of any evidence.
 V1_SYNTHETIC_IDENTITY_HASH = (
     "bd3d694ca6f47b15a4972f043867d5728bee99423d75ed7313391a62901759ca"
+)
+#: The same synthetic fields under V2, with parameters hash "9" * 64, computed
+#: at 52651bd. It pins the V2 hash document: its schema version, its
+#: parameters key and its canonical bytes.
+V2_SYNTHETIC_IDENTITY_HASH = (
+    "6a38169e225141bc857816100d3ac3b7aa75ef73563845dce08d63f6fb711e11"
 )
 
 
@@ -193,6 +210,41 @@ class _LyingDict(dict[str, object]):
 
     def __getitem__(self, key: str) -> object:
         return TEN[key]
+
+
+class _Text(str):
+    """A text leaf of a subclass, as a ``StrEnum`` member is."""
+
+
+class _Real(float):
+    """A float leaf of a subclass."""
+
+
+class _List(list[object]):
+    """A list of a subclass."""
+
+
+class _Tuple(tuple[object, ...]):
+    """A tuple of a subclass."""
+
+
+def _nested(depth: int) -> object:
+    value: object = 0
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+class _SplitDict(dict[str, object]):
+    """A dict whose ``items()`` answers TEN while its storage holds FIVE.
+
+    Iteration and lookup read the storage, so ``content_hash`` of it, or of a
+    proxy over it, answers FIVE, while one read through ``items()`` answers
+    TEN.
+    """
+
+    def items(self) -> Any:
+        return TEN.items()
 
 
 class _RepeatingMapping(Mapping[str, object]):
@@ -383,6 +435,19 @@ def test_the_v2_hash_binds_the_parameters_hash() -> None:
         first.model_copy(update={"strategy_parameters_hash": H["a"]})
 
 
+def test_the_v2_identity_hash_function_is_pinned() -> None:
+    """V2 is the canonical M3 identity, so its hash bytes are pinned too."""
+    draft = EvaluationRunIdentityV2.model_construct(
+        run_identity_hash="0" * 64,
+        **_synthetic_identity_fields(),
+        strategy_parameters_hash=H["9"],
+    )
+
+    assert evaluation_run_identity_v2_hash(draft) == V2_SYNTHETIC_IDENTITY_HASH
+    sealed = _sealed_v2(**_synthetic_identity_fields(), strategy_parameters_hash=H["9"])
+    assert sealed.run_identity_hash == V2_SYNTHETIC_IDENTITY_HASH
+
+
 def test_the_identity_union_discriminates_on_the_schema_version() -> None:
     adapter: TypeAdapter[EvaluationRunIdentityV1 | EvaluationRunIdentityV2] = (
         TypeAdapter(EvaluationRunIdentity)
@@ -468,11 +533,32 @@ def test_the_parameters_hash_is_the_content_hash_of_canonical_parameters() -> No
         ({"target_quantity": "\ud800"}, r"they have no canonical form"),
         ({"rate": Decimal("0.05")}, r"the value at \$\['rate'\] is not exactly"),
         ([{"a": {1, 2}}], r"the value at \$\[0\]\['a'\] is not exactly"),
+        ({"mode": _Text("a")}, r"the value at \$\['mode'\] is not exactly"),
+        ({"rate": _Real(0.5)}, r"the value at \$\['rate'\] is not exactly"),
+        (_List([1]), r"the value at \$ is not exactly"),
+        ({"members": _Tuple((1,))}, r"the value at \$\['members'\] is not exactly"),
+        (_nested(5000), r"they nest too deeply to copy"),
     ],
 )
 def test_non_canonical_parameters_are_refused(parameters: object, problem: str) -> None:
-    with pytest.raises(StrategyParametersBindingError, match=problem):
+    with pytest.raises(
+        StrategyParametersBindingError, match=DEFAULT_NOT_CANONICAL + problem
+    ):
         strategy_parameters_hash(parameters)
+
+
+def test_an_integer_too_long_to_write_is_refused() -> None:
+    """Python refuses to write an int of more digits than its limit."""
+    previous = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    try:
+        with pytest.raises(
+            StrategyParametersBindingError,
+            match=DEFAULT_NOT_CANONICAL + r"they have no canonical form",
+        ):
+            strategy_parameters_hash({"x": 10**5000})
+    finally:
+        sys.set_int_max_str_digits(previous)
 
 
 def test_the_parameters_error_is_a_drift_value_error() -> None:
@@ -658,10 +744,10 @@ def test_the_runner_records_a_v2_run_under_its_parameters(tmp_path: Path) -> Non
     specification = run_support._specification()
     assert specification.parameters == TEN
     identity = _v2_identity(engine, TEN)
+    strategy = ParameterizedFixedTargetStrategy(TEN)
 
     run = execute_experiment_run(
-        specification,
-        _v2_context(engine, ParameterizedFixedTargetStrategy(TEN), identity, ledger),
+        specification, _v2_context(engine, strategy, identity, ledger)
     )
 
     assert run.status.value == "completed"
@@ -669,6 +755,8 @@ def test_the_runner_records_a_v2_run_under_its_parameters(tmp_path: Path) -> Non
     assert run.parameters_hash == identity.strategy_parameters_hash
     assert run_support._metric(run, "run_identity_hash") == identity.run_identity_hash
     assert len(ledger.verified_events()) == 1
+    # One read on the whole runner path: the engine's pre-session binding.
+    assert strategy.parameter_reads == 1
 
 
 def test_the_runner_refuses_a_specification_of_other_parameters(
@@ -691,7 +779,7 @@ def test_the_runner_refuses_a_specification_of_other_parameters(
 def test_the_runner_refuses_a_running_strategy_of_other_parameters(
     tmp_path: Path,
 ) -> None:
-    """Refused before the engine runs, never recorded as a FAILED run."""
+    """Refused before any session, re-raised, never recorded as a FAILED run."""
     ledger = SQLiteLedger(tmp_path / "audit.sqlite3")
     engine = eng._engine()
     strategy = ParameterizedFixedTargetStrategy(FIVE)
@@ -758,6 +846,182 @@ def test_the_runner_compares_the_specification_with_the_canonical_identity(
         )
     assert strategy.seen == []
     assert ledger.verified_events() == ()
+
+
+def _specification_holding(
+    parameters: object, *, construct: bool
+) -> ExperimentSpecification:
+    """The genuine specification, its parameters forged in after validation."""
+    genuine = run_support._specification()
+    if construct:
+        return ExperimentSpecification.model_construct(
+            **(dict(genuine) | {"parameters": parameters})
+        )
+    forged = genuine.model_copy()
+    object.__setattr__(forged, "parameters", parameters)
+    return forged
+
+
+@pytest.mark.parametrize("construct", [False, True], ids=["setattr", "model-construct"])
+def test_the_runner_records_the_one_parameters_digest_it_checked(
+    tmp_path: Path, construct: bool
+) -> None:
+    """Review F1: the M0 row records the digest checked, from one read.
+
+    A proxy over a dict whose ``items()`` answers TEN while its storage holds
+    FIVE answers TEN to the one read the check takes and FIVE to any second,
+    differently implemented read. The M0 row must name the parameters the
+    identity binds, so it records the checked digest, never a re-read.
+    """
+    forged_parameters = MappingProxyType(_SplitDict(FIVE))
+    assert strategy_parameters_hash(forged_parameters) == content_hash(TEN)
+    assert content_hash(forged_parameters) == content_hash(FIVE)
+    ledger = SQLiteLedger(tmp_path / "audit.sqlite3")
+    engine = eng._engine()
+    identity = _v2_identity(engine, TEN)
+
+    run = execute_experiment_run(
+        _specification_holding(forged_parameters, construct=construct),
+        _v2_context(engine, ParameterizedFixedTargetStrategy(TEN), identity, ledger),
+    )
+
+    assert run.status.value == "completed"
+    assert run.parameters_hash == identity.strategy_parameters_hash
+    assert run.parameters_hash == content_hash(TEN)
+    assert len(ledger.verified_events()) == 1
+
+
+class _FlipFlopStrategy(ParameterizedFixedTargetStrategy):
+    """Answers its first parameters read with one value, every later read another."""
+
+    def __init__(self, first: object, later: object) -> None:
+        super().__init__(first)
+        self.first = first
+        self.later = later
+
+    @property
+    def strategy_parameters(self) -> ImmutableJSONValue:
+        self.parameter_reads += 1
+        answer = self.first if self.parameter_reads == 1 else self.later
+        return answer  # type: ignore[return-value]
+
+
+def test_the_runner_path_reads_the_strategy_parameters_once(tmp_path: Path) -> None:
+    """Review F2: a strategy answering TEN, then FIVE, is asked once.
+
+    Before the fix the runner read TEN and the engine read FIVE, so the
+    engine refused and the runner recorded a FAILED row and audit event.
+    """
+    ledger = SQLiteLedger(tmp_path / "audit.sqlite3")
+    engine = eng._engine()
+    identity = _v2_identity(engine, TEN)
+    strategy = _FlipFlopStrategy(TEN, FIVE)
+
+    run = execute_experiment_run(
+        run_support._specification(), _v2_context(engine, strategy, identity, ledger)
+    )
+
+    assert strategy.parameter_reads == 1
+    assert run.status.value == "completed"
+    assert run.parameters_hash == identity.strategy_parameters_hash
+    assert len(ledger.verified_events()) == 1
+
+
+def test_a_parameters_refusal_inside_the_run_is_never_recorded(
+    tmp_path: Path,
+) -> None:
+    """Review F2: the engine's refusal is re-raised, never recorded FAILED."""
+    ledger = SQLiteLedger(tmp_path / "audit.sqlite3")
+    engine = eng._engine()
+    strategy = _FlipFlopStrategy(FIVE, TEN)
+
+    with pytest.raises(StrategyParametersBindingError, match=ENGINE_MISMATCH):
+        execute_experiment_run(
+            run_support._specification(),
+            _v2_context(engine, strategy, _v2_identity(engine, TEN), ledger),
+        )
+    assert strategy.parameter_reads == 1
+    assert strategy.seen == []
+    assert ledger.verified_events() == ()
+
+
+# ==========================================================================
+# The engine binds the strategy that runs from one canonical read
+# ==========================================================================
+
+
+def _reference_of_code_hash(code_hash: object) -> StrategyReference:
+    """The genuine reference, its code hash forged in without validation."""
+    return StrategyReference.model_construct(
+        **(dict(eng.STRATEGY_REFERENCE) | {"code_hash": code_hash})
+    )
+
+
+class _StrategyOfReference(eng.FixedTargetStrategy):
+    """Answers each ``strategy_reference`` read with the next reference given."""
+
+    def __init__(self, *references: object) -> None:
+        super().__init__(eng._buy_ten().targets)
+        self.references = references
+        self.reference_reads = 0
+
+    @property
+    def strategy_reference(self) -> StrategyReference:
+        answer = self.references[min(self.reference_reads, len(self.references) - 1)]
+        self.reference_reads += 1
+        return answer  # type: ignore[return-value]
+
+
+def test_a_code_hash_equal_to_every_text_cannot_pass_the_strategy_binding() -> None:
+    """Review F5: the engine compared the strategy's raw code hash.
+
+    A code hash spelling another version but equal to every string answered
+    the engine's comparison with its own reflected ``__ne__``.
+    """
+    lying = _TextEqualToEveryText("9" * 64)
+    assert lying == eng.STRATEGY_CODE_HASH
+    engine = eng._engine()
+    strategy = _StrategyOfReference(_reference_of_code_hash(lying))
+
+    with pytest.raises(ValueError, match=STRATEGY_NOT_BOUND):
+        engine.run(strategy=strategy, run_identity=_v1_identity(engine))
+    assert strategy.seen == []
+    assert strategy.reference_reads == 1
+
+
+def test_the_engine_reads_the_strategy_reference_once() -> None:
+    """Review F5: a reference that changes between reads is read once."""
+    engine = eng._engine()
+    impostor = _reference_of_code_hash("9" * 64)
+    genuine_first = _StrategyOfReference(eng.STRATEGY_REFERENCE, impostor)
+
+    artifacts = engine.run(strategy=genuine_first, run_identity=_v1_identity(engine))
+
+    assert genuine_first.reference_reads == 1
+    assert artifacts.result.result_hash == REALIZED_RESULT_HASH_SINCE_ISSUE_63_STAGE_2
+    impostor_first = _StrategyOfReference(impostor, eng.STRATEGY_REFERENCE)
+    with pytest.raises(ValueError, match=STRATEGY_NOT_BOUND):
+        engine.run(strategy=impostor_first, run_identity=_v1_identity(engine))
+    assert impostor_first.reference_reads == 1
+    assert impostor_first.seen == []
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        _reference_of_code_hash("not a digest"),
+        _reference_of_code_hash(10),
+        object(),
+    ],
+    ids=["malformed-code-hash", "integer-code-hash", "not-a-reference"],
+)
+def test_a_non_canonical_strategy_reference_is_refused(reference: object) -> None:
+    engine = eng._engine()
+    strategy = _StrategyOfReference(reference)
+
+    with pytest.raises(NonCanonicalEngineInputError, match=NON_CANONICAL_REFERENCE):
+        engine.run(strategy=strategy, run_identity=_v1_identity(engine))
+    assert strategy.seen == []
 
 
 # ==========================================================================
