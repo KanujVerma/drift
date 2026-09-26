@@ -66,13 +66,14 @@ def _parameters_path(path: str, step: str | int) -> str:
 def _exact_parameters(value: object, path: str, label: str) -> JSONValue:
     """Copy canonical JSON data out of ``value``, refusing anything else.
 
-    Only type identity is read, so no method a caller or strategy defines on a
-    leaf runs. A subclassed leaf or key is refused rather than trusted: a key
-    equal to every key would otherwise collapse two parameters into one while
-    the hash was taken, and a leaf equal to every value would answer any
+    Each node is accepted on its exact type alone, so no method a key or leaf
+    defines runs. A subclassed leaf or key is refused rather than trusted: a
+    key equal to every key could collapse two parameters into one while the
+    hash was taken, and a leaf equal to every value would answer any
     comparison. A dict subclass is refused because its own methods could show
     other contents than its storage. A mapping proxy, the form a specification
-    holds, is read once, and a key it names twice is refused.
+    holds, is read once, through the mapping it wraps, and a key it names
+    twice is refused.
     """
     kind = type(value)
     if value is None or kind is str or kind is int or kind is bool:
