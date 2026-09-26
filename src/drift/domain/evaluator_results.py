@@ -19,7 +19,7 @@ from typing import Annotated, Literal, Self
 from pydantic import Field, field_validator, model_validator
 
 from drift.domain.common import FrozenModel, NonBlankStr, SHA256Hash
-from drift.domain.evaluator_bundles import EvaluationRunIdentityV1
+from drift.domain.evaluator_bundles import EvaluationRunIdentity
 from drift.domain.evaluator_lanes import (
     ExploratoryEvaluationAdmissionV1,
     PromotionEvaluationAdmissionV1,
@@ -190,7 +190,10 @@ class _EvaluationResultBaseV1(FrozenModel):
     """Deterministic fields shared by both lane-bound result artifacts."""
 
     schema_version: Literal["1"] = "1"
-    run_identity: EvaluationRunIdentityV1
+    # Either identity version (issue 112). A V1 identity dumps exactly as it
+    # did when this field admitted only V1, so every V1 result hash is
+    # unchanged; a V2 run's result carries its V2 identity.
+    run_identity: EvaluationRunIdentity
     classification: EvaluationClassification
     halted_session_index: int | None = Field(default=None, ge=0)
     halt_reason: NonBlankStr | None = None

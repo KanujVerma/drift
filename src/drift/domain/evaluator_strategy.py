@@ -14,7 +14,7 @@ from uuid import UUID
 
 from pydantic import Field, field_validator, model_validator
 
-from drift.domain.common import UUID7, FrozenModel, UTCDateTime
+from drift.domain.common import UUID7, FrozenModel, ImmutableJSONValue, UTCDateTime
 from drift.domain.evaluator_clock import EvaluationSessionV1
 from drift.domain.evaluator_portfolio import SecurityHoldingV1, decimal_context
 from drift.domain.normalization import DerivedObservationViewV1
@@ -294,6 +294,27 @@ class RuntimeStrategy(Protocol):
 
     def decide(self, context: StrategyDecisionContextV1) -> StrategyDecisionIntentV1:
         """Answer a causal decision context with a complete target intent."""
+        ...
+
+
+@runtime_checkable
+class ParameterizedStrategy(Protocol):
+    """The strategy parameters surface a V2 run identity binds (issue 112).
+
+    An addition beside the lane protocols, not a change to them: a strategy
+    answers ``decide`` or ``decide_exploratory`` for its lane, and exposes its
+    parameters here. Only a run under an ``EvaluationRunIdentityV2`` reads
+    this member, once, before any session is stepped, and refuses a strategy
+    that lacks it; a V1 run never reads it. The value must be canonical JSON
+    data (exactly a ``dict`` or mapping proxy with exact ``str`` keys, a
+    ``list`` or ``tuple``, or an exact ``str``, ``int``, finite ``float``,
+    ``bool`` or ``None``), and its ``strategy_parameters_hash()`` must equal
+    the identity's ``strategy_parameters_hash``.
+    """
+
+    @property
+    def strategy_parameters(self) -> ImmutableJSONValue:
+        """The canonical parameters this strategy instance runs with."""
         ...
 
 

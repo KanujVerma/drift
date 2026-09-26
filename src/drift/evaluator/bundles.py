@@ -7,8 +7,10 @@ from drift.domain.economic_results import EconomicOutcomeResolutionV1
 from drift.domain.evaluator_bundles import (
     EvaluationInputBundleV1,
     EvaluationRunIdentityV1,
+    EvaluationRunIdentityV2,
     evaluation_input_bundle_hash,
     evaluation_run_identity_hash,
+    evaluation_run_identity_v2_hash,
     require_reconstructions_on_scheduled_clock,
 )
 from drift.domain.evaluator_clock import SessionClockV1
@@ -906,6 +908,17 @@ def validate_promotion_admission(
         )
 
 
+def _require_admitted_bundle(
+    admission: EvaluationAdmissionV1, bundle: EvaluationInputBundleV1
+) -> None:
+    if admission.input_bundle_hash != bundle.bundle_hash:
+        raise ValueError(
+            "run identity requires the admission to admit this exact bundle: "
+            f"admission binds {admission.input_bundle_hash}, "
+            f"bundle is {bundle.bundle_hash}"
+        )
+
+
 def build_evaluation_run_identity(
     *,
     strategy_hash: SHA256Hash,
@@ -924,12 +937,7 @@ def build_evaluation_run_identity(
     is enforced here. Accepting the two hashes independently allowed a run
     identity to bind an admission to a bundle that admission never admitted.
     """
-    if admission.input_bundle_hash != bundle.bundle_hash:
-        raise ValueError(
-            "run identity requires the admission to admit this exact bundle: "
-            f"admission binds {admission.input_bundle_hash}, "
-            f"bundle is {bundle.bundle_hash}"
-        )
+    _require_admitted_bundle(admission, bundle)
     draft = EvaluationRunIdentityV1.model_construct(
         schema_version="1",
         strategy_hash=strategy_hash,
@@ -946,3 +954,43 @@ def build_evaluation_run_identity(
         update={"run_identity_hash": evaluation_run_identity_hash(draft)}
     )
     return EvaluationRunIdentityV1.model_validate(candidate.model_dump())
+
+
+def build_evaluation_run_identity_v2(
+    *,
+    strategy_hash: SHA256Hash,
+    strategy_parameters_hash: SHA256Hash,
+    protocol_hash: SHA256Hash,
+    cost_model_hash: SHA256Hash,
+    admission: EvaluationAdmissionV1,
+    bundle: EvaluationInputBundleV1,
+    evaluator_evidence_hash: SHA256Hash,
+    code_version_hash: SHA256Hash,
+    environment_closure_hash: SHA256Hash,
+) -> EvaluationRunIdentityV2:
+    """Build the V2 run identity, which also binds strategy parameters (#112).
+
+    ``strategy_parameters_hash`` is the ``strategy_parameters_hash()`` of the
+    parameters the run declares, which for an experiment run are the
+    specification's. The admission must admit this exact bundle, as for V1.
+    Canonical M3 runs use this identity; ``build_evaluation_run_identity``
+    and V1 are unchanged.
+    """
+    _require_admitted_bundle(admission, bundle)
+    draft = EvaluationRunIdentityV2.model_construct(
+        schema_version="2",
+        strategy_hash=strategy_hash,
+        strategy_parameters_hash=strategy_parameters_hash,
+        protocol_hash=protocol_hash,
+        cost_model_hash=cost_model_hash,
+        admission_hash=admission.admission_hash,
+        bundle_hash=bundle.bundle_hash,
+        evaluator_evidence_hash=evaluator_evidence_hash,
+        code_version_hash=code_version_hash,
+        environment_closure_hash=environment_closure_hash,
+        run_identity_hash="0" * 64,
+    )
+    candidate = draft.model_copy(
+        update={"run_identity_hash": evaluation_run_identity_v2_hash(draft)}
+    )
+    return EvaluationRunIdentityV2.model_validate(candidate.model_dump())
