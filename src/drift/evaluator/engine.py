@@ -159,7 +159,10 @@ from drift.domain.securities import (
 from drift.domain.sessions import SessionKeyV1
 from drift.domain.universes import StructuralEligibilityClassification
 from drift.errors import CanonicalSerializationError, DriftError
-from drift.evaluator.bundles import validate_exploratory_admission
+from drift.evaluator.bundles import (
+    require_evidenced_clock_density,
+    validate_exploratory_admission,
+)
 from drift.evaluator.clock import (
     build_scheduled_reconstruction_clock,
     refuse_same_date_multi_venue_clock,
@@ -718,7 +721,10 @@ def _resolve_reconstructed_lane(
       every reconstruction from its exact source inputs (issue 55), and every
       clock session a reconstruction is on from its calendar row (issue 84).
       A self-consistent reconstruction no source produces never reaches a
-      decision, and neither does a session boundary no row states.
+      decision, and neither does a session boundary no row states. The clock
+      must also be dense: every date it steps across is an evidenced
+      non-trading date under verified closed-world calendar coverage, or
+      construction halts INDETERMINATE (issue 71).
     """
     if isinstance(admission, PromotionEvaluationAdmissionV1):
         if bundle.has_exploratory_reconstructions:
@@ -777,6 +783,9 @@ def _resolve_reconstructed_lane(
         bundle.exploratory_reconstructed_observations, replay=replay, cohort=cohort
     )
     _require_replayed_clock_sessions(bundle.session_clock, replay)
+    # Issue 71 (D8-b): every date the scheduled clock steps across must be an
+    # evidenced non-trading date, or the run halts INDETERMINATE here.
+    require_evidenced_clock_density(bundle.session_clock, replay)
     return _ReconstructedDecisionLane(admission=admission, cohort=cohort)
 
 
