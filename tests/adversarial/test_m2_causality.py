@@ -1460,6 +1460,16 @@ LYING_DATES: dict[str, type[date]] = {
     "and-ordinal-and-iso-form": _LyingFormDate,
 }
 
+#: The refusal each forged clock meets. A date whose ISO form is not its
+#: value's no longer survives revalidation (issue 123): the canonical JSON
+#: rebuild reads its value, so its session no longer matches the hash sealed
+#: over the forged ISO form, and the input is refused before any clock guard.
+LYING_DATE_REFUSALS: dict[type[date], tuple[type[Exception], str]] = {
+    _LyingHashDate: (SameDateMultiVenueClockError, SAME_DATE_CLOCK_REFUSAL),
+    _LyingOrderDate: (SameDateMultiVenueClockError, SAME_DATE_CLOCK_REFUSAL),
+    _LyingFormDate: (ValidationError, r"session hash mismatch"),
+}
+
 
 @pytest.mark.parametrize("lying", LYING_DATES.values(), ids=LYING_DATES)
 def test_a_subclassed_date_cannot_slip_a_same_date_clock_past_construction(
@@ -1467,12 +1477,15 @@ def test_a_subclassed_date_cannot_slip_a_same_date_clock_past_construction(
 ) -> None:
     """#127 review F3: the refusal reads each date through the base type.
 
-    Revalidation keeps a ``date`` subclass on ``local_date`` (issue 123), so
-    the XNAS DAY_1 session can carry one whose own methods say it is another
-    date. Keyed on the value, the refusal was bypassed, and the lying order
-    passes the next-open guard too. Through ``date.toordinal`` and
-    ``date.isoformat`` no subclass method runs, so the forged clock is
-    refused exactly as the genuine one.
+    The input bundle holds a ``date`` subclass on ``local_date``, so the XNAS
+    DAY_1 session carries one whose own methods say it is another date. Keyed
+    on the value, the refusal was bypassed, and the lying order passes the
+    next-open guard too. Through ``date.toordinal`` and ``date.isoformat`` no
+    subclass method runs, so the forged clock is refused exactly as the
+    genuine one. Since issue 123 the engine rebuilds its inputs through
+    canonical JSON, which reads the date's value: a date whose ISO form names
+    another day no longer matches the session hash sealed over that form, and
+    is refused earlier, at revalidation, before any clock guard runs.
     """
     forged = lying(DAY_1.year, DAY_1.month, DAY_1.day)
     xnas = _resealed(
@@ -1487,8 +1500,9 @@ def test_a_subclassed_date_cannot_slip_a_same_date_clock_past_construction(
         accounting_views=(_accounting_view(SEC_A, DAY_1),),
     )
     assert type(bundle.session_clock.sessions[1].session_key.local_date) is lying
+    refusal, reason = LYING_DATE_REFUSALS[lying]
 
-    with pytest.raises(SameDateMultiVenueClockError, match=SAME_DATE_CLOCK_REFUSAL):
+    with pytest.raises(refusal, match=reason):
         _engine(bundle=bundle, protocol=_protocol(warmup=1))
 
 
@@ -1595,9 +1609,9 @@ def test_the_non_overlap_guard_is_what_keeps_decision_history_closed() -> None:
 
 
 def _f4_run(
-    other_days: tuple[date, ...],
+    other_days: tuple[date, ...], target_day: date = JAN6
 ) -> tuple[EvaluationRunArtifactsV1, ReconstructedTargetStrategy]:
-    """SEC on every day, SEC_OTHER on its own days; JAN6 targets SEC_OTHER."""
+    """SEC on every day, SEC_OTHER on its own days; ``target_day`` buys SEC_OTHER."""
     pair = (SEC, SEC_OTHER)
     ours = tuple(
         scheduled_session_case(day, cohort_securities=pair)
@@ -1616,7 +1630,7 @@ def _f4_run(
         (*(observation for observation, _ in ours), *theirs),
         tuple(session for _, session in ours),
     )
-    strategy = ReconstructedTargetStrategy({JAN6: ((SEC_OTHER, 1),)})
+    strategy = ReconstructedTargetStrategy({target_day: ((SEC_OTHER, 1),)})
     engine = reconstructed_engine(bundle, cohort=cohort_of(pair))
     return run_engine(engine, strategy), strategy
 
@@ -1659,6 +1673,54 @@ def test_a_member_missing_its_decision_bar_halts_before_it_can_be_traded() -> No
     control, _ = _f4_run((JAN5, JAN6, JAN7))
 
     assert control.result.classification is EvaluationClassification.COMPLETE
+    fills = [event for event in control.trace.events if event.kind == "fill"]
+    assert [
+        (event.session_key.local_date, event.fill.security_id) for event in fills
+    ] == [(JAN7, SEC_OTHER)]
+
+
+def test_a_member_without_decision_time_history_cannot_be_entered_blind() -> None:
+    """F2 (issue 130): a cohort chosen after the fact must not leak a member's future.
+
+    SEC_OTHER's first reconstruction is JAN6, so the JAN5 decision holds no
+    evidence for it at all. Before issue 130 the JAN5 context still admitted
+    it, a JAN5 target staged, and it filled at the JAN6 open, its first-ever
+    reconstructed open: the run was COMPLETE on a blind entry whose only
+    support was that the cohort lists a security that will trade later. Each
+    decision now admits only the members with reconstructed history at or
+    before its cutoff, so the target is REJECTED at staging with the
+    unadmitted-target cause, and nothing fills. Control: from its first
+    reconstructed session the same member is admitted, and a JAN6 target
+    fills at the JAN7 open.
+    """
+    artifacts, strategy = _f4_run((JAN6, JAN7), target_day=JAN5)
+
+    reason = f"a positive target requires an admitted security: {SEC_OTHER}"
+    assert artifacts.result.classification is EvaluationClassification.REJECTED
+    assert artifacts.result.halted_session_index == 0
+    assert artifacts.result.halt_reason == reason
+    decisions = [
+        event
+        for event in artifacts.trace.events
+        if event.kind == "exploratory_strategy_decision"
+    ]
+    assert [
+        (event.session_key.local_date, event.outcome, event.staged_targets)
+        for event in decisions
+    ] == [(JAN5, "rejected", ())]
+    assert decisions[0].rejection_reason == reason
+    assert [context.admitted_cohort for context in strategy.seen] == [(SEC,)]
+    assert not [event for event in artifacts.trace.events if event.kind == "fill"]
+    assert artifacts.final_state.holdings == ()
+
+    control, admitted = _f4_run((JAN6, JAN7))
+
+    assert control.result.classification is EvaluationClassification.COMPLETE
+    assert [set(context.admitted_cohort) for context in admitted.seen] == [
+        {SEC},
+        {SEC, SEC_OTHER},
+        {SEC, SEC_OTHER},
+    ]
     fills = [event for event in control.trace.events if event.kind == "fill"]
     assert [
         (event.session_key.local_date, event.fill.security_id) for event in fills
