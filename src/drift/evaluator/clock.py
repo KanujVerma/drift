@@ -41,6 +41,18 @@ _required_session_authority = {
 }
 
 
+class RealizedSessionLocalDateError(DriftError, ValueError):
+    """Raised when a realized session's UTC stamps are not on its local date.
+
+    Issue 140. A realized record's ``actual_open`` and ``actual_close`` are
+    UTC instants, and M1d binds neither to the record's own
+    ``session_key.local_date``. A record stamped days after its date would
+    re-derive, faithfully, into the issue 95 lagged clock, so the realized
+    builder, and with it ``verify_session_clock`` and the bundle boundary,
+    refuses such a record.
+    """
+
+
 def _session_from_authority(
     *,
     session_key: SessionKeyV1,
@@ -97,7 +109,12 @@ def build_realized_session_clock(
     queries: tuple[ObservationQueryV1, ...],
     context: M1dResolutionContext,
 ) -> SessionClockV1:
-    """Build a realized-authority clock from authentic selected realized sessions."""
+    """Build a realized-authority clock from authentic selected realized sessions.
+
+    Each admitted record's stamps must fall on its own local date in the
+    venue's authorized local time (issue 140), so a record misdated at its
+    source cannot re-derive into a lagged clock.
+    """
     validate_m1d_resolution_context(context)
     if not queries:
         raise ValueError("realized clock requires at least one session query")
@@ -124,6 +141,9 @@ def build_realized_session_clock(
             )
         if record.actual_close <= record.actual_open:
             raise ValueError("realized session close must follow open")
+        _require_stamps_on_local_date(
+            record, record.actual_open, record.actual_close, query, context
+        )
         sessions.append(
             _session_from_authority(
                 session_key=record.session_key,
@@ -141,6 +161,62 @@ def build_realized_session_clock(
         sessions=sessions_tuple,
         limitations=(),
     )
+
+
+def _require_stamps_on_local_date(
+    record: RealizedSessionVersionV1,
+    actual_open: datetime,
+    actual_close: datetime,
+    query: ObservationQueryV1,
+    context: M1dResolutionContext,
+) -> None:
+    """Refuse a realized record whose UTC stamps are off its local date.
+
+    Issue 140. The venue's local time comes from the authority M1d holds for
+    it: the authorized generated schedule row of the same session key, from
+    the ``generate_schedule`` pipeline the scheduled clock uses. That row
+    converts its local open and close labels to UTC at row-bound historical
+    offsets, each proven by its retained authority artifact, available by the
+    query's cutoff, and agreeing with the exact TZif reconstruction. A label
+    less its authorized UTC instant is therefore that boundary's authorized
+    UTC offset on that date. Each stamp is read at its own boundary's offset,
+    the open at the open's and the close at the close's, and must fall on the
+    record's local date. A row that authorizes no open and close (closed,
+    unknown, indeterminate, or absent) carries no UTC boundaries, since an
+    output that is not authorized never does (``SessionOutputV1``), so it
+    cannot place the stamps, and the record is refused rather than read
+    against the UTC calendar.
+    """
+    key = record.session_key
+    where = f"realized session {key.mic} {key.local_date.isoformat()}"
+    artifact = generate_schedule(query, context, _load_clock_policy(context))
+    rows = _matching_generated_rows(artifact, query)
+    output = rows[0].output if len(rows) == 1 else None
+    if (
+        output is None
+        or output.local_open is None
+        or output.local_close is None
+        or output.utc_open is None
+        or output.utc_close is None
+    ):
+        state = "absent" if output is None else output.state
+        raise RealizedSessionLocalDateError(
+            f"{where} cannot be placed in venue local time: its session key has "
+            "no authorized generated open and close (schedule artifact "
+            f"{artifact.classification}, state {state}) (issue 140)"
+        )
+    for boundary, stamp, label, authorized in (
+        ("open", actual_open, output.local_open, output.utc_open),
+        ("close", actual_close, output.local_close, output.utc_close),
+    ):
+        offset = datetime.fromisoformat(label) - authorized.replace(tzinfo=None)
+        local_date = (stamp + offset).date()
+        if local_date != key.local_date:
+            raise RealizedSessionLocalDateError(
+                f"{where} actual {boundary} {stamp.isoformat()} falls on venue "
+                f"local date {local_date.isoformat()}, not its session date "
+                "(issue 140)"
+            )
 
 
 def build_scheduled_reconstruction_clock(
