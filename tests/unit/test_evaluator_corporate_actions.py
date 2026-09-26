@@ -554,6 +554,7 @@ def _state(
         holdings=holdings,
         pending_cash_claims=claims,
         settled_claim_ids=tuple(sorted(settled)),
+        applied_effect_ids=(),
         mark=None,
         holdings_market_value=ZERO,
         pending_claims_value=claims_value,

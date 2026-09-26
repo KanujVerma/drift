@@ -584,9 +584,12 @@ class PortfolioStateV2(FrozenModel):
     """Immutable portfolio state carrying applied effects and basis status.
 
     ``applied_effect_ids`` records every share-mutating economic effect the
-    book has absorbed, so a replay is detectable from the state alone (issue
+    book has absorbed, and every liquidation instalment that left a basis
+    indeterminate, so a replay is detectable from the state alone (issue
     49), exactly as ``settled_claim_ids`` makes cash entitlements idempotent.
-    Each indeterminate holding names only effects recorded here.
+    Each indeterminate holding names only effects recorded here. Neither
+    record has a default: a rehydrated book that lost one would otherwise
+    read as a book that applied or settled nothing.
     """
 
     schema_version: Literal["2"] = "2"
@@ -596,8 +599,8 @@ class PortfolioStateV2(FrozenModel):
     cash_balance: CanonicalMoney
     holdings: tuple[SecurityHoldingV2, ...]
     pending_cash_claims: tuple[PendingCashClaimV1, ...]
-    settled_claim_ids: tuple[SHA256Hash, ...] = ()
-    applied_effect_ids: tuple[SHA256Hash, ...] = ()
+    settled_claim_ids: tuple[SHA256Hash, ...]
+    applied_effect_ids: tuple[SHA256Hash, ...]
     mark: PortfolioMarkV1 | None = None
     holdings_market_value: CanonicalMoney
     pending_claims_value: CanonicalMoney

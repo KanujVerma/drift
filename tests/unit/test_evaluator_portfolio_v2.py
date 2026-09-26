@@ -8,6 +8,7 @@ lifts a V1 book into V2: a lift would launder the zero basis a V1 spin-off
 child carries (#103) as a known one.
 """
 
+import json
 from datetime import date
 from decimal import Decimal, localcontext
 from typing import Any
@@ -460,6 +461,22 @@ def test_a_v2_book_records_the_effects_it_absorbed() -> None:
 
 def test_an_empty_v2_book_has_applied_nothing() -> None:
     assert _v2_book().applied_effect_ids == ()
+
+
+@pytest.mark.parametrize("field", ["applied_effect_ids", "settled_claim_ids"])
+def test_a_v2_book_that_lost_its_record_is_refused(field: str) -> None:
+    # A rehydrated checkpoint missing its applied-effect record would read as
+    # a book that applied nothing, and a replay would split it again (#20 Q3).
+    # Missing settled claims would let a paid entitlement pay twice. Neither
+    # record may be defaulted back to empty.
+    book = _v2_book(holdings=(_known(),), applied=(SPLIT_ID,))
+    dumped = json.loads(book.model_dump_json())
+    del dumped[field]
+
+    with pytest.raises(ValidationError, match=rf"^1 validation error .*\n{field}\n"):
+        PortfolioStateV2.model_validate_json(json.dumps(dumped))
+    # Control: the full dump rebuilds the same book.
+    assert PortfolioStateV2.model_validate_json(book.model_dump_json()) == book
 
 
 @pytest.mark.parametrize(
