@@ -1385,6 +1385,30 @@ def test_a_non_terminating_relief_is_deterministic() -> None:
         assert first == Decimal(1000) - Decimal(1000) / Decimal(7)
 
 
+def test_a_relief_that_leaves_the_holding_unchanged_is_still_realized() -> None:
+    # One share of known basis 0 and one new share per ten, the fraction sold
+    # for 0.50: the whole count stays 1 and relieving 0 leaves the basis at
+    # 0, so the holding compares equal to the one the pass opened with. The
+    # 0.50 realized against it must be booked all the same.
+    effect, outcome = _aggregate_sale(
+        4335,
+        kind=ActionKind.STOCK_DIVIDEND,
+        numerator="1",
+        denominator="10",
+        meaning="additional_per_predecessor",
+    )
+    state = ca._state(holdings=(ca._holding(quantity=1, basis="0"),))
+
+    updated = _priced_pass(state, effect, outcome, rate="5")
+
+    assert updated.holdings == state.holdings
+    (claim,) = updated.pending_cash_claims
+    assert claim.total_cash_expected == Decimal("0.5")
+    assert updated.realized_gross_pnl == Decimal("0.5")
+    assert updated.realized_net_pnl == Decimal("0.5")
+    assert _identity(updated, opening="10000") == 0
+
+
 def test_a_residual_of_an_indeterminate_basis_stays_indeterminate() -> None:
     effect, outcome = _aggregate_sale(4340)
     book = _indeterminate_book(_spun(quantity=10))

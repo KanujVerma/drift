@@ -620,7 +620,9 @@ class CorporateActionProcessor:
             )
         )
         state = portfolio_state
-        if book.holdings != opening_holdings:
+        # A cash-in-lieu relief can realize PnL without moving a holding (a
+        # zero basis relieves nothing), so realized PnL rebuilds the book too.
+        if book.holdings != opening_holdings or book.realized != ZERO:
             state = _replace_holdings(state, book.holdings, book.realized, applied)
         elif applied != state.applied_effect_ids:
             # Holdings the pass left alone keep their mark: it still prices
