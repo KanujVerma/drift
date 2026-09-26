@@ -1365,14 +1365,16 @@ def test_delivered_cash_no_evidence_explains_halts_a_held_position() -> None:
 #
 # A corporate action that extinguishes a holding for cash is a disposal. Its
 # basis is relieved into realized PnL exactly as a sale at the owed price
-# would relieve it, so the realized-PnL identity below closes for every book:
+# would relieve it, so the realized-PnL identity below closes for every book
+# whose basis is determinate:
 #
 #     cash + pending claims + remaining basis
 #         == initial cash + realized net PnL + distribution income
 #
 # Buy costs are capitalized into basis and sell costs are charged to realized
 # net PnL, so the identity holds under any cost model. A distribution on
-# shares that continue is income, not a disposal.
+# shares that continue is income, not a disposal. A liquidation instalment
+# leaves the basis indeterminate (issue 105), so its book is not asserted.
 
 _INITIAL_CASH = Decimal("10000.00")
 
@@ -1484,7 +1486,12 @@ def test_a_partial_liquidating_distribution_keeps_the_shares_that_continue() -> 
     # Ten shares at the 120.00 close on 9030.00 of cash.
     assert artifacts.result.metrics.ending_net_asset_value == Decimal("10230.00")
     assert artifacts.final_state.realized_gross_pnl == ZERO
-    _assert_realized_identity(artifacts, income=Decimal("30.00"))
+    # Issue 105: whether the instalment returned capital or paid income is
+    # unproven, so the continuing basis is indeterminate and the identity,
+    # asserted over determinate books only, is not asserted here. Its
+    # disposal would halt (tests/adversarial/test_m2_portfolio_state_v2.py).
+    (holding,) = artifacts.final_state.holdings
+    assert holding.basis_status == "indeterminate"
 
 
 def test_a_liquidation_without_a_proven_claim_outcome_halts() -> None:

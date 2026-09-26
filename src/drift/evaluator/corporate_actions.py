@@ -62,6 +62,7 @@ from drift.domain.evaluator_corporate_actions import (
 )
 from drift.domain.evaluator_portfolio import (
     EffectAlreadyAppliedError,
+    IndeterminateBasisError,
     IndeterminateValuationError,
     PendingCashClaimV1,
     PortfolioStateV2,
@@ -136,12 +137,19 @@ class _Book:
     corporate action extinguished for cash owed, whose basis is relieved
     exactly as a sale at the owed price would relieve it.
 
+    ``realized`` also carries the basis a cash-in-lieu fraction relieves
+    from a known pool it re-denominates (issue 105).
+
     ``delivered`` and ``removed`` record, by security, the share action of
     this pass that delivered shares into its holding from another security
     (a spin-off child, an acquirer), and the one that removed its holding
     (a disposal, a share acquisition). Neither leaves a post-action count
     the prior close's holders are proven entitled on
     (``_require_proven_post_action_count``).
+
+    ``recorded`` holds the applied-effect identities of effects that are not
+    share actions but left a basis indeterminate in this pass (a continuing
+    liquidation instalment), so the book records every cause it names.
     """
 
     opening: Mapping[UUID, SecurityHoldingV2]
@@ -152,6 +160,7 @@ class _Book:
     unmodelled: list[_EffectContext] = field(default_factory=list)
     delivered: dict[UUID, _EffectContext] = field(default_factory=dict)
     removed: dict[UUID, _EffectContext] = field(default_factory=dict)
+    recorded: set[SHA256Hash] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -319,6 +328,83 @@ def _requantified(holding: SecurityHoldingV2, quantity: int) -> SecurityHoldingV
         cost_basis=holding.cost_basis,
         basis_indeterminate_by=holding.basis_indeterminate_by,
     )
+
+
+def _relieve_cash_in_lieu(
+    context: _EffectContext,
+    holding: SecurityHoldingV2,
+    exact: Fraction,
+    residual: Fraction,
+    claim: PendingCashClaimV1,
+    book: _Book,
+) -> SecurityHoldingV2:
+    """Relieve the basis a cash-in-lieu fraction carries out of its pool.
+
+    ``holding`` is the re-denominated whole shares of one basis pool, and
+    ``exact`` the exact entitlement the pool became, of which ``residual`` was
+    sold for the claim's proceeds. Under average cost (spec 11.4) the sold
+    fraction carries ``basis * residual / exact`` of the pool, which the
+    source ratio and the book fully determine, so the relief is realized
+    against the proceeds now, as a disposal's is. An indeterminate pool has
+    no proven basis to relieve: it stays indeterminate and names this effect
+    too (issue 105).
+    """
+    if holding.cost_basis is None:
+        return indeterminate_holding(holding, _applied_effect_id(context))
+    share = Fraction(holding.cost_basis) * residual / exact
+    with decimal_context():
+        relieved = Decimal(share.numerator) / Decimal(share.denominator)
+        remaining = holding.cost_basis - relieved
+        book.realized += claim.total_cash_expected - relieved
+    return SecurityHoldingV2(
+        security_id=holding.security_id,
+        quantity=holding.quantity,
+        basis_status="known",
+        cost_basis=remaining,
+    )
+
+
+def _leave_instalment_basis_unproven(
+    context: _EffectContext, owed: Iterable[PendingCashClaimV1], book: _Book
+) -> None:
+    """Apply the issue 105 rule to one continuing liquidation instalment.
+
+    Whether an instalment returns capital or pays income is unproven. Within
+    a known basis both readings realize 0 and leave different bases, so the
+    holding becomes INDETERMINATE and the instalment is recorded as its
+    cause; the later disposal that would realize it then halts. Above the
+    basis, return of capital would realize a gain income would not, and on
+    an indeterminate basis nothing tells the two apart, so the pass halts.
+    So does an instalment whose holding the window's own disposal or
+    conversion already removed: the readings differ in realized PnL, and no
+    holding is left to carry that as an indeterminate basis.
+    """
+    label = (
+        f"the liquidation instalment {context.occurrence_id} on {context.security_id}"
+    )
+    holding = book.holdings.get(context.security_id)
+    if holding is None:
+        raise IndeterminateBasisError(
+            f"{label} is owed on a holding removed in this window, so whether "
+            "it returned capital changes realized PnL and is not proven"
+        )
+    if holding.cost_basis is None:
+        raise IndeterminateBasisError(
+            f"{label} pays on a basis already indeterminate, caused by "
+            f"{', '.join(holding.basis_indeterminate_by)}, so whether it "
+            "returned capital is not proven"
+        )
+    with decimal_context():
+        total = sum((claim.total_cash_expected for claim in owed), ZERO)
+    if total > holding.cost_basis:
+        raise IndeterminateBasisError(
+            f"{label} owes {total}, which exceeds its basis "
+            f"{holding.cost_basis}, so as a return of capital it would realize "
+            "a gain that as income it would not"
+        )
+    cause = _applied_effect_id(context)
+    book.holdings[context.security_id] = indeterminate_holding(holding, cause)
+    book.recorded.add(cause)
 
 
 def _date_facts(payload: TermsPayloadV1) -> dict[str, EconomicDateFactV1]:
@@ -527,7 +613,11 @@ class CorporateActionProcessor:
                     "has no proven M2 accounting rule"
                 )
         applied = tuple(
-            sorted(already | {_applied_effect_id(context) for context in mutations})
+            sorted(
+                already
+                | {_applied_effect_id(context) for context in mutations}
+                | book.recorded
+            )
         )
         state = portfolio_state
         if book.holdings != opening_holdings:
@@ -901,9 +991,13 @@ class CorporateActionProcessor:
                     "a split would extinguish a held position without proven "
                     "consideration for the remainder"
                 )
-            book.holdings[context.security_id] = _requantified(holding, whole)
+            moved = _requantified(holding, whole)
             if residual:
-                self._stage_cash_in_lieu(context, component, residual, book)
+                claim = self._stage_cash_in_lieu(context, component, residual, book)
+                moved = _relieve_cash_in_lieu(
+                    context, moved, exact, residual, claim, book
+                )
+            book.holdings[context.security_id] = moved
         self._scale_target(context, component, book, tie_break)
 
     def _apply_stock_dividend(
@@ -925,9 +1019,13 @@ class CorporateActionProcessor:
             whole, residual = resolve_whole_shares(
                 exact, component.fraction_treatment, tie_break=tie_break
             )
-            book.holdings[context.security_id] = _requantified(holding, whole)
+            moved = _requantified(holding, whole)
             if residual:
-                self._stage_cash_in_lieu(context, component, residual, book)
+                claim = self._stage_cash_in_lieu(context, component, residual, book)
+                moved = _relieve_cash_in_lieu(
+                    context, moved, exact, residual, claim, book
+                )
+            book.holdings[context.security_id] = moved
         # A stock dividend re-denominates the security exactly as a split
         # does, so a target staged in pre-dividend shares is restated too.
         # Left alone, a staged hold would sell the new shares at the open.
@@ -987,6 +1085,9 @@ class CorporateActionProcessor:
             )
             book.delivered.setdefault(child, context)
         if residual:
+            # A cross-security residual: the child fraction sold for cash
+            # relieves an unallocated share of the parent's basis, which the
+            # spin-off already left indeterminate (issue 105).
             self._stage_cash_in_lieu(context, component, residual, book)
 
     def _apply_cash_distribution(
@@ -1032,6 +1133,7 @@ class CorporateActionProcessor:
             context,
             "a liquidating distribution" if liquidating else "a cash distribution",
         )
+        owed: list[PendingCashClaimV1] = []
         for component in components:
             share_basis = component.unit_basis.share_basis
             if share_basis == "predecessor_pre_action":
@@ -1041,15 +1143,19 @@ class CorporateActionProcessor:
                 holding = book.holdings.get(context.security_id)
             if holding is None:
                 continue
-            self._stage_claim(
-                context=context,
-                component_id=component.component_id,
-                quantity=holding.quantity,
-                cash_per_share=self._cash_per_share(component, context.security_id),
-                entitlement_session=entitlement_on,
-                payable_session=payable_on,
-                book=book,
+            owed.append(
+                self._stage_claim(
+                    context=context,
+                    component_id=component.component_id,
+                    quantity=holding.quantity,
+                    cash_per_share=self._cash_per_share(component, context.security_id),
+                    entitlement_session=entitlement_on,
+                    payable_session=payable_on,
+                    book=book,
+                )
             )
+        if liquidating and owed:
+            _leave_instalment_basis_unproven(context, owed, book)
 
     def _apply_cash_acquisition(
         self, context: _EffectContext, book: _Book, window: _SessionWindow
@@ -1139,17 +1245,13 @@ class CorporateActionProcessor:
         book.removed[context.security_id] = context
         # The predecessor's basis, known or not, carries into the acquirer
         # shares it converts into, pooled with any acquirer already held.
-        book.holdings[acquirer] = pooled_holding(
-            existing,
-            SecurityHoldingV2(
-                security_id=acquirer,
-                quantity=whole,
-                basis_status=holding.basis_status,
-                cost_basis=holding.cost_basis,
-                basis_indeterminate_by=holding.basis_indeterminate_by,
-            ),
+        carried = SecurityHoldingV2(
+            security_id=acquirer,
+            quantity=whole,
+            basis_status=holding.basis_status,
+            cost_basis=holding.cost_basis,
+            basis_indeterminate_by=holding.basis_indeterminate_by,
         )
-        book.delivered.setdefault(acquirer, context)
         if cash or residual:
             payable_on = _payable_session(_date_facts(_terms_payload(context)))
             for component_cash in cash:
@@ -1164,8 +1266,19 @@ class CorporateActionProcessor:
                     payable_session=payable_on,
                     book=book,
                 )
+            if cash:
+                # A cash leg is a partial disposal, and no source allocates
+                # the predecessor's basis between it and the acquirer shares.
+                # Carrying the whole basis forward would publish the cash
+                # leg's realized PnL as 0 as if that were proven (issue 105).
+                carried = indeterminate_holding(carried, _applied_effect_id(context))
             if residual:
-                self._stage_cash_in_lieu(context, component, residual, book)
+                claim = self._stage_cash_in_lieu(context, component, residual, book)
+                carried = _relieve_cash_in_lieu(
+                    context, carried, exact, residual, claim, book
+                )
+        book.holdings[acquirer] = pooled_holding(existing, carried)
+        book.delivered.setdefault(acquirer, context)
 
     def _apply_liquidation(
         self, context: _EffectContext, book: _Book, window: _SessionWindow
@@ -1329,7 +1442,7 @@ class CorporateActionProcessor:
         component: ShareComponentV1,
         residual: Fraction,
         book: _Book,
-    ) -> None:
+    ) -> PendingCashClaimV1:
         """Record the cash leg of an aggregate fractional-share sale."""
         rate = self._in_lieu_rates.get(
             (
@@ -1360,7 +1473,7 @@ class CorporateActionProcessor:
             Fraction(Decimal(rate.cash_per_whole_share)) * residual
         )
         payable_on = _payable_session(_date_facts(_terms_payload(context)))
-        self._stage_claim(
+        return self._stage_claim(
             context=context,
             component_id=cash_in_lieu_component_id(component.component_id, residual),
             quantity=1,

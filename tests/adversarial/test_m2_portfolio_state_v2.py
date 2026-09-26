@@ -382,20 +382,28 @@ RUN_PINS: dict[str, tuple[EvaluationClassification, str, str]] = {
         "4298dd0a38d6dde2f2198b01682cdb97b40b38dd0a71341b256a2b545cedca3d",
         "02fc965d2710dcb1b925fee17b71cb532340a2efc58a78afa49d8065ccd30180",
     ),
+    # Issue 105: the instalment leaves the continuing basis indeterminate, so
+    # the session-3 decision context hash moves (f8b8bbef to 98949b80).
     "continuing-instalment": (
         EvaluationClassification.COMPLETE,
-        "764aacef48770bd968281f2fd0982ab20c29fd2d8d7fcf2502a31f5a260c9454",
-        "cb5351c431f7cab6a0f9c695fdf9d530249e3a4c82508dac00f03e97a801c140",
+        "3a8389cc1a9ffa4ab72b8bc2c3a9a8a47e2ec8e107dc9953844c0fb7dc8cbb08",
+        "93a8945b010bb0e63281669634c173f5400953bb49a2fdbe6e4d8123fd09b4b5",
     ),
+    # Issue 105: the cash leg leaves the acquirer basis indeterminate, so the
+    # session-3 decision context hash moves (bf7c5181 to e8e7a543).
     "mixed-acquisition": (
         EvaluationClassification.COMPLETE,
-        "a0126639c5ecfa4091f0265b70f59ce3337b68cbdacb7c771c1eb8afd8e70a02",
-        "6bd7eeed7b5d21b91e9c5bb00f0193022979774ae92e493f0b7c8ca0c14f1ffc",
+        "49008a24ef2b336652c2df389347c4cf7333af0568daef069fa06f982a20dea0",
+        "731027be491d7b7dfffa91b29c46ce4e0169498af4a05b4faf6ca7aad0ec135e",
     ),
+    # Issue 105: the sold third relieves 100.00 of basis against 1.00 of
+    # proceeds, so realized gross and net PnL move from 0 to -99 and the
+    # session-3 decision sees a 900.00 basis (context hash af429511 to
+    # 87213f0b).
     "aggregate-sale-residual": (
         EvaluationClassification.COMPLETE,
-        "f0c0b5a5d992f44475a89ad8aea521878a6323e061579a363d3b2cb7fdeb030e",
-        "1e76eedc696b21f35e4aee912379fe742e2034f1bf62f7b97cf7c8d44a44c430",
+        "fd5f48edbc67a059c983f0f333dddf6a522f84259dde70be5714e0c634947c15",
+        "e85db665771589686ec0084bc6ca178a131efd2ded7b3c5e09447a7d8fa93ae0",
     ),
 }
 
@@ -517,11 +525,12 @@ def test_a_book_replayed_through_its_own_pre_open_is_refused() -> None:
 
 def test_every_run_records_the_share_actions_it_absorbed() -> None:
     recorded = {name: RUNS[name]().final_state.applied_effect_ids for name in RUNS}
-    # A cash dividend and a continuing instalment move no share.
+    # A cash dividend moves no share and leaves no basis indeterminate. Every
+    # other run records its one effect: a share action, or (issue 105) the
+    # continuing instalment its indeterminate basis names.
     assert recorded["cash-dividend"] == ()
-    assert recorded["continuing-instalment"] == ()
     for name in RUNS:
-        if name not in {"cash-dividend", "continuing-instalment"}:
+        if name != "cash-dividend":
             assert len(recorded[name]) == 1, name
 
 
@@ -681,3 +690,178 @@ def test_a_decision_sees_an_indeterminate_basis_as_unknown() -> None:
     # Control: the decision before the spin-off saw the known basis.
     (before,) = strategy.seen[-2].current_holdings
     assert before.cost_basis == Decimal("1000.00")
+
+
+# ==========================================================================
+# Basis allocation from source evidence only (issue 105)
+# ==========================================================================
+
+_INITIAL_CASH = Decimal("10000.00")
+
+
+def _identity_gap(artifacts: EvaluationRunArtifactsV2) -> Decimal:
+    """Cash, claims and remaining basis, less initial cash and realized PnL."""
+    state = artifacts.final_state
+    basis = sum((ca._known_basis(holding) for holding in state.holdings), Decimal(0))
+    return (
+        state.cash_balance
+        + state.pending_claims_value
+        + basis
+        - _INITIAL_CASH
+        - state.realized_net_pnl
+    )
+
+
+def test_an_aggregate_sale_residual_closes_the_realized_pnl_identity() -> None:
+    artifacts = aggregate_sale_residual_run()
+
+    # Ten shares of basis 1000.00 became 3 1/3; the third sold for 1.00 and
+    # carried 100.00 of the pool. Before the fix it relieved nothing and the
+    # identity missed by 100.00.
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    (holding,) = artifacts.final_state.holdings
+    assert (holding.quantity, holding.cost_basis) == (3, Decimal("900"))
+    assert artifacts.result.metrics.realized_net_pnl == Decimal("-99")
+    assert _identity_gap(artifacts) == 0
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "forward-split",
+        "stock-dividend",
+        "stock-acquisition",
+        "extinguishing-liquidation",
+        "cash-acquisition",
+        "aggregate-sale-residual",
+    ],
+)
+def test_the_realized_pnl_identity_closes_over_every_determinate_run(
+    name: str,
+) -> None:
+    assert _identity_gap(RUNS[name]()) == 0
+
+
+def test_a_mixed_acquisition_cash_leg_halts_the_sale_of_its_acquirer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, outcome = _action(
+        ActionKind.MIXED_ACQUISITION,
+        suffix=5100,
+        components=(
+            _shares(
+                numerator="1",
+                denominator="2",
+                meaning="resulting_per_predecessor",
+                recipient=eng.SEC_B,
+            ),
+            _cash("5", "acquisition-cash"),
+        ),
+        dates=_payable(),
+        claim_status="converted",
+    )
+
+    sold = _run_five_sessions(
+        outcome, _then_at_session_3(((eng.SEC_B, 2),)), monkeypatch
+    )
+
+    # Before the fix the acquirer carried the whole 1000.00 basis, the cash
+    # leg realized 0, and selling three acquirer shares relieved 600.00.
+    session, cause = _halt(sold)
+    assert session == 4
+    assert cause.startswith("open_execution: the rebalance sells 3 of")
+
+    # Control: holding the acquirer marks a complete NAV.
+    held = _run_five_sessions(
+        outcome, _then_at_session_3(((eng.SEC_B, 5),)), monkeypatch
+    )
+    assert held.result.classification is EvaluationClassification.COMPLETE
+    (acquirer,) = held.final_state.holdings
+    assert (acquirer.security_id, acquirer.basis_status) == (eng.SEC_B, "indeterminate")
+
+
+def _instalment_then_final(*, amount: str) -> tuple[SecurityEconomicOutcomeV1, str]:
+    """A continuing instalment at session 3, then the final disposal at 4."""
+    cash = _cash(amount, "instalment-cash")
+    terms = ca._terms(
+        suffix=5200,
+        action_kind=ActionKind.LIQUIDATION,
+        components=(cash,),
+        dates=(ca._date_fact("ex", ACTION_AT), *_payable()),
+        security_id=eng.SEC_A,
+    )
+    instalment = ca._effect(
+        suffix=5201,
+        action_kind=ActionKind.LIQUIDATION,
+        components=(cash,),
+        terms=terms,
+        occurrence_id="issue-105-instalment",
+        effective_at=ACTION_AT,
+        security_id=eng.SEC_A,
+    )
+    final_at = "2026-01-09T00:00:00Z"
+    final_cash = _cash("150", "final-cash")
+    final_terms = ca._terms(
+        suffix=5210,
+        action_kind=ActionKind.LIQUIDATION,
+        components=(final_cash,),
+        dates=(ca._date_fact("payable", final_at),),
+        security_id=eng.SEC_A,
+    )
+    final = ca._effect(
+        suffix=5211,
+        action_kind=ActionKind.LIQUIDATION,
+        components=(final_cash,),
+        terms=final_terms,
+        occurrence_id="issue-105-final",
+        effective_at=final_at,
+        security_id=eng.SEC_A,
+        claim_status="extinguished",
+    )
+    outcome = ca._outcome(
+        security_id=eng.SEC_A,
+        terms=(terms, final_terms),
+        effects=(instalment, final),
+        action_kinds=(ActionKind.LIQUIDATION,),
+        claim_status="extinguished",
+    )
+    cause = applied_economic_effect_id(
+        source_id=ca.SOURCE_A,
+        security_id=eng.SEC_A,
+        occurrence_id="issue-105-instalment",
+    )
+    return outcome, cause
+
+
+def test_the_disposal_after_a_liquidation_instalment_halts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outcome, cause = _instalment_then_final(amount="3")
+
+    artifacts = _run_five_sessions(
+        outcome, _then_at_session_3(((eng.SEC_A, 10),)), monkeypatch
+    )
+
+    # Before the fix the 30.00 instalment was income and the final 1500.00
+    # realized 500.00; as a return of capital it would realize 530.00. With
+    # no source saying which, the disposal cannot book either.
+    session, halt = _halt(artifacts)
+    assert session == 4
+    assert halt.startswith("pre_open_effects: the cost basis of")
+    assert cause in halt
+    assert artifacts.result.metrics.realized_gross_pnl == Decimal("0")
+
+
+def test_an_instalment_above_its_basis_halts_at_its_own_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 120.00 a share on ten shares of basis 100.00 a share.
+    outcome, _ = _instalment_then_final(amount="120")
+
+    artifacts = _run_five_sessions(
+        outcome, _then_at_session_3(((eng.SEC_A, 10),)), monkeypatch
+    )
+
+    session, halt = _halt(artifacts)
+    assert session == 3
+    assert "exceeds its basis" in halt

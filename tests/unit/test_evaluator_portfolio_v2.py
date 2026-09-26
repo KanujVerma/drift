@@ -9,7 +9,7 @@ child carries (#103) as a known one.
 """
 
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from typing import Any
 from uuid import UUID
 
@@ -21,6 +21,10 @@ from pydantic import BaseModel, ValidationError, create_model
 
 import drift.errors
 from drift.domain.economic_common import ActionKind
+from drift.domain.economic_events import (
+    CorporateActionTermsVersionV1,
+    EconomicEffectVersionV1,
+)
 from drift.domain.evaluator_corporate_actions import SecurityEconomicOutcomeV1
 from drift.domain.evaluator_execution import (
     RebalanceOutcomeV1,
@@ -43,6 +47,7 @@ from drift.domain.evaluator_portfolio import (
     SecurityHoldingV1,
     SecurityHoldingV2,
     applied_economic_effect_id,
+    decimal_context,
     pending_cash_claim_id,
 )
 from drift.domain.evaluator_strategy import (
@@ -1167,3 +1172,398 @@ def test_an_unfunded_rebalance_is_rejected_before_the_basis_is_judged() -> None:
         execution_listings=ex._listings_for(ex.SEC_A),
     )
     assert outcome.classification == "rejected"
+
+
+# ==========================================================================
+# Basis allocation from source evidence only (issue 105)
+# ==========================================================================
+#
+# Cash in lieu after a re-denomination of one basis pool (a split, a reverse
+# split, a stock dividend, a stock-for-stock acquisition) relieves the known
+# basis pro rata, basis * residual / exact, under the average-cost rule of
+# spec 11.4: the source ratio and the book fully determine it. Everything
+# else needs an allocation no source gives, so it is INDETERMINATE: a mixed
+# acquisition's cash leg, a cross-security residual, any residual of an
+# indeterminate basis, and a continuing liquidation instalment.
+
+
+def _aggregate_sale(
+    suffix: int,
+    *,
+    kind: ActionKind = ActionKind.REVERSE_SPLIT,
+    numerator: str = "1",
+    denominator: str = "3",
+    meaning: str = "resulting_per_predecessor",
+    recipient: UUID = ca.SEC_A,
+    claim_status: str = "continuing",
+    occurrence: str = "occ-residual",
+) -> tuple[EconomicEffectVersionV1, SecurityEconomicOutcomeV1]:
+    component = ca._shares(
+        numerator=numerator,
+        denominator=denominator,
+        recipient=recipient,
+        meaning=meaning,
+        treatment=ca._treatment("aggregate_sale_cash"),
+    )
+    terms = ca._terms(
+        suffix=suffix,
+        action_kind=kind,
+        components=(component,),
+        dates=(ca._date_fact("payable", ca.PAYABLE_AT),),
+    )
+    effect = ca._effect(
+        suffix=suffix + 1,
+        action_kind=kind,
+        components=(component,),
+        terms=terms,
+        occurrence_id=occurrence,
+        claim_status=claim_status,
+    )
+    outcome = ca._outcome(
+        terms=(terms,),
+        effects=(effect,),
+        action_kinds=(kind,),
+        claim_status=claim_status,
+    )
+    return effect, outcome
+
+
+def _priced_pass(
+    state: PortfolioStateV2,
+    effect: EconomicEffectVersionV1,
+    outcome: SecurityEconomicOutcomeV1,
+    *,
+    rate: str,
+    targets: tuple[SecurityTargetPositionV1, ...] = (),
+) -> PortfolioStateV2:
+    processor = ca._processor(
+        cash_in_lieu_rates=(ca._cash_in_lieu_rate(effect=effect, rate=rate),)
+    )
+    updated, _ = processor.apply_pre_open_actions(state, targets, (outcome,), ca._key())
+    return updated
+
+
+def _identity(state: PortfolioStateV2, opening: str) -> Decimal:
+    """Cash, claims and remaining basis, less everything realized."""
+    basis = sum((ca._known_basis(holding) for holding in state.holdings), Decimal(0))
+    return (
+        state.cash_balance + state.pending_claims_value + basis - state.realized_net_pnl
+    ) - Decimal(opening)
+
+
+def test_a_reverse_split_residual_relieves_the_basis_it_sells() -> None:
+    # Ten shares of basis 1000 become 3 1/3; the third is sold for 1.00. It
+    # carries a tenth of the pool, 100.00, so 99.00 is realized as a loss.
+    effect, outcome = _aggregate_sale(4300)
+    state = ca._state(holdings=(ca._holding(quantity=10, basis="1000"),), cash="500")
+
+    updated = _priced_pass(state, effect, outcome, rate="3")
+
+    (holding,) = updated.holdings
+    assert (holding.quantity, holding.cost_basis) == (3, Decimal("900"))
+    (claim,) = updated.pending_cash_claims
+    assert claim.total_cash_expected == Decimal("1")
+    assert updated.realized_gross_pnl == Decimal("-99")
+    assert updated.realized_net_pnl == Decimal("-99")
+    # Before the fix the sold fraction relieved nothing: the identity missed
+    # by the 100.00 of basis it carried away.
+    assert _identity(updated, opening="1500") == 0
+
+
+def test_a_stock_dividend_residual_relieves_the_basis_it_sells() -> None:
+    # 5 shares plus one per two is 7 1/2: the half share carries 1/15.
+    effect, outcome = _aggregate_sale(
+        4310,
+        kind=ActionKind.STOCK_DIVIDEND,
+        numerator="1",
+        denominator="2",
+        meaning="additional_per_predecessor",
+    )
+    state = ca._state(holdings=(ca._holding(quantity=5, basis="150"),), cash="0")
+
+    updated = _priced_pass(state, effect, outcome, rate="4")
+
+    (holding,) = updated.holdings
+    assert (holding.quantity, holding.cost_basis) == (7, Decimal("140"))
+    assert updated.realized_gross_pnl == Decimal("-8")
+    assert _identity(updated, opening="150") == 0
+
+
+def test_a_stock_acquisition_residual_relieves_the_predecessor_pool() -> None:
+    # 10 predecessor shares at 1000 become 10/3 acquirer shares: 3 whole, and
+    # a third sold for 2.00, relieving 100.00 of the predecessor pool before
+    # it pools into the 10 acquirer shares already held at 50.
+    effect, outcome = _aggregate_sale(
+        4320,
+        kind=ActionKind.STOCK_ACQUISITION,
+        recipient=ca.SEC_ACQ,
+        claim_status="converted",
+    )
+    state = ca._state(
+        holdings=(
+            ca._holding(quantity=10, basis="1000"),
+            ca._holding(ca.SEC_ACQ, quantity=10, basis="50"),
+        ),
+        cash="0",
+    )
+    targets = (
+        SecurityTargetPositionV1(security_id=ca.SEC_A, target_quantity=10),
+        SecurityTargetPositionV1(security_id=ca.SEC_ACQ, target_quantity=10),
+    )
+
+    updated = _priced_pass(state, effect, outcome, rate="6", targets=targets)
+
+    (acquirer,) = updated.holdings
+    assert (acquirer.security_id, acquirer.quantity) == (ca.SEC_ACQ, 13)
+    assert acquirer.cost_basis == Decimal("950")
+    assert updated.realized_gross_pnl == Decimal("-98")
+    assert _identity(updated, opening="1050") == 0
+
+
+def test_a_non_terminating_relief_is_deterministic() -> None:
+    # Seven shares 1:2 is 3 1/2: the half carries 1/7 of the pool.
+    def relieved() -> Decimal:
+        effect, outcome = _aggregate_sale(4330, denominator="2")
+        state = ca._state(holdings=(ca._holding(quantity=7, basis="1000"),))
+        (holding,) = _priced_pass(state, effect, outcome, rate="2").holdings
+        return ca._known_basis(holding)
+
+    first = relieved()
+    with localcontext() as ambient:
+        ambient.prec = 6
+        second = relieved()
+    assert first == second
+    # Exactly the pool less its pinned-context seventh.
+    with decimal_context():
+        assert first == Decimal(1000) - Decimal(1000) / Decimal(7)
+
+
+def test_a_residual_of_an_indeterminate_basis_stays_indeterminate() -> None:
+    effect, outcome = _aggregate_sale(4340)
+    book = _indeterminate_book(_spun(quantity=10))
+
+    updated = _priced_pass(book, effect, outcome, rate="3")
+
+    (holding,) = updated.holdings
+    residual_id = _effect_id(occurrence="occ-residual")
+    assert (holding.quantity, holding.basis_status) == (3, "indeterminate")
+    assert holding.basis_indeterminate_by == tuple(sorted((SPIN, residual_id)))
+    # Nothing is realized from a basis nobody knows.
+    assert updated.realized_gross_pnl == Decimal("0")
+    assert len(updated.pending_cash_claims) == 1
+
+
+def test_a_spinoff_residual_relieves_nothing_from_the_indeterminate_parent() -> None:
+    # A cross-security residual: the child fraction is sold for cash, and
+    # the parent it came from is already indeterminate by the spin-off.
+    component = ca._shares(
+        numerator="1",
+        denominator="3",
+        recipient=ca.SEC_CHILD,
+        meaning="additional_per_predecessor",
+        treatment=ca._treatment("aggregate_sale_cash"),
+    )
+    terms = ca._terms(
+        suffix=4350,
+        action_kind=ActionKind.SPINOFF,
+        components=(component,),
+        dates=(ca._date_fact("payable", ca.PAYABLE_AT),),
+    )
+    effect = ca._effect(
+        suffix=4351,
+        action_kind=ActionKind.SPINOFF,
+        components=(component,),
+        terms=terms,
+        occurrence_id="occ-spin",
+    )
+    outcome = ca._outcome(
+        terms=(terms,), effects=(effect,), action_kinds=(ActionKind.SPINOFF,)
+    )
+    state = ca._state(holdings=(ca._holding(quantity=10, basis="1000"),))
+
+    updated = _priced_pass(state, effect, outcome, rate="3")
+
+    held = _by_security(updated)
+    assert held[ca.SEC_A].basis_indeterminate_by == (SPIN,)
+    assert held[ca.SEC_CHILD].quantity == 3
+    assert updated.realized_gross_pnl == Decimal("0")
+
+
+def _mixed_acquisition(suffix: int) -> SecurityEconomicOutcomeV1:
+    shares = ca._shares(
+        numerator="1",
+        denominator="2",
+        recipient=ca.SEC_ACQ,
+        component_id="to-acquirer",
+    )
+    cash = ca._cash(amount="5", component_id="acquisition-cash")
+    terms = ca._terms(
+        suffix=suffix,
+        action_kind=ActionKind.MIXED_ACQUISITION,
+        components=(shares, cash),
+        dates=(ca._date_fact("payable", ca.PAYABLE_AT),),
+    )
+    effect = ca._effect(
+        suffix=suffix + 1,
+        action_kind=ActionKind.MIXED_ACQUISITION,
+        components=(shares, cash),
+        terms=terms,
+        occurrence_id="occ-mixed",
+        claim_status="converted",
+    )
+    return ca._outcome(
+        terms=(terms,),
+        effects=(effect,),
+        action_kinds=(ActionKind.MIXED_ACQUISITION,),
+        claim_status="converted",
+    )
+
+
+def test_a_mixed_acquisition_cash_leg_leaves_the_acquirer_indeterminate() -> None:
+    # 100 shares of basis 1000 become 50 acquirer shares and 500.00 of cash.
+    # Carrying the whole 1000 into the acquirer would publish the cash leg's
+    # realized PnL as 0 as if that were proven.
+    state = ca._state(holdings=(ca._holding(quantity=100, basis="1000"),))
+
+    updated, _ = _pass(state, (_mixed_acquisition(4360),))
+
+    (acquirer,) = updated.holdings
+    assert (acquirer.security_id, acquirer.quantity) == (ca.SEC_ACQ, 50)
+    assert acquirer.basis_status == "indeterminate"
+    assert acquirer.basis_indeterminate_by == (_effect_id(occurrence="occ-mixed"),)
+    assert updated.pending_claims_value == Decimal("500")
+    assert updated.realized_gross_pnl == Decimal("0")
+
+    # Control: with nothing held there is nothing to make indeterminate.
+    untouched, _ = _pass(ca._state(), (_mixed_acquisition(4370),))
+    assert untouched.holdings == ()
+
+
+def _instalment(
+    suffix: int,
+    *,
+    amount: str,
+    occurrence: str = "occ-instalment",
+    at: str = ca.EFFECT_AT,
+    claim_status: str = "continuing",
+) -> tuple[CorporateActionTermsVersionV1, EconomicEffectVersionV1]:
+    """A liquidation of SEC_A: an instalment, or with an ended claim, the final."""
+    cash = ca._cash(amount=amount, component_id=f"{occurrence}-cash")
+    terms = ca._terms(
+        suffix=suffix,
+        action_kind=ActionKind.LIQUIDATION,
+        components=(cash,),
+        dates=(ca._date_fact("ex", at), ca._date_fact("payable", ca.PAYABLE_AT)),
+    )
+    effect = ca._effect(
+        suffix=suffix + 1,
+        action_kind=ActionKind.LIQUIDATION,
+        components=(cash,),
+        terms=terms,
+        occurrence_id=occurrence,
+        effective_at=at,
+        claim_status=claim_status,
+    )
+    return terms, effect
+
+
+def _instalment_outcome(
+    suffix: int, *, amount: str, at: str = ca.EFFECT_AT
+) -> SecurityEconomicOutcomeV1:
+    terms, effect = _instalment(suffix, amount=amount, at=at)
+    return ca._outcome(
+        terms=(terms,), effects=(effect,), action_kinds=(ActionKind.LIQUIDATION,)
+    )
+
+
+INSTALMENT = _effect_id(occurrence="occ-instalment")
+
+
+def test_an_instalment_within_the_basis_leaves_it_indeterminate() -> None:
+    # 3.00 a share on 100 shares of basis 1000. Return of capital leaves
+    # 700; income leaves 1000. Both realize 0, so the basis is unproven.
+    state = ca._state(holdings=(ca._holding(quantity=100, basis="1000"),))
+
+    updated, _ = _pass(state, (_instalment_outcome(4380, amount="3"),))
+
+    (holding,) = updated.holdings
+    assert (holding.quantity, holding.basis_status) == (100, "indeterminate")
+    assert holding.basis_indeterminate_by == (INSTALMENT,)
+    assert updated.applied_effect_ids == (INSTALMENT,)
+    assert updated.pending_claims_value == Decimal("300")
+    assert updated.realized_gross_pnl == Decimal("0")
+
+
+def test_an_instalment_above_the_basis_fails_closed() -> None:
+    # 12.00 a share on a basis of 10.00 a share: return of capital would
+    # realize 200 of gain, income none, so the pass cannot book either.
+    state = ca._state(holdings=(ca._holding(quantity=100, basis="1000"),))
+
+    with pytest.raises(IndeterminateBasisError, match="exceeds its basis"):
+        _pass(state, (_instalment_outcome(4390, amount="12"),))
+
+    # Control: an instalment equal to the basis still realizes 0 either way.
+    equal, _ = _pass(state, (_instalment_outcome(4400, amount="10"),))
+    assert equal.holdings[0].basis_status == "indeterminate"
+
+
+def test_an_instalment_on_an_indeterminate_basis_fails_closed() -> None:
+    with pytest.raises(IndeterminateBasisError, match="already indeterminate"):
+        _pass(_indeterminate_book(_spun()), (_instalment_outcome(4410, amount="1"),))
+
+
+def test_the_disposal_after_an_instalment_halts() -> None:
+    # The instalment leaves the basis indeterminate, so the extinguishing
+    # liquidation a week later cannot relieve it.
+    state = ca._state(holdings=(ca._holding(quantity=100, basis="1000"),))
+    after_instalment, _ = _pass(state, (_instalment_outcome(4420, amount="3"),))
+    advanced = PortfolioAccountingKernel(after_instalment, session_clock=ca.CLOCK)
+    advanced.advance_session(ca._key(ca.LATER_DAY))
+    final = ca._liquidation_case(
+        suffix=4430,
+        claim_status="extinguished",
+        ex_at=ca.LATER_AT,
+        effective_at=ca.LATER_AT,
+    )
+
+    with pytest.raises(IndeterminateBasisError, match="is indeterminate"):
+        _pass(advanced.state, (final,), day=ca.LATER_DAY)
+
+
+def test_an_instalment_beside_the_final_disposal_fails_closed() -> None:
+    # One window holds the extinguishing liquidation and an instalment quoted
+    # per pre-action share. The disposal relieved the whole basis first, so
+    # whether the instalment returned capital changes realized PnL, and no
+    # holding is left to carry that as an indeterminate basis.
+    # The instalment is dated Friday, before Monday's final liquidation, so
+    # M1c composes the claim as extinguished.
+    terms, instalment = _instalment(4440, amount="3", at=ca.BETWEEN_AT)
+    final_terms, final = _instalment(
+        4450,
+        amount="7",
+        occurrence="occ-final",
+        at=ca.LATER_AT,
+        claim_status="extinguished",
+    )
+    outcome = ca._outcome(
+        terms=(terms, final_terms),
+        effects=(instalment, final),
+        action_kinds=(ActionKind.LIQUIDATION,),
+        claim_status="extinguished",
+    )
+    state = ca._state(
+        holdings=(ca._holding(quantity=100, basis="1000"),), day=ca.LATER_DAY
+    )
+
+    with pytest.raises(IndeterminateBasisError, match="removed in this window"):
+        _pass(state, (outcome,), day=ca.LATER_DAY)
+
+    # Control: the final liquidation alone disposes of the known basis.
+    alone = ca._outcome(
+        terms=(final_terms,),
+        effects=(final,),
+        action_kinds=(ActionKind.LIQUIDATION,),
+        claim_status="extinguished",
+    )
+    disposed, _ = _pass(state, (alone,), day=ca.LATER_DAY)
+    assert disposed.realized_gross_pnl == Decimal("-300")

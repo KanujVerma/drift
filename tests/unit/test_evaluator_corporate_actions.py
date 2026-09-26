@@ -75,6 +75,7 @@ from drift.domain.evaluator_lanes import (
     exploratory_evaluation_admission_hash,
 )
 from drift.domain.evaluator_portfolio import (
+    IndeterminateBasisError,
     IndeterminateValuationError,
     MarkEvidenceV1,
     MarkPriceV1,
@@ -826,7 +827,10 @@ def test_reverse_split_aggregate_sale_cash_creates_share_and_in_lieu_claim() -> 
 
     assert len(updated.holdings) == 1
     assert updated.holdings[0].quantity == 1
-    assert updated.holdings[0].cost_basis == Decimal("800")
+    # Issue 105: the quarter share sold carries 1/5 of the 1 1/4 the pool
+    # became, so 160 of the 800 basis is relieved against 1.00 of proceeds.
+    assert updated.holdings[0].cost_basis == Decimal("640")
+    assert updated.realized_gross_pnl == Decimal("-159")
     assert len(updated.pending_cash_claims) == 1
     claim = updated.pending_cash_claims[0]
     assert claim.component_id == cash_in_lieu_component_id("shares-1", Fraction(1, 4))
@@ -2100,9 +2104,11 @@ def test_a_liquidation_on_a_continuing_claim_is_a_cash_distribution() -> None:
     )
 
     # A partial liquidating distribution pays cash on shares that continue:
-    # every share, its basis, and the staged hold all survive.
+    # every share and the staged hold survive. Whether it returned capital is
+    # unproven, so the basis survives as indeterminate (issue 105).
     assert _quantities(updated.holdings) == {SEC_A: 10}
-    assert updated.holdings[0].cost_basis == Decimal("100")
+    assert updated.holdings[0].basis_status == "indeterminate"
+    assert updated.holdings[0].cost_basis is None
     assert _quantities(translated) == {SEC_A: 10}
     claim = updated.pending_cash_claims[0]
     assert claim.action_kind is ActionKind.LIQUIDATION
@@ -2447,8 +2453,12 @@ def test_a_resurrected_liquidation_claim_is_indeterminate() -> None:
 def test_a_liquidation_m1c_composes_as_ended_or_continuing_applies() -> None:
     # Control for the composed-status rule: the same two effects, with the
     # instalment at 10:00 and the final liquidation at 15:00 of one date, are
-    # ones M1c can order, and it composes them as extinguished. Each then
-    # applies by its own rule: 30 for the instalment, 150 for the final.
+    # ones M1c can order, and it composes them as extinguished, so the
+    # composed-unknown rule passes them. They used to apply by their own
+    # rules, 30 for the instalment and 150 for the final. Issue 105 then
+    # halts the pass on the basis instead: the final disposal relieved the
+    # whole 100, and whether the instalment returned capital changes that
+    # realized PnL by 30, with no holding left to carry it.
     outcome = _conflicting_liquidations(
         2940,
         composed="extinguished",
@@ -2457,10 +2467,8 @@ def test_a_liquidation_m1c_composes_as_ended_or_continuing_applies() -> None:
     )
     state = _state(holdings=(_holding(quantity=10, basis="100"),), cash="0")
 
-    updated, _ = _processor().apply_pre_open_actions(state, (), (outcome,), _key())
-
-    assert updated.holdings == ()
-    assert updated.pending_claims_value == Decimal("180")
+    with pytest.raises(IndeterminateBasisError, match="removed in this window"):
+        _processor().apply_pre_open_actions(state, (), (outcome,), _key())
 
 
 @pytest.mark.parametrize("kind", ["cash", "stock"])
@@ -5724,6 +5732,16 @@ def test_a_post_action_distribution_on_a_removed_holding_halts(removal: str) -> 
         _processor().apply_pre_open_actions(
             state, targets, (outcome("predecessor_post_action"),), _key()
         )
+
+    if removal == "final_liquidation":
+        # Issue 105: quoted per pre-action share, a liquidation instalment is
+        # owed on the prior close's holding, but the final disposal already
+        # relieved its whole basis, so whether it returned capital is unproven.
+        with pytest.raises(IndeterminateBasisError, match="removed in this window"):
+            _processor().apply_pre_open_actions(
+                state, targets, (outcome("predecessor_pre_action"),), _key()
+            )
+        return
 
     # Control: quoted per pre-action share, it is owed on the prior close's
     # 100 shares beside whatever the removal owes.
