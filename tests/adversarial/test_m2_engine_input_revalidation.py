@@ -24,6 +24,7 @@ from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Self
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -43,6 +44,7 @@ from exploratory_decision_test_support import (
     ReconstructedTargetStrategy,
     bundle_of,
     cohort_of,
+    exploratory_admission,
     reconstructed_engine,
     replay_of,
     run_engine,
@@ -51,7 +53,8 @@ from exploratory_decision_test_support import (
     source_request,
     three_regular_sessions,
 )
-from pydantic import BaseModel, ValidationError, model_validator
+from observation_test_support import NormalizationHarness, ObservationHarness
+from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 from test_evaluator_reconstruction import make_policy
 
 from drift.domain.evaluator_bundles import (
@@ -81,10 +84,19 @@ from drift.domain.normalization import (
 )
 from drift.domain.observation_query import ObservationOutcomeQueryV1
 from drift.domain.sessions import SessionKeyV1
-from drift.evaluator.engine import SessionEvaluatorEngine, SessionEvaluatorEvidence
+from drift.evaluator.engine import (
+    NonCanonicalEngineInputError,
+    SessionEvaluatorEngine,
+    SessionEvaluatorEvidence,
+    _canonical_m1d_context,
+)
 from drift.evaluator.reconstruction import (
     ExploratoryReconstructionReplay,
     build_exploratory_reconstructed_session_observation,
+)
+from drift.markets.observation_validation import (
+    m1d_context_hash,
+    validate_m1d_resolution_context,
 )
 from drift.serialization.canonical import content_hash
 
@@ -1634,6 +1646,305 @@ def test_an_m1d_context_record_cannot_launder_a_price_it_never_stated() -> None:
 
     with pytest.raises(ValidationError, match=r"observation payload hash mismatch"):
         reconstructed_engine(bundle, replay=replay)
+
+
+# --- the rebuild of an M1d context, member by member (#131 round 2) -----------
+#
+# Each forgery below is refused by name, or rebuilt to its exact canonical
+# value, rather than silently repaired into a valid context.
+
+
+def _structural_context() -> Any:
+    """A genuine M1d context carrying an M1b structural context."""
+    harness = ObservationHarness()
+    harness.attach_m1b()
+    return harness.context
+
+
+def _economic_context() -> Any:
+    """A genuine M1d context carrying M1b structural and M1c economic contexts."""
+    return NormalizationHarness().context
+
+
+def _members(value: object, path: str = "context") -> list[tuple[str, type, str]]:
+    """Every model and leaf of an M1d context, by path, type and content."""
+    if isinstance(value, BaseModel):
+        return [(path, type(value), value.model_dump_json())]
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return [(path, type(value), "")] + [
+            member
+            for item in dataclasses.fields(value)
+            for member in _members(getattr(value, item.name), f"{path}.{item.name}")
+        ]
+    if isinstance(value, tuple):
+        return [(path, tuple, str(len(value)))] + [
+            member
+            for position, item in enumerate(value)
+            for member in _members(item, f"{path}.{position}")
+        ]
+    if isinstance(value, Mapping):
+        return [(path, Mapping, str(len(value)))] + [
+            member
+            for key, item in value.items()
+            for member in _members(key, f"{path}[key]") + _members(item, f"{path}[]")
+        ]
+    return [(path, type(value), repr(value))]
+
+
+def _models(value: object) -> list[BaseModel]:
+    return [item for item in _reachable(value) if isinstance(item, BaseModel)]
+
+
+@pytest.mark.parametrize(
+    "build", [_structural_context, _economic_context], ids=["m1b", "m1b-and-m1c"]
+)
+def test_a_genuine_m1d_context_rebuilds_member_for_member(
+    build: Callable[[], Any],
+) -> None:
+    """Every member keeps its type and content, and no model is shared."""
+    genuine = build()
+    rebuilt = _canonical_m1d_context(genuine)
+
+    assert _members(rebuilt) == _members(genuine)
+    assert m1d_context_hash(rebuilt) == m1d_context_hash(genuine)
+    assert {id(item) for item in _models(rebuilt)}.isdisjoint(
+        id(item) for item in _models(genuine)
+    )
+    validate_m1d_resolution_context(rebuilt)
+
+
+class _SpelledUUID(UUID):
+    """Holds its own identifier, but spells another."""
+
+    def __str__(self) -> str:
+        return "01990000-0000-7000-8000-00000000dead"
+
+
+class _LyingBytes(bytes):
+    """Holds its own bytes, but decodes to other text."""
+
+    def decode(self, encoding: str = "utf-8", errors: str = "strict") -> str:
+        return "tampered"
+
+
+class _ApartKey(str):
+    """A key equal only to itself, so a mapping can hold it beside its text."""
+
+    def __hash__(self) -> int:
+        return hash(("apart", str.__str__(self)))
+
+    def __eq__(self, other: object) -> bool:
+        return self is other
+
+    def __ne__(self, other: object) -> bool:
+        return self is not other
+
+
+class _DuckModel(BaseModel):
+    """Any model's content, under a model that is not the declared one."""
+
+    model_config = ConfigDict(extra="allow")
+
+
+class _ItemsOnly:
+    """Offers ``items`` and ``len`` of a mapping without being one."""
+
+    def __init__(self, entries: Mapping[Any, Any]) -> None:
+        self.entries = dict(entries)
+
+    def items(self) -> Any:
+        return self.entries.items()
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+
+def _fields_of(artifact: Any) -> dict[str, Any]:
+    return {
+        item.name: getattr(artifact, item.name) for item in dataclasses.fields(artifact)
+    }
+
+
+def _first_supporting_artifact(context: Any, forge: Callable[[Any], Any]) -> Any:
+    key, artifact = next(iter(context.supporting_artifacts.items()))
+    supporting = dict(context.supporting_artifacts) | {key: forge(artifact)}
+    return dataclasses.replace(context, supporting_artifacts=supporting)
+
+
+def _with_structural(context: Any, **changes: Any) -> Any:
+    structural = dataclasses.replace(context.structural_context, **changes)
+    return dataclasses.replace(context, structural_context=structural)
+
+
+def _with_universe(context: Any, **changes: Any) -> Any:
+    universe = dataclasses.replace(context.structural_context.universe, **changes)
+    return _with_structural(context, universe=universe)
+
+
+def _with_first_dataset(context: Any, **changes: Any) -> Any:
+    first, *rest = context.observation_datasets
+    datasets = (dataclasses.replace(first, **changes), *rest)
+    return dataclasses.replace(context, observation_datasets=datasets)
+
+
+def _with_a_second_key_for_one_artifact(context: Any) -> Any:
+    key, artifact = next(iter(context.supporting_artifacts.items()))
+    supporting = dict(context.supporting_artifacts) | {_ApartKey(key): artifact}
+    assert len(supporting) == len(context.supporting_artifacts) + 1
+    return dataclasses.replace(context, supporting_artifacts=supporting)
+
+
+#: Each mistyped, forged or duplicated member of a genuine M1b context, and the
+#: exception and message its rebuild must refuse it with. Each would otherwise
+#: be kept (a bytes subclass), coerced by lax validation, dropped as a
+#: duplicate key, or repaired into a valid member of the declared type.
+REFUSED_CONTEXT_MEMBERS: dict[str, tuple[Callable[[Any], Any], type, str]] = {
+    "bytes-subclass-with-its-own-decode": (
+        lambda context: _first_supporting_artifact(
+            context,
+            lambda artifact: dataclasses.replace(
+                artifact, data=_LyingBytes(artifact.data)
+            ),
+        ),
+        TypeError,
+        r"member of type _LyingBytes is not exactly bytes",
+    ),
+    "identifier-as-text-for-lax-validation": (
+        lambda context: dataclasses.replace(context, issuer_id=str(context.issuer_id)),
+        ValidationError,
+        r"UUID",
+    ),
+    "one-artifact-under-two-keys-that-are-one": (
+        _with_a_second_key_for_one_artifact,
+        ValueError,
+        r"^an M1d context mapping holds two keys that are one$",
+    ),
+    "channel-as-a-dict-of-its-fields": (
+        lambda context: dataclasses.replace(
+            context, m1b_requested_channel=context.m1b_requested_channel.model_dump()
+        ),
+        TypeError,
+        r"member of type dict is not one its declaration admits",
+    ),
+    "manifest-under-another-model": (
+        lambda context: _with_first_dataset(
+            context,
+            manifest=_DuckModel(
+                **context.observation_datasets[0].manifest.model_dump()
+            ),
+        ),
+        TypeError,
+        r"member of type _DuckModel is not a DatasetManifestV2",
+    ),
+    "artifact-as-a-lookalike-object": (
+        lambda context: _first_supporting_artifact(
+            context, lambda artifact: SimpleNamespace(**_fields_of(artifact))
+        ),
+        TypeError,
+        r"member of type SimpleNamespace is not a VerifiedArtifactBytes",
+    ),
+    "records-as-a-list": (
+        lambda context: _with_structural(
+            context,
+            roles=dataclasses.replace(
+                context.structural_context.roles,
+                records=list(context.structural_context.roles.records),
+            ),
+        ),
+        TypeError,
+        r"member of type list is not a tuple",
+    ),
+    "retained-evidence-as-an-items-only-object": (
+        lambda context: _with_universe(
+            context,
+            retained_evidence=_ItemsOnly(
+                context.structural_context.universe.retained_evidence
+            ),
+        ),
+        TypeError,
+        r"member of type _ItemsOnly is not a mapping",
+    ),
+}
+
+
+@pytest.mark.parametrize("member", REFUSED_CONTEXT_MEMBERS)
+def test_a_mistyped_m1d_context_member_is_refused_not_repaired(member: str) -> None:
+    forge, refusal, reason = REFUSED_CONTEXT_MEMBERS[member]
+    forged = forge(_structural_context())
+
+    with pytest.raises(refusal, match=reason):
+        _canonical_m1d_context(forged)
+
+
+def test_a_spelled_identifier_in_an_m1d_context_is_rebuilt_to_its_value() -> None:
+    """A strictly valid ``UUID`` subclass is still rebuilt through JSON."""
+    genuine = _structural_context()
+    forged = dataclasses.replace(
+        genuine, issuer_id=_SpelledUUID(int=genuine.issuer_id.int)
+    )
+
+    rebuilt = _canonical_m1d_context(forged)
+
+    assert type(rebuilt.issuer_id) is UUID
+    assert str(rebuilt.issuer_id) == str(UUID(int=genuine.issuer_id.int))
+
+
+# --- the book currency strings (#131 round 2) ---------------------------------
+
+
+def _book_engine(
+    *, namespace: str = eng.BOOK_NAMESPACE, code: str
+) -> SessionEvaluatorEngine:
+    """The reconstructed lane over USD reconstructions, in the given book."""
+    bundle = bundle_of((scheduled_session_case(JAN5), scheduled_session_case(JAN6)))
+    return SessionEvaluatorEngine(
+        bundle=bundle,
+        admission=exploratory_admission(bundle),
+        protocol=eng._protocol(warmup=1),
+        cost_model=eng._cost_model(),
+        evidence=SessionEvaluatorEvidence(
+            listing_role_records=eng.ROLE_RECORDS,
+            exploratory_cohort=cohort_of(),
+            exploratory_reconstruction_replay=replay_of(
+                bundle.exploratory_reconstructed_observations
+            ),
+        ),
+        book_currency_namespace=namespace,
+        book_currency_code=code,
+    )
+
+
+def test_a_book_in_another_currency_still_halts_indeterminate() -> None:
+    """Control: an honest EUR book over USD prices never fills."""
+    artifacts = run_engine(
+        _book_engine(code="EUR"), ReconstructedTargetStrategy({JAN5: ((SEC, 1),)})
+    )
+
+    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
+    assert artifacts.result.metrics.committed_fill_count == 0
+    assert artifacts.result.halt_reason is not None
+    assert artifacts.result.halt_reason.endswith("not the book currency EUR")
+
+
+@pytest.mark.parametrize("argument", ["namespace", "code"])
+def test_a_book_currency_string_with_forged_equality_is_refused(
+    argument: str,
+) -> None:
+    """#131 round 2, G1: the probe's EUR book equal to every currency.
+
+    Held as given, an ``EUR`` book code equal to every string matched the
+    USD prices, so the run filled and ended COMPLETE under the evaluator
+    evidence hash of an honest EUR book, which refuses those prices.
+    """
+    honest = {"namespace": eng.BOOK_NAMESPACE, "code": "EUR"}
+    forged = honest | {argument: _AlwaysEqualStr(honest[argument])}
+
+    with pytest.raises(
+        NonCanonicalEngineInputError,
+        match=rf"^the engine's book_currency_{argument} must be exactly a str, "
+        r"not _AlwaysEqualStr$",
+    ):
+        _book_engine(**forged)
 
 
 # --- the strategy's decision context (issue 123) ------------------------------

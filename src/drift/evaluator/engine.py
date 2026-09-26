@@ -243,6 +243,25 @@ def refuse_promotion_lane(subject: object, *, site: str) -> None:
         )
 
 
+class NonCanonicalEngineInputError(DriftError, TypeError):
+    """Raised when a plain engine argument is not exactly its declared type.
+
+    The engine's model inputs are rebuilt canonically, but a plain argument
+    such as the book currency code has no model to rebuild. A subclass of
+    ``str`` could answer every comparison with a price currency as it
+    chose, while the evidence hash recorded its text, so anything but an
+    exact ``str`` is refused (issue 123, #131 round 2).
+    """
+
+
+def _exact_text(value: object, name: str) -> str:
+    if type(value) is not str:
+        raise NonCanonicalEngineInputError(
+            f"the engine's {name} must be exactly a str, not {_type_name(type(value))}"
+        )
+    return value
+
+
 def _revalidated[M: BaseModel](declared: type[M], model: BaseModel) -> M:
     """Rebuild ``model`` as a fresh, validated ``declared`` (issues 78, 123).
 
@@ -1203,6 +1222,13 @@ class SessionEvaluatorEngine:
         # the admission alone, before anything else, so no bundle, evidence,
         # or gate validity can change the answer.
         refuse_promotion_lane(admission, site="engine construction")
+        # Issue 123 (#131 round 2): the only plain constructor arguments are
+        # the book currency strings, compared with price currencies and
+        # bound into the evidence hash, so neither may carry forged equality.
+        book_currency_namespace = _exact_text(
+            book_currency_namespace, "book_currency_namespace"
+        )
+        book_currency_code = _exact_text(book_currency_code, "book_currency_code")
         # Issue 78: run only on inputs revalidated through their canonical
         # boundary, so a stale self-hash or a foreign payload fails closed here.
         bundle = _revalidated(EvaluationInputBundleV1, bundle)
