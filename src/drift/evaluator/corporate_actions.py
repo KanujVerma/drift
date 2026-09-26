@@ -61,16 +61,24 @@ from drift.domain.evaluator_corporate_actions import (
     resolve_whole_shares,
 )
 from drift.domain.evaluator_portfolio import (
+    EffectAlreadyAppliedError,
+    IndeterminateBasisError,
     IndeterminateValuationError,
     PendingCashClaimV1,
-    PortfolioStateV1,
-    SecurityHoldingV1,
+    PortfolioStateV2,
+    SecurityHoldingV2,
+    applied_economic_effect_id,
     decimal_context,
     pending_cash_claim_id,
 )
 from drift.domain.evaluator_strategy import SecurityTargetPositionV1
 from drift.domain.sessions import SessionKeyV1
-from drift.evaluator.portfolio import PortfolioAccountingKernel
+from drift.evaluator.portfolio import (
+    PortfolioAccountingKernel,
+    indeterminate_holding,
+    known_cost_basis,
+    pooled_holding,
+)
 from drift.serialization.canonical import content_hash
 
 ZERO = Decimal("0")
@@ -129,22 +137,30 @@ class _Book:
     corporate action extinguished for cash owed, whose basis is relieved
     exactly as a sale at the owed price would relieve it.
 
+    ``realized`` also carries the basis a cash-in-lieu fraction relieves
+    from a known pool it re-denominates (issue 105).
+
     ``delivered`` and ``removed`` record, by security, the share action of
     this pass that delivered shares into its holding from another security
     (a spin-off child, an acquirer), and the one that removed its holding
     (a disposal, a share acquisition). Neither leaves a post-action count
     the prior close's holders are proven entitled on
     (``_require_proven_post_action_count``).
+
+    ``recorded`` holds the applied-effect identities of effects that are not
+    share actions but left a basis indeterminate in this pass (a continuing
+    liquidation instalment), so the book records every cause it names.
     """
 
-    opening: Mapping[UUID, SecurityHoldingV1]
-    holdings: dict[UUID, SecurityHoldingV1]
+    opening: Mapping[UUID, SecurityHoldingV2]
+    holdings: dict[UUID, SecurityHoldingV2]
     targets: dict[UUID, SecurityTargetPositionV1]
     claims: dict[ClaimIdentity, PendingCashClaimV1]
     realized: Decimal = ZERO
     unmodelled: list[_EffectContext] = field(default_factory=list)
     delivered: dict[UUID, _EffectContext] = field(default_factory=dict)
     removed: dict[UUID, _EffectContext] = field(default_factory=dict)
+    recorded: set[SHA256Hash] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -238,7 +254,7 @@ def _security_order(security_id: UUID) -> bytes:
     return security_id.bytes
 
 
-def _require_positioned(state: PortfolioStateV1, session: SessionKeyV1) -> None:
+def _require_positioned(state: PortfolioStateV2, session: SessionKeyV1) -> None:
     if state.session_key != session:
         raise ValueError(
             "portfolio state must already be positioned at the current session: "
@@ -270,25 +286,27 @@ def _unique_targets(
 
 
 def _replace_holdings(
-    state: PortfolioStateV1,
-    holdings: Mapping[UUID, SecurityHoldingV1],
+    state: PortfolioStateV2,
+    holdings: Mapping[UUID, SecurityHoldingV2],
     realized: Decimal,
-) -> PortfolioStateV1:
+    applied_effect_ids: tuple[SHA256Hash, ...],
+) -> PortfolioStateV2:
     """Rebuild state around new holdings, discarding any mark.
 
     A mark describes the holdings it was taken against. A corporate action
     replaces those holdings, so carrying the mark forward would value shares
     that no longer exist. ``realized`` is the disposal PnL of the same pass;
     a corporate action carries no transaction cost, so gross and net move
-    together.
+    together. ``applied_effect_ids`` is the book's record after the pass.
     """
     with decimal_context():
-        return PortfolioStateV1(
+        return PortfolioStateV2(
             session_key=state.session_key,
             cash_balance=state.cash_balance,
             holdings=tuple(holdings[key] for key in sorted(holdings, key=str)),
             pending_cash_claims=state.pending_cash_claims,
             settled_claim_ids=state.settled_claim_ids,
+            applied_effect_ids=applied_effect_ids,
             lane=state.lane,
             admission_hash=state.admission_hash,
             mark=None,
@@ -299,6 +317,94 @@ def _replace_holdings(
             realized_net_pnl=state.realized_net_pnl + realized,
             cumulative_transaction_costs=state.cumulative_transaction_costs,
         )
+
+
+def _requantified(holding: SecurityHoldingV2, quantity: int) -> SecurityHoldingV2:
+    """Re-denominate a holding in place: same basis, same basis status."""
+    return SecurityHoldingV2(
+        security_id=holding.security_id,
+        quantity=quantity,
+        basis_status=holding.basis_status,
+        cost_basis=holding.cost_basis,
+        basis_indeterminate_by=holding.basis_indeterminate_by,
+    )
+
+
+def _relieve_cash_in_lieu(
+    context: _EffectContext,
+    holding: SecurityHoldingV2,
+    exact: Fraction,
+    residual: Fraction,
+    claim: PendingCashClaimV1,
+    book: _Book,
+) -> SecurityHoldingV2:
+    """Relieve the basis a cash-in-lieu fraction carries out of its pool.
+
+    ``holding`` is the re-denominated whole shares of one basis pool, and
+    ``exact`` the exact entitlement the pool became, of which ``residual`` was
+    sold for the claim's proceeds. Under average cost (spec 11.4) the sold
+    fraction carries ``basis * residual / exact`` of the pool, which the
+    source ratio and the book fully determine, so the relief is realized
+    against the proceeds now, as a disposal's is. An indeterminate pool has
+    no proven basis to relieve: it stays indeterminate and names this effect
+    too (issue 105).
+    """
+    if holding.cost_basis is None:
+        return indeterminate_holding(holding, _applied_effect_id(context))
+    share = Fraction(holding.cost_basis) * residual / exact
+    with decimal_context():
+        relieved = Decimal(share.numerator) / Decimal(share.denominator)
+        remaining = holding.cost_basis - relieved
+        book.realized += claim.total_cash_expected - relieved
+    return SecurityHoldingV2(
+        security_id=holding.security_id,
+        quantity=holding.quantity,
+        basis_status="known",
+        cost_basis=remaining,
+    )
+
+
+def _leave_instalment_basis_unproven(
+    context: _EffectContext, owed: Iterable[PendingCashClaimV1], book: _Book
+) -> None:
+    """Apply the issue 105 rule to one continuing liquidation instalment.
+
+    Whether an instalment returns capital or pays income is unproven. Within
+    a known basis both readings realize 0 and leave different bases, so the
+    holding becomes INDETERMINATE and the instalment is recorded as its
+    cause; the later disposal that would realize it then halts. Above the
+    basis, return of capital would realize a gain income would not, and on
+    an indeterminate basis nothing tells the two apart, so the pass halts.
+    So does an instalment whose holding the window's own disposal or
+    conversion already removed: the readings differ in realized PnL, and no
+    holding is left to carry that as an indeterminate basis.
+    """
+    label = (
+        f"the liquidation instalment {context.occurrence_id} on {context.security_id}"
+    )
+    holding = book.holdings.get(context.security_id)
+    if holding is None:
+        raise IndeterminateBasisError(
+            f"{label} is owed on a holding removed in this window, so whether "
+            "it returned capital changes realized PnL and is not proven"
+        )
+    if holding.cost_basis is None:
+        raise IndeterminateBasisError(
+            f"{label} pays on a basis already indeterminate, caused by "
+            f"{', '.join(holding.basis_indeterminate_by)}, so whether it "
+            "returned capital is not proven"
+        )
+    with decimal_context():
+        total = sum((claim.total_cash_expected for claim in owed), ZERO)
+    if total > holding.cost_basis:
+        raise IndeterminateBasisError(
+            f"{label} owes {total}, which exceeds its basis "
+            f"{holding.cost_basis}, so as a return of capital it would realize "
+            "a gain that as income it would not"
+        )
+    cause = _applied_effect_id(context)
+    book.holdings[context.security_id] = indeterminate_holding(holding, cause)
+    book.recorded.add(cause)
 
 
 def _date_facts(payload: TermsPayloadV1) -> dict[str, EconomicDateFactV1]:
@@ -390,11 +496,11 @@ class CorporateActionProcessor:
 
     def apply_pre_open_actions(
         self,
-        portfolio_state: PortfolioStateV1,
+        portfolio_state: PortfolioStateV2,
         staged_targets: Iterable[SecurityTargetPositionV1],
         economic_outcomes: Iterable[SecurityEconomicOutcomeV1],
         current_session: SessionKeyV1,
-    ) -> tuple[PortfolioStateV1, tuple[SecurityTargetPositionV1, ...]]:
+    ) -> tuple[PortfolioStateV2, tuple[SecurityTargetPositionV1, ...]]:
         """Fold this session's proven corporate actions into book and targets.
 
         Call this exactly once per session, for every session of the clock in
@@ -402,12 +508,16 @@ class CorporateActionProcessor:
         (see ``_SessionWindow``), so an effect dated on a weekend or a
         did-not-open day is applied at the next pre-open rather than dropped.
         Cash entitlements are idempotent, because a claim already pending or
-        already in ``settled_claim_ids`` is recognized and skipped. Share
-        mutations are NOT: a second call for the same session would split an
-        already split position again. ``PortfolioStateV1`` carries no
-        applied-occurrence ledger to make that detectable from state alone,
-        and that model is outside this task's write-set. The fix is an
-        ``applied_occurrence_ids`` field there.
+        already in ``settled_claim_ids`` is recognized and skipped.
+
+        Share mutations are not idempotent, so a replay of one fails closed
+        (issue 49). The pass records the applied-effect identity of every
+        share-mutating effect it owns in ``applied_effect_ids``, whether or
+        not the book is exposed to it, and refuses with
+        ``EffectAlreadyAppliedError`` any it owns that the book already
+        absorbed, when the book is exposed to a security the effect touches.
+        That is a refusal, not a proven no-op: staged targets are not state,
+        so whether a staged buy was already restated cannot be told.
         """
         _require_positioned(portfolio_state, current_session)
         window = self._session_window(current_session)
@@ -428,9 +538,21 @@ class CorporateActionProcessor:
             else:
                 unsupported.append(outcome)
         every_context = [context for _, contexts in supported for context in contexts]
-        conflicts = _share_action_conflicts(every_context, window)
+        mutations = _window_share_mutations(every_context, window)
+        already = frozenset(portfolio_state.applied_effect_ids)
+        replayed = tuple(
+            context for context in mutations if _applied_effect_id(context) in already
+        )
+        conflicts = _share_action_conflicts(mutations)
         unknown = self._unknown_claims(supported, window)
         ended = self._ended_claim_actions(supported, window)
+        # A replay is judged first: the book already reflects the effect, so
+        # every other rule would be judged against shares it moved once.
+        # Exposure the pass gains to a replayed effect comes only through
+        # another share action touching its security, which conflicts with
+        # it, so the second replay check below is defense in depth, as for a
+        # conflict.
+        self._require_no_exposed_replay(replayed, book)
         # Every rule is judged against the prior close's book here, before
         # any dispatch, and again against the book the pass leaves below. An
         # unknown claim needs both: a disposal may empty the book the pass
@@ -458,6 +580,7 @@ class CorporateActionProcessor:
         # One dispatch over every outcome, so every share action of the pass
         # runs before any cash distribution, whichever outcome each is in.
         self._apply_contexts(every_context, book, window)
+        self._require_no_exposed_replay(replayed, book)
         self._require_no_exposed_conflict(conflicts, book)
         self._require_no_exposed_unknown_claim(unknown, book)
         self._require_no_exposed_ended_claim(ended, book)
@@ -489,9 +612,20 @@ class CorporateActionProcessor:
                     f"corporate action kind {context.payload.action_kind.value} "
                     "has no proven M2 accounting rule"
                 )
+        applied = tuple(
+            sorted(
+                already
+                | {_applied_effect_id(context) for context in mutations}
+                | book.recorded
+            )
+        )
         state = portfolio_state
         if book.holdings != opening_holdings:
-            state = _replace_holdings(state, book.holdings, book.realized)
+            state = _replace_holdings(state, book.holdings, book.realized, applied)
+        elif applied != state.applied_effect_ids:
+            # Holdings the pass left alone keep their mark: it still prices
+            # exactly the shares it was taken against.
+            state = state.model_copy(update={"applied_effect_ids": applied})
         state = self._record_claims(state, book.claims)
         targets = tuple(
             sorted(
@@ -503,10 +637,10 @@ class CorporateActionProcessor:
 
     def apply_intrasession_settlements(
         self,
-        portfolio_state: PortfolioStateV1,
+        portfolio_state: PortfolioStateV2,
         economic_outcomes: Iterable[SecurityEconomicOutcomeV1],
         current_session: SessionKeyV1,
-    ) -> PortfolioStateV1:
+    ) -> PortfolioStateV2:
         """Settle only the entitlements a delivered settlement actually proves.
 
         Delivered cash that matches no pending claim is not simply dropped
@@ -576,6 +710,30 @@ class CorporateActionProcessor:
         return kernel.state
 
     # -- pre-open internals -----------------------------------------------
+
+    def _require_no_exposed_replay(
+        self, replayed: Iterable[_EffectContext], book: _Book
+    ) -> None:
+        """Refuse a share-mutating effect the book has already absorbed.
+
+        The book's ``applied_effect_ids`` say the effect already moved its
+        shares, so applying it again would move them twice: a checkpoint taken
+        after a pre-open and then replayed would split a split position again
+        (issue 49). Only a book exposed to a security the effect touches is
+        halted; for any other book the effect acts on nothing of its own.
+        """
+        for context in replayed:
+            if any(
+                self._is_exposed(touched, book)
+                for touched in _touched_securities(context)
+            ):
+                raise EffectAlreadyAppliedError(
+                    f"the {context.payload.action_kind.value} "
+                    f"{context.occurrence_id} of {context.source_id} on "
+                    f"{context.security_id} was already applied to this book as "
+                    f"effect {_applied_effect_id(context)}, and applying it again "
+                    "would move the shares it moved twice"
+                )
 
     def _require_no_exposed_conflict(
         self, conflicts: Iterable[_ShareActionConflict], book: _Book
@@ -833,13 +991,13 @@ class CorporateActionProcessor:
                     "a split would extinguish a held position without proven "
                     "consideration for the remainder"
                 )
-            book.holdings[context.security_id] = SecurityHoldingV1(
-                security_id=context.security_id,
-                quantity=whole,
-                cost_basis=holding.cost_basis,
-            )
+            moved = _requantified(holding, whole)
             if residual:
-                self._stage_cash_in_lieu(context, component, residual, book)
+                claim = self._stage_cash_in_lieu(context, component, residual, book)
+                moved = _relieve_cash_in_lieu(
+                    context, moved, exact, residual, claim, book
+                )
+            book.holdings[context.security_id] = moved
         self._scale_target(context, component, book, tie_break)
 
     def _apply_stock_dividend(
@@ -861,13 +1019,13 @@ class CorporateActionProcessor:
             whole, residual = resolve_whole_shares(
                 exact, component.fraction_treatment, tie_break=tie_break
             )
-            book.holdings[context.security_id] = SecurityHoldingV1(
-                security_id=context.security_id,
-                quantity=whole,
-                cost_basis=holding.cost_basis,
-            )
+            moved = _requantified(holding, whole)
             if residual:
-                self._stage_cash_in_lieu(context, component, residual, book)
+                claim = self._stage_cash_in_lieu(context, component, residual, book)
+                moved = _relieve_cash_in_lieu(
+                    context, moved, exact, residual, claim, book
+                )
+            book.holdings[context.security_id] = moved
         # A stock dividend re-denominates the security exactly as a split
         # does, so a target staged in pre-dividend shares is restated too.
         # Left alone, a staged hold would sell the new shares at the open.
@@ -896,6 +1054,15 @@ class CorporateActionProcessor:
         whole, residual = resolve_whole_shares(
             exact, component.fraction_treatment, tie_break=tie_break
         )
+        # No M1c field allocates the parent's basis between parent and child
+        # (issue 103). Keeping the parent whole would overstate its basis and
+        # a zero child basis would book the child's sale as pure gain, so
+        # both are indeterminate, caused by this spin-off. That holds whatever
+        # child quantity the holding receives: the distribution happened on
+        # the parent either way. Daily marks still value both from their own
+        # closing prices.
+        cause = _applied_effect_id(context)
+        book.holdings[context.security_id] = indeterminate_holding(holding, cause)
         if whole > 0:
             existing = book.holdings.get(child)
             # Parent shares are unchanged, so the parent target stands. The
@@ -906,18 +1073,21 @@ class CorporateActionProcessor:
                 _credit_target(
                     book, child, whole, held=existing is not None, label="spin-off"
                 )
-            # No tax allocation percentage is claimed, so the child enters at a
-            # zero basis and the parent keeps its own. Daily marks still value
-            # both from their own closing prices.
-            with decimal_context():
-                basis = ZERO if existing is None else existing.cost_basis
-            book.holdings[child] = SecurityHoldingV1(
-                security_id=child,
-                quantity=whole + (0 if existing is None else existing.quantity),
-                cost_basis=basis,
+            book.holdings[child] = pooled_holding(
+                existing,
+                SecurityHoldingV2(
+                    security_id=child,
+                    quantity=whole,
+                    basis_status="indeterminate",
+                    cost_basis=None,
+                    basis_indeterminate_by=(cause,),
+                ),
             )
             book.delivered.setdefault(child, context)
         if residual:
+            # A cross-security residual: the child fraction sold for cash
+            # relieves an unallocated share of the parent's basis, which the
+            # spin-off already left indeterminate (issue 105).
             self._stage_cash_in_lieu(context, component, residual, book)
 
     def _apply_cash_distribution(
@@ -963,6 +1133,7 @@ class CorporateActionProcessor:
             context,
             "a liquidating distribution" if liquidating else "a cash distribution",
         )
+        owed: list[PendingCashClaimV1] = []
         for component in components:
             share_basis = component.unit_basis.share_basis
             if share_basis == "predecessor_pre_action":
@@ -972,15 +1143,19 @@ class CorporateActionProcessor:
                 holding = book.holdings.get(context.security_id)
             if holding is None:
                 continue
-            self._stage_claim(
-                context=context,
-                component_id=component.component_id,
-                quantity=holding.quantity,
-                cash_per_share=self._cash_per_share(component, context.security_id),
-                entitlement_session=entitlement_on,
-                payable_session=payable_on,
-                book=book,
+            owed.append(
+                self._stage_claim(
+                    context=context,
+                    component_id=component.component_id,
+                    quantity=holding.quantity,
+                    cash_per_share=self._cash_per_share(component, context.security_id),
+                    entitlement_session=entitlement_on,
+                    payable_session=payable_on,
+                    book=book,
+                )
             )
+        if liquidating and owed:
+            _leave_instalment_basis_unproven(context, owed, book)
 
     def _apply_cash_acquisition(
         self, context: _EffectContext, book: _Book, window: _SessionWindow
@@ -1066,18 +1241,17 @@ class CorporateActionProcessor:
             _extinguish_target(book, context.security_id)
         if holding is None:
             return
-        with decimal_context():
-            basis = holding.cost_basis + (
-                ZERO if existing is None else existing.cost_basis
-            )
         del book.holdings[context.security_id]
         book.removed[context.security_id] = context
-        book.holdings[acquirer] = SecurityHoldingV1(
+        # The predecessor's basis, known or not, carries into the acquirer
+        # shares it converts into, pooled with any acquirer already held.
+        carried = SecurityHoldingV2(
             security_id=acquirer,
-            quantity=whole + (0 if existing is None else existing.quantity),
-            cost_basis=basis,
+            quantity=whole,
+            basis_status=holding.basis_status,
+            cost_basis=holding.cost_basis,
+            basis_indeterminate_by=holding.basis_indeterminate_by,
         )
-        book.delivered.setdefault(acquirer, context)
         if cash or residual:
             payable_on = _payable_session(_date_facts(_terms_payload(context)))
             for component_cash in cash:
@@ -1092,8 +1266,19 @@ class CorporateActionProcessor:
                     payable_session=payable_on,
                     book=book,
                 )
+            if cash:
+                # A cash leg is a partial disposal, and no source allocates
+                # the predecessor's basis between it and the acquirer shares.
+                # Carrying the whole basis forward would publish the cash
+                # leg's realized PnL as 0 as if that were proven (issue 105).
+                carried = indeterminate_holding(carried, _applied_effect_id(context))
             if residual:
-                self._stage_cash_in_lieu(context, component, residual, book)
+                claim = self._stage_cash_in_lieu(context, component, residual, book)
+                carried = _relieve_cash_in_lieu(
+                    context, carried, exact, residual, claim, book
+                )
+        book.holdings[acquirer] = pooled_holding(existing, carried)
+        book.delivered.setdefault(acquirer, context)
 
     def _apply_liquidation(
         self, context: _EffectContext, book: _Book, window: _SessionWindow
@@ -1257,7 +1442,7 @@ class CorporateActionProcessor:
         component: ShareComponentV1,
         residual: Fraction,
         book: _Book,
-    ) -> None:
+    ) -> PendingCashClaimV1:
         """Record the cash leg of an aggregate fractional-share sale."""
         rate = self._in_lieu_rates.get(
             (
@@ -1288,7 +1473,7 @@ class CorporateActionProcessor:
             Fraction(Decimal(rate.cash_per_whole_share)) * residual
         )
         payable_on = _payable_session(_date_facts(_terms_payload(context)))
-        self._stage_claim(
+        return self._stage_claim(
             context=context,
             component_id=cash_in_lieu_component_id(component.component_id, residual),
             quantity=1,
@@ -1353,7 +1538,7 @@ class CorporateActionProcessor:
     def _dispose(
         self,
         context: _EffectContext,
-        holding: SecurityHoldingV1,
+        holding: SecurityHoldingV2,
         components: Iterable[CashComponentV1],
         book: _Book,
     ) -> None:
@@ -1367,6 +1552,7 @@ class CorporateActionProcessor:
         is realized now: in the pass of the first clock session on or after
         the effective date.
         """
+        basis = known_cost_basis(holding)
         payable_on = _payable_session(_date_facts(_terms_payload(context)))
         del book.holdings[context.security_id]
         book.removed[context.security_id] = context
@@ -1384,13 +1570,13 @@ class CorporateActionProcessor:
             with decimal_context():
                 proceeds += claim.total_cash_expected
         with decimal_context():
-            book.realized += proceeds - holding.cost_basis
+            book.realized += proceeds - basis
 
     def _record_claims(
         self,
-        state: PortfolioStateV1,
+        state: PortfolioStateV2,
         claims: Mapping[ClaimIdentity, PendingCashClaimV1],
-    ) -> PortfolioStateV1:
+    ) -> PortfolioStateV2:
         if not claims:
             return state
         # A claim already pending or already settled is the same entitlement.
@@ -1641,8 +1827,35 @@ def _owed_index(outcome: SecurityEconomicOutcomeV1) -> _OwedIndex:
     return index
 
 
-def _share_action_conflicts(
+def _applied_effect_id(context: _EffectContext) -> SHA256Hash:
+    """The applied-effect identity of one occurred effect (issue 49)."""
+    return applied_economic_effect_id(
+        source_id=context.source_id,
+        security_id=context.security_id,
+        occurrence_id=context.occurrence_id,
+    )
+
+
+def _window_share_mutations(
     contexts: Iterable[_EffectContext], window: _SessionWindow
+) -> tuple[_EffectContext, ...]:
+    """Every share action this window owns, across every outcome of the pass.
+
+    A share action changes a share count on its effective date, so it is
+    owned by the one window that contains that date. A liquidation on a
+    continuing claim changes no share count, so it is not one.
+    """
+    return tuple(
+        context
+        for context in contexts
+        if context.payload.action_kind in SHARE_MUTATING_KINDS
+        and not _is_cash_distribution(context.payload)
+        and window.contains(context.effective_on)
+    )
+
+
+def _share_action_conflicts(
+    mutations: Iterable[_EffectContext],
 ) -> tuple[_ShareActionConflict, ...]:
     """Every security two or more of the window's share actions touch.
 
@@ -1650,14 +1863,7 @@ def _share_action_conflicts(
     which one outcome's acquirer is another outcome's subject counts too.
     """
     members: dict[UUID7, list[_EffectContext]] = {}
-    for context in contexts:
-        if context.payload.action_kind not in SHARE_MUTATING_KINDS:
-            continue
-        if _is_cash_distribution(context.payload):
-            # A liquidation on a continuing claim changes no share count.
-            continue
-        if not window.contains(context.effective_on):
-            continue
+    for context in mutations:
         # A split delivers into its own security; count each action once.
         for security_id in dict.fromkeys(_touched_securities(context)):
             members.setdefault(security_id, []).append(context)
@@ -1708,7 +1914,7 @@ def _definitely_precedes(earlier: _EffectContext, later: _EffectContext) -> bool
 
 
 def _index_pending_claims(
-    state: PortfolioStateV1,
+    state: PortfolioStateV2,
 ) -> dict[_ClaimIndexKey, dict[SHA256Hash, PendingCashClaimV1]]:
     """Index pending claims by the identity a delivery group can name.
 

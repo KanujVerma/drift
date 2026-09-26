@@ -16,7 +16,7 @@ from pydantic import Field, field_validator, model_validator
 
 from drift.domain.common import UUID7, FrozenModel, UTCDateTime
 from drift.domain.evaluator_clock import EvaluationSessionV1
-from drift.domain.evaluator_portfolio import SecurityHoldingV1, decimal_context
+from drift.domain.evaluator_portfolio import SecurityHoldingV2, decimal_context
 from drift.domain.normalization import DerivedObservationViewV1
 from drift.domain.observation_query import ObservationDecisionQueryV1
 from drift.domain.sessions import SessionKeyV1
@@ -44,13 +44,19 @@ def _security_order(security_id: UUID) -> bytes:
 
 
 class PositionViewV1(FrozenModel):
-    """Causal, point-in-time view of one existing portfolio holding."""
+    """Causal, point-in-time view of one existing portfolio holding.
+
+    ``cost_basis`` and ``average_cost_per_share`` are both ``None`` exactly
+    when the holding's basis is indeterminate (issue 103): no source evidence
+    allocates it, and a strategy is never shown an invented number. A view of
+    a known basis dumps exactly as it did before the fields became nullable.
+    """
 
     schema_version: Literal["1"] = "1"
     security_id: UUID7
     quantity: int = Field(gt=0)
-    cost_basis: Decimal
-    average_cost_per_share: Decimal
+    cost_basis: Decimal | None
+    average_cost_per_share: Decimal | None
 
     @model_validator(mode="after")
     def validate_position_view(self) -> Self:
@@ -58,6 +64,13 @@ class PositionViewV1(FrozenModel):
             return self._validate_under_pinned_context()
 
     def _validate_under_pinned_context(self) -> Self:
+        if self.cost_basis is None or self.average_cost_per_share is None:
+            if self.cost_basis is not None or self.average_cost_per_share is not None:
+                raise ValueError(
+                    "an indeterminate basis leaves both the cost basis and the "
+                    "average cost per share unset"
+                )
+            return self
         if self.cost_basis < Decimal("0"):
             raise ValueError("cost basis must be non-negative")
         # A view that disagrees with its own basis would let a strategy see a
@@ -71,8 +84,12 @@ class PositionViewV1(FrozenModel):
         return self
 
 
-def position_view(holding: SecurityHoldingV1) -> PositionViewV1:
-    """Project one holding into its strategy-facing position view."""
+def position_view(holding: SecurityHoldingV2) -> PositionViewV1:
+    """Project one holding into its strategy-facing position view.
+
+    An indeterminate basis projects as ``None`` in both basis fields, so the
+    strategy sees that it is unknown rather than a number.
+    """
     return PositionViewV1(
         security_id=holding.security_id,
         quantity=holding.quantity,

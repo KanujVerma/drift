@@ -75,12 +75,13 @@ from drift.domain.evaluator_lanes import (
     exploratory_evaluation_admission_hash,
 )
 from drift.domain.evaluator_portfolio import (
+    IndeterminateBasisError,
     IndeterminateValuationError,
     MarkEvidenceV1,
     MarkPriceV1,
     PendingCashClaimV1,
-    PortfolioStateV1,
-    SecurityHoldingV1,
+    PortfolioStateV2,
+    SecurityHoldingV2,
     pending_cash_claim_id,
 )
 from drift.domain.evaluator_strategy import SecurityTargetPositionV1
@@ -507,23 +508,45 @@ def _mark_price(security_id: UUID, price: str) -> MarkPriceV1:
 
 def _holding(
     security_id: UUID = SEC_A, quantity: int = 100, basis: str = "1000"
-) -> SecurityHoldingV1:
-    return SecurityHoldingV1(
-        security_id=security_id, quantity=quantity, cost_basis=Decimal(basis)
+) -> SecurityHoldingV2:
+    return SecurityHoldingV2(
+        security_id=security_id,
+        quantity=quantity,
+        basis_status="known",
+        cost_basis=Decimal(basis),
     )
+
+
+def _moved_nothing(updated: PortfolioStateV2, state: PortfolioStateV2) -> bool:
+    """Whether a pass left the book as it was, apart from what it recorded.
+
+    A pass records every share action it owns, exposed or not (issue 49), so
+    a book no action touches can still gain applied effects, and only those.
+    """
+    recorded = set(updated.applied_effect_ids)
+    return recorded >= set(state.applied_effect_ids) and updated.model_dump(
+        exclude={"applied_effect_ids"}
+    ) == state.model_dump(exclude={"applied_effect_ids"})
+
+
+def _known_basis(holding: SecurityHoldingV2) -> Decimal:
+    """The exact basis of a holding the test expects to be known."""
+    assert holding.basis_status == "known"
+    assert holding.cost_basis is not None
+    return holding.cost_basis
 
 
 def _state(
     *,
-    holdings: tuple[SecurityHoldingV1, ...] = (),
+    holdings: tuple[SecurityHoldingV2, ...] = (),
     cash: str = "10000",
     claims: tuple[PendingCashClaimV1, ...] = (),
     settled: tuple[str, ...] = (),
     day: date = EFFECT_DAY,
-) -> PortfolioStateV1:
+) -> PortfolioStateV2:
     claims_value = sum((claim.total_cash_expected for claim in claims), ZERO)
     cash_value = Decimal(cash)
-    return PortfolioStateV1(
+    return PortfolioStateV2(
         lane="exploratory",
         admission_hash=EXPLORATORY.admission_hash,
         session_key=_key(day),
@@ -804,7 +827,10 @@ def test_reverse_split_aggregate_sale_cash_creates_share_and_in_lieu_claim() -> 
 
     assert len(updated.holdings) == 1
     assert updated.holdings[0].quantity == 1
-    assert updated.holdings[0].cost_basis == Decimal("800")
+    # Issue 105: the quarter share sold carries 1/5 of the 1 1/4 the pool
+    # became, so 160 of the 800 basis is relieved against 1.00 of proceeds.
+    assert updated.holdings[0].cost_basis == Decimal("640")
+    assert updated.realized_gross_pnl == Decimal("-159")
     assert len(updated.pending_cash_claims) == 1
     claim = updated.pending_cash_claims[0]
     assert claim.component_id == cash_in_lieu_component_id("shares-1", Fraction(1, 4))
@@ -1088,9 +1114,14 @@ def test_spinoff_creates_child_holding_and_marks_nav_cleanly() -> None:
     updated, _ = _processor().apply_pre_open_actions(state, (), (outcome,), _key())
     by_security = {item.security_id: item for item in updated.holdings}
     assert by_security[SEC_A].quantity == 100
-    assert by_security[SEC_A].cost_basis == Decimal("1000")
     assert by_security[SEC_CHILD].quantity == 50
-    assert by_security[SEC_CHILD].cost_basis == ZERO
+    # Issue 103: no source allocates the basis between parent and child, so
+    # both are indeterminate. The child no longer enters at a zero basis, nor
+    # does the parent keep its whole 1000.
+    assert by_security[SEC_A].basis_status == "indeterminate"
+    assert by_security[SEC_A].cost_basis is None
+    assert by_security[SEC_CHILD].basis_status == "indeterminate"
+    assert by_security[SEC_CHILD].cost_basis is None
 
     kernel = PortfolioAccountingKernel(updated, session_clock=CLOCK)
     kernel.mark_close((_mark_price(SEC_A, "10"), _mark_price(SEC_CHILD, "4")))
@@ -1243,7 +1274,7 @@ def test_cash_dividend_creates_claim_and_settles_on_delivered_evidence() -> None
     assert settled.settled_claim_ids == (claim.claim_id,)
 
 
-def _payable_state(state: PortfolioStateV1) -> PortfolioStateV1:
+def _payable_state(state: PortfolioStateV2) -> PortfolioStateV2:
     kernel = PortfolioAccountingKernel(state, session_clock=CLOCK)
     kernel.advance_session(_key(PAYABLE_DAY))
     return kernel.state
@@ -2073,9 +2104,11 @@ def test_a_liquidation_on_a_continuing_claim_is_a_cash_distribution() -> None:
     )
 
     # A partial liquidating distribution pays cash on shares that continue:
-    # every share, its basis, and the staged hold all survive.
+    # every share and the staged hold survive. Whether it returned capital is
+    # unproven, so the basis survives as indeterminate (issue 105).
     assert _quantities(updated.holdings) == {SEC_A: 10}
-    assert updated.holdings[0].cost_basis == Decimal("100")
+    assert updated.holdings[0].basis_status == "indeterminate"
+    assert updated.holdings[0].cost_basis is None
     assert _quantities(translated) == {SEC_A: 10}
     claim = updated.pending_cash_claims[0]
     assert claim.action_kind is ActionKind.LIQUIDATION
@@ -2148,7 +2181,7 @@ def test_an_unproven_liquidation_behind_only_a_zero_target_commits_nothing() -> 
         state, (_target(SEC_A, 0),), (outcome,), _key()
     )
 
-    assert updated is state
+    assert _moved_nothing(updated, state)
     assert _quantities(translated) == {SEC_A: 0}
 
 
@@ -2170,7 +2203,7 @@ def test_a_cash_acquisition_relieves_its_basis_into_realized_pnl() -> None:
     assert updated.realized_net_pnl == Decimal("300")
     # Realized-PnL identity: cash, claims and remaining basis equal the
     # opening cash and basis plus everything realized.
-    remaining = sum((item.cost_basis for item in updated.holdings), ZERO)
+    remaining = sum((_known_basis(item) for item in updated.holdings), ZERO)
     assert updated.cash_balance + updated.pending_claims_value + remaining == (
         Decimal("500") + Decimal("900") + updated.realized_net_pnl
     )
@@ -2299,7 +2332,7 @@ def test_a_disposal_realizes_the_proceeds_of_every_cash_component() -> None:
 def test_realized_disposal_pnl_accumulates_on_the_prior_realized_pnl() -> None:
     outcome = _liquidation_case(suffix=1990, claim_status="extinguished")
     prior = _state(holdings=(_holding(quantity=10, basis="100"),))
-    state = PortfolioStateV1.model_validate(
+    state = PortfolioStateV2.model_validate(
         dict(prior)
         | {"realized_gross_pnl": Decimal("12"), "realized_net_pnl": Decimal("10")}
     )
@@ -2380,7 +2413,7 @@ def test_a_liquidation_m1c_composes_as_unknown_is_indeterminate() -> None:
     unchanged, _ = _processor().apply_pre_open_actions(
         elsewhere, (), (outcome,), _key()
     )
-    assert unchanged is elsewhere
+    assert _moved_nothing(unchanged, elsewhere)
 
 
 def test_an_extinguishing_liquidation_m1c_composes_as_unknown_halts_alone() -> None:
@@ -2420,8 +2453,12 @@ def test_a_resurrected_liquidation_claim_is_indeterminate() -> None:
 def test_a_liquidation_m1c_composes_as_ended_or_continuing_applies() -> None:
     # Control for the composed-status rule: the same two effects, with the
     # instalment at 10:00 and the final liquidation at 15:00 of one date, are
-    # ones M1c can order, and it composes them as extinguished. Each then
-    # applies by its own rule: 30 for the instalment, 150 for the final.
+    # ones M1c can order, and it composes them as extinguished, so the
+    # composed-unknown rule passes them. They used to apply by their own
+    # rules, 30 for the instalment and 150 for the final. Issue 105 then
+    # halts the pass on the basis instead: the final disposal relieved the
+    # whole 100, and whether the instalment returned capital changes that
+    # realized PnL by 30, with no holding left to carry it.
     outcome = _conflicting_liquidations(
         2940,
         composed="extinguished",
@@ -2430,10 +2467,8 @@ def test_a_liquidation_m1c_composes_as_ended_or_continuing_applies() -> None:
     )
     state = _state(holdings=(_holding(quantity=10, basis="100"),), cash="0")
 
-    updated, _ = _processor().apply_pre_open_actions(state, (), (outcome,), _key())
-
-    assert updated.holdings == ()
-    assert updated.pending_claims_value == Decimal("180")
+    with pytest.raises(IndeterminateBasisError, match="removed in this window"):
+        _processor().apply_pre_open_actions(state, (), (outcome,), _key())
 
 
 @pytest.mark.parametrize("kind", ["cash", "stock"])
@@ -2592,7 +2627,7 @@ def test_a_resurrected_claim_halts_an_ungated_kind_once_exposed(
     processor = _processor()
     flat = _state(cash="10000")
     first, _ = processor.apply_pre_open_actions(flat, (), (outcome,), _key())
-    assert first is flat
+    assert _moved_nothing(first, flat)
 
     held = _state(holdings=(_holding(quantity=100),), day=LATER_DAY)
     with pytest.raises(
@@ -2625,7 +2660,7 @@ def test_a_resurrected_claim_halts_when_the_terminal_predates_the_window(
     unchanged, _ = _processor().apply_pre_open_actions(
         elsewhere, (), (outcome,), _key()
     )
-    assert unchanged is elsewhere
+    assert _moved_nothing(unchanged, elsewhere)
 
 
 def test_a_split_with_its_own_unknown_claim_status_halts() -> None:
@@ -3184,7 +3219,7 @@ def test_a_continuing_share_action_on_an_ended_claim_halts_an_exposed_book(
     unchanged, targets = _processor().apply_pre_open_actions(
         elsewhere, (_target(SEC_OTHER, 5),), (outcome,), _key()
     )
-    assert unchanged is elsewhere
+    assert _moved_nothing(unchanged, elsewhere)
     assert _quantities(targets) == {SEC_OTHER: 5}
 
 
@@ -3211,7 +3246,7 @@ def test_a_continuing_share_action_on_an_ended_claim_halts_a_staged_buy(
     unchanged, targets = _processor().apply_pre_open_actions(
         state, (_target(SEC_A, 0),), (outcome,), _key()
     )
-    assert unchanged is state
+    assert _moved_nothing(unchanged, state)
     assert _quantities(targets) == {SEC_A: 0}
 
 
@@ -3470,7 +3505,7 @@ def test_a_split_then_an_ended_claim_dividend_halts_at_the_dividend(
             unchanged, _ = _processor().apply_pre_open_actions(
                 elsewhere, (), (outcome,), _key(day)
             )
-            assert unchanged is elsewhere
+            assert _moved_nothing(unchanged, elsewhere)
         return
 
     first = _state(holdings=(_holding(quantity=100),))
@@ -3787,7 +3822,7 @@ def _target(security_id: UUID, quantity: int) -> SecurityTargetPositionV1:
 
 
 def _quantities(
-    items: tuple[SecurityTargetPositionV1, ...] | tuple[SecurityHoldingV1, ...],
+    items: tuple[SecurityTargetPositionV1, ...] | tuple[SecurityHoldingV2, ...],
 ) -> dict[UUID, int]:
     return {
         item.security_id: (
@@ -4191,7 +4226,7 @@ def test_share_acquisition_zero_target_without_a_holding_has_no_exposure() -> No
         state, targets, (outcome,), _key()
     )
 
-    assert updated is state
+    assert _moved_nothing(updated, state)
     assert translated == targets
 
 
@@ -4204,7 +4239,7 @@ def test_cash_acquisition_zero_target_without_a_holding_has_no_exposure() -> Non
         state, targets, (outcome,), _key()
     )
 
-    assert updated is state
+    assert _moved_nothing(updated, state)
     assert translated == targets
 
 
@@ -4725,7 +4760,7 @@ def test_two_share_actions_on_two_dates_in_one_window_are_indeterminate(
     unchanged, _ = _processor().apply_pre_open_actions(
         elsewhere, (), (outcome,), _key(LATER_DAY)
     )
-    assert unchanged is elsewhere
+    assert _moved_nothing(unchanged, elsewhere)
 
 
 def test_an_acquirer_split_and_an_acquisition_on_two_dates_are_indeterminate() -> None:
@@ -5294,7 +5329,7 @@ def test_share_actions_on_an_unheld_security_halt_a_staged_buy_of_it() -> None:
     unchanged, translated = _processor().apply_pre_open_actions(
         state, (_target(SEC_A, 0),), (outcome,), _key(LATER_DAY)
     )
-    assert unchanged is state
+    assert _moved_nothing(unchanged, state)
     assert _quantities(translated) == {SEC_A: 0}
 
 
@@ -5377,7 +5412,7 @@ def _delivery_case(
     amount: str = "1",
     share_basis: str,
 ) -> tuple[
-    PortfolioStateV1,
+    PortfolioStateV2,
     tuple[SecurityTargetPositionV1, ...],
     tuple[SecurityEconomicOutcomeV1, ...],
 ]:
@@ -5414,7 +5449,7 @@ def _delivery_case(
     distribution = _distribution(
         SEC_ACQ, 3630, kind=kind, amount=amount, share_basis=share_basis
     )
-    holdings: tuple[SecurityHoldingV1, ...] = (
+    holdings: tuple[SecurityHoldingV2, ...] = (
         _holding(predecessor, quantity=100, basis="900"),
     )
     targets: tuple[SecurityTargetPositionV1, ...] = (_target(predecessor, 100),)
@@ -5589,7 +5624,7 @@ def test_a_post_action_distribution_on_a_spin_off_child_halts(
     # both orders halt. It used to be owed on 50 or 54 parent first, and on
     # nothing or 4 child first.
     assert (parent.bytes < SEC_CHILD.bytes) is (parent == SEC_A)
-    holdings: tuple[SecurityHoldingV1, ...] = (
+    holdings: tuple[SecurityHoldingV2, ...] = (
         _holding(parent, quantity=100, basis="900"),
     )
     if child_held:
@@ -5697,6 +5732,16 @@ def test_a_post_action_distribution_on_a_removed_holding_halts(removal: str) -> 
         _processor().apply_pre_open_actions(
             state, targets, (outcome("predecessor_post_action"),), _key()
         )
+
+    if removal == "final_liquidation":
+        # Issue 105: quoted per pre-action share, a liquidation instalment is
+        # owed on the prior close's holding, but the final disposal already
+        # relieved its whole basis, so whether it returned capital is unproven.
+        with pytest.raises(IndeterminateBasisError, match="removed in this window"):
+            _processor().apply_pre_open_actions(
+                state, targets, (outcome("predecessor_pre_action"),), _key()
+            )
+        return
 
     # Control: quoted per pre-action share, it is owed on the prior close's
     # 100 shares beside whatever the removal owes.
@@ -6185,7 +6230,7 @@ def test_an_unmodelled_action_beside_a_disposal_of_its_security_halts(
     unchanged, translated = _processor().apply_pre_open_actions(
         unheld, targets, (disposed,), _key(day)
     )
-    assert unchanged is unheld
+    assert _moved_nothing(unchanged, unheld)
     assert _quantities(translated) == {SEC_A: 0}
 
 

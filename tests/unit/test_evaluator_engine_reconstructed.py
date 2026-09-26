@@ -60,7 +60,7 @@ from drift.domain.evaluator_lanes import (
 )
 from drift.domain.evaluator_results import (
     EvaluationClassification,
-    EvaluationRunArtifactsV1,
+    EvaluationRunArtifactsV2,
     ExploratoryEvaluationResultV1,
 )
 from drift.domain.evaluator_strategy import (
@@ -77,7 +77,7 @@ from drift.serialization.canonical import content_hash
 
 
 def _exploratory_events(
-    artifacts: EvaluationRunArtifactsV1,
+    artifacts: EvaluationRunArtifactsV2,
 ) -> list[ExploratoryStrategyDecisionTraceEventV1]:
     return [
         event
@@ -553,7 +553,7 @@ def _incomplete(decision: date, *members: tuple[UUID, date, tuple[date, ...]]) -
 
 
 def _halted_at_decision(
-    artifacts: EvaluationRunArtifactsV1, index: int, cause: str
+    artifacts: EvaluationRunArtifactsV2, index: int, cause: str
 ) -> None:
     """One INDETERMINATE halt at this session's decision, with exactly this cause."""
     assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
@@ -734,7 +734,7 @@ def _canonical(*securities: UUID) -> tuple[UUID, ...]:
     return tuple(sorted(securities, key=lambda security_id: security_id.bytes))
 
 
-def _fills(artifacts: EvaluationRunArtifactsV1) -> list[tuple[date, UUID, str, int]]:
+def _fills(artifacts: EvaluationRunArtifactsV2) -> list[tuple[date, UUID, str, int]]:
     return [
         (
             event.session_key.local_date,

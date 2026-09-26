@@ -35,7 +35,7 @@ from pydantic import ValidationError
 
 from drift.domain.evaluator_results import (
     EvaluationClassification,
-    EvaluationRunArtifactsV1,
+    EvaluationRunArtifactsV2,
 )
 from drift.domain.evaluator_strategy import (
     StrategyDecisionContextV1,
@@ -62,7 +62,7 @@ LATE_START = datetime(2031, 12, 31, 23, 59, tzinfo=UTC)
 LATE_END = datetime(2032, 1, 1, 0, 30, tzinfo=UTC)
 
 
-def _artifacts() -> EvaluationRunArtifactsV1:
+def _artifacts() -> EvaluationRunArtifactsV2:
     return eng._run(eng._engine())
 
 
@@ -459,7 +459,7 @@ def test_a_trace_cannot_be_rehashed_around_a_dropped_event() -> None:
     with pytest.raises(
         ValidationError, match=r"result must bind the trace it is paired with"
     ):
-        EvaluationRunArtifactsV1(
+        EvaluationRunArtifactsV2(
             result=result, trace=resealed, final_state=_artifacts().final_state
         )
 
