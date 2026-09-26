@@ -1694,3 +1694,182 @@ def test_a_replayed_disposal_is_refused_before_it_disposes_again() -> None:
 
     with pytest.raises(EffectAlreadyAppliedError, match="cash_acquisition occ-cash"):
         _pass(book, (_cash_acquisition(4610),))
+
+
+# ==========================================================================
+# A recorded occurrence reclassified as cash is refused (#139 review F3)
+# ==========================================================================
+#
+# The action kind is revisable, so a revision can turn a recorded split into
+# a cash distribution or a liquidation instalment of the same occurrence. The
+# cash path consults the record too: booking the cash on top of the shares
+# the split already moved would count one occurrence twice. Cash-only
+# occurrences are not recorded, so the reverse direction is a named residual
+# (spec 11.3 amendment).
+
+_CASH_REPLAY = (
+    r"^the {kind} {occurrence} of synthetic-a on .* was already applied to this "
+    r"book as effect [0-9a-f]{{64}}, and booking its cash as well would count "
+    r"one occurrence twice$"
+)
+
+
+def _dividend(suffix: int, *, occurrence: str, at: str) -> SecurityEconomicOutcomeV1:
+    """A regular cash dividend on SEC_A of 0.50 a share, ex on ``at``."""
+    cash = ca._cash(amount="0.5", component_id=f"{occurrence}-dividend")
+    terms = ca._terms(
+        suffix=suffix,
+        action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
+        components=(cash,),
+        dates=(ca._date_fact("ex", at), ca._date_fact("payable", ca.PAYABLE_AT)),
+    )
+    effect = ca._effect(
+        suffix=suffix + 1,
+        action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
+        components=(cash,),
+        terms=terms,
+        occurrence_id=occurrence,
+        effective_at=at,
+    )
+    return ca._outcome(
+        terms=(terms,),
+        effects=(effect,),
+        action_kinds=(ActionKind.REGULAR_CASH_DIVIDEND,),
+    )
+
+
+def _split_then_a_week_later(suffix: int, occurrence: str) -> PortfolioStateV2:
+    """100 SEC_A split 2:1 as ``occurrence``, the book then a week later."""
+    state = ca._state(holdings=(ca._holding(quantity=100, basis="1000"),))
+    split, _ = _pass(state, (_share_outcome(suffix, occurrence=occurrence),))
+    assert split.holdings[0].quantity == 200
+    advanced = PortfolioAccountingKernel(split, session_clock=ca.CLOCK)
+    advanced.advance_session(ca._key(ca.LATER_DAY))
+    return advanced.state
+
+
+def test_a_split_reclassified_as_an_instalment_is_refused() -> None:
+    book = _split_then_a_week_later(4700, "occ-x")
+    terms, instalment = _instalment(
+        4710, amount="3", occurrence="occ-x", at=ca.LATER_AT
+    )
+    revised = ca._outcome(
+        terms=(terms,), effects=(instalment,), action_kinds=(ActionKind.LIQUIDATION,)
+    )
+
+    # Before the fix the pass kept the 200 split shares, booked a 600.00
+    # instalment claim on them and left the basis indeterminate.
+    with pytest.raises(
+        EffectAlreadyAppliedError,
+        match=_CASH_REPLAY.format(kind="liquidation", occurrence="occ-x"),
+    ):
+        _pass(book, (revised,), day=ca.LATER_DAY)
+
+    # Control: an instalment of another occurrence is booked.
+    terms, other = _instalment(4720, amount="3", occurrence="occ-y", at=ca.LATER_AT)
+    booked, _ = _pass(
+        book,
+        (
+            ca._outcome(
+                terms=(terms,), effects=(other,), action_kinds=(ActionKind.LIQUIDATION,)
+            ),
+        ),
+        day=ca.LATER_DAY,
+    )
+    assert booked.pending_claims_value == Decimal("600")
+    assert booked.holdings[0].basis_status == "indeterminate"
+
+
+def test_a_split_reclassified_as_a_cash_dividend_is_refused() -> None:
+    book = _split_then_a_week_later(4730, "occ-x")
+
+    with pytest.raises(
+        EffectAlreadyAppliedError,
+        match=_CASH_REPLAY.format(kind="regular_cash_dividend", occurrence="occ-x"),
+    ):
+        _pass(
+            book,
+            (_dividend(4740, occurrence="occ-x", at=ca.LATER_AT),),
+            day=ca.LATER_DAY,
+        )
+
+    # Control: a dividend of another occurrence pays on the 200 shares.
+    paid, _ = _pass(
+        book, (_dividend(4750, occurrence="occ-y", at=ca.LATER_AT),), day=ca.LATER_DAY
+    )
+    assert paid.pending_claims_value == Decimal("100")
+
+
+def test_a_replayed_instalment_pass_is_refused_as_a_replay() -> None:
+    # The instalment recorded its identity, so its replay is a replay, not a
+    # second instalment on a basis it already made indeterminate.
+    outcome = _instalment_outcome(4760, amount="3")
+    state = ca._state(holdings=(ca._holding(quantity=100, basis="1000"),))
+    once, _ = _pass(state, (outcome,))
+    assert once.applied_effect_ids == (INSTALMENT,)
+
+    with pytest.raises(
+        EffectAlreadyAppliedError,
+        match=_CASH_REPLAY.format(kind="liquidation", occurrence="occ-instalment"),
+    ):
+        _pass(once, (outcome,))
+
+
+def test_a_recorded_occurrence_on_an_unheld_security_is_not_refused() -> None:
+    # The split of SEC_OTHER was recorded unexposed. Its reclassification as a
+    # dividend owes this book nothing, so there is nothing to refuse.
+    state = ca._state(holdings=(ca._holding(quantity=100),))
+    recorded, _ = _pass(
+        state, (_share_outcome(4770, security_id=ca.SEC_OTHER, occurrence="occ-x"),)
+    )
+    assert recorded.applied_effect_ids == (_effect_id(ca.SEC_OTHER, "occ-x"),)
+    cash = ca._cash(amount="0.5", predecessor=ca.SEC_OTHER)
+    terms = ca._terms(
+        suffix=4780,
+        action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
+        components=(cash,),
+        dates=(
+            ca._date_fact("ex", ca.EFFECT_AT),
+            ca._date_fact("payable", ca.PAYABLE_AT),
+        ),
+        security_id=ca.SEC_OTHER,
+    )
+    effect = ca._effect(
+        suffix=4781,
+        action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
+        components=(cash,),
+        terms=terms,
+        occurrence_id="occ-x",
+        security_id=ca.SEC_OTHER,
+    )
+    dividend = ca._outcome(
+        security_id=ca.SEC_OTHER,
+        terms=(terms,),
+        effects=(effect,),
+        action_kinds=(ActionKind.REGULAR_CASH_DIVIDEND,),
+    )
+
+    again, _ = _pass(recorded, (dividend,))
+
+    assert again == recorded
+
+
+def test_a_cash_dividend_reclassified_as_a_split_is_the_recorded_residual() -> None:
+    # The reverse direction is the named residual of the spec 11.3
+    # amendment: a cash-only occurrence records no applied effect (recording
+    # one would move the hashes of every dividend run), so a revision that
+    # reclassifies a paid dividend as a split still applies the split. This
+    # pins today's behaviour so any change to it is deliberate.
+    state = ca._state(holdings=(ca._holding(quantity=100, basis="1000"),))
+    paid, _ = _pass(state, (_dividend(4790, occurrence="occ-z", at=ca.EFFECT_AT),))
+    assert paid.applied_effect_ids == ()
+    assert paid.pending_claims_value == Decimal("50")
+    advanced = PortfolioAccountingKernel(paid, session_clock=ca.CLOCK)
+    advanced.advance_session(ca._key(ca.LATER_DAY))
+    revised = _share_outcome(4800, occurrence="occ-z", effective_at=ca.LATER_AT)
+
+    split, _ = _pass(advanced.state, (revised,), day=ca.LATER_DAY)
+
+    assert split.holdings[0].quantity == 200
+    assert split.pending_claims_value == Decimal("50")
+    assert split.applied_effect_ids == (_effect_id(occurrence="occ-z"),)

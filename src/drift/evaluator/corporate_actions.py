@@ -150,12 +150,16 @@ class _Book:
     ``recorded`` holds the applied-effect identities of effects that are not
     share actions but left a basis indeterminate in this pass (a continuing
     liquidation instalment), so the book records every cause it names.
+
+    ``applied`` is the record the prior close's book carried in, which the
+    cash path consults as the share replay gate does (#139 review F3).
     """
 
     opening: Mapping[UUID, SecurityHoldingV2]
     holdings: dict[UUID, SecurityHoldingV2]
     targets: dict[UUID, SecurityTargetPositionV1]
     claims: dict[ClaimIdentity, PendingCashClaimV1]
+    applied: frozenset[SHA256Hash]
     realized: Decimal = ZERO
     unmodelled: list[_EffectContext] = field(default_factory=list)
     delivered: dict[UUID, _EffectContext] = field(default_factory=dict)
@@ -517,18 +521,23 @@ class CorporateActionProcessor:
         ``EffectAlreadyAppliedError`` any it owns that the book already
         absorbed, when the book is exposed to a security the effect touches.
         That is a refusal, not a proven no-op: staged targets are not state,
-        so whether a staged buy was already restated cannot be told.
+        so whether a staged buy was already restated cannot be told. A cash
+        entitlement whose occurrence the book already recorded, as a share
+        action or an instalment, is refused likewise when the book holds the
+        security, so a reclassifying revision cannot book both readings.
         """
         _require_positioned(portfolio_state, current_session)
         window = self._session_window(current_session)
         opening_holdings = {
             holding.security_id: holding for holding in portfolio_state.holdings
         }
+        already = frozenset(portfolio_state.applied_effect_ids)
         book = _Book(
             opening=opening_holdings,
             holdings=dict(opening_holdings),
             targets=_unique_targets(staged_targets),
             claims={},
+            applied=already,
         )
         supported: list[tuple[SecurityEconomicOutcomeV1, list[_EffectContext]]] = []
         unsupported: list[SecurityEconomicOutcomeV1] = []
@@ -539,7 +548,6 @@ class CorporateActionProcessor:
                 unsupported.append(outcome)
         every_context = [context for _, contexts in supported for context in contexts]
         mutations = _window_share_mutations(every_context, window)
-        already = frozenset(portfolio_state.applied_effect_ids)
         replayed = tuple(
             context for context in mutations if _applied_effect_id(context) in already
         )
@@ -1116,6 +1124,21 @@ class CorporateActionProcessor:
         # the clock vests at the next pre-open, against the same prior close.
         if not window.contains(entitlement_on):
             return
+        # The book already absorbed this occurrence, as a share action or as
+        # an instalment: a revision reclassified it (the action kind is
+        # revisable) or the pass is replayed. The book holds the security, so
+        # booking the cash as well would count one occurrence twice (#139
+        # review F3). Cash-only occurrences are not recorded, so a paid
+        # dividend later reclassified as a share action is not caught here;
+        # that is a named residual (spec 11.3 amendment).
+        effect_id = _applied_effect_id(context)
+        if effect_id in book.applied:
+            raise EffectAlreadyAppliedError(
+                f"the {context.payload.action_kind.value} {context.occurrence_id} "
+                f"of {context.source_id} on {context.security_id} was already "
+                f"applied to this book as effect {effect_id}, and booking its "
+                "cash as well would count one occurrence twice"
+            )
         liquidating = context.payload.action_kind == ActionKind.LIQUIDATION
         if entitlement_on != window.current and _has_due_bill_facts(dates):
             # A proven due-bill rule names the session holders are entitled
