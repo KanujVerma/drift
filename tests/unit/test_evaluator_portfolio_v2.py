@@ -50,6 +50,7 @@ from drift.domain.evaluator_portfolio import (
     decimal_context,
     pending_cash_claim_id,
 )
+from drift.domain.evaluator_results import EvaluationRunArtifactsV1
 from drift.domain.evaluator_strategy import (
     PositionViewV1,
     SecurityTargetPositionV1,
@@ -107,6 +108,9 @@ V1_SCHEMA_FINGERPRINTS: dict[type[BaseModel], str] = {
     ),
     RebalanceOutcomeV1: (
         "88bac385fd075cccdbb5490d6532241b400b8c57d40857c2f288d2d9c28bec92"
+    ),
+    EvaluationRunArtifactsV1: (
+        "c10716d680a5925956851403839c0a32e50cae968fb0b685d44eb978c7596835"
     ),
 }
 
@@ -993,6 +997,32 @@ def test_a_split_carries_an_indeterminate_basis_forward() -> None:
     (holding,) = updated.holdings
     assert (holding.quantity, holding.basis_status) == (200, "indeterminate")
     assert holding.basis_indeterminate_by == (SPIN,)
+
+
+def test_a_stock_dividend_carries_an_indeterminate_basis_forward() -> None:
+    # One share per ten on 100: the 110 shares are one pool whose basis no
+    # source allocated, so the dividend neither lifts it to known nor
+    # realizes anything from it.
+    dividend = _share_outcome(
+        4245,
+        occurrence="occ-3",
+        kind=ActionKind.STOCK_DIVIDEND,
+        numerator="1",
+        denominator="10",
+        meaning="additional_per_predecessor",
+    )
+
+    updated, _ = _pass(_indeterminate_book(_spun()), (dividend,))
+
+    (holding,) = updated.holdings
+    assert (holding.quantity, holding.basis_status, holding.cost_basis) == (
+        110,
+        "indeterminate",
+        None,
+    )
+    assert holding.basis_indeterminate_by == (SPIN,)
+    assert updated.realized_gross_pnl == Decimal("0")
+    assert updated.pending_cash_claims == ()
 
 
 def _stock_acquisition(suffix: int) -> SecurityEconomicOutcomeV1:
