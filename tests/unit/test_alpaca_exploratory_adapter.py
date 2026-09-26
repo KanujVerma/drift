@@ -1367,7 +1367,7 @@ def test_bundle_carries_reconstructions_and_no_derived_views(
     assert bundle.source_snapshot_hash is None
 
 
-def test_admission_binds_all_six_canonical_alpaca_limitations(
+def test_admission_binds_all_seven_canonical_alpaca_limitations(
     intake: AlpacaExploratoryIntakeResult,
 ) -> None:
     admission = intake.admission
@@ -1380,11 +1380,13 @@ def test_admission_binds_all_six_canonical_alpaca_limitations(
         ALPACA_LIMITATION_BOUNDED_COHORT,
         ALPACA_LIMITATION_SCHEDULED_SESSION_RECONSTRUCTION,
         ALPACA_LIMITATION_RETROSPECTIVE_RECONSTRUCTION,
+        # Issue 71, D3-a: the closed-world reading of the calendar is named.
+        "calendar-absence-read-as-closure-under-closed-world-assumption",
     }
     # Comparing the admission against the module constant the bridge built it
     # from is circular, so the independently spelled set above carries the
-    # content and these two only pin shape: six distinct limitations, sorted.
-    assert len(set(admission.acknowledged_limitations)) == 6
+    # content and these two only pin shape: seven distinct limitations, sorted.
+    assert len(set(admission.acknowledged_limitations)) == 7
     assert list(admission.acknowledged_limitations) == sorted(
         admission.acknowledged_limitations
     )
@@ -1422,13 +1424,15 @@ def hand_minted_admission(
     )
 
 
-def test_the_bridge_bundle_declares_exactly_its_truncated_window_limitation(
+def test_the_bridge_bundle_declares_exactly_its_dataset_limitations(
     intake: AlpacaExploratoryIntakeResult,
 ) -> None:
     # Issue 92: the corporate-action window is a property of the bridge's
     # dataset, not of any evidence member, so the bundle declares it itself.
-    # Spelled independently of the module constant the bridge declares it by.
+    # Issue 71: so is the closed-world reading of the calendar response.
+    # Spelled independently of the module constants the bridge declares them by.
     assert intake.bundle.dataset_limitations == (
+        "calendar-absence-read-as-closure-under-closed-world-assumption",
         "corporate-action-mutation-replay-truncated-to-approx-72-days",
     )
     # Every Alpaca limitation but the bounded cohort is now obliged by the
@@ -1439,6 +1443,7 @@ def test_the_bridge_bundle_declares_exactly_its_truncated_window_limitation(
         ALPACA_LIMITATION_ABSENT_HALTS,
         ALPACA_LIMITATION_SCHEDULED_SESSION_RECONSTRUCTION,
         ALPACA_LIMITATION_RETROSPECTIVE_RECONSTRUCTION,
+        "calendar-absence-read-as-closure-under-closed-world-assumption",
     }
 
 
@@ -1450,7 +1455,7 @@ def test_a_hand_minted_admission_omitting_the_truncated_window_is_refused(
         for item in ALPACA_EXPLORATORY_LIMITATIONS
         if item != ALPACA_LIMITATION_TRUNCATED_CA
     )
-    assert len(omitted) == 5
+    assert len(omitted) == 6
     admission = hand_minted_admission(intake.bundle, omitted)
     assert admission.input_bundle_hash == intake.bundle.bundle_hash
 
@@ -1463,7 +1468,7 @@ def test_a_hand_minted_admission_omitting_the_truncated_window_is_refused(
     ):
         validate_exploratory_admission(admission=admission, bundle=intake.bundle)
 
-    # Control: the same hand-minted admission acknowledging all six is admitted.
+    # Control: the same hand-minted admission acknowledging all seven is admitted.
     validate_exploratory_admission(
         admission=hand_minted_admission(intake.bundle, ALPACA_EXPLORATORY_LIMITATIONS),
         bundle=intake.bundle,
@@ -2297,6 +2302,7 @@ def test_a_calendar_snapshot_with_no_session_rows_fails_closed(
             pinned_request(),
             "0" * 64,
             intake.retained,
+            intake.closed_world_coverage,
         )
 
     assert "calendar snapshot carries no session rows" in str(error.value)
@@ -2347,20 +2353,64 @@ def _window_request(days: tuple[date, ...]) -> AlpacaIntakeRequest:
     )
 
 
-def test_a_window_spanning_a_weekend_gap_fails_closed_by_name(
+def test_a_covered_fortnight_is_accepted_over_its_evidenced_weekend(
     tmp_path: Path,
 ) -> None:
-    """The structural ceiling, pinned: one unbroken run of calendar days.
+    """Issue 71 lifts the one-week ceiling with evidence, not by inference.
 
-    `expected_complete` with `expected_daily_cardinality=1` means, upstream,
-    that every calendar day between the first and last session carries exactly
-    one session. `session_validation` applies no exception-date skip and
-    `generate_schedule` refuses any status other than `expected_complete`, so
-    neither populating `exception_dates` nor downgrading the status widens
-    this. A two-week window therefore cannot be acquired, and the limit is
-    stated here rather than left to be discovered as an opaque
-    `session_coverage_daily_cardinality_mismatch`.
+    The calendar response the bridge already retains is read as closed-world
+    over the bracketed hull of its returned dates (D1-a, D2-b), so the weekend
+    it omits is an evidenced non-trading date and is materialized as two
+    explicit closed rows bound to the ``ClosedWorldSessionCoverageV1`` record.
+    The existing dense walk then accepts a two-week window unchanged.
     """
+    fortnight = tuple(date(2026, 1, day) for day in (5, 6, 7, 8, 9, 12, 13, 14, 15, 16))
+
+    result = run_measured_intake(
+        request=_window_request(fortnight),
+        payloads=_consecutive_payloads(fortnight),
+        private_root=tmp_path / "fortnight",
+    )
+
+    assert (
+        tuple(
+            session.session_key.local_date for session in result.session_clock.sessions
+        )
+        == fortnight
+    )
+    closed = tuple(
+        item.session_key.local_date
+        for dataset in result.context.session_datasets
+        for item in dataset.records
+        if isinstance(item, ScheduledSessionVersionV1) and item.state == "closed"
+    )
+    assert closed == (date(2026, 1, 10), date(2026, 1, 11))
+    coverage = next(
+        item
+        for dataset in result.context.session_datasets
+        for item in dataset.records
+        if isinstance(item, SessionCoverageVersionV1)
+    )
+    assert (coverage.start_date, coverage.end_date) == (fortnight[0], fortnight[-1])
+    assert coverage.status == "expected_complete"
+    assert coverage.exception_dates == ()
+
+
+def test_an_uncovered_fortnight_is_refused_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without a positive closed-world basis the weekend is INDETERMINATE.
+
+    If the calendar statement were unpublished, nothing would establish that
+    an omitted date is closed, so the run span holds INDETERMINATE dates and
+    the bridge refuses the window at intake, naming them (issue 71, D6-a),
+    rather than surfacing an opaque dense-walk failure later.
+    """
+    monkeypatch.setitem(
+        _POLICY_DOCUMENTS["alpaca-calendar-closed-world"],
+        "provider_publication",
+        "not_published",
+    )
     fortnight = tuple(date(2026, 1, day) for day in (5, 6, 7, 8, 9, 12, 13, 14, 15, 16))
 
     with pytest.raises(AlpacaBridgeIncompleteError) as error:
@@ -2371,7 +2421,7 @@ def test_a_window_spanning_a_weekend_gap_fails_closed_by_name(
         )
 
     message = str(error.value)
-    assert "one unbroken run of consecutive calendar days" in message
+    assert "INDETERMINATE" in message
     assert "2026-01-10" in message and "2026-01-11" in message
 
 

@@ -8,7 +8,7 @@ mapped dataset accepted by the Drift public validators, runs the standard M1d
 selection and schedule generation functions, reconstructs source-basis
 ``ExploratoryReconstructedSessionObservationV1`` evidence, builds an
 ``EvaluationInputBundleV1`` through the real builder, mints an exploratory
-admission binding all six canonical Alpaca limitations, and drives the real
+admission binding all seven canonical Alpaca limitations, and drives the real
 ``SessionEvaluatorEngine`` to a sealed ``ExploratoryEvaluationResultV1`` with
 ``is_promotion_grade_evidence=False`` and a complete trace log.
 
@@ -667,7 +667,7 @@ def test_the_cli_runs_the_whole_bridge_offline_from_retained_bytes(
     assert "reconciliation pass" in output
     assert f"sessions {len(SESSION_DATES)}" in output
     assert "lane exploratory; this evidence is never promotion-grade" in output
-    assert output.count("acknowledged limitation ") == 6
+    assert output.count("acknowledged limitation ") == 7
     # The replay itself performed no HTTP exchange of any kind.
     assert len(wire.requests) == requests_before_replay
 

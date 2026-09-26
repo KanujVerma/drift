@@ -32,6 +32,11 @@ corporate action mutation replay is truncated. Therefore:
 
 * The session clock is built in ``scheduled_session_reconstruction`` mode from
   generated schedule rows, never from invented realized sessions.
+* A date the retained calendar response omits, inside the bracketed hull of the
+  dates it returned, is an evidenced non-trading date: it is materialized as
+  an explicit closed row bound to a ``ClosedWorldSessionCoverageV1`` record
+  (issue 71). Any other date the calendar does not return is INDETERMINATE,
+  and a window whose run span holds one is refused.
 * No ``DerivedObservationViewV1`` is produced at all. ``bind_observation_session``
   classifies an observation as bound only through realized open and close
   evidence, so forcing scheduled-only history through the M1d materializers
@@ -166,6 +171,12 @@ from drift.domain.observations import (
 )
 from drift.domain.revisions import RevisionKind
 from drift.domain.securities import ListingV1, ListingVenue, SecurityV1
+from drift.domain.session_closed_world import (
+    ClosedWorldCompletenessAssertionV1,
+    ClosedWorldSessionCoverageV1,
+    closed_world_derivation_algorithm_hash,
+    seal_closed_world_session_coverage,
+)
 from drift.domain.sessions import (
     HistoricalBoundaryOffsetV1,
     HistoricalTimezoneMethodologyV1,
@@ -212,6 +223,12 @@ from drift.markets.observation_validation import (
     observation_validator_implementation_hash,
     validate_observation_dataset,
 )
+from drift.markets.session_closed_world import (
+    closed_world_record_bytes,
+    evidenced_session_date_status,
+    expand_closed_world_coverage,
+    verify_closed_world_session_coverage,
+)
 from drift.markets.session_generation import schedule_generation_algorithm_hash
 from drift.markets.session_validation import (
     SESSION_VALIDATION_PROFILE_ID,
@@ -250,12 +267,22 @@ BRIDGE_COLLECTOR_VERSION = "1"
 BRIDGE_PROVIDER_LEGAL_NAME = "Alpaca Securities LLC"
 BRIDGE_LICENSE_REFERENCE = "alpaca-basic-free-development-tier"
 
+#: Issue 71, decision D3-a. The bridge reads a date its retained calendar
+#: response omits, inside the bracketed hull of the dates it returned, as an
+#: evidenced non-trading date. That rests on a closed-world reading of the
+#: calendar that Alpaca only partially publishes, so every admission and every
+#: bundle the bridge emits names it.
+ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD = (
+    "calendar-absence-read-as-closure-under-closed-world-assumption"
+)
+
 #: Every limitation an Alpaca-backed exploratory admission must acknowledge.
 ALPACA_EXPLORATORY_LIMITATIONS: tuple[str, ...] = tuple(
     sorted(
         (
             ALPACA_LIMITATION_ABSENT_HALTS,
             ALPACA_LIMITATION_BOUNDED_COHORT,
+            ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD,
             ALPACA_LIMITATION_RETROSPECTIVE_RECONSTRUCTION,
             ALPACA_LIMITATION_SCHEDULED_SESSION_RECONSTRUCTION,
             ALPACA_LIMITATION_TRUNCATED_CA,
@@ -432,6 +459,30 @@ _POLICY_DOCUMENTS: dict[str, dict[str, Any]] = {
             ),
             not_established=(
                 "whether an omitted session means no activity or no data",
+            ),
+        ),
+        _policy_statement(
+            "alpaca-calendar-closed-world",
+            source_id=ALPACA_CALENDAR_SOURCE_ID,
+            subject="closed-world reading of one market calendar response",
+            publication="partially_published",
+            statement=(
+                "Alpaca publishes GET /v2/calendar as the market calendar: one "
+                "row per trading day with its open and close, requested over a "
+                "start and an end date. The bridge reads one retained response "
+                "closed-world only over the bracketed hull from the first to "
+                "the last date it returned: a date inside that hull that the "
+                "response omits is an evidenced non-trading date, and every "
+                "date outside it stays indeterminate. This reading is "
+                "exploratory evidence only and is named on every admission."
+            ),
+            not_established=(
+                "that a response lists every trading day, and only trading "
+                "days, of its window",
+                "whether both requested endpoints are inclusive",
+                "whether the endpoint caps, paginates or truncates a response",
+                "whether unscheduled historical closures are reflected",
+                "whether a published calendar is revised in place",
             ),
         ),
         _policy_statement(
@@ -2661,34 +2712,261 @@ def _schedule_policy(
     )
 
 
+# --- closed-world calendar coverage (issue 71) -------------------------------------
+
+_CLOSED_WORLD_POLICY_ID = "alpaca-calendar-closed-world"
+_CLOSED_WORLD_BASES: dict[
+    str,
+    Literal[
+        "provider_published",
+        "provider_partially_published",
+        "drift_asserted_unpublished",
+    ],
+] = {
+    "published": "provider_published",
+    "partially_published": "provider_partially_published",
+    "not_published": "drift_asserted_unpublished",
+}
+
+
+def _require_calendar_inside_window(
+    calendar: Sequence[AlpacaNativeCalendarDay], request: AlpacaIntakeRequest
+) -> None:
+    """Refuse a calendar row outside the requested window, by name.
+
+    Such a row used to be mapped and then dropped from the session bounds while
+    still widening the coverage interval. A closed-world reading cannot rest on
+    a response that answered a different question than the one asked.
+    """
+    outside = tuple(
+        day.session_date.isoformat()
+        for day in calendar
+        if not request.start_date <= day.session_date <= request.end_date
+    )
+    if outside:
+        raise AlpacaBridgeIncompleteError(
+            f"the calendar response returned {outside}, outside the requested "
+            f"window {request.start_date.isoformat()} to "
+            f"{request.end_date.isoformat()}; an out-of-window row cannot widen "
+            "closed-world session coverage"
+        )
+
+
+def build_alpaca_closed_world_coverage(
+    request: AlpacaIntakeRequest,
+    retained: RetainedNativeBytes,
+    acquisition: AlpacaAcquisitionEvidence,
+    methodology_hash: str,
+    support: dict[str, VerifiedArtifactBytes],
+) -> ClosedWorldSessionCoverageV1:
+    """Read the retained calendar response closed-world (issue 71, D1-a, D2-b).
+
+    The record binds the requested window and the receipt's request
+    declaration, the exact retained response bytes and the measured origin
+    record over them, the returned dates, and a completeness assertion whose
+    basis is the provider publication status of the retained
+    ``alpaca-calendar-closed-world`` statement. The covered interval is the
+    bracketed hull of the returned dates, never the requested window, so a
+    truncated head or tail of the response can only leave dates INDETERMINATE.
+    The request declaration and the origin record are retained as supporting
+    artifacts, so the record's bindings resolve inside the M1d context.
+    """
+    if acquisition.reconciliation.result is not AcquisitionCompleteness.PASS:
+        raise AlpacaBridgeIncompleteError(
+            "closed-world calendar coverage needs a passing acquisition reconciliation"
+        )
+    data = retained.artifacts[retained.calendar_hash].data
+    returned = tuple(day.session_date for day in parse_alpaca_calendar(data))
+    if not returned:
+        raise AlpacaBridgeIncompleteError("calendar snapshot carries no session rows")
+    observation = request.observation_for(CALENDAR_OBJECT_KEY)
+    if observation is None or not observation.measured(data):
+        raise AlpacaBridgeIncompleteError(
+            "closed-world calendar coverage needs an origin measured over "
+            "exactly the retained calendar bytes"
+        )
+    identity = _verified(canonical_json(acquisition.receipt.request))
+    origin = _verified(_origin_record_bytes(observation))
+    for artifact in (identity, origin):
+        support[artifact.content_hash] = artifact
+    pages = tuple(
+        page
+        for page in acquisition.receipt.pages
+        if page.page_identity == f"{CALENDAR_OBJECT_KEY}-page-0"
+    )
+    observed = tuple(
+        item
+        for item in acquisition.receipt.observed_objects
+        if item.matched_expected_key == CALENDAR_OBJECT_KEY
+    )
+    publication = str(
+        _POLICY_DOCUMENTS[_CLOSED_WORLD_POLICY_ID]["provider_publication"]
+    )
+    assertion = ClosedWorldCompletenessAssertionV1(
+        schema_version="1",
+        basis=_CLOSED_WORLD_BASES[publication],
+        policy_statement_hash=_policy_hash(_CLOSED_WORLD_POLICY_ID),
+        acquisition_reconciliation_pass=True,
+        returned_dates_unique=len(set(returned)) == len(returned),
+        returned_dates_inside_requested_interval=all(
+            request.start_date <= day <= request.end_date for day in returned
+        ),
+        single_unpaginated_response=(
+            isinstance(_strict_document(data), list)
+            and len(pages) == 1
+            and pages[0].cursor_out is None
+            and pages[0].result == "complete"
+        ),
+        measured_origin=(
+            len(observed) == 1
+            and observed[0].origin_evidence.origin_status is OriginStatus.VERIFIED
+        ),
+    )
+    return seal_closed_world_session_coverage(
+        {
+            "schema_version": "1",
+            "source_id": ALPACA_CALENDAR_SOURCE_ID,
+            "mic": request.mic,
+            "session_scope": "regular",
+            "requested_start_date": request.start_date,
+            "requested_end_date": request.end_date,
+            "request_binding_hash": identity.content_hash,
+            "response_sha256": retained.calendar_hash,
+            "response_byte_size": len(data),
+            "origin_observation_hash": origin.content_hash,
+            "returned_dates": returned,
+            "completeness": assertion,
+            "covered_start_date": returned[0],
+            "covered_end_date": returned[-1],
+            "snapshot_as_of": _exact_boundary(
+                request.acquired_at, retained.calendar_hash, "closed-world:snapshot"
+            ),
+            "timezone_identifier": request.timezone_evidence.timezone_identifier,
+            "source_methodology_hash": methodology_hash,
+            "availability_channel": _channel(),
+            "evidence_grade": "exploratory",
+            "derivation_algorithm_hash": closed_world_derivation_algorithm_hash(),
+            "implementation_hash": m1d_implementation_hash(),
+        }
+    )
+
+
+def verify_alpaca_closed_world_record(
+    record: ClosedWorldSessionCoverageV1,
+    request: AlpacaIntakeRequest,
+    retained: RetainedNativeBytes,
+    acquisition: AlpacaAcquisitionEvidence,
+) -> None:
+    """The bridge-side checks M1d cannot make (V5, V6), and the byte binding.
+
+    The Drift core may not read the provider format, so re-parsing the retained
+    calendar bytes into the returned dates happens here. So does checking that
+    the requested interval is the one the receipt and the expected object
+    declared, and that the origin record is the measurement over these bytes.
+    Each refusal message starts with its contract code.
+    """
+    data = retained.artifacts[retained.calendar_hash].data
+    if (
+        record.response_sha256 != retained.calendar_hash
+        or record.response_byte_size != len(data)
+        or sha256(data).hexdigest() != record.response_sha256
+    ):
+        raise AlpacaBridgeIncompleteError(
+            "closed_world_response_hash_mismatch: the record does not name the "
+            "exact retained calendar response"
+        )
+    parsed = tuple(day.session_date for day in parse_alpaca_calendar(data))
+    if parsed != record.returned_dates:
+        raise AlpacaBridgeIncompleteError(
+            "closed_world_returned_dates_disagree_with_response: the retained "
+            "calendar bytes return other dates than the record states"
+        )
+    identity = acquisition.receipt.request
+    window = (
+        record.requested_start_date.isoformat(),
+        record.requested_end_date.isoformat(),
+    )
+    expected = tuple(
+        item
+        for item in acquisition.expected_inventory.objects
+        if item.object_key == CALENDAR_OBJECT_KEY
+    )
+    if (
+        record.source_id != ALPACA_CALENDAR_SOURCE_ID
+        or record.mic != request.mic
+        or record.request_binding_hash != content_hash(identity)
+        or tuple(identity.requested_date_range) != window
+        or len(expected) != 1
+        or tuple(expected[0].dates) != window
+        or window != (request.start_date.isoformat(), request.end_date.isoformat())
+    ):
+        raise AlpacaBridgeIncompleteError(
+            "closed_world_request_binding_mismatch: the record's requested "
+            "interval or request binding is not the acquisition's declaration"
+        )
+    observation = request.observation_for(CALENDAR_OBJECT_KEY)
+    if (
+        observation is None
+        or not observation.measured(data)
+        or record.origin_observation_hash
+        != sha256(_origin_record_bytes(observation)).hexdigest()
+    ):
+        raise AlpacaBridgeIncompleteError(
+            "closed_world_origin_mismatch: the record's origin is not the "
+            "measurement taken over the retained calendar bytes"
+        )
+
+
+def _require_evidenced_run_span(record: ClosedWorldSessionCoverageV1) -> None:
+    """R1 and D6-a: refuse a run span holding an INDETERMINATE date, by name.
+
+    The run span is the covered hull, from the first to the last returned
+    session. Every date in it must be a returned session or an evidenced
+    non-trading date; a date that is neither is never read as closed, so the
+    window is refused rather than truncated.
+    """
+    first, last = record.covered_start_date, record.covered_end_date
+    unknown = tuple(
+        day.isoformat()
+        for day in (
+            first + timedelta(days=offset) for offset in range((last - first).days + 1)
+        )
+        if evidenced_session_date_status((record,), record.mic, day) == "indeterminate"
+    )
+    if unknown:
+        raise AlpacaBridgeIncompleteError(
+            f"the run span {first.isoformat()} to {last.isoformat()} holds dates "
+            f"that are INDETERMINATE under closed-world calendar coverage: "
+            f"{unknown}; the bridge refuses the window rather than read a date "
+            "the calendar omits as a closed day"
+        )
+
+
 def _coverage_record(
     scheduled: M1dDatasetInput[Any],
     request: AlpacaIntakeRequest,
     methodology_hash: str,
     retained: RetainedNativeBytes,
+    closed_world: ClosedWorldSessionCoverageV1,
 ) -> SessionCoverageVersionV1:
-    """Claim dense coverage over exactly the acquired calendar snapshot.
+    """Claim dense coverage over exactly the closed-world covered interval.
 
     The claim is snapshot-scoped: ``snapshot_as_of`` is the acquisition instant
-    and the inventory enumerates exactly the rows the closed calendar response
-    returned. It makes no claim about revisions Alpaca may have made before the
-    snapshot, which is what the scheduled-reconstruction limitation records.
+    and the inventory enumerates exactly the rows the calendar snapshot yields,
+    the returned sessions and the explicit closed rows derived from the
+    ``ClosedWorldSessionCoverageV1`` record. It makes no claim about revisions
+    Alpaca may have made before the snapshot, which is what the
+    scheduled-reconstruction limitation records.
 
-    Structural ceiling, stated rather than discovered. ``status`` is
-    ``"expected_complete"`` with ``expected_daily_cardinality=1``, and upstream
-    that means literally every calendar day between the first and last returned
-    session carries exactly one session:
-    ``drift.markets.session_validation`` walks ``while current <= end_date``
-    and applies no exception-date skip, so ``exception_dates`` cannot buy back
-    a gap and populating it would change nothing. ``generate_schedule`` in turn
-    refuses any coverage row whose status is not ``"expected_complete"``, so
-    downgrading the status to ``"partial"`` would stop the pipeline instead of
-    widening it. The consequence is that this bridge supports exactly one
-    unbroken run of consecutive session days, in practice a single Monday to
-    Friday week: a two-week window such as 2026-01-05 to 2026-01-16 contains
-    the 01-10 and 01-11 weekend, which no calendar row covers. That case is
-    refused here, by name, rather than surfacing later as an opaque
-    ``session_coverage_daily_cardinality_mismatch`` from the validator.
+    ``status`` is ``"expected_complete"`` with ``expected_daily_cardinality=1``
+    and no exception dates, so upstream every calendar day of the interval
+    must carry exactly one row. Issue 71 meets that with evidence rather than
+    by inference: the interval is the record's bracketed hull, every date in
+    it is either returned or an evidenced non-trading date materialized as a
+    closed row, and the coverage row names the record as its source artifact,
+    so the derivation is bound into every context that carries the claim. A
+    day without a row is refused here by name, before the dense walk would
+    report it as an opaque ``session_coverage_daily_cardinality_mismatch``.
     """
     rows = tuple(
         item
@@ -2704,17 +2982,17 @@ def _coverage_record(
             "the calendar snapshot repeats a session date, so it cannot claim "
             "one session per day"
         )
+    first, last = closed_world.covered_start_date, closed_world.covered_end_date
     gaps = tuple(
-        (ordered[0] + timedelta(days=offset)).isoformat()
-        for offset in range((ordered[-1] - ordered[0]).days + 1)
-        if ordered[0] + timedelta(days=offset) not in set(ordered)
+        (first + timedelta(days=offset)).isoformat()
+        for offset in range((last - first).days + 1)
+        if first + timedelta(days=offset) not in set(ordered)
     )
-    if gaps:
+    if gaps or ordered[0] < first or ordered[-1] > last:
         raise AlpacaBridgeIncompleteError(
-            "this bridge can only claim dense session coverage over one "
-            "unbroken run of consecutive calendar days, and the acquired "
-            f"snapshot skips {gaps}; widen the window only once upstream "
-            "session coverage honours exception dates"
+            "the calendar snapshot does not carry exactly one row for every "
+            f"date of its covered interval {first.isoformat()} to "
+            f"{last.isoformat()}; it leaves {gaps} without a row"
         )
     seed = f"coverage:{request.mic}:{request.cohort_id}"
     values: dict[str, object] = {
@@ -2725,14 +3003,16 @@ def _coverage_record(
             availability=_observed_availability(
                 request.acquired_at, retained.calendar_hash, f"{seed}:available"
             ),
-            source_digest=retained.calendar_hash,
+            # The coverage claim is derived from the closed-world record, so the
+            # record is its source artifact (issue 71).
+            source_digest=sha256(closed_world_record_bytes(closed_world)).hexdigest(),
         ),
         "source_id": ALPACA_CALENDAR_SOURCE_ID,
         "native_record_id": f"calendar:{request.start_date}:{request.end_date}",
         "mic": request.mic,
         "session_scope": "regular",
-        "start_date": min(dates),
-        "end_date": max(dates),
+        "start_date": first,
+        "end_date": last,
         "snapshot_identifier": f"alpaca-calendar-{request.acquired_at.isoformat()}",
         "snapshot_as_of": _exact_boundary(
             request.acquired_at, retained.calendar_hash, f"{seed}:snapshot"
@@ -2898,7 +3178,7 @@ def build_bridge_admission(
     bundle: EvaluationInputBundleV1,
     lane: BridgeLane = "exploratory",
 ) -> ExploratoryEvaluationAdmissionV1:
-    """Mint the exploratory admission binding all six Alpaca limitations.
+    """Mint the exploratory admission binding all seven Alpaca limitations.
 
     ``lane="promotion"`` is refused. This bridge cannot emit a
     ``PromotionEvaluationAdmissionV1`` under any circumstance: promotion
@@ -2933,6 +3213,8 @@ class AlpacaExploratoryIntakeResult:
     securities: tuple[SecurityV1, ...]
     listings: tuple[ListingV1, ...]
     observation_contract: ObservationContractV1
+    #: The closed-world reading of the retained calendar response (issue 71).
+    closed_world_coverage: ClosedWorldSessionCoverageV1
     validation_decisions: tuple[DatasetValidationDecisionV2, ...]
     economic_terms: AlpacaEconomicTermsDataset
     context: M1dResolutionContext
@@ -2979,6 +3261,7 @@ def run_alpaca_exploratory_intake(
     bars = parse_alpaca_bars(payloads.bars)
     calendar = parse_alpaca_calendar(payloads.calendar)
     dividends = parse_alpaca_cash_dividends(payloads.corporate_actions)
+    _require_calendar_inside_window(calendar, request)
 
     securities, listings = map_cohort_identities(request)
     contract, support_seed = build_alpaca_observation_contract(request)
@@ -2987,11 +3270,36 @@ def run_alpaca_exploratory_intake(
     support.update(retained.artifacts)
 
     methodology_hash = _timezone_support(request, support, retained_evidence)
+    # Issue 71: the retained calendar response, read closed-world over the
+    # bracketed hull of its returned dates, is the evidence that a date it
+    # omits is a non-trading date. The run span is refused if any of its dates
+    # stays INDETERMINATE (D6-a); otherwise every evidenced non-trading date is
+    # materialized as an explicit closed row bound to the record (D4-A).
+    closed_world = build_alpaca_closed_world_coverage(
+        request, retained, acquisition, methodology_hash, support
+    )
+    verify_alpaca_closed_world_record(closed_world, request, retained, acquisition)
+    _require_evidenced_run_span(closed_world)
+    closed_world_bytes = _verified(closed_world_record_bytes(closed_world))
+    support[closed_world_bytes.content_hash] = closed_world_bytes
     schedule_rows = tuple(
-        map_calendar_day(
-            day, request, methodology_hash, retained, support, retained_evidence
+        sorted(
+            (
+                *(
+                    map_calendar_day(
+                        day,
+                        request,
+                        methodology_hash,
+                        retained,
+                        support,
+                        retained_evidence,
+                    )
+                    for day in calendar
+                ),
+                *expand_closed_world_coverage(closed_world),
+            ),
+            key=lambda row: row.session_key.local_date,
         )
-        for day in calendar
     )
     schedule_policy = _schedule_policy(request, support, methodology_hash)
     policy_artifact = _verified(canonical_json(schedule_policy))
@@ -3027,7 +3335,9 @@ def run_alpaca_exploratory_intake(
     scheduled = _session_dataset(
         "scheduled_session", schedule_rows, request, support, retained
     )
-    coverage_row = _coverage_record(scheduled, request, methodology_hash, retained)
+    coverage_row = _coverage_record(
+        scheduled, request, methodology_hash, retained, closed_world
+    )
     coverage = _session_dataset(
         "session_coverage", (coverage_row,), request, support, retained
     )
@@ -3050,6 +3360,14 @@ def run_alpaca_exploratory_intake(
         supporting_artifacts=support,
         schedule_generation_policy_hash=policy_artifact.content_hash,
     )
+    # The record, its bound artifacts and its exact closed rows must verify
+    # inside the very context every query binds, as the reconstructed lane
+    # will re-verify them (issue 71, R7).
+    if verify_closed_world_session_coverage(context) != (closed_world,):
+        raise AlpacaBridgeIncompleteError(
+            "the M1d context does not carry exactly this acquisition's "
+            "closed-world calendar coverage"
+        )
     context_hash = m1d_context_hash(context)
 
     cohort = build_bridge_cohort(request)
@@ -3104,7 +3422,11 @@ def run_alpaca_exploratory_intake(
         source_snapshot_hash=None,
         # The corporate-action window is a property of this dataset, which no
         # evidence member declares, so the bundle itself obliges it (issue 92).
-        dataset_limitations=(ALPACA_LIMITATION_TRUNCATED_CA,),
+        # So is the closed-world reading of the calendar response (issue 71).
+        dataset_limitations=(
+            ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD,
+            ALPACA_LIMITATION_TRUNCATED_CA,
+        ),
     )
     admission = build_bridge_admission(bundle=bundle)
 
@@ -3114,6 +3436,7 @@ def run_alpaca_exploratory_intake(
         securities=securities,
         listings=listings,
         observation_contract=contract,
+        closed_world_coverage=closed_world,
         validation_decisions=(
             observations.decision,
             scheduled.decision,

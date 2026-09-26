@@ -51,11 +51,24 @@ run, and again at the result sealing site, so no production path seals a
 refusal stay for the day issue 115 re-enables the lane.
 """
 
-from collections.abc import Callable, Sequence
+import dataclasses
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Any, Literal, cast
+from functools import cache
+from types import NoneType, UnionType
+from typing import (
+    Any,
+    Literal,
+    TypeAliasType,
+    TypeVar,
+    Union,
+    cast,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 from uuid import UUID
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
@@ -159,7 +172,10 @@ from drift.domain.securities import (
 from drift.domain.sessions import SessionKeyV1
 from drift.domain.universes import StructuralEligibilityClassification
 from drift.errors import CanonicalSerializationError, DriftError
-from drift.evaluator.bundles import validate_exploratory_admission
+from drift.evaluator.bundles import (
+    require_evidenced_clock_density,
+    validate_exploratory_admission,
+)
 from drift.evaluator.clock import (
     build_scheduled_reconstruction_clock,
     refuse_same_date_multi_venue_clock,
@@ -175,7 +191,10 @@ from drift.evaluator.reconstruction import (
     require_scheduled_calendar_row,
     verify_exploratory_reconstructions,
 )
-from drift.markets.observation_validation import m1d_context_hash
+from drift.markets.observation_validation import (
+    M1dResolutionContext,
+    m1d_context_hash,
+)
 from drift.serialization.canonical import content_hash
 
 ZERO = Decimal("0")
@@ -227,26 +246,62 @@ def refuse_promotion_lane(subject: object, *, site: str) -> None:
         )
 
 
+class NonCanonicalEngineInputError(DriftError, TypeError):
+    """Raised when a plain engine argument is not exactly its declared type.
+
+    The engine's model inputs are rebuilt canonically, but a plain argument
+    such as the book currency code has no model to rebuild. A subclass of
+    ``str`` could answer every comparison with a price currency as it
+    chose, while the evidence hash recorded its text, so anything but an
+    exact ``str`` is refused (issue 123, #131 round 2).
+    """
+
+
+def _exact_text(value: object, name: str) -> str:
+    if type(value) is not str:
+        raise NonCanonicalEngineInputError(
+            f"the engine's {name} must be exactly a str, not {_type_name(type(value))}"
+        )
+    return value
+
+
 def _revalidated[M: BaseModel](declared: type[M], model: BaseModel) -> M:
-    """Rebuild ``model`` as a fresh, validated ``declared`` (issue 78).
+    """Rebuild ``model`` as a fresh, validated ``declared`` (issues 78, 123).
 
     Pydantic trusts an existing instance placed in a typed field, so an input
     built with ``model_construct``, or one carrying a foreign payload in a
     nested field, would otherwise be evaluated as if it had been validated.
     Validation runs against the declared type, never the instance's own class,
     so a subclass overriding a validator cannot excuse itself.
+
+    That validation alone is not a canonical rebuild (issue 123). Strict
+    validation keeps an instance of a ``UUID``, ``datetime`` or ``date``
+    subclass, and a python-mode dump hands back that same leaf, so its forged
+    ``__eq__``, ``__hash__`` or ``__str__`` would reach every comparison, and
+    canonical hashing (which reads the string form) could disagree with them.
+    The validated model is therefore rebuilt once more through canonical JSON,
+    and only that rebuild is kept: every leaf is a fresh, exact built-in
+    value, every later comparison and hash reads the one canonical value, and
+    the declared type's own hash validators check it again. Validating in
+    python mode first keeps every issue 78 and 111 refusal exactly as it was.
     """
-    return declared.model_validate(model.model_dump(mode="python", warnings=False))
+    validated = declared.model_validate(model.model_dump(mode="python", warnings=False))
+    return declared.model_validate_json(validated.model_dump_json())
 
 
 _ADMISSION: TypeAdapter[EvaluationAdmissionV1] = TypeAdapter(EvaluationAdmissionV1)
 
 
 def _revalidated_admission(admission: BaseModel) -> EvaluationAdmissionV1:
-    """Rebuild an admission as a fresh member of the declared lane union."""
-    return _ADMISSION.validate_python(
+    """Rebuild an admission as a fresh member of the declared lane union.
+
+    Validated in python mode, then rebuilt through canonical JSON, as every
+    engine input is (``_revalidated``, issue 123).
+    """
+    validated = _ADMISSION.validate_python(
         admission.model_dump(mode="python", warnings=False)
     )
+    return _ADMISSION.validate_json(_ADMISSION.dump_json(validated))
 
 
 #: The exact type each declared field of a returned intent must hold, per model.
@@ -526,15 +581,200 @@ class SessionEvaluatorEvidence:
     exploratory_reconstruction_replay: ExploratoryReconstructionReplay | None = None
 
 
+_ADAPTERS: dict[int, tuple[object, TypeAdapter[Any]]] = {}
+
+
+def _adapter(declared: object) -> TypeAdapter[Any]:
+    """One cached adapter per declared scalar hint."""
+    cached = _ADAPTERS.get(id(declared))
+    if cached is None or cached[0] is not declared:
+        cached = (declared, TypeAdapter(declared))
+        _ADAPTERS[id(declared)] = cached
+    return cached[1]
+
+
+@cache
+def _field_hints(kind: type) -> dict[str, Any]:
+    return get_type_hints(kind)
+
+
+def _unaliased(declared: object) -> object:
+    while isinstance(declared, TypeAliasType):
+        declared = declared.__value__
+    return declared
+
+
+def _union_members(declared: object) -> tuple[object, ...]:
+    shape = _unaliased(declared)
+    if get_origin(shape) in (Union, UnionType):
+        return tuple(
+            member for item in get_args(shape) for member in _union_members(item)
+        )
+    return (declared,)
+
+
+def _dataclass_origin(declared: object) -> type | None:
+    shape = _unaliased(declared)
+    origin = get_origin(shape) or shape
+    if isinstance(origin, type) and dataclasses.is_dataclass(origin):
+        return origin
+    return None
+
+
+def _model_class(declared: object) -> type[BaseModel] | None:
+    shape = _unaliased(declared)
+    if isinstance(shape, type) and issubclass(shape, BaseModel):
+        return shape
+    return None
+
+
+def _refuse_member(value: object, expected: str) -> TypeError:
+    return TypeError(
+        f"an M1d context member of type {_type_name(type(value))} is not {expected}"
+    )
+
+
+def _canonical_member(
+    declared: object, value: object, bindings: dict[Any, object]
+) -> object:
+    """Rebuild one M1d context member as its declared type (issue 123 review).
+
+    Models are rebuilt as ``_revalidated`` rebuilds every engine input, as the
+    declared model the value is an instance of, never its own class.
+    Dataclasses are rebuilt field by field from their declared hints, tuples
+    and mappings member by member, and every other scalar through canonical
+    JSON under its declared hint. Anything else is refused.
+    """
+    if isinstance(declared, TypeVar):
+        bound = bindings.get(declared, declared.__bound__)
+        if bound is None:
+            raise TypeError(f"an M1d context member has an unbound {declared}")
+        declared = bound
+    members = _union_members(declared)
+    if len(members) > 1:
+        if value is None and NoneType in members:
+            return None
+        for member in members:
+            kind = _dataclass_origin(member) or _model_class(member)
+            if kind is not None and isinstance(value, kind):
+                return _canonical_member(member, value, bindings)
+        if any(_dataclass_origin(member) or _model_class(member) for member in members):
+            raise _refuse_member(value, "one its declaration admits")
+        return _canonical_scalar(declared, value)
+    shape = _unaliased(declared)
+    model = _model_class(shape)
+    if model is not None:
+        if not isinstance(value, model):
+            raise _refuse_member(value, f"a {_type_name(model)}")
+        return _revalidated(model, value)
+    if _dataclass_origin(shape) is not None:
+        return _canonical_dataclass(shape, value, bindings)
+    origin = get_origin(shape)
+    if origin is tuple:
+        if not isinstance(value, tuple):
+            raise _refuse_member(value, "a tuple")
+        arguments = get_args(shape)
+        if len(arguments) == 2 and arguments[1] is Ellipsis:
+            return tuple(
+                _canonical_member(arguments[0], item, bindings) for item in value
+            )
+        if len(arguments) != len(value):
+            raise _refuse_member(value, f"a tuple of {len(arguments)} members")
+        return tuple(
+            _canonical_member(argument, item, bindings)
+            for argument, item in zip(arguments, value, strict=True)
+        )
+    if origin is Mapping:
+        if not isinstance(value, Mapping):
+            raise _refuse_member(value, "a mapping")
+        key_type, value_type = get_args(shape)
+        entries = cast(Mapping[object, object], value)
+        rebuilt = {
+            _canonical_member(key_type, key, bindings): _canonical_member(
+                value_type, item, bindings
+            )
+            for key, item in entries.items()
+        }
+        if len(rebuilt) != len(entries):
+            raise ValueError("an M1d context mapping holds two keys that are one")
+        return rebuilt
+    if shape is bytes:
+        if type(value) is not bytes:
+            raise _refuse_member(value, "exactly bytes")
+        return value
+    return _canonical_scalar(declared, value)
+
+
+def _canonical_scalar(declared: object, value: object) -> object:
+    """A scalar rebuilt through canonical JSON under its declared hint."""
+    adapter = _adapter(declared)
+    validated = adapter.validate_python(value, strict=True)
+    return adapter.validate_json(adapter.dump_json(validated, warnings=False))
+
+
+def _canonical_dataclass(
+    declared: object, value: object, bindings: dict[Any, object]
+) -> object:
+    """A dataclass rebuilt as its declared class from its rebuilt fields."""
+    origin = cast(type, _dataclass_origin(declared))
+    if not isinstance(value, origin):
+        raise _refuse_member(value, f"a {_type_name(origin)}")
+    arguments = get_args(_unaliased(declared))
+    parameters = getattr(origin, "__parameters__", ())
+    bound = bindings | dict(zip(parameters, arguments, strict=False))
+    hints = _field_hints(origin)
+    return origin(
+        **{
+            item.name: _canonical_member(
+                hints[item.name], getattr(value, item.name), bound
+            )
+            for item in dataclasses.fields(origin)
+            if item.init
+        }
+    )
+
+
+def _canonical_m1d_context(context: object) -> M1dResolutionContext:
+    """Rebuild a replay request's M1d resolution context (issue 123 review).
+
+    M1d replay compares the records it parses from a context's artifact bytes
+    with the records the context holds, so a record leaf with forged equality
+    could pass that check while a re-derivation read the value it holds, a
+    price its bytes never stated. Every model the context holds, at any
+    depth, is therefore rebuilt through canonical JSON, and the context and
+    every dataclass inside it are rebuilt from those members as their
+    declared classes.
+    """
+    return cast(
+        M1dResolutionContext,
+        _canonical_dataclass(M1dResolutionContext, context, {}),
+    )
+
+
 def _revalidated_evidence(
     evidence: SessionEvaluatorEvidence,
 ) -> SessionEvaluatorEvidence:
-    """Rebuild every evidence model as its declared type; contexts validate in M1d."""
+    """Rebuild every evidence model as its declared type; contexts validate in M1d.
+
+    Each model is rebuilt through canonical JSON (issue 123), and so is every
+    model inside each replay request's M1d resolution context, which is then
+    rebuilt from those members. A context shared by several requests is
+    rebuilt once and stays shared.
+    """
 
     def each[M: BaseModel](
         declared: type[M], values: Sequence[BaseModel]
     ) -> tuple[M, ...]:
         return tuple(_revalidated(declared, value) for value in values)
+
+    contexts: dict[int, tuple[object, M1dResolutionContext]] = {}
+
+    def context_of(context: object) -> M1dResolutionContext:
+        known = contexts.get(id(context))
+        if known is None or known[0] is not context:
+            known = (context, _canonical_m1d_context(context))
+            contexts[id(context)] = known
+        return known[1]
 
     replay = evidence.exploratory_reconstruction_replay
     return SessionEvaluatorEvidence(
@@ -562,7 +802,10 @@ def _revalidated_evidence(
             else ExploratoryReconstructionReplay(
                 policy=_revalidated(ExploratoryReconstructionPolicyV1, replay.policy),
                 requests=tuple(
-                    (_revalidated(ObservationOutcomeQueryV1, query), context)
+                    (
+                        _revalidated(ObservationOutcomeQueryV1, query),
+                        context_of(context),
+                    )
                     for query, context in replay.requests
                 ),
             )
@@ -718,7 +961,10 @@ def _resolve_reconstructed_lane(
       every reconstruction from its exact source inputs (issue 55), and every
       clock session a reconstruction is on from its calendar row (issue 84).
       A self-consistent reconstruction no source produces never reaches a
-      decision, and neither does a session boundary no row states.
+      decision, and neither does a session boundary no row states. The clock
+      must also be dense: every date it steps across is an evidenced
+      non-trading date under verified closed-world calendar coverage, or
+      construction halts INDETERMINATE (issue 71).
     """
     if isinstance(admission, PromotionEvaluationAdmissionV1):
         if bundle.has_exploratory_reconstructions:
@@ -777,6 +1023,9 @@ def _resolve_reconstructed_lane(
         bundle.exploratory_reconstructed_observations, replay=replay, cohort=cohort
     )
     _require_replayed_clock_sessions(bundle.session_clock, replay)
+    # Issue 71 (D8-b): every date the scheduled clock steps across must be an
+    # evidenced non-trading date, or the run halts INDETERMINATE here.
+    require_evidenced_clock_density(bundle.session_clock, replay)
     return _ReconstructedDecisionLane(admission=admission, cohort=cohort)
 
 
@@ -982,6 +1231,13 @@ class SessionEvaluatorEngine:
         # the admission alone, before anything else, so no bundle, evidence,
         # or gate validity can change the answer.
         refuse_promotion_lane(admission, site="engine construction")
+        # Issue 123 (#131 round 2): the only plain constructor arguments are
+        # the book currency strings, compared with price currencies and
+        # bound into the evidence hash, so neither may carry forged equality.
+        book_currency_namespace = _exact_text(
+            book_currency_namespace, "book_currency_namespace"
+        )
+        book_currency_code = _exact_text(book_currency_code, "book_currency_code")
         # Issue 78: run only on inputs revalidated through their canonical
         # boundary, so a stale self-hash or a foreign payload fails closed here.
         bundle = _revalidated(EvaluationInputBundleV1, bundle)
@@ -1702,7 +1958,10 @@ class SessionEvaluatorEngine:
         if index < self._protocol.warmup_session_count - 1:
             return None
         context = self._decision_context(loop.state, session)
-        returned = strategy.decide(context)
+        # Issue 123: the strategy is handed a canonical JSON-rebuilt copy that
+        # shares no object with engine state, so rewriting anything it can
+        # reach (a UUID in place, say) cannot change what the engine records.
+        returned = strategy.decide(_revalidated(StrategyDecisionContextV1, context))
         context_hash = content_hash(context)
         try:
             intent = _revalidated_intent(returned)
@@ -1846,7 +2105,10 @@ class SessionEvaluatorEngine:
         if index < self._protocol.warmup_session_count - 1:
             return None
         context = self._reconstructed_decision_context(loop.state, index, session, lane)
-        returned = strategy.decide_exploratory(context)
+        # Issue 123: a canonical copy sharing no object with engine state.
+        returned = strategy.decide_exploratory(
+            _revalidated(ExploratoryStrategyDecisionContextV1, context)
+        )
         common: dict[str, Any] = {
             "sequence": len(loop.events),
             "session_index": index,

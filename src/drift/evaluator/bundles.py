@@ -1,5 +1,7 @@
 """Admission-to-bundle lane gates and deterministic evaluation run identity."""
 
+from datetime import date
+
 from drift.domain.assertions import NormalizedSelectionQueryV1, TemporalIntervalClaimV1
 from drift.domain.common import UUID7, SHA256Hash
 from drift.domain.economic_queries import MarketSelectionQueryV1
@@ -12,6 +14,7 @@ from drift.domain.evaluator_bundles import (
     require_reconstructions_on_scheduled_clock,
 )
 from drift.domain.evaluator_clock import SessionClockV1
+from drift.domain.evaluator_execution import IndeterminateExecutionError
 from drift.domain.evaluator_lanes import (
     EvaluationAdmissionV1,
     ExploratoryEvaluationAdmissionV1,
@@ -69,6 +72,10 @@ from drift.markets.observation_validation import (
     M1dResolutionContext,
     m1d_context_descriptor,
     m1d_context_hash,
+)
+from drift.markets.session_closed_world import (
+    evidenced_session_date_status,
+    verify_closed_world_session_coverage,
 )
 from drift.markets.universes import resolve_structural_eligibility
 from drift.serialization.canonical import content_hash
@@ -359,6 +366,49 @@ def _require_calendar_rows(bundle: EvaluationInputBundleV1) -> None:
     }
     for observation in bundle.exploratory_reconstructed_observations:
         require_scheduled_calendar_row(observation, sessions[observation.session_key])
+
+
+def require_evidenced_clock_density(
+    clock: SessionClockV1, replay: ExploratoryReconstructionReplay
+) -> None:
+    """Refuse a scheduled clock that steps across an unevidenced date (issue 71).
+
+    Next-open execution (section 13.1), the kernel's advance and the
+    corporate-action session windows all read "not a clock session" as "not a
+    trading date". A scheduled clock earns that only if every local date
+    strictly between two consecutive sessions is an evidenced non-trading
+    date: covered by a closed-world calendar record whose exact closed rows
+    the replay's own M1d contexts carry (R3, R4, R7 of the issue 71 contract,
+    decision D8-b). Every record those contexts carry is re-verified first,
+    and an integrity failure refuses by its code. A date that is instead
+    scheduled open, or INDETERMINATE (uncovered, or in conflict), halts the
+    evaluation ``INDETERMINATE`` before any session is stepped, naming every
+    such date; nothing skips to the next known open. Dates are compared through
+    the base ``date`` methods only (issue 123).
+    """
+    contexts = {id(context): context for _query, context in replay.requests}
+    records = {
+        record.record_hash: record
+        for context in contexts.values()
+        for record in verify_closed_world_session_coverage(context)
+    }
+    evidence = tuple(records[key] for key in sorted(records))
+    unevidenced: list[str] = []
+    for previous, current in zip(clock.sessions, clock.sessions[1:], strict=False):
+        mics = sorted({previous.session_key.mic, current.session_key.mic})
+        first = date.toordinal(previous.session_key.local_date) + 1
+        for ordinal in range(first, date.toordinal(current.session_key.local_date)):
+            day = date.fromordinal(ordinal)
+            for mic in mics:
+                status = evidenced_session_date_status(evidence, mic, day)
+                if status != "evidenced_non_trading":
+                    unevidenced.append(f"{mic} {date.isoformat(day)} ({status})")
+    if unevidenced:
+        raise IndeterminateExecutionError(
+            "the scheduled session clock steps across dates no closed-world "
+            "calendar coverage evidences as non-trading, so no next open, "
+            "session window or advance across them is proven: " + ", ".join(unevidenced)
+        )
 
 
 def verify_evaluation_input_bundle(

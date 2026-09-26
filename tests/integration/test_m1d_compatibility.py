@@ -71,6 +71,9 @@ ALLOWED_TASK1_PINNED_LANE_ADDITIONS = frozenset(
         # v7 supersedes v6 under issue #63 stage 2.  v6 stays above, unedited,
         # as the inventory that exactly describes commit a906ab2.
         "tests/fixtures/m1e-compatibility/m1d-v7-protected-sha256.json",
+        # v8 supersedes v7 under issue #71.  v7 stays above, unedited, as the
+        # inventory that exactly describes commit b21efc5.
+        "tests/fixtures/m1e-compatibility/m1d-v8-protected-sha256.json",
         # m1c-v3 supersedes m1c-v2 under issue #63 stage 2, the first M1c
         # supersession link.  m1c-v2 stays above, unedited, as the inventory
         # that exactly describes commit aecee94 and authenticates its archive.
@@ -89,8 +92,11 @@ V5_M1D_INVENTORY = (
 V6_M1D_INVENTORY = (
     REPO_ROOT / "tests/fixtures/m1e-compatibility/m1d-v6-protected-sha256.json"
 )
-CURRENT_M1D_INVENTORY = (
+V7_M1D_INVENTORY = (
     REPO_ROOT / "tests/fixtures/m1e-compatibility/m1d-v7-protected-sha256.json"
+)
+CURRENT_M1D_INVENTORY = (
+    REPO_ROOT / "tests/fixtures/m1e-compatibility/m1d-v8-protected-sha256.json"
 )
 HISTORICAL_M1D_INVENTORY_SHA256 = (
     "6fb819eb863ebf83e1a3b4e3a7e6af261748116502cdb0ad3603d108d17c2e2b"
@@ -110,6 +116,18 @@ V6_M1D_INVENTORY_SHA256 = (
 )
 V6_M1D_INVENTORY_COMMIT = "a906ab293d5690084bb82415c7dcb09cc14903f3"
 """The commit that last wrote v6; every v6 pin describes that commit exactly."""
+V7_M1D_INVENTORY_SHA256 = (
+    "39f410117f36d2094771d4b21b8cfc3db7d53f03deb2feee8529861303b69505"
+)
+V7_M1D_INVENTORY_COMMIT = "b21efc5612259661b7e380b8f856febf49cbf5a6"
+"""The commit that last wrote v7; every v7 pin describes that commit exactly."""
+CLOSED_WORLD_SOURCE_PATHS = frozenset(
+    {
+        "src/drift/domain/session_closed_world.py",
+        "src/drift/markets/session_closed_world.py",
+    }
+)
+"""The two modules issue 71 brings under the M1d freeze as additions."""
 M1C_V2_INVENTORY = (
     REPO_ROOT / "tests/fixtures/m1d-compatibility/m1c-v2-protected-sha256.json"
 )
@@ -409,6 +427,12 @@ def _v6_m1d_inventory() -> dict[str, object]:
     return document
 
 
+def _v7_m1d_inventory() -> dict[str, object]:
+    document = json.loads(V7_M1D_INVENTORY.read_text(encoding="utf-8"))
+    assert isinstance(document, dict)
+    return document
+
+
 def _m1c_link() -> dict[str, object]:
     document = json.loads(M1C_V3_INVENTORY.read_text(encoding="utf-8"))
     assert isinstance(document, dict)
@@ -431,8 +455,8 @@ def _superseded_m1d_source_pins() -> dict[str, str]:
     pinned digest recorded in the current inventory, so the byte freeze is
     moved forward rather than relaxed.  A path can be superseded by any link
     of the chain (v4 under issue #32, v5 under issue #63, v6 under issue
-    #107, v7 under issue #63 stage 2); the latest link that names it carries
-    the digest the working tree must match.
+    #107, v7 under issue #63 stage 2, v8 under issue #71); the latest link
+    that names it carries the digest the working tree must match.
     """
     current = _current_m1d_inventory()
     pins = current["sha256"]
@@ -445,6 +469,7 @@ def _superseded_m1d_source_pins() -> dict[str, str]:
         _previous_m1d_inventory(),
         _v5_m1d_inventory(),
         _v6_m1d_inventory(),
+        _v7_m1d_inventory(),
         current,
     ):
         superseded = document["superseded_paths"]
@@ -1018,11 +1043,20 @@ def test_v6_source_pins_are_superseded_by_v7_without_rewriting_history() -> None
     Stage 2 moved the M1c identities onto the M1c semantic attestations, which
     changed the attestation module and the three M1c stamp-site modules. The
     historical side of every superseded path is the byte content at a906ab2,
-    the commit v6 describes; the current side is the working tree.
+    the commit v6 describes. v7 is itself superseded by v8 under issue #71, so
+    its current side is the byte content at b21efc5, the commit that last wrote
+    v7, rather than the working tree.
     """
     v6 = _v6_m1d_inventory()
-    current = _current_m1d_inventory()
+    v7_raw = V7_M1D_INVENTORY.read_bytes()
+    assert hashlib.sha256(v7_raw).hexdigest() == V7_M1D_INVENTORY_SHA256
+    assert v7_raw == _git_bytes(
+        V7_M1D_INVENTORY_COMMIT, V7_M1D_INVENTORY.relative_to(REPO_ROOT).as_posix()
+    ), "v7 must stay byte-identical to the commit that last wrote it"
+    assert _git("merge-base", "--is-ancestor", V7_M1D_INVENTORY_COMMIT, "HEAD") == ""
+    current = json.loads(v7_raw)
     assert current["inventory_id"] == "m1d-v7-protected-sha256"
+    # v7 still calls itself current: history is superseded, never rewritten.
     assert current["role"] == "current"
     assert current["baseline_commit"] == PINNED_M1D_COMMIT
     supersedes = current["supersedes"]
@@ -1052,8 +1086,8 @@ def test_v6_source_pins_are_superseded_by_v7_without_rewriting_history() -> None
             == record["historical_sha256"]
             == v6_pins[relative]
         ), relative
-        live = (REPO_ROOT / relative).read_bytes()
-        assert hashlib.sha256(live).hexdigest() == record["current_sha256"], relative
+        written = _git_bytes(V7_M1D_INVENTORY_COMMIT, relative)
+        assert hashlib.sha256(written).hexdigest() == record["current_sha256"], relative
         assert record["current_sha256"] != record["historical_sha256"], relative
         expected[relative] = record["current_sha256"]
     assert current["sha256"] == expected
@@ -1064,3 +1098,58 @@ def test_v6_source_pins_are_superseded_by_v7_without_rewriting_history() -> None
         assert (
             m1c[relative]["current_sha256"] == superseded[relative]["current_sha256"]
         ), relative
+
+
+def test_v7_source_pins_are_superseded_by_v8_without_rewriting_history() -> None:
+    """v8 is v7 with exactly the path issue #71 moved and the two it added.
+
+    Issue 71 made ``drift.markets.session_closed_world`` a seed of the
+    ``m1d-evidence-v1`` closure (decision D5-a), which changed the bytes of the
+    attestation module and brought the two closed-world modules into the
+    closure. The historical side of the superseded path is the byte content at
+    b21efc5, the commit v7 describes; the current side, and every added path,
+    is the working tree. Nothing else moves.
+    """
+    v7 = _v7_m1d_inventory()
+    current = _current_m1d_inventory()
+    assert current["inventory_id"] == "m1d-v8-protected-sha256"
+    assert current["role"] == "current"
+    assert current["baseline_commit"] == PINNED_M1D_COMMIT
+    supersedes = current["supersedes"]
+    assert isinstance(supersedes, dict)
+    assert supersedes["inventory_id"] == "m1d-v7-protected-sha256"
+    assert supersedes["path"] == V7_M1D_INVENTORY.relative_to(REPO_ROOT).as_posix()
+    assert supersedes["file_sha256"] == V7_M1D_INVENTORY_SHA256
+    assert supersedes["commit"] == V7_M1D_INVENTORY_COMMIT
+    assert supersedes["issue"] == 71
+    assert "closed-world" in supersedes["reason"]
+
+    superseded = current["superseded_paths"]
+    assert isinstance(superseded, dict)
+    assert set(superseded) == {"src/drift/domain/semantic_attestation.py"}
+    added = current["added_paths"]
+    assert isinstance(added, dict)
+    assert set(added) == CLOSED_WORLD_SOURCE_PATHS
+
+    v7_pins = v7["sha256"]
+    assert isinstance(v7_pins, dict)
+    expected = dict(v7_pins)
+    for relative, record in superseded.items():
+        recorded = _git_bytes(V7_M1D_INVENTORY_COMMIT, relative)
+        assert (
+            hashlib.sha256(recorded).hexdigest()
+            == record["historical_sha256"]
+            == v7_pins[relative]
+        ), relative
+        live = (REPO_ROOT / relative).read_bytes()
+        assert hashlib.sha256(live).hexdigest() == record["current_sha256"], relative
+        assert record["current_sha256"] != record["historical_sha256"], relative
+        expected[relative] = record["current_sha256"]
+    for relative, record in added.items():
+        assert relative not in v7_pins, relative
+        assert record["issue"] == 71, relative
+        assert str(record["justification"]).strip(), relative
+        live = (REPO_ROOT / relative).read_bytes()
+        assert hashlib.sha256(live).hexdigest() == record["current_sha256"], relative
+        expected[relative] = record["current_sha256"]
+    assert current["sha256"] == expected

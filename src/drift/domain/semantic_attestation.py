@@ -86,7 +86,8 @@ Four closures are declared here. ``m1d-source-validation-v1`` identifies the M1d
 validator runs (issue #32). ``m1d-evidence-v1`` identifies the code that
 derives, stamps and checks M1d evidence (issue #63, stage 1): every M1d
 normalization, action-session, session-binding, session-generation, selection
-and usability record binds it as ``implementation_hash``.
+and usability record binds it as ``implementation_hash``, and so does every
+closed-world session coverage record (issue #71).
 ``m1c-source-validation-v1`` identifies the M1c validator runs, bound as
 ``validator_implementation_hash`` by every M1c validation run and decision, and
 ``m1c-evidence-v1`` identifies the code that selects, projects and composes M1c
@@ -181,9 +182,15 @@ M1D_EVIDENCE_SEEDS: tuple[str, ...] = (
     "drift.markets.observation_selection",
     "drift.markets.observation_usability",
     "drift.markets.session_binding",
+    "drift.markets.session_closed_world",
     "drift.markets.session_generation",
 )
-"""Every module that defines, stamps or checks the M1d evidence identity."""
+"""Every module that defines, stamps or checks the M1d evidence identity.
+
+``drift.markets.session_closed_world`` joined under issue 71 (decision D5-a):
+it derives and checks closed-world session coverage, and every
+``ClosedWorldSessionCoverageV1`` binds this identity as its
+``implementation_hash``."""
 
 M1D_EVIDENCE_SEMANTIC_MODULES: tuple[str, ...] = (
     "drift",
@@ -212,6 +219,7 @@ M1D_EVIDENCE_SEMANTIC_MODULES: tuple[str, ...] = (
     "drift.domain.revisions",
     "drift.domain.securities",
     "drift.domain.semantic_attestation",
+    "drift.domain.session_closed_world",
     "drift.domain.sessions",
     "drift.domain.temporal",
     "drift.domain.universes",
@@ -227,6 +235,7 @@ M1D_EVIDENCE_SEMANTIC_MODULES: tuple[str, ...] = (
     "drift.markets.observation_usability",
     "drift.markets.observation_validation",
     "drift.markets.session_binding",
+    "drift.markets.session_closed_world",
     "drift.markets.session_generation",
     "drift.markets.session_validation",
     "drift.markets.universes",
