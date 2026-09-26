@@ -1567,3 +1567,59 @@ def test_an_instalment_beside_the_final_disposal_fails_closed() -> None:
     )
     disposed, _ = _pass(state, (alone,), day=ca.LATER_DAY)
     assert disposed.realized_gross_pnl == Decimal("-300")
+
+
+# ==========================================================================
+# The replay gate, on the books a genuine replay presents (issue 49)
+# ==========================================================================
+
+
+def test_a_replayed_acquisition_is_refused_through_the_acquirer_it_delivered() -> None:
+    # After the pass the book holds the acquirer, not the predecessor. The
+    # effect touches both, so the replay is judged exposed through either.
+    targets = (SecurityTargetPositionV1(security_id=ca.SEC_A, target_quantity=100),)
+    once, translated = _pass(
+        ca._state(holdings=(ca._holding(quantity=100, basis="900"),)),
+        (_stock_acquisition(4600),),
+        targets=targets,
+    )
+    assert [holding.security_id for holding in once.holdings] == [ca.SEC_ACQ]
+
+    with pytest.raises(EffectAlreadyAppliedError, match="stock_acquisition occ-acq"):
+        _pass(once, (_stock_acquisition(4600),), targets=translated)
+
+
+def _cash_acquisition(suffix: int) -> SecurityEconomicOutcomeV1:
+    cash = ca._cash(amount="12", component_id="acquisition-cash")
+    terms = ca._terms(
+        suffix=suffix,
+        action_kind=ActionKind.CASH_ACQUISITION,
+        components=(cash,),
+        dates=(ca._date_fact("payable", ca.PAYABLE_AT),),
+    )
+    effect = ca._effect(
+        suffix=suffix + 1,
+        action_kind=ActionKind.CASH_ACQUISITION,
+        components=(cash,),
+        terms=terms,
+        occurrence_id="occ-cash",
+        claim_status="extinguished",
+    )
+    return ca._outcome(
+        terms=(terms,),
+        effects=(effect,),
+        action_kinds=(ActionKind.CASH_ACQUISITION,),
+        claim_status="extinguished",
+    )
+
+
+def test_a_replayed_disposal_is_refused_before_it_disposes_again() -> None:
+    # A book that already absorbed a cash acquisition yet holds the security:
+    # the book the pass leaves would hold nothing, so only the prior close's
+    # book shows the exposure, and a second disposal would pay twice.
+    book = ca._state(holdings=(ca._holding(quantity=100),)).model_copy(
+        update={"applied_effect_ids": (_effect_id(occurrence="occ-cash"),)}
+    )
+
+    with pytest.raises(EffectAlreadyAppliedError, match="cash_acquisition occ-cash"):
+        _pass(book, (_cash_acquisition(4610),))
