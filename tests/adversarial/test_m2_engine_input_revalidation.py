@@ -1010,23 +1010,29 @@ def test_a_strategy_cannot_rewrite_a_uuid_it_kept_after_the_intent_is_staged(
 #: identity bound into every M1d context hash. A field-by-field diff of all four
 #: runs against main e9e2724 shows only identity-bearing hashes moved; no
 #: quantity, price, cash, NAV, classification, count, status, reason, lane or
-#: kind leaf changes.
+#: kind leaf changes. They were re-pinned again, trace and result, for issue 71,
+#: which makes drift.markets.session_closed_world a seed of m1d-evidence-v1
+#: (decision D5-a): its edit to semantic_attestation.py and the two closed-world
+#: modules it adds move the M1d evidence identity and, through the M1c closures
+#: that also declare semantic_attestation.py, the M1c validator identity bound
+#: into every M1d context hash. A field-by-field diff of all four runs against
+#: main cde7728 shows only identity-bearing hashes moved (0 non-hash leaves).
 GENUINE_RUN_HASHES = {
     "realized-staged": (
-        "5fd254552ea73effee84de6f84d9e5d132c1990d485e53dfccd7860308ea3e9b",
-        "395b1912df800fe5f918db02473d05def981385bc59a83f90f76b5686be67ff3",
+        "436f3edf10204a74776e1e518819cbe02eb5555e1954a11764c80522459d8db6",
+        "054f0a6ac7dc7c10bc05f4de23b59936337a61911680c5b20c1bc08a8f71bd78",
     ),
     "realized-refused-by-staging": (
-        "c7e477f416f17275b398f53a345bbd5b2838716c3e6d0b0ace1c87d22135937b",
-        "5828f1d206402d97ce89fed913cb79b936c12b0ebb597a6eae6d869d7d1a0875",
+        "f432ae02519cf4b9533fd61597ae760837845a3177af273298adade386d3b79a",
+        "6590c7dd4eba120ca2743e899d1933925fd935bf35765524316a9ec1513b13c0",
     ),
     "reconstructed-staged": (
-        "3cbdba4b5ad822ac2fb37e1d976aa1ef8620f27c1fdc196ed41ea87793304a1f",
-        "aebf8c5ba30ae47a449ed5e6e7563fa9407ae53d821bcd24aded92f8cc21dde7",
+        "2a3fb8e68662ec090c1e272e42d2002fcfa3f8d0d7483480f7f66cfe335d53e8",
+        "5d3ad04b644425132476c3996325943656289f762e6737fbfb6e039dc97cc5c3",
     ),
     "reconstructed-refused-by-staging": (
-        "1f5459b52962c8dc08742c3e3ecf295799561655ac9f2a50125c3593586e8d96",
-        "660c7dbc8a3558627eff5e2ef0a3d3de6cdeafdfa97b04e0b6d4e32ec31b030c",
+        "0b064b15a6b34f72b9b79be2fa2af6a290b0a55cad8c5bc1e4ed9f0a275bc340",
+        "0955be07459cf5d7a76bc04f1f699ce4120cc9e16f3f049ef588ff965ea198e1",
     ),
 }
 

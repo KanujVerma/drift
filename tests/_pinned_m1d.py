@@ -24,13 +24,18 @@ The working-tree freeze is an ordered chain of links over v3
   closure guard was hardened against aliased and indirect dynamic imports,
   which changed the bytes of the attestation module. v6 exactly describes
   commit a906ab2, the commit that last wrote it.
-* ``m1d-v7-protected-sha256.json`` (issue #63, stage 2) supersedes v6 and is
-  the CURRENT inventory: the protected paths as they must stand in the live
-  working tree. The M1c identities moved from the whole-tree inventory to the
+* ``m1d-v7-protected-sha256.json`` (issue #63, stage 2) supersedes v6. The M1c
+  identities moved from the whole-tree inventory to the
   ``m1c-source-validation-v1`` and ``m1c-evidence-v1`` semantic attestations,
   which changed the bytes of the attestation module and of the three M1c
   stamp-site modules (``tests/_pinned_m1c.py`` moves the M1c freeze forward
-  by its own first link, m1c-v3, for the same three modules).
+  by its own first link, m1c-v3, for the same three modules). v7 exactly
+  describes commit b21efc5, the commit that last wrote it.
+* ``m1d-v8-protected-sha256.json`` (issue #71) supersedes v7 and is the
+  CURRENT inventory: the protected paths as they must stand in the live
+  working tree. Closed-world session coverage joined the ``m1d-evidence-v1``
+  closure, which changed the bytes of the attestation module and added the
+  two closed-world modules to the freeze.
 
 A later link is appended to ``_FREEZE_INVENTORIES``; the entry it supersedes
 then records the commit that last wrote it. Each link carries two explicit,
@@ -783,6 +788,14 @@ _FREEZE_INVENTORIES: tuple[_FreezeInventory, ...] = (
         path=_FREEZE_FIXTURES / "m1d-v7-protected-sha256.json",
         file_sha256="39f410117f36d2094771d4b21b8cfc3db7d53f03deb2feee8529861303b69505",
         issue=63,
+        commit="b21efc5612259661b7e380b8f856febf49cbf5a6",
+    ),
+    _FreezeInventory(
+        label="v8",
+        inventory_id="m1d-v8-protected-sha256",
+        path=_FREEZE_FIXTURES / "m1d-v8-protected-sha256.json",
+        file_sha256="4aca22d1cd068092748a9d06cb0b7dabe9e6dce178b48a118e25c006da1a77fd",
+        issue=71,
         commit=None,
     ),
 )
@@ -853,7 +866,7 @@ def _chain_links(inventories: Sequence[_FreezeInventory]) -> tuple[_FreezeLink, 
 
 FREEZE_LINKS = _chain_links(_FREEZE_INVENTORIES)
 """v4 (issue #32) over v3, v5 (issue #63) over v4, v6 (issue #107) over v5, v7
-(issue #63 stage 2) over v6."""
+(issue #63 stage 2) over v6, v8 (issue #71) over v7."""
 
 
 def _superseded_source_pins(
@@ -1370,7 +1383,10 @@ def verify_m1d_protected_inputs(
     the v4 delta (the paths issue #32 moved, plus the module that defines the
     M1d replay identities), then the v5 delta (the identity accessor and
     attestation module issue #63 moved), then the v6 delta (the attestation
-    module issue #107 hardened), reproducing v3 everywhere else.
+    module issue #107 hardened), then the v7 delta (the attestation module and
+    the three M1c stamp-site modules issue #63 stage 2 moved), then the v8
+    delta (the attestation module issue #71 moved, plus the two closed-world
+    session coverage modules it added), reproducing v3 everywhere else.
     """
     pins = PROTECTED_M1D_SHA256 if expected is None else expected
     _verify_pinned_inputs(
