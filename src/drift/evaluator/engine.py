@@ -77,7 +77,11 @@ from drift.domain.assertions import ResolutionMode
 from drift.domain.common import UUID7, SHA256Hash
 from drift.domain.evaluator_bundles import (
     EvaluationInputBundleV1,
+    EvaluationRunIdentity,
     EvaluationRunIdentityV1,
+    EvaluationRunIdentityV2,
+    StrategyParametersBindingError,
+    strategy_parameters_hash,
 )
 from drift.domain.evaluator_clock import EvaluationSessionV1, SessionClockV1
 from drift.domain.evaluator_corporate_actions import (
@@ -134,6 +138,7 @@ from drift.domain.evaluator_results import (
     evaluation_result_hash,
 )
 from drift.domain.evaluator_strategy import (
+    ParameterizedStrategy,
     RuntimeStrategy,
     SecurityTargetPositionV1,
     StrategyDecisionContextV1,
@@ -299,6 +304,61 @@ def _revalidated_admission(admission: BaseModel) -> EvaluationAdmissionV1:
         admission.model_dump(mode="python", warnings=False)
     )
     return _ADMISSION.validate_json(_ADMISSION.dump_json(validated))
+
+
+_RUN_IDENTITY: TypeAdapter[EvaluationRunIdentity] = TypeAdapter(EvaluationRunIdentity)
+
+
+def _revalidated_run_identity(
+    identity: BaseModel,
+) -> EvaluationRunIdentityV1 | EvaluationRunIdentityV2:
+    """Rebuild a run identity as a fresh member of the version union (#112).
+
+    Validated in python mode, then rebuilt through canonical JSON, as every
+    engine input is (``_revalidated``, issue 123). The version is the one the
+    identity's own ``schema_version`` names, and that version's hash
+    validator checks the rebuilt value, so a V1 identity is rebuilt exactly as
+    it was before V2 existed.
+    """
+    validated = _RUN_IDENTITY.validate_python(
+        identity.model_dump(mode="python", warnings=False)
+    )
+    return _RUN_IDENTITY.validate_json(_RUN_IDENTITY.dump_json(validated))
+
+
+def require_bound_strategy_parameters(
+    identity: EvaluationRunIdentityV1 | EvaluationRunIdentityV2, strategy: object
+) -> None:
+    """Refuse a strategy whose parameters are not the ones its identity binds.
+
+    Issue 112. A V1 identity binds no parameters, and this never reads a
+    strategy under one. A V2 identity binds ``strategy_parameters_hash``: the
+    strategy must expose its parameters through ``ParameterizedStrategy``,
+    read once here, and their ``strategy_parameters_hash()``, which refuses
+    anything that is not exactly canonical JSON data, must equal it. The
+    identity is rebuilt canonically first and the digest is a fresh
+    ``hexdigest``, so both sides of the comparison are exact ``str`` and no
+    forged comparison can answer it. The engine calls this before any session
+    is stepped, and the experiment runner before the engine runs.
+    """
+    rebuilt = _revalidated_run_identity(identity)
+    if type(rebuilt) is not EvaluationRunIdentityV2:
+        return
+    if not isinstance(strategy, ParameterizedStrategy):
+        raise StrategyParametersBindingError(
+            "a V2 run identity binds strategy parameters, and the strategy "
+            "exposes none: it must implement "
+            "ParameterizedStrategy.strategy_parameters (issue 112)"
+        )
+    exposed = strategy_parameters_hash(
+        strategy.strategy_parameters, label="the parameters the strategy exposes"
+    )
+    if rebuilt.strategy_parameters_hash != exposed:
+        raise StrategyParametersBindingError(
+            "the run identity must bind the parameters the strategy runs with: "
+            f"identity binds {rebuilt.strategy_parameters_hash}, the strategy "
+            f"exposes {exposed}"
+        )
 
 
 #: The exact type each declared field of a returned intent must hold, per model.
@@ -1452,7 +1512,9 @@ class SessionEvaluatorEngine:
         return index
 
     def _require_bound_identity(
-        self, run_identity: EvaluationRunIdentityV1, strategy: LaneDispatchStrategy
+        self,
+        run_identity: EvaluationRunIdentityV1 | EvaluationRunIdentityV2,
+        strategy: LaneDispatchStrategy,
     ) -> None:
         if (
             run_identity.admission_hash != self._admission.admission_hash
@@ -1478,21 +1540,29 @@ class SessionEvaluatorEngine:
                 "the run identity must bind the strategy that runs: identity "
                 f"binds {run_identity.strategy_hash}, the strategy is {running}"
             )
+        # Issue 112: a V2 identity also binds the parameters the strategy runs
+        # with. A V1 identity binds none, and the strategy is not read for them.
+        require_bound_strategy_parameters(run_identity, strategy)
 
     # -- run ----------------------------------------------------------------
 
     def run(
-        self, *, strategy: LaneDispatchStrategy, run_identity: EvaluationRunIdentityV1
+        self,
+        *,
+        strategy: LaneDispatchStrategy,
+        run_identity: EvaluationRunIdentityV1 | EvaluationRunIdentityV2,
     ) -> EvaluationRunArtifactsV1:
         """Step every session through all five phases, halting fail-closed.
 
         The decision lane was fixed at construction. The strategy is bound to
-        that lane's one decision method before any session is stepped.
+        that lane's one decision method before any session is stepped. Under
+        an ``EvaluationRunIdentityV2`` the strategy's exposed parameters are
+        bound to the identity first (issue 112); a V1 run is unchanged.
         """
         # Issue 79 ruling, at use: construction already refused a promotion
         # admission, and nothing past it is stepped under one either.
         refuse_promotion_lane(self._admission, site="an engine run")
-        run_identity = _revalidated(EvaluationRunIdentityV1, run_identity)
+        run_identity = _revalidated_run_identity(run_identity)
         self._require_bound_identity(run_identity, strategy)
         decide = self._lane_decision(strategy)
         sessions = self._bundle.session_clock.sessions
@@ -2289,7 +2359,7 @@ class SessionEvaluatorEngine:
     def _seal_result(
         self,
         *,
-        run_identity: EvaluationRunIdentityV1,
+        run_identity: EvaluationRunIdentityV1 | EvaluationRunIdentityV2,
         halt: _Halt | None,
         metrics: EvaluationSummaryMetricsV1,
         trace: EvaluationTraceLogV1,

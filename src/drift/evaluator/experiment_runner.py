@@ -36,7 +36,13 @@ from pydantic import TypeAdapter
 from drift.domain.artifacts import ArtifactKind, ArtifactReference
 from drift.domain.common import UUID7, ImmutableJSONValue
 from drift.domain.datasets import DatasetReference
-from drift.domain.evaluator_bundles import EvaluationRunIdentityV1
+from drift.domain.evaluator_bundles import (
+    EvaluationRunIdentity,
+    EvaluationRunIdentityV1,
+    EvaluationRunIdentityV2,
+    StrategyParametersBindingError,
+    strategy_parameters_hash,
+)
 from drift.domain.evaluator_results import (
     EvaluationResultV1,
     EvaluationRunArtifactsV1,
@@ -55,6 +61,7 @@ from drift.evaluator.engine import (
     PromotionLaneDisabledError,
     SessionEvaluatorEngine,
     refuse_promotion_lane,
+    require_bound_strategy_parameters,
 )
 from drift.ledger.interface import AuditEventDraft, Ledger
 from drift.serialization.canonical import content_hash
@@ -87,7 +94,7 @@ class ExperimentRunnerContext:
     completed_at: datetime
     engine: SessionEvaluatorEngine
     strategy: LaneDispatchStrategy
-    run_identity: EvaluationRunIdentityV1
+    run_identity: EvaluationRunIdentityV1 | EvaluationRunIdentityV2
     result_artifact_id: UUID7
     trace_artifact_id: UUID7
     result_artifact_location: str
@@ -104,7 +111,7 @@ class _CallerInputs:
     recorded as given.
     """
 
-    run_identity: EvaluationRunIdentityV1
+    run_identity: EvaluationRunIdentityV1 | EvaluationRunIdentityV2
     dataset_hash: str
     specified_strategy_hash: str
     running_strategy_hash: str
@@ -117,9 +124,7 @@ class _CallerInputs:
     audit_event_id: UUID | None
 
 
-_RUN_IDENTITY: TypeAdapter[EvaluationRunIdentityV1] = TypeAdapter(
-    EvaluationRunIdentityV1
-)
+_RUN_IDENTITY: TypeAdapter[EvaluationRunIdentity] = TypeAdapter(EvaluationRunIdentity)
 _DATASET: TypeAdapter[DatasetReference] = TypeAdapter(DatasetReference)
 _STRATEGY: TypeAdapter[StrategyReference] = TypeAdapter(StrategyReference)
 _INSTANT: TypeAdapter[datetime] = TypeAdapter(datetime)
@@ -317,6 +322,38 @@ def _validate_context(inputs: _CallerInputs) -> None:
         )
 
 
+def _require_bound_parameters(
+    specification: ExperimentSpecification,
+    context: ExperimentRunnerContext,
+    inputs: _CallerInputs,
+) -> None:
+    """Bind a V2 run's strategy parameters before the engine runs (issue 112).
+
+    A V2 identity binds ``strategy_parameters_hash``. The specification's
+    parameters must hash to it, so the M0 row's ``parameters_hash`` names the
+    parameters the identity binds. So must the parameters the running
+    strategy exposes, checked here exactly as the engine checks them, so a
+    strategy running other parameters is refused before anything runs or is
+    recorded, not recorded as a FAILED run. Each digest is a fresh ``str``
+    over an exact copy of canonical JSON data, and the identity is the
+    canonical copy, so no forged comparison answers. A V1 identity binds no
+    parameters, and neither side is read under one.
+    """
+    identity = inputs.run_identity
+    if type(identity) is not EvaluationRunIdentityV2:
+        return
+    specified = strategy_parameters_hash(
+        specification.parameters, label="the specification parameters"
+    )
+    if specified != identity.strategy_parameters_hash:
+        raise StrategyParametersBindingError(
+            "the specification parameters do not match the evaluated run "
+            f"identity: specification parameters hash to {specified}, run "
+            f"identity binds {identity.strategy_parameters_hash}"
+        )
+    require_bound_strategy_parameters(identity, context.strategy)
+
+
 def _record_audit_event(
     context: ExperimentRunnerContext, inputs: _CallerInputs, run: ExperimentRun
 ) -> None:
@@ -373,10 +410,17 @@ def execute_experiment_run(
     copies are compared, run and recorded, in the M0 row and in its audit
     event (issue 123). An input that fails its rebuild raises its validation
     error and records nothing.
+
+    Under an ``EvaluationRunIdentityV2`` (issue 112), the specification's
+    parameters and the parameters the running strategy exposes must both hash
+    to the identity's ``strategy_parameters_hash``, or
+    ``StrategyParametersBindingError`` is raised and nothing is recorded. A V1
+    run is unchanged.
     """
     refuse_promotion_lane(context.engine.admission, site="the experiment runner")
     inputs = _caller_inputs(specification, context)
     _validate_context(inputs)
+    _require_bound_parameters(specification, context, inputs)
     common: dict[str, object] = {
         "run_id": inputs.run_id,
         "experiment_id": inputs.experiment_id,

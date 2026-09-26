@@ -1,8 +1,11 @@
 """M2 proof-carrying evaluation input bundle and deterministic run identity."""
 
-from typing import Literal, Self
+from collections.abc import Mapping, Sequence
+from math import isfinite
+from types import MappingProxyType
+from typing import Annotated, Literal, Self, cast
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from drift.domain.assertions import TemporalIntervalClaimV1
 from drift.domain.common import FrozenModel, NonBlankStr, SHA256Hash
@@ -14,7 +17,19 @@ from drift.domain.evaluator_reconstruction import (
 from drift.domain.normalization import DerivedObservationViewV1
 from drift.domain.securities import ListingV1, SecurityV1
 from drift.domain.universes import StructuralEligibilityResultV1
-from drift.serialization.canonical import content_hash
+from drift.errors import DriftError
+from drift.serialization.canonical import JSONValue, content_hash
+
+
+class StrategyParametersBindingError(DriftError, ValueError):
+    """Raised when strategy parameters cannot be bound to a run (issue 112).
+
+    An ``EvaluationRunIdentityV2`` binds a ``strategy_parameters_hash``. The
+    experiment runner refuses a specification, and the runner and the engine
+    refuse a strategy, whose parameters are not canonical JSON data or do not
+    hash to it, and a strategy that exposes no parameters at all. Also a
+    ``ValueError``, as every other run identity refusal is.
+    """
 
 
 def evaluation_input_bundle_hash(bundle: EvaluationInputBundleV1) -> SHA256Hash:
@@ -29,6 +44,94 @@ def evaluation_run_identity_hash(identity: EvaluationRunIdentityV1) -> SHA256Has
     dump = identity.model_dump(mode="python")
     dump.pop("run_identity_hash", None)
     return content_hash(dump)
+
+
+def evaluation_run_identity_v2_hash(identity: EvaluationRunIdentityV2) -> SHA256Hash:
+    """Compute the self-excluding canonical content hash for a V2 run identity.
+
+    The dump hashed carries ``schema_version="2"`` and the
+    ``strategy_parameters_hash`` key, and a V1 dump carries
+    ``schema_version="1"`` and no such key, so the two canonical documents
+    always differ and a V2 identity can never share a hash with a V1 one.
+    """
+    dump = identity.model_dump(mode="python")
+    dump.pop("run_identity_hash", None)
+    return content_hash(dump)
+
+
+def _parameters_path(path: str, step: str | int) -> str:
+    return f"{path}[{step!r}]"
+
+
+def _exact_parameters(value: object, path: str, label: str) -> JSONValue:
+    """Copy canonical JSON data out of ``value``, refusing anything else.
+
+    Only type identity is read, so no method a caller or strategy defines on a
+    leaf runs. A subclassed leaf or key is refused rather than trusted: a key
+    equal to every key would otherwise collapse two parameters into one while
+    the hash was taken, and a leaf equal to every value would answer any
+    comparison. A dict subclass is refused because its own methods could show
+    other contents than its storage. A mapping proxy, the form a specification
+    holds, is read once, and a key it names twice is refused.
+    """
+    kind = type(value)
+    if value is None or kind is str or kind is int or kind is bool:
+        return cast(JSONValue, value)
+    if kind is float:
+        number = cast(float, value)
+        if not isfinite(number):
+            raise StrategyParametersBindingError(
+                f"{label} must be canonical JSON data (issue 112): the float at "
+                f"{path} is not finite"
+            )
+        return number
+    if kind is list or kind is tuple:
+        return [
+            _exact_parameters(item, _parameters_path(path, position), label)
+            for position, item in enumerate(cast(Sequence[object], value))
+        ]
+    if kind is dict or kind is MappingProxyType:
+        copy: dict[str, JSONValue] = {}
+        for key, item in cast(Mapping[object, object], value).items():
+            if type(key) is not str:
+                raise StrategyParametersBindingError(
+                    f"{label} must be canonical JSON data (issue 112): the "
+                    f"mapping at {path} has a key that is not exactly a str"
+                )
+            if key in copy:
+                raise StrategyParametersBindingError(
+                    f"{label} must be canonical JSON data (issue 112): the "
+                    f"mapping at {path} repeats the key {key!r}"
+                )
+            copy[key] = _exact_parameters(item, _parameters_path(path, key), label)
+        return copy
+    raise StrategyParametersBindingError(
+        f"{label} must be canonical JSON data (issue 112): the value at {path} is "
+        "not exactly a str, int, float, bool, None, list, tuple, dict or "
+        "mapping proxy"
+    )
+
+
+def strategy_parameters_hash(
+    parameters: object, *, label: str = "strategy parameters"
+) -> SHA256Hash:
+    """The canonical content hash of one strategy parameterization (issue 112).
+
+    It is ``content_hash`` of an exact copy of the parameters, so for genuine
+    canonical JSON data it equals ``content_hash(parameters)`` byte for byte,
+    whether the data is a literal or the frozen form a specification holds.
+    Anything that is not exactly canonical JSON data is refused with a
+    ``StrategyParametersBindingError`` naming ``label`` and the offending path,
+    never repaired, so no forged comparison can reach the digest.
+    """
+    copy = _exact_parameters(parameters, "$", label)
+    try:
+        return content_hash(copy)
+    except UnicodeError as error:
+        raise StrategyParametersBindingError(
+            f"{label} must be canonical JSON data (issue 112): they have no "
+            f"canonical form: {error}"
+        ) from error
 
 
 def require_reconstructions_on_scheduled_clock(
@@ -280,3 +383,50 @@ class EvaluationRunIdentityV1(FrozenModel):
                 f"got {self.run_identity_hash}"
             )
         return self
+
+
+class EvaluationRunIdentityV2(FrozenModel):
+    """Run identity that also binds the strategy's parameters (issue 112).
+
+    ``EvaluationRunIdentityV1`` binds the strategy's ``code_hash`` only, so
+    two parameterizations of one strategy version share a V1 identity while
+    their results differ (gap G1 of #113). V2 binds every V1 field and
+    ``strategy_parameters_hash``, the ``strategy_parameters_hash()`` of the
+    parameters the run declares. The experiment runner checks it against the
+    specification's parameters, and the runner and the engine check it against
+    the parameters the strategy exposes (``ParameterizedStrategy``). V1 stays
+    frozen and byte-identical, and canonical M3 runs use V2.
+
+    It shares no base class with V1, so no V1 consumer can mistake one for the
+    other, and its hash is taken over a document that carries its own schema
+    version (``evaluation_run_identity_v2_hash``).
+    """
+
+    schema_version: Literal["2"] = "2"
+    strategy_hash: SHA256Hash
+    strategy_parameters_hash: SHA256Hash
+    protocol_hash: SHA256Hash
+    cost_model_hash: SHA256Hash
+    admission_hash: SHA256Hash
+    bundle_hash: SHA256Hash
+    evaluator_evidence_hash: SHA256Hash
+    code_version_hash: SHA256Hash
+    environment_closure_hash: SHA256Hash
+    run_identity_hash: SHA256Hash
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> Self:
+        expected = evaluation_run_identity_v2_hash(self)
+        if self.run_identity_hash != expected:
+            raise ValueError(
+                f"run identity hash mismatch: expected {expected}, "
+                f"got {self.run_identity_hash}"
+            )
+        return self
+
+
+type EvaluationRunIdentity = Annotated[
+    EvaluationRunIdentityV1 | EvaluationRunIdentityV2,
+    Field(discriminator="schema_version"),
+]
+"""Either run identity version, told apart by its ``schema_version``."""
