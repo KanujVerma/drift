@@ -76,6 +76,12 @@ from drift.datasets.hashing import assertion_version_payload
 from drift.datasets.resolver import VerifiedArtifactBytes
 from drift.domain.artifacts import ArtifactKind, ArtifactReference
 from drift.domain.assertions import TemporalIntervalClaimV1
+from drift.domain.evaluator_clock import (
+    EvaluationSessionV1,
+    SessionClockV1,
+    evaluation_session_hash,
+    session_clock_hash,
+)
 from drift.domain.evaluator_execution import IndeterminateExecutionError
 from drift.domain.evaluator_results import EvaluationClassification
 from drift.domain.session_closed_world import (
@@ -87,7 +93,10 @@ from drift.domain.sessions import (
     ScheduleGenerationPolicyV1,
     SessionCoverageVersionV1,
 )
-from drift.evaluator.bundles import build_evaluation_input_bundle
+from drift.evaluator.bundles import (
+    build_evaluation_input_bundle,
+    require_evidenced_clock_density,
+)
 from drift.evaluator.clock import build_scheduled_reconstruction_clock
 from drift.evaluator.engine import (
     PromotionLaneDisabledError,
@@ -428,41 +437,165 @@ def test_a_calendar_row_outside_the_requested_window_is_refused_by_name(
     assert "outside the requested window" in str(error.value)
 
 
-def test_the_engine_refuses_a_clock_that_skips_a_scheduled_open_date(
-    fortnight: AlpacaExploratoryIntakeResult,
-) -> None:
-    """R7 and M10: a hand-built bundle cannot drop a trading date."""
-    dropped = date(2026, 1, 7)
-    requests = tuple(
-        (query, context)
-        for query, context in fortnight.reconstruction_replay.requests
-        if query.session_date != dropped
-    )
-    replay = ExploratoryReconstructionReplay(
-        policy=fortnight.reconstruction_policy, requests=requests
-    )
-    clock = build_scheduled_reconstruction_clock(
-        tuple(query for query, _ in requests if query.security_id == AAPL_ID),
-        fortnight.context,
-    )
+def _bundle_over(
+    intake: AlpacaExploratoryIntakeResult,
+    clock: SessionClockV1,
+    replay: ExploratoryReconstructionReplay,
+) -> Any:
+    """A bundle built through the real builder over ``clock`` and ``replay``."""
     first, last = clock.sessions[0], clock.sessions[-1]
-    bundle = build_evaluation_input_bundle(
+    return build_evaluation_input_bundle(
         evaluation_interval=TemporalIntervalClaimV1(
             schema_version="1",
             start=_exact_boundary(first.opened_at, "a" * 64, "test:start"),
             end=_exact_boundary(last.closed_at, "a" * 64, "test:end"),
         ),
         session_clock=clock,
-        context=fortnight.context,
-        security_identities=fortnight.securities,
-        listing_identities=fortnight.listings,
-        exploratory_cohort=fortnight.cohort,
+        context=intake.context,
+        security_identities=intake.securities,
+        listing_identities=intake.listings,
+        exploratory_cohort=intake.cohort,
         exploratory_reconstruction_replay=replay,
-        dataset_limitations=fortnight.bundle.dataset_limitations,
+        dataset_limitations=intake.bundle.dataset_limitations,
     )
+
+
+def _refused_skipping(intake: AlpacaExploratoryIntakeResult, dropped: date) -> str:
+    """The halt raised for a bundle whose replay and clock drop ``dropped``."""
+    requests = tuple(
+        (query, context)
+        for query, context in intake.reconstruction_replay.requests
+        if query.session_date != dropped
+    )
+    replay = ExploratoryReconstructionReplay(
+        policy=intake.reconstruction_policy, requests=requests
+    )
+    clock = build_scheduled_reconstruction_clock(
+        tuple(query for query, _ in requests if query.security_id == AAPL_ID),
+        intake.context,
+    )
+    assert dropped not in {item.session_key.local_date for item in clock.sessions}
     with pytest.raises(IndeterminateExecutionError) as error:
-        _engine(fortnight, bundle=bundle, replay=replay)
-    assert "XNAS 2026-01-07 (scheduled_open)" in str(error.value)
+        _engine(intake, bundle=_bundle_over(intake, clock, replay), replay=replay)
+    return str(error.value)
+
+
+def test_the_engine_refuses_a_clock_that_skips_a_scheduled_open_date(
+    fortnight: AlpacaExploratoryIntakeResult,
+) -> None:
+    """R7 and M10: a hand-built bundle cannot drop a trading date."""
+    message = _refused_skipping(fortnight, date(2026, 1, 7))
+    assert message.endswith(": XNAS 2026-01-07 (scheduled_open)")
+
+
+def test_the_engine_refuses_a_clock_that_skips_the_monday_after_a_weekend(
+    fortnight: AlpacaExploratoryIntakeResult,
+) -> None:
+    """R7: every date of a gap is checked, not only the first.
+
+    Dropping Monday 2026-01-12 leaves a gap from Friday to Tuesday whose first
+    two dates, the weekend, are evidenced non-trading dates. Only the last
+    one is a skipped trading date, and it alone is named.
+    """
+    message = _refused_skipping(fortnight, date(2026, 1, 12))
+    assert message.endswith(": XNAS 2026-01-12 (scheduled_open)")
+    assert "2026-01-10" not in message and "2026-01-11" not in message
+
+
+def _session_as(
+    session: EvaluationSessionV1, *, day: date | None = None, mic: str | None = None
+) -> EvaluationSessionV1:
+    """``session`` moved to ``day`` (boundaries shifted with it) or ``mic``."""
+    values = {name: getattr(session, name) for name in type(session).model_fields}
+    if day is not None:
+        shift = timedelta(days=(day - session.session_key.local_date).days)
+        values["opened_at"] = session.opened_at + shift
+        values["closed_at"] = session.closed_at + shift
+    values["session_key"] = session.session_key.model_copy(
+        update={
+            key: value
+            for key, value in (("local_date", day), ("mic", mic))
+            if value is not None
+        }
+    )
+    provisional = EvaluationSessionV1.model_construct(**values)
+    values["session_hash"] = evaluation_session_hash(provisional)
+    return EvaluationSessionV1.model_validate(values)
+
+
+def _clock_of(
+    clock: SessionClockV1, sessions: tuple[EvaluationSessionV1, ...]
+) -> SessionClockV1:
+    """``clock`` carrying exactly ``sessions``, its hash re-sealed."""
+    values = {name: getattr(clock, name) for name in type(clock).model_fields}
+    values["sessions"] = sessions
+    provisional = SessionClockV1.model_construct(**values)
+    values["clock_hash"] = session_clock_hash(provisional)
+    return SessionClockV1.model_validate(values)
+
+
+@pytest.mark.parametrize(
+    "unevidenced", ("previous", "current"), ids=("previous-venue", "current-venue")
+)
+def test_the_density_check_covers_the_venues_of_both_sessions(
+    fortnight: AlpacaExploratoryIntakeResult, unevidenced: str
+) -> None:
+    """R7: a gap must be evidenced non-trading for both sessions' venues.
+
+    The record evidences the weekend for XNAS only. A step from Friday to
+    Monday where either session is on XNYS crosses a weekend no record covers
+    for XNYS, so it halts naming exactly the XNYS dates. The engine cannot
+    carry such a clock from the single-venue bridge replay (its lane gate
+    re-derives every clock session from that replay), so the check is driven
+    directly with the replay's verified contexts.
+    """
+    sessions = {
+        item.session_key.local_date: item for item in fortnight.session_clock.sessions
+    }
+    friday, monday = sessions[date(2026, 1, 9)], sessions[date(2026, 1, 12)]
+    replay = fortnight.reconstruction_replay
+    # Control: the same step on XNAS alone rests on the evidenced weekend.
+    require_evidenced_clock_density(
+        _clock_of(fortnight.session_clock, (friday, monday)), replay
+    )
+    if unevidenced == "previous":
+        friday = _session_as(friday, mic="XNYS")
+    else:
+        monday = _session_as(monday, mic="XNYS")
+    with pytest.raises(IndeterminateExecutionError) as error:
+        require_evidenced_clock_density(
+            _clock_of(fortnight.session_clock, (friday, monday)), replay
+        )
+    assert str(error.value).endswith(
+        ": XNYS 2026-01-10 (indeterminate), XNYS 2026-01-11 (indeterminate)"
+    )
+
+
+def test_the_engine_refuses_a_clock_session_on_an_evidenced_non_trading_date(
+    fortnight: AlpacaExploratoryIntakeResult,
+) -> None:
+    """D7-a: a clock session on an evidenced closed date is a conflict.
+
+    A phantom session on Saturday 2026-01-10, which the record evidences as a
+    non-trading date, leaves no gap the density walk would name, so it is
+    refused as a session in its own right, before any session is stepped.
+    """
+    sessions = fortnight.session_clock.sessions
+    friday = next(
+        item for item in sessions if item.session_key.local_date == date(2026, 1, 9)
+    )
+    phantom = _session_as(friday, day=date(2026, 1, 10))
+    clock = _clock_of(
+        fortnight.session_clock,
+        tuple(sorted((*sessions, phantom), key=lambda item: item.opened_at)),
+    )
+    bundle = _bundle_over(fortnight, clock, fortnight.reconstruction_replay)
+    with pytest.raises(IndeterminateExecutionError) as error:
+        _engine(fortnight, bundle=bundle)
+    assert str(error.value).endswith(
+        "evidences as non-trading, which is a conflict and never a session: "
+        "XNAS 2026-01-10"
+    )
 
 
 def test_the_engine_refuses_a_clock_across_an_uncovered_gap() -> None:
@@ -539,6 +672,27 @@ def test_swapped_response_bytes_of_the_same_length_are_refused(
         fortnight.context, {coverage.response_sha256: forged}
     )
     assert _code(context) == "closed_world_response_hash_mismatch"
+
+
+def test_record_bytes_that_do_not_hash_to_their_name_are_refused(
+    fortnight: AlpacaExploratoryIntakeResult,
+) -> None:
+    """A coverage row's source bytes are read strictly.
+
+    Same-length garbage retained under the record's digest cannot even say
+    whether it claims to be a record, so it is refused by code rather than
+    read as "no record here", which would leave the derived closed rows
+    unchecked.
+    """
+    digest = closed_world_record_digest(fortnight.closed_world_coverage)
+    original = fortnight.context.supporting_artifacts[digest].data
+    garbage = bytes(len(original))
+    forged = VerifiedArtifactBytes(
+        data=garbage, byte_size=len(garbage), content_hash=digest
+    )
+    refusal = _refusal(_context_with_support(fortnight.context, {digest: forged}))
+    assert refusal.code == "closed_world_record_hash_mismatch"
+    assert f"the retained bytes named {digest} do not hash to it" in str(refusal)
 
 
 @pytest.mark.parametrize(
