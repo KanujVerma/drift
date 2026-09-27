@@ -781,6 +781,56 @@ def test_an_answer_about_a_later_time_does_not_admit_before_that_time() -> None:
     assert engine.admitted_universe_at(sessions[2]) == (SEC_A,)
 
 
+# --- issue 8 final acceptance: a result learned after the decision (FA1 F4) ---
+
+
+def test_a_result_known_after_the_decision_never_admits_before_it() -> None:
+    """Evaluated as of DAY_0 but known only at DAY_3: no admission before DAY_3.
+
+    The mirror of the case above. ``NormalizedSelectionQueryV1`` does not tie
+    the two clocks together, so an as-known answer about an early instant can
+    be learned late, and only the knowledge-cutoff filter keeps it out of the
+    decisions taken before it was known. Every other universe fixture sets
+    ``evaluation_time == knowledge_cutoff``, where the evaluation-time filter
+    alone would mask a missing knowledge-cutoff filter.
+    """
+    learned_late = _eligibility(SEC_A, LISTING_A, knowledge_cutoff=_close_of(DAY_3))
+    early_answer = _rebound(
+        learned_late,
+        normalized_query=learned_late.normalized_query.model_copy(
+            update={"evaluation_time": _close_of(DAY_0)}
+        ),
+    )
+    query = early_answer.normalized_query
+    assert query.evaluation_time == _close_of(DAY_0)
+    assert query.knowledge_cutoff == _close_of(DAY_3)
+    engine, sessions = _universe_engine(early_answer)
+    assert len(sessions) == 4
+
+    for session in sessions[:3]:
+        assert engine.admitted_universe_at(session) == ()
+    assert engine.admitted_universe_at(sessions[3]) == (SEC_A,)
+
+    buy_and_hold = {DAY_1: ((SEC_A, 10),), DAY_2: ((SEC_A, 10),)}
+    rejected = _run(engine, FixedTargetStrategy(buy_and_hold))
+    assert rejected.result.classification is EvaluationClassification.REJECTED
+    assert rejected.result.metrics.committed_fill_count == 0
+
+    # Control: the identical answer known at the DAY_0 close admits from the
+    # first session and the same decision trades, so the knowledge cutoff is
+    # the only thing that excluded it above.
+    known_early, _ = _universe_engine(
+        _eligibility(SEC_A, LISTING_A, knowledge_cutoff=_close_of(DAY_0))
+    )
+    assert known_early.admitted_universe_at(sessions[0]) == (SEC_A,)
+    traded = _run(known_early, FixedTargetStrategy(buy_and_hold))
+    assert traded.result.classification is EvaluationClassification.COMPLETE
+    assert traded.result.metrics.committed_fill_count == 1
+    assert [
+        (item.security_id, item.quantity) for item in traded.final_state.holdings
+    ] == [(SEC_A, 10)]
+
+
 def test_an_ineligible_secondary_listing_never_removes_an_eligible_primary() -> None:
     """M1b marks every non-primary listing INELIGIBLE; the security stays admitted.
 
