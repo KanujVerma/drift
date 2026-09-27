@@ -164,6 +164,10 @@ from drift.domain.observation_query import (
     ObservationDecisionQueryV1,
     ObservationOutcomeQueryV1,
 )
+from drift.domain.observations import (
+    _REGULAR_SESSION_TRADE_BAR_PROFILE_SPEC,
+    regular_session_trade_bar_profile_hash,
+)
 from drift.domain.securities import (
     ListingLifecycleVersionV1,
     ListingRoleVersionV1,
@@ -547,6 +551,45 @@ def source_basis_price(
     return value
 
 
+@cache
+def _pinned_profile_currencies() -> Mapping[str, str]:
+    """The price currency each pinned M1d observation profile states (#142).
+
+    Keyed by the profile hash an observation query cites. M1d admits a source
+    observation under the regular-session trade-bar profile only, and its
+    usability assessment refuses a contract in any other currency than the
+    one that profile pins, so the pinned specification is the evidence a
+    view's price currency is read from.
+    """
+    currency = _REGULAR_SESSION_TRADE_BAR_PROFILE_SPEC["currency"]
+    if not isinstance(currency, str):  # pragma: no cover - pinned M1d profile
+        raise TypeError("the pinned trade-bar profile must state its currency")
+    return {regular_session_trade_bar_profile_hash(): currency}
+
+
+def accounting_view_currency(view: DerivedObservationViewV1) -> str:
+    """The currency an accounting view's prices were materialized in (#142).
+
+    A derived view carries no currency field of its own. Its query cites, by
+    hash, the M1d observation profile the source observation was admitted
+    under, and that pinned profile states the currency. A view citing any
+    profile no pinned specification states a currency for has no currency the
+    evaluator can read, so it fails closed. M1d states a currency code with no
+    namespace, so this is compared with the book's code, exactly as the
+    reconstructed lane compares its M1d contract currency code.
+    """
+    profile_hash = view.query.observation.profile_hash
+    currency = _pinned_profile_currencies().get(profile_hash)
+    if currency is None:
+        session = view.source_session
+        raise IndeterminateValuationError(
+            f"accounting view for security {view.security_id} on {session.mic} "
+            f"{session.local_date} cites observation profile {profile_hash}, "
+            "which pins no price currency"
+        )
+    return currency
+
+
 @dataclass(frozen=True)
 class SessionEvaluatorEvidence:
     """Evidence the evaluator consults that the input bundle does not carry.
@@ -757,21 +800,43 @@ def _revalidated_evidence(
     model inside each replay request's M1d resolution context, which is then
     rebuilt from those members. A context shared by several requests is
     rebuilt once and stays shared.
+
+    Issue 142: every collection is then held in the order the evidence hash
+    identifies it by, its members' content hashes, and each replay request by
+    the hash of its query and M1d context hash. The caller's order is not
+    part of the run identity, so no consumer may see it: a first fail-closed
+    cause found in record order would otherwise give one identity two results.
     """
 
     def each[M: BaseModel](
         declared: type[M], values: Sequence[BaseModel]
     ) -> tuple[M, ...]:
-        return tuple(_revalidated(declared, value) for value in values)
+        rebuilt = (_revalidated(declared, value) for value in values)
+        return tuple(sorted(rebuilt, key=content_hash))
 
-    contexts: dict[int, tuple[object, M1dResolutionContext]] = {}
+    contexts: dict[int, tuple[object, M1dResolutionContext, str]] = {}
 
-    def context_of(context: object) -> M1dResolutionContext:
+    def context_of(context: object) -> tuple[M1dResolutionContext, str]:
         known = contexts.get(id(context))
         if known is None or known[0] is not context:
-            known = (context, _canonical_m1d_context(context))
+            rebuilt = _canonical_m1d_context(context)
+            known = (context, rebuilt, m1d_context_hash(rebuilt))
             contexts[id(context)] = known
-        return known[1]
+        return known[1], known[2]
+
+    def requests_of(
+        replay: ExploratoryReconstructionReplay,
+    ) -> tuple[tuple[ObservationOutcomeQueryV1, M1dResolutionContext], ...]:
+        keyed = []
+        for query, context in replay.requests:
+            rebuilt_query = _revalidated(ObservationOutcomeQueryV1, query)
+            rebuilt_context, context_hash = context_of(context)
+            key = content_hash({"query": rebuilt_query, "context": context_hash})
+            keyed.append((key, rebuilt_query, rebuilt_context))
+        return tuple(
+            (item_query, item_context)
+            for _, item_query, item_context in sorted(keyed, key=lambda item: item[0])
+        )
 
     replay = evidence.exploratory_reconstruction_replay
     return SessionEvaluatorEvidence(
@@ -798,13 +863,7 @@ def _revalidated_evidence(
             if replay is None
             else ExploratoryReconstructionReplay(
                 policy=_revalidated(ExploratoryReconstructionPolicyV1, replay.policy),
-                requests=tuple(
-                    (
-                        _revalidated(ObservationOutcomeQueryV1, query),
-                        context_of(context),
-                    )
-                    for query, context in replay.requests
-                ),
+                requests=requests_of(replay),
             )
         ),
     )
@@ -1758,8 +1817,28 @@ class SessionEvaluatorEngine:
         return ListingOpenPriceV1(
             listing_id=view.listing_id,
             venue=view.query.observation.venue,
-            unadjusted_open_price=source_basis_price(view, "open"),
+            unadjusted_open_price=self._accounting_price(view, "open"),
         )
+
+    def _accounting_price(
+        self, view: DerivedObservationViewV1, field_name: SourceBasisField
+    ) -> Decimal:
+        """Read one realized-lane accounting price in the book currency (#142).
+
+        The twin of the reconstructed lane's currency refusal: a price the
+        book cannot hold in its own currency is missing evidence, so it halts
+        the run INDETERMINATE rather than entering a NAV in another currency.
+        """
+        value = source_basis_price(view, field_name)
+        currency = accounting_view_currency(view)
+        if currency != self._book_currency_code:
+            session = view.source_session
+            raise IndeterminateValuationError(
+                f"accounting {field_name} price for security {view.security_id} "
+                f"on {session.mic} {session.local_date} is in {currency}, not the "
+                f"book currency {self._book_currency_code}"
+            )
+        return value
 
     def _reconstructed_price(
         self,
@@ -1931,7 +2010,7 @@ class SessionEvaluatorEngine:
         view = self._accounting_view(security_id, session.session_key)
         return MarkPriceV1(
             security_id=security_id,
-            close_price=source_basis_price(view, "close"),
+            close_price=self._accounting_price(view, "close"),
             evidence=MarkEvidenceV1(
                 grade=self._mark_grade, evidence_hash=content_hash(view)
             ),

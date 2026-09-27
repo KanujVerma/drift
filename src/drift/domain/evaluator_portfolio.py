@@ -81,11 +81,24 @@ def canonical_money(value: Decimal) -> Decimal:
     ``decimal_context()`` pins arithmetic, not spelling, so it does not address
     this at all. The sign is carried separately because portfolio realized PnL
     may be negative while M1c source cash may not.
+
+    Issue 142: normalizing under the pinned context rounds any value with more
+    significant digits than the context holds. Re-spelling must never
+    re-value, so such a value is refused instead. Kernel arithmetic already
+    runs in the same context, so no amount it computes is affected.
     """
     with decimal_context():
         magnitude = abs(value).normalize()
         text = format(magnitude, "f")
     validate_canonical_cash(text)
+    # After the M1c rule, which refuses every non-finite rendering first.
+    # ``copy_abs`` is exact; ``abs`` would round under the ambient context.
+    if magnitude != value.copy_abs():
+        raise ValueError(
+            f"monetary amount {value} cannot be held exactly in the pinned "
+            f"{PORTFOLIO_DECIMAL_PRECISION}-digit portfolio context; it is refused, "
+            "not rounded"
+        )
     return Decimal(f"-{text}") if value < Decimal("0") else Decimal(text)
 
 
