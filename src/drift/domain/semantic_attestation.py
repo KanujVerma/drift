@@ -82,7 +82,7 @@ freeze over every declared module, whose links are reviewed, and the
 import-trace test, which runs each closure's seeds in a fresh interpreter and
 checks that no undeclared ``drift`` module is loaded at import time.
 
-Four closures are declared here. ``m1d-source-validation-v1`` identifies the M1d
+Five closures are declared here. ``m1d-source-validation-v1`` identifies the M1d
 validator runs (issue #32). ``m1d-evidence-v1`` identifies the code that
 derives, stamps and checks M1d evidence (issue #63, stage 1): every M1d
 normalization, action-session, session-binding, session-generation, selection
@@ -93,10 +93,17 @@ closed-world session coverage record (issue #71).
 ``m1c-evidence-v1`` identifies the code that selects, projects and composes M1c
 evidence, bound as the ``selection_``, ``projection_`` and
 ``composition_implementation_hash`` of every selection proof, safe fact
-projection and outcome resolution (issue #63, stage 2). Each M1c closure is a
-strict subset of the matching M1d closure, because M1d executes M1c code in
-process, so an M1c edit moves the M1d identities too while an M1d-only edit
-moves neither M1c identity.
+projection and outcome resolution (issue #63, stage 2). Each of those two M1c
+closures is a strict subset of the matching M1d closure, because M1d executes
+M1c code in process, so an M1c edit moves the M1d identities too while an
+M1d-only edit moves neither M1c identity.
+``m1c-corporate-action-coverage-v1`` identifies the code that stamps, verifies
+and derives closed-world corporate-action coverage, bound as the
+``implementation_hash`` of every ``ClosedWorldCorporateActionCoverageV1``
+(issue #76, decision D5-b). It is a closure of its own rather than a seed of
+``m1c-evidence-v1``, so a coverage-code edit stales no retained M1c outcome,
+and no M1c or M1d closure reaches its two modules; it shares every other
+module it declares with ``m1c-evidence-v1``.
 
 The M1c identities used to be the whole-tree inventory; they are attested now,
 and neither ``economic_implementation_hash()`` nor
@@ -327,6 +334,43 @@ M1C_EVIDENCE_SEMANTIC_MODULES: tuple[str, ...] = (
 )
 """The declared semantic closure of the M1c evidence identity."""
 
+M1C_CA_COVERAGE_CLOSURE_ID = "m1c-corporate-action-coverage-v1"
+"""Identifier for the closed-world corporate-action coverage identity closure."""
+
+M1C_CA_COVERAGE_SEEDS: tuple[str, ...] = ("drift.markets.economic_closed_world",)
+"""The one module that stamps and checks the corporate-action coverage identity.
+
+It builds every ``ClosedWorldCorporateActionCoverageV1``, the only place its
+``implementation_hash`` is stamped, and verifies it against this identity
+(issue 76, decision D5-b); the record module joins through it."""
+
+M1C_CA_COVERAGE_SEMANTIC_MODULES: tuple[str, ...] = (
+    "drift",
+    "drift.datasets",
+    "drift.datasets.hashing",
+    "drift.domain",
+    "drift.domain.artifacts",
+    "drift.domain.assertions",
+    "drift.domain.common",
+    "drift.domain.dataset_validation",
+    "drift.domain.datasets",
+    "drift.domain.economic_closed_world",
+    "drift.domain.economic_common",
+    "drift.domain.economic_queries",
+    "drift.domain.economic_results",
+    "drift.domain.manifests",
+    "drift.domain.provenance_references",
+    "drift.domain.revisions",
+    "drift.domain.semantic_attestation",
+    "drift.domain.temporal",
+    "drift.errors",
+    "drift.markets",
+    "drift.markets.economic_closed_world",
+    "drift.serialization",
+    "drift.serialization.canonical",
+)
+"""The declared semantic closure of the corporate-action coverage identity."""
+
 _MODULE_NAME_PATTERN = re.compile(r"^drift(\.[A-Za-z_][A-Za-z0-9_]*)*$")
 _DYNAMIC_IMPORT_NAMES = frozenset({"__import__", "import_module"})
 """Loader names. Only a direct call with a literal target can be bound."""
@@ -494,7 +538,7 @@ members it may bind from each.
 
 Derived from what the M1d validation and evidence closures actually use: the 27
 distinct non-``drift`` modules, and within each only the members the closures
-import or reach. The two M1c closures are subsets of those and need nothing
+import or reach. The three M1c closures are subsets of those and need nothing
 more. A plain ``import X`` or a ``from X import`` whose root is not
 ``drift`` must name one of these modules, and every member it binds or reaches
 must be listed for that module. Everything else fails closed by construction: a
@@ -844,6 +888,23 @@ def m1c_evidence_attestation() -> SemanticAttestationV1:
 def m1c_evidence_attestation_hash() -> SHA256Hash:
     """Return the M1c evidence identity as a bare content hash."""
     return m1c_evidence_attestation().attestation_hash
+
+
+@cache
+def m1c_corporate_action_coverage_attestation() -> SemanticAttestationV1:
+    """Return the guarded, bounded identity of the corporate-action coverage code."""
+    verify_semantic_closure(
+        modules=M1C_CA_COVERAGE_SEMANTIC_MODULES, seeds=M1C_CA_COVERAGE_SEEDS
+    )
+    return build_semantic_attestation(
+        closure_id=M1C_CA_COVERAGE_CLOSURE_ID,
+        modules=M1C_CA_COVERAGE_SEMANTIC_MODULES,
+    )
+
+
+def m1c_corporate_action_coverage_attestation_hash() -> SHA256Hash:
+    """Return the corporate-action coverage identity as a bare content hash."""
+    return m1c_corporate_action_coverage_attestation().attestation_hash
 
 
 def _canonical_declaration(modules: Sequence[str]) -> tuple[str, ...]:
