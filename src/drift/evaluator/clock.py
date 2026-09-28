@@ -248,9 +248,12 @@ def refuse_same_date_multi_venue_clock(clock: SessionClockV1) -> None:
     as does a venue change across dates. The next-open guard in the engine
     stays behind this refusal as defense in depth.
 
-    Dates are read through the base ``date`` methods, never the value's own:
-    revalidation keeps a ``date`` subclass (issue 123), whose equality, hash
-    and string form could otherwise hide a second session on one date.
+    Dates are read through the base ``date`` methods, never the value's own.
+    The engine rebuilds its inputs through canonical JSON (issue 123), so no
+    ``date`` subclass reaches this refusal from an engine; reading through the
+    base type stays as defense in depth for any other caller, since a
+    subclass's equality, hash and string form could otherwise hide a second
+    session on one date.
     """
     first_on: dict[int, SessionKeyV1] = {}
     for session in clock.sessions:

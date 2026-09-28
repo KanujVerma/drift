@@ -1460,6 +1460,16 @@ LYING_DATES: dict[str, type[date]] = {
     "and-ordinal-and-iso-form": _LyingFormDate,
 }
 
+#: The refusal each forged clock meets. A date whose ISO form is not its
+#: value's no longer survives revalidation (issue 123): the canonical JSON
+#: rebuild reads its value, so its session no longer matches the hash sealed
+#: over the forged ISO form, and the input is refused before any clock guard.
+LYING_DATE_REFUSALS: dict[type[date], tuple[type[Exception], str]] = {
+    _LyingHashDate: (SameDateMultiVenueClockError, SAME_DATE_CLOCK_REFUSAL),
+    _LyingOrderDate: (SameDateMultiVenueClockError, SAME_DATE_CLOCK_REFUSAL),
+    _LyingFormDate: (ValidationError, r"session hash mismatch"),
+}
+
 
 @pytest.mark.parametrize("lying", LYING_DATES.values(), ids=LYING_DATES)
 def test_a_subclassed_date_cannot_slip_a_same_date_clock_past_construction(
@@ -1467,12 +1477,15 @@ def test_a_subclassed_date_cannot_slip_a_same_date_clock_past_construction(
 ) -> None:
     """#127 review F3: the refusal reads each date through the base type.
 
-    Revalidation keeps a ``date`` subclass on ``local_date`` (issue 123), so
-    the XNAS DAY_1 session can carry one whose own methods say it is another
-    date. Keyed on the value, the refusal was bypassed, and the lying order
-    passes the next-open guard too. Through ``date.toordinal`` and
-    ``date.isoformat`` no subclass method runs, so the forged clock is
-    refused exactly as the genuine one.
+    The input bundle holds a ``date`` subclass on ``local_date``, so the XNAS
+    DAY_1 session carries one whose own methods say it is another date. Keyed
+    on the value, the refusal was bypassed, and the lying order passes the
+    next-open guard too. Through ``date.toordinal`` and ``date.isoformat`` no
+    subclass method runs, so the forged clock is refused exactly as the
+    genuine one. Since issue 123 the engine rebuilds its inputs through
+    canonical JSON, which reads the date's value: a date whose ISO form names
+    another day no longer matches the session hash sealed over that form, and
+    is refused earlier, at revalidation, before any clock guard runs.
     """
     forged = lying(DAY_1.year, DAY_1.month, DAY_1.day)
     xnas = _resealed(
@@ -1487,8 +1500,9 @@ def test_a_subclassed_date_cannot_slip_a_same_date_clock_past_construction(
         accounting_views=(_accounting_view(SEC_A, DAY_1),),
     )
     assert type(bundle.session_clock.sessions[1].session_key.local_date) is lying
+    refusal, reason = LYING_DATE_REFUSALS[lying]
 
-    with pytest.raises(SameDateMultiVenueClockError, match=SAME_DATE_CLOCK_REFUSAL):
+    with pytest.raises(refusal, match=reason):
         _engine(bundle=bundle, protocol=_protocol(warmup=1))
 
 
