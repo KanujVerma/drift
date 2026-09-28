@@ -1102,22 +1102,35 @@ def test_a_strategy_cannot_rewrite_a_uuid_it_kept_after_the_intent_is_staged(
 #: that also declare semantic_attestation.py, the M1c validator identity bound
 #: into every M1d context hash. A field-by-field diff of all four runs against
 #: main cde7728 shows only identity-bearing hashes moved (0 non-hash leaves).
+#: They were re-pinned again, trace and result, for issue 76: its
+#: m1c-corporate-action-coverage-v1 closure edits semantic_attestation.py, so
+#: the M1d evidence and M1c validator identities move as above; its
+#: corporate_action_coverage bundle field (D8-a) moves every bundle hash; and
+#: each fixture now states quiet closed-world corporate-action coverage for the
+#: securities it holds or trades (exploratory records whose response bytes the
+#: reconstructed contexts retain), because an uncovered exposed security halts.
+#: A field-by-field diff of all four runs against the base dec5d64 shows only
+#: hash leaves moved, plus the admission's acknowledged limitations (and the
+#: reconstructed events that restate them) gaining
+#: corporate-action-absence-read-from-current-provider-snapshot; no quantity,
+#: price, cash, NAV, classification, count, status, reason, lane or kind leaf
+#: changes.
 GENUINE_RUN_HASHES = {
     "realized-staged": (
-        "436f3edf10204a74776e1e518819cbe02eb5555e1954a11764c80522459d8db6",
-        "054f0a6ac7dc7c10bc05f4de23b59936337a61911680c5b20c1bc08a8f71bd78",
+        "385edb0073c986745da4af1fe771b4efa6a23601277418bd1db98672557f8913",
+        "bdf1e607c2b1981724578abb70c98ceb053db35355921abf43ca4366655165c2",
     ),
     "realized-refused-by-staging": (
-        "f432ae02519cf4b9533fd61597ae760837845a3177af273298adade386d3b79a",
-        "6590c7dd4eba120ca2743e899d1933925fd935bf35765524316a9ec1513b13c0",
+        "b8299998e52e646d8cead7e736611aa056c4dfe96973101369a8c427aae33779",
+        "da812d2ae50bd26e9cdca24fc1bd58a9d7094cf44f06467def27359c38497f69",
     ),
     "reconstructed-staged": (
-        "2a3fb8e68662ec090c1e272e42d2002fcfa3f8d0d7483480f7f66cfe335d53e8",
-        "5d3ad04b644425132476c3996325943656289f762e6737fbfb6e039dc97cc5c3",
+        "5cb9ab75de9efeac846f22b072ae750112ac537b6a5dd624f4a87177b9c76ca0",
+        "48dbbf42b20568ada63615856eaa251eea2ba7e44c61add2aaee6057bd9135e1",
     ),
     "reconstructed-refused-by-staging": (
-        "0b064b15a6b34f72b9b79be2fa2af6a290b0a55cad8c5bc1e4ed9f0a275bc340",
-        "0955be07459cf5d7a76bc04f1f699ce4120cc9e16f3f049ef588ff965ea198e1",
+        "a98fd957ec6ef8cedeca80094c6ce007354251ea351a268ab51dd33cb737698c",
+        "11c723f881f87801ad23af6e2b8fb836f86a22afbee275f6c2a1e39786ca2bba",
     ),
 }
 

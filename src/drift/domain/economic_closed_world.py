@@ -104,6 +104,16 @@ CORPORATE_ACTION_COVERAGE_DOMAIN_CODES: tuple[str, ...] = (
 """Every integrity code the record's own validation can raise."""
 
 
+def exact_date(value: date) -> date:
+    """``value`` as an exact ``date``, read through the base methods only.
+
+    A ``date`` subclass can override comparison, hashing and formatting, so
+    every date a record holds or a rule compares is rebuilt from its ordinal
+    first (the issue 123 rule): no subclass method ever decides coverage.
+    """
+    return date.fromordinal(date.toordinal(value))
+
+
 def corporate_action_derivation_algorithm_hash() -> SHA256Hash:
     """Return the static semantic identity of the V1 derivation rule."""
     return content_hash(_DERIVATION_ALGORITHM_V1)
@@ -117,7 +127,7 @@ def corporate_action_snapshot_date(snapshot: TemporalBoundaryClaimV1) -> date:
             "ca_coverage_snapshot_invalid: the snapshot is the exact acquisition "
             "instant"
         )
-    return instant.date()
+    return exact_date(instant.date())
 
 
 def corporate_action_covered_interval(
@@ -130,8 +140,8 @@ def corporate_action_covered_interval(
     It never starts before ``REST_CORPORATE_ACTION_EVIDENCE_FLOOR`` and never
     ends after the snapshot date. ``None`` when that leaves nothing covered.
     """
-    start = max(requested_start, REST_CORPORATE_ACTION_EVIDENCE_FLOOR)
-    end = min(requested_end, corporate_action_snapshot_date(snapshot))
+    start = max(exact_date(requested_start), REST_CORPORATE_ACTION_EVIDENCE_FLOOR)
+    end = min(exact_date(requested_end), corporate_action_snapshot_date(snapshot))
     if start > end:
         return None
     return start, end
@@ -157,6 +167,7 @@ class ReturnedCorporateActionV1(FrozenModel):
     @field_validator("dates")
     @classmethod
     def require_canonical_dates(cls, values: tuple[date, ...]) -> tuple[date, ...]:
+        values = tuple(exact_date(value) for value in values)
         if len(set(values)) != len(values) or tuple(sorted(values)) != values:
             raise ValueError(
                 "ca_coverage_returned_actions_invalid: a returned action's dates "
@@ -228,6 +239,16 @@ class ClosedWorldCorporateActionCoverageV1(FrozenModel):
     derivation_algorithm_hash: SHA256Hash
     implementation_hash: SHA256Hash
     record_hash: SHA256Hash
+
+    @field_validator(
+        "requested_start_date",
+        "requested_end_date",
+        "covered_start_date",
+        "covered_end_date",
+    )
+    @classmethod
+    def read_dates_through_the_base_type(cls, value: date | None) -> date | None:
+        return None if value is None else exact_date(value)
 
     @field_validator("evidence_grade", mode="before")
     @classmethod

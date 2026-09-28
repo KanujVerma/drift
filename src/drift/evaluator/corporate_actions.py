@@ -18,6 +18,11 @@ have no exact decimal spelling fail closed instead of rounding.
 ``IndeterminateValuationError``. There is no branch that quietly picks a
 plausible answer, because a plausible answer in an accounting kernel is a
 silently wrong book.
+
+*No record is not no action* (issue 76). A security the book is exposed to at
+a pre-open must be closed-world covered over that session's window, by the
+processor's mandatory ``CorporateActionCoverageIndex``; an absent outcome is
+never read as "no corporate action".
 """
 
 from collections.abc import Collection, Iterable, Mapping
@@ -73,6 +78,7 @@ from drift.domain.evaluator_portfolio import (
 )
 from drift.domain.evaluator_strategy import SecurityTargetPositionV1
 from drift.domain.sessions import SessionKeyV1
+from drift.evaluator.corporate_action_coverage import CorporateActionCoverageIndex
 from drift.evaluator.portfolio import (
     PortfolioAccountingKernel,
     indeterminate_holding,
@@ -192,6 +198,13 @@ class _SessionWindow:
         if self.previous is None:
             return day == self.current
         return day > self.previous
+
+    @property
+    def first_date(self) -> date:
+        """The first date this pass owns (C2 of issue 76)."""
+        if self.previous is None:
+            return self.current
+        return date.fromordinal(date.toordinal(self.previous) + 1)
 
 
 @dataclass(frozen=True)
@@ -439,6 +452,10 @@ class CorporateActionProcessor:
     arguments. They are source readings that a human made and evidenced; the
     processor will not invent one, and an action that needs a missing reading
     fails closed rather than proceeding on a default.
+
+    ``corporate_action_coverage`` is mandatory (issue 76, decision D7-b): the
+    closed-world coverage every exposed security is held to at every pre-open.
+    There is no default, because a default would be "no action".
     """
 
     def __init__(
@@ -447,6 +464,7 @@ class CorporateActionProcessor:
         session_clock: SessionClockV1,
         book_currency_namespace: str,
         book_currency_code: str,
+        corporate_action_coverage: CorporateActionCoverageIndex,
         tie_breaking_rules: Collection[TieBreakingRuleV1] = (),
         due_bill_rules: Collection[DueBillRuleV1] = (),
         cash_in_lieu_rates: Collection[CashInLieuRateV1] = (),
@@ -455,6 +473,12 @@ class CorporateActionProcessor:
         # authority-bound clock as the caller's book. A clock derived from the
         # book being checked would prove nothing.
         self._session_clock = session_clock
+        if type(corporate_action_coverage) is not CorporateActionCoverageIndex:
+            raise TypeError(
+                "the corporate-action processor requires a "
+                "CorporateActionCoverageIndex (issue 76)"
+            )
+        self._coverage = corporate_action_coverage
         if not book_currency_namespace.strip() or not book_currency_code.strip():
             raise ValueError("a book currency namespace and code are required")
         self._currency = (book_currency_namespace, book_currency_code)
@@ -525,9 +549,17 @@ class CorporateActionProcessor:
         entitlement whose occurrence the book already recorded, as a share
         action or an instalment, is refused likewise when the book holds the
         security, so a reclassifying revision cannot book both readings.
+
+        Issue 76 (C1 to C5). Every security the book is exposed to, judged
+        against the prior close's book and again against the book the pass
+        leaves, must be closed-world covered over this session's window by
+        the coverage index, or the pass halts INDETERMINATE naming it. An
+        M1c-native covered outcome with no records at all is evidenced no
+        action (C4), not unsupported evidence.
         """
         _require_positioned(portfolio_state, current_session)
         window = self._session_window(current_session)
+        window_start, window_end = window.first_date, window.current
         opening_holdings = {
             holding.security_id: holding for holding in portfolio_state.holdings
         }
@@ -541,10 +573,15 @@ class CorporateActionProcessor:
         )
         supported: list[tuple[SecurityEconomicOutcomeV1, list[_EffectContext]]] = []
         unsupported: list[SecurityEconomicOutcomeV1] = []
-        for outcome in _ordered_outcomes(economic_outcomes):
+        ordered = _ordered_outcomes(economic_outcomes)
+        outcome_of = {outcome.security_id: outcome for outcome in ordered}
+        for outcome in ordered:
             if outcome.resolution.support_status == "supported":
                 supported.append((outcome, _effect_contexts(outcome)))
-            else:
+            elif not self._coverage.native_no_action(outcome, window_start, window_end):
+                # C4: an M1c-native covered outcome with no records is
+                # evidenced no action, so only any other outcome that is not
+                # supported can halt an exposed book below.
                 unsupported.append(outcome)
         every_context = [context for _, contexts in supported for context in contexts]
         mutations = _window_share_mutations(every_context, window)
@@ -585,6 +622,9 @@ class CorporateActionProcessor:
             for security_id in (*book.holdings, *book.targets)
             if self._is_exposed(security_id, book)
         }
+        # C1 to C3 (issue 76), against the prior close's book: every security
+        # it holds or stages a buy of must be covered over this window.
+        self._require_covered(exposed_at_close, outcome_of, window_start, window_end)
         # One dispatch over every outcome, so every share action of the pass
         # runs before any cash distribution, whichever outcome each is in.
         self._apply_contexts(every_context, book, window)
@@ -592,6 +632,19 @@ class CorporateActionProcessor:
         self._require_no_exposed_conflict(conflicts, book)
         self._require_no_exposed_unknown_claim(unknown, book)
         self._require_no_exposed_ended_claim(ended, book)
+        # And again against the book the pass leaves: a spin-off child or a
+        # conversion recipient the pass delivers is exposure too (C1).
+        self._require_covered(
+            {
+                security_id
+                for security_id in (*book.holdings, *book.targets)
+                if self._is_exposed(security_id, book)
+            }
+            - exposed_at_close,
+            outcome_of,
+            window_start,
+            window_end,
+        )
         # Exposure to evidence this pass cannot apply is judged against the
         # book the pass leaves: a holding or positive target credited by an
         # earlier dispatch, such as a spin-off child, is exposure too.
@@ -720,6 +773,19 @@ class CorporateActionProcessor:
         return kernel.state
 
     # -- pre-open internals -----------------------------------------------
+
+    def _require_covered(
+        self,
+        exposed: Iterable[UUID],
+        outcome_of: Mapping[UUID, SecurityEconomicOutcomeV1],
+        start: date,
+        end: date,
+    ) -> None:
+        """C3 of issue 76: every exposed security is covered, in security order."""
+        for security_id in sorted(exposed, key=_security_order):
+            self._coverage.require_covered(
+                security_id, outcome_of.get(security_id), start, end
+            )
 
     def _require_no_exposed_replay(
         self, replayed: Iterable[_EffectContext], book: _Book

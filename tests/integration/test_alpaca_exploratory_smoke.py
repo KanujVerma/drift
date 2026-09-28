@@ -382,10 +382,12 @@ def test_a_trading_target_fails_closed_at_the_next_open(
     """Deciding on the bridge bundle is admitted; executing still halts.
 
     Issue 54 prices reconstructed opens and closes, but the bridge supplies no
-    M1b listing role evidence, so the next open halts INDETERMINATE in the
-    execution phase instead of inventing an execution listing. The cause is
-    pinned so that a different fail-closed path cannot stand in for this one.
-    No fill is minted.
+    M1b listing role evidence, so the next open would halt INDETERMINATE in the
+    execution phase instead of inventing an execution listing. Issue 76 halts
+    it one phase earlier: the staged buy makes AAPL exposed at that pre-open,
+    and this bridge bundle carries no closed-world corporate-action coverage,
+    so no absent action is read as no action. The cause is pinned so that a
+    different fail-closed path cannot stand in for this one. No fill is minted.
     """
     artifacts, strategy = _run(intake, BUY_TEN_AAPL)
     result = artifacts.result
@@ -400,10 +402,10 @@ def test_a_trading_target_fails_closed_at_the_next_open(
     assert kinds.count("exploratory_strategy_decision") == 1
     cause = artifacts.trace.events[-1]
     assert cause.kind == "indeterminate_cause"
-    assert cause.phase is EvaluationPhase.OPEN_EXECUTION
-    assert cause.cause_kind == "indeterminate_execution"
+    assert cause.phase is EvaluationPhase.PRE_OPEN_EFFECTS
+    assert cause.cause_kind == "indeterminate_valuation"
     assert cause.cause.startswith(
-        f"no active primary listing for security {AAPL_ID} at "
+        f"no closed-world corporate-action coverage for {AAPL_ID} over "
     ), cause.cause
     assert artifacts.final_state.holdings == ()
 

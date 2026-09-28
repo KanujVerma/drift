@@ -46,7 +46,10 @@ from drift.domain.evaluator_bundles import (
     EvaluationInputBundleV1,
     evaluation_input_bundle_hash,
 )
-from drift.domain.evaluator_lanes import ALPACA_LIMITATION_BOUNDED_COHORT
+from drift.domain.evaluator_lanes import (
+    ALPACA_LIMITATION_BOUNDED_COHORT,
+    LIMITATION_CA_ABSENCE_FROM_CURRENT_SNAPSHOT,
+)
 from drift.domain.evaluator_reconstruction import (
     ExploratoryReconstructedSessionObservationV1,
     exploratory_reconstruction_hash,
@@ -225,10 +228,16 @@ def test_a_fully_acknowledged_realized_run_is_still_admitted() -> None:
 
 
 def test_a_realized_bundle_without_reconstructions_is_unaffected() -> None:
-    """Control: a realized bundle obliging nothing extra runs as it always did."""
+    """Control: a realized bundle obliging nothing extra runs as it always did.
+
+    Issue 76: its quiet exploratory corporate-action coverage records oblige
+    their own snapshot limitation, and nothing else.
+    """
     realized = _bundle()
     assert realized.has_exploratory_reconstructions is False
-    assert realized.required_limitations == ()
+    assert realized.required_limitations == (
+        LIMITATION_CA_ABSENCE_FROM_CURRENT_SNAPSHOT,
+    )
 
     artifacts = run_engine(
         reconstructed_engine(realized, with_cohort=False),

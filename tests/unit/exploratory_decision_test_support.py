@@ -11,6 +11,7 @@ corpora, because every harness attaches its sessions with
 """
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from functools import cache
 from typing import Any, Literal
@@ -21,16 +22,19 @@ from test_assertions import exact_boundary
 from test_evaluator_engine import (
     BOOK_CODE,
     BOOK_NAMESPACE,
+    CA_COVERAGE_SUPPORT,
     CODE_VERSION_HASH,
     ENVIRONMENT_HASH,
     ROLE_RECORDS,
     STRATEGY_REFERENCE,
     _cost_model,
     _protocol,
+    quiet_coverage,
 )
 from test_evaluator_reconstruction import make_cohort, make_policy
 
 from drift.domain.assertions import TemporalIntervalClaimV1
+from drift.domain.economic_closed_world import ClosedWorldCorporateActionCoverageV1
 from drift.domain.evaluator_bundles import EvaluationInputBundleV1
 from drift.domain.evaluator_clock import (
     EvaluationSessionV1,
@@ -162,6 +166,16 @@ def scheduled_session_case(
         claimed_close_utc=(17, 55) if schedule_state == "early_close" else (20, 55),
     )
     harness.attach_sessions(schedule_state=schedule_state, realized_outcome="missing")
+    # Issue 76 (C7): the reconstructed lane re-verifies every corporate-action
+    # coverage record against the replay contexts' retained artifacts, so each
+    # context retains the synthetic response the fixture records bind.
+    harness.context = replace(
+        harness.context,
+        supporting_artifacts={
+            **harness.context.supporting_artifacts,
+            **CA_COVERAGE_SUPPORT,
+        },
+    )
     horizon = f"{(session_date + timedelta(days=1)).isoformat()}T00:00:00Z"
     query = harness.outcome(
         economic_horizon=horizon,
@@ -222,14 +236,31 @@ def scheduled_bundle(
     *,
     clock: SessionClockV1 | None = None,
     source_snapshot_hash: str | None = None,
+    corporate_action_coverage: (
+        tuple[ClosedWorldCorporateActionCoverageV1, ...] | None
+    ) = None,
 ) -> EvaluationInputBundleV1:
-    """A scheduled-reconstruction bundle carrying no authentic view at all."""
+    """A scheduled-reconstruction bundle carrying no authentic view at all.
+
+    Unless stated, both securities are covered by a quiet exploratory
+    corporate-action record over the sessions' dates (issue 76).
+    """
     unique = {session.session_key: session for session in sessions}
+    resolved_clock = (
+        merged_scheduled_clock(tuple(unique.values())) if clock is None else clock
+    )
+    days = [
+        date.fromordinal(date.toordinal(session.session_key.local_date))
+        for session in resolved_clock.sessions
+    ]
+    coverage = (
+        quiet_coverage((SEC, SEC_OTHER), min(days), max(days))
+        if corporate_action_coverage is None
+        else corporate_action_coverage
+    )
     return assemble_evaluation_input_bundle(
         evaluation_interval=interval(),
-        session_clock=(
-            merged_scheduled_clock(tuple(unique.values())) if clock is None else clock
-        ),
+        session_clock=resolved_clock,
         security_identities=(
             SecurityV1(schema_version="1", security_id=SEC),
             SecurityV1(schema_version="1", security_id=SEC_OTHER),
@@ -241,6 +272,7 @@ def scheduled_bundle(
             ),
         ),
         exploratory_reconstructed_observations=tuple(observations),
+        corporate_action_coverage=coverage,
         source_snapshot_hash=source_snapshot_hash,
     )
 

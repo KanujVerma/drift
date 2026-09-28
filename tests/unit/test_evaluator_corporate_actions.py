@@ -3,6 +3,7 @@
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from fractions import Fraction
+from typing import Literal
 from uuid import UUID
 
 import pytest
@@ -23,6 +24,7 @@ from economic_test_support import (
 from observation_test_support import uid
 
 from drift.domain.artifacts import ArtifactReference
+from drift.domain.economic_closed_world import ClosedWorldCorporateActionCoverageV1
 from drift.domain.economic_common import (
     ActionKind,
     CashComponentV1,
@@ -48,6 +50,7 @@ from drift.domain.economic_events import (
 )
 from drift.domain.economic_queries import MarketOutcomeQueryV1
 from drift.domain.economic_results import (
+    EconomicCoverageResolutionV1,
     EconomicDeliveryGroupV1,
     EconomicEffectProjectionV1,
     EconomicOutcomeResolutionV1,
@@ -86,6 +89,7 @@ from drift.domain.evaluator_portfolio import (
 )
 from drift.domain.evaluator_strategy import SecurityTargetPositionV1
 from drift.domain.sessions import SessionKeyV1
+from drift.evaluator.corporate_action_coverage import CorporateActionCoverageIndex
 from drift.evaluator.corporate_actions import CorporateActionProcessor
 from drift.evaluator.portfolio import PortfolioAccountingKernel
 from drift.serialization.canonical import content_hash
@@ -422,8 +426,14 @@ def _delivery(
 
 
 def _query(
-    security_id: UUID, action_kinds: tuple[ActionKind, ...]
+    security_id: UUID, action_kinds: tuple[ActionKind, ...] = tuple(ActionKind)
 ) -> MarketOutcomeQueryV1:
+    """An outcome query from 2020 to 2027, asking for every action kind by default.
+
+    Issue 76, section 3.4 (ii): an outcome is M1c-native corporate-action
+    coverage only when its query asks for the whole action vocabulary, because
+    coverage for splits is not coverage for spin-offs.
+    """
     return MarketOutcomeQueryV1(
         schema_version="1",
         security_id=security_id,
@@ -436,8 +446,26 @@ def _query(
         input_context_hash=HASH_C,
         kind="outcome",
         purpose="economic_outcome",
-        economic_horizon=parse_utc("2021-01-01T00:00:00Z"),
-        evidence_vintage_cutoff=parse_utc("2021-01-01T00:00:00Z"),
+        # Past every clock the M2 suites evaluate over (2020 and 2026), so the
+        # query covers each session window with a day to spare (section 3.4).
+        economic_horizon=parse_utc("2027-01-01T00:00:00Z"),
+        evidence_vintage_cutoff=parse_utc("2027-01-01T00:00:00Z"),
+    )
+
+
+def _coverage_results(*, complete: bool) -> tuple[EconomicCoverageResolutionV1, ...]:
+    """One coverage result per family, all complete or all partial."""
+    return tuple(
+        EconomicCoverageResolutionV1(
+            family=family,
+            source_id=SOURCE_A,
+            selected_coverage_hashes=(HASH_A,),
+            target_manifest_hash=HASH_B,
+            status="complete" if complete else "partial",
+            occurrence_identity_supported=complete,
+            reasons=() if complete else ("coverage_declared_partial",),
+        )
+        for family in ("effect", "settlement", "terms")
     )
 
 
@@ -449,13 +477,22 @@ def _outcome(
     statuses: tuple[str, ...] | None = None,
     delivery_groups: tuple[EconomicDeliveryGroupV1, ...] = (),
     support_status: str = "supported",
-    action_kinds: tuple[ActionKind, ...] = (ActionKind.REGULAR_CASH_DIVIDEND,),
     claim_status: str = "continuing",
+    native_coverage: bool = True,
+    query_kinds: tuple[ActionKind, ...] = tuple(ActionKind),
 ) -> SecurityEconomicOutcomeV1:
+    """One record-bound outcome, M1c-native corporate-action coverage by default.
+
+    Issue 76: an exposed security must be closed-world covered, so by default
+    the resolution carries complete terms, effect and settlement coverage over
+    every action kind (section 3.4). ``native_coverage=False`` makes every
+    family partial, and ``query_kinds`` narrows the query, so a test can state
+    an outcome that is not coverage.
+    """
     effect_statuses = ("effective",) * len(effects) if statuses is None else statuses
     # A composed claim status M1c cannot resolve marks the evidence partial.
     composed_unknown = claim_status == "unknown"
-    query = _query(security_id, action_kinds)
+    query = _query(security_id, query_kinds)
     resolution = EconomicOutcomeResolutionV1(
         schema_version="1",
         query=query,
@@ -477,7 +514,7 @@ def _outcome(
         delivery_groups=delivery_groups,
         uncomposed_settlement_hashes=(),
         associations=(),
-        coverage_results=(),
+        coverage_results=_coverage_results(complete=native_coverage),
         residual_resolutions=(),
         safe_projection_hashes=(),
         claim_status=claim_status,  # type: ignore[arg-type]
@@ -565,16 +602,50 @@ def _state(
     )
 
 
+def _quiet(security_id: UUID) -> SecurityEconomicOutcomeV1:
+    """An M1c-native covered outcome with no records: evidenced no action.
+
+    Issue 76 (C4): a security the book is exposed to without any action of
+    its own, such as a spin-off child, must still be closed-world covered.
+    """
+    return _outcome(security_id=security_id, support_status="indeterminate")
+
+
+def _covered(
+    outcomes: tuple[SecurityEconomicOutcomeV1, ...], *securities: UUID
+) -> tuple[SecurityEconomicOutcomeV1, ...]:
+    """``outcomes`` plus a quiet native outcome for each named security.
+
+    Issue 76: a security the book holds or stages a buy of, with no action of
+    its own in the test, is stated covered explicitly, never by default.
+    """
+    return (*outcomes, *(_quiet(security_id) for security_id in securities))
+
+
+def _coverage_index(
+    records: tuple[ClosedWorldCorporateActionCoverageV1, ...] = (),
+    lane: Literal["exploratory", "promotion"] = "exploratory",
+) -> CorporateActionCoverageIndex:
+    return CorporateActionCoverageIndex(records=records, lane=lane)
+
+
 def _processor(
     *,
     tie_breaking_rules: tuple[TieBreakingRuleV1, ...] = (),
     due_bill_rules: tuple[DueBillRuleV1, ...] = (),
     cash_in_lieu_rates: tuple[CashInLieuRateV1, ...] = (),
+    coverage: CorporateActionCoverageIndex | None = None,
 ) -> CorporateActionProcessor:
+    """The processor under test; by default no exploratory coverage record.
+
+    Every exposed security is then covered only by its own M1c-native outcome
+    (issue 76), which ``_outcome`` states by default.
+    """
     return CorporateActionProcessor(
         session_clock=CLOCK,
         book_currency_namespace=BOOK_NAMESPACE,
         book_currency_code=BOOK_CODE,
+        corporate_action_coverage=_coverage_index() if coverage is None else coverage,
         tie_breaking_rules=tie_breaking_rules,
         due_bill_rules=due_bill_rules,
         cash_in_lieu_rates=cash_in_lieu_rates,
@@ -605,7 +676,7 @@ def _split_case_components(
         components=components,
         terms=terms,
     )
-    outcome = _outcome(terms=(terms,), effects=(effect,), action_kinds=(action_kind,))
+    outcome = _outcome(terms=(terms,), effects=(effect,))
     return terms, effect, outcome
 
 
@@ -734,7 +805,7 @@ def _dividend_case(
         components=(component,),
         terms=terms,
     )
-    outcome = _outcome(terms=(terms,), effects=(effect,), action_kinds=(action_kind,))
+    outcome = _outcome(terms=(terms,), effects=(effect,))
     return terms, effect, outcome
 
 
@@ -1014,7 +1085,7 @@ def test_forward_split_doubles_holdings_and_staged_targets() -> None:
         SecurityTargetPositionV1(security_id=SEC_OTHER, target_quantity=7),
     )
     updated, scaled = _processor().apply_pre_open_actions(
-        state, targets, (outcome,), _key()
+        state, targets, _covered((outcome,), SEC_OTHER), _key()
     )
     assert updated.holdings[0].quantity == 200
     assert updated.holdings[0].cost_basis == Decimal("1000")
@@ -1084,9 +1155,7 @@ def test_stock_dividend_adds_shares_to_the_same_security() -> None:
         components=(component,),
         terms=terms,
     )
-    outcome = _outcome(
-        terms=(terms,), effects=(effect,), action_kinds=(ActionKind.STOCK_DIVIDEND,)
-    )
+    outcome = _outcome(terms=(terms,), effects=(effect,))
     state = _state(holdings=(_holding(quantity=100, basis="1000"),))
     updated, _ = _processor().apply_pre_open_actions(state, (), (outcome,), _key())
     assert updated.holdings[0].quantity == 110
@@ -1108,11 +1177,11 @@ def test_spinoff_creates_child_holding_and_marks_nav_cleanly() -> None:
         components=(component,),
         terms=terms,
     )
-    outcome = _outcome(
-        terms=(terms,), effects=(effect,), action_kinds=(ActionKind.SPINOFF,)
-    )
+    outcome = _outcome(terms=(terms,), effects=(effect,))
     state = _state(holdings=(_holding(quantity=100, basis="1000"),), cash="500")
-    updated, _ = _processor().apply_pre_open_actions(state, (), (outcome,), _key())
+    updated, _ = _processor().apply_pre_open_actions(
+        state, (), _covered((outcome,), SEC_CHILD), _key()
+    )
     by_security = {item.security_id: item for item in updated.holdings}
     assert by_security[SEC_A].quantity == 100
     assert by_security[SEC_CHILD].quantity == 50
@@ -1340,12 +1409,7 @@ def _delivered_dividend(
         settled_at=settled_at,
         occurrence_id=delivered_occurrence,
     )
-    return _outcome(
-        terms=(terms,),
-        effects=(effect,),
-        delivery_groups=(delivery,),
-        action_kinds=(action_kind,),
-    )
+    return _outcome(terms=(terms,), effects=(effect,), delivery_groups=(delivery,))
 
 
 def test_delivered_cash_the_ex_date_rule_proves_unowed_commits_nothing() -> None:
@@ -1409,10 +1473,6 @@ def test_delivered_cash_two_effects_could_explain_is_indeterminate() -> None:
         terms=(terms, special_terms),
         effects=(regular, special),
         delivery_groups=(_delivery(components=(_cash(amount="0.5"),)),),
-        action_kinds=(
-            ActionKind.REGULAR_CASH_DIVIDEND,
-            ActionKind.SPECIAL_CASH_DISTRIBUTION,
-        ),
     )
     state = _state(holdings=(_holding(quantity=100),), cash="1000", day=PAYABLE_DAY)
 
@@ -1835,11 +1895,7 @@ def test_cash_acquisition_removes_position_and_credits_entitlement() -> None:
         terms=terms,
         claim_status="extinguished",
     )
-    outcome = _outcome(
-        terms=(terms,),
-        effects=(effect,),
-        action_kinds=(ActionKind.CASH_ACQUISITION,),
-    )
+    outcome = _outcome(terms=(terms,), effects=(effect,))
     state = _state(holdings=(_holding(quantity=100, basis="900"),), cash="500")
     updated, _ = _processor().apply_pre_open_actions(state, (), (outcome,), _key())
     assert updated.holdings == ()
@@ -1864,11 +1920,7 @@ def test_cash_acquisition_with_continuing_claim_status_is_indeterminate() -> Non
         terms=terms,
         claim_status="continuing",
     )
-    outcome = _outcome(
-        terms=(terms,),
-        effects=(effect,),
-        action_kinds=(ActionKind.CASH_ACQUISITION,),
-    )
+    outcome = _outcome(terms=(terms,), effects=(effect,))
     state = _state(holdings=(_holding(quantity=100),))
     with pytest.raises(
         IndeterminateValuationError,
@@ -1896,13 +1948,11 @@ def test_stock_acquisition_converts_holding_into_the_acquirer() -> None:
         terms=terms,
         claim_status="converted",
     )
-    outcome = _outcome(
-        terms=(terms,),
-        effects=(effect,),
-        action_kinds=(ActionKind.STOCK_ACQUISITION,),
-    )
+    outcome = _outcome(terms=(terms,), effects=(effect,))
     state = _state(holdings=(_holding(quantity=100, basis="900"),))
-    updated, _ = _processor().apply_pre_open_actions(state, (), (outcome,), _key())
+    updated, _ = _processor().apply_pre_open_actions(
+        state, (), _covered((outcome,), SEC_ACQ), _key()
+    )
     assert len(updated.holdings) == 1
     assert updated.holdings[0].security_id == SEC_ACQ
     assert updated.holdings[0].quantity == 150
@@ -1930,13 +1980,11 @@ def test_mixed_acquisition_credits_cash_and_acquirer_shares() -> None:
         terms=terms,
         claim_status="converted",
     )
-    outcome = _outcome(
-        terms=(terms,),
-        effects=(effect,),
-        action_kinds=(ActionKind.MIXED_ACQUISITION,),
-    )
+    outcome = _outcome(terms=(terms,), effects=(effect,))
     state = _state(holdings=(_holding(quantity=100, basis="900"),))
-    updated, _ = _processor().apply_pre_open_actions(state, (), (outcome,), _key())
+    updated, _ = _processor().apply_pre_open_actions(
+        state, (), _covered((outcome,), SEC_ACQ), _key()
+    )
     assert len(updated.holdings) == 1
     assert updated.holdings[0].security_id == SEC_ACQ
     assert updated.holdings[0].quantity == 50
@@ -1963,11 +2011,7 @@ def test_mixed_acquisition_without_cash_terms_is_indeterminate() -> None:
         terms=terms,
         claim_status="converted",
     )
-    outcome = _outcome(
-        terms=(terms,),
-        effects=(effect,),
-        action_kinds=(ActionKind.MIXED_ACQUISITION,),
-    )
+    outcome = _outcome(terms=(terms,), effects=(effect,))
     state = _state(holdings=(_holding(quantity=100),))
     with pytest.raises(
         IndeterminateValuationError,
@@ -1991,9 +2035,7 @@ def test_liquidation_credits_known_proceeds() -> None:
         terms=terms,
         claim_status="extinguished",
     )
-    outcome = _outcome(
-        terms=(terms,), effects=(effect,), action_kinds=(ActionKind.LIQUIDATION,)
-    )
+    outcome = _outcome(terms=(terms,), effects=(effect,))
     state = _state(holdings=(_holding(quantity=10, basis="100"),))
     updated, _ = _processor().apply_pre_open_actions(state, (), (outcome,), _key())
     assert updated.holdings == ()
@@ -2015,9 +2057,7 @@ def test_liquidation_with_missing_terms_is_indeterminate() -> None:
         claim_status="extinguished",
         consideration_status="unknown",
     )
-    outcome = _outcome(
-        terms=(terms,), effects=(effect,), action_kinds=(ActionKind.LIQUIDATION,)
-    )
+    outcome = _outcome(terms=(terms,), effects=(effect,))
     state = _state(holdings=(_holding(quantity=10),))
     with pytest.raises(
         IndeterminateValuationError,
@@ -2231,7 +2271,6 @@ def test_a_continuing_liquidation_delivered_before_its_ex_date_is_indeterminate(
         delivery_groups=(
             _delivery(components=(_cash(amount="7"),), settled_at=LATER_AT),
         ),
-        action_kinds=(ActionKind.LIQUIDATION,),
     )
     state = _state(holdings=(_holding(quantity=10),), day=LATER_DAY)
 
@@ -2295,7 +2334,6 @@ def test_a_continuing_liquidation_is_counted_after_same_session_splits() -> None
         outcome = _outcome(
             terms=(split_terms, liquidation_terms),
             effects=(split_effect, liquidation_effect),
-            action_kinds=(ActionKind.FORWARD_SPLIT, ActionKind.LIQUIDATION),
         )
         # The premise that makes the ordering load-bearing.
         assert content_hash(liquidation_effect) < content_hash(split_effect)
@@ -2391,7 +2429,6 @@ def _conflicting_liquidations(
     return _outcome(
         terms=(final_terms, instalment_terms),
         effects=(final_effect, instalment_effect),
-        action_kinds=(ActionKind.LIQUIDATION,),
         claim_status=composed,
     )
 
@@ -2412,7 +2449,7 @@ def test_a_liquidation_m1c_composes_as_unknown_is_indeterminate() -> None:
     # Control: a book exposed to nothing in SEC_A is not halted.
     elsewhere = _state(holdings=(_holding(SEC_OTHER, quantity=5),))
     unchanged, _ = _processor().apply_pre_open_actions(
-        elsewhere, (), (outcome,), _key()
+        elsewhere, (), _covered((outcome,), SEC_OTHER), _key()
     )
     assert _moved_nothing(unchanged, elsewhere)
 
@@ -2500,7 +2537,6 @@ def test_an_acquisition_m1c_composes_as_unknown_is_indeterminate(kind: str) -> N
     resurrected = _outcome(
         terms=(terms, later_terms),
         effects=(effect, later_effect),
-        action_kinds=(action_kind, ActionKind.REGULAR_CASH_DIVIDEND),
         claim_status="unknown",
     )
     state = _state(holdings=(_holding(quantity=100),))
@@ -2515,10 +2551,11 @@ def test_an_acquisition_m1c_composes_as_unknown_is_indeterminate(kind: str) -> N
     alone = _outcome(
         terms=(terms,),
         effects=(effect,),
-        action_kinds=(action_kind,),
         claim_status=ended,
     )
-    updated, _ = _processor().apply_pre_open_actions(state, (), (alone,), _key())
+    updated, _ = _processor().apply_pre_open_actions(
+        state, (), _covered((alone,), SEC_ACQ), _key()
+    )
     assert SEC_A not in _quantities(updated.holdings)
 
 
@@ -2552,7 +2589,6 @@ def _resurrected_after(
             ("before_window" if terminal_before_window else "effective"),
             "effective",
         ),
-        action_kinds=(ActionKind.CASH_ACQUISITION, payload.action_kind),
         claim_status="unknown",
     )
 
@@ -2659,7 +2695,7 @@ def test_a_resurrected_claim_halts_when_the_terminal_predates_the_window(
     # Control: a book exposed to nothing the outcome touches is not halted.
     elsewhere = _state(holdings=(_holding(SEC_OTHER, quantity=5),))
     unchanged, _ = _processor().apply_pre_open_actions(
-        elsewhere, (), (outcome,), _key()
+        elsewhere, (), _covered((outcome,), SEC_OTHER), _key()
     )
     assert _moved_nothing(unchanged, elsewhere)
 
@@ -2678,7 +2714,6 @@ def test_a_split_with_its_own_unknown_claim_status_halts() -> None:
     outcome = _outcome(
         terms=(terms,),
         effects=(effect,),
-        action_kinds=(ActionKind.FORWARD_SPLIT,),
         claim_status="unknown",
     )
     state = _state(holdings=(_holding(quantity=100),))
@@ -2789,7 +2824,6 @@ def test_an_unknown_claim_counts_exposure_to_the_securities_it_delivers() -> Non
     outcome = _outcome(
         terms=(terms, later_terms),
         effects=(effect, later_effect),
-        action_kinds=(ActionKind.STOCK_ACQUISITION, ActionKind.REGULAR_CASH_DIVIDEND),
         claim_status="unknown",
     )
 
@@ -2807,7 +2841,7 @@ def test_an_unknown_claim_counts_exposure_to_the_securities_it_delivers() -> Non
     # Control: a book exposed to nothing the outcome touches is not halted.
     elsewhere = _state(holdings=(_holding(SEC_OTHER, quantity=5),), day=LATER_DAY)
     unchanged, _ = _processor().apply_pre_open_actions(
-        elsewhere, (), (outcome,), _key(LATER_DAY)
+        elsewhere, (), _covered((outcome,), SEC_OTHER), _key(LATER_DAY)
     )
     assert unchanged is elsewhere
 
@@ -2838,12 +2872,7 @@ def test_an_unknown_claim_is_judged_against_the_book_the_pass_leaves() -> None:
         occurrence_id="occ-spin",
         security_id=SEC_ACQ,
     )
-    spin = _outcome(
-        security_id=SEC_ACQ,
-        terms=(spin_terms,),
-        effects=(spin_effect,),
-        action_kinds=(ActionKind.SPINOFF,),
-    )
+    spin = _outcome(security_id=SEC_ACQ, terms=(spin_terms,), effects=(spin_effect,))
     dividend_terms, dividend_effect = _same_date_effect(
         3450,
         ActionKind.REGULAR_CASH_DIVIDEND,
@@ -2895,10 +2924,7 @@ def test_two_disposals_in_one_pass_both_realize() -> None:
         security_id=SEC_OTHER,
     )
     liquidation = _outcome(
-        security_id=SEC_OTHER,
-        terms=(other_terms,),
-        effects=(other_effect,),
-        action_kinds=(ActionKind.LIQUIDATION,),
+        security_id=SEC_OTHER, terms=(other_terms,), effects=(other_effect,)
     )
     state = _state(
         holdings=(
@@ -2943,7 +2969,6 @@ def test_an_extinguishing_liquidation_beside_a_split_on_another_date_halts() -> 
     outcome = _outcome(
         terms=(split_terms, liquidation_terms),
         effects=(split_effect, liquidation_effect),
-        action_kinds=(ActionKind.FORWARD_SPLIT, ActionKind.LIQUIDATION),
     )
     state = _state(holdings=(_holding(quantity=100),), day=LATER_DAY)
 
@@ -2992,11 +3017,7 @@ def test_a_disposal_without_its_terms_or_payable_date_is_indeterminate(
         terms=None if missing == "terms" else terms,
         claim_status="extinguished",
     )
-    outcome = _outcome(
-        terms=() if missing == "terms" else (terms,),
-        effects=(effect,),
-        action_kinds=(ActionKind.LIQUIDATION,),
-    )
+    outcome = _outcome(terms=() if missing == "terms" else (terms,), effects=(effect,))
     state = _state(holdings=(_holding(quantity=10),))
 
     # The proceeds are owed from the terms' payable date. Without it the
@@ -3034,7 +3055,6 @@ def test_an_extinguishing_liquidation_delivery_vests_on_its_effect_date() -> Non
         terms=(terms,),
         effects=(effect,),
         delivery_groups=(_delivery(components=(component,)),),
-        action_kinds=(ActionKind.LIQUIDATION,),
     )
     state = _state(holdings=(_holding(quantity=10),), cash="1000", day=PAYABLE_DAY)
 
@@ -3080,9 +3100,7 @@ def test_unsupported_action_kind_on_a_held_position_is_indeterminate() -> None:
         terms=terms,
         claim_status="converted",
     )
-    outcome = _outcome(
-        terms=(terms,), effects=(effect,), action_kinds=(ActionKind.CONVERSION,)
-    )
+    outcome = _outcome(terms=(terms,), effects=(effect,))
     state = _state(holdings=(_holding(quantity=10),))
     with pytest.raises(
         IndeterminateValuationError,
@@ -3106,9 +3124,7 @@ def test_unsupported_action_kind_without_exposure_commits_nothing() -> None:
         terms=terms,
         claim_status="converted",
     )
-    outcome = _outcome(
-        terms=(terms,), effects=(effect,), action_kinds=(ActionKind.CONVERSION,)
-    )
+    outcome = _outcome(terms=(terms,), effects=(effect,))
     state = _state()
     updated, targets = _processor().apply_pre_open_actions(
         state, (), (outcome,), _key()
@@ -3170,9 +3186,7 @@ def _ended_claim_share_action(
     kind: ActionKind, *, own: str, composed: str
 ) -> SecurityEconomicOutcomeV1:
     terms, effect = _continuing_share_action(kind, own)
-    return _outcome(
-        terms=(terms,), effects=(effect,), action_kinds=(kind,), claim_status=composed
-    )
+    return _outcome(terms=(terms,), effects=(effect,), claim_status=composed)
 
 
 def _ended_claim_message(kind: ActionKind, status: str) -> str:
@@ -3218,7 +3232,7 @@ def test_a_continuing_share_action_on_an_ended_claim_halts_an_exposed_book(
     # in SEC_A.
     elsewhere = _state(holdings=(_holding(SEC_OTHER, quantity=5),))
     unchanged, targets = _processor().apply_pre_open_actions(
-        elsewhere, (_target(SEC_OTHER, 5),), (outcome,), _key()
+        elsewhere, (_target(SEC_OTHER, 5),), _covered((outcome,), SEC_OTHER), _key()
     )
     assert _moved_nothing(unchanged, elsewhere)
     assert _quantities(targets) == {SEC_OTHER: 5}
@@ -3284,7 +3298,9 @@ def test_a_continuing_share_action_on_a_continuing_claim_applies(
     outcome = _ended_claim_share_action(kind, own="continuing", composed="continuing")
     state = _state(holdings=(_holding(quantity=100),))
 
-    updated, _ = _processor().apply_pre_open_actions(state, (), (outcome,), _key())
+    updated, _ = _processor().apply_pre_open_actions(
+        state, (), _covered((outcome,), SEC_CHILD), _key()
+    )
 
     assert _quantities(updated.holdings) == _CONTINUING_RESULT[kind]
 
@@ -3311,12 +3327,13 @@ def test_a_share_action_before_a_later_acquisition_still_applies(
     outcome = _outcome(
         terms=(action_terms, acquisition_terms),
         effects=(action_effect, acquisition_effect),
-        action_kinds=(kind, ActionKind.CASH_ACQUISITION),
         claim_status="extinguished",
     )
     state = _state(holdings=(_holding(quantity=100),))
 
-    updated, _ = _processor().apply_pre_open_actions(state, (), (outcome,), _key())
+    updated, _ = _processor().apply_pre_open_actions(
+        state, (), _covered((outcome,), SEC_CHILD), _key()
+    )
     assert _quantities(updated.holdings) == _CONTINUING_RESULT[kind]
 
     later = _state(
@@ -3371,7 +3388,6 @@ def test_a_composed_end_no_later_effect_explains_halts_the_share_action(
     outcome = _outcome(
         terms=(split_terms, other_terms),
         effects=(split_effect, other_effect),
-        action_kinds=(ActionKind.FORWARD_SPLIT, other_payload.action_kind),
         claim_status="extinguished",
     )
     day = EFFECT_DAY if ending == "none" else LATER_DAY
@@ -3438,9 +3454,7 @@ def test_a_cash_distribution_on_an_ended_claim_halts_an_exposed_book(
     # Before the fix it was paid as an ordinary distribution, 100 on the 100
     # shares, and the shares were kept on an ended claim.
     terms, effect = _ended_distribution(kind, status)
-    outcome = _outcome(
-        terms=(terms,), effects=(effect,), action_kinds=(kind,), claim_status=status
-    )
+    outcome = _outcome(terms=(terms,), effects=(effect,), claim_status=status)
     message = _ended_distribution_message(kind, status)
 
     held = _state(holdings=(_holding(quantity=100),))
@@ -3456,13 +3470,13 @@ def test_a_cash_distribution_on_an_ended_claim_halts_an_exposed_book(
     # in SEC_A.
     elsewhere = _state(holdings=(_holding(SEC_OTHER, quantity=5),))
     unchanged, _ = _processor().apply_pre_open_actions(
-        elsewhere, (), (outcome,), _key()
+        elsewhere, (), _covered((outcome,), SEC_OTHER), _key()
     )
     assert unchanged is elsewhere
 
     # Control: the same distribution on a continuing claim is owed on 100.
     terms, effect = _ended_distribution(kind, "continuing")
-    continuing = _outcome(terms=(terms,), effects=(effect,), action_kinds=(kind,))
+    continuing = _outcome(terms=(terms,), effects=(effect,))
     paid, _ = _processor().apply_pre_open_actions(held, (), (continuing,), _key())
     (claim,) = paid.pending_cash_claims
     assert (claim.entitled_quantity, claim.total_cash_expected) == (100, Decimal("100"))
@@ -3496,7 +3510,6 @@ def test_a_split_then_an_ended_claim_dividend_halts_at_the_dividend(
     outcome = _outcome(
         terms=(split_terms, dividend_terms),
         effects=(split_effect, dividend_effect),
-        action_kinds=(ActionKind.FORWARD_SPLIT, ActionKind.REGULAR_CASH_DIVIDEND),
         claim_status="extinguished",
     )
 
@@ -3504,7 +3517,7 @@ def test_a_split_then_an_ended_claim_dividend_halts_at_the_dividend(
         for day in (EFFECT_DAY, LATER_DAY):
             elsewhere = _state(holdings=(_holding(SEC_OTHER, quantity=5),), day=day)
             unchanged, _ = _processor().apply_pre_open_actions(
-                elsewhere, (), (outcome,), _key(day)
+                elsewhere, (), _covered((outcome,), SEC_OTHER), _key(day)
             )
             assert _moved_nothing(unchanged, elsewhere)
         return
@@ -3551,12 +3564,7 @@ def test_an_ended_claim_dividend_on_a_delivered_security_halts(parent: UUID) -> 
         occurrence="occ-spin",
         security_id=parent,
     )
-    spin = _outcome(
-        security_id=parent,
-        terms=(spin_terms,),
-        effects=(spin_effect,),
-        action_kinds=(ActionKind.SPINOFF,),
-    )
+    spin = _outcome(security_id=parent, terms=(spin_terms,), effects=(spin_effect,))
 
     def dividend(status: str) -> SecurityEconomicOutcomeV1:
         terms, effect = _ended_distribution(ActionKind.REGULAR_CASH_DIVIDEND, status)
@@ -3662,12 +3670,7 @@ def test_an_ended_claim_dividend_halts_in_its_entitlement_window(
         occurrence="occ-spin",
         security_id=parent,
     )
-    spin = _outcome(
-        security_id=parent,
-        terms=(spin_terms,),
-        effects=(spin_effect,),
-        action_kinds=(ActionKind.SPINOFF,),
-    )
+    spin = _outcome(security_id=parent, terms=(spin_terms,), effects=(spin_effect,))
     dividend = _ended_dividend_outcome(ex_at=LATER_AT, security_id=SEC_CHILD)
     outcomes = (spin, dividend)
     targets = (_target(parent, 100),)
@@ -3748,7 +3751,7 @@ def _share_action_case(
         claim_status=claim_status,
         effective_at=effective_at,
     )
-    return _outcome(terms=(terms,), effects=(effect,), action_kinds=(action_kind,))
+    return _outcome(terms=(terms,), effects=(effect,))
 
 
 def _stock_dividend_case(
@@ -3841,7 +3844,7 @@ def test_stock_dividend_scales_a_staged_hold_target_with_its_holding() -> None:
     targets = (_target(SEC_A, 100), _target(SEC_OTHER, 7))
 
     updated, translated = _processor().apply_pre_open_actions(
-        state, targets, (outcome,), _key()
+        state, targets, _covered((outcome,), SEC_OTHER), _key()
     )
 
     # A hold staged before the dividend is still a hold after it, so the
@@ -3936,7 +3939,7 @@ def test_spinoff_credits_the_child_target_with_the_child_shares_received() -> No
     state = _state(holdings=(_holding(quantity=100),))
 
     updated, translated = _processor().apply_pre_open_actions(
-        state, (_target(SEC_A, 100),), (outcome,), _key()
+        state, (_target(SEC_A, 100),), _covered((outcome,), SEC_CHILD), _key()
     )
 
     assert _quantities(updated.holdings) == {SEC_A: 100, SEC_CHILD: 50}
@@ -3948,7 +3951,7 @@ def test_spinoff_leaves_the_parent_trade_and_holds_the_child() -> None:
     state = _state(holdings=(_holding(quantity=100),))
 
     _, translated = _processor().apply_pre_open_actions(
-        state, (_target(SEC_A, 0),), (outcome,), _key()
+        state, (_target(SEC_A, 0),), _covered((outcome,), SEC_CHILD), _key()
     )
 
     # Parent shares are unchanged, so the staged parent sale is unchanged,
@@ -3964,7 +3967,7 @@ def test_spinoff_adds_received_shares_to_an_existing_child_target() -> None:
     targets = (_target(SEC_A, 100), _target(SEC_CHILD, 4))
 
     updated, translated = _processor().apply_pre_open_actions(
-        state, targets, (outcome,), _key()
+        state, targets, _covered((outcome,), SEC_CHILD), _key()
     )
 
     # The staged child sale of six survives the 50 shares received.
@@ -3984,7 +3987,7 @@ def test_spinoff_credits_only_whole_child_shares_under_a_staged_increase() -> No
     state = _state(holdings=(_holding(quantity=101),))
 
     updated, translated = _processor().apply_pre_open_actions(
-        state, (_target(SEC_A, 200),), (outcome,), _key()
+        state, (_target(SEC_A, 200),), _covered((outcome,), SEC_CHILD), _key()
     )
 
     assert _quantities(updated.holdings) == {SEC_A: 101, SEC_CHILD: 50}
@@ -3996,7 +3999,7 @@ def test_spinoff_without_a_staged_parent_target_stages_no_child_target() -> None
     state = _state(holdings=(_holding(quantity=100),))
 
     updated, translated = _processor().apply_pre_open_actions(
-        state, (), (outcome,), _key()
+        state, (), _covered((outcome,), SEC_CHILD), _key()
     )
 
     # No decision is staged, so no target may be invented for the child.
@@ -4015,7 +4018,7 @@ def test_spinoff_child_held_without_a_staged_target_is_indeterminate() -> None:
         match="held without a staged target of its own",
     ):
         _processor().apply_pre_open_actions(
-            state, (_target(SEC_A, 100),), (outcome,), _key()
+            state, (_target(SEC_A, 100),), _covered((outcome,), SEC_CHILD), _key()
         )
 
 
@@ -4061,7 +4064,7 @@ def test_stock_acquisition_maps_the_staged_target_to_the_acquirer() -> None:
     state = _state(holdings=(_holding(quantity=100),))
 
     updated, translated = _processor().apply_pre_open_actions(
-        state, (_target(SEC_A, 100),), (outcome,), _key()
+        state, (_target(SEC_A, 100),), _covered((outcome,), SEC_ACQ), _key()
     )
 
     assert _quantities(updated.holdings) == {SEC_ACQ: 150}
@@ -4073,7 +4076,7 @@ def test_stock_acquisition_maps_a_trading_target_at_the_exact_ratio() -> None:
     state = _state(holdings=(_holding(quantity=100),))
 
     _, translated = _processor().apply_pre_open_actions(
-        state, (_target(SEC_A, 40),), (outcome,), _key()
+        state, (_target(SEC_A, 40),), _covered((outcome,), SEC_ACQ), _key()
     )
 
     # Selling 60 of 100 predecessor shares is selling 90 of 150 acquirer
@@ -4086,7 +4089,7 @@ def test_stock_acquisition_maps_a_zero_target_onto_the_acquirer() -> None:
     state = _state(holdings=(_holding(quantity=100),))
 
     _, translated = _processor().apply_pre_open_actions(
-        state, (_target(SEC_A, 0),), (outcome,), _key()
+        state, (_target(SEC_A, 0),), _covered((outcome,), SEC_ACQ), _key()
     )
 
     # The staged exit survives the conversion, and the acquirer the book now
@@ -4102,7 +4105,7 @@ def test_stock_acquisition_adds_the_mapped_target_to_the_acquirers_own() -> None
     targets = (_target(SEC_A, 100), _target(SEC_ACQ, 10))
 
     updated, translated = _processor().apply_pre_open_actions(
-        state, targets, (outcome,), _key()
+        state, targets, _covered((outcome,), SEC_ACQ), _key()
     )
 
     assert _quantities(updated.holdings) == {SEC_ACQ: 160}
@@ -4130,7 +4133,7 @@ def test_stock_acquisition_staged_increase_is_indeterminate() -> None:
 
     # Control: a hold maps to exactly the 150 shares received.
     _, translated = _processor().apply_pre_open_actions(
-        state, (_target(SEC_A, 100),), (outcome,), _key()
+        state, (_target(SEC_A, 100),), _covered((outcome,), SEC_ACQ), _key()
     )
     assert _quantities(translated) == {SEC_A: 0, SEC_ACQ: 150}
 
@@ -4177,7 +4180,9 @@ def test_share_acquisition_increase_into_a_held_acquirer_is_indeterminate() -> N
         IndeterminateValuationError,
         match="would buy the acquirer",
     ):
-        _processor().apply_pre_open_actions(state, targets, (outcome,), _key())
+        _processor().apply_pre_open_actions(
+            state, targets, _covered((outcome,), SEC_ACQ), _key()
+        )
 
 
 def test_share_acquisition_target_without_an_ended_claim_is_indeterminate() -> None:
@@ -4257,7 +4262,7 @@ def test_share_acquisition_zero_target_into_an_untargeted_holding_fails() -> Non
         match="held without a staged target of its own",
     ):
         _processor().apply_pre_open_actions(
-            state, (_target(SEC_A, 0),), (outcome,), _key()
+            state, (_target(SEC_A, 0),), _covered((outcome,), SEC_ACQ), _key()
         )
 
 
@@ -4297,7 +4302,7 @@ def test_share_acquisition_target_follows_the_source_tie_breaking_rule(
     # The holding converts to exactly 15, the target of 5 to a tie at 7.5.
     processor = _processor(tie_breaking_rules=(rule,))
     updated, translated = processor.apply_pre_open_actions(
-        state, (_target(SEC_A, 5),), (outcome,), _key()
+        state, (_target(SEC_A, 5),), _covered((outcome,), SEC_ACQ), _key()
     )
 
     assert _quantities(updated.holdings) == {SEC_ACQ: 15}
@@ -4312,7 +4317,7 @@ def test_spinoff_parent_held_without_a_staged_target_stages_no_child() -> None:
     # Another security's target does not stage a decision for the parent, so
     # it cannot license a child target either.
     _, translated = _processor().apply_pre_open_actions(
-        state, targets, (outcome,), _key()
+        state, targets, _covered((outcome,), SEC_CHILD, SEC_OTHER), _key()
     )
 
     assert _quantities(translated) == {SEC_OTHER: 7}
@@ -4326,7 +4331,7 @@ def test_stock_acquisition_unresolvable_fractional_target_is_indeterminate() -> 
 
     # Control: an integral translation needs no tie-breaking rule.
     _, translated = _processor().apply_pre_open_actions(
-        state, (_target(SEC_A, 100),), (outcome,), _key()
+        state, (_target(SEC_A, 100),), _covered((outcome,), SEC_ACQ), _key()
     )
     assert _quantities(translated) == {SEC_A: 0, SEC_ACQ: 150}
 
@@ -4351,7 +4356,7 @@ def test_share_acquisition_into_an_untargeted_holding_is_indeterminate() -> None
         match="held without a staged target of its own",
     ):
         _processor().apply_pre_open_actions(
-            state, (_target(SEC_A, 100),), (outcome,), _key()
+            state, (_target(SEC_A, 100),), _covered((outcome,), SEC_ACQ), _key()
         )
 
 
@@ -4365,7 +4370,7 @@ def test_mixed_acquisition_maps_the_staged_target_to_the_acquirer() -> None:
     state = _state(holdings=(_holding(quantity=100, basis="900"),))
 
     updated, translated = _processor().apply_pre_open_actions(
-        state, (_target(SEC_A, 100),), (outcome,), _key()
+        state, (_target(SEC_A, 100),), _covered((outcome,), SEC_ACQ), _key()
     )
 
     assert _quantities(updated.holdings) == {SEC_ACQ: 50}
@@ -4385,9 +4390,7 @@ def test_terms_without_an_occurred_effect_commit_no_mutation() -> None:
     terms = _terms(
         suffix=510, action_kind=ActionKind.FORWARD_SPLIT, components=(component,)
     )
-    outcome = _outcome(
-        terms=(terms,), effects=(), action_kinds=(ActionKind.FORWARD_SPLIT,)
-    )
+    outcome = _outcome(terms=(terms,), effects=())
     state = _state(holdings=(_holding(quantity=100),))
     targets = (SecurityTargetPositionV1(security_id=SEC_A, target_quantity=50),)
     updated, scaled = _processor().apply_pre_open_actions(
@@ -4409,7 +4412,6 @@ def test_upcoming_effect_commits_no_mutation() -> None:
         terms=outcome.terms_records,
         effects=outcome.effect_records,
         statuses=("upcoming",),
-        action_kinds=(ActionKind.FORWARD_SPLIT,),
     )
     state = _state(holdings=(_holding(quantity=100),))
     updated, _ = _processor().apply_pre_open_actions(state, (), (upcoming,), _key())
@@ -4428,7 +4430,6 @@ def test_indeterminate_effect_projection_fails_closed() -> None:
         terms=outcome.terms_records,
         effects=outcome.effect_records,
         statuses=("indeterminate",),
-        action_kinds=(ActionKind.FORWARD_SPLIT,),
     )
     state = _state(holdings=(_holding(quantity=100),))
     with pytest.raises(
@@ -4450,7 +4451,6 @@ def test_unsupported_outcome_resolution_fails_closed_when_exposed() -> None:
         terms=outcome.terms_records,
         effects=outcome.effect_records,
         support_status="indeterminate",
-        action_kinds=(ActionKind.FORWARD_SPLIT,),
     )
     state = _state(holdings=(_holding(quantity=100),))
     with pytest.raises(
@@ -4558,7 +4558,7 @@ def test_a_share_action_dated_off_the_clock_applies_at_the_next_pre_open(
     # BETWEEN_DAY falls after EFFECT_DAY and before LATER_DAY, so LATER_DAY is
     # the first pre-open that can see the action.
     updated, _ = _processor().apply_pre_open_actions(
-        state, (), (outcome,), _key(LATER_DAY)
+        state, (), _covered((outcome,), SEC_ACQ, SEC_CHILD), _key(LATER_DAY)
     )
     assert _quantities(updated.holdings) == held_after
     # A disposal off the clock still owes its proceeds, vested on the date the
@@ -4650,7 +4650,6 @@ def test_unsupported_evidence_behind_only_a_zero_target_commits_nothing() -> Non
         terms=outcome.terms_records,
         effects=outcome.effect_records,
         support_status="indeterminate",
-        action_kinds=(ActionKind.FORWARD_SPLIT,),
     )
     state = _state()
 
@@ -4743,11 +4742,7 @@ def test_two_share_actions_on_two_dates_in_one_window_are_indeterminate(
         SEC_A, ActionKind.REVERSE_SPLIT, "1", "10", BETWEEN_AT, reverse
     )
     second = _split_effect(SEC_A, ActionKind.FORWARD_SPLIT, "3", "1", LATER_AT, forward)
-    outcome = _outcome(
-        terms=(first[0], second[0]),
-        effects=(first[1], second[1]),
-        action_kinds=(ActionKind.REVERSE_SPLIT, ActionKind.FORWARD_SPLIT),
-    )
+    outcome = _outcome(terms=(first[0], second[0]), effects=(first[1], second[1]))
     state = _state(holdings=(_holding(quantity=105),), day=LATER_DAY)
 
     with pytest.raises(
@@ -4759,7 +4754,7 @@ def test_two_share_actions_on_two_dates_in_one_window_are_indeterminate(
     # Control: a book exposed to neither date's action is not halted.
     elsewhere = _state(holdings=(_holding(SEC_OTHER, quantity=5),), day=LATER_DAY)
     unchanged, _ = _processor().apply_pre_open_actions(
-        elsewhere, (), (outcome,), _key(LATER_DAY)
+        elsewhere, (), _covered((outcome,), SEC_OTHER), _key(LATER_DAY)
     )
     assert _moved_nothing(unchanged, elsewhere)
 
@@ -4771,12 +4766,7 @@ def test_an_acquirer_split_and_an_acquisition_on_two_dates_are_indeterminate() -
     split_terms, split_effect = _split_effect(
         SEC_ACQ, ActionKind.FORWARD_SPLIT, "2", "1", BETWEEN_AT, 2200
     )
-    split = _outcome(
-        security_id=SEC_ACQ,
-        terms=(split_terms,),
-        effects=(split_effect,),
-        action_kinds=(ActionKind.FORWARD_SPLIT,),
-    )
+    split = _outcome(security_id=SEC_ACQ, terms=(split_terms,), effects=(split_effect,))
     acquisition = _share_action_case(
         suffix=2210,
         action_kind=ActionKind.STOCK_ACQUISITION,
@@ -4838,12 +4828,7 @@ def _conversion(
         security_id=source,
         claim_status="converted",
     )
-    return _outcome(
-        security_id=source,
-        terms=(terms,),
-        effects=(effect,),
-        action_kinds=(ActionKind.STOCK_ACQUISITION,),
-    )
+    return _outcome(security_id=source, terms=(terms,), effects=(effect,))
 
 
 @pytest.mark.parametrize("with_split", [True, False], ids=["split", "no-split"])
@@ -4869,10 +4854,7 @@ def test_a_two_hop_conversion_halts_at_the_security_both_hops_touch(
         )
         outcomes.append(
             _outcome(
-                security_id=SEC_OTHER,
-                terms=(split_terms,),
-                effects=(split_effect,),
-                action_kinds=(ActionKind.FORWARD_SPLIT,),
+                security_id=SEC_OTHER, terms=(split_terms,), effects=(split_effect,)
             )
         )
     state = _state(holdings=(_holding(quantity=105),), day=LATER_DAY)
@@ -4887,7 +4869,10 @@ def test_a_two_hop_conversion_halts_at_the_security_both_hops_touch(
 
     # Control: one hop alone touches SEC_ACQ once and simply converts.
     updated, _ = _processor().apply_pre_open_actions(
-        state, (), (_conversion(SEC_A, SEC_ACQ, LATER_AT, 2330),), _key(LATER_DAY)
+        state,
+        (),
+        _covered((_conversion(SEC_A, SEC_ACQ, LATER_AT, 2330),), SEC_ACQ),
+        _key(LATER_DAY),
     )
     assert _quantities(updated.holdings) == {SEC_ACQ: 105}
 
@@ -4921,7 +4906,6 @@ def test_a_conversion_into_a_security_then_disposed_is_still_caught() -> None:
         security_id=SEC_ACQ,
         terms=(split_terms, cash_terms),
         effects=(split_effect, cash_effect),
-        action_kinds=(ActionKind.FORWARD_SPLIT, ActionKind.CASH_ACQUISITION),
     )
     outcomes = (_conversion(SEC_A, SEC_ACQ, LATER_AT, 2390), acquirer)
     state = _state(holdings=(_holding(quantity=100),), day=LATER_DAY)
@@ -4956,7 +4940,6 @@ def test_a_disposal_beside_a_split_on_another_date_is_indeterminate() -> None:
     outcome = _outcome(
         terms=(split_terms, acquisition_terms),
         effects=(split_effect, acquisition_effect),
-        action_kinds=(ActionKind.FORWARD_SPLIT, ActionKind.CASH_ACQUISITION),
     )
     state = _state(holdings=(_holding(quantity=100),), day=LATER_DAY)
 
@@ -5030,7 +5013,6 @@ def test_a_split_then_a_cash_acquisition_on_one_date_is_indeterminate(
     outcome = _outcome(
         terms=(split_terms, cash_terms),
         effects=(split_effect, cash_effect),
-        action_kinds=(ActionKind.FORWARD_SPLIT, ActionKind.CASH_ACQUISITION),
         claim_status="extinguished",
     )
     # The premise: one outcome's effects dispatch in record-hash order.
@@ -5077,7 +5059,6 @@ def test_two_claim_ending_actions_on_one_date_are_indeterminate(
     outcome = _outcome(
         terms=(cash_terms, liquidation_terms),
         effects=(cash_effect, liquidation_effect),
-        action_kinds=(ActionKind.CASH_ACQUISITION, ActionKind.LIQUIDATION),
         claim_status="extinguished",
     )
     # The premise: one outcome's effects dispatch in record-hash order.
@@ -5124,7 +5105,6 @@ def test_a_conversion_and_the_acquirers_disposal_on_one_date_are_indeterminate(
         security_id=predecessor,
         terms=(conversion_terms,),
         effects=(conversion_effect,),
-        action_kinds=(ActionKind.STOCK_ACQUISITION,),
         claim_status="converted",
     )
     cash = _cash(amount="20", component_id="acquirer-cash", predecessor=SEC_ACQ)
@@ -5142,7 +5122,6 @@ def test_a_conversion_and_the_acquirers_disposal_on_one_date_are_indeterminate(
         security_id=SEC_ACQ,
         terms=(cash_terms,),
         effects=(cash_effect,),
-        action_kinds=(ActionKind.CASH_ACQUISITION,),
         claim_status="extinguished",
     )
     state = _state(
@@ -5187,9 +5166,7 @@ def test_a_spin_off_beside_a_split_of_its_parent_is_indeterminate() -> None:
         occurrence="occ-split",
     )
     outcome = _outcome(
-        terms=(spin_terms, split_terms),
-        effects=(spin_effect, split_effect),
-        action_kinds=(ActionKind.SPINOFF, ActionKind.FORWARD_SPLIT),
+        terms=(spin_terms, split_terms), effects=(spin_effect, split_effect)
     )
     state = _state(holdings=(_holding(quantity=100),))
 
@@ -5230,12 +5207,7 @@ def test_a_spin_off_child_cashed_out_in_the_same_window_is_indeterminate(
         occurrence="occ-spin",
         security_id=parent,
     )
-    spin = _outcome(
-        security_id=parent,
-        terms=(spin_terms,),
-        effects=(spin_effect,),
-        action_kinds=(ActionKind.SPINOFF,),
-    )
+    spin = _outcome(security_id=parent, terms=(spin_terms,), effects=(spin_effect,))
     cash_terms, cash_effect = _same_date_effect(
         3570,
         ActionKind.CASH_ACQUISITION,
@@ -5250,7 +5222,6 @@ def test_a_spin_off_child_cashed_out_in_the_same_window_is_indeterminate(
         security_id=SEC_CHILD,
         terms=(cash_terms,),
         effects=(cash_effect,),
-        action_kinds=(ActionKind.CASH_ACQUISITION,),
         claim_status="extinguished",
     )
     state = _state(holdings=(_holding(parent, quantity=100, basis="900"),), cash="0")
@@ -5291,9 +5262,7 @@ def test_a_stock_dividend_beside_a_reverse_split_is_indeterminate() -> None:
         occurrence="occ-reverse-split",
     )
     outcome = _outcome(
-        terms=(dividend_terms, split_terms),
-        effects=(dividend_effect, split_effect),
-        action_kinds=(ActionKind.STOCK_DIVIDEND, ActionKind.REVERSE_SPLIT),
+        terms=(dividend_terms, split_terms), effects=(dividend_effect, split_effect)
     )
     state = _state(holdings=(_holding(quantity=105),))
 
@@ -5311,11 +5280,7 @@ def test_share_actions_on_an_unheld_security_halt_a_staged_buy_of_it() -> None:
     # so a staged buy is exposure to the conflict too.
     first = _split_effect(SEC_A, ActionKind.REVERSE_SPLIT, "1", "10", BETWEEN_AT, 3600)
     second = _split_effect(SEC_A, ActionKind.FORWARD_SPLIT, "3", "1", LATER_AT, 3610)
-    outcome = _outcome(
-        terms=(first[0], second[0]),
-        effects=(first[1], second[1]),
-        action_kinds=(ActionKind.REVERSE_SPLIT, ActionKind.FORWARD_SPLIT),
-    )
+    outcome = _outcome(terms=(first[0], second[0]), effects=(first[1], second[1]))
     state = _state(day=LATER_DAY)
 
     with pytest.raises(
@@ -5397,12 +5362,7 @@ def _distribution(
         share_basis=share_basis,
         with_ex_date=with_ex_date,
     )
-    return _outcome(
-        security_id=security_id,
-        terms=(terms,),
-        effects=(effect,),
-        action_kinds=(kind,),
-    )
+    return _outcome(security_id=security_id, terms=(terms,), effects=(effect,))
 
 
 def _delivery_case(
@@ -5444,7 +5404,6 @@ def _delivery_case(
         security_id=predecessor,
         terms=(conversion_terms,),
         effects=(conversion_effect,),
-        action_kinds=(ActionKind.STOCK_ACQUISITION,),
         claim_status="converted",
     )
     distribution = _distribution(
@@ -5570,7 +5529,6 @@ def test_a_post_action_distribution_counts_its_own_split(
         security_id=SEC_ACQ,
         terms=(split_terms, distribution_terms),
         effects=(split_effect, distribution_effect),
-        action_kinds=(ActionKind.FORWARD_SPLIT, kind),
     )
     state = _state(holdings=(_holding(SEC_ACQ, quantity=10, basis="80"),), cash="0")
 
@@ -5601,12 +5559,7 @@ def _spin_off_to_child(parent: UUID) -> SecurityEconomicOutcomeV1:
         occurrence="occ-spin",
         security_id=parent,
     )
-    return _outcome(
-        security_id=parent,
-        terms=(spin_terms,),
-        effects=(spin_effect,),
-        action_kinds=(ActionKind.SPINOFF,),
-    )
+    return _outcome(security_id=parent, terms=(spin_terms,), effects=(spin_effect,))
 
 
 @pytest.mark.parametrize(
@@ -5715,7 +5668,6 @@ def test_a_post_action_distribution_on_a_removed_holding_halts(removal: str) -> 
         return _outcome(
             terms=(terms, removing_terms),
             effects=(effect, removing_effect),
-            action_kinds=(kind, removing_kind),
             claim_status=status,
         )
 
@@ -5747,7 +5699,7 @@ def test_a_post_action_distribution_on_a_removed_holding_halts(removal: str) -> 
     # Control: quoted per pre-action share, it is owed on the prior close's
     # 100 shares beside whatever the removal owes.
     updated, _ = _processor().apply_pre_open_actions(
-        state, targets, (outcome("predecessor_pre_action"),), _key()
+        state, targets, _covered((outcome("predecessor_pre_action"),), SEC_ACQ), _key()
     )
     (owed,) = (
         claim
@@ -5814,10 +5766,6 @@ def test_an_unknown_basis_distribution_halt_names_the_basis_it_quotes(
             _outcome(
                 terms=(terms, removing_terms),
                 effects=(effect, removing_effect),
-                action_kinds=(
-                    ActionKind.REGULAR_CASH_DIVIDEND,
-                    ActionKind.CASH_ACQUISITION,
-                ),
                 claim_status="extinguished",
             ),
         )
@@ -5904,7 +5852,6 @@ def test_an_ended_claim_spin_off_leaves_a_child_only_book_alone(
         security_id=parent,
         terms=(spin_terms,),
         effects=(spin_effect,),
-        action_kinds=(ActionKind.SPINOFF,),
         claim_status="extinguished",
     )
     state = _state(holdings=(_holding(SEC_CHILD, quantity=4, basis="40"),), cash="0")
@@ -5928,11 +5875,7 @@ def test_share_actions_on_dates_in_different_windows_apply_one_by_one() -> None:
     # its own session's window, so each window holds a single date.
     first = _split_effect(SEC_A, ActionKind.FORWARD_SPLIT, "2", "1", EFFECT_AT, 2230)
     second = _split_effect(SEC_A, ActionKind.FORWARD_SPLIT, "3", "1", LATER_AT, 2240)
-    outcome = _outcome(
-        terms=(first[0], second[0]),
-        effects=(first[1], second[1]),
-        action_kinds=(ActionKind.FORWARD_SPLIT,),
-    )
+    outcome = _outcome(terms=(first[0], second[0]), effects=(first[1], second[1]))
     state = _state(holdings=(_holding(quantity=200),), day=LATER_DAY)
 
     updated, _ = _processor().apply_pre_open_actions(
@@ -5963,9 +5906,7 @@ def test_a_distribution_beside_a_share_action_on_another_date_applies() -> None:
         effective_at=BETWEEN_AT,
     )
     outcome = _outcome(
-        terms=(split_terms, dividend_terms),
-        effects=(split_effect, dividend_effect),
-        action_kinds=(ActionKind.FORWARD_SPLIT, ActionKind.REGULAR_CASH_DIVIDEND),
+        terms=(split_terms, dividend_terms), effects=(split_effect, dividend_effect)
     )
     state = _state(holdings=(_holding(quantity=100),), day=LATER_DAY)
 
@@ -6000,7 +5941,6 @@ def test_a_continuing_liquidation_beside_a_share_action_on_another_date() -> Non
     outcome = _outcome(
         terms=(split_terms, liquidation_terms),
         effects=(split_effect, liquidation_effect),
-        action_kinds=(ActionKind.FORWARD_SPLIT, ActionKind.LIQUIDATION),
     )
     state = _state(holdings=(_holding(quantity=100),), day=LATER_DAY)
 
@@ -6024,7 +5964,6 @@ def test_a_before_window_effect_is_never_applied() -> None:
         terms=outcome.terms_records,
         effects=outcome.effect_records,
         statuses=("before_window",),
-        action_kinds=(ActionKind.FORWARD_SPLIT,),
     )
     state = _state(holdings=(_holding(quantity=100),))
 
@@ -6060,16 +5999,21 @@ def test_unsupported_evidence_is_judged_against_the_book_the_pass_leaves() -> No
         occurrence_id="spin-1",
         security_id=SEC_ACQ,
     )
-    spin = _outcome(
-        security_id=SEC_ACQ,
-        terms=(terms,),
-        effects=(effect,),
-        action_kinds=(ActionKind.SPINOFF,),
+    spin = _outcome(security_id=SEC_ACQ, terms=(terms,), effects=(effect,))
+    # The child's evidence is unsupported, not merely empty: an M1c-native
+    # covered outcome with no records is evidenced no action (issue 76, C4).
+    _, _, split = _split_case(
+        numerator="2",
+        denominator="1",
+        treatment=_treatment("round_down"),
+        action_kind=ActionKind.FORWARD_SPLIT,
+        suffix=2302,
     )
     child = _outcome(
         security_id=SEC_A,
+        terms=split.terms_records,
+        effects=split.effect_records,
         support_status="indeterminate",
-        action_kinds=(ActionKind.FORWARD_SPLIT,),
     )
     state = _state(holdings=(_holding(SEC_ACQ, quantity=100),))
     targets = (_target(SEC_ACQ, 100), _target(SEC_A, 0))
@@ -6103,12 +6047,7 @@ def test_an_unmodelled_action_is_judged_against_the_book_the_pass_leaves() -> No
         occurrence_id="spin-2",
         security_id=SEC_ACQ,
     )
-    spin = _outcome(
-        security_id=SEC_ACQ,
-        terms=(terms,),
-        effects=(effect,),
-        action_kinds=(ActionKind.SPINOFF,),
-    )
+    spin = _outcome(security_id=SEC_ACQ, terms=(terms,), effects=(effect,))
     conversion = _share_action_case(
         suffix=2320,
         action_kind=ActionKind.CONVERSION,
@@ -6187,7 +6126,6 @@ def test_an_unmodelled_action_beside_a_disposal_of_its_security_halts(
     both = _outcome(
         terms=(unmodelled_terms, disposal_terms),
         effects=(unmodelled_effect, disposal_effect),
-        action_kinds=(kind, disposal_kind),
         claim_status="extinguished",
     )
     with pytest.raises(IndeterminateValuationError, match=message):
@@ -6208,7 +6146,6 @@ def test_an_unmodelled_action_beside_a_disposal_of_its_security_halts(
     alone = _outcome(
         terms=(unmodelled_terms,),
         effects=(unmodelled_effect,),
-        action_kinds=(kind,),
         claim_status="converted",
     )
     with pytest.raises(IndeterminateValuationError, match=message):
@@ -6218,7 +6155,6 @@ def test_an_unmodelled_action_beside_a_disposal_of_its_security_halts(
     disposed = _outcome(
         terms=(disposal_terms,),
         effects=(disposal_effect,),
-        action_kinds=(disposal_kind,),
         claim_status="extinguished",
     )
     updated, translated = _processor().apply_pre_open_actions(
@@ -6259,7 +6195,6 @@ def test_an_unmodelled_action_halts_a_staged_buy_in_a_later_window() -> None:
     outcome = _outcome(
         terms=(terms,),
         effects=(effect,),
-        action_kinds=(ActionKind.CONVERSION,),
         claim_status="converted",
     )
     processor = _processor()
@@ -6372,12 +6307,7 @@ def test_cash_in_lieu_delivered_to_a_whole_share_holder_commits_nothing() -> Non
         dates=(_date_fact("payable", PAYABLE_AT),),
     )
     delivery = _delivery(components=(_cash(amount="4", component_id="shares-1"),))
-    outcome = _outcome(
-        terms=(terms,),
-        effects=(effect,),
-        delivery_groups=(delivery,),
-        action_kinds=(ActionKind.REVERSE_SPLIT,),
-    )
+    outcome = _outcome(terms=(terms,), effects=(effect,), delivery_groups=(delivery,))
     state = _state(holdings=(_holding(quantity=2),), cash="1000", day=PAYABLE_DAY)
 
     settled = _processor().apply_intrasession_settlements(
@@ -6467,7 +6397,6 @@ def _with_an_incomplete_pre_window_record(
         effects=(effect, old),
         statuses=("effective", "before_window"),
         delivery_groups=(_delivery(components=(_cash(amount="0.5"),)),),
-        action_kinds=(ActionKind.REGULAR_CASH_DIVIDEND, ActionKind.FORWARD_SPLIT),
     )
 
 
@@ -6517,7 +6446,6 @@ def test_an_incomplete_pre_window_record_explains_nothing() -> None:
                 occurrence_id="old-1",
             ),
         ),
-        action_kinds=(ActionKind.REGULAR_CASH_DIVIDEND, ActionKind.FORWARD_SPLIT),
     )
     state = _state(holdings=(_holding(quantity=100),), cash="1000", day=PAYABLE_DAY)
 
@@ -6671,9 +6599,7 @@ def test_effect_without_an_identified_occurrence_is_indeterminate() -> None:
         terms=terms,
         occurrence_id=None,
     )
-    outcome = _outcome(
-        terms=(terms,), effects=(effect,), action_kinds=(ActionKind.FORWARD_SPLIT,)
-    )
+    outcome = _outcome(terms=(terms,), effects=(effect,))
     state = _state(holdings=(_holding(quantity=100),))
     with pytest.raises(
         IndeterminateValuationError,
@@ -6701,11 +6627,7 @@ def test_duplicate_effective_reports_for_one_occurrence_fail_closed() -> None:
         components=(component,),
         terms=terms,
     )
-    outcome = _outcome(
-        terms=(terms,),
-        effects=(first, second),
-        action_kinds=(ActionKind.FORWARD_SPLIT,),
-    )
+    outcome = _outcome(terms=(terms,), effects=(first, second))
     state = _state(holdings=(_holding(quantity=100),))
     with pytest.raises(
         IndeterminateValuationError,
@@ -6782,9 +6704,7 @@ def test_unsupported_property_component_fails_closed() -> None:
         components=(component, property_leg),
         terms=terms,
     )
-    outcome = _outcome(
-        terms=(terms,), effects=(effect,), action_kinds=(ActionKind.FORWARD_SPLIT,)
-    )
+    outcome = _outcome(terms=(terms,), effects=(effect,))
     state = _state(holdings=(_holding(quantity=100),))
     with pytest.raises(
         IndeterminateValuationError,
@@ -6980,12 +6900,7 @@ def test_dividend_share_basis_selects_pre_or_post_split_quantity() -> None:
             occurrence_id="occ-dividend",
         )
         outcome = _outcome(
-            terms=(split_terms, dividend_terms),
-            effects=(split_effect, dividend_effect),
-            action_kinds=(
-                ActionKind.FORWARD_SPLIT,
-                ActionKind.REGULAR_CASH_DIVIDEND,
-            ),
+            terms=(split_terms, dividend_terms), effects=(split_effect, dividend_effect)
         )
         state = _state(holdings=(_holding(quantity=100),))
         updated, _ = _processor().apply_pre_open_actions(state, (), (outcome,), _key())
@@ -7214,9 +7129,7 @@ def test_liquidation_carrying_a_share_component_is_indeterminate() -> None:
         terms=terms,
         claim_status="extinguished",
     )
-    outcome = _outcome(
-        terms=(terms,), effects=(effect,), action_kinds=(ActionKind.LIQUIDATION,)
-    )
+    outcome = _outcome(terms=(terms,), effects=(effect,))
     state = _state(holdings=(_holding(quantity=10),))
     with pytest.raises(
         IndeterminateValuationError,
@@ -7314,11 +7227,7 @@ def test_share_acquisition_that_extinguishes_a_position_is_indeterminate() -> No
         terms=terms,
         claim_status="converted",
     )
-    outcome = _outcome(
-        terms=(terms,),
-        effects=(effect,),
-        action_kinds=(ActionKind.STOCK_ACQUISITION,),
-    )
+    outcome = _outcome(terms=(terms,), effects=(effect,))
     state = _state(holdings=(_holding(quantity=1),))
     with pytest.raises(
         IndeterminateValuationError,

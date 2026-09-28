@@ -891,3 +891,42 @@ def test_m10_native_coverage_refuses_a_reason_that_can_hide_an_action(
 def test_an_outcome_with_any_effect_or_settlement_record_is_not_empty() -> None:
     assert not native_outcome_is_empty(_resolution(unknown_effects=("a" * 64,)))
     assert not native_outcome_is_empty(_resolution(uncomposed=("b" * 64,)))
+
+
+class _LyingDate(date):
+    """A date whose own comparisons and formatting say it is another day."""
+
+    def __lt__(self, other: object) -> bool:
+        return False
+
+    def __le__(self, other: object) -> bool:
+        return True
+
+    def __gt__(self, other: object) -> bool:
+        return False
+
+    def __ge__(self, other: object) -> bool:
+        return True
+
+    def isoformat(self) -> str:
+        return "1999-01-01"
+
+
+def test_the_record_reads_every_date_through_the_base_type() -> None:
+    """Issue 123 rule: no ``date`` subclass method ever decides coverage."""
+    lying = _LyingDate(REQUESTED_START.year, REQUESTED_START.month, 7)
+    record = _record(returned_actions=(_action(dates=(lying,)),))
+    (action,) = record.returned_actions
+    assert type(action.dates[0]) is date
+    assert action.dates == (date(2026, 1, 7),)
+    for field in ("requested_start_date", "requested_end_date"):
+        assert type(getattr(record, field)) is date
+    # A lying window is read through the base type as well.
+    assert _status((_built(),), lying, JAN9) == "evidenced_no_action"
+    loud = _built(actions=(_action(dates=(JAN8,)),))
+    assert _status((loud,), _LyingDate(2026, 1, 9), JAN9) == "evidenced_no_action"
+    assert _status((loud,), _LyingDate(2026, 1, 8), JAN9) == "actions_present"
+    assert native_outcome_covers_window(_resolution(), lying, JAN9)
+    assert not native_outcome_covers_window(
+        _resolution(history_start="2026-01-07T00:00:00Z"), lying, JAN9
+    )

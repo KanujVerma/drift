@@ -193,6 +193,7 @@ from drift.evaluator.clock import (
     build_scheduled_reconstruction_clock,
     refuse_same_date_multi_venue_clock,
 )
+from drift.evaluator.corporate_action_coverage import CorporateActionCoverageIndex
 from drift.evaluator.corporate_actions import CorporateActionProcessor
 from drift.evaluator.execution import AtomicRebalanceEngine, resolve_execution_listings
 from drift.evaluator.portfolio import (
@@ -204,6 +205,7 @@ from drift.evaluator.reconstruction import (
     require_scheduled_calendar_row,
     verify_exploratory_reconstructions,
 )
+from drift.markets.economic_closed_world import verify_corporate_action_coverage
 from drift.markets.observation_validation import (
     M1dResolutionContext,
     m1d_context_hash,
@@ -1129,7 +1131,10 @@ def _resolve_reconstructed_lane(
       decision, and neither does a session boundary no row states. The clock
       must also be dense: every date it steps across is an evidenced
       non-trading date under verified closed-world calendar coverage, or
-      construction halts INDETERMINATE (issue 71).
+      construction halts INDETERMINATE (issue 71). Every closed-world
+      corporate-action coverage record the bundle carries must then have its
+      exact response bytes and every bound artifact retained in the replay's
+      own M1d contexts (issue 76, C7), or construction is refused by its code.
     """
     if isinstance(admission, PromotionEvaluationAdmissionV1):
         if bundle.has_exploratory_reconstructions:
@@ -1191,7 +1196,25 @@ def _resolve_reconstructed_lane(
     # Issue 71 (D8-b): every date the scheduled clock steps across must be an
     # evidenced non-trading date, or the run halts INDETERMINATE here.
     require_evidenced_clock_density(bundle.session_clock, replay)
+    _require_retained_corporate_action_coverage(bundle, replay)
     return _ReconstructedDecisionLane(admission=admission, cohort=cohort)
+
+
+def _require_retained_corporate_action_coverage(
+    bundle: EvaluationInputBundleV1, replay: ExploratoryReconstructionReplay
+) -> None:
+    """C7 of issue 76: V4 against the replay contexts' retained artifacts.
+
+    The reconstructed lane holds the M1d contexts its reconstructions derive
+    from, and the bridge retains the corporate-action response bytes, the
+    request declaration, the measured origin record and the policy statement
+    in them. A record naming bytes none of those contexts retains is refused.
+    """
+    support: dict[str, Any] = {}
+    for _query, context in replay.requests:
+        support.update(context.supporting_artifacts)
+    for record in bundle.corporate_action_coverage:
+        verify_corporate_action_coverage(record, support)
 
 
 def _require_replayed_clock_sessions(
@@ -1453,10 +1476,19 @@ class SessionEvaluatorEngine:
         # after its gate re-derived every reconstruction (issue 55).
         # Reconstructions riding a realized bundle never price anything.
         self._reconstructed_prices = self._index_reconstructed_prices(bundle)
+        # Issue 76 (C5, V10, V12): the coverage index re-verifies every record
+        # under the running identity and refuses exploratory coverage under a
+        # promotion admission. V11 holds already: the revalidated bundle
+        # refuses a security covered by both kinds of evidence, and the
+        # evidence outcomes are exactly the bundle's (issue 86).
+        self._corporate_action_coverage = CorporateActionCoverageIndex(
+            records=bundle.corporate_action_coverage, lane=admission.lane
+        )
         self._corporate_actions = CorporateActionProcessor(
             session_clock=bundle.session_clock,
             book_currency_namespace=book_currency_namespace,
             book_currency_code=book_currency_code,
+            corporate_action_coverage=self._corporate_action_coverage,
             tie_breaking_rules=evidence.tie_breaking_rules,
             due_bill_rules=evidence.due_bill_rules,
             cash_in_lieu_rates=evidence.cash_in_lieu_rates,

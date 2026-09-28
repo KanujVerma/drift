@@ -99,12 +99,7 @@ def _action(
         security_id=security_id,
         claim_status=claim_status,
     )
-    outcome = ca._outcome(
-        security_id=security_id,
-        terms=(terms,),
-        effects=(effect,),
-        action_kinds=(kind,),
-    )
+    outcome = ca._outcome(security_id=security_id, terms=(terms,), effects=(effect,))
     return effect, outcome
 
 
@@ -348,58 +343,71 @@ def aggregate_sale_residual_run() -> EvaluationRunArtifactsV2:
 #: admission and run identity hashes, its decision-context and mark hashes,
 #: and its trace and result hashes move. That diff of all ten runs shows no
 #: other leaf moving and no classification changing.
+#: Issue 76 moves every pin once more. Its dedicated
+#: m1c-corporate-action-coverage-v1 closure edits semantic_attestation.py,
+#: declared in every closure, so the M1d evidence and M1c validator identities
+#: bound into every M1d context hash move; its hash-covered
+#: corporate_action_coverage bundle field (D8-a) moves every bundle hash;
+#: and each run's outcome now states M1c-native coverage (three complete
+#: families over every action kind, section 3.4), because an exposed security
+#: without coverage halts. A field-by-field diff of all ten runs against the
+#: base dec5d64 shows only hash leaves moving, plus the admission's
+#: acknowledged limitations gaining
+#: corporate-action-absence-read-from-current-provider-snapshot where a
+#: quiet exploratory record covers the second security; no quantity, price,
+#: cash, NAV, classification, count, status or reason changes.
 RUN_PINS: dict[str, tuple[EvaluationClassification, str, str]] = {
     "forward-split": (
         EvaluationClassification.COMPLETE,
-        "ca92a0393a8bf3638801737d5f5966ac80507e9ac63d8d363f2ac7abb5b310d0",
-        "66a3c502f58902837762ddb90b7a72443de6416880dbc3a238629f93a6386b40",
+        "8c5c81fcc3acddaa9eb3c1be37236dcefc82d6f090ac6cfdb0f3cd65c3e597f7",
+        "f47b1e034cb87c6ad38e497fa95b22d235e92246e91dabdaab99b8a45de32240",
     ),
     "stock-dividend": (
         EvaluationClassification.COMPLETE,
-        "c0620796061923bc0bbcd26ef9339af1ac2c743a5645aa05377fae4386223165",
-        "94bf0d98a88509386231c38d3f4a2f278b33bb08194aadf084c85861469d1563",
+        "ac7850f135edcb480e62f9e0ea1b161f0c7c442b627c5ba4863f0c8de1af8b79",
+        "42031b807a8e952ab92f67d2d2c2d3b528842af9f086b3ddba6b89157c1e27ab",
     ),
     "stock-acquisition": (
         EvaluationClassification.COMPLETE,
-        "dbb9321410fd827f65fa8ab2d8f58e7355488c334781b71a0f354160e495c022",
-        "d719459b541dbd0f61112f530157cf36f2cdeca4950bca08f6e404959fd90c41",
+        "08573913bd3e9b5e41386294a377d84905a3169b8a963494e051ec17293a0dd0",
+        "0111588a762f6710b6b1d31200188456fd2d5ccc4d93270de051f82f4c77881f",
     ),
     "extinguishing-liquidation": (
         EvaluationClassification.COMPLETE,
-        "638ee4e7bee0f88e7c78d66f6728da7dc8bfbc3f18fb10411802fd8a9c8d0bf8",
-        "90a3b4c65d48fcd63470f48632d9e7a081086087e7a2ab1082eea4c7d995c391",
+        "9f9d4a3904de23d47f5443d592a3c11b7a0969e0746fef1768b92b6a8d033d14",
+        "8bfb86d4c8213ffd2a5a83036ee735ef7c017162b831af4aeded48d535d2683a",
     ),
     "cash-acquisition": (
         EvaluationClassification.COMPLETE,
-        "102f6cf5b51cdccabf0063a925de4b294c2c8b3537097770d1cb24f4931a0a97",
-        "581cc449e6c98a8c038ae8b86f23c982f6ffcff63c7d5766b6ad110b026282b7",
+        "297c38f0998d49621c28876a7d53e362955f366c64247aba77d4c8be4010b5b5",
+        "78f2a747c894169832a40feb03cae317350022a2abe00fc5a2afa93ce3323d6e",
     ),
     "cash-dividend": (
         EvaluationClassification.COMPLETE,
-        "5036427e25b2d5b7a372801f985c600205ff9371f43ceeed9ba5cf471027af00",
-        "2f35960e790d6e1350e3177636c8431c0b410759e4cae03342dbe12d224ffe61",
+        "97ddf4e29bb8e9ba0319efa130c59ce17089ba1dd4285f1f0f9ca4a66d1da514",
+        "ac25ffd166c876a5f14bcecf36be3714774f9bf7056083c179544eb459d3a65a",
     ),
     # Issue 103: the session-3 decision sees both sides of the spin-off with
     # an indeterminate basis, so its context hash moves (41ce3853 to
     # 3a99b693), and with it the trace and result hashes. Nothing else does.
     "spinoff": (
         EvaluationClassification.COMPLETE,
-        "41e66aa89e78fadc93e9e21ad7cdba6553ee7215aaa7a99c2f1e8fae888c652c",
-        "aa68c784574c0433319766e35da7f66407c666c03c0d5d33482b84486232dac6",
+        "e92a0e2b70cb9c1126b2775d84f9086ea2a88e50548df7f4e36923aafa4fe858",
+        "6dbd7f91399d327601e6f1354bc2d49ecc159ded458984875d20b7979a2d24b6",
     ),
     # Issue 105: the instalment leaves the continuing basis indeterminate, so
     # the session-3 decision context hash moves (f8b8bbef to 98949b80).
     "continuing-instalment": (
         EvaluationClassification.COMPLETE,
-        "88151cc53750d3d83974555f2f639592f2446f66a520e7a655f4a49de2d933b1",
-        "4df43e6d40f02f03c56c61f6658ab7e304e5bfc2eadb14c0d52a26b91019ba67",
+        "8dc4739e54d4f98673b152ac0e05b31bac7a8da491e3d067bfc5db78d12cc05d",
+        "1d5686dcc64a3b6137794830e97e18cce88614c2dcfbed39c069737ac571a540",
     ),
     # Issue 105: the cash leg leaves the acquirer basis indeterminate, so the
     # session-3 decision context hash moves (bf7c5181 to e8e7a543).
     "mixed-acquisition": (
         EvaluationClassification.COMPLETE,
-        "df667937c3b76cfda8ea4a717e55df9274974cc30f2fb658a830c67d2d63981f",
-        "46a4fbb86ffd04a238af943441af475cd1f487700e80ba18bb4912ab8af56fee",
+        "39c626540a7c93d9c9a208be98e8b203a5ff6b96a3dbd31aaec44e6ab46af06f",
+        "e293b23e10ec02d21813363de1072ea262a5a937d236aa809f075b24ba29c44c",
     ),
     # Issue 105: the sold third relieves 100.00 of basis against 1.00 of
     # proceeds, so realized gross and net PnL move from 0 to -99 and the
@@ -407,8 +415,8 @@ RUN_PINS: dict[str, tuple[EvaluationClassification, str, str]] = {
     # 87213f0b).
     "aggregate-sale-residual": (
         EvaluationClassification.COMPLETE,
-        "b82784349f41b81bb2c95b1346bee347aebfca6338bb5c147a3b451cdd3f0e06",
-        "bf14d43264e39e255819f194a742882df7b91d05e69fefbd0ad3bc7ddb620494",
+        "55eff4e09a4a20f572fac07aa816b65c327d1dcbf8aa06d558e4768df6a08471",
+        "be1977fefe26febe886c76a0cf1143eafdf0603e889349155b55f19476a9be1f",
     ),
 }
 
@@ -486,6 +494,7 @@ def _engine_processor() -> CorporateActionProcessor:
         session_clock=eng._clock(),
         book_currency_namespace=eng.BOOK_NAMESPACE,
         book_currency_code=eng.BOOK_CODE,
+        corporate_action_coverage=ca._coverage_index(),
     )
 
 
@@ -827,7 +836,6 @@ def _instalment_then_final(*, amount: str) -> tuple[SecurityEconomicOutcomeV1, s
         security_id=eng.SEC_A,
         terms=(terms, final_terms),
         effects=(instalment, final),
-        action_kinds=(ActionKind.LIQUIDATION,),
         claim_status="extinguished",
     )
     cause = applied_economic_effect_id(

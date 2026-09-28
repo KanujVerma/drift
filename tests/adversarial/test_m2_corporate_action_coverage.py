@@ -20,6 +20,7 @@ reads a credential.
 import sys
 from dataclasses import replace
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,19 @@ if str(_UNIT_SUPPORT) not in sys.path:
     sys.path.insert(0, str(_UNIT_SUPPORT))
 
 import pytest
+import test_evaluator_corporate_actions as ca
+import test_evaluator_engine as eng
+from exploratory_decision_test_support import (
+    JAN5,
+    JAN6,
+    SEC,
+    SEC_OTHER,
+    ReconstructedTargetStrategy,
+    bundle_of,
+    reconstructed_engine,
+    run_engine,
+    three_regular_sessions,
+)
 from observation_test_support import ObservationHarness
 from pydantic import ValidationError
 
@@ -62,9 +76,25 @@ from drift.domain.evaluator_clock import (
     session_clock_hash,
     session_order_key,
 )
+from drift.domain.evaluator_corporate_actions import SecurityEconomicOutcomeV1
 from drift.domain.evaluator_lanes import (
     ExploratoryEvaluationAdmissionV1,
     exploratory_evaluation_admission_hash,
+)
+from drift.domain.evaluator_portfolio import (
+    IndeterminateValuationError,
+    PendingCashClaimV1,
+    PortfolioStateV2,
+    pending_cash_claim_id,
+)
+from drift.domain.evaluator_results import (
+    EvaluationClassification,
+    EvaluationRunArtifactsV2,
+)
+from drift.domain.evaluator_strategy import SecurityTargetPositionV1
+from drift.domain.evaluator_trace import (
+    EvaluationPhase,
+    IndeterminateCauseTraceEventV1,
 )
 from drift.domain.securities import SecurityV1
 from drift.domain.sessions import SessionKeyV1
@@ -76,6 +106,9 @@ from drift.evaluator.bundles import (
     verify_evaluation_input_bundle,
 )
 from drift.evaluator.clock import build_scheduled_reconstruction_clock
+from drift.evaluator.corporate_action_coverage import CorporateActionCoverageIndex
+from drift.evaluator.corporate_actions import CorporateActionProcessor
+from drift.evaluator.engine import SessionEvaluatorEvidence
 from drift.markets.economic_closed_world import (
     CorporateActionCoverageError,
     build_corporate_action_coverage,
@@ -92,7 +125,7 @@ SNAPSHOT = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
 
 
 def _artifact(label: str) -> VerifiedArtifactBytes:
-    data = f'{{"issue":76,"synthetic":"{label}"}}'.encode()
+    data = f'{{"issue":76,"suite":"adversarial","synthetic":"{label}"}}'.encode()
     return VerifiedArtifactBytes(
         data=data, byte_size=len(data), content_hash=sha256(data).hexdigest()
     )
@@ -490,3 +523,459 @@ def test_verifying_a_bundle_verifies_each_record_against_its_context() -> None:
         CorporateActionCoverageError, match=r"^ca_coverage_response_bytes_unavailable"
     ):
         verify_evaluation_input_bundle(bundle=bundle, context=bare)
+
+
+# ==========================================================================
+# The pre-open rule (C1 to C5), on the processor itself
+# ==========================================================================
+
+#: A Friday and the Monday after it: Monday's window is Saturday to Monday.
+FRI, SAT, SUN, MON = date(2026, 1, 2), date(2026, 1, 3), date(2026, 1, 4), DAY_1
+THU = date(2026, 1, 1)
+NO_COVERAGE = r"^no closed-world corporate-action coverage for "
+
+
+def _split(native_id: str, *dates: date) -> ReturnedCorporateActionV1:
+    return ReturnedCorporateActionV1(
+        native_kind="forward_splits",
+        native_id=native_id,
+        action_kind=ActionKind.FORWARD_SPLIT,
+        dates=dates,
+    )
+
+
+def _processor(
+    records: tuple[ClosedWorldCorporateActionCoverageV1, ...] = (),
+    days: tuple[date, ...] = (FRI, MON),
+) -> CorporateActionProcessor:
+    return CorporateActionProcessor(
+        session_clock=eng._clock(days),
+        book_currency_namespace=eng.BOOK_NAMESPACE,
+        book_currency_code=eng.BOOK_CODE,
+        corporate_action_coverage=CorporateActionCoverageIndex(
+            records=records, lane="exploratory"
+        ),
+    )
+
+
+def _held(day: date, security_id: UUID = SEC_A, quantity: int = 10) -> PortfolioStateV2:
+    return ca._state(holdings=(ca._holding(security_id, quantity=quantity),), day=day)
+
+
+def _pre_open(
+    processor: CorporateActionProcessor,
+    state: PortfolioStateV2,
+    day: date,
+    targets: tuple[SecurityTargetPositionV1, ...] = (),
+    outcomes: tuple[SecurityEconomicOutcomeV1, ...] = (),
+) -> tuple[PortfolioStateV2, tuple[SecurityTargetPositionV1, ...]]:
+    return processor.apply_pre_open_actions(state, targets, outcomes, eng._key(day))
+
+
+def test_m1_a_held_security_without_coverage_halts_indeterminate() -> None:
+    """The #76 defect: no record was read as no corporate action."""
+    with pytest.raises(
+        IndeterminateValuationError,
+        match=NO_COVERAGE + rf"{SEC_A} over \[2026-01-03, 2026-01-05\]",
+    ):
+        _pre_open(_processor(), _held(MON), MON)
+    # Control: a quiet record over the window evidences no action.
+    state = _held(MON)
+    assert _pre_open(_processor((coverage(SEC_A, start=FRI, end=MON),)), state, MON)[
+        0
+    ] == (state)
+
+
+def test_m1_coverage_of_another_security_does_not_cover_the_held_one() -> None:
+    with pytest.raises(IndeterminateValuationError, match=NO_COVERAGE + str(SEC_A)):
+        _pre_open(_processor((coverage(SEC_B, start=FRI, end=MON),)), _held(MON), MON)
+
+
+def test_m2_a_staged_buy_of_an_unheld_security_is_exposure() -> None:
+    buy = (SecurityTargetPositionV1(security_id=SEC_B, target_quantity=5),)
+    quiet_a = (coverage(SEC_A, start=FRI, end=MON),)
+    with pytest.raises(IndeterminateValuationError, match=NO_COVERAGE + str(SEC_B)):
+        _pre_open(_processor(quiet_a), _held(MON), MON, buy)
+    # An explicit zero target on an unheld security trades nothing: no exposure.
+    zero = (SecurityTargetPositionV1(security_id=SEC_B, target_quantity=0),)
+    _pre_open(_processor(quiet_a), _held(MON), MON, zero)
+
+
+def test_m2_a_sell_of_a_holding_is_exposure() -> None:
+    sell = (SecurityTargetPositionV1(security_id=SEC_A, target_quantity=0),)
+    with pytest.raises(IndeterminateValuationError, match=NO_COVERAGE + str(SEC_A)):
+        _pre_open(_processor(), _held(MON), MON, sell)
+
+
+def _pending_claim(security_id: UUID) -> PendingCashClaimV1:
+    return PendingCashClaimV1(
+        claim_id=pending_cash_claim_id(
+            source_id="synthetic-a",
+            security_id=security_id,
+            action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
+            occurrence_id="occ-claim",
+            component_id="cash",
+        ),
+        source_id="synthetic-a",
+        security_id=security_id,
+        action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
+        occurrence_id="occ-claim",
+        component_id="cash",
+        entitled_quantity=10,
+        cash_per_share=Decimal("0.5"),
+        total_cash_expected=Decimal("5"),
+        entitlement_session=FRI,
+        payable_session=date(2026, 1, 20),
+    )
+
+
+def test_c1_a_pending_cash_claim_alone_is_not_exposure() -> None:
+    """A claim is fixed in cash and cannot be re-split, so it needs no coverage."""
+    state = ca._state(claims=(_pending_claim(SEC_B),), day=MON)
+    unchanged, _ = _pre_open(_processor(), state, MON)
+    assert unchanged == state
+    # Control: the same book holding the security halts without coverage.
+    with pytest.raises(IndeterminateValuationError, match=NO_COVERAGE + str(SEC_B)):
+        _pre_open(
+            _processor(),
+            ca._state(
+                holdings=(ca._holding(SEC_B, quantity=10),),
+                claims=(_pending_claim(SEC_B),),
+                day=MON,
+            ),
+            MON,
+        )
+
+
+def test_m3_the_window_is_every_date_after_the_previous_session() -> None:
+    """C2: Monday's window is Saturday to Monday; Friday's own date is not in it."""
+    state = _held(MON)
+    # An action on Saturday, a non-session date, lands at Monday's pre-open.
+    on_saturday = (coverage(SEC_A, start=FRI, end=MON, actions=(_split("s", SAT),)),)
+    with pytest.raises(
+        IndeterminateValuationError,
+        match=r"^corporate-action coverage returned actions for .* forward_splits s$",
+    ):
+        _pre_open(_processor(on_saturday), state, MON)
+    # One on Friday belongs to Friday's window, not Monday's.
+    on_friday = (coverage(SEC_A, start=FRI, end=MON, actions=(_split("f", FRI),)),)
+    _pre_open(_processor(on_friday), state, MON)
+    # Coverage must reach back to Saturday: a record starting Sunday does not.
+    from_sunday = (coverage(SEC_A, start=SUN, end=MON),)
+    with pytest.raises(
+        IndeterminateValuationError,
+        match=NO_COVERAGE + rf"{SEC_A} over \[2026-01-03, 2026-01-05\]",
+    ):
+        _pre_open(_processor(from_sunday), state, MON)
+
+
+def test_m3_the_first_session_owns_only_its_own_date() -> None:
+    state = _held(FRI)
+    # An action the day before the first session is taken as already in the
+    # opening book, so it neither halts nor needs coverage.
+    before = (coverage(SEC_A, start=THU, end=MON, actions=(_split("t", THU),)),)
+    _pre_open(_processor(before), state, FRI)
+    only_friday = (coverage(SEC_A, start=FRI, end=FRI),)
+    _pre_open(_processor(only_friday), state, FRI)
+    with pytest.raises(
+        IndeterminateValuationError,
+        match=NO_COVERAGE + rf"{SEC_A} over \[2026-01-02, 2026-01-02\]",
+    ):
+        _pre_open(_processor((coverage(SEC_A, start=SAT, end=MON),)), state, FRI)
+
+
+def test_m9_a_returned_action_in_a_held_window_halts_and_is_named() -> None:
+    records = (coverage(SEC_A, start=FRI, end=MON, actions=(_split("ca-9", MON),)),)
+    with pytest.raises(
+        IndeterminateValuationError,
+        match=(
+            rf"^corporate-action coverage returned actions for {SEC_A} over "
+            r"\[2026-01-03, 2026-01-05\] that no M2 accounting evidence accounts "
+            r"for: forward_splits ca-9$"
+        ),
+    ):
+        _pre_open(_processor(records), _held(MON), MON)
+
+
+def test_m6_a_non_positive_assertion_does_not_cover() -> None:
+    weak = _assertion(requested_types_documented=False)
+    records = (coverage(SEC_A, start=FRI, end=MON, completeness=weak),)
+    with pytest.raises(
+        IndeterminateValuationError, match=NO_COVERAGE + r".* \(indeterminate\)$"
+    ):
+        _pre_open(_processor(records), _held(MON), MON)
+
+
+def test_m17_an_undated_returned_action_halts_every_held_window() -> None:
+    records = (coverage(SEC_A, start=FRI, end=MON, actions=(_split("u"),)),)
+    for day in (FRI, MON):
+        with pytest.raises(IndeterminateValuationError, match=NO_COVERAGE):
+            _pre_open(_processor(records), _held(day), day)
+
+
+def test_m14_v9_overlapping_records_that_disagree_are_never_resolved() -> None:
+    """V9: a window touching a disagreeing overlap halts, though neither alone would.
+
+    Tuesday's window is Tuesday alone. The loud record's split is dated
+    Sunday, inside the overlap but outside the window, so either record on its
+    own evidences no action on Tuesday. Together they disagree about the
+    overlap, and a conflict is never resolved by preference.
+    """
+    tue = date(2026, 1, 6)
+    days = (FRI, MON, tue)
+    quiet = coverage(SEC_A, start=FRI, end=tue)
+    loud = coverage(SEC_A, start=SAT, end=tue, actions=(_split("x", SUN),))
+    state = _held(tue)
+    for alone in (quiet, loud):
+        assert _pre_open(_processor((alone,), days), state, tue)[0] == state
+    with pytest.raises(
+        IndeterminateValuationError,
+        match=NO_COVERAGE
+        + rf"{SEC_A} over \[2026-01-06, 2026-01-06\] \(indeterminate\)$",
+    ):
+        _pre_open(_processor((quiet, loud), days), state, tue)
+
+
+def test_m14_a_record_and_an_outcome_for_one_security_are_refused() -> None:
+    outcome = ca._quiet(SEC_A)
+    with pytest.raises(
+        CorporateActionCoverageError, match=r"^ca_coverage_mixed_sources"
+    ):
+        _pre_open(
+            _processor((coverage(SEC_A, start=FRI, end=MON),)),
+            _held(MON),
+            MON,
+            outcomes=(outcome,),
+        )
+
+
+def test_c4_m11_a_covered_empty_outcome_is_no_action_for_a_held_security() -> None:
+    state = _held(MON)
+    quiet = ca._quiet(SEC_A)
+    assert quiet.resolution.support_status == "indeterminate"
+    assert _pre_open(_processor(), state, MON, outcomes=(quiet,))[0] == state
+    # Control: the same empty outcome that is not complete coverage halts.
+    uncovered = ca._outcome(
+        security_id=SEC_A, support_status="indeterminate", native_coverage=False
+    )
+    with pytest.raises(
+        IndeterminateValuationError,
+        match=NO_COVERAGE + r".*its M1c economic outcome is not complete coverage",
+    ):
+        _pre_open(_processor(), state, MON, outcomes=(uncovered,))
+
+
+def test_m10_an_outcome_over_a_subset_of_action_kinds_is_not_coverage() -> None:
+    subset = ca._outcome(
+        security_id=SEC_A,
+        support_status="indeterminate",
+        query_kinds=(ActionKind.FORWARD_SPLIT, ActionKind.REVERSE_SPLIT),
+    )
+    with pytest.raises(IndeterminateValuationError, match=NO_COVERAGE):
+        _pre_open(_processor(), _held(MON), MON, outcomes=(subset,))
+
+
+def test_m2_a_spin_off_child_delivered_by_the_pass_is_exposure() -> None:
+    """C1: exposure is judged again against the book the pass leaves."""
+    outcome = ca._spinoff_case(suffix=7600)
+    state = ca._state(holdings=(ca._holding(quantity=100),))
+    with pytest.raises(
+        IndeterminateValuationError, match=NO_COVERAGE + str(ca.SEC_CHILD)
+    ):
+        ca._processor().apply_pre_open_actions(state, (), (outcome,), ca._key())
+    # Control: the child stated quiet, the child is credited.
+    updated, _ = ca._processor().apply_pre_open_actions(
+        state, (), ca._covered((outcome,), ca.SEC_CHILD), ca._key()
+    )
+    assert ca.SEC_CHILD in ca._quantities(updated.holdings)
+
+
+def test_d7_the_processor_has_no_default_coverage() -> None:
+    with pytest.raises(TypeError, match="corporate_action_coverage"):
+        CorporateActionProcessor(  # type: ignore[call-arg]
+            session_clock=eng._clock(),
+            book_currency_namespace=eng.BOOK_NAMESPACE,
+            book_currency_code=eng.BOOK_CODE,
+        )
+    with pytest.raises(TypeError, match="requires a CorporateActionCoverageIndex"):
+        CorporateActionProcessor(
+            session_clock=eng._clock(),
+            book_currency_namespace=eng.BOOK_NAMESPACE,
+            book_currency_code=eng.BOOK_CODE,
+            corporate_action_coverage=(),  # type: ignore[arg-type]
+        )
+
+
+def test_an_empty_window_holds_nothing_to_cover() -> None:
+    index = CorporateActionCoverageIndex(records=(), lane="exploratory")
+    index.require_covered(SEC_A, None, MON, FRI)
+    with pytest.raises(IndeterminateValuationError, match=NO_COVERAGE):
+        index.require_covered(SEC_A, None, MON, MON)
+
+
+# ==========================================================================
+# The index at engine construction (V10, V12)
+# ==========================================================================
+
+
+def test_v12_m12_exploratory_coverage_is_refused_under_a_promotion_admission() -> None:
+    with pytest.raises(
+        CorporateActionCoverageError, match=r"^ca_coverage_grade_refused_by_lane"
+    ):
+        CorporateActionCoverageIndex(records=(coverage(SEC_A),), lane="promotion")
+    # Control: a promotion index may be covered only natively, and is built.
+    assert CorporateActionCoverageIndex(records=(), lane="promotion").records == ()
+
+
+def test_v10_m15_a_stale_identity_is_refused_by_the_index() -> None:
+    record = coverage(SEC_A)
+    body = dict(record) | {"implementation_hash": "1" * 64}
+    draft = ClosedWorldCorporateActionCoverageV1.model_construct(**body)
+    stale = ClosedWorldCorporateActionCoverageV1.model_validate(
+        body | {"record_hash": corporate_action_record_hash(draft)}
+    )
+    with pytest.raises(
+        CorporateActionCoverageError,
+        match=r"^ca_coverage_implementation_identity_mismatch",
+    ):
+        CorporateActionCoverageIndex(records=(stale,), lane="exploratory")
+
+
+def test_v10_the_engine_refuses_a_bundle_carrying_a_stale_record() -> None:
+    record = eng.quiet_coverage([eng.SEC_A], eng.DAY_0, eng.DAY_3)[0]
+    body = dict(record) | {"implementation_hash": "1" * 64}
+    draft = ClosedWorldCorporateActionCoverageV1.model_construct(**body)
+    stale = ClosedWorldCorporateActionCoverageV1.model_validate(
+        body | {"record_hash": corporate_action_record_hash(draft)}
+    )
+    bundle = eng._bundle(corporate_action_coverage=(stale,))
+    with pytest.raises(
+        CorporateActionCoverageError,
+        match=r"^ca_coverage_implementation_identity_mismatch",
+    ):
+        eng._engine(bundle=bundle)
+
+
+# ==========================================================================
+# Whole runs, both lanes (criterion 1, criterion 4, C6, C7)
+# ==========================================================================
+
+
+def _halt_cause(artifacts: EvaluationRunArtifactsV2) -> IndeterminateCauseTraceEventV1:
+    (cause,) = (
+        event
+        for event in artifacts.trace.events
+        if isinstance(event, IndeterminateCauseTraceEventV1)
+    )
+    return cause
+
+
+def test_c6_a_realized_run_that_buys_without_coverage_halts_at_the_pre_open() -> None:
+    artifacts = eng._run(eng._engine(bundle=eng._bundle(corporate_action_coverage=())))
+    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
+    cause = _halt_cause(artifacts)
+    assert cause.phase is EvaluationPhase.PRE_OPEN_EFFECTS
+    assert cause.cause == (
+        f"no closed-world corporate-action coverage for {eng.SEC_A} over "
+        "[2026-01-07, 2026-01-07] (indeterminate)"
+    )
+    assert not [event for event in artifacts.trace.events if event.kind == "fill"]
+    # Control: the same run over quiet coverage completes.
+    assert (
+        eng._run(eng._engine()).result.classification
+        is EvaluationClassification.COMPLETE
+    )
+
+
+def _native_twin(*, covered: bool) -> EvaluationRunArtifactsV2:
+    """The realized run with SEC_A covered by its own M1c-native outcome."""
+    outcome = ca._outcome(
+        security_id=eng.SEC_A,
+        support_status="indeterminate",
+        native_coverage=covered,
+    )
+    bundle = eng._bundle(economic_outcomes=(outcome.resolution,))
+    assert {record.security_id for record in bundle.corporate_action_coverage} == {
+        eng.SEC_B
+    }
+    return eng._run(
+        eng._engine(
+            bundle=bundle,
+            evidence=SessionEvaluatorEvidence(
+                listing_role_records=eng.ROLE_RECORDS, economic_outcomes=(outcome,)
+            ),
+        )
+    )
+
+
+def test_criterion_1_a_realized_twin_with_native_coverage_proceeds() -> None:
+    covered = _native_twin(covered=True)
+    assert covered.result.classification is EvaluationClassification.COMPLETE
+    assert covered.result.metrics.committed_fill_count == 1
+    uncovered = _native_twin(covered=False)
+    assert uncovered.result.classification is EvaluationClassification.INDETERMINATE
+    assert _halt_cause(uncovered).phase is EvaluationPhase.PRE_OPEN_EFFECTS
+
+
+def _reconstructed(
+    records: tuple[ClosedWorldCorporateActionCoverageV1, ...] | None,
+) -> EvaluationRunArtifactsV2:
+    return run_engine(
+        reconstructed_engine(
+            bundle_of(three_regular_sessions(), corporate_action_coverage=records)
+        ),
+        ReconstructedTargetStrategy({JAN5: ((SEC, 10),), JAN6: ((SEC, 10),)}),
+    )
+
+
+def test_criterion_1_the_reconstructed_lane_inverts_the_probe() -> None:
+    quiet = _reconstructed(None)
+    assert quiet.result.classification is EvaluationClassification.COMPLETE
+    assert quiet.result.metrics.committed_fill_count == 1
+    bare = _reconstructed(())
+    assert bare.result.classification is EvaluationClassification.INDETERMINATE
+    assert _halt_cause(bare).cause == (
+        f"no closed-world corporate-action coverage for {SEC} over "
+        "[2026-01-06, 2026-01-06] (indeterminate)"
+    )
+    split = eng.quiet_coverage(
+        (SEC, SEC_OTHER),
+        JAN5,
+        date(2026, 1, 7),
+        returned_actions=(_split("ca-jan7", date(2026, 1, 7)),),
+    )
+    held = _reconstructed(split)
+    assert held.result.classification is EvaluationClassification.INDETERMINATE
+    cause = _halt_cause(held)
+    assert cause.phase is EvaluationPhase.PRE_OPEN_EFFECTS
+    assert cause.session_key.local_date == date(2026, 1, 7)
+    assert cause.cause.endswith("forward_splits ca-jan7")
+
+
+def test_c7_the_reconstructed_lane_refuses_bytes_its_contexts_do_not_retain() -> None:
+    # SUPPORT here is not the support every reconstruction context retains.
+    foreign = tuple(
+        coverage(security_id, start=JAN5, end=date(2026, 1, 7))
+        for security_id in (SEC, SEC_OTHER)
+    )
+    bundle = bundle_of(three_regular_sessions(), corporate_action_coverage=foreign)
+    with pytest.raises(
+        CorporateActionCoverageError, match=r"^ca_coverage_response_bytes_unavailable"
+    ):
+        reconstructed_engine(bundle)
+
+
+def test_criterion_4_a_non_trading_run_needs_no_coverage_in_either_lane() -> None:
+    """B0 is unaffected: nothing is exposed, so nothing needs coverage."""
+    realized = eng._run(
+        eng._engine(bundle=eng._bundle(corporate_action_coverage=())),
+        eng.FixedTargetStrategy({}),
+    )
+    assert realized.result.classification is EvaluationClassification.COMPLETE
+    reconstructed = run_engine(
+        reconstructed_engine(
+            bundle_of(three_regular_sessions(), corporate_action_coverage=())
+        ),
+        ReconstructedTargetStrategy({}),
+    )
+    assert reconstructed.result.classification is EvaluationClassification.COMPLETE

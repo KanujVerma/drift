@@ -306,11 +306,7 @@ def test_two_cash_components_on_one_date_are_two_distinct_claims() -> None:
         components=(first, second),
         terms=terms,
     )
-    outcome = ca._outcome(
-        terms=(terms,),
-        effects=(effect,),
-        action_kinds=(ActionKind.REGULAR_CASH_DIVIDEND,),
-    )
+    outcome = ca._outcome(terms=(terms,), effects=(effect,))
     state = ca._state(holdings=(ca._holding(quantity=100),), cash="1000")
 
     staged, _ = ca._processor().apply_pre_open_actions(state, (), (outcome,), ca._key())
@@ -503,11 +499,7 @@ def test_cash_with_no_exact_decimal_spelling_fails_closed() -> None:
         components=(component,),
         terms=terms,
     )
-    outcome = ca._outcome(
-        terms=(terms,),
-        effects=(effect,),
-        action_kinds=(ActionKind.REGULAR_CASH_DIVIDEND,),
-    )
+    outcome = ca._outcome(terms=(terms,), effects=(effect,))
     state = ca._state(holdings=(ca._holding(quantity=100),))
 
     with pytest.raises(
@@ -540,9 +532,7 @@ def test_terms_without_an_occurred_effect_commit_no_mutation() -> None:
         action_kind=ActionKind.FORWARD_SPLIT,
         components=(component,),
     )
-    outcome = ca._outcome(
-        terms=(terms,), effects=(), action_kinds=(ActionKind.FORWARD_SPLIT,)
-    )
+    outcome = ca._outcome(terms=(terms,), effects=())
     state = ca._state(holdings=(ca._holding(quantity=10),), cash="1000")
 
     updated, targets = ca._processor().apply_pre_open_actions(
@@ -573,7 +563,6 @@ def test_an_upcoming_effect_record_commits_no_mutation() -> None:
         terms=occurred.terms_records,
         effects=occurred.effect_records,
         statuses=("upcoming",),
-        action_kinds=(ActionKind.FORWARD_SPLIT,),
     )
     assert len(upcoming.effect_records) == 1
     state = ca._state(holdings=(ca._holding(quantity=10),), cash="1000")
@@ -605,9 +594,7 @@ def test_a_liquidation_without_source_terms_fails_closed(claim_status: str) -> N
         terms=None,
         claim_status=claim_status,
     )
-    outcome = ca._outcome(
-        terms=(), effects=(effect,), action_kinds=(ActionKind.LIQUIDATION,)
-    )
+    outcome = ca._outcome(terms=(), effects=(effect,))
     state = ca._state(holdings=(ca._holding(quantity=10),), cash="1000")
 
     with pytest.raises(
@@ -786,9 +773,7 @@ def _share_action_outcome(
         security_id=eng.SEC_A,
         claim_status=claim_status,
     )
-    return ca._outcome(
-        security_id=eng.SEC_A, terms=(terms,), effects=(effect,), action_kinds=(kind,)
-    )
+    return ca._outcome(security_id=eng.SEC_A, terms=(terms,), effects=(effect,))
 
 
 def _cash_acquisition_outcome(*, suffix: int) -> SecurityEconomicOutcomeV1:
@@ -825,7 +810,6 @@ def _cash_acquisition_outcome(*, suffix: int) -> SecurityEconomicOutcomeV1:
         terms=(terms,),
         effects=(effect,),
         delivery_groups=(delivery,),
-        action_kinds=(ActionKind.CASH_ACQUISITION,),
     )
 
 
@@ -1230,7 +1214,6 @@ def _dividend_outcome(
         terms=(terms,),
         effects=(effect,),
         delivery_groups=deliveries,
-        action_kinds=(ActionKind.REGULAR_CASH_DIVIDEND,),
     )
 
 
@@ -1417,7 +1400,6 @@ def test_delivered_cash_no_evidence_explains_halts_a_held_position() -> None:
                 settled_at="2026-01-08T00:00:00Z",
             ),
         ),
-        action_kinds=(ActionKind.REGULAR_CASH_DIVIDEND,),
     )
 
     artifacts = _run_over(unexplained, days=eng.DAYS, strategy=_hold_ten(eng.DAYS[1:]))
@@ -1516,7 +1498,6 @@ def test_a_settlement_halt_never_marks_the_session_it_halted() -> None:
                 settled_at="2026-01-08T00:00:00Z",
             ),
         ),
-        action_kinds=(ActionKind.REGULAR_CASH_DIVIDEND,),
     )
 
     artifacts = _run_over(unexplained, days=eng.DAYS, strategy=_hold_ten(eng.DAYS[1:]))
@@ -1656,7 +1637,6 @@ def _liquidation_outcome(
         terms=(terms,),
         effects=(effect,),
         delivery_groups=(delivery,),
-        action_kinds=(ActionKind.LIQUIDATION,),
     )
 
 

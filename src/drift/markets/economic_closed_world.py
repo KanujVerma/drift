@@ -45,6 +45,7 @@ from drift.domain.economic_closed_world import (
     corporate_action_covered_interval,
     corporate_action_derivation_algorithm_hash,
     corporate_action_record_hash,
+    exact_date,
 )
 from drift.domain.economic_common import ActionKind
 from drift.domain.economic_queries import market_horizon
@@ -334,10 +335,7 @@ def corporate_action_window_status(
     window (D4-a), and ``evidenced_no_action`` only when none does. There is
     no default "no action".
     """
-    first, last = (
-        date.fromordinal(date.toordinal(start)),
-        date.fromordinal(date.toordinal(end)),
-    )
+    first, last = exact_date(start), exact_date(end)
     if first > last:
         return "indeterminate"
     candidates = _candidates(records, security_id)
@@ -371,6 +369,7 @@ def window_returned_actions(
 
     For naming what halts a run; ordered by native kind, native id and dates.
     """
+    start, end = exact_date(start), exact_date(end)
     found = {
         action
         for record in records
@@ -406,6 +405,7 @@ def native_outcome_covers_window(
     absorbs the offset between UTC instants and local session dates; and (iv)
     no reason that can hide an action.
     """
+    start, end = exact_date(start), exact_date(end)
     families = sorted(item.family for item in resolution.coverage_results)
     if families != list(_NATIVE_FAMILIES):
         return False
@@ -414,7 +414,9 @@ def native_outcome_covers_window(
     query = resolution.query
     if set(query.action_kinds) != set(ActionKind):
         return False
-    if not (query.history_start.date() < start and market_horizon(query).date() > end):
+    history = exact_date(query.history_start.date())
+    horizon = exact_date(market_horizon(query).date())
+    if not (history < start and horizon > end):
         return False
     return not _HIDING_REASONS & set(resolution.reasons)
 
