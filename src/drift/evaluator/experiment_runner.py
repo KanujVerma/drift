@@ -36,7 +36,13 @@ from pydantic import TypeAdapter
 from drift.domain.artifacts import ArtifactKind, ArtifactReference
 from drift.domain.common import UUID7, ImmutableJSONValue
 from drift.domain.datasets import DatasetReference
-from drift.domain.evaluator_bundles import EvaluationRunIdentityV1
+from drift.domain.evaluator_bundles import (
+    EvaluationRunIdentity,
+    EvaluationRunIdentityV1,
+    EvaluationRunIdentityV2,
+    StrategyParametersBindingError,
+    strategy_parameters_hash,
+)
 from drift.domain.evaluator_results import (
     EvaluationResultV1,
     EvaluationRunArtifactsV2,
@@ -87,7 +93,7 @@ class ExperimentRunnerContext:
     completed_at: datetime
     engine: SessionEvaluatorEngine
     strategy: LaneDispatchStrategy
-    run_identity: EvaluationRunIdentityV1
+    run_identity: EvaluationRunIdentityV1 | EvaluationRunIdentityV2
     result_artifact_id: UUID7
     trace_artifact_id: UUID7
     result_artifact_location: str
@@ -104,7 +110,7 @@ class _CallerInputs:
     recorded as given.
     """
 
-    run_identity: EvaluationRunIdentityV1
+    run_identity: EvaluationRunIdentityV1 | EvaluationRunIdentityV2
     dataset_hash: str
     specified_strategy_hash: str
     running_strategy_hash: str
@@ -117,9 +123,7 @@ class _CallerInputs:
     audit_event_id: UUID | None
 
 
-_RUN_IDENTITY: TypeAdapter[EvaluationRunIdentityV1] = TypeAdapter(
-    EvaluationRunIdentityV1
-)
+_RUN_IDENTITY: TypeAdapter[EvaluationRunIdentity] = TypeAdapter(EvaluationRunIdentity)
 _DATASET: TypeAdapter[DatasetReference] = TypeAdapter(DatasetReference)
 _STRATEGY: TypeAdapter[StrategyReference] = TypeAdapter(StrategyReference)
 _INSTANT: TypeAdapter[datetime] = TypeAdapter(datetime)
@@ -317,6 +321,38 @@ def _validate_context(inputs: _CallerInputs) -> None:
         )
 
 
+def _bound_parameters_hash(
+    specification: ExperimentSpecification, inputs: _CallerInputs
+) -> str:
+    """The M0 row's ``parameters_hash``, from one read of the parameters.
+
+    Under a V1 identity it is ``content_hash(specification.parameters)``, as
+    it always was. Under a V2 identity (issue 112) the specification's
+    parameters are read exactly once, into one exact canonical copy
+    (``strategy_parameters_hash``), and that one digest is both compared with
+    the identity's ``strategy_parameters_hash`` and returned for the M0 row,
+    so the row always names the parameters the identity binds. A second,
+    differently implemented read could see other contents, as a mapping proxy
+    over a dict whose ``items()`` and storage disagree does (issue 112 review,
+    F1). The digest is a fresh ``str`` and the identity is the canonical copy,
+    so no forged comparison answers. The running strategy's parameters are
+    bound by the engine, which reads them once before any session.
+    """
+    identity = inputs.run_identity
+    if type(identity) is not EvaluationRunIdentityV2:
+        return content_hash(specification.parameters)
+    specified = strategy_parameters_hash(
+        specification.parameters, label="the specification parameters"
+    )
+    if specified != identity.strategy_parameters_hash:
+        raise StrategyParametersBindingError(
+            "the specification parameters do not match the evaluated run "
+            f"identity: specification parameters hash to {specified}, run "
+            f"identity binds {identity.strategy_parameters_hash}"
+        )
+    return specified
+
+
 def _record_audit_event(
     context: ExperimentRunnerContext, inputs: _CallerInputs, run: ExperimentRun
 ) -> None:
@@ -361,7 +397,9 @@ def execute_experiment_run(
 
     A promotion admission or result is not a defect but a refusal (issue 79
     ruling): it raises `PromotionLaneDisabledError` and records nothing, and
-    so does that error raised from inside the engine run. Returned artifacts
+    so does the engine's own refusal raised from inside its run; strategy
+    code raising it during a session arrives as `StrategyRaisedRefusalError`
+    and is recorded FAILED (issue 112 round-2 review). Returned artifacts
     that fail their canonical rebuild are not recorded either; the validation
     error propagates. Nor are rebuilt artifacts of another run (issue 124):
     they raise `ForeignRunArtifactsError`.
@@ -373,10 +411,20 @@ def execute_experiment_run(
     copies are compared, run and recorded, in the M0 row and in its audit
     event (issue 123). An input that fails its rebuild raises its validation
     error and records nothing.
+
+    Under an ``EvaluationRunIdentityV2`` (issue 112), the specification's
+    parameters, read once, must hash to the identity's
+    ``strategy_parameters_hash``, and that one digest is the M0 row's
+    ``parameters_hash``. The engine binds the running strategy's parameters,
+    read once, before any session. Either refusal raises
+    ``StrategyParametersBindingError`` and records nothing: the engine's is
+    re-raised exactly as ``PromotionLaneDisabledError`` is, never recorded as
+    a FAILED run. A V1 run is unchanged.
     """
     refuse_promotion_lane(context.engine.admission, site="the experiment runner")
     inputs = _caller_inputs(specification, context)
     _validate_context(inputs)
+    parameters_hash = _bound_parameters_hash(specification, inputs)
     common: dict[str, object] = {
         "run_id": inputs.run_id,
         "experiment_id": inputs.experiment_id,
@@ -385,15 +433,19 @@ def execute_experiment_run(
         "code_hash": inputs.run_identity.code_version_hash,
         "environment_hash": inputs.run_identity.environment_closure_hash,
         "dataset_hash": inputs.dataset_hash,
-        "parameters_hash": content_hash(specification.parameters),
+        "parameters_hash": parameters_hash,
     }
     try:
         artifacts = context.engine.run(
             strategy=context.strategy, run_identity=inputs.run_identity
         )
-    except PromotionLaneDisabledError:
+    except PromotionLaneDisabledError, StrategyParametersBindingError:
         # A refusal from inside the run is still a refusal (issue 120 review,
-        # F-B): it is never laundered into a recorded FAILED run.
+        # F-B): it is never laundered into a recorded FAILED run. The engine
+        # raises a parameters binding refusal only before any session (issue
+        # 112 review, F2). Strategy code that raises either error during a
+        # session arrives as StrategyRaisedRefusalError instead, and is
+        # recorded FAILED below (issue 112 round-2 review, R2-1).
         raise
     except Exception as error:
         detail = (
