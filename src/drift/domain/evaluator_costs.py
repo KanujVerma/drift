@@ -6,6 +6,10 @@ from typing import Literal, Self
 from pydantic import ValidationInfo, field_validator, model_validator
 
 from drift.domain.common import FrozenModel, NonBlankStr, SHA256Hash
+from drift.domain.evaluator_portfolio import (
+    PORTFOLIO_DECIMAL_PRECISION,
+    fits_portfolio_context,
+)
 from drift.serialization.canonical import content_hash
 
 
@@ -66,6 +70,21 @@ class EvaluationCostModelV1(FrozenModel):
                 "adverse_slippage_basis_points must be strictly less than "
                 "10000 basis points"
             )
+        # Issue 142 review: cost arithmetic runs in the pinned portfolio
+        # context, so a parameter it cannot hold exactly would be rounded into
+        # every fill. It is refused here, as a wide initial_cash is.
+        for name in (
+            "commission_per_share",
+            "fixed_fee_per_order",
+            "notional_fee_basis_points",
+            "adverse_slippage_basis_points",
+        ):
+            value: Decimal = getattr(self, name)
+            if not fits_portfolio_context(value):
+                raise ValueError(
+                    f"{name} {value} cannot be held exactly in the pinned "
+                    f"{PORTFOLIO_DECIMAL_PRECISION}-digit portfolio context"
+                )
         expected = evaluation_cost_model_hash(self)
         if self.cost_model_hash != expected:
             raise ValueError(
