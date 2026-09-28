@@ -505,7 +505,7 @@ def _evidence_with(name: str, members: tuple[Any, ...]) -> SessionEvaluatorEvide
                 policy=make_policy(), requests=members
             )
         )
-    return SessionEvaluatorEvidence(**{name: members})
+    return SessionEvaluatorEvidence(**cast(dict[str, Any], {name: members}))
 
 
 def test_duplicate_evidence_members_are_kept_in_content_hash_order() -> None:
@@ -819,10 +819,17 @@ def _wide_refusal(what: str, value: object) -> str:
     )
 
 
-def _views_with(day: date, **prices: str) -> tuple[DerivedObservationViewV1, ...]:
-    """SEC_A's genuine accounting views, with ``day``'s prices replaced."""
+def _views_with(
+    day: date, *, open_price: str | None = None, close_price: str | None = None
+) -> tuple[DerivedObservationViewV1, ...]:
+    """SEC_A's genuine accounting views, with ``day``'s given prices replaced."""
     return tuple(
-        eng._accounting_view(eng.SEC_A, item, **(prices if item == day else {}))
+        eng._accounting_view(
+            eng.SEC_A,
+            item,
+            open_price=open_price if item == day else None,
+            close_price=close_price if item == day else None,
+        )
         for item in eng.DAYS
     )
 
