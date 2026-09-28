@@ -18,7 +18,7 @@ from drift.domain.evaluator_clock import (
     EvaluationSessionV1,
     evaluation_session_hash,
 )
-from drift.domain.evaluator_portfolio import SecurityHoldingV1
+from drift.domain.evaluator_portfolio import SecurityHoldingV2
 from drift.domain.evaluator_strategy import (
     DECISION_TIME_MISMATCH,
     PositionViewV1,
@@ -231,9 +231,12 @@ def _outcome_view() -> DerivedObservationViewV1:
     return materialize_observation_outcome(result.reference, query, harness.context)
 
 
-def _holding(security_id: UUID7, quantity: int, basis: str) -> SecurityHoldingV1:
-    return SecurityHoldingV1(
-        security_id=security_id, quantity=quantity, cost_basis=Decimal(basis)
+def _holding(security_id: UUID7, quantity: int, basis: str) -> SecurityHoldingV2:
+    return SecurityHoldingV2(
+        security_id=security_id,
+        quantity=quantity,
+        basis_status="known",
+        cost_basis=Decimal(basis),
     )
 
 

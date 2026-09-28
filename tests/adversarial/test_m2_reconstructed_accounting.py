@@ -54,10 +54,10 @@ from test_evaluator_engine import (
 from drift.domain.evaluator_exploratory_accounting import (
     ExploratoryReconstructedAccountingPriceV1,
 )
-from drift.domain.evaluator_portfolio import PortfolioStateV1
+from drift.domain.evaluator_portfolio import PortfolioStateV2
 from drift.domain.evaluator_results import (
     EvaluationClassification,
-    EvaluationRunArtifactsV1,
+    EvaluationRunArtifactsV2,
     PromotionEvaluationResultV1,
     evaluation_result_hash,
 )
@@ -77,7 +77,7 @@ def _strategy() -> ReconstructedTargetStrategy:
     return ReconstructedTargetStrategy(dict(BUY_AND_HOLD.targets))
 
 
-def _priced(artifacts: EvaluationRunArtifactsV1) -> list[Any]:
+def _priced(artifacts: EvaluationRunArtifactsV2) -> list[Any]:
     return [
         event
         for event in artifacts.trace.events
@@ -85,7 +85,7 @@ def _priced(artifacts: EvaluationRunArtifactsV1) -> list[Any]:
     ]
 
 
-def _cause(artifacts: EvaluationRunArtifactsV1) -> Any:
+def _cause(artifacts: EvaluationRunArtifactsV2) -> Any:
     causes = [
         event for event in artifacts.trace.events if event.kind == "indeterminate_cause"
     ]
@@ -450,7 +450,7 @@ def _promotion_artifacts_over_priced_trace() -> dict[str, Any]:
     mark = state.mark
     assert mark is not None
     assert mark.prices == ()
-    final_state = PortfolioStateV1.model_validate(
+    final_state = PortfolioStateV2.model_validate(
         dict(state)
         | {
             "lane": "promotion",
@@ -469,6 +469,6 @@ def test_a_promotion_result_cannot_bind_a_trace_of_reconstructed_prices() -> Non
             r"EXPLORATORY reconstructed evidence: 3 exploratory_accounting_price"
         ),
     ):
-        EvaluationRunArtifactsV1.model_validate(
+        EvaluationRunArtifactsV2.model_validate(
             _promotion_artifacts_over_priced_trace()
         )
