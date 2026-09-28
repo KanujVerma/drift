@@ -24,7 +24,7 @@ unique to its guard.
 import copy
 import dataclasses
 import sys
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
@@ -36,6 +36,7 @@ for folder in (_SUPPORT / "unit", _SUPPORT / "integration"):
     if str(folder) not in sys.path:
         sys.path.insert(0, str(folder))
 
+import exploratory_decision_test_support as eds
 import pytest
 import test_evaluator_corporate_actions as ca
 import test_evaluator_engine as eng
@@ -43,14 +44,18 @@ import test_evaluator_experiment_run as run_support
 from exploratory_decision_test_support import (
     JAN5,
     JAN6,
+    LISTING,
     SEC,
     ReconstructedTargetStrategy,
     bundle_of,
+    cohort_of,
+    exploratory_admission,
     reconstructed_engine,
     run_engine,
     scheduled_session_case,
 )
 from exploratory_decision_test_support import replay_of as exploratory_replay_of
+from observation_test_support import ObservationHarness
 from pydantic import ValidationError
 from session_test_support import boundary_at, revision
 from test_evaluator_reconstruction import make_policy
@@ -61,9 +66,14 @@ from drift.domain.evaluator_bundles import (
     EvaluationRunIdentityV1,
     evaluation_run_identity_hash,
 )
+from drift.domain.evaluator_clock import EvaluationSessionV1
 from drift.domain.evaluator_corporate_actions import (
     SecurityEconomicOutcomeV1,
     exact_decimal,
+)
+from drift.domain.evaluator_costs import (
+    EvaluationCostModelV1,
+    evaluation_cost_model_hash,
 )
 from drift.domain.evaluator_portfolio import (
     IndeterminateValuationError,
@@ -72,10 +82,14 @@ from drift.domain.evaluator_portfolio import (
     PortfolioFillV1,
     PortfolioStateV1,
     canonical_money,
+    fits_portfolio_context,
 )
 from drift.domain.evaluator_protocol import (
     EvaluationProtocolV1,
     evaluation_protocol_hash,
+)
+from drift.domain.evaluator_reconstruction import (
+    ExploratoryReconstructedSessionObservationV1,
 )
 from drift.domain.evaluator_results import (
     EvaluationClassification,
@@ -96,6 +110,7 @@ from drift.domain.securities import (
     OutcomeEvidenceStatus,
 )
 from drift.domain.temporal import SourcePrecision
+from drift.evaluator.clock import build_scheduled_reconstruction_clock
 from drift.evaluator.engine import (
     SessionEvaluatorEngine,
     SessionEvaluatorEvidence,
@@ -103,7 +118,10 @@ from drift.evaluator.engine import (
     accounting_view_currency,
 )
 from drift.evaluator.experiment_runner import execute_experiment_run
-from drift.evaluator.reconstruction import ExploratoryReconstructionReplay
+from drift.evaluator.reconstruction import (
+    ExploratoryReconstructionReplay,
+    build_exploratory_reconstructed_session_observation,
+)
 from drift.ledger.sqlite import SQLiteLedger
 from drift.markets.observation_validation import m1d_context_hash
 from drift.serialization.canonical import content_hash
@@ -1009,3 +1027,189 @@ def test_a_protocol_keeps_full_width_initial_cash() -> None:
     full = _unvalidated_protocol(str(FULL))
     assert EvaluationProtocolV1.model_validate(full.model_dump()).initial_cash == FULL
     assert eng._protocol(cash=str(FULL)).initial_cash == FULL
+
+
+# --- Round-2 review of PR 145: the remaining reads and the pathological ends --
+
+
+def _wide_open_reconstruction(
+    session_date: date,
+) -> tuple[ExploratoryReconstructedSessionObservationV1, EvaluationSessionV1]:
+    """A genuinely reconstructed session whose source bar opens at WIDE_PRICE."""
+    harness = ObservationHarness(
+        session_date=session_date,
+        security_id=SEC,
+        listing_id=LISTING,
+        close="100.000",
+        available_at=f"{session_date.isoformat()}T22:30:00Z",
+        claimed_close_utc=(20, 55),
+    )
+    harness.use_numeric_values(
+        open_value=WIDE_PRICE, high="101", low="99", close="100.000", volume="1000"
+    )
+    harness.attach_sessions(schedule_state="regular", realized_outcome="missing")
+    horizon = f"{(session_date + timedelta(days=1)).isoformat()}T00:00:00Z"
+    query = harness.outcome(
+        economic_horizon=horizon,
+        evidence_vintage_cutoff=horizon,
+        session_date=session_date.isoformat(),
+    )
+    observation = build_exploratory_reconstructed_session_observation(
+        query, harness.context, cohort_of((SEC,)), make_policy()
+    )
+    # Registered as the support module's own genuine cases are, so the
+    # engine's replay re-derives this reconstruction from its source.
+    eds._SOURCE_REQUESTS[observation.reconstruction_hash] = (query, harness.context)
+    clock = build_scheduled_reconstruction_clock((query,), harness.context)
+    return observation, clock.sessions[0]
+
+
+def _wide_open_reconstructed_engine(code: str) -> SessionEvaluatorEngine:
+    """The reconstructed lane over a wide 2026-01-06 open, in the given book."""
+    bundle = bundle_of((scheduled_session_case(JAN5), _wide_open_reconstruction(JAN6)))
+    return SessionEvaluatorEngine(
+        bundle=bundle,
+        admission=exploratory_admission(bundle),
+        protocol=eng._protocol(warmup=1),
+        cost_model=eng._cost_model(),
+        evidence=SessionEvaluatorEvidence(
+            listing_role_records=eng.ROLE_RECORDS,
+            exploratory_cohort=cohort_of(),
+            exploratory_reconstruction_replay=exploratory_replay_of(
+                bundle.exploratory_reconstructed_observations
+            ),
+        ),
+        book_currency_namespace=eng.BOOK_NAMESPACE,
+        book_currency_code=code,
+    )
+
+
+def test_a_wide_reconstructed_open_halts_before_it_fills() -> None:
+    """Round-2 review: an open-only reconstructed check went untested."""
+    artifacts = run_engine(
+        _wide_open_reconstructed_engine("USD"),
+        ReconstructedTargetStrategy({JAN5: ((SEC, 1),)}),
+    )
+
+    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
+    assert artifacts.result.halt_reason == _wide_refusal(
+        f"exploratory reconstructed open price for security {SEC} on XNYS "
+        f"{JAN6.isoformat()}",
+        WIDE_PRICE,
+    )
+    assert _fill_sessions(artifacts) == []
+    assert _halt_phases(artifacts) == [("open_execution", "indeterminate_valuation")]
+
+
+def test_the_currency_is_checked_before_the_width_in_both_lanes() -> None:
+    """A price in another currency is refused for its currency, whatever its width.
+
+    Spec 11, the issue 142 D4 amendment: the width check runs after the
+    currency check, so the halt names the more basic defect.
+    """
+    realized = eng._run(
+        _realized_engine(
+            code="EUR", accounting_views=_views_with(eng.DAY_2, open_price=WIDE_PRICE)
+        )
+    )
+    reconstructed = run_engine(
+        _wide_open_reconstructed_engine("EUR"),
+        ReconstructedTargetStrategy({JAN5: ((SEC, 1),)}),
+    )
+
+    assert realized.result.halt_reason == _refusal("open", eng.DAY_2, "EUR")
+    assert reconstructed.result.halt_reason == (
+        f"exploratory reconstructed open price for security {SEC} on XNYS "
+        f"{JAN6.isoformat()} is in USD, not the book currency EUR"
+    )
+
+
+COST_FIELDS = (
+    "commission_per_share",
+    "fixed_fee_per_order",
+    "notional_fee_basis_points",
+    "adverse_slippage_basis_points",
+)
+#: 35 significant digits, one more than the pinned portfolio context holds.
+WIDE_COST = "1." + "0" * 33 + "1"
+
+
+def _unvalidated_cost_model(field: str, value: str) -> EvaluationCostModelV1:
+    """The engine tests' zero-cost model with one field, sealed, never validated."""
+    draft = EvaluationCostModelV1.model_construct(
+        **(dict(eng._cost_model()) | {field: Decimal(value)})
+    )
+    return EvaluationCostModelV1.model_construct(
+        **(dict(draft) | {"cost_model_hash": evaluation_cost_model_hash(draft)})
+    )
+
+
+@pytest.mark.parametrize("field", COST_FIELDS)
+def test_a_cost_model_refuses_a_parameter_wider_than_the_context(field: str) -> None:
+    """Round-2 review: a wide cost was silently rounded by cost arithmetic."""
+    assert len(WIDE_COST.replace(".", "")) == 35
+    wide = _unvalidated_cost_model(field, WIDE_COST)
+    refusal = (
+        f"^1 validation error for EvaluationCostModelV1\n  Value error, {field} "
+        f"{getattr(wide, field)} cannot be held exactly in the pinned 34-digit "
+        "portfolio context"
+    )
+
+    with pytest.raises(ValidationError, match=refusal):
+        EvaluationCostModelV1.model_validate(wide.model_dump())
+    with pytest.raises(ValidationError, match=refusal):
+        EvaluationCostModelV1.model_validate_json(wide.model_dump_json())
+    with pytest.raises(ValidationError, match=refusal):
+        eng._engine(cost_model=wide)
+
+
+def test_a_cost_model_keeps_full_width_parameters() -> None:
+    """Control: 34 significant digits, and zeros beyond them, are held exactly."""
+    for field in COST_FIELDS:
+        full = _unvalidated_cost_model(field, "0." + "0" * 40 + "1" * 34)
+        rebuilt = EvaluationCostModelV1.model_validate(full.model_dump())
+        assert getattr(rebuilt, field) == getattr(full, field)
+
+
+def test_exact_decimal_refuses_by_counting_digits_before_it_renders() -> None:
+    """Round-2 review: rendering 4300 digits raised ValueError out of the run.
+
+    A cash amount per 2**6200 shares has 6200 decimal places. Its digits are
+    counted arithmetically, so it is refused as a value the book cannot hold,
+    never by CPython's integer-to-text conversion limit.
+    """
+    amount = Fraction(1, 2**6200)
+
+    with pytest.raises(IndeterminateValuationError) as refused:
+        exact_decimal(amount)
+
+    assert str(refused.value).endswith(
+        "cannot be held exactly in the pinned 34-digit portfolio context"
+    )
+    assert exact_decimal(Fraction(3 * 10**40, 2**10)) == Decimal(3 * 10**40) / 1024
+
+
+#: A finite value whose rounding to the context overflows its exponent range.
+OVERFLOWING = Decimal("1E+1000000")
+
+
+def test_a_value_past_the_exponent_range_does_not_fit_and_never_raises() -> None:
+    """Round-2 review: ``decimal.Overflow`` escaped instead of an answer."""
+    assert fits_portfolio_context(OVERFLOWING) is False
+    assert fits_portfolio_context(OVERFLOWING.copy_negate()) is False
+    with pytest.raises(ValueError, match=PRECISION_REFUSAL):
+        canonical_money(OVERFLOWING)
+    with pytest.raises(ValidationError, match="initial_cash 1E[+]1000000 cannot"):
+        EvaluationProtocolV1.model_validate(
+            _unvalidated_protocol(str(OVERFLOWING)).model_dump()
+        )
+
+
+def test_a_realized_open_past_the_exponent_range_halts_indeterminate() -> None:
+    """Before this it raised Overflow out of the run and the M0 row FAILED."""
+    views = _views_with(eng.DAY_2, open_price=str(OVERFLOWING))
+
+    artifacts = eng._run(_realized_engine(code="USD", accounting_views=views))
+
+    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
+    assert _halt_phases(artifacts) == [("open_execution", "indeterminate_valuation")]

@@ -3,7 +3,7 @@
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import date
-from decimal import ROUND_HALF_EVEN, Context, Decimal, localcontext
+from decimal import ROUND_HALF_EVEN, Context, Decimal, Overflow, localcontext
 from typing import Annotated, Literal, Self
 
 from pydantic import (
@@ -89,17 +89,19 @@ def canonical_money(value: Decimal) -> Decimal:
     affected; the exact rational conversion ``exact_decimal`` is not bounded
     by the context, so it refuses a wider result itself.
     """
-    with decimal_context():
-        magnitude = abs(value).normalize()
-        text = format(magnitude, "f")
-    validate_canonical_cash(text)
-    # After the M1c rule, which refuses every non-finite rendering first.
-    if not fits_portfolio_context(value):
+    # A finite value is judged before it is normalized, since normalizing one
+    # past the context's exponent range raises ``decimal.Overflow``; the M1c
+    # rule below refuses every non-finite rendering as it always has.
+    if value.is_finite() and not fits_portfolio_context(value):
         raise ValueError(
             f"monetary amount {value} cannot be held exactly in the pinned "
             f"{PORTFOLIO_DECIMAL_PRECISION}-digit portfolio context; it is refused, "
             "not rounded"
         )
+    with decimal_context():
+        magnitude = abs(value).normalize()
+        text = format(magnitude, "f")
+    validate_canonical_cash(text)
     return Decimal(f"-{text}") if value < Decimal("0") else Decimal(text)
 
 
@@ -107,14 +109,20 @@ def fits_portfolio_context(value: Decimal) -> bool:
     """Whether the pinned portfolio context holds ``value`` exactly (#142).
 
     A finite value fits when it has at most ``PORTFOLIO_DECIMAL_PRECISION``
-    significant digits; zeros beyond them are not significant. The book holds
-    money only in that context, so a wider value cannot be held without
-    rounding it.
+    significant digits and lies inside the context's exponent range; zeros
+    beyond the significant digits are not significant. The book holds money
+    only in that context, so a value that does not fit cannot be held without
+    rounding it, or at all.
     """
     # ``copy_abs`` is exact; ``abs`` would round under the ambient context.
     exact = value.copy_abs()
     with decimal_context():
-        return exact.normalize() == exact
+        try:
+            return exact.normalize() == exact
+        except Overflow:
+            # Rounding it to the context passes the largest exponent the
+            # context holds, so no amount the book holds equals it.
+            return False
 
 
 def validate_canonical_money(value: object, info: ValidationInfo) -> Decimal:
