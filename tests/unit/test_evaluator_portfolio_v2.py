@@ -1815,6 +1815,25 @@ def test_a_replayed_instalment_pass_is_refused_as_a_replay() -> None:
         _pass(once, (outcome,))
 
 
+def test_a_recorded_instalment_re_read_at_a_later_session_is_not_refused() -> None:
+    # The engine hands every session's pass the same outcomes. At the next
+    # session the recorded instalment is outside the pass's window, so the
+    # replay guard is never reached and nothing is refused or booked again.
+    # A guard ahead of the window check would halt every genuine run whose
+    # instalment is followed by another session (#139 re-review L2).
+    outcome = _instalment_outcome(4765, amount="3")
+    state = ca._state(holdings=(ca._holding(quantity=100, basis="1000"),))
+    once, _ = _pass(state, (outcome,))
+    assert once.applied_effect_ids == (INSTALMENT,)
+    kernel = PortfolioAccountingKernel(once, session_clock=ca.CLOCK)
+    kernel.advance_session(ca._key(ca.LATER_DAY))
+    later = kernel.state
+
+    again, _ = _pass(later, (outcome,), day=ca.LATER_DAY)
+
+    assert again == later
+
+
 def test_a_recorded_occurrence_on_an_unheld_security_is_not_refused() -> None:
     # The split of SEC_OTHER was recorded unexposed. Its reclassification as a
     # dividend owes this book nothing, so there is nothing to refuse.
@@ -1857,9 +1876,10 @@ def test_a_recorded_occurrence_on_an_unheld_security_is_not_refused() -> None:
 def test_a_cash_dividend_reclassified_as_a_split_is_the_recorded_residual() -> None:
     # The reverse direction is the named residual of the spec 11.3
     # amendment: a cash-only occurrence records no applied effect (recording
-    # one would move the hashes of every dividend run), so a revision that
-    # reclassifies a paid dividend as a split still applies the split. This
-    # pins today's behaviour so any change to it is deliberate.
+    # one would refuse a dividend re-read after it vests, not move a hash), so
+    # a revision that reclassifies a paid dividend as a split still applies
+    # the split. This pins today's behaviour so any change to it is
+    # deliberate.
     state = ca._state(holdings=(ca._holding(quantity=100, basis="1000"),))
     paid, _ = _pass(state, (_dividend(4790, occurrence="occ-z", at=ca.EFFECT_AT),))
     assert paid.applied_effect_ids == ()
