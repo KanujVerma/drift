@@ -1873,10 +1873,107 @@ def test_a_recorded_occurrence_on_an_unheld_security_is_not_refused() -> None:
     assert again == recorded
 
 
+def test_both_readings_of_one_occurrence_in_one_window_are_both_booked() -> None:
+    # Spec 11.3: the replay record is read as the prior close left it, so a
+    # share action and a cash distribution of one occurrence that vest in the
+    # same pass are both booked, exactly as a genuine combined occurrence
+    # would be; nothing is refused (#139 follow-up review). A guard that also
+    # consulted the pass's own share actions would refuse the dividend.
+    shares = ca._shares(
+        numerator="2",
+        denominator="1",
+        recipient=ca.SEC_A,
+        predecessor=ca.SEC_A,
+        meaning="resulting_per_predecessor",
+    )
+    split_terms = ca._terms(
+        suffix=4810, action_kind=ActionKind.FORWARD_SPLIT, components=(shares,)
+    )
+    split = ca._effect(
+        suffix=4811,
+        action_kind=ActionKind.FORWARD_SPLIT,
+        components=(shares,),
+        terms=split_terms,
+        occurrence_id="occ-both",
+    )
+    cash = ca._cash(amount="0.5", component_id="occ-both-dividend")
+    dividend_terms = ca._terms(
+        suffix=4820,
+        action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
+        components=(cash,),
+        dates=(
+            ca._date_fact("ex", ca.EFFECT_AT),
+            ca._date_fact("payable", ca.PAYABLE_AT),
+        ),
+    )
+    dividend = ca._effect(
+        suffix=4821,
+        action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
+        components=(cash,),
+        terms=dividend_terms,
+        occurrence_id="occ-both",
+        effective_at=ca.EFFECT_AT,
+    )
+    outcome = ca._outcome(
+        terms=(split_terms, dividend_terms),
+        effects=(split, dividend),
+        action_kinds=(ActionKind.FORWARD_SPLIT, ActionKind.REGULAR_CASH_DIVIDEND),
+    )
+    state = ca._state(holdings=(ca._holding(quantity=100, basis="1000"),))
+
+    once, _ = _pass(state, (outcome,))
+
+    assert once.holdings[0].quantity == 200
+    assert once.pending_claims_value == Decimal("50")
+    assert once.applied_effect_ids == (_effect_id(occurrence="occ-both"),)
+
+
+@pytest.mark.parametrize("suffix", (4830, 4850, 4870, 4890, 4910, 4930))
+def test_an_instalment_and_a_dividend_of_one_occurrence_in_one_window_both_book(
+    suffix: int,
+) -> None:
+    # The same property for two cash readings: an instalment records its
+    # identity in the pass, and a dividend of that occurrence in the same
+    # window is still paid, whichever of the two the pass reaches first. Six
+    # record suffixes cover both content-hash orders, so a guard that also
+    # consulted the pass's own records is refused in some of them.
+    terms, effect = _instalment(suffix, amount="3", occurrence="occ-pair")
+    cash = ca._cash(amount="0.5", component_id="occ-pair-dividend")
+    dividend_terms = ca._terms(
+        suffix=suffix + 10,
+        action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
+        components=(cash,),
+        dates=(
+            ca._date_fact("ex", ca.EFFECT_AT),
+            ca._date_fact("payable", ca.PAYABLE_AT),
+        ),
+    )
+    dividend = ca._effect(
+        suffix=suffix + 11,
+        action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
+        components=(cash,),
+        terms=dividend_terms,
+        occurrence_id="occ-pair",
+        effective_at=ca.EFFECT_AT,
+    )
+    outcome = ca._outcome(
+        terms=(terms, dividend_terms),
+        effects=(effect, dividend),
+        action_kinds=(ActionKind.LIQUIDATION, ActionKind.REGULAR_CASH_DIVIDEND),
+    )
+    state = ca._state(holdings=(ca._holding(quantity=100, basis="1000"),))
+
+    once, _ = _pass(state, (outcome,))
+
+    # 3.00 of instalment and 0.50 of dividend on each of 100 shares.
+    assert once.pending_claims_value == Decimal("350")
+
+
 def test_a_cash_dividend_reclassified_as_a_split_is_the_recorded_residual() -> None:
     # The reverse direction is the named residual of the spec 11.3
     # amendment: a cash-only occurrence records no applied effect (recording
-    # one would refuse a dividend re-read after it vests, not move a hash), so
+    # one would refuse a dividend replayed or revised into a later pass, not
+    # move a hash), so
     # a revision that reclassifies a paid dividend as a split still applies
     # the split. This pins today's behaviour so any change to it is
     # deliberate.
