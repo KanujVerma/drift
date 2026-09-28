@@ -4,14 +4,19 @@ import re
 from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime, timedelta
 from functools import cache
+from hashlib import sha256
+from struct import pack
 from typing import Literal
 
 import action_session_test_support
 import pytest
+import session_test_support
 from observation_test_support import NormalizationHarness, ObservationHarness
 from pydantic import ValidationError
+from session_test_support import availability, boundary_authority_payload
 
 from drift.datasets.hashing import assertion_version_payload
+from drift.datasets.resolver import VerifiedArtifactBytes
 from drift.domain.evaluator_clock import (
     EvaluationSessionV1,
     SessionClockMode,
@@ -27,6 +32,7 @@ from drift.domain.observation_query import ObservationOutcomeQueryV1
 from drift.domain.sessions import (
     RealizedSessionVersionV1,
     ScheduleArtifactV1,
+    ScheduledSessionVersionV1,
     ScheduleGenerationPolicyV1,
     SessionKeyV1,
 )
@@ -47,7 +53,7 @@ from drift.markets.observation_validation import (
     m1d_context_hash,
 )
 from drift.markets.session_generation import generate_schedule
-from drift.serialization.canonical import content_hash
+from drift.serialization.canonical import canonical_json, content_hash
 
 H0 = "0" * 64
 H1 = "1" * 64
@@ -927,3 +933,212 @@ def test_a_realized_record_without_authorized_venue_time_is_refused(
         ),
     ):
         build_realized_session_clock(queries, harness.context)
+
+
+# --- An in-session DST transition (issue 140, PR 144 review F1) ---
+
+EST_OFFSET = -18_000
+EDT_OFFSET = -14_400
+
+#: The in-session corpus springs forward at 2026-11-30 17:00Z, which is 12:00
+#: EST, inside that date's 09:30 to 16:00 session, so the session opens at
+#: UTC-5 and closes at UTC-4. Every earlier corpus instant keeps UTC-5, and the
+#: corpus falls back only long after the last instant it holds.
+IN_SESSION_SPRING_FORWARD = _utc(NOV30, 17)
+IN_SESSION_FALL_BACK = _utc(date(2026, 12, 15), 6)
+
+
+def in_session_dst_timezone_bytes(*, summer_offset_seconds: int = EDT_OFFSET) -> bytes:
+    """The corpus TZif v1 with both transitions moved to the 2026 year end.
+
+    It has the layout of ``session_test_support.timezone_bytes``, so it
+    replaces that function while the in-session corpus is built.
+    """
+    transitions = (
+        int(IN_SESSION_SPRING_FORWARD.timestamp()),
+        int(IN_SESSION_FALL_BACK.timestamp()),
+    )
+    abbreviations = b"EST\0EDT\0"
+    header = (
+        b"TZif\0"
+        + (b"\0" * 15)
+        + pack(">6l", 0, 0, 0, len(transitions), 2, len(abbreviations))
+    )
+    transition_table = b"".join(pack(">l", value) for value in transitions)
+    local_time_types = pack(">lbb", EST_OFFSET, 0, 0) + pack(
+        ">lbb", summer_offset_seconds, 1, 4
+    )
+    return header + transition_table + bytes((1, 0)) + local_time_types + abbreviations
+
+
+def _in_session_dst_schedules(
+    original: Callable[..., ScheduledSessionVersionV1],
+) -> Callable[..., ScheduledSessionVersionV1]:
+    """Wrap the corpus schedule builder to authorize the 2026-11-30 UTC-4 close.
+
+    The builder asserts one offset for both boundaries of a row. Across the
+    in-session transition the close is at UTC-4, so the 2026-11-30 close gets
+    its own authority artifact stating that offset, available when the open's
+    is, and the row is resealed. Every other row is the genuine one.
+    """
+
+    def schedule(
+        local_date: date,
+        state: ScheduleStateT,
+        methodology_hash: str,
+        support: dict[str, VerifiedArtifactBytes],
+        retained: dict[str, object],
+        **options: object,
+    ) -> ScheduledSessionVersionV1:
+        record = original(
+            local_date, state, methodology_hash, support, retained, **options
+        )
+        if local_date != NOV30:
+            return record
+        opening, closing = record.historical_boundary_offsets
+        assert (opening.boundary, closing.boundary) == ("open", "close")
+        assert record.local_close is not None
+        payload = canonical_json(
+            boundary_authority_payload(
+                local_date, "close", record.local_close, EDT_OFFSET
+            )
+        )
+        payload_hash = sha256(payload).hexdigest()
+        evidence = availability(evidence_digest=payload_hash)
+        evidence_hash = content_hash(evidence)
+        support[payload_hash] = VerifiedArtifactBytes(
+            data=payload, byte_size=len(payload), content_hash=payload_hash
+        )
+        retained[evidence_hash] = evidence
+        close = closing.model_copy(
+            update={
+                "utc_offset_seconds": EDT_OFFSET,
+                "authority_artifact_hash": payload_hash,
+                "authority_availability_evidence_hash": evidence_hash,
+            }
+        )
+        revision = record.revision.model_copy(update={"payload_hash": "0" * 64})
+        values = dict(record) | {
+            "revision": revision,
+            "historical_boundary_offsets": (opening, close),
+        }
+        provisional = ScheduledSessionVersionV1.model_construct(**values)
+        values["revision"] = revision.model_copy(
+            update={
+                "payload_hash": content_hash(assertion_version_payload(provisional))
+            }
+        )
+        return ScheduledSessionVersionV1.model_validate(values)
+
+    return schedule
+
+
+@cache
+def in_session_dst_realized_corpus(stamps: RealizedStamps) -> NormalizationHarness:
+    """The restamped corpus over a venue that springs forward mid-session.
+
+    Only the TZif and the 2026-11-30 schedule row differ from the genuine
+    corpus, so the schedule generation that authorizes each boundary's offset
+    is the genuine pipeline. Cached because each corpus is only read.
+    """
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            session_test_support, "timezone_bytes", in_session_dst_timezone_bytes
+        )
+        patch.setattr(
+            action_session_test_support,
+            "schedule_record",
+            # The action corpus imports it from here, so this is the same builder.
+            _in_session_dst_schedules(session_test_support.schedule_record),
+        )
+        patch.setattr(
+            action_session_test_support, "_realized_session", _restamping(stamps)
+        )
+        return NormalizationHarness(include_prior_open=True)
+
+
+#: Stamps where the 2026-11-30 open's UTC-5 and close's UTC-4 disagree on the
+#: local date: the stamps moved, and the refusal (boundary, UTC stamp, and
+#: the venue local date at that boundary's own offset). 04:30Z on 2026-12-01
+#: is 00:30 the next day at the close's UTC-4, but 23:30 on the session date
+#: at the open's UTC-5; 04:30Z on 2026-11-30 is 23:30 the day before at the
+#: open's UTC-5, but 00:30 on the session date at the close's UTC-4.
+IN_SESSION_DST_CASES: dict[str, tuple[RealizedStamps, tuple[str, str, str]]] = {
+    "the-close-read-at-its-own-utc-4": (
+        ((NOV30, _utc(NOV30, 14, 30), _utc(DEC1, 4, 30)),),
+        ("close", "2026-12-01T04:30:00+00:00", "2026-12-01"),
+    ),
+    "the-open-read-at-its-own-utc-5": (
+        ((NOV30, _utc(NOV30, 4, 30), _utc(NOV30, 21)),),
+        ("open", "2026-11-30T04:30:00+00:00", "2026-11-29"),
+    ),
+}
+
+
+def test_the_in_session_dst_corpus_authorizes_two_offsets_for_one_session() -> None:
+    """The corpus is non-vacuous: one session, two authorized offsets.
+
+    The scheduled clock over the genuine pipeline opens 2026-11-30 at 14:30Z,
+    09:30 at UTC-5, and closes it at 20:00Z, 16:00 at UTC-4, so a check that
+    read both stamps at one boundary's offset would misplace the other.
+    """
+    corpus = in_session_dst_realized_corpus(())
+    (session,) = build_scheduled_reconstruction_clock(
+        restamped_corpus_queries(corpus, NOV30), corpus.context
+    ).sessions
+    assert session.opened_at == _utc(NOV30, 14, 30)
+    assert session.closed_at == _utc(NOV30, 20)
+
+
+@pytest.mark.parametrize(
+    "case", IN_SESSION_DST_CASES.values(), ids=IN_SESSION_DST_CASES
+)
+def test_each_stamp_is_read_at_its_own_offset_across_an_in_session_transition(
+    case: tuple[RealizedStamps, tuple[str, str, str]],
+) -> None:
+    """Issue 140: the open is placed at the open's offset, the close at the close's.
+
+    On 2026-11-30 the venue springs forward mid-session. Each stamp below is
+    on the session date at the other boundary's offset and off it at its own,
+    so reading the close at the open's offset, or the open at the close's,
+    admits it. Both the build and verification refuse it.
+    """
+    stamps, (boundary, stamp, local) = case
+    corpus = in_session_dst_realized_corpus(stamps)
+    queries = restamped_corpus_queries(corpus, NOV30)
+    misdated = pre_issue_140_realized_clock(queries, corpus.context)
+    (session,) = misdated.sessions
+    moved = session.opened_at if boundary == "open" else session.closed_at
+    assert moved.isoformat() == stamp
+
+    refusal = off_date_refusal("2026-11-30", boundary, stamp, local)
+    with pytest.raises(RealizedSessionLocalDateError, match=refusal):
+        build_realized_session_clock(queries, corpus.context)
+    with pytest.raises(RealizedSessionLocalDateError, match=refusal):
+        verify_session_clock(misdated, queries, corpus.context)
+
+
+@pytest.mark.parametrize(
+    "stamps",
+    [(), ((NOV30, _utc(NOV30, 5, 30), _utc(DEC1, 3, 30)),)],
+    ids=["genuine", "both-stamps-within-an-hour-of-local-midnight"],
+)
+def test_an_in_session_transition_admits_stamps_on_their_local_date(
+    stamps: RealizedStamps,
+) -> None:
+    """Control: across the transition, on-date stamps build unchanged.
+
+    05:30Z on 2026-11-30 is 00:30 at the open's UTC-5, and 03:30Z on
+    2026-12-01 is 23:30 at the close's UTC-4, both on the session date though
+    the close is on the next UTC date.
+    """
+    corpus = in_session_dst_realized_corpus(stamps)
+    queries = restamped_corpus_queries(corpus, *CORPUS_DATES)
+
+    clock = build_realized_session_clock(queries, corpus.context)
+
+    assert clock == pre_issue_140_realized_clock(queries, corpus.context)
+    assert tuple(item.session_key.local_date for item in clock.sessions) == (
+        CORPUS_DATES
+    )
+    verify_session_clock(clock, queries, corpus.context)
