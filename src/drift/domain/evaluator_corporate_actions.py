@@ -45,7 +45,11 @@ from drift.domain.economic_events import (
     EconomicEffectVersionV1,
 )
 from drift.domain.economic_results import EconomicOutcomeResolutionV1
-from drift.domain.evaluator_portfolio import IndeterminateValuationError
+from drift.domain.evaluator_portfolio import (
+    PORTFOLIO_DECIMAL_PRECISION,
+    IndeterminateValuationError,
+    fits_portfolio_context,
+)
 from drift.domain.provenance_references import validate_safe_provenance_reference
 from drift.domain.temporal import SourcePrecision
 from drift.serialization.canonical import content_hash
@@ -160,7 +164,9 @@ def exact_decimal(value: Fraction) -> Decimal:
 
     A quotient whose denominator has a prime factor other than two or five has
     no finite decimal spelling. Rounding one into a book invents or destroys
-    money, so this fails closed instead.
+    money, so this fails closed instead. So does an exact amount with more
+    significant digits than the pinned portfolio context holds (#142), such as
+    a 31-digit amount per 1024 shares: the book cannot hold it either.
     """
     denominator = value.denominator
     residue = denominator
@@ -182,7 +188,13 @@ def exact_decimal(value: Fraction) -> Decimal:
     digits = str(abs(scaled)).rjust(scale + 1, "0")
     text = digits if scale == 0 else f"{digits[:-scale]}.{digits[-scale:]}"
     # Decimal built from text is exact and never consults the active context.
-    return Decimal(f"{sign}{text}")
+    amount = Decimal(f"{sign}{text}")
+    if not fits_portfolio_context(amount):
+        raise IndeterminateValuationError(
+            f"cash amount {value.numerator}/{denominator} cannot be held exactly "
+            f"in the pinned {PORTFOLIO_DECIMAL_PRECISION}-digit portfolio context"
+        )
+    return amount
 
 
 def boundary_session_date(boundary: TemporalBoundaryClaimV1, *, role: str) -> date:

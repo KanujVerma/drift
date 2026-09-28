@@ -109,12 +109,14 @@ from drift.domain.evaluator_lanes import (
     PromotionEvaluationAdmissionV1,
 )
 from drift.domain.evaluator_portfolio import (
+    PORTFOLIO_DECIMAL_PRECISION,
     IndeterminateValuationError,
     MarkEvidenceGrade,
     MarkEvidenceV1,
     MarkPriceV1,
     PortfolioStateV1,
     decimal_context,
+    fits_portfolio_context,
 )
 from drift.domain.evaluator_protocol import EvaluationProtocolV1
 from drift.domain.evaluator_reconstruction import (
@@ -1828,15 +1830,25 @@ class SessionEvaluatorEngine:
         The twin of the reconstructed lane's currency refusal: a price the
         book cannot hold in its own currency is missing evidence, so it halts
         the run INDETERMINATE rather than entering a NAV in another currency.
+        A price with more significant digits than the pinned portfolio context
+        holds is missing evidence the same way, and halts before a fill rounds
+        it or a mark refuses it out of the run.
         """
         value = source_basis_price(view, field_name)
         currency = accounting_view_currency(view)
+        where = (
+            f"accounting {field_name} price for security {view.security_id} on "
+            f"{view.source_session.mic} {view.source_session.local_date}"
+        )
         if currency != self._book_currency_code:
-            session = view.source_session
             raise IndeterminateValuationError(
-                f"accounting {field_name} price for security {view.security_id} "
-                f"on {session.mic} {session.local_date} is in {currency}, not the "
-                f"book currency {self._book_currency_code}"
+                f"{where} is in {currency}, not the book currency "
+                f"{self._book_currency_code}"
+            )
+        if not fits_portfolio_context(value):
+            raise IndeterminateValuationError(
+                f"{where} cannot be held exactly in the pinned "
+                f"{PORTFOLIO_DECIMAL_PRECISION}-digit portfolio context: {value}"
             )
         return value
 
@@ -1878,6 +1890,15 @@ class SessionEvaluatorEngine:
                 f"exploratory reconstructed {field_role} price for security "
                 f"{security_id} on {where} is in {price.currency}, not the book "
                 f"currency {self._book_currency_code}"
+            )
+        # Issue 142: as in the realized lane, a price the pinned portfolio
+        # context cannot hold exactly is missing evidence for the book.
+        if not fits_portfolio_context(price.unadjusted_price):
+            raise IndeterminateValuationError(
+                f"exploratory reconstructed {field_role} price for security "
+                f"{security_id} on {where} cannot be held exactly in the pinned "
+                f"{PORTFOLIO_DECIMAL_PRECISION}-digit portfolio context: "
+                f"{price.unadjusted_price}"
             )
         return price
 

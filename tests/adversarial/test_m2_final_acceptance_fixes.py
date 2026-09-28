@@ -21,10 +21,12 @@ unique to its guard.
 
 # ruff: noqa: E402
 
+import copy
 import dataclasses
 import sys
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
@@ -38,19 +40,31 @@ import pytest
 import test_evaluator_corporate_actions as ca
 import test_evaluator_engine as eng
 import test_evaluator_experiment_run as run_support
-from exploratory_decision_test_support import JAN5, JAN6, scheduled_session_case
+from exploratory_decision_test_support import (
+    JAN5,
+    JAN6,
+    SEC,
+    ReconstructedTargetStrategy,
+    bundle_of,
+    reconstructed_engine,
+    run_engine,
+    scheduled_session_case,
+)
 from exploratory_decision_test_support import replay_of as exploratory_replay_of
 from pydantic import ValidationError
 from session_test_support import boundary_at, revision
 from test_evaluator_reconstruction import make_policy
 
 from drift.domain.assertions import BoundaryShape, TemporalBoundaryClaimV1
-from drift.domain.economic_common import ActionKind
+from drift.domain.economic_common import ActionKind, CashComponentV1
 from drift.domain.evaluator_bundles import (
     EvaluationRunIdentityV1,
     evaluation_run_identity_hash,
 )
-from drift.domain.evaluator_corporate_actions import SecurityEconomicOutcomeV1
+from drift.domain.evaluator_corporate_actions import (
+    SecurityEconomicOutcomeV1,
+    exact_decimal,
+)
 from drift.domain.evaluator_portfolio import (
     IndeterminateValuationError,
     MarkEvidenceV1,
@@ -59,13 +73,20 @@ from drift.domain.evaluator_portfolio import (
     PortfolioStateV1,
     canonical_money,
 )
+from drift.domain.evaluator_protocol import (
+    EvaluationProtocolV1,
+    evaluation_protocol_hash,
+)
 from drift.domain.evaluator_results import (
     EvaluationClassification,
     EvaluationRunArtifactsV1,
     ExploratoryEvaluationResultV1,
     evaluation_result_hash,
 )
-from drift.domain.evaluator_trace import IndeterminateCauseTraceEventV1
+from drift.domain.evaluator_trace import (
+    FillTraceEventV1,
+    IndeterminateCauseTraceEventV1,
+)
 from drift.domain.normalization import DerivedObservationViewV1
 from drift.domain.securities import (
     ListingLifecycleEventKind,
@@ -96,7 +117,13 @@ def _at(day: date) -> str:
 
 def _dividend(code: str) -> SecurityEconomicOutcomeV1:
     """The probe's dividend on SEC_A, ex and payable on DAY_3, in ``code``."""
-    cash = ca._cash(amount="0.5", component_id="d", predecessor=eng.SEC_A, code=code)
+    return _dividend_of(
+        ca._cash(amount="0.5", component_id="d", predecessor=eng.SEC_A, code=code)
+    )
+
+
+def _dividend_of(cash: CashComponentV1) -> SecurityEconomicOutcomeV1:
+    """A dividend on SEC_A paying ``cash``, ex and payable on DAY_3."""
     terms = ca._terms(
         suffix=5500,
         action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
@@ -470,6 +497,61 @@ def test_the_engine_holds_every_evidence_collection_in_content_hash_order() -> N
         assert _held_keys(backward, name) == held, name
 
 
+def _evidence_with(name: str, members: tuple[Any, ...]) -> SessionEvaluatorEvidence:
+    """Evaluator evidence carrying ``members`` as the collection ``name``."""
+    if name == "replay_requests":
+        return SessionEvaluatorEvidence(
+            exploratory_reconstruction_replay=ExploratoryReconstructionReplay(
+                policy=make_policy(), requests=members
+            )
+        )
+    return SessionEvaluatorEvidence(**{name: members})
+
+
+def test_duplicate_evidence_members_are_kept_in_content_hash_order() -> None:
+    """The evidence hash keeps a repeated member, so the held order keeps it too.
+
+    Sorting by content hash must not also deduplicate: a collection handed a
+    member twice is held with both copies, in the one canonical order.
+    """
+    for name, (first, second) in _two_of_every_collection().items():
+        orders = ((first, second, first), (first, first, second))
+        held = [
+            _held_keys(_revalidated_evidence(_evidence_with(name, o)), name)
+            for o in orders
+        ]
+        assert len(held[0]) == 3, name
+        assert held[0] == sorted(held[0]), name
+        assert held[1] == held[0], name
+        assert len(set(held[0])) == 2, name
+
+
+def test_replay_requests_are_ordered_by_query_and_context_together() -> None:
+    """A request's key is its query and its M1d context hash, not either alone.
+
+    Two requests sharing a query, or sharing a context, still get one order
+    whatever order they are handed in. Keyed by the shared half alone, the
+    sort would tie and keep the caller's order.
+    """
+    first, second = _two_of_every_collection()["replay_requests"]
+    (query_a, context_a), (query_b, context_b) = first, second
+    assert query_a != query_b
+    assert m1d_context_hash(context_a) != m1d_context_hash(context_b)
+    shared_query = ((query_a, context_a), (query_a, context_b))
+    shared_context = ((query_a, context_a), (query_b, context_a))
+    for pair in (shared_query, shared_context):
+        held = [
+            _held_keys(
+                _revalidated_evidence(_evidence_with("replay_requests", order)),
+                "replay_requests",
+            )
+            for order in (pair, pair[::-1])
+        ]
+        assert len(set(held[0])) == 2
+        assert held[0] == sorted(held[0])
+        assert held[1] == held[0]
+
+
 # --- D3: a result binds its admission's bundle to its identity's bundle -----
 
 
@@ -597,6 +679,40 @@ def test_the_runner_records_nothing_for_a_result_naming_another_bundle() -> None
         assert ledger.verified_events() == ()
 
 
+def test_the_runner_refuses_a_nested_rewrite_the_pair_does_not_see() -> None:
+    """Review F2 of PR 145: the runner's canonical JSON rebuild is the defense.
+
+    A result's admission rewritten in place under a resealed result hash
+    passes the artifact pair, which re-runs only the result's own checks. The
+    runner rebuilds what an engine returns through canonical JSON, so the
+    admission's own hash check runs, and nothing is recorded.
+    """
+    engine = eng._engine()
+    returned = copy.deepcopy(eng._run(engine))
+    assert returned.result.admission is not engine.admission
+    object.__setattr__(
+        returned.result.admission, "acknowledged_limitations", ("forged",)
+    )
+    object.__setattr__(
+        returned.result, "result_hash", evaluation_result_hash(returned.result)
+    )
+    EvaluationRunArtifactsV1.model_validate(dict(returned))
+
+    with TemporaryDirectory() as folder:
+        ledger = SQLiteLedger(Path(folder) / "audit.sqlite3")
+        context = run_support._context(
+            cast(SessionEvaluatorEngine, _StandIn(engine, returned)), ledger=ledger
+        )
+
+        with pytest.raises(
+            ValidationError, match=r"result\.exploratory\.admission\n"
+        ) as refused:
+            execute_experiment_run(run_support._specification(), context)
+
+        assert "admission hash mismatch" in str(refused.value)
+        assert ledger.verified_events() == ()
+
+
 # --- D4: canonical money refuses, never rounds, a wider input -----------------
 
 #: 37 significant digits, from probe p3.
@@ -678,3 +794,211 @@ def test_money_fields_keep_a_full_width_value_exactly() -> None:
         security_id=ca.SEC_A, side="buy", quantity=1, fill_price=FULL
     )
     assert fill.fill_price == FULL
+
+
+# --- PR 145 review F1: a value the book cannot hold halts INDETERMINATE ------
+#
+# D4 refuses a wide value where it is first held as money. The review found
+# three reads that reached that refusal only as an exception out of the run,
+# so the M0 row recorded FAILED, or never reached it: an exact per-share cash
+# amount wider than the context, a wide close price, and a wide open price,
+# which fill arithmetic silently rounded. A value the book cannot hold is
+# missing evidence for the book, as a price in another currency is (D1), so
+# each now halts the run INDETERMINATE where it is read.
+
+#: 35 significant digits, one more than the pinned portfolio context holds.
+WIDE_PRICE = "100." + "0" * 31 + "1"
+#: A 31-digit M1c amount per 1024 shares: an exact 38-digit cash per share.
+WIDE_AMOUNT = "1234567890123456789012345678901"
+
+
+def _wide_refusal(what: str, value: object) -> str:
+    return (
+        f"{what} cannot be held exactly in the pinned 34-digit portfolio "
+        f"context: {value}"
+    )
+
+
+def _views_with(day: date, **prices: str) -> tuple[DerivedObservationViewV1, ...]:
+    """SEC_A's genuine accounting views, with ``day``'s prices replaced."""
+    return tuple(
+        eng._accounting_view(eng.SEC_A, item, **(prices if item == day else {}))
+        for item in eng.DAYS
+    )
+
+
+def _fill_sessions(artifacts: EvaluationRunArtifactsV1) -> list[date]:
+    """The session of each traced fill; a halted session's fill is traced only."""
+    return [
+        event.session_key.local_date
+        for event in artifacts.trace.events
+        if isinstance(event, FillTraceEventV1)
+    ]
+
+
+def _halt_phases(artifacts: EvaluationRunArtifactsV1) -> list[tuple[str, str]]:
+    return [
+        (event.phase.value, event.cause_kind)
+        for event in artifacts.trace.events
+        if isinstance(event, IndeterminateCauseTraceEventV1)
+    ]
+
+
+def test_the_wide_values_are_one_digit_or_more_past_the_context() -> None:
+    """The fixtures are non-vacuous: each needs more than 34 digits."""
+    assert len(WIDE_PRICE.replace(".", "")) == 35
+    assert len(WIDE_AMOUNT) == 31
+    per_share = str(Fraction(int(WIDE_AMOUNT), 1024).numerator * 5**10)
+    assert len(per_share) == 38
+    assert len(WIDE_INITIAL_CASH.replace(".", "")) == 35
+
+
+def test_exact_decimal_refuses_a_cash_amount_wider_than_the_context() -> None:
+    amount = Fraction(int(WIDE_AMOUNT), 1024)
+
+    with pytest.raises(IndeterminateValuationError) as refused:
+        exact_decimal(amount)
+
+    assert str(refused.value) == (
+        f"cash amount {WIDE_AMOUNT}/1024 cannot be held exactly in the pinned "
+        "34-digit portfolio context"
+    )
+
+
+def test_exact_decimal_keeps_an_amount_the_context_holds_exactly() -> None:
+    """Controls: 34 significant digits, and zeros beyond them, convert exactly."""
+    assert exact_decimal(Fraction(FULL)) == FULL
+    assert str(exact_decimal(Fraction(FULL))) == str(FULL)
+    assert exact_decimal(Fraction(10**40)) == Decimal(10**40)
+    assert exact_decimal(Fraction(1, 1024)) == Decimal("0.0009765625")
+
+
+def test_a_computed_cash_amount_wider_than_the_context_halts_indeterminate() -> None:
+    """The review probe: a 38-digit cash per share recorded FAILED before."""
+    wide = _dividend_of(
+        ca._cash(
+            amount=WIDE_AMOUNT,
+            component_id="d",
+            predecessor=eng.SEC_A,
+            numerator="1024",
+        )
+    )
+
+    artifacts = eng._run(_realized_engine(code="USD", outcomes=(wide,)))
+
+    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
+    assert artifacts.result.halt_reason == (
+        f"cash amount {WIDE_AMOUNT}/1024 cannot be held exactly in the pinned "
+        "34-digit portfolio context"
+    )
+    assert _halt_phases(artifacts) == [("pre_open_effects", "indeterminate_valuation")]
+    assert artifacts.final_state.pending_cash_claims == ()
+
+
+def test_a_wide_realized_open_halts_before_it_fills() -> None:
+    """Before this fix fill arithmetic rounded the open, and the run completed."""
+    views = _views_with(eng.DAY_2, open_price=WIDE_PRICE)
+
+    artifacts = eng._run(_realized_engine(code="USD", accounting_views=views))
+
+    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
+    assert artifacts.result.halt_reason == _wide_refusal(
+        f"accounting open price for security {eng.SEC_A} on XNYS "
+        f"{eng.DAY_2.isoformat()}",
+        WIDE_PRICE,
+    )
+    assert artifacts.result.metrics.committed_fill_count == 0
+    assert _halt_phases(artifacts) == [("open_execution", "indeterminate_valuation")]
+
+
+def test_a_wide_realized_close_halts_at_the_mark() -> None:
+    """Before this fix the mark raised out of the run and the M0 row FAILED."""
+    views = _views_with(eng.DAY_2, close_price=WIDE_PRICE)
+
+    artifacts = eng._run(_realized_engine(code="USD", accounting_views=views))
+
+    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
+    assert artifacts.result.halt_reason == _wide_refusal(
+        f"accounting close price for security {eng.SEC_A} on XNYS "
+        f"{eng.DAY_2.isoformat()}",
+        WIDE_PRICE,
+    )
+    assert _fill_sessions(artifacts) == [eng.DAY_2]
+    assert _halt_phases(artifacts) == [("close_mark", "indeterminate_valuation")]
+
+
+def test_a_wide_price_no_fill_or_mark_reads_changes_nothing() -> None:
+    """Control: the refusal is at first use, so an unread wide price is inert.
+
+    Nothing is held on 2026-01-06 and nothing fills then, so no read reaches
+    that session's close, and the run completes exactly as the genuine one.
+    """
+    genuine = eng._run(_realized_engine(code="USD"))
+    views = _views_with(eng.DAY_1, close_price=WIDE_PRICE)
+
+    artifacts = eng._run(_realized_engine(code="USD", accounting_views=views))
+
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert artifacts.result.metrics == genuine.result.metrics
+    held, expected = artifacts.final_state, genuine.final_state
+    assert held.holdings == expected.holdings
+    assert held.cash_balance == expected.cash_balance
+    assert held.net_asset_value == expected.net_asset_value == Decimal("10200")
+
+
+def test_a_wide_reconstructed_close_halts_at_the_mark() -> None:
+    """The reconstructed lane's twin: a wide close also raised out of the run."""
+    bundle = bundle_of(
+        (scheduled_session_case(JAN5), scheduled_session_case(JAN6, close=WIDE_PRICE))
+    )
+
+    artifacts = run_engine(
+        reconstructed_engine(bundle), ReconstructedTargetStrategy({JAN5: ((SEC, 1),)})
+    )
+
+    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
+    assert artifacts.result.halt_reason == _wide_refusal(
+        f"exploratory reconstructed close price for security {SEC} on XNYS "
+        f"{JAN6.isoformat()}",
+        WIDE_PRICE,
+    )
+    assert _fill_sessions(artifacts) == [JAN6]
+    assert _halt_phases(artifacts) == [("close_mark", "indeterminate_valuation")]
+
+
+WIDE_INITIAL_CASH = "1234567890123456789012345678901234.5"
+INITIAL_CASH_REFUSAL = (
+    f"initial_cash {WIDE_INITIAL_CASH} cannot be held exactly in the pinned "
+    "34-digit portfolio context"
+)
+
+
+def _unvalidated_protocol(cash: str) -> EvaluationProtocolV1:
+    """The engine tests' protocol with ``cash``, sealed but never validated."""
+    draft = EvaluationProtocolV1.model_construct(
+        **(dict(eng._protocol()) | {"initial_cash": Decimal(cash)})
+    )
+    return EvaluationProtocolV1.model_construct(
+        **(dict(draft) | {"protocol_hash": evaluation_protocol_hash(draft)})
+    )
+
+
+def test_a_protocol_refuses_initial_cash_wider_than_the_context() -> None:
+    """Before this fix it validated, and the run failed at its first book."""
+    wide = _unvalidated_protocol(WIDE_INITIAL_CASH)
+
+    with pytest.raises(ValidationError, match=INITIAL_CASH_REFUSAL):
+        eng._protocol(cash=WIDE_INITIAL_CASH)
+    with pytest.raises(ValidationError, match=INITIAL_CASH_REFUSAL):
+        EvaluationProtocolV1.model_validate(wide.model_dump())
+    with pytest.raises(ValidationError, match=INITIAL_CASH_REFUSAL):
+        EvaluationProtocolV1.model_validate_json(wide.model_dump_json())
+    with pytest.raises(ValidationError, match=INITIAL_CASH_REFUSAL):
+        eng._engine(protocol=wide)
+
+
+def test_a_protocol_keeps_full_width_initial_cash() -> None:
+    """Control: 34 significant digits are held exactly."""
+    full = _unvalidated_protocol(str(FULL))
+    assert EvaluationProtocolV1.model_validate(full.model_dump()).initial_cash == FULL
+    assert eng._protocol(cash=str(FULL)).initial_cash == FULL

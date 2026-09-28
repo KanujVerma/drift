@@ -84,22 +84,37 @@ def canonical_money(value: Decimal) -> Decimal:
 
     Issue 142: normalizing under the pinned context rounds any value with more
     significant digits than the context holds. Re-spelling must never
-    re-value, so such a value is refused instead. Kernel arithmetic already
-    runs in the same context, so no amount it computes is affected.
+    re-value, so such a value is refused instead. Kernel decimal arithmetic
+    already runs in the same context, so no amount it computes that way is
+    affected; the exact rational conversion ``exact_decimal`` is not bounded
+    by the context, so it refuses a wider result itself.
     """
     with decimal_context():
         magnitude = abs(value).normalize()
         text = format(magnitude, "f")
     validate_canonical_cash(text)
     # After the M1c rule, which refuses every non-finite rendering first.
-    # ``copy_abs`` is exact; ``abs`` would round under the ambient context.
-    if magnitude != value.copy_abs():
+    if not fits_portfolio_context(value):
         raise ValueError(
             f"monetary amount {value} cannot be held exactly in the pinned "
             f"{PORTFOLIO_DECIMAL_PRECISION}-digit portfolio context; it is refused, "
             "not rounded"
         )
     return Decimal(f"-{text}") if value < Decimal("0") else Decimal(text)
+
+
+def fits_portfolio_context(value: Decimal) -> bool:
+    """Whether the pinned portfolio context holds ``value`` exactly (#142).
+
+    A finite value fits when it has at most ``PORTFOLIO_DECIMAL_PRECISION``
+    significant digits; zeros beyond them are not significant. The book holds
+    money only in that context, so a wider value cannot be held without
+    rounding it.
+    """
+    # ``copy_abs`` is exact; ``abs`` would round under the ambient context.
+    exact = value.copy_abs()
+    with decimal_context():
+        return exact.normalize() == exact
 
 
 def validate_canonical_money(value: object, info: ValidationInfo) -> Decimal:
