@@ -397,7 +397,9 @@ def execute_experiment_run(
 
     A promotion admission or result is not a defect but a refusal (issue 79
     ruling): it raises `PromotionLaneDisabledError` and records nothing, and
-    so does that error raised from inside the engine run. Returned artifacts
+    so does the engine's own refusal raised from inside its run; strategy
+    code raising it during a session arrives as `StrategyRaisedRefusalError`
+    and is recorded FAILED (issue 112 round-2 review). Returned artifacts
     that fail their canonical rebuild are not recorded either; the validation
     error propagates. Nor are rebuilt artifacts of another run (issue 124):
     they raise `ForeignRunArtifactsError`.
