@@ -93,7 +93,6 @@ from drift.domain.evaluator_reconstruction import (
 )
 from drift.domain.evaluator_results import (
     EvaluationClassification,
-    EvaluationRunArtifactsV1,
     ExploratoryEvaluationResultV1,
     evaluation_result_hash,
 )
@@ -573,7 +572,7 @@ def test_replay_requests_are_ordered_by_query_and_context_together() -> None:
 # --- D3: a result binds its admission's bundle to its identity's bundle -----
 
 
-def _forged_identity(genuine: EvaluationRunArtifactsV1) -> EvaluationRunIdentityV1:
+def _forged_identity(genuine: Any) -> EvaluationRunIdentityV1:
     """Probe p2: the genuine identity renamed onto another bundle and resealed."""
     other_bundle = eng._bundle(days=eng.DAYS[:3])
     assert other_bundle.bundle_hash != genuine.result.admission.input_bundle_hash
@@ -589,7 +588,7 @@ def _forged_identity(genuine: EvaluationRunArtifactsV1) -> EvaluationRunIdentity
 
 
 def _resealed(
-    genuine: EvaluationRunArtifactsV1, identity: EvaluationRunIdentityV1
+    genuine: Any, identity: EvaluationRunIdentityV1
 ) -> ExploratoryEvaluationResultV1:
     """The genuine result under ``identity``, resealed but never validated."""
     unsealed = ExploratoryEvaluationResultV1.model_construct(
@@ -601,9 +600,13 @@ def _resealed(
 
 
 RESULT_BUNDLE_REFUSAL = r"^1 validation error for ExploratoryEvaluationResultV1\n"
-ARTIFACT_BUNDLE_REFUSAL = (
-    r"^1 validation error for EvaluationRunArtifactsV1\nresult\.exploratory\n"
-)
+
+
+def _artifact_bundle_refusal(pair: type[Any]) -> str:
+    """The artifact pair's refusal, for whichever artifacts version runs return."""
+    return rf"^1 validation error for {pair.__name__}\nresult\.exploratory\n"
+
+
 RESULT_BUNDLE_CAUSE = "result run identity must bind the bundle its admission admits"
 
 
@@ -635,8 +638,12 @@ def test_run_artifacts_refuse_a_result_naming_another_bundle(handed: str) -> Non
         object.__setattr__(result, "run_identity", identity)
         object.__setattr__(result, "result_hash", resealed.result_hash)
 
-    with pytest.raises(ValidationError, match=ARTIFACT_BUNDLE_REFUSAL) as refused:
-        EvaluationRunArtifactsV1.model_validate(
+    # The pair of whichever artifacts version the engine returns.
+    pair = type(genuine)
+    with pytest.raises(
+        ValidationError, match=_artifact_bundle_refusal(pair)
+    ) as refused:
+        pair.model_validate(
             {
                 "result": result,
                 "trace": genuine.trace,
@@ -666,8 +673,8 @@ def test_the_runner_records_nothing_for_a_result_naming_another_bundle() -> None
     engine = eng._engine()
     genuine = eng._run(engine)
     identity = _forged_identity(genuine)
-    returned = EvaluationRunArtifactsV1.model_construct(
-        schema_version="1",
+    returned = type(genuine).model_construct(
+        schema_version=genuine.schema_version,
         result=_resealed(genuine, identity),
         trace=genuine.trace,
         final_state=genuine.final_state,
@@ -714,7 +721,7 @@ def test_the_runner_refuses_a_nested_rewrite_the_pair_does_not_see() -> None:
     object.__setattr__(
         returned.result, "result_hash", evaluation_result_hash(returned.result)
     )
-    EvaluationRunArtifactsV1.model_validate(dict(returned))
+    type(returned).model_validate(dict(returned))
 
     with TemporaryDirectory() as folder:
         ledger = SQLiteLedger(Path(folder) / "audit.sqlite3")
@@ -852,7 +859,7 @@ def _views_with(
     )
 
 
-def _fill_sessions(artifacts: EvaluationRunArtifactsV1) -> list[date]:
+def _fill_sessions(artifacts: Any) -> list[date]:
     """The session of each traced fill; a halted session's fill is traced only."""
     return [
         event.session_key.local_date
@@ -861,7 +868,7 @@ def _fill_sessions(artifacts: EvaluationRunArtifactsV1) -> list[date]:
     ]
 
 
-def _halt_phases(artifacts: EvaluationRunArtifactsV1) -> list[tuple[str, str]]:
+def _halt_phases(artifacts: Any) -> list[tuple[str, str]]:
     return [
         (event.phase.value, event.cause_kind)
         for event in artifacts.trace.events
