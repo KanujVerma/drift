@@ -228,6 +228,19 @@ class PromotionLaneDisabledError(DriftError, ValueError):
     """
 
 
+class StrategyRaisedRefusalError(DriftError, RuntimeError):
+    """Raised when strategy code raises one of the engine's refusal types.
+
+    Issue 112 review, R2-1. The experiment runner records nothing for a
+    ``PromotionLaneDisabledError`` or a ``StrategyParametersBindingError``,
+    because the engine raises each only as a refusal: before any session, or
+    while sealing its result. Raised by strategy code during a session, either
+    is a failure of that strategy, which the issue 111 amendment records as a
+    FAILED run, so the engine re-raises it as this error, chained to it, and
+    a strategy can never keep its own failed run out of the M0 ledger.
+    """
+
+
 def refuse_promotion_lane(subject: object, *, site: str) -> None:
     """Fail closed on a promotion admission or result (issue 79 ruling).
 
@@ -1608,10 +1621,25 @@ class SessionEvaluatorEngine:
         )
         halt: _Halt | None = None
         for index, session in enumerate(sessions):
-            if index > 0:
-                loop.state = self._advance(loop.state, session.session_key)
-            self._emit_session_start(loop, index, session)
-            halt = self._step_session(loop, index, session, decide)
+            try:
+                if index > 0:
+                    loop.state = self._advance(loop.state, session.session_key)
+                self._emit_session_start(loop, index, session)
+                halt = self._step_session(loop, index, session, decide)
+            except (
+                PromotionLaneDisabledError,
+                StrategyParametersBindingError,
+            ) as error:
+                # Issue 112 review, R2-1: the engine raises neither inside a
+                # session, so this one came from strategy code, and it fails
+                # the run rather than passing as an unrecorded refusal.
+                key = session.session_key
+                raise StrategyRaisedRefusalError(
+                    f"strategy code raised {type(error).__name__} during the "
+                    f"session {key.mic} {key.local_date}, so the run failed; the "
+                    "engine raises it only as a refusal outside its sessions: "
+                    f"{error}"
+                ) from error
             if halt is not None:
                 break
         trace = seal_evaluation_trace_log(loop.events)

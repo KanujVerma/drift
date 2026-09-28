@@ -441,9 +441,9 @@ def execute_experiment_run(
         # A refusal from inside the run is still a refusal (issue 120 review,
         # F-B): it is never laundered into a recorded FAILED run. The engine
         # raises a parameters binding refusal only before any session (issue
-        # 112 review, F2). A strategy that raises either error itself from its
-        # decision method is likewise not recorded; strategy code is trusted
-        # at the process level (#113 freeze note).
+        # 112 review, F2). Strategy code that raises either error during a
+        # session arrives as StrategyRaisedRefusalError instead, and is
+        # recorded FAILED below (issue 112 round-2 review, R2-1).
         raise
     except Exception as error:
         detail = (

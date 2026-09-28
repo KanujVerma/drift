@@ -14,6 +14,7 @@ V1 stays frozen and byte-identical, and a V1 run never reads parameters.
 # ruff: noqa: E402
 
 import dataclasses
+import re
 import sys
 from collections.abc import Iterator, Mapping
 from decimal import Decimal
@@ -56,7 +57,9 @@ from drift.evaluator.bundles import (
 )
 from drift.evaluator.engine import (
     NonCanonicalEngineInputError,
+    PromotionLaneDisabledError,
     SessionEvaluatorEngine,
+    StrategyRaisedRefusalError,
     require_bound_strategy_parameters,
 )
 from drift.evaluator.experiment_runner import execute_experiment_run
@@ -1124,3 +1127,122 @@ def test_a_reconstructed_v1_run_never_reads_strategy_parameters() -> None:
     assert (
         artifacts.result.result_hash == RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_63_STAGE_2
     )
+
+
+# ==========================================================================
+# Round-2 R2-1: a strategy cannot keep its own failed run out of the ledger
+# ==========================================================================
+#
+# The runner re-raises ``StrategyParametersBindingError`` and
+# ``PromotionLaneDisabledError`` unrecorded, because the engine raises each
+# only as a refusal, before any session or while sealing its result. Raised
+# by strategy code during a session, either is a failure of that strategy,
+# and the issue 111 amendment records any exception raised inside ``decide``
+# as a FAILED run.
+
+STRATEGY_RAISED = (
+    r"^strategy code raised {name} during the session XNYS 2026-01-07, so the "
+    r"run failed; the engine raises it only as a refusal outside its sessions: "
+    r"raised by the strategy$"
+)
+
+
+def _raised_by_the_strategy() -> dict[str, Exception]:
+    return {
+        "parameters-binding-error": StrategyParametersBindingError(
+            "raised by the strategy"
+        ),
+        "promotion-lane-disabled-error": PromotionLaneDisabledError(
+            "raised by the strategy"
+        ),
+    }
+
+
+class _RaisingOnItsSecondDecision(ParameterizedFixedTargetStrategy):
+    """Decides genuinely on 2026-01-06, then raises ``error`` on 2026-01-07."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__(TEN)
+        self.error = error
+
+    def decide(self, context: Any) -> Any:
+        if context.session_key.local_date == eng.DAY_2:
+            raise self.error
+        return super().decide(context)
+
+
+@pytest.mark.parametrize("name", list(_raised_by_the_strategy()))
+def test_a_refusal_type_raised_by_the_strategy_fails_the_run(name: str) -> None:
+    error = _raised_by_the_strategy()[name]
+    engine = eng._engine()
+    strategy = _RaisingOnItsSecondDecision(error)
+
+    with pytest.raises(StrategyRaisedRefusalError) as raised:
+        _run_v2(engine, strategy, _v2_identity(engine, TEN))
+
+    assert raised.value.__cause__ is error
+    assert not isinstance(
+        raised.value, StrategyParametersBindingError | PromotionLaneDisabledError
+    )
+    assert re.fullmatch(
+        STRATEGY_RAISED.format(name=type(error).__name__), str(raised.value)
+    )
+    # It decided genuinely once, and raised at its next decision.
+    assert [context.session_key.local_date for context in strategy.seen] == [eng.DAY_1]
+
+
+@pytest.mark.parametrize("name", list(_raised_by_the_strategy()))
+def test_the_runner_records_a_strategy_raised_refusal_as_a_failed_run(
+    name: str, tmp_path: Path
+) -> None:
+    """R2-1: before this fix the run escaped the M0 ledger unrecorded."""
+    error = _raised_by_the_strategy()[name]
+    ledger = SQLiteLedger(tmp_path / "audit.sqlite3")
+    engine = eng._engine()
+    identity = _v2_identity(engine, TEN)
+    strategy = _RaisingOnItsSecondDecision(error)
+
+    run = execute_experiment_run(
+        run_support._specification(), _v2_context(engine, strategy, identity, ledger)
+    )
+
+    assert run.status.value == "failed"
+    assert run.artifact_references == ()
+    assert run.error_details is not None
+    assert run.error_details.startswith(
+        f"StrategyRaisedRefusalError: strategy code raised {type(error).__name__} "
+    )
+    assert run.parameters_hash == identity.strategy_parameters_hash
+    assert len(ledger.verified_events()) == 1
+    assert strategy.parameter_reads == 1
+
+
+def test_a_refusal_type_raised_from_decide_exploratory_fails_the_run() -> None:
+    """The reconstructed lane's decision method is wrapped the same way."""
+    from exploratory_decision_test_support import (
+        JAN5,
+        JAN6,
+        SEC,
+        ReconstructedTargetStrategy,
+        bundle_of,
+        reconstructed_engine,
+        three_regular_sessions,
+    )
+
+    error = StrategyParametersBindingError("raised by the strategy")
+
+    class _Raising(ReconstructedTargetStrategy):
+        def decide_exploratory(self, context: Any) -> Any:
+            if context.session_key.local_date == JAN6:
+                raise error
+            return super().decide_exploratory(context)
+
+    engine = reconstructed_engine(bundle_of(three_regular_sessions()))
+    strategy = _Raising({JAN5: ((SEC, 10),), JAN6: ((SEC, 10),)})
+
+    with pytest.raises(
+        StrategyRaisedRefusalError, match="during the session XNYS 2026-01-06"
+    ) as raised:
+        engine.run(strategy=strategy, run_identity=_v1_identity(engine))
+
+    assert raised.value.__cause__ is error
