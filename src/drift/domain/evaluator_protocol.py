@@ -6,6 +6,10 @@ from typing import Literal, Self
 from pydantic import ValidationInfo, field_validator, model_validator
 
 from drift.domain.common import FrozenModel, NonBlankStr, SHA256Hash
+from drift.domain.evaluator_portfolio import (
+    PORTFOLIO_DECIMAL_PRECISION,
+    fits_portfolio_context,
+)
 from drift.serialization.canonical import content_hash
 
 
@@ -52,6 +56,14 @@ class EvaluationProtocolV1(FrozenModel):
             raise ValueError("warmup_session_count must be at least 1")
         if self.initial_cash <= Decimal("0.00"):
             raise ValueError("initial_cash must be strictly positive")
+        # Issue 142: the first book holds initial cash as money, so a value the
+        # pinned portfolio context cannot hold exactly is refused here, before
+        # a run can start, rather than failing that run at its first book.
+        if not fits_portfolio_context(self.initial_cash):
+            raise ValueError(
+                f"initial_cash {self.initial_cash} cannot be held exactly in the "
+                f"pinned {PORTFOLIO_DECIMAL_PRECISION}-digit portfolio context"
+            )
         expected = evaluation_protocol_hash(self)
         if self.protocol_hash != expected:
             raise ValueError(
