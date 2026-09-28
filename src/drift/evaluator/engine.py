@@ -114,7 +114,7 @@ from drift.domain.evaluator_portfolio import (
     MarkEvidenceGrade,
     MarkEvidenceV1,
     MarkPriceV1,
-    PortfolioStateV1,
+    PortfolioStateV2,
     decimal_context,
     fits_portfolio_context,
 )
@@ -128,7 +128,7 @@ from drift.domain.evaluator_reconstruction import (
 from drift.domain.evaluator_results import (
     EvaluationClassification,
     EvaluationResultV1,
-    EvaluationRunArtifactsV1,
+    EvaluationRunArtifactsV2,
     EvaluationSummaryMetricsV1,
     ExploratoryEvaluationResultV1,
     PromotionEvaluationResultV1,
@@ -953,7 +953,7 @@ class _Checkpoint:
 class _Loop:
     """Mutable working set carried across the session loop."""
 
-    state: PortfolioStateV1
+    state: PortfolioStateV2
     staged_targets: tuple[SecurityTargetPositionV1, ...] = ()
     #: The session whose close staged the pending decision, if one is pending.
     staged_decision_session: EvaluationSessionV1 | None = None
@@ -1544,7 +1544,7 @@ class SessionEvaluatorEngine:
 
     def run(
         self, *, strategy: LaneDispatchStrategy, run_identity: EvaluationRunIdentityV1
-    ) -> EvaluationRunArtifactsV1:
+    ) -> EvaluationRunArtifactsV2:
         """Step every session through all five phases, halting fail-closed.
 
         The decision lane was fixed at construction. The strategy is bound to
@@ -1579,13 +1579,13 @@ class SessionEvaluatorEngine:
             metrics=self._metrics(loop),
             trace=trace,
         )
-        return EvaluationRunArtifactsV1(
+        return EvaluationRunArtifactsV2(
             result=result, trace=trace, final_state=loop.state
         )
 
     def _advance(
-        self, state: PortfolioStateV1, session_key: SessionKeyV1
-    ) -> PortfolioStateV1:
+        self, state: PortfolioStateV2, session_key: SessionKeyV1
+    ) -> PortfolioStateV2:
         kernel = PortfolioAccountingKernel(
             state, session_clock=self._bundle.session_clock
         )
@@ -2091,7 +2091,7 @@ class SessionEvaluatorEngine:
         return None
 
     def _decision_context(
-        self, state: PortfolioStateV1, session: EvaluationSessionV1
+        self, state: PortfolioStateV2, session: EvaluationSessionV1
     ) -> StrategyDecisionContextV1:
         return StrategyDecisionContextV1(
             session_key=session.session_key,
@@ -2245,7 +2245,7 @@ class SessionEvaluatorEngine:
 
     def _reconstructed_decision_context(
         self,
-        state: PortfolioStateV1,
+        state: PortfolioStateV2,
         index: int,
         session: EvaluationSessionV1,
         lane: _ReconstructedDecisionLane,

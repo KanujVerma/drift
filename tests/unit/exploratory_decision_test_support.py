@@ -57,7 +57,7 @@ from drift.domain.evaluator_reconstruction import (
     ExploratoryCohortAuthorizationV1,
     ExploratoryReconstructedSessionObservationV1,
 )
-from drift.domain.evaluator_results import EvaluationRunArtifactsV1
+from drift.domain.evaluator_results import EvaluationRunArtifactsV2
 from drift.domain.evaluator_strategy import (
     RuntimeStrategy,
     SecurityTargetPositionV1,
@@ -348,7 +348,7 @@ def reconstructed_engine(
 def run_engine(
     engine: SessionEvaluatorEngine,
     strategy: RuntimeStrategy | ExploratoryReconstructedRuntimeStrategy,
-) -> EvaluationRunArtifactsV1:
+) -> EvaluationRunArtifactsV2:
     """Run any engine, in either lane, under an identity bound to its inputs."""
     return engine.run(
         strategy=strategy,
