@@ -32,9 +32,9 @@ import test_evaluator_engine as eng
 import test_evaluator_experiment_run as run_support
 from pydantic import TypeAdapter, ValidationError
 from test_m2_anti_laundering import (
-    REALIZED_RESULT_HASH_SINCE_ISSUE_63_STAGE_2,
-    REALIZED_TRACE_HASH_SINCE_ISSUE_63_STAGE_2,
-    RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_63_STAGE_2,
+    REALIZED_RESULT_HASH_SINCE_ISSUE_71,
+    REALIZED_TRACE_HASH_SINCE_ISSUE_71,
+    RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_71,
 )
 
 from drift.domain.common import ImmutableJSONValue
@@ -47,7 +47,7 @@ from drift.domain.evaluator_bundles import (
     evaluation_run_identity_v2_hash,
     strategy_parameters_hash,
 )
-from drift.domain.evaluator_results import EvaluationRunArtifactsV1
+from drift.domain.evaluator_results import EvaluationRunArtifactsV2
 from drift.domain.evaluator_strategy import ParameterizedStrategy, RuntimeStrategy
 from drift.domain.experiments import ExperimentSpecification
 from drift.domain.strategies import StrategyReference
@@ -299,7 +299,7 @@ def _run_v2(
     engine: SessionEvaluatorEngine,
     strategy: object,
     identity: EvaluationRunIdentityV2,
-) -> EvaluationRunArtifactsV1:
+) -> EvaluationRunArtifactsV2:
     return engine.run(strategy=strategy, run_identity=identity)  # type: ignore[arg-type]
 
 
@@ -391,7 +391,7 @@ def test_a_v2_result_rebuilds_through_canonical_json() -> None:
         engine, ParameterizedFixedTargetStrategy(TEN), _v2_identity(engine)
     )
 
-    rebuilt = EvaluationRunArtifactsV1.model_validate_json(artifacts.model_dump_json())
+    rebuilt = EvaluationRunArtifactsV2.model_validate_json(artifacts.model_dump_json())
 
     assert type(rebuilt.result.run_identity) is EvaluationRunIdentityV2
     assert rebuilt == artifacts
@@ -1001,7 +1001,7 @@ def test_the_engine_reads_the_strategy_reference_once() -> None:
     artifacts = engine.run(strategy=genuine_first, run_identity=_v1_identity(engine))
 
     assert genuine_first.reference_reads == 1
-    assert artifacts.result.result_hash == REALIZED_RESULT_HASH_SINCE_ISSUE_63_STAGE_2
+    assert artifacts.result.result_hash == REALIZED_RESULT_HASH_SINCE_ISSUE_71
     impostor_first = _StrategyOfReference(impostor, eng.STRATEGY_REFERENCE)
     with pytest.raises(ValueError, match=STRATEGY_NOT_BOUND):
         engine.run(strategy=impostor_first, run_identity=_v1_identity(engine))
@@ -1073,8 +1073,8 @@ def test_a_v1_run_never_reads_strategy_parameters() -> None:
 
     assert _ParametersNeverRead.reads == 0
     assert type(artifacts.result.run_identity) is EvaluationRunIdentityV1
-    assert artifacts.trace.trace_hash == REALIZED_TRACE_HASH_SINCE_ISSUE_63_STAGE_2
-    assert artifacts.result.result_hash == REALIZED_RESULT_HASH_SINCE_ISSUE_63_STAGE_2
+    assert artifacts.trace.trace_hash == REALIZED_TRACE_HASH_SINCE_ISSUE_71
+    assert artifacts.result.result_hash == REALIZED_RESULT_HASH_SINCE_ISSUE_71
 
 
 def test_a_v1_experiment_run_never_reads_strategy_parameters() -> None:
@@ -1092,8 +1092,7 @@ def test_a_v1_experiment_run_never_reads_strategy_parameters() -> None:
     assert run.status.value == "completed"
     assert run.parameters_hash == content_hash(specification.parameters)
     assert (
-        run_support._metric(run, "result_hash")
-        == REALIZED_RESULT_HASH_SINCE_ISSUE_63_STAGE_2
+        run_support._metric(run, "result_hash") == REALIZED_RESULT_HASH_SINCE_ISSUE_71
     )
 
 
@@ -1124,9 +1123,7 @@ def test_a_reconstructed_v1_run_never_reads_strategy_parameters() -> None:
 
     assert _NeverRead.reads == 0
     assert type(artifacts.result.run_identity) is EvaluationRunIdentityV1
-    assert (
-        artifacts.result.result_hash == RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_63_STAGE_2
-    )
+    assert artifacts.result.result_hash == RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_71
 
 
 # ==========================================================================

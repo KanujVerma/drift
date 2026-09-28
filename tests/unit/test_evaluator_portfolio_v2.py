@@ -110,8 +110,12 @@ V1_SCHEMA_FINGERPRINTS: dict[type[BaseModel], str] = {
     RebalanceOutcomeV1: (
         "88bac385fd075cccdbb5490d6532241b400b8c57d40857c2f288d2d9c28bec92"
     ),
+    # Issue 112 widens a result's ``run_identity`` to either identity
+    # version, and the V1 pair's schema nests the result's, so this one
+    # fingerprint moves (c10716d6 to 9c2402e0). The V1 pair's own fields,
+    # and every other V1 model, are unchanged.
     EvaluationRunArtifactsV1: (
-        "c10716d680a5925956851403839c0a32e50cae968fb0b685d44eb978c7596835"
+        "9c2402e04f3428aa304b99761e78384d2b354b84bd0203bfbce946106d092088"
     ),
 }
 

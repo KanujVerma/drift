@@ -1443,7 +1443,7 @@ def test_delivered_cash_no_evidence_explains_halts_a_held_position() -> None:
 
 
 def _session_marks(
-    artifacts: EvaluationRunArtifactsV1,
+    artifacts: EvaluationRunArtifactsV2,
 ) -> dict[int, tuple[Decimal, Decimal, Decimal, Decimal]]:
     return {
         point.session_index: (
