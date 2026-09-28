@@ -5,7 +5,15 @@ from typing import Annotated, Literal, Self
 from pydantic import Field, model_validator
 
 from drift.domain.common import FrozenModel, NonBlankStr, SHA256Hash
+from drift.domain.economic_closed_world import CORPORATE_ACTION_SNAPSHOT_LIMITATION
 from drift.serialization.canonical import content_hash
+
+LIMITATION_CA_ABSENCE_FROM_CURRENT_SNAPSHOT = CORPORATE_ACTION_SNAPSHOT_LIMITATION
+"""Issue 76, decision D3-b: an exploratory closed-world corporate-action record
+reads the absence of an action from one current provider snapshot. Every such
+record carries this limitation, so every bundle carrying one requires it and
+the promotion gate refuses it. The string is defined once, beside the record,
+in ``drift.domain.economic_closed_world``; this is its lane-side name."""
 
 ALPACA_LIMITATION_TRUNCATED_CA = (
     "corporate-action-mutation-replay-truncated-to-approx-72-days"
