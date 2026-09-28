@@ -9,6 +9,7 @@ from pydantic import Field, field_validator, model_validator
 
 from drift.domain.assertions import TemporalIntervalClaimV1
 from drift.domain.common import FrozenModel, NonBlankStr, SHA256Hash
+from drift.domain.economic_closed_world import ClosedWorldCorporateActionCoverageV1
 from drift.domain.economic_results import EconomicOutcomeResolutionV1
 from drift.domain.evaluator_clock import SessionClockV1
 from drift.domain.evaluator_reconstruction import (
@@ -202,6 +203,10 @@ class EvaluationInputBundleV1(FrozenModel):
     exploratory_reconstructed_observations: tuple[
         ExploratoryReconstructedSessionObservationV1, ...
     ] = ()
+    # Closed-world corporate-action coverage records (issue 76, decision D8-a).
+    # Covered by the bundle hash and so by every admission of the bundle; each
+    # record's limitations are required limitations of the bundle.
+    corporate_action_coverage: tuple[ClosedWorldCorporateActionCoverageV1, ...] = ()
     # Limitations of the producer's dataset itself, which no evidence member
     # declares, such as a truncated corporate-action window (issue 92).
     dataset_limitations: tuple[NonBlankStr, ...] = ()
@@ -275,6 +280,13 @@ class EvaluationInputBundleV1(FrozenModel):
     ) -> tuple[ExploratoryReconstructedSessionObservationV1, ...]:
         return _canonicalize(members, "exploratory reconstructions")
 
+    @field_validator("corporate_action_coverage")
+    @classmethod
+    def canonicalize_corporate_action_coverage(
+        cls, members: tuple[ClosedWorldCorporateActionCoverageV1, ...]
+    ) -> tuple[ClosedWorldCorporateActionCoverageV1, ...]:
+        return _canonicalize(members, "corporate-action coverage records")
+
     @field_validator("dataset_limitations")
     @classmethod
     def canonicalize_dataset_limitations(
@@ -289,6 +301,7 @@ class EvaluationInputBundleV1(FrozenModel):
         if not self.session_clock.sessions:
             raise ValueError("bundle requires a nonempty session clock")
         self._validate_session_coherence()
+        self._validate_corporate_action_coverage()
         require_reconstructions_on_scheduled_clock(
             self.session_clock, self.exploratory_reconstructed_observations
         )
@@ -349,6 +362,43 @@ class EvaluationInputBundleV1(FrozenModel):
                     f"session closes {last.closed_at}, interval ends {end.upper_bound}"
                 )
 
+    def _validate_corporate_action_coverage(self) -> None:
+        """V11 (issue 76): bind every record to a security the bundle carries.
+
+        A record for a security the bundle does not identify covers nothing
+        the evaluation can hold. And one security is covered by one kind of
+        evidence only: an M1c-native outcome and an exploratory record for the
+        same security could disagree about what happened, and neither may be
+        preferred, so the bundle is refused.
+        """
+        securities = {member.security_id for member in self.security_identities}
+        outside = sorted(
+            {
+                str(record.security_id)
+                for record in self.corporate_action_coverage
+                if record.security_id not in securities
+            }
+        )
+        if outside:
+            raise ValueError(
+                "ca_coverage_security_not_in_bundle: corporate-action coverage "
+                f"names securities the bundle does not identify: {outside}"
+            )
+        native = {outcome.query.security_id for outcome in self.economic_outcomes}
+        mixed = sorted(
+            {
+                str(record.security_id)
+                for record in self.corporate_action_coverage
+                if record.security_id in native
+            }
+        )
+        if mixed:
+            raise ValueError(
+                "ca_coverage_mixed_sources: these securities carry both an M1c "
+                "economic outcome and an exploratory corporate-action coverage "
+                f"record: {mixed}"
+            )
+
     @property
     def has_exploratory_reconstructions(self) -> bool:
         """Whether any exploratory reconstruction evidence backs this bundle."""
@@ -360,13 +410,16 @@ class EvaluationInputBundleV1(FrozenModel):
     def required_limitations(self) -> tuple[str, ...]:
         """Every limitation this bundle obliges an admission to carry.
 
-        That is every limitation its evidence carries and every limitation its
-        producer declares of the dataset itself.
+        That is every limitation its evidence carries, including every
+        limitation of a corporate-action coverage record (issue 76), and every
+        limitation its producer declares of the dataset itself.
         """
         required = set(self.session_clock.acknowledged_limitations)
         required.update(self.dataset_limitations)
         for observation in self.exploratory_reconstructed_observations:
             required.update(observation.acknowledged_limitations)
+        for record in self.corporate_action_coverage:
+            required.update(record.acknowledged_limitations)
         return tuple(sorted(required))
 
 

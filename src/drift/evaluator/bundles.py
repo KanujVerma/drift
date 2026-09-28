@@ -4,6 +4,7 @@ from datetime import date
 
 from drift.domain.assertions import NormalizedSelectionQueryV1, TemporalIntervalClaimV1
 from drift.domain.common import UUID7, SHA256Hash
+from drift.domain.economic_closed_world import ClosedWorldCorporateActionCoverageV1
 from drift.domain.economic_queries import MarketSelectionQueryV1
 from drift.domain.economic_results import EconomicOutcomeResolutionV1
 from drift.domain.evaluator_bundles import (
@@ -65,6 +66,7 @@ from drift.evaluator.reconstruction import (
     require_scheduled_calendar_row,
     verify_exploratory_reconstructions,
 )
+from drift.markets.economic_closed_world import verify_corporate_action_coverage
 from drift.markets.economic_outcomes import resolve_economic_facts
 from drift.markets.normalization import (
     materialize_observation_decision,
@@ -123,6 +125,7 @@ def assemble_evaluation_input_bundle(
     exploratory_reconstructed_observations: tuple[
         ExploratoryReconstructedSessionObservationV1, ...
     ] = (),
+    corporate_action_coverage: tuple[ClosedWorldCorporateActionCoverageV1, ...] = (),
     source_snapshot_hash: SHA256Hash | None = None,
     dataset_limitations: tuple[str, ...] = (),
 ) -> EvaluationInputBundleV1:
@@ -147,6 +150,7 @@ def assemble_evaluation_input_bundle(
         exploratory_reconstructed_observations=_ordered(
             exploratory_reconstructed_observations
         ),
+        corporate_action_coverage=_ordered(corporate_action_coverage),
         dataset_limitations=tuple(sorted(dataset_limitations)),
         bundle_hash="0" * 64,
     )
@@ -245,6 +249,7 @@ def build_evaluation_input_bundle(
     economic_outcomes: tuple[EconomicOutcomeResolutionV1, ...] = (),
     exploratory_cohort: ExploratoryCohortAuthorizationV1 | None = None,
     exploratory_reconstruction_replay: ExploratoryReconstructionReplay | None = None,
+    corporate_action_coverage: tuple[ClosedWorldCorporateActionCoverageV1, ...] = (),
     source_snapshot_hash: SHA256Hash | None = None,
     dataset_limitations: tuple[str, ...] = (),
 ) -> EvaluationInputBundleV1:
@@ -269,6 +274,12 @@ def build_evaluation_input_bundle(
     `dataset_limitations` are the producer's declarations about its dataset
     itself (issue 92). Nothing re-derives them; the bundle hash binds them,
     and every admission of the bundle must acknowledge them.
+
+    Every `corporate_action_coverage` record (issue 76) is re-verified here
+    against the context: under the running coverage identity (V10), with its
+    exact response bytes and every bound artifact retained (V4). The Drift
+    core cannot re-parse the provider bytes (V5), so a record is otherwise
+    only as trusted as the bridge that minted it.
     """
     _require_derived_clock(session_clock, session_queries, context)
     bundle = assemble_evaluation_input_bundle(
@@ -285,11 +296,25 @@ def build_evaluation_input_bundle(
         exploratory_reconstructed_observations=_replayed_reconstructions(
             exploratory_cohort, exploratory_reconstruction_replay, context
         ),
+        corporate_action_coverage=_verified_coverage(
+            corporate_action_coverage, context
+        ),
         source_snapshot_hash=source_snapshot_hash,
         dataset_limitations=dataset_limitations,
     )
     _require_calendar_rows(bundle)
     return bundle
+
+
+def _verified_coverage(
+    records: tuple[ClosedWorldCorporateActionCoverageV1, ...],
+    context: M1dResolutionContext,
+) -> tuple[ClosedWorldCorporateActionCoverageV1, ...]:
+    """V4 and V10 at a bundle boundary, against the context's retained bytes."""
+    return tuple(
+        verify_corporate_action_coverage(record, context.supporting_artifacts)
+        for record in records
+    )
 
 
 def _replayed_reconstructions(
@@ -462,6 +487,10 @@ def verify_evaluation_input_bundle(
     caller that built it. The promotion gate refuses the mode, so it cannot
     reach promotion, and requiring the queries of every scheduled clock is left
     to the scheduled-lane clock work of issue 84, which it overlaps.
+
+    Corporate-action coverage records (issue 76) are re-verified against the
+    context (V4, V10). They are not re-derived: only the bridge can re-parse
+    the retained provider bytes into a record's returned actions (V5).
     """
     _require_replayed(
         "decision view",
@@ -509,6 +538,9 @@ def verify_evaluation_input_bundle(
         _require_calendar_rows(bundle)
 
     _require_derived_clock(bundle.session_clock, session_queries, context)
+    # Issue 76: every coverage record is under the running identity and its
+    # response bytes and bound artifacts are retained in this context.
+    _verified_coverage(bundle.corporate_action_coverage, context)
 
     rebuilt = evaluation_input_bundle_hash(bundle)
     if rebuilt != bundle.bundle_hash:
