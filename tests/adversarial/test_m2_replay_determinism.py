@@ -33,6 +33,10 @@ import test_evaluator_engine as eng
 import test_evaluator_experiment_run as run_support
 from pydantic import ValidationError
 
+from drift.domain.evaluator_bundles import (
+    EvaluationInputBundleV1,
+    evaluation_input_bundle_hash,
+)
 from drift.domain.evaluator_results import (
     EvaluationClassification,
     EvaluationRunArtifactsV1,
@@ -222,6 +226,85 @@ def test_bundle_member_order_cannot_change_the_evaluation() -> None:
         eng._run(eng._engine(bundle=forward)).result.result_hash
         == eng._run(eng._engine(bundle=reversed_bundle)).result.result_hash
     )
+
+
+# --- issue 8 final acceptance: the model boundary and costed arithmetic ------
+
+BUNDLE_MEMBER_FIELDS = (
+    "security_identities",
+    "listing_identities",
+    "authentic_decision_views",
+    "authentic_accounting_views",
+)
+
+
+@pytest.mark.parametrize("field", BUNDLE_MEMBER_FIELDS)
+def test_a_self_hashed_bundle_in_non_canonical_order_is_refused(field: str) -> None:
+    """The bundle model orders its own members rather than trusting a caller.
+
+    The case above goes through the assembler, which sorts before the model
+    sees anything. Here a caller builds the model directly, with one member
+    tuple reversed and a bundle hash computed over that order. Accepting it
+    would give one member set two bundle hashes.
+    """
+    bundle = eng._bundle()
+    canonical = getattr(bundle, field)
+    assert len(canonical) > 1
+    unsorted = tuple(reversed(canonical))
+    assert unsorted != canonical
+    # ``model_construct`` skips validation, so the draft keeps the order it is
+    # handed; ``model_copy`` would validate and quietly sort it.
+    draft = EvaluationInputBundleV1.model_construct(
+        **(dict(bundle) | {field: unsorted})
+    )
+    self_hash = evaluation_input_bundle_hash(draft)
+    assert self_hash != bundle.bundle_hash
+
+    with pytest.raises(ValidationError, match=r"bundle hash mismatch"):
+        EvaluationInputBundleV1.model_validate(dict(draft) | {"bundle_hash": self_hash})
+
+    # Control: the same members in canonical order validate under the
+    # canonical hash, as the one bundle they are.
+    revalidated = EvaluationInputBundleV1.model_validate(dict(bundle))
+    assert revalidated.bundle_hash == bundle.bundle_hash
+
+
+def _costed_engine() -> Any:
+    return eng._engine(
+        cost_model=eng._cost_model(
+            model_id="costed-context-v1",
+            commission="0.01",
+            fixed_fee="1.00",
+            notional_bps="10",
+            slippage_bps="5",
+        )
+    )
+
+
+_BUY_THEN_TRIM = {eng.DAY_1: ((eng.SEC_A, 10),), eng.DAY_2: ((eng.SEC_A, 4),)}
+
+
+def test_a_perturbed_ambient_context_cannot_move_a_costed_book() -> None:
+    """Costed fills book cents that a two-digit context would round away.
+
+    The round-price cases above book only values a two-digit context can
+    spell (9000.00 is 9.0E+3), so they cannot see kernel arithmetic that
+    escaped the pinned context. A costed buy then sell books 8997.40 and
+    then 9655.35 (hand computed in the accounting suite's costed-sell case).
+    """
+    baseline = eng._run(_costed_engine(), eng.FixedTargetStrategy(_BUY_THEN_TRIM))
+    assert baseline.final_state.cash_balance == Decimal("9655.35")
+
+    with localcontext(Context(prec=2, rounding=ROUND_UP)):
+        perturbed = eng._run(_costed_engine(), eng.FixedTargetStrategy(_BUY_THEN_TRIM))
+
+    assert perturbed.result.result_hash == baseline.result.result_hash
+    assert perturbed.trace.trace_hash == baseline.trace.trace_hash
+    assert perturbed.final_state.cash_balance == Decimal("9655.35")
+
+    # Control: one genuine input change, zero costs, moves the result.
+    zero_cost = eng._run(eng._engine(), eng.FixedTargetStrategy(_BUY_THEN_TRIM))
+    assert zero_cost.result.result_hash != baseline.result.result_hash
 
 
 def test_the_result_artifact_carries_no_operational_metadata() -> None:

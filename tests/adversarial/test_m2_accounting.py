@@ -330,6 +330,46 @@ def test_two_cash_components_on_one_date_are_two_distinct_claims() -> None:
         )
 
 
+def test_another_sources_delivery_never_settles_this_sources_claim() -> None:
+    """Settlement matching stays source-scoped when only one claim is pending.
+
+    Source A's 0.50 claim on 100 shares is pending and payable. Source B then
+    reports a delivery reusing A's occurrence and component ids. That is
+    another source's evidence, which no entitlement of this book explains, so
+    it halts. Falling back to any claim sharing the security, occurrence and
+    component would pay A's entitlement on B's word.
+    """
+    claim = ca._manual_claim(payable=ca.PAYABLE_DAY, source_id=ca.SOURCE_A)
+    state = ca._state(claims=(claim,), cash="100", day=ca.PAYABLE_DAY)
+
+    def delivered_by(source_id: str) -> SecurityEconomicOutcomeV1:
+        return ca._outcome(
+            effects=(),
+            delivery_groups=(
+                ca._delivery(components=(ca._cash(amount="0.5"),), source_id=source_id),
+            ),
+        )
+
+    with pytest.raises(
+        IndeterminateValuationError,
+        match=(
+            r"matches no pending claim and no proven entitlement: "
+            r"synthetic-b/occ-1/cash-1$"
+        ),
+    ):
+        ca._processor().apply_intrasession_settlements(
+            state, (delivered_by(ca.SOURCE_B),), ca._key(ca.PAYABLE_DAY)
+        )
+
+    # Control: the identical report from source A settles A's claim.
+    settled = ca._processor().apply_intrasession_settlements(
+        state, (delivered_by(ca.SOURCE_A),), ca._key(ca.PAYABLE_DAY)
+    )
+    assert settled.settled_claim_ids == (claim.claim_id,)
+    assert settled.pending_cash_claims == ()
+    assert settled.cash_balance == Decimal("150.0")
+
+
 # ==========================================================================
 # Due bills, tie-breaking, and unprovable fractions
 # ==========================================================================
@@ -514,6 +554,40 @@ def test_terms_without_an_occurred_effect_commit_no_mutation() -> None:
     assert updated.holdings[0].quantity == 10
     assert updated.cash_balance == Decimal("1000")
     assert updated.pending_cash_claims == ()
+
+
+def test_an_upcoming_effect_record_commits_no_mutation() -> None:
+    """An effect record the source still projects as upcoming is a schedule.
+
+    The case above carries no effect record at all, so it cannot tell an
+    upcoming effect from an occurred one. Here the record is present.
+    """
+    _, _, occurred = ca._split_case(
+        numerator="2",
+        denominator="1",
+        treatment=ca._treatment("round_down"),
+        action_kind=ActionKind.FORWARD_SPLIT,
+        suffix=9710,
+    )
+    upcoming = ca._outcome(
+        terms=occurred.terms_records,
+        effects=occurred.effect_records,
+        statuses=("upcoming",),
+        action_kinds=(ActionKind.FORWARD_SPLIT,),
+    )
+    assert len(upcoming.effect_records) == 1
+    state = ca._state(holdings=(ca._holding(quantity=10),), cash="1000")
+
+    updated, targets = ca._processor().apply_pre_open_actions(
+        state, (), (upcoming,), ca._key()
+    )
+
+    assert updated is state
+    assert targets == ()
+
+    # Control: the identical record projected as effective splits the book.
+    split, _ = ca._processor().apply_pre_open_actions(state, (), (occurred,), ca._key())
+    assert [holding.quantity for holding in split.holdings] == [20]
 
 
 @pytest.mark.parametrize("claim_status", ["extinguished", "continuing"])
@@ -1359,6 +1433,157 @@ def test_delivered_cash_no_evidence_explains_halts_a_held_position() -> None:
     assert flat.result.classification is EvaluationClassification.COMPLETE
 
 
+# --- issue 8 final acceptance: phase order and exactly-once share actions ---
+#
+# Spec 16 orders each session as pre-open effects, open execution,
+# intrasession effects and settlement (Phase 3), then the close mark
+# (Phase 4). Swapping Phases 3 and 4 leaves NAV unchanged, so only the
+# cash-and-claims split of the settlement-day mark, and the session count of
+# a Phase 3 halt, can tell the two orders apart.
+
+
+def _session_marks(
+    artifacts: EvaluationRunArtifactsV1,
+) -> dict[int, tuple[Decimal, Decimal, Decimal, Decimal]]:
+    return {
+        point.session_index: (
+            point.cash_balance,
+            point.holdings_market_value,
+            point.pending_claims_value,
+            point.net_asset_value,
+        )
+        for point in artifacts.result.metrics.equity_series
+    }
+
+
+def test_the_settlement_day_mark_books_the_settled_claim_as_cash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A claim settled in Phase 3 is cash, not a pending claim, at that close.
+
+    Ten shares are bought at the DAY_2 open for 1000.00. A 0.50 dividend with
+    ex date DAY_3 vests on them at the DAY_3 pre-open and is paid and
+    delivered on Friday, session 4. Both closes print 120.00.
+    """
+    _price_the_weekend(monkeypatch, monday="120.00")
+    outcome = _dividend_outcome(
+        suffix=8260,
+        ex_at="2026-01-08T00:00:00Z",
+        payable_at="2026-01-09T00:00:00Z",
+        settled_at="2026-01-09T00:00:00Z",
+    )
+
+    artifacts = _run_over(
+        outcome, days=_OVER_A_WEEKEND, strategy=_hold_ten(_OVER_A_WEEKEND[1:5])
+    )
+
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert _applied_sessions(artifacts) == [3]
+    assert _settled(artifacts) == [(4, Decimal("5.0"))]
+    marks = _session_marks(artifacts)
+    # DAY_3 close: the vested 5.00 is still a claim.
+    assert marks[3] == (
+        Decimal("9000.00"),
+        Decimal("1200.00"),
+        Decimal("5.0"),
+        Decimal("10205.00"),
+    )
+    # Friday close, the settlement day: the same 5.00 is now cash.
+    assert marks[4] == (Decimal("9005.0"), Decimal("1200.00"), ZERO, Decimal("10205.0"))
+    (friday_mark,) = [
+        event
+        for event in artifacts.trace.events
+        if event.kind == "session_mark" and event.session_index == 4
+    ]
+    assert friday_mark.cash_balance == Decimal("9005.0")
+    assert friday_mark.pending_claims_value == ZERO
+
+
+def test_a_settlement_halt_never_marks_the_session_it_halted() -> None:
+    """A Phase 3 halt stops its session before the Phase 4 close mark.
+
+    The metrics quote only sessions that closed, so the equity series ends at
+    the last session before the halt and never quotes the halted one.
+    """
+    cash = ca._cash(amount="0.5", component_id="dividend-cash", predecessor=eng.SEC_A)
+    unexplained = ca._outcome(
+        security_id=eng.SEC_A,
+        delivery_groups=(
+            ca._delivery(
+                components=(cash,),
+                security_id=eng.SEC_A,
+                occurrence_id="issue-8-unexplained",
+                settled_at="2026-01-08T00:00:00Z",
+            ),
+        ),
+        action_kinds=(ActionKind.REGULAR_CASH_DIVIDEND,),
+    )
+
+    artifacts = _run_over(unexplained, days=eng.DAYS, strategy=_hold_ten(eng.DAYS[1:]))
+
+    result = artifacts.result
+    assert result.classification is EvaluationClassification.INDETERMINATE
+    assert result.halted_session_index == 3
+    (cause,) = [
+        event for event in artifacts.trace.events if event.kind == "indeterminate_cause"
+    ]
+    assert cause.session_index == 3
+    assert cause.phase is EvaluationPhase.INTRASESSION_ECONOMIC_EFFECTS
+    assert "no proven entitlement" in cause.cause
+    assert result.metrics.evaluated_session_count == result.halted_session_index
+    assert list(_session_marks(artifacts)) == [0, 1, 2]
+    assert [
+        event.session_index
+        for event in artifacts.trace.events
+        if event.kind == "session_mark"
+    ] == [0, 1, 2]
+    # The last marked close is DAY_2: 9000.00 cash and ten shares at 110.00.
+    assert result.metrics.ending_net_asset_value == Decimal("10100.00")
+
+
+def test_a_split_before_the_last_session_is_applied_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A split effective mid-run lands once, never again at a later pre-open.
+
+    Two sessions follow the DAY_3 split here, so a window that re-applied an
+    already effective split would double the book again on Friday.
+    """
+    monkeypatch.setitem(eng.PRICES[eng.SEC_A], _FRIDAY, ("60.00", "60.00"))
+    monkeypatch.setitem(eng.PRICES[eng.SEC_A], _MONDAY, ("60.00", "60.00"))
+    views = tuple(
+        eng._accounting_view(eng.SEC_A, day, open_price="55.00", close_price="60.00")
+        if day == eng.DAY_3
+        else eng._accounting_view(eng.SEC_A, day)
+        for day in _OVER_A_WEEKEND
+    )
+    # Ten shares are bought at the DAY_2 open. The staged hold of ten is
+    # restated to twenty through the split, and every later decision asks for
+    # the post-split twenty, so a correct run trades exactly once.
+    strategy = eng.FixedTargetStrategy(
+        {
+            eng.DAY_1: ((eng.SEC_A, 10),),
+            eng.DAY_2: ((eng.SEC_A, 10),),
+            eng.DAY_3: ((eng.SEC_A, 20),),
+            _FRIDAY: ((eng.SEC_A, 20),),
+        }
+    )
+
+    artifacts = _run_over(
+        eng._forward_split_outcome("2026-01-08T00:00:00Z"),
+        days=_OVER_A_WEEKEND,
+        strategy=strategy,
+        views=views,
+    )
+
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert _applied_sessions(artifacts) == [3]
+    assert _fills(artifacts) == [(2, "buy", 10)]
+    assert _held(artifacts) == {eng.SEC_A: 20}
+    # 9000.00 cash plus twenty shares at the 60.00 Monday close.
+    assert artifacts.result.metrics.ending_net_asset_value == Decimal("10200.00")
+
+
 # ==========================================================================
 # Liquidation claim status and corporate-action disposal PnL
 # ==========================================================================
@@ -1642,6 +1867,71 @@ def test_a_costed_run_matches_an_independent_exact_computation() -> None:
     )
 
 
+def test_a_costed_partial_sell_matches_an_independent_exact_computation() -> None:
+    """A costed sell: adverse slippage, net proceeds, proportional basis relief.
+
+    Commission 0.01 per share, a 1.00 fixed fee, 10 bps of the unadjusted
+    open notional, and 5 bps adverse slippage. Every number is computed by
+    hand from the fixture prices.
+
+    Buy 10 at the DAY_2 open of 100.00: fill 100.05, gross 1000.50, costs
+    0.10 + 1.00 + 1.00 = 2.10. Cash 8997.40, basis 1002.60.
+
+    Sell 6 at the DAY_3 open of 110.00: fill 110 x 0.9995 = 109.945, gross
+    659.67, costs 0.06 + 1.00 + 0.66 = 1.72, net proceeds 657.95. Cash
+    9655.35. Relieved basis 1002.60 x 6/10 = 601.56, leaving 401.04.
+    Realized gross 659.67 - 601.56 = 58.11, net 58.11 - 1.72 = 56.39.
+
+    Four shares marked at the DAY_3 close of 120.00: NAV 9655.35 + 480.00.
+    """
+    engine = eng._engine(
+        cost_model=eng._cost_model(
+            model_id="costed-sell-v1",
+            commission="0.01",
+            fixed_fee="1.00",
+            notional_bps="10",
+            slippage_bps="5",
+        )
+    )
+    strategy = eng.FixedTargetStrategy(
+        {eng.DAY_1: ((eng.SEC_A, 10),), eng.DAY_2: ((eng.SEC_A, 4),)}
+    )
+
+    artifacts = eng._run(engine, strategy)
+
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    fills = [
+        (event.session_index, event.fill)
+        for event in artifacts.trace.events
+        if event.kind == "fill"
+    ]
+    assert [(index, fill.side, fill.quantity) for index, fill in fills] == [
+        (2, "buy", 10),
+        (3, "sell", 6),
+    ]
+    _, sell = fills[1]
+    assert sell.fill_price == Decimal("109.945")
+    assert sell.gross_notional == Decimal("659.67")
+    assert sell.transaction_costs == Decimal("1.72")
+    assert sell.cash_delta == Decimal("657.95")
+
+    final = artifacts.final_state
+    assert final.cash_balance == Decimal("9655.35")
+    assert [(item.quantity, item.cost_basis) for item in final.holdings] == [
+        (4, Decimal("401.04"))
+    ]
+    assert final.realized_gross_pnl == Decimal("58.11")
+    assert final.realized_net_pnl == Decimal("56.39")
+    assert final.cumulative_transaction_costs == Decimal("3.82")
+    assert final.net_asset_value == Decimal("10135.35")
+    metrics = artifacts.result.metrics
+    assert metrics.realized_net_pnl == Decimal("56.39")
+    assert metrics.gross_traded_notional == Decimal("1660.17")
+    # Realized-PnL identity: cash plus remaining basis is initial cash plus
+    # realized net PnL, 9655.35 + 401.04 == 10000.00 + 56.39.
+    _assert_realized_identity(artifacts)
+
+
 def test_a_split_adjusted_field_method_cannot_become_a_reconstructed_price() -> None:
     """Double adjustment, reconstructed lane (#54): the per-field basis guard.
 
@@ -1739,6 +2029,58 @@ def test_an_unfunded_rebalance_leaves_the_book_completely_untouched() -> None:
     assert outcome.state.cash_balance == Decimal("100.00")
     assert outcome.rejection is not None
     assert outcome.rejection.cash_shortfall == Decimal("900.00")
+
+
+def test_a_plan_unfunded_only_by_its_sell_costs_is_rejected_whole() -> None:
+    """Funding counts sell costs (spec 13.2 step 3), not only buy costs.
+
+    Selling one SEC_A at 100.00 raises 100.00 gross but 99.00 after its 1.00
+    fee. Buying one SEC_B at 98.50 needs 99.50 with its own fee. Gross
+    proceeds would cover the buy with 0.50 to spare; net proceeds leave it
+    0.50 short. A funding check that ignored sell costs would call the plan
+    funded, book the sell, run out of cash on the buy, and abort the whole
+    rebalance instead of rejecting the intent cleanly.
+    """
+    engine = AtomicRebalanceEngine(cost_model=ex.FEE_ONLY, session_clock=ex.EXEC_CLOCK)
+    state = ex._state(cash="0.00", holdings=(ex._holding(ex.SEC_A, 1, "100.00"),))
+    targets = (ex._target(ex.SEC_A, 0), ex._target(ex.SEC_B, 1))
+    listings = ex._listings_for(ex.SEC_A, ex.SEC_B)
+    prices = {ex.SEC_A: ex._price("100.00"), ex.SEC_B: ex._price("98.50")}
+
+    plan = engine.plan(
+        state=state,
+        staged_targets=targets,
+        open_prices=prices,
+        execution_listings=listings,
+    )
+
+    assert plan.gross_sell_proceeds == Decimal("100.00")
+    assert plan.sell_transaction_costs == Decimal("1.00")
+    assert plan.required_cash == Decimal("99.50")
+    assert plan.projected_cash == Decimal("-0.50")
+    assert plan.is_funded is False
+
+    outcome = engine.execute(state=state, plan=plan)
+
+    assert outcome.classification == "rejected"
+    assert outcome.committed_fills == ()
+    assert outcome.halt_stepping is True
+    assert outcome.state is state
+    assert outcome.rejection is not None
+    assert outcome.rejection.cash_shortfall == Decimal("0.50")
+
+    # Control: 0.50 cheaper, the same rotation is funded to the cent and
+    # commits both legs, ending with exactly zero cash.
+    funded = engine.rebalance(
+        state=state,
+        staged_targets=targets,
+        open_prices=prices | {ex.SEC_B: ex._price("98.00")},
+        execution_listings=listings,
+    )
+    assert funded.plan.projected_cash == ZERO
+    assert funded.classification == "executed"
+    assert [fill.side for fill in funded.committed_fills] == ["sell", "buy"]
+    assert funded.state.cash_balance == ZERO
 
 
 def test_a_rejected_rebalance_cannot_be_relabelled_with_committed_fills() -> None:
