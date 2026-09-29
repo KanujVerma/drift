@@ -55,6 +55,17 @@ M1D_REPLAY_IDENTITY_PATHS = frozenset(
         "src/drift/domain/semantic_attestation.py",
     }
 )
+# M1d source added under issue #71: the closed-world session coverage record and
+# its derivation, both declared in the m1d-evidence-v1 closure (decision D5-a).
+# Like the replay-identity path above they are named rather than exempted, and
+# are routed through the same production AST guard below, so neither may import
+# a transport module, spawn a process, or define a network or credential symbol.
+M1D_CLOSED_WORLD_SOURCE_PATHS = frozenset(
+    {
+        "src/drift/domain/session_closed_world.py",
+        "src/drift/markets/session_closed_world.py",
+    }
+)
 # M2 source added under issue #34.  It is additive under ADR 0012 like the
 # evaluator modules, but it does not carry the "evaluator" prefix that
 # _m1e_candidate_paths filters on, so it has to be named.  As with the
@@ -93,6 +104,7 @@ M1E_PRODUCTION_PATHS = frozenset(
 INERT_SOURCE_PATHS = (
     ALLOWED_M1E_PRODUCTION_PATHS
     | M1D_REPLAY_IDENTITY_PATHS
+    | M1D_CLOSED_WORLD_SOURCE_PATHS
     | M2_ADDITIVE_SOURCE_PATHS
     | M2_ALPACA_BRIDGE_SOURCE_PATHS
     | M2_ALPACA_BRIDGE_SCRIPT_PATHS
@@ -725,6 +737,7 @@ def test_m1e_additions_are_allowlisted_inert_and_leave_m1d_pins_unchanged() -> N
     scanned_as_production = (
         M1E_PRODUCTION_PATHS
         | M1D_REPLAY_IDENTITY_PATHS
+        | M1D_CLOSED_WORLD_SOURCE_PATHS
         | M2_ADDITIVE_SOURCE_PATHS
         | M2_ALPACA_BRIDGE_SOURCE_PATHS
     )
