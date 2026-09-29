@@ -1139,9 +1139,12 @@ def test_a_reconstructed_v1_run_never_reads_strategy_parameters() -> None:
 
 STRATEGY_RAISED = (
     r"^strategy code raised {name} during the session XNYS 2026-01-07, so the "
-    r"run failed; the engine raises it only as a refusal outside its sessions: "
-    r"raised by the strategy$"
+    r"run failed; the engine raises it only as a refusal outside its sessions$"
 )
+
+
+def _qualified(kind: type) -> str:
+    return f"{kind.__module__}.{kind.__qualname__}"
 
 
 def _raised_by_the_strategy() -> dict[str, Exception]:
@@ -1182,7 +1185,8 @@ def test_a_refusal_type_raised_by_the_strategy_fails_the_run(name: str) -> None:
         raised.value, StrategyParametersBindingError | PromotionLaneDisabledError
     )
     assert re.fullmatch(
-        STRATEGY_RAISED.format(name=type(error).__name__), str(raised.value)
+        STRATEGY_RAISED.format(name=re.escape(_qualified(type(error)))),
+        str(raised.value),
     )
     # It decided genuinely once, and raised at its next decision.
     assert [context.session_key.local_date for context in strategy.seen] == [eng.DAY_1]
@@ -1207,7 +1211,7 @@ def test_the_runner_records_a_strategy_raised_refusal_as_a_failed_run(
     assert run.artifact_references == ()
     assert run.error_details is not None
     assert run.error_details.startswith(
-        f"StrategyRaisedRefusalError: strategy code raised {type(error).__name__} "
+        f"StrategyRaisedRefusalError: strategy code raised {_qualified(type(error))} "
     )
     assert run.parameters_hash == identity.strategy_parameters_hash
     assert len(ledger.verified_events()) == 1
@@ -1243,3 +1247,114 @@ def test_a_refusal_type_raised_from_decide_exploratory_fails_the_run() -> None:
         engine.run(strategy=strategy, run_identity=_v1_identity(engine))
 
     assert raised.value.__cause__ is error
+
+
+class _UnprintableRefusal(PromotionLaneDisabledError):
+    """A refusal type whose own ``__str__`` raises the plain refusal."""
+
+    def __str__(self) -> str:
+        raise PromotionLaneDisabledError("raised while being printed")
+
+
+def test_a_refusal_type_that_raises_while_printed_still_fails_the_run(
+    tmp_path: Path,
+) -> None:
+    """Follow-up review: the wrapper never formats the strategy's error.
+
+    Formatting it would run its ``__str__``, which here raises a plain
+    ``PromotionLaneDisabledError`` that the runner would re-raise unrecorded.
+    """
+    ledger = SQLiteLedger(tmp_path / "audit.sqlite3")
+    engine = eng._engine()
+    identity = _v2_identity(engine, TEN)
+    strategy = _RaisingOnItsSecondDecision(_UnprintableRefusal())
+
+    run = execute_experiment_run(
+        run_support._specification(), _v2_context(engine, strategy, identity, ledger)
+    )
+
+    assert run.status.value == "failed"
+    assert run.error_details is not None
+    assert _qualified(_UnprintableRefusal) in run.error_details
+    assert len(ledger.verified_events()) == 1
+
+
+class _RefusalWhileHashed(dict[str, object]):
+    """A refused return whose hashing runs strategy code that raises."""
+
+    def __iter__(self) -> Iterator[str]:
+        raise StrategyParametersBindingError("raised while hashed")
+
+    def items(self) -> Any:
+        raise StrategyParametersBindingError("raised while hashed")
+
+    def keys(self) -> Any:
+        raise StrategyParametersBindingError("raised while hashed")
+
+
+class _ReturningAHostileDict(ParameterizedFixedTargetStrategy):
+    def decide(self, context: Any) -> Any:
+        if context.session_key.local_date == eng.DAY_2:
+            return _RefusalWhileHashed()
+        return super().decide(context)
+
+
+def test_a_refusal_type_raised_while_a_refused_return_is_hashed_fails_the_run(
+    tmp_path: Path,
+) -> None:
+    """The wrap covers the whole session step, not only the decide call.
+
+    The engine refuses the returned dict and hashes it for the trace; that
+    hash runs the dict's own methods, which raise a refusal type after
+    ``decide`` has returned.
+    """
+    ledger = SQLiteLedger(tmp_path / "audit.sqlite3")
+    engine = eng._engine()
+    identity = _v2_identity(engine, TEN)
+
+    run = execute_experiment_run(
+        run_support._specification(),
+        _v2_context(engine, _ReturningAHostileDict(TEN), identity, ledger),
+    )
+
+    assert run.status.value == "failed"
+    assert run.error_details is not None
+    assert run.error_details.startswith(
+        "StrategyRaisedRefusalError: strategy code raised "
+        f"{_qualified(StrategyParametersBindingError)} during the session XNYS "
+        "2026-01-07"
+    )
+    assert len(ledger.verified_events()) == 1
+
+
+def test_a_reference_that_changes_between_the_runner_and_the_engine_fails(
+    tmp_path: Path,
+) -> None:
+    """R2-2: the runner and the engine each read the reference once.
+
+    The runner compares the first read with the specification and identity;
+    the engine binds the second. A code hash that changes between them is
+    refused by the engine before any session and recorded FAILED, with no
+    artifact, never as a COMPLETED row.
+    """
+    ledger = SQLiteLedger(tmp_path / "audit.sqlite3")
+    engine = eng._engine()
+    strategy = _StrategyOfReference(
+        eng.STRATEGY_REFERENCE, _reference_of_code_hash("9" * 64)
+    )
+
+    run = execute_experiment_run(
+        run_support._specification(),
+        dataclasses.replace(
+            run_support._context(engine, ledger=ledger),
+            strategy=cast(Any, strategy),
+        ),
+    )
+
+    assert strategy.reference_reads == 2
+    assert run.status.value == "failed"
+    assert run.artifact_references == ()
+    assert run.error_details is not None
+    assert "the run identity must bind the strategy that runs" in run.error_details
+    assert strategy.seen == []
+    assert len(ledger.verified_events()) == 1

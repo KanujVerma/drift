@@ -1219,3 +1219,38 @@ def test_a_realized_open_past_the_exponent_range_halts_indeterminate() -> None:
 
     assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
     assert _halt_phases(artifacts) == [("open_execution", "indeterminate_valuation")]
+
+
+@pytest.mark.parametrize(
+    ("denominator", "problem"),
+    (
+        (1, "cannot be held exactly in the pinned 34-digit portfolio context"),
+        (3, "is not exactly representable as a decimal"),
+    ),
+    ids=("wide", "non-terminating"),
+)
+def test_a_refusal_names_a_ratio_past_the_integer_conversion_limit(
+    denominator: int, problem: str
+) -> None:
+    """Follow-up review: the refusal wording itself must never hit the limit.
+
+    A 5000-digit numerator is past CPython's 4300-digit integer conversion
+    limit, so spelling it with ``str`` would raise ``ValueError`` out of the
+    run instead of the refusal.
+    """
+    # Built arithmetically: parsing 5000 digits would itself hit the limit.
+    numerator = 7 * (10**5000 - 1) // 9
+
+    with pytest.raises(IndeterminateValuationError) as refused:
+        exact_decimal(Fraction(numerator, denominator))
+
+    assert str(refused.value) == f"cash amount {'7' * 5000}/{denominator} {problem}"
+
+
+def test_a_cost_model_keeps_zeros_beyond_its_significant_digits() -> None:
+    """Control: zeros past the significant digits are not significant."""
+    for field in COST_FIELDS:
+        value = "0.005" + "0" * 40
+        model = _unvalidated_cost_model(field, value)
+        rebuilt = EvaluationCostModelV1.model_validate(model.model_dump())
+        assert getattr(rebuilt, field) == Decimal(value)

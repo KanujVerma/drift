@@ -248,7 +248,13 @@ class StrategyRaisedRefusalError(DriftError, RuntimeError):
     while sealing its result. Raised by strategy code during a session, either
     is a failure of that strategy, which the issue 111 amendment records as a
     FAILED run, so the engine re-raises it as this error, chained to it, and
-    a strategy can never keep its own failed run out of the M0 ledger.
+    a strategy cannot keep a failed session out of the M0 ledger this way.
+    The message names the raised type, read through ``type`` itself, and
+    never formats the raised error, whose own ``__str__`` is strategy code.
+    Before any session the engine reads the strategy's reference and its
+    parameters; either read raising a refusal type propagates unrecorded, as
+    any caller input the runner cannot rebuild does (a residual: strategy
+    code is trusted at the process level, #113).
     """
 
 
@@ -1735,12 +1741,15 @@ class SessionEvaluatorEngine:
                 # Issue 112 review, R2-1: the engine raises neither inside a
                 # session, so this one came from strategy code, and it fails
                 # the run rather than passing as an unrecorded refusal.
+                # Named through ``type`` itself; formatting the error would
+                # run its own ``__str__``, which is strategy code.
+                kind = type(error)
+                name = f"{_exact_name(_TYPE_MODULE.__get__(kind))}.{_type_name(kind)}"
                 key = session.session_key
                 raise StrategyRaisedRefusalError(
-                    f"strategy code raised {type(error).__name__} during the "
-                    f"session {key.mic} {key.local_date}, so the run failed; the "
-                    "engine raises it only as a refusal outside its sessions: "
-                    f"{error}"
+                    f"strategy code raised {name} during the session {key.mic} "
+                    f"{key.local_date}, so the run failed; the engine raises it "
+                    "only as a refusal outside its sessions"
                 ) from error
             if halt is not None:
                 break

@@ -544,10 +544,9 @@ def test_the_density_check_covers_the_venues_of_both_sessions(
 
     The record evidences the weekend for XNAS only. A step from Friday to
     Monday where either session is on XNYS crosses a weekend no record covers
-    for XNYS, so it halts naming exactly the XNYS dates. The engine cannot
-    carry such a clock from the single-venue bridge replay (its lane gate
-    re-derives every clock session from that replay), so the check is driven
-    directly with the replay's verified contexts.
+    for XNYS, so it halts naming exactly the XNYS dates. The check is driven
+    directly here, with the replay's verified contexts, over a two-session
+    clock; the engine test below carries three-session clocks through it.
     """
     sessions = {
         item.session_key.local_date: item for item in fortnight.session_clock.sessions
@@ -569,6 +568,42 @@ def test_the_density_check_covers_the_venues_of_both_sessions(
     assert str(error.value).endswith(
         ": XNYS 2026-01-10 (indeterminate), XNYS 2026-01-11 (indeterminate)"
     )
+
+
+@pytest.mark.parametrize(
+    ("phantom_day", "unevidenced"),
+    ((date(2026, 1, 10), "2026-01-11"), (date(2026, 1, 11), "2026-01-10")),
+    ids=("xnys-saturday-then-xnas-monday", "xnas-friday-then-xnys-sunday"),
+)
+def test_the_engine_checks_both_venues_of_every_step_of_a_longer_clock(
+    fortnight: AlpacaExploratoryIntakeResult, phantom_day: date, unevidenced: str
+) -> None:
+    """R7 through the engine: each step's two venues, not the clock's ends.
+
+    The lane gate re-derives only the clock sessions a replay request sits on,
+    so an XNYS session between the XNAS Friday and Monday reaches the density
+    walk. The record evidences the weekend for XNAS only. On Saturday, the
+    step to Monday crosses Sunday from an XNYS session; on Sunday, the step
+    from Friday crosses Saturday into one. Each halts naming exactly the XNYS
+    date, which a walk taking its venues from the clock's first or last
+    session, rather than from the step's own two sessions, would miss (PR 137
+    re-review, L1).
+    """
+    sessions = fortnight.session_clock.sessions
+    friday = next(
+        item for item in sessions if item.session_key.local_date == date(2026, 1, 9)
+    )
+    phantom = _session_as(friday, day=phantom_day, mic="XNYS")
+    clock = _clock_of(
+        fortnight.session_clock,
+        tuple(sorted((*sessions, phantom), key=lambda item: item.opened_at)),
+    )
+    bundle = _bundle_over(fortnight, clock, fortnight.reconstruction_replay)
+
+    with pytest.raises(IndeterminateExecutionError) as error:
+        _engine(fortnight, bundle=bundle)
+
+    assert str(error.value).endswith(f": XNYS {unevidenced} (indeterminate)")
 
 
 def test_the_engine_refuses_a_clock_session_on_an_evidenced_non_trading_date(
