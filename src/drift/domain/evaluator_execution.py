@@ -17,7 +17,8 @@ from drift.domain.common import UUID7, FrozenModel, SHA256Hash
 from drift.domain.evaluator_portfolio import (
     PortfolioFillV1,
     PortfolioStateV1,
-    SecurityHoldingV1,
+    PortfolioStateV2,
+    SecurityHoldingV2,
     decimal_context,
 )
 from drift.domain.securities import ListingVenue
@@ -54,12 +55,13 @@ def _security_order(security_id: UUID) -> bytes:
     return security_id.bytes
 
 
-def positions_digest(holdings: Sequence[SecurityHoldingV1]) -> SHA256Hash:
+def positions_digest(holdings: Sequence[SecurityHoldingV2]) -> SHA256Hash:
     """Digest the share counts a rebalance plan was computed against.
 
     Quantities only. Cost basis does not change any delta, and hashing an
     exact Decimal would make two economically identical books disagree over
-    trailing zeros.
+    trailing zeros. A basis status is no share count either, so an
+    indeterminate basis leaves the digest where a known one would.
     """
     return content_hash(
         {str(holding.security_id): holding.quantity for holding in holdings}
@@ -319,20 +321,47 @@ class RebalanceOutcomeV1(FrozenModel):
 
     @model_validator(mode="after")
     def validate_outcome(self) -> Self:
-        if self.classification == "rejected":
-            if self.rejection is None:
-                raise ValueError("a rejected rebalance requires its rejection")
-            if self.committed_fills:
-                raise ValueError("a rejected rebalance must commit zero fills")
-            if not self.halt_stepping:
-                raise ValueError("a rejected rebalance must halt session stepping")
-            if self.rejection.session_key != self.plan.session_key:
-                raise ValueError("rejection and plan must share a session")
-            return self
-        if self.rejection is not None:
-            raise ValueError("an executed rebalance must not carry a rejection")
-        if self.halt_stepping:
-            raise ValueError("an executed rebalance must not halt session stepping")
-        if self.committed_fills != self.plan.planned_fills:
-            raise ValueError("an executed rebalance must commit every planned fill")
+        _validate_outcome(self)
         return self
+
+
+class RebalanceOutcomeV2(FrozenModel):
+    """The all-or-nothing result of one next-open rebalance of a V2 book.
+
+    A successor, not a subclass: it carries the ``PortfolioStateV2`` the M2
+    stack books into (issues 49, 103, 105). ``RebalanceOutcomeV1`` is kept
+    byte-identical.
+    """
+
+    schema_version: Literal["2"] = "2"
+    classification: Literal["executed", "rejected"]
+    plan: RebalancePlanV1
+    committed_fills: tuple[ExecutionFillV1, ...]
+    rejection: FillRejectionV1 | None
+    state: PortfolioStateV2
+    halt_stepping: bool
+
+    @model_validator(mode="after")
+    def validate_outcome(self) -> Self:
+        _validate_outcome(self)
+        return self
+
+
+def _validate_outcome(outcome: RebalanceOutcomeV1 | RebalanceOutcomeV2) -> None:
+    """Hold the all-or-nothing shape both outcome versions share."""
+    if outcome.classification == "rejected":
+        if outcome.rejection is None:
+            raise ValueError("a rejected rebalance requires its rejection")
+        if outcome.committed_fills:
+            raise ValueError("a rejected rebalance must commit zero fills")
+        if not outcome.halt_stepping:
+            raise ValueError("a rejected rebalance must halt session stepping")
+        if outcome.rejection.session_key != outcome.plan.session_key:
+            raise ValueError("rejection and plan must share a session")
+        return
+    if outcome.rejection is not None:
+        raise ValueError("an executed rebalance must not carry a rejection")
+    if outcome.halt_stepping:
+        raise ValueError("an executed rebalance must not halt session stepping")
+    if outcome.committed_fills != outcome.plan.planned_fills:
+        raise ValueError("an executed rebalance must commit every planned fill")

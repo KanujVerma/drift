@@ -39,7 +39,7 @@ from drift.domain.datasets import DatasetReference
 from drift.domain.evaluator_bundles import EvaluationRunIdentityV1
 from drift.domain.evaluator_results import (
     EvaluationResultV1,
-    EvaluationRunArtifactsV1,
+    EvaluationRunArtifactsV2,
     EvaluationSummaryMetricsV1,
 )
 from drift.domain.evaluator_trace import EvaluationTraceLogV1
@@ -207,7 +207,7 @@ def summary_metrics_payload(
     return payload
 
 
-def _rebuilt_artifacts(artifacts: EvaluationRunArtifactsV1) -> EvaluationRunArtifactsV1:
+def _rebuilt_artifacts(artifacts: EvaluationRunArtifactsV2) -> EvaluationRunArtifactsV2:
     """Rebuild what an engine returned before any of it is recorded (#120 F-A).
 
     The returned object is refused first if it names the promotion lane or
@@ -221,7 +221,7 @@ def _rebuilt_artifacts(artifacts: EvaluationRunArtifactsV1) -> EvaluationRunArti
     refuse_promotion_lane(
         artifacts.result, site="the experiment runner on the returned result"
     )
-    rebuilt = EvaluationRunArtifactsV1.model_validate_json(
+    rebuilt = EvaluationRunArtifactsV2.model_validate_json(
         artifacts.model_dump_json(warnings=False)
     )
     refuse_promotion_lane(
@@ -231,7 +231,7 @@ def _rebuilt_artifacts(artifacts: EvaluationRunArtifactsV1) -> EvaluationRunArti
 
 
 def _refuse_foreign_run(
-    inputs: _CallerInputs, recorded: EvaluationRunArtifactsV1
+    inputs: _CallerInputs, recorded: EvaluationRunArtifactsV2
 ) -> None:
     """Refuse rebuilt artifacts that are not this run's (issue 124).
 
@@ -260,7 +260,7 @@ def _refuse_foreign_run(
 def _artifact_references(
     context: ExperimentRunnerContext,
     inputs: _CallerInputs,
-    artifacts: EvaluationRunArtifactsV1,
+    artifacts: EvaluationRunArtifactsV2,
 ) -> tuple[ArtifactReference, ...]:
     result: EvaluationResultV1 = artifacts.result
     trace: EvaluationTraceLogV1 = artifacts.trace

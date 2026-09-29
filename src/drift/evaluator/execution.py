@@ -25,12 +25,16 @@ from drift.domain.evaluator_execution import (
     FillRejectionV1,
     IndeterminateExecutionError,
     ListingOpenPriceV1,
-    RebalanceOutcomeV1,
+    RebalanceOutcomeV2,
     RebalancePlanV1,
     canonical_fill_order,
     positions_digest,
 )
-from drift.domain.evaluator_portfolio import PortfolioStateV1, decimal_context
+from drift.domain.evaluator_portfolio import (
+    IndeterminateBasisError,
+    PortfolioStateV2,
+    decimal_context,
+)
 from drift.domain.evaluator_strategy import SecurityTargetPositionV1
 from drift.domain.securities import (
     ListingLifecycleEventKind,
@@ -312,6 +316,31 @@ def resolve_execution_listings(
     }
 
 
+def _require_determinate_sells(
+    *, state: PortfolioStateV2, plan: RebalancePlanV1
+) -> None:
+    """Refuse a funded plan that sells a holding whose basis is indeterminate.
+
+    A sale relieves basis into realized PnL, and an indeterminate basis has
+    none to relieve, so the sale fails closed (spec 12.5, issue 103). This is
+    judged after funding, so an unfunded plan is still a fully evidenced
+    rejection, and before commit: raised inside the commit, the kernel's
+    refusal would surface as ``AtomicRebalanceCommitError`` and crash the run
+    rather than classify it INDETERMINATE.
+    """
+    held = {holding.security_id: holding for holding in state.holdings}
+    for fill in plan.planned_fills:
+        holding = held.get(fill.security_id)
+        if fill.side != "sell" or holding is None or holding.cost_basis is not None:
+            continue
+        raise IndeterminateBasisError(
+            f"the rebalance sells {fill.quantity} of {fill.security_id}, whose "
+            "cost basis is indeterminate, caused by "
+            f"{', '.join(holding.basis_indeterminate_by)}, so the realized PnL "
+            "of the sale is not proven"
+        )
+
+
 class AtomicRebalanceEngine:
     """Plans and atomically commits one next-open rebalance.
 
@@ -342,7 +371,7 @@ class AtomicRebalanceEngine:
     def plan(
         self,
         *,
-        state: PortfolioStateV1,
+        state: PortfolioStateV2,
         staged_targets: Sequence[SecurityTargetPositionV1],
         open_prices: Mapping[UUID7, ListingOpenPriceV1],
         execution_listings: Mapping[UUID7, ListingV1],
@@ -359,7 +388,7 @@ class AtomicRebalanceEngine:
     def _plan_under_pinned_context(
         self,
         *,
-        state: PortfolioStateV1,
+        state: PortfolioStateV2,
         staged_targets: Sequence[SecurityTargetPositionV1],
         open_prices: Mapping[UUID7, ListingOpenPriceV1],
         execution_listings: Mapping[UUID7, ListingV1],
@@ -513,8 +542,8 @@ class AtomicRebalanceEngine:
         )
 
     def execute(
-        self, *, state: PortfolioStateV1, plan: RebalancePlanV1
-    ) -> RebalanceOutcomeV1:
+        self, *, state: PortfolioStateV2, plan: RebalancePlanV1
+    ) -> RebalanceOutcomeV2:
         """Commit the whole plan, or none of it."""
         if plan.session_key != state.session_key:
             raise ValueError(
@@ -536,12 +565,13 @@ class AtomicRebalanceEngine:
             )
         if not plan.is_funded:
             return self._reject(state=state, plan=plan)
+        _require_determinate_sells(state=state, plan=plan)
         return self._commit(state=state, plan=plan)
 
     @staticmethod
     def _reject(
-        *, state: PortfolioStateV1, plan: RebalancePlanV1
-    ) -> RebalanceOutcomeV1:
+        *, state: PortfolioStateV2, plan: RebalancePlanV1
+    ) -> RebalanceOutcomeV2:
         with decimal_context():
             rejection = FillRejectionV1(
                 session_key=plan.session_key,
@@ -553,7 +583,7 @@ class AtomicRebalanceEngine:
                 projected_cash=plan.projected_cash,
                 cash_shortfall=-plan.projected_cash,
             )
-        return RebalanceOutcomeV1(
+        return RebalanceOutcomeV2(
             classification="rejected",
             plan=plan,
             committed_fills=(),
@@ -563,8 +593,8 @@ class AtomicRebalanceEngine:
         )
 
     def _commit(
-        self, *, state: PortfolioStateV1, plan: RebalancePlanV1
-    ) -> RebalanceOutcomeV1:
+        self, *, state: PortfolioStateV2, plan: RebalancePlanV1
+    ) -> RebalanceOutcomeV2:
         # The throwaway kernel is validated against the same authority-bound
         # clock as the real book. Synthesizing a clock here would defeat the
         # guard that a book cannot operate on an unauthorized session.
@@ -578,7 +608,7 @@ class AtomicRebalanceEngine:
             raise AtomicRebalanceCommitError(
                 f"funded rebalance could not be booked: {error}"
             ) from error
-        return RebalanceOutcomeV1(
+        return RebalanceOutcomeV2(
             classification="executed",
             plan=plan,
             committed_fills=plan.planned_fills,
@@ -590,11 +620,11 @@ class AtomicRebalanceEngine:
     def rebalance(
         self,
         *,
-        state: PortfolioStateV1,
+        state: PortfolioStateV2,
         staged_targets: Sequence[SecurityTargetPositionV1],
         open_prices: Mapping[UUID7, ListingOpenPriceV1],
         execution_listings: Mapping[UUID7, ListingV1],
-    ) -> RebalanceOutcomeV1:
+    ) -> RebalanceOutcomeV2:
         """Plan and atomically commit one next-open rebalance."""
         plan = self.plan(
             state=state,
