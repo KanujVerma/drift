@@ -57,7 +57,7 @@ from drift.domain.evaluator_lanes import (
 )
 from drift.domain.evaluator_portfolio import (
     IndeterminateValuationError,
-    PortfolioStateV1,
+    PortfolioStateV2,
 )
 from drift.domain.evaluator_protocol import (
     EvaluationProtocolV1,
@@ -65,7 +65,7 @@ from drift.domain.evaluator_protocol import (
 )
 from drift.domain.evaluator_results import (
     EvaluationClassification,
-    EvaluationRunArtifactsV1,
+    EvaluationRunArtifactsV2,
     EvaluationSummaryMetricsV1,
     ExploratoryEvaluationResultV1,
     PromotionEvaluationResultV1,
@@ -621,7 +621,7 @@ def _engine(
 def _run(
     engine: SessionEvaluatorEngine,
     strategy: FixedTargetStrategy | None = None,
-) -> EvaluationRunArtifactsV1:
+) -> EvaluationRunArtifactsV2:
     return engine.run(
         strategy=_buy_ten() if strategy is None else strategy,
         run_identity=_run_identity(
@@ -1293,7 +1293,7 @@ def test_a_commit_failure_is_a_fatal_halt_and_not_a_classification(
     from drift.evaluator import execution as execution_module
 
     def _explode(
-        self: object, *, state: PortfolioStateV1, plan: RebalancePlanV1
+        self: object, *, state: PortfolioStateV2, plan: RebalancePlanV1
     ) -> None:
         raise AtomicRebalanceCommitError("funded rebalance could not be booked")
 
@@ -1449,7 +1449,7 @@ def test_a_result_cannot_be_paired_with_a_trace_of_another_run() -> None:
     forged = _reseal_result(complete.result, trace_hash=halted.trace.trace_hash)
 
     with pytest.raises(ValidationError, match="open exactly the sessions"):
-        EvaluationRunArtifactsV1(
+        EvaluationRunArtifactsV2(
             result=forged, trace=halted.trace, final_state=complete.final_state
         )
 
@@ -1637,7 +1637,7 @@ def test_artifacts_refuse_a_trace_the_result_does_not_hash() -> None:
     assert baseline.trace.trace_hash != shifted.trace.trace_hash
 
     with pytest.raises(ValidationError, match="must bind the trace it is paired with"):
-        EvaluationRunArtifactsV1(
+        EvaluationRunArtifactsV2(
             result=baseline.result,
             trace=shifted.trace,
             final_state=baseline.final_state,

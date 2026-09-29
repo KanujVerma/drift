@@ -31,7 +31,7 @@ from drift.domain.evaluator_execution import (
     FillRejectionV1,
     IndeterminateExecutionError,
     ListingOpenPriceV1,
-    RebalanceOutcomeV1,
+    RebalanceOutcomeV2,
     RebalancePlanV1,
     canonical_fill_order,
 )
@@ -41,8 +41,8 @@ from drift.domain.evaluator_lanes import (
     exploratory_evaluation_admission_hash,
 )
 from drift.domain.evaluator_portfolio import (
-    PortfolioStateV1,
-    SecurityHoldingV1,
+    PortfolioStateV2,
+    SecurityHoldingV2,
 )
 from drift.domain.evaluator_strategy import SecurityTargetPositionV1
 from drift.domain.securities import (
@@ -279,9 +279,9 @@ EXECUTION_ADMISSION = _execution_admission()
 def _state(
     *,
     cash: str = "10000.00",
-    holdings: tuple[SecurityHoldingV1, ...] = (),
+    holdings: tuple[SecurityHoldingV2, ...] = (),
     day: date = EXEC_DATE,
-) -> PortfolioStateV1:
+) -> PortfolioStateV2:
     balance = Decimal(cash)
     # The opening-state factory requires strictly positive seed cash, so a
     # zero-cash book is seeded then drawn down to the balance under test.
@@ -301,9 +301,12 @@ def _state(
     return opening.model_copy(update=update)
 
 
-def _holding(security_id: UUID7, quantity: int, basis: str) -> SecurityHoldingV1:
-    return SecurityHoldingV1(
-        security_id=security_id, quantity=quantity, cost_basis=Decimal(basis)
+def _holding(security_id: UUID7, quantity: int, basis: str) -> SecurityHoldingV2:
+    return SecurityHoldingV2(
+        security_id=security_id,
+        quantity=quantity,
+        basis_status="known",
+        cost_basis=Decimal(basis),
     )
 
 
@@ -1082,7 +1085,7 @@ def test_funded_rebalance_with_a_fee_heavy_sell_commits() -> None:
 def test_fee_heavy_liquidation_outcome_is_invariant_under_swapped_uuids() -> None:
     engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=FEE_ONLY)
 
-    def _liquidate(cheap: UUID7, rich: UUID7) -> RebalanceOutcomeV1:
+    def _liquidate(cheap: UUID7, rich: UUID7) -> RebalanceOutcomeV2:
         holdings = tuple(
             sorted(
                 (_holding(cheap, 1, "5.00"), _holding(rich, 10, "500.00")),
@@ -1554,7 +1557,7 @@ def test_rejection_requires_an_exact_shortfall() -> None:
         )
 
 
-def _plan_and_state() -> tuple[RebalancePlanV1, PortfolioStateV1]:
+def _plan_and_state() -> tuple[RebalancePlanV1, PortfolioStateV2]:
     engine = AtomicRebalanceEngine(session_clock=EXEC_CLOCK, cost_model=ZERO_COST)
     state = _state(cash="1000.00")
     plan = engine.plan(
@@ -1579,7 +1582,7 @@ def test_outcome_rejects_a_rejection_that_committed_fills() -> None:
         cash_shortfall=Decimal("10.00"),
     )
     with pytest.raises(ValidationError, match="zero fills"):
-        RebalanceOutcomeV1(
+        RebalanceOutcomeV2(
             classification="rejected",
             plan=plan,
             committed_fills=plan.planned_fills,
@@ -1602,7 +1605,7 @@ def test_outcome_rejects_a_rejection_that_does_not_halt() -> None:
         cash_shortfall=Decimal("10.00"),
     )
     with pytest.raises(ValidationError, match="halt"):
-        RebalanceOutcomeV1(
+        RebalanceOutcomeV2(
             classification="rejected",
             plan=plan,
             committed_fills=(),
@@ -1625,7 +1628,7 @@ def test_outcome_rejects_an_execution_carrying_a_rejection() -> None:
         cash_shortfall=Decimal("10.00"),
     )
     with pytest.raises(ValidationError, match="rejection"):
-        RebalanceOutcomeV1(
+        RebalanceOutcomeV2(
             classification="executed",
             plan=plan,
             committed_fills=plan.planned_fills,
@@ -1638,7 +1641,7 @@ def test_outcome_rejects_an_execution_carrying_a_rejection() -> None:
 def test_outcome_requires_an_execution_to_commit_the_whole_plan() -> None:
     plan, state = _plan_and_state()
     with pytest.raises(ValidationError, match="every planned fill"):
-        RebalanceOutcomeV1(
+        RebalanceOutcomeV2(
             classification="executed",
             plan=plan,
             committed_fills=(),

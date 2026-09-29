@@ -724,7 +724,7 @@ def _as_promotion(engine: Any, artifacts: Any) -> dict[str, Any]:
         STRATEGY_REFERENCE,
     )
 
-    from drift.domain.evaluator_portfolio import PortfolioStateV1
+    from drift.domain.evaluator_portfolio import PortfolioStateV2
     from drift.domain.evaluator_results import (
         PromotionEvaluationResultV1,
         evaluation_result_hash,
@@ -763,7 +763,7 @@ def _as_promotion(engine: Any, artifacts: Any) -> dict[str, Any]:
         if state.mark is None
         else state.mark.model_copy(update={"lane": "promotion"})
     )
-    final_state = PortfolioStateV1.model_validate(
+    final_state = PortfolioStateV2.model_validate(
         dict(state)
         | {
             "lane": "promotion",
@@ -782,9 +782,9 @@ def test_a_promotion_result_cannot_bind_a_trace_of_reconstructed_decisions() -> 
     while its trace records decisions taken on reconstructed bars. The control
     is the identical trace under its own exploratory result.
     """
-    from drift.domain.evaluator_results import EvaluationRunArtifactsV1
+    from drift.domain.evaluator_results import EvaluationRunArtifactsV2
 
-    control = EvaluationRunArtifactsV1.model_validate(_paired_artifacts("exploratory"))
+    control = EvaluationRunArtifactsV2.model_validate(_paired_artifacts("exploratory"))
     assert control.result.lane == "exploratory"
     assert _exploratory_events(control)
 
@@ -795,7 +795,7 @@ def test_a_promotion_result_cannot_bind_a_trace_of_reconstructed_decisions() -> 
             r"EXPLORATORY reconstructed evidence: 3 exploratory_strategy_decision"
         ),
     ):
-        EvaluationRunArtifactsV1.model_validate(_paired_artifacts("promotion"))
+        EvaluationRunArtifactsV2.model_validate(_paired_artifacts("promotion"))
 
 
 def test_a_realized_promotion_run_is_refused_and_its_pairing_still_binds() -> None:
@@ -819,7 +819,7 @@ def test_a_realized_promotion_run_is_refused_and_its_pairing_still_binds() -> No
         _protocol,
     )
 
-    from drift.domain.evaluator_results import EvaluationRunArtifactsV1
+    from drift.domain.evaluator_results import EvaluationRunArtifactsV2
     from drift.evaluator.engine import SessionEvaluatorEngine, SessionEvaluatorEvidence
 
     realized = _bundle()
@@ -841,9 +841,9 @@ def test_a_realized_promotion_run_is_refused_and_its_pairing_still_binds() -> No
     assert kinds.count("strategy_decision") >= 1
     assert "exploratory_strategy_decision" not in kinds
 
-    artifacts = EvaluationRunArtifactsV1.model_validate(_as_promotion(engine, run))
+    artifacts = EvaluationRunArtifactsV2.model_validate(_as_promotion(engine, run))
     assert artifacts.result.lane == "promotion"
-    rebound = EvaluationRunArtifactsV1.model_validate_json(artifacts.model_dump_json())
+    rebound = EvaluationRunArtifactsV2.model_validate_json(artifacts.model_dump_json())
     assert rebound.result.lane == "promotion"
     assert rebound.trace.trace_hash == run.trace.trace_hash
 
