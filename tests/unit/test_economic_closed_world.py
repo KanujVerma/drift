@@ -919,8 +919,27 @@ def test_the_record_reads_every_date_through_the_base_type() -> None:
     (action,) = record.returned_actions
     assert type(action.dates[0]) is date
     assert action.dates == (date(2026, 1, 7),)
-    for field in ("requested_start_date", "requested_end_date"):
-        assert type(getattr(record, field)) is date
+    # The record's own interval fields are rebuilt through the base type too:
+    # pydantic keeps a date subclass as it is given. A record sealed over the
+    # exact form rebuilds identically when lying dates stand in for its own.
+    exact = _record()
+    lying_fields = {
+        "requested_start_date": _LyingDate(2026, 1, 5),
+        "requested_end_date": _LyingDate(2026, 1, 16),
+        "covered_start_date": _LyingDate(2026, 1, 5),
+        "covered_end_date": _LyingDate(2026, 1, 16),
+    }
+    rebuilt = ClosedWorldCorporateActionCoverageV1.model_validate(
+        dict(exact) | lying_fields
+    )
+    for field in lying_fields:
+        assert type(getattr(rebuilt, field)) is date, field
+    assert rebuilt == exact
+    # The one stamper never seals the lying form: its hash would not cover the
+    # exact form the record is read as, so the builder refuses by its code.
+    with pytest.raises(CorporateActionCoverageError) as refused:
+        _built(start=_LyingDate(2026, 1, 5))
+    assert refused.value.code == "ca_coverage_record_hash_mismatch"
     # A lying window is read through the base type as well.
     assert _status((_built(),), lying, JAN9) == "evidenced_no_action"
     loud = _built(actions=(_action(dates=(JAN8,)),))

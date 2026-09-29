@@ -3417,9 +3417,10 @@ def build_alpaca_corporate_action_coverage(
         len(observed) == 1
         and observed[0].origin_evidence.origin_status is OriginStatus.VERIFIED
     )
-    documented = len(
-        ALPACA_ACTION_TYPES
-    ) == ALPACA_DOCUMENTED_ACTION_TYPE_COUNT and set(types) == set(ALPACA_ACTION_TYPES)
+    # DP-1: the measured types name every documented type only if the
+    # requested set is the documented set, whose size the repository evidences.
+    named_every_type = len(ALPACA_ACTION_TYPES) == ALPACA_DOCUMENTED_ACTION_TYPE_COUNT
+    documented = named_every_type and set(types) == set(ALPACA_ACTION_TYPES)
     records: list[ClosedWorldCorporateActionCoverageV1] = []
     for member in request.members:
         returned = _member_actions(actions, request, member)

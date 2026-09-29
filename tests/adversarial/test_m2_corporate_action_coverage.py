@@ -1175,3 +1175,79 @@ def test_once_covered_the_bridge_trade_still_halts_at_the_open_without_roles(
     assert cause.cause.startswith(
         f"no active primary listing for security {adapter.AAPL_ID} at "
     )
+
+
+# ==========================================================================
+# Criterion 3: the grade follows the source; promotion refuses the record
+# ==========================================================================
+
+
+def test_criterion_3_the_promotion_gate_refuses_a_bundle_carrying_a_record() -> None:
+    """No new gate code: the record's limitation is a required limitation.
+
+    The promotion case differs from an admitted one only in carrying one
+    exploratory coverage record (and the security identity it names). A proof
+    assembled directly over it still meets the gate's own limitation refusal.
+    """
+    import test_replay_provenance as rp
+    from replay_provenance_test_support import qualified_snapshot
+
+    from drift.domain.replay_provenance import _build_bundle_provenance_proof
+    from drift.evaluator.bundles import (
+        qualify_replay_context,
+        validate_promotion_admission,
+    )
+
+    harness, query, reference = rp._decision_case()
+    snapshot = qualified_snapshot(harness.context)
+    qualified = qualify_replay_context(context=harness.context, snapshot=snapshot)
+    admitted = rp._promotion_bundle(harness, query, reference, snapshot)
+    record = coverage(SEC_A, start=date(2026, 11, 1), end=date(2026, 11, 30))
+    carried = assemble_evaluation_input_bundle(
+        evaluation_interval=admitted.evaluation_interval,
+        session_clock=admitted.session_clock,
+        security_identities=(SecurityV1(schema_version="1", security_id=SEC_A),),
+        authentic_decision_views=admitted.authentic_decision_views,
+        corporate_action_coverage=(record,),
+        source_snapshot_hash=admitted.source_snapshot_hash,
+    )
+    assert carried.required_limitations == (CORPORATE_ACTION_SNAPSHOT_LIMITATION,)
+    proof = _build_bundle_provenance_proof(
+        qualified_context_hash=qualified.qualified_hash,
+        source_snapshot_hash=snapshot.snapshot_hash,
+        bundle=carried,
+    )
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^promotion evaluation cannot consume evidence declaring limitations: "
+            rf"\('{CORPORATE_ACTION_SNAPSHOT_LIMITATION}',\)$"
+        ),
+    ):
+        validate_promotion_admission(
+            **rp._promotion_case(carried, proof, snapshot, qualified)
+        )
+
+
+def test_criterion_3_no_record_can_state_a_grade_above_exploratory() -> None:
+    record = coverage(SEC_A)
+    for field, value in (
+        ("evidence_grade", "promotion"),
+        ("revision_support", "captured_history"),
+    ):
+        body = dict(record) | {field: value}
+        with pytest.raises(ValidationError, match="ca_coverage_grade_exceeds_source"):
+            ClosedWorldCorporateActionCoverageV1.model_validate(body)
+
+
+def test_criterion_5_the_bridge_contacts_the_same_three_gets_on_the_same_hosts() -> (
+    None
+):
+    """Q13 and Q15: no new endpoint, route, host or dependency."""
+    assert alpaca._OBJECT_ENDPOINTS == (
+        ("alpaca-historical-bars", "data.alpaca.markets", "/v2/stocks/bars"),
+        ("alpaca-market-calendar", "paper-api.alpaca.markets", "/v2/calendar"),
+        ("alpaca-corporate-actions", "data.alpaca.markets", "/v1/corporate-actions"),
+    )
+    # The core never imports the bridge, the new modules included.
+    alpaca.assert_core_isolation()
