@@ -1322,6 +1322,50 @@ def _require_contiguous_members(
     )
 
 
+def _require_current_securities(
+    decision_session: EvaluationSessionV1,
+    decision_views: Sequence[StrategyDecisionViewV1],
+) -> None:
+    """Refuse a realized decision context holding a stale security.
+
+    Issue 141, owner ruling A: the realized counterpart of the issue 87 rule.
+    A security with decision evidence at this cutoff but no view sourced from
+    the decision session itself (its venue, scope and date) would reach the
+    strategy with history ending at an earlier session, as though it were
+    current, and a target for it would trade on that evidence. The context is
+    incomplete whether or not the strategy would trade the security, and
+    whether or not the universe admits it, so the decision halts
+    INDETERMINATE, naming the decision session and, in canonical order, every
+    such security with the newest session its evidence reaches. A security
+    with no evidence at this cutoff has no view and is left to the existing
+    rules. The views must already have passed the context's causality
+    checks, so evidence sourced after the decision session fails loudly
+    there rather than halting here.
+    """
+    decided = decision_session.session_key
+    clauses: list[str] = []
+    for group in sorted(
+        decision_views, key=lambda item: _security_order(item.security_id)
+    ):
+        if any(view.source_session == decided for view in group.views):
+            continue
+        through = max(
+            (view.source_session for view in group.views),
+            key=lambda key: (key.local_date, key.mic, key.session_scope),
+        )
+        clauses.append(
+            f"security {group.security_id} has decision evidence through "
+            f"{through.mic} {through.local_date.isoformat()} but no view sourced "
+            f"from {decided.mic} {decided.local_date.isoformat()}"
+        )
+    if not clauses:
+        return
+    raise IndeterminateValuationError(
+        "incomplete decision context at the realized decision session "
+        f"{decided.mic} {decided.local_date.isoformat()}: " + "; ".join(clauses)
+    )
+
+
 def require_next_open_execution(
     decision_session: EvaluationSessionV1, execution_session: EvaluationSessionV1
 ) -> None:
@@ -2242,7 +2286,7 @@ class SessionEvaluatorEngine:
     def _decision_context(
         self, state: PortfolioStateV2, session: EvaluationSessionV1
     ) -> StrategyDecisionContextV1:
-        return StrategyDecisionContextV1(
+        context = StrategyDecisionContextV1(
             session_key=session.session_key,
             decision_session=session,
             decision_cutoff=session.closed_at,
@@ -2254,6 +2298,10 @@ class SessionEvaluatorEngine:
             portfolio_nav=state.net_asset_value,
             decision_views=self._decision_views(session),
         )
+        # Issue 141: only a causal context is judged for currency, so evidence
+        # sourced after the decision session still fails loudly above.
+        _require_current_securities(session, context.decision_views)
+        return context
 
     def _decision_views(
         self, session: EvaluationSessionV1
@@ -2265,6 +2313,12 @@ class SessionEvaluatorEngine:
         rule is left to `StrategyDecisionContextV1` rather than being
         pre-filtered here: silently dropping an acausal view would let a
         poisoned bundle run to COMPLETE instead of failing loudly.
+
+        Every security with evidence here must also be current (issue 141):
+        once the context has proven the evidence causal,
+        `_require_current_securities` halts the decision unless each such
+        security has a view sourced from this decision session. A security
+        with no evidence at this cutoff has no view.
         """
         grouped: dict[UUID, list[DerivedObservationViewV1]] = {}
         for view in self._bundle.authentic_decision_views:
