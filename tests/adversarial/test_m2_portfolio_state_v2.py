@@ -343,58 +343,63 @@ def aggregate_sale_residual_run() -> EvaluationRunArtifactsV2:
 #: 5dd05cd before any V2 model existed. The V2 switch and the replay record
 #: moved none of them. Each later move is recorded at its pin, with the only
 #: leaves a field-by-field diff of the run's trace and result shows moving.
+#: Issue 71 moves every pin once: its closed-world session coverage changes
+#: the ``m1d-evidence-v1`` attestation and every bundle, so each run's bundle,
+#: admission and run identity hashes, its decision-context and mark hashes,
+#: and its trace and result hashes move. That diff of all ten runs shows no
+#: other leaf moving and no classification changing.
 RUN_PINS: dict[str, tuple[EvaluationClassification, str, str]] = {
     "forward-split": (
         EvaluationClassification.COMPLETE,
-        "d483818c39bc4a2f8ae1926abc29ce1e419732773f0932201402be32a29b55f7",
-        "22a7b654d166244b378dffed09864ee5f8c73dd3b16c1a71ac73f6adfec27191",
+        "ca92a0393a8bf3638801737d5f5966ac80507e9ac63d8d363f2ac7abb5b310d0",
+        "66a3c502f58902837762ddb90b7a72443de6416880dbc3a238629f93a6386b40",
     ),
     "stock-dividend": (
         EvaluationClassification.COMPLETE,
-        "ba1a70f3dd8af7e29686249abb8f2e74457ff4949fcd289d28ee063e90e566a4",
-        "35041a5eb206c2cbe9e1896ac75dfa2465e4c5e8e2f589322bd77660c695b2e6",
+        "c0620796061923bc0bbcd26ef9339af1ac2c743a5645aa05377fae4386223165",
+        "94bf0d98a88509386231c38d3f4a2f278b33bb08194aadf084c85861469d1563",
     ),
     "stock-acquisition": (
         EvaluationClassification.COMPLETE,
-        "0d6672fd317c95978870980ba814219f4c9acd93995cd058de321382a1126ab6",
-        "18c13a2d2d0be0aa26b30eb9761b2ad1b3fe49be8b9812068cd871c972c82235",
+        "dbb9321410fd827f65fa8ab2d8f58e7355488c334781b71a0f354160e495c022",
+        "d719459b541dbd0f61112f530157cf36f2cdeca4950bca08f6e404959fd90c41",
     ),
     "extinguishing-liquidation": (
         EvaluationClassification.COMPLETE,
-        "2c7956d6d9f0fff865a256bd3974c3b107d745dadbc1b2d3d78b8d1e8053f74b",
-        "a8e96bc267d7b6d522fdda3c05cac170a5fa6c29204a358b766dd17925af2fec",
+        "638ee4e7bee0f88e7c78d66f6728da7dc8bfbc3f18fb10411802fd8a9c8d0bf8",
+        "90a3b4c65d48fcd63470f48632d9e7a081086087e7a2ab1082eea4c7d995c391",
     ),
     "cash-acquisition": (
         EvaluationClassification.COMPLETE,
-        "5dce66eb55c4e5bd2ae0cf56d45a4fe0a3d25d0a83735cad7080805a35d0378a",
-        "2c7f5f76f6d56cf6781ecc8e5d1b038b3cd2b1fdb221289842f277957732e605",
+        "102f6cf5b51cdccabf0063a925de4b294c2c8b3537097770d1cb24f4931a0a97",
+        "581cc449e6c98a8c038ae8b86f23c982f6ffcff63c7d5766b6ad110b026282b7",
     ),
     "cash-dividend": (
         EvaluationClassification.COMPLETE,
-        "3a751f13f36a76fbc602ebbff92e46572158819a910c000efa2a37b3d0fdbb27",
-        "0a86c7b3bb01a6ca19dc08fe75d9a9ce46c22ef1d1f9e25bbd0d0f4fadb44c63",
+        "5036427e25b2d5b7a372801f985c600205ff9371f43ceeed9ba5cf471027af00",
+        "2f35960e790d6e1350e3177636c8431c0b410759e4cae03342dbe12d224ffe61",
     ),
     # Issue 103: the session-3 decision sees both sides of the spin-off with
     # an indeterminate basis, so its context hash moves (41ce3853 to
     # 3a99b693), and with it the trace and result hashes. Nothing else does.
     "spinoff": (
         EvaluationClassification.COMPLETE,
-        "4298dd0a38d6dde2f2198b01682cdb97b40b38dd0a71341b256a2b545cedca3d",
-        "02fc965d2710dcb1b925fee17b71cb532340a2efc58a78afa49d8065ccd30180",
+        "41e66aa89e78fadc93e9e21ad7cdba6553ee7215aaa7a99c2f1e8fae888c652c",
+        "aa68c784574c0433319766e35da7f66407c666c03c0d5d33482b84486232dac6",
     ),
     # Issue 105: the instalment leaves the continuing basis indeterminate, so
     # the session-3 decision context hash moves (f8b8bbef to 98949b80).
     "continuing-instalment": (
         EvaluationClassification.COMPLETE,
-        "3a8389cc1a9ffa4ab72b8bc2c3a9a8a47e2ec8e107dc9953844c0fb7dc8cbb08",
-        "93a8945b010bb0e63281669634c173f5400953bb49a2fdbe6e4d8123fd09b4b5",
+        "88151cc53750d3d83974555f2f639592f2446f66a520e7a655f4a49de2d933b1",
+        "4df43e6d40f02f03c56c61f6658ab7e304e5bfc2eadb14c0d52a26b91019ba67",
     ),
     # Issue 105: the cash leg leaves the acquirer basis indeterminate, so the
     # session-3 decision context hash moves (bf7c5181 to e8e7a543).
     "mixed-acquisition": (
         EvaluationClassification.COMPLETE,
-        "49008a24ef2b336652c2df389347c4cf7333af0568daef069fa06f982a20dea0",
-        "731027be491d7b7dfffa91b29c46ce4e0169498af4a05b4faf6ca7aad0ec135e",
+        "df667937c3b76cfda8ea4a717e55df9274974cc30f2fb658a830c67d2d63981f",
+        "46a4fbb86ffd04a238af943441af475cd1f487700e80ba18bb4912ab8af56fee",
     ),
     # Issue 105: the sold third relieves 100.00 of basis against 1.00 of
     # proceeds, so realized gross and net PnL move from 0 to -99 and the
@@ -402,8 +407,8 @@ RUN_PINS: dict[str, tuple[EvaluationClassification, str, str]] = {
     # 87213f0b).
     "aggregate-sale-residual": (
         EvaluationClassification.COMPLETE,
-        "fd5f48edbc67a059c983f0f333dddf6a522f84259dde70be5714e0c634947c15",
-        "e85db665771589686ec0084bc6ca178a131efd2ded7b3c5e09447a7d8fa93ae0",
+        "b82784349f41b81bb2c95b1346bee347aebfca6338bb5c147a3b451cdd3f0e06",
+        "bf14d43264e39e255819f194a742882df7b91d05e69fefbd0ad3bc7ddb620494",
     ),
 }
 
