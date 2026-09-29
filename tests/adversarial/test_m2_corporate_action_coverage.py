@@ -17,6 +17,7 @@ reads a credential.
 
 # ruff: noqa: E402
 
+import json
 import sys
 from dataclasses import replace
 from datetime import UTC, date, datetime
@@ -31,6 +32,7 @@ if str(_UNIT_SUPPORT) not in sys.path:
     sys.path.insert(0, str(_UNIT_SUPPORT))
 
 import pytest
+import test_alpaca_exploratory_adapter as adapter
 import test_evaluator_corporate_actions as ca
 import test_evaluator_engine as eng
 from exploratory_decision_test_support import (
@@ -47,6 +49,8 @@ from exploratory_decision_test_support import (
 from observation_test_support import ObservationHarness
 from pydantic import ValidationError
 
+import drift.adapters.alpaca_exploratory as alpaca
+from drift.adapters.alpaca_exploratory import AlpacaExploratoryIntakeResult
 from drift.datasets.resolver import VerifiedArtifactBytes
 from drift.domain.artifacts import ArtifactKind, ArtifactReference
 from drift.domain.assertions import (
@@ -108,7 +112,7 @@ from drift.evaluator.bundles import (
 from drift.evaluator.clock import build_scheduled_reconstruction_clock
 from drift.evaluator.corporate_action_coverage import CorporateActionCoverageIndex
 from drift.evaluator.corporate_actions import CorporateActionProcessor
-from drift.evaluator.engine import SessionEvaluatorEvidence
+from drift.evaluator.engine import SessionEvaluatorEngine, SessionEvaluatorEvidence
 from drift.markets.economic_closed_world import (
     CorporateActionCoverageError,
     build_corporate_action_coverage,
@@ -979,3 +983,195 @@ def test_criterion_4_a_non_trading_run_needs_no_coverage_in_either_lane() -> Non
         ReconstructedTargetStrategy({}),
     )
     assert reconstructed.result.classification is EvaluationClassification.COMPLETE
+
+
+# ==========================================================================
+# Criterion 1 through the real Alpaca bridge: the #76 review probe inverts
+# ==========================================================================
+
+#: A measured response returning one forward split for AAPL, every date of it
+#: on 2026-01-08, so only the window that owns 2026-01-08 holds it.
+AAPL_SPLIT_ON_JAN8 = (
+    b'{"corporate_actions":{"forward_splits":[{"id":"ca-aapl-split",'
+    b'"symbol":"AAPL","new_rate":2,"old_rate":1,"ex_date":"2026-01-08",'
+    b'"process_date":"2026-01-08"}]},"next_page_token":null}'
+)
+PROBE_WARMUP = 2
+BUY_AND_HOLD_AAPL = {day: ((adapter.AAPL_ID, 10),) for day in adapter.SESSION_DATES}
+
+
+def _probe(intake: AlpacaExploratoryIntakeResult) -> EvaluationRunArtifactsV2:
+    """The review probe: the bridge bundle, synthetic M1b roles, buy and hold."""
+    engine = SessionEvaluatorEngine(
+        bundle=intake.bundle,
+        admission=intake.admission,
+        protocol=eng._protocol(warmup=PROBE_WARMUP),
+        cost_model=eng._cost_model(),
+        evidence=SessionEvaluatorEvidence(
+            listing_role_records=(
+                eng._role_record(adapter.AAPL_ID, adapter.AAPL_LISTING, suffix=7601),
+                eng._role_record(adapter.MSFT_ID, adapter.MSFT_LISTING, suffix=7621),
+            ),
+            exploratory_cohort=intake.cohort,
+            exploratory_reconstruction_replay=intake.reconstruction_replay,
+        ),
+        book_currency_namespace="iso4217",
+        book_currency_code="USD",
+    )
+    return run_engine(engine, ReconstructedTargetStrategy(BUY_AND_HOLD_AAPL))
+
+
+@pytest.fixture
+def dp1_resolved(monkeypatch: pytest.MonkeyPatch) -> None:
+    """As if DP-1 were resolved: the requested types are every documented type."""
+    monkeypatch.setattr(
+        alpaca, "ALPACA_DOCUMENTED_ACTION_TYPE_COUNT", len(alpaca.ALPACA_ACTION_TYPES)
+    )
+
+
+def test_criterion_1_a_pre_76_bridge_response_halts_the_probe(tmp_path: Path) -> None:
+    """No measured request, no record: the probe no longer completes."""
+    intake = adapter.run_pinned_intake(tmp_path / "private")
+    assert intake.corporate_action_coverage == ()
+    artifacts = _probe(intake)
+    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
+    cause = _halt_cause(artifacts)
+    assert cause.phase is EvaluationPhase.PRE_OPEN_EFFECTS
+    assert cause.session_key.local_date == date(2026, 1, 7)
+    assert cause.cause.startswith(
+        f"no closed-world corporate-action coverage for {adapter.AAPL_ID} over "
+    )
+    assert not [event for event in artifacts.trace.events if event.kind == "fill"]
+
+
+def test_criterion_1_a_quiet_bridge_response_halts_while_dp1_is_open(
+    tmp_path: Path,
+) -> None:
+    """DP-1: the quiet response is read, but no record is positive yet."""
+    intake = adapter.run_covered_intake(tmp_path / "private", adapter.QUIET_ACTIONS)
+    assert len(intake.corporate_action_coverage) == 2
+    artifacts = _probe(intake)
+    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
+    assert _halt_cause(artifacts).cause == (
+        f"no closed-world corporate-action coverage for {adapter.AAPL_ID} over "
+        "[2026-01-07, 2026-01-07] (indeterminate)"
+    )
+
+
+@pytest.mark.usefixtures("dp1_resolved")
+def test_criterion_1_the_probe_trades_over_a_quiet_positive_response(
+    tmp_path: Path,
+) -> None:
+    intake = adapter.run_covered_intake(tmp_path / "private", adapter.QUIET_ACTIONS)
+    assert all(item.completeness.positive for item in intake.corporate_action_coverage)
+    artifacts = _probe(intake)
+    assert artifacts.result.classification is EvaluationClassification.COMPLETE
+    assert artifacts.result.metrics.committed_fill_count == 1
+    (holding,) = artifacts.final_state.holdings
+    assert (holding.security_id, holding.quantity) == (adapter.AAPL_ID, 10)
+
+
+@pytest.mark.usefixtures("dp1_resolved")
+def test_criterion_1_a_split_in_the_response_halts_at_its_own_window(
+    tmp_path: Path,
+) -> None:
+    intake = adapter.run_covered_intake(tmp_path / "private", AAPL_SPLIT_ON_JAN8)
+    artifacts = _probe(intake)
+    assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
+    cause = _halt_cause(artifacts)
+    assert cause.phase is EvaluationPhase.PRE_OPEN_EFFECTS
+    assert cause.session_key.local_date == date(2026, 1, 8)
+    assert cause.cause == (
+        f"corporate-action coverage returned actions for {adapter.AAPL_ID} over "
+        "[2026-01-08, 2026-01-08] that no M2 accounting evidence accounts for: "
+        "forward_splits ca-aapl-split"
+    )
+    # The buy at the 2026-01-07 open was filled; the split's window halts it.
+    assert artifacts.result.metrics.committed_fill_count == 1
+
+
+def _leaves(value: object, prefix: str = "") -> dict[str, object]:
+    out: dict[str, object] = {}
+    if isinstance(value, dict):
+        for key, item in value.items():
+            out.update(_leaves(item, f"{prefix}.{key}" if prefix else str(key)))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            out.update(_leaves(item, f"{prefix}[{index}]"))
+    else:
+        out[prefix] = value
+    return out
+
+
+def test_criterion_4_a_non_trading_bridge_run_moves_only_its_hashes(
+    tmp_path: Path,
+) -> None:
+    """B0 is unaffected: over the same bridge data, with or without the records.
+
+    The covered bundle carries two records, so its hash, and every hash that
+    binds it, moves; nothing else in the run does.
+    """
+    bare = adapter.run_pinned_intake(tmp_path / "bare")
+    covered = adapter.run_covered_intake(tmp_path / "covered")
+    assert bare.corporate_action_coverage == ()
+    assert len(covered.corporate_action_coverage) == 2
+    assert covered.bundle.bundle_hash != bare.bundle.bundle_hash
+
+    def b0(intake: AlpacaExploratoryIntakeResult) -> dict[str, object]:
+        artifacts = run_engine(
+            SessionEvaluatorEngine(
+                bundle=intake.bundle,
+                admission=intake.admission,
+                protocol=eng._protocol(warmup=PROBE_WARMUP),
+                cost_model=eng._cost_model(),
+                evidence=SessionEvaluatorEvidence(
+                    exploratory_cohort=intake.cohort,
+                    exploratory_reconstruction_replay=intake.reconstruction_replay,
+                ),
+                book_currency_namespace="iso4217",
+                book_currency_code="USD",
+            ),
+            ReconstructedTargetStrategy({}),
+        )
+        assert artifacts.result.classification is EvaluationClassification.COMPLETE
+        return _leaves(json.loads(artifacts.result.model_dump_json()))
+
+    before, after = b0(bare), b0(covered)
+    assert set(before) == set(after)
+    moved = {key for key in before if before[key] != after[key]}
+    assert moved
+    for key in moved:
+        assert isinstance(before[key], str) and len(str(before[key])) == 64, key
+        assert isinstance(after[key], str) and len(str(after[key])) == 64, key
+
+
+@pytest.mark.usefixtures("dp1_resolved")
+def test_once_covered_the_bridge_trade_still_halts_at_the_open_without_roles(
+    tmp_path: Path,
+) -> None:
+    """The issue 54 cause the pre-open now precedes is still pinned behind it.
+
+    With positive coverage the pre-open passes, and with no M1b listing role
+    evidence the next open halts INDETERMINATE in the execution phase instead
+    of inventing an execution listing, exactly as before issue 76.
+    """
+    intake = adapter.run_covered_intake(tmp_path / "private", adapter.QUIET_ACTIONS)
+    engine = SessionEvaluatorEngine(
+        bundle=intake.bundle,
+        admission=intake.admission,
+        protocol=eng._protocol(warmup=PROBE_WARMUP),
+        cost_model=eng._cost_model(),
+        evidence=SessionEvaluatorEvidence(
+            exploratory_cohort=intake.cohort,
+            exploratory_reconstruction_replay=intake.reconstruction_replay,
+        ),
+        book_currency_namespace="iso4217",
+        book_currency_code="USD",
+    )
+    artifacts = run_engine(engine, ReconstructedTargetStrategy(BUY_AND_HOLD_AAPL))
+    cause = _halt_cause(artifacts)
+    assert cause.phase is EvaluationPhase.OPEN_EXECUTION
+    assert cause.cause_kind == "indeterminate_execution"
+    assert cause.cause.startswith(
+        f"no active primary listing for security {adapter.AAPL_ID} at "
+    )

@@ -47,6 +47,13 @@ corporate action mutation replay is truncated. Therefore:
 * Corporate actions map to ``CorporateActionTermsVersionV1`` only. No occurred
   effect and no delivered settlement is ever minted, so no portfolio cash or
   share mutation can be derived from an Alpaca terms record.
+* The retained corporate-actions response is also read closed-world, one
+  ``ClosedWorldCorporateActionCoverageV1`` per cohort member (issue 76), but
+  only when the measured request that produced it names the requested window,
+  the cohort and every action type this bridge requests. Every response group
+  is parsed; any returned action in an exposed window halts the evaluation,
+  and a window no record positively covers is INDETERMINATE. A response whose
+  measured request was not retained yields no record at all.
 
 Nothing produced here is promotion-grade evidence, and nothing produced here can
 be converted into promotion-grade evidence.
@@ -99,6 +106,12 @@ from drift.domain.dataset_validation import (
     ValidationRunContextV1,
 )
 from drift.domain.datasets import TemporalCoverage
+from drift.domain.economic_closed_world import (
+    CORPORATE_ACTION_SNAPSHOT_LIMITATION,
+    ClosedWorldCorporateActionCoverageV1,
+    CorporateActionCompletenessAssertionV1,
+    ReturnedCorporateActionV1,
+)
 from drift.domain.economic_common import (
     ActionKind,
     CashComponentV1,
@@ -204,6 +217,10 @@ from drift.evaluator.bundles import (
 )
 from drift.evaluator.clock import build_scheduled_reconstruction_clock
 from drift.evaluator.reconstruction import ExploratoryReconstructionReplay
+from drift.markets.economic_closed_world import (
+    build_corporate_action_coverage,
+    verify_corporate_action_coverage,
+)
 from drift.markets.economic_validation import (
     ECONOMIC_VALIDATION_PROFILE_ID,
     economic_role_contract,
@@ -276,12 +293,53 @@ ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD = (
     "calendar-absence-read-as-closure-under-closed-world-assumption"
 )
 
+#: Issue 76, decision D3-b. The bridge reads the absence of a corporate action
+#: from one current provider snapshot, so every coverage record it emits, and
+#: every admission of a bundle carrying one, names it.
+ALPACA_LIMITATION_CA_SNAPSHOT_ABSENCE = CORPORATE_ACTION_SNAPSHOT_LIMITATION
+
+#: Issue 76, decision D1-b: every action type this bridge names in the ``types``
+#: filter of ``GET /v1/corporate-actions``, as Alpaca publishes the enumeration
+#: of that parameter. Omitting a type would leave its absence unevidenced, so
+#: the request names every one this bridge can name.
+ALPACA_ACTION_TYPES: tuple[str, ...] = (
+    "cash_dividend",
+    "cash_merger",
+    "forward_split",
+    "name_change",
+    "redemption",
+    "reverse_split",
+    "rights_distribution",
+    "spin_off",
+    "stock_and_cash_merger",
+    "stock_dividend",
+    "stock_merger",
+    "unit_split",
+    "worthless_removal",
+)
+
+#: How many action types the repository evidences Alpaca documents:
+#: ``docs/architecture/m1e-provider-selection.md``, section 3 (Alpaca), "Rich
+#: Corporate Actions REST": "All 17 documented action types are accessible."
+#: The record names none of them, and this bridge can name only
+#: ``len(ALPACA_ACTION_TYPES)``. A request naming fewer types than are
+#: documented does not evidence the absence of the rest, so until the two
+#: agree no record this bridge emits is a positive completeness assertion
+#: (issue 76, decision packet DP-1): every exposed window stays INDETERMINATE.
+ALPACA_DOCUMENTED_ACTION_TYPE_COUNT = 17
+
+#: The named refusal to cover (issue 76, B2): a retained response whose
+#: measured origin carries no request target cannot evidence which types,
+#: window or cohort produced it, so it yields no coverage record at all.
+ALPACA_CA_COVERAGE_REQUEST_UNMEASURED = "ca_coverage_request_unmeasured"
+
 #: Every limitation an Alpaca-backed exploratory admission must acknowledge.
 ALPACA_EXPLORATORY_LIMITATIONS: tuple[str, ...] = tuple(
     sorted(
         (
             ALPACA_LIMITATION_ABSENT_HALTS,
             ALPACA_LIMITATION_BOUNDED_COHORT,
+            ALPACA_LIMITATION_CA_SNAPSHOT_ABSENCE,
             ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD,
             ALPACA_LIMITATION_RETROSPECTIVE_RECONSTRUCTION,
             ALPACA_LIMITATION_SCHEDULED_SESSION_RECONSTRUCTION,
@@ -486,6 +544,39 @@ _POLICY_DOCUMENTS: dict[str, dict[str, Any]] = {
             ),
         ),
         _policy_statement(
+            "alpaca-corporate-actions-closed-world",
+            source_id=ALPACA_ACTION_SOURCE_ID,
+            subject="closed-world reading of one corporate-actions response",
+            publication="partially_published",
+            statement=(
+                "Alpaca publishes GET /v1/corporate-actions as the corporate "
+                "action history, filtered by symbols, by types and by a start "
+                "and an end date. The bridge names every action type it can "
+                "name, the declared cohort and the declared window in one "
+                "unpaginated request, measures that request, and reads the "
+                "retained response closed-world per cohort member over the "
+                "requested window, never before 2021-08-02, the earliest "
+                "action date the repository evidences a REST response "
+                "returning, and never after the acquisition date. A returned "
+                "action with any date inside a window is present there; a "
+                "window no returned action is dated in evidences no action "
+                "only under a positive assertion. This reading is a current "
+                "snapshot with no revision history, exploratory evidence only, "
+                "and named on every admission."
+            ),
+            not_established=(
+                "which date field the start and end filters apply to, for "
+                "each action type",
+                "any date-range cap, history floor or silent truncation of a response",
+                "whether an action is returned under a former symbol after a "
+                "symbol change",
+                "whether a returned action is revised or withdrawn in place",
+                "that the requested types are every type Alpaca documents: "
+                "the provider-selection record counts 17 documented types "
+                "without naming them, and this bridge names 13",
+            ),
+        ),
+        _policy_statement(
             "alpaca-acquisition-methodology",
             source_id=BRIDGE_COLLECTOR_ID,
             subject="how this bridge acquires and retains provider bytes",
@@ -601,6 +692,21 @@ class AlpacaNativeCashDividend:
     ex_date: date
     record_date: date
     payable_date: date
+
+
+@dataclass(frozen=True, slots=True)
+class AlpacaNativeCorporateAction:
+    """One corporate action of any type, as the provider printed it (issue 76).
+
+    ``group`` is the response group it was returned under, ``symbols`` every
+    symbol any symbol field names, and ``dates`` every date any date field
+    carries, sorted and unique. Nothing here interprets the action.
+    """
+
+    group: str
+    native_id: str
+    symbols: tuple[str, ...]
+    dates: tuple[date, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -768,6 +874,189 @@ def parse_alpaca_cash_dividends(data: bytes) -> tuple[AlpacaNativeCashDividend, 
     return tuple(sorted(rows, key=lambda row: (row.symbol, row.native_id)))
 
 
+#: The M1c action kind a response group corresponds to, where that
+#: correspondence is exact. Every other group, including cash dividends (which
+#: may be regular or special) and name changes, is kept with no kind; no
+#: consumer rule reads the kind (issue 76, B3).
+_ACTION_GROUP_KINDS: dict[str, ActionKind] = {
+    "cash_mergers": ActionKind.CASH_ACQUISITION,
+    "forward_splits": ActionKind.FORWARD_SPLIT,
+    "reverse_splits": ActionKind.REVERSE_SPLIT,
+    "rights_distributions": ActionKind.RIGHTS_WARRANTS_CVR,
+    "spin_offs": ActionKind.SPINOFF,
+    "stock_and_cash_mergers": ActionKind.MIXED_ACQUISITION,
+    "stock_dividends": ActionKind.STOCK_DIVIDEND,
+    "stock_mergers": ActionKind.STOCK_ACQUISITION,
+}
+
+
+def _action_native_id(entry: Mapping[str, Any], group: str) -> str:
+    """The provider's own identifier, or a content address when it prints none."""
+    for name in ("id", "corporate_action_id"):
+        value = entry.get(name)
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            raise AlpacaBridgeIncompleteError(
+                f"a {group} row carries a {name} that is not an identifier"
+            )
+        return value
+    canonical = json.dumps(entry, sort_keys=True, separators=(",", ":"), default=str)
+    return f"sha256:{sha256(canonical.encode('utf-8')).hexdigest()}"
+
+
+def _action_symbols(entry: Mapping[str, Any], group: str) -> tuple[str, ...]:
+    """Every symbol a ``symbol`` or ``*_symbol`` field of one row names."""
+    found: set[str] = set()
+    for name, value in entry.items():
+        if name != "symbol" and not name.endswith("_symbol"):
+            continue
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            raise AlpacaBridgeIncompleteError(
+                f"a {group} row carries a {name} that is not a symbol"
+            )
+        found.add(value)
+    return tuple(sorted(found))
+
+
+def _action_dates(entry: Mapping[str, Any], group: str) -> tuple[date, ...]:
+    """Every date a ``date`` or ``*_date`` field of one row carries.
+
+    A null field carries none. Anything else that is not an exact
+    ``YYYY-MM-DD`` date is refused: a date the bridge cannot read could lie in
+    any window.
+    """
+    found: set[date] = set()
+    for name, value in entry.items():
+        if name != "date" and not name.endswith("_date"):
+            continue
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            raise AlpacaBridgeIncompleteError(
+                f"a {group} row carries a {name} that is not a date"
+            )
+        try:
+            parsed = date.fromisoformat(value)
+        except ValueError as error:
+            raise AlpacaBridgeIncompleteError(
+                f"a {group} row carries a {name} that is not an ISO date: {value}"
+            ) from error
+        if parsed.isoformat() != value:
+            raise AlpacaBridgeIncompleteError(
+                f"a {group} row carries a {name} that is not an ISO date: {value}"
+            )
+        found.add(parsed)
+    return tuple(sorted(found))
+
+
+def parse_alpaca_corporate_actions(
+    data: bytes,
+) -> tuple[AlpacaNativeCorporateAction, ...]:
+    """Parse every group of an exact ``/v1/corporate-actions`` response.
+
+    Issue 76, B3. No group is dropped, including one this bridge has no kind
+    for: a response group that is read as nothing would be read as no action.
+    A paginated page, a malformed row and a repeated action are refused.
+    """
+    document = _strict_document(data)
+    if not isinstance(document, dict):
+        raise AlpacaBridgeIncompleteError("actions response must be a JSON object")
+    _require_closed_page(document, "corporate actions")
+    grouped = document.get("corporate_actions")
+    if not isinstance(grouped, dict):
+        raise AlpacaBridgeIncompleteError("actions response must carry its actions")
+    rows: list[AlpacaNativeCorporateAction] = []
+    for group, entries in grouped.items():
+        if not group.strip():
+            raise AlpacaBridgeIncompleteError(
+                "actions response carries an unnamed action group"
+            )
+        if not isinstance(entries, list):
+            raise AlpacaBridgeIncompleteError(
+                f"corporate action group {group} must be a JSON array"
+            )
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise AlpacaBridgeIncompleteError(
+                    f"a {group} row must be a JSON object"
+                )
+            rows.append(
+                AlpacaNativeCorporateAction(
+                    group=group,
+                    native_id=_action_native_id(entry, group),
+                    symbols=_action_symbols(entry, group),
+                    dates=_action_dates(entry, group),
+                )
+            )
+    keys = tuple((row.group, row.native_id) for row in rows)
+    if len(set(keys)) != len(keys):
+        raise AlpacaBridgeIncompleteError(
+            "the corporate-actions response repeats an action in one group"
+        )
+    return tuple(sorted(rows, key=lambda row: (row.group, row.native_id)))
+
+
+def _decoded_query_component(text: str) -> str:
+    """Invert the form encoding the acquisition CLI applies to its query.
+
+    Only ``+`` and ``%XX`` escapes are decoded; anything else must already be
+    printable ASCII. A malformed escape is refused rather than guessed.
+    """
+    decoded = bytearray()
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if character == "+":
+            decoded.append(0x20)
+            index += 1
+        elif character == "%":
+            pair = text[index + 1 : index + 3]
+            if len(pair) != 2 or not all(
+                item in "0123456789abcdefABCDEF" for item in pair
+            ):
+                raise AlpacaBridgeIncompleteError(
+                    "a measured request target carries a malformed escape"
+                )
+            decoded.append(int(pair, 16))
+            index += 3
+        elif "!" <= character <= "~":
+            decoded.append(ord(character))
+            index += 1
+        else:
+            raise AlpacaBridgeIncompleteError(
+                "a measured request target carries an unencoded character"
+            )
+    try:
+        return decoded.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise AlpacaBridgeIncompleteError(
+            "a measured request target is not UTF-8"
+        ) from error
+
+
+def measured_request_parameters(target: str) -> tuple[str, dict[str, str]]:
+    """Split one measured request target into its route and query parameters."""
+    route, _, query = target.partition("?")
+    parameters: dict[str, str] = {}
+    if query:
+        for pair in query.split("&"):
+            name, equals, value = pair.partition("=")
+            if not equals:
+                raise AlpacaBridgeIncompleteError(
+                    "a measured request target carries a parameter with no value"
+                )
+            key = _decoded_query_component(name)
+            if key in parameters:
+                raise AlpacaBridgeIncompleteError(
+                    f"a measured request target repeats the parameter {key}"
+                )
+            parameters[key] = _decoded_query_component(value)
+    return route, parameters
+
+
 def _required_date(entry: Mapping[str, Any], name: str) -> date:
     value = entry.get(name)
     if not isinstance(value, str):
@@ -851,6 +1140,11 @@ class AlpacaOriginObservation:
     body_sha256: str
     #: Byte length of that exact response body.
     body_byte_size: int
+    #: The exact request target the transport sent: the route and the query
+    #: string (issue 76, B2). ``None`` for a measurement that did not record
+    #: it, which every origin retained before issue 76 is; such a response can
+    #: evidence no closed-world corporate-action coverage.
+    request_target: str | None = None
 
     def __post_init__(self) -> None:
         if self.observed_at.tzinfo is None:
@@ -868,6 +1162,16 @@ class AlpacaOriginObservation:
             raise AlpacaBridgeIncompleteError(
                 "a measured origin must name the byte size of the exact body it "
                 "measured"
+            )
+        target = self.request_target
+        if target is not None and (
+            type(target) is not str
+            or not target.startswith("/")
+            or not all("!" <= character <= "~" for character in target)
+        ):
+            raise AlpacaBridgeIncompleteError(
+                "a measured request target must be the exact printable route and "
+                "query the transport sent"
             )
 
     def measured(self, data: bytes) -> bool:
@@ -968,6 +1272,12 @@ class AlpacaIntakeRequest:
                 raise AlpacaBridgeIncompleteError(
                     f"{key} returned HTTP {observation.http_status}, which is "
                     "not a complete provider response"
+                )
+            target = observation.request_target
+            if target is not None and target.partition("?")[0] != _OBJECT_ROUTES[key]:
+                raise AlpacaBridgeIncompleteError(
+                    f"{key} was measured requesting {target.partition('?')[0]} "
+                    f"but is declared as {_OBJECT_ROUTES[key]}"
                 )
             # The acquisition window has to contain the instants that were
             # actually measured, so it cannot be backdated or forward-dated
@@ -1297,6 +1607,8 @@ def retain_native_bytes(
 #: Where measured origin records live under the private retention root.
 ORIGIN_RECORD_DIRECTORY = "origins"
 ORIGIN_RECORD_SCHEMA_VERSION = "1"
+#: A record of a measurement that recorded its request target (issue 76, B2).
+ORIGIN_RECORD_TARGET_SCHEMA_VERSION = "2"
 _ORIGIN_RECORD_KIND = "drift-alpaca-measured-origin"
 _ORIGIN_RECORD_FIELDS = frozenset(
     {
@@ -1312,6 +1624,7 @@ _ORIGIN_RECORD_FIELDS = frozenset(
         "tls_endpoint_identity",
     }
 )
+_ORIGIN_RECORD_TARGET_FIELDS = _ORIGIN_RECORD_FIELDS | {"request_target"}
 
 
 def _retained_body(retained: RetainedNativeBytes, key: str) -> bytes:
@@ -1326,7 +1639,7 @@ def _retained_body(retained: RetainedNativeBytes, key: str) -> bytes:
 
 def _origin_record_bytes(observation: AlpacaOriginObservation) -> bytes:
     """Encode one measured origin as the canonical bytes of its record."""
-    document = {
+    document: dict[str, object] = {
         "body_byte_size": observation.body_byte_size,
         "body_sha256": observation.body_sha256,
         "content_type": observation.content_type,
@@ -1338,6 +1651,11 @@ def _origin_record_bytes(observation: AlpacaOriginObservation) -> bytes:
         "schema_version": ORIGIN_RECORD_SCHEMA_VERSION,
         "tls_endpoint_identity": observation.tls_endpoint_identity,
     }
+    # A measurement without a request target keeps the version 1 bytes exactly,
+    # so every record retained before issue 76 still reads back unchanged.
+    if observation.request_target is not None:
+        document["request_target"] = observation.request_target
+        document["schema_version"] = ORIGIN_RECORD_TARGET_SCHEMA_VERSION
     return json.dumps(document, sort_keys=True, separators=(",", ":")).encode("ascii")
 
 
@@ -1347,12 +1665,22 @@ def _parse_origin_record(data: bytes) -> AlpacaOriginObservation | None:
         document = json.loads(data.decode("ascii"))
     except UnicodeDecodeError, ValueError:
         return None
-    if not isinstance(document, dict) or set(document) != _ORIGIN_RECORD_FIELDS:
+    if not isinstance(document, dict):
         return None
+    versions = {
+        ORIGIN_RECORD_SCHEMA_VERSION: _ORIGIN_RECORD_FIELDS,
+        ORIGIN_RECORD_TARGET_SCHEMA_VERSION: _ORIGIN_RECORD_TARGET_FIELDS,
+    }
+    version = document.get("schema_version")
     if (
-        document["kind"] != _ORIGIN_RECORD_KIND
-        or document["schema_version"] != ORIGIN_RECORD_SCHEMA_VERSION
+        not isinstance(version, str)
+        or version not in versions
+        or set(document) != versions[version]
+        or document["kind"] != _ORIGIN_RECORD_KIND
     ):
+        return None
+    target = document.get("request_target")
+    if target is not None and not isinstance(target, str):
         return None
     texts = ("object_key", "body_sha256", "request_host", "observed_at")
     optional_texts = ("tls_endpoint_identity", "content_type")
@@ -1376,6 +1704,7 @@ def _parse_origin_record(data: bytes) -> AlpacaOriginObservation | None:
             observed_at=datetime.fromisoformat(document["observed_at"]),
             body_sha256=document["body_sha256"],
             body_byte_size=document["body_byte_size"],
+            request_target=target,
         )
     except ValueError:
         return None
@@ -1488,6 +1817,39 @@ _OBJECT_ENDPOINTS: tuple[tuple[str, str, str], ...] = (
     (ACTIONS_OBJECT_KEY, ALPACA_DATA_HOST, ALPACA_ACTIONS_ROUTE),
 )
 _OBJECT_HOSTS: dict[str, str] = {key: host for key, host, _ in _OBJECT_ENDPOINTS}
+_OBJECT_ROUTES: dict[str, str] = {key: route for key, _, route in _OBJECT_ENDPOINTS}
+
+
+def alpaca_endpoint_parameters(
+    request: AlpacaIntakeRequest,
+) -> dict[str, dict[str, str]]:
+    """The exact query parameters of every declared endpoint (issue 76, B1, B2).
+
+    The acquisition CLI sends exactly these, and the receipt's request
+    declaration carries exactly these, per endpoint. The corporate-actions
+    request names every type in ``ALPACA_ACTION_TYPES`` on the same GET and
+    host as before; only its ``types`` filter widened.
+    """
+    symbols = ",".join(sorted(member.symbol for member in request.members))
+    start, end = request.start_date.isoformat(), request.end_date.isoformat()
+    return {
+        BARS_OBJECT_KEY: {
+            "adjustment": "raw",
+            "end": end,
+            "feed": "sip",
+            "start": start,
+            "symbols": symbols,
+            "timeframe": "1Day",
+        },
+        CALENDAR_OBJECT_KEY: {"end": end, "start": start},
+        ACTIONS_OBJECT_KEY: {
+            "end": end,
+            "start": start,
+            "symbols": symbols,
+            "types": ",".join(ALPACA_ACTION_TYPES),
+        },
+    }
+
 
 #: The fields each endpoint is expected to return. A calendar row carries no
 #: OHLCV and a dividend row carries no OHLCV, so declaring OHLCV for all three
@@ -1495,14 +1857,10 @@ _OBJECT_HOSTS: dict[str, str] = {key: host for key, host, _ in _OBJECT_ENDPOINTS
 _EXPECTED_FIELDS: dict[str, tuple[str, ...]] = {
     BARS_OBJECT_KEY: tuple(sorted(REQUIRED_RECONSTRUCTION_FIELDS)),
     CALENDAR_OBJECT_KEY: ("close", "date", "open"),
-    ACTIONS_OBJECT_KEY: (
-        "corporate_action_id",
-        "ex_date",
-        "payable_date",
-        "rate",
-        "record_date",
-        "symbol",
-    ),
+    # Every group of the corporate-actions response is read (issue 76, B3), and
+    # each group prints its own row fields, so the response is declared by the
+    # envelope every group sits in.
+    ACTIONS_OBJECT_KEY: ("corporate_actions", "next_page_token"),
 }
 
 
@@ -1621,13 +1979,9 @@ def _request_identity(request: AlpacaIntakeRequest) -> RequestIdentityV1:
         route_template=",".join(
             f"{host}{route}" for _, host, route in _OBJECT_ENDPOINTS
         ),
-        canonical_parameters={
-            "adjustment": "raw",
-            "end": request.end_date.isoformat(),
-            "feed": "sip",
-            "start": request.start_date.isoformat(),
-            "timeframe": "1Day",
-        },
+        # Per endpoint, with the cohort symbols and the corporate-action types
+        # (issue 76, B2), so the declaration states every query parameter sent.
+        canonical_parameters=cast(Any, alpaca_endpoint_parameters(request)),
         requested_universe=tuple(member.symbol for member in request.members),
         requested_fields=tuple(sorted(REQUIRED_RECONSTRUCTION_FIELDS)),
         requested_date_range=(
@@ -2917,6 +3271,284 @@ def verify_alpaca_closed_world_record(
         )
 
 
+# --- closed-world corporate-action coverage (issue 76) ------------------------------
+
+_CA_COVERAGE_POLICY_ID = "alpaca-corporate-actions-closed-world"
+
+
+def _attributed_members(
+    action: AlpacaNativeCorporateAction, request: AlpacaIntakeRequest
+) -> tuple[AlpacaCohortMember, ...]:
+    """B3: every member a symbol field names, or every member when none does.
+
+    An action naming no cohort symbol cannot be ruled out for any member, so
+    it is attributed to all of them rather than to none.
+    """
+    named = tuple(
+        member for member in request.members if member.symbol in action.symbols
+    )
+    return named or request.members
+
+
+def _member_actions(
+    actions: Sequence[AlpacaNativeCorporateAction],
+    request: AlpacaIntakeRequest,
+    member: AlpacaCohortMember,
+) -> tuple[ReturnedCorporateActionV1, ...]:
+    """Every returned action attributed to one member, as the record states it."""
+    returned = (
+        ReturnedCorporateActionV1(
+            native_kind=action.group,
+            native_id=action.native_id,
+            action_kind=_ACTION_GROUP_KINDS.get(action.group),
+            dates=action.dates,
+        )
+        for action in actions
+        if member in _attributed_members(action, request)
+    )
+    return tuple(sorted(returned, key=lambda item: (item.native_kind, item.native_id)))
+
+
+def _require_measured_actions_request(
+    request: AlpacaIntakeRequest, observation: AlpacaOriginObservation
+) -> tuple[str, ...]:
+    """V6 and V8: the measured request is exactly the declared one.
+
+    Returns the requested action types, sorted. A measured ``types`` filter
+    that omits a type this bridge requests is refused by
+    ``ca_coverage_action_classes_incomplete``; any other difference from the
+    declared route, host, window or cohort by
+    ``ca_coverage_request_binding_mismatch``.
+    """
+    target = observation.request_target
+    if target is None:
+        raise AlpacaBridgeIncompleteError(
+            f"{ALPACA_CA_COVERAGE_REQUEST_UNMEASURED}: the corporate-actions "
+            "origin carries no measured request target"
+        )
+    route, measured = measured_request_parameters(target)
+    expected = alpaca_endpoint_parameters(request)[ACTIONS_OBJECT_KEY]
+    types = tuple(measured.get("types", "").split(","))
+    if len(set(types)) != len(types) or set(types) != set(ALPACA_ACTION_TYPES):
+        raise AlpacaBridgeIncompleteError(
+            "ca_coverage_action_classes_incomplete: the measured corporate-actions "
+            f"request names the types {measured.get('types')!r}, not every type "
+            "this bridge requests"
+        )
+    if (
+        route != ALPACA_ACTIONS_ROUTE
+        or observation.request_host != ALPACA_DATA_HOST
+        or {key: value for key, value in measured.items() if key != "types"}
+        != {key: value for key, value in expected.items() if key != "types"}
+    ):
+        raise AlpacaBridgeIncompleteError(
+            "ca_coverage_request_binding_mismatch: the measured corporate-actions "
+            "request is not the declared route, host, window and cohort"
+        )
+    return tuple(sorted(types))
+
+
+def build_alpaca_corporate_action_coverage(
+    request: AlpacaIntakeRequest,
+    retained: RetainedNativeBytes,
+    acquisition: AlpacaAcquisitionEvidence,
+    support: dict[str, VerifiedArtifactBytes],
+) -> tuple[tuple[ClosedWorldCorporateActionCoverageV1, ...], str | None]:
+    """Read the retained corporate-actions response closed-world (issue 76).
+
+    Returns one record per cohort member (B4), a member with no returned
+    action included, and no refusal; or no record and the named refusal
+    ``ALPACA_CA_COVERAGE_REQUEST_UNMEASURED`` when the measured origin carries
+    no request target (B2), which every origin retained before issue 76 is.
+    Replaying such bytes can never claim coverage of every type.
+
+    Each record binds the requested window, the receipt's request declaration,
+    the exact retained response and the measured origin record over it (both
+    retained into ``support``), every returned action attributed to the member
+    (B3), and a completeness assertion whose basis is the publication status
+    of the retained ``alpaca-corporate-actions-closed-world`` statement. The
+    assertion is positive only if the measured types are every type the
+    provider documents, which the repository cannot yet establish (DP-1).
+
+    Intake never refuses for thin coverage (B5, D6-b): a short or
+    non-positive record is emitted as it is, and only an exposed evaluation
+    halts on it. Integrity failures refuse by name.
+    """
+    if acquisition.reconciliation.result is not AcquisitionCompleteness.PASS:
+        raise AlpacaBridgeIncompleteError(
+            "closed-world corporate-action coverage needs a passing acquisition "
+            "reconciliation"
+        )
+    data = retained.artifacts[retained.corporate_actions_hash].data
+    observation = request.observation_for(ACTIONS_OBJECT_KEY)
+    if observation is None or not observation.measured(data):
+        raise AlpacaBridgeIncompleteError(
+            "closed-world corporate-action coverage needs an origin measured over "
+            "exactly the retained corporate-actions bytes"
+        )
+    if observation.request_target is None:
+        return (), ALPACA_CA_COVERAGE_REQUEST_UNMEASURED
+    types = _require_measured_actions_request(request, observation)
+    actions = parse_alpaca_corporate_actions(data)
+    identity = _verified(canonical_json(acquisition.receipt.request))
+    origin = _verified(_origin_record_bytes(observation))
+    for artifact in (identity, origin):
+        support[artifact.content_hash] = artifact
+    pages = tuple(
+        page
+        for page in acquisition.receipt.pages
+        if page.page_identity == f"{ACTIONS_OBJECT_KEY}-page-0"
+    )
+    observed = tuple(
+        item
+        for item in acquisition.receipt.observed_objects
+        if item.matched_expected_key == ACTIONS_OBJECT_KEY
+    )
+    publication = str(_POLICY_DOCUMENTS[_CA_COVERAGE_POLICY_ID]["provider_publication"])
+    document = _strict_document(data)
+    single = (
+        isinstance(document, dict)
+        and document.get("next_page_token") is None
+        and len(pages) == 1
+        and pages[0].cursor_out is None
+        and pages[0].result == "complete"
+    )
+    measured_origin = (
+        len(observed) == 1
+        and observed[0].origin_evidence.origin_status is OriginStatus.VERIFIED
+    )
+    documented = len(
+        ALPACA_ACTION_TYPES
+    ) == ALPACA_DOCUMENTED_ACTION_TYPE_COUNT and set(types) == set(ALPACA_ACTION_TYPES)
+    records: list[ClosedWorldCorporateActionCoverageV1] = []
+    for member in request.members:
+        returned = _member_actions(actions, request, member)
+        assertion = CorporateActionCompletenessAssertionV1(
+            basis=_CLOSED_WORLD_BASES[publication],
+            policy_statement_hash=_policy_hash(_CA_COVERAGE_POLICY_ID),
+            acquisition_reconciliation_pass=True,
+            single_unpaginated_response=single,
+            measured_origin=measured_origin,
+            requested_types_documented=documented,
+            returned_actions_attributed=True,
+            returned_actions_inside_requested_window=all(
+                any(request.start_date <= day <= request.end_date for day in item.dates)
+                for item in returned
+            ),
+        )
+        try:
+            records.append(
+                build_corporate_action_coverage(
+                    source_id=ALPACA_ACTION_SOURCE_ID,
+                    security_id=member.security_id,
+                    queried_symbol=member.symbol,
+                    requested_start_date=request.start_date,
+                    requested_end_date=request.end_date,
+                    requested_action_classes=types,
+                    request_binding_hash=identity.content_hash,
+                    response_sha256=retained.corporate_actions_hash,
+                    response_byte_size=len(data),
+                    origin_observation_hash=origin.content_hash,
+                    returned_actions=returned,
+                    completeness=assertion,
+                    # The instant by which every provider byte had been
+                    # observed, as the calendar record states it (issue 71).
+                    snapshot_as_of=_exact_boundary(
+                        request.acquired_at,
+                        retained.corporate_actions_hash,
+                        f"ca-coverage:{member.symbol}:snapshot",
+                    ),
+                )
+            )
+        except ValueError as error:
+            raise AlpacaBridgeIncompleteError(str(error)) from error
+    return tuple(records), None
+
+
+def verify_alpaca_corporate_action_record(
+    record: ClosedWorldCorporateActionCoverageV1,
+    request: AlpacaIntakeRequest,
+    retained: RetainedNativeBytes,
+    acquisition: AlpacaAcquisitionEvidence,
+) -> None:
+    """The bridge-side checks the Drift core cannot make (V4, V5, V6, V8).
+
+    The core may not read the provider format, so re-parsing every group of
+    the retained bytes into the member's returned actions happens here. So
+    does holding the requested window, the cohort symbol, the measured
+    request and the origin record to the acquisition that produced them.
+    Each refusal message starts with its contract code.
+    """
+    data = retained.artifacts[retained.corporate_actions_hash].data
+    if (
+        record.response_sha256 != retained.corporate_actions_hash
+        or record.response_byte_size != len(data)
+        or sha256(data).hexdigest() != record.response_sha256
+    ):
+        raise AlpacaBridgeIncompleteError(
+            "ca_coverage_response_hash_mismatch: the record does not name the exact "
+            "retained corporate-actions response"
+        )
+    members = tuple(
+        member for member in request.members if member.security_id == record.security_id
+    )
+    if len(members) != 1 or record.queried_symbol != members[0].symbol:
+        raise AlpacaBridgeIncompleteError(
+            "ca_coverage_request_binding_mismatch: the record names no cohort member "
+            "under its own symbol"
+        )
+    if _member_actions(parse_alpaca_corporate_actions(data), request, members[0]) != (
+        record.returned_actions
+    ):
+        raise AlpacaBridgeIncompleteError(
+            "ca_coverage_returned_actions_disagree_with_response: the retained "
+            "response returns other actions for the member than the record states"
+        )
+    observation = request.observation_for(ACTIONS_OBJECT_KEY)
+    if observation is None or not observation.measured(data):
+        raise AlpacaBridgeIncompleteError(
+            "ca_coverage_origin_mismatch: no origin was measured over the retained "
+            "corporate-actions bytes"
+        )
+    if record.requested_action_classes != _require_measured_actions_request(
+        request, observation
+    ):
+        raise AlpacaBridgeIncompleteError(
+            "ca_coverage_action_classes_incomplete: the record's requested action "
+            "classes are not the measured request's"
+        )
+    identity = acquisition.receipt.request
+    window = (
+        record.requested_start_date.isoformat(),
+        record.requested_end_date.isoformat(),
+    )
+    expected = tuple(
+        item
+        for item in acquisition.expected_inventory.objects
+        if item.object_key == ACTIONS_OBJECT_KEY
+    )
+    if (
+        record.source_id != ALPACA_ACTION_SOURCE_ID
+        or record.request_binding_hash != content_hash(identity)
+        or tuple(identity.requested_date_range) != window
+        or len(expected) != 1
+        or tuple(expected[0].dates) != window
+        or window != (request.start_date.isoformat(), request.end_date.isoformat())
+    ):
+        raise AlpacaBridgeIncompleteError(
+            "ca_coverage_request_binding_mismatch: the record's requested interval "
+            "or request binding is not the acquisition's declaration"
+        )
+    if (
+        record.origin_observation_hash
+        != sha256(_origin_record_bytes(observation)).hexdigest()
+    ):
+        raise AlpacaBridgeIncompleteError(
+            "ca_coverage_origin_mismatch: the record's origin is not the measurement "
+            "taken over the retained corporate-actions bytes"
+        )
+
+
 def _require_evidenced_run_span(record: ClosedWorldSessionCoverageV1) -> None:
     """R1 and D6-a: refuse a run span holding an INDETERMINATE date, by name.
 
@@ -3178,7 +3810,7 @@ def build_bridge_admission(
     bundle: EvaluationInputBundleV1,
     lane: BridgeLane = "exploratory",
 ) -> ExploratoryEvaluationAdmissionV1:
-    """Mint the exploratory admission binding all seven Alpaca limitations.
+    """Mint the exploratory admission binding every Alpaca limitation.
 
     ``lane="promotion"`` is refused. This bridge cannot emit a
     ``PromotionEvaluationAdmissionV1`` under any circumstance: promotion
@@ -3215,6 +3847,11 @@ class AlpacaExploratoryIntakeResult:
     observation_contract: ObservationContractV1
     #: The closed-world reading of the retained calendar response (issue 71).
     closed_world_coverage: ClosedWorldSessionCoverageV1
+    #: One closed-world reading of the retained corporate-actions response per
+    #: cohort member (issue 76), or none when its request was not measured.
+    corporate_action_coverage: tuple[ClosedWorldCorporateActionCoverageV1, ...]
+    #: The named refusal to cover, when no record could be read (issue 76, B2).
+    corporate_action_coverage_refusal: str | None
     validation_decisions: tuple[DatasetValidationDecisionV2, ...]
     economic_terms: AlpacaEconomicTermsDataset
     context: M1dResolutionContext
@@ -3282,6 +3919,17 @@ def run_alpaca_exploratory_intake(
     _require_evidenced_run_span(closed_world)
     closed_world_bytes = _verified(closed_world_record_bytes(closed_world))
     support[closed_world_bytes.content_hash] = closed_world_bytes
+    # Issue 76: the retained corporate-actions response, read closed-world per
+    # cohort member when its measured request names every requested type, the
+    # window and the cohort. Thin or non-positive coverage is emitted as it is
+    # (B5); only an exposed evaluation halts on it.
+    corporate_action_coverage, coverage_refusal = (
+        build_alpaca_corporate_action_coverage(request, retained, acquisition, support)
+    )
+    for coverage_record in corporate_action_coverage:
+        verify_alpaca_corporate_action_record(
+            coverage_record, request, retained, acquisition
+        )
     schedule_rows = tuple(
         sorted(
             (
@@ -3368,6 +4016,10 @@ def run_alpaca_exploratory_intake(
             "the M1d context does not carry exactly this acquisition's "
             "closed-world calendar coverage"
         )
+    # And every corporate-action record's bytes and bound artifacts must be
+    # retained in it, as the reconstructed lane will re-verify (issue 76, C7).
+    for coverage_record in corporate_action_coverage:
+        verify_corporate_action_coverage(coverage_record, context.supporting_artifacts)
     context_hash = m1d_context_hash(context)
 
     cohort = build_bridge_cohort(request)
@@ -3419,6 +4071,9 @@ def run_alpaca_exploratory_intake(
         economic_outcomes=(),
         exploratory_cohort=cohort,
         exploratory_reconstruction_replay=reconstruction_replay,
+        # Issue 76 (B7): the coverage records ride in the bundle, where the
+        # admission binds them and their limitation is required.
+        corporate_action_coverage=corporate_action_coverage,
         source_snapshot_hash=None,
         # The corporate-action window is a property of this dataset, which no
         # evidence member declares, so the bundle itself obliges it (issue 92).
@@ -3437,6 +4092,8 @@ def run_alpaca_exploratory_intake(
         listings=listings,
         observation_contract=contract,
         closed_world_coverage=closed_world,
+        corporate_action_coverage=corporate_action_coverage,
+        corporate_action_coverage_refusal=coverage_refusal,
         validation_decisions=(
             observations.decision,
             scheduled.decision,
