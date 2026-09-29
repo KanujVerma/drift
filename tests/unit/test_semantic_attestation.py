@@ -2421,3 +2421,21 @@ def test_importing_the_ca_coverage_closure_loads_only_its_declared_modules() -> 
     loaded = set(report["loaded"])
     assert set(seeds) <= loaded
     assert loaded <= set(declared), sorted(loaded - set(declared))
+
+
+def test_every_ca_coverage_closure_module_is_byte_pinned_by_the_current_freeze() -> (
+    None
+):
+    """No declared module can move the identity while every byte freeze is green.
+
+    The two issue 76 modules are M1d-pinned by their v9 additions; every other
+    module the closure declares was already pinned.
+    """
+    pins = _load_pinned_m1d().PROTECTED_M1D_SHA256
+    root = _package_root()
+    repository = root.parents[1]
+    for module in semantic_attestation.M1C_CA_COVERAGE_SEMANTIC_MODULES:
+        path = semantic_attestation._declared_module_path(root, module)
+        relative = path.relative_to(repository).as_posix()
+        assert relative in pins, module
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == pins[relative], module
