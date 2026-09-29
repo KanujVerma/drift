@@ -1937,6 +1937,48 @@ def test_every_m1d_evidence_closure_module_is_byte_pinned_by_the_current_freeze(
         assert hashlib.sha256(path.read_bytes()).hexdigest() == pins[relative], module
 
 
+# --- closed-world session coverage (issue 71) ---------------------------------
+
+_CLOSED_WORLD_MODULES = frozenset(
+    {"drift.domain.session_closed_world", "drift.markets.session_closed_world"}
+)
+"""The two modules issue 71 adds, and the only ones it adds to any closure."""
+
+
+def test_closed_world_coverage_joins_only_the_m1d_evidence_closure() -> None:
+    """D5-a: the derivation module is an m1d-evidence-v1 seed; nothing else moves.
+
+    The markets module derives, stamps and checks the M1d evidence identity,
+    so it must be a seed; the record module it imports joins through it. No
+    validation closure and no M1c closure grows, because M1d validation and M1c
+    code never execute either module.
+    """
+    seeds = semantic_attestation.M1D_EVIDENCE_SEEDS
+    assert "drift.markets.session_closed_world" in seeds
+    assert "drift.domain.session_closed_world" not in seeds
+    assert "drift.markets.session_closed_world" in (
+        _modules_binding_the_m1d_evidence_identity()
+    )
+    evidence = set(resolve_semantic_closure(seeds=seeds))
+    assert _CLOSED_WORLD_MODULES <= evidence
+    assert _CLOSED_WORLD_MODULES <= set(
+        semantic_attestation.M1D_EVIDENCE_SEMANTIC_MODULES
+    )
+    for closure in (
+        M1D_VALIDATION_SEMANTIC_MODULES,
+        semantic_attestation.M1C_VALIDATION_SEMANTIC_MODULES,
+        semantic_attestation.M1C_EVIDENCE_SEMANTIC_MODULES,
+    ):
+        assert not _CLOSED_WORLD_MODULES & set(closure)
+    # Without the new seed the closure would lose exactly the two modules.
+    without = tuple(
+        seed for seed in seeds if seed != "drift.markets.session_closed_world"
+    )
+    assert evidence - set(resolve_semantic_closure(seeds=without)) == set(
+        _CLOSED_WORLD_MODULES
+    )
+
+
 # --- M1c identities (issue 63, stage 2) ---------------------------------------
 
 _M1C_BASELINE_COMMIT = "aecee94207dbd64aa5154fe03295f35566ec7268"

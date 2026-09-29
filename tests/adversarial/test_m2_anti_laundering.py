@@ -89,14 +89,14 @@ from drift.domain.evaluator_portfolio import (
     MarkEvidenceV1,
     MarkPriceV1,
     PortfolioMarkV1,
-    PortfolioStateV1,
+    PortfolioStateV2,
 )
 from drift.domain.evaluator_reconstruction import (
     ExploratoryReconstructedSessionObservationV1,
 )
 from drift.domain.evaluator_results import (
     LANE_GRANTED_MARK_GRADE,
-    EvaluationRunArtifactsV1,
+    EvaluationRunArtifactsV2,
     ExploratoryEvaluationResultV1,
     PromotionEvaluationResultV1,
 )
@@ -470,14 +470,14 @@ def test_run_artifacts_refuse_a_final_state_in_another_lane(trade: bool) -> None
     for price in state["mark"]["prices"]:
         price["evidence"]["grade"] = "promotion_grade"
     assert bool(state["mark"]["prices"]) is trade
-    assert PortfolioStateV1.model_validate_json(json.dumps(state)).lane == "promotion"
+    assert PortfolioStateV2.model_validate_json(json.dumps(state)).lane == "promotion"
 
     with pytest.raises(
         ValidationError,
         match=r"final portfolio state is in the promotion lane, its result is in "
         r"the exploratory lane",
     ):
-        EvaluationRunArtifactsV1.model_validate_json(json.dumps(data))
+        EvaluationRunArtifactsV2.model_validate_json(json.dumps(data))
 
 
 def test_run_artifacts_refuse_a_final_state_marked_above_its_result_lane() -> None:
@@ -494,7 +494,7 @@ def test_run_artifacts_refuse_a_final_state_marked_above_its_result_lane() -> No
     for price in state["mark"]["prices"]:
         assert price["evidence"]["grade"] == "exploratory"
         price["evidence"]["grade"] = "promotion_grade"
-    assert PortfolioStateV1.model_validate_json(json.dumps(state)).lane == (
+    assert PortfolioStateV2.model_validate_json(json.dumps(state)).lane == (
         "exploratory"
     )
 
@@ -503,11 +503,11 @@ def test_run_artifacts_refuse_a_final_state_marked_above_its_result_lane() -> No
         match=r"a result in the exploratory lane grants exploratory marks, its "
         r"final state marks security \S+ promotion_grade",
     ):
-        EvaluationRunArtifactsV1.model_validate_json(json.dumps(data))
+        EvaluationRunArtifactsV2.model_validate_json(json.dumps(data))
 
     # Control: the genuine pair validates.
     genuine = _genuine_pair_json()
-    assert EvaluationRunArtifactsV1.model_validate_json(json.dumps(genuine))
+    assert EvaluationRunArtifactsV2.model_validate_json(json.dumps(genuine))
 
 
 # ==========================================================================
@@ -1570,7 +1570,7 @@ RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_107 = (
 # evaluator evidence hash, and the bundle, admission, run-identity, trace and
 # result chain. No quantity, price, cash, NAV, classification, count, status,
 # reason, lane or kind leaf changes. These are the same two runs' hashes since
-# that recorded change; issue 71 re-pins them the same way.
+# that recorded change; issue 71 re-pins them the same way, below.
 REALIZED_TRACE_HASH_SINCE_ISSUE_63_STAGE_2 = (
     "5fd254552ea73effee84de6f84d9e5d132c1990d485e53dfccd7860308ea3e9b"
 )
@@ -1582,6 +1582,30 @@ RECONSTRUCTED_TRACE_HASH_SINCE_ISSUE_63_STAGE_2 = (
 )
 RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_63_STAGE_2 = (
     "4853de62f54c764aa163449c2c0b9c67527df2bb02fe10dcb1df35116652ddee"
+)
+# Issue 71 makes `drift.markets.session_closed_world` a seed of the
+# `m1d-evidence-v1` closure (decision D5-a). Its edit to `semantic_attestation.py`
+# and the two closed-world modules it adds move the M1d evidence identity by
+# design (011cf2f5 to 1a104251), and, because `semantic_attestation.py` is also
+# declared in both M1c closures, the M1c validator identity bound into every M1d
+# context hash (84b494ff to 6ab03915). A field-by-field diff of all six pinned
+# runs against main cde7728 shows only identity-bearing hashes moved: context,
+# mark, session, reconstruction, price and generated-row hashes, the evaluator
+# evidence hash, and the bundle, admission, run-identity, trace and result
+# chain. No quantity, price, cash, NAV, classification, count, status, reason,
+# lane or kind leaf changes (0 non-hash leaves moved). These are the same two
+# runs' hashes since that recorded change.
+REALIZED_TRACE_HASH_SINCE_ISSUE_71 = (
+    "436f3edf10204a74776e1e518819cbe02eb5555e1954a11764c80522459d8db6"
+)
+REALIZED_RESULT_HASH_SINCE_ISSUE_71 = (
+    "054f0a6ac7dc7c10bc05f4de23b59936337a61911680c5b20c1bc08a8f71bd78"
+)
+RECONSTRUCTED_TRACE_HASH_SINCE_ISSUE_71 = (
+    "f6fc5fc64c103c00cbe4a83fddbf56afef4c1354812c4c753cbcfa78304e1b71"
+)
+RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_71 = (
+    "26e9b58c70694e1e1291b7b4eb572f0656e98c6f5d12845981c34c9d0814af0a"
 )
 
 
@@ -1698,7 +1722,7 @@ def _promotion_evidence_sites(path: Path) -> tuple[list[str], int]:
     that type, or a literal stating ``lane`` as ``"promotion"`` or
     ``is_promotion_grade_evidence`` as true. The lane literal is what selects
     the promotion member when a result is built through ``EvaluationResultV1``
-    or ``EvaluationRunArtifactsV1``. An ``isinstance`` test names the type
+    or ``EvaluationRunArtifactsV2``. An ``isinstance`` test names the type
     without building one, so it is not a site.
     """
     sites: list[str] = []
@@ -1770,8 +1794,8 @@ def test_disabling_promotion_leaves_the_realized_lane_byte_identical() -> None:
 
     assert artifacts.result.lane == "exploratory"
     assert artifacts.result.metrics.committed_fill_count == 1
-    assert artifacts.trace.trace_hash == REALIZED_TRACE_HASH_SINCE_ISSUE_63_STAGE_2
-    assert artifacts.result.result_hash == REALIZED_RESULT_HASH_SINCE_ISSUE_63_STAGE_2
+    assert artifacts.trace.trace_hash == REALIZED_TRACE_HASH_SINCE_ISSUE_71
+    assert artifacts.result.result_hash == REALIZED_RESULT_HASH_SINCE_ISSUE_71
 
 
 def test_disabling_promotion_leaves_the_reconstructed_lane_byte_identical() -> None:
@@ -1797,7 +1821,5 @@ def test_disabling_promotion_leaves_the_reconstructed_lane_byte_identical() -> N
         event.kind == "exploratory_strategy_decision"
         for event in artifacts.trace.events
     )
-    assert artifacts.trace.trace_hash == RECONSTRUCTED_TRACE_HASH_SINCE_ISSUE_63_STAGE_2
-    assert (
-        artifacts.result.result_hash == RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_63_STAGE_2
-    )
+    assert artifacts.trace.trace_hash == RECONSTRUCTED_TRACE_HASH_SINCE_ISSUE_71
+    assert artifacts.result.result_hash == RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_71

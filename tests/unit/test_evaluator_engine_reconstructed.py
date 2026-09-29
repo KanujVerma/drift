@@ -60,7 +60,7 @@ from drift.domain.evaluator_lanes import (
 )
 from drift.domain.evaluator_results import (
     EvaluationClassification,
-    EvaluationRunArtifactsV1,
+    EvaluationRunArtifactsV2,
     ExploratoryEvaluationResultV1,
 )
 from drift.domain.evaluator_strategy import (
@@ -77,7 +77,7 @@ from drift.serialization.canonical import content_hash
 
 
 def _exploratory_events(
-    artifacts: EvaluationRunArtifactsV1,
+    artifacts: EvaluationRunArtifactsV2,
 ) -> list[ExploratoryStrategyDecisionTraceEventV1]:
     return [
         event
@@ -498,12 +498,15 @@ JAN9 = date(2026, 1, 9)
 
 
 def _cohort_bundle(
-    bars: dict[UUID, tuple[date, ...]], cohort: tuple[UUID, ...] = PAIR
+    bars: dict[UUID, tuple[date, ...]],
+    cohort: tuple[UUID, ...] = PAIR,
+    closes: dict[UUID, str] | None = None,
 ) -> EvaluationInputBundleV1:
     """Genuine reconstructions of each member on exactly the days it names.
 
     Each clock session is the one the first member carrying that day built, so
     every clock session re-derives from a replay request actually in the run.
+    A member's bars close at ``closes[member]``, or at the default close.
     """
     cases = {
         (security_id, day): scheduled_session_case(
@@ -511,6 +514,11 @@ def _cohort_bundle(
             security_id=security_id,
             listing_id=_LISTING_OF[security_id],
             cohort_securities=cohort,
+            **(
+                {"close": closes[security_id]}
+                if closes is not None and security_id in closes
+                else {}
+            ),
         )
         for security_id, days in bars.items()
         for day in days
@@ -553,7 +561,7 @@ def _incomplete(decision: date, *members: tuple[UUID, date, tuple[date, ...]]) -
 
 
 def _halted_at_decision(
-    artifacts: EvaluationRunArtifactsV1, index: int, cause: str
+    artifacts: EvaluationRunArtifactsV2, index: int, cause: str
 ) -> None:
     """One INDETERMINATE halt at this session's decision, with exactly this cause."""
     assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
@@ -618,23 +626,40 @@ def test_the_cause_names_members_in_canonical_order_not_bundle_order() -> None:
 
     A bundle orders its reconstructions by content hash, so reading members in
     the order their bars appear would name them in hash order. SEC_OTHER starts
-    late at JAN6, and in this layout SEC_THIRD's bars precede it in the bundle,
-    which the first assertion pins so the test cannot pass vacuously. Both
-    members stop after JAN6, so the JAN7 decision names both.
+    late at JAN6, and in the chosen layout SEC_THIRD's bars precede it in the
+    bundle, which the assertion below pins so the test cannot pass vacuously.
+    Both members stop after JAN6, so the JAN7 decision names both.
+
+    Which layout puts SEC_THIRD first is a property of the reconstruction
+    hashes, and those move whenever the M1d evidence identity moves (issue 71
+    moved it and reordered the fixed layout). So the layout is chosen from a
+    fixed family of SEC_THIRD closes, the first one in which SEC_THIRD's bars
+    precede SEC_OTHER's, and one must exist. A close changes no halt cause.
     """
     strategy = _hold_cash()
-    bundle = _cohort_bundle(
-        {SEC_THIRD: (JAN5, JAN6), SEC: _ALL_DAYS, SEC_OTHER: (JAN6,)},
-        cohort=TRIO,
-    )
-    in_bundle_order = list(
-        dict.fromkeys(
-            observation.security_id
-            for observation in bundle.exploratory_reconstructed_observations
-            if observation.security_id != SEC
+
+    def in_bundle_order(bundle: EvaluationInputBundleV1) -> list[UUID]:
+        return list(
+            dict.fromkeys(
+                observation.security_id
+                for observation in bundle.exploratory_reconstructed_observations
+                if observation.security_id != SEC
+            )
         )
+
+    layouts = (
+        _cohort_bundle(
+            {SEC_THIRD: (JAN5, JAN6), SEC: _ALL_DAYS, SEC_OTHER: (JAN6,)},
+            cohort=TRIO,
+            closes={SEC_THIRD: close},
+        )
+        for close in ("100.000", "100.250", "100.500", "100.750", "101.000")
     )
-    assert in_bundle_order == [SEC_THIRD, SEC_OTHER]
+    bundle = next(
+        (item for item in layouts if in_bundle_order(item) == [SEC_THIRD, SEC_OTHER]),
+        None,
+    )
+    assert bundle is not None, "no layout puts SEC_THIRD's bars first"
 
     artifacts = run_engine(
         reconstructed_engine(bundle, cohort=cohort_of(TRIO)), strategy
@@ -734,7 +759,7 @@ def _canonical(*securities: UUID) -> tuple[UUID, ...]:
     return tuple(sorted(securities, key=lambda security_id: security_id.bytes))
 
 
-def _fills(artifacts: EvaluationRunArtifactsV1) -> list[tuple[date, UUID, str, int]]:
+def _fills(artifacts: EvaluationRunArtifactsV2) -> list[tuple[date, UUID, str, int]]:
     return [
         (
             event.session_key.local_date,
