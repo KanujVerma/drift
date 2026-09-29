@@ -45,7 +45,11 @@ from drift.domain.economic_events import (
     EconomicEffectVersionV1,
 )
 from drift.domain.economic_results import EconomicOutcomeResolutionV1
-from drift.domain.evaluator_portfolio import IndeterminateValuationError
+from drift.domain.evaluator_portfolio import (
+    PORTFOLIO_DECIMAL_PRECISION,
+    IndeterminateValuationError,
+    fits_portfolio_context,
+)
 from drift.domain.provenance_references import validate_safe_provenance_reference
 from drift.domain.temporal import SourcePrecision
 from drift.serialization.canonical import content_hash
@@ -160,7 +164,9 @@ def exact_decimal(value: Fraction) -> Decimal:
 
     A quotient whose denominator has a prime factor other than two or five has
     no finite decimal spelling. Rounding one into a book invents or destroys
-    money, so this fails closed instead.
+    money, so this fails closed instead. So does an exact amount with more
+    significant digits than the pinned portfolio context holds (#142), such as
+    a 31-digit amount per 1024 shares: the book cannot hold it either.
     """
     denominator = value.denominator
     residue = denominator
@@ -169,8 +175,8 @@ def exact_decimal(value: Fraction) -> Decimal:
             residue //= prime
     if residue != 1:
         raise IndeterminateValuationError(
-            f"cash amount {value.numerator}/{denominator} is not exactly "
-            "representable as a decimal"
+            f"cash amount {_ratio_text(value)} is not exactly representable as "
+            "a decimal"
         )
     scale = 0
     power = 1
@@ -178,11 +184,34 @@ def exact_decimal(value: Fraction) -> Decimal:
         power *= 10
         scale += 1
     scaled = value.numerator * (power // denominator)
-    sign = "-" if scaled < 0 else ""
-    digits = str(abs(scaled)).rjust(scale + 1, "0")
-    text = digits if scale == 0 else f"{digits[:-scale]}.{digits[-scale:]}"
-    # Decimal built from text is exact and never consults the active context.
-    return Decimal(f"{sign}{text}")
+    # Decimal built from an integer or a digit tuple is exact, never consults
+    # the active context, and, unlike a text rendering, is not bounded by
+    # CPython's 4300-digit integer conversion limit (#142 review), so a wide
+    # amount is refused below as one the book cannot hold, not by that limit.
+    _, digits, _ = Decimal(abs(scaled)).as_tuple()
+    amount = Decimal((1 if scaled < 0 else 0, digits, -scale))
+    if not fits_portfolio_context(amount):
+        raise IndeterminateValuationError(
+            f"cash amount {_ratio_text(value)} cannot be held exactly in the "
+            f"pinned {PORTFOLIO_DECIMAL_PRECISION}-digit portfolio context"
+        )
+    return amount
+
+
+def _ratio_text(value: Fraction) -> str:
+    """Spell a rational for a message, however many digits it has (#142).
+
+    Digits are read through ``Decimal``, which is exact and not bounded by
+    CPython's integer conversion limit, so a refusal can always be worded.
+    """
+    numerator, denominator = (
+        Decimal(item).as_tuple() for item in (value.numerator, value.denominator)
+    )
+    sign = "-" if numerator.sign else ""
+    return (
+        f"{sign}{''.join(map(str, numerator.digits))}/"
+        f"{''.join(map(str, denominator.digits))}"
+    )
 
 
 def boundary_session_date(boundary: TemporalBoundaryClaimV1, *, role: str) -> date:

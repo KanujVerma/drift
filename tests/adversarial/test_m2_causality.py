@@ -61,6 +61,13 @@ from test_evaluator_bundles import (
     realized_corpus_clock,
     realized_corpus_queries,
 )
+from test_evaluator_clock import (
+    LAGGED_RECORD_STAMPS,
+    off_date_refusal,
+    pre_issue_140_realized_clock,
+    restamped_corpus_queries,
+    restamped_realized_corpus,
+)
 from test_evaluator_engine import (
     BOOK_CODE,
     BOOK_NAMESPACE,
@@ -135,9 +142,11 @@ from drift.domain.universes import (
 )
 from drift.evaluator.bundles import (
     assemble_evaluation_input_bundle,
+    build_evaluation_input_bundle,
     verify_evaluation_input_bundle,
 )
 from drift.evaluator.clock import (
+    RealizedSessionLocalDateError,
     SameDateMultiVenueClockError,
     build_realized_session_clock,
 )
@@ -781,6 +790,56 @@ def test_an_answer_about_a_later_time_does_not_admit_before_that_time() -> None:
     assert engine.admitted_universe_at(sessions[2]) == (SEC_A,)
 
 
+# --- issue 8 final acceptance: a result learned after the decision (FA1 F4) ---
+
+
+def test_a_result_known_after_the_decision_never_admits_before_it() -> None:
+    """Evaluated as of DAY_0 but known only at DAY_3: no admission before DAY_3.
+
+    The mirror of the case above. ``NormalizedSelectionQueryV1`` does not tie
+    the two clocks together, so an as-known answer about an early instant can
+    be learned late, and only the knowledge-cutoff filter keeps it out of the
+    decisions taken before it was known. Every other universe fixture sets
+    ``evaluation_time == knowledge_cutoff``, where the evaluation-time filter
+    alone would mask a missing knowledge-cutoff filter.
+    """
+    learned_late = _eligibility(SEC_A, LISTING_A, knowledge_cutoff=_close_of(DAY_3))
+    early_answer = _rebound(
+        learned_late,
+        normalized_query=learned_late.normalized_query.model_copy(
+            update={"evaluation_time": _close_of(DAY_0)}
+        ),
+    )
+    query = early_answer.normalized_query
+    assert query.evaluation_time == _close_of(DAY_0)
+    assert query.knowledge_cutoff == _close_of(DAY_3)
+    engine, sessions = _universe_engine(early_answer)
+    assert len(sessions) == 4
+
+    for session in sessions[:3]:
+        assert engine.admitted_universe_at(session) == ()
+    assert engine.admitted_universe_at(sessions[3]) == (SEC_A,)
+
+    buy_and_hold = {DAY_1: ((SEC_A, 10),), DAY_2: ((SEC_A, 10),)}
+    rejected = _run(engine, FixedTargetStrategy(buy_and_hold))
+    assert rejected.result.classification is EvaluationClassification.REJECTED
+    assert rejected.result.metrics.committed_fill_count == 0
+
+    # Control: the identical answer known at the DAY_0 close admits from the
+    # first session and the same decision trades, so the knowledge cutoff is
+    # the only thing that excluded it above.
+    known_early, _ = _universe_engine(
+        _eligibility(SEC_A, LISTING_A, knowledge_cutoff=_close_of(DAY_0))
+    )
+    assert known_early.admitted_universe_at(sessions[0]) == (SEC_A,)
+    traded = _run(known_early, FixedTargetStrategy(buy_and_hold))
+    assert traded.result.classification is EvaluationClassification.COMPLETE
+    assert traded.result.metrics.committed_fill_count == 1
+    assert [
+        (item.security_id, item.quantity) for item in traded.final_state.holdings
+    ] == [(SEC_A, 10)]
+
+
 def test_an_ineligible_secondary_listing_never_removes_an_eligible_primary() -> None:
     """M1b marks every non-primary listing INELIGIBLE; the security stays admitted.
 
@@ -1302,6 +1361,60 @@ def test_a_lagged_realized_clock_is_refused_where_bundles_are_prepared() -> None
     with pytest.raises(ValueError, match=refusal):
         verify_evaluation_input_bundle(
             bundle=assembled, context=realized_corpus().context, session_queries=queries
+        )
+
+
+def test_a_lag_moved_into_the_m1d_realized_records_is_refused_where_built() -> None:
+    """Issue 140, the FA1 F1 probe: the issue 95 lag, one layer down.
+
+    The corpus is the genuine realized corpus with only the stamps of two M1d
+    realized records moved: 2026-11-27 carries 2026-11-30's regular hours and
+    2026-11-30 carries 2026-12-01's. M1d accepts the records, so the issue 96
+    re-derivation would rebuild the lag faithfully, and before issue 140 the
+    bundle built from these queries carried it. The engine's next-open guard
+    passes the 2026-11-27 decision to the 2026-11-30 open, which in truth
+    printed before that decision's cutoff. The realized builder now places
+    each stamp in the venue's local time and refuses a record whose stamp is
+    off its date, at the clock build and at both bundle boundaries.
+    """
+    corpus = restamped_realized_corpus(LAGGED_RECORD_STAMPS)
+    queries = restamped_corpus_queries(corpus, *REALIZED_CORPUS_DATES)
+    lagged = pre_issue_140_realized_clock(queries, corpus.context)
+    _, day_1, day_2 = lagged.sessions
+    assert day_1.session_key.local_date == date(2026, 11, 27)
+    assert day_2.session_key.local_date == date(2026, 11, 30)
+    require_next_open_execution(day_1, day_2)
+    true_open = datetime.combine(day_2.session_key.local_date, REGULAR_OPEN, tzinfo=UTC)
+    assert true_open < day_1.closed_at
+    # Control: the genuine corpus over the same dates is prepared, and verifies.
+    genuine_queries = realized_corpus_queries(*REALIZED_CORPUS_DATES)
+    prepared = build_over_realized_corpus(
+        realized_corpus_clock(*REALIZED_CORPUS_DATES), genuine_queries
+    )
+    verify_evaluation_input_bundle(
+        bundle=prepared,
+        context=realized_corpus().context,
+        session_queries=genuine_queries,
+    )
+
+    refusal = off_date_refusal(
+        "2026-11-27", "open", "2026-11-30T14:30:00+00:00", "2026-11-30"
+    )
+    with pytest.raises(RealizedSessionLocalDateError, match=refusal):
+        build_realized_session_clock(queries, corpus.context)
+    with pytest.raises(RealizedSessionLocalDateError, match=refusal):
+        build_evaluation_input_bundle(
+            evaluation_interval=prepared.evaluation_interval,
+            session_clock=lagged,
+            context=corpus.context,
+            session_queries=queries,
+        )
+    assembled = assemble_evaluation_input_bundle(
+        evaluation_interval=prepared.evaluation_interval, session_clock=lagged
+    )
+    with pytest.raises(RealizedSessionLocalDateError, match=refusal):
+        verify_evaluation_input_bundle(
+            bundle=assembled, context=corpus.context, session_queries=queries
         )
 
 

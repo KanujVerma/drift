@@ -204,12 +204,25 @@ class _EvaluationResultBaseV1(FrozenModel):
         """Content-addressed identity of this result artifact."""
         return self.result_hash
 
-    def _validate_common(self, admission_hash: SHA256Hash) -> None:
+    def _validate_common(
+        self,
+        admission: ExploratoryEvaluationAdmissionV1 | PromotionEvaluationAdmissionV1,
+    ) -> None:
+        admission_hash = admission.admission_hash
         if self.run_identity.admission_hash != admission_hash:
             raise ValueError(
                 "result run identity must bind the admission it carries: "
                 f"identity holds {self.run_identity.admission_hash}, admission "
                 f"is {admission_hash}"
+            )
+        # Issue 142: the identity holds bare hashes, so naming the admission
+        # does not make it name the bundle that admission admits. The spec 4.2
+        # link is bound here too, not only where an identity is built.
+        if self.run_identity.bundle_hash != admission.input_bundle_hash:
+            raise ValueError(
+                "result run identity must bind the bundle its admission admits: "
+                f"identity holds {self.run_identity.bundle_hash}, admission "
+                f"admits {admission.input_bundle_hash}"
             )
         # A halted run must say where and why it stopped, and a complete run
         # must not claim a halt it never took.
@@ -261,7 +274,7 @@ class ExploratoryEvaluationResultV1(_EvaluationResultBaseV1):
 
     @model_validator(mode="after")
     def validate_result(self) -> Self:
-        self._validate_common(self.admission.admission_hash)
+        self._validate_common(self.admission)
         return self
 
 
@@ -279,7 +292,7 @@ class PromotionEvaluationResultV1(_EvaluationResultBaseV1):
 
     @model_validator(mode="after")
     def validate_result(self) -> Self:
-        self._validate_common(self.admission.admission_hash)
+        self._validate_common(self.admission)
         return self
 
 
