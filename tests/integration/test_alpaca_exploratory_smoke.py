@@ -1674,11 +1674,9 @@ def test_b1_the_online_actions_request_names_every_type_and_is_measured(
         "AAPL",
         "MSFT",
     }
-    # DP-1: the requested types are not yet evidenced to be every documented
-    # type, so no record is positive and an exposed window stays INDETERMINATE.
-    assert not any(
-        item.completeness.positive for item in result.corporate_action_coverage
-    )
+    # The measured request named every type the API reference documents, so
+    # every record is a positive completeness assertion (DP-1, resolved).
+    assert all(item.completeness.positive for item in result.corporate_action_coverage)
 
 
 def test_the_live_brokerage_host_is_refused_before_any_request(

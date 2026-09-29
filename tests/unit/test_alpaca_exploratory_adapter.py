@@ -2658,7 +2658,7 @@ def test_b1_the_actions_request_names_every_type_on_the_same_route() -> None:
     }
     assert "cash_dividend" in ALPACA_ACTION_TYPES
     assert "forward_split" in ALPACA_ACTION_TYPES
-    assert len(ALPACA_ACTION_TYPES) == len(set(ALPACA_ACTION_TYPES)) == 13
+    assert len(ALPACA_ACTION_TYPES) == len(set(ALPACA_ACTION_TYPES)) == 16
     assert tuple(sorted(ALPACA_ACTION_TYPES)) == ALPACA_ACTION_TYPES
 
 
@@ -2748,27 +2748,135 @@ def covered_request(actions: bytes = PINNED_CORPORATE_ACTIONS) -> AlpacaIntakeRe
     return with_measured_targets(measured_over(pinned_request(), payloads))
 
 
-def test_dp1_no_record_is_positive_while_the_documented_types_are_unnamed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+#: The values Alpaca's API reference for GET /v1/corporate-actions enumerates
+#: for its ``types`` parameter (https://docs.alpaca.markets/reference/
+#: corporateactions-1, API version 1.1, page last updated 2026-05-27), spelled
+#: here independently of the module constant the bridge requests them by.
+DOCUMENTED_ACTION_TYPES = (
+    "reverse_split",
+    "forward_split",
+    "unit_split",
+    "cash_dividend",
+    "stock_dividend",
+    "spin_off",
+    "cash_merger",
+    "stock_merger",
+    "stock_and_cash_merger",
+    "redemption",
+    "name_change",
+    "worthless_removal",
+    "rights_distribution",
+    "partial_call",
+    "reorganization",
+    "capital_gains_distribution",
+)
+
+
+def test_dp1_the_requested_types_are_exactly_the_documented_enumeration() -> None:
+    """DP-1 resolved from the provider's own API reference: 16 types, no fewer."""
+    assert len(DOCUMENTED_ACTION_TYPES) == len(set(DOCUMENTED_ACTION_TYPES)) == 16
+    assert ALPACA_ACTION_TYPES == tuple(sorted(DOCUMENTED_ACTION_TYPES))
+    assert ALPACA_DOCUMENTED_ACTION_TYPE_COUNT == 16
+    statement = str(
+        _POLICY_DOCUMENTS["alpaca-corporate-actions-closed-world"]["statement"]
+    )
+    assert "enumerates 16 values for types" in statement
+    assert "version 1.1, page last updated 2026-05-27" in statement
+
+
+def test_dp1_a_quiet_response_under_every_documented_type_is_positive(
+    tmp_path: Path,
 ) -> None:
-    """The record counts 17 documented types; the bridge names 13 (DP-1)."""
-    assert ALPACA_DOCUMENTED_ACTION_TYPE_COUNT == 17
-    covered = run_covered_intake(tmp_path / "private")
+    covered = run_covered_intake(tmp_path / "private", QUIET_ACTIONS)
+    assert len(covered.corporate_action_coverage) == 2
     for record in covered.corporate_action_coverage:
+        assert record.requested_action_classes == ALPACA_ACTION_TYPES
+        assert record.completeness.requested_types_documented is True
+        assert record.completeness.positive
+        assert record.returned_actions == ()
+
+
+@pytest.mark.parametrize("omitted", sorted(DOCUMENTED_ACTION_TYPES))
+def test_dp1_a_measured_request_omitting_a_documented_type_is_non_positive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, omitted: str
+) -> None:
+    """The structural type check: an omitted type is never evidenced absent.
+
+    The bridge's own declared types are narrowed by one, so the measured
+    request names exactly what the bridge declares (V8 holds) and still omits a
+    type the API reference documents. The response is read and its records
+    emitted (B5), but no record is positive. A measured request that instead
+    contradicts the bridge's declaration refuses intake (V8, see M5).
+    """
+    narrowed = tuple(item for item in ALPACA_ACTION_TYPES if item != omitted)
+    assert len(narrowed) == 15
+    monkeypatch.setattr(alpaca, "ALPACA_ACTION_TYPES", narrowed)
+    covered = run_covered_intake(tmp_path / "private", QUIET_ACTIONS)
+    assert len(covered.corporate_action_coverage) == 2
+    for record in covered.corporate_action_coverage:
+        assert omitted not in record.requested_action_classes
+        assert record.requested_action_classes == narrowed
         assert record.completeness.requested_types_documented is False
         assert not record.completeness.positive
-        others = record.completeness.model_copy(
+        # Every other check held: only the omitted type withholds the claim.
+        assert record.completeness.model_copy(
             update={"requested_types_documented": True}
-        )
-        assert others.positive
-    # Once the documented set is the requested set, the same read is positive.
-    monkeypatch.setattr(
-        alpaca, "ALPACA_DOCUMENTED_ACTION_TYPE_COUNT", len(ALPACA_ACTION_TYPES)
+        ).positive
+
+
+#: One row in each group the three types newest to the reference return.
+NEW_GROUP_ACTIONS = (
+    b'{"corporate_actions":{'
+    b'"partial_calls":[{"id":"ca-aapl-partial-call","symbol":"AAPL",'
+    b'"cusip":"037833100","rate":"0.25","process_date":"2026-01-07",'
+    b'"redemption_date":"2026-01-08","payable_date":"2026-01-09"}],'
+    b'"reorganizations":[{"id":"ca-msft-reorganization",'
+    b'"old_symbol":"MSFT","new_symbol":"MSFN","process_date":"2026-01-06",'
+    b'"effective_date":"2026-01-06"}],'
+    b'"capital_gains_distributions":[{"id":"ca-aapl-capital-gains",'
+    b'"symbol":"AAPL","rate":"0.12","ex_date":"2026-01-08",'
+    b'"record_date":"2026-01-08","payable_date":"2026-01-12"}]},'
+    b'"next_page_token":null}'
+)
+
+
+def test_b3_the_three_newest_groups_are_parsed_and_attributed_without_a_kind(
+    tmp_path: Path,
+) -> None:
+    parsed = {
+        item.group: item for item in parse_alpaca_corporate_actions(NEW_GROUP_ACTIONS)
+    }
+    assert set(parsed) == {
+        "capital_gains_distributions",
+        "partial_calls",
+        "reorganizations",
+    }
+    assert parsed["partial_calls"].dates == (
+        date(2026, 1, 7),
+        date(2026, 1, 8),
+        date(2026, 1, 9),
     )
-    resolved = run_covered_intake(tmp_path / "resolved")
-    assert all(
-        item.completeness.positive for item in resolved.corporate_action_coverage
+    assert parsed["reorganizations"].symbols == ("MSFN", "MSFT")
+    assert parsed["capital_gains_distributions"].dates == (
+        date(2026, 1, 8),
+        date(2026, 1, 12),
     )
+    covered = run_covered_intake(tmp_path / "private", NEW_GROUP_ACTIONS)
+    returned = {
+        item.queried_symbol: [
+            (action.native_kind, action.native_id, action.action_kind)
+            for action in item.returned_actions
+        ]
+        for item in covered.corporate_action_coverage
+    }
+    # No M1c kind corresponds exactly to any of the three, so none is given.
+    assert returned == {
+        "AAPL": [
+            ("capital_gains_distributions", "ca-aapl-capital-gains", None),
+            ("partial_calls", "ca-aapl-partial-call", None),
+        ],
+        "MSFT": [("reorganizations", "ca-msft-reorganization", None)],
+    }
 
 
 def test_b3_attribution_follows_every_symbol_field_and_never_drops_a_row(
@@ -2894,13 +3002,15 @@ def test_b5_m16_thin_or_non_positive_coverage_never_refuses_intake(
     """D6-b: only an exposed evaluation halts; the intake completes."""
     quiet = run_covered_intake(tmp_path / "quiet", QUIET_ACTIONS)
     assert all(not item.returned_actions for item in quiet.corporate_action_coverage)
+    # Returned actions are recorded, not refused: they halt only an exposed
+    # window that holds one of their dates.
     busy = run_covered_intake(tmp_path / "busy", EVERY_GROUP_ACTIONS)
     assert len(busy.corporate_action_coverage) == 2
-    assert all(
-        not item.completeness.positive for item in busy.corporate_action_coverage
-    )
-    # An action dated outside the requested window keeps the record, and marks
-    # the assumed filter semantics falsified.
+    assert all(item.returned_actions for item in busy.corporate_action_coverage)
+    assert all(item.completeness.positive for item in busy.corporate_action_coverage)
+    # An action dated outside the requested window keeps the record, marks the
+    # assumed filter semantics falsified, and so leaves the record non-positive;
+    # the intake still completes.
     outside = EVERY_GROUP_ACTIONS.replace(
         b'"process_date":"2026-01-09"', b'"process_date":"2026-02-09"'
     )
@@ -2910,6 +3020,9 @@ def test_b5_m16_thin_or_non_positive_coverage_never_refuses_intake(
         for item in late.corporate_action_coverage
     }
     assert flags == {"AAPL": False, "MSFT": False}
+    assert not any(
+        item.completeness.positive for item in late.corporate_action_coverage
+    )
 
 
 def test_b6_the_new_limitation_and_policy_statement_are_named() -> None:
@@ -2924,6 +3037,6 @@ def test_b6_the_new_limitation_and_policy_statement_are_named() -> None:
         "date-range cap, history floor or silent truncation",
         "former symbol",
         "revised or withdrawn in place",
-        "counts 17 documented types",
+        "16 documented types are every kind of action",
     ):
         assert gap in not_established, gap

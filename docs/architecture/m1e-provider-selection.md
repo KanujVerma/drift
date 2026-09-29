@@ -171,8 +171,16 @@ Claims in this document are strictly classified using four epistemic tiers:
 - **Microstructure Fidelity**: Raw historical trades include nanosecond UTC
   timestamps (`t`), exchange codes (`x`), trade condition arrays (`c`), trade
   sequence IDs (`i`), and tape indicators (`z`).
-- **Rich Corporate Actions REST**: All 17 documented action types are accessible.
-  Empirically verified cases include:
+- **Rich Corporate Actions REST**: The endpoint's documented `types`
+  enumeration has 16 values: `reverse_split`, `forward_split`, `unit_split`,
+  `cash_dividend`, `stock_dividend`, `spin_off`, `cash_merger`, `stock_merger`,
+  `stock_and_cash_merger`, `redemption`, `name_change`, `worthless_removal`,
+  `rights_distribution`, `partial_call`, `reorganization` and
+  `capital_gains_distribution` (Alpaca API reference for
+  `GET /v1/corporate-actions`,
+  https://docs.alpaca.markets/reference/corporateactions-1, API version 1.1,
+  page last updated 27 May 2026; response groups are the plural forms). That
+  is documentation, not a probe of all 16. Empirically verified cases include:
   - *Name change*: FB -> META (`old_symbol: FB`, `new_symbol: META`,
     `process_date: 2022-06-09`).
   - *Forward split*: NVDA 10-for-1 split (`old_rate: 1`, `new_rate: 10`,

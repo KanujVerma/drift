@@ -299,15 +299,19 @@ ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD = (
 ALPACA_LIMITATION_CA_SNAPSHOT_ABSENCE = CORPORATE_ACTION_SNAPSHOT_LIMITATION
 
 #: Issue 76, decision D1-b: every action type this bridge names in the ``types``
-#: filter of ``GET /v1/corporate-actions``, as Alpaca publishes the enumeration
-#: of that parameter. Omitting a type would leave its absence unevidenced, so
-#: the request names every one this bridge can name.
+#: filter of ``GET /v1/corporate-actions``: exactly the values Alpaca's API
+#: reference enumerates for that parameter (see
+#: ``ALPACA_DOCUMENTED_ACTION_TYPE_COUNT``), sorted. Omitting a type would leave
+#: its absence unevidenced, so the request names every documented one.
 ALPACA_ACTION_TYPES: tuple[str, ...] = (
+    "capital_gains_distribution",
     "cash_dividend",
     "cash_merger",
     "forward_split",
     "name_change",
+    "partial_call",
     "redemption",
+    "reorganization",
     "reverse_split",
     "rights_distribution",
     "spin_off",
@@ -318,15 +322,17 @@ ALPACA_ACTION_TYPES: tuple[str, ...] = (
     "worthless_removal",
 )
 
-#: How many action types the repository evidences Alpaca documents:
-#: ``docs/architecture/m1e-provider-selection.md``, section 3 (Alpaca), "Rich
-#: Corporate Actions REST": "All 17 documented action types are accessible."
-#: The record names none of them, and this bridge can name only
-#: ``len(ALPACA_ACTION_TYPES)``. A request naming fewer types than are
-#: documented does not evidence the absence of the rest, so until the two
-#: agree no record this bridge emits is a positive completeness assertion
-#: (issue 76, decision packet DP-1): every exposed window stays INDETERMINATE.
-ALPACA_DOCUMENTED_ACTION_TYPE_COUNT = 17
+#: How many values Alpaca documents for the ``types`` query parameter of
+#: ``GET /v1/corporate-actions``: the API reference at
+#: https://docs.alpaca.markets/reference/corporateactions-1 (API version 1.1,
+#: page last updated 2026-05-27) enumerates exactly 16, the names in
+#: ``ALPACA_ACTION_TYPES`` (issue 76, decision packet DP-1, resolved from that
+#: first-party reference). A record's completeness assertion is positive only if
+#: the measured request named that many distinct types, and exactly the ones
+#: this bridge declares: a request that omits a documented type evidences
+#: nothing about it, so its records are non-positive and every exposed window
+#: stays INDETERMINATE.
+ALPACA_DOCUMENTED_ACTION_TYPE_COUNT = 16
 
 #: The named refusal to cover (issue 76, B2): a retained response whose
 #: measured origin carries no request target cannot evidence which types,
@@ -551,11 +557,12 @@ _POLICY_DOCUMENTS: dict[str, dict[str, Any]] = {
             statement=(
                 "Alpaca publishes GET /v1/corporate-actions as the corporate "
                 "action history, filtered by symbols, by types and by a start "
-                "and an end date. The bridge names every action type it can "
-                "name, the declared cohort and the declared window in one "
-                "unpaginated request, measures that request, and reads the "
-                "retained response closed-world per cohort member over the "
-                "requested window, never before 2021-08-02, the earliest "
+                "and an end date; its API reference (version 1.1, page last "
+                "updated 2026-05-27) enumerates 16 values for types. The bridge "
+                "names every one of them, the declared cohort and the declared "
+                "window in one unpaginated request, measures that request, and "
+                "reads the retained response closed-world per cohort member over "
+                "the requested window, never before 2021-08-02, the earliest "
                 "action date the repository evidences a REST response "
                 "returning, and never after the acquisition date. A returned "
                 "action with any date inside a window is present there; a "
@@ -571,9 +578,10 @@ _POLICY_DOCUMENTS: dict[str, dict[str, Any]] = {
                 "whether an action is returned under a former symbol after a "
                 "symbol change",
                 "whether a returned action is revised or withdrawn in place",
-                "that the requested types are every type Alpaca documents: "
-                "the provider-selection record counts 17 documented types "
-                "without naming them, and this bridge names 13",
+                "that the 16 documented types are every kind of action the "
+                "endpoint can return: the reference documents the enumeration, "
+                "not its completeness, and a type added later is absent from "
+                "every request that predates it",
             ),
         ),
         _policy_statement(
@@ -876,8 +884,10 @@ def parse_alpaca_cash_dividends(data: bytes) -> tuple[AlpacaNativeCashDividend, 
 
 #: The M1c action kind a response group corresponds to, where that
 #: correspondence is exact. Every other group, including cash dividends (which
-#: may be regular or special) and name changes, is kept with no kind; no
-#: consumer rule reads the kind (issue 76, B3).
+#: may be regular or special), name changes, partial calls, reorganizations
+#: (which need not be bankruptcy reorganizations) and capital gains
+#: distributions, is kept with no kind; no consumer rule reads the kind
+#: (issue 76, B3).
 _ACTION_GROUP_KINDS: dict[str, ActionKind] = {
     "cash_mergers": ActionKind.CASH_ACQUISITION,
     "forward_splits": ActionKind.FORWARD_SPLIT,
@@ -3367,8 +3377,11 @@ def build_alpaca_corporate_action_coverage(
     retained into ``support``), every returned action attributed to the member
     (B3), and a completeness assertion whose basis is the publication status
     of the retained ``alpaca-corporate-actions-closed-world`` statement. The
-    assertion is positive only if the measured types are every type the
-    provider documents, which the repository cannot yet establish (DP-1).
+    assertion is positive only if the measured request named every type the
+    provider documents (``ALPACA_DOCUMENTED_ACTION_TYPE_COUNT``). A measured
+    request that contradicts this bridge's own declared types is an integrity
+    failure and refuses intake (V8); one whose declared types themselves omit
+    a documented type is read, but its records are non-positive.
 
     Intake never refuses for thin coverage (B5, D6-b): a short or
     non-positive record is emitted as it is, and only an exposed evaluation
@@ -3417,9 +3430,10 @@ def build_alpaca_corporate_action_coverage(
         len(observed) == 1
         and observed[0].origin_evidence.origin_status is OriginStatus.VERIFIED
     )
-    # DP-1: the measured types name every documented type only if the
-    # requested set is the documented set, whose size the repository evidences.
-    named_every_type = len(ALPACA_ACTION_TYPES) == ALPACA_DOCUMENTED_ACTION_TYPE_COUNT
+    # The structural type check (DP-1, resolved): the measured request names
+    # every documented type only if it named as many distinct types as the
+    # API reference documents, and exactly the ones this bridge declares.
+    named_every_type = len(set(types)) == ALPACA_DOCUMENTED_ACTION_TYPE_COUNT
     documented = named_every_type and set(types) == set(ALPACA_ACTION_TYPES)
     records: list[ClosedWorldCorporateActionCoverageV1] = []
     for member in request.members:

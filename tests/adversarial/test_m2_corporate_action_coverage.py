@@ -1021,14 +1021,6 @@ def _probe(intake: AlpacaExploratoryIntakeResult) -> EvaluationRunArtifactsV2:
     return run_engine(engine, ReconstructedTargetStrategy(BUY_AND_HOLD_AAPL))
 
 
-@pytest.fixture
-def dp1_resolved(monkeypatch: pytest.MonkeyPatch) -> None:
-    """As if DP-1 were resolved: the requested types are every documented type."""
-    monkeypatch.setattr(
-        alpaca, "ALPACA_DOCUMENTED_ACTION_TYPE_COUNT", len(alpaca.ALPACA_ACTION_TYPES)
-    )
-
-
 def test_criterion_1_a_pre_76_bridge_response_halts_the_probe(tmp_path: Path) -> None:
     """No measured request, no record: the probe no longer completes."""
     intake = adapter.run_pinned_intake(tmp_path / "private")
@@ -1044,12 +1036,29 @@ def test_criterion_1_a_pre_76_bridge_response_halts_the_probe(tmp_path: Path) ->
     assert not [event for event in artifacts.trace.events if event.kind == "fill"]
 
 
-def test_criterion_1_a_quiet_bridge_response_halts_while_dp1_is_open(
-    tmp_path: Path,
+def test_criterion_1_a_request_omitting_a_documented_type_halts_the_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """DP-1: the quiet response is read, but no record is positive yet."""
+    """The structural type check, end to end: an omitted type is unevidenced.
+
+    With the bridge's declared types one short of the documented enumeration,
+    the quiet response is read and recorded, but no record is positive, so the
+    staged buy halts at the first exposed pre-open instead of trading.
+    """
+    monkeypatch.setattr(
+        alpaca,
+        "ALPACA_ACTION_TYPES",
+        tuple(
+            item
+            for item in alpaca.ALPACA_ACTION_TYPES
+            if item != "capital_gains_distribution"
+        ),
+    )
     intake = adapter.run_covered_intake(tmp_path / "private", adapter.QUIET_ACTIONS)
     assert len(intake.corporate_action_coverage) == 2
+    assert not any(
+        item.completeness.positive for item in intake.corporate_action_coverage
+    )
     artifacts = _probe(intake)
     assert artifacts.result.classification is EvaluationClassification.INDETERMINATE
     assert _halt_cause(artifacts).cause == (
@@ -1058,7 +1067,6 @@ def test_criterion_1_a_quiet_bridge_response_halts_while_dp1_is_open(
     )
 
 
-@pytest.mark.usefixtures("dp1_resolved")
 def test_criterion_1_the_probe_trades_over_a_quiet_positive_response(
     tmp_path: Path,
 ) -> None:
@@ -1071,7 +1079,6 @@ def test_criterion_1_the_probe_trades_over_a_quiet_positive_response(
     assert (holding.security_id, holding.quantity) == (adapter.AAPL_ID, 10)
 
 
-@pytest.mark.usefixtures("dp1_resolved")
 def test_criterion_1_a_split_in_the_response_halts_at_its_own_window(
     tmp_path: Path,
 ) -> None:
@@ -1145,7 +1152,6 @@ def test_criterion_4_a_non_trading_bridge_run_moves_only_its_hashes(
         assert isinstance(after[key], str) and len(str(after[key])) == 64, key
 
 
-@pytest.mark.usefixtures("dp1_resolved")
 def test_once_covered_the_bridge_trade_still_halts_at_the_open_without_roles(
     tmp_path: Path,
 ) -> None:
