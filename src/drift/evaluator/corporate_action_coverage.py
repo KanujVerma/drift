@@ -103,15 +103,21 @@ class CorporateActionCoverageIndex:
     ) -> bool:
         """C4: whether an outcome is M1c-native coverage with no records at all.
 
-        Such an outcome is evidenced no action over the window, not unsupported
+        Such an outcome, with no record of any family (no terms, effect,
+        settlement or cancellation record, in the resolution or bound to the
+        outcome), is evidenced no action over the window, not unsupported
         evidence, whatever its ``support_status`` says about its empty record
-        set.
+        set. An outcome carrying any record, a terms record alone included,
+        is judged by the support rules as before (review F2).
         """
         self._refuse_mixed(outcome.security_id)
         start, end = exact_date(start), exact_date(end)
-        return native_outcome_covers_window(
-            outcome.resolution, start, end
-        ) and native_outcome_is_empty(outcome.resolution)
+        return (
+            not outcome.terms_records
+            and not outcome.effect_records
+            and native_outcome_covers_window(outcome.resolution, start, end)
+            and native_outcome_is_empty(outcome.resolution)
+        )
 
     def require_covered(
         self,

@@ -422,14 +422,25 @@ def native_outcome_covers_window(
 
 
 def native_outcome_is_empty(resolution: EconomicOutcomeResolutionV1) -> bool:
-    """Whether a resolution carries no effect or settlement evidence at all.
+    """Whether a resolution carries no record of any family at all (C4).
 
-    Under M1c-native coverage (section 3.4) such an outcome is evidenced no
-    action (C4), not unsupported evidence.
+    No effect projection, delivery group, unknown effect or uncomposed
+    settlement; no selected or upcoming terms record and no cancelled action;
+    and no association, residual resolution or safe projection, each of which
+    exists only over some record. Under M1c-native coverage (section 3.4) only
+    such an outcome is evidenced no action rather than unsupported evidence. A
+    terms record alone is a schedule, not evidence that nothing happened, so an
+    outcome carrying one is not empty (review F2).
     """
     return not (
         resolution.effect_projections
         or resolution.delivery_groups
         or resolution.unknown_effect_hashes
         or resolution.uncomposed_settlement_hashes
+        or resolution.selected_terms_hashes
+        or resolution.upcoming_terms_hashes
+        or resolution.cancelled_action_hashes
+        or resolution.associations
+        or resolution.residual_resolutions
+        or resolution.safe_projection_hashes
     )

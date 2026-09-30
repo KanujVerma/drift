@@ -769,6 +769,80 @@ def test_c4_m11_a_covered_empty_outcome_is_no_action_for_a_held_security() -> No
         _pre_open(_processor(), state, MON, outcomes=(uncovered,))
 
 
+@pytest.mark.parametrize("status", ("unsupported", "indeterminate"))
+def test_f2_a_covered_terms_only_outcome_is_not_no_action_for_a_held_book(
+    status: str,
+) -> None:
+    """C4 applies only to an outcome with no record of any family (review F2).
+
+    The held security's outcome is complete M1c-native coverage but carries
+    an in-window reverse-split terms record and no effect. A schedule without
+    an effect is not evidence that nothing happened, and it is not supported
+    evidence either, so the held book halts as it did before issue 76.
+    """
+    terms, _, _ = ca._split_case(
+        numerator="1",
+        denominator="8",
+        treatment=ca._treatment("round_down"),
+        suffix=9100,
+    )
+    outcome = ca._outcome(terms=(terms,), support_status=status)
+    assert outcome.resolution.selected_terms_hashes
+    state = ca._state(holdings=(ca._holding(quantity=100),))
+    with pytest.raises(
+        IndeterminateValuationError,
+        match=(
+            r"^economic outcome resolution is not supported evidence for "
+            rf"{ca.SEC_A}: {status}$"
+        ),
+    ):
+        ca._processor().apply_pre_open_actions(state, (), (outcome,), ca._key())
+    index = CorporateActionCoverageIndex(records=(), lane="exploratory")
+    assert not index.native_no_action(outcome, ca.EFFECT_DAY, ca.EFFECT_DAY)
+    # Control: the same covered outcome with no record at all is no action.
+    assert index.native_no_action(ca._quiet(ca.SEC_A), ca.EFFECT_DAY, ca.EFFECT_DAY)
+
+
+def test_f3_a_staged_buy_is_judged_against_the_prior_close_book() -> None:
+    """C1 before dispatch (review F3): the pass may extinguish the target.
+
+    SEC_A is not held; a buy of it is staged. Its own supported cash
+    acquisition extinguishes the claim and zeroes the target during the pass,
+    so the book the pass leaves is not exposed to it. Only the prior-close
+    check sees the staged buy, and its outcome is not native coverage (a
+    subset of kinds), so the pass halts rather than trading on it.
+    """
+    terms = ca._terms(
+        suffix=9300,
+        action_kind=ActionKind.CASH_ACQUISITION,
+        components=(ca._cash(amount="12"),),
+        dates=(ca._date_fact("payable", ca.PAYABLE_AT),),
+    )
+    effect = ca._effect(
+        suffix=9301,
+        action_kind=ActionKind.CASH_ACQUISITION,
+        components=(ca._cash(amount="12"),),
+        terms=terms,
+        claim_status="extinguished",
+        effective_at=ca.EFFECT_AT,
+    )
+    outcome = ca._outcome(
+        terms=(terms,), effects=(effect,), query_kinds=(ActionKind.CASH_ACQUISITION,)
+    )
+    assert outcome.resolution.support_status == "supported"
+    with pytest.raises(
+        IndeterminateValuationError,
+        match=(
+            rf"^no closed-world corporate-action coverage for {ca.SEC_A} over "
+            r"\[2020-06-01, 2020-06-01\]: its M1c economic outcome is not complete "
+            r"coverage of every action kind over the window$"
+        ),
+    ):
+        ca._processor().apply_pre_open_actions(
+            ca._state(), (ca._target(ca.SEC_A, 5),), (outcome,), ca._key()
+        )
+
+
 def test_m10_an_outcome_over_a_subset_of_action_kinds_is_not_coverage() -> None:
     subset = ca._outcome(
         security_id=SEC_A,

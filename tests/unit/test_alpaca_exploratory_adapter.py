@@ -2662,12 +2662,28 @@ def test_b1_the_actions_request_names_every_type_on_the_same_route() -> None:
     assert tuple(sorted(ALPACA_ACTION_TYPES)) == ALPACA_ACTION_TYPES
 
 
-def test_b2_the_request_declaration_states_every_parameter_per_endpoint(
-    intake: AlpacaExploratoryIntakeResult,
+def test_b2_f6_the_request_declaration_states_what_was_measured_per_endpoint(
+    intake: AlpacaExploratoryIntakeResult, tmp_path: Path
 ) -> None:
+    """The receipt states only the parameters a transport measured (review F6).
+
+    The pinned origins carry no request target, as every origin retained
+    before issue 76 does, so the receipt claims no parameter for any endpoint
+    rather than the 16 types the bytes were never fetched with; the B2 refusal
+    to cover is unchanged. A measured acquisition states exactly what it sent.
+    """
+    unmeasured = intake.acquisition.receipt.request.canonical_parameters
+    assert unmeasured == {
+        ACTIONS_OBJECT_KEY: "unmeasured",
+        BARS_OBJECT_KEY: "unmeasured",
+        CALENDAR_OBJECT_KEY: "unmeasured",
+    }
+    assert intake.corporate_action_coverage == ()
+    assert intake.corporate_action_coverage_refusal == "ca_coverage_request_unmeasured"
+    covered = run_covered_intake(tmp_path / "private")
     declared = cast(
         dict[str, dict[str, str]],
-        intake.acquisition.receipt.request.canonical_parameters,
+        covered.acquisition.receipt.request.canonical_parameters,
     )
     assert declared == alpaca_endpoint_parameters(pinned_request())
     assert declared[ACTIONS_OBJECT_KEY]["types"] == ",".join(ALPACA_ACTION_TYPES)
@@ -3040,3 +3056,86 @@ def test_b6_the_new_limitation_and_policy_statement_are_named() -> None:
         "16 documented types are every kind of action",
     ):
         assert gap in not_established, gap
+
+
+# --- review F1: a repeated JSON key is an integrity failure, never last-wins ---------
+
+DUPLICATE_GROUP = (
+    b'{"corporate_actions":{"forward_splits":[{"id":"ca-aapl-split",'
+    b'"symbol":"AAPL","new_rate":2,"old_rate":1,"ex_date":"2026-01-08",'
+    b'"process_date":"2026-01-08"}],"forward_splits":[]},"next_page_token":null}'
+)
+DUPLICATE_PAGE_TOKEN = (
+    b'{"corporate_actions":{},"next_page_token":"more","next_page_token":null}'
+)
+DUPLICATE_NESTED_KEY = (
+    b'{"corporate_actions":{"forward_splits":[{"id":"ca-aapl-split",'
+    b'"symbol":"AAPL","ex_date":"2026-01-08","ex_date":null}]},'
+    b'"next_page_token":null}'
+)
+DUPLICATES = {
+    "group": DUPLICATE_GROUP,
+    "page-token": DUPLICATE_PAGE_TOKEN,
+    "nested-entry-key": DUPLICATE_NESTED_KEY,
+}
+DUPLICATE_REFUSAL = r"^alpaca_response_duplicate_key: "
+
+
+@pytest.mark.parametrize("data", DUPLICATES.values(), ids=DUPLICATES)
+def test_f1_a_repeated_key_in_the_actions_response_is_refused_by_the_parser(
+    data: bytes,
+) -> None:
+    with pytest.raises(AlpacaBridgeIncompleteError, match=DUPLICATE_REFUSAL):
+        parse_alpaca_corporate_actions(data)
+    with pytest.raises(AlpacaBridgeIncompleteError, match=DUPLICATE_REFUSAL):
+        parse_alpaca_cash_dividends(data)
+
+
+@pytest.mark.parametrize("data", DUPLICATES.values(), ids=DUPLICATES)
+def test_f1_a_repeated_key_in_the_actions_response_is_refused_at_intake(
+    tmp_path: Path, data: bytes
+) -> None:
+    """Last-wins would read a repeated group or page token as a quiet page."""
+    with pytest.raises(AlpacaBridgeIncompleteError, match=DUPLICATE_REFUSAL):
+        run_covered_intake(tmp_path / "private", data)
+
+
+@pytest.mark.parametrize("data", DUPLICATES.values(), ids=DUPLICATES)
+def test_f1_a_repeated_key_is_refused_when_v5_re_parses_the_bytes(
+    tmp_path: Path, data: bytes
+) -> None:
+    covered = run_covered_intake(tmp_path / "genuine")
+    record = next(
+        item
+        for item in covered.corporate_action_coverage
+        if item.queried_symbol == "AAPL"
+    )
+    forged = _resealed_coverage(
+        record,
+        response_sha256=sha256(data).hexdigest(),
+        response_byte_size=len(data),
+    )
+    retained = retain_native_bytes(
+        tmp_path / "forged", replace(pinned_payloads(), corporate_actions=data)
+    )
+    with pytest.raises(AlpacaBridgeIncompleteError, match=DUPLICATE_REFUSAL):
+        verify_alpaca_corporate_action_record(
+            forged, covered_request(), retained, covered.acquisition
+        )
+
+
+def test_f1_the_shared_parser_refuses_a_repeated_key_in_bars_and_calendar() -> None:
+    repeated_symbol = PINNED_BARS.replace(b'],"MSFT":[', b'],"AAPL":[', 1)
+    assert repeated_symbol != PINNED_BARS
+    with pytest.raises(AlpacaBridgeIncompleteError, match=DUPLICATE_REFUSAL):
+        parse_alpaca_bars(repeated_symbol)
+    repeated_date = PINNED_CALENDAR.replace(
+        b'"date":"2026-01-05",', b'"date":"2026-01-05","date":"2026-01-06",', 1
+    )
+    assert repeated_date != PINNED_CALENDAR
+    with pytest.raises(AlpacaBridgeIncompleteError, match=DUPLICATE_REFUSAL):
+        parse_alpaca_calendar(repeated_date)
+    # Control: the genuine responses still parse.
+    assert len(parse_alpaca_bars(PINNED_BARS)) == 10
+    assert len(parse_alpaca_calendar(PINNED_CALENDAR)) == 5
+    assert len(parse_alpaca_corporate_actions(EVERY_GROUP_ACTIONS)) == 4

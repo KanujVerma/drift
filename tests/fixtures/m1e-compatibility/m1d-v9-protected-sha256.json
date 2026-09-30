@@ -25,7 +25,7 @@
       "justification": "This module defines ClosedWorldCorporateActionCoverageV1, its completeness assertion and its returned-action record, the M1c record whose derivation reads a window a retained corporate-actions response covers closed-world, and the 2021-08-02 REST evidence floor its covered interval never starts before (issue 76, decisions D2 and D3). It is declared in the m1c-corporate-action-coverage-v1 closure through its importer, so its bytes determine that identity; without a pin a change here could move the identity every record binds while every byte freeze stayed green. It is an addition rather than a supersession because no earlier link pins the path at all."
     },
     "src/drift/markets/economic_closed_world.py": {
-      "current_sha256": "078e70b4c1e4a14016ad6a85292945b19def835bbe231a247b4a10f4f97bceda",
+      "current_sha256": "7294e4ee0c431e934d6cc5dc24164f3897067086e3ef81c3ea8a541958cc4bf4",
       "issue": 76,
       "justification": "This module stamps, verifies and derives closed-world corporate-action coverage: build_corporate_action_coverage, the only stamper of a record's implementation_hash, verify_corporate_action_coverage, corporate_action_window_status and native_outcome_covers_window (issue 76). It is the one seed of the m1c-corporate-action-coverage-v1 closure under decision D5-b and checks every record's implementation_hash against that identity, so its bytes determine the identity. It is an addition rather than a supersession because no earlier link pins the path at all."
     }
@@ -83,7 +83,7 @@
     "src/drift/ledger/sqlite.py": "eea9039b61eea5627b8f5b0dbeac131bbdb4906fea7c33a2dbab4d29f72d13d4",
     "src/drift/markets/__init__.py": "8f3c07529e25e0abd52e307276edbd5d728debe442fcd58dfd2d0c227abd6775",
     "src/drift/markets/action_sessions.py": "8491561cbcb535572ae1124c68a64788674185f576a4e61a6b737dfb6513e499",
-    "src/drift/markets/economic_closed_world.py": "078e70b4c1e4a14016ad6a85292945b19def835bbe231a247b4a10f4f97bceda",
+    "src/drift/markets/economic_closed_world.py": "7294e4ee0c431e934d6cc5dc24164f3897067086e3ef81c3ea8a541958cc4bf4",
     "src/drift/markets/economic_outcomes.py": "07d3f46014a99e2fe91fc73db7b054caab9eaae76b11f4e70b98e6193028bc42",
     "src/drift/markets/economic_selection.py": "e6b464a3a4aa93e241af5c4e1f507a1ae712a79534edc5253789a369bfae98c3",
     "src/drift/markets/economic_validation.py": "049155fcc34e9e9565592292d333694542a9d8d38a928510fd82c516aa065e76",

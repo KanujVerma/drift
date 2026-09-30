@@ -726,9 +726,36 @@ class AlpacaNativePayloads:
     corporate_actions: bytes
 
 
+class AlpacaDuplicateKeyError(AlpacaBridgeIncompleteError):
+    """A provider response repeats a key inside one JSON object (review F1).
+
+    Plain JSON decoding keeps the last of two equal keys, so a repeated group
+    or page token would silently erase whatever the first one said: a
+    ``forward_splits`` group repeated as an empty list reads as no split, and a
+    ``next_page_token`` repeated as null reads a paginated page as closed. The
+    bytes are ambiguous, so they are refused, never resolved by position.
+    """
+
+
+def _refuse_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    document: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in document:
+            raise AlpacaDuplicateKeyError(
+                f"alpaca_response_duplicate_key: the response repeats the key "
+                f"{key!r} inside one JSON object"
+            )
+        document[key] = value
+    return document
+
+
 def _strict_document(data: bytes) -> Any:
-    """Parse native JSON without ever materializing a binary float."""
-    return json.loads(data.decode("utf-8"), parse_float=Decimal)
+    """Parse native JSON exactly: no binary float and no repeated object key."""
+    return json.loads(
+        data.decode("utf-8"),
+        parse_float=Decimal,
+        object_pairs_hook=_refuse_duplicate_keys,
+    )
 
 
 def _exact_decimal(value: object, label: str) -> Decimal:
@@ -1883,6 +1910,9 @@ def _document_matches_object_key(key: str, data: bytes) -> bool:
     """
     try:
         document = _strict_document(data)
+    except AlpacaDuplicateKeyError:
+        # Ambiguous bytes are an integrity failure by name, not a shape miss.
+        raise
     except UnicodeDecodeError, ValueError:
         return False
     if key == BARS_OBJECT_KEY:
@@ -1976,6 +2006,29 @@ def _byte_graph(retained: RetainedNativeBytes) -> NativeByteGraphV1:
     )
 
 
+def _measured_endpoint_parameters(
+    request: AlpacaIntakeRequest,
+) -> dict[str, dict[str, str] | str]:
+    """The query parameters each endpoint was measured requesting (review F6).
+
+    An endpoint whose measured origin carries its request target states the
+    parameters that target names; the acquisition CLI sends exactly
+    ``alpaca_endpoint_parameters``, so a genuine run states those. An endpoint
+    with no measured target, as every origin retained before issue 76 has,
+    states ``"unmeasured"``: a replay of old bytes cannot say which types or
+    window produced them, so its receipt claims none.
+    """
+    stated: dict[str, dict[str, str] | str] = {}
+    for key, _host, _route in _OBJECT_ENDPOINTS:
+        observation = request.observation_for(key)
+        target = None if observation is None else observation.request_target
+        if target is None:
+            stated[key] = "unmeasured"
+        else:
+            stated[key] = measured_request_parameters(target)[1]
+    return stated
+
+
 def _request_identity(request: AlpacaIntakeRequest) -> RequestIdentityV1:
     return RequestIdentityV1(
         schema_version="1",
@@ -1989,9 +2042,10 @@ def _request_identity(request: AlpacaIntakeRequest) -> RequestIdentityV1:
         route_template=",".join(
             f"{host}{route}" for _, host, route in _OBJECT_ENDPOINTS
         ),
-        # Per endpoint, with the cohort symbols and the corporate-action types
-        # (issue 76, B2), so the declaration states every query parameter sent.
-        canonical_parameters=cast(Any, alpaca_endpoint_parameters(request)),
+        # Per endpoint, what the transport measured it sent (issue 76, B2;
+        # review F6), so the declaration never states a parameter the bytes
+        # were not fetched with.
+        canonical_parameters=cast(Any, _measured_endpoint_parameters(request)),
         requested_universe=tuple(member.symbol for member in request.members),
         requested_fields=tuple(sorted(REQUIRED_RECONSTRUCTION_FIELDS)),
         requested_date_range=(

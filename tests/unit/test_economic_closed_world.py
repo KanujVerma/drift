@@ -773,6 +773,10 @@ def _resolution(
     reasons: tuple[str, ...] = (),
     unknown_effects: tuple[str, ...] = (),
     uncomposed: tuple[str, ...] = (),
+    selected_terms: tuple[str, ...] = (),
+    upcoming_terms: tuple[str, ...] = (),
+    cancelled: tuple[str, ...] = (),
+    safe_projections: tuple[str, ...] = (),
 ) -> EconomicOutcomeResolutionV1:
     query = MarketOutcomeQueryV1(
         schema_version="1",
@@ -801,10 +805,10 @@ def _resolution(
         composition_algorithm="drift-m1c-economic-composition-v1",
         composition_algorithm_spec_hash="e" * 64,
         composition_implementation_hash="f" * 64,
-        selected_terms_hashes=(),
-        upcoming_terms_hashes=(),
+        selected_terms_hashes=selected_terms,
+        upcoming_terms_hashes=upcoming_terms,
         effect_projections=(),
-        cancelled_action_hashes=(),
+        cancelled_action_hashes=cancelled,
         unknown_effect_hashes=unknown_effects,
         delivery_groups=(),
         uncomposed_settlement_hashes=uncomposed,
@@ -815,7 +819,7 @@ def _resolution(
             else families
         ),
         residual_resolutions=(),
-        safe_projection_hashes=(),
+        safe_projection_hashes=safe_projections,
         claim_status="continuing",
         evidence_completeness="known" if not reasons else "partial",
         support_status="indeterminate",
@@ -891,6 +895,34 @@ def test_m10_native_coverage_refuses_a_reason_that_can_hide_an_action(
 def test_an_outcome_with_any_effect_or_settlement_record_is_not_empty() -> None:
     assert not native_outcome_is_empty(_resolution(unknown_effects=("a" * 64,)))
     assert not native_outcome_is_empty(_resolution(uncomposed=("b" * 64,)))
+
+
+@pytest.mark.parametrize(
+    ("selected_terms", "upcoming_terms", "cancelled", "safe_projections"),
+    (
+        (("a" * 64,), (), (), ()),
+        ((), ("b" * 64,), (), ()),
+        ((), (), ("c" * 64,), ()),
+        ((), (), (), ("d" * 64,)),
+    ),
+    ids=("selected-terms", "upcoming-terms", "cancelled-action", "safe-projection"),
+)
+def test_f2_an_outcome_with_any_terms_or_cancellation_record_is_not_empty(
+    selected_terms: tuple[str, ...],
+    upcoming_terms: tuple[str, ...],
+    cancelled: tuple[str, ...],
+    safe_projections: tuple[str, ...],
+) -> None:
+    """C4 reads no action only from an outcome with no record of any family."""
+    assert native_outcome_is_empty(_resolution())
+    assert not native_outcome_is_empty(
+        _resolution(
+            selected_terms=selected_terms,
+            upcoming_terms=upcoming_terms,
+            cancelled=cancelled,
+            safe_projections=safe_projections,
+        )
+    )
 
 
 class _LyingDate(date):
