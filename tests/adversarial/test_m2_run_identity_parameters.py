@@ -1358,3 +1358,35 @@ def test_a_reference_that_changes_between_the_runner_and_the_engine_fails(
     assert "the run identity must bind the strategy that runs" in run.error_details
     assert strategy.seen == []
     assert len(ledger.verified_events()) == 1
+
+
+class _UnprintableStrategyError(RuntimeError):
+    """A general exception whose own __str__ raises while being printed (#149)."""
+
+    def __str__(self) -> str:
+        raise RuntimeError("raised while being printed")
+
+
+def test_a_strategy_raising_an_unprintable_exception_records_failed(
+    tmp_path: Path,
+) -> None:
+    """Issue 149: an exception whose __str__ raises records FAILED with one audit event.
+
+    Before this fix, the runner called str(error) directly, so the exception
+    escaped the runner and the run was never recorded in M0 or the ledger.
+    """
+    ledger = SQLiteLedger(tmp_path / "audit.sqlite3")
+    engine = eng._engine()
+    identity = _v2_identity(engine, TEN)
+    strategy = _RaisingOnItsSecondDecision(_UnprintableStrategyError())
+
+    run = execute_experiment_run(
+        run_support._specification(), _v2_context(engine, strategy, identity, ledger)
+    )
+
+    assert run.status.value == "failed"
+    assert run.artifact_references == ()
+    assert run.error_details is not None
+    assert "_UnprintableStrategyError" in run.error_details
+    assert "<unprintable>" in run.error_details
+    assert len(ledger.verified_events()) == 1
