@@ -1,6 +1,9 @@
 """Admission-to-bundle lane gates and deterministic evaluation run identity."""
 
-from datetime import date
+from datetime import date, datetime
+from typing import Literal
+
+from pydantic import ValidationError
 
 from drift.domain.assertions import NormalizedSelectionQueryV1, TemporalIntervalClaimV1
 from drift.domain.common import UUID7, SHA256Hash
@@ -28,6 +31,7 @@ from drift.domain.evaluator_reconstruction import (
     ExploratoryReconstructedSessionObservationV1,
 )
 from drift.domain.normalization import (
+    AnchorOpeningEvidenceV1,
     DerivedObservationViewV1,
     NormalizationQueryV1,
     ObservationDecisionReferenceV1,
@@ -56,10 +60,15 @@ from drift.domain.replay_provenance import (
     verify_snapshot_binding_purpose,
 )
 from drift.domain.securities import IdentityAssignmentEffect, ListingV1, SecurityV1
+from drift.domain.sessions import RealizedSessionVersionV1
 from drift.domain.source_snapshots import RealSourceSnapshotV1
 from drift.domain.universes import StructuralEligibilityResultV1
+from drift.errors import DriftError
 from drift.evaluator.admission import validate_m1e_promotion_evidence
-from drift.evaluator.clock import verify_session_clock
+from drift.evaluator.clock import (
+    realized_stamps_local_date_refusal,
+    verify_session_clock,
+)
 from drift.evaluator.reconstruction import (
     ExploratoryReconstructionReplay,
     replay_exploratory_reconstructions,
@@ -71,7 +80,9 @@ from drift.markets.economic_outcomes import resolve_economic_facts
 from drift.markets.normalization import (
     materialize_observation_decision,
     materialize_observation_outcome,
+    normalize_observation,
 )
+from drift.markets.observation_selection import select_observation_records
 from drift.markets.observation_validation import (
     M1dResolutionContext,
     m1d_context_descriptor,
@@ -104,6 +115,21 @@ query are requested.
 """
 type EconomicReplayRequests = tuple[MarketSelectionQueryV1, ...]
 """One M1c query per economic outcome, resolved over the context's M1c evidence."""
+
+
+class AnchorSessionLocalDateError(DriftError, ValueError):
+    """Raised when a split view's anchor stamp is off the anchor's local date.
+
+    Issue 147, owner ruling option C, part B: an interim M2 guard. M1d reads a
+    split normalization's anchor open from the anchor session's realized
+    record, or from that record's opening evidence, without binding the stamp
+    to the anchor's ``local_date`` (the issue 140 condition, one layer down).
+    The anchor need not be a clock session, so the issue 140 clock guard never
+    reads it, and a misdated anchor record changes the view's split factor.
+    Both bundle boundaries therefore refuse a split-normalized decision view
+    whose anchor evidence is off its date. The canonical fix is in M1d
+    (issue 151).
+    """
 
 
 def _ordered[T](members: tuple[T, ...]) -> tuple[T, ...]:
@@ -271,6 +297,12 @@ def build_evaluation_input_bundle(
     supplied. The caller still names the clock it expects, so a bundle built
     here carries exactly that clock, now proven equal to its derivation.
 
+    Every split-normalized decision view's anchor evidence is held to the
+    issue 140 local-date check (issue 147, an interim M2 guard ahead of the
+    M1d fix of issue 151): the anchor need not be a clock session, so the
+    clock's own check never reads it, and a misdated anchor record would
+    change the view's split factor.
+
     `dataset_limitations` are the producer's declarations about its dataset
     itself (issue 92). Nothing re-derives them; the bundle hash binds them,
     and every admission of the bundle must acknowledge them.
@@ -303,6 +335,7 @@ def build_evaluation_input_bundle(
         dataset_limitations=dataset_limitations,
     )
     _require_calendar_rows(bundle)
+    _require_anchor_stamps_on_local_date(bundle.authentic_decision_views, context)
     return bundle
 
 
@@ -395,6 +428,99 @@ def _require_calendar_rows(bundle: EvaluationInputBundleV1) -> None:
         require_scheduled_calendar_row(observation, sessions[observation.session_key])
 
 
+def _require_anchor_stamps_on_local_date(
+    views: tuple[DerivedObservationViewV1, ...], context: M1dResolutionContext
+) -> None:
+    """Hold every split-normalized view's anchor to the issue 140 check (issue 147).
+
+    The anchor evidence is re-read exactly as M1d normalization reads it. The
+    anchor query is the view's own observation query moved to the anchor's
+    date. When it selects one completed ``opened`` realized record, the anchor
+    open was that record's ``actual_open`` (for an anchor that is the view's
+    source session, through the source binding, which selects the same
+    record), and both of its stamps are checked, as the realized clock checks
+    a record. Otherwise the view materialized on the record's opening
+    evidence, and the open of the one ``AnchorOpeningEvidenceV1`` its fresh
+    derivation cites is checked. Each stamp is read by the one issue 140
+    reading, ``realized_stamps_local_date_refusal``, at its own boundary's
+    authorized offset on the anchor date's generated schedule row. The anchor
+    session need not be a clock session, so nothing else reads it. A
+    source-basis view has no anchor and nothing is read for it, and no
+    realized record other than an anchor's is read.
+    """
+    for view in views:
+        if view.basis_mode != "split_normalized":
+            continue
+        where = f"split-normalized decision view of security {view.security_id}"
+        anchor = view.anchor_session
+        if anchor is None:
+            raise AnchorSessionLocalDateError(
+                f"{where} carries no anchor session (issue 147)"
+            )
+        where = f"{where} anchored on {anchor.mic} {anchor.local_date.isoformat()}"
+        anchor_query = view.query.observation.model_copy(
+            update={"session_date": anchor.local_date}
+        )
+        selected = select_observation_records(anchor_query, "realized_session", context)
+        records = tuple(
+            item
+            for item in selected.records
+            if isinstance(item, RealizedSessionVersionV1)
+        )
+        stamps: tuple[tuple[Literal["open", "close"], datetime], ...]
+        if (
+            len(records) == 1
+            and records[0].outcome == "opened"
+            and records[0].actual_open is not None
+            and records[0].actual_close is not None
+        ):
+            evidence = "realized session"
+            stamps = (
+                ("open", records[0].actual_open),
+                ("close", records[0].actual_close),
+            )
+        else:
+            evidence = "opening evidence"
+            stamps = (("open", _cited_anchor_opening(view, context, where)),)
+        refusal = realized_stamps_local_date_refusal(
+            anchor, stamps, anchor_query, context
+        )
+        if refusal is not None:
+            raise AnchorSessionLocalDateError(
+                f"{where}: the anchor's {evidence} {refusal} (issue 147)"
+            )
+
+
+def _cited_anchor_opening(
+    view: DerivedObservationViewV1, context: M1dResolutionContext, where: str
+) -> datetime:
+    """The open of the one anchor opening evidence a view's derivation cites.
+
+    The view is normalized afresh, and must replay to itself; the anchor
+    opening evidence that normalization used is among the artifacts its
+    derivation cites, and is the only one for the anchor session.
+    """
+    result = normalize_observation(view.query, context)
+    cited: list[datetime] = []
+    if result.view == view and result.derivation is not None:
+        for digest in result.derivation.artifact_hashes:
+            artifact = context.supporting_artifacts.get(digest)
+            if artifact is None:
+                continue
+            try:
+                opening = AnchorOpeningEvidenceV1.model_validate_json(artifact.data)
+            except ValidationError:
+                continue
+            if opening.session_key == view.anchor_session:
+                cited.append(opening.actual_open)
+    if len(cited) != 1:
+        raise AnchorSessionLocalDateError(
+            f"{where}: the anchor's open is neither one completed realized session "
+            "nor one opening evidence its derivation cites (issue 147)"
+        )
+    return cited[0]
+
+
 def require_evidenced_clock_density(
     clock: SessionClockV1, replay: ExploratoryReconstructionReplay
 ) -> None:
@@ -474,7 +600,9 @@ def verify_evaluation_input_bundle(
     rather than merely self-declared. Exploratory reconstructions are
     re-derived the same way; a bundle carrying any without the inputs to
     re-derive them is refused, and so is one carrying any on a clock that is
-    not a scheduled session reconstruction (issue 72).
+    not a scheduled session reconstruction (issue 72). Every split-normalized
+    decision view's anchor evidence is held to the issue 140 local-date check,
+    as at build (issue 147).
 
     Structural eligibilities and economic outcomes are re-derived the same way
     from their requests over the context's M1b and M1c evidence, and the clock
@@ -498,6 +626,7 @@ def verify_evaluation_input_bundle(
         replay_decision_views(decision_requests, context),
         bundle.authentic_decision_views,
     )
+    _require_anchor_stamps_on_local_date(bundle.authentic_decision_views, context)
     _require_replayed(
         "accounting view",
         "accounting views",

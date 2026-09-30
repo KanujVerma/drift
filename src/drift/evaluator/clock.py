@@ -1,6 +1,7 @@
 """Session clock builders for the M2 evaluator (realized and scheduled modes)."""
 
 from datetime import date, datetime
+from typing import Literal
 
 from drift.domain.evaluator_clock import (
     EvaluationSessionV1,
@@ -189,6 +190,32 @@ def _require_stamps_on_local_date(
     """
     key = record.session_key
     where = f"realized session {key.mic} {key.local_date.isoformat()}"
+    refusal = realized_stamps_local_date_refusal(
+        key, (("open", actual_open), ("close", actual_close)), query, context
+    )
+    if refusal is not None:
+        raise RealizedSessionLocalDateError(f"{where} {refusal} (issue 140)")
+
+
+def realized_stamps_local_date_refusal(
+    session_key: SessionKeyV1,
+    stamps: tuple[tuple[Literal["open", "close"], datetime], ...],
+    query: ObservationQueryV1,
+    context: M1dResolutionContext,
+) -> str | None:
+    """Say why realized stamps are not on their session's local date, if so.
+
+    The one issue 140 reading, shared by the realized clock builder and the
+    issue 147 anchor guard of the bundle boundaries, each of which refuses on
+    a returned reason in its own words. Each stamp is named by its boundary
+    and read at that boundary's authorized offset on the authorized generated
+    schedule row of ``query``'s session (see ``_require_stamps_on_local_date``
+    for where that offset comes from), and must land on
+    ``session_key.local_date``. Stamps are read in the order given, and the
+    first off its date is the one named. A session without an authorized
+    generated open and close cannot place any stamp. Returns ``None`` when
+    every stamp is on the date.
+    """
     artifact = generate_schedule(query, context, _load_clock_policy(context))
     rows = _matching_generated_rows(artifact, query)
     output = rows[0].output if len(rows) == 1 else None
@@ -200,23 +227,25 @@ def _require_stamps_on_local_date(
         or output.utc_close is None
     ):
         state = "absent" if output is None else output.state
-        raise RealizedSessionLocalDateError(
-            f"{where} cannot be placed in venue local time: its session key has "
+        return (
+            "cannot be placed in venue local time: its session key has "
             "no authorized generated open and close (schedule artifact "
-            f"{artifact.classification}, state {state}) (issue 140)"
+            f"{artifact.classification}, state {state})"
         )
-    for boundary, stamp, label, authorized in (
-        ("open", actual_open, output.local_open, output.utc_open),
-        ("close", actual_close, output.local_close, output.utc_close),
-    ):
-        offset = datetime.fromisoformat(label) - authorized.replace(tzinfo=None)
+    authorized = {
+        "open": (output.local_open, output.utc_open),
+        "close": (output.local_close, output.utc_close),
+    }
+    for boundary, stamp in stamps:
+        label, instant = authorized[boundary]
+        offset = datetime.fromisoformat(label) - instant.replace(tzinfo=None)
         local_date = (stamp + offset).date()
-        if local_date != key.local_date:
-            raise RealizedSessionLocalDateError(
-                f"{where} actual {boundary} {stamp.isoformat()} falls on venue "
-                f"local date {local_date.isoformat()}, not its session date "
-                "(issue 140)"
+        if local_date != session_key.local_date:
+            return (
+                f"actual {boundary} {stamp.isoformat()} falls on venue "
+                f"local date {local_date.isoformat()}, not its session date"
             )
+    return None
 
 
 def build_scheduled_reconstruction_clock(

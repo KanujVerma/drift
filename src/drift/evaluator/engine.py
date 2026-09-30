@@ -1345,6 +1345,76 @@ def _require_contiguous_members(
     )
 
 
+def _require_contiguous_securities(
+    clock_history: Sequence[SessionKeyV1],
+    decision_views: Sequence[StrategyDecisionViewV1],
+) -> None:
+    """Refuse a realized decision context holding a gapped or stale security.
+
+    Issue 141, owner ruling A, extended to contiguity under the owner's
+    fail-closed operating rule recorded on #62, exactly as issue 87 was: the
+    realized counterpart of `_require_contiguous_members`. ``clock_history``
+    is the decision's history in clock order, ending at the decision session.
+    A security with decision evidence at this cutoff must have a view sourced
+    from every one of those sessions (its venue, scope and date) from its
+    first viewed session through the decision session. Otherwise it would
+    reach the strategy with history ending early, as though it were current,
+    or with a hole a lookback indexed by position would silently span, and a
+    target for it would trade on that evidence. A date the clock does not
+    step is not a session, so it is never a gap. The context is incomplete
+    whether or not the strategy would trade the security, and whether or not
+    the universe admits it, so the decision halts INDETERMINATE, naming the
+    decision session and, in canonical order, every such security with its
+    first viewed session and each session it lacks. A security with no
+    evidence at this cutoff has no view and is left to the existing rules.
+
+    The views must already have passed the context's causality checks, so
+    evidence sourced after the decision session fails loudly there rather
+    than halting here. A view sourced from any session outside this history
+    is refused loudly too. The bundle and the clock already exclude one (the
+    bundle holds only clock sessions, and a same-date multi-venue clock is
+    refused at construction, issue 97), so that refusal is defense in depth.
+    """
+    history = frozenset(clock_history)
+    decided = clock_history[-1]
+    clauses: list[str] = []
+    for group in sorted(
+        decision_views, key=lambda item: _security_order(item.security_id)
+    ):
+        held = {view.source_session for view in group.views}
+        outside = sorted(
+            held - history,
+            key=lambda key: (key.local_date, key.mic, key.session_scope),
+        )
+        if outside:
+            raise ValueError(
+                f"decision evidence for security {group.security_id} is sourced "
+                "from a session the clock has not closed by the decision session "
+                f"{decided.mic} {decided.local_date.isoformat()}: "
+                + ", ".join(
+                    f"{key.mic} {key.local_date.isoformat()}" for key in outside
+                )
+            )
+        first = next(
+            position for position, key in enumerate(clock_history) if key in held
+        )
+        missing = tuple(key for key in clock_history[first:] if key not in held)
+        if not missing:
+            continue
+        start = clock_history[first]
+        clauses.append(
+            f"security {group.security_id} has decision evidence from "
+            f"{start.mic} {start.local_date.isoformat()} but no view sourced from "
+            + ", ".join(f"{key.mic} {key.local_date.isoformat()}" for key in missing)
+        )
+    if not clauses:
+        return
+    raise IndeterminateValuationError(
+        "incomplete decision context at the realized decision session "
+        f"{decided.mic} {decided.local_date.isoformat()}: " + "; ".join(clauses)
+    )
+
+
 def require_next_open_execution(
     decision_session: EvaluationSessionV1, execution_session: EvaluationSessionV1
 ) -> None:
@@ -2229,7 +2299,7 @@ class SessionEvaluatorEngine:
     ) -> _Halt | None:
         if index < self._protocol.warmup_session_count - 1:
             return None
-        context = self._decision_context(loop.state, session)
+        context = self._decision_context(loop.state, index, session)
         # Issue 123: the strategy is handed a canonical JSON-rebuilt copy that
         # shares no object with engine state, so rewriting anything it can
         # reach (a UUID in place, say) cannot change what the engine records.
@@ -2272,9 +2342,9 @@ class SessionEvaluatorEngine:
         return None
 
     def _decision_context(
-        self, state: PortfolioStateV2, session: EvaluationSessionV1
+        self, state: PortfolioStateV2, index: int, session: EvaluationSessionV1
     ) -> StrategyDecisionContextV1:
-        return StrategyDecisionContextV1(
+        context = StrategyDecisionContextV1(
             session_key=session.session_key,
             decision_session=session,
             decision_cutoff=session.closed_at,
@@ -2286,6 +2356,20 @@ class SessionEvaluatorEngine:
             portfolio_nav=state.net_asset_value,
             decision_views=self._decision_views(session),
         )
+        # Issue 141: only a causal context is judged for contiguity, so
+        # evidence sourced after the decision session still fails loudly above.
+        # Its history is the one the reconstructed lane selects (issue 66).
+        sessions = self._bundle.session_clock.sessions
+        stepped = reconstructed_history_sessions(sessions, index)
+        _require_contiguous_securities(
+            tuple(
+                item.session_key
+                for item in sessions[: index + 1]
+                if item.session_key in stepped
+            ),
+            context.decision_views,
+        )
+        return context
 
     def _decision_views(
         self, session: EvaluationSessionV1
@@ -2297,6 +2381,13 @@ class SessionEvaluatorEngine:
         rule is left to `StrategyDecisionContextV1` rather than being
         pre-filtered here: silently dropping an acausal view would let a
         poisoned bundle run to COMPLETE instead of failing loudly.
+
+        Every security with evidence here must also be contiguous and
+        current (issue 141): once the context has proven the evidence causal,
+        `_require_contiguous_securities` halts the decision unless each such
+        security has a view sourced from every history session from its first
+        viewed session through this decision session. A security with no
+        evidence at this cutoff has no view.
         """
         grouped: dict[UUID, list[DerivedObservationViewV1]] = {}
         for view in self._bundle.authentic_decision_views:

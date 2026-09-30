@@ -98,8 +98,18 @@ def position_view(holding: SecurityHoldingV2) -> PositionViewV1:
     )
 
 
+def _source_session_order(session_key: SessionKeyV1) -> tuple[object, ...]:
+    """Chronological order of one security's decision history."""
+    return (session_key.local_date, session_key.mic, session_key.session_scope)
+
+
 class StrategyDecisionViewV1(FrozenModel):
-    """Canonical, causally anchored decision evidence for one security."""
+    """Canonical, causally anchored decision evidence for one security.
+
+    Members are held in business time (issue 141): by source session, oldest
+    first, and by content hash among views of one session, so a strategy
+    reads its history in session order whatever order the views arrive in.
+    """
 
     schema_version: Literal["1"] = "1"
     security_id: UUID7
@@ -116,7 +126,16 @@ class StrategyDecisionViewV1(FrozenModel):
         digests = tuple(digest for digest, _ in paired)
         if len(set(digests)) != len(digests):
             raise ValueError("decision view members must be unique")
-        return tuple(view for _, view in sorted(paired, key=lambda pair: pair[0]))
+        return tuple(
+            view
+            for _, view in sorted(
+                paired,
+                key=lambda pair: (
+                    _source_session_order(pair[1].source_session),
+                    pair[0],
+                ),
+            )
+        )
 
     @model_validator(mode="after")
     def validate_decision_view(self) -> Self:
