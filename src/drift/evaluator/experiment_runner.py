@@ -385,6 +385,33 @@ def _record_audit_event(
     )
 
 
+_TYPE_QUALNAME = vars(type)["__qualname__"]
+_UNNAMED = "<unnamed>"
+_UNPRINTABLE = "<unprintable>"
+
+
+def _exact_name(name: object) -> str:
+    return name if type(name) is str else _UNNAMED
+
+
+def _type_name(kind: type) -> str:
+    return _exact_name(_TYPE_QUALNAME.__get__(kind))
+
+
+def _error_details(error: Exception) -> str:
+    """Format an exception without running the error's own code (#149)."""
+    kind = type(error)
+    type_name = _type_name(kind)
+    try:
+        text = str(error)
+    except Exception:
+        text = _UNPRINTABLE
+    else:
+        if type(text) is not str:
+            text = _UNPRINTABLE
+    return f"{type_name}: {text}" if text else type_name
+
+
 def execute_experiment_run(
     specification: ExperimentSpecification, context: ExperimentRunnerContext
 ) -> ExperimentRun:
@@ -448,9 +475,7 @@ def execute_experiment_run(
         # recorded FAILED below (issue 112 round-2 review, R2-1).
         raise
     except Exception as error:
-        detail = (
-            f"{type(error).__name__}: {error}" if str(error) else type(error).__name__
-        )
+        detail = _error_details(error)
         run = ExperimentRun.model_validate(
             common
             | {
