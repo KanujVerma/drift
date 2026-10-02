@@ -360,32 +360,32 @@ RUN_PINS: dict[str, tuple[EvaluationClassification, str, str]] = {
     "forward-split": (
         EvaluationClassification.COMPLETE,
         "8c5c81fcc3acddaa9eb3c1be37236dcefc82d6f090ac6cfdb0f3cd65c3e597f7",
-        "f47b1e034cb87c6ad38e497fa95b22d235e92246e91dabdaab99b8a45de32240",
+        "10202f71358140cb075aad399606361a60df4d7d9dd1055260f3fc1e9dda50da",
     ),
     "stock-dividend": (
         EvaluationClassification.COMPLETE,
         "ac7850f135edcb480e62f9e0ea1b161f0c7c442b627c5ba4863f0c8de1af8b79",
-        "42031b807a8e952ab92f67d2d2c2d3b528842af9f086b3ddba6b89157c1e27ab",
+        "fbb2f1291322089d8c47bad9b87b1d44ce8a754e956697af1c660f506f4908c4",
     ),
     "stock-acquisition": (
         EvaluationClassification.COMPLETE,
         "08573913bd3e9b5e41386294a377d84905a3169b8a963494e051ec17293a0dd0",
-        "0111588a762f6710b6b1d31200188456fd2d5ccc4d93270de051f82f4c77881f",
+        "fc64baa34243ea0aec36477d099738cb858a1d5a447d44abd5c535defb417e9f",
     ),
     "extinguishing-liquidation": (
         EvaluationClassification.COMPLETE,
         "9f9d4a3904de23d47f5443d592a3c11b7a0969e0746fef1768b92b6a8d033d14",
-        "8bfb86d4c8213ffd2a5a83036ee735ef7c017162b831af4aeded48d535d2683a",
+        "66fc9078407d90e351877a37aad03552b459ba6aa1257ee0419f4527a38c0f1a",
     ),
     "cash-acquisition": (
         EvaluationClassification.COMPLETE,
         "297c38f0998d49621c28876a7d53e362955f366c64247aba77d4c8be4010b5b5",
-        "78f2a747c894169832a40feb03cae317350022a2abe00fc5a2afa93ce3323d6e",
+        "6f0caa6b186b8807bf906dfd65805b28fd2a892ec782c632e044379b94f5a4cd",
     ),
     "cash-dividend": (
         EvaluationClassification.COMPLETE,
         "97ddf4e29bb8e9ba0319efa130c59ce17089ba1dd4285f1f0f9ca4a66d1da514",
-        "ac25ffd166c876a5f14bcecf36be3714774f9bf7056083c179544eb459d3a65a",
+        "b2e6d16ac12ee7718dcd158fdeb78e7a51b9c4437da3e41551e12e57021d2b77",
     ),
     # Issue 103: the session-3 decision sees both sides of the spin-off with
     # an indeterminate basis, so its context hash moves (41ce3853 to
@@ -393,21 +393,21 @@ RUN_PINS: dict[str, tuple[EvaluationClassification, str, str]] = {
     "spinoff": (
         EvaluationClassification.COMPLETE,
         "e92a0e2b70cb9c1126b2775d84f9086ea2a88e50548df7f4e36923aafa4fe858",
-        "6dbd7f91399d327601e6f1354bc2d49ecc159ded458984875d20b7979a2d24b6",
+        "20081d531729ea3048511ab6c178e304cf5bb66283e4f760b7a4e46ce0d655d2",
     ),
     # Issue 105: the instalment leaves the continuing basis indeterminate, so
     # the session-3 decision context hash moves (f8b8bbef to 98949b80).
     "continuing-instalment": (
         EvaluationClassification.COMPLETE,
         "8dc4739e54d4f98673b152ac0e05b31bac7a8da491e3d067bfc5db78d12cc05d",
-        "1d5686dcc64a3b6137794830e97e18cce88614c2dcfbed39c069737ac571a540",
+        "5a310ebb23d10be3562d6fe90aa1cc8fb2a39ab896e5cd29e988c23f8c45440d",
     ),
     # Issue 105: the cash leg leaves the acquirer basis indeterminate, so the
     # session-3 decision context hash moves (bf7c5181 to e8e7a543).
     "mixed-acquisition": (
         EvaluationClassification.COMPLETE,
         "39c626540a7c93d9c9a208be98e8b203a5ff6b96a3dbd31aaec44e6ab46af06f",
-        "e293b23e10ec02d21813363de1072ea262a5a937d236aa809f075b24ba29c44c",
+        "594210dd538ca161fade5bb9df3515cf7f7753d6b81210e6612aca9cc03130f8",
     ),
     # Issue 105: the sold third relieves 100.00 of basis against 1.00 of
     # proceeds, so realized gross and net PnL move from 0 to -99 and the
@@ -416,7 +416,7 @@ RUN_PINS: dict[str, tuple[EvaluationClassification, str, str]] = {
     "aggregate-sale-residual": (
         EvaluationClassification.COMPLETE,
         "55eff4e09a4a20f572fac07aa816b65c327d1dcbf8aa06d558e4768df6a08471",
-        "be1977fefe26febe886c76a0cf1143eafdf0603e889349155b55f19476a9be1f",
+        "62703c54d9db0cb08c1e63504c0b2752b7ef2f8e3f54460b4fec4b10fb3c9c6c",
     ),
 }
 
