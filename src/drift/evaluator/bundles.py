@@ -21,6 +21,7 @@ from drift.domain.evaluator_bundles import (
 from drift.domain.evaluator_clock import SessionClockV1
 from drift.domain.evaluator_execution import IndeterminateExecutionError
 from drift.domain.evaluator_lanes import (
+    ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD,
     EvaluationAdmissionV1,
     ExploratoryEvaluationAdmissionV1,
     PromotionEvaluationAdmissionV1,
@@ -257,6 +258,20 @@ def replay_economic_outcomes(
     )
 
 
+def _has_closed_world_coverage(
+    context: M1dResolutionContext | None,
+    replay: ExploratoryReconstructionReplay | None,
+) -> bool:
+    """Return whether context or reconstruction replay carries closed-world coverage."""
+    if context is not None and bool(verify_closed_world_session_coverage(context)):
+        return True
+    if replay is not None:
+        for _query, ctx in replay.requests:
+            if verify_closed_world_session_coverage(ctx):
+                return True
+    return False
+
+
 def build_evaluation_input_bundle(
     *,
     evaluation_interval: TemporalIntervalClaimV1,
@@ -300,9 +315,15 @@ def build_evaluation_input_bundle(
 
     `dataset_limitations` are the producer's declarations about its dataset
     itself (issue 92). Nothing re-derives them; the bundle hash binds them,
-    and every admission of the bundle must acknowledge them.
+    and every admission of the bundle must acknowledge them. If the evidence
+    carries closed-world calendar coverage, ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD
+    is obliged directly from that evidence (issue 146).
     """
     _require_derived_clock(session_clock, session_queries, context)
+    limitations = set(dataset_limitations)
+    if _has_closed_world_coverage(context, exploratory_reconstruction_replay):
+        limitations.add(ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD)
+    dataset_limitations = tuple(sorted(limitations))
     bundle = assemble_evaluation_input_bundle(
         evaluation_interval=evaluation_interval,
         session_clock=session_clock,
@@ -638,6 +659,13 @@ def verify_evaluation_input_bundle(
         _require_calendar_rows(bundle)
 
     _require_derived_clock(bundle.session_clock, session_queries, context)
+
+    if _has_closed_world_coverage(context, exploratory_reconstruction_replay):
+        if ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD not in bundle.dataset_limitations:
+            raise ValueError(
+                "bundle carries closed-world session coverage but its dataset "
+                f"limitations omit {ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD}"
+            )
 
     rebuilt = evaluation_input_bundle_hash(bundle)
     if rebuilt != bundle.bundle_hash:
