@@ -52,7 +52,8 @@ refusal stay for the day issue 115 re-enables the lane.
 """
 
 import dataclasses
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -253,6 +254,18 @@ class StrategyRaisedRefusalError(DriftError, RuntimeError):
     parameters; either read raising a refusal type propagates unrecorded, as
     any caller input the runner cannot rebuild does (a residual: strategy
     code is trusted at the process level, #113).
+    """
+
+
+class StrategyRaisedIndeterminateError(DriftError, RuntimeError):
+    """Raised when strategy code raises an indeterminate error (#150).
+
+    The engine catches `IndeterminateValuationError` and
+    `IndeterminateExecutionError` inside `_step_session` to record a halted
+    `INDETERMINATE` evaluation, but that halt is reserved for evidence
+    insufficiency in the engine's accounting and context construction.
+    Raised by strategy code inside a session, either error is a strategy
+    defect, which the issue 111 amendment records as a FAILED run.
     """
 
 
@@ -466,6 +479,25 @@ def _exact_name(name: object) -> str:
 
 def _type_name(kind: type) -> str:
     return _exact_name(_TYPE_QUALNAME.__get__(kind))
+
+
+@contextmanager
+def _guard_strategy_indeterminate(session_key: SessionKeyV1) -> Iterator[None]:
+    """Re-raise indeterminate errors from strategy code as a strategy failure (#150).
+
+    Named through `type` itself; formatting the error would run its own
+    `__str__`, which is strategy code.
+    """
+    try:
+        yield
+    except (IndeterminateValuationError, IndeterminateExecutionError) as error:
+        kind = type(error)
+        name = f"{_exact_name(_TYPE_MODULE.__get__(kind))}.{_type_name(kind)}"
+        raise StrategyRaisedIndeterminateError(
+            f"strategy code raised {name} during the session "
+            f"{session_key.mic} {session_key.local_date}, so the run failed; "
+            "indeterminate errors are engine halts, not strategy returns"
+        ) from error
 
 
 def _refuse_intent(problem: str) -> StrategyIntentRejectedError:
@@ -2271,13 +2303,16 @@ class SessionEvaluatorEngine:
         # Issue 123: the strategy is handed a canonical JSON-rebuilt copy that
         # shares no object with engine state, so rewriting anything it can
         # reach (a UUID in place, say) cannot change what the engine records.
-        returned = strategy.decide(_revalidated(StrategyDecisionContextV1, context))
+        with _guard_strategy_indeterminate(session.session_key):
+            returned = strategy.decide(_revalidated(StrategyDecisionContextV1, context))
         context_hash = content_hash(context)
         try:
             intent = _revalidated_intent(returned)
             staged = stage_decision_targets(intent, context)
         except StrategyIntentRejectedError as error:
             reason = str(error) or type(error).__name__
+            with _guard_strategy_indeterminate(session.session_key):
+                intent_hash = _returned_intent_hash(returned)
             loop.events.append(
                 StrategyDecisionTraceEventV1(
                     sequence=len(loop.events),
@@ -2285,7 +2320,7 @@ class SessionEvaluatorEngine:
                     session_key=session.session_key,
                     decision_cutoff=session.closed_at,
                     context_hash=context_hash,
-                    intent_hash=_returned_intent_hash(returned),
+                    intent_hash=intent_hash,
                     outcome="rejected",
                     staged_targets=(),
                     rejection_reason=reason,
@@ -2437,9 +2472,10 @@ class SessionEvaluatorEngine:
             return None
         context = self._reconstructed_decision_context(loop.state, index, session, lane)
         # Issue 123: a canonical copy sharing no object with engine state.
-        returned = strategy.decide_exploratory(
-            _revalidated(ExploratoryStrategyDecisionContextV1, context)
-        )
+        with _guard_strategy_indeterminate(session.session_key):
+            returned = strategy.decide_exploratory(
+                _revalidated(ExploratoryStrategyDecisionContextV1, context)
+            )
         common: dict[str, Any] = {
             "sequence": len(loop.events),
             "session_index": index,
@@ -2460,10 +2496,12 @@ class SessionEvaluatorEngine:
             staged = stage_exploratory_decision_targets(intent, context)
         except StrategyIntentRejectedError as error:
             reason = str(error) or type(error).__name__
+            with _guard_strategy_indeterminate(session.session_key):
+                intent_hash = _returned_intent_hash(returned)
             loop.events.append(
                 ExploratoryStrategyDecisionTraceEventV1(
                     **common,
-                    intent_hash=_returned_intent_hash(returned),
+                    intent_hash=intent_hash,
                     outcome="rejected",
                     staged_targets=(),
                     rejection_reason=reason,
