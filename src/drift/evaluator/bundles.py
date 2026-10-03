@@ -21,6 +21,7 @@ from drift.domain.evaluator_bundles import (
 from drift.domain.evaluator_clock import SessionClockV1
 from drift.domain.evaluator_execution import IndeterminateExecutionError
 from drift.domain.evaluator_lanes import (
+    ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD,
     EvaluationAdmissionV1,
     ExploratoryEvaluationAdmissionV1,
     PromotionEvaluationAdmissionV1,
@@ -257,6 +258,20 @@ def replay_economic_outcomes(
     )
 
 
+def _has_closed_world_coverage(
+    context: M1dResolutionContext | None,
+    replay: ExploratoryReconstructionReplay | None,
+) -> bool:
+    """Return whether context or reconstruction replay carries closed-world coverage."""
+    if context is not None and bool(verify_closed_world_session_coverage(context)):
+        return True
+    if replay is not None:
+        for _query, ctx in replay.requests:
+            if verify_closed_world_session_coverage(ctx):
+                return True
+    return False
+
+
 def build_evaluation_input_bundle(
     *,
     evaluation_interval: TemporalIntervalClaimV1,
@@ -300,9 +315,15 @@ def build_evaluation_input_bundle(
 
     `dataset_limitations` are the producer's declarations about its dataset
     itself (issue 92). Nothing re-derives them; the bundle hash binds them,
-    and every admission of the bundle must acknowledge them.
+    and every admission of the bundle must acknowledge them. If the evidence
+    carries closed-world calendar coverage, ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD
+    is obliged directly from that evidence (issue 146).
     """
     _require_derived_clock(session_clock, session_queries, context)
+    limitations = set(dataset_limitations)
+    if _has_closed_world_coverage(context, exploratory_reconstruction_replay):
+        limitations.add(ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD)
+    dataset_limitations = tuple(sorted(limitations))
     bundle = assemble_evaluation_input_bundle(
         evaluation_interval=evaluation_interval,
         session_clock=session_clock,
@@ -513,8 +534,9 @@ def require_evidenced_clock_density(
     evaluation ``INDETERMINATE`` before any session is stepped, naming every
     such date; nothing skips to the next known open. A clock session on a date
     the evidence reads as non-trading is a conflict (decision D7-a) and halts
-    the same way. Dates are compared through the base ``date`` methods only
-    (issue 123).
+    the same way. A clock session on an unevidenced date is unproven and halts
+    the same way before any session is stepped (issue 148 option B). Dates are
+    compared through the base ``date`` methods only (issue 123).
     """
     contexts = {id(context): context for _query, context in replay.requests}
     records = {
@@ -523,20 +545,35 @@ def require_evidenced_clock_density(
         for record in verify_closed_world_session_coverage(context)
     }
     evidence = tuple(records[key] for key in sorted(records))
-    on_closed_dates = tuple(
-        f"{session.session_key.mic} {date.isoformat(session.session_key.local_date)}"
-        for session in clock.sessions
-        if evidenced_session_date_status(
-            evidence, session.session_key.mic, session.session_key.local_date
+    if evidence:
+        on_closed_dates = tuple(
+            f"{s.session_key.mic} {date.isoformat(s.session_key.local_date)}"
+            for s in clock.sessions
+            if evidenced_session_date_status(
+                evidence, s.session_key.mic, s.session_key.local_date
+            )
+            == "evidenced_non_trading"
         )
-        == "evidenced_non_trading"
-    )
-    if on_closed_dates:
-        raise IndeterminateExecutionError(
-            "the scheduled session clock holds a session on a date closed-world "
-            "calendar coverage evidences as non-trading, which is a conflict and "
-            "never a session: " + ", ".join(on_closed_dates)
+        if on_closed_dates:
+            raise IndeterminateExecutionError(
+                "the scheduled session clock holds a session on a date closed-world "
+                "calendar coverage evidences as non-trading, which is a conflict and "
+                "never a session: " + ", ".join(on_closed_dates)
+            )
+        on_unevidenced_dates = tuple(
+            f"{s.session_key.mic} {date.isoformat(s.session_key.local_date)}"
+            for s in clock.sessions
+            if evidenced_session_date_status(
+                evidence, s.session_key.mic, s.session_key.local_date
+            )
+            == "indeterminate"
         )
+        if on_unevidenced_dates:
+            raise IndeterminateExecutionError(
+                "the scheduled session clock holds a session on a date no closed-world "
+                "calendar coverage evidences as trading, so no session is proven: "
+                + ", ".join(on_unevidenced_dates)
+            )
     unevidenced: list[str] = []
     for previous, current in zip(clock.sessions, clock.sessions[1:], strict=False):
         mics = sorted({previous.session_key.mic, current.session_key.mic})
@@ -638,6 +675,13 @@ def verify_evaluation_input_bundle(
         _require_calendar_rows(bundle)
 
     _require_derived_clock(bundle.session_clock, session_queries, context)
+
+    if _has_closed_world_coverage(context, exploratory_reconstruction_replay):
+        if ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD not in bundle.dataset_limitations:
+            raise ValueError(
+                "bundle carries closed-world session coverage but its dataset "
+                f"limitations omit {ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD}"
+            )
 
     rebuilt = evaluation_input_bundle_hash(bundle)
     if rebuilt != bundle.bundle_hash:

@@ -124,6 +124,9 @@ from drift.domain.evaluator_lanes import (
     ExploratoryEvaluationAdmissionV1,
     exploratory_evaluation_admission_hash,
 )
+from drift.domain.evaluator_lanes import (
+    ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD as ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD,
+)
 from drift.domain.evaluator_reconstruction import (
     REQUIRED_RECONSTRUCTION_FIELDS,
     ExploratoryCohortAuthorizationV1,
@@ -266,15 +269,6 @@ BRIDGE_COLLECTOR_ID = "drift-alpaca-exploratory-bridge"
 BRIDGE_COLLECTOR_VERSION = "1"
 BRIDGE_PROVIDER_LEGAL_NAME = "Alpaca Securities LLC"
 BRIDGE_LICENSE_REFERENCE = "alpaca-basic-free-development-tier"
-
-#: Issue 71, decision D3-a. The bridge reads a date its retained calendar
-#: response omits, inside the bracketed hull of the dates it returned, as an
-#: evidenced non-trading date. That rests on a closed-world reading of the
-#: calendar that Alpaca only partially publishes, so every admission and every
-#: bundle the bridge emits names it.
-ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD = (
-    "calendar-absence-read-as-closure-under-closed-world-assumption"
-)
 
 #: Every limitation an Alpaca-backed exploratory admission must acknowledge.
 ALPACA_EXPLORATORY_LIMITATIONS: tuple[str, ...] = tuple(
