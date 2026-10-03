@@ -1,0 +1,59 @@
+{
+  "contract_id": "m2-strategy-surface-v1",
+  "scope": "Frozen M2 runtime strategy surface consumed by M3 and M12",
+  "tier_a_models": {
+    "ExploratoryReconstructedDecisionViewV1": "2f9012b39ec44ce3e728d3b066502aef9343141e93be915a87bb62693b538f66",
+    "ExploratoryStrategyDecisionContextV1": "d88aed5d6aebd0234db5c71936be3d7c95da69f3f9d14cd5bd7bb472f89d1bb6",
+    "PositionViewV1": "15082034c23294e94519521f675d85b05b9fc8cd7e3d9ada5bfeb44fd2116586",
+    "SecurityTargetPositionV1": "663a06f89d574f1014e8bce5eb98b6b1f2ffeaa3224be1b4a287c35b4764810f",
+    "StrategyDecisionContextV1": "2f56868fef8227336a59a7cc684f10199c5072aa2ce09f09d7c4576a6b12b90f",
+    "StrategyDecisionIntentV1": "ca6e95452205678d1b504d195bdee50a3f58b90d70eccc8b1c7c82c883f9351e",
+    "StrategyDecisionViewV1": "abf03b272bc87e2639cab93879e7d80b7d615a16d9f14103423c343492292b88",
+    "StrategyReference": "5a2ee8aa4062c83882ed6e6a57a0602c48be8c4af59ad7ee6a40e3a66bddc4f1"
+  },
+  "tier_a_protocols": {
+    "ExploratoryReconstructedRuntimeStrategy": [
+      "decide_exploratory",
+      "strategy_reference"
+    ],
+    "ParameterizedStrategy": [
+      "strategy_parameters"
+    ],
+    "RuntimeStrategy": [
+      "decide",
+      "strategy_reference"
+    ]
+  },
+  "tier_a_signatures": {
+    "ExploratoryReconstructedRuntimeStrategy.decide_exploratory": "(self, context: drift.domain.evaluator_exploratory_strategy.ExploratoryStrategyDecisionContextV1) -> drift.domain.evaluator_strategy.StrategyDecisionIntentV1",
+    "ExploratoryReconstructedRuntimeStrategy.strategy_reference": "(self) -> drift.domain.strategies.StrategyReference",
+    "ParameterizedStrategy.strategy_parameters": "(self) -> ImmutableJSONValue",
+    "RuntimeStrategy.decide": "(self, context: drift.domain.evaluator_strategy.StrategyDecisionContextV1) -> drift.domain.evaluator_strategy.StrategyDecisionIntentV1",
+    "RuntimeStrategy.strategy_reference": "(self) -> drift.domain.strategies.StrategyReference",
+    "stage_decision_targets": "(intent: drift.domain.evaluator_strategy.StrategyDecisionIntentV1, context: drift.domain.evaluator_strategy.StrategyDecisionContextV1) -> tuple[drift.domain.evaluator_strategy.SecurityTargetPositionV1, ...]",
+    "stage_exploratory_decision_targets": "(intent: drift.domain.evaluator_strategy.StrategyDecisionIntentV1, context: drift.domain.evaluator_exploratory_strategy.ExploratoryStrategyDecisionContextV1) -> tuple[drift.domain.evaluator_strategy.SecurityTargetPositionV1, ...]"
+  },
+  "tier_a_errors_and_constants": {
+    "DECISION_TIME_MISMATCH": "decision intent decision_time must strictly match context.decision_cutoff",
+    "EXPLORATORY_RECONSTRUCTED_EVIDENCE_GRADE": "exploratory_reconstructed",
+    "RECONSTRUCTED_DECISION_LIMITATIONS": [
+      "derived-bars-unversioned-without-provider-vintages",
+      "evaluation-restricted-to-declared-bounded-cohort",
+      "session-clock-reconstructed-from-scheduled-calendar-without-independent-realized-history",
+      "strategy-inputs-retrospectively-reconstructed-from-audit-vintage-bars",
+      "trading-halt-telemetry-absent-from-api"
+    ],
+    "SCHEDULED_CLOCK_LIMITATIONS": [
+      "trading-halt-telemetry-absent-from-api",
+      "session-clock-reconstructed-from-scheduled-calendar-without-independent-realized-history"
+    ],
+    "StrategyIntentRejectedError_mro": [
+      "StrategyIntentRejectedError",
+      "DriftError",
+      "ValueError",
+      "Exception",
+      "BaseException",
+      "object"
+    ]
+  }
+}
