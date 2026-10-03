@@ -58,7 +58,6 @@ from drift.adapters.alpaca_exploratory import (
     _POLICY_DOCUMENTS,
     ALPACA_CALENDAR_SOURCE_ID,
     ALPACA_EXPLORATORY_LIMITATIONS,
-    ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD,
     ALPACA_PAPER_TRADING_HOST,
     CALENDAR_OBJECT_KEY,
     AlpacaBridgeIncompleteError,
@@ -83,6 +82,10 @@ from drift.domain.evaluator_clock import (
     session_clock_hash,
 )
 from drift.domain.evaluator_execution import IndeterminateExecutionError
+from drift.domain.evaluator_lanes import (
+    ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD,
+    ALPACA_LIMITATION_TRUNCATED_CA,
+)
 from drift.domain.evaluator_results import EvaluationClassification
 from drift.domain.session_closed_world import (
     ClosedWorldSessionCoverageV1,
@@ -94,8 +97,10 @@ from drift.domain.sessions import (
     SessionCoverageVersionV1,
 )
 from drift.evaluator.bundles import (
+    assemble_evaluation_input_bundle,
     build_evaluation_input_bundle,
     require_evidenced_clock_density,
+    verify_evaluation_input_bundle,
 )
 from drift.evaluator.clock import build_scheduled_reconstruction_clock
 from drift.evaluator.engine import (
@@ -1095,6 +1100,124 @@ def test_the_admission_acknowledges_the_closed_world_reading(
     )
     with pytest.raises(ValueError, match="omits required bundle limitations"):
         _engine(fortnight, admission=hand_minted_admission(fortnight.bundle, omitted))
+
+
+def test_probe_p5_closed_world_coverage_obliges_limitation_and_engine_refuses_omission(
+    fortnight: AlpacaExploratoryIntakeResult,
+) -> None:
+    """Probe P5 (issue 146): closed-world coverage obliges the limitation.
+
+    If a bundle carries closed-world session coverage in its M1d context or
+    replay, but admission omits ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD,
+    engine construction or the admission gate must refuse with a clear message.
+    """
+    # Case 1: Admission omitting the limitation from a bundle that declares it.
+    omitted = tuple(
+        item
+        for item in fortnight.bundle.required_limitations
+        if item != ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD
+    )
+    with pytest.raises(ValueError, match="omits required bundle limitations"):
+        _engine(fortnight, admission=hand_minted_admission(fortnight.bundle, omitted))
+
+    # Case 2: A bundle stripped of the limitation in dataset_limitations,
+    # paired with an admission that also omits it. The engine's admission
+    # gate must refuse because the exploratory reconstruction replay evidence
+    # carries closed-world session coverage.
+    stripped_limitations = tuple(
+        item
+        for item in fortnight.bundle.dataset_limitations
+        if item != ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD
+    )
+    stripped_bundle = assemble_evaluation_input_bundle(
+        evaluation_interval=fortnight.bundle.evaluation_interval,
+        session_clock=fortnight.bundle.session_clock,
+        security_identities=fortnight.bundle.security_identities,
+        listing_identities=fortnight.bundle.listing_identities,
+        structural_eligibilities=fortnight.bundle.structural_eligibilities,
+        economic_outcomes=fortnight.bundle.economic_outcomes,
+        authentic_decision_views=fortnight.bundle.authentic_decision_views,
+        authentic_accounting_views=fortnight.bundle.authentic_accounting_views,
+        exploratory_reconstructed_observations=fortnight.bundle.exploratory_reconstructed_observations,
+        source_snapshot_hash=fortnight.bundle.source_snapshot_hash,
+        dataset_limitations=stripped_limitations,
+    )
+    omitted_admission_limitations = tuple(
+        item
+        for item in fortnight.admission.acknowledged_limitations
+        if item != ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD
+    )
+    stripped_admission = hand_minted_admission(
+        stripped_bundle, omitted_admission_limitations
+    )
+    assert (
+        ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD
+        not in stripped_admission.acknowledged_limitations
+    )
+    with pytest.raises(ValueError, match="closed-world"):
+        SessionEvaluatorEngine(
+            bundle=stripped_bundle,
+            admission=stripped_admission,
+            protocol=_protocol(warmup=WARMUP),
+            cost_model=_cost_model(),
+            evidence=SessionEvaluatorEvidence(
+                exploratory_cohort=fortnight.cohort,
+                exploratory_reconstruction_replay=fortnight.reconstruction_replay,
+            ),
+            book_currency_namespace="iso4217",
+            book_currency_code="USD",
+        )
+
+
+def test_closed_world_limitation_obliged_from_evidence_at_bundle_build_and_verify(
+    fortnight: AlpacaExploratoryIntakeResult,
+) -> None:
+    """Issue 146: bundle build and verify oblige the closed-world
+    limitation from evidence.
+    """
+    # When built without producer choosing to declare it, evidence obliges it:
+    bundle = build_evaluation_input_bundle(
+        evaluation_interval=fortnight.bundle.evaluation_interval,
+        session_clock=fortnight.bundle.session_clock,
+        context=fortnight.context,
+        decision_requests=(),
+        accounting_requests=(),
+        security_identities=fortnight.bundle.security_identities,
+        listing_identities=fortnight.bundle.listing_identities,
+        structural_eligibilities=(),
+        economic_outcomes=(),
+        exploratory_cohort=fortnight.cohort,
+        exploratory_reconstruction_replay=fortnight.reconstruction_replay,
+        dataset_limitations=(ALPACA_LIMITATION_TRUNCATED_CA,),
+    )
+    assert ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD in bundle.dataset_limitations
+
+    # verify_evaluation_input_bundle rejects a bundle whose dataset_limitations omits:
+    stripped_limitations = tuple(
+        item
+        for item in fortnight.bundle.dataset_limitations
+        if item != ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD
+    )
+    stripped_bundle = assemble_evaluation_input_bundle(
+        evaluation_interval=fortnight.bundle.evaluation_interval,
+        session_clock=fortnight.bundle.session_clock,
+        security_identities=fortnight.bundle.security_identities,
+        listing_identities=fortnight.bundle.listing_identities,
+        structural_eligibilities=fortnight.bundle.structural_eligibilities,
+        economic_outcomes=fortnight.bundle.economic_outcomes,
+        authentic_decision_views=fortnight.bundle.authentic_decision_views,
+        authentic_accounting_views=fortnight.bundle.authentic_accounting_views,
+        exploratory_reconstructed_observations=fortnight.bundle.exploratory_reconstructed_observations,
+        source_snapshot_hash=fortnight.bundle.source_snapshot_hash,
+        dataset_limitations=stripped_limitations,
+    )
+    with pytest.raises(ValueError, match="closed-world"):
+        verify_evaluation_input_bundle(
+            bundle=stripped_bundle,
+            context=fortnight.context,
+            exploratory_cohort=fortnight.cohort,
+            exploratory_reconstruction_replay=fortnight.reconstruction_replay,
+        )
 
 
 def test_no_promotion_consumer_accepts_closed_world_evidence(
