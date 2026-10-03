@@ -535,18 +535,19 @@ def _clock_of(
 
 
 @pytest.mark.parametrize(
-    "unevidenced", ("previous", "current"), ids=("previous-venue", "current-venue")
+    ("unevidenced", "problem_date"),
+    (("previous", "2026-01-09"), ("current", "2026-01-12")),
+    ids=("previous-venue", "current-venue"),
 )
 def test_the_density_check_covers_the_venues_of_both_sessions(
-    fortnight: AlpacaExploratoryIntakeResult, unevidenced: str
+    fortnight: AlpacaExploratoryIntakeResult, unevidenced: str, problem_date: str
 ) -> None:
-    """R7: a gap must be evidenced non-trading for both sessions' venues.
+    """R7 and issue 148: an unevidenced venue session is refused before stepping.
 
-    The record evidences the weekend for XNAS only. A step from Friday to
-    Monday where either session is on XNYS crosses a weekend no record covers
-    for XNYS, so it halts naming exactly the XNYS dates. The check is driven
-    directly here, with the replay's verified contexts, over a two-session
-    clock; the engine test below carries three-session clocks through it.
+    The record evidences trading and closed dates for XNAS only. A step from
+    Friday to Monday where either session is moved to XNYS sits on a date
+    no record evidences as trading for XNYS, so under issue 148 option B it
+    halts naming that session's unevidenced date before any step is evaluated.
     """
     sessions = {
         item.session_key.local_date: item for item in fortnight.session_clock.sessions
@@ -566,29 +567,19 @@ def test_the_density_check_covers_the_venues_of_both_sessions(
             _clock_of(fortnight.session_clock, (friday, monday)), replay
         )
     assert str(error.value).endswith(
-        ": XNYS 2026-01-10 (indeterminate), XNYS 2026-01-11 (indeterminate)"
+        f"evidences as trading, so no session is proven: XNYS {problem_date}"
     )
 
 
 @pytest.mark.parametrize(
-    ("phantom_day", "unevidenced"),
-    ((date(2026, 1, 10), "2026-01-11"), (date(2026, 1, 11), "2026-01-10")),
+    "phantom_day",
+    (date(2026, 1, 10), date(2026, 1, 11)),
     ids=("xnys-saturday-then-xnas-monday", "xnas-friday-then-xnys-sunday"),
 )
 def test_the_engine_checks_both_venues_of_every_step_of_a_longer_clock(
-    fortnight: AlpacaExploratoryIntakeResult, phantom_day: date, unevidenced: str
+    fortnight: AlpacaExploratoryIntakeResult, phantom_day: date
 ) -> None:
-    """R7 through the engine: each step's two venues, not the clock's ends.
-
-    The lane gate re-derives only the clock sessions a replay request sits on,
-    so an XNYS session between the XNAS Friday and Monday reaches the density
-    walk. The record evidences the weekend for XNAS only. On Saturday, the
-    step to Monday crosses Sunday from an XNYS session; on Sunday, the step
-    from Friday crosses Saturday into one. Each halts naming exactly the XNYS
-    date, which a walk taking its venues from the clock's first or last
-    session, rather than from the step's own two sessions, would miss (PR 137
-    re-review, L1).
-    """
+    """R7 and issue 148: an unevidenced phantom session halts before stepping."""
     sessions = fortnight.session_clock.sessions
     friday = next(
         item for item in sessions if item.session_key.local_date == date(2026, 1, 9)
@@ -603,7 +594,9 @@ def test_the_engine_checks_both_venues_of_every_step_of_a_longer_clock(
     with pytest.raises(IndeterminateExecutionError) as error:
         _engine(fortnight, bundle=bundle)
 
-    assert str(error.value).endswith(f": XNYS {unevidenced} (indeterminate)")
+    assert str(error.value).endswith(
+        f"evidences as trading, so no session is proven: XNYS {phantom_day.isoformat()}"
+    )
 
 
 def test_the_engine_refuses_a_clock_session_on_an_evidenced_non_trading_date(
@@ -630,6 +623,44 @@ def test_the_engine_refuses_a_clock_session_on_an_evidenced_non_trading_date(
     assert str(error.value).endswith(
         "evidences as non-trading, which is a conflict and never a session: "
         "XNAS 2026-01-10"
+    )
+
+
+def test_the_engine_refuses_a_clock_session_on_an_unevidenced_date(
+    fortnight: AlpacaExploratoryIntakeResult,
+) -> None:
+    """Issue 148: a clock session on an unevidenced date is refused before stepping."""
+    sessions = fortnight.session_clock.sessions
+    first = sessions[0]
+    phantom = _session_as(first, day=date(2026, 1, 4))
+    clock = _clock_of(
+        fortnight.session_clock,
+        tuple(sorted((*sessions, phantom), key=lambda item: item.opened_at)),
+    )
+    bundle = _bundle_over(fortnight, clock, fortnight.reconstruction_replay)
+    with pytest.raises(IndeterminateExecutionError) as error:
+        _engine(fortnight, bundle=bundle)
+    assert str(error.value).endswith(
+        "evidences as trading, so no session is proven: XNAS 2026-01-04"
+    )
+
+
+def test_the_engine_refuses_a_trailing_clock_session_on_an_unevidenced_date(
+    fortnight: AlpacaExploratoryIntakeResult,
+) -> None:
+    """Issue 148: a trailing clock session on an unevidenced date is refused."""
+    sessions = fortnight.session_clock.sessions
+    last = sessions[-1]
+    phantom = _session_as(last, day=date(2026, 1, 17))
+    clock = _clock_of(
+        fortnight.session_clock,
+        tuple(sorted((*sessions, phantom), key=lambda item: item.opened_at)),
+    )
+    bundle = _bundle_over(fortnight, clock, fortnight.reconstruction_replay)
+    with pytest.raises(IndeterminateExecutionError) as error:
+        _engine(fortnight, bundle=bundle)
+    assert str(error.value).endswith(
+        "evidences as trading, so no session is proven: XNAS 2026-01-17"
     )
 
 
