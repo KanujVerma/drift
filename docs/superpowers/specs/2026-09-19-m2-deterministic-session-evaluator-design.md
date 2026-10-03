@@ -287,8 +287,8 @@ class PositionViewV1(FrozenModel):
 
     security_id: UUID7
     quantity: int
-    cost_basis: Decimal
-    average_cost_per_share: Decimal
+    cost_basis: Decimal | None = None
+    average_cost_per_share: Decimal | None = None
 
 
 class StrategyDecisionViewV1(FrozenModel):
@@ -323,7 +323,6 @@ class StrategyDecisionIntentV1(FrozenModel):
     session_key: SessionKeyV1
     decision_time: UTCDateTime  # Must strictly match context.decision_cutoff
     targets: tuple[SecurityTargetPositionV1, ...]
-    strategy_state_artifact: ArtifactReference | None = None
 
 
 class RuntimeStrategy(Protocol):
@@ -335,6 +334,25 @@ class RuntimeStrategy(Protocol):
     def decide(
         self, context: StrategyDecisionContextV1
     ) -> StrategyDecisionIntentV1: ...
+
+
+class ExploratoryReconstructedRuntimeStrategy(Protocol):
+    """Exploratory-only strategy interface invoked by the evaluator engine."""
+
+    @property
+    def strategy_reference(self) -> StrategyReference: ...
+
+    def decide_exploratory(
+        self, context: ExploratoryStrategyDecisionContextV1
+    ) -> StrategyDecisionIntentV1: ...
+
+
+@runtime_checkable
+class ParameterizedStrategy(Protocol):
+    """Optional protocol for strategies exposing canonical parameters."""
+
+    @property
+    def strategy_parameters(self) -> ImmutableJSONValue: ...
 ```
 
 Note on decision determinism: The evaluator engine strictly validates that `intent.decision_time == context.decision_cutoff`. Strategies are prohibited from populating `decision_time` using system wall-clock functions like `datetime.now(timezone.utc)`. If a strategy returns an intent with a mismatched timestamp, validation fails closed with `ValueError("decision intent decision_time must strictly match context.decision_cutoff")`.
@@ -364,6 +382,44 @@ Strategies emit target WHOLE-SHARE quantities rather than fractional weights or 
 - **Phase 5 vs. Phase 2 Validation Boundary**:
   - In Phase 5 (Post-Close Decision), the engine validates: targets are whole-share integers, targets are non-negative, and new entries (`target > 0`) belong to `admitted_universe`. Phase 5 does NOT validate cash solvency, because next-session open prices and slippage are strictly future unknowns.
   - In Phase 2 (Open Execution), actual cash solvency is enforced when open prices are materialized.
+
+### 6.5 Frozen Strategy Surface Contract (Issue 113)
+
+The M2 runtime strategy surface consumed by M3 (baseline suite B0 to B5) and M12 (strategy intent form) is frozen under `tests/fixtures/contracts/m2-strategy-surface-v1.json` and verified by `tests/unit/test_m2_strategy_contract.py` and `tests/adversarial/test_m2_strategy_contract_boundary.py`.
+
+#### Tier A Frozen Surface Inventory
+- **Domain Models & Schemas**:
+  - `PositionViewV1`
+  - `StrategyDecisionViewV1`
+  - `StrategyDecisionContextV1`
+  - `SecurityTargetPositionV1`
+  - `StrategyDecisionIntentV1`
+  - `ExploratoryStrategyDecisionContextV1`
+  - `ExploratoryReconstructedDecisionViewV1`
+  - `StrategyReference`
+- **Protocols & Signatures**:
+  - `RuntimeStrategy` (`decide`, `strategy_reference`)
+  - `ExploratoryReconstructedRuntimeStrategy` (`decide_exploratory`, `strategy_reference`)
+  - `ParameterizedStrategy` (`strategy_parameters`)
+- **Staging Callables**:
+  - `stage_decision_targets(intent, context)`
+  - `stage_exploratory_decision_targets(intent, context)`
+- **Errors & Constants**:
+  - `StrategyIntentRejectedError` (subclasses `DriftError`, `ValueError`)
+  - `DECISION_TIME_MISMATCH`
+  - `EXPLORATORY_RECONSTRUCTED_EVIDENCE_GRADE`
+  - `SCHEDULED_CLOCK_LIMITATIONS`
+  - `RECONSTRUCTED_DECISION_LIMITATIONS`
+
+#### Tier B Evaluator-Internal Surface (Not Frozen)
+- `SessionEvaluatorEngine` internal methods and decision dispatch loops (`_decision_context`, `_reconstructed_decision_context`, `_post_close_decision`, `_post_close_reconstructed_decision`, `_revalidated_intent`).
+- Intent parsing, exact-type walk (`_require_exact_model`, `_require_exact_node`), and uncanonical return hashing.
+- Rebalance execution engine and fill generation.
+
+#### Versioning & Evolution Rules
+- Tier A models and callable signatures are strictly frozen. Any change to field names, types, constraints, default values, or callable signatures requires a new versioned schema or interface (e.g., `V2`) and an explicit `kind:contract` issue.
+- Strategies must remain pure functions of their inputs (context and bound parameters); runtime state persistence across sessions is prohibited.
+- Strategy code execution runs in-process with the evaluator engine. Isolation of hostile or untrusted strategy code is an explicit non-goal for M2 (deferred to untrusted strategy execution in M7/M8).
 
 ---
 
@@ -1320,8 +1376,8 @@ The M2 implementation must pass the following explicit adversarial acceptance te
 | **Accounting** | Missing Close Forward-Fill | Held position has missing close price; evaluator forward-fills prior close | Valuation fails closed to `INDETERMINATE`. |
 | **Accounting** | Multiple Same-Date Cash Claims | Two dividends on same date share security ID and dates | Distinct claim IDs via M1c component/occurrence hash. |
 | **Execution** | Close-for-Open Fallback | Missing open price replaced by prior or current close price | Execution fails closed to `INDETERMINATE`. |
-| **Execution** | Negative Target Position | Strategy emits negative whole-share target quantity (short position) | Intent rejected; run classified as `REJECTED`. |
-| **Execution** | Fractional Share Target | Strategy emits floating-point target quantity (e.g. 10.5 shares) | Intent rejected; whole shares only. |
+| **Execution** | Negative Target Position | Strategy emits negative whole-share target quantity (short position) | Intent rejected (`REJECTED`) when returned in intent, or `FAILED` run when strategy raises during execution. |
+| **Execution** | Fractional Share Target | Strategy emits floating-point target quantity (e.g. 10.5 shares) | Intent rejected (`REJECTED`) when returned in intent, or `FAILED` run when strategy raises during execution. |
 | **Execution** | Unfunded Rebalance Shortfall | Target rebalance exceeds cash after planned sells | 0 fills committed; stepping halts; classified `REJECTED`. |
 | **Execution** | Zero Warmup Session Count | Protocol declared with `warmup_session_count = 0` | Rejected by protocol validation; requires W >= 1. |
 | **Gatekeeper** | Missing Audit Purpose Report | Promotion admission has decision report but lacks retrospective audit report | Rejected by gatekeeper; requires both purpose reports. |
@@ -1348,6 +1404,7 @@ M2 does NOT implement:
 - Short selling, margin, leverage, or stock borrowing mechanics.
 - Options, futures, foreign exchange, or fixed income.
 - Live trading, broker order submission, or Robinhood integration.
+- In-process strategy code sandboxing or OS-level process isolation (untrusted strategies are deferred to M7/M8; M2 strategies are trusted at process level).
 
 ---
 
