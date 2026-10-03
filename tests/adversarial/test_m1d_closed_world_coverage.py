@@ -58,7 +58,6 @@ from drift.adapters.alpaca_exploratory import (
     _POLICY_DOCUMENTS,
     ALPACA_CALENDAR_SOURCE_ID,
     ALPACA_EXPLORATORY_LIMITATIONS,
-    ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD,
     ALPACA_PAPER_TRADING_HOST,
     CALENDAR_OBJECT_KEY,
     AlpacaBridgeIncompleteError,
@@ -83,6 +82,10 @@ from drift.domain.evaluator_clock import (
     session_clock_hash,
 )
 from drift.domain.evaluator_execution import IndeterminateExecutionError
+from drift.domain.evaluator_lanes import (
+    ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD,
+    ALPACA_LIMITATION_TRUNCATED_CA,
+)
 from drift.domain.evaluator_results import EvaluationClassification
 from drift.domain.session_closed_world import (
     ClosedWorldSessionCoverageV1,
@@ -94,8 +97,10 @@ from drift.domain.sessions import (
     SessionCoverageVersionV1,
 )
 from drift.evaluator.bundles import (
+    assemble_evaluation_input_bundle,
     build_evaluation_input_bundle,
     require_evidenced_clock_density,
+    verify_evaluation_input_bundle,
 )
 from drift.evaluator.clock import build_scheduled_reconstruction_clock
 from drift.evaluator.engine import (
@@ -535,18 +540,19 @@ def _clock_of(
 
 
 @pytest.mark.parametrize(
-    "unevidenced", ("previous", "current"), ids=("previous-venue", "current-venue")
+    ("unevidenced", "problem_date"),
+    (("previous", "2026-01-09"), ("current", "2026-01-12")),
+    ids=("previous-venue", "current-venue"),
 )
 def test_the_density_check_covers_the_venues_of_both_sessions(
-    fortnight: AlpacaExploratoryIntakeResult, unevidenced: str
+    fortnight: AlpacaExploratoryIntakeResult, unevidenced: str, problem_date: str
 ) -> None:
-    """R7: a gap must be evidenced non-trading for both sessions' venues.
+    """R7 and issue 148: an unevidenced venue session is refused before stepping.
 
-    The record evidences the weekend for XNAS only. A step from Friday to
-    Monday where either session is on XNYS crosses a weekend no record covers
-    for XNYS, so it halts naming exactly the XNYS dates. The check is driven
-    directly here, with the replay's verified contexts, over a two-session
-    clock; the engine test below carries three-session clocks through it.
+    The record evidences trading and closed dates for XNAS only. A step from
+    Friday to Monday where either session is moved to XNYS sits on a date
+    no record evidences as trading for XNYS, so under issue 148 option B it
+    halts naming that session's unevidenced date before any step is evaluated.
     """
     sessions = {
         item.session_key.local_date: item for item in fortnight.session_clock.sessions
@@ -566,29 +572,19 @@ def test_the_density_check_covers_the_venues_of_both_sessions(
             _clock_of(fortnight.session_clock, (friday, monday)), replay
         )
     assert str(error.value).endswith(
-        ": XNYS 2026-01-10 (indeterminate), XNYS 2026-01-11 (indeterminate)"
+        f"evidences as trading, so no session is proven: XNYS {problem_date}"
     )
 
 
 @pytest.mark.parametrize(
-    ("phantom_day", "unevidenced"),
-    ((date(2026, 1, 10), "2026-01-11"), (date(2026, 1, 11), "2026-01-10")),
+    "phantom_day",
+    (date(2026, 1, 10), date(2026, 1, 11)),
     ids=("xnys-saturday-then-xnas-monday", "xnas-friday-then-xnys-sunday"),
 )
 def test_the_engine_checks_both_venues_of_every_step_of_a_longer_clock(
-    fortnight: AlpacaExploratoryIntakeResult, phantom_day: date, unevidenced: str
+    fortnight: AlpacaExploratoryIntakeResult, phantom_day: date
 ) -> None:
-    """R7 through the engine: each step's two venues, not the clock's ends.
-
-    The lane gate re-derives only the clock sessions a replay request sits on,
-    so an XNYS session between the XNAS Friday and Monday reaches the density
-    walk. The record evidences the weekend for XNAS only. On Saturday, the
-    step to Monday crosses Sunday from an XNYS session; on Sunday, the step
-    from Friday crosses Saturday into one. Each halts naming exactly the XNYS
-    date, which a walk taking its venues from the clock's first or last
-    session, rather than from the step's own two sessions, would miss (PR 137
-    re-review, L1).
-    """
+    """R7 and issue 148: an unevidenced phantom session halts before stepping."""
     sessions = fortnight.session_clock.sessions
     friday = next(
         item for item in sessions if item.session_key.local_date == date(2026, 1, 9)
@@ -603,7 +599,9 @@ def test_the_engine_checks_both_venues_of_every_step_of_a_longer_clock(
     with pytest.raises(IndeterminateExecutionError) as error:
         _engine(fortnight, bundle=bundle)
 
-    assert str(error.value).endswith(f": XNYS {unevidenced} (indeterminate)")
+    assert str(error.value).endswith(
+        f"evidences as trading, so no session is proven: XNYS {phantom_day.isoformat()}"
+    )
 
 
 def test_the_engine_refuses_a_clock_session_on_an_evidenced_non_trading_date(
@@ -630,6 +628,44 @@ def test_the_engine_refuses_a_clock_session_on_an_evidenced_non_trading_date(
     assert str(error.value).endswith(
         "evidences as non-trading, which is a conflict and never a session: "
         "XNAS 2026-01-10"
+    )
+
+
+def test_the_engine_refuses_a_clock_session_on_an_unevidenced_date(
+    fortnight: AlpacaExploratoryIntakeResult,
+) -> None:
+    """Issue 148: a clock session on an unevidenced date is refused before stepping."""
+    sessions = fortnight.session_clock.sessions
+    first = sessions[0]
+    phantom = _session_as(first, day=date(2026, 1, 4))
+    clock = _clock_of(
+        fortnight.session_clock,
+        tuple(sorted((*sessions, phantom), key=lambda item: item.opened_at)),
+    )
+    bundle = _bundle_over(fortnight, clock, fortnight.reconstruction_replay)
+    with pytest.raises(IndeterminateExecutionError) as error:
+        _engine(fortnight, bundle=bundle)
+    assert str(error.value).endswith(
+        "evidences as trading, so no session is proven: XNAS 2026-01-04"
+    )
+
+
+def test_the_engine_refuses_a_trailing_clock_session_on_an_unevidenced_date(
+    fortnight: AlpacaExploratoryIntakeResult,
+) -> None:
+    """Issue 148: a trailing clock session on an unevidenced date is refused."""
+    sessions = fortnight.session_clock.sessions
+    last = sessions[-1]
+    phantom = _session_as(last, day=date(2026, 1, 17))
+    clock = _clock_of(
+        fortnight.session_clock,
+        tuple(sorted((*sessions, phantom), key=lambda item: item.opened_at)),
+    )
+    bundle = _bundle_over(fortnight, clock, fortnight.reconstruction_replay)
+    with pytest.raises(IndeterminateExecutionError) as error:
+        _engine(fortnight, bundle=bundle)
+    assert str(error.value).endswith(
+        "evidences as trading, so no session is proven: XNAS 2026-01-17"
     )
 
 
@@ -1064,6 +1100,124 @@ def test_the_admission_acknowledges_the_closed_world_reading(
     )
     with pytest.raises(ValueError, match="omits required bundle limitations"):
         _engine(fortnight, admission=hand_minted_admission(fortnight.bundle, omitted))
+
+
+def test_probe_p5_closed_world_coverage_obliges_limitation_and_engine_refuses_omission(
+    fortnight: AlpacaExploratoryIntakeResult,
+) -> None:
+    """Probe P5 (issue 146): closed-world coverage obliges the limitation.
+
+    If a bundle carries closed-world session coverage in its M1d context or
+    replay, but admission omits ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD,
+    engine construction or the admission gate must refuse with a clear message.
+    """
+    # Case 1: Admission omitting the limitation from a bundle that declares it.
+    omitted = tuple(
+        item
+        for item in fortnight.bundle.required_limitations
+        if item != ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD
+    )
+    with pytest.raises(ValueError, match="omits required bundle limitations"):
+        _engine(fortnight, admission=hand_minted_admission(fortnight.bundle, omitted))
+
+    # Case 2: A bundle stripped of the limitation in dataset_limitations,
+    # paired with an admission that also omits it. The engine's admission
+    # gate must refuse because the exploratory reconstruction replay evidence
+    # carries closed-world session coverage.
+    stripped_limitations = tuple(
+        item
+        for item in fortnight.bundle.dataset_limitations
+        if item != ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD
+    )
+    stripped_bundle = assemble_evaluation_input_bundle(
+        evaluation_interval=fortnight.bundle.evaluation_interval,
+        session_clock=fortnight.bundle.session_clock,
+        security_identities=fortnight.bundle.security_identities,
+        listing_identities=fortnight.bundle.listing_identities,
+        structural_eligibilities=fortnight.bundle.structural_eligibilities,
+        economic_outcomes=fortnight.bundle.economic_outcomes,
+        authentic_decision_views=fortnight.bundle.authentic_decision_views,
+        authentic_accounting_views=fortnight.bundle.authentic_accounting_views,
+        exploratory_reconstructed_observations=fortnight.bundle.exploratory_reconstructed_observations,
+        source_snapshot_hash=fortnight.bundle.source_snapshot_hash,
+        dataset_limitations=stripped_limitations,
+    )
+    omitted_admission_limitations = tuple(
+        item
+        for item in fortnight.admission.acknowledged_limitations
+        if item != ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD
+    )
+    stripped_admission = hand_minted_admission(
+        stripped_bundle, omitted_admission_limitations
+    )
+    assert (
+        ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD
+        not in stripped_admission.acknowledged_limitations
+    )
+    with pytest.raises(ValueError, match="closed-world"):
+        SessionEvaluatorEngine(
+            bundle=stripped_bundle,
+            admission=stripped_admission,
+            protocol=_protocol(warmup=WARMUP),
+            cost_model=_cost_model(),
+            evidence=SessionEvaluatorEvidence(
+                exploratory_cohort=fortnight.cohort,
+                exploratory_reconstruction_replay=fortnight.reconstruction_replay,
+            ),
+            book_currency_namespace="iso4217",
+            book_currency_code="USD",
+        )
+
+
+def test_closed_world_limitation_obliged_from_evidence_at_bundle_build_and_verify(
+    fortnight: AlpacaExploratoryIntakeResult,
+) -> None:
+    """Issue 146: bundle build and verify oblige the closed-world
+    limitation from evidence.
+    """
+    # When built without producer choosing to declare it, evidence obliges it:
+    bundle = build_evaluation_input_bundle(
+        evaluation_interval=fortnight.bundle.evaluation_interval,
+        session_clock=fortnight.bundle.session_clock,
+        context=fortnight.context,
+        decision_requests=(),
+        accounting_requests=(),
+        security_identities=fortnight.bundle.security_identities,
+        listing_identities=fortnight.bundle.listing_identities,
+        structural_eligibilities=(),
+        economic_outcomes=(),
+        exploratory_cohort=fortnight.cohort,
+        exploratory_reconstruction_replay=fortnight.reconstruction_replay,
+        dataset_limitations=(ALPACA_LIMITATION_TRUNCATED_CA,),
+    )
+    assert ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD in bundle.dataset_limitations
+
+    # verify_evaluation_input_bundle rejects a bundle whose dataset_limitations omits:
+    stripped_limitations = tuple(
+        item
+        for item in fortnight.bundle.dataset_limitations
+        if item != ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD
+    )
+    stripped_bundle = assemble_evaluation_input_bundle(
+        evaluation_interval=fortnight.bundle.evaluation_interval,
+        session_clock=fortnight.bundle.session_clock,
+        security_identities=fortnight.bundle.security_identities,
+        listing_identities=fortnight.bundle.listing_identities,
+        structural_eligibilities=fortnight.bundle.structural_eligibilities,
+        economic_outcomes=fortnight.bundle.economic_outcomes,
+        authentic_decision_views=fortnight.bundle.authentic_decision_views,
+        authentic_accounting_views=fortnight.bundle.authentic_accounting_views,
+        exploratory_reconstructed_observations=fortnight.bundle.exploratory_reconstructed_observations,
+        source_snapshot_hash=fortnight.bundle.source_snapshot_hash,
+        dataset_limitations=stripped_limitations,
+    )
+    with pytest.raises(ValueError, match="closed-world"):
+        verify_evaluation_input_bundle(
+            bundle=stripped_bundle,
+            context=fortnight.context,
+            exploratory_cohort=fortnight.cohort,
+            exploratory_reconstruction_replay=fortnight.reconstruction_replay,
+        )
 
 
 def test_no_promotion_consumer_accepts_closed_world_evidence(
