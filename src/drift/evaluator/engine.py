@@ -110,6 +110,7 @@ from drift.domain.evaluator_exploratory_strategy import (
     stage_exploratory_decision_targets,
 )
 from drift.domain.evaluator_lanes import (
+    ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD,
     ALPACA_LIMITATION_COHORT_LISTING_ROLE,
     EvaluationAdmissionV1,
     ExploratoryEvaluationAdmissionV1,
@@ -213,6 +214,7 @@ from drift.markets.observation_validation import (
     M1dResolutionContext,
     m1d_context_hash,
 )
+from drift.markets.session_closed_world import verify_closed_world_session_coverage
 from drift.serialization.canonical import content_hash
 
 ZERO = Decimal("0")
@@ -1249,6 +1251,22 @@ def _resolve_reconstructed_lane(
         raise ValueError(
             f"exploratory admission omits the bounded cohort limitation: {missing}"
         )
+    if replay is not None and any(
+        verify_closed_world_session_coverage(ctx) for _, ctx in replay.requests
+    ):
+        if (
+            ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD
+            not in admission.acknowledged_limitations
+        ):
+            raise ValueError(
+                "exploratory admission omits the closed-world calendar limitation: "
+                f"{ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD}"
+            )
+        if ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD not in bundle.dataset_limitations:
+            raise ValueError(
+                "bundle carries closed-world session coverage but its dataset "
+                f"limitations omit {ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD}"
+            )
     sessions = {
         session.session_key: session for session in bundle.session_clock.sessions
     }

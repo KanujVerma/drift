@@ -33,6 +33,9 @@ ALPACA_LIMITATION_RETROSPECTIVE_RECONSTRUCTION = (
 ALPACA_LIMITATION_COHORT_LISTING_ROLE = (
     "execution-listing-declared-by-cohort-not-historical-role-evidence"
 )
+ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD = (
+    "calendar-absence-read-as-closure-under-closed-world-assumption"
+)
 
 
 def exploratory_evaluation_admission_hash(

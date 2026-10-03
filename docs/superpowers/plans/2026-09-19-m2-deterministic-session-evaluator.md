@@ -706,13 +706,14 @@ Build the bounded, offline Alpaca exploratory intake bridge to acquire free deve
     - **NO Manual Derived Views**: Must never construct `DerivedObservationViewV1` manually from provider JSON.
     - **NO Fake Realized Sessions**: Scheduled calendar rows must never be converted into `RealizedSessionVersionV1`. Operates under `scheduled_session_reconstruction` mode.
     - **NO Invented Corporate Action Effects or Settlements**: Terms records mapped only as terms. Delisted or unprovable settlements are not invented.
-  - Mints `ExploratoryEvaluationAdmissionV1` binding the six canonical limitation constants:
+  - Mints `ExploratoryEvaluationAdmissionV1` binding the seven canonical limitation constants:
     1. `ALPACA_LIMITATION_TRUNCATED_CA`
     2. `ALPACA_LIMITATION_UNVERSIONED_BARS`
     3. `ALPACA_LIMITATION_ABSENT_HALTS`
     4. `ALPACA_LIMITATION_BOUNDED_COHORT`
     5. `ALPACA_LIMITATION_SCHEDULED_SESSION_RECONSTRUCTION`
     6. `ALPACA_LIMITATION_RETROSPECTIVE_RECONSTRUCTION`
+    7. `ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD`
 - `intake_alpaca_exploratory.py`: CLI tool for bounded cohort acquisition.
 - `test_alpaca_exploratory_smoke.py`:
   - Executes a complete exploratory evaluation run using the Alpaca development bundle and a simple reference strategy.
@@ -726,7 +727,7 @@ Build the bounded, offline Alpaca exploratory intake bridge to acquire free deve
 ### 5. GREEN Acceptance Criteria
 - Adapter maps Alpaca bars and corporate actions into valid Drift M1b-M1d domain instances via the layered pipeline.
 - Drift public validators accept the mapped datasets.
-- Exploratory admission artifact correctly records all six canonical limitation constants.
+- Exploratory admission artifact correctly records all seven canonical limitation constants.
 - Smoke evaluation executes end-to-end on quiet window, producing an `ExploratoryEvaluationResultV1` and a complete trace log.
 - All unit and integration tests run completely offline without `.env` or network access using pinned fixtures.
 
