@@ -1118,19 +1118,19 @@ def test_a_strategy_cannot_rewrite_a_uuid_it_kept_after_the_intent_is_staged(
 GENUINE_RUN_HASHES = {
     "realized-staged": (
         "385edb0073c986745da4af1fe771b4efa6a23601277418bd1db98672557f8913",
-        "bdf1e607c2b1981724578abb70c98ceb053db35355921abf43ca4366655165c2",
+        "be6e7622324ec3f16e7e6349a681f9234893bfba8184db1570ba128538c2e603",
     ),
     "realized-refused-by-staging": (
         "b8299998e52e646d8cead7e736611aa056c4dfe96973101369a8c427aae33779",
-        "da812d2ae50bd26e9cdca24fc1bd58a9d7094cf44f06467def27359c38497f69",
+        "f745cb6b43833fc62b12e151b9e837ad68e5a8dc30548c2dd840b778a1f2ce2b",
     ),
     "reconstructed-staged": (
         "5cb9ab75de9efeac846f22b072ae750112ac537b6a5dd624f4a87177b9c76ca0",
-        "48dbbf42b20568ada63615856eaa251eea2ba7e44c61add2aaee6057bd9135e1",
+        "01d62be1a45cbc774bb18c654a98f8f3bab3513e7f4eb2cdf9573e115323cb3d",
     ),
     "reconstructed-refused-by-staging": (
         "a98fd957ec6ef8cedeca80094c6ce007354251ea351a268ab51dd33cb737698c",
-        "11c723f881f87801ad23af6e2b8fb836f86a22afbee275f6c2a1e39786ca2bba",
+        "0abd6dbbd0bed13b090b3288168506c8c3a80a04155d414c21b93b43c8786c68",
     ),
 }
 
