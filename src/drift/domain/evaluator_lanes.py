@@ -30,6 +30,9 @@ ALPACA_LIMITATION_SCHEDULED_SESSION_RECONSTRUCTION = (
 ALPACA_LIMITATION_RETROSPECTIVE_RECONSTRUCTION = (
     "strategy-inputs-retrospectively-reconstructed-from-audit-vintage-bars"
 )
+ALPACA_LIMITATION_COHORT_LISTING_ROLE = (
+    "execution-listing-declared-by-cohort-not-historical-role-evidence"
+)
 
 
 def exploratory_evaluation_admission_hash(

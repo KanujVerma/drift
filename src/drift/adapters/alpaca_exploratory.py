@@ -130,6 +130,7 @@ from drift.domain.evaluator_clock import SessionClockV1
 from drift.domain.evaluator_lanes import (
     ALPACA_LIMITATION_ABSENT_HALTS,
     ALPACA_LIMITATION_BOUNDED_COHORT,
+    ALPACA_LIMITATION_COHORT_LISTING_ROLE,
     ALPACA_LIMITATION_RETROSPECTIVE_RECONSTRUCTION,
     ALPACA_LIMITATION_SCHEDULED_SESSION_RECONSTRUCTION,
     ALPACA_LIMITATION_TRUNCATED_CA,
@@ -140,8 +141,10 @@ from drift.domain.evaluator_lanes import (
 from drift.domain.evaluator_reconstruction import (
     REQUIRED_RECONSTRUCTION_FIELDS,
     ExploratoryCohortAuthorizationV1,
+    ExploratoryCohortListingRoleV1,
     ExploratoryReconstructedSessionObservationV1,
     ExploratoryReconstructionPolicyV1,
+    build_exploratory_cohort_listing_role,
     cohort_authorization_hash,
     exploratory_reconstruction_semantic_hash,
     reconstruction_policy_hash,
@@ -347,6 +350,7 @@ ALPACA_EXPLORATORY_LIMITATIONS: tuple[str, ...] = tuple(
             ALPACA_LIMITATION_BOUNDED_COHORT,
             ALPACA_LIMITATION_CA_SNAPSHOT_ABSENCE,
             ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD,
+            ALPACA_LIMITATION_COHORT_LISTING_ROLE,
             ALPACA_LIMITATION_RETROSPECTIVE_RECONSTRUCTION,
             ALPACA_LIMITATION_SCHEDULED_SESSION_RECONSTRUCTION,
             ALPACA_LIMITATION_TRUNCATED_CA,
@@ -3856,6 +3860,28 @@ def build_bridge_cohort(
     return ExploratoryCohortAuthorizationV1.model_validate(candidate.model_dump())
 
 
+def build_bridge_cohort_listing_roles(
+    cohort: ExploratoryCohortAuthorizationV1,
+    members: Sequence[AlpacaCohortMember],
+) -> tuple[ExploratoryCohortListingRoleV1, ...]:
+    """Mint exploratory execution listing roles for every cohort member (issue 77)."""
+    roles = (
+        build_exploratory_cohort_listing_role(
+            cohort=cohort,
+            security_id=member.security_id,
+            listing_id=member.listing_id,
+            venue=member.venue,
+        )
+        for member in members
+    )
+    return tuple(
+        sorted(
+            roles,
+            key=lambda role: (str(role.security_id), str(role.listing_id)),
+        )
+    )
+
+
 def build_bridge_reconstruction_policy() -> ExploratoryReconstructionPolicyV1:
     """Mint the fixed source-basis scheduled reconstruction policy."""
     draft = ExploratoryReconstructionPolicyV1.model_construct(
@@ -3925,6 +3951,8 @@ class AlpacaExploratoryIntakeResult:
     economic_terms: AlpacaEconomicTermsDataset
     context: M1dResolutionContext
     cohort: ExploratoryCohortAuthorizationV1
+    #: The exploratory execution listing roles derived from the cohort (issue 77).
+    exploratory_listing_roles: tuple[ExploratoryCohortListingRoleV1, ...]
     reconstruction_policy: ExploratoryReconstructionPolicyV1
     outcome_queries: tuple[ObservationOutcomeQueryV1, ...]
     reconstruction_replay: ExploratoryReconstructionReplay
@@ -4153,6 +4181,7 @@ def run_alpaca_exploratory_intake(
         ),
     )
     admission = build_bridge_admission(bundle=bundle)
+    listing_roles = build_bridge_cohort_listing_roles(cohort, request.members)
 
     return AlpacaExploratoryIntakeResult(
         retained=retained,
@@ -4172,6 +4201,7 @@ def run_alpaca_exploratory_intake(
         economic_terms=economic_terms,
         context=context,
         cohort=cohort,
+        exploratory_listing_roles=listing_roles,
         reconstruction_policy=reconstruction_policy,
         outcome_queries=queries,
         reconstruction_replay=reconstruction_replay,

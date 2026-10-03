@@ -110,6 +110,7 @@ from drift.domain.evaluator_exploratory_strategy import (
     stage_exploratory_decision_targets,
 )
 from drift.domain.evaluator_lanes import (
+    ALPACA_LIMITATION_COHORT_LISTING_ROLE,
     EvaluationAdmissionV1,
     ExploratoryEvaluationAdmissionV1,
     PromotionEvaluationAdmissionV1,
@@ -127,6 +128,7 @@ from drift.domain.evaluator_portfolio import (
 from drift.domain.evaluator_protocol import EvaluationProtocolV1
 from drift.domain.evaluator_reconstruction import (
     ExploratoryCohortAuthorizationV1,
+    ExploratoryCohortListingRoleV1,
     ExploratoryReconstructedSessionObservationV1,
     ExploratoryReconstructionPolicyV1,
     cohort_required_limitations,
@@ -768,6 +770,7 @@ class SessionEvaluatorEvidence:
     cash_in_lieu_rates: tuple[CashInLieuRateV1, ...] = ()
     exploratory_cohort: ExploratoryCohortAuthorizationV1 | None = None
     exploratory_reconstruction_replay: ExploratoryReconstructionReplay | None = None
+    exploratory_listing_roles: tuple[ExploratoryCohortListingRoleV1, ...] = ()
 
 
 _ADAPTERS: dict[int, tuple[object, TypeAdapter[Any]]] = {}
@@ -1015,6 +1018,9 @@ def _revalidated_evidence(
                 requests=requests_of(replay),
             )
         ),
+        exploratory_listing_roles=each(
+            ExploratoryCohortListingRoleV1, evidence.exploratory_listing_roles
+        ),
     )
 
 
@@ -1071,6 +1077,7 @@ def evaluator_evidence_hash(
                     ),
                 }
             ),
+            "exploratory_listing_roles": members(evidence.exploratory_listing_roles),
         }
     )
 
@@ -1143,6 +1150,7 @@ def _resolve_reconstructed_lane(
     admission: EvaluationAdmissionV1,
     cohort: ExploratoryCohortAuthorizationV1 | None,
     replay: ExploratoryReconstructionReplay | None,
+    exploratory_listing_roles: tuple[ExploratoryCohortListingRoleV1, ...] = (),
 ) -> _ReconstructedDecisionLane | None:
     """Fix the decision lane at construction, refusing every upgrade path.
 
@@ -1189,6 +1197,10 @@ def _resolve_reconstructed_lane(
                 "a promotion admission cannot evaluate exploratory "
                 "reconstruction replay evidence"
             )
+        if exploratory_listing_roles:
+            raise ValueError(
+                "a promotion admission cannot evaluate exploratory cohort listing roles"
+            )
         return None
     validate_exploratory_admission(admission=admission, bundle=bundle)
     if bundle.session_clock.mode != "scheduled_session_reconstruction":
@@ -1202,12 +1214,32 @@ def _resolve_reconstructed_lane(
                 "exploratory reconstruction replay evidence scopes only a "
                 "scheduled session reconstruction evaluation"
             )
+        if exploratory_listing_roles:
+            raise ValueError(
+                "exploratory cohort listing roles scope only a scheduled session "
+                "reconstruction evaluation"
+            )
         return None
     if cohort is None:
         raise ValueError(
             "a scheduled session reconstruction evaluation requires its "
             "predeclared exploratory cohort"
         )
+    if exploratory_listing_roles:
+        for role in exploratory_listing_roles:
+            if role.cohort_hash != cohort.cohort_hash:
+                raise ValueError(
+                    f"exploratory cohort listing role cohort hash mismatch: "
+                    f"expected {cohort.cohort_hash}, got {role.cohort_hash}"
+                )
+        if (
+            ALPACA_LIMITATION_COHORT_LISTING_ROLE
+            not in admission.acknowledged_limitations
+        ):
+            raise ValueError(
+                "exploratory admission omits the cohort listing role limitation: "
+                f"'{ALPACA_LIMITATION_COHORT_LISTING_ROLE}'"
+            )
     missing = tuple(
         limitation
         for limitation in cohort_required_limitations(cohort)
@@ -1571,6 +1603,7 @@ class SessionEvaluatorEngine:
             admission=admission,
             cohort=evidence.exploratory_cohort,
             replay=evidence.exploratory_reconstruction_replay,
+            exploratory_listing_roles=evidence.exploratory_listing_roles,
         )
         # After the lane gate, so a malformed replay meets its intended refusal.
         self._evidence_hash = evaluator_evidence_hash(
@@ -2010,6 +2043,7 @@ class SessionEvaluatorEngine:
             listings=self._bundle.listing_identities,
             termination_records=self._evidence.listing_termination_records,
             lifecycle_records=self._evidence.listing_lifecycle_records,
+            exploratory_listing_roles=self._evidence.exploratory_listing_roles,
         )
         if self._reconstructed_lane is None:
             prices = {

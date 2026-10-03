@@ -35,6 +35,7 @@ from drift.domain.evaluator_portfolio import (
     PortfolioStateV2,
     decimal_context,
 )
+from drift.domain.evaluator_reconstruction import ExploratoryCohortListingRoleV1
 from drift.domain.evaluator_strategy import SecurityTargetPositionV1
 from drift.domain.securities import (
     ListingLifecycleEventKind,
@@ -203,6 +204,7 @@ def resolve_execution_listing(
     listings: Sequence[ListingV1],
     termination_records: Sequence[ListingTerminationVersionV1],
     lifecycle_records: Sequence[ListingLifecycleVersionV1],
+    exploratory_listing_roles: Sequence[ExploratoryCohortListingRoleV1] = (),
 ) -> ListingV1:
     """Resolve the active historical primary execution listing for a security.
 
@@ -215,7 +217,9 @@ def resolve_execution_listing(
 
     The termination and lifecycle evidence sets are required rather than
     defaulted, so a caller must state what it holds instead of silently
-    resolving on role evidence alone.
+    resolving on role evidence alone. When no authoritative historical role
+    evidence covers a security, an exploratory cohort listing role may provide
+    execution listing authority in the exploratory lane (issue 77).
     """
     instant = execution_session.opened_at
     candidates = tuple(
@@ -265,16 +269,30 @@ def resolve_execution_listing(
         if ListingRole.PRIMARY in roles
     }
     if not active_listing_ids:
-        raise IndeterminateExecutionError(
-            f"no active primary listing for security {security_id} at "
-            f"{instant.isoformat()}"
+        matching_cohort = tuple(
+            role
+            for role in exploratory_listing_roles
+            if role.security_id == security_id
         )
-    if len(active_listing_ids) > 1:
+        if not matching_cohort:
+            raise IndeterminateExecutionError(
+                f"no active primary listing for security {security_id} at "
+                f"{instant.isoformat()}"
+            )
+        cohort_listing_ids = {role.listing_id for role in matching_cohort}
+        if len(cohort_listing_ids) > 1:
+            raise IndeterminateExecutionError(
+                "exploratory cohort listing role is not uniquely resolved for security "
+                f"{security_id} at {instant.isoformat()}"
+            )
+        resolved_id = next(iter(cohort_listing_ids))
+    elif len(active_listing_ids) > 1:
         raise IndeterminateExecutionError(
             f"primary listing is not uniquely resolved for security {security_id} "
             f"at {instant.isoformat()}"
         )
-    resolved_id = next(iter(active_listing_ids))
+    else:
+        resolved_id = next(iter(active_listing_ids))
     _require_unterminated(
         listing_id=resolved_id,
         instant=instant,
@@ -301,6 +319,7 @@ def resolve_execution_listings(
     listings: Sequence[ListingV1],
     termination_records: Sequence[ListingTerminationVersionV1],
     lifecycle_records: Sequence[ListingLifecycleVersionV1],
+    exploratory_listing_roles: Sequence[ExploratoryCohortListingRoleV1] = (),
 ) -> dict[UUID7, ListingV1]:
     """Resolve one execution listing per security, failing closed on any gap."""
     return {
@@ -311,6 +330,7 @@ def resolve_execution_listings(
             listings=listings,
             termination_records=termination_records,
             lifecycle_records=lifecycle_records,
+            exploratory_listing_roles=exploratory_listing_roles,
         )
         for security_id in sorted(set(security_ids), key=_security_order)
     }
