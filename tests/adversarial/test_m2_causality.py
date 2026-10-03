@@ -97,6 +97,7 @@ from test_evaluator_engine import (
     _role_record,
     _run,
     _template_view,
+    quiet_coverage,
 )
 
 from drift.domain.assertions import ResolutionMode, TemporalIntervalClaimV1
@@ -246,10 +247,18 @@ def _bundle_over(
     accounting_views: tuple[DerivedObservationViewV1, ...],
     eligibilities: tuple[StructuralEligibilityResultV1, ...] | None = None,
 ) -> Any:
-    """A bundle bound to an explicitly supplied clock."""
+    """A bundle bound to an explicitly supplied clock.
+
+    Both securities are covered by a quiet exploratory corporate-action record
+    over the clock's dates (issue 76).
+    """
     universe = (
         (_eligibility(SEC_A, LISTING_A),) if eligibilities is None else eligibilities
     )
+    days = [
+        date.fromordinal(date.toordinal(session.session_key.local_date))
+        for session in clock.sessions
+    ]
     return assemble_evaluation_input_bundle(
         evaluation_interval=_interval(),
         session_clock=clock,
@@ -259,6 +268,9 @@ def _bundle_over(
         economic_outcomes=(),
         authentic_decision_views=decision_views,
         authentic_accounting_views=accounting_views,
+        corporate_action_coverage=quiet_coverage(
+            [member.security_id for member in SECURITIES], min(days), max(days)
+        ),
     )
 
 

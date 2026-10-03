@@ -12,6 +12,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from functools import cache
+from hashlib import sha256
 from typing import Any
 from uuid import UUID
 
@@ -21,15 +22,23 @@ from pydantic import ValidationError
 from session_test_support import boundary_at, revision
 from test_assertions import exact_boundary
 
+from drift.datasets.resolver import VerifiedArtifactBytes
 from drift.domain.artifacts import ArtifactKind, ArtifactReference
 from drift.domain.assertions import (
+    BoundaryShape,
     InformationRole,
     M1bSelectionPurpose,
     NormalizedSelectionQueryV1,
     ResolutionMode,
+    TemporalBoundaryClaimV1,
     TemporalIntervalClaimV1,
 )
 from drift.domain.common import UUID7
+from drift.domain.economic_closed_world import (
+    ClosedWorldCorporateActionCoverageV1,
+    CorporateActionCompletenessAssertionV1,
+    ReturnedCorporateActionV1,
+)
 from drift.domain.evaluator_bundles import (
     EvaluationInputBundleV1,
     EvaluationRunIdentityV1,
@@ -92,6 +101,7 @@ from drift.domain.securities import (
 )
 from drift.domain.sessions import SessionKeyV1
 from drift.domain.strategies import StrategyReference
+from drift.domain.temporal import SourcePrecision
 from drift.domain.universes import (
     StructuralEligibilityClassification,
     StructuralEligibilityResultV1,
@@ -106,6 +116,7 @@ from drift.evaluator.engine import (
     SessionEvaluatorEvidence,
     source_basis_price,
 )
+from drift.markets.economic_closed_world import build_corporate_action_coverage
 from drift.serialization.canonical import content_hash
 
 BOOK_NAMESPACE = "ISO-4217"
@@ -479,6 +490,88 @@ def _interval() -> TemporalIntervalClaimV1:
     return TemporalIntervalClaimV1(schema_version="1", start=exact_boundary(), end=None)
 
 
+# --- closed-world corporate-action coverage (issue 76) -----------------
+
+
+def _ca_artifact(label: str) -> VerifiedArtifactBytes:
+    data = f'{{"issue":76,"synthetic":"{label}"}}'.encode()
+    return VerifiedArtifactBytes(
+        data=data, byte_size=len(data), content_hash=sha256(data).hexdigest()
+    )
+
+
+CA_RESPONSE = _ca_artifact("quiet corporate-actions response")
+CA_REQUEST = _ca_artifact("corporate-actions request declaration")
+CA_ORIGIN = _ca_artifact("corporate-actions measured origin")
+CA_POLICY = _ca_artifact("corporate-actions closed-world policy statement")
+CA_COVERAGE_SUPPORT: dict[str, VerifiedArtifactBytes] = {
+    item.content_hash: item for item in (CA_RESPONSE, CA_REQUEST, CA_ORIGIN, CA_POLICY)
+}
+"""The retained artifacts every synthetic coverage record here binds (V4)."""
+
+CA_SNAPSHOT_AT = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
+
+
+def quiet_coverage(
+    security_ids: Sequence[UUID],
+    start: date,
+    end: date,
+    *,
+    returned_actions: tuple[ReturnedCorporateActionV1, ...] = (),
+    positive: bool = True,
+) -> tuple[ClosedWorldCorporateActionCoverageV1, ...]:
+    """One exploratory closed-world record per security over ``[start, end]``.
+
+    Issue 76: silent "no corporate action" is no longer a default, so a test
+    that holds or trades a security states its premise that nothing happened
+    to it: a quiet, positive, exploratory-grade response. ``positive=False``
+    states the same response under a non-positive assertion.
+    """
+    snapshot = TemporalBoundaryClaimV1(
+        schema_version="1",
+        shape=BoundaryShape.EXACT,
+        lower_bound=CA_SNAPSHOT_AT,
+        upper_bound=CA_SNAPSHOT_AT,
+        source_precision=SourcePrecision.SECOND,
+        source_time_label="2026-09-20T12:00:00Z",
+        source_timezone=None,
+        evidence_reference=ArtifactReference(
+            artifact_id=uid(776),
+            kind=ArtifactKind.OTHER,
+            content_hash=CA_RESPONSE.content_hash,
+            location=f"drift+sha256://{CA_RESPONSE.content_hash}",
+        ),
+    )
+    completeness = CorporateActionCompletenessAssertionV1(
+        basis="provider_partially_published",
+        policy_statement_hash=CA_POLICY.content_hash,
+        acquisition_reconciliation_pass=True,
+        single_unpaginated_response=True,
+        measured_origin=True,
+        requested_types_documented=positive,
+        returned_actions_attributed=True,
+        returned_actions_inside_requested_window=True,
+    )
+    return tuple(
+        build_corporate_action_coverage(
+            source_id="synthetic-corporate-actions-v1",
+            security_id=security_id,
+            queried_symbol=f"SYM-{str(security_id)[-4:]}",
+            requested_start_date=start,
+            requested_end_date=end,
+            requested_action_classes=("cash_dividend", "forward_split"),
+            request_binding_hash=CA_REQUEST.content_hash,
+            response_sha256=CA_RESPONSE.content_hash,
+            response_byte_size=CA_RESPONSE.byte_size,
+            origin_observation_hash=CA_ORIGIN.content_hash,
+            returned_actions=returned_actions,
+            completeness=completeness,
+            snapshot_as_of=snapshot,
+        )
+        for security_id in security_ids
+    )
+
+
 def _bundle(
     *,
     days: Sequence[date] = DAYS,
@@ -486,7 +579,15 @@ def _bundle(
     accounting_views: tuple[DerivedObservationViewV1, ...] | None = None,
     eligibilities: tuple[StructuralEligibilityResultV1, ...] | None = None,
     economic_outcomes: tuple[Any, ...] = (),
+    corporate_action_coverage: (
+        tuple[ClosedWorldCorporateActionCoverageV1, ...] | None
+    ) = None,
 ) -> EvaluationInputBundleV1:
+    """The realized-lane fixture bundle over ``days``.
+
+    Unless stated, every security without an economic outcome of its own is
+    covered by a quiet exploratory record over the whole clock (issue 76).
+    """
     decision = (
         tuple(_decision_view(SEC_A, day) for day in days[1:])
         if decision_views is None
@@ -500,6 +601,20 @@ def _bundle(
     universe = (
         (_eligibility(SEC_A, LISTING_A),) if eligibilities is None else eligibilities
     )
+    with_outcome = {outcome.query.security_id for outcome in economic_outcomes}
+    coverage = (
+        quiet_coverage(
+            [
+                member.security_id
+                for member in SECURITIES
+                if member.security_id not in with_outcome
+            ],
+            min(days),
+            max(days),
+        )
+        if corporate_action_coverage is None
+        else corporate_action_coverage
+    )
     return assemble_evaluation_input_bundle(
         evaluation_interval=_interval(),
         session_clock=_clock(days),
@@ -509,15 +624,19 @@ def _bundle(
         economic_outcomes=economic_outcomes,
         authentic_decision_views=decision,
         authentic_accounting_views=accounting,
+        corporate_action_coverage=coverage,
     )
 
 
 def _admission(bundle: EvaluationInputBundleV1) -> ExploratoryEvaluationAdmissionV1:
+    """An exploratory admission acknowledging every limitation the bundle obliges."""
     draft = ExploratoryEvaluationAdmissionV1.model_construct(
         schema_version="1",
         lane="exploratory",
         input_bundle_hash=bundle.bundle_hash,
-        acknowledged_limitations=(ALPACA_LIMITATION_BOUNDED_COHORT,),
+        acknowledged_limitations=tuple(
+            sorted({ALPACA_LIMITATION_BOUNDED_COHORT, *bundle.required_limitations})
+        ),
         admission_hash=H["0"],
     )
     candidate = draft.model_copy(
@@ -1676,12 +1795,7 @@ def _forward_split_outcome(effective_at: str) -> Any:
         effective_at=effective_at,
         security_id=SEC_A,
     )
-    return _outcome(
-        security_id=SEC_A,
-        terms=(terms,),
-        effects=(effect,),
-        action_kinds=(ActionKind.FORWARD_SPLIT,),
-    )
+    return _outcome(security_id=SEC_A, terms=(terms,), effects=(effect,))
 
 
 def _split_engine() -> tuple[SessionEvaluatorEngine, Any]:

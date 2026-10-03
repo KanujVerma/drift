@@ -16,7 +16,7 @@ V1 stays frozen and byte-identical, and a V1 run never reads parameters.
 import dataclasses
 import re
 import sys
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from decimal import Decimal
 from pathlib import Path
 from types import MappingProxyType
@@ -32,9 +32,9 @@ import test_evaluator_engine as eng
 import test_evaluator_experiment_run as run_support
 from pydantic import TypeAdapter, ValidationError
 from test_m2_anti_laundering import (
-    REALIZED_RESULT_HASH_SINCE_ISSUE_71,
-    REALIZED_TRACE_HASH_SINCE_ISSUE_71,
-    RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_71,
+    REALIZED_RESULT_HASH_SINCE_ISSUE_76,
+    REALIZED_TRACE_HASH_SINCE_ISSUE_76,
+    RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_76,
 )
 
 from drift.domain.common import ImmutableJSONValue
@@ -47,6 +47,8 @@ from drift.domain.evaluator_bundles import (
     evaluation_run_identity_v2_hash,
     strategy_parameters_hash,
 )
+from drift.domain.evaluator_execution import IndeterminateExecutionError
+from drift.domain.evaluator_portfolio import IndeterminateValuationError
 from drift.domain.evaluator_results import EvaluationRunArtifactsV2
 from drift.domain.evaluator_strategy import ParameterizedStrategy, RuntimeStrategy
 from drift.domain.experiments import ExperimentSpecification
@@ -59,6 +61,7 @@ from drift.evaluator.engine import (
     NonCanonicalEngineInputError,
     PromotionLaneDisabledError,
     SessionEvaluatorEngine,
+    StrategyRaisedIndeterminateError,
     StrategyRaisedRefusalError,
     require_bound_strategy_parameters,
 )
@@ -1001,7 +1004,7 @@ def test_the_engine_reads_the_strategy_reference_once() -> None:
     artifacts = engine.run(strategy=genuine_first, run_identity=_v1_identity(engine))
 
     assert genuine_first.reference_reads == 1
-    assert artifacts.result.result_hash == REALIZED_RESULT_HASH_SINCE_ISSUE_71
+    assert artifacts.result.result_hash == REALIZED_RESULT_HASH_SINCE_ISSUE_76
     impostor_first = _StrategyOfReference(impostor, eng.STRATEGY_REFERENCE)
     with pytest.raises(ValueError, match=STRATEGY_NOT_BOUND):
         engine.run(strategy=impostor_first, run_identity=_v1_identity(engine))
@@ -1073,8 +1076,8 @@ def test_a_v1_run_never_reads_strategy_parameters() -> None:
 
     assert _ParametersNeverRead.reads == 0
     assert type(artifacts.result.run_identity) is EvaluationRunIdentityV1
-    assert artifacts.trace.trace_hash == REALIZED_TRACE_HASH_SINCE_ISSUE_71
-    assert artifacts.result.result_hash == REALIZED_RESULT_HASH_SINCE_ISSUE_71
+    assert artifacts.trace.trace_hash == REALIZED_TRACE_HASH_SINCE_ISSUE_76
+    assert artifacts.result.result_hash == REALIZED_RESULT_HASH_SINCE_ISSUE_76
 
 
 def test_a_v1_experiment_run_never_reads_strategy_parameters() -> None:
@@ -1092,7 +1095,7 @@ def test_a_v1_experiment_run_never_reads_strategy_parameters() -> None:
     assert run.status.value == "completed"
     assert run.parameters_hash == content_hash(specification.parameters)
     assert (
-        run_support._metric(run, "result_hash") == REALIZED_RESULT_HASH_SINCE_ISSUE_71
+        run_support._metric(run, "result_hash") == REALIZED_RESULT_HASH_SINCE_ISSUE_76
     )
 
 
@@ -1123,7 +1126,7 @@ def test_a_reconstructed_v1_run_never_reads_strategy_parameters() -> None:
 
     assert _NeverRead.reads == 0
     assert type(artifacts.result.run_identity) is EvaluationRunIdentityV1
-    assert artifacts.result.result_hash == RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_71
+    assert artifacts.result.result_hash == RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_76
 
 
 # ==========================================================================
@@ -1389,4 +1392,114 @@ def test_a_strategy_raising_an_unprintable_exception_records_failed(
     assert run.error_details is not None
     assert "_UnprintableStrategyError" in run.error_details
     assert "<unprintable>" in run.error_details
+    assert len(ledger.verified_events()) == 1
+
+
+@pytest.mark.parametrize(
+    "error_factory",
+    [
+        lambda: IndeterminateValuationError("strategy claimed missing valuation"),
+        lambda: IndeterminateExecutionError("strategy claimed missing execution"),
+    ],
+    ids=["valuation", "execution"],
+)
+def test_strategy_raising_indeterminate_error_from_decide_fails_the_run(
+    error_factory: Callable[[], Exception],
+    tmp_path: Path,
+) -> None:
+    """Issue 150: indeterminate errors from decide record FAILED through the runner."""
+    error = error_factory()
+    ledger = SQLiteLedger(tmp_path / "audit.sqlite3")
+    engine = eng._engine()
+    identity = _v2_identity(engine, TEN)
+    strategy = _RaisingOnItsSecondDecision(error)
+
+    with pytest.raises(StrategyRaisedIndeterminateError) as raised:
+        _run_v2(engine, strategy, identity)
+    assert raised.value.__cause__ is error
+    assert re.search(
+        r"^strategy code raised .*\."
+        r"(IndeterminateValuationError|IndeterminateExecutionError) "
+        r"during the session",
+        str(raised.value),
+    )
+
+    strategy_runner = _RaisingOnItsSecondDecision(error)
+    run = execute_experiment_run(
+        run_support._specification(),
+        _v2_context(engine, strategy_runner, identity, ledger),
+    )
+    assert run.status.value == "failed"
+    assert run.artifact_references == ()
+    assert run.error_details is not None
+    assert "StrategyRaisedIndeterminateError" in run.error_details
+    assert len(ledger.verified_events()) == 1
+
+
+def test_strategy_raising_indeterminate_error_from_decide_exploratory_fails(
+    tmp_path: Path,
+) -> None:
+    """Issue 150: reconstructed lane decide_exploratory is wrapped the same way."""
+    from exploratory_decision_test_support import (
+        JAN5,
+        JAN6,
+        SEC,
+        ReconstructedTargetStrategy,
+        bundle_of,
+        reconstructed_engine,
+        three_regular_sessions,
+    )
+
+    error = IndeterminateValuationError("reconstructed strategy raised indeterminate")
+
+    class _Raising(ReconstructedTargetStrategy):
+        def decide_exploratory(self, context: Any) -> Any:
+            if context.session_key.local_date == JAN6:
+                raise error
+            return super().decide_exploratory(context)
+
+    engine = reconstructed_engine(bundle_of(three_regular_sessions()))
+    strategy = _Raising({JAN5: ((SEC, 10),), JAN6: ((SEC, 10),)})
+
+    with pytest.raises(
+        StrategyRaisedIndeterminateError, match="during the session XNYS 2026-01-06"
+    ) as raised:
+        engine.run(strategy=strategy, run_identity=_v1_identity(engine))
+
+    assert raised.value.__cause__ is error
+
+
+def test_strategy_raising_indeterminate_error_while_refused_return_is_hashed_fails(
+    tmp_path: Path,
+) -> None:
+    """Issue 150: hashing a refused return that raises indeterminate error fails."""
+
+    class _IndeterminateWhileHashed(dict[str, object]):
+        def __iter__(self) -> Iterator[str]:
+            raise IndeterminateValuationError("raised while hashed")
+
+        def items(self) -> Any:
+            raise IndeterminateValuationError("raised while hashed")
+
+        def keys(self) -> Any:
+            raise IndeterminateValuationError("raised while hashed")
+
+    class _HostileReturnStrategy(ParameterizedFixedTargetStrategy):
+        def decide(self, context: Any) -> Any:
+            if context.session_key.local_date == eng.DAY_2:
+                return _IndeterminateWhileHashed()
+            return super().decide(context)
+
+    ledger = SQLiteLedger(tmp_path / "audit.sqlite3")
+    engine = eng._engine()
+    identity = _v2_identity(engine, TEN)
+
+    run = execute_experiment_run(
+        run_support._specification(),
+        _v2_context(engine, _HostileReturnStrategy(TEN), identity, ledger),
+    )
+
+    assert run.status.value == "failed"
+    assert run.error_details is not None
+    assert "StrategyRaisedIndeterminateError" in run.error_details
     assert len(ledger.verified_events()) == 1

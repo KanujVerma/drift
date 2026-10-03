@@ -52,7 +52,8 @@ refusal stay for the day issue 115 re-enables the lane.
 """
 
 import dataclasses
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -194,6 +195,7 @@ from drift.evaluator.clock import (
     build_scheduled_reconstruction_clock,
     refuse_same_date_multi_venue_clock,
 )
+from drift.evaluator.corporate_action_coverage import CorporateActionCoverageIndex
 from drift.evaluator.corporate_actions import CorporateActionProcessor
 from drift.evaluator.execution import AtomicRebalanceEngine, resolve_execution_listings
 from drift.evaluator.portfolio import (
@@ -205,6 +207,7 @@ from drift.evaluator.reconstruction import (
     require_scheduled_calendar_row,
     verify_exploratory_reconstructions,
 )
+from drift.markets.economic_closed_world import verify_corporate_action_coverage
 from drift.markets.observation_validation import (
     M1dResolutionContext,
     m1d_context_hash,
@@ -255,6 +258,18 @@ class StrategyRaisedRefusalError(DriftError, RuntimeError):
     parameters; either read raising a refusal type propagates unrecorded, as
     any caller input the runner cannot rebuild does (a residual: strategy
     code is trusted at the process level, #113).
+    """
+
+
+class StrategyRaisedIndeterminateError(DriftError, RuntimeError):
+    """Raised when strategy code raises an indeterminate error (#150).
+
+    The engine catches `IndeterminateValuationError` and
+    `IndeterminateExecutionError` inside `_step_session` to record a halted
+    `INDETERMINATE` evaluation, but that halt is reserved for evidence
+    insufficiency in the engine's accounting and context construction.
+    Raised by strategy code inside a session, either error is a strategy
+    defect, which the issue 111 amendment records as a FAILED run.
     """
 
 
@@ -468,6 +483,25 @@ def _exact_name(name: object) -> str:
 
 def _type_name(kind: type) -> str:
     return _exact_name(_TYPE_QUALNAME.__get__(kind))
+
+
+@contextmanager
+def _guard_strategy_indeterminate(session_key: SessionKeyV1) -> Iterator[None]:
+    """Re-raise indeterminate errors from strategy code as a strategy failure (#150).
+
+    Named through `type` itself; formatting the error would run its own
+    `__str__`, which is strategy code.
+    """
+    try:
+        yield
+    except (IndeterminateValuationError, IndeterminateExecutionError) as error:
+        kind = type(error)
+        name = f"{_exact_name(_TYPE_MODULE.__get__(kind))}.{_type_name(kind)}"
+        raise StrategyRaisedIndeterminateError(
+            f"strategy code raised {name} during the session "
+            f"{session_key.mic} {session_key.local_date}, so the run failed; "
+            "indeterminate errors are engine halts, not strategy returns"
+        ) from error
 
 
 def _refuse_intent(problem: str) -> StrategyIntentRejectedError:
@@ -1137,7 +1171,10 @@ def _resolve_reconstructed_lane(
       decision, and neither does a session boundary no row states. The clock
       must also be dense: every date it steps across is an evidenced
       non-trading date under verified closed-world calendar coverage, or
-      construction halts INDETERMINATE (issue 71).
+      construction halts INDETERMINATE (issue 71). Every closed-world
+      corporate-action coverage record the bundle carries must then have its
+      exact response bytes and every bound artifact retained in the replay's
+      own M1d contexts (issue 76, C7), or construction is refused by its code.
     """
     if isinstance(admission, PromotionEvaluationAdmissionV1):
         if bundle.has_exploratory_reconstructions:
@@ -1215,7 +1252,25 @@ def _resolve_reconstructed_lane(
     # Issue 71 (D8-b): every date the scheduled clock steps across must be an
     # evidenced non-trading date, or the run halts INDETERMINATE here.
     require_evidenced_clock_density(bundle.session_clock, replay)
+    _require_retained_corporate_action_coverage(bundle, replay)
     return _ReconstructedDecisionLane(admission=admission, cohort=cohort)
+
+
+def _require_retained_corporate_action_coverage(
+    bundle: EvaluationInputBundleV1, replay: ExploratoryReconstructionReplay
+) -> None:
+    """C7 of issue 76: V4 against the replay contexts' retained artifacts.
+
+    The reconstructed lane holds the M1d contexts its reconstructions derive
+    from, and the bridge retains the corporate-action response bytes, the
+    request declaration, the measured origin record and the policy statement
+    in them. A record naming bytes none of those contexts retains is refused.
+    """
+    support: dict[str, Any] = {}
+    for _query, context in replay.requests:
+        support.update(context.supporting_artifacts)
+    for record in bundle.corporate_action_coverage:
+        verify_corporate_action_coverage(record, support)
 
 
 def _require_replayed_clock_sessions(
@@ -1547,10 +1602,19 @@ class SessionEvaluatorEngine:
         # after its gate re-derived every reconstruction (issue 55).
         # Reconstructions riding a realized bundle never price anything.
         self._reconstructed_prices = self._index_reconstructed_prices(bundle)
+        # Issue 76 (C5, V10, V12): the coverage index re-verifies every record
+        # under the running identity and refuses exploratory coverage under a
+        # promotion admission. V11 holds already: the revalidated bundle
+        # refuses a security covered by both kinds of evidence, and the
+        # evidence outcomes are exactly the bundle's (issue 86).
+        self._corporate_action_coverage = CorporateActionCoverageIndex(
+            records=bundle.corporate_action_coverage, lane=admission.lane
+        )
         self._corporate_actions = CorporateActionProcessor(
             session_clock=bundle.session_clock,
             book_currency_namespace=book_currency_namespace,
             book_currency_code=book_currency_code,
+            corporate_action_coverage=self._corporate_action_coverage,
             tie_breaking_rules=evidence.tie_breaking_rules,
             due_bill_rules=evidence.due_bill_rules,
             cash_in_lieu_rates=evidence.cash_in_lieu_rates,
@@ -2289,13 +2353,16 @@ class SessionEvaluatorEngine:
         # Issue 123: the strategy is handed a canonical JSON-rebuilt copy that
         # shares no object with engine state, so rewriting anything it can
         # reach (a UUID in place, say) cannot change what the engine records.
-        returned = strategy.decide(_revalidated(StrategyDecisionContextV1, context))
+        with _guard_strategy_indeterminate(session.session_key):
+            returned = strategy.decide(_revalidated(StrategyDecisionContextV1, context))
         context_hash = content_hash(context)
         try:
             intent = _revalidated_intent(returned)
             staged = stage_decision_targets(intent, context)
         except StrategyIntentRejectedError as error:
             reason = str(error) or type(error).__name__
+            with _guard_strategy_indeterminate(session.session_key):
+                intent_hash = _returned_intent_hash(returned)
             loop.events.append(
                 StrategyDecisionTraceEventV1(
                     sequence=len(loop.events),
@@ -2303,7 +2370,7 @@ class SessionEvaluatorEngine:
                     session_key=session.session_key,
                     decision_cutoff=session.closed_at,
                     context_hash=context_hash,
-                    intent_hash=_returned_intent_hash(returned),
+                    intent_hash=intent_hash,
                     outcome="rejected",
                     staged_targets=(),
                     rejection_reason=reason,
@@ -2455,9 +2522,10 @@ class SessionEvaluatorEngine:
             return None
         context = self._reconstructed_decision_context(loop.state, index, session, lane)
         # Issue 123: a canonical copy sharing no object with engine state.
-        returned = strategy.decide_exploratory(
-            _revalidated(ExploratoryStrategyDecisionContextV1, context)
-        )
+        with _guard_strategy_indeterminate(session.session_key):
+            returned = strategy.decide_exploratory(
+                _revalidated(ExploratoryStrategyDecisionContextV1, context)
+            )
         common: dict[str, Any] = {
             "sequence": len(loop.events),
             "session_index": index,
@@ -2478,10 +2546,12 @@ class SessionEvaluatorEngine:
             staged = stage_exploratory_decision_targets(intent, context)
         except StrategyIntentRejectedError as error:
             reason = str(error) or type(error).__name__
+            with _guard_strategy_indeterminate(session.session_key):
+                intent_hash = _returned_intent_hash(returned)
             loop.events.append(
                 ExploratoryStrategyDecisionTraceEventV1(
                     **common,
-                    intent_hash=_returned_intent_hash(returned),
+                    intent_hash=intent_hash,
                     outcome="rejected",
                     staged_targets=(),
                     rejection_reason=reason,

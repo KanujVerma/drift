@@ -35,9 +35,12 @@ each response is checked to have come back from the exact `https://` origin
 that was asked for before its body is read.
 
 Origin evidence is measured, never assumed. Each fetch records the HTTP
-status, the content type, the host, the instant the body finished being read,
-and the SHA-256 and byte size of the exact body, and those measurements are
-what reach the acquisition receipt. An online run also persists each
+status, the content type, the host, the exact request target (route and query
+string) it sent, the instant the body finished being read, and the SHA-256 and
+byte size of the exact body, and those measurements are what reach the
+acquisition receipt. The corporate-actions request names every action type the
+adapter requests (issue 76), and its measured request target is what lets the
+bridge read the response closed-world. An online run also persists each
 measurement as a content-addressed record in the private store, beside the
 bytes it measured. On the ``--offline-bytes`` path no HTTP exchange happens in
 this process at all, so there is nothing to measure: an origin is certified
@@ -89,6 +92,7 @@ from drift.adapters.alpaca_exploratory import (  # noqa: E402
     AlpacaReconstructionLineage,
     AlpacaTimezoneEvidence,
     RetainedNativeBytes,
+    alpaca_endpoint_parameters,
     load_retained_origin_observations,
     retain_native_bytes,
     retain_origin_observations,
@@ -253,44 +257,41 @@ def _fetch_bytes(
         observed_at=observed_at,
         body_sha256=sha256(body).hexdigest(),
         body_byte_size=len(body),
+        # The exact route and query this request sent (issue 76, B2).
+        request_target=f"{route}?{query}",
     )
 
 
 def _acquire_payloads(
-    declaration: Mapping[str, Any], keys: tuple[str, str]
+    request: AlpacaIntakeRequest, keys: tuple[str, str]
 ) -> tuple[AlpacaNativePayloads, dict[str, AlpacaOriginObservation]]:
-    """Acquire the three declared endpoints for the bounded cohort."""
-    symbols = ",".join(
-        sorted(str(member["symbol"]) for member in declaration["members"])
-    )
-    start = str(declaration["start_date"])
-    end = str(declaration["end_date"])
+    """Acquire the three declared endpoints for the bounded cohort.
+
+    The query parameters are the adapter's declaration of each endpoint, so
+    the receipt, the measured request target and the wire all state the same
+    request. The corporate-actions GET names every action type the adapter
+    requests (issue 76, B1): the same route and host, with a wider filter.
+    """
+    parameters = alpaca_endpoint_parameters(request)
     bars, bars_origin = _fetch_bytes(
         BARS_OBJECT_KEY,
         ALPACA_DATA_HOST,
         ALPACA_BARS_ROUTE,
-        {
-            "symbols": symbols,
-            "timeframe": "1Day",
-            "start": start,
-            "end": end,
-            "feed": "sip",
-            "adjustment": "raw",
-        },
+        parameters[BARS_OBJECT_KEY],
         keys,
     )
     calendar, calendar_origin = _fetch_bytes(
         CALENDAR_OBJECT_KEY,
         ALPACA_PAPER_TRADING_HOST,
         ALPACA_CALENDAR_ROUTE,
-        {"start": start, "end": end},
+        parameters[CALENDAR_OBJECT_KEY],
         keys,
     )
     actions, actions_origin = _fetch_bytes(
         ACTIONS_OBJECT_KEY,
         ALPACA_DATA_HOST,
         ALPACA_ACTIONS_ROUTE,
-        {"symbols": symbols, "start": start, "end": end, "types": "cash_dividend"},
+        parameters[ACTIONS_OBJECT_KEY],
         keys,
     )
     payloads = AlpacaNativePayloads(
@@ -469,7 +470,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0
         try:
-            payloads, measured = _acquire_payloads(declaration, keys)
+            payloads, measured = _acquire_payloads(request, keys)
         except (
             urllib.error.URLError,
             TimeoutError,
@@ -508,6 +509,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"reconciliation {result.acquisition.reconciliation.result.value}")
     print(f"sessions {len(result.session_clock.sessions)}")
     print(f"reconstructions {len(result.reconstructions)}")
+    print(f"corporate-action coverage records {len(result.corporate_action_coverage)}")
+    if result.corporate_action_coverage_refusal is not None:
+        print(
+            "corporate-action coverage refused: "
+            f"{result.corporate_action_coverage_refusal}; an exposed evaluation "
+            "over this bundle halts INDETERMINATE"
+        )
     print(f"bundle sha256 {result.bundle.bundle_hash}")
     print(f"exploratory admission sha256 {result.admission.admission_hash}")
     for limitation in result.admission.acknowledged_limitations:

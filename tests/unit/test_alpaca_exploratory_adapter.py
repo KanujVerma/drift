@@ -19,19 +19,24 @@ from pathlib import Path
 from struct import pack
 from types import SimpleNamespace
 from typing import Any, cast
+from urllib.parse import urlencode
 from uuid import UUID
 
 import pytest
 
+import drift.adapters.alpaca_exploratory as alpaca
 from drift.adapters.alpaca_exploratory import (
     _CORE_PACKAGES,
     _POLICY_DOCUMENTS,
     ACTIONS_OBJECT_KEY,
     ALPACA_ACTION_SOURCE_ID,
+    ALPACA_ACTION_TYPES,
     ALPACA_BAR_SOURCE_ID,
     ALPACA_CALENDAR_SOURCE_ID,
     ALPACA_DATA_HOST,
+    ALPACA_DOCUMENTED_ACTION_TYPE_COUNT,
     ALPACA_EXPLORATORY_LIMITATIONS,
+    ALPACA_LIMITATION_CA_SNAPSHOT_ABSENCE,
     ALPACA_PAPER_TRADING_HOST,
     BARS_OBJECT_KEY,
     CALENDAR_OBJECT_KEY,
@@ -52,6 +57,7 @@ from drift.adapters.alpaca_exploratory import (
     _policy_hash,
     _session_bounds,
     _verified,
+    alpaca_endpoint_parameters,
     assert_core_isolation,
     build_alpaca_acquisition_evidence,
     build_bridge_admission,
@@ -62,12 +68,18 @@ from drift.adapters.alpaca_exploratory import (
     parse_alpaca_bars,
     parse_alpaca_calendar,
     parse_alpaca_cash_dividends,
+    parse_alpaca_corporate_actions,
     retain_native_bytes,
     retain_origin_observations,
     run_alpaca_exploratory_intake,
+    verify_alpaca_corporate_action_record,
 )
 from drift.domain.acquisition import AcquisitionCompleteness, OriginStatus
-from drift.domain.economic_common import CashComponentV1
+from drift.domain.economic_closed_world import (
+    ClosedWorldCorporateActionCoverageV1,
+    corporate_action_record_hash,
+)
+from drift.domain.economic_common import ActionKind, CashComponentV1
 from drift.domain.economic_events import CorporateActionTermsVersionV1
 from drift.domain.evaluator_bundles import EvaluationInputBundleV1
 from drift.domain.evaluator_lanes import (
@@ -749,7 +761,12 @@ def test_a_payload_filed_under_the_wrong_object_key_is_refused(
 def test_the_expected_inventory_declares_each_endpoints_own_fields(
     intake: AlpacaExploratoryIntakeResult,
 ) -> None:
-    """A calendar row has no OHLCV and a dividend row has no OHLCV."""
+    """A calendar row has no OHLCV and a corporate action has no OHLCV.
+
+    Issue 76 (B3): every group of the corporate-actions response is read, and
+    each group prints its own row fields, so the response is declared by the
+    envelope its groups sit in.
+    """
     fields = {
         item.object_key: item.fields
         for item in intake.acquisition.expected_inventory.objects
@@ -757,14 +774,7 @@ def test_the_expected_inventory_declares_each_endpoints_own_fields(
 
     assert fields[BARS_OBJECT_KEY] == ("close", "high", "low", "open", "volume")
     assert fields[CALENDAR_OBJECT_KEY] == ("close", "date", "open")
-    assert fields[ACTIONS_OBJECT_KEY] == (
-        "corporate_action_id",
-        "ex_date",
-        "payable_date",
-        "rate",
-        "record_date",
-        "symbol",
-    )
+    assert fields[ACTIONS_OBJECT_KEY] == ("corporate_actions", "next_page_token")
     assert len({fields[key] for key in fields}) == 3
     endpoints = {
         item.object_key: item.endpoint_or_file
@@ -1367,7 +1377,7 @@ def test_bundle_carries_reconstructions_and_no_derived_views(
     assert bundle.source_snapshot_hash is None
 
 
-def test_admission_binds_all_seven_canonical_alpaca_limitations(
+def test_admission_binds_all_eight_canonical_alpaca_limitations(
     intake: AlpacaExploratoryIntakeResult,
 ) -> None:
     admission = intake.admission
@@ -1382,11 +1392,13 @@ def test_admission_binds_all_seven_canonical_alpaca_limitations(
         ALPACA_LIMITATION_RETROSPECTIVE_RECONSTRUCTION,
         # Issue 71, D3-a: the closed-world reading of the calendar is named.
         "calendar-absence-read-as-closure-under-closed-world-assumption",
+        # Issue 76, D3-b: so is the absence of an action read from a snapshot.
+        "corporate-action-absence-read-from-current-provider-snapshot",
     }
     # Comparing the admission against the module constant the bridge built it
     # from is circular, so the independently spelled set above carries the
-    # content and these two only pin shape: seven distinct limitations, sorted.
-    assert len(set(admission.acknowledged_limitations)) == 7
+    # content and these two only pin shape: eight distinct limitations, sorted.
+    assert len(set(admission.acknowledged_limitations)) == 8
     assert list(admission.acknowledged_limitations) == sorted(
         admission.acknowledged_limitations
     )
@@ -1455,7 +1467,7 @@ def test_a_hand_minted_admission_omitting_the_truncated_window_is_refused(
         for item in ALPACA_EXPLORATORY_LIMITATIONS
         if item != ALPACA_LIMITATION_TRUNCATED_CA
     )
-    assert len(omitted) == 6
+    assert len(omitted) == 7
     admission = hand_minted_admission(intake.bundle, omitted)
     assert admission.input_bundle_hash == intake.bundle.bundle_hash
 
@@ -2489,3 +2501,641 @@ def test_every_availability_claim_is_the_measured_acquisition_instant(
     assert claims
     for claim in claims:
         assert claim.lower_bound == claim.upper_bound == acquired_at
+
+
+# ==================================================================================
+# Closed-world corporate-action coverage (issue 76, B1 to B7)
+# ==================================================================================
+
+#: A response returning four groups: the pinned AAPL cash dividend, an MSFT
+#: forward split, an MSFT name change printed under its former symbol, and a
+#: worthless removal for a symbol no cohort member holds. The name change and
+#: the removal carry no action kind of their own.
+EVERY_GROUP_ACTIONS = (
+    b'{"corporate_actions":{"cash_dividends":[{'
+    b'"corporate_action_id":"ca-aapl-20260107-cash-dividend",'
+    b'"ex_date":"2026-01-07","payable_date":"2026-01-15",'
+    b'"process_date":"2026-01-07","rate":"0.250","record_date":"2026-01-08",'
+    b'"symbol":"AAPL"}],'
+    b'"forward_splits":[{"id":"ca-msft-split","symbol":"MSFT","new_rate":2,'
+    b'"old_rate":1,"ex_date":"2026-01-08","record_date":"2026-01-07",'
+    b'"payable_date":"2026-01-07","due_bill_redemption_date":"2026-01-09",'
+    b'"process_date":"2026-01-08"}],'
+    b'"name_changes":[{"id":"ca-msft-rename","old_symbol":"MSFT",'
+    b'"new_symbol":"MSFX","process_date":"2026-01-06"}],'
+    b'"worthless_removals":[{"id":"ca-zzzz-removal","symbol":"ZZZZ",'
+    b'"process_date":"2026-01-09","cusip":"000000000"}]},'
+    b'"next_page_token":null}'
+)
+QUIET_ACTIONS = b'{"corporate_actions":{},"next_page_token":null}'
+
+
+def measured_target(request: AlpacaIntakeRequest, key: str) -> str:
+    """The exact request target the acquisition CLI sends for one endpoint."""
+    parameters = alpaca_endpoint_parameters(request)[key]
+    routes = {
+        BARS_OBJECT_KEY: "/v2/stocks/bars",
+        CALENDAR_OBJECT_KEY: "/v2/calendar",
+        ACTIONS_OBJECT_KEY: "/v1/corporate-actions",
+    }
+    return f"{routes[key]}?{urlencode(sorted(parameters.items()))}"
+
+
+def with_measured_targets(
+    request: AlpacaIntakeRequest, *, actions_target: str | None = None
+) -> AlpacaIntakeRequest:
+    """The request as an issue 76 transport measured it: every target recorded."""
+    assert request.origin_observations is not None
+    return replace(
+        request,
+        origin_observations={
+            key: replace(
+                observation,
+                request_target=(
+                    actions_target
+                    if key == ACTIONS_OBJECT_KEY and actions_target is not None
+                    else measured_target(request, key)
+                ),
+            )
+            for key, observation in request.origin_observations.items()
+        },
+    )
+
+
+def run_covered_intake(
+    root: Path,
+    actions: bytes = PINNED_CORPORATE_ACTIONS,
+    *,
+    actions_target: str | None = None,
+) -> AlpacaExploratoryIntakeResult:
+    """The real bridge over ``actions`` with every request target measured."""
+    payloads = replace(pinned_payloads(), corporate_actions=actions)
+    request = with_measured_targets(
+        measured_over(pinned_request(), payloads), actions_target=actions_target
+    )
+    return run_alpaca_exploratory_intake(
+        request=request, payloads=payloads, private_root=root
+    )
+
+
+def test_b3_every_group_of_the_actions_response_is_parsed() -> None:
+    actions = parse_alpaca_corporate_actions(EVERY_GROUP_ACTIONS)
+    assert [(item.group, item.native_id) for item in actions] == [
+        ("cash_dividends", "ca-aapl-20260107-cash-dividend"),
+        ("forward_splits", "ca-msft-split"),
+        ("name_changes", "ca-msft-rename"),
+        ("worthless_removals", "ca-zzzz-removal"),
+    ]
+    by_id = {item.native_id: item for item in actions}
+    assert by_id["ca-msft-split"].dates == (
+        date(2026, 1, 7),
+        date(2026, 1, 8),
+        date(2026, 1, 9),
+    )
+    assert by_id["ca-msft-rename"].symbols == ("MSFT", "MSFX")
+    assert by_id["ca-zzzz-removal"].dates == (date(2026, 1, 9),)
+    # M4 control: the terms reader still reads only the cash dividends.
+    assert [
+        item.native_id for item in parse_alpaca_cash_dividends(EVERY_GROUP_ACTIONS)
+    ] == ["ca-aapl-20260107-cash-dividend"]
+
+
+def test_b3_an_unnamed_row_gets_a_content_address_and_null_dates_carry_none() -> None:
+    data = (
+        b'{"corporate_actions":{"unit_splits":[{"symbol":"AAPL",'
+        b'"ex_date":null,"process_date":"2026-01-06"}]},"next_page_token":null}'
+    )
+    (action,) = parse_alpaca_corporate_actions(data)
+    assert action.native_id.startswith("sha256:") and len(action.native_id) == 71
+    assert action.dates == (date(2026, 1, 6),)
+    assert parse_alpaca_corporate_actions(data) == (action,)
+
+
+@pytest.mark.parametrize(
+    ("data", "message"),
+    (
+        (
+            b'{"corporate_actions":{"forward_splits":[{"id":"a","ex_date":"2026-1-5"}]},'
+            b'"next_page_token":null}',
+            "not an ISO date",
+        ),
+        (
+            b'{"corporate_actions":{"forward_splits":[{"id":"a","ex_date":20260105}]},'
+            b'"next_page_token":null}',
+            "not a date",
+        ),
+        (
+            b'{"corporate_actions":{"forward_splits":[{"id":"a"},{"id":"a"}]},'
+            b'"next_page_token":null}',
+            "repeats an action",
+        ),
+        (
+            b'{"corporate_actions":{"forward_splits":{}},"next_page_token":null}',
+            "must be a JSON array",
+        ),
+        (
+            b'{"corporate_actions":{"forward_splits":[]},"next_page_token":"next"}',
+            "paginated and incomplete",
+        ),
+    ),
+    ids=("short-date", "numeric-date", "repeated", "not-an-array", "paginated"),
+)
+def test_b3_an_unreadable_actions_response_is_refused(
+    data: bytes, message: str
+) -> None:
+    with pytest.raises(AlpacaBridgeIncompleteError, match=message):
+        parse_alpaca_corporate_actions(data)
+
+
+def test_b1_the_actions_request_names_every_type_on_the_same_route() -> None:
+    request = pinned_request()
+    parameters = alpaca_endpoint_parameters(request)
+    assert parameters[ACTIONS_OBJECT_KEY] == {
+        "end": "2026-01-09",
+        "start": "2026-01-05",
+        "symbols": "AAPL,MSFT",
+        "types": ",".join(ALPACA_ACTION_TYPES),
+    }
+    assert "cash_dividend" in ALPACA_ACTION_TYPES
+    assert "forward_split" in ALPACA_ACTION_TYPES
+    assert len(ALPACA_ACTION_TYPES) == len(set(ALPACA_ACTION_TYPES)) == 16
+    assert tuple(sorted(ALPACA_ACTION_TYPES)) == ALPACA_ACTION_TYPES
+
+
+def test_b2_f6_the_request_declaration_states_what_was_measured_per_endpoint(
+    intake: AlpacaExploratoryIntakeResult, tmp_path: Path
+) -> None:
+    """The receipt states only the parameters a transport measured (review F6).
+
+    The pinned origins carry no request target, as every origin retained
+    before issue 76 does, so the receipt claims no parameter for any endpoint
+    rather than the 16 types the bytes were never fetched with; the B2 refusal
+    to cover is unchanged. A measured acquisition states exactly what it sent.
+    """
+    unmeasured = intake.acquisition.receipt.request.canonical_parameters
+    assert unmeasured == {
+        ACTIONS_OBJECT_KEY: "unmeasured",
+        BARS_OBJECT_KEY: "unmeasured",
+        CALENDAR_OBJECT_KEY: "unmeasured",
+    }
+    assert intake.corporate_action_coverage == ()
+    assert intake.corporate_action_coverage_refusal == "ca_coverage_request_unmeasured"
+    covered = run_covered_intake(tmp_path / "private")
+    declared = cast(
+        dict[str, dict[str, str]],
+        covered.acquisition.receipt.request.canonical_parameters,
+    )
+    assert declared == alpaca_endpoint_parameters(pinned_request())
+    assert declared[ACTIONS_OBJECT_KEY]["types"] == ",".join(ALPACA_ACTION_TYPES)
+    assert declared[BARS_OBJECT_KEY]["symbols"] == "AAPL,MSFT"
+
+
+def test_b2_a_measured_request_target_round_trips_through_its_origin_record() -> None:
+    request = with_measured_targets(pinned_request())
+    assert request.origin_observations is not None
+    measured = request.origin_observations[ACTIONS_OBJECT_KEY]
+    record = _origin_record_bytes(measured)
+    assert json.loads(record)["schema_version"] == "2"
+    assert json.loads(record)["request_target"] == measured.request_target
+    # A measurement without a target keeps the version 1 record bytes exactly.
+    unmeasured = pinned_origin_observations()[ACTIONS_OBJECT_KEY]
+    legacy = json.loads(_origin_record_bytes(unmeasured))
+    assert legacy["schema_version"] == "1" and "request_target" not in legacy
+
+
+def test_b2_a_measured_target_on_another_route_is_refused() -> None:
+    request = pinned_request()
+    with pytest.raises(AlpacaBridgeIncompleteError, match="measured requesting /v2"):
+        with_measured_targets(request, actions_target="/v2/calendar?start=x")
+    with pytest.raises(AlpacaBridgeIncompleteError, match="exact printable route"):
+        with_measured_targets(request, actions_target="v1/corporate-actions?x=1")
+
+
+def test_b2_a_pre_76_response_yields_only_a_named_refusal_to_cover(
+    intake: AlpacaExploratoryIntakeResult,
+) -> None:
+    """No measured request target: replaying old bytes can never claim coverage."""
+    assert intake.corporate_action_coverage == ()
+    assert intake.corporate_action_coverage_refusal == "ca_coverage_request_unmeasured"
+    assert intake.bundle.corporate_action_coverage == ()
+
+
+def test_b4_b7_one_record_per_member_rides_in_the_bundle(tmp_path: Path) -> None:
+    covered = run_covered_intake(tmp_path / "private")
+    assert covered.corporate_action_coverage_refusal is None
+    records = {item.queried_symbol: item for item in covered.corporate_action_coverage}
+    assert set(records) == {"AAPL", "MSFT"}
+    assert {item.security_id for item in records.values()} == {AAPL_ID, MSFT_ID}
+    # MSFT returned nothing, and still gets a record (B4).
+    assert records["MSFT"].returned_actions == ()
+    (dividend,) = records["AAPL"].returned_actions
+    assert (dividend.native_kind, dividend.native_id) == (
+        "cash_dividends",
+        "ca-aapl-20260107-cash-dividend",
+    )
+    assert dividend.dates == (date(2026, 1, 7), date(2026, 1, 8), date(2026, 1, 15))
+    for record in records.values():
+        assert record.source_id == ALPACA_ACTION_SOURCE_ID
+        assert record.evidence_grade == "exploratory"
+        assert record.revision_support == "current_only"
+        assert record.requested_action_classes == ALPACA_ACTION_TYPES
+        assert (record.requested_start_date, record.requested_end_date) == (
+            SESSION_DATES[0],
+            SESSION_DATES[-1],
+        )
+        assert (record.covered_start_date, record.covered_end_date) == (
+            SESSION_DATES[0],
+            SESSION_DATES[-1],
+        )
+        assert record.response_sha256 == covered.retained.corporate_actions_hash
+        verify_alpaca_corporate_action_record(
+            record, covered_request(), covered.retained, covered.acquisition
+        )
+    assert set(covered.bundle.corporate_action_coverage) == set(records.values())
+    assert covered.bundle.economic_outcomes == ()
+    assert ALPACA_LIMITATION_CA_SNAPSHOT_ABSENCE in covered.bundle.required_limitations
+    assert ALPACA_LIMITATION_CA_SNAPSHOT_ABSENCE in (
+        covered.admission.acknowledged_limitations
+    )
+
+
+def covered_request(actions: bytes = PINNED_CORPORATE_ACTIONS) -> AlpacaIntakeRequest:
+    payloads = replace(pinned_payloads(), corporate_actions=actions)
+    return with_measured_targets(measured_over(pinned_request(), payloads))
+
+
+#: The values Alpaca's API reference for GET /v1/corporate-actions enumerates
+#: for its ``types`` parameter (https://docs.alpaca.markets/reference/
+#: corporateactions-1, API version 1.1, page last updated 2026-05-27), spelled
+#: here independently of the module constant the bridge requests them by.
+DOCUMENTED_ACTION_TYPES = (
+    "reverse_split",
+    "forward_split",
+    "unit_split",
+    "cash_dividend",
+    "stock_dividend",
+    "spin_off",
+    "cash_merger",
+    "stock_merger",
+    "stock_and_cash_merger",
+    "redemption",
+    "name_change",
+    "worthless_removal",
+    "rights_distribution",
+    "partial_call",
+    "reorganization",
+    "capital_gains_distribution",
+)
+
+
+def test_dp1_the_requested_types_are_exactly_the_documented_enumeration() -> None:
+    """DP-1 resolved from the provider's own API reference: 16 types, no fewer."""
+    assert len(DOCUMENTED_ACTION_TYPES) == len(set(DOCUMENTED_ACTION_TYPES)) == 16
+    assert ALPACA_ACTION_TYPES == tuple(sorted(DOCUMENTED_ACTION_TYPES))
+    assert ALPACA_DOCUMENTED_ACTION_TYPE_COUNT == 16
+    statement = str(
+        _POLICY_DOCUMENTS["alpaca-corporate-actions-closed-world"]["statement"]
+    )
+    assert "enumerates 16 values for types" in statement
+    assert "version 1.1, page last updated 2026-05-27" in statement
+
+
+def test_dp1_a_quiet_response_under_every_documented_type_is_positive(
+    tmp_path: Path,
+) -> None:
+    covered = run_covered_intake(tmp_path / "private", QUIET_ACTIONS)
+    assert len(covered.corporate_action_coverage) == 2
+    for record in covered.corporate_action_coverage:
+        assert record.requested_action_classes == ALPACA_ACTION_TYPES
+        assert record.completeness.requested_types_documented is True
+        assert record.completeness.positive
+        assert record.returned_actions == ()
+
+
+@pytest.mark.parametrize("omitted", sorted(DOCUMENTED_ACTION_TYPES))
+def test_dp1_a_measured_request_omitting_a_documented_type_is_non_positive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, omitted: str
+) -> None:
+    """The structural type check: an omitted type is never evidenced absent.
+
+    The bridge's own declared types are narrowed by one, so the measured
+    request names exactly what the bridge declares (V8 holds) and still omits a
+    type the API reference documents. The response is read and its records
+    emitted (B5), but no record is positive. A measured request that instead
+    contradicts the bridge's declaration refuses intake (V8, see M5).
+    """
+    narrowed = tuple(item for item in ALPACA_ACTION_TYPES if item != omitted)
+    assert len(narrowed) == 15
+    monkeypatch.setattr(alpaca, "ALPACA_ACTION_TYPES", narrowed)
+    covered = run_covered_intake(tmp_path / "private", QUIET_ACTIONS)
+    assert len(covered.corporate_action_coverage) == 2
+    for record in covered.corporate_action_coverage:
+        assert omitted not in record.requested_action_classes
+        assert record.requested_action_classes == narrowed
+        assert record.completeness.requested_types_documented is False
+        assert not record.completeness.positive
+        # Every other check held: only the omitted type withholds the claim.
+        assert record.completeness.model_copy(
+            update={"requested_types_documented": True}
+        ).positive
+
+
+#: One row in each group the three types newest to the reference return.
+NEW_GROUP_ACTIONS = (
+    b'{"corporate_actions":{'
+    b'"partial_calls":[{"id":"ca-aapl-partial-call","symbol":"AAPL",'
+    b'"cusip":"037833100","rate":"0.25","process_date":"2026-01-07",'
+    b'"redemption_date":"2026-01-08","payable_date":"2026-01-09"}],'
+    b'"reorganizations":[{"id":"ca-msft-reorganization",'
+    b'"old_symbol":"MSFT","new_symbol":"MSFN","process_date":"2026-01-06",'
+    b'"effective_date":"2026-01-06"}],'
+    b'"capital_gains_distributions":[{"id":"ca-aapl-capital-gains",'
+    b'"symbol":"AAPL","rate":"0.12","ex_date":"2026-01-08",'
+    b'"record_date":"2026-01-08","payable_date":"2026-01-12"}]},'
+    b'"next_page_token":null}'
+)
+
+
+def test_b3_the_three_newest_groups_are_parsed_and_attributed_without_a_kind(
+    tmp_path: Path,
+) -> None:
+    parsed = {
+        item.group: item for item in parse_alpaca_corporate_actions(NEW_GROUP_ACTIONS)
+    }
+    assert set(parsed) == {
+        "capital_gains_distributions",
+        "partial_calls",
+        "reorganizations",
+    }
+    assert parsed["partial_calls"].dates == (
+        date(2026, 1, 7),
+        date(2026, 1, 8),
+        date(2026, 1, 9),
+    )
+    assert parsed["reorganizations"].symbols == ("MSFN", "MSFT")
+    assert parsed["capital_gains_distributions"].dates == (
+        date(2026, 1, 8),
+        date(2026, 1, 12),
+    )
+    covered = run_covered_intake(tmp_path / "private", NEW_GROUP_ACTIONS)
+    returned = {
+        item.queried_symbol: [
+            (action.native_kind, action.native_id, action.action_kind)
+            for action in item.returned_actions
+        ]
+        for item in covered.corporate_action_coverage
+    }
+    # No M1c kind corresponds exactly to any of the three, so none is given.
+    assert returned == {
+        "AAPL": [
+            ("capital_gains_distributions", "ca-aapl-capital-gains", None),
+            ("partial_calls", "ca-aapl-partial-call", None),
+        ],
+        "MSFT": [("reorganizations", "ca-msft-reorganization", None)],
+    }
+
+
+def test_b3_attribution_follows_every_symbol_field_and_never_drops_a_row(
+    tmp_path: Path,
+) -> None:
+    covered = run_covered_intake(tmp_path / "private", EVERY_GROUP_ACTIONS)
+    returned = {
+        item.queried_symbol: [
+            (action.native_kind, action.native_id, action.action_kind)
+            for action in item.returned_actions
+        ]
+        for item in covered.corporate_action_coverage
+    }
+    assert returned == {
+        "AAPL": [
+            ("cash_dividends", "ca-aapl-20260107-cash-dividend", None),
+            # A row naming no cohort member is attributed to every member.
+            ("worthless_removals", "ca-zzzz-removal", None),
+        ],
+        "MSFT": [
+            ("forward_splits", "ca-msft-split", ActionKind.FORWARD_SPLIT),
+            # Printed under the former symbol MSFT: attributed to MSFT.
+            ("name_changes", "ca-msft-rename", None),
+            ("worthless_removals", "ca-zzzz-removal", None),
+        ],
+    }
+
+
+def test_v5_v6_v8_the_bridge_verifies_each_record_against_its_acquisition(
+    tmp_path: Path,
+) -> None:
+    covered = run_covered_intake(tmp_path / "private", EVERY_GROUP_ACTIONS)
+    request = covered_request(EVERY_GROUP_ACTIONS)
+    record = next(
+        item
+        for item in covered.corporate_action_coverage
+        if item.queried_symbol == "MSFT"
+    )
+    verify_alpaca_corporate_action_record(
+        record, request, covered.retained, covered.acquisition
+    )
+    # M8: a record that drops a returned action is refused by re-parsing (V5).
+    dropped = _resealed_coverage(record, returned_actions=record.returned_actions[:1])
+    with pytest.raises(
+        AlpacaBridgeIncompleteError,
+        match=r"^ca_coverage_returned_actions_disagree_with_response",
+    ):
+        verify_alpaca_corporate_action_record(
+            dropped, request, covered.retained, covered.acquisition
+        )
+    # A record naming another member's symbol is refused (V6).
+    renamed = _resealed_coverage(record, queried_symbol="AAPL")
+    with pytest.raises(
+        AlpacaBridgeIncompleteError, match=r"^ca_coverage_request_binding_mismatch"
+    ):
+        verify_alpaca_corporate_action_record(
+            renamed, request, covered.retained, covered.acquisition
+        )
+    # M8: bytes of the same length swapped under the record's name (V4).
+    swapped = EVERY_GROUP_ACTIONS.replace(b"ca-zzzz-removal", b"ca-yyyy-removal")
+    assert len(swapped) == len(EVERY_GROUP_ACTIONS)
+    other = run_covered_intake(tmp_path / "other", swapped)
+    with pytest.raises(
+        AlpacaBridgeIncompleteError, match=r"^ca_coverage_response_hash_mismatch"
+    ):
+        verify_alpaca_corporate_action_record(
+            record, request, other.retained, other.acquisition
+        )
+
+
+def _resealed_coverage(
+    record: ClosedWorldCorporateActionCoverageV1, **changes: Any
+) -> ClosedWorldCorporateActionCoverageV1:
+    body = dict(record) | changes
+    draft = ClosedWorldCorporateActionCoverageV1.model_construct(**body)
+    return ClosedWorldCorporateActionCoverageV1.model_validate(
+        body | {"record_hash": corporate_action_record_hash(draft)}
+    )
+
+
+def test_m5_a_measured_request_filtered_to_cash_dividends_is_refused(
+    tmp_path: Path,
+) -> None:
+    """V8: the pre-76 filter, measured, is refused rather than read as coverage."""
+    request = pinned_request()
+    target = "/v1/corporate-actions?" + urlencode(
+        sorted(
+            (
+                alpaca_endpoint_parameters(request)[ACTIONS_OBJECT_KEY]
+                | {"types": "cash_dividend"}
+            ).items()
+        )
+    )
+    with pytest.raises(
+        AlpacaBridgeIncompleteError, match=r"^ca_coverage_action_classes_incomplete"
+    ):
+        run_covered_intake(tmp_path / "private", actions_target=target)
+
+
+@pytest.mark.parametrize(
+    "changed",
+    ({"start": "2026-01-06"}, {"symbols": "AAPL"}, {"end": "2026-01-10"}),
+    ids=("start", "symbols", "end"),
+)
+def test_v6_a_measured_request_for_another_window_or_cohort_is_refused(
+    tmp_path: Path, changed: dict[str, str]
+) -> None:
+    request = pinned_request()
+    target = "/v1/corporate-actions?" + urlencode(
+        sorted(
+            (alpaca_endpoint_parameters(request)[ACTIONS_OBJECT_KEY] | changed).items()
+        )
+    )
+    with pytest.raises(
+        AlpacaBridgeIncompleteError, match=r"^ca_coverage_request_binding_mismatch"
+    ):
+        run_covered_intake(tmp_path / "private", actions_target=target)
+
+
+def test_b5_m16_thin_or_non_positive_coverage_never_refuses_intake(
+    tmp_path: Path,
+) -> None:
+    """D6-b: only an exposed evaluation halts; the intake completes."""
+    quiet = run_covered_intake(tmp_path / "quiet", QUIET_ACTIONS)
+    assert all(not item.returned_actions for item in quiet.corporate_action_coverage)
+    # Returned actions are recorded, not refused: they halt only an exposed
+    # window that holds one of their dates.
+    busy = run_covered_intake(tmp_path / "busy", EVERY_GROUP_ACTIONS)
+    assert len(busy.corporate_action_coverage) == 2
+    assert all(item.returned_actions for item in busy.corporate_action_coverage)
+    assert all(item.completeness.positive for item in busy.corporate_action_coverage)
+    # An action dated outside the requested window keeps the record, marks the
+    # assumed filter semantics falsified, and so leaves the record non-positive;
+    # the intake still completes.
+    outside = EVERY_GROUP_ACTIONS.replace(
+        b'"process_date":"2026-01-09"', b'"process_date":"2026-02-09"'
+    )
+    late = run_covered_intake(tmp_path / "late", outside)
+    flags = {
+        item.queried_symbol: item.completeness.returned_actions_inside_requested_window
+        for item in late.corporate_action_coverage
+    }
+    assert flags == {"AAPL": False, "MSFT": False}
+    assert not any(
+        item.completeness.positive for item in late.corporate_action_coverage
+    )
+
+
+def test_b6_the_new_limitation_and_policy_statement_are_named() -> None:
+    assert ALPACA_LIMITATION_CA_SNAPSHOT_ABSENCE in ALPACA_EXPLORATORY_LIMITATIONS
+    assert len(ALPACA_EXPLORATORY_LIMITATIONS) == 8
+    statement = _POLICY_DOCUMENTS["alpaca-corporate-actions-closed-world"]
+    assert statement["source_id"] == ALPACA_ACTION_SOURCE_ID
+    assert statement["provider_publication"] == "partially_published"
+    not_established = " ".join(statement["not_established"])
+    for gap in (
+        "which date field the start and end filters apply to",
+        "date-range cap, history floor or silent truncation",
+        "former symbol",
+        "revised or withdrawn in place",
+        "16 documented types are every kind of action",
+    ):
+        assert gap in not_established, gap
+
+
+# --- review F1: a repeated JSON key is an integrity failure, never last-wins ---------
+
+DUPLICATE_GROUP = (
+    b'{"corporate_actions":{"forward_splits":[{"id":"ca-aapl-split",'
+    b'"symbol":"AAPL","new_rate":2,"old_rate":1,"ex_date":"2026-01-08",'
+    b'"process_date":"2026-01-08"}],"forward_splits":[]},"next_page_token":null}'
+)
+DUPLICATE_PAGE_TOKEN = (
+    b'{"corporate_actions":{},"next_page_token":"more","next_page_token":null}'
+)
+DUPLICATE_NESTED_KEY = (
+    b'{"corporate_actions":{"forward_splits":[{"id":"ca-aapl-split",'
+    b'"symbol":"AAPL","ex_date":"2026-01-08","ex_date":null}]},'
+    b'"next_page_token":null}'
+)
+DUPLICATES = {
+    "group": DUPLICATE_GROUP,
+    "page-token": DUPLICATE_PAGE_TOKEN,
+    "nested-entry-key": DUPLICATE_NESTED_KEY,
+}
+DUPLICATE_REFUSAL = r"^alpaca_response_duplicate_key: "
+
+
+@pytest.mark.parametrize("data", DUPLICATES.values(), ids=DUPLICATES)
+def test_f1_a_repeated_key_in_the_actions_response_is_refused_by_the_parser(
+    data: bytes,
+) -> None:
+    with pytest.raises(AlpacaBridgeIncompleteError, match=DUPLICATE_REFUSAL):
+        parse_alpaca_corporate_actions(data)
+    with pytest.raises(AlpacaBridgeIncompleteError, match=DUPLICATE_REFUSAL):
+        parse_alpaca_cash_dividends(data)
+
+
+@pytest.mark.parametrize("data", DUPLICATES.values(), ids=DUPLICATES)
+def test_f1_a_repeated_key_in_the_actions_response_is_refused_at_intake(
+    tmp_path: Path, data: bytes
+) -> None:
+    """Last-wins would read a repeated group or page token as a quiet page."""
+    with pytest.raises(AlpacaBridgeIncompleteError, match=DUPLICATE_REFUSAL):
+        run_covered_intake(tmp_path / "private", data)
+
+
+@pytest.mark.parametrize("data", DUPLICATES.values(), ids=DUPLICATES)
+def test_f1_a_repeated_key_is_refused_when_v5_re_parses_the_bytes(
+    tmp_path: Path, data: bytes
+) -> None:
+    covered = run_covered_intake(tmp_path / "genuine")
+    record = next(
+        item
+        for item in covered.corporate_action_coverage
+        if item.queried_symbol == "AAPL"
+    )
+    forged = _resealed_coverage(
+        record,
+        response_sha256=sha256(data).hexdigest(),
+        response_byte_size=len(data),
+    )
+    retained = retain_native_bytes(
+        tmp_path / "forged", replace(pinned_payloads(), corporate_actions=data)
+    )
+    with pytest.raises(AlpacaBridgeIncompleteError, match=DUPLICATE_REFUSAL):
+        verify_alpaca_corporate_action_record(
+            forged, covered_request(), retained, covered.acquisition
+        )
+
+
+def test_f1_the_shared_parser_refuses_a_repeated_key_in_bars_and_calendar() -> None:
+    repeated_symbol = PINNED_BARS.replace(b'],"MSFT":[', b'],"AAPL":[', 1)
+    assert repeated_symbol != PINNED_BARS
+    with pytest.raises(AlpacaBridgeIncompleteError, match=DUPLICATE_REFUSAL):
+        parse_alpaca_bars(repeated_symbol)
+    repeated_date = PINNED_CALENDAR.replace(
+        b'"date":"2026-01-05",', b'"date":"2026-01-05","date":"2026-01-06",', 1
+    )
+    assert repeated_date != PINNED_CALENDAR
+    with pytest.raises(AlpacaBridgeIncompleteError, match=DUPLICATE_REFUSAL):
+        parse_alpaca_calendar(repeated_date)
+    # Control: the genuine responses still parse.
+    assert len(parse_alpaca_bars(PINNED_BARS)) == 10
+    assert len(parse_alpaca_calendar(PINNED_CALENDAR)) == 5
+    assert len(parse_alpaca_corporate_actions(EVERY_GROUP_ACTIONS)) == 4

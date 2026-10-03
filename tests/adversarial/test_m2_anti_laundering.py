@@ -1607,6 +1607,30 @@ RECONSTRUCTED_TRACE_HASH_SINCE_ISSUE_71 = (
 RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_71 = (
     "26e9b58c70694e1e1291b7b4eb572f0656e98c6f5d12845981c34c9d0814af0a"
 )
+# Issue 76 adds the dedicated m1c-corporate-action-coverage-v1 closure. Its edit
+# to `semantic_attestation.py`, declared in every closure, moves the M1d evidence
+# identity and the M1c validator identity bound into every M1d context hash;
+# its hash-covered `corporate_action_coverage` bundle field (D8-a) moves every
+# bundle hash; and both fixtures now state quiet closed-world corporate-action
+# coverage for the securities they hold or trade, because an uncovered exposed
+# security halts INDETERMINATE (C3). A field-by-field diff of both runs against
+# the base dec5d64 shows only hash leaves moved, plus the admission's
+# acknowledged limitations (and the reconstructed events restating them)
+# gaining `corporate-action-absence-read-from-current-provider-snapshot`. No
+# quantity, price, cash, NAV, classification, count, status, reason, lane or
+# kind leaf changes. These are the same two runs' hashes since that change.
+REALIZED_TRACE_HASH_SINCE_ISSUE_76 = (
+    "385edb0073c986745da4af1fe771b4efa6a23601277418bd1db98672557f8913"
+)
+REALIZED_RESULT_HASH_SINCE_ISSUE_76 = (
+    "be6e7622324ec3f16e7e6349a681f9234893bfba8184db1570ba128538c2e603"
+)
+RECONSTRUCTED_TRACE_HASH_SINCE_ISSUE_76 = (
+    "8cc9a23409d27882464ad59bcba2f05216d8344c671d58baa3f07a69da38643a"
+)
+RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_76 = (
+    "e8c1f61541fb5d43a8cd24d3bbb8565ca8d8c74045720928222af007f8129e4f"
+)
 
 
 def _promotion_engine(bundle: Any, admission: Any) -> SessionEvaluatorEngine:
@@ -1794,8 +1818,8 @@ def test_disabling_promotion_leaves_the_realized_lane_byte_identical() -> None:
 
     assert artifacts.result.lane == "exploratory"
     assert artifacts.result.metrics.committed_fill_count == 1
-    assert artifacts.trace.trace_hash == REALIZED_TRACE_HASH_SINCE_ISSUE_71
-    assert artifacts.result.result_hash == REALIZED_RESULT_HASH_SINCE_ISSUE_71
+    assert artifacts.trace.trace_hash == REALIZED_TRACE_HASH_SINCE_ISSUE_76
+    assert artifacts.result.result_hash == REALIZED_RESULT_HASH_SINCE_ISSUE_76
 
 
 def test_disabling_promotion_leaves_the_reconstructed_lane_byte_identical() -> None:
@@ -1821,5 +1845,5 @@ def test_disabling_promotion_leaves_the_reconstructed_lane_byte_identical() -> N
         event.kind == "exploratory_strategy_decision"
         for event in artifacts.trace.events
     )
-    assert artifacts.trace.trace_hash == RECONSTRUCTED_TRACE_HASH_SINCE_ISSUE_71
-    assert artifacts.result.result_hash == RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_71
+    assert artifacts.trace.trace_hash == RECONSTRUCTED_TRACE_HASH_SINCE_ISSUE_76
+    assert artifacts.result.result_hash == RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_76

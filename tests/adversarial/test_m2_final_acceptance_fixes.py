@@ -172,7 +172,6 @@ def _dividend_of(cash: CashComponentV1) -> SecurityEconomicOutcomeV1:
                 settled_at=_at(eng.DAY_3),
             ),
         ),
-        action_kinds=(ActionKind.REGULAR_CASH_DIVIDEND,),
     )
 
 

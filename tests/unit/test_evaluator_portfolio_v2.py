@@ -704,9 +704,7 @@ def _share_outcome(
         security_id=security_id,
         source_id=source_id,
     )
-    return ca._outcome(
-        security_id=security_id, terms=(terms,), effects=(effect,), action_kinds=(kind,)
-    )
+    return ca._outcome(security_id=security_id, terms=(terms,), effects=(effect,))
 
 
 def _effect_id(
@@ -763,7 +761,9 @@ def test_recording_an_unexposed_effect_keeps_the_mark_and_the_book() -> None:
     kernel.mark_close((ca._mark_price(ca.SEC_A, "10"),))
     marked = kernel.state
 
-    updated, _ = _pass(marked, (_share_outcome(4040, security_id=ca.SEC_OTHER),))
+    updated, _ = _pass(
+        marked, ca._covered((_share_outcome(4040, security_id=ca.SEC_OTHER),), ca.SEC_A)
+    )
 
     assert updated.applied_effect_ids == (_effect_id(ca.SEC_OTHER),)
     assert updated.model_dump(exclude={"applied_effect_ids"}) == marked.model_dump(
@@ -810,9 +810,9 @@ def test_a_replay_exposed_only_by_a_staged_buy_is_refused() -> None:
 def test_a_replay_on_an_unexposed_book_changes_nothing() -> None:
     outcome = _share_outcome(4070, security_id=ca.SEC_OTHER)
     state = ca._state(holdings=(ca._holding(quantity=100),))
-    once, _ = _pass(state, (outcome,))
+    once, _ = _pass(state, ca._covered((outcome,), ca.SEC_A))
 
-    again, _ = _pass(once, (outcome,))
+    again, _ = _pass(once, ca._covered((outcome,), ca.SEC_A))
 
     assert again == once
 
@@ -854,10 +854,15 @@ def test_a_reclassifying_revision_cannot_mutate_one_occurrence_twice() -> None:
 def test_one_occurrence_reported_by_two_sources_is_two_effects() -> None:
     # Identity is source-scoped, as M1c occurrence identity is.
     state = ca._state(holdings=(ca._holding(quantity=100),))
-    first, _ = _pass(state, (_share_outcome(4110, security_id=ca.SEC_OTHER),))
+    first, _ = _pass(
+        state, ca._covered((_share_outcome(4110, security_id=ca.SEC_OTHER),), ca.SEC_A)
+    )
     second, _ = _pass(
         first,
-        (_share_outcome(4120, security_id=ca.SEC_OTHER, source_id=ca.SOURCE_B),),
+        ca._covered(
+            (_share_outcome(4120, security_id=ca.SEC_OTHER, source_id=ca.SOURCE_B),),
+            ca.SEC_A,
+        ),
     )
     assert second.applied_effect_ids == tuple(
         sorted(
@@ -914,9 +919,7 @@ def _spinoff(
         terms=terms,
         occurrence_id=occurrence,
     )
-    return ca._outcome(
-        terms=(terms,), effects=(effect,), action_kinds=(ActionKind.SPINOFF,)
-    )
+    return ca._outcome(terms=(terms,), effects=(effect,))
 
 
 SPIN = _effect_id(occurrence="occ-spin")
@@ -929,7 +932,7 @@ def _by_security(state: PortfolioStateV2) -> dict[UUID, SecurityHoldingV2]:
 def test_a_spinoff_makes_the_parent_and_the_child_indeterminate() -> None:
     state = ca._state(holdings=(ca._holding(quantity=100, basis="1000"),), cash="500")
 
-    updated, _ = _pass(state, (_spinoff(4200),))
+    updated, _ = _pass(state, ca._covered((_spinoff(4200),), ca.SEC_CHILD))
 
     held = _by_security(updated)
     # Before the fix the child entered at a zero basis and the parent kept
@@ -960,7 +963,9 @@ def test_a_spinoff_into_a_held_child_pools_an_indeterminate_basis() -> None:
         SecurityTargetPositionV1(security_id=ca.SEC_CHILD, target_quantity=4),
     )
 
-    updated, _ = _pass(state, (_spinoff(4210),), targets=targets)
+    updated, _ = _pass(
+        state, ca._covered((_spinoff(4210),), ca.SEC_CHILD), targets=targets
+    )
 
     child = _by_security(updated)[ca.SEC_CHILD]
     assert (child.quantity, child.basis_status, child.cost_basis) == (
@@ -984,7 +989,7 @@ def test_a_spinoff_leaves_the_parent_indeterminate_even_without_child_shares() -
 def test_an_unheld_parent_leaves_the_book_known() -> None:
     state = ca._state(holdings=(ca._holding(ca.SEC_OTHER, quantity=5),))
 
-    updated, _ = _pass(state, (_spinoff(4230),))
+    updated, _ = _pass(state, ca._covered((_spinoff(4230),), ca.SEC_OTHER))
 
     assert [holding.basis_status for holding in updated.holdings] == ["known"]
 
@@ -1070,7 +1075,6 @@ def _stock_acquisition(suffix: int) -> SecurityEconomicOutcomeV1:
     return ca._outcome(
         terms=(terms,),
         effects=(effect,),
-        action_kinds=(ActionKind.STOCK_ACQUISITION,),
         claim_status="converted",
     )
 
@@ -1086,7 +1090,9 @@ def test_a_share_acquisition_carries_the_basis_status_into_the_acquirer() -> Non
         SecurityTargetPositionV1(security_id=ca.SEC_ACQ, target_quantity=10),
     )
 
-    updated, _ = _pass(book, (_stock_acquisition(4250),), targets=targets)
+    updated, _ = _pass(
+        book, ca._covered((_stock_acquisition(4250),), ca.SEC_ACQ), targets=targets
+    )
 
     (acquirer,) = updated.holdings
     assert (acquirer.security_id, acquirer.quantity) == (ca.SEC_ACQ, 110)
@@ -1100,7 +1106,9 @@ def test_a_share_acquisition_carries_the_basis_status_into_the_acquirer() -> Non
             ca._holding(ca.SEC_ACQ, quantity=10, basis="100"),
         )
     )
-    pooled, _ = _pass(known, (_stock_acquisition(4260),), targets=targets)
+    pooled, _ = _pass(
+        known, ca._covered((_stock_acquisition(4260),), ca.SEC_ACQ), targets=targets
+    )
     (acquirer,) = pooled.holdings
     assert (acquirer.basis_status, acquirer.cost_basis) == ("known", Decimal("1000"))
 
@@ -1125,7 +1133,6 @@ def test_a_disposal_of_an_indeterminate_holding_fails_closed() -> None:
     outcome = ca._outcome(
         terms=(terms,),
         effects=(effect,),
-        action_kinds=(ActionKind.CASH_ACQUISITION,),
         claim_status="extinguished",
     )
 
@@ -1273,7 +1280,6 @@ def _aggregate_sale(
     outcome = ca._outcome(
         terms=(terms,),
         effects=(effect,),
-        action_kinds=(kind,),
         claim_status=claim_status,
     )
     return effect, outcome
@@ -1286,11 +1292,15 @@ def _priced_pass(
     *,
     rate: str,
     targets: tuple[SecurityTargetPositionV1, ...] = (),
+    covered: tuple[UUID, ...] = (),
 ) -> PortfolioStateV2:
+    """One pre-open pass; ``covered`` names securities stated quiet (issue 76)."""
     processor = ca._processor(
         cash_in_lieu_rates=(ca._cash_in_lieu_rate(effect=effect, rate=rate),)
     )
-    updated, _ = processor.apply_pre_open_actions(state, targets, (outcome,), ca._key())
+    updated, _ = processor.apply_pre_open_actions(
+        state, targets, ca._covered((outcome,), *covered), ca._key()
+    )
     return updated
 
 
@@ -1362,7 +1372,9 @@ def test_a_stock_acquisition_residual_relieves_the_predecessor_pool() -> None:
         SecurityTargetPositionV1(security_id=ca.SEC_ACQ, target_quantity=10),
     )
 
-    updated = _priced_pass(state, effect, outcome, rate="6", targets=targets)
+    updated = _priced_pass(
+        state, effect, outcome, rate="6", targets=targets, covered=(ca.SEC_ACQ,)
+    )
 
     (acquirer,) = updated.holdings
     assert (acquirer.security_id, acquirer.quantity) == (ca.SEC_ACQ, 13)
@@ -1451,12 +1463,10 @@ def test_a_spinoff_residual_relieves_nothing_from_the_indeterminate_parent() -> 
         terms=terms,
         occurrence_id="occ-spin",
     )
-    outcome = ca._outcome(
-        terms=(terms,), effects=(effect,), action_kinds=(ActionKind.SPINOFF,)
-    )
+    outcome = ca._outcome(terms=(terms,), effects=(effect,))
     state = ca._state(holdings=(ca._holding(quantity=10, basis="1000"),))
 
-    updated = _priced_pass(state, effect, outcome, rate="3")
+    updated = _priced_pass(state, effect, outcome, rate="3", covered=(ca.SEC_CHILD,))
 
     held = _by_security(updated)
     assert held[ca.SEC_A].basis_indeterminate_by == (SPIN,)
@@ -1489,7 +1499,6 @@ def _mixed_acquisition(suffix: int) -> SecurityEconomicOutcomeV1:
     return ca._outcome(
         terms=(terms,),
         effects=(effect,),
-        action_kinds=(ActionKind.MIXED_ACQUISITION,),
         claim_status="converted",
     )
 
@@ -1500,7 +1509,7 @@ def test_a_mixed_acquisition_cash_leg_leaves_the_acquirer_indeterminate() -> Non
     # realized PnL as 0 as if that were proven.
     state = ca._state(holdings=(ca._holding(quantity=100, basis="1000"),))
 
-    updated, _ = _pass(state, (_mixed_acquisition(4360),))
+    updated, _ = _pass(state, ca._covered((_mixed_acquisition(4360),), ca.SEC_ACQ))
 
     (acquirer,) = updated.holdings
     assert (acquirer.security_id, acquirer.quantity) == (ca.SEC_ACQ, 50)
@@ -1546,9 +1555,7 @@ def _instalment_outcome(
     suffix: int, *, amount: str, at: str = ca.EFFECT_AT
 ) -> SecurityEconomicOutcomeV1:
     terms, effect = _instalment(suffix, amount=amount, at=at)
-    return ca._outcome(
-        terms=(terms,), effects=(effect,), action_kinds=(ActionKind.LIQUIDATION,)
-    )
+    return ca._outcome(terms=(terms,), effects=(effect,))
 
 
 INSTALMENT = _effect_id(occurrence="occ-instalment")
@@ -1623,7 +1630,6 @@ def test_an_instalment_beside_the_final_disposal_fails_closed() -> None:
     outcome = ca._outcome(
         terms=(terms, final_terms),
         effects=(instalment, final),
-        action_kinds=(ActionKind.LIQUIDATION,),
         claim_status="extinguished",
     )
     state = ca._state(
@@ -1637,7 +1643,6 @@ def test_an_instalment_beside_the_final_disposal_fails_closed() -> None:
     alone = ca._outcome(
         terms=(final_terms,),
         effects=(final,),
-        action_kinds=(ActionKind.LIQUIDATION,),
         claim_status="extinguished",
     )
     disposed, _ = _pass(state, (alone,), day=ca.LATER_DAY)
@@ -1655,7 +1660,7 @@ def test_a_replayed_acquisition_is_refused_through_the_acquirer_it_delivered() -
     targets = (SecurityTargetPositionV1(security_id=ca.SEC_A, target_quantity=100),)
     once, translated = _pass(
         ca._state(holdings=(ca._holding(quantity=100, basis="900"),)),
-        (_stock_acquisition(4600),),
+        ca._covered((_stock_acquisition(4600),), ca.SEC_ACQ),
         targets=targets,
     )
     assert [holding.security_id for holding in once.holdings] == [ca.SEC_ACQ]
@@ -1683,7 +1688,6 @@ def _cash_acquisition(suffix: int) -> SecurityEconomicOutcomeV1:
     return ca._outcome(
         terms=(terms,),
         effects=(effect,),
-        action_kinds=(ActionKind.CASH_ACQUISITION,),
         claim_status="extinguished",
     )
 
@@ -1735,11 +1739,7 @@ def _dividend(suffix: int, *, occurrence: str, at: str) -> SecurityEconomicOutco
         occurrence_id=occurrence,
         effective_at=at,
     )
-    return ca._outcome(
-        terms=(terms,),
-        effects=(effect,),
-        action_kinds=(ActionKind.REGULAR_CASH_DIVIDEND,),
-    )
+    return ca._outcome(terms=(terms,), effects=(effect,))
 
 
 def _split_then_a_week_later(suffix: int, occurrence: str) -> PortfolioStateV2:
@@ -1757,9 +1757,7 @@ def test_a_split_reclassified_as_an_instalment_is_refused() -> None:
     terms, instalment = _instalment(
         4710, amount="3", occurrence="occ-x", at=ca.LATER_AT
     )
-    revised = ca._outcome(
-        terms=(terms,), effects=(instalment,), action_kinds=(ActionKind.LIQUIDATION,)
-    )
+    revised = ca._outcome(terms=(terms,), effects=(instalment,))
 
     # Before the fix the pass kept the 200 split shares, booked a 600.00
     # instalment claim on them and left the basis indeterminate.
@@ -1773,11 +1771,7 @@ def test_a_split_reclassified_as_an_instalment_is_refused() -> None:
     terms, other = _instalment(4720, amount="3", occurrence="occ-y", at=ca.LATER_AT)
     booked, _ = _pass(
         book,
-        (
-            ca._outcome(
-                terms=(terms,), effects=(other,), action_kinds=(ActionKind.LIQUIDATION,)
-            ),
-        ),
+        (ca._outcome(terms=(terms,), effects=(other,)),),
         day=ca.LATER_DAY,
     )
     assert booked.pending_claims_value == Decimal("600")
@@ -1843,7 +1837,11 @@ def test_a_recorded_occurrence_on_an_unheld_security_is_not_refused() -> None:
     # dividend owes this book nothing, so there is nothing to refuse.
     state = ca._state(holdings=(ca._holding(quantity=100),))
     recorded, _ = _pass(
-        state, (_share_outcome(4770, security_id=ca.SEC_OTHER, occurrence="occ-x"),)
+        state,
+        ca._covered(
+            (_share_outcome(4770, security_id=ca.SEC_OTHER, occurrence="occ-x"),),
+            ca.SEC_A,
+        ),
     )
     assert recorded.applied_effect_ids == (_effect_id(ca.SEC_OTHER, "occ-x"),)
     cash = ca._cash(amount="0.5", predecessor=ca.SEC_OTHER)
@@ -1865,14 +1863,9 @@ def test_a_recorded_occurrence_on_an_unheld_security_is_not_refused() -> None:
         occurrence_id="occ-x",
         security_id=ca.SEC_OTHER,
     )
-    dividend = ca._outcome(
-        security_id=ca.SEC_OTHER,
-        terms=(terms,),
-        effects=(effect,),
-        action_kinds=(ActionKind.REGULAR_CASH_DIVIDEND,),
-    )
+    dividend = ca._outcome(security_id=ca.SEC_OTHER, terms=(terms,), effects=(effect,))
 
-    again, _ = _pass(recorded, (dividend,))
+    again, _ = _pass(recorded, ca._covered((dividend,), ca.SEC_A))
 
     assert again == recorded
 
@@ -1921,7 +1914,6 @@ def test_both_readings_of_one_occurrence_in_one_window_are_both_booked() -> None
     outcome = ca._outcome(
         terms=(split_terms, dividend_terms),
         effects=(split, dividend),
-        action_kinds=(ActionKind.FORWARD_SPLIT, ActionKind.REGULAR_CASH_DIVIDEND),
     )
     state = ca._state(holdings=(ca._holding(quantity=100, basis="1000"),))
 
@@ -1963,7 +1955,6 @@ def test_an_instalment_and_a_dividend_of_one_occurrence_in_one_window_both_book(
     outcome = ca._outcome(
         terms=(terms, dividend_terms),
         effects=(effect, dividend),
-        action_kinds=(ActionKind.LIQUIDATION, ActionKind.REGULAR_CASH_DIVIDEND),
     )
     state = ca._state(holdings=(ca._holding(quantity=100, basis="1000"),))
 

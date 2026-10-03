@@ -97,6 +97,8 @@ from test_evaluator_engine import (  # noqa: E402
 )
 
 from drift.adapters.alpaca_exploratory import (  # noqa: E402
+    ACTIONS_OBJECT_KEY,
+    ALPACA_ACTION_TYPES,
     ALPACA_EXPLORATORY_LIMITATIONS,
     AlpacaBridgeIncompleteError,
     AlpacaExploratoryIntakeResult,
@@ -382,10 +384,12 @@ def test_a_trading_target_fails_closed_at_the_next_open(
     """Deciding on the bridge bundle is admitted; executing still halts.
 
     Issue 54 prices reconstructed opens and closes, but the bridge supplies no
-    M1b listing role evidence, so the next open halts INDETERMINATE in the
-    execution phase instead of inventing an execution listing. The cause is
-    pinned so that a different fail-closed path cannot stand in for this one.
-    No fill is minted.
+    M1b listing role evidence, so the next open would halt INDETERMINATE in the
+    execution phase instead of inventing an execution listing. Issue 76 halts
+    it one phase earlier: the staged buy makes AAPL exposed at that pre-open,
+    and this bridge bundle carries no closed-world corporate-action coverage,
+    so no absent action is read as no action. The cause is pinned so that a
+    different fail-closed path cannot stand in for this one. No fill is minted.
     """
     artifacts, strategy = _run(intake, BUY_TEN_AAPL)
     result = artifacts.result
@@ -400,10 +404,10 @@ def test_a_trading_target_fails_closed_at_the_next_open(
     assert kinds.count("exploratory_strategy_decision") == 1
     cause = artifacts.trace.events[-1]
     assert cause.kind == "indeterminate_cause"
-    assert cause.phase is EvaluationPhase.OPEN_EXECUTION
-    assert cause.cause_kind == "indeterminate_execution"
+    assert cause.phase is EvaluationPhase.PRE_OPEN_EFFECTS
+    assert cause.cause_kind == "indeterminate_valuation"
     assert cause.cause.startswith(
-        f"no active primary listing for security {AAPL_ID} at "
+        f"no closed-world corporate-action coverage for {AAPL_ID} over "
     ), cause.cause
     assert artifacts.final_state.holdings == ()
 
@@ -667,7 +671,11 @@ def test_the_cli_runs_the_whole_bridge_offline_from_retained_bytes(
     assert "reconciliation pass" in output
     assert f"sessions {len(SESSION_DATES)}" in output
     assert "lane exploratory; this evidence is never promotion-grade" in output
-    assert output.count("acknowledged limitation ") == 7
+    assert output.count("acknowledged limitation ") == 8
+    # The online run measured its corporate-actions request, so the replay
+    # reads its retained record back and covers both members (issue 76).
+    assert "corporate-action coverage records 2" in output
+    assert "corporate-action coverage refused" not in output
     # The replay itself performed no HTTP exchange of any kind.
     assert len(wire.requests) == requests_before_replay
 
@@ -1636,6 +1644,41 @@ def test_acquisition_contacts_only_the_market_data_and_paper_trading_hosts(
     assert all(item.host != LIVE_BROKERAGE_HOST for item in wire.requests)
 
 
+def test_b1_the_online_actions_request_names_every_type_and_is_measured(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue 76, B1 and B2: one GET, same host and route, every type, measured."""
+    cli = _load_cli()
+    seen = _spy_on_intake(monkeypatch, cli)
+    wire, _declaration = _acquire_online(
+        cli, tmp_path, tmp_path / "private", capsys, monkeypatch
+    )
+
+    (sent,) = [item for item in wire.requests if item.path == "/v1/corporate-actions"]
+    assert sent.origin == DATA_ORIGIN
+    target = bytes(sent.sent).split(b"\r\n", 1)[0].decode("latin-1").split(" ")[1]
+    query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(target).query))
+    assert query == {
+        "end": "2026-01-09",
+        "start": "2026-01-05",
+        "symbols": "AAPL,MSFT",
+        "types": ",".join(ALPACA_ACTION_TYPES),
+    }
+    ((request, result),) = seen
+    assert request.origin_observations is not None
+    assert request.origin_observations[ACTIONS_OBJECT_KEY].request_target == target
+    assert result.corporate_action_coverage_refusal is None
+    assert {item.queried_symbol for item in result.corporate_action_coverage} == {
+        "AAPL",
+        "MSFT",
+    }
+    # The measured request named every type the API reference documents, so
+    # every record is a positive completeness assertion (DP-1, resolved).
+    assert all(item.completeness.positive for item in result.corporate_action_coverage)
+
+
 def test_the_live_brokerage_host_is_refused_before_any_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1691,6 +1734,10 @@ def test_an_online_acquisition_replayed_offline_reproduces_its_measured_origin(
         }
 
     assert _origins(offline) == _origins(online)
+    # The retained record carries the measured request target, so the replay
+    # reads the same closed-world corporate-action records (issue 76, B2).
+    assert offline.corporate_action_coverage == online.corporate_action_coverage
+    assert len(online.corporate_action_coverage) == 2
     replayed = _origins(offline)
     assert {key: item.origin_status for key, item in replayed.items()} == {
         cli.BARS_OBJECT_KEY: OriginStatus.VERIFIED,

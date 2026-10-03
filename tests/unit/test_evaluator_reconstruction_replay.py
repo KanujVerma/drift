@@ -166,8 +166,11 @@ def test_the_preparation_boundary_derives_reconstructions_itself() -> None:
     )
 
     assert built.exploratory_reconstructed_observations == (jan5,)
-    # Identical to assembling the genuine reconstruction by hand.
-    assert built == scheduled_bundle((jan5,), (scheduled_session_case(JAN5)[1],))
+    # Identical to assembling the genuine reconstruction by hand, stating the
+    # same (absent) corporate-action coverage (issue 76).
+    assert built == scheduled_bundle(
+        (jan5,), (scheduled_session_case(JAN5)[1],), corporate_action_coverage=()
+    )
 
 
 @pytest.mark.parametrize("half", ["cohort", "replay"])

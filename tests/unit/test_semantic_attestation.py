@@ -2276,3 +2276,166 @@ def test_every_m1c_closure_module_is_byte_pinned_by_the_current_freezes() -> Non
             outside_m1c_freeze.add(relative)
     assert outside_m1c_freeze == {"src/drift/domain/semantic_attestation.py"}
     assert "src/drift/domain/semantic_attestation.py" not in m1c_pins
+
+
+# --- closed-world corporate-action coverage (issue 76, decision D5-b) ----------
+
+_CA_COVERAGE_MODULES = frozenset(
+    {"drift.domain.economic_closed_world", "drift.markets.economic_closed_world"}
+)
+"""The two modules issue 76 adds; no closure but its own declares either."""
+
+_CA_COVERAGE_IDENTITY_NAMES = frozenset(
+    {
+        "m1c_corporate_action_coverage_attestation",
+        "m1c_corporate_action_coverage_attestation_hash",
+    }
+)
+"""Every public name that yields the corporate-action coverage identity."""
+
+
+def test_declared_ca_coverage_closure_is_exactly_the_resolved_closure() -> None:
+    assert semantic_attestation.M1C_CA_COVERAGE_SEEDS == (
+        "drift.markets.economic_closed_world",
+    )
+    assert resolve_semantic_closure(
+        seeds=semantic_attestation.M1C_CA_COVERAGE_SEEDS
+    ) == tuple(semantic_attestation.M1C_CA_COVERAGE_SEMANTIC_MODULES)
+    verify_semantic_closure(
+        modules=semantic_attestation.M1C_CA_COVERAGE_SEMANTIC_MODULES,
+        seeds=semantic_attestation.M1C_CA_COVERAGE_SEEDS,
+    )
+
+
+def test_ca_coverage_attestation_is_bounded_and_versioned() -> None:
+    accessor = semantic_attestation.m1c_corporate_action_coverage_attestation
+    attestation = accessor()
+    assert attestation.algorithm_id == SEMANTIC_ATTESTATION_ALGORITHM_V1
+    assert attestation.schema_version == "1"
+    assert attestation.closure_id == "m1c-corporate-action-coverage-v1"
+    assert attestation.closure_id == semantic_attestation.M1C_CA_COVERAGE_CLOSURE_ID
+    assert attestation.declared_modules == tuple(
+        semantic_attestation.M1C_CA_COVERAGE_SEMANTIC_MODULES
+    )
+    assert accessor() is attestation
+    assert (
+        semantic_attestation.m1c_corporate_action_coverage_attestation_hash()
+        == attestation.attestation_hash
+    )
+    assert attestation == build_semantic_attestation(
+        closure_id="m1c-corporate-action-coverage-v1",
+        modules=semantic_attestation.M1C_CA_COVERAGE_SEMANTIC_MODULES,
+    )
+
+
+def test_ca_coverage_closure_adds_exactly_its_two_modules_to_the_attested_code() -> (
+    None
+):
+    """D5-b: a dedicated closure; no M1c or M1d closure reaches the new code.
+
+    Seeding ``m1c-evidence-v1`` instead would stale every retained M1c outcome
+    on a coverage-code edit. Every module the closure declares besides its two
+    own is already declared by ``m1c-evidence-v1``.
+    """
+    declared = set(semantic_attestation.M1C_CA_COVERAGE_SEMANTIC_MODULES)
+    assert _CA_COVERAGE_MODULES <= declared
+    assert declared - _CA_COVERAGE_MODULES < set(
+        semantic_attestation.M1C_EVIDENCE_SEMANTIC_MODULES
+    )
+    for closure in (
+        M1D_VALIDATION_SEMANTIC_MODULES,
+        semantic_attestation.M1D_EVIDENCE_SEMANTIC_MODULES,
+        semantic_attestation.M1C_VALIDATION_SEMANTIC_MODULES,
+        semantic_attestation.M1C_EVIDENCE_SEMANTIC_MODULES,
+    ):
+        assert not _CA_COVERAGE_MODULES & set(closure)
+    for module in declared:
+        assert not module.startswith(
+            ("drift.adapters", "drift.evaluator", "drift.qualification")
+        ), module
+    # Without its seed the closure is empty: the seed is what reaches the code.
+    assert resolve_semantic_closure(seeds=()) == ()
+
+
+def test_every_module_binding_the_ca_coverage_identity_is_its_seed() -> None:
+    """Only the builder and verifier stamp or check it; the definer declares it."""
+    assert _modules_naming(_CA_COVERAGE_IDENTITY_NAMES) == (
+        frozenset(semantic_attestation.M1C_CA_COVERAGE_SEEDS)
+        | _M1D_EVIDENCE_IDENTITY_DEFINERS
+    )
+
+
+def test_ca_coverage_identity_is_distinct_from_every_other_identity() -> None:
+    identities = (
+        semantic_attestation.m1c_corporate_action_coverage_attestation_hash(),
+        semantic_attestation.m1c_validation_attestation_hash(),
+        semantic_attestation.m1c_evidence_attestation_hash(),
+        m1d_semantic_attestation_hash(),
+        semantic_attestation.m1d_evidence_attestation_hash(),
+        economic_implementation_hash(),
+    )
+    assert len(set(identities)) == len(identities)
+
+
+@pytest.mark.parametrize(
+    "dropped",
+    ("drift.domain.economic_closed_world", "drift.domain.economic_results"),
+)
+def test_ca_coverage_attestation_fails_closed_on_an_incomplete_declaration(
+    monkeypatch: pytest.MonkeyPatch, dropped: str
+) -> None:
+    accessor = semantic_attestation.m1c_corporate_action_coverage_attestation
+    declared = tuple(
+        module
+        for module in semantic_attestation.M1C_CA_COVERAGE_SEMANTIC_MODULES
+        if module != dropped
+    )
+    accessor.cache_clear()
+    monkeypatch.setattr(
+        semantic_attestation, "M1C_CA_COVERAGE_SEMANTIC_MODULES", declared
+    )
+    try:
+        with pytest.raises(
+            SemanticClosureError,
+            match=r"escaped the declared attestation closure: .*-> "
+            + dropped.replace(".", r"\."),
+        ):
+            accessor()
+    finally:
+        accessor.cache_clear()
+
+
+def test_importing_the_ca_coverage_closure_loads_only_its_declared_modules() -> None:
+    """The import-trace backstop of issue 107, for the issue 76 closure."""
+    seeds = semantic_attestation.M1C_CA_COVERAGE_SEEDS
+    declared = semantic_attestation.M1C_CA_COVERAGE_SEMANTIC_MODULES
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", _IMPORT_TRACE_PROGRAM, json.dumps(seeds)],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    report = json.loads(completed.stdout)
+    assert Path(report["package"]).resolve() == (_package_root() / "__init__.py")
+    loaded = set(report["loaded"])
+    assert set(seeds) <= loaded
+    assert loaded <= set(declared), sorted(loaded - set(declared))
+
+
+def test_every_ca_coverage_closure_module_is_byte_pinned_by_the_current_freeze() -> (
+    None
+):
+    """No declared module can move the identity while every byte freeze is green.
+
+    The two issue 76 modules are M1d-pinned by their v9 additions; every other
+    module the closure declares was already pinned.
+    """
+    pins = _load_pinned_m1d().PROTECTED_M1D_SHA256
+    root = _package_root()
+    repository = root.parents[1]
+    for module in semantic_attestation.M1C_CA_COVERAGE_SEMANTIC_MODULES:
+        path = semantic_attestation._declared_module_path(root, module)
+        relative = path.relative_to(repository).as_posix()
+        assert relative in pins, module
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == pins[relative], module
