@@ -109,11 +109,15 @@ next READY issue in this workstream. If none exists, report blocked.
 
 - **Completed**: M0 (evidence kernel), M1a (temporal provenance), M1b
   (historical identity/universes), M1c (economic facts), M1d
-  (observations/sessions/normalization), and M1e Tasks 1-7 (offline
-  environment closure, golden case grader, replay harness).
+  (observations/sessions/normalization), M1e Tasks 1-7 (offline
+  environment closure, golden case grader, replay harness), M2
+  (deterministic session-level evaluator and portfolio accounting kernel),
+  and M3 (deterministic baseline strategies B0-B5, canonical runner, and
+  adversarial acceptance suite).
 - **Sequencing State (ADR 0012)**: M1e Task 8 (promotion-grade real-source
-  qualification) is paused/deferred until economically justified. M2
-  evaluator architecture and exploratory development are authorized using
+  qualification) is paused/deferred until economically justified. M4
+  (prediction and outcome tracking) is the active next milestone.
+  Exploratory evaluator and baseline development are authorized using
   free development data (Alpaca Basic).
 - **Ownership (ADR 0014)**: All remaining active roadmap implementation
   from M2 through M18+ is Krish-owned. Historical Kanuj work through

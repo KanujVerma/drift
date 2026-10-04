@@ -8,12 +8,13 @@ bias, survivorship bias, or ungrounded simulation assumptions.
 Research outputs in Drift remain strictly untrusted until validated through a
 tamper-evident, append-only evidence history and explicit promotion gates.
 
-> **Current Boundary**: Drift is not yet an equity backtester or a live trading bot.
-> Completed milestones (M0 through M1d) provide a tamper-evident, append-only research evidence
-> kernel, temporal provenance, historical identity/universes, economic action
-> terms, and normalized observations using synthetic local fixtures. M1e
-> (real-source qualification and offline replay closure) is currently in progress.
-> Drift has no live broker connection, active order execution, or live capital.
+> **Current Boundary**: Drift is not yet a live trading bot. Completed
+> milestones (M0 through M3) provide a tamper-evident research evidence kernel,
+> temporal provenance, point-in-time universes, corporate actions, normalized
+> observations, a deterministic session-level evaluator, and canonical reference
+> baselines (B0 through B5). M1e Task 8 (paid promotion qualification) is
+> deferred under ADR 0012. M4 (prediction and outcome tracking) is the active
+> milestone. Drift has no live broker connection, active order execution, or live capital.
 
 ---
 
@@ -69,11 +70,14 @@ historical source evidence
   grader G01-G18, replay harness). Task 8 (paid promotion-grade qualification) is deferred
   under ADR 0012 until economically justified by exploratory research.
   (See [M1e Provider Selection](docs/architecture/m1e-provider-selection.md) and [ADR 0012](docs/adr/0012-permit-exploratory-evaluation-before-promotion-grade-source-qualification.md)).
-- **M2: Deterministic Session-Level Evaluator and Portfolio Accounting Kernel**: Next Milestone.
-  Exploratory evaluator development with free development data (Alpaca Basic) is authorized
-  under ADR 0012; promotion-grade evaluation remains strictly gated on positive M1e qualification.
-  (See [M2 Design](docs/superpowers/specs/2026-09-19-m2-deterministic-session-evaluator-design.md)
-  and [M2 Plan](docs/superpowers/plans/2026-09-19-m2-deterministic-session-evaluator.md)).
+- **M2: Deterministic Session-Level Evaluator and Portfolio Accounting Kernel**: Complete.
+  Single deterministic, provider-neutral evaluator core operating across exploratory
+  and promotion lanes with portfolio state accounting and experiment runner.
+- **M3: Deterministic Baselines**: Complete.
+  Reference baseline strategy library B0 through B5 (cash, buy-and-hold, equal-weight rebalance,
+  12-1 momentum, 60-session low volatility), canonical runner with whole-tree code-version
+  provenance, and adversarial acceptance suite.
+- **M4: Prediction and Outcome Tracking**: Active Milestone.
 
 ---
 
