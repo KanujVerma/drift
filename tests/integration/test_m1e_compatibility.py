@@ -139,6 +139,7 @@ M4_PREDICTION_TRACKING_SOURCE_PATHS = frozenset(
         "src/drift/domain/predictions.py",
         "src/drift/tracking/__init__.py",
         "src/drift/tracking/recorder.py",
+        "src/drift/tracking/resolver.py",
     }
 )
 M1E_PRODUCTION_PATHS = frozenset(
