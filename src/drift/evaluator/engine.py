@@ -1046,42 +1046,40 @@ def evaluator_evidence_hash(
         return sorted(content_hash(value) for value in values)
 
     replay = evidence.exploratory_reconstruction_replay
-    return content_hash(
-        {
-            "book_currency": {
-                "namespace": book_currency_namespace,
-                "code": book_currency_code,
-            },
-            "listing_role_records": members(evidence.listing_role_records),
-            "listing_termination_records": members(
-                evidence.listing_termination_records
-            ),
-            "listing_lifecycle_records": members(evidence.listing_lifecycle_records),
-            "economic_outcomes": members(evidence.economic_outcomes),
-            "tie_breaking_rules": members(evidence.tie_breaking_rules),
-            "due_bill_rules": members(evidence.due_bill_rules),
-            "cash_in_lieu_rates": members(evidence.cash_in_lieu_rates),
-            "exploratory_cohort": (
-                None
-                if evidence.exploratory_cohort is None
-                else content_hash(evidence.exploratory_cohort)
-            ),
-            "exploratory_reconstruction_replay": (
-                None
-                if replay is None
-                else {
-                    "policy": content_hash(replay.policy),
-                    "requests": sorted(
-                        content_hash(
-                            {"query": query, "context": m1d_context_hash(context)}
-                        )
-                        for query, context in replay.requests
-                    ),
-                }
-            ),
-            "exploratory_listing_roles": members(evidence.exploratory_listing_roles),
-        }
-    )
+    payload: dict[str, Any] = {
+        "book_currency": {
+            "namespace": book_currency_namespace,
+            "code": book_currency_code,
+        },
+        "listing_role_records": members(evidence.listing_role_records),
+        "listing_termination_records": members(evidence.listing_termination_records),
+        "listing_lifecycle_records": members(evidence.listing_lifecycle_records),
+        "economic_outcomes": members(evidence.economic_outcomes),
+        "tie_breaking_rules": members(evidence.tie_breaking_rules),
+        "due_bill_rules": members(evidence.due_bill_rules),
+        "cash_in_lieu_rates": members(evidence.cash_in_lieu_rates),
+        "exploratory_cohort": (
+            None
+            if evidence.exploratory_cohort is None
+            else content_hash(evidence.exploratory_cohort)
+        ),
+        "exploratory_reconstruction_replay": (
+            None
+            if replay is None
+            else {
+                "policy": content_hash(replay.policy),
+                "requests": sorted(
+                    content_hash({"query": query, "context": m1d_context_hash(context)})
+                    for query, context in replay.requests
+                ),
+            }
+        ),
+    }
+    if evidence.exploratory_listing_roles:
+        payload["exploratory_listing_roles"] = members(
+            evidence.exploratory_listing_roles
+        )
+    return content_hash(payload)
 
 
 @dataclass(frozen=True)
