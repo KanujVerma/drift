@@ -129,6 +129,16 @@ M3_BASELINE_SOURCE_PATHS = frozenset(
         "src/drift/baselines/runner.py",
     }
 )
+# M4 prediction and outcome tracking source added under issue #175. Like the M2
+# and M3 additive modules above, these domain models do not carry the
+# "evaluator" prefix, so they are named and routed through the production
+# AST guard.
+M4_PREDICTION_TRACKING_SOURCE_PATHS = frozenset(
+    {
+        "src/drift/domain/outcomes.py",
+        "src/drift/domain/predictions.py",
+    }
+)
 M1E_PRODUCTION_PATHS = frozenset(
     path for path in ALLOWED_M1E_PRODUCTION_PATHS if path.startswith("src/drift/")
 )
@@ -141,6 +151,7 @@ INERT_SOURCE_PATHS = (
     | M2_ALPACA_BRIDGE_SOURCE_PATHS
     | M2_ALPACA_BRIDGE_SCRIPT_PATHS
     | M3_BASELINE_SOURCE_PATHS
+    | M4_PREDICTION_TRACKING_SOURCE_PATHS
 )
 M1E_SCRIPT_PATHS = frozenset(
     path for path in ALLOWED_M1E_PRODUCTION_PATHS if path.startswith("scripts/")
@@ -775,6 +786,7 @@ def test_m1e_additions_are_allowlisted_inert_and_leave_m1d_pins_unchanged() -> N
         | M2_ADDITIVE_SOURCE_PATHS
         | M2_ALPACA_BRIDGE_SOURCE_PATHS
         | M3_BASELINE_SOURCE_PATHS
+        | M4_PREDICTION_TRACKING_SOURCE_PATHS
     )
     assert present & scanned_as_production
     for relative in present:
