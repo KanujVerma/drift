@@ -78,13 +78,16 @@ M1C_CLOSED_WORLD_SOURCE_PATHS = frozenset(
         "src/drift/markets/economic_closed_world.py",
     }
 )
-# M2 source added under issue #34.  It is additive under ADR 0012 like the
-# evaluator modules, but it does not carry the "evaluator" prefix that
-# _m1e_candidate_paths filters on, so it has to be named.  As with the
+# M2 source added under issue #34 and issue #116. It is additive under ADR 0012
+# like the evaluator modules, but it does not carry the "evaluator" prefix that
+# _m1e_candidate_paths filters on, so it has to be named. As with the
 # replay-identity path above it is named rather than exempted, and is routed
 # through the same production AST guard below.
 M2_ADDITIVE_SOURCE_PATHS = frozenset(
     {
+        "src/drift/analysis/__init__.py",
+        "src/drift/analysis/analytical_returns.py",
+        "src/drift/domain/analytical_returns.py",
         "src/drift/domain/replay_provenance.py",
     }
 )
