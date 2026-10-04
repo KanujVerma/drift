@@ -113,6 +113,21 @@ M2_ALPACA_BRIDGE_SCRIPT_PATHS = frozenset(
         "scripts/intake_alpaca_exploratory.py",
     }
 )
+# M3 baseline strategy source added under issue #166. Like the M2 additive
+# modules above, these reference strategies do not carry the "evaluator" prefix,
+# so they are named and routed through the production AST guard.
+M3_BASELINE_SOURCE_PATHS = frozenset(
+    {
+        "src/drift/baselines/__init__.py",
+        "src/drift/baselines/b0_cash.py",
+        "src/drift/baselines/b1_single_buy_and_hold.py",
+        "src/drift/baselines/b2_equal_weight_buy_and_hold.py",
+        "src/drift/baselines/b3_monthly_equal_weight_rebalance.py",
+        "src/drift/baselines/b4_momentum.py",
+        "src/drift/baselines/b5_low_volatility.py",
+        "src/drift/baselines/common.py",
+    }
+)
 M1E_PRODUCTION_PATHS = frozenset(
     path for path in ALLOWED_M1E_PRODUCTION_PATHS if path.startswith("src/drift/")
 )
@@ -124,6 +139,7 @@ INERT_SOURCE_PATHS = (
     | M2_ADDITIVE_SOURCE_PATHS
     | M2_ALPACA_BRIDGE_SOURCE_PATHS
     | M2_ALPACA_BRIDGE_SCRIPT_PATHS
+    | M3_BASELINE_SOURCE_PATHS
 )
 M1E_SCRIPT_PATHS = frozenset(
     path for path in ALLOWED_M1E_PRODUCTION_PATHS if path.startswith("scripts/")
@@ -757,6 +773,7 @@ def test_m1e_additions_are_allowlisted_inert_and_leave_m1d_pins_unchanged() -> N
         | M1C_CLOSED_WORLD_SOURCE_PATHS
         | M2_ADDITIVE_SOURCE_PATHS
         | M2_ALPACA_BRIDGE_SOURCE_PATHS
+        | M3_BASELINE_SOURCE_PATHS
     )
     assert present & scanned_as_production
     for relative in present:
