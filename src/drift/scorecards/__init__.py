@@ -5,6 +5,11 @@ probabilistic calibration curves, drawdown trajectory analysis, portfolio
 turnover, and multiple-testing adjustments.
 """
 
+from drift.scorecards.generator import (
+    ScorecardGeneratorHarness,
+    deterministic_scorecard_uuid7,
+    generate_model_scorecard,
+)
 from drift.scorecards.multiple_testing import (
     benjamini_hochberg_adjust_all,
     bonferroni_adjust_all,
@@ -31,6 +36,7 @@ from drift.scorecards.predictive import (
 )
 
 __all__ = [
+    "ScorecardGeneratorHarness",
     "aggregate_information_coefficients",
     "benjamini_hochberg_adjust_all",
     "bonferroni_adjust_all",
@@ -45,7 +51,9 @@ __all__ = [
     "compute_sample_moments",
     "compute_spearman_rank_correlation",
     "compute_turnover_summary",
+    "deterministic_scorecard_uuid7",
     "fractional_ranks",
+    "generate_model_scorecard",
     "generate_prediction_scorecard",
     "generate_strategy_scorecard",
     "holm_bonferroni_adjust_all",
