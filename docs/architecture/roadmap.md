@@ -151,10 +151,35 @@ operational authorization.
   long-only allocations; strictly non-promotable exploratory evidence; zero broker
   or execution authority.
 
-### M4 through M6: Quantitative Modeling Foundations
-- **M4 Prediction and Outcome Tracking** (Krish; Active Milestone): Record ex-ante model predictions and link
-  them auditably to subsequent realized market facts in the ledger.
-- **M5 Statistical and Model Scorecards** (Krish): Measure calibration, information coefficients,
+### M4: Prediction and Outcome Tracking (Complete)
+- **Owner**: Krish.
+- **Status**: Complete. Closed with Issue #11 and PR #184 (#183).
+- **Objective**: Record ex-ante model predictions and link them auditably to
+  subsequent realized market facts in the ledger, enforcing temporal causality
+  and fail-closed completeness.
+- **Delivered**:
+  - Domain models and ledger schemas in `src/drift/domain/predictions.py` and
+    `src/drift/domain/outcomes.py` (`ExAntePredictionRecordV1`, `ExAntePredictionSetV1`,
+    `RealizedOutcomeRecordV1`, `RealizedOutcomeBatchV1`).
+  - Atomic epoch recorder and M0 ledger persistence in `src/drift/tracking/recorder.py`
+    (`PredictionRecorder`, `m4.prediction_set.recorded`).
+  - Deterministic outcome resolver and attribution engine in `src/drift/tracking/resolver.py`
+    (`OutcomeResolver`, `m4.outcome_batch.resolved`) supporting forward returns,
+    directional returns, realized volatility, excess return, and cross-sectional rank.
+  - Fail-closed terminal states: `RESOLVED`, `INDETERMINATE`, `DELISTED_WITH_OUTCOME`,
+    `DELISTED_WITHOUT_OUTCOME`, and `EXCLUDED_UNAVAILABLE`.
+  - Baseline predictor adapters in `src/drift/tracking/adapters.py` (`B4MomentumPredictor`,
+    `B5LowVolatilityPredictor`, `NullReferencePredictor`).
+  - Evaluation tracking harness in `src/drift/tracking/harness.py` (`PredictionTrackingHarness`).
+  - Comprehensive adversarial acceptance suite in `tests/adversarial/test_m4_prediction_tracking_adversarial.py`
+    verifying lookahead immunity, causality ordering, anti-cherry-picking, corporate action invariance,
+    and replay determinism.
+- **Invariants**: Bitwise-reproducible prediction sets and outcome batches; fail-closed
+  completeness with zero dropped cohort members; corporate-action-consistent analytical returns;
+  strictly non-promotable exploratory evidence; zero broker or execution authority.
+
+### M5 through M6: Quantitative Modeling Foundations
+- **M5 Statistical and Model Scorecards** (Krish; Active Next Milestone): Measure calibration, information coefficients,
   drawdown profiles, and turnover with multiple-testing adjustments.
 - **M6 Structured Research Memory** (Krish): Establish a queryable historical archive of
   hypotheses, trials, parameter searches, and failure postmortems to prevent repeat errors.
