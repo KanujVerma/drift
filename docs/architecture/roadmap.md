@@ -32,9 +32,9 @@ operational authorization.
 | **M1c** | Corporate Actions / Economic Facts | - | **COMPLETE** | Terms, occurred effects, reported settlements, dependent replay. |
 | **M1d** | Observations, Sessions, Normalization | - | **COMPLETE** | Source claims, realized sessions, missingness, split-normalized views. |
 | **M1e** | Real-Source Qualification & Replay | - | **IN PROGRESS / DEFERRED** | Tasks 1-7 complete (offline closure); Task 8 paid promotion qualification deferred. |
-| **M2** | Evaluator / Backtester | Krish | **IN PROGRESS** | Deterministic point-in-time strategy evaluation; exploratory lane authorized under ADR 0012. |
-| **M3** | Deterministic Baselines | Krish | Planned | Passive, factor, and mechanical reference benchmark strategies. |
-| **M4** | Prediction / Outcome Tracking | Krish | Planned | Audited tracking of ex-ante forecasts against realized market facts. |
+| **M2** | Evaluator / Backtester | Krish | **COMPLETE** | Deterministic point-in-time strategy evaluation; exploratory lane authorized under ADR 0012. |
+| **M3** | Deterministic Baselines | Krish | **COMPLETE** | Passive, factor, and mechanical reference benchmark strategies B0 through B5. |
+| **M4** | Prediction / Outcome Tracking | Krish | **IN PROGRESS** | Audited tracking of ex-ante forecasts against realized market facts. |
 | **M5** | Statistical / Model Scorecards | Krish | Planned | Rigorous performance attribution, calibration, and degradation metrics. |
 | **M6** | Structured Research Memory | Krish | Planned | Semantic storage of past experiments, failures, and causal insights. |
 | **M7** | First AI Research Agent | Krish | Planned | Autonomous hypothesis generation and experiment specification. |
@@ -108,9 +108,9 @@ operational authorization.
 - **Documents**: See [M1e Provider Selection](m1e-provider-selection.md) and
   [ADR 0012](../adr/0012-permit-exploratory-evaluation-before-promotion-grade-source-qualification.md).
 
-### M2: Deterministic Session-Level Evaluator and Portfolio Accounting Kernel (In Progress)
+### M2: Deterministic Session-Level Evaluator and Portfolio Accounting Kernel (Complete)
 - **Owner**: Krish. Remaining M2 implementation belongs to workstream `krish`. Historical Task 2A work through `ca055b8011e72b0834075f67a402228df76e18da` was completed under the Kanuj workstream.
-- **Status**: In progress (exploratory lane authorized under ADR 0012). Live task state is the GitHub M2 milestone and its issues.
+- **Status**: Complete. Closed with Issue #1 and Issue #8 (PR #156).
 - **Objective**: Implement a single deterministic, provider-neutral evaluator core
   operating across two distinct evaluation lanes:
   - *EXPLORATORY Lane*: Consumes free development data (Alpaca Basic) with known
@@ -129,10 +129,30 @@ operational authorization.
 - **Documents**: See [M2 Design Specification](../superpowers/specs/2026-09-19-m2-deterministic-session-evaluator-design.md)
   and [M2 Implementation Plan](../superpowers/plans/2026-09-19-m2-deterministic-session-evaluator.md).
 
-### M3 through M6: Quantitative Modeling Foundations
-- **M3 Deterministic Baselines** (Krish): Build passive, factor, and mechanical reference
-  strategies against which all future research models are compared.
-- **M4 Prediction and Outcome Tracking** (Krish): Record ex-ante model predictions and link
+### M3: Deterministic Baselines (Complete)
+- **Owner**: Krish.
+- **Status**: Complete. Closed with Issue #10 and PR #170 (#169).
+- **Objective**: Build passive, factor, and mechanical reference strategies against
+  which future research models are compared.
+- **Delivered**:
+  - Deterministic reference baseline strategy library B0 through B5 in `src/drift/baselines/`:
+    - B0: Cash (Null Hypothesis)
+    - B1: Per-Security Buy-and-Hold
+    - B2: Equal-Weight Cohort Buy-and-Hold
+    - B3: Monthly Equal-Weight Rebalance
+    - B4: 12-1 Momentum (Corporate-action-consistent analytical returns)
+    - B5: 60-Session Low Volatility (Exact population return variance)
+  - Canonical baseline suite runner in `src/drift/baselines/runner.py` binding
+    whole-tree code-version provenance (`drift_source_inventory_hash()`).
+  - Comprehensive adversarial acceptance suite in `tests/adversarial/test_m3_baselines_adversarial.py`
+    verifying lookahead immunity, cohort survivorship, non-promotability,
+    closed-world replay determinism, and fail-closed missingness.
+- **Invariants**: Pure deterministic functions of decision contexts; whole-share
+  long-only allocations; strictly non-promotable exploratory evidence; zero broker
+  or execution authority.
+
+### M4 through M6: Quantitative Modeling Foundations
+- **M4 Prediction and Outcome Tracking** (Krish; Active Milestone): Record ex-ante model predictions and link
   them auditably to subsequent realized market facts in the ledger.
 - **M5 Statistical and Model Scorecards** (Krish): Measure calibration, information coefficients,
   drawdown profiles, and turnover with multiple-testing adjustments.
