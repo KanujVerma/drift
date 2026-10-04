@@ -90,6 +90,7 @@ from drift.domain.evaluator_protocol import (
 )
 from drift.domain.evaluator_reconstruction import (
     ExploratoryReconstructedSessionObservationV1,
+    build_exploratory_cohort_listing_role,
 )
 from drift.domain.evaluator_results import (
     EvaluationClassification,
@@ -106,6 +107,7 @@ from drift.domain.securities import (
     ListingLifecycleVersionV1,
     ListingTerminationReason,
     ListingTerminationVersionV1,
+    ListingVenue,
     OutcomeEvidenceStatus,
 )
 from drift.domain.temporal import SourcePrecision
@@ -429,8 +431,23 @@ def _two_of_every_collection() -> dict[str, tuple[Any, Any]]:
     reconstructed = tuple(scheduled_session_case(day)[0] for day in (JAN5, JAN6))
     requests = exploratory_replay_of(reconstructed).requests
     assert len(requests) == 2
+    cohort = cohort_of((eng.SEC_A, eng.SEC_B))
     return {
         "listing_role_records": eng.ROLE_RECORDS,
+        "exploratory_listing_roles": (
+            build_exploratory_cohort_listing_role(
+                cohort=cohort,
+                security_id=eng.SEC_A,
+                listing_id=eng.LISTING_A,
+                venue=ListingVenue.XNYS,
+            ),
+            build_exploratory_cohort_listing_role(
+                cohort=cohort,
+                security_id=eng.SEC_B,
+                listing_id=eng.LISTING_B,
+                venue=ListingVenue.XNYS,
+            ),
+        ),
         "listing_termination_records": _probe_terminations(),
         "listing_lifecycle_records": (
             _lifecycle(
