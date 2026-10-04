@@ -178,11 +178,23 @@ operational authorization.
   completeness with zero dropped cohort members; corporate-action-consistent analytical returns;
   strictly non-promotable exploratory evidence; zero broker or execution authority.
 
-### M5 through M6: Quantitative Modeling Foundations
-- **M5 Statistical and Model Scorecards** (Krish; Active Next Milestone): Measure calibration, information coefficients,
-  drawdown profiles, and turnover with multiple-testing adjustments.
-- **M6 Structured Research Memory** (Krish): Establish a queryable historical archive of
-  hypotheses, trials, parameter searches, and failure postmortems to prevent repeat errors.
+### M5: Statistical and Model Scorecards (Complete)
+- **Owner**: Krish.
+- **Status**: Complete. Closed with Issue #12 and PR #200 (#199).
+- **Objective**: Measure calibration, information coefficients, performance attribution, risk profiles, drawdown profiles, and multiple-testing adjustments across strategies and predictive models.
+- **Delivered**:
+  - Domain models and ledger schemas in `src/drift/domain/scorecards.py` (`PredictionScorecardV1`, `StrategyScorecardV1`, `ModelScorecardV1`, `InformationCoefficientSummaryV1`, `CalibrationSummaryV1`, `DrawdownProfileV1`, `MultipleTestingAdjustmentsV1`, `AuditEventPayloadV1`).
+  - Predictive power and calibration metrics engine in `src/drift/scorecards/predictive.py` (fractional ranks with symmetric tie-breaking, Spearman/Pearson correlation, Information Coefficients, Brier score, ECE, reliability bins).
+  - Performance attribution, risk profiles, drawdown engine, and PnL completeness validation in `src/drift/scorecards/performance.py` (cumulative/annualized returns, annualized volatility, downside deviation, Sharpe, Sortino, Calmar, underwater drawdown curves, strict propagation of `RealizedPnLCompletenessV1` per Issue #152).
+  - Multiple-testing adjustment engine in `src/drift/scorecards/multiple_testing.py` (Deflated Sharpe Ratio per Bailey & Lopez de Prado 2014, Bonferroni, Holm step-down FWER, Benjamini-Hochberg step-up FDR).
+  - Composite scorecard generator harness and M0 ledger sealing in `src/drift/scorecards/generator.py` (`ScorecardGeneratorHarness`, `m5.scorecard.recorded` audit events).
+  - Comprehensive adversarial acceptance suite in `tests/adversarial/test_m5_scorecards_adversarial.py` (bit-flip tampering, degenerate zero-volatility returns, single-session returns, PnL incompleteness anti-laundering, multiple-testing monotonicity, large-trial selection bias deflation, degenerate prediction bounds, SQLite ledger trigger and cryptographic chain tampering, empty shell model scorecard rejection, empty epoch fail-closed, epoch order invariance).
+- **Invariants**: Pure Python standard-library math (Decimal, math.sqrt, statistics.NormalDist) with zero numpy or scipy runtime dependencies; strict non-promotable exploratory lane evidence; fail-closed PnL completeness preservation; tamper-evident cryptographic hash chains; zero broker or execution authority.
+
+### M6: Structured Research Memory (Active Next Milestone)
+- **Owner**: Krish.
+- **Status**: Active Next Milestone. Tracked under Parent Issue #13.
+- **Objective**: Establish a queryable historical archive of hypotheses, trials, parameter searches, and failure postmortems to prevent repeat errors.
 
 ### M7 through M11: Autonomous Research and R&D Loop
 - **M7 First AI Research Agent** (Krish): Deploy an autonomous agent tasked with generating
