@@ -129,14 +129,16 @@ M3_BASELINE_SOURCE_PATHS = frozenset(
         "src/drift/baselines/runner.py",
     }
 )
-# M4 prediction and outcome tracking source added under issue #175. Like the M2
-# and M3 additive modules above, these domain models do not carry the
-# "evaluator" prefix, so they are named and routed through the production
-# AST guard.
+# M4 prediction and outcome tracking source added under issues #175 and #177.
+# Like the M2 and M3 additive modules above, these models and engines do not
+# carry the "evaluator" prefix, so they are named and routed through the
+# production AST guard.
 M4_PREDICTION_TRACKING_SOURCE_PATHS = frozenset(
     {
         "src/drift/domain/outcomes.py",
         "src/drift/domain/predictions.py",
+        "src/drift/tracking/__init__.py",
+        "src/drift/tracking/recorder.py",
     }
 )
 M1E_PRODUCTION_PATHS = frozenset(
