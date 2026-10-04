@@ -144,6 +144,20 @@ M4_PREDICTION_TRACKING_SOURCE_PATHS = frozenset(
         "src/drift/tracking/resolver.py",
     }
 )
+# M5 statistical and model scorecard source added under issue #189.
+# Like the M2, M3, and M4 additive modules above, these models and engines
+# do not carry the "evaluator" prefix, so they are named and routed through the
+# production AST guard.
+M5_SCORECARD_SOURCE_PATHS = frozenset(
+    {
+        "src/drift/domain/scorecards.py",
+        "src/drift/scorecards/__init__.py",
+        "src/drift/scorecards/generator.py",
+        "src/drift/scorecards/multiple_testing.py",
+        "src/drift/scorecards/performance.py",
+        "src/drift/scorecards/predictive.py",
+    }
+)
 M1E_PRODUCTION_PATHS = frozenset(
     path for path in ALLOWED_M1E_PRODUCTION_PATHS if path.startswith("src/drift/")
 )
@@ -157,6 +171,7 @@ INERT_SOURCE_PATHS = (
     | M2_ALPACA_BRIDGE_SCRIPT_PATHS
     | M3_BASELINE_SOURCE_PATHS
     | M4_PREDICTION_TRACKING_SOURCE_PATHS
+    | M5_SCORECARD_SOURCE_PATHS
 )
 M1E_SCRIPT_PATHS = frozenset(
     path for path in ALLOWED_M1E_PRODUCTION_PATHS if path.startswith("scripts/")
@@ -792,6 +807,7 @@ def test_m1e_additions_are_allowlisted_inert_and_leave_m1d_pins_unchanged() -> N
         | M2_ALPACA_BRIDGE_SOURCE_PATHS
         | M3_BASELINE_SOURCE_PATHS
         | M4_PREDICTION_TRACKING_SOURCE_PATHS
+        | M5_SCORECARD_SOURCE_PATHS
     )
     assert present & scanned_as_production
     for relative in present:
