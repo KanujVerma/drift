@@ -41,7 +41,10 @@ from drift.domain.predictions import (
     ScalarPointPredictionV1,
 )
 from drift.ledger.interface import AuditEventDraft, Ledger
-from drift.tracking.recorder import TrackingError
+from drift.tracking.recorder import (
+    TrackingError,
+    deterministic_tracking_uuid7,
+)
 
 OUTCOME_BATCH_EVENT_TYPE: NonBlankStr = "m4.outcome_batch.resolved"
 OUTCOME_BATCH_ENTITY_TYPE: NonBlankStr = "outcome_batch"
@@ -155,8 +158,14 @@ class OutcomeResolver:
         self,
         *,
         ledger: Ledger | None = None,
+        deterministic: bool = False,
     ) -> None:
         self._ledger = ledger
+        self._deterministic = deterministic
+
+    @property
+    def deterministic(self) -> bool:
+        return self._deterministic
 
     def resolve_single_prediction(
         self,
@@ -170,7 +179,11 @@ class OutcomeResolver:
     ) -> RealizedOutcomeRecordV1:
         """Resolve a single ex-ante prediction against market evidence."""
         if outcome_id is None:
-            outcome_id = uuid7()
+            if self._deterministic:
+                seed = f"{prediction.run_id}:outcome:{prediction.prediction_id}"
+                outcome_id = deterministic_tracking_uuid7(seed)
+            else:
+                outcome_id = uuid7()
 
         resolved_utc = (
             resolved_at.astimezone(UTC)
@@ -549,9 +562,16 @@ class OutcomeResolver:
                 err = None
                 if isinstance(p.prediction_value, ScalarPointPredictionV1):
                     err = rank_val - p.prediction_value.point_value
+                single_out_id = (
+                    deterministic_tracking_uuid7(
+                        f"{p.run_id}:outcome:{p.prediction_id}"
+                    )
+                    if self._deterministic
+                    else uuid7()
+                )
                 outcomes.append(
                     build_realized_outcome_record(
-                        outcome_id=uuid7(),
+                        outcome_id=single_out_id,
                         prediction_id=p.prediction_id,
                         status=OutcomeResolutionStatus.RESOLVED,
                         realized_value=rank_val,
@@ -579,9 +599,16 @@ class OutcomeResolver:
                         err = None
                         if isinstance(p.prediction_value, ScalarPointPredictionV1):
                             err = avg_rank - p.prediction_value.point_value
+                        tied_out_id = (
+                            deterministic_tracking_uuid7(
+                                f"{p.run_id}:outcome:{p.prediction_id}"
+                            )
+                            if self._deterministic
+                            else uuid7()
+                        )
                         outcomes.append(
                             build_realized_outcome_record(
-                                outcome_id=uuid7(),
+                                outcome_id=tied_out_id,
                                 prediction_id=p.prediction_id,
                                 status=OutcomeResolutionStatus.RESOLVED,
                                 realized_value=avg_rank,
@@ -593,7 +620,11 @@ class OutcomeResolver:
                         )
 
         if outcome_batch_id is None:
-            outcome_batch_id = uuid7()
+            if self._deterministic:
+                seed = f"{run_id}:batch:{resolved_utc.isoformat()}:{len(outcomes)}"
+                outcome_batch_id = deterministic_tracking_uuid7(seed)
+            else:
+                outcome_batch_id = uuid7()
 
         batch = build_realized_outcome_batch(
             outcome_batch_id=outcome_batch_id,
@@ -605,7 +636,11 @@ class OutcomeResolver:
 
         if self._ledger is not None:
             if audit_event_id is None:
-                audit_event_id = uuid7()
+                if self._deterministic:
+                    seed = f"{run_id}:outcome_event:{batch.outcome_batch_id}"
+                    audit_event_id = deterministic_tracking_uuid7(seed)
+                else:
+                    audit_event_id = uuid7()
             draft = AuditEventDraft(
                 event_id=audit_event_id,
                 event_type=OUTCOME_BATCH_EVENT_TYPE,

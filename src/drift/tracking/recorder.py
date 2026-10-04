@@ -4,6 +4,7 @@ Manages buffering, causal validation, atomic epoch sealing, and M0 ledger
 persistence of ex-ante prediction sets.
 """
 
+import hashlib
 from datetime import UTC, date, datetime
 from typing import Literal
 from uuid import UUID, uuid7
@@ -27,6 +28,17 @@ from drift.ledger.interface import AuditEventDraft, Ledger
 PREDICTION_SET_EVENT_TYPE: NonBlankStr = "m4.prediction_set.recorded"
 PREDICTION_SET_ENTITY_TYPE: NonBlankStr = "prediction_set"
 PREDICTION_SET_EVENT_SCHEMA_VERSION: NonBlankStr = "1"
+
+
+def deterministic_tracking_uuid7(seed: str) -> UUID:
+    """Derive a deterministic UUIDv7 value from a seed string."""
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+    raw = int(digest[:32], 16)
+    raw &= ~(0xF << 76)
+    raw |= 0x7 << 76
+    raw &= ~(0x3 << 62)
+    raw |= 0x2 << 62
+    return UUID(int=raw)
 
 
 class TrackingError(DriftError):
@@ -54,12 +66,14 @@ class PredictionRecorder:
         run_id: UUID,
         lane: Literal["exploratory", "promotion"] = "exploratory",
         ledger: Ledger | None = None,
+        deterministic: bool = False,
         input_context_hash: str = "0" * 64,
         model_provenance_hash: str = "0" * 64,
     ) -> None:
         self._run_id = run_id
         self._lane: Literal["exploratory", "promotion"] = lane
         self._ledger = ledger
+        self._deterministic = deterministic
         self._input_context_hash = input_context_hash
         self._model_provenance_hash = model_provenance_hash
         self._buffer: list[ExAntePredictionRecordV1] = []
@@ -73,6 +87,10 @@ class PredictionRecorder:
     @property
     def lane(self) -> Literal["exploratory", "promotion"]:
         return self._lane
+
+    @property
+    def deterministic(self) -> bool:
+        return self._deterministic
 
     @property
     def buffered_count(self) -> int:
@@ -108,7 +126,14 @@ class PredictionRecorder:
             )
 
         if prediction_id is None:
-            prediction_id = uuid7()
+            if self._deterministic:
+                seed = (
+                    f"{self._run_id}:pred:{security_id}:{target_type.value}:"
+                    f"{target_horizon.start_session_date}:{target_horizon.end_session_date}"
+                )
+                prediction_id = deterministic_tracking_uuid7(seed)
+            else:
+                prediction_id = uuid7()
 
         if as_of_time is None:
             as_of_time = datetime(
@@ -157,7 +182,11 @@ class PredictionRecorder:
                 )
 
         if prediction_set_id is None:
-            prediction_set_id = uuid7()
+            if self._deterministic:
+                seed = f"{self._run_id}:set:{session_date}:{as_of_utc.isoformat()}"
+                prediction_set_id = deterministic_tracking_uuid7(seed)
+            else:
+                prediction_set_id = uuid7()
 
         reanchored: list[ExAntePredictionRecordV1] = []
         for p in self._buffer:
@@ -197,7 +226,11 @@ class PredictionRecorder:
 
         if self._ledger is not None:
             if audit_event_id is None:
-                audit_event_id = uuid7()
+                if self._deterministic:
+                    seed = f"{self._run_id}:pred_event:{pred_set.prediction_set_id}"
+                    audit_event_id = deterministic_tracking_uuid7(seed)
+                else:
+                    audit_event_id = uuid7()
             draft = AuditEventDraft(
                 event_id=audit_event_id,
                 event_type=PREDICTION_SET_EVENT_TYPE,
