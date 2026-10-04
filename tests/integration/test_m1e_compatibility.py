@@ -126,6 +126,7 @@ M3_BASELINE_SOURCE_PATHS = frozenset(
         "src/drift/baselines/b4_momentum.py",
         "src/drift/baselines/b5_low_volatility.py",
         "src/drift/baselines/common.py",
+        "src/drift/baselines/runner.py",
     }
 )
 M1E_PRODUCTION_PATHS = frozenset(
