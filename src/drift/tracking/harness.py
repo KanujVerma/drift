@@ -61,22 +61,32 @@ class PredictionTrackingHarness:
         run_id: UUID,
         lane: Literal["exploratory", "promotion"] = "exploratory",
         ledger: Ledger | None = None,
+        deterministic: bool = False,
         input_context_hash: str = "0" * 64,
         model_provenance_hash: str = "0" * 64,
     ) -> None:
         self._run_id = run_id
         self._lane = lane
         self._ledger = ledger
+        self._deterministic = deterministic
         self._recorder = PredictionRecorder(
             run_id=run_id,
             lane=lane,
             ledger=ledger,
+            deterministic=deterministic,
             input_context_hash=input_context_hash,
             model_provenance_hash=model_provenance_hash,
         )
-        self._resolver = OutcomeResolver(ledger=ledger)
+        self._resolver = OutcomeResolver(
+            ledger=ledger,
+            deterministic=deterministic,
+        )
         self._sealed_sets: list[ExAntePredictionSetV1] = []
         self._resolved_batches: list[RealizedOutcomeBatchV1] = []
+
+    @property
+    def deterministic(self) -> bool:
+        return self._deterministic
 
     @property
     def run_id(self) -> UUID:
