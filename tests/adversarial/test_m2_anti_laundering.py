@@ -1618,19 +1618,24 @@ RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_71 = (
 # acknowledged limitations (and the reconstructed events restating them)
 # gaining `corporate-action-absence-read-from-current-provider-snapshot`. No
 # quantity, price, cash, NAV, classification, count, status, reason, lane or
-# kind leaf changes. These are the same two runs' hashes since that change.
+# Issue 152: adds the result-level signal `realized_pnl_completeness` to
+# `EvaluationSummaryMetricsV1` (issue 152 follow-up to PR #139).
+# This recorded, hash-changing addition moves the result hashes, while
+# trace hashes remain byte-identical.
 REALIZED_TRACE_HASH_SINCE_ISSUE_76 = (
     "385edb0073c986745da4af1fe771b4efa6a23601277418bd1db98672557f8913"
 )
-REALIZED_RESULT_HASH_SINCE_ISSUE_76 = (
-    "be6e7622324ec3f16e7e6349a681f9234893bfba8184db1570ba128538c2e603"
+REALIZED_RESULT_HASH_SINCE_ISSUE_152 = (
+    "fbd23a72b28fb9b08002c99b0763c9756a501836b1bc310704e829dce799817a"
 )
+REALIZED_RESULT_HASH_SINCE_ISSUE_76 = REALIZED_RESULT_HASH_SINCE_ISSUE_152
 RECONSTRUCTED_TRACE_HASH_SINCE_ISSUE_76 = (
     "8cc9a23409d27882464ad59bcba2f05216d8344c671d58baa3f07a69da38643a"
 )
-RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_76 = (
-    "e8c1f61541fb5d43a8cd24d3bbb8565ca8d8c74045720928222af007f8129e4f"
+RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_152 = (
+    "9b41b9f949a31a11b8ed9e954fc641a4c23ca4fd42bbdf82dc813b9a78492a07"
 )
+RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_76 = RECONSTRUCTED_RESULT_HASH_SINCE_ISSUE_152
 
 
 def _promotion_engine(bundle: Any, admission: Any) -> SessionEvaluatorEngine:

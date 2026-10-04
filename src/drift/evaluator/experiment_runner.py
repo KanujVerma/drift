@@ -185,6 +185,7 @@ def summary_metrics_payload(
     """
     refuse_promotion_lane(result, site="the summary metrics projection")
     metrics: EvaluationSummaryMetricsV1 = result.metrics
+    completeness = metrics.realized_pnl_completeness
     payload: dict[str, ImmutableJSONValue] = {
         "lane": result.lane,
         "classification": result.classification.value,
@@ -195,6 +196,25 @@ def summary_metrics_payload(
         "result_hash": result.result_hash,
         "trace_hash": result.trace_hash,
         "run_identity_hash": result.run_identity.run_identity_hash,
+        "realized_pnl_is_complete": completeness.is_complete,
+        "realized_pnl_excluded_disposals": tuple(
+            {
+                "schema_version": d.schema_version,
+                "security_id": str(d.security_id),
+                "source_id": d.source_id,
+                "action_kind": d.action_kind.value,
+                "occurrence_id": d.occurrence_id,
+                "component_id": d.component_id,
+                "session_key": {
+                    "mic": d.session_key.mic,
+                    "local_date": d.session_key.local_date.isoformat(),
+                },
+                "cash_proceeds": str(d.cash_proceeds),
+                "reason": d.reason,
+                "applied_effect_id": d.applied_effect_id,
+            }
+            for d in completeness.excluded_disposals
+        ),
     }
     exact: Mapping[str, Decimal] = {
         "initial_cash": metrics.initial_cash,

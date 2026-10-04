@@ -357,35 +357,37 @@ def aggregate_sale_residual_run() -> EvaluationRunArtifactsV2:
 #: quiet exploratory record covers the second security; no quantity, price,
 #: cash, NAV, classification, count, status or reason changes.
 RUN_PINS: dict[str, tuple[EvaluationClassification, str, str]] = {
+    # Issue 152: adds realized_pnl_completeness to EvaluationSummaryMetricsV1,
+    # moving result_hash while trace_hash remains byte-identical.
     "forward-split": (
         EvaluationClassification.COMPLETE,
         "8c5c81fcc3acddaa9eb3c1be37236dcefc82d6f090ac6cfdb0f3cd65c3e597f7",
-        "10202f71358140cb075aad399606361a60df4d7d9dd1055260f3fc1e9dda50da",
+        "029efd67da54ce8f8b4f41fda166a7175298b1544d149c2598da0e51c337cb13",
     ),
     "stock-dividend": (
         EvaluationClassification.COMPLETE,
         "ac7850f135edcb480e62f9e0ea1b161f0c7c442b627c5ba4863f0c8de1af8b79",
-        "fbb2f1291322089d8c47bad9b87b1d44ce8a754e956697af1c660f506f4908c4",
+        "5d04eed99a40752b35cdc5201cf94ee2e2bd85eddd0708a808397e018f9709e3",
     ),
     "stock-acquisition": (
         EvaluationClassification.COMPLETE,
         "08573913bd3e9b5e41386294a377d84905a3169b8a963494e051ec17293a0dd0",
-        "fc64baa34243ea0aec36477d099738cb858a1d5a447d44abd5c535defb417e9f",
+        "54a2b11b564cdfba47856eb663570619d051985b2d9565691109341c7706738d",
     ),
     "extinguishing-liquidation": (
         EvaluationClassification.COMPLETE,
         "9f9d4a3904de23d47f5443d592a3c11b7a0969e0746fef1768b92b6a8d033d14",
-        "66fc9078407d90e351877a37aad03552b459ba6aa1257ee0419f4527a38c0f1a",
+        "bbe599be0cb0c115029b3200e70ecbc3ce3505f671e7252e40aa88fbe32c3a52",
     ),
     "cash-acquisition": (
         EvaluationClassification.COMPLETE,
         "297c38f0998d49621c28876a7d53e362955f366c64247aba77d4c8be4010b5b5",
-        "6f0caa6b186b8807bf906dfd65805b28fd2a892ec782c632e044379b94f5a4cd",
+        "1db97351547e5eaa647991f160d360ef9870ec0a464c8b7b7ae0217cbc114e89",
     ),
     "cash-dividend": (
         EvaluationClassification.COMPLETE,
         "97ddf4e29bb8e9ba0319efa130c59ce17089ba1dd4285f1f0f9ca4a66d1da514",
-        "b2e6d16ac12ee7718dcd158fdeb78e7a51b9c4437da3e41551e12e57021d2b77",
+        "318c3d2c6e3a7c4e45d176d7a1f4e05a307f35199760cb646fa985e4ca8fa84c",
     ),
     # Issue 103: the session-3 decision sees both sides of the spin-off with
     # an indeterminate basis, so its context hash moves (41ce3853 to
@@ -393,21 +395,21 @@ RUN_PINS: dict[str, tuple[EvaluationClassification, str, str]] = {
     "spinoff": (
         EvaluationClassification.COMPLETE,
         "e92a0e2b70cb9c1126b2775d84f9086ea2a88e50548df7f4e36923aafa4fe858",
-        "20081d531729ea3048511ab6c178e304cf5bb66283e4f760b7a4e46ce0d655d2",
+        "253e62d75a255378a2c4fbc387604ea3106b8d336721fdc516fe28f9c48737fe",
     ),
     # Issue 105: the instalment leaves the continuing basis indeterminate, so
     # the session-3 decision context hash moves (f8b8bbef to 98949b80).
     "continuing-instalment": (
         EvaluationClassification.COMPLETE,
         "8dc4739e54d4f98673b152ac0e05b31bac7a8da491e3d067bfc5db78d12cc05d",
-        "5a310ebb23d10be3562d6fe90aa1cc8fb2a39ab896e5cd29e988c23f8c45440d",
+        "6e1a21b92d7d24dc5d45d949a8869d7e287863a79c51d551b33890d82f666709",
     ),
     # Issue 105: the cash leg leaves the acquirer basis indeterminate, so the
     # session-3 decision context hash moves (bf7c5181 to e8e7a543).
     "mixed-acquisition": (
         EvaluationClassification.COMPLETE,
         "39c626540a7c93d9c9a208be98e8b203a5ff6b96a3dbd31aaec44e6ab46af06f",
-        "594210dd538ca161fade5bb9df3515cf7f7753d6b81210e6612aca9cc03130f8",
+        "23f29c2c74b013eb500938f133a373cf40746608eaa50bf959087df46568a9b8",
     ),
     # Issue 105: the sold third relieves 100.00 of basis against 1.00 of
     # proceeds, so realized gross and net PnL move from 0 to -99 and the
@@ -416,7 +418,7 @@ RUN_PINS: dict[str, tuple[EvaluationClassification, str, str]] = {
     "aggregate-sale-residual": (
         EvaluationClassification.COMPLETE,
         "55eff4e09a4a20f572fac07aa816b65c327d1dcbf8aa06d558e4768df6a08471",
-        "62703c54d9db0cb08c1e63504c0b2752b7ef2f8e3f54460b4fec4b10fb3c9c6c",
+        "4301170289af9eeaacb91086a6fe36343730606871b1d3da911143807aad08d3",
     ),
 }
 

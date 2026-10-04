@@ -139,9 +139,12 @@ from drift.domain.evaluator_results import (
     EvaluationResultV1,
     EvaluationRunArtifactsV2,
     EvaluationSummaryMetricsV1,
+    ExcludedDisposalV1,
     ExploratoryEvaluationResultV1,
     PromotionEvaluationResultV1,
+    RealizedPnLCompletenessV1,
     SessionEquityPointV1,
+    disposal_sort_key,
     evaluation_result_hash,
 )
 from drift.domain.evaluator_strategy import (
@@ -1115,6 +1118,7 @@ class _Loop:
     checkpoints: list[_Checkpoint] = field(default_factory=list)
     gross_traded_notional: Decimal = ZERO
     committed_fill_count: int = 0
+    excluded_disposals: list[ExcludedDisposalV1] = field(default_factory=list)
 
 
 type LaneDispatchStrategy = RuntimeStrategy | ExploratoryReconstructedRuntimeStrategy
@@ -1995,6 +1999,7 @@ class SessionEvaluatorEngine:
             loop.staged_targets,
             self._evidence.economic_outcomes,
             session.session_key,
+            excluded_disposals=loop.excluded_disposals,
         )
         loop.state = state
         loop.staged_targets = targets
@@ -2731,6 +2736,16 @@ class SessionEvaluatorEngine:
                 turnover = ZERO
                 fills = 0
             net_pnl = ending_nav - initial
+        completeness = (
+            RealizedPnLCompletenessV1(
+                is_complete=False,
+                excluded_disposals=tuple(
+                    sorted(loop.excluded_disposals, key=disposal_sort_key)
+                ),
+            )
+            if loop.excluded_disposals
+            else RealizedPnLCompletenessV1()
+        )
         return EvaluationSummaryMetricsV1(
             evaluated_session_count=len(loop.checkpoints),
             initial_cash=initial,
@@ -2744,6 +2759,7 @@ class SessionEvaluatorEngine:
             gross_traded_notional=turnover,
             committed_fill_count=fills,
             equity_series=tuple(item.point for item in loop.checkpoints),
+            realized_pnl_completeness=completeness,
         )
 
     def _seal_result(
