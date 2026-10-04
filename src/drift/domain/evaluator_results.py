@@ -18,7 +18,8 @@ from typing import Annotated, Literal, Self
 
 from pydantic import Field, field_validator, model_validator
 
-from drift.domain.common import FrozenModel, NonBlankStr, SHA256Hash
+from drift.domain.common import UUID7, FrozenModel, NonBlankStr, SHA256Hash
+from drift.domain.economic_common import ActionKind
 from drift.domain.evaluator_bundles import EvaluationRunIdentity
 from drift.domain.evaluator_lanes import (
     ExploratoryEvaluationAdmissionV1,
@@ -61,6 +62,83 @@ class EvaluationClassification(StrEnum):
     COMPLETE = "complete"
     INDETERMINATE = "indeterminate"
     REJECTED = "rejected"
+
+
+DISPOSAL_EXCLUSION_INDETERMINATE_POOL_CASH_IN_LIEU = (
+    "indeterminate cost basis for cash-in-lieu residual disposal"
+)
+DISPOSAL_EXCLUSION_SPINOFF_RESIDUAL_UNALLOCATED_BASIS = (
+    "unallocated parent cost basis for spin-off child residual disposal"
+)
+DISPOSAL_EXCLUSION_MIXED_ACQUISITION_UNALLOCATED_BASIS = (
+    "unallocated cost basis for mixed acquisition cash leg disposal"
+)
+
+
+class ExcludedDisposalV1(FrozenModel):
+    """A partial disposal excluded from realized PnL for an unknown cost basis."""
+
+    schema_version: Literal["1"] = "1"
+    security_id: UUID7
+    source_id: NonBlankStr
+    action_kind: ActionKind
+    occurrence_id: NonBlankStr
+    component_id: NonBlankStr
+    session_key: SessionKeyV1
+    cash_proceeds: CanonicalMoney
+    reason: NonBlankStr
+    applied_effect_id: SHA256Hash
+
+    @model_validator(mode="after")
+    def validate_disposal(self) -> Self:
+        with decimal_context():
+            if self.cash_proceeds < ZERO:
+                raise ValueError("cash proceeds must be non-negative")
+        return self
+
+
+def disposal_sort_key(
+    disposal: ExcludedDisposalV1,
+) -> tuple[str, bytes, str, str, str]:
+    return (
+        disposal.session_key.local_date.isoformat(),
+        disposal.security_id.bytes,
+        disposal.source_id,
+        disposal.occurrence_id,
+        disposal.component_id,
+    )
+
+
+def require_canonical_disposals(
+    disposals: tuple[ExcludedDisposalV1, ...],
+) -> None:
+    keys = [disposal_sort_key(d) for d in disposals]
+    if len(set(keys)) != len(keys):
+        raise ValueError("excluded disposals must be unique")
+    if tuple(sorted(disposals, key=disposal_sort_key)) != disposals:
+        raise ValueError("excluded disposals must be canonically sorted")
+
+
+class RealizedPnLCompletenessV1(FrozenModel):
+    """Signal whether realized PnL covers every disposal of the evaluation."""
+
+    schema_version: Literal["1"] = "1"
+    is_complete: bool = True
+    excluded_disposals: tuple[ExcludedDisposalV1, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_completeness(self) -> Self:
+        has_exclusions = len(self.excluded_disposals) > 0
+        if self.is_complete and has_exclusions:
+            raise ValueError(
+                "a complete realized PnL signal cannot declare excluded disposals"
+            )
+        if not self.is_complete and not has_exclusions:
+            raise ValueError(
+                "an incomplete realized PnL signal must name the excluded disposals"
+            )
+        require_canonical_disposals(self.excluded_disposals)
+        return self
 
 
 class SessionEquityPointV1(FrozenModel):
@@ -111,6 +189,9 @@ class EvaluationSummaryMetricsV1(FrozenModel):
     gross_traded_notional: CanonicalMoney
     committed_fill_count: int = Field(ge=0)
     equity_series: tuple[SessionEquityPointV1, ...]
+    realized_pnl_completeness: RealizedPnLCompletenessV1 = Field(
+        default_factory=RealizedPnLCompletenessV1
+    )
 
     @field_validator("equity_series")
     @classmethod
@@ -206,6 +287,11 @@ class _EvaluationResultBaseV1(FrozenModel):
     def result_id(self) -> SHA256Hash:
         """Content-addressed identity of this result artifact."""
         return self.result_hash
+
+    @property
+    def realized_pnl_completeness(self) -> RealizedPnLCompletenessV1:
+        """Signal whether realized PnL covers every disposal of the evaluation."""
+        return self.metrics.realized_pnl_completeness
 
     def _validate_common(
         self,

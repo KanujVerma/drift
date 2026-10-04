@@ -87,6 +87,12 @@ from drift.domain.evaluator_portfolio import (
     SecurityHoldingV2,
     pending_cash_claim_id,
 )
+from drift.domain.evaluator_results import (
+    DISPOSAL_EXCLUSION_INDETERMINATE_POOL_CASH_IN_LIEU,
+    DISPOSAL_EXCLUSION_MIXED_ACQUISITION_UNALLOCATED_BASIS,
+    DISPOSAL_EXCLUSION_SPINOFF_RESIDUAL_UNALLOCATED_BASIS,
+    ExcludedDisposalV1,
+)
 from drift.domain.evaluator_strategy import SecurityTargetPositionV1
 from drift.domain.sessions import SessionKeyV1
 from drift.evaluator.corporate_action_coverage import CorporateActionCoverageIndex
@@ -580,6 +586,7 @@ def _state(
     claims: tuple[PendingCashClaimV1, ...] = (),
     settled: tuple[str, ...] = (),
     day: date = EFFECT_DAY,
+    applied: tuple[str, ...] = (),
 ) -> PortfolioStateV2:
     claims_value = sum((claim.total_cash_expected for claim in claims), ZERO)
     cash_value = Decimal(cash)
@@ -591,7 +598,7 @@ def _state(
         holdings=holdings,
         pending_cash_claims=claims,
         settled_claim_ids=tuple(sorted(settled)),
-        applied_effect_ids=(),
+        applied_effect_ids=applied,
         mark=None,
         holdings_market_value=ZERO,
         pending_claims_value=claims_value,
@@ -7363,3 +7370,120 @@ def test_ambiguous_due_bill_rule_shape_is_enforced() -> None:
             redemption_session=LATER_DAY,
             reason=None,
         )
+
+
+def test_spinoff_with_residual_records_excluded_disposal() -> None:
+    component = _shares(
+        numerator="1",
+        denominator="8",
+        recipient=SEC_CHILD,
+        meaning="additional_per_predecessor",
+        treatment=_treatment("aggregate_sale_cash"),
+    )
+    terms = _terms(
+        suffix=740,
+        action_kind=ActionKind.SPINOFF,
+        components=(component,),
+        dates=(_date_fact("payable", PAYABLE_AT),),
+    )
+    effect = _effect(
+        suffix=741,
+        action_kind=ActionKind.SPINOFF,
+        components=(component,),
+        terms=terms,
+    )
+    outcome = _outcome(terms=(terms,), effects=(effect,))
+    processor = _processor(
+        cash_in_lieu_rates=(_cash_in_lieu_rate(effect=effect, rate="8"),)
+    )
+    state = _state(holdings=(_holding(quantity=10, basis="1000"),))
+    excluded: list[ExcludedDisposalV1] = []
+    processor.apply_pre_open_actions(
+        state,
+        (),
+        _covered((outcome,), SEC_CHILD),
+        _key(),
+        excluded_disposals=excluded,
+    )
+    assert len(excluded) == 1
+    disposal = excluded[0]
+    assert disposal.security_id == SEC_A
+    assert disposal.action_kind == ActionKind.SPINOFF
+    assert disposal.cash_proceeds == Decimal("2")
+    assert disposal.reason == DISPOSAL_EXCLUSION_SPINOFF_RESIDUAL_UNALLOCATED_BASIS
+
+
+def test_mixed_acquisition_cash_leg_records_excluded_disposal() -> None:
+    share = _shares(
+        numerator="1",
+        denominator="2",
+        recipient=SEC_ACQ,
+        treatment=_treatment("round_down"),
+    )
+    cash = _cash(amount="3", component_id="cash-1")
+    terms = _terms(
+        suffix=750,
+        action_kind=ActionKind.MIXED_ACQUISITION,
+        components=(share, cash),
+        dates=(_date_fact("payable", PAYABLE_AT),),
+    )
+    effect = _effect(
+        suffix=751,
+        action_kind=ActionKind.MIXED_ACQUISITION,
+        components=(share, cash),
+        terms=terms,
+        claim_status="converted",
+    )
+    outcome = _outcome(terms=(terms,), effects=(effect,))
+    state = _state(holdings=(_holding(quantity=100, basis="900"),))
+    excluded: list[ExcludedDisposalV1] = []
+    _processor().apply_pre_open_actions(
+        state,
+        (),
+        _covered((outcome,), SEC_ACQ),
+        _key(),
+        excluded_disposals=excluded,
+    )
+    assert len(excluded) == 1
+    disposal = excluded[0]
+    assert disposal.security_id == SEC_A
+    assert disposal.action_kind == ActionKind.MIXED_ACQUISITION
+    assert disposal.component_id == "cash-1"
+    assert disposal.cash_proceeds == Decimal("300")
+    assert disposal.reason == DISPOSAL_EXCLUSION_MIXED_ACQUISITION_UNALLOCATED_BASIS
+
+
+def test_cash_in_lieu_on_indeterminate_basis_records_excluded_disposal() -> None:
+    treatment = _treatment("aggregate_sale_cash")
+    terms, effect, outcome = _split_case(
+        numerator="1",
+        denominator="8",
+        treatment=treatment,
+        suffix=760,
+        dates=(_date_fact("payable", PAYABLE_AT),),
+    )
+    processor = _processor(
+        cash_in_lieu_rates=(_cash_in_lieu_rate(effect=effect, rate="4"),)
+    )
+    indeterminate_holding = SecurityHoldingV2(
+        security_id=SEC_A,
+        quantity=10,
+        basis_status="indeterminate",
+        cost_basis=None,
+        basis_indeterminate_by=("0" * 64,),
+    )
+    state = _state(holdings=(indeterminate_holding,), applied=("0" * 64,))
+    excluded: list[ExcludedDisposalV1] = []
+    processor.apply_pre_open_actions(
+        state,
+        (),
+        (outcome,),
+        _key(),
+        excluded_disposals=excluded,
+    )
+    assert len(excluded) == 1
+    disposal = excluded[0]
+    assert disposal.security_id == SEC_A
+    assert disposal.action_kind == ActionKind.REVERSE_SPLIT
+    assert disposal.cash_proceeds == Decimal("1")
+    assert disposal.reason == DISPOSAL_EXCLUSION_INDETERMINATE_POOL_CASH_IN_LIEU

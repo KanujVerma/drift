@@ -76,6 +76,12 @@ from drift.domain.evaluator_portfolio import (
     decimal_context,
     pending_cash_claim_id,
 )
+from drift.domain.evaluator_results import (
+    DISPOSAL_EXCLUSION_INDETERMINATE_POOL_CASH_IN_LIEU,
+    DISPOSAL_EXCLUSION_MIXED_ACQUISITION_UNALLOCATED_BASIS,
+    DISPOSAL_EXCLUSION_SPINOFF_RESIDUAL_UNALLOCATED_BASIS,
+    ExcludedDisposalV1,
+)
 from drift.domain.evaluator_strategy import SecurityTargetPositionV1
 from drift.domain.sessions import SessionKeyV1
 from drift.evaluator.corporate_action_coverage import CorporateActionCoverageIndex
@@ -161,12 +167,14 @@ class _Book:
     cash path consults as the share replay gate does (#139 review F3).
     """
 
+    session_key: SessionKeyV1
     opening: Mapping[UUID, SecurityHoldingV2]
     holdings: dict[UUID, SecurityHoldingV2]
     targets: dict[UUID, SecurityTargetPositionV1]
     claims: dict[ClaimIdentity, PendingCashClaimV1]
     applied: frozenset[SHA256Hash]
     realized: Decimal = ZERO
+    excluded_disposals: list[ExcludedDisposalV1] = field(default_factory=list)
     unmodelled: list[_EffectContext] = field(default_factory=list)
     delivered: dict[UUID, _EffectContext] = field(default_factory=dict)
     removed: dict[UUID, _EffectContext] = field(default_factory=dict)
@@ -367,6 +375,19 @@ def _relieve_cash_in_lieu(
     too (issue 105).
     """
     if holding.cost_basis is None:
+        book.excluded_disposals.append(
+            ExcludedDisposalV1(
+                security_id=context.security_id,
+                source_id=context.source_id,
+                action_kind=context.payload.action_kind,
+                occurrence_id=context.occurrence_id,
+                component_id=claim.component_id,
+                session_key=book.session_key,
+                cash_proceeds=claim.total_cash_expected,
+                reason=DISPOSAL_EXCLUSION_INDETERMINATE_POOL_CASH_IN_LIEU,
+                applied_effect_id=_applied_effect_id(context),
+            )
+        )
         return indeterminate_holding(holding, _applied_effect_id(context))
     share = Fraction(holding.cost_basis) * residual / exact
     with decimal_context():
@@ -528,6 +549,8 @@ class CorporateActionProcessor:
         staged_targets: Iterable[SecurityTargetPositionV1],
         economic_outcomes: Iterable[SecurityEconomicOutcomeV1],
         current_session: SessionKeyV1,
+        *,
+        excluded_disposals: list[ExcludedDisposalV1] | None = None,
     ) -> tuple[PortfolioStateV2, tuple[SecurityTargetPositionV1, ...]]:
         """Fold this session's proven corporate actions into book and targets.
 
@@ -565,6 +588,7 @@ class CorporateActionProcessor:
         }
         already = frozenset(portfolio_state.applied_effect_ids)
         book = _Book(
+            session_key=current_session,
             opening=opening_holdings,
             holdings=dict(opening_holdings),
             targets=_unique_targets(staged_targets),
@@ -696,6 +720,8 @@ class CorporateActionProcessor:
                 key=lambda item: _security_order(item.security_id),
             )
         )
+        if excluded_disposals is not None:
+            excluded_disposals.extend(book.excluded_disposals)
         return state, targets
 
     def apply_intrasession_settlements(
@@ -1164,7 +1190,20 @@ class CorporateActionProcessor:
             # A cross-security residual: the child fraction sold for cash
             # relieves an unallocated share of the parent's basis, which the
             # spin-off already left indeterminate (issue 105).
-            self._stage_cash_in_lieu(context, component, residual, book)
+            claim = self._stage_cash_in_lieu(context, component, residual, book)
+            book.excluded_disposals.append(
+                ExcludedDisposalV1(
+                    security_id=context.security_id,
+                    source_id=context.source_id,
+                    action_kind=context.payload.action_kind,
+                    occurrence_id=context.occurrence_id,
+                    component_id=claim.component_id,
+                    session_key=book.session_key,
+                    cash_proceeds=claim.total_cash_expected,
+                    reason=DISPOSAL_EXCLUSION_SPINOFF_RESIDUAL_UNALLOCATED_BASIS,
+                    applied_effect_id=cause,
+                )
+            )
 
     def _apply_cash_distribution(
         self, context: _EffectContext, book: _Book, window: _SessionWindow
@@ -1346,7 +1385,7 @@ class CorporateActionProcessor:
         if cash or residual:
             payable_on = _payable_session(_date_facts(_terms_payload(context)))
             for component_cash in cash:
-                self._stage_claim(
+                claim = self._stage_claim(
                     context=context,
                     component_id=component_cash.component_id,
                     quantity=holding.quantity,
@@ -1356,6 +1395,19 @@ class CorporateActionProcessor:
                     entitlement_session=context.effective_on,
                     payable_session=payable_on,
                     book=book,
+                )
+                book.excluded_disposals.append(
+                    ExcludedDisposalV1(
+                        security_id=context.security_id,
+                        source_id=context.source_id,
+                        action_kind=context.payload.action_kind,
+                        occurrence_id=context.occurrence_id,
+                        component_id=component_cash.component_id,
+                        session_key=book.session_key,
+                        cash_proceeds=claim.total_cash_expected,
+                        reason=DISPOSAL_EXCLUSION_MIXED_ACQUISITION_UNALLOCATED_BASIS,
+                        applied_effect_id=_applied_effect_id(context),
+                    )
                 )
             if cash:
                 # A cash leg is a partial disposal, and no source allocates
