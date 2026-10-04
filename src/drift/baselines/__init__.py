@@ -19,6 +19,15 @@ from drift.baselines.b3_monthly_equal_weight_rebalance import (
 )
 from drift.baselines.b4_momentum import B4MomentumStrategy
 from drift.baselines.b5_low_volatility import B5LowVolatilityStrategy
+from drift.baselines.runner import (
+    BaselineReferenceStrategy,
+    BaselineSuiteResult,
+    build_canonical_run_identity,
+    build_canonical_specification,
+    make_bundle_dataset_reference,
+    run_baseline_suite,
+    run_canonical_baseline,
+)
 
 __all__ = [
     "B0CashStrategy",
@@ -27,4 +36,11 @@ __all__ = [
     "B3MonthlyEqualWeightRebalanceStrategy",
     "B4MomentumStrategy",
     "B5LowVolatilityStrategy",
+    "BaselineReferenceStrategy",
+    "BaselineSuiteResult",
+    "build_canonical_run_identity",
+    "build_canonical_specification",
+    "make_bundle_dataset_reference",
+    "run_baseline_suite",
+    "run_canonical_baseline",
 ]

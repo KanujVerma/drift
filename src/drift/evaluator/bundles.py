@@ -38,7 +38,10 @@ from drift.domain.normalization import (
     ObservationDecisionReferenceV1,
     ObservationOutcomeReferenceV1,
 )
-from drift.domain.observation_query import ObservationQueryV1
+from drift.domain.observation_query import (
+    ObservationQueryV1,
+    drift_source_inventory_hash,
+)
 from drift.domain.qualification import (
     ConsumerPurpose,
     M1eCompletionRecordV1,
@@ -1198,7 +1201,7 @@ def build_evaluation_run_identity(
     admission: EvaluationAdmissionV1,
     bundle: EvaluationInputBundleV1,
     evaluator_evidence_hash: SHA256Hash,
-    code_version_hash: SHA256Hash,
+    code_version_hash: SHA256Hash | None = None,
     environment_closure_hash: SHA256Hash,
 ) -> EvaluationRunIdentityV1:
     """Build the deterministic semantic identity for one evaluation run.
@@ -1207,8 +1210,12 @@ def build_evaluation_run_identity(
     hashes so the declared chain `admission.input_bundle_hash == bundle_hash`
     is enforced here. Accepting the two hashes independently allowed a run
     identity to bind an admission to a bundle that admission never admitted.
+    If ``code_version_hash`` is omitted, it defaults to the whole-tree repository
+    provenance accessor ``drift_source_inventory_hash()`` (issue 109, issue 63 Q6).
     """
     _require_admitted_bundle(admission, bundle)
+    if code_version_hash is None:
+        code_version_hash = drift_source_inventory_hash()
     draft = EvaluationRunIdentityV1.model_construct(
         schema_version="1",
         strategy_hash=strategy_hash,
@@ -1236,7 +1243,7 @@ def build_evaluation_run_identity_v2(
     admission: EvaluationAdmissionV1,
     bundle: EvaluationInputBundleV1,
     evaluator_evidence_hash: SHA256Hash,
-    code_version_hash: SHA256Hash,
+    code_version_hash: SHA256Hash | None = None,
     environment_closure_hash: SHA256Hash,
 ) -> EvaluationRunIdentityV2:
     """Build the V2 run identity, which also binds strategy parameters (#112).
@@ -1246,8 +1253,13 @@ def build_evaluation_run_identity_v2(
     specification's. The admission must admit this exact bundle, as for V1.
     Canonical M3 runs use this identity; ``build_evaluation_run_identity``
     and V1 are unchanged.
+    If ``code_version_hash`` is omitted, it defaults to
+    ``drift_source_inventory_hash()``, binding whole-tree build
+    provenance (issue 109).
     """
     _require_admitted_bundle(admission, bundle)
+    if code_version_hash is None:
+        code_version_hash = drift_source_inventory_hash()
     draft = EvaluationRunIdentityV2.model_construct(
         schema_version="2",
         strategy_hash=strategy_hash,
