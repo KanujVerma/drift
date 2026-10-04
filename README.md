@@ -9,12 +9,13 @@ Research outputs in Drift remain strictly untrusted until validated through a
 tamper-evident, append-only evidence history and explicit promotion gates.
 
 > **Current Boundary**: Drift is not yet a live trading bot. Completed
-> milestones (M0 through M3) provide a tamper-evident research evidence kernel,
+> milestones (M0 through M4) provide a tamper-evident research evidence kernel,
 > temporal provenance, point-in-time universes, corporate actions, normalized
-> observations, a deterministic session-level evaluator, and canonical reference
-> baselines (B0 through B5). M1e Task 8 (paid promotion qualification) is
-> deferred under ADR 0012. M4 (prediction and outcome tracking) is the active
-> milestone. Drift has no live broker connection, active order execution, or live capital.
+> observations, a deterministic session-level evaluator, canonical reference
+> baselines (B0 through B5), and ex-ante prediction and outcome tracking.
+> M1e Task 8 (paid promotion qualification) is deferred under ADR 0012. M5
+> (statistical and model scorecards) is the active next milestone. Drift has no
+> live broker connection, active order execution, or live capital.
 
 ---
 
@@ -77,7 +78,9 @@ historical source evidence
   Reference baseline strategy library B0 through B5 (cash, buy-and-hold, equal-weight rebalance,
   12-1 momentum, 60-session low volatility), canonical runner with whole-tree code-version
   provenance, and adversarial acceptance suite.
-- **M4: Prediction and Outcome Tracking**: Active Milestone.
+- **M4: Prediction and Outcome Tracking**: Complete.
+  Domain models, atomic prediction recorder, deterministic outcome resolver with corporate-action-consistent analytical returns, baseline predictor adapters (B4 momentum, B5 low volatility, Null), evaluation tracking harness, and adversarial acceptance suite.
+- **M5: Statistical and Model Scorecards**: Active Next Milestone.
 
 ---
 
