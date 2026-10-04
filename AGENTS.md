@@ -113,12 +113,15 @@ next READY issue in this workstream. If none exists, report blocked.
   environment closure, golden case grader, replay harness), M2
   (deterministic session-level evaluator and portfolio accounting kernel),
   M3 (deterministic baseline strategies B0-B5, canonical runner, and
-  adversarial acceptance suite), and M4 (prediction and outcome tracking
+  adversarial acceptance suite), M4 (prediction and outcome tracking
   kernel, atomic epoch recorder, deterministic outcome resolver, baseline
-  predictor adapters, and adversarial acceptance suite).
+  predictor adapters, and adversarial acceptance suite), and M5
+  (statistical and model scorecard kernel, predictive calibration,
+  performance attribution, multiple-testing adjustments, composite
+  scorecard generator, and adversarial acceptance suite).
 - **Sequencing State (ADR 0012)**: M1e Task 8 (promotion-grade real-source
-  qualification) is paused/deferred until economically justified. M5
-  (statistical and model scorecards) is the active next milestone.
+  qualification) is paused/deferred until economically justified. M6
+  (structured research memory) is the active next milestone.
   Exploratory evaluator and baseline development are authorized using
   free development data (Alpaca Basic).
 - **Ownership (ADR 0014)**: All remaining active roadmap implementation

@@ -9,13 +9,14 @@ Research outputs in Drift remain strictly untrusted until validated through a
 tamper-evident, append-only evidence history and explicit promotion gates.
 
 > **Current Boundary**: Drift is not yet a live trading bot. Completed
-> milestones (M0 through M4) provide a tamper-evident research evidence kernel,
+> milestones (M0 through M5) provide a tamper-evident research evidence kernel,
 > temporal provenance, point-in-time universes, corporate actions, normalized
 > observations, a deterministic session-level evaluator, canonical reference
-> baselines (B0 through B5), and ex-ante prediction and outcome tracking.
-> M1e Task 8 (paid promotion qualification) is deferred under ADR 0012. M5
-> (statistical and model scorecards) is the active next milestone. Drift has no
-> live broker connection, active order execution, or live capital.
+> baselines (B0 through B5), ex-ante prediction and outcome tracking, and
+> statistical and model scorecards. M1e Task 8 (paid promotion qualification)
+> is deferred under ADR 0012. M6 (structured research memory) is the active next
+> milestone. Drift has no live broker connection, active order execution, or
+> live capital.
 
 ---
 
@@ -43,6 +44,7 @@ historical source evidence
   -> evaluator and backtester
   -> deterministic baselines
   -> prediction and outcome tracking
+  -> statistical and model scorecards
   -> structured research memory
   -> AI research agent
   -> recursive R&D loop
@@ -80,7 +82,9 @@ historical source evidence
   provenance, and adversarial acceptance suite.
 - **M4: Prediction and Outcome Tracking**: Complete.
   Domain models, atomic prediction recorder, deterministic outcome resolver with corporate-action-consistent analytical returns, baseline predictor adapters (B4 momentum, B5 low volatility, Null), evaluation tracking harness, and adversarial acceptance suite.
-- **M5: Statistical and Model Scorecards**: Active Next Milestone.
+- **M5: Statistical and Model Scorecards**: Complete.
+  Domain models, predictive power and calibration metrics engine, performance attribution, risk profiles, drawdown engine, multiple-testing adjustment engine (DSR, Bonferroni, Holm, Benjamini-Hochberg), composite scorecard generator harness, M0 SQLite audit events (m5.scorecard.recorded), and adversarial acceptance suite.
+- **M6: Structured Research Memory**: Active Next Milestone.
 
 ---
 
