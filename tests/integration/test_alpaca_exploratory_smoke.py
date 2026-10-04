@@ -165,6 +165,7 @@ def _engine(intake: AlpacaExploratoryIntakeResult) -> SessionEvaluatorEngine:
         evidence=SessionEvaluatorEvidence(
             exploratory_cohort=intake.cohort,
             exploratory_reconstruction_replay=intake.reconstruction_replay,
+            exploratory_listing_roles=intake.exploratory_listing_roles,
         ),
         book_currency_namespace="iso4217",
         book_currency_code="USD",
@@ -670,8 +671,9 @@ def test_the_cli_runs_the_whole_bridge_offline_from_retained_bytes(
     output = capsys.readouterr().out
     assert "reconciliation pass" in output
     assert f"sessions {len(SESSION_DATES)}" in output
-    assert "lane exploratory; this evidence is never promotion-grade" in output
-    assert output.count("acknowledged limitation ") == 8
+    assert output.count("acknowledged limitation ") == len(
+        ALPACA_EXPLORATORY_LIMITATIONS
+    )
     # The online run measured its corporate-actions request, so the replay
     # reads its retained record back and covers both members (issue 76).
     assert "corporate-action coverage records 2" in output

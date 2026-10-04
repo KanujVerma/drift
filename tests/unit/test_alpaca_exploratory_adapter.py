@@ -82,15 +82,22 @@ from drift.domain.economic_closed_world import (
 from drift.domain.economic_common import ActionKind, CashComponentV1
 from drift.domain.economic_events import CorporateActionTermsVersionV1
 from drift.domain.evaluator_bundles import EvaluationInputBundleV1
+from drift.domain.evaluator_execution import IndeterminateExecutionError
 from drift.domain.evaluator_lanes import (
     ALPACA_LIMITATION_ABSENT_HALTS,
     ALPACA_LIMITATION_BOUNDED_COHORT,
+    ALPACA_LIMITATION_COHORT_LISTING_ROLE,
     ALPACA_LIMITATION_RETROSPECTIVE_RECONSTRUCTION,
     ALPACA_LIMITATION_SCHEDULED_SESSION_RECONSTRUCTION,
     ALPACA_LIMITATION_TRUNCATED_CA,
     ALPACA_LIMITATION_UNVERSIONED_BARS,
     ExploratoryEvaluationAdmissionV1,
     exploratory_evaluation_admission_hash,
+)
+from drift.domain.evaluator_reconstruction import (
+    ExploratoryCohortListingRoleV1,
+    build_exploratory_cohort_listing_role,
+    exploratory_cohort_listing_role_hash,
 )
 from drift.domain.normalization import DerivedObservationViewV1
 from drift.domain.securities import ListingVenue
@@ -102,6 +109,8 @@ from drift.evaluator.bundles import (
     assemble_evaluation_input_bundle,
     validate_exploratory_admission,
 )
+from drift.evaluator.engine import SessionEvaluatorEngine, SessionEvaluatorEvidence
+from drift.evaluator.execution import resolve_execution_listings
 from drift.markets.observation_validation import M1dDatasetInput
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1377,7 +1386,7 @@ def test_bundle_carries_reconstructions_and_no_derived_views(
     assert bundle.source_snapshot_hash is None
 
 
-def test_admission_binds_all_eight_canonical_alpaca_limitations(
+def test_admission_binds_all_nine_canonical_alpaca_limitations(
     intake: AlpacaExploratoryIntakeResult,
 ) -> None:
     admission = intake.admission
@@ -1394,11 +1403,13 @@ def test_admission_binds_all_eight_canonical_alpaca_limitations(
         "calendar-absence-read-as-closure-under-closed-world-assumption",
         # Issue 76, D3-b: so is the absence of an action read from a snapshot.
         "corporate-action-absence-read-from-current-provider-snapshot",
+        # Issue 77: execution listing declared by cohort.
+        "execution-listing-declared-by-cohort-not-historical-role-evidence",
     }
     # Comparing the admission against the module constant the bridge built it
     # from is circular, so the independently spelled set above carries the
-    # content and these two only pin shape: eight distinct limitations, sorted.
-    assert len(set(admission.acknowledged_limitations)) == 8
+    # content and these two only pin shape: nine distinct limitations, sorted.
+    assert len(set(admission.acknowledged_limitations)) == 9
     assert list(admission.acknowledged_limitations) == sorted(
         admission.acknowledged_limitations
     )
@@ -1467,7 +1478,7 @@ def test_a_hand_minted_admission_omitting_the_truncated_window_is_refused(
         for item in ALPACA_EXPLORATORY_LIMITATIONS
         if item != ALPACA_LIMITATION_TRUNCATED_CA
     )
-    assert len(omitted) == 7
+    assert len(omitted) == 8
     admission = hand_minted_admission(intake.bundle, omitted)
     assert admission.input_bundle_hash == intake.bundle.bundle_hash
 
@@ -3043,7 +3054,8 @@ def test_b5_m16_thin_or_non_positive_coverage_never_refuses_intake(
 
 def test_b6_the_new_limitation_and_policy_statement_are_named() -> None:
     assert ALPACA_LIMITATION_CA_SNAPSHOT_ABSENCE in ALPACA_EXPLORATORY_LIMITATIONS
-    assert len(ALPACA_EXPLORATORY_LIMITATIONS) == 8
+    assert ALPACA_LIMITATION_COHORT_LISTING_ROLE in ALPACA_EXPLORATORY_LIMITATIONS
+    assert len(ALPACA_EXPLORATORY_LIMITATIONS) == 9
     statement = _POLICY_DOCUMENTS["alpaca-corporate-actions-closed-world"]
     assert statement["source_id"] == ALPACA_ACTION_SOURCE_ID
     assert statement["provider_publication"] == "partially_published"
@@ -3139,3 +3151,153 @@ def test_f1_the_shared_parser_refuses_a_repeated_key_in_bars_and_calendar() -> N
     assert len(parse_alpaca_bars(PINNED_BARS)) == 10
     assert len(parse_alpaca_calendar(PINNED_CALENDAR)) == 5
     assert len(parse_alpaca_corporate_actions(EVERY_GROUP_ACTIONS)) == 4
+
+
+# --- issue 77: exploratory cohort listing roles -------------------------------------
+
+
+def test_issue_77_bridge_intake_emits_exploratory_listing_roles(
+    intake: AlpacaExploratoryIntakeResult,
+) -> None:
+    """The intake pipeline derives one exploratory listing role per cohort member."""
+    roles = intake.exploratory_listing_roles
+    assert len(roles) == len(intake.cohort.security_ids)
+    assert len(roles) == 2
+
+    for role in roles:
+        assert isinstance(role, ExploratoryCohortListingRoleV1)
+        assert role.cohort_hash == intake.cohort.cohort_hash
+        assert role.role == "primary"
+        assert role.acknowledged_limitations == (ALPACA_LIMITATION_COHORT_LISTING_ROLE,)
+        assert role.record_hash == exploratory_cohort_listing_role_hash(role)
+
+    role_securities = {role.security_id for role in roles}
+    assert role_securities == set(intake.cohort.security_ids)
+
+
+def test_issue_77_listing_role_validation_guards(
+    intake: AlpacaExploratoryIntakeResult,
+) -> None:
+    """The model fails closed on tampered hash or missing limitation."""
+    sample = intake.exploratory_listing_roles[0]
+
+    with pytest.raises(ValueError, match="hash mismatch"):
+        sample.model_copy(update={"record_hash": "0" * 64})
+
+    with pytest.raises(ValueError, match="requires"):
+        sample.model_copy(update={"acknowledged_limitations": ("other-limitation",)})
+
+
+def test_issue_77_resolve_execution_listing_respects_exploratory_roles(
+    intake: AlpacaExploratoryIntakeResult,
+) -> None:
+    """resolve_execution_listings resolves with exploratory roles and halts without."""
+    session = intake.bundle.session_clock.sessions[0]
+    security_ids = tuple(intake.cohort.security_ids)
+
+    resolved = resolve_execution_listings(
+        security_ids=security_ids,
+        execution_session=session,
+        role_records=(),
+        listings=intake.bundle.listing_identities,
+        termination_records=(),
+        lifecycle_records=(),
+        exploratory_listing_roles=intake.exploratory_listing_roles,
+    )
+    assert len(resolved) == len(security_ids)
+    role_map = {
+        role.security_id: role.listing_id for role in intake.exploratory_listing_roles
+    }
+    for sec_id in security_ids:
+        assert sec_id in resolved
+        assert resolved[sec_id].listing_id == role_map[sec_id]
+
+    # Without exploratory listing roles and without M1b records,
+    # resolution fails closed.
+    with pytest.raises(IndeterminateExecutionError, match="no active primary listing"):
+        resolve_execution_listings(
+            security_ids=security_ids,
+            execution_session=session,
+            role_records=(),
+            listings=intake.bundle.listing_identities,
+            termination_records=(),
+            lifecycle_records=(),
+            exploratory_listing_roles=(),
+        )
+
+
+def test_issue_77_engine_lane_resolution_refuses_forged_cohort_roles(
+    intake: AlpacaExploratoryIntakeResult,
+) -> None:
+    """Engine construction refuses cohort roles with mismatched cohort hash."""
+    from test_evaluator_engine import _cost_model, _protocol
+
+    role = intake.exploratory_listing_roles[0]
+    foreign_cohort = alpaca.build_bridge_cohort(
+        pinned_request(cohort_id="foreign-cohort")
+    )
+    forged_role = build_exploratory_cohort_listing_role(
+        cohort=foreign_cohort,
+        security_id=role.security_id,
+        listing_id=role.listing_id,
+        venue=role.venue,
+    )
+
+    evidence = SessionEvaluatorEvidence(
+        exploratory_cohort=intake.cohort,
+        exploratory_reconstruction_replay=intake.reconstruction_replay,
+        exploratory_listing_roles=(forged_role,),
+    )
+
+    with pytest.raises(ValueError, match="cohort hash mismatch"):
+        SessionEvaluatorEngine(
+            bundle=intake.bundle,
+            admission=intake.admission,
+            protocol=_protocol(warmup=2),
+            cost_model=_cost_model(),
+            evidence=evidence,
+            book_currency_namespace="iso4217",
+            book_currency_code="USD",
+        )
+
+
+def test_issue_77_engine_refuses_missing_cohort_listing_role_limitation(
+    intake: AlpacaExploratoryIntakeResult,
+) -> None:
+    """Engine construction refuses cohort roles if admission omits the limitation."""
+    from test_evaluator_engine import _cost_model, _protocol
+
+    stripped_limitations = tuple(
+        lim
+        for lim in intake.admission.acknowledged_limitations
+        if lim != ALPACA_LIMITATION_COHORT_LISTING_ROLE
+    )
+    draft = intake.admission.model_construct(
+        schema_version="1",
+        lane="exploratory",
+        input_bundle_hash=intake.bundle.bundle_hash,
+        acknowledged_limitations=stripped_limitations,
+        admission_hash="0" * 64,
+    )
+    candidate = draft.model_copy(
+        update={"admission_hash": exploratory_evaluation_admission_hash(draft)}
+    )
+    unacknowledged_admission = ExploratoryEvaluationAdmissionV1.model_validate(
+        candidate.model_dump()
+    )
+    evidence = SessionEvaluatorEvidence(
+        exploratory_cohort=intake.cohort,
+        exploratory_reconstruction_replay=intake.reconstruction_replay,
+        exploratory_listing_roles=intake.exploratory_listing_roles,
+    )
+
+    with pytest.raises(ValueError, match="cohort listing role limitation"):
+        SessionEvaluatorEngine(
+            bundle=intake.bundle,
+            admission=unacknowledged_admission,
+            protocol=_protocol(warmup=2),
+            cost_model=_cost_model(),
+            evidence=evidence,
+            book_currency_namespace="iso4217",
+            book_currency_code="USD",
+        )

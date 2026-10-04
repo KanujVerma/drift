@@ -27,6 +27,7 @@ from drift.domain.common import (
 )
 from drift.domain.evaluator_lanes import (
     ALPACA_LIMITATION_BOUNDED_COHORT,
+    ALPACA_LIMITATION_COHORT_LISTING_ROLE,
     ALPACA_LIMITATION_RETROSPECTIVE_RECONSTRUCTION,
     ALPACA_LIMITATION_UNVERSIONED_BARS,
 )
@@ -284,3 +285,82 @@ def exploratory_required_limitations(
 ) -> tuple[NonBlankStr, ...]:
     """Return the limitations the exploratory reconstruction always binds."""
     return observation.acknowledged_limitations
+
+
+class ExploratoryCohortListingRoleV1(FrozenModel):
+    """Exploratory-grade execution listing role derived from a predeclared cohort.
+
+    Issue 77, Option A. Binds each cohort member's declared listing and venue
+    as its execution listing for the duration of an exploratory run. It is
+    NOT an M1b ListingRoleVersionV1, makes no claim of historical primary
+    status or survivorship-free listing identity, and is refused by the
+    promotion lane.
+    """
+
+    schema_version: Literal["1"] = "1"
+    kind: Literal["exploratory_cohort_listing_role"] = "exploratory_cohort_listing_role"
+    cohort_hash: SHA256Hash
+    security_id: UUID7
+    listing_id: UUID7
+    venue: ListingVenue
+    role: Literal["primary"] = "primary"
+    acknowledged_limitations: tuple[NonBlankStr, ...] = (
+        ALPACA_LIMITATION_COHORT_LISTING_ROLE,
+    )
+    record_hash: SHA256Hash
+
+    @field_validator("acknowledged_limitations")
+    @classmethod
+    def validate_limitations(
+        cls, values: tuple[NonBlankStr, ...]
+    ) -> tuple[NonBlankStr, ...]:
+        if ALPACA_LIMITATION_COHORT_LISTING_ROLE not in values:
+            raise ValueError(
+                "exploratory cohort listing role requires "
+                f"'{ALPACA_LIMITATION_COHORT_LISTING_ROLE}'"
+            )
+        return tuple(sorted(values))
+
+    @model_validator(mode="after")
+    def validate_record(self) -> Self:
+        expected = exploratory_cohort_listing_role_hash(self)
+        if self.record_hash != expected:
+            raise ValueError(
+                f"exploratory cohort listing role hash mismatch: expected {expected}, "
+                f"got {self.record_hash}"
+            )
+        return self
+
+
+def exploratory_cohort_listing_role_hash(
+    record: ExploratoryCohortListingRoleV1,
+) -> SHA256Hash:
+    """Compute canonical content hash for ExploratoryCohortListingRoleV1."""
+    dump = record.model_dump(mode="python")
+    dump.pop("record_hash", None)
+    return content_hash(dump)
+
+
+def build_exploratory_cohort_listing_role(
+    *,
+    cohort: ExploratoryCohortAuthorizationV1,
+    security_id: UUID7,
+    listing_id: UUID7,
+    venue: ListingVenue,
+) -> ExploratoryCohortListingRoleV1:
+    """Mint one ExploratoryCohortListingRoleV1 bound to the cohort hash."""
+    draft = ExploratoryCohortListingRoleV1.model_construct(
+        schema_version="1",
+        kind="exploratory_cohort_listing_role",
+        cohort_hash=cohort.cohort_hash,
+        security_id=security_id,
+        listing_id=listing_id,
+        venue=venue,
+        role="primary",
+        acknowledged_limitations=(ALPACA_LIMITATION_COHORT_LISTING_ROLE,),
+        record_hash="0" * 64,
+    )
+    candidate = draft.model_copy(
+        update={"record_hash": exploratory_cohort_listing_role_hash(draft)}
+    )
+    return ExploratoryCohortListingRoleV1.model_validate(candidate.model_dump())
