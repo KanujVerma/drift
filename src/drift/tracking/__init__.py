@@ -1,5 +1,15 @@
 """Ex-ante prediction and outcome tracking package for Drift (M4)."""
 
+from drift.tracking.adapters import (
+    B4MomentumPredictor,
+    B5LowVolatilityPredictor,
+    NullReferencePredictor,
+    PredictorAdapter,
+)
+from drift.tracking.harness import (
+    PredictionTrackingHarness,
+    PredictionTrackingSummaryV1,
+)
 from drift.tracking.recorder import (
     PREDICTION_SET_ENTITY_TYPE,
     PREDICTION_SET_EVENT_SCHEMA_VERSION,
@@ -22,6 +32,12 @@ from drift.tracking.resolver import (
 )
 
 __all__ = [
+    "B4MomentumPredictor",
+    "B5LowVolatilityPredictor",
+    "NullReferencePredictor",
+    "PredictorAdapter",
+    "PredictionTrackingHarness",
+    "PredictionTrackingSummaryV1",
     "OUTCOME_BATCH_ENTITY_TYPE",
     "OUTCOME_BATCH_EVENT_SCHEMA_VERSION",
     "OUTCOME_BATCH_EVENT_TYPE",
