@@ -40,20 +40,26 @@ class ResearchLoopArchive:
             if event.event_type == ITERATION_EVENT_TYPE:
                 iter_raw = event.payload.get("iteration")
                 if isinstance(iter_raw, Mapping):
-                    it = ResearchIterationRecordV1.model_validate_json(
-                        canonical_json(dict(iter_raw))
-                    )
-                    if it.loop_id not in self._iterations:
-                        self._iterations[it.loop_id] = []
-                    self._iterations[it.loop_id].append(it)
+                    try:
+                        it = ResearchIterationRecordV1.model_validate_json(
+                            canonical_json(dict(iter_raw))
+                        )
+                        if it.loop_id not in self._iterations:
+                            self._iterations[it.loop_id] = []
+                        self._iterations[it.loop_id].append(it)
+                    except Exception:
+                        continue
 
             elif event.event_type == LOOP_EVENT_TYPE:
                 sum_raw = event.payload.get("summary")
                 if isinstance(sum_raw, Mapping):
-                    summary = ResearchLoopSummaryV1.model_validate_json(
-                        canonical_json(dict(sum_raw))
-                    )
-                    self._summaries[summary.loop_id] = summary
+                    try:
+                        summary = ResearchLoopSummaryV1.model_validate_json(
+                            canonical_json(dict(sum_raw))
+                        )
+                        self._summaries[summary.loop_id] = summary
+                    except Exception:
+                        continue
 
         # Ensure iterations are ordered by iteration_index
         for iters in self._iterations.values():
