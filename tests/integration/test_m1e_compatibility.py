@@ -449,6 +449,19 @@ def _m1e_paths_on_disk() -> set[str]:
         and not path.startswith("src/drift/domain/evaluator_")
         and not path.startswith("src/drift/agent/")
         and not path.startswith("src/drift/domain/research_agent")
+        and not path.startswith("src/drift/shadow/")
+        and not path.startswith("src/drift/domain/shadow_")
+        and not path.startswith("src/drift/risk/")
+        and not path.startswith("src/drift/domain/risk")
+        and not path.startswith("src/drift/execution/")
+        and not path.startswith("src/drift/domain/execution")
+        and not path.startswith("src/drift/validation/")
+        and not path.startswith("src/drift/domain/paper_validation")
+        and not path.startswith("src/drift/adapters/robinhood")
+        and not path.startswith("src/drift/canary/")
+        and not path.startswith("src/drift/domain/canary")
+        and not path.startswith("src/drift/autonomy/")
+        and not path.startswith("src/drift/domain/autonomy")
     }
     return m1e_candidates - baseline
 
