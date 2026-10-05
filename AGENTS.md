@@ -115,13 +115,21 @@ next READY issue in this workstream. If none exists, report blocked.
   M3 (deterministic baseline strategies B0-B5, canonical runner, and
   adversarial acceptance suite), M4 (prediction and outcome tracking
   kernel, atomic epoch recorder, deterministic outcome resolver, baseline
-  predictor adapters, and adversarial acceptance suite), and M5
+  predictor adapters, and adversarial acceptance suite), M5
   (statistical and model scorecard kernel, predictive calibration,
   performance attribution, multiple-testing adjustments, composite
-  scorecard generator, and adversarial acceptance suite).
+  scorecard generator, and adversarial acceptance suite), M6
+  (structured research memory archive and query kernel), M12
+  (shadow broker engine, execution simulation, and accounting reconciler),
+  M13 (deterministic hard risk gatekeeper, persistent kill switch, and harness),
+  M14 (broker-neutral execution router, persistent order intent journal, and mock adapter),
+  M15 (real-world paper / shadow validation engine, market feed streamer, and drift tracker),
+  M16 (official Robinhood Agentic MCP adapter, portfolio sync, and transport),
+  M17 (tiny-money canary layer, allocation gatekeeper, and settlement reconciler), and
+  M18+ (bounded autonomy orchestrator, allocation governor, and audited evidence ledger).
 - **Sequencing State (ADR 0012)**: M1e Task 8 (promotion-grade real-source
-  qualification) is paused/deferred until economically justified. M6
-  (structured research memory) is the active next milestone.
+  qualification) is paused/deferred until economically justified. M7
+  (first AI research agent) is the active next milestone.
   Exploratory evaluator and baseline development are authorized using
   free development data (Alpaca Basic).
 - **Ownership (ADR 0014)**: All remaining active roadmap implementation
