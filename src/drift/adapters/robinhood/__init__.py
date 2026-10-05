@@ -9,6 +9,11 @@ from drift.adapters.robinhood.config import (
     ROBINHOOD_ADAPTER_SCHEMA_VERSION,
     RobinhoodAgenticConfigV1,
 )
+from drift.adapters.robinhood.sync import (
+    PositionDiscrepancyV1,
+    ReconciliationReportV1,
+    RobinhoodPortfolioSynchronizer,
+)
 from drift.adapters.robinhood.transport import (
     MockRobinhoodMcpTransport,
     RobinhoodMcpError,
@@ -18,8 +23,11 @@ from drift.adapters.robinhood.transport import (
 __all__ = [
     "ROBINHOOD_ADAPTER_SCHEMA_VERSION",
     "MockRobinhoodMcpTransport",
+    "PositionDiscrepancyV1",
+    "ReconciliationReportV1",
     "RobinhoodAgenticAdapter",
     "RobinhoodAgenticConfigV1",
     "RobinhoodMcpError",
     "RobinhoodMcpTransportProtocol",
+    "RobinhoodPortfolioSynchronizer",
 ]
