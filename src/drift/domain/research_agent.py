@@ -46,6 +46,36 @@ class ProposalValidationStatus(StrEnum):
     REJECTED_INSUFFICIENT_CRITERIA = "rejected_insufficient_criteria"
 
 
+def compute_context_packet_hash(unsigned: Mapping[str, Any]) -> SHA256Hash:
+    """Compute deterministic SHA-256 hash for a ResearchContextPacketV1."""
+    d = dict(unsigned)
+    d.pop("context_hash", None)
+    return content_hash(d)
+
+
+def compute_hypothesis_proposal_hash(unsigned: Mapping[str, Any]) -> SHA256Hash:
+    """Compute deterministic SHA-256 hash for a HypothesisProposalV1."""
+    d = dict(unsigned)
+    d.pop("proposal_hash", None)
+    return content_hash(d)
+
+
+def compute_experiment_specification_proposal_hash(
+    unsigned: Mapping[str, Any],
+) -> SHA256Hash:
+    """Compute deterministic SHA-256 hash for an ExperimentSpecificationProposalV1."""
+    d = dict(unsigned)
+    d.pop("specification_hash", None)
+    return content_hash(d)
+
+
+def compute_proposal_validation_hash(unsigned: Mapping[str, Any]) -> SHA256Hash:
+    """Compute deterministic SHA-256 hash for a ProposalValidationResultV1."""
+    d = dict(unsigned)
+    d.pop("validation_hash", None)
+    return content_hash(d)
+
+
 class ResearchContextPacketV1(FrozenModel):
     """Immutable context packet providing historical research memory to an agent."""
 
@@ -70,6 +100,9 @@ class ResearchContextPacketV1(FrozenModel):
             raise ValueError("active_hypotheses_count cannot be negative")
         if self.falsified_hypotheses_count < 0:
             raise ValueError("falsified_hypotheses_count cannot be negative")
+        expected_hash = compute_context_packet_hash(self.model_dump(mode="python"))
+        if self.context_hash != expected_hash:
+            raise ValueError("research context packet hash mismatch")
         return self
 
 
@@ -104,6 +137,9 @@ class HypothesisProposalV1(FrozenModel):
             and self.min_information_coefficient <= Decimal("0")
         ):
             raise ValueError("min_information_coefficient must be strictly positive")
+        expected_hash = compute_hypothesis_proposal_hash(self.model_dump(mode="python"))
+        if self.proposal_hash != expected_hash:
+            raise ValueError("hypothesis proposal hash mismatch")
         return self
 
 
@@ -129,6 +165,11 @@ class ExperimentSpecificationProposalV1(FrozenModel):
                 f"parameters_hash mismatch: expected {expected}, "
                 f"got {self.parameters_hash}"
             )
+        expected_spec_hash = compute_experiment_specification_proposal_hash(
+            self.model_dump(mode="python")
+        )
+        if self.specification_hash != expected_spec_hash:
+            raise ValueError("experiment specification proposal hash mismatch")
         return self
 
 
@@ -154,37 +195,10 @@ class ProposalValidationResultV1(FrozenModel):
             raise ValueError(
                 "rejected proposals must specify at least one rejection reason"
             )
+        expected_hash = compute_proposal_validation_hash(self.model_dump(mode="python"))
+        if self.validation_hash != expected_hash:
+            raise ValueError("proposal validation result hash mismatch")
         return self
-
-
-def compute_context_packet_hash(unsigned: Mapping[str, Any]) -> SHA256Hash:
-    """Compute deterministic SHA-256 hash for a ResearchContextPacketV1."""
-    d = dict(unsigned)
-    d.pop("context_hash", None)
-    return content_hash(d)
-
-
-def compute_hypothesis_proposal_hash(unsigned: Mapping[str, Any]) -> SHA256Hash:
-    """Compute deterministic SHA-256 hash for a HypothesisProposalV1."""
-    d = dict(unsigned)
-    d.pop("proposal_hash", None)
-    return content_hash(d)
-
-
-def compute_experiment_specification_proposal_hash(
-    unsigned: Mapping[str, Any],
-) -> SHA256Hash:
-    """Compute deterministic SHA-256 hash for an ExperimentSpecificationProposalV1."""
-    d = dict(unsigned)
-    d.pop("specification_hash", None)
-    return content_hash(d)
-
-
-def compute_proposal_validation_hash(unsigned: Mapping[str, Any]) -> SHA256Hash:
-    """Compute deterministic SHA-256 hash for a ProposalValidationResultV1."""
-    d = dict(unsigned)
-    d.pop("validation_hash", None)
-    return content_hash(d)
 
 
 def build_research_context_packet(
