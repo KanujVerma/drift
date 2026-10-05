@@ -7,9 +7,19 @@ from drift.promotion.gatekeeper import (
     evaluate_regime_stress,
     evaluate_walk_forward_consistency,
 )
+from drift.promotion.runner import (
+    CandidatePromotionRequestV1,
+    PromotionBatchResultV1,
+    PromotionRecorderProtocol,
+    PromotionRunner,
+)
 
 __all__ = [
+    "CandidatePromotionRequestV1",
+    "PromotionBatchResultV1",
     "PromotionGatekeeper",
+    "PromotionRecorderProtocol",
+    "PromotionRunner",
     "calculate_deflated_sharpe_ratio",
     "estimate_probability_backtest_overfitting",
     "evaluate_regime_stress",
