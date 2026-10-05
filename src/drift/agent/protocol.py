@@ -1,6 +1,6 @@
 """Research agent interface protocols (M7-4, Issue 223)."""
 
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from drift.domain.research_agent import (
     ExperimentSpecificationProposalV1,
@@ -10,6 +10,7 @@ from drift.domain.research_agent import (
 from drift.domain.research_memory import ParameterSearchSpaceV1
 
 
+@runtime_checkable
 class ResearchAgentProtocol(Protocol):
     """Protocol implemented by research proposal generators."""
 
