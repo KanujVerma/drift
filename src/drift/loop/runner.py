@@ -39,6 +39,7 @@ from drift.loop.diagnosis import (
     diagnose_trial_outcome,
 )
 from drift.loop.evaluator_adapter import TrialEvaluatorProtocol
+from drift.loop.recorder import ResearchLoopRecorder
 from drift.memory.archive import ResearchMemoryArchive
 from drift.memory.recorder import (
     ResearchMemoryRecorder,
@@ -60,6 +61,7 @@ class ResearchLoopRunner:
         recorder: ResearchMemoryRecorder,
         archive: ResearchMemoryArchive,
         search_spaces: Mapping[str, ParameterSearchSpaceV1] | None = None,
+        loop_recorder: ResearchLoopRecorder | None = None,
     ) -> None:
         self.config = config
         self.synthesizer = synthesizer
@@ -69,6 +71,7 @@ class ResearchLoopRunner:
         self.recorder = recorder
         self.archive = archive
         self.search_spaces = dict(search_spaces) if search_spaces else {}
+        self.loop_recorder = loop_recorder
 
     def run(
         self,
@@ -138,6 +141,8 @@ class ResearchLoopRunner:
                     completed_at=completed_time,
                 )
                 iterations.append(iter_rec)
+                if self.loop_recorder is not None:
+                    self.loop_recorder.record_iteration(iter_rec)
                 continue
 
             accepted_count += 1
@@ -225,6 +230,8 @@ class ResearchLoopRunner:
                 completed_at=completed_time,
             )
             iterations.append(iter_rec)
+            if self.loop_recorder is not None:
+                self.loop_recorder.record_iteration(iter_rec)
 
             # 8. Check target performance achievement
             if (
@@ -251,5 +258,7 @@ class ResearchLoopRunner:
             best_annualized_sharpe=best_sharpe,
             final_exhaustion_fraction=Decimal("0.0"),
         )
+        if self.loop_recorder is not None:
+            self.loop_recorder.record_loop_summary(summary)
 
         return summary, tuple(iterations)
