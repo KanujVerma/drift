@@ -4,6 +4,13 @@ Provides market feed processing, execution drift tracking, and shadow validation
 harnesses decoupled from live capital deployment.
 """
 
+from drift.validation.feed import (
+    FeedEmptyError,
+    FeedError,
+    MarketDataStreamerProtocol,
+    MockMarketDataStreamer,
+    NonMonotonicTimestampError,
+)
 from drift.validation.journal import (
     DuplicateValidationRecordError,
     PersistentShadowValidationJournal,
@@ -13,6 +20,11 @@ from drift.validation.journal import (
 
 __all__ = [
     "DuplicateValidationRecordError",
+    "FeedEmptyError",
+    "FeedError",
+    "MarketDataStreamerProtocol",
+    "MockMarketDataStreamer",
+    "NonMonotonicTimestampError",
     "PersistentShadowValidationJournal",
     "ValidationAppendOnlyViolationError",
     "ValidationJournalError",
