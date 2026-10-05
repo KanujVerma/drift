@@ -4,6 +4,10 @@ Provides abstract execution protocols, persistent order intent journals, and
 broker-neutral execution routing.
 """
 
+from drift.execution.adapter import (
+    BrokerAdapterProtocol,
+    MockBrokerAdapter,
+)
 from drift.execution.journal import (
     DuplicateIntentRecordError,
     ExecutionJournalError,
@@ -12,8 +16,10 @@ from drift.execution.journal import (
 )
 
 __all__ = [
+    "BrokerAdapterProtocol",
     "DuplicateIntentRecordError",
     "ExecutionJournalError",
     "IntentAppendOnlyViolationError",
+    "MockBrokerAdapter",
     "PersistentOrderIntentJournal",
 ]
