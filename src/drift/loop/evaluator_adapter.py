@@ -31,9 +31,11 @@ class DeterministicMockTrialEvaluator:
         metric_overrides: Mapping[str, Mapping[str, Any]] | None = None,
         eval_fn: Callable[[ExperimentSpecificationProposalV1], Mapping[str, Any]]
         | None = None,
+        default_metrics: Mapping[str, Any] | None = None,
     ) -> None:
         self.metric_overrides = dict(metric_overrides) if metric_overrides else {}
         self.eval_fn = eval_fn
+        self.default_metrics = dict(default_metrics) if default_metrics else None
 
     def evaluate_experiment(
         self,
@@ -46,6 +48,9 @@ class DeterministicMockTrialEvaluator:
         param_hash = experiment.parameters_hash
         if param_hash in self.metric_overrides:
             return self.metric_overrides[param_hash]
+
+        if self.default_metrics is not None:
+            return dict(self.default_metrics)
 
         # Deterministic synthetic metrics derived from parameters hash
         int_seed = int(param_hash[:8], 16)
