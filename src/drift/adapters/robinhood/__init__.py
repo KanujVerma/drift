@@ -21,9 +21,9 @@ from drift.adapters.robinhood.transport import (
 )
 
 __all__ = [
-    "ROBINHOOD_ADAPTER_SCHEMA_VERSION",
     "MockRobinhoodMcpTransport",
     "PositionDiscrepancyV1",
+    "ROBINHOOD_ADAPTER_SCHEMA_VERSION",
     "ReconciliationReportV1",
     "RobinhoodAgenticAdapter",
     "RobinhoodAgenticConfigV1",
