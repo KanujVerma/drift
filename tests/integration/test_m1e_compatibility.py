@@ -451,6 +451,8 @@ def _m1e_paths_on_disk() -> set[str]:
         and not path.startswith("src/drift/domain/shadow_")
         and not path.startswith("src/drift/risk/")
         and not path.startswith("src/drift/domain/risk")
+        and not path.startswith("src/drift/execution/")
+        and not path.startswith("src/drift/domain/execution")
     }
     return m1e_candidates - baseline
 
