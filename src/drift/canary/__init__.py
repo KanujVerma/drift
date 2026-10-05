@@ -5,7 +5,9 @@ for minimal real-capital operational validation per ADR 0011, ADR 0013, and ADR 
 """
 
 from drift.canary.gatekeeper import CanaryAllocationGatekeeper
+from drift.canary.settlement import CanarySettlementGrader
 
 __all__ = [
     "CanaryAllocationGatekeeper",
+    "CanarySettlementGrader",
 ]
