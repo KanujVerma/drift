@@ -16,13 +16,19 @@ from drift.shadow.journal import (
     ShadowJournalError,
     SimulationExecutionJournal,
 )
+from drift.shadow.reconciler import (
+    ReconciliationMismatchError,
+    ShadowBrokerReconciler,
+)
 
 __all__ = [
     "DuplicateJournalRecordError",
     "JournalAppendOnlyViolationError",
     "OrderExecutionError",
+    "ReconciliationMismatchError",
     "ShadowBroker",
     "ShadowBrokerError",
+    "ShadowBrokerReconciler",
     "ShadowJournalError",
     "SimulationExecutionJournal",
 ]
