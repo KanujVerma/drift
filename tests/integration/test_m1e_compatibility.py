@@ -158,6 +158,20 @@ M5_SCORECARD_SOURCE_PATHS = frozenset(
         "src/drift/scorecards/predictive.py",
     }
 )
+# M6 structured research memory source added under issue #205 and child slices.
+# Like the M2, M3, M4, and M5 additive modules above, these models and engines
+# do not carry the "evaluator" prefix, so they are named and routed through the
+# production AST guard.
+M6_RESEARCH_MEMORY_SOURCE_PATHS = frozenset(
+    {
+        "src/drift/domain/research_memory.py",
+        "src/drift/memory/__init__.py",
+        "src/drift/memory/archive.py",
+        "src/drift/memory/hypothesis.py",
+        "src/drift/memory/postmortem.py",
+        "src/drift/memory/recorder.py",
+    }
+)
 M1E_PRODUCTION_PATHS = frozenset(
     path for path in ALLOWED_M1E_PRODUCTION_PATHS if path.startswith("src/drift/")
 )
@@ -172,6 +186,7 @@ INERT_SOURCE_PATHS = (
     | M3_BASELINE_SOURCE_PATHS
     | M4_PREDICTION_TRACKING_SOURCE_PATHS
     | M5_SCORECARD_SOURCE_PATHS
+    | M6_RESEARCH_MEMORY_SOURCE_PATHS
 )
 M1E_SCRIPT_PATHS = frozenset(
     path for path in ALLOWED_M1E_PRODUCTION_PATHS if path.startswith("scripts/")
@@ -808,6 +823,7 @@ def test_m1e_additions_are_allowlisted_inert_and_leave_m1d_pins_unchanged() -> N
         | M3_BASELINE_SOURCE_PATHS
         | M4_PREDICTION_TRACKING_SOURCE_PATHS
         | M5_SCORECARD_SOURCE_PATHS
+        | M6_RESEARCH_MEMORY_SOURCE_PATHS
     )
     assert present & scanned_as_production
     for relative in present:
