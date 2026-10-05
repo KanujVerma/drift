@@ -5,6 +5,11 @@ append-only SQLite journal, and accounting reconciliation against
 M2 PortfolioAccountingKernel.
 """
 
+from drift.shadow.broker import (
+    OrderExecutionError,
+    ShadowBroker,
+    ShadowBrokerError,
+)
 from drift.shadow.journal import (
     DuplicateJournalRecordError,
     JournalAppendOnlyViolationError,
@@ -15,6 +20,9 @@ from drift.shadow.journal import (
 __all__ = [
     "DuplicateJournalRecordError",
     "JournalAppendOnlyViolationError",
+    "OrderExecutionError",
+    "ShadowBroker",
+    "ShadowBrokerError",
     "ShadowJournalError",
     "SimulationExecutionJournal",
 ]
