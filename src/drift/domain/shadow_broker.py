@@ -33,16 +33,22 @@ SHADOW_BROKER_SCHEMA_VERSION: Literal["1"] = "1"
 __all__ = [
     "SHADOW_BROKER_SCHEMA_VERSION",
     "EligibilityStatus",
+    "ExecutionReconciliationV1",
     "MarketExecutionEligibilityV1",
     "SimulatedFillV1",
     "SimulatedOrderStatus",
     "SimulatedOrderV1",
+    "SimulatedRejectionV1",
+    "build_execution_reconciliation",
     "build_market_execution_eligibility",
     "build_simulated_fill",
     "build_simulated_order",
+    "build_simulated_rejection",
+    "compute_execution_reconciliation_hash",
     "compute_market_execution_eligibility_hash",
     "compute_simulated_fill_hash",
     "compute_simulated_order_hash",
+    "compute_simulated_rejection_hash",
 ]
 
 
@@ -96,6 +102,22 @@ def compute_simulated_fill_hash(unsigned: Mapping[str, Any]) -> SHA256Hash:
         d["transaction_costs"], Decimal
     ):
         d["transaction_costs"] = canonical_money(d["transaction_costs"])
+    return content_hash(d)
+
+
+def compute_simulated_rejection_hash(unsigned: Mapping[str, Any]) -> SHA256Hash:
+    """Compute canonical content hash for SimulatedRejectionV1."""
+    d = dict(unsigned)
+    d.pop("rejection_hash", None)
+    return content_hash(d)
+
+
+def compute_execution_reconciliation_hash(unsigned: Mapping[str, Any]) -> SHA256Hash:
+    """Compute canonical content hash for ExecutionReconciliationV1."""
+    d = dict(unsigned)
+    d.pop("reconciliation_hash", None)
+    if d.get("cash") is not None and isinstance(d["cash"], Decimal):
+        d["cash"] = canonical_money(d["cash"])
     return content_hash(d)
 
 
@@ -201,6 +223,46 @@ class SimulatedFillV1(FrozenModel):
         )
 
 
+class SimulatedRejectionV1(FrozenModel):
+    """One rejected simulated order recorded with reason."""
+
+    schema_version: Literal["1"] = SHADOW_BROKER_SCHEMA_VERSION
+    order_id: UUID7
+    session_key: SessionKeyV1
+    security_id: UUID7
+    reason: NonBlankStr
+    rejected_at: UTCDateTime
+    rejection_hash: SHA256Hash
+
+    @model_validator(mode="after")
+    def validate_rejection_integrity(self) -> Self:
+        expected = compute_simulated_rejection_hash(self.model_dump(mode="python"))
+        if self.rejection_hash != expected:
+            raise ValueError("simulated rejection hash mismatch")
+        return self
+
+
+class ExecutionReconciliationV1(FrozenModel):
+    """Snapshot reconciliation between broker execution records and portfolio state."""
+
+    schema_version: Literal["1"] = SHADOW_BROKER_SCHEMA_VERSION
+    reconciliation_id: UUID7
+    session_key: SessionKeyV1
+    reconciled_at: UTCDateTime
+    cash: CanonicalMoney
+    holdings_count: int = Field(ge=0)
+    status: Literal["matched", "mismatched"]
+    discrepancies: tuple[NonBlankStr, ...] = ()
+    reconciliation_hash: SHA256Hash
+
+    @model_validator(mode="after")
+    def validate_reconciliation_integrity(self) -> Self:
+        expected = compute_execution_reconciliation_hash(self.model_dump(mode="python"))
+        if self.reconciliation_hash != expected:
+            raise ValueError("execution reconciliation hash mismatch")
+        return self
+
+
 # =========================================================================
 # Builders
 # =========================================================================
@@ -294,5 +356,61 @@ def build_simulated_fill(
         {
             **unsigned,
             "fill_hash": f_hash,
+        }
+    )
+
+
+def build_simulated_rejection(
+    *,
+    order_id: UUID,
+    session_key: SessionKeyV1,
+    security_id: UUID,
+    reason: str,
+    rejected_at: datetime,
+) -> SimulatedRejectionV1:
+    """Construct immutable SimulatedRejectionV1 with computed hash."""
+    unsigned: dict[str, Any] = {
+        "schema_version": SHADOW_BROKER_SCHEMA_VERSION,
+        "order_id": order_id,
+        "session_key": session_key,
+        "security_id": security_id,
+        "reason": reason,
+        "rejected_at": rejected_at,
+    }
+    r_hash = compute_simulated_rejection_hash(unsigned)
+    return SimulatedRejectionV1.model_validate(
+        {
+            **unsigned,
+            "rejection_hash": r_hash,
+        }
+    )
+
+
+def build_execution_reconciliation(
+    *,
+    reconciliation_id: UUID,
+    session_key: SessionKeyV1,
+    reconciled_at: datetime,
+    cash: Decimal,
+    holdings_count: int,
+    status: Literal["matched", "mismatched"],
+    discrepancies: tuple[str, ...] = (),
+) -> ExecutionReconciliationV1:
+    """Construct immutable ExecutionReconciliationV1 with computed hash."""
+    unsigned: dict[str, Any] = {
+        "schema_version": SHADOW_BROKER_SCHEMA_VERSION,
+        "reconciliation_id": reconciliation_id,
+        "session_key": session_key,
+        "reconciled_at": reconciled_at,
+        "cash": canonical_money(cash),
+        "holdings_count": holdings_count,
+        "status": status,
+        "discrepancies": discrepancies,
+    }
+    rec_hash = compute_execution_reconciliation_hash(unsigned)
+    return ExecutionReconciliationV1.model_validate(
+        {
+            **unsigned,
+            "reconciliation_hash": rec_hash,
         }
     )

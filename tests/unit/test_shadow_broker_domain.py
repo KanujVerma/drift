@@ -11,11 +11,15 @@ from drift.domain.evaluator_portfolio import PortfolioFillV1
 from drift.domain.sessions import SessionKeyV1
 from drift.domain.shadow_broker import (
     EligibilityStatus,
+    ExecutionReconciliationV1,
     MarketExecutionEligibilityV1,
     SimulatedFillV1,
+    SimulatedRejectionV1,
+    build_execution_reconciliation,
     build_market_execution_eligibility,
     build_simulated_fill,
     build_simulated_order,
+    build_simulated_rejection,
 )
 
 NOW = datetime(2026, 3, 1, 10, 0, 0, tzinfo=UTC)
@@ -168,3 +172,49 @@ def test_simulated_fill_and_projection_to_m2_portfolio_fill() -> None:
     tampered["fill_price"] = Decimal("999.99")
     with pytest.raises(ValidationError, match="simulated fill hash mismatch"):
         SimulatedFillV1.model_validate(tampered)
+
+
+def test_simulated_rejection_validation() -> None:
+    """Verifies rejection models, reason requirements, and tamper detection."""
+    sec = uuid7()
+    order_id = uuid7()
+
+    rej = build_simulated_rejection(
+        order_id=order_id,
+        session_key=KEY,
+        security_id=sec,
+        reason="ineligible_security: halted",
+        rejected_at=NOW,
+    )
+    assert rej.order_id == order_id
+    assert rej.reason == "ineligible_security: halted"
+
+    # Tampering
+    tampered = rej.model_dump(mode="python")
+    tampered["reason"] = "tampered_reason"
+    with pytest.raises(ValidationError, match="simulated rejection hash mismatch"):
+        SimulatedRejectionV1.model_validate(tampered)
+
+
+def test_execution_reconciliation_validation() -> None:
+    """Verifies reconciliation model, money normalization, and tamper detection."""
+    rec_id = uuid7()
+
+    rec = build_execution_reconciliation(
+        reconciliation_id=rec_id,
+        session_key=KEY,
+        reconciled_at=NOW,
+        cash=Decimal("100000.00"),
+        holdings_count=3,
+        status="matched",
+    )
+    assert rec.status == "matched"
+    assert rec.cash == Decimal("100000")
+    assert rec.holdings_count == 3
+    assert rec.discrepancies == ()
+
+    # Tampering
+    tampered = rec.model_dump(mode="python")
+    tampered["status"] = "mismatched"
+    with pytest.raises(ValidationError, match="execution reconciliation hash mismatch"):
+        ExecutionReconciliationV1.model_validate(tampered)
