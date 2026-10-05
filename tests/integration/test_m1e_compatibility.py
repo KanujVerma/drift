@@ -453,9 +453,10 @@ def _m1e_paths_on_disk() -> set[str]:
         and not path.startswith("src/drift/domain/research_loop")
         and not path.startswith("src/drift/tournament/")
         and not path.startswith("src/drift/domain/tournament")
+        and not path.startswith("src/drift/promotion/")
+        and not path.startswith("src/drift/domain/promotion")
     }
     return m1e_candidates - baseline
-
 
 
 def _import_aliases(tree: ast.AST) -> dict[str, str]:
