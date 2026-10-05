@@ -42,9 +42,7 @@ class DeterministicMockResearchAgent:
             f"mock:exp:{self.seed}:{self._counter}:{context.context_hash[:16]}"
         )
 
-        title = (
-            f"Deterministic hypothesis #{self._counter} for {target_strategy_type}"
-        )
+        title = f"Deterministic hypothesis #{self._counter} for {target_strategy_type}"
         rationale = (
             f"Systematic exploration of {target_strategy_type} parameter space "
             f"conditioned on trial count K={context.total_trial_count}."
