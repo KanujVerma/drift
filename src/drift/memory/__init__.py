@@ -1,5 +1,6 @@
 """Structured research memory package for Drift (Milestone M6)."""
 
+from drift.memory.archive import ResearchMemoryArchive
 from drift.memory.hypothesis import (
     HypothesisFalsificationCriteria,
     HypothesisManager,
@@ -29,6 +30,7 @@ __all__ = [
     "HypothesisManager",
     "HypothesisNotFoundError",
     "InvalidStateTransitionError",
+    "ResearchMemoryArchive",
     "ResearchMemoryError",
     "ResearchMemoryRecorder",
     "deterministic_memory_uuid7",
