@@ -63,23 +63,31 @@ M6 provides a tamper-evident, append-only research memory kernel that:
 ### 3.1 Hypothesis Lifecycle States
 ```python
 class HypothesisStatus(StrEnum):
-    PROPOSED = "proposed"      # Newly formulated, unexecuted
-    ACTIVE = "active"          # Under current evaluation
-    VALIDATED = "validated"    # Survived empirical evaluation and multiple-testing thresholds
-    FALSIFIED = "falsified"    # Met pre-registered falsification criteria
-    ABANDONED = "abandoned"    # Retired due to structural invalidity or superseded mechanism
+    PROPOSED = "proposed"  # Newly formulated, unexecuted
+    ACTIVE = "active"  # Under current evaluation
+    VALIDATED = (
+        "validated"  # Survived empirical evaluation and multiple-testing thresholds
+    )
+    FALSIFIED = "falsified"  # Met pre-registered falsification criteria
+    ABANDONED = (
+        "abandoned"  # Retired due to structural invalidity or superseded mechanism
+    )
 ```
 
 ### 3.2 Failure Categories
 ```python
 class FailureCategory(StrEnum):
-    TURNOVER_DRAG = "turnover_drag"                  # Alpha consumed by costs/fees
-    NEGATIVE_ALPHA = "negative_alpha"                # Information coefficient <= 0
-    DRAWDOWN_BREACH = "drawdown_breach"              # Exceeded acceptable drawdown bounds
-    CALIBRATION_FAILURE = "calibration_failure"      # Severe probability miscalibration (high ECE/Brier)
-    OVERFITTING_REJECTION = "overfitting_rejection"  # Rejected by DSR / multiple-testing penalty
-    DATA_DEFECT = "data_defect"                      # Delisting bias, unallocated basis, or missing data
-    EXECUTION_UNVIABLE = "execution_unviable"        # Excessive market impact or illiquidity
+    TURNOVER_DRAG = "turnover_drag"  # Alpha consumed by costs/fees
+    NEGATIVE_ALPHA = "negative_alpha"  # Information coefficient <= 0
+    DRAWDOWN_BREACH = "drawdown_breach"  # Exceeded acceptable drawdown bounds
+    CALIBRATION_FAILURE = (
+        "calibration_failure"  # Severe probability miscalibration (high ECE/Brier)
+    )
+    OVERFITTING_REJECTION = (
+        "overfitting_rejection"  # Rejected by DSR / multiple-testing penalty
+    )
+    DATA_DEFECT = "data_defect"  # Delisting bias, unallocated basis, or missing data
+    EXECUTION_UNVIABLE = "execution_unviable"  # Excessive market impact or illiquidity
 ```
 
 ### 3.3 Research Trial Records
