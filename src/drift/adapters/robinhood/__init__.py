@@ -4,6 +4,7 @@ Provides configuration schemas, transport protocols, deterministic mock transpor
 and broker adapter implementations for Robinhood Agentic MCP tools per ADR 0011.
 """
 
+from drift.adapters.robinhood.adapter import RobinhoodAgenticAdapter
 from drift.adapters.robinhood.config import (
     ROBINHOOD_ADAPTER_SCHEMA_VERSION,
     RobinhoodAgenticConfigV1,
@@ -17,6 +18,7 @@ from drift.adapters.robinhood.transport import (
 __all__ = [
     "ROBINHOOD_ADAPTER_SCHEMA_VERSION",
     "MockRobinhoodMcpTransport",
+    "RobinhoodAgenticAdapter",
     "RobinhoodAgenticConfigV1",
     "RobinhoodMcpError",
     "RobinhoodMcpTransportProtocol",
