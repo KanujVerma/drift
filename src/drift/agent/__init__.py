@@ -4,8 +4,10 @@ from drift.agent.context import (
     DEFAULT_STRATEGY_TYPES,
     ResearchContextSynthesizer,
 )
+from drift.agent.validator import ProposalValidator
 
 __all__ = [
     "DEFAULT_STRATEGY_TYPES",
+    "ProposalValidator",
     "ResearchContextSynthesizer",
 ]
