@@ -11,9 +11,11 @@ from drift.autonomy.ledger import (
     GovernanceLedgerError,
     PersistentEvidenceLedger,
 )
+from drift.autonomy.orchestrator import BoundedAutonomyOrchestrator
 
 __all__ = [
     "AllocationExpansionGovernor",
+    "BoundedAutonomyOrchestrator",
     "GovernanceAppendOnlyViolationError",
     "GovernanceChainIntegrityError",
     "GovernanceLedgerError",
