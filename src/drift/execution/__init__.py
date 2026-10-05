@@ -14,12 +14,22 @@ from drift.execution.journal import (
     IntentAppendOnlyViolationError,
     PersistentOrderIntentJournal,
 )
+from drift.execution.router import (
+    BrokerNeutralExecutionRouter,
+    DuplicateClientOrderIdError,
+    RouterExecutionError,
+    UnknownIntentError,
+)
 
 __all__ = [
     "BrokerAdapterProtocol",
+    "BrokerNeutralExecutionRouter",
+    "DuplicateClientOrderIdError",
     "DuplicateIntentRecordError",
     "ExecutionJournalError",
     "IntentAppendOnlyViolationError",
     "MockBrokerAdapter",
     "PersistentOrderIntentJournal",
+    "RouterExecutionError",
+    "UnknownIntentError",
 ]
