@@ -466,6 +466,7 @@ def _m1e_paths_on_disk() -> set[str]:
         and not path.startswith("src/drift/domain/research_loop")
         and not path.startswith("src/drift/tournament/")
         and not path.startswith("src/drift/domain/tournament")
+        and not path.startswith("src/drift/experiments/")
     }
     return m1e_candidates - baseline
 
