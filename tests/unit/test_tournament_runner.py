@@ -48,18 +48,29 @@ def test_runner_match_champion_defends_title() -> None:
         min_delta_sharpe=Decimal("0.25"),
     )
 
+    c_returns = tuple(
+        Decimal("0.001") + Decimal(str(i % 5)) / Decimal("1000") for i in range(60)
+    )
+    h_returns_defend = tuple(
+        Decimal("0.0012") + Decimal(str((i + 1) % 5)) / Decimal("1000")
+        for i in range(60)
+    )
     evaluator = DeterministicMockTrialEvaluator(
         metric_overrides={
             champ.parameters_hash: {
                 "annualized_sharpe": Decimal("1.20"),
                 "max_drawdown": Decimal("0.08"),
                 "annualized_turnover": Decimal("2.0"),
+                "is_pnl_complete": True,
+                "session_returns": c_returns,
             },
             chall.parameters_hash: {
                 # Challenger only marginally better (+0.05 < required +0.25)
                 "annualized_sharpe": Decimal("1.25"),
                 "max_drawdown": Decimal("0.08"),
                 "annualized_turnover": Decimal("2.1"),
+                "is_pnl_complete": True,
+                "session_returns": h_returns_defend,
             },
         }
     )
@@ -85,18 +96,29 @@ def test_runner_match_challenger_promoted() -> None:
         min_delta_sharpe=Decimal("0.30"),
     )
 
+    c_returns = tuple(
+        Decimal("0.001") + Decimal(str(i % 5)) / Decimal("1000") for i in range(60)
+    )
+    h_returns_promo = tuple(
+        Decimal("0.005") + Decimal(str((i + 1) % 5)) / Decimal("1000")
+        for i in range(60)
+    )
     evaluator = DeterministicMockTrialEvaluator(
         metric_overrides={
             champ.parameters_hash: {
                 "annualized_sharpe": Decimal("1.00"),
                 "max_drawdown": Decimal("0.10"),
                 "annualized_turnover": Decimal("2.0"),
+                "is_pnl_complete": True,
+                "session_returns": c_returns,
             },
             chall.parameters_hash: {
                 # Significantly outperforms: +0.60 Sharpe, lower DD
                 "annualized_sharpe": Decimal("1.60"),
                 "max_drawdown": Decimal("0.07"),
                 "annualized_turnover": Decimal("2.2"),
+                "is_pnl_complete": True,
+                "session_returns": h_returns_promo,
             },
         }
     )
@@ -166,17 +188,28 @@ def test_runner_with_mock_recorder() -> None:
             self.rejections.append(match)
 
     recorder = MockRecorder()
+    c_returns = tuple(
+        Decimal("0.001") + Decimal(str(i % 5)) / Decimal("1000") for i in range(60)
+    )
+    h_returns = tuple(
+        Decimal("0.005") + Decimal(str((i + 1) % 5)) / Decimal("1000")
+        for i in range(60)
+    )
     evaluator = DeterministicMockTrialEvaluator(
         metric_overrides={
             champ.parameters_hash: {
                 "annualized_sharpe": Decimal("1.00"),
                 "max_drawdown": Decimal("0.10"),
                 "annualized_turnover": Decimal("2.0"),
+                "is_pnl_complete": True,
+                "session_returns": c_returns,
             },
             chall.parameters_hash: {
                 "annualized_sharpe": Decimal("1.50"),
                 "max_drawdown": Decimal("0.08"),
                 "annualized_turnover": Decimal("2.2"),
+                "is_pnl_complete": True,
+                "session_returns": h_returns,
             },
         }
     )

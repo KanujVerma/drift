@@ -43,14 +43,23 @@ class DeterministicMockTrialEvaluator:
     ) -> Mapping[str, Any]:
         """Return deterministic metrics for an experiment specification."""
         if self.eval_fn is not None:
-            return self.eval_fn(experiment)
+            res = dict(self.eval_fn(experiment))
+            res.setdefault("is_mock", True)
+            res.setdefault("is_synthetic", True)
+            return res
 
         param_hash = experiment.parameters_hash
         if param_hash in self.metric_overrides:
-            return self.metric_overrides[param_hash]
+            res = dict(self.metric_overrides[param_hash])
+            res.setdefault("is_mock", True)
+            res.setdefault("is_synthetic", True)
+            return res
 
         if self.default_metrics is not None:
-            return dict(self.default_metrics)
+            res = dict(self.default_metrics)
+            res.setdefault("is_mock", True)
+            res.setdefault("is_synthetic", True)
+            return res
 
         # Deterministic synthetic metrics derived from parameters hash
         int_seed = int(param_hash[:8], 16)
@@ -62,4 +71,6 @@ class DeterministicMockTrialEvaluator:
             "annualized_sharpe": sharpe,
             "max_drawdown": drawdown,
             "annualized_turnover": turnover,
+            "is_mock": True,
+            "is_synthetic": True,
         }

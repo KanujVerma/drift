@@ -79,18 +79,29 @@ def test_adv_marginal_noise_outperformance_rejection() -> None:
         min_delta_sharpe=Decimal("0.25"),
     )
 
+    c_returns = tuple(
+        Decimal("0.001") + Decimal(str(i % 5)) / Decimal("1000") for i in range(60)
+    )
+    h_returns = tuple(
+        Decimal("0.0012") + Decimal(str((i + 1) % 5)) / Decimal("1000")
+        for i in range(60)
+    )
     evaluator = DeterministicMockTrialEvaluator(
         metric_overrides={
             champ.parameters_hash: {
                 "annualized_sharpe": Decimal("1.00"),
                 "max_drawdown": Decimal("0.08"),
                 "annualized_turnover": Decimal("2.0"),
+                "is_pnl_complete": True,
+                "session_returns": c_returns,
             },
             chall.parameters_hash: {
                 # Only +0.05 better (noise)
                 "annualized_sharpe": Decimal("1.05"),
                 "max_drawdown": Decimal("0.08"),
                 "annualized_turnover": Decimal("2.0"),
+                "is_pnl_complete": True,
+                "session_returns": h_returns,
             },
         }
     )
@@ -179,17 +190,28 @@ def test_adv_drawdown_tail_risk_breach_rejection() -> None:
         max_drawdown_slack=Decimal("0.10"),  # max allowed DD: 0.08 * 1.1 = 0.088
     )
 
+    c_returns = tuple(
+        Decimal("0.001") + Decimal(str(i % 5)) / Decimal("1000") for i in range(60)
+    )
+    h_returns = tuple(
+        Decimal("0.005") + Decimal(str((i + 1) % 5)) / Decimal("1000")
+        for i in range(60)
+    )
     evaluator = DeterministicMockTrialEvaluator(
         metric_overrides={
             champ.parameters_hash: {
                 "annualized_sharpe": Decimal("1.00"),
                 "max_drawdown": Decimal("0.08"),
                 "annualized_turnover": Decimal("2.0"),
+                "is_pnl_complete": True,
+                "session_returns": c_returns,
             },
             chall.parameters_hash: {
                 "annualized_sharpe": Decimal("2.50"),  # Huge Sharpe
                 "max_drawdown": Decimal("0.22"),  # Breaches 0.088 limit
                 "annualized_turnover": Decimal("2.0"),
+                "is_pnl_complete": True,
+                "session_returns": h_returns,
             },
         }
     )
@@ -220,17 +242,28 @@ def test_adv_turnover_drag_ratio_breach_rejection() -> None:
         max_turnover_ratio=Decimal("2.0"),
     )
 
+    c_returns = tuple(
+        Decimal("0.001") + Decimal(str(i % 5)) / Decimal("1000") for i in range(60)
+    )
+    h_returns = tuple(
+        Decimal("0.005") + Decimal(str((i + 1) % 5)) / Decimal("1000")
+        for i in range(60)
+    )
     evaluator = DeterministicMockTrialEvaluator(
         metric_overrides={
             champ.parameters_hash: {
                 "annualized_sharpe": Decimal("1.00"),
                 "max_drawdown": Decimal("0.08"),
                 "annualized_turnover": Decimal("2.0"),
+                "is_pnl_complete": True,
+                "session_returns": c_returns,
             },
             chall.parameters_hash: {
                 "annualized_sharpe": Decimal("2.00"),
                 "max_drawdown": Decimal("0.07"),
                 "annualized_turnover": Decimal("7.5"),  # Turnover ratio = 3.75 > 2.0
+                "is_pnl_complete": True,
+                "session_returns": h_returns,
             },
         }
     )
@@ -293,6 +326,13 @@ def test_adv_incomplete_realized_pnl_disqualification() -> None:
         created_at=TIMESTAMP_START,
     )
 
+    c_returns = tuple(
+        Decimal("0.001") + Decimal(str(i % 5)) / Decimal("1000") for i in range(60)
+    )
+    h_returns = tuple(
+        Decimal("0.005") + Decimal(str((i + 1) % 5)) / Decimal("1000")
+        for i in range(60)
+    )
     evaluator = DeterministicMockTrialEvaluator(
         metric_overrides={
             champ.parameters_hash: {
@@ -300,12 +340,14 @@ def test_adv_incomplete_realized_pnl_disqualification() -> None:
                 "max_drawdown": Decimal("0.08"),
                 "annualized_turnover": Decimal("2.0"),
                 "is_pnl_complete": True,
+                "session_returns": c_returns,
             },
             chall.parameters_hash: {
                 "annualized_sharpe": Decimal("2.50"),
                 "max_drawdown": Decimal("0.06"),
                 "annualized_turnover": Decimal("2.1"),
                 "is_pnl_complete": False,  # Unknown basis disposal!
+                "session_returns": h_returns,
             },
         }
     )

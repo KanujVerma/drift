@@ -44,11 +44,42 @@ def diagnose_trial_outcome(
     metrics: Mapping[str, Any],
 ) -> TrialDiagnosisResult:
     """Evaluate actual metrics against hypothesis falsification criteria."""
+    # 0. Check for missing mandatory metrics and incomplete evidence
+    raw_sharpe = metrics.get("annualized_sharpe")
+    raw_drawdown = metrics.get("max_drawdown")
+    raw_turnover = metrics.get("annualized_turnover")
+
+    if raw_sharpe is None or raw_drawdown is None or raw_turnover is None:
+        return TrialDiagnosisResult(
+            outcome=TrialOutcome.INVALIDATED,
+            failure_category=FailureCategory.DATA_DEFECT,
+            root_cause_summary=(
+                "Missing mandatory evaluation metrics (Sharpe, Drawdown, or Turnover)"
+            ),
+            lessons_learned=(
+                "Evaluator output is incomplete. Ensure all required metrics "
+                "are provided."
+            ),
+            breached_criteria=("missing_mandatory_metrics",),
+            forbidden_variations=(),
+        )
+
+    if metrics.get("is_pnl_complete") is False:
+        return TrialDiagnosisResult(
+            outcome=TrialOutcome.INVALIDATED,
+            failure_category=FailureCategory.DATA_DEFECT,
+            root_cause_summary=(
+                "realized PnL completeness not satisfied; disposals missing cost basis"
+            ),
+            lessons_learned="Trial evaluation produced incomplete PnL evidence.",
+            breached_criteria=("incomplete_pnl",),
+            forbidden_variations=(),
+        )
+
     breaches: list[str] = []
     primary_category: FailureCategory | None = None
 
     # 1. Sharpe Ratio
-    raw_sharpe = metrics.get("annualized_sharpe", Decimal("0"))
     sharpe = Decimal(str(raw_sharpe))
     if sharpe < hypothesis.min_annualized_sharpe:
         breaches.append(
@@ -61,7 +92,6 @@ def diagnose_trial_outcome(
             primary_category = FailureCategory.CALIBRATION_FAILURE
 
     # 2. Maximum Drawdown
-    raw_drawdown = metrics.get("max_drawdown", Decimal("0"))
     drawdown = Decimal(str(raw_drawdown))
     if drawdown > hypothesis.max_drawdown_limit:
         breaches.append(
@@ -72,7 +102,6 @@ def diagnose_trial_outcome(
             primary_category = FailureCategory.DRAWDOWN_BREACH
 
     # 3. Annualized Turnover
-    raw_turnover = metrics.get("annualized_turnover", Decimal("0"))
     turnover = Decimal(str(raw_turnover))
     if turnover > hypothesis.max_turnover_limit:
         breaches.append(
