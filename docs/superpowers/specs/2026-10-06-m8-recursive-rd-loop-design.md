@@ -116,7 +116,9 @@ class ResearchLoopConfigV1(FrozenModel):
     max_iterations: int = Field(default=10, ge=1, le=100)
     max_consecutive_failures: int = Field(default=5, ge=1, le=20)
     target_annualized_sharpe: Decimal | None = None
-    target_exhaustion_fraction: Decimal = Field(default=Decimal("0.90"), ge=Decimal("0.1"), le=Decimal("1.0"))
+    target_exhaustion_fraction: Decimal = Field(
+        default=Decimal("0.90"), ge=Decimal("0.1"), le=Decimal("1.0")
+    )
     stop_on_target_met: bool = True
     created_at: UTCDateTime
     config_hash: SHA256Hash
