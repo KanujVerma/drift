@@ -81,88 +81,39 @@ research from promotion-grade live execution safety:
 The codebase currently implements the foundational evidence, temporal, and
 semantic layers:
 
-### M0: Research Evidence Kernel (Complete)
-- Frozen Pydantic domain models for hypotheses, runs, evidence, and artifacts.
-- Canonical JSON serialization guaranteeing deterministic byte representation.
-- SHA-256 hash-chained audit events recording a tamper-evident, append-only causal history.
-- Transactional, append-only local SQLite ledger with monotonic sequencing and
-  snapshot verification.
+### Implemented Research Foundations (M0 through M6)
+- **M0 Evidence Kernel**: Monotonically sequenced SQLite ledger with SHA-256 hash chaining.
+- **M1a-M1d Provenance & Normalization**: Temporal manifests, survivor-free universes, corporate action replay, and cutoff-safe split-normalized views.
+- **M1e Source Qualification (Tasks 1-7)**: macOS/arm64 offline closure and Table 1401 golden case invariant grader (Task 8 deferred under ADR 0012).
+- **M2 Deterministic Evaluator**: Provider-neutral session evaluator and portfolio accounting kernel operating across exploratory and promotion lanes.
+- **M3 Deterministic Baselines**: Reference benchmark strategies B0 through B5 with whole-tree inventory provenance.
+- **M4 Prediction and Outcome Tracking**: Ex-ante prediction sets and deterministic outcome batches with fail-closed missingness.
+- **M5 Statistical and Model Scorecards**: Predictive calibration, performance attribution, DSR multiple-testing adjustments, and PnL completeness propagation.
+- **M6 Structured Research Memory**: Append-only SQLite research memory journal and query engine.
 
-### M1a: Temporal Provenance (Complete)
-- Exact-byte dataset manifests with SHA-256 digests and file sizes.
-- Channel-scoped availability evidence proving what was accessible when.
-- Immutable fact revisions and exact-object validation records.
-- Query-bound tri-state cutoff decisions preventing future information leakage.
-
-### M1b: Historical Identity and Universes (Complete)
-- Strict separation of issuer, security, and venue listing identities.
-- Historical ticker mappings, primary listing venue histories, and delistings.
-- Point-in-time universe composition and structural eligibility rules.
-
-### M1c: Historical Economic Facts (Complete)
-- Independent modeling of announced action terms, actual occurred effects, and
-  reported settlement deliveries.
-- Explicit cash, share, and property consideration components.
-- Exact multi-source occurrence reconciliation with dependent replay.
-
-### M1d: Observations, Sessions, and Normalization (Complete)
-- Immutable source observation claims preserved without lossy assumptions.
-- Pinned schedule and realized-session facts capturing early closes and halts.
-- Orthogonal missingness dimensions distinguishing no-trade from non-reporting.
-- Cutoff-safe source-basis and split-normalized historical views.
-
-### M1e: License-Gated Real-Source Qualification and Replay Closure (In Progress / Deferred)
-- Tasks 1 through 7 complete and verified across 1,882 tests.
-- Provider-neutral qualification profiles, rights assessments, and private content store.
-- Exact source snapshots and Table 1401 golden case invariant grader (G01-G18).
-- macOS/arm64 environment closure (19 artifact kinds) and offline replay harness.
-- Task 8 (real provider pilot): Paid promotion-grade source qualification is
-  paused/deferred under ADR 0012 until economically justified by exploratory
-  research. See [M1e Provider Selection](m1e-provider-selection.md) and
-  [ADR 0012](../adr/0012-permit-exploratory-evaluation-before-promotion-grade-source-qualification.md).
+### Autonomous Research Loop and Tournament (M7, M8, M10)
+- **M7 AI Research Agent**: Autonomous Gemini-assisted hypothesis and experiment specification with strict parameter validation.
+- **M8 Recursive R&D Loop**: Iterative research refinement connected directly to authentic M2 deterministic session evaluation via `M2TrialEvaluatorAdapter`.
+- **M10 Champion / Challenger Tournament**: Model tournaments guarded by a non-negotiable Scientific Integrity Firewall eliminating synthetic returns and enforcing empirical paired series.
+- **Parallel Research Portfolios**: Isolated $10,000 portfolio cohort harness (`drift.experiments.parallel_portfolios`) for reproducible multi-strategy evaluation.
 
 ---
 
-## Future Execution Architecture (M13 through M16)
+## Execution and Risk Architecture (M12 through M18+)
 
-### Live Execution Safety Controls (M13 - M15)
-When Drift reaches live execution validation, the runtime incorporates strict
-safety patterns drawn from institutional trading systems:
+> **Operational Boundary**: Milestones M12 through M18+ are fully implemented in runtime
+> code and verified across unit and adversarial test suites. However, in accordance with
+> ADR 0011, ADR 0012, and ADR 0014, live broker connection, active order placement, and
+> live capital remain strictly **UNAUTHORIZED**.
 
-1. **Deterministic Position and Order Limits**: Hard-coded caps on maximum order
-   notional, maximum open position size, and maximum portfolio leverage.
-2. **Persistent Kill Switch**: An external, file-backed emergency stop switch
-   that survives process restarts and immediately cancels pending orders.
-3. **Pending Order Intent State**: Orders must be recorded in an intent journal
-   before submission to prevent duplicate order generation during network latency.
-4. **Broker Readback and Reconciliation**: Continuous reconciliation loop matching
-   local position intent against actual broker account positions.
-5. **Crash Recovery**: Deterministic state reconstruction from the execution
-   journal upon startup.
-6. **Private Runtime State Outside Git**: All credentials, session tokens, and
-   account state live in private local storage outside source control.
-7. **Dry-Run / Shadow Preview Mode**: Full validation pipeline running against live
-   quotes without order placement.
-8. **Tiny-Capital Canary Rollout**: Real-money execution strictly constrained to
-   minimal capital allocations (e.g., single-share canary testing).
-9. **Cumulative Daily Loss Limits**: Hard automated circuit breakers halting
-   trading if realized or unrealized drawdown exceeds daily thresholds.
-10. **Asset Allowlists**: Execution restricted strictly to pre-approved, highly
-    liquid symbols meeting universe criteria.
-
-### Official Robinhood Agentic MCP Adapter (M16)
-Drift integrates with live brokerages exclusively through standard, supported
-interfaces (ADR 0002 and ADR 0011):
-
-- **No Unofficial APIs**: Drift forbids reverse-engineered web scrapers,
-  `robin_stocks`, browser automation, or private endpoint emulation.
-- **Broker-Neutral Interface**: Core trading strategies interact with an
-  abstract, broker-neutral execution boundary.
-- **Official MCP Connection**: The live execution adapter communicates with
-  Robinhood via the official Robinhood Agentic MCP protocol on a dedicated
-  Agentic Trading Account.
-- **Role Isolation**: Robinhood is live execution and account state
-  infrastructure, never Drift's historical research truth source.
+### Implemented Execution Components
+1. **M12 Simulated Shadow Broker**: In-memory broker simulator tracking orders, fills, and exposures.
+2. **M13 Deterministic Hard Risk**: Non-negotiable risk gatekeeper enforcing position limits, gross exposure caps, drawdown stops, and persistent kill switches.
+3. **M14 Broker-Neutral Execution**: Abstract router and persistent order intent journal enforcing strict idempotency and position reconciliation.
+4. **M15 Shadow Validation**: Live tick streamer, execution drift tracker, and shadow validation telemetry.
+5. **M16 Official Robinhood Agentic MCP Adapter**: Official Agentic Trading protocol integration behind broker-neutral execution (ADR 0011).
+6. **M17 Tiny-Money Canary**: Micro-capital execution layer with allocation gatekeepers and settlement grading.
+7. **M18+ Bounded Autonomy**: Tier-based capital expansion governors with audited evidence ledgers.
 
 ---
 
@@ -172,6 +123,7 @@ interfaces (ADR 0002 and ADR 0011):
 - **Workstream Ownership**: [workstreams.md](workstreams.md)
 - **Agent Operating Workflow and Authority**: [agent-workflow.md](agent-workflow.md)
 - **Trust Boundaries and Retention**: [trust-boundaries.md](trust-boundaries.md)
+- **Execution Safety Audit**: [execution-safety-audit.md](execution-safety-audit.md)
 - **M1e Provider Selection State**: [m1e-provider-selection.md](m1e-provider-selection.md)
 - **Accepted Architecture Decisions**: [docs/adr/](../adr/)
-- **Active Executable Plan**: [docs/superpowers/plans/2026-09-13-m1e-license-gated-real-source-qualification-replay-closure.md](../superpowers/plans/2026-09-13-m1e-license-gated-real-source-qualification-replay-closure.md)
+- **Active Executable Plan**: [docs/superpowers/plans/2026-09-19-m2-deterministic-session-evaluator.md](../superpowers/plans/2026-09-19-m2-deterministic-session-evaluator.md)
