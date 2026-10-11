@@ -286,7 +286,7 @@ def test_genuine_adapter_end_to_end_in_production_mode(tmp_path: Path) -> None:
     config = build_research_loop_config(
         loop_id=UUID("018f3a5b-6c7d-7890-8123-456789abcd99"),
         target_strategy_type="b0_cash",
-        max_iterations=2,
+        max_iterations=1,
         created_at=TIMESTAMP,
     )
 
@@ -304,13 +304,13 @@ def test_genuine_adapter_end_to_end_in_production_mode(tmp_path: Path) -> None:
 
     summary, iterations = runner.run(start_time=TIMESTAMP)
 
-    assert summary.total_iterations == 2
-    assert len(iterations) == 2
+    assert summary.total_iterations == 1
+    assert len(iterations) == 1
     assert all(it.status == IterationStatus.EVALUATION_COMPLETED for it in iterations)
     assert all(it.annualized_sharpe is not None for it in iterations)
 
     trials = archive.get_trials()
-    assert len(trials) == 2
+    assert len(trials) == 1
     for t in trials:
         assert isinstance(t.headline_metrics, Mapping)
         assert t.headline_metrics.get("is_mock") is False

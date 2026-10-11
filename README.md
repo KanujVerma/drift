@@ -93,15 +93,35 @@ Drift evaluates progress across five distinct dimensions:
 | **M17** Tiny-Money Canary | COMPLETE | COMPLETE | ACCEPTED | N/A (CANARY) | **UNAUTHORIZED** |
 | **M18+** Bounded Autonomy | COMPLETE | COMPLETE | ACCEPTED | N/A (AUTONOMY) | **UNAUTHORIZED** |
 
+### PR #350 Research Integrity and Parallel Portfolios Components
+
+The components introduced in PR #350 operate across Drift's 5-dimensional status model:
+- **Domain Schema**: Data models and boundary types.
+- **Ledger Events**: M0 audit ledger persistence and schema bindings.
+- **Service Implementation**: Core business logic and runtime services.
+- **Unit Tests**: Targeted functional and boundary unit coverage.
+- **Verification Suite**: Integrated adversarial, determinism, and property verification.
+
+| Component | Domain Schema | Ledger Events | Service Implementation | Unit Tests | Verification Suite | Status | Lane Status |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Deterministic Evaluator Adapter** (M2/M8) | COMPLETE | COMPLETE | COMPLETE | COMPLETE | COMPLETE | PENDING EXTERNAL REVIEW | EXPLORATORY ONLY |
+| **Parallel $10,000 Portfolios Harness** | COMPLETE | COMPLETE | COMPLETE | COMPLETE | COMPLETE | PENDING EXTERNAL REVIEW | EXPLORATORY ONLY |
+| **Scientific Integrity Firewall** | COMPLETE | COMPLETE | COMPLETE | COMPLETE | COMPLETE | PENDING EXTERNAL REVIEW | EXPLORATORY ONLY |
+| **Tournament Evidence Requirements** | COMPLETE | COMPLETE | COMPLETE | COMPLETE | COMPLETE | PENDING EXTERNAL REVIEW | EXPLORATORY ONLY |
+
+> **Exploratory Evidence Boundary**: All evaluation evidence produced in the exploratory lane
+> is strictly non-promotable and cannot be upgraded, relabeled, or converted into promotion-grade
+> evidence. Promotion to production-authorized lanes requires a fresh, independent evaluation
+> run against an accepted promotion-qualified M1e dataset (deferred under ADR 0012). PR #350
+> does NOT qualify M1e Task 8 and does NOT promote any strategy to live execution.
+
 ### Parallel Research Portfolios ($10,000 Initial Capital)
 Drift provides an isolated, deterministic research portfolio cohort harness
-(`drift.experiments.parallel_portfolios` / `drift-portfolios` CLI) for evaluating
-independent $10,000 strategy accounts in parallel under identical market sessions:
+(`drift.experiments.parallel_portfolios`) for evaluating independent $10,000
+strategy accounts in parallel under identical market sessions:
 ```bash
 # Run deterministic parallel research portfolio cohort demo
-uv run python -m drift.experiments.parallel_portfolios
-# Or via console entry point
-uv run drift-portfolios
+python -m drift.experiments.parallel_portfolios
 ```
 
 ---

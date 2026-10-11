@@ -78,7 +78,7 @@ class TournamentRunner:
         config: TournamentConfigV1,
         evaluator: TrialEvaluatorProtocol,
         recorder: TournamentRecorderProtocol | None = None,
-        require_genuine_evidence: bool = False,
+        require_genuine_evidence: bool = True,
     ) -> None:
         self.config = config
         self.evaluator = evaluator
@@ -124,17 +124,17 @@ class TournamentRunner:
                 champion=champion,
                 challenger=challenger,
                 champion_sharpe=Decimal(
-                    str(champ_metrics.get("annualized_sharpe", "0.0"))
+                    str(champ_metrics.get("annualized_sharpe", "0.0") or "0.0")
                 ),
                 challenger_sharpe=Decimal(
-                    str(chall_metrics.get("annualized_sharpe", "0.0"))
+                    str(chall_metrics.get("annualized_sharpe", "0.0") or "0.0")
                 ),
                 delta_sharpe=Decimal("0.0"),
                 champion_max_drawdown=Decimal(
-                    str(champ_metrics.get("max_drawdown", "0.0"))
+                    str(champ_metrics.get("max_drawdown", "0.0") or "0.0")
                 ),
                 challenger_max_drawdown=Decimal(
-                    str(chall_metrics.get("max_drawdown", "0.0"))
+                    str(chall_metrics.get("max_drawdown", "0.0") or "0.0")
                 ),
                 turnover_ratio=Decimal("1.0"),
                 paired_t_stat=Decimal("0.0"),
@@ -152,6 +152,84 @@ class TournamentRunner:
                 self.recorder.record_match(record)
                 self.recorder.record_rejection(record)
             return record
+
+        # Strict evidence binding enforcement when genuine evidence is required
+        if self.require_genuine_evidence:
+            rejection_reasons_list: list[str] = []
+
+            c_bundle = champ_metrics.get("bundle_hash")
+            h_bundle = chall_metrics.get("bundle_hash")
+            if not c_bundle or not h_bundle or c_bundle != h_bundle:
+                rejection_reasons_list.append(
+                    f"input bundle mismatch or missing: champion bundle '{c_bundle}' "
+                    f"vs challenger bundle '{h_bundle}'"
+                )
+
+            c_sessions = champ_metrics.get("session_keys") or champ_metrics.get(
+                "session_dates"
+            )
+            h_sessions = chall_metrics.get("session_keys") or chall_metrics.get(
+                "session_dates"
+            )
+            if (
+                not isinstance(c_sessions, Sequence)
+                or not isinstance(h_sessions, Sequence)
+                or len(c_sessions) == 0
+                or len(h_sessions) == 0
+                or tuple(c_sessions) != tuple(h_sessions)
+            ):
+                rejection_reasons_list.append(
+                    "evaluation session calendar mismatch, missing, or empty "
+                    "between champion and challenger"
+                )
+
+            c_cost = champ_metrics.get("cost_model_hash")
+            h_cost = chall_metrics.get("cost_model_hash")
+            if (c_cost or h_cost) and c_cost != h_cost:
+                rejection_reasons_list.append(
+                    f"evaluation cost model mismatch: champion '{c_cost}' "
+                    f"vs challenger '{h_cost}'"
+                )
+
+            c_pnl = champ_metrics.get("is_pnl_complete") is True
+            h_pnl = chall_metrics.get("is_pnl_complete") is True
+            if not c_pnl or not h_pnl:
+                rejection_reasons_list.append(
+                    "realized PnL completeness not satisfied for both participants"
+                )
+
+            if rejection_reasons_list:
+                record = build_tournament_match_record(
+                    match_id=resolved_match_id,
+                    tournament_id=self.config.tournament_id,
+                    champion=champion,
+                    challenger=challenger,
+                    champion_sharpe=Decimal(
+                        str(champ_metrics.get("annualized_sharpe", "0.0") or "0.0")
+                    ),
+                    challenger_sharpe=Decimal(
+                        str(chall_metrics.get("annualized_sharpe", "0.0") or "0.0")
+                    ),
+                    delta_sharpe=Decimal("0.0"),
+                    champion_max_drawdown=Decimal(
+                        str(champ_metrics.get("max_drawdown", "0.0") or "0.0")
+                    ),
+                    challenger_max_drawdown=Decimal(
+                        str(chall_metrics.get("max_drawdown", "0.0") or "0.0")
+                    ),
+                    turnover_ratio=Decimal("1.0"),
+                    paired_t_stat=Decimal("0.0"),
+                    p_value=Decimal("1.0"),
+                    decision=TournamentDecision.REJECTED_INCOMPLETE_EVIDENCE,
+                    rejection_reasons=tuple(rejection_reasons_list),
+                    evaluated_sessions_count=0,
+                    started_at=start_time,
+                    completed_at=end_time,
+                )
+                if self.recorder is not None:
+                    self.recorder.record_match(record)
+                    self.recorder.record_rejection(record)
+                return record
 
         # 3. Extract headline metrics without optimistic defaults
         raw_c_sharpe = champ_metrics.get("annualized_sharpe")

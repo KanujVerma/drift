@@ -106,7 +106,9 @@ def test_adv_marginal_noise_outperformance_rejection() -> None:
         }
     )
 
-    runner = TournamentRunner(config=config, evaluator=evaluator)
+    runner = TournamentRunner(
+        config=config, evaluator=evaluator, require_genuine_evidence=False
+    )
     record = runner.run_match(
         champion=champ,
         challenger=chall,
@@ -216,7 +218,9 @@ def test_adv_drawdown_tail_risk_breach_rejection() -> None:
         }
     )
 
-    runner = TournamentRunner(config=config, evaluator=evaluator)
+    runner = TournamentRunner(
+        config=config, evaluator=evaluator, require_genuine_evidence=False
+    )
     record = runner.run_match(
         champion=champ,
         challenger=chall,
@@ -268,7 +272,9 @@ def test_adv_turnover_drag_ratio_breach_rejection() -> None:
         }
     )
 
-    runner = TournamentRunner(config=config, evaluator=evaluator)
+    runner = TournamentRunner(
+        config=config, evaluator=evaluator, require_genuine_evidence=False
+    )
     record = runner.run_match(
         champion=champ,
         challenger=chall,
@@ -352,7 +358,9 @@ def test_adv_incomplete_realized_pnl_disqualification() -> None:
         }
     )
 
-    runner = TournamentRunner(config=config, evaluator=evaluator)
+    runner = TournamentRunner(
+        config=config, evaluator=evaluator, require_genuine_evidence=False
+    )
     record = runner.run_match(
         champion=champ,
         challenger=chall,

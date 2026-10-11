@@ -66,6 +66,7 @@ class ResearchLoopRunner:
         archive: ResearchMemoryArchive,
         search_spaces: Mapping[str, ParameterSearchSpaceV1] | None = None,
         loop_recorder: ResearchLoopRecorder | None = None,
+        allow_mock_evaluator: bool = False,
         production_mode: bool = False,
     ) -> None:
         self.config = config
@@ -77,18 +78,21 @@ class ResearchLoopRunner:
         self.archive = archive
         self.search_spaces = dict(search_spaces) if search_spaces else {}
         self.loop_recorder = loop_recorder
+        self.allow_mock_evaluator = allow_mock_evaluator
         self.production_mode = production_mode or getattr(
             config, "is_production", False
         )
 
-        if self.production_mode:
-            if (
-                isinstance(evaluator, DeterministicMockTrialEvaluator)
-                or getattr(evaluator, "is_mock", False)
-                or getattr(evaluator, "is_synthetic", False)
-            ):
+        is_mock_evaluator = (
+            isinstance(evaluator, DeterministicMockTrialEvaluator)
+            or getattr(evaluator, "is_mock", False)
+            or getattr(evaluator, "is_synthetic", False)
+        )
+        if is_mock_evaluator:
+            if not self.allow_mock_evaluator or self.production_mode:
                 raise MockEvaluatorProductionError(
-                    "Deterministic mock evaluator cannot be used in production mode; "
+                    "Deterministic mock evaluator cannot be used in production mode "
+                    "(and cannot be used without explicit allow_mock_evaluator=True); "
                     "a genuine M2TrialEvaluatorAdapter is required."
                 )
 
@@ -182,10 +186,7 @@ class ResearchLoopRunner:
             run_id = deterministic_memory_uuid7(f"run:{self.config.loop_id}:{iter_idx}")
 
             postmortem_id: UUID | None = None
-            if (
-                diag.outcome == TrialOutcome.FAILED
-                or diag.outcome == TrialOutcome.INVALIDATED
-            ):
+            if diag.outcome == TrialOutcome.FAILED:
                 falsified_count += 1
                 consecutive_failures += 1
 
@@ -195,6 +196,22 @@ class ResearchLoopRunner:
                     run_id=run_id,
                     trial_id=trial_id,
                     falsified_hypothesis_id=hyp_prop.proposal_id,
+                    created_at=step_time,
+                )
+                self.recorder.record_postmortem(pm)
+                postmortem_id = pm.postmortem_id
+            elif diag.outcome == TrialOutcome.INVALIDATED:
+                # An invalidated trial indicates execution failure or incomplete data,
+                # not a falsified scientific hypothesis.
+                # Do not increment falsified_count.
+                consecutive_failures += 1
+
+                pm = build_automatic_failure_postmortem(
+                    diagnosis=diag,
+                    experiment_id=exp_prop.experiment_proposal_id,
+                    run_id=run_id,
+                    trial_id=trial_id,
+                    falsified_hypothesis_id=None,
                     created_at=step_time,
                 )
                 self.recorder.record_postmortem(pm)

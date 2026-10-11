@@ -75,7 +75,9 @@ def test_runner_match_champion_defends_title() -> None:
         }
     )
 
-    runner = TournamentRunner(config=config, evaluator=evaluator)
+    runner = TournamentRunner(
+        config=config, evaluator=evaluator, require_genuine_evidence=False
+    )
     record = runner.run_match(
         champion=champ,
         challenger=chall,
@@ -123,7 +125,9 @@ def test_runner_match_challenger_promoted() -> None:
         }
     )
 
-    runner = TournamentRunner(config=config, evaluator=evaluator)
+    runner = TournamentRunner(
+        config=config, evaluator=evaluator, require_genuine_evidence=False
+    )
     record = runner.run_match(
         champion=champ,
         challenger=chall,
@@ -155,7 +159,9 @@ def test_runner_rejects_non_incumbent_as_champion() -> None:
     )
     evaluator = DeterministicMockTrialEvaluator()
 
-    runner = TournamentRunner(config=config, evaluator=evaluator)
+    runner = TournamentRunner(
+        config=config, evaluator=evaluator, require_genuine_evidence=False
+    )
     with pytest.raises(ValueError, match="not declared as incumbent champion"):
         runner.run_match(
             champion=fake_champ,
@@ -218,6 +224,7 @@ def test_runner_with_mock_recorder() -> None:
         config=config,
         evaluator=evaluator,
         recorder=recorder,
+        require_genuine_evidence=False,
     )
 
     record = runner.run_match(
@@ -254,7 +261,9 @@ def test_runner_reproducibility() -> None:
         }
     )
 
-    runner = TournamentRunner(config=config, evaluator=evaluator)
+    runner = TournamentRunner(
+        config=config, evaluator=evaluator, require_genuine_evidence=False
+    )
     rec1 = runner.run_match(
         champion=champ,
         challenger=chall,

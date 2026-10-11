@@ -25,12 +25,9 @@ DEFAULT_STRATEGY_TYPES: tuple[str, ...] = (
     "b5_low_volatility",
 )
 
-LEGACY_STRATEGY_TYPE_ALIASES: dict[str, str] = {
-    "b0_passive_equal_weight": "b0_cash",
-    "b1_market_cap_weight": "b1_single_buy_and_hold",
-    "b2_fixed_universe_rebalance": "b2_equal_weight_buy_and_hold",
-    "b3_mean_reversion": "b3_monthly_equal_weight_rebalance",
-}
+# Removed semantically incorrect legacy aliases per architecture review.
+# Only demonstrably equivalent aliases may be registered here.
+LEGACY_STRATEGY_TYPE_ALIASES: dict[str, str] = {}
 
 
 class ResearchContextSynthesizer:

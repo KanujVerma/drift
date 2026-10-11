@@ -64,6 +64,7 @@ def test_diagnose_trial_outcome_superior() -> None:
         "annualized_sharpe": Decimal("1.25"),
         "max_drawdown": Decimal("0.10"),
         "annualized_turnover": Decimal("3.2"),
+        "is_pnl_complete": True,
     }
 
     diag = diagnose_trial_outcome(hypothesis=hyp, experiment=exp, metrics=metrics)
@@ -80,6 +81,7 @@ def test_diagnose_trial_outcome_neutral() -> None:
         "annualized_sharpe": Decimal("0.70"),
         "max_drawdown": Decimal("0.15"),
         "annualized_turnover": Decimal("4.0"),
+        "is_pnl_complete": True,
     }
 
     diag = diagnose_trial_outcome(hypothesis=hyp, experiment=exp, metrics=metrics)
@@ -95,6 +97,7 @@ def test_diagnose_trial_outcome_negative_alpha() -> None:
         "annualized_sharpe": Decimal("-0.20"),
         "max_drawdown": Decimal("0.15"),
         "annualized_turnover": Decimal("3.0"),
+        "is_pnl_complete": True,
     }
 
     diag = diagnose_trial_outcome(hypothesis=hyp, experiment=exp, metrics=metrics)
@@ -111,6 +114,7 @@ def test_diagnose_trial_outcome_calibration_failure() -> None:
         "annualized_sharpe": Decimal("0.35"),  # positive but below 0.60
         "max_drawdown": Decimal("0.15"),
         "annualized_turnover": Decimal("3.0"),
+        "is_pnl_complete": True,
     }
 
     diag = diagnose_trial_outcome(hypothesis=hyp, experiment=exp, metrics=metrics)
@@ -126,6 +130,7 @@ def test_diagnose_trial_outcome_drawdown_breach() -> None:
         "annualized_sharpe": Decimal("0.80"),
         "max_drawdown": Decimal("0.32"),  # exceeds 0.20 limit
         "annualized_turnover": Decimal("3.0"),
+        "is_pnl_complete": True,
     }
 
     diag = diagnose_trial_outcome(hypothesis=hyp, experiment=exp, metrics=metrics)
@@ -141,12 +146,38 @@ def test_diagnose_trial_outcome_turnover_drag() -> None:
         "annualized_sharpe": Decimal("0.80"),
         "max_drawdown": Decimal("0.15"),
         "annualized_turnover": Decimal("8.5"),  # exceeds 5.0 limit
+        "is_pnl_complete": True,
     }
 
     diag = diagnose_trial_outcome(hypothesis=hyp, experiment=exp, metrics=metrics)
     assert diag.outcome == TrialOutcome.FAILED
     assert diag.failure_category == FailureCategory.TURNOVER_DRAG
     assert any("annualized_turnover" in b for b in diag.breached_criteria)
+
+
+def test_diagnose_trial_outcome_incomplete_pnl_invalidated() -> None:
+    hyp = _sample_hypothesis()
+    exp = _sample_experiment()
+    # Missing is_pnl_complete
+    metrics_missing = {
+        "annualized_sharpe": Decimal("1.25"),
+        "max_drawdown": Decimal("0.10"),
+        "annualized_turnover": Decimal("3.2"),
+    }
+    diag = diagnose_trial_outcome(
+        hypothesis=hyp, experiment=exp, metrics=metrics_missing
+    )
+    assert diag.outcome == TrialOutcome.INVALIDATED
+    assert diag.failure_category == FailureCategory.DATA_DEFECT
+    assert "PnL completeness" in diag.root_cause_summary
+
+    # Explicit False is_pnl_complete
+    metrics_false = {**metrics_missing, "is_pnl_complete": False}
+    diag_f = diagnose_trial_outcome(
+        hypothesis=hyp, experiment=exp, metrics=metrics_false
+    )
+    assert diag_f.outcome == TrialOutcome.INVALIDATED
+    assert diag_f.failure_category == FailureCategory.DATA_DEFECT
 
 
 def test_build_automatic_failure_postmortem() -> None:
@@ -156,6 +187,7 @@ def test_build_automatic_failure_postmortem() -> None:
         "annualized_sharpe": Decimal("0.20"),
         "max_drawdown": Decimal("0.35"),
         "annualized_turnover": Decimal("6.0"),
+        "is_pnl_complete": True,
     }
 
     diag = diagnose_trial_outcome(hypothesis=hyp, experiment=exp, metrics=metrics)
@@ -182,6 +214,7 @@ def test_build_automatic_failure_postmortem_invalid_for_success() -> None:
         "annualized_sharpe": Decimal("1.20"),
         "max_drawdown": Decimal("0.10"),
         "annualized_turnover": Decimal("3.0"),
+        "is_pnl_complete": True,
     }
 
     diag = diagnose_trial_outcome(hypothesis=hyp, experiment=exp, metrics=metrics)

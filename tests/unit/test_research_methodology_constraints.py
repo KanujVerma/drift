@@ -5,9 +5,10 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
 
+import pytest
+
 from drift.agent.context import (
     DEFAULT_STRATEGY_TYPES,
-    LEGACY_STRATEGY_TYPE_ALIASES,
 )
 from drift.agent.validator import ProposalValidator
 from drift.domain.research_agent import (
@@ -19,7 +20,12 @@ from drift.domain.research_memory import (
     build_parameter_search_space,
 )
 from drift.ledger.sqlite import SQLiteLedger
-from drift.loop.evaluator_adapter import STRATEGY_REGISTRY
+from drift.loop.evaluator_adapter import (
+    STRATEGY_REGISTRY,
+    StrategyParameterValidationError,
+    UnknownStrategyTypeError,
+    resolve_and_instantiate_strategy,
+)
 from drift.memory.archive import ResearchMemoryArchive
 from drift.memory.recorder import deterministic_memory_uuid7
 
@@ -41,12 +47,64 @@ def test_default_strategy_types_match_m3_canonical_baselines() -> None:
     assert DEFAULT_STRATEGY_TYPES == expected
 
 
-def test_legacy_aliases_reconciled_with_strategy_registry() -> None:
-    """Legacy strategy type aliases are registered in STRATEGY_REGISTRY."""
-    for legacy_name, canonical_name in LEGACY_STRATEGY_TYPE_ALIASES.items():
-        assert legacy_name in STRATEGY_REGISTRY
-        assert canonical_name in STRATEGY_REGISTRY
-        assert STRATEGY_REGISTRY[legacy_name] is STRATEGY_REGISTRY[canonical_name]
+def test_incompatible_legacy_aliases_rejected() -> None:
+    """Incompatible legacy aliases must be rejected with UnknownStrategyTypeError."""
+    incompatible = (
+        "b0_passive_equal_weight",
+        "b1_market_cap_weight",
+        "b2_fixed_universe_rebalance",
+        "b3_mean_reversion",
+    )
+    for name in incompatible:
+        assert name not in STRATEGY_REGISTRY
+        with pytest.raises(UnknownStrategyTypeError):
+            resolve_and_instantiate_strategy(name)
+
+
+def test_strategy_parameter_validation_allowlist_and_types() -> None:
+    """Verify strict parameter allowlists and typing across M3 baselines."""
+    # B0 rejects unknown params
+    with pytest.raises(StrategyParameterValidationError):
+        resolve_and_instantiate_strategy("b0_cash", {"unknown_param": 123})
+
+    # B1 requires target_security_id and rejects unknown params
+    with pytest.raises(StrategyParameterValidationError):
+        resolve_and_instantiate_strategy("b1_single_buy_and_hold", {})
+    with pytest.raises(StrategyParameterValidationError):
+        resolve_and_instantiate_strategy(
+            "b1_single_buy_and_hold",
+            {"target_security_id": "018f3a5b-6c7d-7890-8123-456789abcd01", "extra": 1},
+        )
+
+    # B2 rejects unknown params
+    with pytest.raises(StrategyParameterValidationError):
+        resolve_and_instantiate_strategy("b2_equal_weight_buy_and_hold", {"unknown": 1})
+
+    # B4 rejects bool, float, str for integer parameters
+    with pytest.raises(StrategyParameterValidationError):
+        resolve_and_instantiate_strategy("b4_momentum", {"formation_sessions": True})
+    with pytest.raises(StrategyParameterValidationError):
+        resolve_and_instantiate_strategy("b4_momentum", {"formation_sessions": 12.5})
+    with pytest.raises(StrategyParameterValidationError):
+        resolve_and_instantiate_strategy("b4_momentum", {"formation_sessions": "252"})
+    with pytest.raises(StrategyParameterValidationError):
+        resolve_and_instantiate_strategy("b4_momentum", {"unexpected_param": 10})
+
+    # B5 rejects bool, float, str
+    with pytest.raises(StrategyParameterValidationError):
+        resolve_and_instantiate_strategy(
+            "b5_low_volatility", {"lookback_returns": False}
+        )
+    with pytest.raises(StrategyParameterValidationError):
+        resolve_and_instantiate_strategy(
+            "b5_low_volatility", {"lookback_returns": 30.5}
+        )
+    with pytest.raises(StrategyParameterValidationError):
+        resolve_and_instantiate_strategy(
+            "b5_low_volatility", {"lookback_returns": "60"}
+        )
+    with pytest.raises(StrategyParameterValidationError):
+        resolve_and_instantiate_strategy("b5_low_volatility", {"unknown_param": 5})
 
 
 def test_validator_rejects_hypothesis_experiment_strategy_mismatch(

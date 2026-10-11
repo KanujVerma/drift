@@ -97,6 +97,21 @@ semantic layers:
 - **M10 Champion / Challenger Tournament**: Model tournaments guarded by a non-negotiable Scientific Integrity Firewall eliminating synthetic returns and enforcing empirical paired series.
 - **Parallel Research Portfolios**: Isolated $10,000 portfolio cohort harness (`drift.experiments.parallel_portfolios`) for reproducible multi-strategy evaluation.
 
+### PR #350 Additions (Research Integrity & Parallel Portfolios)
+
+| Component | Domain Schema | Ledger Events | Service Implementation | Unit Tests | Verification Suite | Status | Lane Status |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Deterministic Evaluator Adapter** (M2/M8) | COMPLETE | COMPLETE | COMPLETE | COMPLETE | COMPLETE | PENDING EXTERNAL REVIEW | EXPLORATORY ONLY |
+| **Parallel $10,000 Portfolios Harness** | COMPLETE | COMPLETE | COMPLETE | COMPLETE | COMPLETE | PENDING EXTERNAL REVIEW | EXPLORATORY ONLY |
+| **Scientific Integrity Firewall** | COMPLETE | COMPLETE | COMPLETE | COMPLETE | COMPLETE | PENDING EXTERNAL REVIEW | EXPLORATORY ONLY |
+| **Tournament Evidence Requirements** | COMPLETE | COMPLETE | COMPLETE | COMPLETE | COMPLETE | PENDING EXTERNAL REVIEW | EXPLORATORY ONLY |
+
+> **Exploratory Lane Non-Upgrade Invariant**: Evidence generated within the exploratory lane
+> is strictly non-promotable and cannot be upgraded into promotion-grade evidence. Promotion
+> requires a fresh run against an accepted promotion-qualified M1e dataset. PR #350 does NOT
+> qualify M1e Task 8 or promote strategies to live trading.
+> Supported CLI execution: `python -m drift.experiments.parallel_portfolios`.
+
 ---
 
 ## Execution and Risk Architecture (M12 through M18+)

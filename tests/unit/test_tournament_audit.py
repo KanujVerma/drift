@@ -223,6 +223,7 @@ def test_runner_with_recorder_end_to_end(tmp_path: Path) -> None:
         config=config,
         evaluator=evaluator,
         recorder=recorder,
+        require_genuine_evidence=False,
     )
 
     record = runner.run_match(

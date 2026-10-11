@@ -3,6 +3,7 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 from drift.agent.context import ResearchContextSynthesizer
@@ -81,6 +82,7 @@ def test_runner_terminates_on_max_iterations(tmp_path: Path) -> None:
         evaluator=evaluator,
         recorder=recorder,
         archive=archive,
+        allow_mock_evaluator=True,
     )
 
     summary, iterations = runner.run(TIMESTAMP)
@@ -132,6 +134,7 @@ def test_runner_circuit_breaker_on_consecutive_failures(tmp_path: Path) -> None:
         evaluator=evaluator,
         recorder=recorder,
         archive=archive,
+        allow_mock_evaluator=True,
     )
 
     summary, iterations = runner.run(TIMESTAMP)
@@ -160,7 +163,7 @@ def test_runner_terminates_on_target_performance_met(tmp_path: Path) -> None:
 
         def evaluate_experiment(
             self, experiment: ExperimentSpecificationProposalV1
-        ) -> dict[str, Decimal]:
+        ) -> dict[str, Any]:
             self.calls += 1
             # Iteration 0 returns 1.10, iteration 1 returns 1.65 (beats target 1.50)
             sharpe = Decimal("1.10") if self.calls == 1 else Decimal("1.65")
@@ -168,6 +171,7 @@ def test_runner_terminates_on_target_performance_met(tmp_path: Path) -> None:
                 "annualized_sharpe": sharpe,
                 "max_drawdown": Decimal("0.05"),
                 "annualized_turnover": Decimal("2.0"),
+                "is_pnl_complete": True,
             }
 
     config = build_research_loop_config(
@@ -188,6 +192,7 @@ def test_runner_terminates_on_target_performance_met(tmp_path: Path) -> None:
         evaluator=DynamicEvaluator(),
         recorder=recorder,
         archive=archive,
+        allow_mock_evaluator=True,
     )
 
     summary, iterations = runner.run(TIMESTAMP)
@@ -232,6 +237,7 @@ def test_runner_handles_proposal_rejection(tmp_path: Path) -> None:
         evaluator=evaluator,
         recorder=recorder,
         archive=archive,
+        allow_mock_evaluator=True,
     )
 
     summary, iterations = runner.run(TIMESTAMP)
@@ -274,6 +280,7 @@ def test_runner_reproducibility(tmp_path: Path) -> None:
             evaluator=evaluator,
             recorder=recorder,
             archive=archive,
+            allow_mock_evaluator=True,
         )
         return runner.run(TIMESTAMP)
 

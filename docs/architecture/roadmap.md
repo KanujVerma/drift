@@ -222,10 +222,27 @@ Progress is evaluated across five distinct dimensions:
 - **M10 Champion / Challenger Tournament** (Krish; Implemented & Fortified): Systematic out-of-sample
   competitions (`src/drift/tournament/`) guarded by a non-negotiable Scientific Integrity Firewall
   that strictly prohibits synthetic return construction, mandates empirical paired return alignments,
-  and fails closed on incomplete evidence.
-- **M11 Promotion and Overfitting Controls** (Krish; Queued): Strict statistical gatekeeping incorporating
-  Deflated Sharpe Ratios, Probability of Backtest Overfitting (PBO), multiple-testing
-  and search-inflation controls, walk-forward out-of-sample evidence, and M1e promotion qualification.
+### PR #350 Additions: Research Integrity, Real Evaluation, and Parallel Portfolios
+- **Status**: PENDING EXTERNAL REVIEW across all components.
+- **Lane**: EXPLORATORY ONLY (ADR 0012).
+- **Absolute Non-Upgrade Rule**: Exploratory evaluation evidence is strictly non-promotable
+  and cannot be upgraded, relabeled, or converted into promotion-grade evidence. Promotion
+  requires a fresh, independent evaluation run directly against an accepted promotion-qualified
+  M1e dataset. PR #350 does NOT qualify M1e Task 8 and does NOT promote strategies to production.
+
+| Component | Domain Schema | Ledger Events | Service Implementation | Unit Tests | Verification Suite | Status | Lane Status |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Deterministic Evaluator Adapter** (M2/M8) | COMPLETE | COMPLETE | COMPLETE | COMPLETE | COMPLETE | PENDING EXTERNAL REVIEW | EXPLORATORY ONLY |
+| **Parallel $10,000 Portfolios Harness** | COMPLETE | COMPLETE | COMPLETE | COMPLETE | COMPLETE | PENDING EXTERNAL REVIEW | EXPLORATORY ONLY |
+| **Scientific Integrity Firewall** | COMPLETE | COMPLETE | COMPLETE | COMPLETE | COMPLETE | PENDING EXTERNAL REVIEW | EXPLORATORY ONLY |
+| **Tournament Evidence Requirements** | COMPLETE | COMPLETE | COMPLETE | COMPLETE | COMPLETE | PENDING EXTERNAL REVIEW | EXPLORATORY ONLY |
+
+- **Delivered**:
+  - `M2TrialEvaluatorAdapter` bridging M8 recursive research loop to authentic M2 deterministic portfolio accounting kernel.
+  - `PortfolioCohortHarness` in `src/drift/experiments/parallel_portfolios.py` running reproducible parallel $10,000 strategy accounts.
+  - Supported CLI execution: `python -m drift.experiments.parallel_portfolios`.
+  - Non-negotiable Scientific Integrity Firewall enforcing empirical paired returns, fail-closed PnL completeness, and rejecting mock evidence.
+  - Cryptographic evidence binding for tournament comparisons (bundle_hash, cost_model_hash, session calendar match).
 
 ### M12 through M15: Execution and Risk Architecture (Complete)
 - **M12 Shadow Broker** (Krish; Complete): Bridge research into realistic simulated execution, tracking

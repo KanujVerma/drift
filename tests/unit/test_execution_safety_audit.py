@@ -99,12 +99,16 @@ def _make_state(cash: Decimal = Decimal("100000.00")) -> PortfolioStateV2:
     )
 
 
-def test_s1_router_bypasses_hard_risk_gatekeeper(tmp_path: Any) -> None:
-    """Audit S1: Router routes intents without consulting HardRiskGatekeeper.
+# =============================================================================
+# DEFECT REPRODUCTION TESTS (Defects S1 through S5 - Currently UNFIXED)
+# =============================================================================
 
-    The router accepts OrderIntentV1 and dispatches directly to the adapter.
-    Even if an active HardRiskGatekeeper with restrictive limits is present
-    in the process, the router does not require or evaluate risk verdicts.
+
+def test_s1_reproduce_router_bypasses_hard_risk_gatekeeper(tmp_path: Any) -> None:
+    """Defect Reproduction S1: Router routes intents without gatekeeper.
+
+    Reproduces the known defect where OrderIntentV1 is dispatched directly
+    without evaluating active risk limits.
     """
     db_path = str(tmp_path / "order_intents.db")
     journal = PersistentOrderIntentJournal(db_path)
@@ -114,18 +118,19 @@ def test_s1_router_bypasses_hard_risk_gatekeeper(tmp_path: Any) -> None:
     # Intent exceeds typical risk notional
     intent = _make_intent(quantity=100, limit_price=Decimal("200.00"))
 
-    # Intent routes and fills without any risk gatekeeper evaluation
+    # Confirms S1 defect: routes and fills without risk evaluation
     report = router.route_intent(intent)
     assert report.status == ExecutionStatus.FILLED
     assert report.cum_quantity == 100
 
 
-def test_s1_orchestrators_only_check_kill_switch_not_full_policy(tmp_path: Any) -> None:
-    """Audit S1: Orchestrators only check is_kill_switch_tripped, bypassing full policy.
+def test_s1_reproduce_orchestrators_only_check_kill_switch_not_full_policy(
+    tmp_path: Any,
+) -> None:
+    """Defect Reproduction S1: Orchestrators only check is_kill_switch_tripped.
 
-    ShadowValidationEngine, CanaryExecutionOrchestrator, and BoundedAutonomyOrchestrator
-    accept an optional HardRiskGatekeeper, but only inspect its kill switch latch,
-    bypassing rate limits, order notional limits, and exposure limits.
+    Reproduces the known defect where CanaryExecutionOrchestrator inspects only
+    the boolean kill switch latch, bypassing quantitative position and order limits.
     """
     db_risk = str(tmp_path / "risk.db")
     risk_journal = PersistentRiskJournal(db_risk)
@@ -147,7 +152,6 @@ def test_s1_orchestrators_only_check_kill_switch_not_full_policy(tmp_path: Any) 
     adapter = MockBrokerAdapter(initial_cash=Decimal("50000.00"))
     router = BrokerNeutralExecutionRouter(adapter=adapter, journal=intent_journal)
 
-    # Configure canary orchestrator with canary limit higher than risk limit
     canary_policy = CanaryPolicyV1(
         canary_authorized=True,
         max_order_quantity=50,
@@ -163,22 +167,21 @@ def test_s1_orchestrators_only_check_kill_switch_not_full_policy(tmp_path: Any) 
         risk_gatekeeper=gatekeeper,
     )
 
-    # Order has quantity=10 (exceeds HardRiskGatekeeper limit of 5 shares)
+    # Order quantity=10 exceeds HardRiskGatekeeper limit of 5 shares
     intent = _make_intent(quantity=10, limit_price=Decimal("100.00"))
     report, _ = orchestrator.submit_canary_intent(
         intent, reference_price=Decimal("100.00")
     )
 
-    # Confirms S1: Order is approved and routed despite violating gatekeeper policy
+    # Confirms S1 defect: order fills despite violating gatekeeper limits
     assert report.status == ExecutionStatus.FILLED
     assert report.cum_quantity == 10
 
 
-def test_s2_domain_type_mismatch_between_risk_and_execution() -> None:
-    """Audit S2: Gatekeeper accepts SimulatedOrderV1 while router accepts OrderIntentV1.
+def test_s2_reproduce_domain_type_mismatch_between_risk_and_execution() -> None:
+    """Defect Reproduction S2: Mismatch between risk and execution models.
 
-    HardRiskGatekeeper.evaluate_order expects SimulatedOrderV1. An OrderIntentV1
-    cannot be directly evaluated without type adaptation.
+    Reproduces the known defect where HardRiskGatekeeper cannot evaluate OrderIntentV1.
     """
     policy = build_risk_policy(
         policy_id="audit-risk-policy-2",
@@ -195,10 +198,8 @@ def test_s2_domain_type_mismatch_between_risk_and_execution() -> None:
     gatekeeper = HardRiskGatekeeper(policy=policy, journal=risk_journal)
     intent = _make_intent()
 
-    # Demonstrates S2 type mismatch: OrderIntentV1 lacks SimulatedOrderV1 fields
+    # Confirms S2 defect: evaluates to AttributeError due to mismatched contracts
     with pytest.raises(AttributeError):
-        # SimulatedOrderV1 has order_id, side (str), etc.
-        # OrderIntentV1 has intent_id, side (OrderSide enum), etc.
         gatekeeper.evaluate_order(
             intent,  # type: ignore[arg-type]
             portfolio_state=_make_state(),
@@ -207,11 +208,10 @@ def test_s2_domain_type_mismatch_between_risk_and_execution() -> None:
         )
 
 
-def test_s3_robinhood_cancellation_error_swallowed_as_canceled() -> None:
-    """Audit S3: Robinhood cancellation transport error returns CANCELED status.
+def test_s3_reproduce_robinhood_cancellation_error_swallowed_as_canceled() -> None:
+    """Defect Reproduction S3: Robinhood cancellation transport error returns CANCELED.
 
-    RobinhoodAgenticAdapter.cancel_intent catches RobinhoodMcpError and swallows it,
-    unconditionally returning ExecutionStatus.CANCELED.
+    Reproduces the known defect where RobinhoodAgenticAdapter swallows transport errors.
     """
     sec_id = uuid7()
     config = RobinhoodAgenticConfigV1(account_id="acc-01", symbol_map={sec_id: "AAPL"})
@@ -222,23 +222,21 @@ def test_s3_robinhood_cancellation_error_swallowed_as_canceled() -> None:
     adapter = RobinhoodAgenticAdapter(config=config, transport=failing_transport)
 
     intent = _make_intent()
-    # Mock transport does not fill if auto_fill=False
     adapter._intent_to_broker_order[intent.intent_id] = "rh-ord-9999"
 
-    # Cancel intent encounters RobinhoodMcpError on cancel_order tool
     cancel_report = adapter.cancel_intent(intent.intent_id)
 
-    # Confirms S3: Adapter returns CANCELED despite failed cancellation
+    # Confirms S3 defect: adapter returns CANCELED despite failed cancellation
     assert cancel_report.status == ExecutionStatus.CANCELED
     assert cancel_report.leaves_quantity == 0
 
 
-def test_s4_ambiguous_submission_error_marked_as_definitive_rejection() -> None:
-    """Audit S4: Ambiguous MCP network timeout on submission is marked as REJECTED.
+def test_s4_reproduce_ambiguous_submission_error_marked_as_definitive_rejection() -> (
+    None
+):
+    """Defect Reproduction S4: Submission network timeout marked as REJECTED.
 
-    When robinhood_place_order encounters a timeout or network error, the adapter
-    returns ExecutionStatus.REJECTED with broker_order_id=None, even though the order
-    may have been received and filled on the broker side.
+    Reproduces the known defect where ambiguous timeout is marked as terminal REJECTED.
     """
     sec_id = uuid7()
     config = RobinhoodAgenticConfigV1(account_id="acc-01", symbol_map={sec_id: "AAPL"})
@@ -263,30 +261,204 @@ def test_s4_ambiguous_submission_error_marked_as_definitive_rejection() -> None:
 
     report = adapter.submit_intent(intent)
 
-    # Confirms S4: Ambiguous network error is marked as authoritative REJECTED
+    # Confirms S4 defect: ambiguous timeout is authoritatively marked REJECTED
     assert report.status == ExecutionStatus.REJECTED
     assert report.broker_order_id is None
     assert "Connection timed out" in str(report.rejection_reason)
 
 
-def test_s5_unknown_symbol_maps_to_fabricated_uuid() -> None:
-    """Audit S5: Unmapped Robinhood positions map to fabricated DNS UUIDs and crash.
+def test_s5_reproduce_unknown_symbol_maps_to_fabricated_uuid() -> None:
+    """Defect Reproduction S5: Unmapped positions map to DNS UUIDs and crash.
 
-    RobinhoodAgenticAdapter.get_positions uses uuid5 DNS hashing for unmapped symbols.
-    Because BrokerPositionSnapshotV1 requires strict UUIDv7, the fabricated UUIDv5
-    fails schema validation and causes get_positions to crash.
+    Reproduces the known defect where uuid5 DNS hashing fails UUIDv7 schema validation.
     """
     config = RobinhoodAgenticConfigV1(account_id="acc-01", symbol_map={})
     transport = MockRobinhoodMcpTransport()
-    # Populate an unmapped position in the mock transport
     transport._positions["UNMAPPED_TICKER"] = {
         "quantity": 25,
         "cost_basis": Decimal("2500.00"),
     }
     adapter = RobinhoodAgenticAdapter(config=config, transport=transport)
 
-    # Confirms S5: Constructing BrokerPositionSnapshotV1 with UUIDv5 fails validation
+    # Confirms S5 defect: fails with Pydantic ValidationError on UUIDv7 requirement
     with pytest.raises(ValidationError) as excinfo:
         adapter.get_positions()
 
     assert "identifiers must be UUIDv7 values" in str(excinfo.value)
+
+
+# =============================================================================
+# SAFE-BEHAVIOR REGRESSION TESTS (Strict xfail - Must fail until remediated)
+# =============================================================================
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Defect S1: Router routes intents without HardRiskGatekeeper (UNFIXED)",
+)
+def test_s1_safe_behavior_router_must_enforce_hard_risk_limits(tmp_path: Any) -> None:
+    """Safe behavior invariant: router must reject intents that exceed risk limits."""
+    db_path = str(tmp_path / "order_intents.db")
+    journal = PersistentOrderIntentJournal(db_path)
+    adapter = MockBrokerAdapter(initial_cash=Decimal("50000.00"))
+    router = BrokerNeutralExecutionRouter(adapter=adapter, journal=journal)
+
+    intent = _make_intent(quantity=100, limit_price=Decimal("200.00"))
+    report = router.route_intent(intent)
+    # Safe behavior: unvetted order without risk approval must NOT be FILLED
+    assert report.status != ExecutionStatus.FILLED
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Defect S1: Orchestrators check kill switch latch only (UNFIXED)",
+)
+def test_s1_safe_behavior_orchestrator_must_reject_order_exceeding_risk_policy(
+    tmp_path: Any,
+) -> None:
+    """Safe behavior invariant: orchestrator must reject orders exceeding limits."""
+    db_risk = str(tmp_path / "risk.db")
+    risk_journal = PersistentRiskJournal(db_risk)
+    policy = build_risk_policy(
+        policy_id="audit-risk-policy-1",
+        max_order_quantity=5,
+        max_order_notional=Decimal("500.00"),
+        max_position_notional=Decimal("2000.00"),
+        max_position_weight_basis_points=2500,
+        max_gross_exposure_basis_points=10000,
+        max_session_drawdown_basis_points=300,
+        max_trailing_drawdown_basis_points=1000,
+        max_orders_per_minute=10,
+    )
+    gatekeeper = HardRiskGatekeeper(policy=policy, journal=risk_journal)
+
+    db_intents = str(tmp_path / "intents.db")
+    intent_journal = PersistentOrderIntentJournal(db_intents)
+    adapter = MockBrokerAdapter(initial_cash=Decimal("50000.00"))
+    router = BrokerNeutralExecutionRouter(adapter=adapter, journal=intent_journal)
+
+    canary_policy = CanaryPolicyV1(
+        canary_authorized=True,
+        max_order_quantity=50,
+        max_order_notional=Decimal("2000.00"),
+        max_cumulative_notional=Decimal("5000.00"),
+    )
+    canary_gatekeeper = CanaryAllocationGatekeeper(policy=canary_policy)
+    canary_grader = CanarySettlementGrader(policy=canary_policy)
+    orchestrator = CanaryExecutionOrchestrator(
+        router=router,
+        gatekeeper=canary_gatekeeper,
+        settlement_grader=canary_grader,
+        risk_gatekeeper=gatekeeper,
+    )
+
+    intent = _make_intent(quantity=10, limit_price=Decimal("100.00"))
+    report, _ = orchestrator.submit_canary_intent(
+        intent, reference_price=Decimal("100.00")
+    )
+    # Safe behavior: must reject order that exceeds gatekeeper limit of 5 shares
+    assert report.status != ExecutionStatus.FILLED
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Defect S2: HardRiskGatekeeper does not support OrderIntentV1 (UNFIXED)",
+)
+def test_s2_safe_behavior_gatekeeper_evaluates_order_intent() -> None:
+    """Safe behavior invariant: Gatekeeper evaluates OrderIntentV1 cleanly."""
+    policy = build_risk_policy(
+        policy_id="audit-risk-policy-2",
+        max_order_notional=Decimal("10000.00"),
+        max_order_quantity=100,
+        max_position_notional=Decimal("50000.00"),
+        max_position_weight_basis_points=2500,
+        max_gross_exposure_basis_points=10000,
+        max_session_drawdown_basis_points=300,
+        max_trailing_drawdown_basis_points=1000,
+        max_orders_per_minute=10,
+    )
+    risk_journal = PersistentRiskJournal(":memory:")
+    gatekeeper = HardRiskGatekeeper(policy=policy, journal=risk_journal)
+    intent = _make_intent()
+
+    # Safe behavior: should evaluate OrderIntentV1 without raising AttributeError
+    verdict = gatekeeper.evaluate_order(
+        intent,  # type: ignore[arg-type]
+        portfolio_state=_make_state(),
+        current_price=Decimal("100.00"),
+        evaluation_time=datetime.now(UTC),
+    )
+    assert verdict is not None
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Defect S3: Adapter swallows cancel transport error as CANCELED (UNFIXED)",
+)
+def test_s3_safe_behavior_cancellation_error_fails_closed() -> None:
+    """Safe behavior invariant: cancellation error must NOT report CANCELED."""
+    sec_id = uuid7()
+    config = RobinhoodAgenticConfigV1(account_id="acc-01", symbol_map={sec_id: "AAPL"})
+    failing_transport = _FailingMcpTransport(
+        fail_tool="robinhood_cancel_order",
+        error_message="503 Service Unavailable: broker cancel failed",
+    )
+    adapter = RobinhoodAgenticAdapter(config=config, transport=failing_transport)
+
+    intent = _make_intent()
+    adapter._intent_to_broker_order[intent.intent_id] = "rh-ord-9999"
+
+    cancel_report = adapter.cancel_intent(intent.intent_id)
+    # Safe behavior: must not report CANCELED when cancellation call failed
+    assert cancel_report.status != ExecutionStatus.CANCELED
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Defect S4: Ambiguous timeout marked as authoritative REJECTED (UNFIXED)",
+)
+def test_s4_safe_behavior_submission_timeout_not_marked_rejected() -> None:
+    """Safe behavior invariant: timeout must NOT be marked as REJECTED."""
+    sec_id = uuid7()
+    config = RobinhoodAgenticConfigV1(account_id="acc-01", symbol_map={sec_id: "AAPL"})
+    failing_transport = _FailingMcpTransport(
+        fail_tool="robinhood_place_order",
+        error_message="Connection timed out after 30 seconds",
+    )
+    adapter = RobinhoodAgenticAdapter(config=config, transport=failing_transport)
+
+    intent = build_order_intent(
+        intent_id=uuid7(),
+        client_order_id="ambiguous-cli-001",
+        session_key=_make_session_key(),
+        security_id=sec_id,
+        side=OrderSide.BUY,
+        quantity=50,
+        order_type=OrderType.LIMIT,
+        limit_price=Decimal("150.00"),
+        time_in_force=TimeInForce.DAY,
+        created_at=datetime.now(UTC),
+    )
+
+    report = adapter.submit_intent(intent)
+    # Safe behavior: timeout must be ambiguous/pending reconciliation, not REJECTED
+    assert report.status != ExecutionStatus.REJECTED
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Defect S5: Unmapped positions map to DNS UUIDv5 and crash (UNFIXED)",
+)
+def test_s5_safe_behavior_unmapped_symbol_quarantined_without_crash() -> None:
+    """Safe behavior invariant: unmapped positions quarantined without crash."""
+    config = RobinhoodAgenticConfigV1(account_id="acc-01", symbol_map={})
+    transport = MockRobinhoodMcpTransport()
+    transport._positions["UNMAPPED_TICKER"] = {
+        "quantity": 25,
+        "cost_basis": Decimal("2500.00"),
+    }
+    adapter = RobinhoodAgenticAdapter(config=config, transport=transport)
+
+    # Safe behavior: get_positions must succeed (quarantining) without ValidationError
+    positions = adapter.get_positions()
+    assert len(positions) == 0

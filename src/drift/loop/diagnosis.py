@@ -97,7 +97,7 @@ def diagnose_trial_outcome(
             forbidden_variations=(),
         )
 
-    if metrics.get("is_pnl_complete") is False:
+    if metrics.get("is_pnl_complete") is not True:
         return TrialDiagnosisResult(
             outcome=TrialOutcome.INVALIDATED,
             failure_category=FailureCategory.DATA_DEFECT,

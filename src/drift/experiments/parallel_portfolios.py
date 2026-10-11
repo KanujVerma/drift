@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
 from pathlib import Path
 from typing import Any
-from uuid import UUID
 
 from drift.baselines.runner import build_canonical_run_identity
 from drift.domain.common import SHA256Hash
@@ -56,9 +55,9 @@ class CohortPortfolioResult:
     initial_cash: Decimal
     ending_nav: Decimal
     total_return_pct: Decimal
-    annualized_sharpe: Decimal
-    max_drawdown_pct: Decimal
-    annualized_turnover: Decimal
+    annualized_sharpe: Decimal | None
+    max_drawdown_pct: Decimal | None
+    annualized_turnover: Decimal | None
     fill_count: int
     trace_hash: str
     result_hash: str
@@ -66,6 +65,10 @@ class CohortPortfolioResult:
     classification: str
     is_pnl_complete: bool
     net_profit_and_loss: Decimal
+    bundle_hash: str
+    run_identity_hash: str
+    cost_model_hash: str
+    protocol_hash: str
 
 
 @dataclass(frozen=True)
@@ -145,13 +148,16 @@ def _portfolio_worker_entrypoint(task: _PortfolioWorkerTask) -> CohortPortfolioR
             initial_nav=initial_nav,
         )
         max_dd = dd_profile.maximum_drawdown
+        max_drawdown_pct: Decimal | None = (abs(max_dd) * HUNDRED).quantize(
+            TWO_PLACES, rounding=ROUND_HALF_EVEN
+        )
 
         turnover_summary = compute_turnover_summary(metrics)
-        ann_turnover = turnover_summary.annualized_turnover
+        ann_turnover: Decimal | None = turnover_summary.annualized_turnover
     else:
-        ann_sharpe = ZERO
-        max_dd = ZERO
-        ann_turnover = ZERO
+        ann_sharpe = None
+        max_drawdown_pct = None
+        ann_turnover = None
 
     total_return_pct = (
         ((ending_nav - initial_nav) / initial_nav * HUNDRED).quantize(
@@ -159,9 +165,6 @@ def _portfolio_worker_entrypoint(task: _PortfolioWorkerTask) -> CohortPortfolioR
         )
         if initial_nav > ZERO
         else ZERO.quantize(TWO_PLACES)
-    )
-    max_drawdown_pct = (abs(max_dd) * HUNDRED).quantize(
-        TWO_PLACES, rounding=ROUND_HALF_EVEN
     )
 
     strategy_type_label = type(strategy).__name__
@@ -182,17 +185,21 @@ def _portfolio_worker_entrypoint(task: _PortfolioWorkerTask) -> CohortPortfolioR
         classification=result.classification.value,
         is_pnl_complete=metrics.realized_pnl_completeness.is_complete,
         net_profit_and_loss=metrics.net_profit_and_loss,
+        bundle_hash=task.bundle.bundle_hash,
+        run_identity_hash=run_identity.run_identity_hash,
+        cost_model_hash=task.cost_model.cost_model_hash,
+        protocol_hash=task.protocol.protocol_hash,
     )
 
 
 def compute_daily_returns_correlation(
     series_a: Sequence[Decimal],
     series_b: Sequence[Decimal],
-) -> Decimal:
+) -> Decimal | None:
     """Compute Pearson correlation coefficient between two series of daily returns.
 
-    Returns 1.0000 if series are identical.
-    Returns 0.0000 if either series has zero variance (e.g. constant cash return).
+    Returns None if either series has zero variance (e.g. constant returns),
+    or if series length is less than 2, because correlation is mathematically undefined.
     Guarantees strict symmetry and bounded values in [-1.0000, 1.0000].
     """
     if len(series_a) != len(series_b):
@@ -201,11 +208,7 @@ def compute_daily_returns_correlation(
         )
     n = len(series_a)
     if n < 2:
-        return (
-            ONE.quantize(FOUR_PLACES)
-            if series_a == series_b
-            else ZERO.quantize(FOUR_PLACES)
-        )
+        return None
 
     mean_a = sum(series_a, ZERO) / Decimal(n)
     mean_b = sum(series_b, ZERO) / Decimal(n)
@@ -214,25 +217,17 @@ def compute_daily_returns_correlation(
     var_b = sum((y - mean_b) ** 2 for y in series_b) / Decimal(n - 1)
 
     if var_a <= ZERO or var_b <= ZERO:
-        return (
-            ONE.quantize(FOUR_PLACES)
-            if series_a == series_b
-            else ZERO.quantize(FOUR_PLACES)
-        )
-
-    cov = sum(
-        (x - mean_a) * (y - mean_b) for x, y in zip(series_a, series_b, strict=True)
-    ) / Decimal(n - 1)
+        return None
 
     std_a = Decimal(str(math.sqrt(float(var_a))))
     std_b = Decimal(str(math.sqrt(float(var_b))))
 
     if std_a <= ZERO or std_b <= ZERO:
-        return (
-            ONE.quantize(FOUR_PLACES)
-            if series_a == series_b
-            else ZERO.quantize(FOUR_PLACES)
-        )
+        return None
+
+    cov = sum(
+        (x - mean_a) * (y - mean_b) for x, y in zip(series_a, series_b, strict=True)
+    ) / Decimal(n - 1)
 
     corr = cov / (std_a * std_b)
     if corr > ONE:
@@ -250,11 +245,11 @@ class PortfolioCohortHarness:
         cohort: Mapping[str, Any] | Sequence[Any],
         bundle: EvaluationInputBundleV1,
         *,
+        evidence: SessionEvaluatorEvidence,
         cost_model: EvaluationCostModelV1 | None = None,
         protocol: EvaluationProtocolV1 | None = None,
         initial_cash: Decimal = TARGET_INITIAL_CASH,
         admission: EvaluationAdmissionV1 | None = None,
-        evidence: SessionEvaluatorEvidence | None = None,
         book_currency_namespace: str = "ISO-4217",
         book_currency_code: str = "USD",
         environment_closure_hash: SHA256Hash = "0" * 64,
@@ -289,15 +284,7 @@ class PortfolioCohortHarness:
         self._cost_model = (
             cost_model if cost_model is not None else build_zero_cost_model()
         )
-
-        if evidence is not None:
-            self._evidence = evidence
-        else:
-            try:
-                self._evidence = build_offline_cohort_evidence()
-            except Exception:
-                self._evidence = SessionEvaluatorEvidence()
-
+        self._evidence = evidence
         self._book_currency_namespace = book_currency_namespace
         self._book_currency_code = book_currency_code
         self._environment_closure_hash = environment_closure_hash
@@ -407,15 +394,30 @@ class PortfolioCohortHarness:
 
         rows: list[list[str]] = []
         for r in results:
+            sharpe_str = (
+                f"{r.annualized_sharpe:>6.4f}"
+                if r.annualized_sharpe is not None
+                else "   N/A"
+            )
+            mdd_str = (
+                f"{r.max_drawdown_pct:>6.2f}%"
+                if r.max_drawdown_pct is not None
+                else "   N/A"
+            )
+            turnover_str = (
+                f"{r.annualized_turnover:>6.4f}"
+                if r.annualized_turnover is not None
+                else "   N/A"
+            )
             rows.append(
                 [
                     r.strategy_id,
                     f"${r.initial_cash:,.2f}",
                     f"${r.ending_nav:,.2f}",
                     f"{r.total_return_pct:>6.2f}%",
-                    f"{r.annualized_sharpe:>6.4f}",
-                    f"{r.max_drawdown_pct:>6.2f}%",
-                    f"{r.annualized_turnover:>6.4f}",
+                    sharpe_str,
+                    mdd_str,
+                    turnover_str,
                     str(r.fill_count),
                     f"{r.result_hash[:12]}...",
                 ]
@@ -448,27 +450,25 @@ class PortfolioCohortHarness:
     @staticmethod
     def compute_correlation_matrix(
         results: Sequence[CohortPortfolioResult],
-    ) -> dict[str, dict[str, Decimal]]:
+    ) -> dict[str, dict[str, Decimal | None]]:
         """Compute cross-cohort daily return correlation matrix.
 
-        Matrix is symmetric with 1.0000 on the diagonal.
+        Matrix is symmetric with bounded values in [-1.0000, 1.0000]
+        or None (undefined).
         """
-        matrix: dict[str, dict[str, Decimal]] = {}
+        matrix: dict[str, dict[str, Decimal | None]] = {}
         for r_a in results:
             matrix[r_a.strategy_id] = {}
             for r_b in results:
-                if r_a.strategy_id == r_b.strategy_id:
-                    matrix[r_a.strategy_id][r_b.strategy_id] = ONE.quantize(FOUR_PLACES)
-                else:
-                    corr = compute_daily_returns_correlation(
-                        r_a.daily_returns, r_b.daily_returns
-                    )
-                    matrix[r_a.strategy_id][r_b.strategy_id] = corr
+                corr = compute_daily_returns_correlation(
+                    r_a.daily_returns, r_b.daily_returns
+                )
+                matrix[r_a.strategy_id][r_b.strategy_id] = corr
         return matrix
 
     @staticmethod
     def format_correlation_matrix(
-        matrix: Mapping[str, Mapping[str, Decimal]],
+        matrix: Mapping[str, Mapping[str, Decimal | None]],
     ) -> str:
         """Format daily return correlation matrix as an ASCII table."""
         sids = list(matrix.keys())
@@ -480,7 +480,8 @@ class PortfolioCohortHarness:
         for sid_a in sids:
             col_widths[0] = max(col_widths[0], len(sid_a))
             for i, sid_b in enumerate(sids, start=1):
-                val_str = f"{matrix[sid_a][sid_b]:.4f}"
+                val = matrix[sid_a][sid_b]
+                val_str = f"{val:.4f}" if val is not None else " N/A  "
                 col_widths[i] = max(col_widths[i], len(val_str))
 
         sep = "+-" + "-+-".join("-" * w for w in col_widths) + "-+"
@@ -494,7 +495,8 @@ class PortfolioCohortHarness:
         for sid_a in sids:
             row = [sid_a]
             for sid_b in sids:
-                row.append(f"{matrix[sid_a][sid_b]:.4f}")
+                val = matrix[sid_a][sid_b]
+                row.append(f"{val:.4f}" if val is not None else " N/A  ")
             row_line = (
                 "| "
                 + " | ".join(val.ljust(col_widths[i]) for i, val in enumerate(row))
@@ -540,11 +542,12 @@ def build_reference_baseline_cohort(
     bundle: EvaluationInputBundleV1,
 ) -> dict[str, Any]:
     """Construct reference baseline strategy cohort over the bundle."""
-    sec_a = (
-        bundle.security_identities[0].security_id
-        if bundle.security_identities
-        else UUID("019b8240-0000-7000-8000-000000000200")
-    )
+    if not bundle.security_identities:
+        raise ValueError(
+            "Input bundle contains no security identities for B1 "
+            "single buy-and-hold baseline"
+        )
+    sec_a = bundle.security_identities[0].security_id
 
     from drift.baselines.b0_cash import B0CashStrategy
     from drift.baselines.b1_single_buy_and_hold import B1SingleBuyAndHoldStrategy
@@ -573,6 +576,11 @@ def main() -> int:
     """CLI entrypoint executing parallel $10,000 research portfolios."""
     print("=" * 80)
     print("DRIFT: PARALLEL $10,000 RESEARCH PORTFOLIOS COHORT HARNESS")
+    print("=" * 80)
+    print("SYNTHETIC FOUR-SESSION TEST FIXTURE")
+    print("NOT ACTUAL MARKET PERFORMANCE")
+    print("NOT SCIENTIFICALLY QUALIFIED")
+    print("NOT PROMOTION-GRADE")
     print("=" * 80)
     print("Loading offline deterministic evaluation input bundle and evidence...")
     bundle = build_offline_cohort_bundle()

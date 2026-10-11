@@ -14,13 +14,17 @@ Architecture Decision Packets for reviewer determination.
 
 ## 1. Summary of Audited Concerns
 
-| Concern | Component | Symbol | Audit Status | Severity |
-| :--- | :--- | :--- | :--- | :--- |
-| **S1** | `execution.router`, `validation.engine`, `canary.orchestrator`, `autonomy.orchestrator` | `route_intent`, `submit_canary_intent`, `submit_autonomous_intent` | **CONFIRMED** | High |
-| **S2** | `risk.gatekeeper`, `domain.shadow_broker` vs `domain.execution` | `HardRiskGatekeeper.evaluate_order` | **CONFIRMED** | High |
-| **S3** | `adapters.robinhood.adapter` | `RobinhoodAgenticAdapter.cancel_intent` | **CONFIRMED** | Critical |
-| **S4** | `adapters.robinhood.adapter` | `RobinhoodAgenticAdapter.submit_intent` | **CONFIRMED** | Critical |
-| **S5** | `adapters.robinhood.adapter` | `RobinhoodAgenticAdapter.get_positions` | **CONFIRMED** | Critical |
+All five concerns (S1 through S5) are **CONFIRMED UNFIXED** in repository code.
+They are tracked by defect reproduction tests and safe-behavior regression tests
+marked with `@pytest.mark.xfail(strict=True)` in `tests/unit/test_execution_safety_audit.py`.
+
+| Concern | Component | Symbol | Code Status | Live Trading Blocker | Severity |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **S1** | `execution.router`, `validation.engine`, `canary.orchestrator`, `autonomy.orchestrator` | `route_intent`, `submit_canary_intent`, `submit_autonomous_intent` | **UNFIXED** | **ABSOLUTE BLOCKER** | High |
+| **S2** | `risk.gatekeeper`, `domain.shadow_broker` vs `domain.execution` | `HardRiskGatekeeper.evaluate_order` | **UNFIXED** | **ABSOLUTE BLOCKER** | High |
+| **S3** | `adapters.robinhood.adapter` | `RobinhoodAgenticAdapter.cancel_intent` | **UNFIXED** | **ABSOLUTE BLOCKER** | Critical |
+| **S4** | `adapters.robinhood.adapter` | `RobinhoodAgenticAdapter.submit_intent` | **UNFIXED** | **ABSOLUTE BLOCKER** | Critical |
+| **S5** | `adapters.robinhood.adapter` | `RobinhoodAgenticAdapter.get_positions` | **UNFIXED** | **RESEARCH/ACCOUNTING BLOCKER** | Critical |
 
 ---
 
@@ -28,6 +32,10 @@ Architecture Decision Packets for reviewer determination.
 
 ### S1. Hard Risk Policy Bypass on Order Submission Routes
 
+- **Status**: **UNFIXED** (Audit Confirmed)
+- **Blocker Status**: **ABSOLUTE LIVE TRADING BLOCKER**
+- **Defect Reproduction Test**: `tests/unit/test_execution_safety_audit.py::test_s1_reproduce_router_bypasses_hard_risk_gatekeeper` and `test_s1_reproduce_orchestrators_only_check_kill_switch_not_full_policy`
+- **Safe-Behavior Regression Test**: `tests/unit/test_execution_safety_audit.py::test_s1_safe_behavior_router_must_enforce_hard_risk_limits` and `test_s1_safe_behavior_orchestrator_must_reject_order_exceeding_risk_policy` (marked `@pytest.mark.xfail(strict=True)`)
 - **Exact File and Symbol**:
   - `src/drift/execution/router.py`: `BrokerNeutralExecutionRouter.route_intent`
   - `src/drift/validation/engine.py`: `ShadowValidationEngine.route_intent`
@@ -37,16 +45,12 @@ Architecture Decision Packets for reviewer determination.
   - Direct router dispatch: Calling `router.route_intent(intent)` routes directly to `adapter.submit_intent(intent)` with zero gatekeeper evaluation.
   - Orchestrator dispatch: `ShadowValidationEngine`, `CanaryExecutionOrchestrator`, and `BoundedAutonomyOrchestrator` treat `risk_gatekeeper` as optional (`HardRiskGatekeeper | None = None`). When provided, they check only `risk_gatekeeper.journal.is_kill_switch_tripped()`.
   - Rate limit, order size limit, order notional limit, position concentration limit, and gross exposure limits are completely bypassed.
-  - Verified in `tests/unit/test_execution_safety_audit.py::test_s1_router_bypasses_hard_risk_gatekeeper` and `test_s1_orchestrators_only_check_kill_switch_not_full_policy`.
 - **Safety Invariant Violated**:
   - Non-negotiable pre-execution hard risk enforcement invariant (ADR 0011, ADR 0013): every order intent targeting broker execution must pass deterministic risk limits before reaching the transport adapter.
-- **Smallest Safe Contract Change**:
+- **Required Remediation**:
   - Make `HardRiskGatekeeper` a mandatory dependency of `BrokerNeutralExecutionRouter`, or require an immutable, cryptographically hashed `RiskVerdictV1` reference attached to `OrderIntentV1` prior to routing.
 - **Impact on Existing Callers**:
   - `route_intent` must receive current portfolio state and reference price, or query account/portfolio state prior to dispatch.
-- **Necessary Tests**:
-  - Positive: Valid order within all limits produces ALLOWED verdict and routes.
-  - Negative: Orders exceeding rate limits, order notional, or exposure limits are rejected at the router boundary even if the kill switch has not latched.
 - **Persisted Schema Change Required**:
   - None required for memory evaluation. Optional foreign key `risk_verdict_id` in `order_intents` table of `PersistentOrderIntentJournal`.
 - **Architecture/ADR Decision Required**:
@@ -56,6 +60,10 @@ Architecture Decision Packets for reviewer determination.
 
 ### S2. Domain Type Mismatch Between Risk Gatekeeper and Execution Router
 
+- **Status**: **UNFIXED** (Audit Confirmed)
+- **Blocker Status**: **ABSOLUTE LIVE TRADING BLOCKER**
+- **Defect Reproduction Test**: `tests/unit/test_execution_safety_audit.py::test_s2_reproduce_domain_type_mismatch_between_risk_and_execution`
+- **Safe-Behavior Regression Test**: `tests/unit/test_execution_safety_audit.py::test_s2_safe_behavior_gatekeeper_evaluates_order_intent` (marked `@pytest.mark.xfail(strict=True)`)
 - **Exact File and Symbol**:
   - `src/drift/risk/gatekeeper.py`: `HardRiskGatekeeper.evaluate_order`
   - `src/drift/domain/shadow_broker.py`: `SimulatedOrderV1`
@@ -64,15 +72,12 @@ Architecture Decision Packets for reviewer determination.
   - `HardRiskGatekeeper.evaluate_order` expects `order: SimulatedOrderV1`, which requires simulated order fields (`order_id: UUID`, `side: str`, `price: Decimal`).
   - `BrokerNeutralExecutionRouter` accepts `intent: OrderIntentV1` (`intent_id: UUID`, `client_order_id: str`, `side: OrderSide`, `limit_price: Decimal | None`).
   - Calling `gatekeeper.evaluate_order(intent, ...)` fails with `AttributeError`.
-  - Verified in `tests/unit/test_execution_safety_audit.py::test_s2_domain_type_mismatch_between_risk_and_execution`.
 - **Safety Invariant Violated**:
   - Domain cohesion across risk and execution layers. The hard risk gatekeeper was coupled to M12 shadow simulation contracts rather than M14 broker-neutral execution contracts.
-- **Smallest Safe Contract Change**:
+- **Required Remediation**:
   - Add `evaluate_intent(self, intent: OrderIntentV1, *, portfolio_state: PortfolioStateV2, current_price: Decimal | None, evaluation_time: datetime) -> RiskVerdictV1` to `HardRiskGatekeeper`, or accept a unified protocol implemented by both `SimulatedOrderV1` and `OrderIntentV1`.
 - **Impact on Existing Callers**:
   - Zero breaking changes to existing `evaluate_order` callers in M12/M13 simulation harness.
-- **Necessary Tests**:
-  - Unit tests verifying `evaluate_intent` evaluates order notional, quantity, concentration, and gross exposure for `OrderIntentV1`.
 - **Persisted Schema Change Required**:
   - None (`PersistentRiskJournal` stores `order_id: UUID`, which accommodates both `SimulatedOrderV1.order_id` and `OrderIntentV1.intent_id`).
 - **Architecture/ADR Decision Required**:
@@ -82,6 +87,10 @@ Architecture Decision Packets for reviewer determination.
 
 ### S3. Cancellation Failure Swallowed as Authoritative CANCELED
 
+- **Status**: **UNFIXED** (Audit Confirmed)
+- **Blocker Status**: **ABSOLUTE LIVE TRADING BLOCKER**
+- **Defect Reproduction Test**: `tests/unit/test_execution_safety_audit.py::test_s3_reproduce_robinhood_cancellation_error_swallowed_as_canceled`
+- **Safe-Behavior Regression Test**: `tests/unit/test_execution_safety_audit.py::test_s3_safe_behavior_cancellation_error_fails_closed` (marked `@pytest.mark.xfail(strict=True)`)
 - **Exact File and Symbol**:
   - `src/drift/adapters/robinhood/adapter.py`: `RobinhoodAgenticAdapter.cancel_intent` (lines 152-174)
 - **Reproduction Path**:
@@ -90,15 +99,12 @@ Architecture Decision Packets for reviewer determination.
   - If the broker tool raises `RobinhoodMcpError` (e.g. HTTP 503, connection loss, or order already too late to cancel), the exception is swallowed.
   - The adapter unconditionally constructs and returns an `ExecutionReportV1` with `status=ExecutionStatus.CANCELED` and `leaves_quantity=0`.
   - The router persists this report, believing the order was cancelled, while the order remains active or filled on the broker.
-  - Verified in `tests/unit/test_execution_safety_audit.py::test_s3_robinhood_cancellation_error_swallowed_as_canceled`.
 - **Safety Invariant Violated**:
   - Truth-in-reporting invariant: an execution status report must represent actual confirmed broker state, never assumed success upon transport failure.
-- **Smallest Safe Contract Change**:
-  - If `RobinhoodMcpError` is raised during `robinhood_cancel_order`, do not emit `ExecutionStatus.CANCELED`. Instead, query `robinhood_get_order` to determine the true state. If query is unavailable, raise `RouterExecutionError` or mark intent as `CANCEL_FAILED` / `PENDING_RECONCILIATION`.
+- **Required Remediation**:
+  - If `RobinhoodMcpError` is raised during `robinhood_cancel_order`, do not emit `ExecutionStatus.CANCELED`. Instead, query `robinhood_get_order` to determine true state. If query is unavailable, raise `RouterExecutionError` or mark intent as `CANCEL_FAILED` / `PENDING_RECONCILIATION`.
 - **Impact on Existing Callers**:
   - Callers will not erroneously assume open risk is closed when broker cancellation fails.
-- **Necessary Tests**:
-  - Cancellation failure returns status reflecting failure or raises recoverable error.
 - **Persisted Schema Change Required**:
   - None if `ExecutionStatus.REJECTED` or existing status is used; addition of `CANCEL_FAILED` or `UNKNOWN` if fine-grained status is adopted.
 - **Architecture/ADR Decision Required**:
@@ -108,6 +114,10 @@ Architecture Decision Packets for reviewer determination.
 
 ### S4. Ambiguous Submission Error Recorded as Authoritative Rejection
 
+- **Status**: **UNFIXED** (Audit Confirmed)
+- **Blocker Status**: **ABSOLUTE LIVE TRADING BLOCKER**
+- **Defect Reproduction Test**: `tests/unit/test_execution_safety_audit.py::test_s4_reproduce_ambiguous_submission_error_marked_as_definitive_rejection`
+- **Safe-Behavior Regression Test**: `tests/unit/test_execution_safety_audit.py::test_s4_safe_behavior_submission_timeout_not_marked_rejected` (marked `@pytest.mark.xfail(strict=True)`)
 - **Exact File and Symbol**:
   - `src/drift/adapters/robinhood/adapter.py`: `RobinhoodAgenticAdapter.submit_intent` (lines 93-107)
 - **Reproduction Path**:
@@ -117,15 +127,12 @@ Architecture Decision Packets for reviewer determination.
   - The router records the intent as rejected.
   - However, in reality, the order may have reached Robinhood and executed.
   - If an automated strategy or retry loop subsequently re-submits or assumes zero position, double-execution or unhedged exposure results.
-  - Verified in `tests/unit/test_execution_safety_audit.py::test_s4_ambiguous_submission_error_marked_as_definitive_rejection`.
 - **Safety Invariant Violated**:
   - Ambiguous state must fail closed to an uncertain state requiring reconciliation, rather than resolving to a false-negative rejection.
-- **Smallest Safe Contract Change**:
+- **Required Remediation**:
   - When `RobinhoodMcpError` occurs during submission, do not record terminal `ExecutionStatus.REJECTED`. Mark state as `UNKNOWN` / `AMBIGUOUS_SUBMISSION` and initiate an idempotent query using `client_token` to confirm whether Robinhood accepted the order.
 - **Impact on Existing Callers**:
   - Protects automated callers from double-submission hazards.
-- **Necessary Tests**:
-  - Submission network timeout triggers reconciliation via client token before final status resolution.
 - **Persisted Schema Change Required**:
   - Addition of `ExecutionStatus.UNKNOWN` or `ExecutionStatus.PENDING_CONFIRMATION` to `drift.domain.execution.ExecutionStatus`.
 - **Architecture/ADR Decision Required**:
@@ -135,6 +142,10 @@ Architecture Decision Packets for reviewer determination.
 
 ### S5. Unmapped Symbol Maps to Fabricated DNS UUID and Crashes Schema Validation
 
+- **Status**: **UNFIXED** (Audit Confirmed)
+- **Blocker Status**: **RESEARCH AND ACCOUNTING INTEGRITY BLOCKER**
+- **Defect Reproduction Test**: `tests/unit/test_execution_safety_audit.py::test_s5_reproduce_unknown_symbol_maps_to_fabricated_uuid`
+- **Safe-Behavior Regression Test**: `tests/unit/test_execution_safety_audit.py::test_s5_safe_behavior_unmapped_symbol_quarantined_without_crash` (marked `@pytest.mark.xfail(strict=True)`)
 - **Exact File and Symbol**:
   - `src/drift/adapters/robinhood/adapter.py`: `RobinhoodAgenticAdapter.get_positions` (lines 254-257)
 - **Reproduction Path**:
@@ -147,16 +158,13 @@ Architecture Decision Packets for reviewer determination.
   - The adapter fabricates a UUIDv5 from the symbol string.
   - **Critical Empirical Discovery**: In `drift.domain.execution.BrokerPositionSnapshotV1`, the `security_id` field enforces strict UUIDv7 format (`@field_validator: identifiers must be UUIDv7 values`).
   - Because `uuid5` produces a version 5 UUID (not version 7), `build_broker_position_snapshot` raises a Pydantic `ValidationError` and crashes the entire `get_positions()` call!
-  - Verified in `tests/unit/test_execution_safety_audit.py::test_s5_unknown_symbol_maps_to_fabricated_uuid`.
 - **Safety Invariant Violated**:
   - (1) M0/M1 temporal provenance and security identity invariant: all security identifiers must resolve to verified historical security identities in the Drift evidence kernel, never ad-hoc fabricated UUIDs.
   - (2) Domain schema invariant: UUIDv7 is required for all entity identifiers across Drift domain models.
-- **Smallest Safe Contract Change**:
+- **Required Remediation**:
   - Fail closed: unmapped symbols must either raise an `UnmappedSecurityError`, or unmapped positions must be quarantined into a separate unmapped positions collection rather than fabricating arbitrary IDs.
 - **Impact on Existing Callers**:
   - Prevents total process crashes on unknown positions; isolates untracked assets from Drift portfolio accounting.
-- **Necessary Tests**:
-  - Positions with unmapped symbols fail closed or are quarantined cleanly without schema validation crashes.
 - **Persisted Schema Change Required**:
   - None.
 - **Architecture/ADR Decision Required**:
@@ -222,3 +230,45 @@ Architecture Decision Packets for reviewer determination.
   Option B: filter and quarantine unmapped positions while logging an alert to prevent schema crashes.
 - **Exact Question Needed**:
   *How should broker adapters handle positions in securities that are not present in the configured Drift universe mapping?*
+
+---
+
+### Decision Packet 4: Tournament Promotion Authority in Exploratory Lane
+
+- **What was discovered**:
+  `TournamentRunner` issues `TournamentDecision.PROMOTED` when a challenger outperforms a champion across paired evaluation. However, ADR 0012 establishes that exploratory evaluation evidence (e.g. from Alpaca Basic development data) is strictly non-promotable and cannot be upgraded or relabeled into promotion-grade evidence. Promotion requires an independent evaluation run against an accepted promotion-qualified M1e dataset.
+- **Why a decision is needed**:
+  Issuing `TournamentDecision.PROMOTED` on exploratory evidence violates the core trust boundary established in ADR 0012, risking automated promotion of unvetted strategies.
+- **Viable Options**:
+  - *Option A (Cap at VALIDATED in Exploratory Lane)*: `TournamentRunner` checks `champ_metrics` and `chall_metrics` admission lane. If operating in exploratory lane, the maximum verdict is capped at `TournamentDecision.VALIDATED` (never `PROMOTED`).
+  - *Option B (Exploratory Promotion Flag)*: Introduce `TournamentDecision.EXPLORATORY_PROMOTED` or an `is_exploratory_promotion: bool` attribute on `TournamentMatchRecordV1` to prevent confusion with canonical promotion.
+  - *Option C (Explicit Promotion Admission Proof)*: Require cryptographic proof of promotion-grade qualification (`PromotionAdmissionV1`) before `TournamentRunner` is permitted to issue `TournamentDecision.PROMOTED`.
+- **Tradeoffs / Evidence**:
+  - Option A provides absolute mechanical enforcement of ADR 0012, preventing false promotions by construction.
+  - Option B allows exploratory tournaments to declare winners without breaching canonical registries, but creates two parallel concepts of promotion.
+  - Option C strictly binds promotion authority to data license and qualification credentials, matching M1e architectural design.
+- **Recommended Option**:
+  Option A (cap exploratory matches at VALIDATED) combined with Option C for promotion lane.
+- **Exact Question Needed**:
+  *Should `TournamentRunner` strictly forbid `TournamentDecision.PROMOTED` when operating on exploratory evaluation evidence, capping outcomes at `VALIDATED`?*
+
+---
+
+### Decision Packet 5: Research Proposal Parameter Correspondence (Universe and Cadence)
+
+- **What was discovered**:
+  `ExperimentSpecificationProposalV1` includes `universe_id: str` and `rebalance_frequency: str`. However, M3 deterministic reference strategies operate on whatever universe is embedded in the evaluation input bundle, and their rebalance cadence is governed by strategy constructor parameters (`rebalance_dates` in B3) rather than proposal fields.
+- **Why a decision is needed**:
+  Proposal parameters that have no semantic effect on instantiated strategies create a false audit trail, where proposals appear to request specific universes and rebalance frequencies that are ignored during execution.
+- **Viable Options**:
+  - *Option A (Semantic Validation)*: Validate that `proposal.universe_id` strictly matches `bundle.universe_id`, and that `proposal.rebalance_frequency` matches strategy cadence constraints; fail closed on mismatch.
+  - *Option B (Parameter Delegation)*: Bind `universe_id` and `rebalance_frequency` directly into strategy instantiation logic (e.g. dynamically generating rebalance dates for B3 based on proposal frequency).
+  - *Option C (Schema Cleanup)*: Remove unutilized fields from `ExperimentSpecificationProposalV1` until dynamic universe slicing and schedule generation are implemented.
+- **Tradeoffs / Evidence**:
+  - Option A preserves the proposal schema while guaranteeing research integrity and preventing misleading experiments.
+  - Option B increases M3 strategy flexibility but requires substantial scheduling infrastructure.
+  - Option C simplifies domain models but requires migrating existing research memory records.
+- **Recommended Option**:
+  Option A: enforce strict agreement between proposal parameters and bundle/strategy attributes.
+- **Exact Question Needed**:
+  *How should `universe_id` and `rebalance_frequency` in experiment proposals correspond to evaluation bundle universe and strategy rebalance schedule?*

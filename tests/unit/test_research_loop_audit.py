@@ -169,6 +169,7 @@ def test_runner_with_loop_recorder_end_to_end(tmp_path: Path) -> None:
         recorder=mem_recorder,
         archive=mem_archive,
         loop_recorder=loop_recorder,
+        allow_mock_evaluator=True,
     )
 
     summary, iterations = runner.run(TIMESTAMP)

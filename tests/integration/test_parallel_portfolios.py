@@ -87,6 +87,10 @@ def test_portfolio_isolation_and_initial_cash() -> None:
         assert r.is_pnl_complete is True
         assert len(r.trace_hash) == 64
         assert len(r.result_hash) == 64
+        assert len(r.bundle_hash) == 64
+        assert len(r.run_identity_hash) == 64
+        assert len(r.cost_model_hash) == 64
+        assert len(r.protocol_hash) == 64
         assert len(r.daily_returns) == len(bundle.session_clock.sessions)
 
     # Cash strategy remained at exactly $10,000.00
@@ -135,13 +139,19 @@ def test_parallel_matches_sequential_bit_for_bit() -> None:
         assert s_res.annualized_turnover == p_res.annualized_turnover
         assert s_res.fill_count == p_res.fill_count
         assert s_res.daily_returns == p_res.daily_returns
+        assert s_res.bundle_hash == p_res.bundle_hash
+        assert s_res.run_identity_hash == p_res.run_identity_hash
+        assert s_res.cost_model_hash == p_res.cost_model_hash
+        assert s_res.protocol_hash == p_res.protocol_hash
         # Bit-for-bit trace hash and result hash equality across process boundary
         assert s_res.trace_hash == p_res.trace_hash
         assert s_res.result_hash == p_res.result_hash
 
 
 def test_correlation_matrix_properties() -> None:
-    """Correlation matrix is symmetric, bounded, and has 1.0000 on the diagonal."""
+    """Correlation matrix is symmetric, bounded, and formats undefined series
+    as None.
+    """
     bundle = build_offline_cohort_bundle()
     evidence = build_offline_cohort_evidence()
     cohort = build_reference_baseline_cohort(bundle)
@@ -156,15 +166,21 @@ def test_correlation_matrix_properties() -> None:
 
     sids = [r.strategy_id for r in results]
     for s_a in sids:
-        # Diagonal is exactly 1.0000
-        assert matrix[s_a][s_a] == Decimal("1.0000")
         for s_b in sids:
             val_ab = matrix[s_a][s_b]
             val_ba = matrix[s_b][s_a]
             # Symmetry: Corr(A, B) == Corr(B, A)
             assert val_ab == val_ba
-            # Bounded in [-1.0000, 1.0000]
-            assert Decimal("-1.0000") <= val_ab <= Decimal("1.0000")
+            if val_ab is not None:
+                # Bounded in [-1.0000, 1.0000]
+                assert Decimal("-1.0000") <= val_ab <= Decimal("1.0000")
+
+    # b0_cash has zero variance; correlation with itself or others is undefined (None)
+    assert matrix["b0_cash"]["b0_cash"] is None
+    # Non-zero variance series with itself is 1.0000
+    assert matrix["b1_single_buy_and_hold"]["b1_single_buy_and_hold"] == Decimal(
+        "1.0000"
+    )
 
 
 def test_correlation_zero_variance_and_identical() -> None:
@@ -202,18 +218,12 @@ def test_correlation_zero_variance_and_identical() -> None:
         identical_series, inverse_series
     ) == Decimal("-1.0000")
 
-    # Zero-variance vs non-zero variance -> 0.0000
-    assert compute_daily_returns_correlation(zero_series, identical_series) == Decimal(
-        "0.0000"
-    )
-    assert compute_daily_returns_correlation(identical_series, zero_series) == Decimal(
-        "0.0000"
-    )
+    # Zero-variance vs non-zero variance -> None (undefined)
+    assert compute_daily_returns_correlation(zero_series, identical_series) is None
+    assert compute_daily_returns_correlation(identical_series, zero_series) is None
 
-    # Zero-variance with itself -> 1.0000
-    assert compute_daily_returns_correlation(zero_series, zero_series) == Decimal(
-        "1.0000"
-    )
+    # Zero-variance with itself -> None (undefined)
+    assert compute_daily_returns_correlation(zero_series, zero_series) is None
 
     # Length mismatch raises ValueError
     with pytest.raises(ValueError, match="Series lengths must match"):
@@ -246,6 +256,7 @@ def test_table_formatters() -> None:
     assert "Strategy ID" in matrix_table
     assert "1.0000" in matrix_table
     assert "b0_cash" in matrix_table
+    assert "N/A" in matrix_table
 
 
 def test_cli_main_runs_and_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
@@ -255,6 +266,8 @@ def test_cli_main_runs_and_exits_zero(capsys: pytest.CaptureFixture[str]) -> Non
 
     captured = capsys.readouterr()
     assert "PARALLEL $10,000 RESEARCH PORTFOLIOS COHORT HARNESS" in captured.out
+    assert "SYNTHETIC FOUR-SESSION TEST FIXTURE" in captured.out
+    assert "NOT PROMOTION-GRADE" in captured.out
     assert "Cohort Performance Summary" in captured.out
     assert "Cross-Cohort Daily Return Correlation Matrix" in captured.out
     assert "Portfolio isolation verified" in captured.out

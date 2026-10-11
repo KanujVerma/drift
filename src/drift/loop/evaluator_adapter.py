@@ -99,12 +99,17 @@ STRATEGY_REGISTRY: dict[str, type] = {
     "b5": B5LowVolatilityStrategy,
     "lowvolatilitybaselinestrategy": B5LowVolatilityStrategy,
     "b5lowvolatilitystrategy": B5LowVolatilityStrategy,
-    # Legacy specification aliases
-    "b0_passive_equal_weight": B0CashStrategy,
-    "b1_market_cap_weight": B1SingleBuyAndHoldStrategy,
-    "b2_fixed_universe_rebalance": B2EqualWeightBuyAndHoldStrategy,
-    "b3_mean_reversion": B3MonthlyEqualWeightRebalanceStrategy,
 }
+
+
+def _validate_strict_int(val: Any, param_name: str) -> int:
+    """Validate that val is strictly an int (rejecting bool, float, str)."""
+    if isinstance(val, bool) or not isinstance(val, int):
+        raise StrategyParameterValidationError(
+            f"Parameter '{param_name}' must be an integer "
+            f"(parameters must be integers), got {type(val).__name__}: {val!r}"
+        )
+    return val
 
 
 def resolve_and_instantiate_strategy(
@@ -113,7 +118,7 @@ def resolve_and_instantiate_strategy(
     *,
     bundle: EvaluationInputBundleV1 | None = None,
 ) -> Any:
-    """Resolve strategy type to M3 implementation with parameter validation."""
+    """Resolve strategy type to M3 implementation with strict parameter validation."""
     norm_key = strategy_type.strip().lower()
     strategy_cls = STRATEGY_REGISTRY.get(norm_key)
     if strategy_cls is None:
@@ -124,21 +129,25 @@ def resolve_and_instantiate_strategy(
     params = dict(parameters) if parameters else {}
 
     if strategy_cls is B0CashStrategy:
+        if params:
+            raise StrategyParameterValidationError(
+                f"B0CashStrategy accepts no parameters, got: {sorted(params.keys())}"
+            )
         return B0CashStrategy()
 
     elif strategy_cls is B1SingleBuyAndHoldStrategy:
+        allowed_b1 = {"target_security_id", "security_id"}
+        unknown_b1 = set(params.keys()) - allowed_b1
+        if unknown_b1:
+            raise StrategyParameterValidationError(
+                "B1SingleBuyAndHoldStrategy received unknown parameters: "
+                f"{sorted(unknown_b1)}"
+            )
         sec_raw = params.get("target_security_id") or params.get("security_id")
         if sec_raw is None:
-            if (
-                bundle is not None
-                and bundle.security_identities
-                and len(bundle.security_identities) == 1
-            ):
-                sec_raw = bundle.security_identities[0].security_id
-            else:
-                raise StrategyParameterValidationError(
-                    "B1 strategy requires 'target_security_id' parameter."
-                )
+            raise StrategyParameterValidationError(
+                "B1 strategy requires 'target_security_id' parameter."
+            )
         if isinstance(sec_raw, str):
             try:
                 sec_id = UUID(sec_raw)
@@ -150,18 +159,33 @@ def resolve_and_instantiate_strategy(
             sec_id = sec_raw
         else:
             raise StrategyParameterValidationError(
-                f"target_security_id must be a UUID or UUID string, got {type(sec_raw)}"
+                "target_security_id must be a UUID or UUID string, "
+                f"got {type(sec_raw).__name__}"
             )
         return B1SingleBuyAndHoldStrategy(target_security_id=sec_id)
 
     elif strategy_cls is B2EqualWeightBuyAndHoldStrategy:
+        if params:
+            raise StrategyParameterValidationError(
+                "B2EqualWeightBuyAndHoldStrategy accepts no parameters, "
+                f"got: {sorted(params.keys())}"
+            )
         return B2EqualWeightBuyAndHoldStrategy()
 
     elif strategy_cls is B3MonthlyEqualWeightRebalanceStrategy:
+        allowed_b3 = {"rebalance_dates", "rebalance_on_initial_session"}
+        unknown_b3 = set(params.keys()) - allowed_b3
+        if unknown_b3:
+            raise StrategyParameterValidationError(
+                "B3MonthlyEqualWeightRebalanceStrategy received unknown parameters: "
+                f"{sorted(unknown_b3)}"
+            )
         rebalance_dates = params.get("rebalance_dates")
         dates_arg: tuple[date, ...] | None = None
         if rebalance_dates is not None:
-            if not isinstance(rebalance_dates, Sequence):
+            if not isinstance(rebalance_dates, Sequence) or isinstance(
+                rebalance_dates, (str, bytes)
+            ):
                 raise StrategyParameterValidationError(
                     "rebalance_dates must be a sequence of date objects or strings."
                 )
@@ -178,13 +202,15 @@ def resolve_and_instantiate_strategy(
                     parsed_dates.append(item)
                 else:
                     raise StrategyParameterValidationError(
-                        f"rebalance date must be date or ISO string, got {type(item)}"
+                        "rebalance date must be date or ISO string, "
+                        f"got {type(item).__name__}"
                     )
             dates_arg = tuple(parsed_dates)
         rebal_initial = params.get("rebalance_on_initial_session", True)
         if not isinstance(rebal_initial, bool):
             raise StrategyParameterValidationError(
-                f"rebalance_on_initial_session must be bool, got {type(rebal_initial)}"
+                "rebalance_on_initial_session must be bool, "
+                f"got {type(rebal_initial).__name__}"
             )
         return B3MonthlyEqualWeightRebalanceStrategy(
             rebalance_dates=dates_arg,
@@ -192,18 +218,18 @@ def resolve_and_instantiate_strategy(
         )
 
     elif strategy_cls is B4MomentumStrategy:
+        allowed_b4 = {"formation_sessions", "skip_sessions", "min_eligible_count"}
+        unknown_b4 = set(params.keys()) - allowed_b4
+        if unknown_b4:
+            raise StrategyParameterValidationError(
+                f"B4MomentumStrategy received unknown parameters: {sorted(unknown_b4)}"
+            )
         formation = params.get("formation_sessions", 252)
         skip = params.get("skip_sessions", 21)
         min_eligible = params.get("min_eligible_count", 2)
-        try:
-            formation_int = int(formation)
-            skip_int = int(skip)
-            min_eligible_int = int(min_eligible)
-        except (ValueError, TypeError) as error:
-            raise StrategyParameterValidationError(
-                "B4 parameters formation_sessions, skip_sessions, "
-                f"min_eligible_count must be integers: {error}"
-            ) from error
+        formation_int = _validate_strict_int(formation, "formation_sessions")
+        skip_int = _validate_strict_int(skip, "skip_sessions")
+        min_eligible_int = _validate_strict_int(min_eligible, "min_eligible_count")
         if formation_int <= 0 or skip_int < 0 or min_eligible_int <= 0:
             raise StrategyParameterValidationError(
                 "B4 parameters must be positive (formation > 0, "
@@ -216,16 +242,17 @@ def resolve_and_instantiate_strategy(
         )
 
     elif strategy_cls is B5LowVolatilityStrategy:
+        allowed_b5 = {"lookback_returns", "min_eligible_count"}
+        unknown_b5 = set(params.keys()) - allowed_b5
+        if unknown_b5:
+            raise StrategyParameterValidationError(
+                "B5LowVolatilityStrategy received unknown parameters: "
+                f"{sorted(unknown_b5)}"
+            )
         lookback = params.get("lookback_returns", 60)
         min_eligible = params.get("min_eligible_count", 2)
-        try:
-            lookback_int = int(lookback)
-            min_eligible_int = int(min_eligible)
-        except (ValueError, TypeError) as error:
-            raise StrategyParameterValidationError(
-                "B5 parameters lookback_returns, min_eligible_count "
-                f"must be integers: {error}"
-            ) from error
+        lookback_int = _validate_strict_int(lookback, "lookback_returns")
+        min_eligible_int = _validate_strict_int(min_eligible, "min_eligible_count")
         if lookback_int <= 0 or min_eligible_int <= 0:
             raise StrategyParameterValidationError(
                 "B5 parameters must be positive (lookback > 0, min_eligible > 0)"
@@ -488,6 +515,16 @@ class M2TrialEvaluatorAdapter:
                 "run_identity_hash": run_identity.run_identity_hash,
                 "strategy_hash": run_identity.strategy_hash,
                 "strategy_parameters_hash": run_identity.strategy_parameters_hash,
+                "cost_model_hash": self._engine.cost_model.cost_model_hash,
+                "protocol_hash": self._engine.protocol.protocol_hash,
+                "session_keys": tuple(
+                    f"{s.session_key.mic}:{s.session_key.local_date.isoformat()}"
+                    for s in self._engine.bundle.session_clock.sessions
+                ),
+                "session_dates": tuple(
+                    s.session_key.local_date
+                    for s in self._engine.bundle.session_clock.sessions
+                ),
                 "is_mock": False,
                 "is_synthetic": False,
             }
@@ -506,6 +543,16 @@ class M2TrialEvaluatorAdapter:
                 "run_identity_hash": run_identity.run_identity_hash,
                 "strategy_hash": run_identity.strategy_hash,
                 "strategy_parameters_hash": run_identity.strategy_parameters_hash,
+                "cost_model_hash": self._engine.cost_model.cost_model_hash,
+                "protocol_hash": self._engine.protocol.protocol_hash,
+                "session_keys": tuple(
+                    f"{s.session_key.mic}:{s.session_key.local_date.isoformat()}"
+                    for s in self._engine.bundle.session_clock.sessions
+                ),
+                "session_dates": tuple(
+                    s.session_key.local_date
+                    for s in self._engine.bundle.session_clock.sessions
+                ),
                 "is_mock": False,
                 "is_synthetic": False,
             }
@@ -524,6 +571,16 @@ class M2TrialEvaluatorAdapter:
                 "run_identity_hash": run_identity.run_identity_hash,
                 "strategy_hash": run_identity.strategy_hash,
                 "strategy_parameters_hash": run_identity.strategy_parameters_hash,
+                "cost_model_hash": self._engine.cost_model.cost_model_hash,
+                "protocol_hash": self._engine.protocol.protocol_hash,
+                "session_keys": tuple(
+                    f"{s.session_key.mic}:{s.session_key.local_date.isoformat()}"
+                    for s in self._engine.bundle.session_clock.sessions
+                ),
+                "session_dates": tuple(
+                    s.session_key.local_date
+                    for s in self._engine.bundle.session_clock.sessions
+                ),
                 "is_mock": False,
                 "is_synthetic": False,
             }
@@ -564,21 +621,22 @@ class DeterministicMockTrialEvaluator:
         """Return deterministic metrics for an experiment specification."""
         if self.eval_fn is not None:
             res = dict(self.eval_fn(experiment))
-            res.setdefault("is_mock", True)
-            res.setdefault("is_synthetic", True)
+            res["is_mock"] = True
+            res["is_synthetic"] = True
             return res
 
         param_hash = experiment.parameters_hash
         if param_hash in self.metric_overrides:
             res = dict(self.metric_overrides[param_hash])
-            res.setdefault("is_mock", True)
-            res.setdefault("is_synthetic", True)
+            res["is_mock"] = True
+            res["is_synthetic"] = True
             return res
 
         if self.default_metrics is not None:
             res = dict(self.default_metrics)
-            res.setdefault("is_mock", True)
-            res.setdefault("is_synthetic", True)
+            res.setdefault("is_pnl_complete", True)
+            res["is_mock"] = True
+            res["is_synthetic"] = True
             return res
 
         int_seed = int(param_hash[:8], 16)
@@ -590,6 +648,7 @@ class DeterministicMockTrialEvaluator:
             "annualized_sharpe": sharpe,
             "max_drawdown": drawdown,
             "annualized_turnover": turnover,
+            "is_pnl_complete": True,
             "is_mock": True,
             "is_synthetic": True,
         }
