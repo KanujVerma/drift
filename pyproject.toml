@@ -11,6 +11,9 @@ dependencies = [
     "pydantic>=2.0,<3.0",
 ]
 
+[project.scripts]
+drift-portfolios = "drift.experiments.parallel_portfolios:main"
+
 [dependency-groups]
 dev = [
     "mypy>=1.11",
