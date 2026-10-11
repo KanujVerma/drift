@@ -99,6 +99,11 @@ STRATEGY_REGISTRY: dict[str, type] = {
     "b5": B5LowVolatilityStrategy,
     "lowvolatilitybaselinestrategy": B5LowVolatilityStrategy,
     "b5lowvolatilitystrategy": B5LowVolatilityStrategy,
+    # Legacy specification aliases
+    "b0_passive_equal_weight": B0CashStrategy,
+    "b1_market_cap_weight": B1SingleBuyAndHoldStrategy,
+    "b2_fixed_universe_rebalance": B2EqualWeightBuyAndHoldStrategy,
+    "b3_mean_reversion": B3MonthlyEqualWeightRebalanceStrategy,
 }
 
 

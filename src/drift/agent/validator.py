@@ -108,6 +108,21 @@ class ProposalValidator:
                 evaluated_at=as_of_time,
             )
 
+        # 2b. Hypothesis and Experiment Target Strategy Alignment
+        if hypothesis.target_strategy_type != experiment.strategy_type:
+            rejection_reasons.append(
+                f"Experiment strategy_type '{experiment.strategy_type}' does not match "
+                f"hypothesis target_strategy_type '{hypothesis.target_strategy_type}'"
+            )
+            return build_proposal_validation_result(
+                validation_id=val_id,
+                proposal_id=hypothesis.proposal_id,
+                status=ProposalValidationStatus.REJECTED_OUT_OF_BOUNDS,
+                is_accepted=False,
+                rejection_reasons=tuple(rejection_reasons),
+                evaluated_at=as_of_time,
+            )
+
         # 3. Parameter Deduplication Check
         if self.archive.is_parameter_region_evaluated(
             experiment.strategy_type, experiment.parameters_hash
@@ -146,8 +161,15 @@ class ProposalValidator:
                 evaluated_at=as_of_time,
             )
 
-        # 5. Parameter Search Space Bounds Check
+        # 5. Parameter Search Space Bounds and Constraints Check
         space = self.search_spaces.get(experiment.strategy_type)
+        if space is not None:
+            if space.exhaustion_fraction >= Decimal("1.0"):
+                rejection_reasons.append(
+                    f"Parameter search space for '{experiment.strategy_type}' "
+                    f"is fully exhausted ({space.exhaustion_fraction})"
+                )
+
         if space is not None and isinstance(experiment.proposed_parameters, Mapping):
             for dim in space.dimension_names:
                 if dim not in experiment.proposed_parameters:
@@ -160,6 +182,53 @@ class ProposalValidator:
                         f"Unexpected parameter '{param_key}' not in "
                         f"search space dimensions"
                     )
+
+        # Baseline Strategy Parameter Validation
+        if isinstance(experiment.proposed_parameters, Mapping):
+            strat_key = experiment.strategy_type.strip().lower()
+            params = experiment.proposed_parameters
+            if strat_key in ("b1", "b1_single_buy_and_hold", "b1_market_cap_weight"):
+                sec_val = params.get("target_security_id") or params.get("security_id")
+                if sec_val is not None:
+                    if isinstance(sec_val, str):
+                        try:
+                            UUID(sec_val)
+                        except ValueError as err:
+                            rejection_reasons.append(
+                                f"Invalid target_security_id UUID string '{sec_val}': "
+                                f"{err}"
+                            )
+                    elif not isinstance(sec_val, UUID):
+                        rejection_reasons.append(
+                            "B1 target_security_id must be UUID or UUID string, "
+                            f"got {type(sec_val)}"
+                        )
+            elif strat_key in ("b4", "b4_momentum"):
+                for field_name in ("formation_sessions", "min_eligible_count"):
+                    if field_name in params:
+                        val = params[field_name]
+                        if not isinstance(val, int) or val <= 0:
+                            rejection_reasons.append(
+                                f"B4 parameter '{field_name}' must be positive "
+                                f"integer, got {val}"
+                            )
+                if "skip_sessions" in params:
+                    val = params["skip_sessions"]
+                    if not isinstance(val, int) or val < 0:
+                        rejection_reasons.append(
+                            "B4 parameter 'skip_sessions' must be non-negative "
+                            f"integer, got {val}"
+                        )
+            elif strat_key in ("b5", "b5_low_volatility"):
+                for field_name in ("lookback_returns", "min_eligible_count"):
+                    if field_name in params:
+                        val = params[field_name]
+                        if not isinstance(val, int) or val <= 0:
+                            rejection_reasons.append(
+                                f"B5 parameter '{field_name}' must be positive "
+                                f"integer, got {val}"
+                            )
+
         if rejection_reasons:
             return build_proposal_validation_result(
                 validation_id=val_id,
