@@ -49,6 +49,39 @@ def diagnose_trial_outcome(
     raw_drawdown = metrics.get("max_drawdown")
     raw_turnover = metrics.get("annualized_turnover")
 
+    if (
+        metrics.get("is_indeterminate") is True
+        or metrics.get("classification") == "indeterminate"
+    ):
+        halt_reason = metrics.get("halt_reason", "indeterminate evaluation")
+        return TrialDiagnosisResult(
+            outcome=TrialOutcome.INVALIDATED,
+            failure_category=FailureCategory.DATA_DEFECT,
+            root_cause_summary=f"Trial evaluation was indeterminate: {halt_reason}",
+            lessons_learned=(
+                "Session evaluation halted as indeterminate due to missing or "
+                "ambiguous evidence."
+            ),
+            breached_criteria=("indeterminate_evaluation",),
+            forbidden_variations=(),
+        )
+
+    if (
+        metrics.get("is_rejected") is True
+        or metrics.get("classification") == "rejected"
+    ):
+        halt_reason = metrics.get("halt_reason", "rejected evaluation")
+        return TrialDiagnosisResult(
+            outcome=TrialOutcome.FAILED,
+            failure_category=FailureCategory.EXECUTION_UNVIABLE,
+            root_cause_summary=f"Trial evaluation was rejected: {halt_reason}",
+            lessons_learned=(
+                "Strategy intent or execution was rejected during session evaluation."
+            ),
+            breached_criteria=("rejected_evaluation",),
+            forbidden_variations=(),
+        )
+
     if raw_sharpe is None or raw_drawdown is None or raw_turnover is None:
         return TrialDiagnosisResult(
             outcome=TrialOutcome.INVALIDATED,
