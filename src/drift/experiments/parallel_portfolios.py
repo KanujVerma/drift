@@ -71,6 +71,10 @@ class CohortPortfolioResult:
     cost_model_hash: str
     protocol_hash: str
     session_keys: tuple[SessionKeyV1, ...] = ()
+    halt_reason: str | None = None
+    transaction_costs: Decimal = ZERO
+    ending_cash: Decimal = ZERO
+    settled_dividend_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -200,6 +204,10 @@ def _portfolio_worker_entrypoint(task: _PortfolioWorkerTask) -> CohortPortfolioR
         cost_model_hash=task.cost_model.cost_model_hash,
         protocol_hash=task.protocol.protocol_hash,
         session_keys=session_keys,
+        halt_reason=result.halt_reason,
+        transaction_costs=artifacts.final_state.cumulative_transaction_costs,
+        ending_cash=artifacts.final_state.cash_balance,
+        settled_dividend_count=len(artifacts.final_state.settled_claim_ids),
     )
 
 
