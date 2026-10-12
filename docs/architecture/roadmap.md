@@ -24,38 +24,33 @@ operational authorization.
 
 ## Milestone Status Overview
 
-Progress is evaluated across five distinct dimensions:
-- **IMPLEMENTED**: Code written and merged into repository.
-- **TESTED**: Unit, integration, and adversarial tests passing.
-- **INDEPENDENTLY REVIEWED**: Reviewed and accepted by independent architecture review.
-- **SCIENTIFICALLY QUALIFIED**: Backed by accepted promotion-grade source data and out-of-sample rigor.
-- **OPERATIONALLY AUTHORIZED**: Authorized for live capital or external brokerage execution.
+Progress across Drift milestones is tracked below. Note that code availability does not constitute operational authority: completion of milestone implementation (including M11 promotion controls or M16-M18 live execution components) does not authorize live trading, broker order routing, or the promotion of exploratory evaluation results without promotion-grade M1e evidence.
 
-| Milestone | Title | Owner | Implementation & Test | Review | Scientific Qualification | Operational Authority |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **M0** | Auditable Evidence Kernel | - | COMPLETE | ACCEPTED | QUALIFIED | LOCAL ONLY |
-| **M1a** | Temporal Provenance | - | COMPLETE | ACCEPTED | QUALIFIED | LOCAL ONLY |
-| **M1b** | Historical Identity / Universes | - | COMPLETE | ACCEPTED | QUALIFIED | LOCAL ONLY |
-| **M1c** | Corporate Actions / Economic Facts | - | COMPLETE | ACCEPTED | QUALIFIED | LOCAL ONLY |
-| **M1d** | Observations, Sessions, Normalization | - | COMPLETE | ACCEPTED | QUALIFIED | LOCAL ONLY |
-| **M1e** | Real-Source Qualification & Replay | - | TASKS 1-7 COMPLETE | ACCEPTED | DEFERRED (Task 8) | LOCAL ONLY |
-| **M2** | Evaluator / Backtester | Krish | COMPLETE | ACCEPTED | EXPLORATORY (ADR 0012) | LOCAL ONLY |
-| **M3** | Deterministic Baselines (B0-B5) | Krish | COMPLETE | ACCEPTED | EXPLORATORY | LOCAL ONLY |
-| **M4** | Prediction / Outcome Tracking | Krish | COMPLETE | ACCEPTED | EXPLORATORY | LOCAL ONLY |
-| **M5** | Statistical / Model Scorecards | Krish | COMPLETE | ACCEPTED | EXPLORATORY | LOCAL ONLY |
-| **M6** | Structured Research Memory | Krish | COMPLETE | ACCEPTED | EXPLORATORY | LOCAL ONLY |
-| **M7** | First AI Research Agent | Krish | COMPLETE | PENDING REVIEW | EXPLORATORY | LOCAL ONLY |
-| **M8** | Recursive R&D Loop | Krish | COMPLETE | PENDING REVIEW | EXPLORATORY | LOCAL ONLY |
-| **M9** | Multi-Agent Research | Krish | CONDITIONAL | - | UNQUALIFIED | LOCAL ONLY |
-| **M10** | Champion / Challenger Tournament | Krish | COMPLETE | PENDING REVIEW | EXPLORATORY | LOCAL ONLY |
-| **M11** | Promotion & Overfitting Controls | Krish | QUEUED | - | UNQUALIFIED | UNAUTHORIZED |
-| **M12** | Simulated Shadow Broker | Krish | COMPLETE | ACCEPTED | N/A (SIMULATION) | UNAUTHORIZED |
-| **M13** | Deterministic Hard Risk | Krish | COMPLETE | ACCEPTED | N/A (RISK GATE) | UNAUTHORIZED |
-| **M14** | Broker-Neutral Execution | Krish | COMPLETE | ACCEPTED | N/A (EXECUTION) | UNAUTHORIZED |
-| **M15** | Real-World Paper / Shadow Validation | Krish | COMPLETE | ACCEPTED | N/A (SHADOW) | UNAUTHORIZED |
-| **M16** | Official Robinhood Agentic MCP Adapter | Krish | COMPLETE | ACCEPTED | N/A (ADAPTER) | **UNAUTHORIZED** |
-| **M17** | Tiny-Money Canary | Krish | COMPLETE | ACCEPTED | N/A (CANARY) | **UNAUTHORIZED** |
-| **M18+** | Bounded Autonomy & Improvement | Krish | COMPLETE | ACCEPTED | N/A (AUTONOMY) | **UNAUTHORIZED** |
+| Milestone | Title | Owner | Status | Primary Output / Invariant |
+|---|---|---|---|---|
+| **M0** | Auditable Evidence Kernel | - | **COMPLETE** | Monotonic append-only SQLite ledger with SHA-256 hash chaining. |
+| **M1a** | Temporal Provenance | - | **COMPLETE** | Exact-byte manifests, channel availability, and tri-state cutoffs. |
+| **M1b** | Historical Identity / Universes | - | **COMPLETE** | Issuer/security/listing separation, point-in-time universe composition. |
+| **M1c** | Corporate Actions / Economic Facts | - | **COMPLETE** | Terms, occurred effects, reported settlements, dependent replay. |
+| **M1d** | Observations, Sessions, Normalization | - | **COMPLETE** | Source claims, realized sessions, missingness, split-normalized views. |
+| **M1e** | Real-Source Qualification & Replay | - | **IN PROGRESS / DEFERRED** | Tasks 1-7 complete (offline closure); Task 8 paid promotion qualification deferred. |
+| **M2** | Evaluator / Backtester | Krish | **COMPLETE** | Deterministic point-in-time strategy evaluation; exploratory lane authorized under ADR 0012. |
+| **M3** | Deterministic Baselines | Krish | **COMPLETE** | Passive, factor, and mechanical reference benchmark strategies B0 through B5. |
+| **M4** | Prediction / Outcome Tracking | Krish | **COMPLETE** | Audited tracking of ex-ante forecasts against realized market facts. |
+| **M5** | Statistical / Model Scorecards | Krish | **COMPLETE** | Rigorous performance attribution, calibration, and degradation metrics. |
+| **M6** | Structured Research Memory | Krish | **COMPLETE** | Semantic storage of past experiments, failures, and causal insights. |
+| **M7** | First AI Research Agent | Krish | **COMPLETE** | Autonomous hypothesis generation and experiment specification. |
+| **M8** | Recursive R&D Loop | Krish | **COMPLETE** | Continuous exploration, hypothesis refinement, and model iteration. |
+| **M9** | Multi-Agent Research | Krish | Conditional / Paused | Specialized research teams (pursued only if evidence warrants). |
+| **M10** | Champion / Challenger Tournament | Krish | **COMPLETE** | Systematic out-of-sample comparison of incumbent and contender models. |
+| **M11** | Promotion & Overfitting Controls | Krish | **COMPLETE** | Deflated Sharpe ratios, multiple-testing penalties, strict gatekeeping. |
+| **M12** | Shadow Broker | Krish | **COMPLETE** | Realistic simulated broker tracking intended orders, fills, and exposures. |
+| **M13** | Deterministic Hard Risk | Krish | **COMPLETE** | Hard-coded executor limits, persistent kill switches, drawdown stops. |
+| **M14** | Broker-Neutral Execution | Krish | **COMPLETE** | Abstract execution interfaces decoupling strategies from venues. |
+| **M15** | Real-World Paper / Shadow Validation | Krish | **COMPLETE** | Live market feed validation without capital risk. |
+| **M16** | Official Robinhood Agentic MCP Adapter | Krish | **COMPLETE** | Integration with Robinhood via official Agentic Trading protocol. |
+| **M17** | Tiny-Money Canary | Krish | **COMPLETE** | Minimal real-capital validation (e.g., single-share order routing). |
+| **M18+** | Bounded Autonomy & Improvement | Krish | **COMPLETE** | Controlled live allocation with ongoing empirical evidence governance. M18+ is an open-ended operating phase. |
 
 ---
 
@@ -208,20 +203,22 @@ Progress is evaluated across five distinct dimensions:
   - Comprehensive adversarial acceptance suite in `tests/adversarial/test_m6_research_memory_adversarial.py`.
 - **Invariants**: Append-only immutability enforced by SQLite triggers; tamper-evident hash chaining; strictly zero Unicode em dashes.
 
-### M7 through M11: Autonomous Research and R&D Loop
-- **M7 First AI Research Agent** (Krish; Implemented & Verified): Autonomous Gemini-assisted research agent
-  (`src/drift/agent/`) generating testable hypotheses, valid experiment specifications, and parameter
-  constraints for canonical baseline strategies (B0-B5) with search space exhaustion detection.
-- **M8 Recursive R&D Loop** (Krish; Implemented & Connected to M2): Automated iterative loop
-  (`src/drift/loop/`) executing research cycles against authentic deterministic M2 evaluation
-  (`src/drift/loop/evaluator_adapter.py`) rather than synthetic mocks. Evaluates within the
-  exploratory lane (ADR 0012).
-- **M9 Multi-Agent Research** (Krish; Conditional): Specialized agent roles (e.g., hypothesis
-  generator, risk critic, feature engineer) to be pursued only if empirical evidence proves
-  clear advantage over a unified research agent.
-- **M10 Champion / Challenger Tournament** (Krish; Implemented & Fortified): Systematic out-of-sample
-  competitions (`src/drift/tournament/`) guarded by a non-negotiable Scientific Integrity Firewall
-  that strictly prohibits synthetic return construction, mandates empirical paired return alignments,
+### M7 through M11: Autonomous Research and R&D Loop (Complete)
+- **M7 First AI Research Agent** (Krish; Complete): Deployed autonomous agent tasked with generating
+  testable hypotheses and creating valid experiment specifications with fail-closed gatekeeping and
+  production Gemini adapter. Closed with Issue #14 and PR #228.
+- **M8 Recursive R&D Loop** (Krish; Complete): Established automated recursive pipeline coordinating
+  memory context synthesis, hypothesis proposal generation, simulation evaluation, automated failure
+  diagnosis, and M0 SQLite ledger audit trail integration. Closed with Issue #15 and PR #240.
+- **M9 Multi-Agent Research** (Krish, conditional): Paused until economically justified. Ownership does not make M9 ready.
+- **M10 Champion / Challenger Tournament** (Krish; Complete): Ran systematic out-of-sample competitions
+  between incumbent champions and newly promoted contenders using paired returns differential tests,
+  Student t-statistic, two-sided p-values, and historical tournament archive. Closed with Issue #17 and PR #252.
+- **M11 Promotion and Overfitting Controls** (Krish; Complete): Strict statistical gatekeeping incorporating
+  closed-form Deflated Sharpe Ratios (DSR per Bailey & Lopez de Prado 2014), Probability of Backtest
+  Overfitting (PBO via CSCV), walk-forward temporal stability checks, volatility regime stress testing, and
+  transactional M0 ledger candidate registry archive. Closed with Issue #18 and PR #264.
+
 ### PR #350 Additions: Research Integrity, Real Evaluation, and Parallel Portfolios
 - **Status**: PENDING EXTERNAL REVIEW across all components.
 - **Lane**: EXPLORATORY ONLY (ADR 0012).
@@ -229,15 +226,13 @@ Progress is evaluated across five distinct dimensions:
   and cannot be upgraded, relabeled, or converted into promotion-grade evidence. Promotion
   requires a fresh, independent evaluation run directly against an accepted promotion-qualified
   M1e dataset. PR #350 does NOT qualify M1e Task 8 and does NOT promote strategies to production.
+  M11 code availability on main does NOT authorize promotion of exploratory strategies.
+- **Synthetic Fixture Notice**: The four-session evaluation dataset used in development and tests
+  is synthetic and does not represent real market conditions or historical profitability evidence.
+- **Execution Safety Notice**: Execution safety audit concerns S1 through S5 remain open and
+  unresolved, blocking any live trading or capital authorization.
 
-| Component | Domain Schema | Ledger Events | Service Implementation | Unit Tests | Verification Suite | Status | Lane Status |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Deterministic Evaluator Adapter** (M2/M8) | COMPLETE | COMPLETE | COMPLETE | COMPLETE | COMPLETE | PENDING EXTERNAL REVIEW | EXPLORATORY ONLY |
-| **Parallel $10,000 Portfolios Harness** | COMPLETE | COMPLETE | COMPLETE | COMPLETE | COMPLETE | PENDING EXTERNAL REVIEW | EXPLORATORY ONLY |
-| **Scientific Integrity Firewall** | COMPLETE | COMPLETE | COMPLETE | COMPLETE | COMPLETE | PENDING EXTERNAL REVIEW | EXPLORATORY ONLY |
-| **Tournament Evidence Requirements** | COMPLETE | COMPLETE | COMPLETE | COMPLETE | COMPLETE | PENDING EXTERNAL REVIEW | EXPLORATORY ONLY |
-
-- **Delivered**:
+- **Delivered in PR #350**:
   - `M2TrialEvaluatorAdapter` bridging M8 recursive research loop to authentic M2 deterministic portfolio accounting kernel.
   - `PortfolioCohortHarness` in `src/drift/experiments/parallel_portfolios.py` running reproducible parallel $10,000 strategy accounts.
   - Supported CLI execution: `python -m drift.experiments.parallel_portfolios`.
