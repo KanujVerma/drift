@@ -182,10 +182,8 @@ def _api_keys_from_environment() -> tuple[str, str] | None:
     `InvalidApiKeyError`, naming only the variable, when a set value could not
     be sent as a header verbatim.
     """
-    key_id = os.environ.get(KEY_ID_VARIABLE) or os.environ.get("ALPACA_API_KEY_ID")
-    secret_key = os.environ.get(SECRET_KEY_VARIABLE) or os.environ.get(
-        "ALPACA_API_SECRET_KEY"
-    )
+    key_id = os.environ.get(KEY_ID_VARIABLE)
+    secret_key = os.environ.get(SECRET_KEY_VARIABLE)
     if key_id is None or secret_key is None:
         return None
     if not _usable_key(key_id):

@@ -239,7 +239,9 @@ def _unvalidated_member(name: str) -> Any:
         if argument not in (type(None), Ellipsis)
     )
     empty = member.model_construct()
-    return empty if name == "exploratory_cohort" else (empty,)
+    if name in ("exploratory_cohort", "exploratory_dividends"):
+        return empty
+    return (empty,)
 
 
 @pytest.mark.parametrize(

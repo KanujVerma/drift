@@ -206,7 +206,7 @@ class ExploratoryDividendPolicyV1(FrozenModel):
     """Declared cash dividends recognized in exploratory evaluation."""
 
     schema_version: Literal["1"] = "1"
-    dividends: tuple[ExploratoryCashDividendTermsV1, ...] = ()
+    dividends: tuple[ExploratoryCashDividendTermsV1, ...]
     terms_hash: SHA256Hash = Field(default="0" * 64)
     source_payloads: tuple[bytes, ...] = ()
 
@@ -214,7 +214,9 @@ class ExploratoryDividendPolicyV1(FrozenModel):
     @classmethod
     def _canonicalize_policy(cls, data: Any) -> Any:
         if isinstance(data, Mapping):
-            raw_divs = data.get("dividends", ())
+            raw_divs = data.get("dividends")
+            if not raw_divs:
+                raise ValueError("dividend policy requires at least one dividend term")
             raw_payloads = data.get("source_payloads", ())
             declared_hash = data.get("terms_hash")
             if declared_hash == "0" * 64:
