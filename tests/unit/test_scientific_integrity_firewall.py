@@ -11,7 +11,10 @@ Validates that scientific evaluation and tournament decisions fail closed when:
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
+
+import pytest
 
 from drift.domain.tournament import (
     TournamentConfigV1,
@@ -575,6 +578,7 @@ def test_cost_model_equal_authentic_accepted() -> None:
     )
 
     cost_hash = "c" * 64
+    proto_hash = "p" * 64
     evaluator = _AuthenticMetricsEvaluator(
         {
             str(champ.participant_id): {
@@ -586,6 +590,7 @@ def test_cost_model_equal_authentic_accepted() -> None:
                 "session_keys": sessions,
                 "session_returns": champ_returns,
                 "cost_model_hash": cost_hash,
+                "protocol_hash": proto_hash,
                 "is_mock": False,
             },
             str(chall.participant_id): {
@@ -597,6 +602,7 @@ def test_cost_model_equal_authentic_accepted() -> None:
                 "session_keys": sessions,
                 "session_returns": chall_returns,
                 "cost_model_hash": cost_hash,
+                "protocol_hash": proto_hash,
                 "is_mock": False,
             },
         }
@@ -627,6 +633,7 @@ def test_calendar_and_return_series_length_mismatch_refused() -> None:
         Decimal("0.003") + Decimal(str(i % 5)) / Decimal("1000") for i in range(59)
     )
 
+    proto_hash = "p" * 64
     evaluator = _AuthenticMetricsEvaluator(
         {
             str(champ.participant_id): {
@@ -638,6 +645,7 @@ def test_calendar_and_return_series_length_mismatch_refused() -> None:
                 "session_keys": sessions,
                 "session_returns": champ_returns,
                 "cost_model_hash": "c" * 64,
+                "protocol_hash": proto_hash,
                 "is_mock": False,
             },
             str(chall.participant_id): {
@@ -649,6 +657,7 @@ def test_calendar_and_return_series_length_mismatch_refused() -> None:
                 "session_keys": sessions,
                 "session_returns": chall_returns,
                 "cost_model_hash": "c" * 64,
+                "protocol_hash": proto_hash,
                 "is_mock": False,
             },
         }
@@ -667,3 +676,258 @@ def test_calendar_and_return_series_length_mismatch_refused() -> None:
         "return series length does not match session calendar" in r
         for r in record.rejection_reasons
     )
+
+
+@pytest.mark.parametrize(
+    "bad_calendar",
+    [
+        "NYSE:2026-01-01",  # string satisfies Sequence but is scalar text
+        b"NYSE:2026-01-01",  # bytes satisfies Sequence but is raw binary
+        bytearray(b"NYSE:2026-01-01"),  # bytearray satisfies Sequence
+    ],
+)
+def test_malformed_scalar_calendar_forms_rejected(bad_calendar: Any) -> None:
+    """Scalar text and binary sequence types must be rejected as malformed calendars."""
+    champ, chall = _sample_participants()
+    config = _sample_config(min_evaluation_sessions=60)
+    returns = tuple(Decimal("0.01") for _ in range(60))
+
+    evaluator = _AuthenticMetricsEvaluator(
+        {
+            str(champ.participant_id): {
+                "annualized_sharpe": Decimal("1.00"),
+                "max_drawdown": Decimal("0.10"),
+                "annualized_turnover": Decimal("2.0"),
+                "is_pnl_complete": True,
+                "bundle_hash": "a" * 64,
+                "session_keys": bad_calendar,
+                "session_returns": returns,
+                "cost_model_hash": "c" * 64,
+                "protocol_hash": "p" * 64,
+                "is_mock": False,
+            },
+            str(chall.participant_id): {
+                "annualized_sharpe": Decimal("1.50"),
+                "max_drawdown": Decimal("0.08"),
+                "annualized_turnover": Decimal("2.2"),
+                "is_pnl_complete": True,
+                "bundle_hash": "a" * 64,
+                "session_keys": bad_calendar,
+                "session_returns": returns,
+                "cost_model_hash": "c" * 64,
+                "protocol_hash": "p" * 64,
+                "is_mock": False,
+            },
+        }
+    )
+    runner = TournamentRunner(
+        config=config, evaluator=evaluator, require_genuine_evidence=True
+    )
+    record = runner.run_match(
+        champion=champ,
+        challenger=chall,
+        start_time=TIMESTAMP_START,
+        end_time=TIMESTAMP_END,
+    )
+    assert record.decision == TournamentDecision.REJECTED_INCOMPLETE_EVIDENCE
+    assert any(
+        "session calendar mismatch, missing, or empty" in r
+        for r in record.rejection_reasons
+    )
+
+
+def test_explicit_synthetic_flag_rejected() -> None:
+    """Explicit is_synthetic=True must be rejected when genuine evidence is required."""
+    champ, chall = _sample_participants()
+    config = _sample_config(min_evaluation_sessions=60)
+    sessions = tuple(f"NYSE:2026-01-{i + 1:02d}" for i in range(60))
+    returns = tuple(Decimal("0.001") for _ in range(60))
+
+    evaluator = _AuthenticMetricsEvaluator(
+        {
+            str(champ.participant_id): {
+                "annualized_sharpe": Decimal("1.00"),
+                "max_drawdown": Decimal("0.10"),
+                "annualized_turnover": Decimal("2.0"),
+                "is_pnl_complete": True,
+                "bundle_hash": "a" * 64,
+                "session_keys": sessions,
+                "session_returns": returns,
+                "cost_model_hash": "c" * 64,
+                "protocol_hash": "p" * 64,
+                "is_mock": False,
+                "is_synthetic": True,  # Challenger is marked synthetic!
+            },
+            str(chall.participant_id): {
+                "annualized_sharpe": Decimal("1.50"),
+                "max_drawdown": Decimal("0.08"),
+                "annualized_turnover": Decimal("2.2"),
+                "is_pnl_complete": True,
+                "bundle_hash": "a" * 64,
+                "session_keys": sessions,
+                "session_returns": returns,
+                "cost_model_hash": "c" * 64,
+                "protocol_hash": "p" * 64,
+                "is_mock": False,
+                "is_synthetic": False,
+            },
+        }
+    )
+    runner = TournamentRunner(
+        config=config, evaluator=evaluator, require_genuine_evidence=True
+    )
+    record = runner.run_match(
+        champion=champ,
+        challenger=chall,
+        start_time=TIMESTAMP_START,
+        end_time=TIMESTAMP_END,
+    )
+    assert record.decision == TournamentDecision.REJECTED_INCOMPLETE_EVIDENCE
+    assert any(
+        "mock-derived or synthetic evaluation results" in r
+        for r in record.rejection_reasons
+    )
+
+
+def test_missing_champion_protocol_hash_rejected() -> None:
+    """Missing champion protocol_hash must reject match comparison."""
+    champ, chall = _sample_participants()
+    config = _sample_config(min_evaluation_sessions=60)
+    sessions = tuple(f"NYSE:2026-01-{i + 1:02d}" for i in range(60))
+    returns = tuple(Decimal("0.001") for _ in range(60))
+
+    evaluator = _AuthenticMetricsEvaluator(
+        {
+            str(champ.participant_id): {
+                "annualized_sharpe": Decimal("1.00"),
+                "max_drawdown": Decimal("0.10"),
+                "annualized_turnover": Decimal("2.0"),
+                "is_pnl_complete": True,
+                "bundle_hash": "a" * 64,
+                "session_keys": sessions,
+                "session_returns": returns,
+                "cost_model_hash": "c" * 64,
+                # champion missing protocol_hash
+                "is_mock": False,
+            },
+            str(chall.participant_id): {
+                "annualized_sharpe": Decimal("1.50"),
+                "max_drawdown": Decimal("0.08"),
+                "annualized_turnover": Decimal("2.2"),
+                "is_pnl_complete": True,
+                "bundle_hash": "a" * 64,
+                "session_keys": sessions,
+                "session_returns": returns,
+                "cost_model_hash": "c" * 64,
+                "protocol_hash": "p" * 64,
+                "is_mock": False,
+            },
+        }
+    )
+    runner = TournamentRunner(
+        config=config, evaluator=evaluator, require_genuine_evidence=True
+    )
+    record = runner.run_match(
+        champion=champ,
+        challenger=chall,
+        start_time=TIMESTAMP_START,
+        end_time=TIMESTAMP_END,
+    )
+    assert record.decision == TournamentDecision.REJECTED_INCOMPLETE_EVIDENCE
+    assert any("protocol mismatch or missing" in r for r in record.rejection_reasons)
+
+
+def test_missing_challenger_protocol_hash_rejected() -> None:
+    """Missing challenger protocol_hash must reject match comparison."""
+    champ, chall = _sample_participants()
+    config = _sample_config(min_evaluation_sessions=60)
+    sessions = tuple(f"NYSE:2026-01-{i + 1:02d}" for i in range(60))
+    returns = tuple(Decimal("0.001") for _ in range(60))
+
+    evaluator = _AuthenticMetricsEvaluator(
+        {
+            str(champ.participant_id): {
+                "annualized_sharpe": Decimal("1.00"),
+                "max_drawdown": Decimal("0.10"),
+                "annualized_turnover": Decimal("2.0"),
+                "is_pnl_complete": True,
+                "bundle_hash": "a" * 64,
+                "session_keys": sessions,
+                "session_returns": returns,
+                "cost_model_hash": "c" * 64,
+                "protocol_hash": "p" * 64,
+                "is_mock": False,
+            },
+            str(chall.participant_id): {
+                "annualized_sharpe": Decimal("1.50"),
+                "max_drawdown": Decimal("0.08"),
+                "annualized_turnover": Decimal("2.2"),
+                "is_pnl_complete": True,
+                "bundle_hash": "a" * 64,
+                "session_keys": sessions,
+                "session_returns": returns,
+                "cost_model_hash": "c" * 64,
+                # challenger missing protocol_hash
+                "is_mock": False,
+            },
+        }
+    )
+    runner = TournamentRunner(
+        config=config, evaluator=evaluator, require_genuine_evidence=True
+    )
+    record = runner.run_match(
+        champion=champ,
+        challenger=chall,
+        start_time=TIMESTAMP_START,
+        end_time=TIMESTAMP_END,
+    )
+    assert record.decision == TournamentDecision.REJECTED_INCOMPLETE_EVIDENCE
+    assert any("protocol mismatch or missing" in r for r in record.rejection_reasons)
+
+
+def test_different_protocol_hashes_rejected() -> None:
+    """Mismatched protocol hashes must reject match comparison."""
+    champ, chall = _sample_participants()
+    config = _sample_config(min_evaluation_sessions=60)
+    sessions = tuple(f"NYSE:2026-01-{i + 1:02d}" for i in range(60))
+    returns = tuple(Decimal("0.001") for _ in range(60))
+
+    evaluator = _AuthenticMetricsEvaluator(
+        {
+            str(champ.participant_id): {
+                "annualized_sharpe": Decimal("1.00"),
+                "max_drawdown": Decimal("0.10"),
+                "annualized_turnover": Decimal("2.0"),
+                "is_pnl_complete": True,
+                "bundle_hash": "a" * 64,
+                "session_keys": sessions,
+                "session_returns": returns,
+                "cost_model_hash": "c" * 64,
+                "protocol_hash": "p1" * 32,
+                "is_mock": False,
+            },
+            str(chall.participant_id): {
+                "annualized_sharpe": Decimal("1.50"),
+                "max_drawdown": Decimal("0.08"),
+                "annualized_turnover": Decimal("2.2"),
+                "is_pnl_complete": True,
+                "bundle_hash": "a" * 64,
+                "session_keys": sessions,
+                "session_returns": returns,
+                "cost_model_hash": "c" * 64,
+                "protocol_hash": "p2" * 32,
+                "is_mock": False,
+            },
+        }
+    )
+    runner = TournamentRunner(
+        config=config, evaluator=evaluator, require_genuine_evidence=True
+    )
+    record = runner.run_match(
+        champion=champ,
+        challenger=chall,
+        start_time=TIMESTAMP_START,
+        end_time=TIMESTAMP_END,
+    )
+    assert record.decision == TournamentDecision.REJECTED_INCOMPLETE_EVIDENCE
+    assert any("protocol mismatch or missing" in r for r in record.rejection_reasons)

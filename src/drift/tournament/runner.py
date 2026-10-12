@@ -114,10 +114,14 @@ class TournamentRunner:
         champ_metrics = self.evaluator.evaluate_experiment(champ_exp)
         chall_metrics = self.evaluator.evaluate_experiment(chall_exp)
 
-        # Check mock evidence restriction
+        # Check mock or synthetic evidence restriction
         is_champ_mock = bool(champ_metrics.get("is_mock", False))
         is_chall_mock = bool(chall_metrics.get("is_mock", False))
-        if self.require_genuine_evidence and (is_champ_mock or is_chall_mock):
+        is_champ_synthetic = bool(champ_metrics.get("is_synthetic", False))
+        is_chall_synthetic = bool(chall_metrics.get("is_synthetic", False))
+        if self.require_genuine_evidence and (
+            is_champ_mock or is_chall_mock or is_champ_synthetic or is_chall_synthetic
+        ):
             record = build_tournament_match_record(
                 match_id=resolved_match_id,
                 tournament_id=self.config.tournament_id,
@@ -141,7 +145,7 @@ class TournamentRunner:
                 p_value=Decimal("1.0"),
                 decision=TournamentDecision.REJECTED_INCOMPLETE_EVIDENCE,
                 rejection_reasons=(
-                    "mock-derived evaluation results cannot satisfy "
+                    "mock-derived or synthetic evaluation results cannot satisfy "
                     "genuine evidence requirements",
                 ),
                 evaluated_sessions_count=0,
@@ -176,7 +180,9 @@ class TournamentRunner:
 
             if (
                 not isinstance(c_sessions, Sequence)
+                or isinstance(c_sessions, (str, bytes, bytearray))
                 or not isinstance(h_sessions, Sequence)
+                or isinstance(h_sessions, (str, bytes, bytearray))
                 or len(c_sessions) == 0
                 or len(h_sessions) == 0
                 or tuple(c_sessions) != tuple(h_sessions)
@@ -205,6 +211,14 @@ class TournamentRunner:
                 rejection_reasons_list.append(
                     f"evaluation cost model mismatch or missing: champion '{c_cost}' "
                     f"vs challenger '{h_cost}'"
+                )
+
+            c_proto = champ_metrics.get("protocol_hash")
+            h_proto = chall_metrics.get("protocol_hash")
+            if not c_proto or not h_proto or c_proto != h_proto:
+                rejection_reasons_list.append(
+                    f"evaluation protocol mismatch or missing: champion '{c_proto}' "
+                    f"vs challenger '{h_proto}'"
                 )
 
             c_pnl = champ_metrics.get("is_pnl_complete") is True

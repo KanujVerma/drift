@@ -557,6 +557,8 @@ class PortfolioCohortHarness:
             if r.classification == "complete"
             and r.is_pnl_complete
             and r.total_return_pct is not None
+            and len(r.session_keys) > 0
+            and len(r.daily_returns) == len(r.session_keys)
         ]
 
         if not eligible:

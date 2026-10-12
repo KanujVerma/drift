@@ -783,3 +783,85 @@ def test_incomplete_run_refuses_correlation_and_ranking() -> None:
 
     # Ranking batch with only incomplete result returns empty list
     assert PortfolioCohortHarness.rank_results([r_incomplete]) == []
+
+
+def test_ranking_disqualifies_empty_session_keys_or_inconsistent_returns() -> None:
+    """Ranking must strictly disqualify results with empty session_keys
+    or length mismatch.
+    """
+    sessions = (
+        SessionKeyV1(mic="XNYS", session_scope="regular", local_date=date(2026, 1, 5)),
+        SessionKeyV1(mic="XNYS", session_scope="regular", local_date=date(2026, 1, 6)),
+    )
+    r_valid = CohortPortfolioResult(
+        strategy_id="strat_valid",
+        strategy_type="B1",
+        initial_cash=Decimal("10000.00"),
+        ending_nav=Decimal("10500.00"),
+        total_return_pct=Decimal("0.0500"),
+        annualized_sharpe=Decimal("1.50"),
+        max_drawdown_pct=Decimal("0.0200"),
+        annualized_turnover=Decimal("0.50"),
+        fill_count=2,
+        trace_hash="t1" * 32,
+        result_hash="r1" * 32,
+        daily_returns=(Decimal("0.02"), Decimal("0.03")),
+        classification="complete",
+        is_pnl_complete=True,
+        net_profit_and_loss=Decimal("500.00"),
+        bundle_hash="b" * 64,
+        run_identity_hash="i1" * 32,
+        cost_model_hash="c" * 64,
+        protocol_hash="p" * 64,
+        session_keys=sessions,
+    )
+    r_empty_sessions = CohortPortfolioResult(
+        strategy_id="strat_empty_sessions",
+        strategy_type="B1",
+        initial_cash=Decimal("10000.00"),
+        ending_nav=Decimal("10500.00"),
+        total_return_pct=Decimal("0.0500"),
+        annualized_sharpe=Decimal("1.50"),
+        max_drawdown_pct=Decimal("0.0200"),
+        annualized_turnover=Decimal("0.50"),
+        fill_count=2,
+        trace_hash="t2" * 32,
+        result_hash="r2" * 32,
+        daily_returns=(),
+        classification="complete",
+        is_pnl_complete=True,
+        net_profit_and_loss=Decimal("500.00"),
+        bundle_hash="b" * 64,
+        run_identity_hash="i2" * 32,
+        cost_model_hash="c" * 64,
+        protocol_hash="p" * 64,
+        session_keys=(),
+    )
+    r_mismatched_length = CohortPortfolioResult(
+        strategy_id="strat_mismatch",
+        strategy_type="B1",
+        initial_cash=Decimal("10000.00"),
+        ending_nav=Decimal("10500.00"),
+        total_return_pct=Decimal("0.0500"),
+        annualized_sharpe=Decimal("1.50"),
+        max_drawdown_pct=Decimal("0.0200"),
+        annualized_turnover=Decimal("0.50"),
+        fill_count=2,
+        trace_hash="t3" * 32,
+        result_hash="r3" * 32,
+        daily_returns=(Decimal("0.05"),),  # 1 return vs 2 sessions
+        classification="complete",
+        is_pnl_complete=True,
+        net_profit_and_loss=Decimal("500.00"),
+        bundle_hash="b" * 64,
+        run_identity_hash="i3" * 32,
+        cost_model_hash="c" * 64,
+        protocol_hash="p" * 64,
+        session_keys=sessions,
+    )
+
+    ranked = PortfolioCohortHarness.rank_results(
+        [r_valid, r_empty_sessions, r_mismatched_length]
+    )
+    assert len(ranked) == 1
+    assert ranked[0].strategy_id == "strat_valid"
