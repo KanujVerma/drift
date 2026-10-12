@@ -233,24 +233,29 @@ marked with `@pytest.mark.xfail(strict=True)` in `tests/unit/test_execution_safe
 
 ---
 
-### Decision Packet 4: Tournament Promotion Authority in Exploratory Lane
+### Decision Packet 4: Tournament Advancement vs M11 Statistical Promotion Gate
 
 - **What was discovered**:
-  `TournamentRunner` issues `TournamentDecision.PROMOTED` when a challenger outperforms a champion across paired evaluation. However, ADR 0012 establishes that exploratory evaluation evidence (e.g. from Alpaca Basic development data) is strictly non-promotable and cannot be upgraded or relabeled into promotion-grade evidence. Promotion requires an independent evaluation run against an accepted promotion-qualified M1e dataset.
+  `TournamentRunner` issues `TournamentDecision.PROMOTED` when a challenger outperforms a champion across paired evaluation. However, M11 (`src/drift/domain/promotion.py`, `src/drift/promotion/gatekeeper.py`) defines the canonical promotion authority with explicit dual-lane verdicts:
+  `PromotionGateVerdict.PROMOTION_QUALIFIED` vs `PromotionGateVerdict.EXPLORATORY_PASSED`.
+  Under ADR 0012, exploratory evaluation evidence (e.g. from Alpaca Basic development data) is strictly non-promotable and cannot be upgraded or relabeled into promotion-grade evidence. Promotion requires an independent evaluation run against an accepted promotion-qualified M1e dataset.
 - **Why a decision is needed**:
-  Issuing `TournamentDecision.PROMOTED` on exploratory evidence violates the core trust boundary established in ADR 0012, risking automated promotion of unvetted strategies.
+  The term "promotion" is overloaded:
+  1. In M10, `TournamentDecision.PROMOTED` denotes *internal research advancement* (a challenger replacing an incumbent champion as the benchmark reference in research memory).
+  2. In M11, `PromotionGateVerdict.PROMOTION_QUALIFIED` denotes *canonical qualification* under an authorized promotion dataset, which is a prerequisite for downstream validation (M12/M15).
+  Calling an M10 match outcome "PROMOTED" risks confusing internal hypothesis advancement with canonical M11 promotion qualification.
 - **Viable Options**:
-  - *Option A (Cap at VALIDATED in Exploratory Lane)*: `TournamentRunner` checks `champ_metrics` and `chall_metrics` admission lane. If operating in exploratory lane, the maximum verdict is capped at `TournamentDecision.VALIDATED` (never `PROMOTED`).
-  - *Option B (Exploratory Promotion Flag)*: Introduce `TournamentDecision.EXPLORATORY_PROMOTED` or an `is_exploratory_promotion: bool` attribute on `TournamentMatchRecordV1` to prevent confusion with canonical promotion.
-  - *Option C (Explicit Promotion Admission Proof)*: Require cryptographic proof of promotion-grade qualification (`PromotionAdmissionV1`) before `TournamentRunner` is permitted to issue `TournamentDecision.PROMOTED`.
+  - *Option A (Terminology Alignment with Existing Enums)*: Keep existing persisted enums intact without schema migrations. Clarify contractually that `TournamentDecision.PROMOTED` represents internal tournament advancement only. To qualify for downstream milestones, an advanced candidate must subsequently pass M11's `PromotionGatekeeper`, which evaluates `is_promotion_grade_evidence` and `is_promotion_grade_authorized` to emit `PromotionGateVerdict.PROMOTION_QUALIFIED` (or `EXPLORATORY_PASSED`).
+  - *Option B (Cap Tournament Outcomes in Exploratory Mode)*: When `TournamentRunner` operates on exploratory evidence, cap match outcomes at `TournamentDecision.VALIDATED` and disallow `PROMOTED`.
+  - *Option C (Introduce Distinct Persisted Enums)*: Migrate `TournamentDecision` schema to rename `PROMOTED` to `ADVANCED_AS_INCUMBENT` to remove all semantic ambiguity.
 - **Tradeoffs / Evidence**:
-  - Option A provides absolute mechanical enforcement of ADR 0012, preventing false promotions by construction.
-  - Option B allows exploratory tournaments to declare winners without breaching canonical registries, but creates two parallel concepts of promotion.
-  - Option C strictly binds promotion authority to data license and qualification credentials, matching M1e architectural design.
+  - Option A requires zero database or schema migrations, respects accepted domain models, and aligns with M11's already merged architecture on main where `PromotionGateVerdict` strictly enforces the exploratory vs promotion gate.
+  - Option B eliminates the word "PROMOTED" in exploratory runs, but changes existing M10 tournament behavior where champions are replaced by successful challengers.
+  - Option C provides the cleanest vocabulary, but breaks serialized tournament history and backwards compatibility.
 - **Recommended Option**:
-  Option A (cap exploratory matches at VALIDATED) combined with Option C for promotion lane.
+  Option A: Maintain existing persisted enums (`TournamentDecision.PROMOTED` in M10 and `PromotionGateVerdict` in M11). Document the strict boundary: M10 tournament advancement is an internal research selection step; canonical promotion authority resides exclusively with M11, and neither milestone authorizes live trading or broker connections.
 - **Exact Question Needed**:
-  *Should `TournamentRunner` strictly forbid `TournamentDecision.PROMOTED` when operating on exploratory evaluation evidence, capping outcomes at `VALIDATED`?*
+  *Should Drift formally designate M10's `TournamentDecision.PROMOTED` as internal research benchmark advancement while reserving canonical promotion authority exclusively for M11's `PromotionGateVerdict.PROMOTION_QUALIFIED`?*
 
 ---
 
@@ -272,3 +277,25 @@ marked with `@pytest.mark.xfail(strict=True)` in `tests/unit/test_execution_safe
   Option A: enforce strict agreement between proposal parameters and bundle/strategy attributes.
 - **Exact Question Needed**:
   *How should `universe_id` and `rebalance_frequency` in experiment proposals correspond to evaluation bundle universe and strategy rebalance schedule?*
+
+---
+
+### Decision Packet 6: Replay-Bound Evidence Verification at Tournament Boundary
+
+- **What was discovered**:
+  M2 deterministic session evaluation cryptographically binds input bundles, admissions, protocols, cost models, code version, and environment closure into `EvaluationRunArtifactsV2`, featuring deterministic `result_hash` and `trace_hash`.
+  At the M10 tournament boundary, `TournamentRunner` receives metric dictionaries. In PR #350 Task 4, `M2TrialEvaluatorAdapter` was upgraded to expose authentic `result_hash`, `trace_hash`, `bundle_hash`, and `cost_model_hash`. However, `TournamentRunner` currently enforces equality and presence of these hashes, but does not independently execute the full M2 replay verifier during match evaluation.
+- **Why a decision is needed**:
+  Re-running full M2 session replay inside `TournamentRunner` for every tournament match would double evaluation compute time and require full bundle reconstruction during matches. Protected replay contracts (such as `pyproject.toml`, pinned manifests, and frozen models) must not be weakened or altered.
+- **Viable Options**:
+  - *Option A (Cryptographic Artifact Witness Verification)*: `TournamentRunner` requires and inspects genuine artifact hashes (`result_hash`, `trace_hash`, `bundle_hash`, `cost_model_hash`, `protocol_hash`) provided by `M2TrialEvaluatorAdapter`. Matches are refused if hashes are missing, mismatched, or marked as mock. Full replay verification is executed only when a candidate is submitted to M11 promotion.
+  - *Option B (Synchronous End-to-End Replay in Tournament)*: `TournamentRunner` instantiates a secondary `SessionEvaluatorEngine` and re-runs each strategy to verify bit-for-bit output match before certifying the tournament result.
+  - *Option C (Offline Batch Replay Auditor)*: Tournaments execute with witness hashes, and an asynchronous audit job independently re-verifies traces in research memory before archiving.
+- **Tradeoffs / Evidence**:
+  - Option A provides strong cryptographic tamper detection with O(1) runtime overhead, perfectly preserves protected replay contracts without modification, and enforces strict integrity gates without slowing down research loops.
+  - Option B provides maximum immediate adversarial proof, but doubles runtime for every match in large cohorts.
+  - Option C provides asynchronous safety, but risks delayed detection of non-reproducible trials.
+- **Recommended Option**:
+  Option A: enforce cryptographic artifact witness verification (`result_hash`, `trace_hash`, matching `cost_model_hash` and session calendars) at the tournament boundary, leaving full end-to-end replay verification as an entry requirement for M11 candidate promotion.
+- **Exact Question Needed**:
+  *Should TournamentRunner rely on cryptographic artifact witness checking (Option A) during tournament execution and gate canonical M11 promotion on a full M2 replay audit, rather than running synchronous re-execution inside every tournament match?*

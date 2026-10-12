@@ -54,7 +54,7 @@ class CohortPortfolioResult:
     strategy_type: str
     initial_cash: Decimal
     ending_nav: Decimal
-    total_return_pct: Decimal
+    total_return_pct: Decimal | None
     annualized_sharpe: Decimal | None
     max_drawdown_pct: Decimal | None
     annualized_turnover: Decimal | None
@@ -159,13 +159,19 @@ def _portfolio_worker_entrypoint(task: _PortfolioWorkerTask) -> CohortPortfolioR
         max_drawdown_pct = None
         ann_turnover = None
 
-    total_return_pct = (
-        ((ending_nav - initial_nav) / initial_nav * HUNDRED).quantize(
-            TWO_PLACES, rounding=ROUND_HALF_EVEN
+    if (
+        result.classification == EvaluationClassification.COMPLETE
+        and metrics.realized_pnl_completeness.is_complete
+    ):
+        total_return_pct: Decimal | None = (
+            ((ending_nav - initial_nav) / initial_nav * HUNDRED).quantize(
+                TWO_PLACES, rounding=ROUND_HALF_EVEN
+            )
+            if initial_nav > ZERO
+            else ZERO.quantize(TWO_PLACES)
         )
-        if initial_nav > ZERO
-        else ZERO.quantize(TWO_PLACES)
-    )
+    else:
+        total_return_pct = None
 
     strategy_type_label = type(strategy).__name__
 
@@ -382,6 +388,7 @@ class PortfolioCohortHarness:
         """Format cohort comparison as a clean ASCII table."""
         headers = [
             "Strategy ID",
+            "Status",
             "Initial Cash",
             "Ending NAV",
             "Return %",
@@ -394,6 +401,20 @@ class PortfolioCohortHarness:
 
         rows: list[list[str]] = []
         for r in results:
+            if r.classification == "complete" and r.is_pnl_complete:
+                status_str = "COMPLETE"
+            elif r.classification == "complete" and not r.is_pnl_complete:
+                status_str = "INCOMPLETE (PNL)"
+            else:
+                status_str = (
+                    r.classification.upper() if r.classification else "INCOMPLETE"
+                )
+
+            ret_str = (
+                f"{r.total_return_pct:>6.2f}%"
+                if r.total_return_pct is not None
+                else "   N/A"
+            )
             sharpe_str = (
                 f"{r.annualized_sharpe:>6.4f}"
                 if r.annualized_sharpe is not None
@@ -412,9 +433,10 @@ class PortfolioCohortHarness:
             rows.append(
                 [
                     r.strategy_id,
+                    status_str,
                     f"${r.initial_cash:,.2f}",
                     f"${r.ending_nav:,.2f}",
-                    f"{r.total_return_pct:>6.2f}%",
+                    ret_str,
                     sharpe_str,
                     mdd_str,
                     turnover_str,
@@ -453,18 +475,62 @@ class PortfolioCohortHarness:
     ) -> dict[str, dict[str, Decimal | None]]:
         """Compute cross-cohort daily return correlation matrix.
 
-        Matrix is symmetric with bounded values in [-1.0000, 1.0000]
-        or None (undefined).
+        Only COMPLETE, PnL-complete, mutually aligned runs are eligible for
+        correlation comparisons. Incomplete or unaligned pairs return None.
+        Matrix is symmetric with bounded values in [-1.0000, 1.0000] or None.
         """
         matrix: dict[str, dict[str, Decimal | None]] = {}
         for r_a in results:
             matrix[r_a.strategy_id] = {}
             for r_b in results:
-                corr = compute_daily_returns_correlation(
-                    r_a.daily_returns, r_b.daily_returns
+                a_eligible = (
+                    r_a.classification == "complete"
+                    and r_a.is_pnl_complete
+                    and r_a.total_return_pct is not None
                 )
-                matrix[r_a.strategy_id][r_b.strategy_id] = corr
+                b_eligible = (
+                    r_b.classification == "complete"
+                    and r_b.is_pnl_complete
+                    and r_b.total_return_pct is not None
+                )
+                if (
+                    not a_eligible
+                    or not b_eligible
+                    or len(r_a.daily_returns) != len(r_b.daily_returns)
+                ):
+                    matrix[r_a.strategy_id][r_b.strategy_id] = None
+                else:
+                    corr = compute_daily_returns_correlation(
+                        r_a.daily_returns, r_b.daily_returns
+                    )
+                    matrix[r_a.strategy_id][r_b.strategy_id] = corr
         return matrix
+
+    @staticmethod
+    def rank_results(
+        results: Sequence[CohortPortfolioResult],
+    ) -> list[CohortPortfolioResult]:
+        """Rank completed, PnL-complete portfolio results by total return.
+
+        Incomplete, indeterminate, or unaligned results are disqualified from ranking
+        and cannot appear as valid winners.
+        """
+        eligible = [
+            r
+            for r in results
+            if r.classification == "complete"
+            and r.is_pnl_complete
+            and r.total_return_pct is not None
+        ]
+        return sorted(
+            eligible,
+            key=lambda r: (
+                r.total_return_pct
+                if r.total_return_pct is not None
+                else Decimal("-Infinity")
+            ),
+            reverse=True,
+        )
 
     @staticmethod
     def format_correlation_matrix(

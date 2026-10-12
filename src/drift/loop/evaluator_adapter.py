@@ -517,6 +517,12 @@ class M2TrialEvaluatorAdapter:
                 "strategy_parameters_hash": run_identity.strategy_parameters_hash,
                 "cost_model_hash": self._engine.cost_model.cost_model_hash,
                 "protocol_hash": self._engine.protocol.protocol_hash,
+                "result_hash": getattr(result, "result_hash", None),
+                "trace_hash": (
+                    getattr(artifacts.trace, "trace_hash", None)
+                    if hasattr(artifacts, "trace")
+                    else None
+                ),
                 "session_keys": tuple(
                     f"{s.session_key.mic}:{s.session_key.local_date.isoformat()}"
                     for s in self._engine.bundle.session_clock.sessions
@@ -545,6 +551,12 @@ class M2TrialEvaluatorAdapter:
                 "strategy_parameters_hash": run_identity.strategy_parameters_hash,
                 "cost_model_hash": self._engine.cost_model.cost_model_hash,
                 "protocol_hash": self._engine.protocol.protocol_hash,
+                "result_hash": getattr(result, "result_hash", None),
+                "trace_hash": (
+                    getattr(artifacts.trace, "trace_hash", None)
+                    if hasattr(artifacts, "trace")
+                    else None
+                ),
                 "session_keys": tuple(
                     f"{s.session_key.mic}:{s.session_key.local_date.isoformat()}"
                     for s in self._engine.bundle.session_clock.sessions
@@ -573,6 +585,12 @@ class M2TrialEvaluatorAdapter:
                 "strategy_parameters_hash": run_identity.strategy_parameters_hash,
                 "cost_model_hash": self._engine.cost_model.cost_model_hash,
                 "protocol_hash": self._engine.protocol.protocol_hash,
+                "result_hash": getattr(result, "result_hash", None),
+                "trace_hash": (
+                    getattr(artifacts.trace, "trace_hash", None)
+                    if hasattr(artifacts, "trace")
+                    else None
+                ),
                 "session_keys": tuple(
                     f"{s.session_key.mic}:{s.session_key.local_date.isoformat()}"
                     for s in self._engine.bundle.session_clock.sessions

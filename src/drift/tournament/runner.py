@@ -171,6 +171,9 @@ class TournamentRunner:
             h_sessions = chall_metrics.get("session_keys") or chall_metrics.get(
                 "session_dates"
             )
+            c_returns = _extract_returns(champ_metrics)
+            h_returns = _extract_returns(chall_metrics)
+
             if (
                 not isinstance(c_sessions, Sequence)
                 or not isinstance(h_sessions, Sequence)
@@ -182,12 +185,25 @@ class TournamentRunner:
                     "evaluation session calendar mismatch, missing, or empty "
                     "between champion and challenger"
                 )
+            elif (
+                c_returns is None
+                or h_returns is None
+                or len(c_returns) != len(c_sessions)
+                or len(h_returns) != len(h_sessions)
+            ):
+                c_ret_len = len(c_returns) if c_returns is not None else "None"
+                h_ret_len = len(h_returns) if h_returns is not None else "None"
+                rejection_reasons_list.append(
+                    "evaluation return series length does not match session calendar: "
+                    f"champion returns {c_ret_len} vs sessions {len(c_sessions)}, "
+                    f"challenger returns {h_ret_len} vs sessions {len(h_sessions)}"
+                )
 
             c_cost = champ_metrics.get("cost_model_hash")
             h_cost = chall_metrics.get("cost_model_hash")
-            if (c_cost or h_cost) and c_cost != h_cost:
+            if not c_cost or not h_cost or c_cost != h_cost:
                 rejection_reasons_list.append(
-                    f"evaluation cost model mismatch: champion '{c_cost}' "
+                    f"evaluation cost model mismatch or missing: champion '{c_cost}' "
                     f"vs challenger '{h_cost}'"
                 )
 
@@ -274,9 +290,15 @@ class TournamentRunner:
         if (
             isinstance(c_sessions, Sequence)
             and isinstance(h_sessions, Sequence)
-            and tuple(c_sessions) != tuple(h_sessions)
+            and (
+                tuple(c_sessions) != tuple(h_sessions)
+                or c_returns is None
+                or h_returns is None
+                or len(c_returns) != len(c_sessions)
+                or len(h_returns) != len(h_sessions)
+            )
         ):
-            # Incompatible session alignments: refuse comparison
+            # Incompatible session alignments or length mismatch: refuse comparison
             c_returns = ()
             h_returns = ()
 

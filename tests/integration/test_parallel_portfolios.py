@@ -7,6 +7,7 @@ import pytest
 from drift.baselines.b0_cash import B0CashStrategy
 from drift.domain.evaluator_protocol import EvaluationProtocolV1
 from drift.experiments.parallel_portfolios import (
+    CohortPortfolioResult,
     PortfolioCohortHarness,
     build_offline_cohort_bundle,
     build_offline_cohort_evidence,
@@ -271,3 +272,109 @@ def test_cli_main_runs_and_exits_zero(capsys: pytest.CaptureFixture[str]) -> Non
     assert "Cohort Performance Summary" in captured.out
     assert "Cross-Cohort Daily Return Correlation Matrix" in captured.out
     assert "Portfolio isolation verified" in captured.out
+
+
+def test_incomplete_and_pnl_incomplete_portfolio_reporting() -> None:
+    """Incomplete and PnL-incomplete portfolios report None return, preserve ending NAV,
+    and format as N/A without entering rankings.
+    """
+    res_complete = CohortPortfolioResult(
+        strategy_id="strat_complete",
+        strategy_type="B1",
+        initial_cash=Decimal("10000.00"),
+        ending_nav=Decimal("11000.00"),
+        total_return_pct=Decimal("10.00"),
+        annualized_sharpe=Decimal("1.5000"),
+        max_drawdown_pct=Decimal("0.0500"),
+        annualized_turnover=Decimal("2.0000"),
+        fill_count=1,
+        trace_hash="t" * 64,
+        result_hash="r" * 64,
+        daily_returns=(
+            Decimal("0.02"),
+            Decimal("0.03"),
+            Decimal("-0.01"),
+            Decimal("0.06"),
+        ),
+        classification="complete",
+        is_pnl_complete=True,
+        net_profit_and_loss=Decimal("1000.00"),
+        bundle_hash="b" * 64,
+        run_identity_hash="i" * 64,
+        cost_model_hash="c" * 64,
+        protocol_hash="p" * 64,
+    )
+    res_indeterminate = CohortPortfolioResult(
+        strategy_id="strat_indeterminate",
+        strategy_type="B4",
+        initial_cash=Decimal("10000.00"),
+        ending_nav=Decimal("10500.00"),
+        total_return_pct=None,
+        annualized_sharpe=None,
+        max_drawdown_pct=None,
+        annualized_turnover=None,
+        fill_count=2,
+        trace_hash="t" * 64,
+        result_hash="r" * 64,
+        daily_returns=(Decimal("0.02"), Decimal("0.03")),
+        classification="indeterminate",
+        is_pnl_complete=False,
+        net_profit_and_loss=Decimal("500.00"),
+        bundle_hash="b" * 64,
+        run_identity_hash="i" * 64,
+        cost_model_hash="c" * 64,
+        protocol_hash="p" * 64,
+    )
+    res_pnl_incomplete = CohortPortfolioResult(
+        strategy_id="strat_pnl_incomplete",
+        strategy_type="B2",
+        initial_cash=Decimal("10000.00"),
+        ending_nav=Decimal("12000.00"),
+        total_return_pct=None,
+        annualized_sharpe=Decimal("2.0000"),
+        max_drawdown_pct=Decimal("0.0200"),
+        annualized_turnover=Decimal("1.0000"),
+        fill_count=3,
+        trace_hash="t" * 64,
+        result_hash="r" * 64,
+        daily_returns=(
+            Decimal("0.04"),
+            Decimal("0.05"),
+            Decimal("0.05"),
+            Decimal("0.06"),
+        ),
+        classification="complete",
+        is_pnl_complete=False,
+        net_profit_and_loss=Decimal("2000.00"),
+        bundle_hash="b" * 64,
+        run_identity_hash="i" * 64,
+        cost_model_hash="c" * 64,
+        protocol_hash="p" * 64,
+    )
+
+    results = [res_complete, res_indeterminate, res_pnl_incomplete]
+
+    # 1. Comparison table formatting
+    table = PortfolioCohortHarness.format_comparison_table(results)
+    assert "Status" in table
+    assert "COMPLETE" in table
+    assert "INDETERMINATE" in table
+    assert "INCOMPLETE (PNL)" in table
+    assert "$10,500.00" in table
+    assert "$12,000.00" in table
+    assert "10.00%" in table
+    assert "   N/A" in table
+
+    # 2. Ranking disqualification: incomplete runs cannot be ranked or win
+    ranked = PortfolioCohortHarness.rank_results(results)
+    assert len(ranked) == 1
+    assert ranked[0].strategy_id == "strat_complete"
+
+    # 3. Correlation matrix resilience: incomplete or unequal-length series return None
+    matrix = PortfolioCohortHarness.compute_correlation_matrix(results)
+    assert matrix["strat_complete"]["strat_complete"] == Decimal("1.0000")
+    assert matrix["strat_complete"]["strat_indeterminate"] is None
+    assert matrix["strat_indeterminate"]["strat_complete"] is None
+    assert matrix["strat_complete"]["strat_pnl_incomplete"] is None
+    assert matrix["strat_pnl_incomplete"]["strat_complete"] is None
+    assert matrix["strat_indeterminate"]["strat_indeterminate"] is None

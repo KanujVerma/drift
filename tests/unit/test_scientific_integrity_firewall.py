@@ -8,6 +8,7 @@ Validates that scientific evaluation and tournament decisions fail closed when:
 5. Constant return series with zero variance attempt to claim p=0 significance.
 """
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
@@ -342,3 +343,327 @@ def test_legitimate_paired_return_comparisons_succeed() -> None:
     assert res.decision == TournamentDecision.PROMOTED
     assert res.delta_sharpe == Decimal("0.40")
     assert len(res.rejection_reasons) == 0
+
+
+class _AuthenticMetricsEvaluator:
+    """Evaluator that supplies genuine, non-mock empirical metrics for testing."""
+
+    def __init__(self, overrides: Mapping[str, Mapping[str, object]]) -> None:
+        self.overrides = overrides
+
+    def evaluate_experiment(self, experiment: object) -> dict[str, object]:
+        pid = str(getattr(experiment, "experiment_proposal_id", ""))
+        params_hash = str(getattr(experiment, "proposed_parameters_hash", ""))
+        stype = str(getattr(experiment, "strategy_type", ""))
+        for key in (pid, params_hash, stype):
+            if key in self.overrides:
+                return dict(self.overrides[key])
+        return {}
+
+
+def test_cost_model_both_missing_refused() -> None:
+    """Missing cost_model_hash on both participants must refuse comparison."""
+    champ, chall = _sample_participants()
+    config = _sample_config(min_evaluation_sessions=60)
+    sessions = tuple(f"NYSE:2026-01-{i + 1:02d}" for i in range(60))
+    champ_returns = tuple(
+        Decimal("0.001") + Decimal(str(i % 5)) / Decimal("1000") for i in range(60)
+    )
+    chall_returns = tuple(
+        Decimal("0.003") + Decimal(str(i % 5)) / Decimal("1000") for i in range(60)
+    )
+
+    evaluator = _AuthenticMetricsEvaluator(
+        {
+            str(champ.participant_id): {
+                "annualized_sharpe": Decimal("1.00"),
+                "max_drawdown": Decimal("0.10"),
+                "annualized_turnover": Decimal("2.0"),
+                "is_pnl_complete": True,
+                "bundle_hash": "a" * 64,
+                "session_keys": sessions,
+                "session_returns": champ_returns,
+                "is_mock": False,
+            },
+            str(chall.participant_id): {
+                "annualized_sharpe": Decimal("1.50"),
+                "max_drawdown": Decimal("0.08"),
+                "annualized_turnover": Decimal("2.2"),
+                "is_pnl_complete": True,
+                "bundle_hash": "a" * 64,
+                "session_keys": sessions,
+                "session_returns": chall_returns,
+                "is_mock": False,
+            },
+        }
+    )
+    runner = TournamentRunner(
+        config=config, evaluator=evaluator, require_genuine_evidence=True
+    )
+    record = runner.run_match(
+        champion=champ,
+        challenger=chall,
+        start_time=TIMESTAMP_START,
+        end_time=TIMESTAMP_END,
+    )
+    assert record.decision == TournamentDecision.REJECTED_INCOMPLETE_EVIDENCE
+    assert any("cost model mismatch or missing" in r for r in record.rejection_reasons)
+
+
+def test_cost_model_champion_missing_refused() -> None:
+    """Missing cost_model_hash on champion must refuse comparison."""
+    champ, chall = _sample_participants()
+    config = _sample_config(min_evaluation_sessions=60)
+    sessions = tuple(f"NYSE:2026-01-{i + 1:02d}" for i in range(60))
+    champ_returns = tuple(
+        Decimal("0.001") + Decimal(str(i % 5)) / Decimal("1000") for i in range(60)
+    )
+    chall_returns = tuple(
+        Decimal("0.003") + Decimal(str(i % 5)) / Decimal("1000") for i in range(60)
+    )
+
+    evaluator = _AuthenticMetricsEvaluator(
+        {
+            str(champ.participant_id): {
+                "annualized_sharpe": Decimal("1.00"),
+                "max_drawdown": Decimal("0.10"),
+                "annualized_turnover": Decimal("2.0"),
+                "is_pnl_complete": True,
+                "bundle_hash": "a" * 64,
+                "session_keys": sessions,
+                "session_returns": champ_returns,
+                "is_mock": False,
+            },
+            str(chall.participant_id): {
+                "annualized_sharpe": Decimal("1.50"),
+                "max_drawdown": Decimal("0.08"),
+                "annualized_turnover": Decimal("2.2"),
+                "is_pnl_complete": True,
+                "bundle_hash": "a" * 64,
+                "session_keys": sessions,
+                "session_returns": chall_returns,
+                "cost_model_hash": "c" * 64,
+                "is_mock": False,
+            },
+        }
+    )
+    runner = TournamentRunner(
+        config=config, evaluator=evaluator, require_genuine_evidence=True
+    )
+    record = runner.run_match(
+        champion=champ,
+        challenger=chall,
+        start_time=TIMESTAMP_START,
+        end_time=TIMESTAMP_END,
+    )
+    assert record.decision == TournamentDecision.REJECTED_INCOMPLETE_EVIDENCE
+    assert any("cost model mismatch or missing" in r for r in record.rejection_reasons)
+
+
+def test_cost_model_challenger_missing_refused() -> None:
+    """Missing cost_model_hash on challenger must refuse comparison."""
+    champ, chall = _sample_participants()
+    config = _sample_config(min_evaluation_sessions=60)
+    sessions = tuple(f"NYSE:2026-01-{i + 1:02d}" for i in range(60))
+    champ_returns = tuple(
+        Decimal("0.001") + Decimal(str(i % 5)) / Decimal("1000") for i in range(60)
+    )
+    chall_returns = tuple(
+        Decimal("0.003") + Decimal(str(i % 5)) / Decimal("1000") for i in range(60)
+    )
+
+    evaluator = _AuthenticMetricsEvaluator(
+        {
+            str(champ.participant_id): {
+                "annualized_sharpe": Decimal("1.00"),
+                "max_drawdown": Decimal("0.10"),
+                "annualized_turnover": Decimal("2.0"),
+                "is_pnl_complete": True,
+                "bundle_hash": "a" * 64,
+                "session_keys": sessions,
+                "session_returns": champ_returns,
+                "cost_model_hash": "c" * 64,
+                "is_mock": False,
+            },
+            str(chall.participant_id): {
+                "annualized_sharpe": Decimal("1.50"),
+                "max_drawdown": Decimal("0.08"),
+                "annualized_turnover": Decimal("2.2"),
+                "is_pnl_complete": True,
+                "bundle_hash": "a" * 64,
+                "session_keys": sessions,
+                "session_returns": chall_returns,
+                "is_mock": False,
+            },
+        }
+    )
+    runner = TournamentRunner(
+        config=config, evaluator=evaluator, require_genuine_evidence=True
+    )
+    record = runner.run_match(
+        champion=champ,
+        challenger=chall,
+        start_time=TIMESTAMP_START,
+        end_time=TIMESTAMP_END,
+    )
+    assert record.decision == TournamentDecision.REJECTED_INCOMPLETE_EVIDENCE
+    assert any("cost model mismatch or missing" in r for r in record.rejection_reasons)
+
+
+def test_cost_model_mismatched_refused() -> None:
+    """Mismatched cost_model_hash between participants must refuse comparison."""
+    champ, chall = _sample_participants()
+    config = _sample_config(min_evaluation_sessions=60)
+    sessions = tuple(f"NYSE:2026-01-{i + 1:02d}" for i in range(60))
+    champ_returns = tuple(
+        Decimal("0.001") + Decimal(str(i % 5)) / Decimal("1000") for i in range(60)
+    )
+    chall_returns = tuple(
+        Decimal("0.003") + Decimal(str(i % 5)) / Decimal("1000") for i in range(60)
+    )
+
+    evaluator = _AuthenticMetricsEvaluator(
+        {
+            str(champ.participant_id): {
+                "annualized_sharpe": Decimal("1.00"),
+                "max_drawdown": Decimal("0.10"),
+                "annualized_turnover": Decimal("2.0"),
+                "is_pnl_complete": True,
+                "bundle_hash": "a" * 64,
+                "session_keys": sessions,
+                "session_returns": champ_returns,
+                "cost_model_hash": "1" * 64,
+                "is_mock": False,
+            },
+            str(chall.participant_id): {
+                "annualized_sharpe": Decimal("1.50"),
+                "max_drawdown": Decimal("0.08"),
+                "annualized_turnover": Decimal("2.2"),
+                "is_pnl_complete": True,
+                "bundle_hash": "a" * 64,
+                "session_keys": sessions,
+                "session_returns": chall_returns,
+                "cost_model_hash": "2" * 64,
+                "is_mock": False,
+            },
+        }
+    )
+    runner = TournamentRunner(
+        config=config, evaluator=evaluator, require_genuine_evidence=True
+    )
+    record = runner.run_match(
+        champion=champ,
+        challenger=chall,
+        start_time=TIMESTAMP_START,
+        end_time=TIMESTAMP_END,
+    )
+    assert record.decision == TournamentDecision.REJECTED_INCOMPLETE_EVIDENCE
+    assert any("cost model mismatch or missing" in r for r in record.rejection_reasons)
+
+
+def test_cost_model_equal_authentic_accepted() -> None:
+    """Equal authentic cost_model_hash allows match comparison to proceed."""
+    champ, chall = _sample_participants()
+    config = _sample_config(min_evaluation_sessions=60)
+    sessions = tuple(f"NYSE:2026-01-{i + 1:02d}" for i in range(60))
+    champ_returns = tuple(
+        Decimal("0.001") + Decimal(str(i % 5)) / Decimal("1000") for i in range(60)
+    )
+    chall_returns = tuple(
+        Decimal("0.004") + Decimal(str((i + 1) % 5)) / Decimal("1000")
+        for i in range(60)
+    )
+
+    cost_hash = "c" * 64
+    evaluator = _AuthenticMetricsEvaluator(
+        {
+            str(champ.participant_id): {
+                "annualized_sharpe": Decimal("1.00"),
+                "max_drawdown": Decimal("0.10"),
+                "annualized_turnover": Decimal("2.0"),
+                "is_pnl_complete": True,
+                "bundle_hash": "a" * 64,
+                "session_keys": sessions,
+                "session_returns": champ_returns,
+                "cost_model_hash": cost_hash,
+                "is_mock": False,
+            },
+            str(chall.participant_id): {
+                "annualized_sharpe": Decimal("1.50"),
+                "max_drawdown": Decimal("0.08"),
+                "annualized_turnover": Decimal("2.2"),
+                "is_pnl_complete": True,
+                "bundle_hash": "a" * 64,
+                "session_keys": sessions,
+                "session_returns": chall_returns,
+                "cost_model_hash": cost_hash,
+                "is_mock": False,
+            },
+        }
+    )
+    runner = TournamentRunner(
+        config=config, evaluator=evaluator, require_genuine_evidence=True
+    )
+    record = runner.run_match(
+        champion=champ,
+        challenger=chall,
+        start_time=TIMESTAMP_START,
+        end_time=TIMESTAMP_END,
+    )
+    assert record.decision == TournamentDecision.PROMOTED
+    assert len(record.rejection_reasons) == 0
+
+
+def test_calendar_and_return_series_length_mismatch_refused() -> None:
+    """Return series length mismatch against session calendar must refuse comparison."""
+    champ, chall = _sample_participants()
+    config = _sample_config(min_evaluation_sessions=60)
+    sessions = tuple(f"NYSE:2026-01-{i + 1:02d}" for i in range(60))
+    champ_returns = tuple(
+        Decimal("0.001") + Decimal(str(i % 5)) / Decimal("1000") for i in range(60)
+    )
+    # Challenger has 59 returns instead of 60 sessions
+    chall_returns = tuple(
+        Decimal("0.003") + Decimal(str(i % 5)) / Decimal("1000") for i in range(59)
+    )
+
+    evaluator = _AuthenticMetricsEvaluator(
+        {
+            str(champ.participant_id): {
+                "annualized_sharpe": Decimal("1.00"),
+                "max_drawdown": Decimal("0.10"),
+                "annualized_turnover": Decimal("2.0"),
+                "is_pnl_complete": True,
+                "bundle_hash": "a" * 64,
+                "session_keys": sessions,
+                "session_returns": champ_returns,
+                "cost_model_hash": "c" * 64,
+                "is_mock": False,
+            },
+            str(chall.participant_id): {
+                "annualized_sharpe": Decimal("1.50"),
+                "max_drawdown": Decimal("0.08"),
+                "annualized_turnover": Decimal("2.2"),
+                "is_pnl_complete": True,
+                "bundle_hash": "a" * 64,
+                "session_keys": sessions,
+                "session_returns": chall_returns,
+                "cost_model_hash": "c" * 64,
+                "is_mock": False,
+            },
+        }
+    )
+    runner = TournamentRunner(
+        config=config, evaluator=evaluator, require_genuine_evidence=True
+    )
+    record = runner.run_match(
+        champion=champ,
+        challenger=chall,
+        start_time=TIMESTAMP_START,
+        end_time=TIMESTAMP_END,
+    )
+    assert record.decision == TournamentDecision.REJECTED_INCOMPLETE_EVIDENCE
+    assert any(
+        "return series length does not match session calendar" in r
+        for r in record.rejection_reasons
+    )
