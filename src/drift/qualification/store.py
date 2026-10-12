@@ -1,6 +1,9 @@
 """Private, isolated, content-addressed storage for M1e real source data."""
 
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore[assignment]
 import json
 import os
 import stat
@@ -60,6 +63,20 @@ def _write_private_text(path: Path, text: str) -> None:
         os.close(fd)
 
 
+def _fsync_dir(path: Path) -> None:
+    """Fsync directory entry on POSIX platforms; no-op on Windows."""
+    if os.name == "nt":
+        return
+    try:
+        dfd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
 def open_private_store_session(
     root: Path,
     policy: PrivateStorePolicyV1,
@@ -111,7 +128,8 @@ def open_private_store_session(
     lock_path = resolved_root / "locks" / f"{pilot_id}.lock"
     lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        if fcntl is not None:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
     except Exception as exc:
         os.close(lock_fd)
         raise ValueError("failed to acquire store session lock") from exc
@@ -130,7 +148,8 @@ def close_private_store_session(session: PrivateStoreSession) -> None:
     """Release exclusive store lock and close file descriptor."""
     if session.lock_fd >= 0:
         try:
-            fcntl.flock(session.lock_fd, fcntl.LOCK_UN)
+            if fcntl is not None:
+                fcntl.flock(session.lock_fd, fcntl.LOCK_UN)
         finally:
             os.close(session.lock_fd)
             session.lock_fd = -1
@@ -270,11 +289,7 @@ def store_content_object(
     if not target_obj_file.is_file():
         os.replace(tx_obj_file, target_obj_file)
         os.chmod(target_obj_file, 0o600)
-        dfd = os.open(target_obj_dir, os.O_RDONLY)
-        try:
-            os.fsync(dfd)
-        finally:
-            os.close(dfd)
+        _fsync_dir(target_obj_dir)
 
     # Install rights binding into place:
     # object-rights/<sha256>/<rights-binding-hash>.json
@@ -284,11 +299,7 @@ def store_content_object(
     target_rights_file = rights_dir / f"{b_hash}.json"
     os.replace(tx_rights_file, target_rights_file)
     os.chmod(target_rights_file, 0o600)
-    rfd = os.open(rights_dir, os.O_RDONLY)
-    try:
-        os.fsync(rfd)
-    finally:
-        os.close(rfd)
+    _fsync_dir(rights_dir)
 
     # Update inventory atomically
     new_cumulative = cumulative_bytes + artifact.byte_size
@@ -316,11 +327,7 @@ def store_content_object(
     )
     os.replace(tmp_inv, inventory_file)
     os.chmod(inventory_file, 0o600)
-    ifd = os.open(inventory_file.parent, os.O_RDONLY)
-    try:
-        os.fsync(ifd)
-    finally:
-        os.close(ifd)
+    _fsync_dir(inventory_file.parent)
 
     location_ref = ArtifactReference(
         artifact_id=uuid7(),
