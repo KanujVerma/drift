@@ -2,8 +2,10 @@
 
 This document presents the empirical architectural audit of Drift's broker,
 risk, and execution subsystems (M13 through M18) conducted under Phase 5.
-All findings are verified by empirical regression tests in
-`tests/unit/test_execution_safety_audit.py`.
+Defect reproduction and safe-behavior regression tests are retained in
+`tests/unit/test_execution_safety_audit.py`. Source observations, test evidence,
+and proposed architecture remedies are distinct; a proposed remedy is not an
+implemented or accepted control.
 
 In accordance with Drift operating rules and ADR 0014, this audit is read-only
 regarding live broker adapters and router authority. Live trading is strictly
@@ -44,11 +46,11 @@ marked with `@pytest.mark.xfail(strict=True)` in `tests/unit/test_execution_safe
 - **Reproduction Path**:
   - Direct router dispatch: Calling `router.route_intent(intent)` routes directly to `adapter.submit_intent(intent)` with zero gatekeeper evaluation.
   - Orchestrator dispatch: `ShadowValidationEngine`, `CanaryExecutionOrchestrator`, and `BoundedAutonomyOrchestrator` treat `risk_gatekeeper` as optional (`HardRiskGatekeeper | None = None`). When provided, they check only `risk_gatekeeper.journal.is_kill_switch_tripped()`.
-  - Rate limit, order size limit, order notional limit, position concentration limit, and gross exposure limits are completely bypassed.
+  - The full `HardRiskGatekeeper` policy (rate, order size, notional, concentration, and gross exposure limits) is not evaluated on these dispatch paths. Canary allocation and autonomy tier checks remain separate controls; they do not replace the hard risk policy.
 - **Safety Invariant Violated**:
   - Non-negotiable pre-execution hard risk enforcement invariant (ADR 0011, ADR 0013): every order intent targeting broker execution must pass deterministic risk limits before reaching the transport adapter.
 - **Required Remediation**:
-  - Make `HardRiskGatekeeper` a mandatory dependency of `BrokerNeutralExecutionRouter`, or require an immutable, cryptographically hashed `RiskVerdictV1` reference attached to `OrderIntentV1` prior to routing.
+  - Proposed remedies are to make `HardRiskGatekeeper` a mandatory dependency of `BrokerNeutralExecutionRouter`, or require a verdict bound to the exact intent and evaluated risk context through a trusted artifact binding or signature. A bare hashed `RiskVerdictV1` reference is insufficient; the authority boundary remains a decision under Packet 1.
 - **Impact on Existing Callers**:
   - `route_intent` must receive current portfolio state and reference price, or query account/portfolio state prior to dispatch.
 - **Persisted Schema Change Required**:
@@ -69,7 +71,7 @@ marked with `@pytest.mark.xfail(strict=True)` in `tests/unit/test_execution_safe
   - `src/drift/domain/shadow_broker.py`: `SimulatedOrderV1`
   - `src/drift/domain/execution.py`: `OrderIntentV1`
 - **Reproduction Path**:
-  - `HardRiskGatekeeper.evaluate_order` expects `order: SimulatedOrderV1`, which requires simulated order fields (`order_id: UUID`, `side: str`, `price: Decimal`).
+  - `HardRiskGatekeeper.evaluate_order` expects `order: SimulatedOrderV1`, with `order_id: UUID7`, `side: Literal["buy", "sell"]`, whole-share `quantity`, and optional `limit_price`. There is no `price` field on this model; `current_price: Decimal | None` is a separate keyword argument to `evaluate_order`.
   - `BrokerNeutralExecutionRouter` accepts `intent: OrderIntentV1` (`intent_id: UUID`, `client_order_id: str`, `side: OrderSide`, `limit_price: Decimal | None`).
   - Calling `gatekeeper.evaluate_order(intent, ...)` fails with `AttributeError`.
 - **Safety Invariant Violated**:
@@ -106,7 +108,7 @@ marked with `@pytest.mark.xfail(strict=True)` in `tests/unit/test_execution_safe
 - **Impact on Existing Callers**:
   - Callers will not erroneously assume open risk is closed when broker cancellation fails.
 - **Persisted Schema Change Required**:
-  - None if `ExecutionStatus.REJECTED` or existing status is used; addition of `CANCEL_FAILED` or `UNKNOWN` if fine-grained status is adopted.
+  - Whether an existing status can accurately represent cancellation uncertainty remains a contract decision. Any new `CANCEL_FAILED` or `UNKNOWN` persisted enum member requires explicit acceptance and migration review; an existing terminal status must not be assumed to establish the broker outcome.
 - **Architecture/ADR Decision Required**:
   - Yes (see Decision Packet 2).
 
@@ -156,15 +158,15 @@ marked with `@pytest.mark.xfail(strict=True)` in `tests/unit/test_execution_safe
         sec_id = uuid5(NAMESPACE_DNS, f"drift.equity.{sym}")
     ```
   - The adapter fabricates a UUIDv5 from the symbol string.
-  - **Critical Empirical Discovery**: In `drift.domain.execution.BrokerPositionSnapshotV1`, the `security_id` field enforces strict UUIDv7 format (`@field_validator: identifiers must be UUIDv7 values`).
-  - Because `uuid5` produces a version 5 UUID (not version 7), `build_broker_position_snapshot` raises a Pydantic `ValidationError` and crashes the entire `get_positions()` call!
+  - In `drift.domain.execution.BrokerPositionSnapshotV1`, `security_id: UUID7` requires a version 7 identifier through the shared domain validation contract.
+  - Because `uuid5` produces a version 5 UUID (not version 7), `build_broker_position_snapshot` raises a Pydantic `ValidationError`, aborting the `get_positions()` call.
 - **Safety Invariant Violated**:
   - (1) M0/M1 temporal provenance and security identity invariant: all security identifiers must resolve to verified historical security identities in the Drift evidence kernel, never ad-hoc fabricated UUIDs.
-  - (2) Domain schema invariant: UUIDv7 is required for all entity identifiers across Drift domain models.
+  - (2) The inspected broker position model requires a UUIDv7 security identifier.
 - **Required Remediation**:
   - Fail closed: unmapped symbols must either raise an `UnmappedSecurityError`, or unmapped positions must be quarantined into a separate unmapped positions collection rather than fabricating arbitrary IDs.
 - **Impact on Existing Callers**:
-  - Prevents total process crashes on unknown positions; isolates untracked assets from Drift portfolio accounting.
+  - Would prevent the demonstrated position-query validation failure on unknown positions and isolate untracked assets from Drift portfolio accounting. The source does not establish that this exception terminates the whole process.
 - **Persisted Schema Change Required**:
   - None.
 - **Architecture/ADR Decision Required**:
@@ -182,10 +184,10 @@ marked with `@pytest.mark.xfail(strict=True)` in `tests/unit/test_execution_safe
   Live or paper order execution cannot rely on optional upstream checks. A single non-negotiable risk barrier must guard the broker adapter boundary.
 - **Viable Options**:
   - *Option A (Router-Internal Gating)*: Integrate `HardRiskGatekeeper` directly inside `BrokerNeutralExecutionRouter.route_intent`. The router requires portfolio state and market prices to evaluate risk before dispatching to any adapter.
-  - *Option B (Cryptographic Risk Verdict Token)*: Require every `OrderIntentV1` to carry a signed/hashed `RiskVerdictV1` reference generated by `HardRiskGatekeeper.evaluate_intent`. The router verifies the verdict token prior to submission.
+  - *Option B (Cryptographic Risk Verdict Token)*: Require every `OrderIntentV1` to carry a `RiskVerdictV1` reference generated by a proposed `HardRiskGatekeeper.evaluate_intent`. The router would verify a signature or trusted artifact binding and bind the verdict to the exact intent and evaluated risk context before submission. A bare hash string is not proof of authorization.
 - **Tradeoffs / Evidence**:
-  - Option A centralizes enforcement inside the router, making risk evasion impossible for any caller. However, it tightly couples the router to portfolio state and pricing feeds.
-  - Option B keeps the router broker-neutral and stateless, but requires orchestrators to explicitly orchestrate risk evaluation before calling the router.
+  - Option A centralizes enforcement for router-routed intents, but still requires all execution paths to respect that boundary. It couples the router to portfolio state and pricing feeds.
+  - Option B can keep risk and portfolio evaluation outside the broker-neutral router, but requires callers to obtain a verifiable verdict. The router remains stateful through its persistent intent and execution-report journal.
 - **Recommended Option**:
   Option A for single-process operations, or Option B if the router is envisioned as an independent service in future milestones.
 - **Exact Question Needed**:
@@ -223,7 +225,7 @@ marked with `@pytest.mark.xfail(strict=True)` in `tests/unit/test_execution_safe
   - *Option B (Quarantined Positions Collection)*: Return recognized positions in `get_positions()` and expose unmapped positions in a separate `get_unmapped_positions()` inspection method.
   - *Option C (Dynamic M1b Security Master Lookup)*: Pass a security master resolver to the adapter to resolve ticker strings to canonical M1b security UUIDs at runtime.
 - **Tradeoffs / Evidence**:
-  - Option A guarantees zero unmapped assets exist in the account, but halts trading if any corporate action, dividend share, or manual deposit introduces an untracked ticker.
+  - Option A refuses a position query when an unmapped asset is present. It does not remove that asset from the account, and a corporate action, dividend share, or manual deposit can still introduce an untracked ticker.
   - Option B allows portfolio reconciliation to operate cleanly on tracked assets while alerting operators to untracked holdings.
   - Option C dynamically resolves symbols, but introduces a historical provenance dependency into the execution adapter.
 - **Recommended Option**:
@@ -236,24 +238,25 @@ marked with `@pytest.mark.xfail(strict=True)` in `tests/unit/test_execution_safe
 ### Decision Packet 4: Tournament Advancement vs M11 Statistical Promotion Gate
 
 - **What was discovered**:
-  `TournamentRunner` issues `TournamentDecision.PROMOTED` when a challenger outperforms a champion across paired evaluation. However, M11 (`src/drift/domain/promotion.py`, `src/drift/promotion/gatekeeper.py`) defines the canonical promotion authority with explicit dual-lane verdicts:
+  `TournamentRunner` issues `TournamentDecision.PROMOTED` when a challenger passes its paired comparison gates. M11 (`src/drift/domain/promotion.py`, `src/drift/promotion/gatekeeper.py`) exposes separate promotion and exploratory verdicts:
   `PromotionGateVerdict.PROMOTION_QUALIFIED` vs `PromotionGateVerdict.EXPLORATORY_PASSED`.
+  The current M11 implementation selects that lane using caller/configuration booleans and accepts favorable defaults for omitted statistics. These unresolved trust and completeness concerns are tracked by [issue #360](https://github.com/KanujVerma/drift/issues/360); the enum value alone does not prove accepted M1e qualification or artifact provenance.
   Under ADR 0012, exploratory evaluation evidence (e.g. from Alpaca Basic development data) is strictly non-promotable and cannot be upgraded or relabeled into promotion-grade evidence. Promotion requires an independent evaluation run against an accepted promotion-qualified M1e dataset.
 - **Why a decision is needed**:
   The term "promotion" is overloaded:
   1. In M10, `TournamentDecision.PROMOTED` denotes *internal research advancement* (a challenger replacing an incumbent champion as the benchmark reference in research memory).
-  2. In M11, `PromotionGateVerdict.PROMOTION_QUALIFIED` denotes *canonical qualification* under an authorized promotion dataset, which is a prerequisite for downstream validation (M12/M15).
+  2. In M11, `PromotionGateVerdict.PROMOTION_QUALIFIED` names the intended scientific qualification outcome. Its current emission does not independently establish authenticated source qualification, and operational authorization remains separately gated.
   Calling an M10 match outcome "PROMOTED" risks confusing internal hypothesis advancement with canonical M11 promotion qualification.
 - **Viable Options**:
   - *Option A (Terminology Alignment with Existing Enums)*: Keep existing persisted enums intact without schema migrations. Clarify contractually that `TournamentDecision.PROMOTED` represents internal tournament advancement only. To qualify for downstream milestones, an advanced candidate must subsequently pass M11's `PromotionGatekeeper`, which evaluates `is_promotion_grade_evidence` and `is_promotion_grade_authorized` to emit `PromotionGateVerdict.PROMOTION_QUALIFIED` (or `EXPLORATORY_PASSED`).
-  - *Option B (Cap Tournament Outcomes in Exploratory Mode)*: When `TournamentRunner` operates on exploratory evidence, cap match outcomes at `TournamentDecision.VALIDATED` and disallow `PROMOTED`.
+  - *Option B (Cap Tournament Outcomes in Exploratory Mode)*: Introduce an accepted representation for an exploratory outcome cap. `TournamentDecision.VALIDATED` is not an existing enum member; any new persisted verdict would require explicit contract and migration review before implementation.
   - *Option C (Introduce Distinct Persisted Enums)*: Migrate `TournamentDecision` schema to rename `PROMOTED` to `ADVANCED_AS_INCUMBENT` to remove all semantic ambiguity.
 - **Tradeoffs / Evidence**:
-  - Option A requires zero database or schema migrations, respects accepted domain models, and aligns with M11's already merged architecture on main where `PromotionGateVerdict` strictly enforces the exploratory vs promotion gate.
+  - Option A can preserve the existing enums without database or schema migration. M11 currently distinguishes verdict labels through caller/configuration flags, while evidence authenticity and omitted-statistics handling remain unresolved under issue #360.
   - Option B eliminates the word "PROMOTED" in exploratory runs, but changes existing M10 tournament behavior where champions are replaced by successful challengers.
   - Option C provides the cleanest vocabulary, but breaks serialized tournament history and backwards compatibility.
 - **Recommended Option**:
-  Option A: Maintain existing persisted enums (`TournamentDecision.PROMOTED` in M10 and `PromotionGateVerdict` in M11). Document the strict boundary: M10 tournament advancement is an internal research selection step; canonical promotion authority resides exclusively with M11, and neither milestone authorizes live trading or broker connections.
+  Option A: Maintain existing persisted enums (`TournamentDecision.PROMOTED` in M10 and `PromotionGateVerdict` in M11). Treat M10 advancement as internal research selection. M11 is the intended downstream scientific qualification interface, but its current verdict is not authenticated qualification proof while issue #360 is unresolved. Neither milestone authorizes live trading or broker connections.
 - **Exact Question Needed**:
   *Should Drift formally designate M10's `TournamentDecision.PROMOTED` as internal research benchmark advancement while reserving canonical promotion authority exclusively for M11's `PromotionGateVerdict.PROMOTION_QUALIFIED`?*
 
@@ -270,7 +273,7 @@ marked with `@pytest.mark.xfail(strict=True)` in `tests/unit/test_execution_safe
   - *Option B (Parameter Delegation)*: Bind `universe_id` and `rebalance_frequency` directly into strategy instantiation logic (e.g. dynamically generating rebalance dates for B3 based on proposal frequency).
   - *Option C (Schema Cleanup)*: Remove unutilized fields from `ExperimentSpecificationProposalV1` until dynamic universe slicing and schedule generation are implemented.
 - **Tradeoffs / Evidence**:
-  - Option A preserves the proposal schema while guaranteeing research integrity and preventing misleading experiments.
+  - Option A can preserve the proposal schema and reject the specified universe/cadence mismatches. Those checks do not establish general scientific integrity or source qualification.
   - Option B increases M3 strategy flexibility but requires substantial scheduling infrastructure.
   - Option C simplifies domain models but requires migrating existing research memory records.
 - **Recommended Option**:
@@ -284,7 +287,9 @@ marked with `@pytest.mark.xfail(strict=True)` in `tests/unit/test_execution_safe
 
 - **What was discovered**:
   M2 deterministic session evaluation binds input bundles, admissions, protocols, cost models, code version, and environment closure into `EvaluationRunArtifactsV2`, generating deterministic `result_hash` and `trace_hash`.
-  At the M10 tournament boundary, `TournamentRunner` receives metric dictionaries. In PR #350, `M2TrialEvaluatorAdapter` was updated to expose `result_hash`, `trace_hash`, `bundle_hash`, and `cost_model_hash`.
+  At the M10 tournament boundary, `TournamentRunner` receives metric dictionaries. In PR #350, `M2TrialEvaluatorAdapter` exposes `result_hash`, `trace_hash`, `bundle_hash`, `cost_model_hash`, and `protocol_hash`.
+  At the reviewed source snapshot `e85db5a39d6cce00b94d51079ae736dc8e5a05dd`, the runner rejects explicitly mock or synthetic results in genuine mode; checks bundle, cost, and protocol identity presence/equality; rejects scalar text/binary calendars; and checks nonempty aligned calendars, return counts, and exact True PnL completeness. It does not inspect result/trace hashes, validate hash formats, authenticate retained artifacts, or execute an independent replay verifier.
+  Different competitors' result/trace hashes need not match. Identical deterministic evaluations can share hashes; neither equality nor inequality alone establishes authenticity.
   However, standalone `result_hash` and `trace_hash` strings do not cryptographically authenticate an M2 computation. An untrusted or adversarial caller can supply arbitrary matching hash strings in an in-memory dictionary.
   Hash presence and equality provide consistency checks across comparisons; they do NOT by themselves prove:
   - authentic M2 execution;
@@ -294,17 +299,17 @@ marked with `@pytest.mark.xfail(strict=True)` in `tests/unit/test_execution_safe
   - artifact provenance.
   Furthermore, O(1) in-memory hash equality checks cannot replace a trusted, authenticated artifact registry or independent cryptographic replay verification.
 - **Why a decision is needed**:
-  Running full synchronous M2 session replay inside `TournamentRunner` for every tournament match would double evaluation compute time and require full bundle reconstruction during matches. Conversely, treating bare hash strings as proof of genuine evaluation without registry attestation or replay checks leaves a verification gap. Protected replay contracts (such as `pyproject.toml`, pinned manifests, and frozen models) must not be weakened or altered.
+  Running full synchronous M2 session replay inside `TournamentRunner` for every tournament match would add replay computation and may require bundle reconstruction during matches. The compute cost has not been measured; no fixed multiplier is established. Conversely, treating bare hash strings as proof of genuine evaluation without registry attestation or replay checks leaves a verification gap. Protected replay contracts (such as `pyproject.toml`, pinned manifests, and frozen models) must not be weakened or altered.
 - **Viable Options**:
-  - *Option A (Consistency Hash Checking with Deferred Replay Audit)*: `TournamentRunner` enforces hash presence and consistency checks (`bundle_hash`, `cost_model_hash`, session calendars, and matching hash formats) across competitors as a basic consistency gate. Full cryptographic replay verification against an authenticated artifact store is required at the M11 promotion entry boundary before candidate qualification.
+  - *Option A (Consistency Hash Checking with Deferred Replay Audit)*: Preserve current identity/calendar consistency checks and consider additional witness presence or format checks only under accepted contracts. This option would require independent M2 replay verification against an authenticated artifact store at the M11 entry boundary before candidate qualification. That downstream verification placement is a proposal, not an implemented or accepted control.
   - *Option B (Synchronous End-to-End Replay in Tournament)*: `TournamentRunner` instantiates a secondary `SessionEvaluatorEngine` and re-runs each strategy to verify bit-for-bit output match before certifying the tournament result.
   - *Option C (Offline Batch Replay Auditor)*: Tournaments execute with consistency hashes, and an asynchronous audit job independently re-verifies traces in authenticated research memory before archiving.
 - **Tradeoffs / Evidence**:
-  - Option A provides fast O(1) runtime consistency checking during research tournaments, but must explicitly recognize that bare hash presence is only a consistency check, not proof of authenticity or source qualification without the downstream M11 replay gate.
-  - Option B provides immediate adversarial verification at the cost of doubling execution compute time across tournament rounds.
+  - Option A performs constant-size hash equality work for fixed-size identities, linear calendar equality checks in the session count, and return-count agreement checks during research tournaments. Bare hash presence is only consistency evidence, not proof of authenticity or source qualification; the proposed downstream M11 replay gate is not implemented or accepted.
+  - Option B would add synchronous replay computation and any required input reconstruction to tournament rounds. Its runtime and memory costs require measurement, and verification still depends on trusted inputs and replay contracts.
   - Option C provides asynchronous verification, but risks delayed detection of unverified trials.
 - **Recommended Option**:
-  Option A: enforce strict consistency checks (bundle, cost model, calendar, and hash presence) at the tournament boundary, while treating these strictly as consistency checks rather than cryptographic proof of authenticity. Gate canonical promotion on a full M2 replay audit against an authenticated artifact store before M11 qualification.
+  Proposed Option A: retain strict consistency checks at the tournament boundary and treat them as consistency evidence rather than cryptographic proof. Add a full M2 replay audit against an authenticated artifact store before M11 qualification only after the architecture and consumed contracts are accepted.
 - **Status**:
   OPEN - Pending external architecture review. No new persisted evidence schema is implemented and no promotion authority is activated.
 - **Exact Question Needed**:
