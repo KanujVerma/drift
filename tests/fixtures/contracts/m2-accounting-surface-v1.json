@@ -1,0 +1,48 @@
+{
+  "contract_id": "m2-accounting-surface-v1",
+  "scope": "Frozen M2 canonical accounting surface consumed by M12",
+  "tier_a_models": {
+    "EvaluationCostModelV1": "d3487c17ecabf312b6a7e632c18341d15d302b8a9e50c5705165b2dd54f261a4",
+    "MarkEvidenceV1": "546b396f2013664fbdb890e2383475b7bece08a12ead7db4e9dfb8763c42740c",
+    "MarkPriceV1": "19244d89a77f736858910971909e1f8bb22fba212c93b12f3a54f68c99abd78c",
+    "PendingCashClaimV1": "d049aed2750ea4392e75c0412eb67753c9780824fa816c94764db1027e7b08be",
+    "PortfolioFillV1": "a0a7b65c8f7b95d4311c1ace0dd099e01d78270d1c4d693b8c93ce80585808e2",
+    "PortfolioMarkV1": "99f259c8ee5784280afa7fb3d9cb8f13e4e719ee974bf61b7d259be1c5d54135",
+    "PortfolioStateV2": "4ac4d9645131812d1135e45e420da3913b781cbbf033e5f6a4fc25d1ea36f3dc",
+    "RealizedPnLCompletenessV1": "14ab8a603fd1819f7515efa8bbe3e956bf06fdb4a29a08854db2b2b104ba1a00",
+    "SecurityHoldingV2": "8b3d286aa140481e046d88f602085077df25220b3cf1532974ac7ea10c533a65"
+  },
+  "tier_a_signatures": {
+    "PortfolioAccountingKernel.__init__": "(self, state: drift.domain.evaluator_portfolio.PortfolioStateV2, *, session_clock: drift.domain.evaluator_clock.SessionClockV1) -> None",
+    "PortfolioAccountingKernel.advance_session": "(self, session_key: drift.domain.sessions.SessionKeyV1) -> None",
+    "PortfolioAccountingKernel.apply_fill": "(self, fill: drift.domain.evaluator_portfolio.PortfolioFillV1) -> None",
+    "PortfolioAccountingKernel.mark_close": "(self, marks: collections.abc.Collection[drift.domain.evaluator_portfolio.MarkPriceV1]) -> None",
+    "PortfolioAccountingKernel.record_claim": "(self, claim: drift.domain.evaluator_portfolio.PendingCashClaimV1) -> None",
+    "PortfolioAccountingKernel.settle_claims": "(self, delivered_claim_ids: collections.abc.Collection[SHA256Hash]) -> None",
+    "PortfolioAccountingKernel.supersede_claim": "(self, claim: drift.domain.evaluator_portfolio.PendingCashClaimV1) -> None",
+    "applied_economic_effect_id": "(*, source_id: str, security_id: UUID7, occurrence_id: str) -> SHA256Hash",
+    "decimal_context": "() -> collections.abc.Iterator[None]",
+    "pending_cash_claim_id": "(*, source_id: str, security_id: UUID7, action_kind: drift.domain.economic_common.ActionKind, occurrence_id: str, component_id: str) -> SHA256Hash"
+  },
+  "tier_a_errors_and_constants": {
+    "APPLIED_EFFECT_ID_PROFILE": "drift-applied-economic-effect-v1",
+    "CLAIM_ID_PROFILE": "drift-pending-cash-claim-v2",
+    "PORTFOLIO_DECIMAL_PRECISION": 34,
+    "EffectAlreadyAppliedError_mro": [
+      "EffectAlreadyAppliedError",
+      "IndeterminateValuationError",
+      "DriftError",
+      "Exception",
+      "BaseException",
+      "object"
+    ],
+    "IndeterminateBasisError_mro": [
+      "IndeterminateBasisError",
+      "IndeterminateValuationError",
+      "DriftError",
+      "Exception",
+      "BaseException",
+      "object"
+    ]
+  }
+}
