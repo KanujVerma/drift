@@ -1,27 +1,10 @@
 ---
-description: Bootstrap every Cursor session from root AGENTS.md and Drift Resume.
+description: Universal issue-driven Drift bootstrap for all three workstreams
 alwaysApply: true
 ---
-
-# Drift Cursor Bootstrap
-
-Read root `AGENTS.md` first. Then execute the Drift Resume protocol in
-`docs/architecture/agent-workflow.md`.
-
-Cursor is a convenience layer. It does not replace the repository operating
-contract. Non-Cursor agents use the same files.
-
-Required behavior:
-
-- Resolve workstream identity (`kanuj` or `krish`). If unresolved, STOP with
-  `WORKSTREAM_IDENTITY_UNRESOLVED`.
-- Use the assigned GitHub issue as the current-task source of truth.
-- Obey that issue's workstream owner and write-set. Treat other paths as
-  read-only unless the issue is amended.
-- Never ask Kanuj or Krish to relay instructions to the other workstream.
-  File a GitHub issue owned by the other workstream instead.
-- Use GitHub issue, dependency, and PR flow for live state.
-- Run Checkpoint after each accepted slice and Handoff on the GitHub issue
-  if work is unfinished.
-- Prefer repository code, tests, Git history, and GitHub state over chat
-  memory.
+Read root AGENTS.md and run Drift Resume before work. Resolve kanuj, krish or
+matthew; use the assigned GitHub issue, not chat memory. Obey producer contracts,
+exact write-sets and active writer reservations. Send cross-workstream requests
+through GitHub issues/dependencies, never through a human relay. Use repository
+Checkpoint, documentation-impact and Handoff protocols. This rule is only a
+wrapper; canonical policy lives in AGENTS.md and docs/architecture/.

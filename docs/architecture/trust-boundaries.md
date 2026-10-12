@@ -69,3 +69,13 @@ An exploratory result can NEVER be relabeled, promoted, converted, or upgraded
 into promotion-grade evidence. Promotion requires an entirely NEW, independent
 evaluation run executed directly against an accepted promotion-qualified M1e
 dataset. Evidence laundering is strictly prohibited.
+
+## Adaptive research extension
+
+The [adaptive design](adaptive-experiments/design.md) adds planned research
+interfaces, not authority to connect brokers or trade. News/social content and
+AI proposals are untrusted. Modeled exploratory dividends are not delivered
+settlement facts. Exploratory comparisons are not promotion-grade verdicts.
+Accepted design, valid simulation, independently reviewed evidence, source
+qualification, candidate eligibility and operational authorization must be
+reported separately. Existing promotion restrictions are not lifted.
