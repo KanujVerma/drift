@@ -35,6 +35,7 @@ from drift.domain.economic_closed_world import (
 )
 from drift.domain.evaluator_corporate_actions import SecurityEconomicOutcomeV1
 from drift.domain.evaluator_portfolio import IndeterminateValuationError
+from drift.evaluator.exploratory_dividends import ExploratoryDividendPolicyV1
 from drift.markets.economic_closed_world import (
     CorporateActionCoverageError,
     corporate_action_window_status,
@@ -66,6 +67,7 @@ class CorporateActionCoverageIndex:
         *,
         records: Iterable[ClosedWorldCorporateActionCoverageV1],
         lane: CoverageLane,
+        exploratory_dividend_policy: ExploratoryDividendPolicyV1 | None = None,
     ) -> None:
         if lane not in ("exploratory", "promotion"):
             raise ValueError(f"unknown evaluation lane for coverage: {lane!r}")
@@ -76,9 +78,15 @@ class CorporateActionCoverageIndex:
                 "a promotion admission cannot be covered by exploratory-grade "
                 "corporate-action coverage records",
             )
+        if lane == "promotion" and exploratory_dividend_policy is not None:
+            raise CorporateActionCoverageError(
+                "ca_coverage_grade_refused_by_lane",
+                "a promotion admission cannot use exploratory dividend policy",
+            )
         self._records = verified
         self._lane: CoverageLane = lane
         self._securities = frozenset(item.security_id for item in verified)
+        self._exploratory_dividend_policy = exploratory_dividend_policy
 
     @property
     def records(self) -> tuple[ClosedWorldCorporateActionCoverageV1, ...]:
@@ -157,9 +165,27 @@ class CorporateActionCoverageIndex:
             return
         present = window_returned_actions(self._records, security_id, start, end)
         if present:
-            named = ", ".join(
-                f"{action.native_kind} {action.native_id}" for action in present
-            )
+            if (
+                self._exploratory_dividend_policy is not None
+                and self._lane == "exploratory"
+            ):
+                unhandled = tuple(
+                    action
+                    for action in present
+                    if action.native_kind != "cash_dividends"
+                    or not self._exploratory_dividend_policy.is_handled(
+                        security_id, action.native_id
+                    )
+                )
+                if not unhandled:
+                    return
+                named = ", ".join(
+                    f"{action.native_kind} {action.native_id}" for action in unhandled
+                )
+            else:
+                named = ", ".join(
+                    f"{action.native_kind} {action.native_id}" for action in present
+                )
             raise IndeterminateValuationError(
                 "corporate-action coverage returned actions for "
                 f"{_window_text(security_id, start, end)} that no M2 accounting "

@@ -77,6 +77,7 @@ from pydantic_core import PydanticSerializationError
 
 from drift.domain.assertions import ResolutionMode
 from drift.domain.common import UUID7, SHA256Hash
+from drift.domain.economic_common import ActionKind
 from drift.domain.evaluator_bundles import (
     EvaluationInputBundleV1,
     EvaluationRunIdentity,
@@ -122,9 +123,11 @@ from drift.domain.evaluator_portfolio import (
     MarkEvidenceGrade,
     MarkEvidenceV1,
     MarkPriceV1,
+    PendingCashClaimV1,
     PortfolioStateV2,
     decimal_context,
     fits_portfolio_context,
+    pending_cash_claim_id,
 )
 from drift.domain.evaluator_protocol import EvaluationProtocolV1
 from drift.domain.evaluator_reconstruction import (
@@ -203,6 +206,7 @@ from drift.evaluator.clock import (
 from drift.evaluator.corporate_action_coverage import CorporateActionCoverageIndex
 from drift.evaluator.corporate_actions import CorporateActionProcessor
 from drift.evaluator.execution import AtomicRebalanceEngine, resolve_execution_listings
+from drift.evaluator.exploratory_dividends import ExploratoryDividendPolicyV1
 from drift.evaluator.portfolio import (
     PortfolioAccountingKernel,
     initial_portfolio_state,
@@ -212,7 +216,10 @@ from drift.evaluator.reconstruction import (
     require_scheduled_calendar_row,
     verify_exploratory_reconstructions,
 )
-from drift.markets.economic_closed_world import verify_corporate_action_coverage
+from drift.markets.economic_closed_world import (
+    CorporateActionCoverageError,
+    verify_corporate_action_coverage,
+)
 from drift.markets.observation_validation import (
     M1dResolutionContext,
     m1d_context_hash,
@@ -776,6 +783,7 @@ class SessionEvaluatorEvidence:
     exploratory_cohort: ExploratoryCohortAuthorizationV1 | None = None
     exploratory_reconstruction_replay: ExploratoryReconstructionReplay | None = None
     exploratory_listing_roles: tuple[ExploratoryCohortListingRoleV1, ...] = ()
+    exploratory_dividends: ExploratoryDividendPolicyV1 | None = None
 
 
 _ADAPTERS: dict[int, tuple[object, TypeAdapter[Any]]] = {}
@@ -1026,6 +1034,13 @@ def _revalidated_evidence(
         exploratory_listing_roles=each(
             ExploratoryCohortListingRoleV1, evidence.exploratory_listing_roles
         ),
+        exploratory_dividends=(
+            None
+            if evidence.exploratory_dividends is None
+            else _revalidated(
+                ExploratoryDividendPolicyV1, evidence.exploratory_dividends
+            )
+        ),
     )
 
 
@@ -1082,6 +1097,8 @@ def evaluator_evidence_hash(
         payload["exploratory_listing_roles"] = members(
             evidence.exploratory_listing_roles
         )
+    if evidence.exploratory_dividends is not None:
+        payload["exploratory_dividends"] = evidence.exploratory_dividends.terms_hash
     return content_hash(payload)
 
 
@@ -1637,13 +1654,21 @@ class SessionEvaluatorEngine:
         # after its gate re-derived every reconstruction (issue 55).
         # Reconstructions riding a realized bundle never price anything.
         self._reconstructed_prices = self._index_reconstructed_prices(bundle)
+        if admission.lane == "promotion" and evidence.exploratory_dividends is not None:
+            raise CorporateActionCoverageError(
+                "ca_coverage_grade_refused_by_lane",
+                "a promotion admission cannot use exploratory dividend policy",
+            )
+        self._exploratory_dividends = evidence.exploratory_dividends
         # Issue 76 (C5, V10, V12): the coverage index re-verifies every record
         # under the running identity and refuses exploratory coverage under a
         # promotion admission. V11 holds already: the revalidated bundle
         # refuses a security covered by both kinds of evidence, and the
         # evidence outcomes are exactly the bundle's (issue 86).
         self._corporate_action_coverage = CorporateActionCoverageIndex(
-            records=bundle.corporate_action_coverage, lane=admission.lane
+            records=bundle.corporate_action_coverage,
+            lane=admission.lane,
+            exploratory_dividend_policy=self._exploratory_dividends,
         )
         self._corporate_actions = CorporateActionProcessor(
             session_clock=bundle.session_clock,
@@ -2001,6 +2026,52 @@ class SessionEvaluatorEngine:
             session.session_key,
             excluded_disposals=loop.excluded_disposals,
         )
+        if self._exploratory_dividends is not None:
+            window = self._corporate_actions._session_window(session.session_key)
+            new_claims: list[PendingCashClaimV1] = []
+            for holding in state.holdings:
+                if holding.quantity <= 0:
+                    continue
+                for div in self._exploratory_dividends.dividends_in_window(
+                    holding.security_id, window.first_date, window.current
+                ):
+                    entitled_qty = holding.quantity
+                    with decimal_context():
+                        total_cash = div.rate * entitled_qty
+                    claim_id = pending_cash_claim_id(
+                        source_id=div.source_id,
+                        security_id=div.security_id,
+                        action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
+                        occurrence_id=div.native_id,
+                        component_id="cash_dividend",
+                    )
+                    if claim_id in state.settled_claim_ids or any(
+                        c.claim_id == claim_id for c in state.pending_cash_claims
+                    ):
+                        continue
+                    new_claims.append(
+                        PendingCashClaimV1(
+                            schema_version="1",
+                            claim_id=claim_id,
+                            source_id=div.source_id,
+                            security_id=div.security_id,
+                            action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
+                            occurrence_id=div.native_id,
+                            component_id="cash_dividend",
+                            entitled_quantity=entitled_qty,
+                            cash_per_share=div.rate,
+                            total_cash_expected=total_cash,
+                            entitlement_session=session.session_key.local_date,
+                            payable_session=div.payable_date,
+                        )
+                    )
+            if new_claims:
+                kernel = PortfolioAccountingKernel(
+                    state, session_clock=self._bundle.session_clock
+                )
+                for claim in new_claims:
+                    kernel.record_claim(claim)
+                state = kernel.state
         loop.state = state
         loop.staged_targets = targets
         after_holdings = positions_digest(state.holdings)
@@ -2268,6 +2339,18 @@ class SessionEvaluatorEngine:
         state = self._corporate_actions.apply_intrasession_settlements(
             loop.state, self._evidence.economic_outcomes, session.session_key
         )
+        if self._exploratory_dividends is not None:
+            payable = tuple(
+                claim.claim_id
+                for claim in state.pending_cash_claims
+                if claim.payable_session <= session.session_key.local_date
+            )
+            if payable:
+                kernel = PortfolioAccountingKernel(
+                    state, session_clock=self._bundle.session_clock
+                )
+                kernel.settle_claims(payable)
+                state = kernel.state
         loop.state = state
         settled = tuple(sorted(set(state.settled_claim_ids) - before_settled))
         if not settled:
