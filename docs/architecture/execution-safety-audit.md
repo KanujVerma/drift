@@ -280,22 +280,32 @@ marked with `@pytest.mark.xfail(strict=True)` in `tests/unit/test_execution_safe
 
 ---
 
-### Decision Packet 6: Replay-Bound Evidence Verification at Tournament Boundary
+### Decision Packet 6: Replay-Bound Evidence Verification at Tournament Boundary (STATUS: OPEN)
 
 - **What was discovered**:
-  M2 deterministic session evaluation cryptographically binds input bundles, admissions, protocols, cost models, code version, and environment closure into `EvaluationRunArtifactsV2`, featuring deterministic `result_hash` and `trace_hash`.
-  At the M10 tournament boundary, `TournamentRunner` receives metric dictionaries. In PR #350 Task 4, `M2TrialEvaluatorAdapter` was upgraded to expose authentic `result_hash`, `trace_hash`, `bundle_hash`, and `cost_model_hash`. However, `TournamentRunner` currently enforces equality and presence of these hashes, but does not independently execute the full M2 replay verifier during match evaluation.
+  M2 deterministic session evaluation binds input bundles, admissions, protocols, cost models, code version, and environment closure into `EvaluationRunArtifactsV2`, generating deterministic `result_hash` and `trace_hash`.
+  At the M10 tournament boundary, `TournamentRunner` receives metric dictionaries. In PR #350, `M2TrialEvaluatorAdapter` was updated to expose `result_hash`, `trace_hash`, `bundle_hash`, and `cost_model_hash`.
+  However, standalone `result_hash` and `trace_hash` strings do not cryptographically authenticate an M2 computation. An untrusted or adversarial caller can supply arbitrary matching hash strings in an in-memory dictionary.
+  Hash presence and equality provide consistency checks across comparisons; they do NOT by themselves prove:
+  - authentic M2 execution;
+  - source completeness;
+  - source qualification;
+  - trace validity;
+  - artifact provenance.
+  Furthermore, O(1) in-memory hash equality checks cannot replace a trusted, authenticated artifact registry or independent cryptographic replay verification.
 - **Why a decision is needed**:
-  Re-running full M2 session replay inside `TournamentRunner` for every tournament match would double evaluation compute time and require full bundle reconstruction during matches. Protected replay contracts (such as `pyproject.toml`, pinned manifests, and frozen models) must not be weakened or altered.
+  Running full synchronous M2 session replay inside `TournamentRunner` for every tournament match would double evaluation compute time and require full bundle reconstruction during matches. Conversely, treating bare hash strings as proof of genuine evaluation without registry attestation or replay checks leaves a verification gap. Protected replay contracts (such as `pyproject.toml`, pinned manifests, and frozen models) must not be weakened or altered.
 - **Viable Options**:
-  - *Option A (Cryptographic Artifact Witness Verification)*: `TournamentRunner` requires and inspects genuine artifact hashes (`result_hash`, `trace_hash`, `bundle_hash`, `cost_model_hash`, `protocol_hash`) provided by `M2TrialEvaluatorAdapter`. Matches are refused if hashes are missing, mismatched, or marked as mock. Full replay verification is executed only when a candidate is submitted to M11 promotion.
+  - *Option A (Consistency Hash Checking with Deferred Replay Audit)*: `TournamentRunner` enforces hash presence and consistency checks (`bundle_hash`, `cost_model_hash`, session calendars, and matching hash formats) across competitors as a basic consistency gate. Full cryptographic replay verification against an authenticated artifact store is required at the M11 promotion entry boundary before candidate qualification.
   - *Option B (Synchronous End-to-End Replay in Tournament)*: `TournamentRunner` instantiates a secondary `SessionEvaluatorEngine` and re-runs each strategy to verify bit-for-bit output match before certifying the tournament result.
-  - *Option C (Offline Batch Replay Auditor)*: Tournaments execute with witness hashes, and an asynchronous audit job independently re-verifies traces in research memory before archiving.
+  - *Option C (Offline Batch Replay Auditor)*: Tournaments execute with consistency hashes, and an asynchronous audit job independently re-verifies traces in authenticated research memory before archiving.
 - **Tradeoffs / Evidence**:
-  - Option A provides strong cryptographic tamper detection with O(1) runtime overhead, perfectly preserves protected replay contracts without modification, and enforces strict integrity gates without slowing down research loops.
-  - Option B provides maximum immediate adversarial proof, but doubles runtime for every match in large cohorts.
-  - Option C provides asynchronous safety, but risks delayed detection of non-reproducible trials.
+  - Option A provides fast O(1) runtime consistency checking during research tournaments, but must explicitly recognize that bare hash presence is only a consistency check, not proof of authenticity or source qualification without the downstream M11 replay gate.
+  - Option B provides immediate adversarial verification at the cost of doubling execution compute time across tournament rounds.
+  - Option C provides asynchronous verification, but risks delayed detection of unverified trials.
 - **Recommended Option**:
-  Option A: enforce cryptographic artifact witness verification (`result_hash`, `trace_hash`, matching `cost_model_hash` and session calendars) at the tournament boundary, leaving full end-to-end replay verification as an entry requirement for M11 candidate promotion.
+  Option A: enforce strict consistency checks (bundle, cost model, calendar, and hash presence) at the tournament boundary, while treating these strictly as consistency checks rather than cryptographic proof of authenticity. Gate canonical promotion on a full M2 replay audit against an authenticated artifact store before M11 qualification.
+- **Status**:
+  OPEN - Pending external architecture review. No new persisted evidence schema is implemented and no promotion authority is activated.
 - **Exact Question Needed**:
-  *Should TournamentRunner rely on cryptographic artifact witness checking (Option A) during tournament execution and gate canonical M11 promotion on a full M2 replay audit, rather than running synchronous re-execution inside every tournament match?*
+  *Should Drift treat in-memory artifact hashes at the M10 tournament boundary strictly as consistency checks (Option A) and require a full M2 replay audit against an authenticated artifact store at the M11 promotion boundary, rather than executing synchronous replay verification inside every tournament match?*

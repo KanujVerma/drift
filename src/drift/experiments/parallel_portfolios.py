@@ -25,6 +25,7 @@ from drift.domain.evaluator_lanes import EvaluationAdmissionV1
 from drift.domain.evaluator_protocol import EvaluationProtocolV1
 from drift.domain.evaluator_results import EvaluationClassification
 from drift.domain.securities import ListingRoleVersionV1
+from drift.domain.sessions import SessionKeyV1
 from drift.evaluator.engine import SessionEvaluatorEngine, SessionEvaluatorEvidence
 from drift.loop.evaluator_adapter import (
     build_default_evaluation_protocol,
@@ -69,6 +70,7 @@ class CohortPortfolioResult:
     run_identity_hash: str
     cost_model_hash: str
     protocol_hash: str
+    session_keys: tuple[SessionKeyV1, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -136,7 +138,14 @@ def _portfolio_worker_entrypoint(task: _PortfolioWorkerTask) -> CohortPortfolioR
             daily_returns.append(ZERO)
         prev_nav = pt.net_asset_value
 
-    if result.classification == EvaluationClassification.COMPLETE:
+    session_keys = tuple(pt.session_key for pt in metrics.equity_series)
+
+    is_fully_evaluated = (
+        result.classification == EvaluationClassification.COMPLETE
+        and metrics.realized_pnl_completeness.is_complete
+    )
+
+    if is_fully_evaluated:
         ret_and_risk = compute_return_and_risk(
             metrics.equity_series,
             initial_nav=initial_nav,
@@ -154,15 +163,7 @@ def _portfolio_worker_entrypoint(task: _PortfolioWorkerTask) -> CohortPortfolioR
 
         turnover_summary = compute_turnover_summary(metrics)
         ann_turnover: Decimal | None = turnover_summary.annualized_turnover
-    else:
-        ann_sharpe = None
-        max_drawdown_pct = None
-        ann_turnover = None
 
-    if (
-        result.classification == EvaluationClassification.COMPLETE
-        and metrics.realized_pnl_completeness.is_complete
-    ):
         total_return_pct: Decimal | None = (
             ((ending_nav - initial_nav) / initial_nav * HUNDRED).quantize(
                 TWO_PLACES, rounding=ROUND_HALF_EVEN
@@ -171,6 +172,9 @@ def _portfolio_worker_entrypoint(task: _PortfolioWorkerTask) -> CohortPortfolioR
             else ZERO.quantize(TWO_PLACES)
         )
     else:
+        ann_sharpe = None
+        max_drawdown_pct = None
+        ann_turnover = None
         total_return_pct = None
 
     strategy_type_label = type(strategy).__name__
@@ -195,6 +199,7 @@ def _portfolio_worker_entrypoint(task: _PortfolioWorkerTask) -> CohortPortfolioR
         run_identity_hash=run_identity.run_identity_hash,
         cost_model_hash=task.cost_model.cost_model_hash,
         protocol_hash=task.protocol.protocol_hash,
+        session_keys=session_keys,
     )
 
 
@@ -476,8 +481,9 @@ class PortfolioCohortHarness:
         """Compute cross-cohort daily return correlation matrix.
 
         Only COMPLETE, PnL-complete, mutually aligned runs are eligible for
-        correlation comparisons. Incomplete or unaligned pairs return None.
-        Matrix is symmetric with bounded values in [-1.0000, 1.0000] or None.
+        correlation comparisons. Incomplete, unaligned, or cross-cohort
+        pairs return None. Matrix is symmetric with bounded values in
+        [-1.0000, 1.0000] or None.
         """
         matrix: dict[str, dict[str, Decimal | None]] = {}
         for r_a in results:
@@ -487,17 +493,25 @@ class PortfolioCohortHarness:
                     r_a.classification == "complete"
                     and r_a.is_pnl_complete
                     and r_a.total_return_pct is not None
+                    and len(r_a.daily_returns) == len(r_a.session_keys)
+                    and len(r_a.session_keys) > 0
                 )
                 b_eligible = (
                     r_b.classification == "complete"
                     and r_b.is_pnl_complete
                     and r_b.total_return_pct is not None
+                    and len(r_b.daily_returns) == len(r_b.session_keys)
+                    and len(r_b.session_keys) > 0
                 )
-                if (
-                    not a_eligible
-                    or not b_eligible
-                    or len(r_a.daily_returns) != len(r_b.daily_returns)
-                ):
+                compatible = (
+                    a_eligible
+                    and b_eligible
+                    and r_a.session_keys == r_b.session_keys
+                    and r_a.bundle_hash == r_b.bundle_hash
+                    and r_a.cost_model_hash == r_b.cost_model_hash
+                    and r_a.protocol_hash == r_b.protocol_hash
+                )
+                if not compatible:
                     matrix[r_a.strategy_id][r_b.strategy_id] = None
                 else:
                     corr = compute_daily_returns_correlation(
@@ -513,8 +527,30 @@ class PortfolioCohortHarness:
         """Rank completed, PnL-complete portfolio results by total return.
 
         Incomplete, indeterminate, or unaligned results are disqualified from ranking
-        and cannot appear as valid winners.
+        and cannot appear as valid winners. If results originate from
+        incompatible cohorts (mismatched bundle, cost model, protocol, or session keys),
+        fails closed with ValueError.
         """
+        if not results:
+            return []
+
+        # Validate that all results in the batch share cohort configuration
+        first_bundle = results[0].bundle_hash
+        first_cost = results[0].cost_model_hash
+        first_proto = results[0].protocol_hash
+        for r in results[1:]:
+            if (
+                r.bundle_hash != first_bundle
+                or r.cost_model_hash != first_cost
+                or r.protocol_hash != first_proto
+            ):
+                raise ValueError(
+                    "Cannot rank results across incompatible cohorts: "
+                    f"mismatched bundle ({r.bundle_hash} != {first_bundle}), "
+                    f"cost model ({r.cost_model_hash} != {first_cost}), "
+                    f"or protocol ({r.protocol_hash} != {first_proto})"
+                )
+
         eligible = [
             r
             for r in results
@@ -522,6 +558,18 @@ class PortfolioCohortHarness:
             and r.is_pnl_complete
             and r.total_return_pct is not None
         ]
+
+        if not eligible:
+            return []
+
+        # Validate that all eligible results share identical session keys
+        first_sessions = eligible[0].session_keys
+        for r in eligible[1:]:
+            if r.session_keys != first_sessions:
+                raise ValueError(
+                    "Cannot rank results with misaligned session key sequences"
+                )
+
         return sorted(
             eligible,
             key=lambda r: (

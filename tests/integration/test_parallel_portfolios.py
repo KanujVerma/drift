@@ -1,11 +1,13 @@
 """Integration tests for parallel $10,000 research portfolios (Phase 3)."""
 
+from datetime import date
 from decimal import Decimal
 
 import pytest
 
 from drift.baselines.b0_cash import B0CashStrategy
 from drift.domain.evaluator_protocol import EvaluationProtocolV1
+from drift.domain.sessions import SessionKeyV1
 from drift.experiments.parallel_portfolios import (
     CohortPortfolioResult,
     PortfolioCohortHarness,
@@ -144,6 +146,8 @@ def test_parallel_matches_sequential_bit_for_bit() -> None:
         assert s_res.run_identity_hash == p_res.run_identity_hash
         assert s_res.cost_model_hash == p_res.cost_model_hash
         assert s_res.protocol_hash == p_res.protocol_hash
+        assert s_res.session_keys == p_res.session_keys
+        assert len(s_res.session_keys) == len(bundle.session_clock.sessions)
         # Bit-for-bit trace hash and result hash equality across process boundary
         assert s_res.trace_hash == p_res.trace_hash
         assert s_res.result_hash == p_res.result_hash
@@ -275,9 +279,14 @@ def test_cli_main_runs_and_exits_zero(capsys: pytest.CaptureFixture[str]) -> Non
 
 
 def test_incomplete_and_pnl_incomplete_portfolio_reporting() -> None:
-    """Incomplete and PnL-incomplete portfolios report None return, preserve ending NAV,
-    and format as N/A without entering rankings.
+    """Incomplete and PnL-incomplete portfolios report None for all headline metrics,
+    preserve ending NAV, and format as N/A without entering rankings.
     """
+    mock_sessions = tuple(
+        SessionKeyV1(mic="XNYS", session_scope="regular", local_date=date(2026, 1, i))
+        for i in range(1, 5)
+    )
+
     res_complete = CohortPortfolioResult(
         strategy_id="strat_complete",
         strategy_type="B1",
@@ -303,6 +312,7 @@ def test_incomplete_and_pnl_incomplete_portfolio_reporting() -> None:
         run_identity_hash="i" * 64,
         cost_model_hash="c" * 64,
         protocol_hash="p" * 64,
+        session_keys=mock_sessions,
     )
     res_indeterminate = CohortPortfolioResult(
         strategy_id="strat_indeterminate",
@@ -324,6 +334,7 @@ def test_incomplete_and_pnl_incomplete_portfolio_reporting() -> None:
         run_identity_hash="i" * 64,
         cost_model_hash="c" * 64,
         protocol_hash="p" * 64,
+        session_keys=mock_sessions[:2],
     )
     res_pnl_incomplete = CohortPortfolioResult(
         strategy_id="strat_pnl_incomplete",
@@ -331,9 +342,9 @@ def test_incomplete_and_pnl_incomplete_portfolio_reporting() -> None:
         initial_cash=Decimal("10000.00"),
         ending_nav=Decimal("12000.00"),
         total_return_pct=None,
-        annualized_sharpe=Decimal("2.0000"),
-        max_drawdown_pct=Decimal("0.0200"),
-        annualized_turnover=Decimal("1.0000"),
+        annualized_sharpe=None,
+        max_drawdown_pct=None,
+        annualized_turnover=None,
         fill_count=3,
         trace_hash="t" * 64,
         result_hash="r" * 64,
@@ -350,11 +361,13 @@ def test_incomplete_and_pnl_incomplete_portfolio_reporting() -> None:
         run_identity_hash="i" * 64,
         cost_model_hash="c" * 64,
         protocol_hash="p" * 64,
+        session_keys=mock_sessions,
     )
 
     results = [res_complete, res_indeterminate, res_pnl_incomplete]
 
-    # 1. Comparison table formatting
+    # 1. Comparison table formatting: all headline metrics display N/A for
+    # PnL-incomplete
     table = PortfolioCohortHarness.format_comparison_table(results)
     assert "Status" in table
     assert "COMPLETE" in table
@@ -364,6 +377,12 @@ def test_incomplete_and_pnl_incomplete_portfolio_reporting() -> None:
     assert "$12,000.00" in table
     assert "10.00%" in table
     assert "   N/A" in table
+
+    # Verify PnL-incomplete row specifically formats all headline scores as N/A
+    pnl_row = next(
+        line for line in table.splitlines() if "strat_pnl_incomplete" in line
+    )
+    assert pnl_row.count("N/A") == 4
 
     # 2. Ranking disqualification: incomplete runs cannot be ranked or win
     ranked = PortfolioCohortHarness.rank_results(results)
@@ -378,3 +397,389 @@ def test_incomplete_and_pnl_incomplete_portfolio_reporting() -> None:
     assert matrix["strat_complete"]["strat_pnl_incomplete"] is None
     assert matrix["strat_pnl_incomplete"]["strat_complete"] is None
     assert matrix["strat_indeterminate"]["strat_indeterminate"] is None
+
+
+def test_correlation_matrix_refuses_different_session_keys() -> None:
+    """Equal-length series across different session calendars return None correlation
+    and fail closed on ranking.
+    """
+    sessions_a = tuple(
+        SessionKeyV1(mic="XNYS", session_scope="regular", local_date=date(2026, 1, i))
+        for i in range(1, 5)
+    )
+    sessions_b = tuple(
+        SessionKeyV1(mic="XNYS", session_scope="regular", local_date=date(2026, 2, i))
+        for i in range(1, 5)
+    )
+
+    r_a = CohortPortfolioResult(
+        strategy_id="strat_jan",
+        strategy_type="B1",
+        initial_cash=Decimal("10000.00"),
+        ending_nav=Decimal("10500.00"),
+        total_return_pct=Decimal("5.00"),
+        annualized_sharpe=Decimal("1.2000"),
+        max_drawdown_pct=Decimal("0.0200"),
+        annualized_turnover=Decimal("0.5000"),
+        fill_count=1,
+        trace_hash="t1" * 32,
+        result_hash="r1" * 32,
+        daily_returns=(
+            Decimal("0.01"),
+            Decimal("0.02"),
+            Decimal("-0.01"),
+            Decimal("0.03"),
+        ),
+        classification="complete",
+        is_pnl_complete=True,
+        net_profit_and_loss=Decimal("500.00"),
+        bundle_hash="b" * 64,
+        run_identity_hash="i1" * 32,
+        cost_model_hash="c" * 64,
+        protocol_hash="p" * 64,
+        session_keys=sessions_a,
+    )
+    r_b = CohortPortfolioResult(
+        strategy_id="strat_feb",
+        strategy_type="B2",
+        initial_cash=Decimal("10000.00"),
+        ending_nav=Decimal("10800.00"),
+        total_return_pct=Decimal("8.00"),
+        annualized_sharpe=Decimal("1.8000"),
+        max_drawdown_pct=Decimal("0.0100"),
+        annualized_turnover=Decimal("0.8000"),
+        fill_count=2,
+        trace_hash="t2" * 32,
+        result_hash="r2" * 32,
+        daily_returns=(
+            Decimal("0.02"),
+            Decimal("0.04"),
+            Decimal("-0.02"),
+            Decimal("0.04"),
+        ),
+        classification="complete",
+        is_pnl_complete=True,
+        net_profit_and_loss=Decimal("800.00"),
+        bundle_hash="b" * 64,
+        run_identity_hash="i2" * 32,
+        cost_model_hash="c" * 64,
+        protocol_hash="p" * 64,
+        session_keys=sessions_b,
+    )
+
+    matrix = PortfolioCohortHarness.compute_correlation_matrix([r_a, r_b])
+    # Self-correlations for non-zero variance series work
+    assert matrix["strat_jan"]["strat_jan"] == Decimal("1.0000")
+    assert matrix["strat_feb"]["strat_feb"] == Decimal("1.0000")
+    # Cross-correlation between different session calendars returns None
+    assert matrix["strat_jan"]["strat_feb"] is None
+    assert matrix["strat_feb"]["strat_jan"] is None
+
+    # Ranking across misaligned session key sequences fails closed
+    with pytest.raises(
+        ValueError, match="Cannot rank results with misaligned session key sequences"
+    ):
+        PortfolioCohortHarness.rank_results([r_a, r_b])
+
+
+def test_correlation_matrix_computes_for_same_session_keys_compatible_evidence() -> (
+    None
+):
+    """Mutually aligned series sharing exact session keys and cohort identity
+    compute valid correlation.
+    """
+    sessions = tuple(
+        SessionKeyV1(mic="XNYS", session_scope="regular", local_date=date(2026, 1, i))
+        for i in range(1, 5)
+    )
+
+    r_1 = CohortPortfolioResult(
+        strategy_id="strat_1",
+        strategy_type="B1",
+        initial_cash=Decimal("10000.00"),
+        ending_nav=Decimal("10500.00"),
+        total_return_pct=Decimal("5.00"),
+        annualized_sharpe=Decimal("1.2000"),
+        max_drawdown_pct=Decimal("0.0200"),
+        annualized_turnover=Decimal("0.5000"),
+        fill_count=1,
+        trace_hash="t1" * 32,
+        result_hash="r1" * 32,
+        daily_returns=(
+            Decimal("0.01"),
+            Decimal("0.02"),
+            Decimal("-0.01"),
+            Decimal("0.03"),
+        ),
+        classification="complete",
+        is_pnl_complete=True,
+        net_profit_and_loss=Decimal("500.00"),
+        bundle_hash="b" * 64,
+        run_identity_hash="i1" * 32,
+        cost_model_hash="c" * 64,
+        protocol_hash="p" * 64,
+        session_keys=sessions,
+    )
+    r_2 = CohortPortfolioResult(
+        strategy_id="strat_2",
+        strategy_type="B2",
+        initial_cash=Decimal("10000.00"),
+        ending_nav=Decimal("11000.00"),
+        total_return_pct=Decimal("10.00"),
+        annualized_sharpe=Decimal("2.0000"),
+        max_drawdown_pct=Decimal("0.0100"),
+        annualized_turnover=Decimal("1.0000"),
+        fill_count=2,
+        trace_hash="t2" * 32,
+        result_hash="r2" * 32,
+        daily_returns=(
+            Decimal("0.02"),
+            Decimal("0.04"),
+            Decimal("-0.02"),
+            Decimal("0.06"),
+        ),
+        classification="complete",
+        is_pnl_complete=True,
+        net_profit_and_loss=Decimal("1000.00"),
+        bundle_hash="b" * 64,
+        run_identity_hash="i2" * 32,
+        cost_model_hash="c" * 64,
+        protocol_hash="p" * 64,
+        session_keys=sessions,
+    )
+
+    matrix = PortfolioCohortHarness.compute_correlation_matrix([r_1, r_2])
+    # r_2 daily returns are exact 2x scaling of r_1, so correlation is 1.0000
+    assert matrix["strat_1"]["strat_2"] == Decimal("1.0000")
+    assert matrix["strat_2"]["strat_1"] == Decimal("1.0000")
+
+    ranked = PortfolioCohortHarness.rank_results([r_1, r_2])
+    assert len(ranked) == 2
+    assert ranked[0].strategy_id == "strat_2"
+    assert ranked[1].strategy_id == "strat_1"
+
+
+def test_correlation_and_ranking_refuse_different_bundle_hash() -> None:
+    """Portfolios evaluated on different input bundles return None correlation
+    and fail ranking.
+    """
+    sessions = tuple(
+        SessionKeyV1(mic="XNYS", session_scope="regular", local_date=date(2026, 1, i))
+        for i in range(1, 5)
+    )
+
+    r_bundle1 = CohortPortfolioResult(
+        strategy_id="strat_bundle1",
+        strategy_type="B1",
+        initial_cash=Decimal("10000.00"),
+        ending_nav=Decimal("10500.00"),
+        total_return_pct=Decimal("5.00"),
+        annualized_sharpe=Decimal("1.2000"),
+        max_drawdown_pct=Decimal("0.0200"),
+        annualized_turnover=Decimal("0.5000"),
+        fill_count=1,
+        trace_hash="t1" * 32,
+        result_hash="r1" * 32,
+        daily_returns=(
+            Decimal("0.01"),
+            Decimal("0.02"),
+            Decimal("-0.01"),
+            Decimal("0.03"),
+        ),
+        classification="complete",
+        is_pnl_complete=True,
+        net_profit_and_loss=Decimal("500.00"),
+        bundle_hash="1" * 64,
+        run_identity_hash="i1" * 32,
+        cost_model_hash="c" * 64,
+        protocol_hash="p" * 64,
+        session_keys=sessions,
+    )
+    r_bundle2 = CohortPortfolioResult(
+        strategy_id="strat_bundle2",
+        strategy_type="B2",
+        initial_cash=Decimal("10000.00"),
+        ending_nav=Decimal("10800.00"),
+        total_return_pct=Decimal("8.00"),
+        annualized_sharpe=Decimal("1.8000"),
+        max_drawdown_pct=Decimal("0.0100"),
+        annualized_turnover=Decimal("0.8000"),
+        fill_count=2,
+        trace_hash="t2" * 32,
+        result_hash="r2" * 32,
+        daily_returns=(
+            Decimal("0.02"),
+            Decimal("0.04"),
+            Decimal("-0.02"),
+            Decimal("0.04"),
+        ),
+        classification="complete",
+        is_pnl_complete=True,
+        net_profit_and_loss=Decimal("800.00"),
+        bundle_hash="2" * 64,
+        run_identity_hash="i2" * 32,
+        cost_model_hash="c" * 64,
+        protocol_hash="p" * 64,
+        session_keys=sessions,
+    )
+
+    matrix = PortfolioCohortHarness.compute_correlation_matrix([r_bundle1, r_bundle2])
+    assert matrix["strat_bundle1"]["strat_bundle2"] is None
+    assert matrix["strat_bundle2"]["strat_bundle1"] is None
+
+    with pytest.raises(
+        ValueError,
+        match="Cannot rank results across incompatible cohorts: mismatched bundle",
+    ):
+        PortfolioCohortHarness.rank_results([r_bundle1, r_bundle2])
+
+
+def test_correlation_and_ranking_refuse_different_cost_model_hash() -> None:
+    """Portfolios evaluated under different cost models return None correlation
+    and fail ranking.
+    """
+    sessions = tuple(
+        SessionKeyV1(mic="XNYS", session_scope="regular", local_date=date(2026, 1, i))
+        for i in range(1, 5)
+    )
+
+    r_cost1 = CohortPortfolioResult(
+        strategy_id="strat_cost1",
+        strategy_type="B1",
+        initial_cash=Decimal("10000.00"),
+        ending_nav=Decimal("10500.00"),
+        total_return_pct=Decimal("5.00"),
+        annualized_sharpe=Decimal("1.2000"),
+        max_drawdown_pct=Decimal("0.0200"),
+        annualized_turnover=Decimal("0.5000"),
+        fill_count=1,
+        trace_hash="t1" * 32,
+        result_hash="r1" * 32,
+        daily_returns=(
+            Decimal("0.01"),
+            Decimal("0.02"),
+            Decimal("-0.01"),
+            Decimal("0.03"),
+        ),
+        classification="complete",
+        is_pnl_complete=True,
+        net_profit_and_loss=Decimal("500.00"),
+        bundle_hash="b" * 64,
+        run_identity_hash="i1" * 32,
+        cost_model_hash="1" * 64,
+        protocol_hash="p" * 64,
+        session_keys=sessions,
+    )
+    r_cost2 = CohortPortfolioResult(
+        strategy_id="strat_cost2",
+        strategy_type="B2",
+        initial_cash=Decimal("10000.00"),
+        ending_nav=Decimal("10800.00"),
+        total_return_pct=Decimal("8.00"),
+        annualized_sharpe=Decimal("1.8000"),
+        max_drawdown_pct=Decimal("0.0100"),
+        annualized_turnover=Decimal("0.8000"),
+        fill_count=2,
+        trace_hash="t2" * 32,
+        result_hash="r2" * 32,
+        daily_returns=(
+            Decimal("0.02"),
+            Decimal("0.04"),
+            Decimal("-0.02"),
+            Decimal("0.04"),
+        ),
+        classification="complete",
+        is_pnl_complete=True,
+        net_profit_and_loss=Decimal("800.00"),
+        bundle_hash="b" * 64,
+        run_identity_hash="i2" * 32,
+        cost_model_hash="2" * 64,
+        protocol_hash="p" * 64,
+        session_keys=sessions,
+    )
+
+    matrix = PortfolioCohortHarness.compute_correlation_matrix([r_cost1, r_cost2])
+    assert matrix["strat_cost1"]["strat_cost2"] is None
+    assert matrix["strat_cost2"]["strat_cost1"] is None
+
+    with pytest.raises(
+        ValueError,
+        match="Cannot rank results across incompatible cohorts: .*cost model",
+    ):
+        PortfolioCohortHarness.rank_results([r_cost1, r_cost2])
+
+
+def test_incomplete_run_refuses_correlation_and_ranking() -> None:
+    """Incomplete runs cannot produce correlation with complete runs and are
+    excluded from ranking.
+    """
+    sessions = tuple(
+        SessionKeyV1(mic="XNYS", session_scope="regular", local_date=date(2026, 1, i))
+        for i in range(1, 5)
+    )
+
+    r_complete = CohortPortfolioResult(
+        strategy_id="strat_complete",
+        strategy_type="B1",
+        initial_cash=Decimal("10000.00"),
+        ending_nav=Decimal("10500.00"),
+        total_return_pct=Decimal("5.00"),
+        annualized_sharpe=Decimal("1.2000"),
+        max_drawdown_pct=Decimal("0.0200"),
+        annualized_turnover=Decimal("0.5000"),
+        fill_count=1,
+        trace_hash="t1" * 32,
+        result_hash="r1" * 32,
+        daily_returns=(
+            Decimal("0.01"),
+            Decimal("0.02"),
+            Decimal("-0.01"),
+            Decimal("0.03"),
+        ),
+        classification="complete",
+        is_pnl_complete=True,
+        net_profit_and_loss=Decimal("500.00"),
+        bundle_hash="b" * 64,
+        run_identity_hash="i1" * 32,
+        cost_model_hash="c" * 64,
+        protocol_hash="p" * 64,
+        session_keys=sessions,
+    )
+    r_incomplete = CohortPortfolioResult(
+        strategy_id="strat_incomplete",
+        strategy_type="B2",
+        initial_cash=Decimal("10000.00"),
+        ending_nav=Decimal("10200.00"),
+        total_return_pct=None,
+        annualized_sharpe=None,
+        max_drawdown_pct=None,
+        annualized_turnover=None,
+        fill_count=1,
+        trace_hash="t2" * 32,
+        result_hash="r2" * 32,
+        daily_returns=(Decimal("0.01"), Decimal("0.01")),
+        classification="indeterminate",
+        is_pnl_complete=False,
+        net_profit_and_loss=Decimal("200.00"),
+        bundle_hash="b" * 64,
+        run_identity_hash="i2" * 32,
+        cost_model_hash="c" * 64,
+        protocol_hash="p" * 64,
+        session_keys=sessions[:2],
+    )
+
+    matrix = PortfolioCohortHarness.compute_correlation_matrix(
+        [r_complete, r_incomplete]
+    )
+    assert matrix["strat_complete"]["strat_complete"] == Decimal("1.0000")
+    assert matrix["strat_complete"]["strat_incomplete"] is None
+    assert matrix["strat_incomplete"]["strat_complete"] is None
+    assert matrix["strat_incomplete"]["strat_incomplete"] is None
+
+    # Ranking batch with both only includes the complete result
+    ranked = PortfolioCohortHarness.rank_results([r_complete, r_incomplete])
+    assert len(ranked) == 1
+    assert ranked[0].strategy_id == "strat_complete"
+
+    # Ranking batch with only incomplete result returns empty list
+    assert PortfolioCohortHarness.rank_results([r_incomplete]) == []
