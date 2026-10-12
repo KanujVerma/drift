@@ -4,7 +4,7 @@ Enforces non-negotiable position limits, gross exposure caps, drawdown stops,
 persistent kill switches, and order rate throttles prior to order submission.
 """
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
@@ -13,6 +13,7 @@ from drift.domain.evaluator_portfolio import (
     canonical_money,
     decimal_context,
 )
+from drift.domain.execution import OrderIntentV1, OrderSide
 from drift.domain.risk import (
     RiskPolicyV1,
     RiskVerdictStatus,
@@ -59,20 +60,34 @@ class HardRiskGatekeeper:
 
     def evaluate_order(
         self,
-        order: SimulatedOrderV1,
+        order: SimulatedOrderV1 | OrderIntentV1,
         *,
-        portfolio_state: PortfolioStateV2,
-        current_price: Decimal | None,
-        evaluation_time: datetime,
+        portfolio_state: PortfolioStateV2 | None = None,
+        current_price: Decimal | None = None,
+        evaluation_time: datetime | None = None,
     ) -> RiskVerdictV1:
         """Evaluate order against non-negotiable hard risk limits.
 
+        Accepts either SimulatedOrderV1 or OrderIntentV1.
         Returns RiskVerdictV1 and logs verdict into PersistentRiskJournal.
         """
+        order_id: UUID = (
+            order.order_id if isinstance(order, SimulatedOrderV1) else order.intent_id
+        )
+        side: str = (
+            order.side.value if isinstance(order.side, OrderSide) else order.side
+        )
+        if evaluation_time is None:
+            evaluation_time = getattr(order, "created_at", None) or datetime.now(UTC)
+
+        existing_verdict = self._journal.get_verdict_for_order(order_id)
+        if existing_verdict is not None:
+            return existing_verdict
+
         # 1. Persistent Kill Switch Latch Check
         if self._journal.is_kill_switch_tripped():
             return self._record_verdict(
-                order_id=order.order_id,
+                order_id=order_id,
                 status=RiskVerdictStatus.KILL_SWITCH_ACTIVE,
                 reason="emergency_kill_switch_is_active: trading halted",
                 evaluated_at=evaluation_time,
@@ -85,7 +100,7 @@ class HardRiskGatekeeper:
             or current_price <= Decimal("0")
         ):
             return self._record_verdict(
-                order_id=order.order_id,
+                order_id=order_id,
                 status=RiskVerdictStatus.REJECTED,
                 reason="indeterminate_market_price: fail closed on invalid price",
                 evaluated_at=evaluation_time,
@@ -96,7 +111,7 @@ class HardRiskGatekeeper:
         self._order_timestamps = [t for t in self._order_timestamps if t > cutoff]
         if len(self._order_timestamps) >= self._policy.max_orders_per_minute:
             return self._record_verdict(
-                order_id=order.order_id,
+                order_id=order_id,
                 status=RiskVerdictStatus.REJECTED,
                 reason=(
                     f"order_rate_limit_exceeded: maximum "
@@ -105,78 +120,81 @@ class HardRiskGatekeeper:
                 evaluated_at=evaluation_time,
             )
 
-        # 4. NAV & Drawdown Circuit Breakers
-        nav = portfolio_state.net_asset_value
-        if nav <= Decimal("0"):
-            self._journal.trip_kill_switch(
-                reason="portfolio_insolvency: NAV is non-positive",
-                tripped_at=evaluation_time,
-            )
-            return self._record_verdict(
-                order_id=order.order_id,
-                status=RiskVerdictStatus.KILL_SWITCH_ACTIVE,
-                reason="portfolio_insolvency: NAV is non-positive",
-                evaluated_at=evaluation_time,
-            )
-
-        with decimal_context():
-            if self._session_start_nav is None:
-                self._session_start_nav = nav
-            if nav > self._peak_nav:
-                self._peak_nav = nav
-
-            if self._current_session_key is None:
-                self._current_session_key = portfolio_state.session_key
-            elif self._current_session_key != portfolio_state.session_key:
-                self._session_start_nav = nav
-                self._current_session_key = portfolio_state.session_key
-
-            # Session Drawdown Check
-            if nav < self._session_start_nav:
-                loss = self._session_start_nav - nav
-                session_dd_bps = int((loss / self._session_start_nav) * BPS_DENOMINATOR)
-                if session_dd_bps >= self._policy.max_session_drawdown_basis_points:
-                    limit_bps = self._policy.max_session_drawdown_basis_points
-                    self._journal.trip_kill_switch(
-                        reason=(
-                            f"session_drawdown_breached: {session_dd_bps} bps >= "
-                            f"limit {limit_bps} bps"
-                        ),
-                        tripped_at=evaluation_time,
-                    )
-                    return self._record_verdict(
-                        order_id=order.order_id,
-                        status=RiskVerdictStatus.KILL_SWITCH_ACTIVE,
-                        reason="session_drawdown_breached: kill switch tripped",
-                        evaluated_at=evaluation_time,
-                    )
-
-            # Trailing Peak Drawdown Check
-            if nav < self._peak_nav:
-                trailing_loss = self._peak_nav - nav
-                trailing_dd_bps = int(
-                    (trailing_loss / self._peak_nav) * BPS_DENOMINATOR
+        # 4. NAV & Drawdown Circuit Breakers (evaluated if portfolio_state is provided)
+        if portfolio_state is not None:
+            nav = portfolio_state.net_asset_value
+            if nav <= Decimal("0"):
+                self._journal.trip_kill_switch(
+                    reason="portfolio_insolvency: NAV is non-positive",
+                    tripped_at=evaluation_time,
                 )
-                if trailing_dd_bps >= self._policy.max_trailing_drawdown_basis_points:
+                return self._record_verdict(
+                    order_id=order_id,
+                    status=RiskVerdictStatus.KILL_SWITCH_ACTIVE,
+                    reason="portfolio_insolvency: NAV is non-positive",
+                    evaluated_at=evaluation_time,
+                )
+
+            with decimal_context():
+                if self._session_start_nav is None:
+                    self._session_start_nav = nav
+                if nav > self._peak_nav:
+                    self._peak_nav = nav
+
+                if self._current_session_key is None:
+                    self._current_session_key = portfolio_state.session_key
+                elif self._current_session_key != portfolio_state.session_key:
+                    self._session_start_nav = nav
+                    self._current_session_key = portfolio_state.session_key
+
+                # Session Drawdown Check
+                if nav < self._session_start_nav:
+                    loss = self._session_start_nav - nav
+                    session_dd_bps = int(
+                        (loss / self._session_start_nav) * BPS_DENOMINATOR
+                    )
+                    if session_dd_bps >= self._policy.max_session_drawdown_basis_points:
+                        limit_bps = self._policy.max_session_drawdown_basis_points
+                        self._journal.trip_kill_switch(
+                            reason=(
+                                f"session_drawdown_breached: {session_dd_bps} bps >= "
+                                f"limit {limit_bps} bps"
+                            ),
+                            tripped_at=evaluation_time,
+                        )
+                        return self._record_verdict(
+                            order_id=order_id,
+                            status=RiskVerdictStatus.KILL_SWITCH_ACTIVE,
+                            reason="session_drawdown_breached: kill switch tripped",
+                            evaluated_at=evaluation_time,
+                        )
+
+                # Trailing Peak Drawdown Check
+                if nav < self._peak_nav:
+                    trailing_loss = self._peak_nav - nav
+                    trailing_dd_bps = int(
+                        (trailing_loss / self._peak_nav) * BPS_DENOMINATOR
+                    )
                     limit_tr = self._policy.max_trailing_drawdown_basis_points
-                    self._journal.trip_kill_switch(
-                        reason=(
-                            f"trailing_drawdown_breached: {trailing_dd_bps} bps >= "
-                            f"limit {limit_tr} bps"
-                        ),
-                        tripped_at=evaluation_time,
-                    )
-                    return self._record_verdict(
-                        order_id=order.order_id,
-                        status=RiskVerdictStatus.KILL_SWITCH_ACTIVE,
-                        reason="trailing_drawdown_breached: kill switch tripped",
-                        evaluated_at=evaluation_time,
-                    )
+                    if trailing_dd_bps >= limit_tr:
+                        self._journal.trip_kill_switch(
+                            reason=(
+                                f"trailing_drawdown_breached: {trailing_dd_bps} bps >= "
+                                f"limit {limit_tr} bps"
+                            ),
+                            tripped_at=evaluation_time,
+                        )
+                        return self._record_verdict(
+                            order_id=order_id,
+                            status=RiskVerdictStatus.KILL_SWITCH_ACTIVE,
+                            reason="trailing_drawdown_breached: kill switch tripped",
+                            evaluated_at=evaluation_time,
+                        )
 
         # 5. Order Size Limits
         if order.quantity > self._policy.max_order_quantity:
             return self._record_verdict(
-                order_id=order.order_id,
+                order_id=order_id,
                 status=RiskVerdictStatus.REJECTED,
                 reason=(
                     f"max_order_quantity_exceeded: requested {order.quantity} "
@@ -189,7 +207,7 @@ class HardRiskGatekeeper:
             order_notional = canonical_money(Decimal(order.quantity) * current_price)
         if order_notional > self._policy.max_order_notional:
             return self._record_verdict(
-                order_id=order.order_id,
+                order_id=order_id,
                 status=RiskVerdictStatus.REJECTED,
                 reason=(
                     f"max_order_notional_exceeded: order notional {order_notional} "
@@ -199,7 +217,8 @@ class HardRiskGatekeeper:
             )
 
         # 6. Position Concentration and Gross Exposure (for BUY orders)
-        if order.side == "buy":
+        if side == "buy" and portfolio_state is not None:
+            nav = portfolio_state.net_asset_value
             current_held = 0
             for h in portfolio_state.holdings:
                 if h.security_id == order.security_id:
@@ -211,7 +230,7 @@ class HardRiskGatekeeper:
                 proj_pos_notional = canonical_money(Decimal(proj_qty) * current_price)
                 if proj_pos_notional > self._policy.max_position_notional:
                     return self._record_verdict(
-                        order_id=order.order_id,
+                        order_id=order_id,
                         status=RiskVerdictStatus.REJECTED,
                         reason=(
                             f"max_position_notional_exceeded: {proj_pos_notional} "
@@ -224,7 +243,7 @@ class HardRiskGatekeeper:
                 limit_w = self._policy.max_position_weight_basis_points
                 if proj_weight_bps > limit_w:
                     return self._record_verdict(
-                        order_id=order.order_id,
+                        order_id=order_id,
                         status=RiskVerdictStatus.REJECTED,
                         reason=(
                             f"max_position_weight_exceeded: {proj_weight_bps} "
@@ -238,7 +257,7 @@ class HardRiskGatekeeper:
                 limit_g = self._policy.max_gross_exposure_basis_points
                 if proj_gross_bps > limit_g:
                     return self._record_verdict(
-                        order_id=order.order_id,
+                        order_id=order_id,
                         status=RiskVerdictStatus.REJECTED,
                         reason=(
                             f"max_gross_exposure_exceeded: {proj_gross_bps} "
@@ -250,10 +269,26 @@ class HardRiskGatekeeper:
         # 7. Allowed
         self._order_timestamps.append(evaluation_time)
         return self._record_verdict(
-            order_id=order.order_id,
+            order_id=order_id,
             status=RiskVerdictStatus.ALLOWED,
             reason=None,
             evaluated_at=evaluation_time,
+        )
+
+    def evaluate_intent(
+        self,
+        intent: OrderIntentV1,
+        *,
+        portfolio_state: PortfolioStateV2 | None = None,
+        current_price: Decimal | None = None,
+        evaluation_time: datetime | None = None,
+    ) -> RiskVerdictV1:
+        """Evaluate OrderIntentV1 against non-negotiable hard risk limits."""
+        return self.evaluate_order(
+            intent,
+            portfolio_state=portfolio_state,
+            current_price=current_price,
+            evaluation_time=evaluation_time,
         )
 
     def _record_verdict(

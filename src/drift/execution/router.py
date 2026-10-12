@@ -5,18 +5,24 @@ enforces intent idempotency via PersistentOrderIntentJournal, and audits all
 outbound intents and inbound execution reports.
 """
 
-from uuid import UUID
+from datetime import UTC, datetime
+from decimal import Decimal
+from uuid import UUID, uuid7
 
 from drift.domain.evaluator_portfolio import PortfolioStateV2
 from drift.domain.execution import (
     ExecutionReportV1,
+    ExecutionStatus,
     OrderIntentV1,
+    build_execution_report,
 )
+from drift.domain.risk import RiskVerdictStatus
 from drift.errors import DriftError
 from drift.execution.adapter import BrokerAdapterProtocol
 from drift.execution.journal import (
     PersistentOrderIntentJournal,
 )
+from drift.risk.gatekeeper import HardRiskGatekeeper
 
 __all__ = [
     "BrokerNeutralExecutionRouter",
@@ -46,9 +52,11 @@ class BrokerNeutralExecutionRouter:
         *,
         adapter: BrokerAdapterProtocol,
         journal: PersistentOrderIntentJournal,
+        risk_gatekeeper: HardRiskGatekeeper | None = None,
     ) -> None:
         self._adapter = adapter
         self._journal = journal
+        self._risk_gatekeeper = risk_gatekeeper
 
     @property
     def adapter(self) -> BrokerAdapterProtocol:
@@ -60,7 +68,17 @@ class BrokerNeutralExecutionRouter:
         """Underlying audit journal."""
         return self._journal
 
-    def route_intent(self, intent: OrderIntentV1) -> ExecutionReportV1:
+    @property
+    def risk_gatekeeper(self) -> HardRiskGatekeeper | None:
+        """Optional pre-execution hard risk gatekeeper."""
+        return self._risk_gatekeeper
+
+    def route_intent(
+        self,
+        intent: OrderIntentV1,
+        *,
+        current_price: Decimal | None = None,
+    ) -> ExecutionReportV1:
         """Route an order intent to the broker adapter with idempotency guarantees.
 
         If the client_order_id or intent_id has already been recorded:
@@ -70,6 +88,7 @@ class BrokerNeutralExecutionRouter:
           DuplicateClientOrderIdError.
         Otherwise:
         - Persists the outbound intent to the journal.
+        - Evaluates risk_gatekeeper if configured; returns REJECTED if disallowed.
         - Dispatches the intent to the broker adapter.
         - Persists the resulting execution report to the journal.
         - Returns the execution report.
@@ -111,8 +130,39 @@ class BrokerNeutralExecutionRouter:
                 self._journal.record_execution_report(adapter_rep)
                 return adapter_rep
 
-        # New intent: record to journal, dispatch, record report
+        # New intent: record to journal
         self._journal.record_intent(intent)
+
+        # Pre-execution hard risk gatekeeper evaluation
+        if self._risk_gatekeeper is not None:
+            eval_price = (
+                current_price if current_price is not None else intent.limit_price
+            )
+            verdict = self._risk_gatekeeper.evaluate_order(
+                intent,
+                current_price=eval_price,
+                evaluation_time=intent.created_at,
+            )
+            if verdict.status != RiskVerdictStatus.ALLOWED:
+                rejection_reason = (
+                    "risk_gatekeeper_halt: kill switch active"
+                    if verdict.status == RiskVerdictStatus.KILL_SWITCH_ACTIVE
+                    else f"risk_gatekeeper_rejection: {verdict.reason}"
+                )
+                rejected_report = build_execution_report(
+                    report_id=uuid7(),
+                    intent_id=intent.intent_id,
+                    broker_order_id=None,
+                    status=ExecutionStatus.REJECTED,
+                    cum_quantity=0,
+                    leaves_quantity=intent.quantity,
+                    rejection_reason=rejection_reason,
+                    reported_at=datetime.now(UTC),
+                )
+                self._journal.record_execution_report(rejected_report)
+                return rejected_report
+
+        # Dispatch to broker adapter
         report = self._adapter.submit_intent(intent)
         self._journal.record_execution_report(report)
         return report
