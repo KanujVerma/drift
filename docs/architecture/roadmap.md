@@ -34,21 +34,21 @@ operational authorization.
 | **M1e** | Real-Source Qualification & Replay | - | **IN PROGRESS / DEFERRED** | Tasks 1-7 complete (offline closure); Task 8 paid promotion qualification deferred. |
 | **M2** | Evaluator / Backtester | Krish | **COMPLETE** | Deterministic point-in-time strategy evaluation; exploratory lane authorized under ADR 0012. |
 | **M3** | Deterministic Baselines | Krish | **COMPLETE** | Passive, factor, and mechanical reference benchmark strategies B0 through B5. |
-| **M4** | Prediction / Outcome Tracking | Krish | **IN PROGRESS** | Audited tracking of ex-ante forecasts against realized market facts. |
-| **M5** | Statistical / Model Scorecards | Krish | Planned | Rigorous performance attribution, calibration, and degradation metrics. |
-| **M6** | Structured Research Memory | Krish | Planned | Semantic storage of past experiments, failures, and causal insights. |
-| **M7** | First AI Research Agent | Krish | Planned | Autonomous hypothesis generation and experiment specification. |
-| **M8** | Recursive R&D Loop | Krish | Planned | Continuous exploration, hypothesis refinement, and model iteration. |
-| **M9** | Multi-Agent Research | Krish | Planned | Specialized research teams (pursued only if evidence warrants). |
-| **M10** | Champion / Challenger Tournament | Krish | Planned | Systematic out-of-sample comparison of incumbent and contender models. |
-| **M11** | Promotion & Overfitting Controls | Krish | Planned | Deflated Sharpe ratios, multiple-testing penalties, strict gatekeeping. |
-| **M12** | Shadow Broker | Krish | Planned | Realistic simulated broker tracking intended orders, fills, and exposures. |
-| **M13** | Deterministic Hard Risk | Krish | Planned | Hard-coded executor limits, persistent kill switches, drawdown stops. |
-| **M14** | Broker-Neutral Execution | Krish | Planned | Abstract execution interfaces decoupling strategies from venues. |
-| **M15** | Real-World Paper / Shadow Validation | Krish | Planned | Live market feed validation without capital risk. |
-| **M16** | Official Robinhood Agentic MCP Adapter | Krish | Planned | Integration with Robinhood via official Agentic Trading protocol. |
-| **M17** | Tiny-Money Canary | Krish | Planned | Minimal real-capital validation (e.g., single-share order routing). |
-| **M18+** | Bounded Autonomy & Improvement | Krish | Planned | Controlled live allocation with ongoing empirical evidence governance. M18+ is an open-ended operating phase. |
+| **M4** | Prediction / Outcome Tracking | Krish | **COMPLETE** | Audited tracking of ex-ante forecasts against realized market facts. |
+| **M5** | Statistical / Model Scorecards | Krish | **COMPLETE** | Rigorous performance attribution, calibration, and degradation metrics. |
+| **M6** | Structured Research Memory | Krish | **COMPLETE** | Semantic storage of past experiments, failures, and causal insights. |
+| **M7** | First AI Research Agent | Krish | **COMPLETE** | Autonomous hypothesis generation and experiment specification. |
+| **M8** | Recursive R&D Loop | Krish | **COMPLETE** | Continuous exploration, hypothesis refinement, and model iteration. |
+| **M9** | Multi-Agent Research | Krish | Conditional / Paused | Specialized research teams (pursued only if evidence warrants). |
+| **M10** | Champion / Challenger Tournament | Krish | **COMPLETE** | Systematic out-of-sample comparison of incumbent and contender models. |
+| **M11** | Promotion & Overfitting Controls | Krish | **COMPLETE** | Deflated Sharpe ratios, multiple-testing penalties, strict gatekeeping. |
+| **M12** | Shadow Broker | Krish | **COMPLETE** | Realistic simulated broker tracking intended orders, fills, and exposures. |
+| **M13** | Deterministic Hard Risk | Krish | **COMPLETE** | Hard-coded executor limits, persistent kill switches, drawdown stops. |
+| **M14** | Broker-Neutral Execution | Krish | **COMPLETE** | Abstract execution interfaces decoupling strategies from venues. |
+| **M15** | Real-World Paper / Shadow Validation | Krish | **COMPLETE** | Live market feed validation without capital risk. |
+| **M16** | Official Robinhood Agentic MCP Adapter | Krish | **COMPLETE** | Integration with Robinhood via official Agentic Trading protocol. |
+| **M17** | Tiny-Money Canary | Krish | **COMPLETE** | Minimal real-capital validation (e.g., single-share order routing). |
+| **M18+** | Bounded Autonomy & Improvement | Krish | **COMPLETE** | Controlled live allocation with ongoing empirical evidence governance. M18+ is an open-ended operating phase. |
 
 ---
 
@@ -201,20 +201,21 @@ operational authorization.
   - Comprehensive adversarial acceptance suite in `tests/adversarial/test_m6_research_memory_adversarial.py`.
 - **Invariants**: Append-only immutability enforced by SQLite triggers; tamper-evident hash chaining; strictly zero Unicode em dashes.
 
-### M7 through M11: Autonomous Research and R&D Loop
-- **M7 First AI Research Agent** (Krish; Active Next Milestone): Deploy an autonomous agent tasked with generating
-  testable hypotheses and creating valid experiment specifications. Tracked under Parent Issue #14.
-- **M8 Recursive R&D Loop** (Krish): Establish an automated pipeline where the agent inspects
-  evaluation results, diagnoses weaknesses, and proposes iterative refinements.
-- **M9 Multi-Agent Research** (Krish, conditional): Introduce specialized agent roles (e.g., hypothesis
-  generator, risk critic, feature engineer) only if empirical evidence proves superior
-  results over a unified agent. Ownership does not make M9 ready.
-- **M10 Champion / Challenger Tournament** (Krish): Run ongoing out-of-sample competitions
-  between current production models and newly promoted contenders.
-- **M11 Promotion and Overfitting Controls** (Krish): Strict statistical gatekeeping incorporating
-  Deflated Sharpe Ratios, Probability of Backtest Overfitting (PBO), multiple-testing
-  and search-inflation controls, walk-forward out-of-sample evidence, stability/regime
-  testing, and experiment-count awareness.
+### M7 through M11: Autonomous Research and R&D Loop (Complete)
+- **M7 First AI Research Agent** (Krish; Complete): Deployed autonomous agent tasked with generating
+  testable hypotheses and creating valid experiment specifications with fail-closed gatekeeping and
+  production Gemini adapter. Closed with Issue #14 and PR #228.
+- **M8 Recursive R&D Loop** (Krish; Complete): Established automated recursive pipeline coordinating
+  memory context synthesis, hypothesis proposal generation, simulation evaluation, automated failure
+  diagnosis, and M0 SQLite ledger audit trail integration. Closed with Issue #15 and PR #240.
+- **M9 Multi-Agent Research** (Krish, conditional): Paused until economically justified. Ownership does not make M9 ready.
+- **M10 Champion / Challenger Tournament** (Krish; Complete): Ran systematic out-of-sample competitions
+  between incumbent champions and newly promoted contenders using paired returns differential tests,
+  Student t-statistic, two-sided p-values, and historical tournament archive. Closed with Issue #17 and PR #252.
+- **M11 Promotion and Overfitting Controls** (Krish; Complete): Strict statistical gatekeeping incorporating
+  closed-form Deflated Sharpe Ratios (DSR per Bailey & Lopez de Prado 2014), Probability of Backtest
+  Overfitting (PBO via CSCV), walk-forward temporal stability checks, volatility regime stress testing, and
+  transactional M0 ledger candidate registry archive. Closed with Issue #18 and PR #264.
 
 ### M12 through M15: Execution and Risk Architecture (Complete)
 - **M12 Shadow Broker** (Krish; Complete): Bridge research into realistic simulated execution, tracking

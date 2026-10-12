@@ -119,8 +119,12 @@ next READY issue in this workstream. If none exists, report blocked.
   (statistical and model scorecard kernel, predictive calibration,
   performance attribution, multiple-testing adjustments, composite
   scorecard generator, and adversarial acceptance suite), M6
-  (structured research memory archive and query kernel), M12
-  (shadow broker engine, execution simulation, and accounting reconciler),
+  (structured research memory archive and query kernel), M7
+  (first AI research agent, Gemini adapter, and adversarial acceptance suite),
+  M8 (recursive R&D loop controller, automated failure diagnosis, and audit archive),
+  M10 (champion / challenger tournament runner, statistical comparator, and archive),
+  M11 (promotion gatekeeper, DSR, PBO, walk-forward controls, and registry archive),
+  M12 (shadow broker engine, execution simulation, and accounting reconciler),
   M13 (deterministic hard risk gatekeeper, persistent kill switch, and harness),
   M14 (broker-neutral execution router, persistent order intent journal, and mock adapter),
   M15 (real-world paper / shadow validation engine, market feed streamer, and drift tracker),
@@ -128,8 +132,8 @@ next READY issue in this workstream. If none exists, report blocked.
   M17 (tiny-money canary layer, allocation gatekeeper, and settlement reconciler), and
   M18+ (bounded autonomy orchestrator, allocation governor, and audited evidence ledger).
 - **Sequencing State (ADR 0012)**: M1e Task 8 (promotion-grade real-source
-  qualification) is paused/deferred until economically justified. M7
-  (first AI research agent) is the active next milestone.
+  qualification) is paused/deferred until economically justified. M9
+  (multi-agent research) remains conditional.
   Exploratory evaluator and baseline development are authorized using
   free development data (Alpaca Basic).
 - **Ownership (ADR 0014)**: All remaining active roadmap implementation
