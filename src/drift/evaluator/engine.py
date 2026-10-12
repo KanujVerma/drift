@@ -2339,33 +2339,45 @@ class SessionEvaluatorEngine:
         state = self._corporate_actions.apply_intrasession_settlements(
             loop.state, self._evidence.economic_outcomes, session.session_key
         )
+        m1c_settled = tuple(sorted(set(state.settled_claim_ids) - before_settled))
+        if m1c_settled:
+            with decimal_context():
+                m1c_delivered = state.cash_balance - before_cash
+            loop.events.append(
+                ClaimSettledTraceEventV1(
+                    sequence=len(loop.events),
+                    session_index=index,
+                    session_key=session.session_key,
+                    claim_ids=m1c_settled,
+                    settled_cash=m1c_delivered,
+                )
+            )
         if self._exploratory_dividends is not None:
-            payable = tuple(
+            exploratory_payable = tuple(
                 claim.claim_id
                 for claim in state.pending_cash_claims
                 if claim.payable_session <= session.session_key.local_date
+                and self._exploratory_dividends.is_policy_claim(claim)
             )
-            if payable:
+            if exploratory_payable:
+                exp_before_cash = state.cash_balance
                 kernel = PortfolioAccountingKernel(
                     state, session_clock=self._bundle.session_clock
                 )
-                kernel.settle_claims(payable)
+                kernel.settle_claims(exploratory_payable)
                 state = kernel.state
+                with decimal_context():
+                    exp_delivered = state.cash_balance - exp_before_cash
+                loop.events.append(
+                    ClaimSettledTraceEventV1(
+                        sequence=len(loop.events),
+                        session_index=index,
+                        session_key=session.session_key,
+                        claim_ids=tuple(sorted(exploratory_payable)),
+                        settled_cash=exp_delivered,
+                    )
+                )
         loop.state = state
-        settled = tuple(sorted(set(state.settled_claim_ids) - before_settled))
-        if not settled:
-            return
-        with decimal_context():
-            delivered = state.cash_balance - before_cash
-        loop.events.append(
-            ClaimSettledTraceEventV1(
-                sequence=len(loop.events),
-                session_index=index,
-                session_key=session.session_key,
-                claim_ids=settled,
-                settled_cash=delivered,
-            )
-        )
 
     # -- phase 4: close mark -----------------------------------------------------
 

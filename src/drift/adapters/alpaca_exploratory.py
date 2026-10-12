@@ -942,6 +942,16 @@ _ACTION_GROUP_KINDS: dict[str, ActionKind] = {
 
 def _action_native_id(entry: Mapping[str, Any], group: str) -> str:
     """The provider's own identifier, or a content address when it prints none."""
+    provider_id = entry.get("id")
+    corporate_id = entry.get("corporate_action_id")
+    if (
+        provider_id is not None
+        and corporate_id is not None
+        and provider_id != corporate_id
+    ):
+        raise AlpacaBridgeIncompleteError(
+            f"a {group} row carries conflicting corporate action identifiers"
+        )
     for name in ("id", "corporate_action_id"):
         value = entry.get(name)
         if value is None:
@@ -1153,6 +1163,13 @@ def build_exploratory_dividends_from_alpaca(
         ExploratoryDividendPolicyV1,
     )
 
+    computed_sha256 = sha256(data).hexdigest()
+    if response_sha256 is not None and response_sha256 != computed_sha256:
+        raise AlpacaBridgeIncompleteError(
+            f"declared response hash mismatch: expected {computed_sha256}, "
+            f"got {response_sha256}"
+        )
+
     member_by_symbol = {m.symbol: m for m in members}
     parsed = parse_alpaca_cash_dividends(data)
     terms_list: list[ExploratoryCashDividendTermsV1] = []
@@ -1169,11 +1186,14 @@ def build_exploratory_dividends_from_alpaca(
                 ex_date=item.ex_date,
                 record_date=item.record_date,
                 payable_date=item.payable_date,
-                source_id="alpaca-exploratory-dividends",
-                response_sha256=response_sha256,
+                source_id=ALPACA_ACTION_SOURCE_ID,
+                response_sha256=computed_sha256,
             )
         )
-    return ExploratoryDividendPolicyV1(dividends=tuple(terms_list))
+    return ExploratoryDividendPolicyV1(
+        dividends=tuple(terms_list),
+        source_payloads=(data,),
+    )
 
 
 @dataclass(frozen=True, slots=True)

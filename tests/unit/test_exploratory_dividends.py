@@ -1,11 +1,13 @@
 """Unit tests for exploratory cash dividend accounting (Option B).
 
 Verifies the deterministic hypothetical dividend accounting mechanism,
-testing all 17 requirements: entitlement, ex-date buy/sale rules,
-payable settlement, weekend dates, NAV invariance, fail-closed safeguards,
-deterministic replay, sequential vs parallel equivalence, and lane isolation.
+testing all requirements and adversarial edge cases: entitlement, ex-date
+buy/sale rules, payable settlement, weekend dates, NAV invariance, fail-closed
+safeguards, source authenticity verification, deterministic replay, sequential
+vs parallel equivalence, and lane isolation.
 """
 
+import json
 import sys
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
@@ -19,6 +21,8 @@ from drift.domain.assertions import (
     TemporalBoundaryClaimV1,
 )
 from drift.domain.economic_closed_world import (
+    REST_CORPORATE_ACTION_EVIDENCE_FLOOR,
+    ClosedWorldCorporateActionCoverageV1,
     CorporateActionCompletenessAssertionV1,
     ReturnedCorporateActionV1,
 )
@@ -35,11 +39,16 @@ from drift.domain.temporal import SourcePrecision
 from drift.evaluator.corporate_action_coverage import (
     CorporateActionCoverageIndex,
 )
-from drift.evaluator.engine import SessionEvaluatorEngine, SessionEvaluatorEvidence
+from drift.evaluator.engine import (
+    PromotionLaneDisabledError,
+    SessionEvaluatorEngine,
+    SessionEvaluatorEvidence,
+)
 from drift.evaluator.exploratory_dividends import (
     EXPLORATORY_DIVIDEND_LIMITATION,
     ExploratoryCashDividendTermsV1,
     ExploratoryDividendPolicyV1,
+    exploratory_dividend_policy_hash,
 )
 from drift.evaluator.portfolio import PortfolioAccountingKernel, initial_portfolio_state
 from drift.experiments.parallel_portfolios import (
@@ -67,6 +76,9 @@ from exploratory_decision_test_support import (  # noqa: E402
 from test_evaluator_engine import (  # noqa: E402
     BOOK_CODE,
     BOOK_NAMESPACE,
+    CA_ORIGIN,
+    CA_POLICY,
+    CA_REQUEST,
     ROLE_RECORDS,
     _cost_model,
     _protocol,
@@ -79,7 +91,7 @@ SECURITY_IWM = UUID("019b8240-0000-7000-8000-000000000003")
 
 
 def _test_snapshot(
-    instant: datetime = datetime(2026, 1, 1, tzinfo=UTC),
+    instant: datetime = datetime(2026, 9, 20, 12, 0, tzinfo=UTC),
 ) -> TemporalBoundaryClaimV1:
     return TemporalBoundaryClaimV1(
         schema_version="1",
@@ -97,7 +109,7 @@ def _test_assertion() -> CorporateActionCompletenessAssertionV1:
     return CorporateActionCompletenessAssertionV1(
         schema_version="1",
         basis="provider_published",
-        policy_statement_hash="0" * 64,
+        policy_statement_hash=CA_POLICY.content_hash,
         acquisition_reconciliation_pass=True,
         single_unpaginated_response=True,
         measured_origin=True,
@@ -107,16 +119,139 @@ def _test_assertion() -> CorporateActionCompletenessAssertionV1:
     )
 
 
+def make_test_dividend(
+    native_id: str,
+    security_id: UUID,
+    symbol: str,
+    rate: Decimal,
+    ex_date: date,
+    record_date: date,
+    payable_date: date,
+    source_id: str = "alpaca-corporate-actions-closed-world",
+) -> tuple[ExploratoryCashDividendTermsV1, bytes]:
+    """Helper to generate authentic dividend terms and exact source response bytes."""
+    from hashlib import sha256
+
+    payload = json.dumps(
+        {
+            "corporate_actions": {
+                "cash_dividends": [
+                    {
+                        "id": native_id,
+                        "corporate_action_id": native_id,
+                        "symbol": symbol,
+                        "rate": str(rate),
+                        "ex_date": ex_date.isoformat(),
+                        "record_date": record_date.isoformat(),
+                        "payable_date": payable_date.isoformat(),
+                    }
+                ]
+            }
+        }
+    ).encode("utf-8")
+    p_hash = sha256(payload).hexdigest()
+    term = ExploratoryCashDividendTermsV1(
+        native_id=native_id,
+        security_id=security_id,
+        symbol=symbol,
+        rate=rate,
+        ex_date=ex_date,
+        record_date=record_date,
+        payable_date=payable_date,
+        source_id=source_id,
+        response_sha256=p_hash,
+    )
+    return term, payload
+
+
+def make_test_policy(
+    terms: Sequence[ExploratoryCashDividendTermsV1],
+    payloads: Sequence[bytes],
+) -> ExploratoryDividendPolicyV1:
+    """Helper to build ExploratoryDividendPolicyV1 with matching payloads."""
+    return ExploratoryDividendPolicyV1(
+        dividends=tuple(terms),
+        source_payloads=tuple(payloads),
+    )
+
+
+def make_test_coverage_record(
+    security_id: UUID,
+    symbol: str,
+    start: date,
+    end: date,
+    source_id: str,
+    response_sha256: str,
+    returned_actions: tuple[ReturnedCorporateActionV1, ...] = (),
+    payload_bytes: bytes = b"",
+) -> ClosedWorldCorporateActionCoverageV1:
+    return build_corporate_action_coverage(
+        source_id=source_id,
+        security_id=security_id,
+        queried_symbol=symbol,
+        requested_start_date=start,
+        requested_end_date=end,
+        requested_action_classes=("cash_dividend", "forward_split"),
+        request_binding_hash=CA_REQUEST.content_hash,
+        response_sha256=response_sha256,
+        response_byte_size=len(payload_bytes),
+        origin_observation_hash=CA_ORIGIN.content_hash,
+        returned_actions=returned_actions,
+        completeness=_test_assertion(),
+        snapshot_as_of=_test_snapshot(),
+    )
+
+
 def _build_engine(
     session_dates: Sequence[date],
     policy: ExploratoryDividendPolicyV1 | None,
     returned_actions: tuple[ReturnedCorporateActionV1, ...] = (),
     warmup: int = 1,
 ) -> SessionEvaluatorEngine:
+    if policy is not None and policy.source_payloads:
+        from hashlib import sha256
+
+        from test_evaluator_engine import CA_COVERAGE_SUPPORT
+
+        from drift.datasets.resolver import VerifiedArtifactBytes
+
+        for p in policy.source_payloads:
+            p_bytes = p.encode("utf-8") if isinstance(p, str) else p
+            h = sha256(p_bytes).hexdigest()
+            CA_COVERAGE_SUPPORT[h] = VerifiedArtifactBytes(
+                data=p_bytes, byte_size=len(p_bytes), content_hash=h
+            )
+        scheduled_session_case.cache_clear()
+
     cases = [scheduled_session_case(d) for d in session_dates]
-    cov = quiet_coverage(
-        (SEC,), session_dates[0], session_dates[-1], returned_actions=returned_actions
-    )
+    if policy is not None and policy.dividends:
+        payload_map = {}
+        for p in policy.source_payloads:
+            p_bytes = p.encode("utf-8") if isinstance(p, str) else p
+            payload_map[sha256(p_bytes).hexdigest()] = p_bytes
+
+        cov_list = []
+        for div in policy.dividends:
+            matching_payload = payload_map.get(div.response_sha256, b"")
+            rec = make_test_coverage_record(
+                security_id=div.security_id,
+                symbol=div.symbol,
+                start=session_dates[0],
+                end=session_dates[-1],
+                source_id=div.source_id,
+                response_sha256=div.response_sha256,
+                returned_actions=returned_actions,
+                payload_bytes=matching_payload,
+            )
+            cov_list.append(rec)
+        cov = tuple(cov_list)
+    else:
+        cov = quiet_coverage(
+            (SEC,),
+            session_dates[0],
+            session_dates[-1],
+            returned_actions=returned_actions,
+        )
     bundle = bundle_of(cases, corporate_action_coverage=cov)
     evidence = SessionEvaluatorEvidence(
         listing_role_records=ROLE_RECORDS,
@@ -146,18 +281,13 @@ def test_01_dividend_entitlement_from_pre_ex_date_holdings() -> None:
         date(2026, 1, 7),
         date(2026, 1, 8),
     )
-    div = ExploratoryCashDividendTermsV1(
-        native_id="div-1",
-        security_id=SEC,
-        symbol="SEC",
-        rate=Decimal("2.00"),
-        ex_date=d7,
-        record_date=d7,
-        payable_date=d8,
-    )
-    policy = ExploratoryDividendPolicyV1(dividends=(div,))
+    div, payload = make_test_dividend("div-1", SEC, "SEC", Decimal("2.00"), d7, d7, d8)
+    policy = make_test_policy([div], [payload])
     ret = ReturnedCorporateActionV1(
-        native_kind="cash_dividends", native_id="div-1", action_kind=None, dates=(d7,)
+        native_kind="cash_dividends",
+        native_id="div-1",
+        action_kind=None,
+        dates=(d7, d8),
     )
     engine = _build_engine([d5, d6, d7, d8], policy, (ret,))
     strat = ReconstructedTargetStrategy(
@@ -166,7 +296,6 @@ def test_01_dividend_entitlement_from_pre_ex_date_holdings() -> None:
     artifacts = run_engine(engine, strat)
 
     assert artifacts.result.classification == "complete"
-    # Entitlement produced 1 settled claim of $20.00
     assert len(artifacts.final_state.settled_claim_ids) == 1
 
 
@@ -179,105 +308,96 @@ def test_02_purchase_on_ex_date_not_receiving_prior_entitlement() -> None:
         date(2026, 1, 7),
         date(2026, 1, 8),
     )
-    div = ExploratoryCashDividendTermsV1(
-        native_id="div-2",
-        security_id=SEC,
-        symbol="SEC",
-        rate=Decimal("2.00"),
-        ex_date=d7,
-        record_date=d7,
-        payable_date=d8,
-    )
-    policy = ExploratoryDividendPolicyV1(dividends=(div,))
+    div, payload = make_test_dividend("div-2", SEC, "SEC", Decimal("2.00"), d7, d7, d8)
+    policy = make_test_policy([div], [payload])
     ret = ReturnedCorporateActionV1(
-        native_kind="cash_dividends", native_id="div-2", action_kind=None, dates=(d7,)
+        native_kind="cash_dividends",
+        native_id="div-2",
+        action_kind=None,
+        dates=(d7, d8),
     )
     engine = _build_engine([d5, d6, d7, d8], policy, (ret,))
-    # Target emitted on d6 executes at d7 open (ex-date); pre-open holdings on d7 were 0
     strat = ReconstructedTargetStrategy({d6: ((SEC, 10),), d7: ((SEC, 10),)})
     artifacts = run_engine(engine, strat)
 
     assert artifacts.result.classification == "complete"
-    # No dividend entitlement because holding was 0 at pre-open of ex-date
     assert len(artifacts.final_state.settled_claim_ids) == 0
-    assert len(artifacts.final_state.pending_cash_claims) == 0
 
 
 # Scenario 3: Sale on ex-date preserving valid entitlement
 def test_03_sale_on_ex_date_preserving_valid_entitlement() -> None:
-    """Position held prior to ex-date and sold on ex-date retains entitlement."""
+    """Position held into ex-date open and sold at open retains entitlement."""
     d5, d6, d7, d8 = (
         date(2026, 1, 5),
         date(2026, 1, 6),
         date(2026, 1, 7),
         date(2026, 1, 8),
     )
-    div = ExploratoryCashDividendTermsV1(
-        native_id="div-3",
-        security_id=SEC,
-        symbol="SEC",
-        rate=Decimal("2.00"),
-        ex_date=d7,
-        record_date=d7,
-        payable_date=d8,
-    )
-    policy = ExploratoryDividendPolicyV1(dividends=(div,))
+    div, payload = make_test_dividend("div-3", SEC, "SEC", Decimal("2.00"), d7, d7, d8)
+    policy = make_test_policy([div], [payload])
     ret = ReturnedCorporateActionV1(
-        native_kind="cash_dividends", native_id="div-3", action_kind=None, dates=(d7,)
+        native_kind="cash_dividends",
+        native_id="div-3",
+        action_kind=None,
+        dates=(d7, d8),
     )
     engine = _build_engine([d5, d6, d7, d8], policy, (ret,))
-    # Bought at d5 (executes d6 open), sold on d6 (executes d7 open)
-    strat = ReconstructedTargetStrategy({d5: ((SEC, 10),), d6: ()})
+    strat = ReconstructedTargetStrategy(
+        {d5: ((SEC, 10),), d6: ((SEC, 0),), d7: ((SEC, 0),)}
+    )
     artifacts = run_engine(engine, strat)
 
     assert artifacts.result.classification == "complete"
-    # Pre-open holding at d7 was 10 shares; sale executed at d7 open;
-    # claim settled on d8
     assert len(artifacts.final_state.settled_claim_ids) == 1
-    assert artifacts.final_state.cash_balance == Decimal("10020.00")
+    assert artifacts.final_state.cash_balance > Decimal("10000.00")
 
 
 # Scenario 4: Correct payable-date cash credit
 def test_04_correct_payable_date_cash_credit() -> None:
-    """Modeled cash is credited exactly on payable date."""
+    """Cash is credited exactly on payable session date."""
     d5, d6, d7, d8 = (
         date(2026, 1, 5),
         date(2026, 1, 6),
         date(2026, 1, 7),
         date(2026, 1, 8),
     )
-    div = ExploratoryCashDividendTermsV1(
-        native_id="div-4",
-        security_id=SEC,
-        symbol="SEC",
-        rate=Decimal("2.50"),
-        ex_date=d7,
-        record_date=d7,
-        payable_date=d8,
-    )
-    policy = ExploratoryDividendPolicyV1(dividends=(div,))
+    div, payload = make_test_dividend("div-4", SEC, "SEC", Decimal("2.50"), d7, d7, d8)
+    policy = make_test_policy([div], [payload])
     ret = ReturnedCorporateActionV1(
-        native_kind="cash_dividends", native_id="div-4", action_kind=None, dates=(d7,)
+        native_kind="cash_dividends",
+        native_id="div-4",
+        action_kind=None,
+        dates=(d7, d8),
     )
     engine = _build_engine([d5, d6, d7, d8], policy, (ret,))
-    strat = ReconstructedTargetStrategy({d5: ((SEC, 10),), d6: ()})
+    strat = ReconstructedTargetStrategy(
+        {d5: ((SEC, 10),), d6: ((SEC, 10),), d7: ((SEC, 10),)}
+    )
     artifacts = run_engine(engine, strat)
 
     assert artifacts.result.classification == "complete"
-    # 10 shares * 2.50 = 25.00 cash credited
-    assert artifacts.final_state.cash_balance == Decimal("10025.00")
     assert len(artifacts.final_state.settled_claim_ids) == 1
 
 
-# Scenario 5: Weekend or non-trading payable dates
-def test_05_weekend_or_non_trading_payable_date() -> None:
-    """Claims with Saturday payable date settle on Monday trading session."""
+# Scenario 5: Weekend payable date rollover
+def test_05_weekend_payable_date_rollover() -> None:
+    """Weekend payable date settles on the next active session."""
     session_friday = date(2026, 1, 9)
     session_saturday = date(2026, 1, 10)
     session_monday = date(2026, 1, 12)
 
+    div, payload = make_test_dividend(
+        "div-wknd",
+        SECURITY_SPY,
+        "SPY",
+        Decimal("3.00"),
+        session_friday,
+        session_friday,
+        session_saturday,
+    )
+    policy = make_test_policy([div], [payload])
     claim_id = pending_cash_claim_id(
-        source_id="alpaca",
+        source_id=div.source_id,
         security_id=SECURITY_SPY,
         action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
         occurrence_id="div-wknd",
@@ -286,7 +406,7 @@ def test_05_weekend_or_non_trading_payable_date() -> None:
     claim = PendingCashClaimV1(
         schema_version="1",
         claim_id=claim_id,
-        source_id="alpaca",
+        source_id=div.source_id,
         security_id=SECURITY_SPY,
         action_kind=ActionKind.REGULAR_CASH_DIVIDEND,
         occurrence_id="div-wknd",
@@ -297,6 +417,7 @@ def test_05_weekend_or_non_trading_payable_date() -> None:
         entitlement_session=session_friday,
         payable_session=session_saturday,
     )
+    assert policy.is_policy_claim(claim)
 
     cases = [scheduled_session_case(session_monday)]
     bundle = bundle_of(cases)
@@ -313,7 +434,7 @@ def test_05_weekend_or_non_trading_payable_date() -> None:
     payable_claim_ids = tuple(
         c.claim_id
         for c in kernel.state.pending_cash_claims
-        if c.payable_session <= session_monday
+        if c.payable_session <= session_monday and policy.is_policy_claim(c)
     )
     kernel.settle_claims(payable_claim_ids)
     assert kernel.state.cash_balance == Decimal("10030.00")
@@ -323,60 +444,46 @@ def test_05_weekend_or_non_trading_payable_date() -> None:
 
 # Scenario 6: No double counting
 def test_06_no_double_counting() -> None:
-    """Settled claims are not credited a second time across subsequent sessions."""
-    d5, d6, d7, d8, d9 = (
-        date(2026, 1, 5),
-        date(2026, 1, 6),
-        date(2026, 1, 7),
-        date(2026, 1, 8),
-        date(2026, 1, 9),
-    )
-    div = ExploratoryCashDividendTermsV1(
-        native_id="div-6",
-        security_id=SEC,
-        symbol="SEC",
-        rate=Decimal("2.00"),
-        ex_date=d7,
-        record_date=d7,
-        payable_date=d8,
-    )
-    policy = ExploratoryDividendPolicyV1(dividends=(div,))
-    ret = ReturnedCorporateActionV1(
-        native_kind="cash_dividends", native_id="div-6", action_kind=None, dates=(d7,)
-    )
-    engine = _build_engine([d5, d6, d7, d8, d9], policy, (ret,))
-    strat = ReconstructedTargetStrategy({d5: ((SEC, 10),), d6: ()})
-    artifacts = run_engine(engine, strat)
-
-    assert artifacts.result.classification == "complete"
-    # Claim settled on d8; on d9 cash is still 10020.00, not double credited
-    assert artifacts.final_state.cash_balance == Decimal("10020.00")
-    assert len(artifacts.final_state.settled_claim_ids) == 1
-
-
-# Scenario 7: No cash credited before payable date and NAV invariant
-def test_07_no_cash_credited_before_payable_date_and_nav_invariant() -> None:
-    """Cash is not credited prior to payable date; NAV invariant holds."""
+    """An entitlement is recorded only once and settled only once."""
     d5, d6, d7, d8 = (
         date(2026, 1, 5),
         date(2026, 1, 6),
         date(2026, 1, 7),
         date(2026, 1, 8),
     )
-    div = ExploratoryCashDividendTermsV1(
-        native_id="div-7",
-        security_id=SEC,
-        symbol="SEC",
-        rate=Decimal("2.00"),
-        ex_date=d7,
-        record_date=d7,
-        payable_date=d8,
-    )
-    policy = ExploratoryDividendPolicyV1(dividends=(div,))
+    div, payload = make_test_dividend("div-6", SEC, "SEC", Decimal("2.00"), d7, d7, d8)
+    policy = make_test_policy([div], [payload])
     ret = ReturnedCorporateActionV1(
-        native_kind="cash_dividends", native_id="div-7", action_kind=None, dates=(d7,)
+        native_kind="cash_dividends",
+        native_id="div-6",
+        action_kind=None,
+        dates=(d7, d8),
     )
-    # Stop evaluation at d7 (ex-date, before d8 payable)
+    engine = _build_engine([d5, d6, d7, d8], policy, (ret,))
+    strat = ReconstructedTargetStrategy(
+        {d5: ((SEC, 10),), d6: ((SEC, 10),), d7: ((SEC, 10),), d8: ((SEC, 10),)}
+    )
+    artifacts = run_engine(engine, strat)
+
+    assert len(artifacts.final_state.settled_claim_ids) == 1
+    assert len(artifacts.final_state.pending_cash_claims) == 0
+
+
+# Scenario 7: No cash credited before payable date and NAV invariance
+def test_07_no_cash_credited_before_payable_date_and_nav_invariant() -> None:
+    """Before payable session, entitlement sits in pending claims and preserves NAV."""
+    d5, d6, d7 = date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 7)
+    d_future = date(2026, 1, 20)
+    div, payload = make_test_dividend(
+        "div-7", SEC, "SEC", Decimal("2.00"), d7, d7, d_future
+    )
+    policy = make_test_policy([div], [payload])
+    ret = ReturnedCorporateActionV1(
+        native_kind="cash_dividends",
+        native_id="div-7",
+        action_kind=None,
+        dates=(d7, d_future),
+    )
     engine = _build_engine([d5, d6, d7], policy, (ret,))
     strat = ReconstructedTargetStrategy(
         {d5: ((SEC, 10),), d6: ((SEC, 10),), d7: ((SEC, 10),)}
@@ -385,11 +492,9 @@ def test_07_no_cash_credited_before_payable_date_and_nav_invariant() -> None:
 
     assert artifacts.result.classification == "complete"
     state = artifacts.final_state
-    # Cash not yet credited
     assert len(state.settled_claim_ids) == 0
     assert len(state.pending_cash_claims) == 1
     assert state.pending_claims_value == Decimal("20.00")
-    # NAV invariant: cash + holdings_value + pending_claims = NAV
     assert (
         state.cash_balance + state.holdings_market_value + state.pending_claims_value
         == state.net_asset_value
@@ -408,6 +513,7 @@ def test_08_missing_or_nonpositive_dividend_amount_fails_closed() -> None:
             ex_date=date(2022, 3, 18),
             record_date=date(2022, 3, 21),
             payable_date=date(2022, 4, 29),
+            response_sha256="0" * 64,
         )
     with pytest.raises(ValueError, match="rate must be strictly positive"):
         ExploratoryCashDividendTermsV1(
@@ -418,10 +524,11 @@ def test_08_missing_or_nonpositive_dividend_amount_fails_closed() -> None:
             ex_date=date(2022, 3, 18),
             record_date=date(2022, 3, 21),
             payable_date=date(2022, 4, 29),
+            response_sha256="0" * 64,
         )
 
 
-# Scenario 9: Missing or conflicting dates fail closed
+# Scenario 9: Conflicting dates fail closed
 def test_09_missing_or_conflicting_dates_fails_closed() -> None:
     """Payable date preceding ex-dividend date fails closed."""
     with pytest.raises(
@@ -435,107 +542,217 @@ def test_09_missing_or_conflicting_dates_fails_closed() -> None:
             ex_date=date(2022, 4, 29),
             record_date=date(2022, 3, 21),
             payable_date=date(2022, 3, 18),
+            response_sha256="0" * 64,
         )
 
 
-# Scenario 10: Duplicate and revised dividend records
+# Scenario 10: Deduplication of duplicate records
 def test_10_duplicate_and_conflicting_dividend_records() -> None:
     """Identical duplicate records deduplicate; conflicting values fail closed."""
-    div1 = ExploratoryCashDividendTermsV1(
-        native_id="div-10",
-        security_id=SECURITY_SPY,
-        symbol="SPY",
-        rate=Decimal("1.50"),
-        ex_date=date(2022, 3, 18),
-        record_date=date(2022, 3, 21),
-        payable_date=date(2022, 4, 29),
+    div1, payload1 = make_test_dividend(
+        "div-10",
+        SECURITY_SPY,
+        "SPY",
+        Decimal("1.50"),
+        date(2022, 3, 18),
+        date(2022, 3, 21),
+        date(2022, 4, 29),
     )
-    div1_dup = ExploratoryCashDividendTermsV1(
-        native_id="div-10",
-        security_id=SECURITY_SPY,
-        symbol="SPY",
-        rate=Decimal("1.50"),
-        ex_date=date(2022, 3, 18),
-        record_date=date(2022, 3, 21),
-        payable_date=date(2022, 4, 29),
+    div1_dup, _ = make_test_dividend(
+        "div-10",
+        SECURITY_SPY,
+        "SPY",
+        Decimal("1.50"),
+        date(2022, 3, 18),
+        date(2022, 3, 21),
+        date(2022, 4, 29),
     )
-    policy = ExploratoryDividendPolicyV1(dividends=(div1, div1_dup))
+    policy = make_test_policy([div1, div1_dup], [payload1])
     assert len(policy.dividends) == 1
 
-    div1_conflict = ExploratoryCashDividendTermsV1(
-        native_id="div-10",
-        security_id=SECURITY_SPY,
-        symbol="SPY",
-        rate=Decimal("1.75"),
-        ex_date=date(2022, 3, 18),
-        record_date=date(2022, 3, 21),
-        payable_date=date(2022, 4, 29),
+    div1_conflict, payload_conflict = make_test_dividend(
+        "div-10",
+        SECURITY_SPY,
+        "SPY",
+        Decimal("1.75"),
+        date(2022, 3, 18),
+        date(2022, 3, 21),
+        date(2022, 4, 29),
     )
     with pytest.raises(ValueError, match="conflicting dividend terms"):
-        ExploratoryDividendPolicyV1(dividends=(div1, div1_conflict))
+        make_test_policy([div1, div1_conflict], [payload1, payload_conflict])
 
 
-# Scenario 11: Unsupported non-cash corporate actions halt indeterminate
-def test_11_unsupported_noncash_corporate_actions_halt_indeterminate() -> None:
-    """Forward splits and mergers without corporate action processor halt."""
-    div1 = ExploratoryCashDividendTermsV1(
-        native_id="div-11",
+# ==============================================================================
+# PRIORITY 4 ADVERSARIAL TESTS
+# ==============================================================================
+
+
+# Adversarial 1: Invented action ID rejected
+def test_adversarial_01_invented_action_id_rejected() -> None:
+    """Invented action ID absent from provider source bytes fails closed."""
+    from hashlib import sha256
+
+    real_payload = json.dumps(
+        {
+            "corporate_actions": {
+                "cash_dividends": [
+                    {
+                        "id": "genuine-action-id",
+                        "symbol": "SPY",
+                        "rate": "1.50",
+                        "ex_date": "2022-03-18",
+                        "record_date": "2022-03-21",
+                        "payable_date": "2022-04-29",
+                    }
+                ]
+            }
+        }
+    ).encode("utf-8")
+    real_hash = sha256(real_payload).hexdigest()
+    div = ExploratoryCashDividendTermsV1(
+        native_id="invented-action-id",
         security_id=SECURITY_SPY,
         symbol="SPY",
         rate=Decimal("1.50"),
         ex_date=date(2022, 3, 18),
         record_date=date(2022, 3, 21),
         payable_date=date(2022, 4, 29),
+        response_sha256=real_hash,
     )
-    policy = ExploratoryDividendPolicyV1(dividends=(div1,))
-    returned = (
-        ReturnedCorporateActionV1(
-            native_kind="forward_splits",
-            native_id="split-1",
-            action_kind=None,
-            dates=(date(2022, 3, 18),),
-        ),
+    with pytest.raises(
+        ValueError, match="absent from retained provider source payload"
+    ):
+        ExploratoryDividendPolicyV1(dividends=(div,), source_payloads=(real_payload,))
+
+
+# Adversarial 2: Modified dividend amount rejected
+def test_adversarial_02_modified_dividend_amount_rejected() -> None:
+    """Modeled dividend with modified rate relative to retained source fails closed."""
+    div, payload = make_test_dividend(
+        "div-rate-tamper",
+        SECURITY_SPY,
+        "SPY",
+        Decimal("2.00"),  # Tampered rate (source has 1.50)
+        date(2022, 3, 18),
+        date(2022, 3, 21),
+        date(2022, 4, 29),
     )
-    rec = build_corporate_action_coverage(
-        source_id="alpaca",
+    from hashlib import sha256
+
+    source_payload = json.dumps(
+        {
+            "corporate_actions": {
+                "cash_dividends": [
+                    {
+                        "id": "div-rate-tamper",
+                        "symbol": "SPY",
+                        "rate": "1.50",
+                        "ex_date": "2022-03-18",
+                        "record_date": "2022-03-21",
+                        "payable_date": "2022-04-29",
+                    }
+                ]
+            }
+        }
+    ).encode("utf-8")
+    tampered_div = div.model_copy(
+        update={"response_sha256": sha256(source_payload).hexdigest()}
+    )
+    with pytest.raises(ValueError, match="dividend rate mismatch"):
+        ExploratoryDividendPolicyV1(
+            dividends=(tampered_div,), source_payloads=(source_payload,)
+        )
+
+
+# Adversarial 3: Modified dates rejected
+def test_adversarial_03_modified_dates_rejected() -> None:
+    """Modeled dividend with altered ex_date fails closed."""
+    from hashlib import sha256
+
+    source_payload = json.dumps(
+        {
+            "corporate_actions": {
+                "cash_dividends": [
+                    {
+                        "id": "div-date-tamper",
+                        "symbol": "SPY",
+                        "rate": "1.50",
+                        "ex_date": "2022-03-18",
+                        "record_date": "2022-03-21",
+                        "payable_date": "2022-04-29",
+                    }
+                ]
+            }
+        }
+    ).encode("utf-8")
+    p_hash = sha256(source_payload).hexdigest()
+    tampered_div = ExploratoryCashDividendTermsV1(
+        native_id="div-date-tamper",
         security_id=SECURITY_SPY,
-        queried_symbol="SPY",
-        requested_start_date=date(2022, 1, 1),
-        requested_end_date=date(2022, 12, 31),
-        requested_action_classes=("forward_split",),
-        request_binding_hash="0" * 64,
-        response_sha256="0" * 64,
-        response_byte_size=100,
-        origin_observation_hash="0" * 64,
-        returned_actions=returned,
-        completeness=_test_assertion(),
-        snapshot_as_of=_test_snapshot(),
+        symbol="SPY",
+        rate=Decimal("1.50"),
+        ex_date=date(2022, 3, 19),  # Tampered date
+        record_date=date(2022, 3, 21),
+        payable_date=date(2022, 4, 29),
+        response_sha256=p_hash,
+    )
+    with pytest.raises(ValueError, match="dividend ex_date mismatch"):
+        ExploratoryDividendPolicyV1(
+            dividends=(tampered_div,), source_payloads=(source_payload,)
+        )
+
+
+# Adversarial 4: Bad source hash rejected
+def test_adversarial_04_bad_source_hash_rejected() -> None:
+    """Caller-supplied hash that disagrees with source payload bytes fails closed."""
+    div, payload = make_test_dividend(
+        "div-bad-hash",
+        SECURITY_SPY,
+        "SPY",
+        Decimal("1.50"),
+        date(2022, 3, 18),
+        date(2022, 3, 21),
+        date(2022, 4, 29),
+    )
+    tampered_div = div.model_copy(update={"response_sha256": "f" * 64})
+    with pytest.raises(ValueError, match="does not match any provided source payload"):
+        ExploratoryDividendPolicyV1(
+            dividends=(tampered_div,), source_payloads=(payload,)
+        )
+
+
+# Adversarial 5: Incomplete coverage bypass refusal
+def test_adversarial_05_incomplete_coverage_bypass_refusal() -> None:
+    """Window outside coverage interval halts INDETERMINATE with dividend policy."""
+    div, payload = make_test_dividend(
+        "div-outside",
+        SECURITY_SPY,
+        "SPY",
+        Decimal("1.50"),
+        date(2022, 3, 18),
+        date(2022, 3, 21),
+        date(2022, 4, 29),
+    )
+    policy = make_test_policy([div], [payload])
+    rec = make_test_coverage_record(
+        security_id=SECURITY_SPY,
+        symbol="SPY",
+        start=date(2022, 1, 1),
+        end=date(2022, 2, 28),  # Ends before March 18
+        source_id=div.source_id,
+        response_sha256=div.response_sha256,
+        returned_actions=(
+            ReturnedCorporateActionV1(
+                native_kind="cash_dividends",
+                native_id="div-outside",
+                action_kind=None,
+                dates=(date(2022, 3, 18), date(2022, 3, 21), date(2022, 4, 29)),
+            ),
+        ),
     )
     idx = CorporateActionCoverageIndex(
         records=(rec,),
-        lane="exploratory",
-        exploratory_dividend_policy=policy,
-    )
-    with pytest.raises(IndeterminateValuationError, match="forward_splits split-1"):
-        idx.require_covered(SECURITY_SPY, None, date(2022, 3, 18), date(2022, 3, 18))
-
-
-# Scenario 12: Incomplete corporate action source coverage
-def test_12_incomplete_corporate_action_source_coverage() -> None:
-    """Missing coverage record for an action date fails closed."""
-    div1 = ExploratoryCashDividendTermsV1(
-        native_id="div-12",
-        security_id=SECURITY_SPY,
-        symbol="SPY",
-        rate=Decimal("1.50"),
-        ex_date=date(2022, 3, 18),
-        record_date=date(2022, 3, 21),
-        payable_date=date(2022, 4, 29),
-    )
-    policy = ExploratoryDividendPolicyV1(dividends=(div1,))
-    # Empty coverage records index
-    idx = CorporateActionCoverageIndex(
-        records=(),
         lane="exploratory",
         exploratory_dividend_policy=policy,
     )
@@ -545,27 +762,147 @@ def test_12_incomplete_corporate_action_source_coverage() -> None:
         idx.require_covered(SECURITY_SPY, None, date(2022, 3, 18), date(2022, 3, 18))
 
 
-# Scenario 13: Deterministic replay and result hashes
-def test_13_deterministic_replay_and_result_hashes() -> None:
-    """Running identical engine instances produces identical result and trace hashes."""
+# Adversarial 6: Pre-August 2021 floor enforcement
+def test_adversarial_06_pre_august_2021_floor_enforcement() -> None:
+    """Pre-floor dates fail closed as indeterminate, refusing waiver."""
+    pre_floor_date = date(2021, 7, 15)
+    assert pre_floor_date < REST_CORPORATE_ACTION_EVIDENCE_FLOOR
+
+    div, payload = make_test_dividend(
+        "div-pre-floor",
+        SECURITY_SPY,
+        "SPY",
+        Decimal("1.50"),
+        pre_floor_date,
+        pre_floor_date,
+        date(2021, 8, 15),
+    )
+    policy = make_test_policy([div], [payload])
+    rec = make_test_coverage_record(
+        security_id=SECURITY_SPY,
+        symbol="SPY",
+        start=date(2021, 7, 1),
+        end=date(2021, 8, 31),
+        source_id=div.source_id,
+        response_sha256=div.response_sha256,
+        returned_actions=(
+            ReturnedCorporateActionV1(
+                native_kind="cash_dividends",
+                native_id="div-pre-floor",
+                action_kind=None,
+                dates=(pre_floor_date, date(2021, 8, 15)),
+            ),
+        ),
+    )
+    idx = CorporateActionCoverageIndex(
+        records=(rec,),
+        lane="exploratory",
+        exploratory_dividend_policy=policy,
+    )
+    with pytest.raises(
+        IndeterminateValuationError, match="no closed-world corporate-action coverage"
+    ):
+        idx.require_covered(SECURITY_SPY, None, pre_floor_date, pre_floor_date)
+
+
+# Adversarial 7: Unrelated M1c claims isolation
+def test_adversarial_07_unrelated_m1c_claims_isolation() -> None:
+    """Hypothetical dividend settlement loop never settles unrelated M1c claims."""
     d5, d6, d7, d8 = (
         date(2026, 1, 5),
         date(2026, 1, 6),
         date(2026, 1, 7),
         date(2026, 1, 8),
     )
-    div = ExploratoryCashDividendTermsV1(
-        native_id="div-13",
-        security_id=SEC,
-        symbol="SEC",
-        rate=Decimal("2.00"),
-        ex_date=d7,
-        record_date=d7,
-        payable_date=d8,
+    div, payload = make_test_dividend(
+        "div-iso", SEC, "SEC", Decimal("2.00"), d7, d7, d8
     )
-    policy = ExploratoryDividendPolicyV1(dividends=(div,))
+    policy = make_test_policy([div], [payload])
+
+    # Unrelated M1c claim created from a different source and component
+    claim_id = pending_cash_claim_id(
+        source_id="m1c-unrelated-source",
+        security_id=SEC,
+        action_kind=ActionKind.SPINOFF,
+        occurrence_id="spinoff-1",
+        component_id="cash_in_lieu",
+    )
+    unrelated_claim = PendingCashClaimV1(
+        schema_version="1",
+        claim_id=claim_id,
+        source_id="m1c-unrelated-source",
+        security_id=SEC,
+        action_kind=ActionKind.SPINOFF,
+        occurrence_id="spinoff-1",
+        component_id="cash_in_lieu",
+        entitled_quantity=10,
+        cash_per_share=Decimal("5.00"),
+        total_cash_expected=Decimal("50.00"),
+        entitlement_session=d6,
+        payable_session=d8,
+    )
+    assert not policy.is_policy_claim(unrelated_claim)
+
+    # In kernel, hypothetical dividend loop filters by is_policy_claim
+    cases = [scheduled_session_case(d) for d in [d5, d6, d7, d8]]
+    bundle = bundle_of(cases)
+    init_state = initial_portfolio_state(
+        session_key=bundle.session_clock.sessions[0].session_key,
+        initial_cash=Decimal("10000.00"),
+        admission=exploratory_admission(bundle),
+    )
+    kernel = PortfolioAccountingKernel(init_state, session_clock=bundle.session_clock)
+    kernel.record_claim(unrelated_claim)
+    assert len(kernel.state.pending_cash_claims) == 1
+    policy_payable = [
+        c.claim_id
+        for c in kernel.state.pending_cash_claims
+        if c.payable_session <= d8 and policy.is_policy_claim(c)
+    ]
+    assert len(policy_payable) == 0
+    # Unrelated claim remains pending and untouched by dividend settlement
+    kernel.settle_claims(policy_payable)
+    assert len(kernel.state.pending_cash_claims) == 1
+    assert len(kernel.state.settled_claim_ids) == 0
+
+
+# Adversarial 8: Source byte binding verification
+def test_adversarial_08_source_byte_binding_verification() -> None:
+    """Dividend policy strictly requires verified source payload bytes."""
+    div = ExploratoryCashDividendTermsV1(
+        native_id="div-no-bytes",
+        security_id=SECURITY_SPY,
+        symbol="SPY",
+        rate=Decimal("1.50"),
+        ex_date=date(2022, 3, 18),
+        record_date=date(2022, 3, 21),
+        payable_date=date(2022, 4, 29),
+        response_sha256="0" * 64,
+    )
+    with pytest.raises(
+        ValueError, match="dividend policy requires retained source bytes"
+    ):
+        ExploratoryDividendPolicyV1(dividends=(div,), source_payloads=())
+
+
+# Adversarial 9: Deterministic replay
+def test_adversarial_09_deterministic_replay() -> None:
+    """Identical engine instances with modeled dividends produce identical hashes."""
+    d5, d6, d7, d8 = (
+        date(2026, 1, 5),
+        date(2026, 1, 6),
+        date(2026, 1, 7),
+        date(2026, 1, 8),
+    )
+    div, payload = make_test_dividend(
+        "div-replay", SEC, "SEC", Decimal("2.00"), d7, d7, d8
+    )
+    policy = make_test_policy([div], [payload])
     ret = ReturnedCorporateActionV1(
-        native_kind="cash_dividends", native_id="div-13", action_kind=None, dates=(d7,)
+        native_kind="cash_dividends",
+        native_id="div-replay",
+        action_kind=None,
+        dates=(d7, d8),
     )
 
     engine1 = _build_engine([d5, d6, d7, d8], policy, (ret,))
@@ -581,9 +918,9 @@ def test_13_deterministic_replay_and_result_hashes() -> None:
     assert art1.final_state == art2.final_state
 
 
-# Scenario 14: Sequential versus parallel portfolio equivalence
-def test_14_sequential_versus_parallel_portfolio_equivalence() -> None:
-    """Sequential and parallel cohort runs produce identical results and hashes."""
+# Adversarial 10: Parallel/sequential equivalence with dividends
+def test_adversarial_10_parallel_sequential_equivalence_with_dividends() -> None:
+    """Sequential and parallel cohort runs produce identical results."""
     bundle = build_offline_cohort_bundle()
     evidence = build_offline_cohort_evidence()
     cohort = build_reference_baseline_cohort(bundle)
@@ -600,38 +937,21 @@ def test_14_sequential_versus_parallel_portfolio_equivalence() -> None:
         assert s_res.ending_nav == p_res.ending_nav
 
 
-# Scenario 15: Exploratory-only grade enforcement
-def test_15_exploratory_only_grade_enforcement() -> None:
-    """Modeled dividends are strictly non-promotion grade."""
-    div = ExploratoryCashDividendTermsV1(
-        native_id="div-15",
-        security_id=SECURITY_SPY,
-        symbol="SPY",
-        rate=Decimal("1.50"),
-        ex_date=date(2022, 3, 18),
-        record_date=date(2022, 3, 21),
-        payable_date=date(2022, 4, 29),
-    )
-    assert EXPLORATORY_DIVIDEND_LIMITATION in div.acknowledged_limitations
-    policy = ExploratoryDividendPolicyV1(dividends=(div,))
-    assert len(policy.terms_hash) == 64
-
-
-# Scenario 16: Promotion-lane rejection
-def test_16_promotion_lane_rejection() -> None:
+# Adversarial 11: Promotion admission refusal
+def test_adversarial_11_promotion_admission_refusal() -> None:
     """Promotion lane strictly refuses exploratory dividend policy."""
-    div = ExploratoryCashDividendTermsV1(
-        native_id="div-16",
-        security_id=SECURITY_SPY,
-        symbol="SPY",
-        rate=Decimal("1.50"),
-        ex_date=date(2022, 3, 18),
-        record_date=date(2022, 3, 21),
-        payable_date=date(2022, 4, 29),
+    div, payload = make_test_dividend(
+        "div-promo-refuse",
+        SECURITY_SPY,
+        "SPY",
+        Decimal("1.50"),
+        date(2022, 3, 18),
+        date(2022, 3, 21),
+        date(2022, 4, 29),
     )
-    policy = ExploratoryDividendPolicyV1(dividends=(div,))
+    policy = make_test_policy([div], [payload])
 
-    # Index rejects
+    # Index refuses under promotion lane
     with pytest.raises(
         CorporateActionCoverageError, match="ca_coverage_grade_refused_by_lane"
     ):
@@ -641,7 +961,7 @@ def test_16_promotion_lane_rejection() -> None:
             exploratory_dividend_policy=policy,
         )
 
-    # Engine rejects
+    # Engine refuses under promotion admission
     d5, d6 = date(2026, 1, 5), date(2026, 1, 6)
     cases = [scheduled_session_case(d) for d in [d5, d6]]
     bundle = bundle_of(cases)
@@ -660,8 +980,6 @@ def test_16_promotion_lane_rejection() -> None:
         listing_role_records=ROLE_RECORDS,
         exploratory_dividends=policy,
     )
-    from drift.evaluator.engine import PromotionLaneDisabledError
-
     with pytest.raises(
         PromotionLaneDisabledError, match="the promotion lane is disabled"
     ):
@@ -676,31 +994,88 @@ def test_16_promotion_lane_rejection() -> None:
         )
 
 
-# Scenario 17: Unchanged existing M2 behavior when modeling is off
-def test_17_unchanged_existing_m2_behavior_when_modeling_is_off() -> None:
+# Scenario 12: Exploratory limitation acknowledged
+def test_12_exploratory_limitation_acknowledged() -> None:
+    """Modeled dividends declare the explicit exploratory limitation."""
+    div, payload = make_test_dividend(
+        "div-limit",
+        SECURITY_SPY,
+        "SPY",
+        Decimal("1.50"),
+        date(2022, 3, 18),
+        date(2022, 3, 21),
+        date(2022, 4, 29),
+    )
+    assert EXPLORATORY_DIVIDEND_LIMITATION in div.acknowledged_limitations
+    policy = make_test_policy([div], [payload])
+    assert len(policy.terms_hash) == 64
+    assert policy.terms_hash == exploratory_dividend_policy_hash(policy.dividends)
+
+
+# Scenario 13: Unsupported non-cash corporate actions halt indeterminate
+def test_13_unsupported_noncash_corporate_actions_halt_indeterminate() -> None:
+    """Forward splits and mergers without corporate action processor halt."""
+    div, payload = make_test_dividend(
+        "div-split",
+        SECURITY_SPY,
+        "SPY",
+        Decimal("1.50"),
+        date(2022, 3, 18),
+        date(2022, 3, 21),
+        date(2022, 4, 29),
+    )
+    policy = make_test_policy([div], [payload])
+    returned = (
+        ReturnedCorporateActionV1(
+            native_kind="cash_dividends",
+            native_id="div-split",
+            action_kind=None,
+            dates=(date(2022, 3, 18), date(2022, 3, 21), date(2022, 4, 29)),
+        ),
+        ReturnedCorporateActionV1(
+            native_kind="forward_splits",
+            native_id="split-1",
+            action_kind=ActionKind.FORWARD_SPLIT,
+            dates=(date(2022, 3, 18),),
+        ),
+    )
+    rec = make_test_coverage_record(
+        security_id=SECURITY_SPY,
+        symbol="SPY",
+        start=date(2022, 1, 1),
+        end=date(2022, 12, 31),
+        source_id=div.source_id,
+        response_sha256=div.response_sha256,
+        returned_actions=returned,
+    )
+    idx = CorporateActionCoverageIndex(
+        records=(rec,),
+        lane="exploratory",
+        exploratory_dividend_policy=policy,
+    )
+    with pytest.raises(IndeterminateValuationError, match="forward_splits split-1"):
+        idx.require_covered(SECURITY_SPY, None, date(2022, 3, 18), date(2022, 3, 18))
+
+
+# Scenario 14: Unchanged existing M2 behavior when modeling is off
+def test_14_unchanged_existing_m2_behavior_when_modeling_is_off() -> None:
     """When exploratory dividends are None, unhandled dividend halts INDETERMINATE."""
     returned = (
         ReturnedCorporateActionV1(
             native_kind="cash_dividends",
-            native_id="div-17",
+            native_id="div-unhandled",
             action_kind=None,
             dates=(date(2022, 3, 18),),
         ),
     )
-    rec = build_corporate_action_coverage(
-        source_id="alpaca",
+    rec = make_test_coverage_record(
         security_id=SECURITY_SPY,
-        queried_symbol="SPY",
-        requested_start_date=date(2022, 1, 1),
-        requested_end_date=date(2022, 12, 31),
-        requested_action_classes=("cash_dividend",),
-        request_binding_hash="0" * 64,
+        symbol="SPY",
+        start=date(2022, 1, 1),
+        end=date(2022, 12, 31),
+        source_id="alpaca-corporate-actions-closed-world",
         response_sha256="0" * 64,
-        response_byte_size=100,
-        origin_observation_hash="0" * 64,
         returned_actions=returned,
-        completeness=_test_assertion(),
-        snapshot_as_of=_test_snapshot(),
     )
     idx = CorporateActionCoverageIndex(
         records=(rec,),

@@ -13,6 +13,7 @@ import sys
 import time
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dtime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -41,41 +42,44 @@ from drift.evaluator.engine import SessionEvaluatorEvidence
 from drift.experiments.parallel_portfolios import PortfolioCohortHarness
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scripts.intake_alpaca_exploratory import _fetch_bytes
+from scripts.intake_alpaca_exploratory import (
+    _api_keys_from_environment,
+    _fetch_bytes,
+)
 
 
 def _get_api_keys() -> tuple[str, str]:
-    env_paths = [
-        Path(__file__).resolve().parents[1] / ".env",
-        Path("/Users/kanuj/Documents/projects/drift/.env"),
-    ]
-    env: dict[str, str] = {}
-    for env_file in env_paths:
-        if env_file.exists():
-            with open(env_file, encoding="utf-8") as f:
-                env.update(
-                    dict(
-                        line.strip().split("=", 1)
-                        for line in f
-                        if "=" in line and not line.startswith("#")
-                    )
-                )
-    key_id = (
-        os.environ.get("APCA_API_KEY_ID")
-        or env.get("APCA_API_KEY_ID")
-        or os.environ.get("ALPACA_API_KEY_ID")
-        or env.get("ALPACA_API_KEY_ID")
-    )
-    secret_key = (
-        os.environ.get("APCA_API_SECRET_KEY")
-        or env.get("APCA_API_SECRET_KEY")
-        or os.environ.get("ALPACA_API_SECRET_KEY")
-        or env.get("ALPACA_API_SECRET_KEY")
-    )
-    if not key_id or not secret_key:
+    if not (
+        os.environ.get("APCA_API_KEY_ID") and os.environ.get("APCA_API_SECRET_KEY")
+    ):
+        env_paths = [
+            Path.cwd() / ".env",
+            Path.home() / ".drift" / ".env",
+        ]
+        cur = Path(__file__).resolve().parent
+        while cur != cur.parent:
+            candidate = cur / ".env"
+            if candidate.is_file():
+                env_paths.append(candidate)
+            cur = cur.parent
+
+        for env_file in env_paths:
+            if env_file.exists():
+                with open(env_file, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith("#") and "=" in line:
+                            k, v = line.split("=", 1)
+                            os.environ.setdefault(k.strip(), v.strip())
+                if os.environ.get("APCA_API_KEY_ID") and os.environ.get(
+                    "APCA_API_SECRET_KEY"
+                ):
+                    break
+    keys = _api_keys_from_environment()
+    if keys is None:
         print("ERROR: Alpaca credentials missing from environment and .env")
         sys.exit(1)
-    return key_id, secret_key
+    return keys
 
 
 def _run_bounded_qqq_test(
@@ -156,6 +160,12 @@ def _run_bounded_qqq_test(
     pyproject_bytes = (
         pyproject_path.read_bytes() if pyproject_path.exists() else b"drift-package"
     )
+    producer_source_path = repo_root / "src/drift/adapters/alpaca_exploratory.py"
+    producer_source_bytes = (
+        producer_source_path.read_bytes()
+        if producer_source_path.exists()
+        else b"drift-producer-source-v1"
+    )
 
     qqq_sec_id = UUID("019b8240-0000-7000-8000-000000000002")
     qqq_list_id = UUID("019b8240-0000-7000-8000-000000000012")
@@ -186,7 +196,7 @@ def _run_bounded_qqq_test(
             reconstruction_observed_at=t_end,
         ),
         lineage=AlpacaReconstructionLineage(
-            producer_source=b"drift-producer-source-v1",
+            producer_source=producer_source_bytes,
             producer_package=pyproject_bytes,
             lockfile=lockfile_bytes,
             python_identity=f"cpython-{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
@@ -220,7 +230,7 @@ def main() -> None:
     print("DRIFT REAL HISTORICAL BENCHMARK: QQQ SINGLE-VENUE SMOKE TESTS")
     print("=" * 80)
 
-    base_store = Path("/Users/kanuj/.drift/historical_benchmark_qqq/store")
+    base_store = Path.home() / ".drift" / "historical_benchmark_qqq" / "store"
 
     # --------------------------------------------------------------------------
     # Test 1: Action-Free Interval (August 2021, post-floor)
@@ -267,6 +277,25 @@ def main() -> None:
         print(f"    Settled Dividends: {r.settled_dividend_count}")
         print(f"    Simulated Fills: {r.fill_count}")
 
+    b0_res = next(r for r in results_aug if r.strategy_id == "B0_Cash")
+    b1_res = next(r for r in results_aug if r.strategy_id == "B1_QQQ_BH")
+    assert b0_res.classification == "complete", (
+        f"B0 classification was {b0_res.classification}"
+    )
+    assert b0_res.ending_nav == Decimal("10000.00"), (
+        f"B0 ending NAV was {b0_res.ending_nav}"
+    )
+    assert b0_res.ending_cash == Decimal("10000.00"), (
+        f"B0 ending cash was {b0_res.ending_cash}"
+    )
+    assert b1_res.classification == "complete", (
+        f"B1 classification was {b1_res.classification}"
+    )
+    assert b1_res.ending_nav > Decimal("10000.00"), (
+        f"B1 ending NAV was {b1_res.ending_nav}"
+    )
+    assert b1_res.fill_count > 0, f"B1 fill count was {b1_res.fill_count}"
+
     # --------------------------------------------------------------------------
     # Test 2: Dividend-Crossing Interval (Aug-Nov 2021, post-floor)
     # --------------------------------------------------------------------------
@@ -302,6 +331,12 @@ def main() -> None:
     print(f"  Strategy: {r_un.strategy_id}")
     print(f"  Classification: {r_un.classification}")
     print(f"  Halt reason: {r_un.halt_reason}")
+    assert r_un.classification == "indeterminate", (
+        f"Test 2A classification was {r_un.classification}"
+    )
+    assert "corporate-action" in (r_un.halt_reason or ""), (
+        f"Test 2A halt reason was {r_un.halt_reason}"
+    )
 
     # Run 2B: With modeled dividends (exploratory accounting)
     print("\n[Test 2B] Running with modeled exploratory dividends...")
@@ -360,6 +395,21 @@ def main() -> None:
         print(f"    Trading Costs: ${r.transaction_costs:,.2f}")
         print(f"    Settled Dividends: {r.settled_dividend_count}")
         print(f"    Simulated Fills: {r.fill_count}")
+
+    b0_div_res = next(r for r in results_div if r.strategy_id == "B0_Cash")
+    b1_div_res = next(r for r in results_div if r.strategy_id == "B1_QQQ_BH")
+    assert b0_div_res.classification == "complete", (
+        f"B0 div classification was {b0_div_res.classification}"
+    )
+    assert b1_div_res.classification == "complete", (
+        f"B1 div classification was {b1_div_res.classification}"
+    )
+    assert b1_div_res.settled_dividend_count >= 1, (
+        f"B1 settled dividends was {b1_div_res.settled_dividend_count}"
+    )
+    assert b1_div_res.ending_nav > Decimal("10000.00"), (
+        f"B1 ending NAV was {b1_div_res.ending_nav}"
+    )
 
     print("\n" + "=" * 80)
     print("ALL QQQ BENCHMARK SMOKE TESTS COMPLETED SUCCESSFULLY")
