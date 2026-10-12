@@ -2,6 +2,7 @@
 
 import os
 import stat
+import sys
 from hashlib import sha256
 from pathlib import Path
 from uuid import uuid7
@@ -157,9 +158,9 @@ def test_store_and_read_content_object(tmp_path: Path) -> None:
         # <approved-root>/objects/sha256/<first-two>/<sha256>
         expected_obj_path = tmp_path / "objects" / "sha256" / c_hash[:2] / c_hash
         assert expected_obj_path.is_file()
-        # Verify file mode is 0600
-        mode = stat.S_IMODE(expected_obj_path.stat().st_mode)
-        assert mode == 0o600
+        if sys.platform != "win32":
+            mode = stat.S_IMODE(expected_obj_path.stat().st_mode)
+            assert mode == 0o600
 
         # Read back
         read_back = read_content_object(
@@ -295,6 +296,10 @@ def test_recovery_quarantines_incomplete_transaction(tmp_path: Path) -> None:
         close_private_store_session(session)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Creating symlinks requires elevated privileges on Windows",
+)
 def test_symlink_attack_rejected(tmp_path: Path) -> None:
     policy = _make_policy()
     evidence = _make_evidence()
@@ -544,6 +549,10 @@ def test_private_store_session_context_manager(tmp_path: Path) -> None:
     assert session.lock_fd == -1
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX file mode bits are not supported on Windows",
+)
 def test_private_store_file_permissions(tmp_path: Path) -> None:
     policy = _make_policy()
     evidence = _make_evidence()
