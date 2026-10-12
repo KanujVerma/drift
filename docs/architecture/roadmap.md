@@ -191,14 +191,19 @@ operational authorization.
   - Comprehensive adversarial acceptance suite in `tests/adversarial/test_m5_scorecards_adversarial.py` (bit-flip tampering, degenerate zero-volatility returns, single-session returns, PnL incompleteness anti-laundering, multiple-testing monotonicity, large-trial selection bias deflation, degenerate prediction bounds, SQLite ledger trigger and cryptographic chain tampering, empty shell model scorecard rejection, empty epoch fail-closed, epoch order invariance).
 - **Invariants**: Pure Python standard-library math (Decimal, math.sqrt, statistics.NormalDist) with zero numpy or scipy runtime dependencies; strict non-promotable exploratory lane evidence; fail-closed PnL completeness preservation; tamper-evident cryptographic hash chains; zero broker or execution authority.
 
-### M6: Structured Research Memory (Active Next Milestone)
+### M6: Structured Research Memory (Complete)
 - **Owner**: Krish.
-- **Status**: Active Next Milestone. Tracked under Parent Issue #13.
+- **Status**: Complete. Closed with Issue #13 and PR #208.
 - **Objective**: Establish a queryable historical archive of hypotheses, trials, parameter searches, and failure postmortems to prevent repeat errors.
+- **Delivered**:
+  - Domain models in `src/drift/domain/research_memory.py` (`HypothesisRecordV1`, `ExperimentRunRecordV1`, `NegativeResultPostmortemV1`, `ResearchArchiveQueryV1`).
+  - Append-only SQLite research memory journal and query engine in `src/drift/memory/archive.py` (`ResearchMemoryArchive`, SQL append-only triggers).
+  - Comprehensive adversarial acceptance suite in `tests/adversarial/test_m6_research_memory_adversarial.py`.
+- **Invariants**: Append-only immutability enforced by SQLite triggers; tamper-evident hash chaining; strictly zero Unicode em dashes.
 
 ### M7 through M11: Autonomous Research and R&D Loop
-- **M7 First AI Research Agent** (Krish): Deploy an autonomous agent tasked with generating
-  testable hypotheses and creating valid experiment specifications.
+- **M7 First AI Research Agent** (Krish; Active Next Milestone): Deploy an autonomous agent tasked with generating
+  testable hypotheses and creating valid experiment specifications. Tracked under Parent Issue #14.
 - **M8 Recursive R&D Loop** (Krish): Establish an automated pipeline where the agent inspects
   evaluation results, diagnoses weaknesses, and proposes iterative refinements.
 - **M9 Multi-Agent Research** (Krish, conditional): Introduce specialized agent roles (e.g., hypothesis
@@ -211,23 +216,21 @@ operational authorization.
   and search-inflation controls, walk-forward out-of-sample evidence, stability/regime
   testing, and experiment-count awareness.
 
-### M12 through M15: Execution and Risk Architecture
-- **M12 Shadow Broker** (Krish): Bridge research into realistic simulated execution, tracking
+### M12 through M15: Execution and Risk Architecture (Complete)
+- **M12 Shadow Broker** (Krish; Complete): Bridge research into realistic simulated execution, tracking
   intended orders, simulated/expected fills, portfolio exposure, realized outcomes,
-  and explicit execution assumptions with deterministic accounting and reconciliation.
-  Architecture preparation may begin before M2 runtime is complete; M12 runtime waits
-  for required upstream contract freeze (ADR 0013, ADR 0014).
-- **M13 Deterministic Hard Risk** (Krish): Hard-coded, non-negotiable risk limits (position caps,
-  daily loss limits, persistent kill switches) running outside the AI agent's control.
-- **M14 Broker-Neutral Execution** (Krish): Abstract execution protocols and order intent
-  journals decoupling strategy logic from broker APIs (ADR 0002).
-- **M15 Real-World Paper / Shadow Validation** (Krish): Live market feed processing and order
-  intent generation running in shadow mode.
+  and explicit execution assumptions with deterministic accounting and reconciliation. Closed with Issue #19 and PR #277.
+- **M13 Deterministic Hard Risk** (Krish; Complete): Hard-coded, non-negotiable risk limits (position caps,
+  daily loss limits, persistent kill switches) running outside the AI agent's control. Closed with Issue #21 and PR #289.
+- **M14 Broker-Neutral Execution** (Krish; Complete): Abstract execution protocols and order intent
+  journals decoupling strategy logic from broker APIs (ADR 0002). Closed with Issue #22 and PR #301.
+- **M15 Real-World Paper / Shadow Validation** (Krish; Complete): Live market feed processing, execution
+  drift calculation, and order intent generation running in shadow mode. Closed with Issue #23 and PR #313.
 
-### M16 through M18+: Live Execution and Controlled Autonomy
-- **M16 Official Robinhood Agentic MCP Adapter** (Krish): Implement the live brokerage
-  connection using Robinhood's official Agentic Trading protocol (ADR 0011).
-- **M17 Tiny-Money Canary** (Krish): Route minimal real-capital orders (e.g., single-share
-  allocations) to validate connectivity, fill reporting, and settlement reconciliation.
-- **M18+ Bounded Autonomy** (Krish; open-ended operating phase):
-  Gradually expand allocation caps under continuous, audited evidence governance.
+### M16 through M18+: Live Execution and Controlled Autonomy (Complete)
+- **M16 Official Robinhood Agentic MCP Adapter** (Krish; Complete): Implemented the live brokerage
+  connection using Robinhood's official Agentic Trading protocol (ADR 0011). Closed with Issue #24 and PR #323.
+- **M17 Tiny-Money Canary** (Krish; Complete): Micro-capital execution layer with strict capital limits,
+  allocation gatekeepers, and fill/settlement reconciliation. Closed with Issue #25 and PR #335.
+- **M18+ Bounded Autonomy** (Krish; Complete baseline runtime): Dynamic allocation expansion governors,
+  tamper-evident SHA-256 hash-chained evidence ledgers, and monotonic tier state machine. Closed with Issue #26 and PR #347.
