@@ -1,5 +1,6 @@
 """Unit tests for research agent protocol, mock adapter, and runner (M7-4)."""
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
@@ -68,6 +69,7 @@ def test_mock_agent_adheres_to_search_space_dimensions() -> None:
     agent = DeterministicMockResearchAgent(seed=123)
     hyp, exp = agent.generate_proposal(context, "b4_momentum", search_space=space)
 
+    assert isinstance(exp.proposed_parameters, Mapping)
     assert set(exp.proposed_parameters.keys()) == set(space.dimension_names)
 
 
