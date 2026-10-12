@@ -534,6 +534,74 @@ def test_cash_dividends_parse_into_canonical_exact_cash() -> None:
     assert dividend.ex_date == date(2026, 1, 7)
 
 
+def _dividend_payload(entry_override: dict[str, Any]) -> bytes:
+    base = {
+        "symbol": "AAPL",
+        "rate": "0.250",
+        "ex_date": "2026-01-07",
+        "record_date": "2026-01-08",
+        "payable_date": "2026-01-15",
+    }
+    base.update(entry_override)
+    return json.dumps(
+        {
+            "corporate_actions": {"cash_dividends": [base]},
+            "next_page_token": None,
+        }
+    ).encode("utf-8")
+
+
+def test_cash_dividends_parse_with_id_only() -> None:
+    payload = _dividend_payload({"id": "ca-id-only"})
+    dividends = parse_alpaca_cash_dividends(payload)
+    assert len(dividends) == 1
+    assert dividends[0].native_id == "ca-id-only"
+
+
+def test_cash_dividends_parse_with_corporate_action_id_only() -> None:
+    payload = _dividend_payload({"corporate_action_id": "ca-corp-only"})
+    dividends = parse_alpaca_cash_dividends(payload)
+    assert len(dividends) == 1
+    assert dividends[0].native_id == "ca-corp-only"
+
+
+def test_cash_dividends_parse_with_matching_both_identifiers() -> None:
+    payload = _dividend_payload({"id": "ca-match", "corporate_action_id": "ca-match"})
+    dividends = parse_alpaca_cash_dividends(payload)
+    assert len(dividends) == 1
+    assert dividends[0].native_id == "ca-match"
+
+
+def test_cash_dividends_reject_conflicting_identifiers() -> None:
+    payload = _dividend_payload({"id": "ca-one", "corporate_action_id": "ca-two"})
+    with pytest.raises(AlpacaBridgeIncompleteError) as error:
+        parse_alpaca_cash_dividends(payload)
+    assert "conflicting corporate action identifiers" in str(error.value)
+
+
+def test_cash_dividends_reject_neither_identifier_present() -> None:
+    payload = _dividend_payload({})
+    with pytest.raises(AlpacaBridgeIncompleteError) as error:
+        parse_alpaca_cash_dividends(payload)
+    assert "dividend row is missing its identity" in str(error.value)
+
+
+@pytest.mark.parametrize("empty_id", ["", "   ", "\t\n"])
+def test_cash_dividends_reject_empty_identifier(empty_id: str) -> None:
+    payload = _dividend_payload({"id": empty_id})
+    with pytest.raises(AlpacaBridgeIncompleteError) as error:
+        parse_alpaca_cash_dividends(payload)
+    assert "dividend row is missing its identity" in str(error.value)
+
+
+@pytest.mark.parametrize("non_string_id", [12345, 99.9, True, ["id"], {"nested": "id"}])
+def test_cash_dividends_reject_non_string_identifier(non_string_id: Any) -> None:
+    payload = _dividend_payload({"id": non_string_id})
+    with pytest.raises(AlpacaBridgeIncompleteError) as error:
+        parse_alpaca_cash_dividends(payload)
+    assert "dividend row is missing its identity" in str(error.value)
+
+
 # --- step 1: private retention outside Git --------------------------------------------
 
 
