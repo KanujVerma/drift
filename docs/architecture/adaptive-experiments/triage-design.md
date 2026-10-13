@@ -166,6 +166,32 @@ If reliable identity or version information is unavailable,
 the component must not falsely claim an event is an exact
 duplicate.
 
+Duplicate suppression is scoped to the same accepted screening
+policy identity and version, the same logical screening context,
+and compatible qualified source evidence.
+
+A prior screening record is eligible for duplicate suppression
+only when it represents a completed, conclusive classification
+(CANDIDATE_ALERT or NO_ALERT).
+
+A previous ABSTAIN or UNAVAILABLE outcome is not grounds for
+duplicate suppression.
+
+Prior-processing evidence must have actually been available by
+the decision cutoff used for the current evaluation.
+
+A previously processed event must not be treated as a global
+duplicate across independent campaign arms or screening contexts.
+
+Explicitly shared screening/preprocessing may be supported when
+it is defined in the accepted experiment contract.
+
+The triage component must not invent the experiment-context
+schema or maintain a new persistence layer.
+
+When the relevant prior-processing scope or evidence cannot be
+established, do not claim a proven duplicate.
+
 ### Time context
 
 Any historical screening decision must use only information
@@ -263,13 +289,36 @@ Do not substitute a default list of important events.
 
 ### Step 3: Evaluate exact duplicate identity
 
-If an identical source identity, version and applicable
-content identity were previously processed, classify the new
-occurrence as NO_ALERT with a duplicate reason and a reference
-to the previously processed version.
+Classify the current occurrence as duplicate NO_ALERT only when
+all of the following conditions are established:
 
-If the same source identity and version refer to conflicting
-content evidence, report ABSTAIN and preserve the conflict.
+1. Source identity, event version and applicable content
+   identity match a previously processed occurrence.
+2. The accepted screening policy identity and version match.
+3. The logical screening context matches, or explicitly
+   authorized shared preprocessing applies.
+4. The previous classification was conclusively
+   CANDIDATE_ALERT or NO_ALERT.
+5. The previous classification used compatible qualified
+   source evidence.
+6. The previous processing evidence was available by the
+   current evaluation's decision cutoff.
+
+If these conditions are not established, do not return
+duplicate NO_ALERT.
+
+Continue evaluating the current event using the applicable
+evidence and screening-policy rules.
+
+Previously ABSTAIN or UNAVAILABLE events must remain eligible
+for justified reevaluation when their required information
+becomes available.
+
+A changed screening policy must not inherit an older policy's
+duplicate-suppression result.
+
+Conflicting content evidence for the same source identity and
+version must still produce ABSTAIN with the conflict preserved.
 
 Do not silently pick whichever copy arrived first.
 
@@ -345,6 +394,27 @@ solely because their text looks similar.
 
 Conflicting event versions must be surfaced rather than
 silently reconciled.
+
+Duplicate suppression is specific to the relevant policy,
+qualified evidence, causal time context and logical screening
+context.
+
+A previous screening result cannot suppress a new decision
+under a different policy merely because the source event
+identity is unchanged.
+
+An earlier ABSTAIN or UNAVAILABLE result cannot be converted
+into NO_ALERT solely because the event appears in processed
+history.
+
+Independent experiment arms must not unintentionally share
+duplicate-suppression state.
+
+An explicitly shared preprocessing arrangement requires an
+accepted experiment contract and appropriate attribution.
+
+Records that were unavailable at a historical decision cutoff
+cannot influence duplicate classification at that cutoff.
 
 The screening policy may eventually include an explicit
 review-rate or cooldown policy.
@@ -534,6 +604,64 @@ Expected:
   availability permits it.
 - No retroactive backdating.
 
+### Case 12: Changed screening policy
+
+Input:
+- Event S1, version V1, content identity H1.
+- Previously evaluated under policy P1.
+- P1 explicitly excluded its category.
+- New policy P2 explicitly permits the same category.
+- Current source evidence is qualified.
+
+Expected:
+- Evaluate under P2.
+- Produce CANDIDATE_ALERT if its requirements are satisfied.
+- Preserve P2's identity and reasons.
+- Do not suppress the event merely because P1 processed it.
+
+### Case 13: Previously inconclusive screening
+
+Input:
+- Event S1, version V1.
+- Earlier result was ABSTAIN because category information
+  was unavailable.
+- The same event is evaluated again with qualified category
+  information under an applicable policy.
+- The supplied policy explicitly permits the category.
+
+Expected:
+- Reevaluate the event.
+- Produce CANDIDATE_ALERT when requirements are satisfied.
+- Do not convert the earlier ABSTAIN into duplicate NO_ALERT.
+- Preserve the evidence and policy references.
+
+The same principle applies to a previous UNAVAILABLE result
+when required source evidence later becomes available.
+
+### Case 14: Independent contexts and future processing
+
+Input A:
+- Two independent experiment arms evaluate the same source
+  event and policy.
+- The first arm has already produced CANDIDATE_ALERT.
+- The second arm has not processed the event in its own
+  screening context.
+
+Expected A:
+- The second arm evaluates the event independently.
+- The first arm's history does not automatically suppress it.
+- Explicit shared preprocessing is permitted only under an
+  accepted experiment contract.
+
+Input B:
+- An event was processed at T2.
+- A historical evaluation occurs at T1, before T2.
+
+Expected B:
+- The processing record from T2 cannot establish a duplicate
+  at T1.
+- No future-state leakage.
+
 ## Producer-consumer compatibility
 
 Matthew owns the normalized source envelope.
@@ -558,11 +686,21 @@ establish:
 8. How deterministic prior-processing evidence reaches triage.
 9. How TRIAGE outcomes and retained references are represented.
 10. How malformed, missing and incompatible inputs fail safely.
+11. How logical screening context and duplicate-suppression
+    scope are represented compatibly with the experiment contract
+    owned by Harsha (#392).
 
 Matthew must review this behavior specification for compatibility
 with the accepted or proposed #394 envelope.
 
 Kanuj must review #394 for compatibility with these behavior cases.
+
+The final duplicate-scope and logical screening-context
+representation must be compatible with the experiment contract
+owned by Harsha (#392). The single normative minimal source-envelope
+specification remains Matthew's #394. Neither #392 nor #394 is
+implemented or accepted by this change, and this document does not
+invent final wire types or persistence schemas for either contract.
 
 If compatibility is unresolved, record the exact conflict in
 GitHub. Do not silently invent a shared schema.
@@ -600,6 +738,7 @@ This specification does not select:
 - Model provider or inference budget.
 - Persisted data retention rules.
 - Final input/output wire types.
+- Logical screening context or experiment-scope wire representation.
 - Actual source adapter implementation.
 - Risk mandates or trading permissions.
 
