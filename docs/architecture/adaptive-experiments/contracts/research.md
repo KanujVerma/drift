@@ -40,8 +40,7 @@ are separate facts. No Flash version, context size, tool capability, API access,
 pricing, quota or subscription entitlement is assumed. Record actual capability
 only when verified in the authorized environment. No runtime LLM call, provider
 credential, paid service, dataset acquisition, broker-connected paper operation
-or live capital is authorized here. Nerve is paused; do not touch/probe Nerve,
-WSL or KRISHPC, change host configuration, run Cargo or clean caches.
+or live capital is authorized here.
 
 Navigate: [mission and ownership](#mission-accepted-choices-and-boundaries),
 [current implementation](#flow-and-current-implementation-truth),
