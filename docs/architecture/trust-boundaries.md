@@ -79,3 +79,8 @@ settlement facts. Exploratory comparisons are not promotion-grade verdicts.
 Accepted design, valid simulation, independently reviewed evidence, source
 qualification, candidate eligibility and operational authorization must be
 reported separately. Existing promotion restrictions are not lifted.
+
+Experiment analysis is not a second account ledger. Matthew's audited RESULT
+remains the account arithmetic. Scientific eligibility evidence does not grant
+operational permission, broker access or live capital. Four human workstreams
+do not authorize multiple runtime research agents.

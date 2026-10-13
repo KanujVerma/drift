@@ -232,3 +232,12 @@ and final wire schemas need owner-produced specifications and acceptance.
 No agent may fill these with guessed production defaults. Missing configuration
 blocks the dependent experiment, not unrelated design or fixture-only work.
 The product decisions are frozen; these implementation parameters are not.
+
+## Ownership record, separate from D01-D17
+
+D01 through D17 and the rationale above are unchanged by the four-person
+ownership amendment accepted on 2026-10-12. That amendment is not a new product
+decision and it does not renumber this register. Accountable owners, producer
+routing and the reason for the split are in
+[workstreams](../workstreams.md), [ADR 0015](../../adr/0015-three-feature-workstreams-and-explicit-writer-handoffs.md)
+and the [requirements crosswalk](requirements-crosswalk.md).

@@ -1,9 +1,9 @@
 ---
-description: Universal issue-driven Drift bootstrap for all three workstreams
+description: Universal issue-driven Drift bootstrap for all four workstreams
 alwaysApply: true
 ---
-Read root AGENTS.md and run Drift Resume before work. Resolve kanuj, krish or
-matthew; use the assigned GitHub issue, not chat memory. Obey producer contracts,
+Read root AGENTS.md and run Drift Resume before work. Resolve kanuj, krish, matthew or
+harsha; use the assigned GitHub issue, not chat history. Obey producer contracts,
 exact write-sets and active writer reservations. Send cross-workstream requests
 through GitHub issues/dependencies, never through a human relay. Use repository
 Checkpoint, documentation-impact and Handoff protocols. This rule is only a

@@ -7,28 +7,37 @@ not executable code, a new persisted schema, an approved ETF list, or evidence
 that an API already exists. Exact runtime signatures and wire types are frozen
 by the producer contract issues before consumers implement against them.
 
-Build the smallest end-to-end research increments. Do not turn a three-person
-project into three microservices, three backtesters or an always-running fleet
+Build the smallest end-to-end research increments. Do not turn a four-person
+project into four microservices, four backtesters or an always-running fleet
 of coding agents. Use the current repository and modular Python packages;
 process isolation is introduced where untrusted execution actually requires it.
 
 ## Ownership and flow
 
-Matthew: retained source data -> normalized observations/events -> execution
-and portfolio accounting -> audited results.
+Krish builds the decision-maker. Matthew builds the single simulation and
+enforcement boundary. Harsha builds the experiment system that measures whether
+an adaptive policy helps. Kanuj builds only the small offline screening step
+and is not on the critical path for the others' first fixture tests.
 
-Kanuj: normalized event -> deterministic candidate alert or explicit screening
-result. This is a small pure transformation, not a news provider or AI model.
+Matthew: retained authorized inputs and proposals -> timing, fills, risk and
+approval checks -> reconciled account state and audited results.
 
-Krish: candidate alert and point-in-time context -> AI significance assessment
--> bounded strategy/allocation proposal -> experiment comparison and learning.
-Krish also owns the conventional optimizer and scientific acceptance logic.
+Kanuj: normalized event -> deterministic candidate alert, or an explicit
+screening or unavailable result. This is not a news provider or an AI model.
 
-All proposal producers, including static strategies, conventional optimizers,
-AI selectors and later generated strategies, use the same accepted interfaces.
-Matthew's platform validates and simulates approved intent. The research system
-cannot call a broker or mutate the risk mandate. Outcomes return to Krish's
-research recorder only when they actually become available.
+Krish: point-in-time context -> grounded research -> an approved-family proposal
+-> time-eligible feedback and permitted learning-state updates. He owns optimizer
+R, model replay and raw attempt/cost receipts. He does not own the study's
+success definition.
+
+Harsha: frozen study -> campaign orchestration -> isolated comparison arms ->
+complete trial records -> metrics, uncertainty and scientific eligibility
+evidence. He calculates analyses from Matthew's RESULT. He does not replace
+that RESULT or run a second account ledger. Routine matured feedback does not
+wait for a human approval from Harsha on every simulated decision.
+
+All proposal producers use the same accepted interfaces. The research system
+cannot call a broker or mutate the risk mandate.
 
 ## Existing code to extend, not duplicate
 
@@ -59,7 +68,7 @@ use an explicitly versioned additive type when they do not.
 | CONTEXT/CANDIDATE | Krish | Time-bounded research context and proposal: experiment/arm ID, portfolio-state version, decision time, available information, approved candidate/version and parameters, target weights/cash, evidence references, rationale, costs/budget and explicit abstention. |
 | EXEC | Matthew | Execution request/result and capability boundary: mandate/approval identity, input state version, session eligibility, order restrictions, price freshness, submission deadline, fill/partial/unfilled/rejected/unknown states, fees and trace links. |
 | RESULT | Matthew | Audited accounting result: gross account NAV/cash/positions/claims, classified completeness, time-indexed returns, realized costs, dataset/run/policy/trace identity and unresolved evidence. No headline performance for incomplete runs. |
-| EXPERIMENT/ELIGIBILITY | Krish | Frozen campaign specification, search budget ledger, metric definitions, all-trial history, uncertainty, paper-candidate eligibility and refusal reasons. No authority to enable a broker or upgrade exploratory source evidence. |
+| EXPERIMENT/ELIGIBILITY | Harsha | Frozen campaign specification, all-trial completeness, economic attribution, metric definitions, uncertainty, paper-candidate eligibility and refusal reasons. Consumes Krish's attempt receipts and Matthew's RESULT. No authority to enable a broker, rewrite account P&L, or upgrade exploratory source evidence. |
 | MANDATE/APPROVAL | Matthew | Versioned risk constraints and Ask/Smart/Auto modes, measurable thresholds, expiry, revocation and pause/reconciliation rules. Approval is bound to exact intent and relevant state, not reusable blanket permission. |
 
 Every contract specifies exact types, units, time zones, required versus missing
@@ -183,8 +192,10 @@ contract, with tests for orders already in flight.
 Performance feedback may enter learning memory only when its observed outcome
 is available. Invalid simulation is not evidence that an economic hypothesis was
 falsified. New candidate eligibility is stage-specific and reviewed separately
-from live capital authority. M11 scientific checks belong to Krish; Matthew
-owns enforcement of valid eligibility and operational permissions.
+from live capital authority. Harsha owns M11 scientific eligibility evidence.
+Krish owns the learning behavior being measured. Matthew owns enforcement of
+valid eligibility and operational permissions. Scientific eligibility is not
+permission to trade.
 
 ## Approval boundary
 

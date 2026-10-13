@@ -6,25 +6,27 @@ and PRs are discovered in GitHub through those keys.
 
 ## Phase 0: adopt policy without disrupting work
 
-SETUP prepares the exact docs and blocked queue. ACTIVATE checks the actual
-merged coordination PR and activates only unblocked work. ACCESS verifies
-Matthew's identity. HANDOFF records existing writer reservations and target
-ownership. Existing research/historical PRs are reviewed and accepted separately;
-setup does not merge, rewrite or certify them.
+SETUP prepares the docs and the blocked queue. The common routing activation
+is separate from each person's access activation, so one unresolved login does
+not freeze the other workstreams. HANDOFF records writer reservations and target
+ownership. Existing research and historical pull requests are reviewed
+separately. Setup does not merge, rewrite or certify them.
 
 ## Phase 1: parallel contract and methodology work
 
-- Krish: K-CONTRACT, K-METHOD, K-METRICS. Produce precise proposal/experiment
-  contracts, a controlled experiment plan and independently checked metrics.
-- Matthew: M-CONTRACT, M-SOURCES, M-TIMING, M-MANDATE. Produce source/result,
-  acquisition/coverage, execution-timing and permission/risk specifications.
-- Kanuj: TRIAGE-IMPL after the minimal source/triage contract is accepted. One
-  bounded offline feature, not a live ingestion or model project.
+- Krish: the research-context contract. Produce CONTEXT/CANDIDATE and attempt
+  replay semantics. Experiment and eligibility semantics are Harsha's contract.
+- Harsha: the experiment contract, methodology and metrics. Produce the study
+  plan, trial-record requirements and independently checked definitions.
+- Matthew: source and result contracts, the minimal triage source envelope,
+  acquisition, execution timing and mandate specifications.
+- Kanuj: a small triage behavior note now, and the runtime slice only after the
+  minimal source envelope and that behavior note are accepted.
 
-Krish and Matthew can start their design tasks from current repository evidence
-without waiting for each other's runtime. Only the dependent implementation is
-blocked by an unaccepted interface. Consumer review keeps a producer from
-unilaterally changing both sides of a boundary.
+Design and fixture work does not wait for another person's finished runtime.
+Production consumers wait for the specific accepted interface. Synthetic fixtures
+are not authentic coverage, proof of profit, validated fills or permission to
+call a provider.
 
 ## Phase 2: smallest feature implementations
 
@@ -33,11 +35,14 @@ with signatures, permitted paths, RED/GREEN cases, compatible versions and
 stop conditions. Do not mark a broad parent READY as blanket implementation
 permission. The setup agent creates no runtime classes or code stubs.
 
-Krish's first meaningful slice emits bounded AI and R proposals from fixed
-accepted context, with response replay and spending records. Matthew's first
-slice accepts a scripted proposal against small retained/fixture market inputs
-and yields auditable execution/accounting outcomes. Both can be tested without
-a finished triage component. Kanuj's accepted triage then replaces fixture alerts.
+Krish's first slice emits bounded AI and R proposals from fixed context, with
+replay and spending records. Matthew's first slice accepts a scripted proposal
+against fixture inputs and yields a risk rejection or an accepted, partial or
+unfilled result with reconciled cash and positions. Harsha's first slice uses
+hand-calculated results and fake producer adapters to show isolated accounts,
+all-trial records, cost attribution, missing-evidence refusal and a report.
+Kanuj's accepted triage later replaces fixture alerts. None of these slices is
+permission to trade.
 
 ## Phase 3: end-to-end evidence
 
@@ -61,10 +66,10 @@ No stage of this delivery plan grants real-money authority.
 
 ## Integration and workload rules
 
-Krish owns the research integration/acceptance issue; Matthew owns platform
-producer changes. Neither edits the other's source opportunistically. Kanuj is
-not a required final reviewer or infrastructure rescuer. Rebalance later unclaimed
-work based on evidence about effort, not artificial equal issue counts.
+Harsha owns the integrated scientific acceptance design. Matthew owns platform
+producer changes. Krish owns producer fixes inside the learning loop. Kanuj is
+not a required final reviewer or infrastructure rescuer. Do not invent equal
+effort shares.
 
 For unresolved design parameters, the owner writes an evidence-backed proposal
 in its specification issue. The implementation agent does not select missing

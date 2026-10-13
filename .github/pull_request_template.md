@@ -1,7 +1,7 @@
 ## Issue and ownership
 
 - Linked issue and feature:
-- Accountable workstream: kanuj / krish / matthew
+- Accountable workstream: kanuj / krish / matthew / harsha
 - Execution agent and actual GitHub actor:
 - Producer/consumer contracts and accepted revision:
 - Use `Closes #...` only for fully satisfied scope.

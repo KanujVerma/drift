@@ -1,6 +1,6 @@
 # Drift agent workflow and continuity
 
-This protocol applies to Kanuj, Krish, Matthew and compatible coding agents.
+This protocol applies to Kanuj, Krish, Matthew, Harsha and compatible coding agents.
 AGENTS.md is the universal bootstrap. Cursor commands are thin wrappers.
 GitHub is the live task/decision queue, not a claim that agents run continuously.
 
@@ -32,12 +32,13 @@ model, provider, risk threshold, permission, schema or source-grade default.
    tracking refs and relevant worktrees. Do not stash/reset/clean another tree.
 3. Resolve workstream per [workstreams.md](workstreams.md). Do not change shared
    clone config just to resolve identity. Record actual GitHub actor separately.
-4. If the three-person transition is not activated, locate the open ACTIVATE
-   issue by its bootstrap marker. Its designated owner may reconcile its
-   blocked state only after the required setup PR is actually merged and
-   the activation preconditions are satisfied. Do not activate feature work
-   from a branch-local draft. Then read the linked issue, its latest comments, related PR/reviews/checks and
-   native/text blockers. If no linked work exists, search the workstream queue.
+4. If this workstream's activation is not complete, read the open activation
+   issue for that workstream, not only the omnibus tracker. A common routing
+   gate and a per-person access gate are different blockers. Do not treat another
+   person's unresolved login as a blocker of this workstream. Do not activate
+   feature work from a branch-local draft. Then read the linked issue, its latest
+   comments, related PR/reviews/checks and native/text blockers. If no linked
+   work exists, search the workstream queue.
 5. Reconcile actual completion evidence. Do not redo merged work because a stale
    label or handoff says it is pending. Do not infer acceptance from an old CI run.
 6. Select an already claimed issue bound to this branch, otherwise the highest
@@ -56,6 +57,49 @@ model, provider, risk threshold, permission, schema or source-grade default.
 If all work is blocked, report specific blockers in GitHub and the handoff.
 Do not invent tasks or ask a human to relay instructions. Account identity,
 source spending and authorization still require an actual authorized decision.
+
+
+## Cold start with no chat history
+
+An agent that can read this repository and GitHub does not need a prior
+conversation, a setup ZIP, or a copied prompt.
+
+A. Read AGENTS.md, the decisions and their rationale, the design, the owner map
+   and the requirements crosswalk. Resolve the workstream from the explicit
+   invocation plus verified issue, branch and config evidence. Separately record
+   the authenticated GitHub actor and whether that login can write.
+B. Read the linked issue, the latest comments, relevant pull requests and reviews,
+   accepted contracts, and native or textual blockers. Fetch current remote state
+   without stashing, resetting or cleaning a dirty or differently owned worktree.
+C. Explain the architecture, the decisions and why they were made, the owned and
+   excluded scope, the interfaces, the current status and the next legitimate
+   action. Cite repository paths and issue or decision references. A draft is not
+   main. A green test is not architectural acceptance or operational permission.
+D. A question such as "what do I own?" is read-only. It does not claim a task,
+   change labels or start coding. An explicit Resume invocation may select
+   eligible work and claim it.
+E. Prefer a legitimate existing claim bound to the current branch. Otherwise
+   choose the highest-priority eligible owned executable issue. If the current
+   claim is blocked, checkpoint it before selecting independent disjoint work.
+F. Before editing, publish and read back the writer, paths, branch and HEAD.
+   A label or assignee is not an atomic lock. Reconcile racing claims in GitHub
+   and stop only the overlapping slice.
+G. When another owner's interface is missing, search for an existing request
+   first. Otherwise open a producer-owned issue with evidence, the smallest
+   change, affected consumers, exact paths and acceptance needs, and link the
+   blocker. Do not ask a human to paste instructions into another chat.
+H. At meaningful checkpoints and before shared-boundary edits, refresh the
+   issues, publish evidence, update permitted docs, and record release or
+   acquisition when work actually transfers. After an interruption, reconstruct
+   from GitHub and local Git state.
+I. Low-level mechanical choices inside an accepted contract stay with the
+   implementing agent. Material architecture, money, access, security and
+   operational decisions need the authorized owner in GitHub. Do not self-approve
+   them and do not make Kanuj the default reviewer of every change.
+
+GitHub access that cannot be refreshed must be reported as stale. Do not invent
+the missing state or write from an old snapshot. Agents do not wake themselves,
+poll forever, or lock files merely because a dependency exists.
 
 ## During work
 

@@ -11,16 +11,20 @@ this repository. Do not assume a particular machine path, model or editor.
 
 ## Required reading
 
+- [Onboarding](docs/architecture/adaptive-experiments/onboarding.md)
+- [Decisions and rationale](docs/architecture/adaptive-experiments/decisions.md)
 - [Workstream ownership](docs/architecture/workstreams.md)
+- [Requirements crosswalk](docs/architecture/adaptive-experiments/requirements-crosswalk.md)
 - [Resume, Checkpoint and Handoff](docs/architecture/agent-workflow.md)
 - [Roadmap](docs/architecture/roadmap.md)
-- [Adaptive experiment decisions and design](docs/architecture/adaptive-experiments/README.md)
-- The assigned GitHub issue, latest comments, PR, dependencies and exact contracts.
+- [Adaptive experiment start page](docs/architecture/adaptive-experiments/README.md)
+- The assigned GitHub issue, its latest comments, PR, dependencies and exact contracts.
 
 ## Operating rules
 
-1. Run Resume first. Resolve `kanuj`, `krish` or `matthew` through verified config,
+1. Run Resume first. Resolve `kanuj`, `krish`, `matthew` or `harsha` through verified config,
    branch/issue evidence. Stop conflicting/unresolved identity; never guess.
+   A question about ownership is read-only and does not claim a task.
 2. No issue means no product implementation. Verify READY/unblocked state and
    exact write-set. Read other paths, but do not edit them without amendment.
 3. One accountable feature owner, one issue owner and one writer per overlapping
@@ -65,7 +69,8 @@ this repository. Do not assume a particular machine path, model or editor.
 
 The adaptive design is accepted intent, not a completed runtime. Existing
 milestone code and safety/evidence limitations must be checked at the relevant
-revision. Three human workstreams do not activate conditional M9 agent teams.
+revision. Four human workstreams do not activate conditional M9 agent teams.
+Partial activation of one workstream does not require every other login to be resolved.
 Use the adopting coordination issue's activation record before beginning newly
 created queue items. Unknown configuration blocks dependent runtime, not safe
 independent documentation or labelled fixture work.
