@@ -225,8 +225,9 @@ This does not imply economic significance has been proven.
 ### NO_ALERT
 
 The accepted screening policy explicitly excludes the event,
-or the same event version has already been processed with
-matching identity evidence.
+or the current occurrence is proved to be a duplicate under
+**all** the policy, logical-context, conclusive-prior-outcome,
+qualified-evidence and causal-cutoff conditions in Step 3.
 
 The component records the exclusion or duplicate reason.
 
@@ -491,6 +492,14 @@ Input:
 - Event S1, version V1.
 - Same accepted source/version/content identity as an
   already processed occurrence.
+- The screening policy identity and version are identical to
+  the prior decision.
+- The logical screening context is the same, or the accepted
+  experiment contract explicitly authorizes shared preprocessing.
+- The prior outcome was conclusive (CANDIDATE_ALERT or NO_ALERT)
+  using compatible qualified source evidence.
+- The prior screening evidence was available by the current
+  decision cutoff.
 
 Expected:
 - NO_ALERT with duplicate reason.
@@ -701,6 +710,17 @@ owned by Harsha (#392). The single normative minimal source-envelope
 specification remains Matthew's #394. Neither #392 nor #394 is
 implemented or accepted by this change, and this document does not
 invent final wire types or persistence schemas for either contract.
+
+The generic, caller-supplied logical screening context required for
+standalone offline triage is defined behaviorally here; #392 owns the later
+experiment-arm mapping and any shared preprocessing. #392 is not a
+prerequisite for the scoped #381 offline feature when accepted #393 and #394
+provide an implementable, reviewable context interface. Any actual wire
+incompatibility must be escalated with evidence before integration, not
+filled with guessed types.
+This does not approve a final wire field or modify the GitHub dependency
+graph. Matthew's #394 remains the one normative source envelope and remains
+required for #381.
 
 If compatibility is unresolved, record the exact conflict in
 GitHub. Do not silently invent a shared schema.
