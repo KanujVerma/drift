@@ -6,6 +6,11 @@ Accepted architecture decision, 2026-09-21.
 Supersedes the milestone-owner allocation in
 [ADR 0013](0013-parallelize-owned-milestones-without-advancing-authorization.md).
 
+Current feature ownership and active-writer migration are governed by
+[ADR 0015](0015-three-feature-workstreams-and-explicit-writer-handoffs.md). This document remains a historical record;
+its unchanged scientific, evidence and operational-authorization safeguards
+remain applicable.
+
 ## Context
 
 ADR 0013 established an exact 8/8 Kanuj/Krish milestone split so two people

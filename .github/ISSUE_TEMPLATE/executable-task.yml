@@ -1,95 +1,71 @@
 name: Drift executable task
-description: Create an executable Drift issue with one workstream owner, write-set, and blockers.
-title: "[M?][<Workstream>] "
+description: One owner, exact paths, evidence, blockers and acceptance criteria.
+title: "[<Feature>][<Owner>] <bounded task>"
 labels: []
 body:
   - type: markdown
     attributes:
       value: |
-        Every executable Drift task needs exactly one workstream owner.
-        There is no shared workstream. Live status stays on this issue and
-        its pull request. Durable ownership lives in `docs/architecture/workstreams.md`.
-
-        After creating this issue, add labels: `workstream:kanuj` or
-        `workstream:krish`, `kind:*`, `state:*`, `priority:*`, and
-        `needs:architecture` when required. Also set the GitHub Milestone.
+        One accountable owner and one writer per overlapping write-set.
+        Add exactly one workstream label, one state label and appropriate kind/priority labels after creation.
+        GitHub is live state. Accepted docs own design. A parent issue is not implementation permission.
   - type: dropdown
     id: workstream
     attributes:
       label: Workstream owner
-      description: Exactly one execution owner.
-      options:
-        - kanuj
-        - krish
-    validations:
-      required: true
-  - type: dropdown
-    id: milestone_id
-    attributes:
-      label: Roadmap milestone
-      options:
-        - M2
-        - M3
-        - M4
-        - M5
-        - M6
-        - M7
-        - M8
-        - M9
-        - M10
-        - M11
-        - M12
-        - M13
-        - M14
-        - M15
-        - M16
-        - M17
-        - M18+
-        - Coordination / docs / contract (not a roadmap milestone)
+      options: [kanuj, krish, matthew, harsha]
     validations:
       required: true
   - type: input
-    id: task_slice
+    id: feature
     attributes:
-      label: Task / slice
-      description: Short identifier such as M2-2B or M12-P0.
+      label: Feature and roadmap mapping
+      description: Feature identifier and applicable historical milestone, or coordination.
+    validations:
+      required: true
+  - type: input
+    id: slice
+    attributes:
+      label: Task or slice
+    validations:
+      required: true
+  - type: dropdown
+    id: state
+    attributes:
+      label: Initial state
+      options: [blocked, ready, in-progress, review]
     validations:
       required: true
   - type: textarea
     id: objective
     attributes:
-      label: Objective
+      label: Objective and non-goals
     validations:
       required: true
   - type: textarea
-    id: blocked_by
+    id: blockers
     attributes:
-      label: Dependencies / blocked-by
-      description: Native GitHub blocked-by relationships plus `Blocked by #...` text.
-      placeholder: "Blocked by #123"
+      label: Dependencies and blocked-by
+      description: Native issue edges plus exact text; name contract PR acceptance and permission conditions.
     validations:
       required: true
   - type: textarea
-    id: consumed_contracts
+    id: contracts
     attributes:
-      label: Consumed contracts
-      description: Existing interfaces this issue may read but must not alter unless it is a producer contract issue.
+      label: Consumed contracts and required accepted versions
     validations:
       required: true
   - type: textarea
-    id: write_set
+    id: writes
     attributes:
-      label: Allowed write-set
-      description: Exact paths this issue may modify. All other paths are read-only.
-      placeholder: |
-        - src/drift/example.py
-        - tests/unit/test_example.py
+      label: Exact allowed write-set
+      description: One explicit repository path per line; broad directory ownership is not enough.
     validations:
       required: true
   - type: textarea
-    id: read_only
+    id: protected
     attributes:
-      label: Read-only / protected surfaces
+      label: Protected or read-only surfaces and active writers
     validations:
       required: true
   - type: textarea
@@ -101,39 +77,37 @@ body:
   - type: textarea
     id: tests
     attributes:
-      label: Test requirements
+      label: Test and evidence requirements
     validations:
       required: true
-  - type: dropdown
-    id: docs_impact
+  - type: textarea
+    id: docs
     attributes:
       label: Documentation impact
-      options:
-        - No canonical docs become false or incomplete
-        - Update docs inside this write-set in the same PR
-        - File a separate kind:docs issue; this write-set cannot touch the stale docs
     validations:
       required: true
   - type: textarea
-    id: stop_conditions
+    id: stop
     attributes:
-      label: Stop conditions
-      description: When to STOP for architecture adjudication, missing contracts, write-set overlap, or unresolved workstream identity.
-    validations:
-      required: true
-  - type: dropdown
-    id: architecture_review
-    attributes:
-      label: Architecture review required?
-      options:
-        - "No"
-        - "Yes - needs:architecture Decision Packet before runtime implementation"
+      label: Stop conditions and architecture review requirement
     validations:
       required: true
   - type: textarea
-    id: pr_boundary
+    id: authority
     attributes:
-      label: Expected PR boundary
-      description: Branch convention `kanuj/<issue>-<name>` or `krish/<issue>-<name>`, and whether this PR may close the issue.
+      label: Network, credential, cost and operational authorization
+      description: State none unless explicit authorization is linked. Simulation is not live permission.
+    validations:
+      required: true
+  - type: textarea
+    id: pr
+    attributes:
+      label: Expected branch and PR boundary
+    validations:
+      required: true
+  - type: textarea
+    id: progress
+    attributes:
+      label: Claim, checkpoint, handoff and next action
     validations:
       required: true
