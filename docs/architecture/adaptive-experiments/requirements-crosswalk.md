@@ -26,3 +26,72 @@ Release parameters that remain unspecified are listed at the end of
 thresholds, source rights, model versions and budgets, clocks, optimizer bounds,
 statistical thresholds, approval expiry, pause and cancel behavior, news
 retention and wire schemas.
+
+## Acceptance obligations
+
+These obligations are the completion bar for the named issues. They do not
+authorize a restore, a containment probe, a broker connection or M9 runtime.
+
+### #392 experiment contract
+
+Define frozen campaign and arm identity, and which state may change during a
+campaign. Reference Matthew's authoritative RESULT and Krish's attempt receipts.
+Specify complete treatment of valid, failed, rejected and duplicate trials.
+Allocate cost without a second account ledger. Include eligibility and refusal
+states, version and compatibility rules, and examples for malformed, missing,
+stale and cross-arm evidence. Krish reviews research and feedback consumption.
+Matthew reviews operational eligibility consumption. Harsha does not approve his
+own producer changes.
+
+### #393 and #394
+
+#393 specifies triage behavior and output only: supplied policy, time and
+version, exact duplicate versus material revision, alert versus non-alert,
+abstention and unavailable, and malicious text kept as inert data. #394 is the
+only normative minimal source envelope: source identity, times, quality,
+missing values, duplicate versus correction, and empty versus broken. Each
+owner reviews the other's compatibility. Neither issue implements runtime types.
+#376 cites the accepted #394 revision and does not rewrite that envelope.
+
+### #377 conditional agent study
+
+Retain a conditional 1-versus-3 study with matched information, opportunities
+and model capability. Count aggregate team requests, tokens and costs, including
+critiques, retries and discarded work. Verification sits outside the proposer
+team. A flexible-budget economic study does not replace that controlled
+comparison. Ten agents remain conditional. Keeping one agent is a valid outcome.
+Do not implement M9 and do not add numerical defaults. #16 stays the conditional
+gate. Krish reviews producer-behavior implications. Matthew reviews that the
+study grants no operational permission.
+
+### #395 recovery
+
+Distinguish three targets: feature-off fallback on the corrected current kernel,
+isolated restoration of original code plus private state plus runtime against an
+exact manifest and declared scope, and a frozen scientific control on that same
+corrected kernel. Require separate evidence for code, private state and runtime,
+including tree state, database and schema consistency, dependencies and replay.
+Name the authorized custodian and the isolated target. Preserve later trials,
+costs, losses and audit lineage. An old checkout is not verified private-state
+recovery and is not a safe active deployment. Do not point old code at an
+incompatible current database. This issue does not perform a restore. Harsha's
+#397 reviews the evidence rules. Matthew does not self-certify them.
+
+### #396 containment
+
+Specify worker, trusted evaluator and recorder, independent holdout evaluation,
+and publisher boundaries. Protect results, policy, approvals, original private
+state and secrets. State effective IDE, terminal, plugin, MCP, hook and
+subprocess capabilities, and allowed versus denied network destinations. An
+unconfined fallback is a refusal. Describe inert denial probes and allowed
+positive controls, plus the tested revision and environment to record. Do not
+run those probes from this issue. #397 reviews independence. Prompts, folders,
+CODEOWNERS and worktrees are not the enforcement boundary.
+
+### #397 release acceptance
+
+Build the requirement-to-test matrix, independence and conflict rules, tested
+revision and environment, and pass, fail, not-run, blocked and unavailable
+treatment. State what forbids a release claim. Harsha may evaluate Matthew's
+mechanisms with evidence. He may not certify his own changes or replace evidence
+with an assertion. Operational authority stays a separate grant.

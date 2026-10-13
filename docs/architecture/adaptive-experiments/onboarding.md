@@ -42,40 +42,46 @@ The seventeen decisions and their rationale are D01 through D17 in
 | matthew | Matthew | Data, the one simulator, accounting, execution, risk, recovery and containment mechanisms | A second analysis engine, unilateral eligibility rules |
 | harsha | Harsha | Study orchestration, trial completeness, metrics, reports, scientific eligibility evidence | A second backtester, generic QA for every PR, self-certified acceptance |
 
-Verified logins: `KanujVerma` for kanuj, `Krish-Verma` for krish, and
-`matthew-philip` for matthew. Harsha's login is not verified. Do not guess a
-handle because it resembles the name. The access issue records the remaining
-question. Matthew's issues stay unassigned until the post-merge activation
-assigns `matthew-philip`.
+Stable login mappings, not a live assignee list: `KanujVerma` is kanuj,
+`Krish-Verma` is krish, and `matthew-philip` is matthew. Do not guess a login
+from a personal name. Harsha's login is not stored on this page. Read #370 and
+the latest activation receipt for current access and assignees. A newer receipt
+overrides this page. Do not treat an old sentence here as a current blocker.
 
 Producer contracts, all still specifications rather than implemented APIs:
 
-| Contract | Producer | First specification issue |
+| Contract | Producer | Specification issue |
 |---|---|---|
-| SRC minimal envelope for triage | Matthew | #394 |
-| SRC and RESULT, broader | Matthew | #376 |
+| Minimal SRC envelope for triage, the only definition | Matthew | #394 |
+| Broader SRC and RESULT, citing #394 rather than redefining it | Matthew | #376 |
 | EXEC | Matthew | #379 |
 | MANDATE/APPROVAL | Matthew | #380 |
-| TRIAGE behavior | Kanuj | #393 |
-| TRIAGE runtime | Kanuj | #381, after #393 and #394 |
+| TRIAGE behavior and output | Kanuj | #393 |
+| TRIAGE runtime | Kanuj | #381, after accepted #393 and #394 |
 | CONTEXT/CANDIDATE and attempt replay | Krish | #375 |
 | EXPERIMENT/ELIGIBILITY | Harsha | #392 |
 
 ## Next legitimate task
 
-Resolve the workstream. Read that workstream's activation issue. If it is still
-blocked, the next action is the blocker named there, not a new coding task.
+Resolve the workstream from the invocation, the issue label and the branch
+prefix. If those disagree, stop with WORKSTREAM_IDENTITY_UNRESOLVED. Read the
+workstream activation issue. If it is blocked, the next action is that blocker.
+Do not start coding. Parents #372, #373, #374 and #391 are not executable.
 
-| Workstream | Activation issue | First design issue when that gate is open |
-|---|---|---|
-| kanuj | #387 | #393. Runtime #381 stays blocked until #393 and #394 are accepted. |
-| krish | #388 | #375 |
-| matthew | #389 | #394, and the other platform design issues #376, #378, #379 and #380 |
-| harsha | #390 | #392, #377 and #382. #390 also waits on the access issue #370. |
+Resume then selects the oldest unblocked executable issue at the highest
+priority: p0, then p1, then p2. Several p0 issues may be eligible together.
+That is a candidate set, not a chain. Do not invent a blocker to force a
+preferred order.
 
-The common routing gate is #386. The tracker #369 stays open until every
-workstream entry is accounted for. #369 is not the native blocker of Krish's
-or Kanuj's design issues. An unresolved Harsha login does not stop the others.
+| Workstream | Entry gate | Eligible executable issues once that gate is open | Resume selects |
+|---|---|---|---|
+| kanuj | #387 | #393 is the design issue. #381 stays blocked until accepted #393 and #394 revisions are named. | #393. Branch `kanuj/393-triage-design`. |
+| krish | #388 | #375. It is not blocked by #369 or #370. | #375, the only Krish p0 design issue on this gate. Branch `krish/375-k-contract`. |
+| matthew | #389 | #376, #378, #379, #380 and #394, all p0. #376 is older than #394. | #376 first. Do not write a second triage envelope in #376. #394 is the only envelope definition and remains an independent later claim. Branch for the selected issue is `matthew/<issue>-<slug>` from that issue. |
+| harsha | #390 | #377, #382 and #392, all p0. #377 is the oldest. None blocks the others. | #377. Branch `harsha/377-k-method`. #390 also depends on #370. |
+
+The common routing gate is #386. #369 is the tracker. It does not block #386,
+#387, #388, #389 or #390. An open question on #370 blocks #390 only.
 
 A parent issue such as #372, #373, #374 or #391 is not an implementation task.
 

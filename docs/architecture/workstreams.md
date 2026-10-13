@@ -114,15 +114,14 @@ Human/workstream identity is distinct from the GitHub token actor and model
 brand. A Gemini, Cursor, Codex or Kimi agent must record its actual actor and
 issue; it may not pretend to be another person's GitHub account.
 
-Use verified GitHub logins only. `KanujVerma` maps to kanuj. `Krish-Verma` maps
-to krish. `matthew-philip` maps to matthew and currently has write access; his
-issue assignment waits for the post-merge activation recorded on the access issue.
-Harsha has no verified login in the collaborator list for this revision. Do not
-infer one from a name-shaped username. A missing login blocks only that person's
-authenticated start, not preparation or another owner's eligible design work.
-The intended workstream, the accountable human, the execution agent and the
-actual GitHub actor are four separate facts. A shared publisher login does not
-prove the work belongs to Kanuj.
+Stable login mappings are `KanujVerma` for kanuj, `Krish-Verma` for krish, and
+`matthew-philip` for matthew. Do not infer a login from a personal name. This
+page does not store Harsha's login and does not store who is currently assigned.
+Read #370 and the latest activation receipt for access and assignees. A newer
+receipt overrides this page. A missing login blocks only that person's entry
+gate. The intended workstream, the accountable human, the execution agent and
+the actual GitHub actor are four separate facts. A shared publisher login does
+not prove the work belongs to Kanuj.
 
 ## Contracts, decisions and reviews
 

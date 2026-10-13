@@ -77,6 +77,12 @@ producer/consumer tests. Unknown and false are not interchangeable. Runtime
 consumers wait for the accepted contract PR. Review and fixture design can
 continue in parallel without pretending an unimplemented adapter exists.
 
+The minimal source envelope used by triage has one normative specification.
+The broader source and result contract cites that revision and does not define
+a second envelope. Triage behavior and output are a separate producer document.
+Runtime triage waits for those two accepted revisions, not for the rest of the
+result contract.
+
 Kanuj's triage contract should be small enough to implement in one bounded
 feature PR. Matthew supplies source fixtures/contract; Krish can consume
 explicitly synthetic alerts for unit testing until real triage is connected.
