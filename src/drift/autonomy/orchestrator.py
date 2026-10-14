@@ -19,6 +19,7 @@ from drift.domain.execution import (
     OrderIntentV1,
     build_execution_report,
 )
+from drift.domain.risk import RiskVerdictStatus
 from drift.execution.router import BrokerNeutralExecutionRouter
 from drift.risk.gatekeeper import HardRiskGatekeeper
 
@@ -115,12 +116,24 @@ class BoundedAutonomyOrchestrator:
                 reported_at=now,
             )
 
-        # 3. Hard risk kill switch check
+        # 3. Hard risk gatekeeper evaluation
         if self._risk_gatekeeper is not None:
-            if self._risk_gatekeeper.journal.is_kill_switch_tripped():
-                self._governor.record_kill_switch_trip(
-                    "kill switch active during submission"
-                )
+            verdict = self._risk_gatekeeper.evaluate_order(
+                intent,
+                current_price=price,
+                evaluation_time=now,
+            )
+            if verdict.status != RiskVerdictStatus.ALLOWED:
+                if verdict.status == RiskVerdictStatus.KILL_SWITCH_ACTIVE:
+                    self._governor.record_kill_switch_trip(
+                        str(verdict.reason or "kill switch active during submission")
+                    )
+                    rejection_reason = "emergency_kill_switch_active"
+                else:
+                    self._governor.record_risk_halt(
+                        str(verdict.reason or "risk gatekeeper rejected intent")
+                    )
+                    rejection_reason = f"risk_gatekeeper_rejection: {verdict.reason}"
                 return build_execution_report(
                     report_id=uuid7(),
                     intent_id=intent.intent_id,
@@ -128,7 +141,7 @@ class BoundedAutonomyOrchestrator:
                     status=ExecutionStatus.REJECTED,
                     cum_quantity=0,
                     leaves_quantity=intent.quantity,
-                    rejection_reason="emergency_kill_switch_active",
+                    rejection_reason=rejection_reason,
                     reported_at=now,
                 )
 
