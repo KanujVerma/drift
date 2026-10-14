@@ -1,14 +1,15 @@
 """Bounded historical benchmark smoke tests for QQQ (XNAS).
 
 Tests:
-1. Action-free interval (January 2021): B0 (Cash) and B1 (QQQ Buy-and-Hold).
-2. Dividend-crossing interval (Jan-Apr 2021):
+1. Action-free interval (August 2021): B0 (Cash) and B1 (QQQ Buy-and-Hold).
+2. Dividend-crossing interval (August-November 2021):
    - Fail-closed run without modeled dividends: verify INDETERMINATE.
    - Exploratory run with modeled dividends: verify entitlement and NAV.
 """
 
 import json
 import os
+import re
 import sys
 import time
 from datetime import UTC, date, datetime, timedelta
@@ -82,6 +83,52 @@ def _get_api_keys() -> tuple[str, str]:
     return keys
 
 
+def _detect_tzdb_release(tzif_path: Path) -> str:
+    """Detect the host tzdb release or fail closed if unverifiable."""
+    try:
+        import tzdata
+
+        release = getattr(tzdata, "IANA_VERSION", None) or getattr(
+            tzdata, "__version__", None
+        )
+        if release:
+            m = re.match(r"^(\d{4}[a-z])", str(release))
+            if m:
+                return m.group(1)
+            return str(release)
+    except ImportError:
+        pass
+
+    resolved = tzif_path.resolve()
+    for part in resolved.parts:
+        m = re.match(r"^(\d{4}[a-z])", part)
+        if m:
+            return m.group(1)
+
+    tzdata_zi = tzif_path.parent / "tzdata.zi"
+    if not tzdata_zi.exists() and tzif_path.parent.name == "America":
+        tzdata_zi = tzif_path.parent.parent / "tzdata.zi"
+    if tzdata_zi.exists():
+        with open(tzdata_zi, encoding="utf-8", errors="replace") as f:
+            first_line = f.readline()
+            m = re.search(r"version\s+(\d{4}[a-z])", first_line)
+            if m:
+                return m.group(1)
+
+    tz_latest = Path("/var/db/timezone/tz_latest")
+    if tz_latest.exists():
+        target = tz_latest.resolve()
+        m = re.match(r"^(\d{4}[a-z])", target.name)
+        if m:
+            return m.group(1)
+
+    raise RuntimeError(
+        f"Cannot verify tzdb release from host timezone at {tzif_path} "
+        f"(resolved: {resolved}). Failing closed rather than assuming "
+        "a hardcoded release."
+    )
+
+
 def _run_bounded_qqq_test(
     start_date: date,
     end_date: date,
@@ -149,23 +196,38 @@ def _run_bounded_qqq_test(
         boundary_offsets[(d, "close")] = int(dt_c.utcoffset().total_seconds())
 
     tz_path = Path("/usr/share/zoneinfo/America/New_York")
+    if not tz_path.is_file():
+        raise FileNotFoundError(
+            f"Required timezone evidence file not found at {tz_path}. "
+            "Fail-closed: cannot construct authentic timezone evidence."
+        )
     tz_bytes = tz_path.read_bytes()
+    tzdb_release = _detect_tzdb_release(tz_path)
 
     repo_root = Path(__file__).resolve().parents[1]
     lockfile_path = repo_root / "uv.lock"
-    lockfile_bytes = (
-        lockfile_path.read_bytes() if lockfile_path.exists() else b"drift-lockfile"
-    )
+    if not lockfile_path.is_file():
+        raise FileNotFoundError(
+            f"Required lockfile not found at {lockfile_path}. "
+            "Fail-closed: cannot construct authentic reconstruction lineage."
+        )
+    lockfile_bytes = lockfile_path.read_bytes()
+
     pyproject_path = repo_root / "pyproject.toml"
-    pyproject_bytes = (
-        pyproject_path.read_bytes() if pyproject_path.exists() else b"drift-package"
-    )
+    if not pyproject_path.is_file():
+        raise FileNotFoundError(
+            f"Required pyproject.toml not found at {pyproject_path}. "
+            "Fail-closed: cannot construct authentic reconstruction lineage."
+        )
+    pyproject_bytes = pyproject_path.read_bytes()
+
     producer_source_path = repo_root / "src/drift/adapters/alpaca_exploratory.py"
-    producer_source_bytes = (
-        producer_source_path.read_bytes()
-        if producer_source_path.exists()
-        else b"drift-producer-source-v1"
-    )
+    if not producer_source_path.is_file():
+        raise FileNotFoundError(
+            f"Required producer source not found at {producer_source_path}. "
+            "Fail-closed: cannot construct authentic reconstruction lineage."
+        )
+    producer_source_bytes = producer_source_path.read_bytes()
 
     qqq_sec_id = UUID("019b8240-0000-7000-8000-000000000002")
     qqq_list_id = UUID("019b8240-0000-7000-8000-000000000012")
@@ -192,7 +254,7 @@ def _run_bounded_qqq_test(
             timezone_identifier="America/New_York",
             source_timezone_label="Eastern",
             tzif_bytes=tz_bytes,
-            tzdb_release="2024a",
+            tzdb_release=tzdb_release,
             reconstruction_observed_at=t_end,
         ),
         lineage=AlpacaReconstructionLineage(
