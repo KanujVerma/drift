@@ -1,11 +1,13 @@
 # Execution Safety Audit: Broker and Risk Integration (Phase 5)
 
 This document presents the empirical architectural audit of Drift's broker,
-risk, and execution subsystems (M13 through M18) conducted under Phase 5.
-Defect reproduction and safe-behavior regression tests are retained in
-`tests/unit/test_execution_safety_audit.py`. Source observations, test evidence,
-and proposed architecture remedies are distinct; a proposed remedy is not an
-implemented or accepted control.
+risk, and execution subsystems (M13 through M18) conducted under Phase 5,
+updated to reflect baseline remediations merged in PR #362 and PR #364.
+Defect reproduction, positive regressions, and safe-behavior regression tests
+are retained in `tests/unit/test_execution_safety_audit.py` and
+`tests/unit/test_execution_safety_robinhood.py`. Source observations, test
+evidence, and proposed architecture remedies are distinct; a proposed remedy
+is not an implemented or accepted control.
 
 In accordance with Drift operating rules and ADR 0014, this audit is read-only
 regarding live broker adapters and router authority. Live trading is strictly
@@ -16,17 +18,26 @@ Architecture Decision Packets for reviewer determination.
 
 ## 1. Summary of Audited Concerns
 
-All five concerns (S1 through S5) are **CONFIRMED UNFIXED** in repository code.
-They are tracked by defect reproduction tests and safe-behavior regression tests
-marked with `@pytest.mark.xfail(strict=True)` in `tests/unit/test_execution_safety_audit.py`.
+The five concerns (S1 through S5) are empirical execution and risk boundaries.
+Following the integration of PR #362 (risk gatekeeper support for order intents
+and canary orchestrator evaluation) and PR #364 (Robinhood adapter cancellation
+and unmapped symbol quarantine), several bounded defects have been addressed,
+while core architectural boundaries (direct-router bypass, optional gatekeepers,
+and ambiguous timeout classification) remain open.
 
 | Concern | Component | Symbol | Code Status | Live Trading Blocker | Severity |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **S1** | `execution.router`, `validation.engine`, `canary.orchestrator`, `autonomy.orchestrator` | `route_intent`, `submit_canary_intent`, `submit_autonomous_intent` | **UNFIXED** | **ABSOLUTE BLOCKER** | High |
-| **S2** | `risk.gatekeeper`, `domain.shadow_broker` vs `domain.execution` | `HardRiskGatekeeper.evaluate_order` | **UNFIXED** | **ABSOLUTE BLOCKER** | High |
-| **S3** | `adapters.robinhood.adapter` | `RobinhoodAgenticAdapter.cancel_intent` | **UNFIXED** | **ABSOLUTE BLOCKER** | Critical |
-| **S4** | `adapters.robinhood.adapter` | `RobinhoodAgenticAdapter.submit_intent` | **UNFIXED** | **ABSOLUTE BLOCKER** | Critical |
-| **S5** | `adapters.robinhood.adapter` | `RobinhoodAgenticAdapter.get_positions` | **UNFIXED** | **RESEARCH/ACCOUNTING BLOCKER** | Critical |
+| **S1** | `execution.router`, `validation.engine`, `canary.orchestrator`, `autonomy.orchestrator` | `route_intent`, `submit_canary_intent`, `submit_autonomous_intent` | **PARTIALLY REMEDIATED** | **ABSOLUTE BLOCKER** | High |
+| **S2** | `risk.gatekeeper`, `domain.shadow_broker` vs `domain.execution` | `HardRiskGatekeeper.evaluate_order` | **REMEDIATED (BOUNDED)** | **ABSOLUTE BLOCKER** | High |
+| **S3** | `adapters.robinhood.adapter` | `RobinhoodAgenticAdapter.cancel_intent` | **PARTIALLY REMEDIATED** | **ABSOLUTE BLOCKER** | Critical |
+| **S4** | `adapters.robinhood.adapter` | `RobinhoodAgenticAdapter.submit_intent` | **UNRESOLVED** | **ABSOLUTE BLOCKER** | Critical |
+| **S5** | `adapters.robinhood.adapter` | `RobinhoodAgenticAdapter.get_positions` | **REMEDIATED (BOUNDED)** | **RESEARCH/ACCOUNTING LIMITATION** | Critical |
+
+- **S1 (Partially Remediated)**: Configured orchestrator risk enforcement works. When `CanaryExecutionOrchestrator` is configured with a `HardRiskGatekeeper`, non-compliant order intents are evaluated and rejected pre-trade. However, direct-router bypass (`BrokerNeutralExecutionRouter.route_intent`) and optional missing gatekeepers (`risk_gatekeeper: HardRiskGatekeeper | None = None`) remain unresolved.
+- **S2 (Remediated - Bounded)**: Original `OrderIntentV1` compatibility issue addressed. `HardRiskGatekeeper.evaluate_order` accepts `OrderIntentV1` and evaluates quantitative limits without raising `AttributeError`. This addresses contract mismatch but does not prove universal execution risk enforcement across all entry points.
+- **S3 (Partially Remediated)**: Original unconditional false-CANCELED behavior addressed. `RobinhoodAgenticAdapter.cancel_intent` no longer unconditionally reports `CANCELED` upon transport failure, preserving the `cancellation_failed` reason. However, uncertain broker status after a cancellation failure remains a limitation; falling back to `REJECTED` does not establish that the broker order ceased to exist.
+- **S4 (Unresolved)**: Client-token reconciliation was introduced to query existing orders after submission timeouts, but unconfirmed submission timeouts still fall back to `REJECTED`. This ambiguous terminal state leaves open double-execution hazards.
+- **S5 (Remediated - Bounded)**: Original fabricated-UUID crash addressed through unmapped-position quarantine. Unmapped ticker symbols are filtered and tracked in `adapter.quarantined_symbols` rather than synthesizing invalid UUIDs that fail UUIDv7 validation. This quarantine isolates untracked assets from Drift accounting but does not constitute complete identity or portfolio-state authentication.
 
 ---
 
@@ -34,19 +45,23 @@ marked with `@pytest.mark.xfail(strict=True)` in `tests/unit/test_execution_safe
 
 ### S1. Hard Risk Policy Bypass on Order Submission Routes
 
-- **Status**: **UNFIXED** (Audit Confirmed)
+- **Status**: **PARTIALLY REMEDIATED** (Configured orchestrator risk enforcement works; direct-router bypass and optional missing gatekeepers remain unresolved)
 - **Blocker Status**: **ABSOLUTE LIVE TRADING BLOCKER**
-- **Defect Reproduction Test**: `tests/unit/test_execution_safety_audit.py::test_s1_reproduce_router_bypasses_hard_risk_gatekeeper` and `test_s1_reproduce_orchestrators_only_check_kill_switch_not_full_policy`
-- **Safe-Behavior Regression Test**: `tests/unit/test_execution_safety_audit.py::test_s1_safe_behavior_router_must_enforce_hard_risk_limits` and `test_s1_safe_behavior_orchestrator_must_reject_order_exceeding_risk_policy` (marked `@pytest.mark.xfail(strict=True)`)
+- **Defect Reproduction and Regression Tests**:
+  - Direct router bypass reproduction: `tests/unit/test_execution_safety_audit.py::test_s1_reproduce_router_bypasses_hard_risk_gatekeeper`
+  - Optional missing gatekeeper negative coverage: `tests/unit/test_execution_safety_audit.py::test_s1_orchestrator_permits_none_gatekeeper_bypassing_risk`
+  - Configured orchestrator positive regressions: `tests/unit/test_execution_safety_audit.py::test_s1_configured_orchestrator_rejects_order_violating_hard_risk_policy` and `test_s1_safe_behavior_orchestrator_must_reject_order_exceeding_risk_policy`
+  - Safe-behavior router regression (strict xfail): `tests/unit/test_execution_safety_audit.py::test_s1_safe_behavior_router_must_enforce_hard_risk_limits` (marked `@pytest.mark.xfail(strict=True)`)
 - **Exact File and Symbol**:
   - `src/drift/execution/router.py`: `BrokerNeutralExecutionRouter.route_intent`
   - `src/drift/validation/engine.py`: `ShadowValidationEngine.route_intent`
   - `src/drift/canary/orchestrator.py`: `CanaryExecutionOrchestrator.submit_canary_intent`
   - `src/drift/autonomy/orchestrator.py`: `BoundedAutonomyOrchestrator.submit_autonomous_intent`
-- **Reproduction Path**:
-  - Direct router dispatch: Calling `router.route_intent(intent)` routes directly to `adapter.submit_intent(intent)` with zero gatekeeper evaluation.
-  - Orchestrator dispatch: `ShadowValidationEngine`, `CanaryExecutionOrchestrator`, and `BoundedAutonomyOrchestrator` treat `risk_gatekeeper` as optional (`HardRiskGatekeeper | None = None`). When provided, they check only `risk_gatekeeper.journal.is_kill_switch_tripped()`.
-  - The full `HardRiskGatekeeper` policy (rate, order size, notional, concentration, and gross exposure limits) is not evaluated on these dispatch paths. Canary allocation and autonomy tier checks remain separate controls; they do not replace the hard risk policy.
+- **Audit Findings and State Reconciliation**:
+  - Configured orchestrator enforcement: PR #362 updated `CanaryExecutionOrchestrator.submit_canary_intent` to evaluate `HardRiskGatekeeper.evaluate_order` when `self._risk_gatekeeper` is provided. If `verdict.status != RiskVerdictStatus.ALLOWED`, the order is rejected with `rejection_reason="risk_halt: ..."` prior to routing.
+  - Direct router bypass: Calling `router.route_intent(intent)` routes directly to `adapter.submit_intent(intent)` with zero gatekeeper evaluation.
+  - Optional missing gatekeeper: `CanaryExecutionOrchestrator` and `BoundedAutonomyOrchestrator` still treat `risk_gatekeeper` as optional (`HardRiskGatekeeper | None = None`). When omitted, order intents bypass hard risk evaluation and fill directly via the router.
+  - S1 is not globally fixed. The ability to dispatch without hard-risk authorization remains an open vulnerability.
 - **Safety Invariant Violated**:
   - Non-negotiable pre-execution hard risk enforcement invariant (ADR 0011, ADR 0013): every order intent targeting broker execution must pass deterministic risk limits before reaching the transport adapter.
 - **Required Remediation**:
@@ -62,49 +77,50 @@ marked with `@pytest.mark.xfail(strict=True)` in `tests/unit/test_execution_safe
 
 ### S2. Domain Type Mismatch Between Risk Gatekeeper and Execution Router
 
-- **Status**: **UNFIXED** (Audit Confirmed)
+- **Status**: **REMEDIATED (BOUNDED)** (Original OrderIntentV1 compatibility issue addressed; this does not prove universal execution risk enforcement)
 - **Blocker Status**: **ABSOLUTE LIVE TRADING BLOCKER**
-- **Defect Reproduction Test**: `tests/unit/test_execution_safety_audit.py::test_s2_reproduce_domain_type_mismatch_between_risk_and_execution`
-- **Safe-Behavior Regression Test**: `tests/unit/test_execution_safety_audit.py::test_s2_safe_behavior_gatekeeper_evaluates_order_intent` (marked `@pytest.mark.xfail(strict=True)`)
+- **Defect Reproduction and Regression Tests**:
+  - Intent evaluation and limit enforcement regression: `tests/unit/test_execution_safety_audit.py::test_s2_gatekeeper_evaluates_order_intent_v1_and_enforces_limits`
+  - Safe-behavior regression: `tests/unit/test_execution_safety_audit.py::test_s2_safe_behavior_gatekeeper_evaluates_order_intent`
+  - Risk gatekeeper test suite: `tests/unit/test_execution_safety_risk.py::test_gatekeeper_evaluates_order_intent_v1_without_portfolio_state`
 - **Exact File and Symbol**:
   - `src/drift/risk/gatekeeper.py`: `HardRiskGatekeeper.evaluate_order`
-  - `src/drift/domain/shadow_broker.py`: `SimulatedOrderV1`
   - `src/drift/domain/execution.py`: `OrderIntentV1`
-- **Reproduction Path**:
-  - `HardRiskGatekeeper.evaluate_order` expects `order: SimulatedOrderV1`, with `order_id: UUID7`, `side: Literal["buy", "sell"]`, whole-share `quantity`, and optional `limit_price`. There is no `price` field on this model; `current_price: Decimal | None` is a separate keyword argument to `evaluate_order`.
-  - `BrokerNeutralExecutionRouter` accepts `intent: OrderIntentV1` (`intent_id: UUID`, `client_order_id: str`, `side: OrderSide`, `limit_price: Decimal | None`).
-  - Calling `gatekeeper.evaluate_order(intent, ...)` fails with `AttributeError`.
+  - `src/drift/domain/shadow_broker.py`: `SimulatedOrderV1`
+- **Audit Findings and State Reconciliation**:
+  - PR #362 updated `HardRiskGatekeeper.evaluate_order` to support `OrderIntentV1` polymorphically alongside `SimulatedOrderV1`. Rate, order size, notional, and concentration limits are now evaluated cleanly without `AttributeError`.
+  - Bounded scope: Addressing contract compatibility allows `HardRiskGatekeeper` to evaluate `OrderIntentV1` when called, but does not prove universal execution risk enforcement across all order entry paths in the system.
 - **Safety Invariant Violated**:
   - Domain cohesion across risk and execution layers. The hard risk gatekeeper was coupled to M12 shadow simulation contracts rather than M14 broker-neutral execution contracts.
 - **Required Remediation**:
-  - Add `evaluate_intent(self, intent: OrderIntentV1, *, portfolio_state: PortfolioStateV2, current_price: Decimal | None, evaluation_time: datetime) -> RiskVerdictV1` to `HardRiskGatekeeper`, or accept a unified protocol implemented by both `SimulatedOrderV1` and `OrderIntentV1`.
+  - Contract compatibility has been implemented. Universal gatekeeper invocation across all dispatch paths remains tied to Decision Packet 1.
 - **Impact on Existing Callers**:
   - Zero breaking changes to existing `evaluate_order` callers in M12/M13 simulation harness.
 - **Persisted Schema Change Required**:
-  - None (`PersistentRiskJournal` stores `order_id: UUID`, which accommodates both `SimulatedOrderV1.order_id` and `OrderIntentV1.intent_id`).
+  - None (`PersistentRiskJournal` stores `order_id: UUID`, accommodating both `SimulatedOrderV1.order_id` and `OrderIntentV1.intent_id`).
 - **Architecture/ADR Decision Required**:
-  - Minor amendment to M13/M14 contract boundary (see Decision Packet 1).
+  - Contract boundary resolved; architectural enforcement boundary remains under Decision Packet 1.
 
 ---
 
 ### S3. Cancellation Failure Swallowed as Authoritative CANCELED
 
-- **Status**: **UNFIXED** (Audit Confirmed)
+- **Status**: **PARTIALLY REMEDIATED** (Original unconditional false-CANCELED behavior addressed; uncertain broker status after a cancellation failure remains a limitation)
 - **Blocker Status**: **ABSOLUTE LIVE TRADING BLOCKER**
-- **Defect Reproduction Test**: `tests/unit/test_execution_safety_audit.py::test_s3_reproduce_robinhood_cancellation_error_swallowed_as_canceled`
-- **Safe-Behavior Regression Test**: `tests/unit/test_execution_safety_audit.py::test_s3_safe_behavior_cancellation_error_fails_closed` (marked `@pytest.mark.xfail(strict=True)`)
+- **Defect Reproduction and Regression Tests**:
+  - Error preservation regression: `tests/unit/test_execution_safety_audit.py::test_s3_cancellation_error_not_swallowed_and_preserves_failure_reason`
+  - Safe-behavior regression: `tests/unit/test_execution_safety_audit.py::test_s3_safe_behavior_cancellation_error_fails_closed`
+  - Robinhood unit test: `tests/unit/test_execution_safety_robinhood.py::test_s3_cancel_failure_does_not_falsely_emit_canceled`
 - **Exact File and Symbol**:
-  - `src/drift/adapters/robinhood/adapter.py`: `RobinhoodAgenticAdapter.cancel_intent` (lines 152-174)
-- **Reproduction Path**:
-  - `RobinhoodAgenticAdapter.cancel_intent(intent_id)` invokes `self._transport.call_tool("robinhood_cancel_order", {"order_id": broker_order_id})`.
-  - The call is wrapped in `try ... except RobinhoodMcpError: pass`.
-  - If the broker tool raises `RobinhoodMcpError` (e.g. HTTP 503, connection loss, or order already too late to cancel), the exception is swallowed.
-  - The adapter unconditionally constructs and returns an `ExecutionReportV1` with `status=ExecutionStatus.CANCELED` and `leaves_quantity=0`.
-  - The router persists this report, believing the order was cancelled, while the order remains active or filled on the broker.
+  - `src/drift/adapters/robinhood/adapter.py`: `RobinhoodAgenticAdapter.cancel_intent`
+- **Audit Findings and State Reconciliation**:
+  - PR #364 modified `RobinhoodAgenticAdapter.cancel_intent` so that transport exceptions (`RobinhoodMcpError`) are no longer silently swallowed to emit `ExecutionStatus.CANCELED`.
+  - When cancellation fails, the adapter queries `get_intent_status` or retains existing status with `rejection_reason=f"cancellation_failed: {exc}"`.
+  - Limitation: If broker status cannot be determined (e.g. no prior cached report and status query unavailable), the adapter falls back to `ExecutionStatus.REJECTED`. Emitting `REJECTED` or failing to cancel does not establish that the broker order stopped existing. Uncertain cancellation states remain an unresolved risk limitation under Decision Packet 2.
 - **Safety Invariant Violated**:
   - Truth-in-reporting invariant: an execution status report must represent actual confirmed broker state, never assumed success upon transport failure.
 - **Required Remediation**:
-  - If `RobinhoodMcpError` is raised during `robinhood_cancel_order`, do not emit `ExecutionStatus.CANCELED`. Instead, query `robinhood_get_order` to determine true state. If query is unavailable, raise `RouterExecutionError` or mark intent as `CANCEL_FAILED` / `PENDING_RECONCILIATION`.
+  - Implement an explicit uncertain cancellation state (`CANCEL_FAILED` or `PENDING_RECONCILIATION`) rather than falling back to terminal statuses that could misrepresent open broker commitments.
 - **Impact on Existing Callers**:
   - Callers will not erroneously assume open risk is closed when broker cancellation fails.
 - **Persisted Schema Change Required**:
@@ -116,23 +132,22 @@ marked with `@pytest.mark.xfail(strict=True)` in `tests/unit/test_execution_safe
 
 ### S4. Ambiguous Submission Error Recorded as Authoritative Rejection
 
-- **Status**: **UNFIXED** (Audit Confirmed)
+- **Status**: **UNRESOLVED**
 - **Blocker Status**: **ABSOLUTE LIVE TRADING BLOCKER**
-- **Defect Reproduction Test**: `tests/unit/test_execution_safety_audit.py::test_s4_reproduce_ambiguous_submission_error_marked_as_definitive_rejection`
-- **Safe-Behavior Regression Test**: `tests/unit/test_execution_safety_audit.py::test_s4_safe_behavior_submission_timeout_not_marked_rejected` (marked `@pytest.mark.xfail(strict=True)`)
+- **Defect Reproduction and Regression Tests**:
+  - Defect reproduction: `tests/unit/test_execution_safety_audit.py::test_s4_reproduce_ambiguous_submission_error_marked_as_definitive_rejection`
+  - Safe-behavior regression (strict xfail): `tests/unit/test_execution_safety_audit.py::test_s4_safe_behavior_submission_timeout_not_marked_rejected` (marked `@pytest.mark.xfail(strict=True)`)
+  - Robinhood unit test: `tests/unit/test_execution_safety_robinhood.py::test_s4_submission_timeout_without_broker_order_fails_closed`
 - **Exact File and Symbol**:
-  - `src/drift/adapters/robinhood/adapter.py`: `RobinhoodAgenticAdapter.submit_intent` (lines 93-107)
-- **Reproduction Path**:
-  - During `submit_intent`, `self._transport.call_tool("robinhood_place_order", args)` is invoked.
-  - If network timeout, connection reset, or gateway 504 occurs, `RobinhoodMcpError` is raised.
-  - The adapter catches the error and immediately constructs an `ExecutionReportV1` with `status=ExecutionStatus.REJECTED` and `broker_order_id=None`.
-  - The router records the intent as rejected.
-  - However, in reality, the order may have reached Robinhood and executed.
-  - If an automated strategy or retry loop subsequently re-submits or assumes zero position, double-execution or unhedged exposure results.
+  - `src/drift/adapters/robinhood/adapter.py`: `RobinhoodAgenticAdapter.submit_intent`
+- **Audit Findings and State Reconciliation**:
+  - PR #364 added client-token reconciliation (`_try_reconcile_by_client_token`) upon submission timeout.
+  - However, when client-token reconciliation does not locate an existing order (or when the reconciliation query itself fails), the adapter constructs an `ExecutionReportV1` with `status=ExecutionStatus.REJECTED`.
+  - Authoritatively marking an unconfirmed submission timeout as `REJECTED` remains a safety hazard: network timeouts do not prove non-receipt by the broker. If an automated caller treats the intent as rejected and re-submits, double-execution can occur.
 - **Safety Invariant Violated**:
   - Ambiguous state must fail closed to an uncertain state requiring reconciliation, rather than resolving to a false-negative rejection.
 - **Required Remediation**:
-  - When `RobinhoodMcpError` occurs during submission, do not record terminal `ExecutionStatus.REJECTED`. Mark state as `UNKNOWN` / `AMBIGUOUS_SUBMISSION` and initiate an idempotent query using `client_token` to confirm whether Robinhood accepted the order.
+  - When `RobinhoodMcpError` occurs during submission and reconciliation is indeterminate, do not record terminal `ExecutionStatus.REJECTED`. Mark state as `UNKNOWN` / `AMBIGUOUS_SUBMISSION` and initiate reconciliation or trip the emergency kill switch.
 - **Impact on Existing Callers**:
   - Protects automated callers from double-submission hazards.
 - **Persisted Schema Change Required**:
@@ -144,29 +159,24 @@ marked with `@pytest.mark.xfail(strict=True)` in `tests/unit/test_execution_safe
 
 ### S5. Unmapped Symbol Maps to Fabricated DNS UUID and Crashes Schema Validation
 
-- **Status**: **UNFIXED** (Audit Confirmed)
-- **Blocker Status**: **RESEARCH AND ACCOUNTING INTEGRITY BLOCKER**
-- **Defect Reproduction Test**: `tests/unit/test_execution_safety_audit.py::test_s5_reproduce_unknown_symbol_maps_to_fabricated_uuid`
-- **Safe-Behavior Regression Test**: `tests/unit/test_execution_safety_audit.py::test_s5_safe_behavior_unmapped_symbol_quarantined_without_crash` (marked `@pytest.mark.xfail(strict=True)`)
+- **Status**: **REMEDIATED (BOUNDED)** (Original fabricated-UUID crash addressed through unmapped-position quarantine; quarantine does not constitute complete identity or portfolio-state authentication)
+- **Blocker Status**: **RESEARCH AND ACCOUNTING INTEGRITY LIMITATION**
+- **Defect Reproduction and Regression Tests**:
+  - Quarantine and mapped preservation regression: `tests/unit/test_execution_safety_audit.py::test_s5_unmapped_positions_quarantined_without_crash_or_fabricated_uuid`
+  - Safe-behavior regression: `tests/unit/test_execution_safety_audit.py::test_s5_safe_behavior_unmapped_symbol_quarantined_without_crash`
+  - Robinhood unit test: `tests/unit/test_execution_safety_robinhood.py::test_s5_unmapped_positions_quarantined_without_schema_crash`
 - **Exact File and Symbol**:
-  - `src/drift/adapters/robinhood/adapter.py`: `RobinhoodAgenticAdapter.get_positions` (lines 254-257)
-- **Reproduction Path**:
-  - When Robinhood reports positions for symbols not present in `config.symbol_map`:
-    ```python
-    sec_id = self._reverse_symbol_map.get(sym)
-    if sec_id is None:
-        sec_id = uuid5(NAMESPACE_DNS, f"drift.equity.{sym}")
-    ```
-  - The adapter fabricates a UUIDv5 from the symbol string.
-  - In `drift.domain.execution.BrokerPositionSnapshotV1`, `security_id: UUID7` requires a version 7 identifier through the shared domain validation contract.
-  - Because `uuid5` produces a version 5 UUID (not version 7), `build_broker_position_snapshot` raises a Pydantic `ValidationError`, aborting the `get_positions()` call.
+  - `src/drift/adapters/robinhood/adapter.py`: `RobinhoodAgenticAdapter.get_positions`
+- **Audit Findings and State Reconciliation**:
+  - PR #364 eliminated DNS UUIDv5 fabrication. Unknown symbols in `get_positions` are added to `self._quarantined_symbols` and excluded from returned `BrokerPositionSnapshotV1` records, preventing Pydantic `ValidationError` crashes on UUIDv7 constraints.
+  - Bounded scope: Quarantining unknown positions prevents crashes but does not provide complete historical identity resolution (M1b) or authenticated account portfolio reconciliation. Untracked holdings in a brokerage account remain unrepresented in Drift portfolio state.
 - **Safety Invariant Violated**:
   - (1) M0/M1 temporal provenance and security identity invariant: all security identifiers must resolve to verified historical security identities in the Drift evidence kernel, never ad-hoc fabricated UUIDs.
   - (2) The inspected broker position model requires a UUIDv7 security identifier.
 - **Required Remediation**:
-  - Fail closed: unmapped symbols must either raise an `UnmappedSecurityError`, or unmapped positions must be quarantined into a separate unmapped positions collection rather than fabricating arbitrary IDs.
+  - Quarantine mechanism is active. Long-term dynamic resolution or external portfolio reconciliation remains under Decision Packet 3.
 - **Impact on Existing Callers**:
-  - Would prevent the demonstrated position-query validation failure on unknown positions and isolate untracked assets from Drift portfolio accounting. The source does not establish that this exception terminates the whole process.
+  - Prevents position-query validation crashes when untracked assets exist in a brokerage account.
 - **Persisted Schema Change Required**:
   - None.
 - **Architecture/ADR Decision Required**:
