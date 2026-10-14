@@ -10,6 +10,11 @@ One-milestone-one-owner, the separation of build order from authorization
 order, contract freeze, and GitHub coordination remain in force unless ADR
 0014 says otherwise. The historical rationale below is unchanged.
 
+Current feature ownership and active-writer migration are governed by
+[ADR 0015](0015-three-feature-workstreams-and-explicit-writer-handoffs.md). This document remains a historical record;
+its unchanged scientific, evidence and operational-authorization safeguards
+remain applicable.
+
 ## Context
 
 Drift's bounded roadmap from M2 through M17 contains sixteen milestone IDs.

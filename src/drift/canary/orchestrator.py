@@ -18,6 +18,7 @@ from drift.domain.execution import (
     OrderIntentV1,
     build_execution_report,
 )
+from drift.domain.risk import RiskVerdictStatus
 from drift.execution.router import BrokerNeutralExecutionRouter
 from drift.risk.gatekeeper import HardRiskGatekeeper
 
@@ -88,8 +89,20 @@ class CanaryExecutionOrchestrator:
 
         # 2. Evaluate hard risk gatekeeper if configured
         if self._risk_gatekeeper is not None:
-            # Check if kill switch is tripped
-            if self._risk_gatekeeper.journal.is_kill_switch_tripped():
+            price = (
+                reference_price if reference_price is not None else intent.limit_price
+            )
+            verdict = self._risk_gatekeeper.evaluate_order(
+                intent,
+                current_price=price,
+                evaluation_time=now,
+            )
+            if verdict.status != RiskVerdictStatus.ALLOWED:
+                rejection_reason = (
+                    "risk_halt: kill switch is tripped"
+                    if verdict.status == RiskVerdictStatus.KILL_SWITCH_ACTIVE
+                    else f"risk_halt: {verdict.reason}"
+                )
                 rejected_report = build_execution_report(
                     report_id=uuid7(),
                     intent_id=intent.intent_id,
@@ -97,7 +110,7 @@ class CanaryExecutionOrchestrator:
                     status=ExecutionStatus.REJECTED,
                     cum_quantity=0,
                     leaves_quantity=intent.quantity,
-                    rejection_reason="risk_halt: kill switch is tripped",
+                    rejection_reason=rejection_reason,
                     reported_at=now,
                 )
                 return (rejected_report, None)

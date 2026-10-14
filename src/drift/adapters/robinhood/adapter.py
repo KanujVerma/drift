@@ -7,7 +7,7 @@ official Robinhood Agentic MCP tool calls per ADR 0011 and ADR 0013.
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
-from uuid import NAMESPACE_DNS, UUID, uuid5, uuid7
+from uuid import UUID, uuid7
 
 from drift.adapters.robinhood.config import RobinhoodAgenticConfigV1
 from drift.adapters.robinhood.transport import (
@@ -49,6 +49,7 @@ class RobinhoodAgenticAdapter:
         self._broker_order_to_intent: dict[str, UUID] = {}
         self._latest_reports: dict[UUID, ExecutionReportV1] = {}
         self._intents: dict[UUID, OrderIntentV1] = {}
+        self._quarantined_symbols: set[str] = set()
 
     @property
     def config(self) -> RobinhoodAgenticConfigV1:
@@ -59,6 +60,64 @@ class RobinhoodAgenticAdapter:
     def transport(self) -> RobinhoodMcpTransportProtocol:
         """Underlying MCP transport."""
         return self._transport
+
+    @property
+    def quarantined_symbols(self) -> frozenset[str]:
+        """Symbols present in broker account but quarantined due to missing mapping."""
+        return frozenset(self._quarantined_symbols)
+
+    def _try_reconcile_by_client_token(
+        self,
+        intent_id: UUID,
+    ) -> dict[str, Any] | None:
+        """Attempt to locate order by client_token if submission was ambiguous."""
+        try:
+            return self._transport.call_tool(
+                "robinhood_get_order_by_client_token",
+                {"client_token": str(intent_id)},
+            )
+        except RobinhoodMcpError:
+            return None
+
+    def _build_report_from_raw(
+        self,
+        intent: OrderIntentV1,
+        raw: dict[str, Any],
+        reported_at: datetime,
+    ) -> ExecutionReportV1:
+        broker_order_id = str(raw["order_id"]) if "order_id" in raw else None
+        if broker_order_id is not None:
+            self._intent_to_broker_order[intent.intent_id] = broker_order_id
+            self._broker_order_to_intent[broker_order_id] = intent.intent_id
+
+        raw_status = str(raw.get("status", "")).lower()
+        status = self._map_order_status(raw_status)
+
+        cum_qty = int(raw.get("cum_quantity", 0))
+        leaves_qty = max(0, intent.quantity - cum_qty)
+        avg_price = (
+            Decimal(str(raw["avg_fill_price"]))
+            if raw.get("avg_fill_price") is not None
+            else None
+        )
+        rejection_reason = raw.get("rejection_reason")
+        if status == ExecutionStatus.REJECTED and not rejection_reason:
+            rejection_reason = "rejected by robinhood mcp"
+
+        return build_execution_report(
+            report_id=uuid7(),
+            intent_id=intent.intent_id,
+            broker_order_id=broker_order_id,
+            status=status,
+            cum_quantity=cum_qty,
+            leaves_quantity=leaves_qty,
+            last_fill_price=avg_price,
+            last_fill_quantity=cum_qty if cum_qty > 0 else None,
+            avg_fill_price=avg_price,
+            fee_amount=Decimal("0"),
+            rejection_reason=str(rejection_reason) if rejection_reason else None,
+            reported_at=reported_at,
+        )
 
     def submit_intent(self, intent: OrderIntentV1) -> ExecutionReportV1:
         """Submit an order intent to Robinhood Agentic MCP tools."""
@@ -92,53 +151,31 @@ class RobinhoodAgenticAdapter:
 
         try:
             raw = self._transport.call_tool("robinhood_place_order", args)
+            report = self._build_report_from_raw(intent, raw, now)
         except RobinhoodMcpError as exc:
-            report = build_execution_report(
-                report_id=uuid7(),
-                intent_id=intent.intent_id,
-                broker_order_id=None,
-                status=ExecutionStatus.REJECTED,
-                cum_quantity=0,
-                leaves_quantity=intent.quantity,
-                rejection_reason=f"mcp_error: {exc}",
-                reported_at=now,
-            )
-            self._latest_reports[intent.intent_id] = report
-            return report
+            # Reconcile ambiguous submission by client_token
+            recon = self._try_reconcile_by_client_token(intent.intent_id)
+            if recon is not None and "order_id" in recon:
+                report = self._build_report_from_raw(intent, recon, now)
+            else:
+                msg = str(exc).lower()
+                is_timeout = "timeout" in msg or "timed out" in msg
+                rejection_reason = (
+                    f"mcp_submission_timeout: {exc}"
+                    if is_timeout
+                    else f"mcp_error: {exc}"
+                )
+                report = build_execution_report(
+                    report_id=uuid7(),
+                    intent_id=intent.intent_id,
+                    broker_order_id=None,
+                    status=ExecutionStatus.REJECTED,
+                    cum_quantity=0,
+                    leaves_quantity=intent.quantity,
+                    rejection_reason=rejection_reason,
+                    reported_at=now,
+                )
 
-        broker_order_id = str(raw["order_id"]) if "order_id" in raw else None
-        if broker_order_id is not None:
-            self._intent_to_broker_order[intent.intent_id] = broker_order_id
-            self._broker_order_to_intent[broker_order_id] = intent.intent_id
-
-        raw_status = str(raw.get("status", "")).lower()
-        status = self._map_order_status(raw_status)
-
-        cum_qty = int(raw.get("cum_quantity", 0))
-        leaves_qty = max(0, intent.quantity - cum_qty)
-        avg_price = (
-            Decimal(str(raw["avg_fill_price"]))
-            if raw.get("avg_fill_price") is not None
-            else None
-        )
-        rejection_reason = raw.get("rejection_reason")
-        if status == ExecutionStatus.REJECTED and not rejection_reason:
-            rejection_reason = "rejected by robinhood mcp"
-
-        report = build_execution_report(
-            report_id=uuid7(),
-            intent_id=intent.intent_id,
-            broker_order_id=broker_order_id,
-            status=status,
-            cum_quantity=cum_qty,
-            leaves_quantity=leaves_qty,
-            last_fill_price=avg_price,
-            last_fill_quantity=cum_qty if cum_qty > 0 else None,
-            avg_fill_price=avg_price,
-            fee_amount=Decimal("0"),
-            rejection_reason=str(rejection_reason) if rejection_reason else None,
-            reported_at=now,
-        )
         self._latest_reports[intent.intent_id] = report
         return report
 
@@ -156,8 +193,40 @@ class RobinhoodAgenticAdapter:
                     "robinhood_cancel_order",
                     {"order_id": broker_order_id},
                 )
-            except RobinhoodMcpError:
-                pass
+            except RobinhoodMcpError as exc:
+                # Query actual broker status on cancel failure
+                latest = self.get_intent_status(intent_id)
+                report_status = (
+                    latest.status
+                    if latest is not None
+                    else (
+                        existing.status
+                        if existing is not None
+                        else ExecutionStatus.REJECTED
+                    )
+                )
+                cum = (
+                    latest.cum_quantity
+                    if latest is not None
+                    else (existing.cum_quantity if existing is not None else 0)
+                )
+                leaves = (
+                    latest.leaves_quantity
+                    if latest is not None
+                    else (existing.leaves_quantity if existing is not None else 0)
+                )
+                report = build_execution_report(
+                    report_id=uuid7(),
+                    intent_id=intent_id,
+                    broker_order_id=broker_order_id,
+                    status=report_status,
+                    cum_quantity=cum,
+                    leaves_quantity=leaves,
+                    rejection_reason=f"cancellation_failed: {exc}",
+                    reported_at=now,
+                )
+                self._latest_reports[intent_id] = report
+                return report
 
         cum = existing.cum_quantity if existing is not None else 0
         report = build_execution_report(
@@ -253,7 +322,8 @@ class RobinhoodAgenticAdapter:
 
             sec_id = self._reverse_symbol_map.get(sym)
             if sec_id is None:
-                sec_id = uuid5(NAMESPACE_DNS, f"drift.equity.{sym}")
+                self._quarantined_symbols.add(sym)
+                continue
 
             cost_basis = Decimal(str(pos.get("cost_basis", "0")))
             curr_price = (

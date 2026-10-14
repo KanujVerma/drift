@@ -73,6 +73,8 @@ class MockRobinhoodMcpTransport:
             return self._handle_cancel_order(args)
         if tool_name == "robinhood_get_order":
             return self._handle_get_order(args)
+        if tool_name == "robinhood_get_order_by_client_token":
+            return self._handle_get_order_by_client_token(args)
         if tool_name == "robinhood_get_account":
             return self._handle_get_account()
         if tool_name == "robinhood_get_positions":
@@ -204,6 +206,13 @@ class MockRobinhoodMcpTransport:
         if record is None:
             raise RobinhoodMcpError(f"order {order_id} not found")
         return dict(record)
+
+    def _handle_get_order_by_client_token(self, args: dict[str, Any]) -> dict[str, Any]:
+        token = str(args.get("client_token", ""))
+        for record in self._orders.values():
+            if str(record.get("client_token", "")) == token:
+                return dict(record)
+        raise RobinhoodMcpError(f"order with client_token {token} not found")
 
     def _handle_get_account(self) -> dict[str, Any]:
         with decimal_context():
