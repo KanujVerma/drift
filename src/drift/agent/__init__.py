@@ -2,6 +2,7 @@
 
 from drift.agent.context import (
     DEFAULT_STRATEGY_TYPES,
+    LEGACY_STRATEGY_TYPE_ALIASES,
     ResearchContextSynthesizer,
 )
 from drift.agent.gemini_agent import (
@@ -20,6 +21,7 @@ __all__ = [
     "GeminiAgentSchemaOutput",
     "GeminiResearchAgent",
     "GeminiResearchAgentError",
+    "LEGACY_STRATEGY_TYPE_ALIASES",
     "ProposalValidator",
     "ResearchAgentProtocol",
     "ResearchAgentRunner",

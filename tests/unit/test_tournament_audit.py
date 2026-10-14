@@ -193,17 +193,28 @@ def test_runner_with_recorder_end_to_end(tmp_path: Path) -> None:
         min_delta_sharpe=Decimal("0.20"),
     )
 
+    champ_returns = tuple(
+        Decimal("0.001") + Decimal(str(i % 5)) / Decimal("1000") for i in range(60)
+    )
+    chall_returns = tuple(
+        Decimal("0.004") + Decimal(str((i + 1) % 5)) / Decimal("1000")
+        for i in range(60)
+    )
     evaluator = DeterministicMockTrialEvaluator(
         metric_overrides={
             champ.parameters_hash: {
                 "annualized_sharpe": Decimal("1.00"),
                 "max_drawdown": Decimal("0.10"),
                 "annualized_turnover": Decimal("2.0"),
+                "is_pnl_complete": True,
+                "session_returns": champ_returns,
             },
             chall.parameters_hash: {
                 "annualized_sharpe": Decimal("1.50"),
                 "max_drawdown": Decimal("0.08"),
                 "annualized_turnover": Decimal("2.2"),
+                "is_pnl_complete": True,
+                "session_returns": chall_returns,
             },
         }
     )
@@ -212,6 +223,7 @@ def test_runner_with_recorder_end_to_end(tmp_path: Path) -> None:
         config=config,
         evaluator=evaluator,
         recorder=recorder,
+        require_genuine_evidence=False,
     )
 
     record = runner.run_match(

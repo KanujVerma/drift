@@ -1,0 +1,2143 @@
+{
+  "schema_version": "1",
+  "evaluation_interval": {
+    "schema_version": "1",
+    "start": {
+      "schema_version": "1",
+      "shape": "exact",
+      "lower_bound": "2020-01-02T14:30:00Z",
+      "upper_bound": "2020-01-02T14:30:00Z",
+      "source_precision": "second",
+      "source_time_label": "2020-01-02T14:30:00Z",
+      "source_timezone": null,
+      "evidence_reference": {
+        "artifact_id": "019b8240-0000-7000-8000-000000000001",
+        "kind": "other",
+        "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "location": "evidence/source.json"
+      }
+    },
+    "end": null
+  },
+  "source_snapshot_hash": null,
+  "session_clock": {
+    "schema_version": "1",
+    "mode": "realized_session_authority",
+    "sessions": [
+      {
+        "schema_version": "1",
+        "session_key": {
+          "schema_version": "1",
+          "mic": "XNYS",
+          "session_scope": "regular",
+          "local_date": "2026-01-05"
+        },
+        "opened_at": "2026-01-05T14:30:00Z",
+        "closed_at": "2026-01-05T21:00:00Z",
+        "authority": "realized",
+        "authority_record_hashes": [
+          "1111111111111111111111111111111111111111111111111111111111111111"
+        ],
+        "authority_proof_hashes": [
+          "2222222222222222222222222222222222222222222222222222222222222222"
+        ],
+        "session_hash": "4d7d9990e71b7d822622cd1b518a0f7c3cd08db5feeb176b9e488f014ed67368"
+      },
+      {
+        "schema_version": "1",
+        "session_key": {
+          "schema_version": "1",
+          "mic": "XNYS",
+          "session_scope": "regular",
+          "local_date": "2026-01-06"
+        },
+        "opened_at": "2026-01-06T14:30:00Z",
+        "closed_at": "2026-01-06T21:00:00Z",
+        "authority": "realized",
+        "authority_record_hashes": [
+          "1111111111111111111111111111111111111111111111111111111111111111"
+        ],
+        "authority_proof_hashes": [
+          "2222222222222222222222222222222222222222222222222222222222222222"
+        ],
+        "session_hash": "7d03f7b5766fab1b3b55518b4216a6ff5ff4bd3f3e7a7f2e87d1874b4e82f920"
+      },
+      {
+        "schema_version": "1",
+        "session_key": {
+          "schema_version": "1",
+          "mic": "XNYS",
+          "session_scope": "regular",
+          "local_date": "2026-01-07"
+        },
+        "opened_at": "2026-01-07T14:30:00Z",
+        "closed_at": "2026-01-07T21:00:00Z",
+        "authority": "realized",
+        "authority_record_hashes": [
+          "1111111111111111111111111111111111111111111111111111111111111111"
+        ],
+        "authority_proof_hashes": [
+          "2222222222222222222222222222222222222222222222222222222222222222"
+        ],
+        "session_hash": "7a253171103348127c834ed1daabb694394483072a1e9f5f3bee9210c22c08f3"
+      },
+      {
+        "schema_version": "1",
+        "session_key": {
+          "schema_version": "1",
+          "mic": "XNYS",
+          "session_scope": "regular",
+          "local_date": "2026-01-08"
+        },
+        "opened_at": "2026-01-08T14:30:00Z",
+        "closed_at": "2026-01-08T21:00:00Z",
+        "authority": "realized",
+        "authority_record_hashes": [
+          "1111111111111111111111111111111111111111111111111111111111111111"
+        ],
+        "authority_proof_hashes": [
+          "2222222222222222222222222222222222222222222222222222222222222222"
+        ],
+        "session_hash": "32fe54d09dfd2baa860d89a5d51131f51ad4bbe35860b83d91823961255ef201"
+      }
+    ],
+    "acknowledged_limitations": [],
+    "clock_hash": "f2b9cdc7dcb39a3618b53d647a426bc465d89f54284a836c11498345e8e32ce9"
+  },
+  "security_identities": [
+    {
+      "schema_version": "1",
+      "security_id": "019b8240-0000-7000-8000-000000000200"
+    },
+    {
+      "schema_version": "1",
+      "security_id": "019b8240-0000-7000-8000-000000000300"
+    }
+  ],
+  "listing_identities": [
+    {
+      "schema_version": "1",
+      "listing_id": "019b8240-0000-7000-8000-000000000301",
+      "venue": "XNYS"
+    },
+    {
+      "schema_version": "1",
+      "listing_id": "019b8240-0000-7000-8000-000000000201",
+      "venue": "XNYS"
+    }
+  ],
+  "structural_eligibilities": [
+    {
+      "schema_version": "1",
+      "issuer_id": "019b8240-0000-7000-8000-000000000202",
+      "security_id": "019b8240-0000-7000-8000-000000000300",
+      "listing_id": "019b8240-0000-7000-8000-000000000301",
+      "methodology_id": "synthetic-universe-v1",
+      "definition_hash": "7777777777777777777777777777777777777777777777777777777777777777",
+      "classification": "eligible",
+      "reasons": [
+        "synthetic"
+      ],
+      "normalized_query": {
+        "schema_version": "1",
+        "purpose": "structural_eligibility",
+        "information_role": "decision_information",
+        "resolution_mode": "as_known",
+        "subject_hash": "e2cc03f1bc0e81c86a14a703fb517e010a33fbd27614f74dbdff7fa55452f82a",
+        "source_manifest_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+        "validation_decision_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+        "context_bundle_hashes": [
+          "3333333333333333333333333333333333333333333333333333333333333333",
+          "4444444444444444444444444444444444444444444444444444444444444444"
+        ],
+        "dataset_role_hash": "5555555555555555555555555555555555555555555555555555555555555555",
+        "record_contract_hash": "6666666666666666666666666666666666666666666666666666666666666666",
+        "schema_hash": "8888888888888888888888888888888888888888888888888888888888888888",
+        "knowledge_cutoff": "2026-01-01T00:00:00Z",
+        "evaluation_time": "2026-01-01T00:00:00Z",
+        "requested_channel": {
+          "kind": "public",
+          "identifier": "synthetic-public",
+          "version": "1"
+        },
+        "policy_id": "synthetic-universe-policy",
+        "policy_hash": "9999999999999999999999999999999999999999999999999999999999999999"
+      },
+      "identity_bundle_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+      "universe_bundle_hash": "4444444444444444444444444444444444444444444444444444444444444444",
+      "identity_assignment_resolution_hashes": [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      ],
+      "identity_resolution_hashes": [
+        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      ],
+      "classification_resolution_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "primary_listing_resolution_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "lifecycle_resolution_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "membership_resolution_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+      "selection_proof_hashes": [
+        "5555555555555555555555555555555555555555555555555555555555555555"
+      ],
+      "outcome_binding_hash": "d6889fc605acd95e06489e3cdeeaba313159e0aa0f475762bd35d5f37413d6f1"
+    },
+    {
+      "schema_version": "1",
+      "issuer_id": "019b8240-0000-7000-8000-000000000202",
+      "security_id": "019b8240-0000-7000-8000-000000000200",
+      "listing_id": "019b8240-0000-7000-8000-000000000201",
+      "methodology_id": "synthetic-universe-v1",
+      "definition_hash": "7777777777777777777777777777777777777777777777777777777777777777",
+      "classification": "eligible",
+      "reasons": [
+        "synthetic"
+      ],
+      "normalized_query": {
+        "schema_version": "1",
+        "purpose": "structural_eligibility",
+        "information_role": "decision_information",
+        "resolution_mode": "as_known",
+        "subject_hash": "97d3484711025aeac08120fb01391e60d0fb0e82ea20b682a1a623cba69ef29e",
+        "source_manifest_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+        "validation_decision_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+        "context_bundle_hashes": [
+          "3333333333333333333333333333333333333333333333333333333333333333",
+          "4444444444444444444444444444444444444444444444444444444444444444"
+        ],
+        "dataset_role_hash": "5555555555555555555555555555555555555555555555555555555555555555",
+        "record_contract_hash": "6666666666666666666666666666666666666666666666666666666666666666",
+        "schema_hash": "8888888888888888888888888888888888888888888888888888888888888888",
+        "knowledge_cutoff": "2026-01-01T00:00:00Z",
+        "evaluation_time": "2026-01-01T00:00:00Z",
+        "requested_channel": {
+          "kind": "public",
+          "identifier": "synthetic-public",
+          "version": "1"
+        },
+        "policy_id": "synthetic-universe-policy",
+        "policy_hash": "9999999999999999999999999999999999999999999999999999999999999999"
+      },
+      "identity_bundle_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+      "universe_bundle_hash": "4444444444444444444444444444444444444444444444444444444444444444",
+      "identity_assignment_resolution_hashes": [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      ],
+      "identity_resolution_hashes": [
+        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      ],
+      "classification_resolution_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "primary_listing_resolution_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "lifecycle_resolution_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "membership_resolution_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+      "selection_proof_hashes": [
+        "5555555555555555555555555555555555555555555555555555555555555555"
+      ],
+      "outcome_binding_hash": "3f440ebbc979473a8c420d1e3aa74d12e359e90510c3de798ab56969b58a9f03"
+    }
+  ],
+  "economic_outcomes": [],
+  "authentic_decision_views": [
+    {
+      "schema_version": "1",
+      "role": "decision",
+      "query": {
+        "schema_version": "1",
+        "observation": {
+          "schema_version": "1",
+          "listing_id": "019b8240-0000-7000-8000-000000000201",
+          "security_id": "019b8240-0000-7000-8000-000000000200",
+          "venue": "XNYS",
+          "session_date": "2026-01-06",
+          "source_id": "synthetic-source",
+          "contract_hash": "e40755aba6dc2e5fd1b2bb3da3815bd07f56359988e88fee4f5bbe3a3d413f5b",
+          "source_selection_policy_hash": "37974017cd131d606b5430d5d518e07a73109964e789468d2d8e3179f7362d4d",
+          "profile_hash": "ba0f848b5e04fadcb4b810b86fc91930e3cb3765288f926f61e9218d6306ff50",
+          "requested_channel": {
+            "kind": "public",
+            "identifier": "synthetic-public",
+            "version": "1"
+          },
+          "availability_policy_id": "public-exact",
+          "availability_policy_hash": "0af23b5694839416ce238eb3e363c8fbd1010645592b09b4eff21c3b1185d144",
+          "input_context_hash": "b8936689b376ebc8d3c61a5a47a41093938c91b1984489188633e319044d0617",
+          "kind": "decision",
+          "decision_time": "2026-01-06T21:00:00Z",
+          "knowledge_cutoff": "2026-01-06T21:00:00Z",
+          "effective_cutoff": "2026-01-06T21:00:00Z"
+        },
+        "policy_hash": "fcf3b5d9b80207129b4ec5b67e46468f1ba89f9dd5e2088df2d56526ceb0360d",
+        "anchor_session": null
+      },
+      "query_hash": "5786185fc0d3a9315e534fb42faef6c624cb7303c8bca19ff6b9a28742273cec",
+      "source_session": {
+        "schema_version": "1",
+        "mic": "XNYS",
+        "session_scope": "regular",
+        "local_date": "2026-01-06"
+      },
+      "listing_id": "019b8240-0000-7000-8000-000000000201",
+      "security_id": "019b8240-0000-7000-8000-000000000200",
+      "basis_mode": "source_basis",
+      "anchor_session": null,
+      "fields": [
+        {
+          "schema_version": "1",
+          "field_name": "close",
+          "method_id": "close-v1",
+          "meaning": "price",
+          "source_value": "100.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "high",
+          "method_id": "high-v1",
+          "meaning": "price",
+          "source_value": "100.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "low",
+          "method_id": "low-v1",
+          "meaning": "price",
+          "source_value": "100.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "open",
+          "method_id": "open-v1",
+          "meaning": "price",
+          "source_value": "100.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "volume",
+          "method_id": "volume-v1",
+          "meaning": "share_volume",
+          "source_value": "1000",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        }
+      ],
+      "usability_hash": "04399eab57ea0aedc11d9e852dc1670a3f1cdd2e9a661cd2b38de36fc81eebe3",
+      "output_hash": "5478b67e17b38ead77a81413e35978252c9ce7af0e15d4d7a91740ab57acdfe8",
+      "derivation_hash": "74fa3d25eedcdad2d03b65e535e888d29fd090fb54bf0f0c123b16a20bf6465a"
+    },
+    {
+      "schema_version": "1",
+      "role": "decision",
+      "query": {
+        "schema_version": "1",
+        "observation": {
+          "schema_version": "1",
+          "listing_id": "019b8240-0000-7000-8000-000000000201",
+          "security_id": "019b8240-0000-7000-8000-000000000200",
+          "venue": "XNYS",
+          "session_date": "2026-01-07",
+          "source_id": "synthetic-source",
+          "contract_hash": "e40755aba6dc2e5fd1b2bb3da3815bd07f56359988e88fee4f5bbe3a3d413f5b",
+          "source_selection_policy_hash": "37974017cd131d606b5430d5d518e07a73109964e789468d2d8e3179f7362d4d",
+          "profile_hash": "ba0f848b5e04fadcb4b810b86fc91930e3cb3765288f926f61e9218d6306ff50",
+          "requested_channel": {
+            "kind": "public",
+            "identifier": "synthetic-public",
+            "version": "1"
+          },
+          "availability_policy_id": "public-exact",
+          "availability_policy_hash": "0af23b5694839416ce238eb3e363c8fbd1010645592b09b4eff21c3b1185d144",
+          "input_context_hash": "b8936689b376ebc8d3c61a5a47a41093938c91b1984489188633e319044d0617",
+          "kind": "decision",
+          "decision_time": "2026-01-07T21:00:00Z",
+          "knowledge_cutoff": "2026-01-07T21:00:00Z",
+          "effective_cutoff": "2026-01-07T21:00:00Z"
+        },
+        "policy_hash": "fcf3b5d9b80207129b4ec5b67e46468f1ba89f9dd5e2088df2d56526ceb0360d",
+        "anchor_session": null
+      },
+      "query_hash": "aaafac2a661e0b74c6530ab4fe36832d34ba4c44905b000da2ac65e9ad1a5718",
+      "source_session": {
+        "schema_version": "1",
+        "mic": "XNYS",
+        "session_scope": "regular",
+        "local_date": "2026-01-07"
+      },
+      "listing_id": "019b8240-0000-7000-8000-000000000201",
+      "security_id": "019b8240-0000-7000-8000-000000000200",
+      "basis_mode": "source_basis",
+      "anchor_session": null,
+      "fields": [
+        {
+          "schema_version": "1",
+          "field_name": "close",
+          "method_id": "close-v1",
+          "meaning": "price",
+          "source_value": "110.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "high",
+          "method_id": "high-v1",
+          "meaning": "price",
+          "source_value": "110.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "low",
+          "method_id": "low-v1",
+          "meaning": "price",
+          "source_value": "100.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "open",
+          "method_id": "open-v1",
+          "meaning": "price",
+          "source_value": "100.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "volume",
+          "method_id": "volume-v1",
+          "meaning": "share_volume",
+          "source_value": "1000",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        }
+      ],
+      "usability_hash": "04399eab57ea0aedc11d9e852dc1670a3f1cdd2e9a661cd2b38de36fc81eebe3",
+      "output_hash": "8e57ed521d69d13bea3c9e2d4ae9bb688d9a3f4f6a2e4f1aeb5b715082190f7a",
+      "derivation_hash": "74fa3d25eedcdad2d03b65e535e888d29fd090fb54bf0f0c123b16a20bf6465a"
+    },
+    {
+      "schema_version": "1",
+      "role": "decision",
+      "query": {
+        "schema_version": "1",
+        "observation": {
+          "schema_version": "1",
+          "listing_id": "019b8240-0000-7000-8000-000000000201",
+          "security_id": "019b8240-0000-7000-8000-000000000200",
+          "venue": "XNYS",
+          "session_date": "2026-01-08",
+          "source_id": "synthetic-source",
+          "contract_hash": "e40755aba6dc2e5fd1b2bb3da3815bd07f56359988e88fee4f5bbe3a3d413f5b",
+          "source_selection_policy_hash": "37974017cd131d606b5430d5d518e07a73109964e789468d2d8e3179f7362d4d",
+          "profile_hash": "ba0f848b5e04fadcb4b810b86fc91930e3cb3765288f926f61e9218d6306ff50",
+          "requested_channel": {
+            "kind": "public",
+            "identifier": "synthetic-public",
+            "version": "1"
+          },
+          "availability_policy_id": "public-exact",
+          "availability_policy_hash": "0af23b5694839416ce238eb3e363c8fbd1010645592b09b4eff21c3b1185d144",
+          "input_context_hash": "b8936689b376ebc8d3c61a5a47a41093938c91b1984489188633e319044d0617",
+          "kind": "decision",
+          "decision_time": "2026-01-08T21:00:00Z",
+          "knowledge_cutoff": "2026-01-08T21:00:00Z",
+          "effective_cutoff": "2026-01-08T21:00:00Z"
+        },
+        "policy_hash": "fcf3b5d9b80207129b4ec5b67e46468f1ba89f9dd5e2088df2d56526ceb0360d",
+        "anchor_session": null
+      },
+      "query_hash": "ec0e39a1f8b97c2169473b3c1f379c19492f02c1854d5932b30aacbedc3c8e3d",
+      "source_session": {
+        "schema_version": "1",
+        "mic": "XNYS",
+        "session_scope": "regular",
+        "local_date": "2026-01-08"
+      },
+      "listing_id": "019b8240-0000-7000-8000-000000000201",
+      "security_id": "019b8240-0000-7000-8000-000000000200",
+      "basis_mode": "source_basis",
+      "anchor_session": null,
+      "fields": [
+        {
+          "schema_version": "1",
+          "field_name": "close",
+          "method_id": "close-v1",
+          "meaning": "price",
+          "source_value": "120.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "high",
+          "method_id": "high-v1",
+          "meaning": "price",
+          "source_value": "120.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "low",
+          "method_id": "low-v1",
+          "meaning": "price",
+          "source_value": "110.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "open",
+          "method_id": "open-v1",
+          "meaning": "price",
+          "source_value": "110.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "volume",
+          "method_id": "volume-v1",
+          "meaning": "share_volume",
+          "source_value": "1000",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        }
+      ],
+      "usability_hash": "04399eab57ea0aedc11d9e852dc1670a3f1cdd2e9a661cd2b38de36fc81eebe3",
+      "output_hash": "0ad014b3f7292f9bbba71dba9fc9680473a00ab5b58d675c7519310824c26bd9",
+      "derivation_hash": "74fa3d25eedcdad2d03b65e535e888d29fd090fb54bf0f0c123b16a20bf6465a"
+    },
+    {
+      "schema_version": "1",
+      "role": "decision",
+      "query": {
+        "schema_version": "1",
+        "observation": {
+          "schema_version": "1",
+          "listing_id": "019b8240-0000-7000-8000-000000000301",
+          "security_id": "019b8240-0000-7000-8000-000000000300",
+          "venue": "XNYS",
+          "session_date": "2026-01-07",
+          "source_id": "synthetic-source",
+          "contract_hash": "e40755aba6dc2e5fd1b2bb3da3815bd07f56359988e88fee4f5bbe3a3d413f5b",
+          "source_selection_policy_hash": "37974017cd131d606b5430d5d518e07a73109964e789468d2d8e3179f7362d4d",
+          "profile_hash": "ba0f848b5e04fadcb4b810b86fc91930e3cb3765288f926f61e9218d6306ff50",
+          "requested_channel": {
+            "kind": "public",
+            "identifier": "synthetic-public",
+            "version": "1"
+          },
+          "availability_policy_id": "public-exact",
+          "availability_policy_hash": "0af23b5694839416ce238eb3e363c8fbd1010645592b09b4eff21c3b1185d144",
+          "input_context_hash": "b8936689b376ebc8d3c61a5a47a41093938c91b1984489188633e319044d0617",
+          "kind": "decision",
+          "decision_time": "2026-01-07T21:00:00Z",
+          "knowledge_cutoff": "2026-01-07T21:00:00Z",
+          "effective_cutoff": "2026-01-07T21:00:00Z"
+        },
+        "policy_hash": "fcf3b5d9b80207129b4ec5b67e46468f1ba89f9dd5e2088df2d56526ceb0360d",
+        "anchor_session": null
+      },
+      "query_hash": "378758ddd7cca7dbdc185098478367e85e66570377afc04de39c35935d161f26",
+      "source_session": {
+        "schema_version": "1",
+        "mic": "XNYS",
+        "session_scope": "regular",
+        "local_date": "2026-01-07"
+      },
+      "listing_id": "019b8240-0000-7000-8000-000000000301",
+      "security_id": "019b8240-0000-7000-8000-000000000300",
+      "basis_mode": "source_basis",
+      "anchor_session": null,
+      "fields": [
+        {
+          "schema_version": "1",
+          "field_name": "close",
+          "method_id": "close-v1",
+          "meaning": "price",
+          "source_value": "50.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "high",
+          "method_id": "high-v1",
+          "meaning": "price",
+          "source_value": "50.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "low",
+          "method_id": "low-v1",
+          "meaning": "price",
+          "source_value": "50.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "open",
+          "method_id": "open-v1",
+          "meaning": "price",
+          "source_value": "50.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "volume",
+          "method_id": "volume-v1",
+          "meaning": "share_volume",
+          "source_value": "1000",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        }
+      ],
+      "usability_hash": "04399eab57ea0aedc11d9e852dc1670a3f1cdd2e9a661cd2b38de36fc81eebe3",
+      "output_hash": "f754a842bf2a5448f84e846ab7f603b924639090dbaead7cdbd55a2c4071eb76",
+      "derivation_hash": "74fa3d25eedcdad2d03b65e535e888d29fd090fb54bf0f0c123b16a20bf6465a"
+    },
+    {
+      "schema_version": "1",
+      "role": "decision",
+      "query": {
+        "schema_version": "1",
+        "observation": {
+          "schema_version": "1",
+          "listing_id": "019b8240-0000-7000-8000-000000000301",
+          "security_id": "019b8240-0000-7000-8000-000000000300",
+          "venue": "XNYS",
+          "session_date": "2026-01-06",
+          "source_id": "synthetic-source",
+          "contract_hash": "e40755aba6dc2e5fd1b2bb3da3815bd07f56359988e88fee4f5bbe3a3d413f5b",
+          "source_selection_policy_hash": "37974017cd131d606b5430d5d518e07a73109964e789468d2d8e3179f7362d4d",
+          "profile_hash": "ba0f848b5e04fadcb4b810b86fc91930e3cb3765288f926f61e9218d6306ff50",
+          "requested_channel": {
+            "kind": "public",
+            "identifier": "synthetic-public",
+            "version": "1"
+          },
+          "availability_policy_id": "public-exact",
+          "availability_policy_hash": "0af23b5694839416ce238eb3e363c8fbd1010645592b09b4eff21c3b1185d144",
+          "input_context_hash": "b8936689b376ebc8d3c61a5a47a41093938c91b1984489188633e319044d0617",
+          "kind": "decision",
+          "decision_time": "2026-01-06T21:00:00Z",
+          "knowledge_cutoff": "2026-01-06T21:00:00Z",
+          "effective_cutoff": "2026-01-06T21:00:00Z"
+        },
+        "policy_hash": "fcf3b5d9b80207129b4ec5b67e46468f1ba89f9dd5e2088df2d56526ceb0360d",
+        "anchor_session": null
+      },
+      "query_hash": "a664b5a49df9581a1afe164429e61028705765e231413f249debf7e82544928d",
+      "source_session": {
+        "schema_version": "1",
+        "mic": "XNYS",
+        "session_scope": "regular",
+        "local_date": "2026-01-06"
+      },
+      "listing_id": "019b8240-0000-7000-8000-000000000301",
+      "security_id": "019b8240-0000-7000-8000-000000000300",
+      "basis_mode": "source_basis",
+      "anchor_session": null,
+      "fields": [
+        {
+          "schema_version": "1",
+          "field_name": "close",
+          "method_id": "close-v1",
+          "meaning": "price",
+          "source_value": "50.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "high",
+          "method_id": "high-v1",
+          "meaning": "price",
+          "source_value": "50.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "low",
+          "method_id": "low-v1",
+          "meaning": "price",
+          "source_value": "50.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "open",
+          "method_id": "open-v1",
+          "meaning": "price",
+          "source_value": "50.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "volume",
+          "method_id": "volume-v1",
+          "meaning": "share_volume",
+          "source_value": "1000",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        }
+      ],
+      "usability_hash": "04399eab57ea0aedc11d9e852dc1670a3f1cdd2e9a661cd2b38de36fc81eebe3",
+      "output_hash": "f09ba95eb51c5e6751f44b9b791687780bf0c3c2c7440c924f5c8a1655612d40",
+      "derivation_hash": "74fa3d25eedcdad2d03b65e535e888d29fd090fb54bf0f0c123b16a20bf6465a"
+    },
+    {
+      "schema_version": "1",
+      "role": "decision",
+      "query": {
+        "schema_version": "1",
+        "observation": {
+          "schema_version": "1",
+          "listing_id": "019b8240-0000-7000-8000-000000000301",
+          "security_id": "019b8240-0000-7000-8000-000000000300",
+          "venue": "XNYS",
+          "session_date": "2026-01-08",
+          "source_id": "synthetic-source",
+          "contract_hash": "e40755aba6dc2e5fd1b2bb3da3815bd07f56359988e88fee4f5bbe3a3d413f5b",
+          "source_selection_policy_hash": "37974017cd131d606b5430d5d518e07a73109964e789468d2d8e3179f7362d4d",
+          "profile_hash": "ba0f848b5e04fadcb4b810b86fc91930e3cb3765288f926f61e9218d6306ff50",
+          "requested_channel": {
+            "kind": "public",
+            "identifier": "synthetic-public",
+            "version": "1"
+          },
+          "availability_policy_id": "public-exact",
+          "availability_policy_hash": "0af23b5694839416ce238eb3e363c8fbd1010645592b09b4eff21c3b1185d144",
+          "input_context_hash": "b8936689b376ebc8d3c61a5a47a41093938c91b1984489188633e319044d0617",
+          "kind": "decision",
+          "decision_time": "2026-01-08T21:00:00Z",
+          "knowledge_cutoff": "2026-01-08T21:00:00Z",
+          "effective_cutoff": "2026-01-08T21:00:00Z"
+        },
+        "policy_hash": "fcf3b5d9b80207129b4ec5b67e46468f1ba89f9dd5e2088df2d56526ceb0360d",
+        "anchor_session": null
+      },
+      "query_hash": "8e7e6b3cbb0422c2107811e2a43c5415b722a787f4681e7e007ebb58c7161b6c",
+      "source_session": {
+        "schema_version": "1",
+        "mic": "XNYS",
+        "session_scope": "regular",
+        "local_date": "2026-01-08"
+      },
+      "listing_id": "019b8240-0000-7000-8000-000000000301",
+      "security_id": "019b8240-0000-7000-8000-000000000300",
+      "basis_mode": "source_basis",
+      "anchor_session": null,
+      "fields": [
+        {
+          "schema_version": "1",
+          "field_name": "close",
+          "method_id": "close-v1",
+          "meaning": "price",
+          "source_value": "50.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "high",
+          "method_id": "high-v1",
+          "meaning": "price",
+          "source_value": "50.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "low",
+          "method_id": "low-v1",
+          "meaning": "price",
+          "source_value": "50.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "open",
+          "method_id": "open-v1",
+          "meaning": "price",
+          "source_value": "50.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "volume",
+          "method_id": "volume-v1",
+          "meaning": "share_volume",
+          "source_value": "1000",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        }
+      ],
+      "usability_hash": "04399eab57ea0aedc11d9e852dc1670a3f1cdd2e9a661cd2b38de36fc81eebe3",
+      "output_hash": "7538d30d51a49dd567b5b36515f77b1a982e2d3c9291d64ce1a30e5f4a684ce0",
+      "derivation_hash": "74fa3d25eedcdad2d03b65e535e888d29fd090fb54bf0f0c123b16a20bf6465a"
+    }
+  ],
+  "authentic_accounting_views": [
+    {
+      "schema_version": "1",
+      "role": "outcome",
+      "query": {
+        "schema_version": "1",
+        "observation": {
+          "schema_version": "1",
+          "listing_id": "019b8240-0000-7000-8000-000000000201",
+          "security_id": "019b8240-0000-7000-8000-000000000200",
+          "venue": "XNYS",
+          "session_date": "2026-01-07",
+          "source_id": "synthetic-source",
+          "contract_hash": "e40755aba6dc2e5fd1b2bb3da3815bd07f56359988e88fee4f5bbe3a3d413f5b",
+          "source_selection_policy_hash": "37974017cd131d606b5430d5d518e07a73109964e789468d2d8e3179f7362d4d",
+          "profile_hash": "ba0f848b5e04fadcb4b810b86fc91930e3cb3765288f926f61e9218d6306ff50",
+          "requested_channel": {
+            "kind": "public",
+            "identifier": "synthetic-public",
+            "version": "1"
+          },
+          "availability_policy_id": "public-exact",
+          "availability_policy_hash": "0af23b5694839416ce238eb3e363c8fbd1010645592b09b4eff21c3b1185d144",
+          "input_context_hash": "b8936689b376ebc8d3c61a5a47a41093938c91b1984489188633e319044d0617",
+          "kind": "outcome",
+          "economic_horizon": "2026-01-07T21:00:00Z",
+          "evidence_vintage_cutoff": "2026-01-07T21:00:00Z"
+        },
+        "policy_hash": "fcf3b5d9b80207129b4ec5b67e46468f1ba89f9dd5e2088df2d56526ceb0360d",
+        "anchor_session": null
+      },
+      "query_hash": "654a934049a474637becae8b1d667a1ea2676afc7cafc9c10e956df93743b677",
+      "source_session": {
+        "schema_version": "1",
+        "mic": "XNYS",
+        "session_scope": "regular",
+        "local_date": "2026-01-07"
+      },
+      "listing_id": "019b8240-0000-7000-8000-000000000201",
+      "security_id": "019b8240-0000-7000-8000-000000000200",
+      "basis_mode": "source_basis",
+      "anchor_session": null,
+      "fields": [
+        {
+          "schema_version": "1",
+          "field_name": "close",
+          "method_id": "close-v1",
+          "meaning": "price",
+          "source_value": "110.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "high",
+          "method_id": "high-v1",
+          "meaning": "price",
+          "source_value": "110.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "low",
+          "method_id": "low-v1",
+          "meaning": "price",
+          "source_value": "100.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "open",
+          "method_id": "open-v1",
+          "meaning": "price",
+          "source_value": "100.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "volume",
+          "method_id": "volume-v1",
+          "meaning": "share_volume",
+          "source_value": "1000",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        }
+      ],
+      "usability_hash": "04399eab57ea0aedc11d9e852dc1670a3f1cdd2e9a661cd2b38de36fc81eebe3",
+      "output_hash": "a5875575365be88ae232906463a28f257251ed11dfcc430b139246f973be4330",
+      "derivation_hash": "74fa3d25eedcdad2d03b65e535e888d29fd090fb54bf0f0c123b16a20bf6465a"
+    },
+    {
+      "schema_version": "1",
+      "role": "outcome",
+      "query": {
+        "schema_version": "1",
+        "observation": {
+          "schema_version": "1",
+          "listing_id": "019b8240-0000-7000-8000-000000000301",
+          "security_id": "019b8240-0000-7000-8000-000000000300",
+          "venue": "XNYS",
+          "session_date": "2026-01-08",
+          "source_id": "synthetic-source",
+          "contract_hash": "e40755aba6dc2e5fd1b2bb3da3815bd07f56359988e88fee4f5bbe3a3d413f5b",
+          "source_selection_policy_hash": "37974017cd131d606b5430d5d518e07a73109964e789468d2d8e3179f7362d4d",
+          "profile_hash": "ba0f848b5e04fadcb4b810b86fc91930e3cb3765288f926f61e9218d6306ff50",
+          "requested_channel": {
+            "kind": "public",
+            "identifier": "synthetic-public",
+            "version": "1"
+          },
+          "availability_policy_id": "public-exact",
+          "availability_policy_hash": "0af23b5694839416ce238eb3e363c8fbd1010645592b09b4eff21c3b1185d144",
+          "input_context_hash": "b8936689b376ebc8d3c61a5a47a41093938c91b1984489188633e319044d0617",
+          "kind": "outcome",
+          "economic_horizon": "2026-01-08T21:00:00Z",
+          "evidence_vintage_cutoff": "2026-01-08T21:00:00Z"
+        },
+        "policy_hash": "fcf3b5d9b80207129b4ec5b67e46468f1ba89f9dd5e2088df2d56526ceb0360d",
+        "anchor_session": null
+      },
+      "query_hash": "620ef5c16ee4fecd6d963a3e9f69d2ff143adf1c8798074c858539ac36c430df",
+      "source_session": {
+        "schema_version": "1",
+        "mic": "XNYS",
+        "session_scope": "regular",
+        "local_date": "2026-01-08"
+      },
+      "listing_id": "019b8240-0000-7000-8000-000000000301",
+      "security_id": "019b8240-0000-7000-8000-000000000300",
+      "basis_mode": "source_basis",
+      "anchor_session": null,
+      "fields": [
+        {
+          "schema_version": "1",
+          "field_name": "close",
+          "method_id": "close-v1",
+          "meaning": "price",
+          "source_value": "50.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "high",
+          "method_id": "high-v1",
+          "meaning": "price",
+          "source_value": "50.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "low",
+          "method_id": "low-v1",
+          "meaning": "price",
+          "source_value": "50.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "open",
+          "method_id": "open-v1",
+          "meaning": "price",
+          "source_value": "50.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "volume",
+          "method_id": "volume-v1",
+          "meaning": "share_volume",
+          "source_value": "1000",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        }
+      ],
+      "usability_hash": "04399eab57ea0aedc11d9e852dc1670a3f1cdd2e9a661cd2b38de36fc81eebe3",
+      "output_hash": "b01ffdd7d1076c27d92d2bef26cd9d9a15c6538a8397909b33ff08c1893a0052",
+      "derivation_hash": "74fa3d25eedcdad2d03b65e535e888d29fd090fb54bf0f0c123b16a20bf6465a"
+    },
+    {
+      "schema_version": "1",
+      "role": "outcome",
+      "query": {
+        "schema_version": "1",
+        "observation": {
+          "schema_version": "1",
+          "listing_id": "019b8240-0000-7000-8000-000000000201",
+          "security_id": "019b8240-0000-7000-8000-000000000200",
+          "venue": "XNYS",
+          "session_date": "2026-01-08",
+          "source_id": "synthetic-source",
+          "contract_hash": "e40755aba6dc2e5fd1b2bb3da3815bd07f56359988e88fee4f5bbe3a3d413f5b",
+          "source_selection_policy_hash": "37974017cd131d606b5430d5d518e07a73109964e789468d2d8e3179f7362d4d",
+          "profile_hash": "ba0f848b5e04fadcb4b810b86fc91930e3cb3765288f926f61e9218d6306ff50",
+          "requested_channel": {
+            "kind": "public",
+            "identifier": "synthetic-public",
+            "version": "1"
+          },
+          "availability_policy_id": "public-exact",
+          "availability_policy_hash": "0af23b5694839416ce238eb3e363c8fbd1010645592b09b4eff21c3b1185d144",
+          "input_context_hash": "b8936689b376ebc8d3c61a5a47a41093938c91b1984489188633e319044d0617",
+          "kind": "outcome",
+          "economic_horizon": "2026-01-08T21:00:00Z",
+          "evidence_vintage_cutoff": "2026-01-08T21:00:00Z"
+        },
+        "policy_hash": "fcf3b5d9b80207129b4ec5b67e46468f1ba89f9dd5e2088df2d56526ceb0360d",
+        "anchor_session": null
+      },
+      "query_hash": "fe0f9d8ae528b7cba3bd6c4eede37bc37c203bfb62a426a9252977c845e9b97b",
+      "source_session": {
+        "schema_version": "1",
+        "mic": "XNYS",
+        "session_scope": "regular",
+        "local_date": "2026-01-08"
+      },
+      "listing_id": "019b8240-0000-7000-8000-000000000201",
+      "security_id": "019b8240-0000-7000-8000-000000000200",
+      "basis_mode": "source_basis",
+      "anchor_session": null,
+      "fields": [
+        {
+          "schema_version": "1",
+          "field_name": "close",
+          "method_id": "close-v1",
+          "meaning": "price",
+          "source_value": "120.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "high",
+          "method_id": "high-v1",
+          "meaning": "price",
+          "source_value": "120.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "low",
+          "method_id": "low-v1",
+          "meaning": "price",
+          "source_value": "110.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "open",
+          "method_id": "open-v1",
+          "meaning": "price",
+          "source_value": "110.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "volume",
+          "method_id": "volume-v1",
+          "meaning": "share_volume",
+          "source_value": "1000",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        }
+      ],
+      "usability_hash": "04399eab57ea0aedc11d9e852dc1670a3f1cdd2e9a661cd2b38de36fc81eebe3",
+      "output_hash": "6f2b5e40222931fa77f053f28d6b7e8b1732d86e6fece6048c065cfc20cd6235",
+      "derivation_hash": "74fa3d25eedcdad2d03b65e535e888d29fd090fb54bf0f0c123b16a20bf6465a"
+    },
+    {
+      "schema_version": "1",
+      "role": "outcome",
+      "query": {
+        "schema_version": "1",
+        "observation": {
+          "schema_version": "1",
+          "listing_id": "019b8240-0000-7000-8000-000000000201",
+          "security_id": "019b8240-0000-7000-8000-000000000200",
+          "venue": "XNYS",
+          "session_date": "2026-01-06",
+          "source_id": "synthetic-source",
+          "contract_hash": "e40755aba6dc2e5fd1b2bb3da3815bd07f56359988e88fee4f5bbe3a3d413f5b",
+          "source_selection_policy_hash": "37974017cd131d606b5430d5d518e07a73109964e789468d2d8e3179f7362d4d",
+          "profile_hash": "ba0f848b5e04fadcb4b810b86fc91930e3cb3765288f926f61e9218d6306ff50",
+          "requested_channel": {
+            "kind": "public",
+            "identifier": "synthetic-public",
+            "version": "1"
+          },
+          "availability_policy_id": "public-exact",
+          "availability_policy_hash": "0af23b5694839416ce238eb3e363c8fbd1010645592b09b4eff21c3b1185d144",
+          "input_context_hash": "b8936689b376ebc8d3c61a5a47a41093938c91b1984489188633e319044d0617",
+          "kind": "outcome",
+          "economic_horizon": "2026-01-06T21:00:00Z",
+          "evidence_vintage_cutoff": "2026-01-06T21:00:00Z"
+        },
+        "policy_hash": "fcf3b5d9b80207129b4ec5b67e46468f1ba89f9dd5e2088df2d56526ceb0360d",
+        "anchor_session": null
+      },
+      "query_hash": "1c35f5140b575f8c3c47dc39a8b030f1620e25dc5707055c0dff94a2d2e4bbbf",
+      "source_session": {
+        "schema_version": "1",
+        "mic": "XNYS",
+        "session_scope": "regular",
+        "local_date": "2026-01-06"
+      },
+      "listing_id": "019b8240-0000-7000-8000-000000000201",
+      "security_id": "019b8240-0000-7000-8000-000000000200",
+      "basis_mode": "source_basis",
+      "anchor_session": null,
+      "fields": [
+        {
+          "schema_version": "1",
+          "field_name": "close",
+          "method_id": "close-v1",
+          "meaning": "price",
+          "source_value": "100.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "high",
+          "method_id": "high-v1",
+          "meaning": "price",
+          "source_value": "100.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "low",
+          "method_id": "low-v1",
+          "meaning": "price",
+          "source_value": "100.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "open",
+          "method_id": "open-v1",
+          "meaning": "price",
+          "source_value": "100.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "volume",
+          "method_id": "volume-v1",
+          "meaning": "share_volume",
+          "source_value": "1000",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        }
+      ],
+      "usability_hash": "04399eab57ea0aedc11d9e852dc1670a3f1cdd2e9a661cd2b38de36fc81eebe3",
+      "output_hash": "ca54e083dc19eba6190a2ed62ffa001d1583d1fc4fe2697f3ebe30a262b2b559",
+      "derivation_hash": "74fa3d25eedcdad2d03b65e535e888d29fd090fb54bf0f0c123b16a20bf6465a"
+    },
+    {
+      "schema_version": "1",
+      "role": "outcome",
+      "query": {
+        "schema_version": "1",
+        "observation": {
+          "schema_version": "1",
+          "listing_id": "019b8240-0000-7000-8000-000000000301",
+          "security_id": "019b8240-0000-7000-8000-000000000300",
+          "venue": "XNYS",
+          "session_date": "2026-01-06",
+          "source_id": "synthetic-source",
+          "contract_hash": "e40755aba6dc2e5fd1b2bb3da3815bd07f56359988e88fee4f5bbe3a3d413f5b",
+          "source_selection_policy_hash": "37974017cd131d606b5430d5d518e07a73109964e789468d2d8e3179f7362d4d",
+          "profile_hash": "ba0f848b5e04fadcb4b810b86fc91930e3cb3765288f926f61e9218d6306ff50",
+          "requested_channel": {
+            "kind": "public",
+            "identifier": "synthetic-public",
+            "version": "1"
+          },
+          "availability_policy_id": "public-exact",
+          "availability_policy_hash": "0af23b5694839416ce238eb3e363c8fbd1010645592b09b4eff21c3b1185d144",
+          "input_context_hash": "b8936689b376ebc8d3c61a5a47a41093938c91b1984489188633e319044d0617",
+          "kind": "outcome",
+          "economic_horizon": "2026-01-06T21:00:00Z",
+          "evidence_vintage_cutoff": "2026-01-06T21:00:00Z"
+        },
+        "policy_hash": "fcf3b5d9b80207129b4ec5b67e46468f1ba89f9dd5e2088df2d56526ceb0360d",
+        "anchor_session": null
+      },
+      "query_hash": "7be6d3f6ac5cfb268bf427b7cc14ee0cef1745b7eb4d817b1bb24599fef7c926",
+      "source_session": {
+        "schema_version": "1",
+        "mic": "XNYS",
+        "session_scope": "regular",
+        "local_date": "2026-01-06"
+      },
+      "listing_id": "019b8240-0000-7000-8000-000000000301",
+      "security_id": "019b8240-0000-7000-8000-000000000300",
+      "basis_mode": "source_basis",
+      "anchor_session": null,
+      "fields": [
+        {
+          "schema_version": "1",
+          "field_name": "close",
+          "method_id": "close-v1",
+          "meaning": "price",
+          "source_value": "50.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "high",
+          "method_id": "high-v1",
+          "meaning": "price",
+          "source_value": "50.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "low",
+          "method_id": "low-v1",
+          "meaning": "price",
+          "source_value": "50.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "open",
+          "method_id": "open-v1",
+          "meaning": "price",
+          "source_value": "50.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "volume",
+          "method_id": "volume-v1",
+          "meaning": "share_volume",
+          "source_value": "1000",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        }
+      ],
+      "usability_hash": "04399eab57ea0aedc11d9e852dc1670a3f1cdd2e9a661cd2b38de36fc81eebe3",
+      "output_hash": "8f7de34a767685a4a1ec14cbaf94d51d4576897c3f47c17cd3a9d8c88cf8b35c",
+      "derivation_hash": "74fa3d25eedcdad2d03b65e535e888d29fd090fb54bf0f0c123b16a20bf6465a"
+    },
+    {
+      "schema_version": "1",
+      "role": "outcome",
+      "query": {
+        "schema_version": "1",
+        "observation": {
+          "schema_version": "1",
+          "listing_id": "019b8240-0000-7000-8000-000000000301",
+          "security_id": "019b8240-0000-7000-8000-000000000300",
+          "venue": "XNYS",
+          "session_date": "2026-01-05",
+          "source_id": "synthetic-source",
+          "contract_hash": "e40755aba6dc2e5fd1b2bb3da3815bd07f56359988e88fee4f5bbe3a3d413f5b",
+          "source_selection_policy_hash": "37974017cd131d606b5430d5d518e07a73109964e789468d2d8e3179f7362d4d",
+          "profile_hash": "ba0f848b5e04fadcb4b810b86fc91930e3cb3765288f926f61e9218d6306ff50",
+          "requested_channel": {
+            "kind": "public",
+            "identifier": "synthetic-public",
+            "version": "1"
+          },
+          "availability_policy_id": "public-exact",
+          "availability_policy_hash": "0af23b5694839416ce238eb3e363c8fbd1010645592b09b4eff21c3b1185d144",
+          "input_context_hash": "b8936689b376ebc8d3c61a5a47a41093938c91b1984489188633e319044d0617",
+          "kind": "outcome",
+          "economic_horizon": "2026-01-05T21:00:00Z",
+          "evidence_vintage_cutoff": "2026-01-05T21:00:00Z"
+        },
+        "policy_hash": "fcf3b5d9b80207129b4ec5b67e46468f1ba89f9dd5e2088df2d56526ceb0360d",
+        "anchor_session": null
+      },
+      "query_hash": "4fd2590a526c15584cd36b83bde20009174aeaba4073fccdeacf4ad22258f926",
+      "source_session": {
+        "schema_version": "1",
+        "mic": "XNYS",
+        "session_scope": "regular",
+        "local_date": "2026-01-05"
+      },
+      "listing_id": "019b8240-0000-7000-8000-000000000301",
+      "security_id": "019b8240-0000-7000-8000-000000000300",
+      "basis_mode": "source_basis",
+      "anchor_session": null,
+      "fields": [
+        {
+          "schema_version": "1",
+          "field_name": "close",
+          "method_id": "close-v1",
+          "meaning": "price",
+          "source_value": "50.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "high",
+          "method_id": "high-v1",
+          "meaning": "price",
+          "source_value": "50.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "low",
+          "method_id": "low-v1",
+          "meaning": "price",
+          "source_value": "50.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "open",
+          "method_id": "open-v1",
+          "meaning": "price",
+          "source_value": "50.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "volume",
+          "method_id": "volume-v1",
+          "meaning": "share_volume",
+          "source_value": "1000",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        }
+      ],
+      "usability_hash": "04399eab57ea0aedc11d9e852dc1670a3f1cdd2e9a661cd2b38de36fc81eebe3",
+      "output_hash": "97ac594971560f86be3eb66da8e82859875fac3d3e48e71dddb524e204528bfa",
+      "derivation_hash": "74fa3d25eedcdad2d03b65e535e888d29fd090fb54bf0f0c123b16a20bf6465a"
+    },
+    {
+      "schema_version": "1",
+      "role": "outcome",
+      "query": {
+        "schema_version": "1",
+        "observation": {
+          "schema_version": "1",
+          "listing_id": "019b8240-0000-7000-8000-000000000301",
+          "security_id": "019b8240-0000-7000-8000-000000000300",
+          "venue": "XNYS",
+          "session_date": "2026-01-07",
+          "source_id": "synthetic-source",
+          "contract_hash": "e40755aba6dc2e5fd1b2bb3da3815bd07f56359988e88fee4f5bbe3a3d413f5b",
+          "source_selection_policy_hash": "37974017cd131d606b5430d5d518e07a73109964e789468d2d8e3179f7362d4d",
+          "profile_hash": "ba0f848b5e04fadcb4b810b86fc91930e3cb3765288f926f61e9218d6306ff50",
+          "requested_channel": {
+            "kind": "public",
+            "identifier": "synthetic-public",
+            "version": "1"
+          },
+          "availability_policy_id": "public-exact",
+          "availability_policy_hash": "0af23b5694839416ce238eb3e363c8fbd1010645592b09b4eff21c3b1185d144",
+          "input_context_hash": "b8936689b376ebc8d3c61a5a47a41093938c91b1984489188633e319044d0617",
+          "kind": "outcome",
+          "economic_horizon": "2026-01-07T21:00:00Z",
+          "evidence_vintage_cutoff": "2026-01-07T21:00:00Z"
+        },
+        "policy_hash": "fcf3b5d9b80207129b4ec5b67e46468f1ba89f9dd5e2088df2d56526ceb0360d",
+        "anchor_session": null
+      },
+      "query_hash": "ba9de98dcec1b1c7c5e33c90c6f53b88c33847ad82c751cbcc450269502f34e9",
+      "source_session": {
+        "schema_version": "1",
+        "mic": "XNYS",
+        "session_scope": "regular",
+        "local_date": "2026-01-07"
+      },
+      "listing_id": "019b8240-0000-7000-8000-000000000301",
+      "security_id": "019b8240-0000-7000-8000-000000000300",
+      "basis_mode": "source_basis",
+      "anchor_session": null,
+      "fields": [
+        {
+          "schema_version": "1",
+          "field_name": "close",
+          "method_id": "close-v1",
+          "meaning": "price",
+          "source_value": "50.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "high",
+          "method_id": "high-v1",
+          "meaning": "price",
+          "source_value": "50.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "low",
+          "method_id": "low-v1",
+          "meaning": "price",
+          "source_value": "50.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "open",
+          "method_id": "open-v1",
+          "meaning": "price",
+          "source_value": "50.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "volume",
+          "method_id": "volume-v1",
+          "meaning": "share_volume",
+          "source_value": "1000",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        }
+      ],
+      "usability_hash": "04399eab57ea0aedc11d9e852dc1670a3f1cdd2e9a661cd2b38de36fc81eebe3",
+      "output_hash": "ffcd42efef406d1a985ee2059cb0d490560a3cec01c49bd07f3f1f9ed4643ab6",
+      "derivation_hash": "74fa3d25eedcdad2d03b65e535e888d29fd090fb54bf0f0c123b16a20bf6465a"
+    },
+    {
+      "schema_version": "1",
+      "role": "outcome",
+      "query": {
+        "schema_version": "1",
+        "observation": {
+          "schema_version": "1",
+          "listing_id": "019b8240-0000-7000-8000-000000000201",
+          "security_id": "019b8240-0000-7000-8000-000000000200",
+          "venue": "XNYS",
+          "session_date": "2026-01-05",
+          "source_id": "synthetic-source",
+          "contract_hash": "e40755aba6dc2e5fd1b2bb3da3815bd07f56359988e88fee4f5bbe3a3d413f5b",
+          "source_selection_policy_hash": "37974017cd131d606b5430d5d518e07a73109964e789468d2d8e3179f7362d4d",
+          "profile_hash": "ba0f848b5e04fadcb4b810b86fc91930e3cb3765288f926f61e9218d6306ff50",
+          "requested_channel": {
+            "kind": "public",
+            "identifier": "synthetic-public",
+            "version": "1"
+          },
+          "availability_policy_id": "public-exact",
+          "availability_policy_hash": "0af23b5694839416ce238eb3e363c8fbd1010645592b09b4eff21c3b1185d144",
+          "input_context_hash": "b8936689b376ebc8d3c61a5a47a41093938c91b1984489188633e319044d0617",
+          "kind": "outcome",
+          "economic_horizon": "2026-01-05T21:00:00Z",
+          "evidence_vintage_cutoff": "2026-01-05T21:00:00Z"
+        },
+        "policy_hash": "fcf3b5d9b80207129b4ec5b67e46468f1ba89f9dd5e2088df2d56526ceb0360d",
+        "anchor_session": null
+      },
+      "query_hash": "301a9a5a368d73ea38aa70620af3e300be11ffa41ca94d81cd428fdabef31eef",
+      "source_session": {
+        "schema_version": "1",
+        "mic": "XNYS",
+        "session_scope": "regular",
+        "local_date": "2026-01-05"
+      },
+      "listing_id": "019b8240-0000-7000-8000-000000000201",
+      "security_id": "019b8240-0000-7000-8000-000000000200",
+      "basis_mode": "source_basis",
+      "anchor_session": null,
+      "fields": [
+        {
+          "schema_version": "1",
+          "field_name": "close",
+          "method_id": "close-v1",
+          "meaning": "price",
+          "source_value": "100.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "high",
+          "method_id": "high-v1",
+          "meaning": "price",
+          "source_value": "100.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "low",
+          "method_id": "low-v1",
+          "meaning": "price",
+          "source_value": "100.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "open",
+          "method_id": "open-v1",
+          "meaning": "price",
+          "source_value": "100.00",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        },
+        {
+          "schema_version": "1",
+          "field_name": "volume",
+          "method_id": "volume-v1",
+          "meaning": "share_volume",
+          "source_value": "1000",
+          "exact_factor": {
+            "schema_version": "1",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "exact_transformed_value": null,
+          "quantized_value": null,
+          "output_scale": null,
+          "rounded_to_zero": false
+        }
+      ],
+      "usability_hash": "04399eab57ea0aedc11d9e852dc1670a3f1cdd2e9a661cd2b38de36fc81eebe3",
+      "output_hash": "401d7ff438c90827b6a8d037ac1b9c10408b7df7a0d26b97216de4923bf660cd",
+      "derivation_hash": "74fa3d25eedcdad2d03b65e535e888d29fd090fb54bf0f0c123b16a20bf6465a"
+    }
+  ],
+  "exploratory_reconstructed_observations": [],
+  "corporate_action_coverage": [
+    {
+      "schema_version": "1",
+      "source_id": "synthetic-corporate-actions-v1",
+      "security_id": "019b8240-0000-7000-8000-000000000300",
+      "queried_symbol": "SYM-0300",
+      "requested_start_date": "2026-01-05",
+      "requested_end_date": "2026-01-08",
+      "requested_action_classes": [
+        "cash_dividend",
+        "forward_split"
+      ],
+      "request_binding_hash": "088000083a985c63af426b0bf5e2222fb70f39a376f1fe5be5a0f53cb53ca68f",
+      "response_sha256": "73edd081d3e57e1914392db0747c17c011038a21bcf4babe29610144cb5ebea1",
+      "response_byte_size": 59,
+      "origin_observation_hash": "1821a47bc770222b724fb99693662593eab1dea2d1562e2c3c378b31d03e306d",
+      "returned_actions": [],
+      "completeness": {
+        "schema_version": "1",
+        "basis": "provider_partially_published",
+        "policy_statement_hash": "c29eec4f9145f407b9d2ddfd3c6dba492b5085abb44630c05231d8bfd2fad06f",
+        "acquisition_reconciliation_pass": true,
+        "single_unpaginated_response": true,
+        "measured_origin": true,
+        "requested_types_documented": true,
+        "returned_actions_attributed": true,
+        "returned_actions_inside_requested_window": true
+      },
+      "covered_start_date": "2026-01-05",
+      "covered_end_date": "2026-01-08",
+      "snapshot_as_of": {
+        "schema_version": "1",
+        "shape": "exact",
+        "lower_bound": "2026-09-20T12:00:00Z",
+        "upper_bound": "2026-09-20T12:00:00Z",
+        "source_precision": "second",
+        "source_time_label": "2026-09-20T12:00:00Z",
+        "source_timezone": null,
+        "evidence_reference": {
+          "artifact_id": "01990000-0000-7000-8000-000000000776",
+          "kind": "other",
+          "content_hash": "73edd081d3e57e1914392db0747c17c011038a21bcf4babe29610144cb5ebea1",
+          "location": "drift+sha256://73edd081d3e57e1914392db0747c17c011038a21bcf4babe29610144cb5ebea1"
+        }
+      },
+      "revision_support": "current_only",
+      "evidence_grade": "exploratory",
+      "acknowledged_limitations": [
+        "corporate-action-absence-read-from-current-provider-snapshot"
+      ],
+      "derivation_algorithm_hash": "7b98e1884f9f8543cfc32be78364ee1987e818fbb1c6f00fb2be7a71690e41a5",
+      "implementation_hash": "aea41a71b1eadf180aa656803b743a5ff608dabce1b852602889f927b3f77999",
+      "record_hash": "9e3d83dfb1eed34099b82d09cba7cb1814b3335127dfd9ad877910da419b9ee2"
+    },
+    {
+      "schema_version": "1",
+      "source_id": "synthetic-corporate-actions-v1",
+      "security_id": "019b8240-0000-7000-8000-000000000200",
+      "queried_symbol": "SYM-0200",
+      "requested_start_date": "2026-01-05",
+      "requested_end_date": "2026-01-08",
+      "requested_action_classes": [
+        "cash_dividend",
+        "forward_split"
+      ],
+      "request_binding_hash": "088000083a985c63af426b0bf5e2222fb70f39a376f1fe5be5a0f53cb53ca68f",
+      "response_sha256": "73edd081d3e57e1914392db0747c17c011038a21bcf4babe29610144cb5ebea1",
+      "response_byte_size": 59,
+      "origin_observation_hash": "1821a47bc770222b724fb99693662593eab1dea2d1562e2c3c378b31d03e306d",
+      "returned_actions": [],
+      "completeness": {
+        "schema_version": "1",
+        "basis": "provider_partially_published",
+        "policy_statement_hash": "c29eec4f9145f407b9d2ddfd3c6dba492b5085abb44630c05231d8bfd2fad06f",
+        "acquisition_reconciliation_pass": true,
+        "single_unpaginated_response": true,
+        "measured_origin": true,
+        "requested_types_documented": true,
+        "returned_actions_attributed": true,
+        "returned_actions_inside_requested_window": true
+      },
+      "covered_start_date": "2026-01-05",
+      "covered_end_date": "2026-01-08",
+      "snapshot_as_of": {
+        "schema_version": "1",
+        "shape": "exact",
+        "lower_bound": "2026-09-20T12:00:00Z",
+        "upper_bound": "2026-09-20T12:00:00Z",
+        "source_precision": "second",
+        "source_time_label": "2026-09-20T12:00:00Z",
+        "source_timezone": null,
+        "evidence_reference": {
+          "artifact_id": "01990000-0000-7000-8000-000000000776",
+          "kind": "other",
+          "content_hash": "73edd081d3e57e1914392db0747c17c011038a21bcf4babe29610144cb5ebea1",
+          "location": "drift+sha256://73edd081d3e57e1914392db0747c17c011038a21bcf4babe29610144cb5ebea1"
+        }
+      },
+      "revision_support": "current_only",
+      "evidence_grade": "exploratory",
+      "acknowledged_limitations": [
+        "corporate-action-absence-read-from-current-provider-snapshot"
+      ],
+      "derivation_algorithm_hash": "7b98e1884f9f8543cfc32be78364ee1987e818fbb1c6f00fb2be7a71690e41a5",
+      "implementation_hash": "aea41a71b1eadf180aa656803b743a5ff608dabce1b852602889f927b3f77999",
+      "record_hash": "11687465849ecbf845f40339edd62a673dc9977fbd12fe74c7f3ccac99177232"
+    }
+  ],
+  "dataset_limitations": [],
+  "bundle_hash": "8e124826e0743adf90c75282257efd74c967d9ae7b33a0faee657c8082689bbf"
+}

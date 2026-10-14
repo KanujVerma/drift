@@ -24,6 +24,8 @@ operational authorization.
 
 ## Milestone Status Overview
 
+Progress across Drift milestones is tracked below. Note that code availability does not constitute operational authority: completion of milestone implementation (including M11 promotion controls or M16-M18 live execution components) does not authorize live trading, broker order routing, or the promotion of exploratory evaluation results without promotion-grade M1e evidence.
+
 | Milestone | Title | Owner | Status | Primary Output / Invariant |
 |---|---|---|---|---|
 | **M0** | Auditable Evidence Kernel | - | **COMPLETE** | Monotonic append-only SQLite ledger with SHA-256 hash chaining. |
@@ -216,6 +218,26 @@ operational authorization.
   closed-form Deflated Sharpe Ratios (DSR per Bailey & Lopez de Prado 2014), Probability of Backtest
   Overfitting (PBO via CSCV), walk-forward temporal stability checks, volatility regime stress testing, and
   transactional M0 ledger candidate registry archive. Closed with Issue #18 and PR #264.
+
+### PR #350 Additions: Research Integrity, Real Evaluation, and Parallel Portfolios
+- **Status**: PENDING EXTERNAL REVIEW across all components.
+- **Lane**: EXPLORATORY ONLY (ADR 0012).
+- **Absolute Non-Upgrade Rule**: Exploratory evaluation evidence is strictly non-promotable
+  and cannot be upgraded, relabeled, or converted into promotion-grade evidence. Promotion
+  requires a fresh, independent evaluation run directly against an accepted promotion-qualified
+  M1e dataset. PR #350 does NOT qualify M1e Task 8 and does NOT promote strategies to production.
+  M11 code availability on main does NOT authorize promotion of exploratory strategies.
+- **Synthetic Fixture Notice**: The four-session evaluation dataset used in development and tests
+  is synthetic and does not represent real market conditions or historical profitability evidence.
+- **Execution Safety Notice**: Execution safety audit concerns S1 through S5 remain open and
+  unresolved, blocking any live trading or capital authorization.
+
+- **Delivered in PR #350**:
+  - `M2TrialEvaluatorAdapter` bridging M8 recursive research loop to authentic M2 deterministic portfolio accounting kernel.
+  - `PortfolioCohortHarness` in `src/drift/experiments/parallel_portfolios.py` running reproducible parallel $10,000 strategy accounts.
+  - Supported CLI execution: `python -m drift.experiments.parallel_portfolios`.
+  - Non-negotiable Scientific Integrity Firewall enforcing empirical paired returns, fail-closed PnL completeness, and rejecting mock evidence.
+  - Cryptographic evidence binding for tournament comparisons (bundle_hash, cost_model_hash, session calendar match).
 
 ### M12 through M15: Execution and Risk Architecture (Complete)
 - **M12 Shadow Broker** (Krish; Complete): Bridge research into realistic simulated execution, tracking

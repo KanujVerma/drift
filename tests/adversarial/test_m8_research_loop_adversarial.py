@@ -179,6 +179,7 @@ def test_adv_runaway_loop_prevention(tmp_path: Path) -> None:
         recorder=rec,
         archive=arc,
         loop_recorder=loop_rec,
+        allow_mock_evaluator=True,
     )
 
     summary, iterations = runner.run(TIMESTAMP)
@@ -233,6 +234,7 @@ def test_adv_circuit_breaker_consecutive_failures(tmp_path: Path) -> None:
         recorder=rec,
         archive=arc,
         loop_recorder=loop_rec,
+        allow_mock_evaluator=True,
     )
 
     summary, iterations = runner.run(TIMESTAMP)
@@ -324,6 +326,7 @@ def test_adv_memory_feedback_loop_prevents_repeats(tmp_path: Path) -> None:
         recorder=rec,
         archive=arc,
         loop_recorder=loop_rec,
+        allow_mock_evaluator=True,
     )
 
     summary, iterations = runner.run(TIMESTAMP)
@@ -480,7 +483,7 @@ def test_adv_target_performance_early_exit_boundary(tmp_path: Path) -> None:
 
         def evaluate_experiment(
             self, experiment: ExperimentSpecificationProposalV1
-        ) -> dict[str, Decimal]:
+        ) -> dict[str, object]:
             self.call_count += 1
             # Step 1: 0.90, Step 2: 1.40, Step 3: 2.10 (exceeds target 2.0)
             sharpes = [Decimal("0.90"), Decimal("1.40"), Decimal("2.10")]
@@ -489,6 +492,7 @@ def test_adv_target_performance_early_exit_boundary(tmp_path: Path) -> None:
                 "annualized_sharpe": sharpe,
                 "max_drawdown": Decimal("0.05"),
                 "annualized_turnover": Decimal("1.5"),
+                "is_pnl_complete": True,
             }
 
     evaluator = StepwiseEvaluator()
@@ -510,6 +514,7 @@ def test_adv_target_performance_early_exit_boundary(tmp_path: Path) -> None:
         recorder=rec,
         archive=arc,
         loop_recorder=loop_rec,
+        allow_mock_evaluator=True,
     )
 
     summary, iterations = runner.run(TIMESTAMP)
@@ -563,6 +568,7 @@ def test_adv_loop_audit_ledger_immutability(tmp_path: Path) -> None:
         recorder=rec,
         archive=arc,
         loop_recorder=loop_rec,
+        allow_mock_evaluator=True,
     )
 
     summary, iterations = runner.run(TIMESTAMP)

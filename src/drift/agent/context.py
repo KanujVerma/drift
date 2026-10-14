@@ -17,13 +17,17 @@ from drift.domain.research_memory import HypothesisStatus
 from drift.memory.archive import ResearchMemoryArchive
 
 DEFAULT_STRATEGY_TYPES: tuple[str, ...] = (
-    "b0_passive_equal_weight",
-    "b1_market_cap_weight",
-    "b2_fixed_universe_rebalance",
-    "b3_mean_reversion",
+    "b0_cash",
+    "b1_single_buy_and_hold",
+    "b2_equal_weight_buy_and_hold",
+    "b3_monthly_equal_weight_rebalance",
     "b4_momentum",
     "b5_low_volatility",
 )
+
+# Removed semantically incorrect legacy aliases per architecture review.
+# Only demonstrably equivalent aliases may be registered here.
+LEGACY_STRATEGY_TYPE_ALIASES: dict[str, str] = {}
 
 
 class ResearchContextSynthesizer:

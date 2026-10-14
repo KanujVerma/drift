@@ -53,6 +53,13 @@ class DeterministicMockResearchAgent:
         if search_space is not None and search_space.dimension_names:
             for i, dim in enumerate(search_space.dimension_names):
                 parameters[dim] = 10 + (self._counter * 5) + i
+        elif target_strategy_type in (
+            "b0_cash",
+            "b0",
+            "b2_equal_weight_buy_and_hold",
+            "b2",
+        ):
+            parameters = {}
         else:
             parameters = {"lookback_sessions": 20 + (self._counter * 2)}
 

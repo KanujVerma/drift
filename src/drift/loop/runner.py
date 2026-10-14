@@ -38,7 +38,11 @@ from drift.loop.diagnosis import (
     build_automatic_failure_postmortem,
     diagnose_trial_outcome,
 )
-from drift.loop.evaluator_adapter import TrialEvaluatorProtocol
+from drift.loop.evaluator_adapter import (
+    DeterministicMockTrialEvaluator,
+    MockEvaluatorProductionError,
+    TrialEvaluatorProtocol,
+)
 from drift.loop.recorder import ResearchLoopRecorder
 from drift.memory.archive import ResearchMemoryArchive
 from drift.memory.recorder import (
@@ -62,6 +66,8 @@ class ResearchLoopRunner:
         archive: ResearchMemoryArchive,
         search_spaces: Mapping[str, ParameterSearchSpaceV1] | None = None,
         loop_recorder: ResearchLoopRecorder | None = None,
+        allow_mock_evaluator: bool = False,
+        production_mode: bool = False,
     ) -> None:
         self.config = config
         self.synthesizer = synthesizer
@@ -72,6 +78,23 @@ class ResearchLoopRunner:
         self.archive = archive
         self.search_spaces = dict(search_spaces) if search_spaces else {}
         self.loop_recorder = loop_recorder
+        self.allow_mock_evaluator = allow_mock_evaluator
+        self.production_mode = production_mode or getattr(
+            config, "is_production", False
+        )
+
+        is_mock_evaluator = (
+            isinstance(evaluator, DeterministicMockTrialEvaluator)
+            or getattr(evaluator, "is_mock", False)
+            or getattr(evaluator, "is_synthetic", False)
+        )
+        if is_mock_evaluator:
+            if not self.allow_mock_evaluator or self.production_mode:
+                raise MockEvaluatorProductionError(
+                    "Deterministic mock evaluator cannot be used in production mode "
+                    "(and cannot be used without explicit allow_mock_evaluator=True); "
+                    "a genuine M2TrialEvaluatorAdapter is required."
+                )
 
     def run(
         self,
@@ -177,15 +200,32 @@ class ResearchLoopRunner:
                 )
                 self.recorder.record_postmortem(pm)
                 postmortem_id = pm.postmortem_id
+            elif diag.outcome == TrialOutcome.INVALIDATED:
+                # An invalidated trial indicates execution failure or incomplete data,
+                # not a falsified scientific hypothesis.
+                # Do not increment falsified_count.
+                consecutive_failures += 1
+
+                pm = build_automatic_failure_postmortem(
+                    diagnosis=diag,
+                    experiment_id=exp_prop.experiment_proposal_id,
+                    run_id=run_id,
+                    trial_id=trial_id,
+                    falsified_hypothesis_id=None,
+                    created_at=step_time,
+                )
+                self.recorder.record_postmortem(pm)
+                postmortem_id = pm.postmortem_id
             else:
                 validated_count += 1
                 consecutive_failures = 0
 
-                raw_s = metrics.get("annualized_sharpe", Decimal("0"))
-                sharpe_val = Decimal(str(raw_s))
-                if best_sharpe is None or sharpe_val > best_sharpe:
-                    best_sharpe = sharpe_val
-                    best_trial_id = trial_id
+                raw_s = metrics.get("annualized_sharpe")
+                if raw_s is not None:
+                    sharpe_val = Decimal(str(raw_s))
+                    if best_sharpe is None or sharpe_val > best_sharpe:
+                        best_sharpe = sharpe_val
+                        best_trial_id = trial_id
 
             # 6. Seal trial into M0 research memory ledger
             trial = build_research_trial_record(
@@ -207,6 +247,13 @@ class ResearchLoopRunner:
             self.recorder.record_trial(trial)
             self.archive.refresh()
 
+            raw_s = metrics.get("annualized_sharpe")
+            raw_dd = metrics.get("max_drawdown")
+            raw_to = metrics.get("annualized_turnover")
+            ann_s = Decimal(str(raw_s)) if raw_s is not None else None
+            ann_dd = Decimal(str(raw_dd)) if raw_dd is not None else None
+            ann_to = Decimal(str(raw_to)) if raw_to is not None else None
+
             # 7. Record completed iteration
             iter_rec = build_research_iteration_record(
                 iteration_id=deterministic_memory_uuid7(
@@ -219,11 +266,9 @@ class ResearchLoopRunner:
                 hypothesis_proposal_id=hyp_prop.proposal_id,
                 experiment_proposal_id=exp_prop.experiment_proposal_id,
                 trial_outcome=diag.outcome,
-                annualized_sharpe=Decimal(str(metrics.get("annualized_sharpe", "0"))),
-                max_drawdown=Decimal(str(metrics.get("max_drawdown", "0"))),
-                annualized_turnover=Decimal(
-                    str(metrics.get("annualized_turnover", "0"))
-                ),
+                annualized_sharpe=ann_s,
+                max_drawdown=ann_dd,
+                annualized_turnover=ann_to,
                 failure_category=diag.failure_category,
                 postmortem_id=postmortem_id,
                 started_at=step_time,

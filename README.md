@@ -8,15 +8,16 @@ bias, survivorship bias, or ungrounded simulation assumptions.
 Research outputs in Drift remain strictly untrusted until validated through a
 tamper-evident, append-only evidence history and explicit promotion gates.
 
-> **Current Boundary**: Drift is not yet a live trading bot. Completed
-> milestones (M0 through M5) provide a tamper-evident research evidence kernel,
-> temporal provenance, point-in-time universes, corporate actions, normalized
-> observations, a deterministic session-level evaluator, canonical reference
-> baselines (B0 through B5), ex-ante prediction and outcome tracking, and
-> statistical and model scorecards. M1e Task 8 (paid promotion qualification)
-> is deferred under ADR 0012. M6 (structured research memory) is the active next
-> milestone. Drift has no live broker connection, active order execution, or
-> live capital.
+> **Current Boundary**: Drift is an evidence-first quantitative research system,
+> not a live trading bot. Foundations M0 through M6 are complete and verified.
+> The research pipeline (M7 research agent, M8 recursive R&D loop, and M10
+> champion/challenger tournament) is connected to authentic M2 deterministic
+> evaluation and fortified with an empirical scientific integrity firewall.
+> Execution architecture (M12 simulated broker, M13 hard risk, M14 broker-neutral
+> router, M15 shadow validation, M16 Robinhood adapter, M17 canary, and M18+
+> bounded autonomy) is implemented in runtime code, but live broker connection,
+> active order placement, and live capital remain strictly **UNAUTHORIZED**.
+> Paid promotion qualification (M1e Task 8) is deferred under ADR 0012.
 
 ---
 
@@ -63,28 +64,65 @@ historical source evidence
 
 ## Current Project Status
 
-- **M0: Auditable Evidence Kernel**: Complete (monotonically sequenced SQLite ledger).
-- **M1a: Temporal Provenance**: Complete (exact manifests, availability, cutoff gates).
-- **M1b: Historical Identity and Universes**: Complete (issuer/security/listing separation, survivor-free universes).
-- **M1c: Corporate Actions and Economic Outcomes**: Complete (action terms, occurred effects, reported settlements).
-- **M1d: Observations, Sessions, and Normalization**: Complete (raw source claims, realized sessions, split normalization).
-- **M1e: Real-Source Qualification and Replay Closure**: In Progress / Deferred.
-  Tasks 1 through 7 are complete (offline macOS/arm64 environment closure, golden case
-  grader G01-G18, replay harness). Task 8 (paid promotion-grade qualification) is deferred
-  under ADR 0012 until economically justified by exploratory research.
-  (See [M1e Provider Selection](docs/architecture/m1e-provider-selection.md) and [ADR 0012](docs/adr/0012-permit-exploratory-evaluation-before-promotion-grade-source-qualification.md)).
-- **M2: Deterministic Session-Level Evaluator and Portfolio Accounting Kernel**: Complete.
-  Single deterministic, provider-neutral evaluator core operating across exploratory
-  and promotion lanes with portfolio state accounting and experiment runner.
-- **M3: Deterministic Baselines**: Complete.
-  Reference baseline strategy library B0 through B5 (cash, buy-and-hold, equal-weight rebalance,
-  12-1 momentum, 60-session low volatility), canonical runner with whole-tree code-version
-  provenance, and adversarial acceptance suite.
-- **M4: Prediction and Outcome Tracking**: Complete.
-  Domain models, atomic prediction recorder, deterministic outcome resolver with corporate-action-consistent analytical returns, baseline predictor adapters (B4 momentum, B5 low volatility, Null), evaluation tracking harness, and adversarial acceptance suite.
-- **M5: Statistical and Model Scorecards**: Complete.
-  Domain models, predictive power and calibration metrics engine, performance attribution, risk profiles, drawdown engine, multiple-testing adjustment engine (DSR, Bonferroni, Holm, Benjamini-Hochberg), composite scorecard generator harness, M0 SQLite audit events (m5.scorecard.recorded), and adversarial acceptance suite.
-- **M6: Structured Research Memory**: Active Next Milestone.
+Drift evaluates progress across five distinct dimensions:
+- **IMPLEMENTED**: Code written and merged in repository.
+- **TESTED**: Unit, integration, and adversarial tests passing.
+- **INDEPENDENTLY REVIEWED**: Reviewed and accepted through external architectural review.
+- **SCIENTIFICALLY QUALIFIED**: Backed by accepted promotion-grade source data and out-of-sample rigor.
+- **OPERATIONALLY AUTHORIZED**: Authorized for live capital or external brokerage execution.
+
+| Milestone | Implementation | Tests | Review | Scientific Qualification | Operational Authority |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **M0** Evidence Kernel | COMPLETE | COMPLETE | ACCEPTED | QUALIFIED | LOCAL ONLY |
+| **M1a-d** Provenance & Normalization | COMPLETE | COMPLETE | ACCEPTED | QUALIFIED | LOCAL ONLY |
+| **M1e** Source Qualification (Tasks 1-7) | COMPLETE | COMPLETE | ACCEPTED | DEFERRED (Task 8) | LOCAL ONLY |
+| **M2** Deterministic Evaluator | COMPLETE | COMPLETE | ACCEPTED | EXPLORATORY (ADR 0012) | LOCAL ONLY |
+| **M3** Reference Baselines (B0-B5) | COMPLETE | COMPLETE | ACCEPTED | EXPLORATORY | LOCAL ONLY |
+| **M4** Prediction / Outcome Tracking | COMPLETE | COMPLETE | ACCEPTED | EXPLORATORY | LOCAL ONLY |
+| **M5** Statistical Scorecards | COMPLETE | COMPLETE | ACCEPTED | EXPLORATORY | LOCAL ONLY |
+| **M6** Research Memory | COMPLETE | COMPLETE | ACCEPTED | EXPLORATORY | LOCAL ONLY |
+| **M7** AI Research Agent | COMPLETE | COMPLETE | PENDING REVIEW | EXPLORATORY | LOCAL ONLY |
+| **M8** Recursive R&D Loop | COMPLETE | COMPLETE | PENDING REVIEW | EXPLORATORY | LOCAL ONLY |
+| **M10** Champion / Challenger | COMPLETE | COMPLETE | PENDING REVIEW | EXPLORATORY | LOCAL ONLY |
+| **M11** Promotion / Overfitting Gates | QUEUED | QUEUED | QUEUED | UNQUALIFIED | UNAUTHORIZED |
+| **M12** Simulated Shadow Broker | COMPLETE | COMPLETE | ACCEPTED | N/A (SIMULATION) | UNAUTHORIZED |
+| **M13** Deterministic Hard Risk | COMPLETE | COMPLETE | ACCEPTED | N/A (RISK GATE) | UNAUTHORIZED |
+| **M14** Broker-Neutral Router | COMPLETE | COMPLETE | ACCEPTED | N/A (EXECUTION) | UNAUTHORIZED |
+| **M15** Paper / Shadow Validation | COMPLETE | COMPLETE | ACCEPTED | N/A (SHADOW) | UNAUTHORIZED |
+| **M16** Robinhood Agentic MCP Adapter | COMPLETE | COMPLETE | ACCEPTED | N/A (ADAPTER) | **UNAUTHORIZED** |
+| **M17** Tiny-Money Canary | COMPLETE | COMPLETE | ACCEPTED | N/A (CANARY) | **UNAUTHORIZED** |
+| **M18+** Bounded Autonomy | COMPLETE | COMPLETE | ACCEPTED | N/A (AUTONOMY) | **UNAUTHORIZED** |
+
+### PR #350 Research Integrity and Parallel Portfolios Components
+
+The components introduced in PR #350 operate across Drift's 5-dimensional status model:
+- **Domain Schema**: Data models and boundary types.
+- **Ledger Events**: M0 audit ledger persistence and schema bindings.
+- **Service Implementation**: Core business logic and runtime services.
+- **Unit Tests**: Targeted functional and boundary unit coverage.
+- **Verification Suite**: Integrated adversarial, determinism, and property verification.
+
+| Component | Domain Schema | Ledger Events | Service Implementation | Unit Tests | Verification Suite | Status | Lane Status |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Deterministic Evaluator Adapter** (M2/M8) | COMPLETE | COMPLETE | COMPLETE | COMPLETE | COMPLETE | PENDING EXTERNAL REVIEW | EXPLORATORY ONLY |
+| **Parallel $10,000 Portfolios Harness** | COMPLETE | COMPLETE | COMPLETE | COMPLETE | COMPLETE | PENDING EXTERNAL REVIEW | EXPLORATORY ONLY |
+| **Scientific Integrity Firewall** | COMPLETE | COMPLETE | COMPLETE | COMPLETE | COMPLETE | PENDING EXTERNAL REVIEW | EXPLORATORY ONLY |
+| **Tournament Evidence Requirements** | COMPLETE | COMPLETE | COMPLETE | COMPLETE | COMPLETE | PENDING EXTERNAL REVIEW | EXPLORATORY ONLY |
+
+> **Exploratory Evidence Boundary**: All evaluation evidence produced in the exploratory lane
+> is strictly non-promotable and cannot be upgraded, relabeled, or converted into promotion-grade
+> evidence. Promotion to production-authorized lanes requires a fresh, independent evaluation
+> run against an accepted promotion-qualified M1e dataset (deferred under ADR 0012). PR #350
+> does NOT qualify M1e Task 8 and does NOT promote any strategy to live execution.
+
+### Parallel Research Portfolios ($10,000 Initial Capital)
+Drift provides an isolated, deterministic research portfolio cohort harness
+(`drift.experiments.parallel_portfolios`) for evaluating independent $10,000
+strategy accounts in parallel under identical market sessions:
+```bash
+# Run deterministic parallel research portfolio cohort demo
+python -m drift.experiments.parallel_portfolios
+```
 
 ---
 

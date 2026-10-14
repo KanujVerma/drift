@@ -46,12 +46,22 @@ def test_paired_returns_statistics_identical_series() -> None:
 
 def test_paired_returns_statistics_superior_series() -> None:
     champ = [Decimal("0.001")] * 60
-    # Challenger consistently earns +0.005 higher per session
+    # Challenger earns +0.005 higher per session with zero variance (refused)
     chall = [Decimal("0.006")] * 60
     mean_diff, t_stat, p_val = compute_paired_returns_statistics(champ, chall)
     assert mean_diff == Decimal("0.005")
-    assert t_stat == Decimal("999.0")
-    assert p_val == Decimal("0.0")
+    assert t_stat == Decimal("0.0")
+    assert p_val == Decimal("1.0")
+
+    # When series has genuine empirical variance, significance is established
+    chall_var = [
+        Decimal("0.006") + Decimal(str((i % 5) - 2)) / Decimal("1000")
+        for i in range(60)
+    ]
+    mean_diff_v, t_stat_v, p_val_v = compute_paired_returns_statistics(champ, chall_var)
+    assert mean_diff_v == Decimal("0.005")
+    assert t_stat_v > Decimal("2.0")
+    assert p_val_v < Decimal("0.05")
 
 
 def test_evaluate_head_to_head_match_promoted() -> None:
@@ -60,7 +70,8 @@ def test_evaluate_head_to_head_match_promoted() -> None:
         Decimal("0.001") + Decimal(str(i % 5)) / Decimal("1000") for i in range(80)
     ]
     chall_returns = [
-        Decimal("0.004") + Decimal(str(i % 5)) / Decimal("1000") for i in range(80)
+        Decimal("0.004") + Decimal(str((i + 1) % 5)) / Decimal("1000")
+        for i in range(80)
     ]
 
     res = evaluate_head_to_head_match(
@@ -85,8 +96,13 @@ def test_evaluate_head_to_head_match_promoted() -> None:
 
 def test_evaluate_head_to_head_match_rejected_insufficient_outperformance() -> None:
     config = _sample_config(min_delta_sharpe=Decimal("0.30"))
-    champ_returns = [Decimal("0.001")] * 60
-    chall_returns = [Decimal("0.002")] * 60
+    champ_returns = [
+        Decimal("0.001") + Decimal(str(i % 5)) / Decimal("1000") for i in range(60)
+    ]
+    chall_returns = [
+        Decimal("0.002") + Decimal(str((i + 1) % 5)) / Decimal("1000")
+        for i in range(60)
+    ]
 
     res = evaluate_head_to_head_match(
         config=config,
@@ -98,6 +114,7 @@ def test_evaluate_head_to_head_match_rejected_insufficient_outperformance() -> N
         challenger_turnover=Decimal("2.2"),
         champion_returns=champ_returns,
         challenger_returns=chall_returns,
+        is_pnl_complete=True,
     )
 
     assert res.decision == TournamentDecision.REJECTED_INSUFFICIENT_OUTPERFORMANCE
@@ -125,6 +142,7 @@ def test_evaluate_head_to_head_match_rejected_multiple_testing_penalty() -> None
         champion_returns=champ_returns,
         challenger_returns=chall_returns,
         trials_evaluated_count=10,
+        is_pnl_complete=True,
     )
 
     if res.p_value > Decimal("0.005"):
@@ -134,8 +152,13 @@ def test_evaluate_head_to_head_match_rejected_multiple_testing_penalty() -> None
 
 def test_evaluate_head_to_head_match_rejected_excessive_drawdown() -> None:
     config = _sample_config(max_drawdown_slack=Decimal("0.10"))
-    champ_returns = [Decimal("0.001")] * 60
-    chall_returns = [Decimal("0.005")] * 60
+    champ_returns = [
+        Decimal("0.001") + Decimal(str(i % 5)) / Decimal("1000") for i in range(60)
+    ]
+    chall_returns = [
+        Decimal("0.005") + Decimal(str((i + 1) % 5)) / Decimal("1000")
+        for i in range(60)
+    ]
 
     res = evaluate_head_to_head_match(
         config=config,
@@ -147,6 +170,7 @@ def test_evaluate_head_to_head_match_rejected_excessive_drawdown() -> None:
         challenger_turnover=Decimal("2.2"),
         champion_returns=champ_returns,
         challenger_returns=chall_returns,
+        is_pnl_complete=True,
     )
 
     assert res.decision == TournamentDecision.REJECTED_EXCESSIVE_DRAWDOWN
@@ -155,19 +179,25 @@ def test_evaluate_head_to_head_match_rejected_excessive_drawdown() -> None:
 
 def test_evaluate_head_to_head_match_rejected_excessive_turnover() -> None:
     config = _sample_config(max_turnover_ratio=Decimal("2.0"))
-    champ_returns = [Decimal("0.001")] * 60
-    chall_returns = [Decimal("0.005")] * 60
+    champ_returns = [
+        Decimal("0.001") + Decimal(str(i % 5)) / Decimal("1000") for i in range(60)
+    ]
+    chall_returns = [
+        Decimal("0.005") + Decimal(str((i + 1) % 5)) / Decimal("1000")
+        for i in range(60)
+    ]
 
     res = evaluate_head_to_head_match(
         config=config,
         champion_sharpe=Decimal("1.00"),
         challenger_sharpe=Decimal("1.50"),
         champion_max_drawdown=Decimal("0.10"),
-        challenger_max_drawdown=Decimal("0.08"),
+        challenger_max_drawdown=Decimal("0.09"),
         champion_turnover=Decimal("2.0"),
-        challenger_turnover=Decimal("5.5"),  # Ratio = 2.75 > 2.0
+        challenger_turnover=Decimal("5.0"),  # 5.0 / 2.0 = 2.5 > 2.0
         champion_returns=champ_returns,
         challenger_returns=chall_returns,
+        is_pnl_complete=True,
     )
 
     assert res.decision == TournamentDecision.REJECTED_EXCESSIVE_TURNOVER

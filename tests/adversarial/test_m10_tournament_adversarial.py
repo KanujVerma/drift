@@ -14,6 +14,7 @@ Attacks tournament engine boundary invariants across:
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import pytest
@@ -79,23 +80,36 @@ def test_adv_marginal_noise_outperformance_rejection() -> None:
         min_delta_sharpe=Decimal("0.25"),
     )
 
+    c_returns = tuple(
+        Decimal("0.001") + Decimal(str(i % 5)) / Decimal("1000") for i in range(60)
+    )
+    h_returns = tuple(
+        Decimal("0.0012") + Decimal(str((i + 1) % 5)) / Decimal("1000")
+        for i in range(60)
+    )
     evaluator = DeterministicMockTrialEvaluator(
         metric_overrides={
             champ.parameters_hash: {
                 "annualized_sharpe": Decimal("1.00"),
                 "max_drawdown": Decimal("0.08"),
                 "annualized_turnover": Decimal("2.0"),
+                "is_pnl_complete": True,
+                "session_returns": c_returns,
             },
             chall.parameters_hash: {
                 # Only +0.05 better (noise)
                 "annualized_sharpe": Decimal("1.05"),
                 "max_drawdown": Decimal("0.08"),
                 "annualized_turnover": Decimal("2.0"),
+                "is_pnl_complete": True,
+                "session_returns": h_returns,
             },
         }
     )
 
-    runner = TournamentRunner(config=config, evaluator=evaluator)
+    runner = TournamentRunner(
+        config=config, evaluator=evaluator, require_genuine_evidence=False
+    )
     record = runner.run_match(
         champion=champ,
         challenger=chall,
@@ -179,22 +193,35 @@ def test_adv_drawdown_tail_risk_breach_rejection() -> None:
         max_drawdown_slack=Decimal("0.10"),  # max allowed DD: 0.08 * 1.1 = 0.088
     )
 
+    c_returns = tuple(
+        Decimal("0.001") + Decimal(str(i % 5)) / Decimal("1000") for i in range(60)
+    )
+    h_returns = tuple(
+        Decimal("0.005") + Decimal(str((i + 1) % 5)) / Decimal("1000")
+        for i in range(60)
+    )
     evaluator = DeterministicMockTrialEvaluator(
         metric_overrides={
             champ.parameters_hash: {
                 "annualized_sharpe": Decimal("1.00"),
                 "max_drawdown": Decimal("0.08"),
                 "annualized_turnover": Decimal("2.0"),
+                "is_pnl_complete": True,
+                "session_returns": c_returns,
             },
             chall.parameters_hash: {
                 "annualized_sharpe": Decimal("2.50"),  # Huge Sharpe
                 "max_drawdown": Decimal("0.22"),  # Breaches 0.088 limit
                 "annualized_turnover": Decimal("2.0"),
+                "is_pnl_complete": True,
+                "session_returns": h_returns,
             },
         }
     )
 
-    runner = TournamentRunner(config=config, evaluator=evaluator)
+    runner = TournamentRunner(
+        config=config, evaluator=evaluator, require_genuine_evidence=False
+    )
     record = runner.run_match(
         champion=champ,
         challenger=chall,
@@ -220,22 +247,35 @@ def test_adv_turnover_drag_ratio_breach_rejection() -> None:
         max_turnover_ratio=Decimal("2.0"),
     )
 
+    c_returns = tuple(
+        Decimal("0.001") + Decimal(str(i % 5)) / Decimal("1000") for i in range(60)
+    )
+    h_returns = tuple(
+        Decimal("0.005") + Decimal(str((i + 1) % 5)) / Decimal("1000")
+        for i in range(60)
+    )
     evaluator = DeterministicMockTrialEvaluator(
         metric_overrides={
             champ.parameters_hash: {
                 "annualized_sharpe": Decimal("1.00"),
                 "max_drawdown": Decimal("0.08"),
                 "annualized_turnover": Decimal("2.0"),
+                "is_pnl_complete": True,
+                "session_returns": c_returns,
             },
             chall.parameters_hash: {
                 "annualized_sharpe": Decimal("2.00"),
                 "max_drawdown": Decimal("0.07"),
                 "annualized_turnover": Decimal("7.5"),  # Turnover ratio = 3.75 > 2.0
+                "is_pnl_complete": True,
+                "session_returns": h_returns,
             },
         }
     )
 
-    runner = TournamentRunner(config=config, evaluator=evaluator)
+    runner = TournamentRunner(
+        config=config, evaluator=evaluator, require_genuine_evidence=False
+    )
     record = runner.run_match(
         champion=champ,
         challenger=chall,
@@ -293,6 +333,13 @@ def test_adv_incomplete_realized_pnl_disqualification() -> None:
         created_at=TIMESTAMP_START,
     )
 
+    c_returns = tuple(
+        Decimal("0.001") + Decimal(str(i % 5)) / Decimal("1000") for i in range(60)
+    )
+    h_returns = tuple(
+        Decimal("0.005") + Decimal(str((i + 1) % 5)) / Decimal("1000")
+        for i in range(60)
+    )
     evaluator = DeterministicMockTrialEvaluator(
         metric_overrides={
             champ.parameters_hash: {
@@ -300,17 +347,21 @@ def test_adv_incomplete_realized_pnl_disqualification() -> None:
                 "max_drawdown": Decimal("0.08"),
                 "annualized_turnover": Decimal("2.0"),
                 "is_pnl_complete": True,
+                "session_returns": c_returns,
             },
             chall.parameters_hash: {
                 "annualized_sharpe": Decimal("2.50"),
                 "max_drawdown": Decimal("0.06"),
                 "annualized_turnover": Decimal("2.1"),
                 "is_pnl_complete": False,  # Unknown basis disposal!
+                "session_returns": h_returns,
             },
         }
     )
 
-    runner = TournamentRunner(config=config, evaluator=evaluator)
+    runner = TournamentRunner(
+        config=config, evaluator=evaluator, require_genuine_evidence=False
+    )
     record = runner.run_match(
         champion=champ,
         challenger=chall,
@@ -435,3 +486,88 @@ def test_adv_archive_corrupted_payload_resilience(tmp_path: Path) -> None:
     assert archive.promotions_count == 1
     assert archive.get_match(valid_record.match_id) == valid_record
     assert archive.get_current_champion("b4_momentum") == chall
+
+
+# -----------------------------------------------------------------------------
+# Vector 9: Malformed Calendar and Synthetic Provenance Rejection
+# -----------------------------------------------------------------------------
+
+
+def test_adv_malformed_calendar_and_synthetic_provenance_rejected() -> None:
+    """Ensure malformed scalar calendars and synthetic evidence fail closed
+    under authentic requirements.
+    """
+    champ, chall = _sample_participants()
+    config = build_tournament_config(
+        tournament_id=TOURNAMENT_ID_1,
+        created_at=TIMESTAMP_START,
+        min_delta_sharpe=Decimal("0.25"),
+    )
+
+    class _CustomEvaluator:
+        def __init__(self, metrics: dict[str, Any]) -> None:
+            self._metrics = metrics
+
+        def evaluate_experiment(self, exp: Any) -> dict[str, Any]:
+            return dict(self._metrics)
+
+    proto = "a" * 64
+    bundle = "b" * 64
+    cost = "c" * 64
+    returns = tuple(Decimal("0.01") for _ in range(60))
+
+    # Sub-case A: string scalar calendar bypassing sequence check
+    string_cal_evaluator = _CustomEvaluator(
+        {
+            "annualized_sharpe": Decimal("1.50"),
+            "max_drawdown": Decimal("0.08"),
+            "annualized_turnover": Decimal("2.0"),
+            "is_pnl_complete": True,
+            "bundle_hash": bundle,
+            "cost_model_hash": cost,
+            "protocol_hash": proto,
+            "session_keys": "NYSE:2026-01-01",  # scalar string
+            "session_returns": returns,
+            "is_mock": False,
+            "is_synthetic": False,
+        }
+    )
+    runner_a = TournamentRunner(
+        config=config, evaluator=string_cal_evaluator, require_genuine_evidence=True
+    )
+    record_a = runner_a.run_match(
+        champion=champ,
+        challenger=chall,
+        start_time=TIMESTAMP_START,
+        end_time=TIMESTAMP_END,
+    )
+    assert record_a.decision == TournamentDecision.REJECTED_INCOMPLETE_EVIDENCE
+    assert any("calendar" in r for r in record_a.rejection_reasons)
+
+    # Sub-case B: is_synthetic=True flagged evidence
+    synthetic_evaluator = _CustomEvaluator(
+        {
+            "annualized_sharpe": Decimal("1.50"),
+            "max_drawdown": Decimal("0.08"),
+            "annualized_turnover": Decimal("2.0"),
+            "is_pnl_complete": True,
+            "bundle_hash": bundle,
+            "cost_model_hash": cost,
+            "protocol_hash": proto,
+            "session_keys": tuple(f"NYSE:2026-01-{i + 1:02d}" for i in range(60)),
+            "session_returns": returns,
+            "is_mock": False,
+            "is_synthetic": True,  # synthetic flagged
+        }
+    )
+    runner_b = TournamentRunner(
+        config=config, evaluator=synthetic_evaluator, require_genuine_evidence=True
+    )
+    record_b = runner_b.run_match(
+        champion=champ,
+        challenger=chall,
+        start_time=TIMESTAMP_START,
+        end_time=TIMESTAMP_END,
+    )
+    assert record_b.decision == TournamentDecision.REJECTED_INCOMPLETE_EVIDENCE
+    assert any("synthetic" in r for r in record_b.rejection_reasons)
