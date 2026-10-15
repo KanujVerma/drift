@@ -31,10 +31,12 @@ from uuid import UUID
 
 from drift.domain.economic_closed_world import (
     ClosedWorldCorporateActionCoverageV1,
+    ReturnedCorporateActionV1,
     exact_date,
 )
 from drift.domain.evaluator_corporate_actions import SecurityEconomicOutcomeV1
 from drift.domain.evaluator_portfolio import IndeterminateValuationError
+from drift.evaluator.exploratory_dividends import ExploratoryDividendPolicyV1
 from drift.markets.economic_closed_world import (
     CorporateActionCoverageError,
     corporate_action_window_status,
@@ -66,6 +68,7 @@ class CorporateActionCoverageIndex:
         *,
         records: Iterable[ClosedWorldCorporateActionCoverageV1],
         lane: CoverageLane,
+        exploratory_dividend_policy: ExploratoryDividendPolicyV1 | None = None,
     ) -> None:
         if lane not in ("exploratory", "promotion"):
             raise ValueError(f"unknown evaluation lane for coverage: {lane!r}")
@@ -76,9 +79,74 @@ class CorporateActionCoverageIndex:
                 "a promotion admission cannot be covered by exploratory-grade "
                 "corporate-action coverage records",
             )
+        if lane == "promotion" and exploratory_dividend_policy is not None:
+            raise CorporateActionCoverageError(
+                "ca_coverage_grade_refused_by_lane",
+                "a promotion admission cannot use exploratory dividend policy",
+            )
         self._records = verified
         self._lane: CoverageLane = lane
         self._securities = frozenset(item.security_id for item in verified)
+        self._exploratory_dividend_policy = exploratory_dividend_policy
+
+        if (
+            exploratory_dividend_policy is not None
+            and exploratory_dividend_policy.dividends
+        ):
+            self._verify_dividend_policy(exploratory_dividend_policy)
+
+    def _verify_dividend_policy(self, policy: ExploratoryDividendPolicyV1) -> None:
+        records_by_security = {rec.security_id: rec for rec in self._records}
+        for div in policy.dividends:
+            rec = records_by_security.get(div.security_id)
+            if rec is None:
+                raise CorporateActionCoverageError(
+                    "ca_coverage_missing",
+                    f"dividend policy declares terms for security {div.security_id} "
+                    "which has no corporate-action coverage record",
+                )
+            if rec.queried_symbol != div.symbol:
+                raise CorporateActionCoverageError(
+                    "ca_coverage_symbol_mismatch",
+                    f"dividend symbol {div.symbol} does not match "
+                    f"coverage queried symbol {rec.queried_symbol}",
+                )
+            if rec.source_id != div.source_id:
+                raise CorporateActionCoverageError(
+                    "ca_coverage_source_mismatch",
+                    f"dividend source {div.source_id} does not match "
+                    f"coverage source {rec.source_id}",
+                )
+            if rec.response_sha256 != div.response_sha256:
+                raise CorporateActionCoverageError(
+                    "ca_coverage_hash_mismatch",
+                    f"dividend response hash {div.response_sha256} does not match "
+                    f"coverage response hash {rec.response_sha256}",
+                )
+            matching_action = next(
+                (
+                    action
+                    for action in rec.returned_actions
+                    if action.native_kind == "cash_dividends"
+                    and action.native_id == div.native_id
+                ),
+                None,
+            )
+            if matching_action is None:
+                raise CorporateActionCoverageError(
+                    "ca_coverage_action_missing",
+                    f"dividend native id {div.native_id} for {div.symbol} is absent "
+                    "from returned corporate actions in coverage record",
+                )
+            expected_dates = tuple(
+                sorted({div.ex_date, div.record_date, div.payable_date})
+            )
+            if matching_action.dates != expected_dates:
+                raise CorporateActionCoverageError(
+                    "ca_coverage_dates_mismatch",
+                    f"dividend dates for {div.native_id} do not match returned action "
+                    f"dates: expected {expected_dates}, got {matching_action.dates}",
+                )
 
     @property
     def records(self) -> tuple[ClosedWorldCorporateActionCoverageV1, ...]:
@@ -155,11 +223,43 @@ class CorporateActionCoverageIndex:
         status = corporate_action_window_status(self._records, security_id, start, end)
         if status == "evidenced_no_action":
             return
+        if status != "actions_present":
+            raise IndeterminateValuationError(
+                "no closed-world corporate-action coverage for "
+                f"{_window_text(security_id, start, end)} ({status})"
+            )
         present = window_returned_actions(self._records, security_id, start, end)
         if present:
-            named = ", ".join(
-                f"{action.native_kind} {action.native_id}" for action in present
-            )
+            if (
+                self._exploratory_dividend_policy is not None
+                and self._lane == "exploratory"
+            ):
+                unhandled: list[ReturnedCorporateActionV1] = []
+                for action in present:
+                    if action.native_kind != "cash_dividends":
+                        unhandled.append(action)
+                        continue
+                    term = self._exploratory_dividend_policy.terms_for(
+                        security_id, action.native_id
+                    )
+                    if term is None:
+                        unhandled.append(action)
+                        continue
+                    expected_dates = tuple(
+                        sorted({term.ex_date, term.record_date, term.payable_date})
+                    )
+                    if action.dates != expected_dates:
+                        unhandled.append(action)
+                        continue
+                if not unhandled:
+                    return
+                named = ", ".join(
+                    f"{action.native_kind} {action.native_id}" for action in unhandled
+                )
+            else:
+                named = ", ".join(
+                    f"{action.native_kind} {action.native_id}" for action in present
+                )
             raise IndeterminateValuationError(
                 "corporate-action coverage returned actions for "
                 f"{_window_text(security_id, start, end)} that no M2 accounting "

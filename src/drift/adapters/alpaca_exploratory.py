@@ -887,9 +887,25 @@ def parse_alpaca_cash_dividends(data: bytes) -> tuple[AlpacaNativeCashDividend, 
     for entry in entries:
         if not isinstance(entry, dict):
             raise AlpacaBridgeIncompleteError("dividend row must be a JSON object")
-        native_id = entry.get("corporate_action_id")
+        provider_id = entry.get("id")
+        corporate_id = entry.get("corporate_action_id")
+
+        if (
+            provider_id is not None
+            and corporate_id is not None
+            and provider_id != corporate_id
+        ):
+            raise AlpacaBridgeIncompleteError(
+                "conflicting corporate action identifiers"
+            )
+
+        native_id = provider_id if provider_id is not None else corporate_id
+
+        if not isinstance(native_id, str) or not native_id.strip():
+            raise AlpacaBridgeIncompleteError("dividend row is missing its identity")
+
         symbol = entry.get("symbol")
-        if not isinstance(native_id, str) or not isinstance(symbol, str):
+        if not isinstance(symbol, str) or not symbol.strip():
             raise AlpacaBridgeIncompleteError("dividend row is missing its identity")
         rate = _exact_decimal(entry.get("rate"), "dividend rate")
         rows.append(
@@ -926,6 +942,16 @@ _ACTION_GROUP_KINDS: dict[str, ActionKind] = {
 
 def _action_native_id(entry: Mapping[str, Any], group: str) -> str:
     """The provider's own identifier, or a content address when it prints none."""
+    provider_id = entry.get("id")
+    corporate_id = entry.get("corporate_action_id")
+    if (
+        provider_id is not None
+        and corporate_id is not None
+        and provider_id != corporate_id
+    ):
+        raise AlpacaBridgeIncompleteError(
+            f"a {group} row carries conflicting corporate action identifiers"
+        )
     for name in ("id", "corporate_action_id"):
         value = entry.get(name)
         if value is None:
@@ -1124,6 +1150,50 @@ class AlpacaCohortMember:
     security_id: UUID
     listing_id: UUID
     venue: ListingVenue
+
+
+def build_exploratory_dividends_from_alpaca(
+    data: bytes,
+    members: Sequence[AlpacaCohortMember],
+    response_sha256: str | None = None,
+) -> Any:
+    """Build an exploratory dividend policy from raw Alpaca corporate action bytes."""
+    from drift.evaluator.exploratory_dividends import (
+        ExploratoryCashDividendTermsV1,
+        ExploratoryDividendPolicyV1,
+    )
+
+    computed_sha256 = sha256(data).hexdigest()
+    if response_sha256 is not None and response_sha256 != computed_sha256:
+        raise AlpacaBridgeIncompleteError(
+            f"declared response hash mismatch: expected {computed_sha256}, "
+            f"got {response_sha256}"
+        )
+
+    member_by_symbol = {m.symbol: m for m in members}
+    parsed = parse_alpaca_cash_dividends(data)
+    terms_list: list[ExploratoryCashDividendTermsV1] = []
+    for item in parsed:
+        member = member_by_symbol.get(item.symbol)
+        if member is None:
+            continue
+        terms_list.append(
+            ExploratoryCashDividendTermsV1(
+                native_id=item.native_id,
+                security_id=member.security_id,
+                symbol=item.symbol,
+                rate=item.rate,
+                ex_date=item.ex_date,
+                record_date=item.record_date,
+                payable_date=item.payable_date,
+                source_id=ALPACA_ACTION_SOURCE_ID,
+                response_sha256=computed_sha256,
+            )
+        )
+    return ExploratoryDividendPolicyV1(
+        dividends=tuple(terms_list),
+        source_payloads=(data,),
+    )
 
 
 @dataclass(frozen=True, slots=True)

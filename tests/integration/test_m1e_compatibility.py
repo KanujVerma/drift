@@ -113,6 +113,12 @@ M2_ALPACA_BRIDGE_SCRIPT_PATHS = frozenset(
         "scripts/intake_alpaca_exploratory.py",
     }
 )
+# The M2 historical benchmark script evaluates QQQ baseline strategies using
+# retainable historical observations. It requires no network transport, no
+# subprocesses, and no credential reads; its capabilities are bounded to
+# offline evaluation and standard data structures.
+BENCHMARK_SCRIPT_PATH = "scripts/benchmark_qqq_historical.py"
+M2_BENCHMARK_SCRIPT_PATHS = frozenset({BENCHMARK_SCRIPT_PATH})
 # M3 baseline strategy source added under issue #166. Like the M2 additive
 # modules above, these reference strategies do not carry the "evaluator" prefix,
 # so they are named and routed through the production AST guard.
@@ -183,6 +189,7 @@ INERT_SOURCE_PATHS = (
     | M2_ADDITIVE_SOURCE_PATHS
     | M2_ALPACA_BRIDGE_SOURCE_PATHS
     | M2_ALPACA_BRIDGE_SCRIPT_PATHS
+    | M2_BENCHMARK_SCRIPT_PATHS
     | M3_BASELINE_SOURCE_PATHS
     | M4_PREDICTION_TRACKING_SOURCE_PATHS
     | M5_SCORECARD_SOURCE_PATHS
@@ -400,6 +407,38 @@ ALPACA_SCRIPT_ALLOWLIST = BridgeCapabilityAllowlist(
     },
     environment_reads=frozenset({"APCA_API_KEY_ID", "APCA_API_SECRET_KEY"}),
     dunder_attributes=frozenset({"__init__", "__name__"}),
+    refused_builtins=frozenset({"open"}),
+)
+#: Capability allowlist for the M2 historical benchmark script. The script
+#: operates strictly offline, reading serialized observations and timezone data,
+#: and executes baseline evaluation algorithms without direct network or process
+#: privileges.
+BENCHMARK_SCRIPT_ALLOWLIST = BridgeCapabilityAllowlist(
+    import_roots=frozenset(
+        {
+            "dataclasses",
+            "datetime",
+            "decimal",
+            "drift",
+            "json",
+            "pathlib",
+            "re",
+            "scripts",
+            "sys",
+            "time",
+            "typing",
+            "uuid",
+            "zoneinfo",
+        }
+    ),
+    module_attributes={
+        "json": frozenset({"loads"}),
+        "re": frozenset({"match", "search"}),
+        "sys": frozenset({"exit", "path", "version_info"}),
+        "time": frozenset({"time"}),
+    },
+    environment_reads=frozenset(),
+    dunder_attributes=frozenset({"__file__", "__init__", "__name__"}),
     refused_builtins=frozenset({"open"}),
 )
 
@@ -769,6 +808,58 @@ def _assert_m2_bridge_script_allowed(relative: str, source: str) -> None:
     assert not violations, "alpaca bridge allowlist: " + "; ".join(violations)
 
 
+def _assert_m2_benchmark_script_allowed(relative: str, source: str) -> None:
+    """Enforce exact static capability bounds on the M2 historical benchmark script.
+
+    The benchmark script is strictly offline: no network imports, no process
+    orchestration, no dynamic code execution, no direct credential reads, and
+    no definitions named after forbidden capabilities.
+    """
+    assert relative in M2_BENCHMARK_SCRIPT_PATHS, (
+        f"unexpected M2 benchmark script: {relative}"
+    )
+    tree = ast.parse(source, relative)
+    aliases = _import_aliases(tree)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            modules = [node.module or ""]
+        else:
+            modules = []
+        for module in modules:
+            root = module.split(".", maxsplit=1)[0]
+            assert root not in PROCESS_IMPORT_ROOTS, (
+                f"process import in the M2 benchmark script: {module}"
+            )
+            assert root not in NETWORK_IMPORT_ROOTS, (
+                f"network import in the M2 benchmark script: {module}"
+            )
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            _assert_definition_allowed(node.name, relative, script=True)
+        if isinstance(node, ast.Call):
+            call_path = _call_path(node.func, aliases)
+            assert call_path not in FORBIDDEN_PROCESS_CALLS, (
+                f"forbidden process call in the M2 benchmark script: {call_path}"
+            )
+            assert call_path not in FORBIDDEN_DYNAMIC_CALLS, (
+                f"forbidden dynamic call in the M2 benchmark script: {call_path}"
+            )
+            assert call_path not in CREDENTIAL_READ_CALLS, (
+                "forbidden credential read call in the M2 benchmark script: "
+                f"{call_path}"
+            )
+        if isinstance(node, ast.Subscript):
+            access_path = _call_path(node.value, aliases)
+            assert access_path != "os.environ", (
+                "forbidden os.environ subscript in the M2 benchmark script"
+            )
+    violations = _bridge_capability_violations(
+        source, relative, BENCHMARK_SCRIPT_ALLOWLIST
+    )
+    assert not violations, "benchmark script allowlist: " + "; ".join(violations)
+
+
 def _assert_m1e_script_allowed(relative: str, source: str) -> None:
     assert relative in M1E_SCRIPT_PATHS, f"unexpected M1e script: {relative}"
     tree = ast.parse(source, relative)
@@ -856,6 +947,8 @@ def test_m1e_additions_are_allowlisted_inert_and_leave_m1d_pins_unchanged() -> N
             _assert_m1e_production_module_allowed(source, relative)
         elif relative in M2_ALPACA_BRIDGE_SCRIPT_PATHS:
             _assert_m2_bridge_script_allowed(relative, source)
+        elif relative in M2_BENCHMARK_SCRIPT_PATHS:
+            _assert_m2_benchmark_script_allowed(relative, source)
         else:
             _assert_m1e_script_allowed(relative, source)
 
@@ -1216,3 +1309,97 @@ def test_a_second_origin_record_minter_is_detected(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert _origin_record_minters(tmp_path) == {"src/drift/evaluator/sneaky.py"}
+
+
+#: Every capability expansion or bypass route tested against the benchmark script.
+#: Each is paired with the error substring that must be asserted when injected.
+BENCHMARK_SCRIPT_BYPASSES: dict[str, tuple[str, str]] = {
+    "network-import-urllib": (
+        "import urllib.request\n",
+        "network import in the M2 benchmark script: urllib.request",
+    ),
+    "network-import-httpx": (
+        "import httpx\n",
+        "network import in the M2 benchmark script: httpx",
+    ),
+    "network-from-import": (
+        "from http.client import HTTPSConnection\n",
+        "network import in the M2 benchmark script: http.client",
+    ),
+    "process-import-subprocess": (
+        "import subprocess\n",
+        "process import in the M2 benchmark script: subprocess",
+    ),
+    "process-call-os-system": (
+        "import os\nos.system('echo 1')\n",
+        "forbidden process call in the M2 benchmark script: os.system",
+    ),
+    "dynamic-call-exec": (
+        "exec('pass')\n",
+        "forbidden dynamic call in the M2 benchmark script: exec",
+    ),
+    "dynamic-call-eval": (
+        "eval('1 + 1')\n",
+        "forbidden dynamic call in the M2 benchmark script: eval",
+    ),
+    "dynamic-call-getattr": (
+        "getattr(sys, 'path')\n",
+        "reaches getattr, a builtin that resolves modules",
+    ),
+    "credential-env-read-getenv": (
+        "import os\n_LEAK = os.getenv('APCA_API_KEY_ID')\n",
+        "forbidden credential read call in the M2 benchmark script: os.getenv",
+    ),
+    "credential-env-read-subscript": (
+        "import os\n_LEAK = os.environ['APCA_API_KEY_ID']\n",
+        "forbidden os.environ subscript in the M2 benchmark script",
+    ),
+    "builtin-open": (
+        "_LEAK = open('secret.txt')\n",
+        "reaches the builtin open, which is outside its allowlist",
+    ),
+    "proc-environ-file": (
+        '_LEAK = Path("/proc/self/environ").read_bytes()\n',
+        "names the process-environment file '/proc/self/environ'",
+    ),
+    "credential-definition-name": (
+        "def read_credential_store() -> None:\n    pass\n",
+        "network or credential definition is deferred to Task 8: read_credential_store",
+    ),
+    "forbidden-broker-definition": (
+        "def execute_broker_trade() -> None:\n    pass\n",
+        "forbidden M1e capability definition: execute_broker_trade",
+    ),
+    "unauthorized-import-root": (
+        "import socket\n",
+        "network import in the M2 benchmark script: socket",
+    ),
+    "sys-modules-bypass": (
+        "_LEAK = sys.modules['os']\n",
+        "uses sys.modules, which is outside the sys allowlist",
+    ),
+}
+
+
+def test_the_real_benchmark_script_passes_its_capability_guard() -> None:
+    """The real historical benchmark script must pass its capability guard."""
+    script_source = (REPO_ROOT / BENCHMARK_SCRIPT_PATH).read_text(encoding="utf-8")
+    assert (
+        _bridge_capability_violations(
+            script_source, BENCHMARK_SCRIPT_PATH, BENCHMARK_SCRIPT_ALLOWLIST
+        )
+        == []
+    )
+    _assert_m2_benchmark_script_allowed(BENCHMARK_SCRIPT_PATH, script_source)
+
+
+@pytest.mark.parametrize("bypass", sorted(BENCHMARK_SCRIPT_BYPASSES))
+def test_every_known_capability_bypass_is_refused_in_the_benchmark_script(
+    bypass: str,
+) -> None:
+    injection, rule = BENCHMARK_SCRIPT_BYPASSES[bypass]
+    source = (REPO_ROOT / BENCHMARK_SCRIPT_PATH).read_text(encoding="utf-8")
+    with pytest.raises(AssertionError, match=re.escape(rule)):
+        _assert_m2_benchmark_script_allowed(
+            BENCHMARK_SCRIPT_PATH, source + "\n\n" + injection
+        )
