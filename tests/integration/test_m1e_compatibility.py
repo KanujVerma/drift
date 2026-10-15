@@ -1264,10 +1264,10 @@ def test_the_script_may_read_only_the_two_alpaca_key_variables(bypass: str) -> N
         )
 
 
-#: The only production module allowed to mint measured-origin records. It is
-#: the one module that performs the transfer the records describe.
+#: The only production modules allowed to mint measured-origin records. They
+#: are the modules that perform the transfer the records describe.
 ORIGIN_RECORD_MINTER = "retain_origin_observations"
-ORIGIN_RECORD_MINTING_PATHS = frozenset({ALPACA_SCRIPT_PATH})
+ORIGIN_RECORD_MINTING_PATHS = frozenset({ALPACA_SCRIPT_PATH, BENCHMARK_SCRIPT_PATH})
 
 
 def _origin_record_minters(root: Path) -> set[str]:

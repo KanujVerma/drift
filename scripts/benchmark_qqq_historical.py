@@ -37,11 +37,13 @@ from drift.adapters.alpaca_exploratory import (
     AlpacaCohortMember,
     AlpacaIntakeRequest,
     AlpacaNativePayloads,
+    AlpacaOriginObservation,
     AlpacaReconstructionLineage,
     AlpacaTimezoneEvidence,
     build_exploratory_dividends_from_alpaca,
     load_retained_origin_observations,
     retain_native_bytes,
+    retain_origin_observations,
     run_alpaca_exploratory_intake,
 )
 from drift.domain.securities import ListingVenue
@@ -195,16 +197,20 @@ def _load_offline_payloads(
     if not offline_dir.is_dir():
         raise FileNotFoundError(f"Offline payload directory not found: {offline_dir}")
 
-    bars_path = offline_dir / BARS_FILE_NAME
-    cal_path = offline_dir / CALENDAR_FILE_NAME
-    actions_path = offline_dir / ACTIONS_FILE_NAME
+    resolved_base = offline_dir.resolve()
+    bars_path = (offline_dir / BARS_FILE_NAME).resolve()
+    cal_path = (offline_dir / CALENDAR_FILE_NAME).resolve()
+    actions_path = (offline_dir / ACTIONS_FILE_NAME).resolve()
 
-    if not bars_path.is_file():
-        raise FileNotFoundError(f"Missing required offline payload: {bars_path}")
-    if not cal_path.is_file():
-        raise FileNotFoundError(f"Missing required offline payload: {cal_path}")
-    if not actions_path.is_file():
-        raise FileNotFoundError(f"Missing required offline payload: {actions_path}")
+    for p, name in (
+        (bars_path, BARS_FILE_NAME),
+        (cal_path, CALENDAR_FILE_NAME),
+        (actions_path, ACTIONS_FILE_NAME),
+    ):
+        if not p.is_file():
+            raise FileNotFoundError(f"Missing required offline payload: {p}")
+        if not p.is_relative_to(resolved_base):
+            raise ValueError(f"Path traversal rejected for payload file: {name}")
 
     bars_body = bars_path.read_bytes()
     cal_body = cal_path.read_bytes()
@@ -212,12 +218,18 @@ def _load_offline_payloads(
 
     # Verify SHA-256 digests against manifest if present
     for manifest_name in ("sha256.json", "manifest.json", "checksums.json"):
-        manifest_path = offline_dir / manifest_name
+        manifest_path = (offline_dir / manifest_name).resolve()
         if manifest_path.is_file():
+            if not manifest_path.is_relative_to(resolved_base):
+                raise ValueError("Path traversal rejected for checksum manifest")
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             if isinstance(manifest, dict):
                 for fname, expected_hash in manifest.items():
-                    target_file = offline_dir / fname
+                    target_file = (offline_dir / fname).resolve()
+                    if not target_file.is_relative_to(resolved_base):
+                        raise ValueError(
+                            f"Path traversal rejected for manifest target: {fname}"
+                        )
                     if target_file.is_file():
                         actual_hash = hashlib.sha256(
                             target_file.read_bytes()
@@ -243,8 +255,10 @@ def _load_offline_payloads(
         )
 
     metadata: dict[str, Any] | None = None
-    meta_path = offline_dir / "metadata.json"
+    meta_path = (offline_dir / "metadata.json").resolve()
     if meta_path.is_file():
+        if not meta_path.is_relative_to(resolved_base):
+            raise ValueError("Path traversal rejected for metadata.json")
         meta_doc = json.loads(meta_path.read_text(encoding="utf-8"))
         if isinstance(meta_doc, dict):
             metadata = meta_doc
@@ -271,7 +285,6 @@ def _run_bounded_qqq_test(
         keys = _get_api_keys()
         now_utc = datetime.now(UTC).replace(microsecond=0)
         t_start = now_utc - timedelta(minutes=5)
-        t_end = now_utc + timedelta(minutes=5)
 
         print(
             f"\n[{label}] Acquiring historical data for QQQ "
@@ -301,15 +314,41 @@ def _run_bounded_qqq_test(
             bars_info["params"],
             keys,
         )
+        t_end = datetime.now(UTC).replace(microsecond=0) + timedelta(minutes=5)
         payloads = AlpacaNativePayloads(
             bars=bars_body, calendar=cal_body, corporate_actions=actions_body
         )
-        retain_native_bytes(store_dir, payloads)
-        origin_obs: dict[str, Any] | None = {
+        retained = retain_native_bytes(store_dir, payloads)
+        origin_obs_live: dict[str, AlpacaOriginObservation] = {
             ACTIONS_OBJECT_KEY: actions_obs,
             CALENDAR_OBJECT_KEY: cal_obs,
             BARS_OBJECT_KEY: bars_obs,
         }
+        # Persist actual measured origin evidence beside retained bytes
+        retain_origin_observations(retained, origin_obs_live)
+        origin_obs: dict[str, AlpacaOriginObservation] | None = origin_obs_live
+
+        # Materialize turnkey offline replay package in store_dir
+        (store_dir / BARS_FILE_NAME).write_bytes(bars_body)
+        (store_dir / CALENDAR_FILE_NAME).write_bytes(cal_body)
+        (store_dir / ACTIONS_FILE_NAME).write_bytes(actions_body)
+        meta = {
+            "request_start": t_start.isoformat(),
+            "request_end": t_end.isoformat(),
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+        }
+        (store_dir / "metadata.json").write_text(
+            json.dumps(meta, indent=2), encoding="utf-8"
+        )
+        sha256_manifest = {
+            BARS_FILE_NAME: hashlib.sha256(bars_body).hexdigest(),
+            CALENDAR_FILE_NAME: hashlib.sha256(cal_body).hexdigest(),
+            ACTIONS_FILE_NAME: hashlib.sha256(actions_body).hexdigest(),
+        }
+        (store_dir / "sha256.json").write_text(
+            json.dumps(sha256_manifest, indent=2), encoding="utf-8"
+        )
     elif mode == "offline":
         if offline_dir is None:
             raise ValueError(
@@ -320,26 +359,46 @@ def _run_bounded_qqq_test(
         cal_body = payloads.calendar
         retained = retain_native_bytes(store_dir, payloads)
 
-        # Copy any origin records from offline_dir to store_dir
+        # Copy any origin records from offline_dir to store_dir safely
+        resolved_offline = offline_dir.resolve()
         src_origins = offline_dir / "origins" / "sha256"
         if src_origins.is_dir():
+            resolved_src_origins = src_origins.resolve()
+            if not resolved_src_origins.is_relative_to(resolved_offline):
+                raise ValueError("Path traversal rejected for origins directory")
             dst_origins = store_dir / "origins" / "sha256"
             dst_origins.mkdir(parents=True, exist_ok=True)
             for entry in src_origins.iterdir():
-                if entry.is_file():
-                    (dst_origins / entry.name).write_bytes(entry.read_bytes())
+                resolved_entry = entry.resolve()
+                if resolved_entry.is_file():
+                    if not resolved_entry.is_relative_to(resolved_src_origins):
+                        raise ValueError(
+                            f"Path traversal rejected for origin record: {entry.name}"
+                        )
+                    dst_file = (dst_origins / entry.name).resolve()
+                    if resolved_entry != dst_file:
+                        dst_file.write_bytes(resolved_entry.read_bytes())
 
+        # Authoritative acquisition window: fail closed if missing or contradictory
         if (
-            metadata is not None
-            and "request_start" in metadata
-            and "request_end" in metadata
+            metadata is None
+            or "request_start" not in metadata
+            or "request_end" not in metadata
         ):
-            t_start = datetime.fromisoformat(metadata["request_start"])
-            t_end = datetime.fromisoformat(metadata["request_end"])
-        else:
-            now_utc = datetime.now(UTC).replace(microsecond=0)
-            t_start = now_utc - timedelta(days=3650)
-            t_end = now_utc + timedelta(days=1)
+            raise ValueError(
+                f"[{label}] Missing authoritative acquisition window metadata in "
+                f"{offline_dir}. Fail closed: retrospective replay requires "
+                "verified request_start and request_end timestamps."
+            )
+
+        t_start = datetime.fromisoformat(metadata["request_start"])
+        t_end = datetime.fromisoformat(metadata["request_end"])
+        if t_end < t_start:
+            raise ValueError(
+                f"[{label}] Contradictory acquisition window metadata: "
+                f"request_end ({t_end.isoformat()}) precedes "
+                f"request_start ({t_start.isoformat()})"
+            )
 
         bound = load_retained_origin_observations(
             retained, window_start=t_start, window_end=t_end

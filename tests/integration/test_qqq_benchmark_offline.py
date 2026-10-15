@@ -686,3 +686,232 @@ def test_main_cli_offline_without_offline_bytes_fails() -> None:
     """Invoking offline mode without --offline-bytes exits with code 1."""
     code = main(["--mode", "offline"])
     assert code == 1
+
+
+# ------------------------------------------------------------------------------
+# Turnkey Mock Live-to-Offline Replay & Acquisition Metadata Regressions
+# ------------------------------------------------------------------------------
+
+
+def test_mock_acquisition_to_offline_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Live acquisition creates a turnkey replay package reproducible offline."""
+    import scripts.benchmark_qqq_historical as b_mod
+
+    dates = [date(2021, 8, 2), date(2021, 8, 3), date(2021, 8, 4)]
+
+    cal_entries = [
+        {"date": d.isoformat(), "open": "09:30", "close": "16:00"} for d in dates
+    ]
+    bars_entries = []
+    price = 365.0
+    for d in dates:
+        bars_entries.append(
+            {
+                "t": f"{d.isoformat()}T04:00:00Z",
+                "o": round(price, 2),
+                "h": round(price + 2.0, 2),
+                "l": round(price - 1.0, 2),
+                "c": round(price + 1.0, 2),
+                "v": 1000000,
+                "n": 1000,
+            }
+        )
+        price += 0.5
+    bars_doc = {"bars": {"QQQ": bars_entries}}
+    actions_doc: dict[str, object] = {"corporate_actions": {"cash_dividends": []}}
+
+    payload_map = {
+        BARS_OBJECT_KEY: json.dumps(bars_doc).encode("utf-8"),
+        CALENDAR_OBJECT_KEY: json.dumps(cal_entries).encode("utf-8"),
+        ACTIONS_OBJECT_KEY: json.dumps(actions_doc).encode("utf-8"),
+    }
+
+    monkeypatch.setattr(b_mod, "_get_api_keys", lambda: ("mock_key", "mock_secret"))
+
+    obs_time = datetime.now(UTC)
+
+    def _mock_fetch(
+        object_key: str,
+        host: str,
+        route: str,
+        params: dict[str, str],
+        keys: tuple[str, str],
+    ) -> tuple[bytes, AlpacaOriginObservation]:
+        body = payload_map[object_key]
+        tgt = route + "?" + urlencode(sorted(params.items()))
+        obs = AlpacaOriginObservation(
+            object_key=object_key,
+            request_host=host,
+            tls_endpoint_identity=host,
+            http_status=200,
+            content_type="application/json",
+            observed_at=obs_time,
+            body_sha256=sha256(body).hexdigest(),
+            body_byte_size=len(body),
+            request_target=tgt,
+        )
+        return body, obs
+
+    monkeypatch.setattr(b_mod, "_fetch_bytes", _mock_fetch)
+
+    live_store = tmp_path / "live_store"
+    live_intake, _ = _run_bounded_qqq_test(
+        start_date=dates[0],
+        end_date=dates[-1],
+        store_dir=live_store,
+        label="test_mock_live",
+        mode="live",
+    )
+
+    # Verify that live acquisition created the turnkey offline package:
+    # 1. Materialized payload files
+    assert (live_store / "bars.json").is_file()
+    assert (live_store / "calendar.json").is_file()
+    assert (live_store / "corporate-actions.json").is_file()
+    # 2. Manifests
+    assert (live_store / "metadata.json").is_file()
+    assert (live_store / "sha256.json").is_file()
+    # 3. Retained origin observations
+    assert (live_store / "origins" / "sha256").is_dir()
+
+    evidence_live = SessionEvaluatorEvidence(
+        exploratory_cohort=live_intake.cohort,
+        exploratory_listing_roles=live_intake.exploratory_listing_roles,
+        exploratory_reconstruction_replay=live_intake.reconstruction_replay,
+    )
+    harness_live = PortfolioCohortHarness(
+        cohort={"B0_Cash": "b0_cash"},
+        bundle=live_intake.bundle,
+        admission=live_intake.admission,
+        evidence=evidence_live,
+    )
+    live_res = harness_live.run(parallel=False)[0]
+
+    # Replay offline using ONLY the private root of the live acquisition
+    def _fail_on_network(*args: object, **kwargs: object) -> object:
+        raise AssertionError("Network/provider call attempted during offline replay")
+
+    monkeypatch.setattr(b_mod, "_fetch_bytes", _fail_on_network)
+
+    def _fail_on_creds() -> tuple[str, str]:
+        raise AssertionError("Credentials accessed during offline replay")
+
+    monkeypatch.setattr(b_mod, "_get_api_keys", _fail_on_creds)
+
+    offline_store = tmp_path / "offline_store"
+    offline_intake, _ = _run_bounded_qqq_test(
+        start_date=dates[0],
+        end_date=dates[-1],
+        store_dir=offline_store,
+        label="test_mock_offline_replay",
+        mode="offline",
+        offline_dir=live_store,
+    )
+
+    evidence_offline = SessionEvaluatorEvidence(
+        exploratory_cohort=offline_intake.cohort,
+        exploratory_listing_roles=offline_intake.exploratory_listing_roles,
+        exploratory_reconstruction_replay=offline_intake.reconstruction_replay,
+    )
+    harness_offline = PortfolioCohortHarness(
+        cohort={"B0_Cash": "b0_cash"},
+        bundle=offline_intake.bundle,
+        admission=offline_intake.admission,
+        evidence=evidence_offline,
+    )
+    offline_res = harness_offline.run(parallel=False)[0]
+
+    # Compare bundle, run identity, result and trace hashes
+    assert live_intake.bundle.bundle_hash == offline_intake.bundle.bundle_hash
+    assert live_res.run_identity_hash == offline_res.run_identity_hash
+    assert live_res.result_hash == offline_res.result_hash
+    assert live_res.trace_hash == offline_res.trace_hash
+
+
+def test_missing_metadata_fails_closed(tmp_path: Path) -> None:
+    """Offline replay fails closed when metadata.json is missing."""
+    dates = [date(2021, 8, 2), date(2021, 8, 3), date(2021, 8, 4)]
+    fix_dir, _ = _generate_synthetic_fixture(tmp_path / "offline_src", dates)
+    (fix_dir / "metadata.json").unlink()
+
+    with pytest.raises(
+        ValueError, match="Missing authoritative acquisition window metadata"
+    ):
+        _run_bounded_qqq_test(
+            start_date=dates[0],
+            end_date=dates[-1],
+            store_dir=tmp_path / "store",
+            label="test_missing_meta",
+            mode="offline",
+            offline_dir=fix_dir,
+        )
+
+
+def test_contradictory_metadata_fails_closed(tmp_path: Path) -> None:
+    """Offline replay fails closed when request_end precedes request_start."""
+    dates = [date(2021, 8, 2), date(2021, 8, 3), date(2021, 8, 4)]
+    fix_dir, _ = _generate_synthetic_fixture(tmp_path / "offline_src", dates)
+    bad_meta = {
+        "request_start": "2021-08-05T00:00:00+00:00",
+        "request_end": "2021-08-01T00:00:00+00:00",
+    }
+    (fix_dir / "metadata.json").write_text(json.dumps(bad_meta), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Contradictory acquisition window metadata"):
+        _run_bounded_qqq_test(
+            start_date=dates[0],
+            end_date=dates[-1],
+            store_dir=tmp_path / "store",
+            label="test_contradictory_meta",
+            mode="offline",
+            offline_dir=fix_dir,
+        )
+
+
+def test_path_traversal_payload_fails_closed(tmp_path: Path) -> None:
+    """Replay rejects symlinks or payload references resolving outside offline_dir."""
+    dates = [date(2021, 8, 2), date(2021, 8, 3), date(2021, 8, 4)]
+    fix_dir, _ = _generate_synthetic_fixture(tmp_path / "offline_src", dates)
+
+    # 1. Payload file symlinked to outside
+    outside_file = tmp_path / "outside_bars.json"
+    outside_file.write_bytes((fix_dir / "bars.json").read_bytes())
+    (fix_dir / "bars.json").unlink()
+    (fix_dir / "bars.json").symlink_to(outside_file)
+
+    with pytest.raises(ValueError, match="Path traversal rejected"):
+        _load_offline_payloads(fix_dir)
+
+    # Restore bars.json
+    (fix_dir / "bars.json").unlink()
+    (fix_dir / "bars.json").write_bytes(outside_file.read_bytes())
+
+    # 2. Metadata file symlinked outside
+    outside_meta = tmp_path / "outside_meta.json"
+    outside_meta.write_bytes((fix_dir / "metadata.json").read_bytes())
+    (fix_dir / "metadata.json").unlink()
+    (fix_dir / "metadata.json").symlink_to(outside_meta)
+
+    with pytest.raises(ValueError, match="Path traversal rejected for metadata.json"):
+        _load_offline_payloads(fix_dir)
+
+
+def test_persisted_acquisition_metadata_replays_successfully(
+    tmp_path: Path,
+) -> None:
+    """Exact persisted request_start/request_end bounds recover origin evidence."""
+    dates = [date(2021, 8, 2), date(2021, 8, 3), date(2021, 8, 4)]
+    fix_dir, _ = _generate_synthetic_fixture(tmp_path / "offline_src", dates)
+
+    intake, payloads = _run_bounded_qqq_test(
+        start_date=dates[0],
+        end_date=dates[-1],
+        store_dir=tmp_path / "store",
+        label="test_persisted_meta",
+        mode="offline",
+        offline_dir=fix_dir,
+    )
+    assert intake is not None
+    assert intake.bundle.bundle_hash is not None
