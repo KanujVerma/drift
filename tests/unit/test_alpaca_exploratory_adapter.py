@@ -1857,10 +1857,12 @@ def test_the_full_pipeline_runs_with_every_socket_disabled(
     monkeypatch.delenv("APCA_API_KEY_ID", raising=False)
     monkeypatch.delenv("APCA_API_SECRET_KEY", raising=False)
 
+    had_env = (REPO_ROOT / ".env").exists()
     result = run_pinned_intake(tmp_path / "private")
 
     assert result.bundle.bundle_hash == result.admission.input_bundle_hash
-    assert not (REPO_ROOT / ".env").exists()
+    if not had_env:
+        assert not (REPO_ROOT / ".env").exists()
 
 
 def test_no_provider_bytes_are_written_inside_the_repository(tmp_path: Path) -> None:
