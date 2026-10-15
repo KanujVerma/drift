@@ -8,10 +8,10 @@ Tests:
 """
 
 import json
-import os
 import re
 import sys
 import time
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dtime
 from decimal import Decimal
@@ -50,83 +50,79 @@ from scripts.intake_alpaca_exploratory import (
 
 
 def _get_api_keys() -> tuple[str, str]:
-    if not (
-        os.environ.get("APCA_API_KEY_ID") and os.environ.get("APCA_API_SECRET_KEY")
-    ):
-        env_paths = [
-            Path.cwd() / ".env",
-            Path.home() / ".drift" / ".env",
-        ]
-        cur = Path(__file__).resolve().parent
-        while cur != cur.parent:
-            candidate = cur / ".env"
-            if candidate.is_file():
-                env_paths.append(candidate)
-            cur = cur.parent
-
-        for env_file in env_paths:
-            if env_file.exists():
-                with open(env_file, encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if line and not line.startswith("#") and "=" in line:
-                            k, v = line.split("=", 1)
-                            os.environ.setdefault(k.strip(), v.strip())
-                if os.environ.get("APCA_API_KEY_ID") and os.environ.get(
-                    "APCA_API_SECRET_KEY"
-                ):
-                    break
     keys = _api_keys_from_environment()
     if keys is None:
-        print("ERROR: Alpaca credentials missing from environment and .env")
+        print("ERROR: Alpaca credentials missing from environment")
         sys.exit(1)
     return keys
 
 
-def _detect_tzdb_release(tzif_path: Path) -> str:
-    """Detect the host tzdb release or fail closed if unverifiable."""
-    try:
-        import tzdata
+@dataclass(frozen=True, slots=True)
+class PackagedTimezoneSource:
+    """Verifiable timezone package metadata bound to its enclosed TZIF bytes."""
 
-        release = getattr(tzdata, "IANA_VERSION", None) or getattr(
-            tzdata, "__version__", None
-        )
-        if release:
-            m = re.match(r"^(\d{4}[a-z])", str(release))
-            if m:
-                return m.group(1)
-            return str(release)
-    except ImportError:
-        pass
+    iana_version: str
+    tzif_bytes: bytes
 
+
+def _detect_os_tzdb_release(tzif_path: Path) -> str:
+    """Detect the IANA release label bound to an OS timezone file, or fail closed."""
     resolved = tzif_path.resolve()
     for part in resolved.parts:
-        m = re.match(r"^(\d{4}[a-z])", part)
+        m = re.match(r"^(\d{4}[a-z])(?:\.|$)", part)
         if m:
             return m.group(1)
 
-    tzdata_zi = tzif_path.parent / "tzdata.zi"
-    if not tzdata_zi.exists() and tzif_path.parent.name == "America":
-        tzdata_zi = tzif_path.parent.parent / "tzdata.zi"
-    if tzdata_zi.exists():
-        with open(tzdata_zi, encoding="utf-8", errors="replace") as f:
-            first_line = f.readline()
+    for parent in (resolved.parent, resolved.parent.parent):
+        zi = parent / "tzdata.zi"
+        if zi.is_file():
+            first_line = zi.read_text(encoding="utf-8", errors="replace").split(
+                "\n", 1
+            )[0]
             m = re.search(r"version\s+(\d{4}[a-z])", first_line)
             if m:
                 return m.group(1)
 
-    tz_latest = Path("/var/db/timezone/tz_latest")
-    if tz_latest.exists():
-        target = tz_latest.resolve()
-        m = re.match(r"^(\d{4}[a-z])", target.name)
-        if m:
-            return m.group(1)
-
     raise RuntimeError(
-        f"Cannot verify tzdb release from host timezone at {tzif_path} "
+        f"Cannot verify tzdb release bound to host timezone at {tzif_path} "
         f"(resolved: {resolved}). Failing closed rather than assuming "
-        "a hardcoded release."
+        "an unverified release."
     )
+
+
+def resolve_timezone_evidence(
+    timezone_identifier: str = "America/New_York",
+    *,
+    zoneinfo_dir: Path | None = None,
+    package_source: PackagedTimezoneSource | None = None,
+) -> tuple[bytes, str]:
+    """Resolve verifiable TZIF bytes and the release label strictly bound to them.
+
+    When ``package_source`` is provided, both bytes and release are taken directly
+    from that verified packaged source. Otherwise, reads from the OS zoneinfo tree
+    and binds to metadata verified within that exact file tree.
+
+    Never borrows a package release label for separately read OS file bytes,
+    and fails closed if the selected source cannot be verifiably resolved.
+    """
+    if package_source is not None:
+        release = package_source.iana_version
+        if not re.match(r"^\d{4}[a-z]$", release):
+            raise RuntimeError(
+                f"Package source does not provide a valid IANA version: {release!r}"
+            )
+        return package_source.tzif_bytes, release
+
+    base_dir = zoneinfo_dir or Path("/usr/share/zoneinfo")
+    tzif_path = base_dir / timezone_identifier
+    if not tzif_path.is_file():
+        raise FileNotFoundError(
+            f"Required timezone evidence file not found at {tzif_path}. "
+            "Fail-closed: cannot construct authentic timezone evidence."
+        )
+    tz_bytes = tzif_path.read_bytes()
+    tzdb_release = _detect_os_tzdb_release(tzif_path)
+    return tz_bytes, tzdb_release
 
 
 def _run_bounded_qqq_test(
@@ -191,18 +187,15 @@ def _run_bounded_qqq_test(
     for item in cal_json:
         d = date.fromisoformat(item["date"])
         dt_o = datetime.combine(d, dtime(9, 30), tzinfo=ny)
-        boundary_offsets[(d, "open")] = int(dt_o.utcoffset().total_seconds())
+        offset_o = dt_o.utcoffset()
+        assert offset_o is not None
+        boundary_offsets[(d, "open")] = int(offset_o.total_seconds())
         dt_c = datetime.combine(d, dtime(16, 0), tzinfo=ny)
-        boundary_offsets[(d, "close")] = int(dt_c.utcoffset().total_seconds())
+        offset_c = dt_c.utcoffset()
+        assert offset_c is not None
+        boundary_offsets[(d, "close")] = int(offset_c.total_seconds())
 
-    tz_path = Path("/usr/share/zoneinfo/America/New_York")
-    if not tz_path.is_file():
-        raise FileNotFoundError(
-            f"Required timezone evidence file not found at {tz_path}. "
-            "Fail-closed: cannot construct authentic timezone evidence."
-        )
-    tz_bytes = tz_path.read_bytes()
-    tzdb_release = _detect_tzdb_release(tz_path)
+    tz_bytes, tzdb_release = resolve_timezone_evidence("America/New_York")
 
     repo_root = Path(__file__).resolve().parents[1]
     lockfile_path = repo_root / "uv.lock"

@@ -3369,3 +3369,112 @@ def test_issue_77_engine_refuses_missing_cohort_listing_role_limitation(
             book_currency_namespace="iso4217",
             book_currency_code="USD",
         )
+
+
+def _load_benchmark_module() -> tuple[type[Any], Any]:
+    import sys
+
+    repo_root = str(Path(__file__).resolve().parents[2])
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    from scripts.benchmark_qqq_historical import (
+        PackagedTimezoneSource,
+        resolve_timezone_evidence,
+    )
+
+    return PackagedTimezoneSource, resolve_timezone_evidence
+
+
+def test_resolve_timezone_evidence_binds_to_os_metadata(tmp_path: Path) -> None:
+    """Verifiable OS zoneinfo metadata is bound directly to the read TZIF bytes."""
+    _, resolve_timezone_evidence = _load_benchmark_module()
+
+    ny_dir = tmp_path / "America"
+    ny_dir.mkdir(parents=True)
+    ny_file = ny_dir / "New_York"
+    ny_file.write_bytes(b"synthetic_os_tzif_bytes")
+    zi_file = tmp_path / "tzdata.zi"
+    zi_file.write_text("# version 2024b\nzone America/New_York ...\n", encoding="utf-8")
+
+    tz_bytes, release = resolve_timezone_evidence(
+        "America/New_York", zoneinfo_dir=tmp_path
+    )
+    assert tz_bytes == b"synthetic_os_tzif_bytes"
+    assert release == "2024b"
+
+
+def test_resolve_timezone_evidence_from_package_source() -> None:
+    """Packaged timezone source binds its release directly to its enclosed bytes."""
+    PackagedTimezoneSource, resolve_timezone_evidence = _load_benchmark_module()
+
+    pkg = PackagedTimezoneSource(
+        iana_version="2021a", tzif_bytes=b"synthetic_package_bytes"
+    )
+    tz_bytes, release = resolve_timezone_evidence(package_source=pkg)
+    assert tz_bytes == b"synthetic_package_bytes"
+    assert release == "2021a"
+
+
+def test_resolve_timezone_evidence_mismatched_package_and_os_never_cross_pollinate(
+    tmp_path: Path,
+) -> None:
+    """Package and OS releases never cross-pollinate or borrow versions from
+    each other."""
+    PackagedTimezoneSource, resolve_timezone_evidence = _load_benchmark_module()
+
+    ny_dir = tmp_path / "America"
+    ny_dir.mkdir(parents=True)
+    ny_file = ny_dir / "New_York"
+    ny_file.write_bytes(b"os_tzif")
+    zi_file = tmp_path / "tzdata.zi"
+    zi_file.write_text("# version 2024b\n", encoding="utf-8")
+
+    pkg = PackagedTimezoneSource(iana_version="2021a", tzif_bytes=b"pkg_tzif")
+
+    # When resolving OS source, the release must be 2024b, never package's 2021a
+    os_bytes, os_release = resolve_timezone_evidence(
+        "America/New_York", zoneinfo_dir=tmp_path
+    )
+    assert os_bytes == b"os_tzif"
+    assert os_release == "2024b"
+
+    # When resolving package source, the release must be 2021a, never OS's 2024b
+    pkg_bytes, pkg_release = resolve_timezone_evidence(package_source=pkg)
+    assert pkg_bytes == b"pkg_tzif"
+    assert pkg_release == "2021a"
+
+
+def test_resolve_timezone_evidence_unverifiable_os_fails_closed(tmp_path: Path) -> None:
+    """An OS timezone file with no verifiable metadata in its tree fails closed."""
+    _, resolve_timezone_evidence = _load_benchmark_module()
+
+    ny_dir = tmp_path / "America"
+    ny_dir.mkdir(parents=True)
+    ny_file = ny_dir / "New_York"
+    ny_file.write_bytes(b"unverifiable_bytes")
+
+    with pytest.raises(
+        RuntimeError, match="Cannot verify tzdb release bound to host timezone"
+    ):
+        resolve_timezone_evidence("America/New_York", zoneinfo_dir=tmp_path)
+
+
+def test_resolve_timezone_evidence_invalid_package_version_fails_closed() -> None:
+    """An invalid non-IANA package release string fails closed."""
+    PackagedTimezoneSource, resolve_timezone_evidence = _load_benchmark_module()
+
+    bad_pkg = PackagedTimezoneSource(iana_version="0.1.0", tzif_bytes=b"tz")
+    with pytest.raises(
+        RuntimeError, match="Package source does not provide a valid IANA version"
+    ):
+        resolve_timezone_evidence(package_source=bad_pkg)
+
+
+def test_resolve_timezone_evidence_missing_os_file_fails_closed(tmp_path: Path) -> None:
+    """A missing timezone file fails closed with FileNotFoundError."""
+    _, resolve_timezone_evidence = _load_benchmark_module()
+
+    with pytest.raises(
+        FileNotFoundError, match="Required timezone evidence file not found"
+    ):
+        resolve_timezone_evidence("Nonexistent/Zone", zoneinfo_dir=tmp_path)
