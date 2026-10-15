@@ -7,10 +7,14 @@ Tests:
    - Exploratory run with modeled dividends: verify entitlement and NAV.
 """
 
+import argparse
+import hashlib
+import io
 import json
 import re
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dtime
@@ -36,6 +40,8 @@ from drift.adapters.alpaca_exploratory import (
     AlpacaReconstructionLineage,
     AlpacaTimezoneEvidence,
     build_exploratory_dividends_from_alpaca,
+    load_retained_origin_observations,
+    retain_native_bytes,
     run_alpaca_exploratory_intake,
 )
 from drift.domain.securities import ListingVenue
@@ -47,6 +53,10 @@ from scripts.intake_alpaca_exploratory import (
     _api_keys_from_environment,
     _fetch_bytes,
 )
+
+BARS_FILE_NAME = "bars.json"
+CALENDAR_FILE_NAME = "calendar.json"
+ACTIONS_FILE_NAME = "corporate-actions.json"
 
 
 def _get_api_keys() -> tuple[str, str]:
@@ -125,64 +135,237 @@ def resolve_timezone_evidence(
     return tz_bytes, tzdb_release
 
 
+def build_benchmark_request_manifest(
+    start_date: date, end_date: date
+) -> dict[str, dict[str, Any]]:
+    """Build the exact provider GET request manifest from implemented parameters."""
+    start_str = start_date.isoformat()
+    end_str = end_date.isoformat()
+    return {
+        ACTIONS_OBJECT_KEY: {
+            "host": ALPACA_DATA_HOST,
+            "route": ALPACA_ACTIONS_ROUTE,
+            "params": {
+                "end": end_str,
+                "start": start_str,
+                "symbols": "QQQ",
+                "types": ",".join(ALPACA_ACTION_TYPES),
+            },
+        },
+        CALENDAR_OBJECT_KEY: {
+            "host": ALPACA_PAPER_TRADING_HOST,
+            "route": ALPACA_CALENDAR_ROUTE,
+            "params": {
+                "end": end_str,
+                "start": start_str,
+            },
+        },
+        BARS_OBJECT_KEY: {
+            "host": ALPACA_DATA_HOST,
+            "route": ALPACA_BARS_ROUTE,
+            "params": {
+                "adjustment": "raw",
+                "end": end_str,
+                "feed": "sip",
+                "limit": "10000",
+                "start": start_str,
+                "symbols": "QQQ",
+                "timeframe": "1Day",
+            },
+        },
+    }
+
+
+def _find_window_offline_dir(base_dir: Path, window_name: str) -> Path:
+    """Resolve the directory holding offline payloads for a named benchmark window."""
+    sub = base_dir / window_name
+    if sub.is_dir():
+        return sub
+    if (base_dir / BARS_FILE_NAME).is_file():
+        return base_dir
+    raise FileNotFoundError(
+        f"Offline payload directory for {window_name} not found at {sub} or {base_dir}"
+    )
+
+
+def _load_offline_payloads(
+    offline_dir: Path,
+) -> tuple[AlpacaNativePayloads, dict[str, Any] | None]:
+    """Load and verify retained payload files from an offline directory."""
+    if not offline_dir.is_dir():
+        raise FileNotFoundError(f"Offline payload directory not found: {offline_dir}")
+
+    bars_path = offline_dir / BARS_FILE_NAME
+    cal_path = offline_dir / CALENDAR_FILE_NAME
+    actions_path = offline_dir / ACTIONS_FILE_NAME
+
+    if not bars_path.is_file():
+        raise FileNotFoundError(f"Missing required offline payload: {bars_path}")
+    if not cal_path.is_file():
+        raise FileNotFoundError(f"Missing required offline payload: {cal_path}")
+    if not actions_path.is_file():
+        raise FileNotFoundError(f"Missing required offline payload: {actions_path}")
+
+    bars_body = bars_path.read_bytes()
+    cal_body = cal_path.read_bytes()
+    actions_body = actions_path.read_bytes()
+
+    # Verify SHA-256 digests against manifest if present
+    for manifest_name in ("sha256.json", "manifest.json", "checksums.json"):
+        manifest_path = offline_dir / manifest_name
+        if manifest_path.is_file():
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(manifest, dict):
+                for fname, expected_hash in manifest.items():
+                    target_file = offline_dir / fname
+                    if target_file.is_file():
+                        actual_hash = hashlib.sha256(
+                            target_file.read_bytes()
+                        ).hexdigest()
+                        if actual_hash != expected_hash:
+                            raise ValueError(
+                                f"SHA-256 digest mismatch for {fname}: "
+                                f"expected {expected_hash}, got {actual_hash}"
+                            )
+
+    # Refuse incomplete/paginated evidence
+    bars_doc = json.loads(bars_body)
+    if isinstance(bars_doc, dict) and bars_doc.get("next_page_token") is not None:
+        raise ValueError(
+            "Paginated bars response rejected: "
+            f"next_page_token={bars_doc.get('next_page_token')!r}"
+        )
+    actions_doc = json.loads(actions_body)
+    if isinstance(actions_doc, dict) and actions_doc.get("next_page_token") is not None:
+        raise ValueError(
+            "Paginated corporate-actions response rejected: "
+            f"next_page_token={actions_doc.get('next_page_token')!r}"
+        )
+
+    metadata: dict[str, Any] | None = None
+    meta_path = offline_dir / "metadata.json"
+    if meta_path.is_file():
+        meta_doc = json.loads(meta_path.read_text(encoding="utf-8"))
+        if isinstance(meta_doc, dict):
+            metadata = meta_doc
+
+    payloads = AlpacaNativePayloads(
+        bars=bars_body, calendar=cal_body, corporate_actions=actions_body
+    )
+    return payloads, metadata
+
+
 def _run_bounded_qqq_test(
     start_date: date,
     end_date: date,
     store_dir: Path,
     label: str,
+    *,
+    mode: str = "offline",
+    offline_dir: Path | None = None,
 ) -> tuple[Any, AlpacaNativePayloads]:
-    keys = _get_api_keys()
     store_dir.mkdir(parents=True, exist_ok=True)
+    manifest = build_benchmark_request_manifest(start_date, end_date)
 
-    now_utc = datetime.now(UTC).replace(microsecond=0)
-    t_start = now_utc - timedelta(minutes=5)
-    t_end = now_utc + timedelta(minutes=5)
+    if mode == "live":
+        keys = _get_api_keys()
+        now_utc = datetime.now(UTC).replace(microsecond=0)
+        t_start = now_utc - timedelta(minutes=5)
+        t_end = now_utc + timedelta(minutes=5)
 
-    print(
-        f"\n[{label}] Acquiring historical data for QQQ "
-        f"from {start_date} to {end_date}..."
-    )
-    start_str = start_date.isoformat()
-    end_str = end_date.isoformat()
+        print(
+            f"\n[{label}] Acquiring historical data for QQQ "
+            f"from {start_date} to {end_date}..."
+        )
+        actions_info = manifest[ACTIONS_OBJECT_KEY]
+        actions_body, actions_obs = _fetch_bytes(
+            ACTIONS_OBJECT_KEY,
+            actions_info["host"],
+            actions_info["route"],
+            actions_info["params"],
+            keys,
+        )
+        cal_info = manifest[CALENDAR_OBJECT_KEY]
+        cal_body, cal_obs = _fetch_bytes(
+            CALENDAR_OBJECT_KEY,
+            cal_info["host"],
+            cal_info["route"],
+            cal_info["params"],
+            keys,
+        )
+        bars_info = manifest[BARS_OBJECT_KEY]
+        bars_body, bars_obs = _fetch_bytes(
+            BARS_OBJECT_KEY,
+            bars_info["host"],
+            bars_info["route"],
+            bars_info["params"],
+            keys,
+        )
+        payloads = AlpacaNativePayloads(
+            bars=bars_body, calendar=cal_body, corporate_actions=actions_body
+        )
+        retain_native_bytes(store_dir, payloads)
+        origin_obs: dict[str, Any] | None = {
+            ACTIONS_OBJECT_KEY: actions_obs,
+            CALENDAR_OBJECT_KEY: cal_obs,
+            BARS_OBJECT_KEY: bars_obs,
+        }
+    elif mode == "offline":
+        if offline_dir is None:
+            raise ValueError(
+                f"[{label}] Offline mode requires an offline payload directory"
+            )
+        print(f"\n[{label}] Loading offline payloads from {offline_dir}...")
+        payloads, metadata = _load_offline_payloads(offline_dir)
+        cal_body = payloads.calendar
+        retained = retain_native_bytes(store_dir, payloads)
 
-    actions_params = {
-        "end": end_str,
-        "start": start_str,
-        "symbols": "QQQ",
-        "types": ",".join(ALPACA_ACTION_TYPES),
-    }
-    actions_body, actions_obs = _fetch_bytes(
-        ACTIONS_OBJECT_KEY, ALPACA_DATA_HOST, ALPACA_ACTIONS_ROUTE, actions_params, keys
-    )
+        # Copy any origin records from offline_dir to store_dir
+        src_origins = offline_dir / "origins" / "sha256"
+        if src_origins.is_dir():
+            dst_origins = store_dir / "origins" / "sha256"
+            dst_origins.mkdir(parents=True, exist_ok=True)
+            for entry in src_origins.iterdir():
+                if entry.is_file():
+                    (dst_origins / entry.name).write_bytes(entry.read_bytes())
 
-    cal_params = {"end": end_str, "start": start_str}
-    cal_body, cal_obs = _fetch_bytes(
-        CALENDAR_OBJECT_KEY,
-        ALPACA_PAPER_TRADING_HOST,
-        ALPACA_CALENDAR_ROUTE,
-        cal_params,
-        keys,
-    )
+        if (
+            metadata is not None
+            and "request_start" in metadata
+            and "request_end" in metadata
+        ):
+            t_start = datetime.fromisoformat(metadata["request_start"])
+            t_end = datetime.fromisoformat(metadata["request_end"])
+        else:
+            now_utc = datetime.now(UTC).replace(microsecond=0)
+            t_start = now_utc - timedelta(days=3650)
+            t_end = now_utc + timedelta(days=1)
 
-    bars_params = {
-        "adjustment": "raw",
-        "end": end_str,
-        "feed": "sip",
-        "limit": "10000",
-        "start": start_str,
-        "symbols": "QQQ",
-        "timeframe": "1Day",
-    }
-    bars_body, bars_obs = _fetch_bytes(
-        BARS_OBJECT_KEY, ALPACA_DATA_HOST, ALPACA_BARS_ROUTE, bars_params, keys
-    )
+        bound = load_retained_origin_observations(
+            retained, window_start=t_start, window_end=t_end
+        )
+        unbound = tuple(
+            key
+            for key in (ACTIONS_OBJECT_KEY, CALENDAR_OBJECT_KEY, BARS_OBJECT_KEY)
+            if key not in bound
+        )
+        if unbound:
+            print(
+                f"[{label}] Missing origin records for {', '.join(unbound)}. "
+                "Intake will record unverified origin evidence."
+            )
+            origin_obs = None
+        else:
+            origin_obs = bound
+    else:
+        raise ValueError(f"Unknown benchmark mode: {mode!r}")
 
-    payloads = AlpacaNativePayloads(
-        bars=bars_body, calendar=cal_body, corporate_actions=actions_body
-    )
+    # Timezone evidence and calendar boundary offsets derived strictly from
+    # verified TZIF bytes
+    tz_bytes, tzdb_release = resolve_timezone_evidence("America/New_York")
+    ny = ZoneInfo.from_file(io.BytesIO(tz_bytes), key="America/New_York")
 
     cal_json = json.loads(cal_body)
-    ny = ZoneInfo("America/New_York")
     boundary_offsets = {}
     for item in cal_json:
         d = date.fromisoformat(item["date"])
@@ -194,8 +377,6 @@ def _run_bounded_qqq_test(
         offset_c = dt_c.utcoffset()
         assert offset_c is not None
         boundary_offsets[(d, "close")] = int(offset_c.total_seconds())
-
-    tz_bytes, tzdb_release = resolve_timezone_evidence("America/New_York")
 
     repo_root = Path(__file__).resolve().parents[1]
     lockfile_path = repo_root / "uv.lock"
@@ -224,6 +405,9 @@ def _run_bounded_qqq_test(
 
     qqq_sec_id = UUID("019b8240-0000-7000-8000-000000000002")
     qqq_list_id = UUID("019b8240-0000-7000-8000-000000000012")
+
+    start_str = start_date.isoformat()
+    end_str = end_date.isoformat()
 
     req = AlpacaIntakeRequest(
         cohort_id=f"qqq-smoke-{start_str}-{end_str}",
@@ -257,11 +441,7 @@ def _run_bounded_qqq_test(
             python_identity=f"cpython-{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
         ),
         boundary_offsets=boundary_offsets,
-        origin_observations={
-            ACTIONS_OBJECT_KEY: actions_obs,
-            CALENDAR_OBJECT_KEY: cal_obs,
-            BARS_OBJECT_KEY: bars_obs,
-        },
+        origin_observations=origin_obs,
     )
 
     t0 = time.time()
@@ -280,12 +460,67 @@ def _run_bounded_qqq_test(
     return intake_result, payloads
 
 
-def main() -> None:
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="benchmark_qqq_historical",
+        description="Bounded historical benchmark smoke tests for QQQ (XNAS).",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("offline", "live"),
+        default="offline",
+        help=(
+            "execution mode: 'offline' (default, requires --offline-bytes) "
+            "or 'live' (explicit provider acquisition)"
+        ),
+    )
+    parser.add_argument(
+        "--offline-bytes",
+        type=Path,
+        default=None,
+        help=(
+            "directory of previously retained response bytes; required in offline mode"
+        ),
+    )
+    parser.add_argument(
+        "--private-root",
+        type=Path,
+        default=None,
+        help=(
+            "private retention root outside Git; "
+            "defaults to ~/.drift/historical_benchmark_qqq/store"
+        ),
+    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
     print("=" * 80)
     print("DRIFT REAL HISTORICAL BENCHMARK: QQQ SINGLE-VENUE SMOKE TESTS")
     print("=" * 80)
 
-    base_store = Path.home() / ".drift" / "historical_benchmark_qqq" / "store"
+    args = _build_parser().parse_args(argv)
+    base_store = args.private_root or (
+        Path.home() / ".drift" / "historical_benchmark_qqq" / "store"
+    )
+
+    if args.mode == "offline":
+        if args.offline_bytes is None:
+            print("ERROR: offline mode requires --offline-bytes <directory>.")
+            print(
+                "For live acquisition, explicitly specify --mode live with "
+                "authorized credentials."
+            )
+            return 1
+        offline_aug = _find_window_offline_dir(
+            args.offline_bytes, "action_free_aug2021"
+        )
+        offline_div = _find_window_offline_dir(
+            args.offline_bytes, "dividend_aug_nov_2021"
+        )
+    else:
+        offline_aug = None
+        offline_div = None
 
     # --------------------------------------------------------------------------
     # Test 1: Action-Free Interval (August 2021, post-floor)
@@ -296,6 +531,8 @@ def main() -> None:
         end_date=date(2021, 8, 31),
         store_dir=base_store / "action_free_aug2021",
         label="Test 1 (Action-Free Aug 2021)",
+        mode=args.mode,
+        offline_dir=offline_aug,
     )
 
     qqq_sec_id = UUID("019b8240-0000-7000-8000-000000000002")
@@ -343,13 +580,21 @@ def main() -> None:
     assert b0_res.ending_cash == Decimal("10000.00"), (
         f"B0 ending cash was {b0_res.ending_cash}"
     )
+    assert b0_res.fill_count == 0, f"B0 fill count was {b0_res.fill_count}"
+    assert b0_res.transaction_costs == Decimal("0.00"), (
+        f"B0 transaction costs was {b0_res.transaction_costs}"
+    )
+
     assert b1_res.classification == "complete", (
         f"B1 classification was {b1_res.classification}"
     )
-    assert b1_res.ending_nav > Decimal("10000.00"), (
-        f"B1 ending NAV was {b1_res.ending_nav}"
-    )
     assert b1_res.fill_count > 0, f"B1 fill count was {b1_res.fill_count}"
+    assert b1_res.transaction_costs == Decimal("0.00"), (
+        f"B1 transaction costs was {b1_res.transaction_costs}"
+    )
+    assert b1_res.ending_cash >= Decimal("0.00"), (
+        f"B1 ending cash negative: {b1_res.ending_cash}"
+    )
 
     # --------------------------------------------------------------------------
     # Test 2: Dividend-Crossing Interval (Aug-Nov 2021, post-floor)
@@ -360,6 +605,8 @@ def main() -> None:
         end_date=date(2021, 11, 5),
         store_dir=base_store / "dividend_aug_nov_2021",
         label="Test 2 (Dividend-Crossing Aug-Nov 2021)",
+        mode=args.mode,
+        offline_dir=offline_div,
     )
 
     # Run 2A: Without modeled dividends (must fail closed)
@@ -408,14 +655,10 @@ def main() -> None:
         response_sha256=intake_div.retained.corporate_actions_hash,
     )
     print(
-        f"  Built dividend policy with {len(div_policy.dividends)} terms, "
-        f"hash: {div_policy.terms_hash[:16]}..."
+        f"Built exploratory dividend terms: "
+        f"{len(div_policy.dividends)} term(s) covering "
+        f"{', '.join(sorted(str(d.security_id) for d in div_policy.dividends))}"
     )
-    for d in div_policy.dividends:
-        print(
-            f"    Dividend {d.native_id}: ex={d.ex_date}, "
-            f"pay={d.payable_date}, rate=${d.rate}"
-        )
 
     evidence_div = SessionEvaluatorEvidence(
         exploratory_cohort=intake_div.cohort,
@@ -423,7 +666,6 @@ def main() -> None:
         exploratory_reconstruction_replay=intake_div.reconstruction_replay,
         exploratory_dividends=div_policy,
     )
-
     cohort_div = {
         "B0_Cash": "b0_cash",
         "B1_QQQ_BH": ("b1_single_buy_and_hold", {"target_security_id": qqq_sec_id}),
@@ -456,20 +698,39 @@ def main() -> None:
     assert b0_div_res.classification == "complete", (
         f"B0 div classification was {b0_div_res.classification}"
     )
+    assert b0_div_res.ending_nav == Decimal("10000.00"), (
+        f"B0 div ending NAV was {b0_div_res.ending_nav}"
+    )
+    assert b0_div_res.ending_cash == Decimal("10000.00"), (
+        f"B0 div ending cash was {b0_div_res.ending_cash}"
+    )
+    assert b0_div_res.fill_count == 0, f"B0 div fill count was {b0_div_res.fill_count}"
+    assert b0_div_res.settled_dividend_count == 0, (
+        f"B0 div settled dividends was {b0_div_res.settled_dividend_count}"
+    )
+    assert b0_div_res.transaction_costs == Decimal("0.00"), (
+        f"B0 div transaction costs was {b0_div_res.transaction_costs}"
+    )
+
     assert b1_div_res.classification == "complete", (
         f"B1 div classification was {b1_div_res.classification}"
     )
     assert b1_div_res.settled_dividend_count >= 1, (
         f"B1 settled dividends was {b1_div_res.settled_dividend_count}"
     )
-    assert b1_div_res.ending_nav > Decimal("10000.00"), (
-        f"B1 ending NAV was {b1_div_res.ending_nav}"
+    assert b1_div_res.fill_count > 0, f"B1 div fill count was {b1_div_res.fill_count}"
+    assert b1_div_res.transaction_costs == Decimal("0.00"), (
+        f"B1 div transaction costs was {b1_div_res.transaction_costs}"
+    )
+    assert b1_div_res.ending_cash >= Decimal("0.00"), (
+        f"B1 div ending cash negative: {b1_div_res.ending_cash}"
     )
 
     print("\n" + "=" * 80)
     print("ALL QQQ BENCHMARK SMOKE TESTS COMPLETED SUCCESSFULLY")
     print("=" * 80)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -416,10 +416,14 @@ ALPACA_SCRIPT_ALLOWLIST = BridgeCapabilityAllowlist(
 BENCHMARK_SCRIPT_ALLOWLIST = BridgeCapabilityAllowlist(
     import_roots=frozenset(
         {
+            "argparse",
+            "collections",
             "dataclasses",
             "datetime",
             "decimal",
             "drift",
+            "hashlib",
+            "io",
             "json",
             "pathlib",
             "re",
@@ -432,7 +436,10 @@ BENCHMARK_SCRIPT_ALLOWLIST = BridgeCapabilityAllowlist(
         }
     ),
     module_attributes={
-        "json": frozenset({"loads"}),
+        "argparse": frozenset({"ArgumentParser"}),
+        "hashlib": frozenset({"sha256"}),
+        "io": frozenset({"BytesIO"}),
+        "json": frozenset({"dumps", "loads"}),
         "re": frozenset({"match", "search"}),
         "sys": frozenset({"exit", "path", "version_info"}),
         "time": frozenset({"time"}),
