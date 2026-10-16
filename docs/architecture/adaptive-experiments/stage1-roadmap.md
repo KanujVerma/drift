@@ -1,0 +1,136 @@
+# Stage 1 implementation roadmap: controlled adaptive strategy selection
+
+## Purpose and authority
+
+Translate the owner-approved [Stage 1 S01-S38 decision register](stage1-decisions.md) into a **sequenced research and engineering plan**, consistent with broader [D01-D17](decisions.md), [system design](design.md), [workstreams](../workstreams.md) and the existing [delivery plan](delivery-plan.md). This is not a new software interface, activated work order, study preregistration, automatically approved numeric mandate, or authority to call a market provider or broker. Exact writer scopes, dependencies, claims and completion status live in GitHub issues/PRs, not on this page.
+
+**Delivery policy (S38):** Evidence research and safe synthetic/offline engineering proceed in parallel; dependent consumers wait for accepted producer contracts and verified authority. A blocked platform contract does not forbid independent fixture or specification work. No code is implemented by this docs proposal. Do not merge, change protected artifacts, acquire paid data, use credentials, paper-trade or deploy capital without separate scope.
+
+The targeted scientific question: **Does a frozen, feedback-informed AI selector earn higher net returns than a competent conventional risk-aware selector R, conditional on identical eligible B3/B4/B5 opportunities, information, risk constraints and execution assumptions?** Statistical and economic success require separate preregistered evidence, not merely a positive backtest.
+
+## 1. Frozen primary study candidate, not yet runnable
+
+| Dimension | Primary protocol and critical caveat |
+| --- | --- |
+| Action/menu | Once each month, AI may select only B3 equal-weight, B4 12-minus-1 relative momentum or B5 low volatility. No AI-selected all-cash, strategy-code generation, parameter tuning or freeform asset weights. |
+| Eligibility | Full **253 completed market-session warmup** for B4 plus **126 additional completed observation sessions**. Each strategy's historical portfolio results must be source- and accounting-eligible. Ineligible source is unavailable, never an empty sell-all target. |
+| Initial state | Every selector starts the scored phase in **B3** with an independent fresh **USD 10,000** simulated account. First adaptive switch only after the first complete scored month. No inherited observation-period gains. |
+| Scheduling | One common monthly strategy-selection checkpoint. Determine decision close/cutoff and next **eligible open** using approved venue calendars, not a weekday guess. Existing strategy-internal decisions may still occur under their frozen policy. |
+| Context | Identical time-eligible structured performance/history, market/risk and switching-cost information for AI and conventional selectors. Candidate outcomes are counterfactual reference accounts, not the AI account's profits. |
+| AI | One decision-maker, model/prompt/tools/learning update rule frozen; time-eligible verified history and evidence-linked mutable reflections, latest 126 sessions emphasized by a frozen summarizer. Abstention retains only a valid current strategy. |
+| Conventional rivals | **R** is the primary comparator with frozen development-fitted deterministic risk/return/cost scoring; **R-simple** is prior-six-month raw return winner. Frozen B3/B4/B5, passive **C** and cash **D** are independent explanatory controls. |
+| Universe | Provisional **12 ETFs**: VOO, IJH, IJR, QQQ, VEA, VWO, SHY, IEF, TLT, TIP, LQD, GLD. Universe and membership eligibility must be independently qualified and frozen; **11 ETF ex-QQQ** is a prespecified sensitivity. |
+| Risk | One **Balanced** mandate for constrained adaptive comparisons. Fixed no-short/no-leverage and researched ETF/class maximums. Primary rejects a noncompliant proposed switch, but existing violations require separately specified deterministic corrective action and truthful fill outcomes. |
+| Economics | Source-backed deterministic spread, slippage and fee assumptions, applied identically to all arms; full gross, trading-net and economic-cost views. Zero-cost fixtures cannot support investment claims. |
+| Execution | Exact transition targets at next valid open, subject to portfolio state, price/freshness checks, risk gate, fees, whole-share rounding, partial/unfilled states, corporate actions and reconciled RESULT. |
+| Endpoint | AI minus R net investment return under comparable risk, plus independently checked uncertainty, multiple-testing control, operating costs and opportunity count. Success criteria **not yet numerically frozen**. |
+| Reporting | Include every valid/invalid/refused trial and model attempt. Report A/B/C/D/R accounts honestly, risk-matched C separately from unaltered buy-and-hold C where a 100% equity C violates Balanced constraints. |
+
+**Important feasibility observation:** The existing B4 and B5 choose the top/bottom **ceil(n/2)** eligible ETFs at equal weights, not arbitrary diversified targets. With 12 eligible funds this would typically produce six held ETFs (about 16.7% each before share rounding), but the selected six may cluster in one asset class. An arbitrary equity-class limit could reject nearly all interesting momentum selections. B3 equally weights **each ETF**, not each asset class, and so the candidate 12-fund cohort begins around **50% equity / 41.7% bond / 8.3% gold**. These are properties to test, not authority to modify or rebalance strategy code.
+
+## 2. Ownership and existing producer boundaries
+
+| Owner | Accountable contribution to this roadmap | Contract / GitHub starting points |
+| --- | --- | --- |
+| **Kanuj (owner)** | Lead research and approval of design/numeric decision packets, scope/priority decisions, and a **small separate offline deterministic news triage** slice. Do **not** assign him general infrastructure rescue, AI training or mandatory global review. | [#418 decisions and roadmap](https://github.com/KanujVerma/drift/issues/418), [#393 triage behavior](https://github.com/KanujVerma/drift/issues/393); triage runtime remains separately gated. |
+| **Matthew (platform producer)** | Authentic market-data provenance/rights and venue/calendar alignment; normalized sources; accounting, switching/execution, corporate actions and cost modeling; deterministic mandatory risk, protective actions, UNKNOWN and recovery behavior. Own **SRC, EXEC, RESULT, MANDATE** interfaces. | [#376 platform SRC/RESULT](https://github.com/KanujVerma/drift/issues/376), [#378 data qualification](https://github.com/KanujVerma/drift/issues/378), [#380 mandate](https://github.com/KanujVerma/drift/issues/380), [#379 execution timing](https://github.com/KanujVerma/drift/issues/379), [#411 unknown execution](https://github.com/KanujVerma/drift/issues/411), [#395 recovery](https://github.com/KanujVerma/drift/issues/395), [#396 containment](https://github.com/KanujVerma/drift/issues/396). |
+| **Krish (intelligence producer)** | Bounded CONTEXT/CANDIDATE decisions, strategy-selection switching protocol, fixed AI policy and learning-state rules, evidence-linked reflections, deterministic R and R-simple, R-ML development experiment, prompt/model replay, attempts and inference cost receipts. Preserve B3/B4/B5 strategy identities. | [#375 research contract](https://github.com/KanujVerma/drift/issues/375), [#400 research draft](https://github.com/KanujVerma/drift/pull/400), venue/calendar representation issue [#365](https://github.com/KanujVerma/drift/issues/365) requires explicit producer routing before shared-interface edits. |
+| **Harsha (scientific producer)** | Preregistered EXPERIMENT/ELIGIBILITY protocol, comparable trial orchestration, metric definitions, missing-evidence refusal, risk/operating-cost attribution, statistical uncertainty, multiple-comparison discipline, forward readout and independent acceptance design. He does not replace Matthew's ledger or self-review his own measurement code. | [#377 methodology](https://github.com/KanujVerma/drift/issues/377), [#392 experiment contract](https://github.com/KanujVerma/drift/issues/392), [#382 metrics](https://github.com/KanujVerma/drift/issues/382), [#397 independent acceptance](https://github.com/KanujVerma/drift/issues/397). |
+
+Human owner, issue owner, writer, code reviewer and final architecture approver are separate roles. The table is *routing*, not a grant to edit another contributor's draft. Search and read the current issue, claims and PR before touching a path. Harsha's access/activation must be verified through [#370](https://github.com/KanujVerma/drift/issues/370) and its linked gate; no guessing usernames or impersonation. Other owners do not wait for that login to begin **their own** independently eligible work.
+
+## 3. Parallel research/specification track
+
+### R1. Qualify the proposed ETF cohort and market history (Matthew + owner review)
+- For all twelve candidate tickers, prove point-in-time listing/security identity, venue MIC, market calendar, prices, actions and distributions, real first availability, source/licensing/retention rights, coverage/gaps, quote assumptions and provenance. Gold trust structure and corporate actions must be modeled, not discarded.
+- Treat the previously reproduced QQQ-only historical replay as **limited evidence of accounting/replay**, not general multi-ETF qualification. Mixed Nasdaq/NYSE Arca venue support needs a correctly reviewed contract; [#365](https://github.com/KanujVerma/drift/issues/365) remains the named venue investigation.
+- Produce a coverage chart with every fund's 253-session warmup and 126-session observation eligibility. If 2021 scoring is intended, **additional earlier eligible sessions** may be needed. Do not backdate an unavailable input or weaken the required source-evidence floor.
+- Compute design-only correlations, overlap, asset-class counts, and feasible B3/B4/B5 monthly targets using strictly permissible data. The proposed 12-fund primary and 11-fund no-QQQ sensitivity are **not** chosen by seeing the final outcome.
+- **Gate:** versioned qualified universe plus review; otherwise only labeled synthetic fixtures, never scored historical claims.
+
+### R2. Specify and test the numerical Balanced mandate (Kanuj-led research; Matthew enforcement; Harsha validity review)
+- Research candidate **individual ETF and asset-class maxima**, price-drift tolerance and correction urgency, gross invested exposure, turnover/order restrictions, liquidity/order availability, and no leverage/shorting. Do not add mandatory class minimums.
+- Test **feasibility of strategy selections** before locking caps: how often B3, B4 and B5 breach ETF/class rules; how often the primary selector would have every switch rejected; how asset-class and ETF overlap matter. Show both a few hand-calculated synthetic cases and time-eligible development-only examples.
+- Specify incoming **rejection** primary versus deterministic **minimum trim** secondary. For adjustment, freeze priority/tie order, combined ETF/class conflicts, rounding, cash residual, non-remediable target refusal and expense attribution.
+- Define a **separate existing-portfolio drift correction** policy: detection timing, fresh evidence, authorized risk-reducing orders, partial fills, halted/in-flight/UNKNOWN states, latch/pause interactions, reconciliation and transparent failures. No claim that a halt magically liquidates.
+- Research dynamic **volatility targeting and drawdown-trigger** alternatives as secondary overlays: observation window, target, trigger, horizon, de-risk increment, recovery/re-entry and common controls. The historical drawdown threshold is **not** a maximum loss guarantee.
+- Existing [RiskPolicyV1](../../../src/drift/domain/risk.py) expresses only some fixed caps; [HardRiskGatekeeper](../../../src/drift/risk/gatekeeper.py) mainly evaluates proposed orders and a latched kill switch blocks even sells. Mandatory remediation and class/turnover/volatility overlays **require explicit new design and independently accepted integration**, not an undocumented toggle.
+- **Gate:** published numerical Decision Packet with evidence, independent review and owner approval. Illustrative 25% concentration or 8-12% volatility ranges remain nonbinding until then. Coordinate with Matthew's [mandate draft #414](https://github.com/KanujVerma/drift/pull/414), do not overwrite it.
+
+### R3. Specify comparable trading economics and R/R-ML (Matthew + Krish + Harsha)
+- Research deterministic, per-ETF spread/slippage/fee candidates, timing, whole-share and cash behavior, and the distinction between investment-account trading costs and separately attributed inference/data/research costs. Investigate market-condition-dependent secondary cost model only if authorized time-eligible source data supports it.
+- Freeze R's **actual scoring formula**, features, windows, risk treatment, cost estimation, parameter search bounds and tie/abstention behavior on development data; it must be credible, not deliberately weak. R-simple remains a transparent previous-six-month return winner.
+- Define R-ML's feature set, model family, label horizon, chronological training/validation, refit policy and research budget entirely using allowed earlier data. Record training and inference cost. No holdout peeking.
+- **Gate:** source-backed costs, R rule, model-selection procedure and tested comparable input envelopes accepted before primary scoring.
+
+### R4. Preregister scientific protocol (Harsha + owner approval)
+- Define what is an eligible **month**, a separate account, a successful/failed strategy proposal, a valid switch, an outcome, a censored/incomplete trial and a forward decision. Fix benchmark returns, risk/cash yield, calendar and cost treatment.
+- Historical candidates: **2021-2023 development, 2024 validation, 2025 proposed historical holdout**, only as source-qualified and verified against all prior tuning and model pretraining leakage. A contaminated historical holdout is not pristine. No arbitrary extension or re-cut after seeing results.
+- Preregister primary hypothesis AI minus R and materiality criterion, statistical test with dependence-aware intervals, uncertainty/multiple comparisons, prospective minimum evidence/time, permissible early stopping and explicit success/inconclusive/unsuccessful decisions. Correct existing questionable Sharpe and undefined-statistic handling under [#382](https://github.com/KanujVerma/drift/issues/382).
+- Declare secondary tests and family-wise exploration accounting **before** looking at confirmation outcomes. Even a positive historical result does not meet a prospective confirmation requirement.
+- **Gate:** independently accepted study manifest and metric implementation; no after-the-fact threshold selection.
+
+## 4. Parallel engineering track: smallest synthetic-to-offline slices
+
+These are proposed **new child scopes** after accepted contracts, not permission to modify a current contributor's source files. Reuse existing [design.md](design.md) producer interfaces and [delivery-plan.md](delivery-plan.md) process. Each slice gets its own owner, allowed files, tests, verified issue dependency and draft PR.
+
+| Engineering slice | Proposed producer | Minimum reviewable output and tests | Prerequisite |
+| --- | --- | --- | --- |
+| E1. Eligible strategy-reference engine | Krish with Matthew accounting producer | Record all B3/B4/B5 counterfactual portfolios, eligibility, session history and per-date outcomes. Reject unavailable history, missing dates and accidental empty-target liquidation. | Accepted candidate/accounting/result contracts and synthetic fixtures. |
+| E2. Monthly adaptive decision protocol | Krish | Fixed B3 initial strategy, time-eligible 126-session observations, structured AI and R inputs, proposal/abstain/evidence schema, deterministic monthly switch checkpoint; snapshot decisions. | Accepted CONTEXT/CANDIDATE and campaign boundaries. |
+| E3. Next-open transition evaluator | Matthew, consuming Krish targets | Execute a newly selected strategy's frozen **target portfolio** at next valid open, including real/partial/unfilled simulated fills, fees, rounding, inherited holdings and account reconciliation, without silently changing baseline code semantics. | Accepted EXEC/RESULT and risk; venue/calendar and switching contract. |
+| E4. Mandate and corrective action integration | Matthew | Pre-trade **reject** primary, incoming **minimum trim** secondary, ongoing drift detection/repair, sell-protective versus pause/latch behavior, signed and audited risk states. | R2 accepted policy plus MANDATE, EXEC, UNKNOWN/recovery/containment contracts. |
+| E5. AI memory and replay | Krish | Immutable observations, evidence-backed versioned reflections, matured updates, model/prompt/summary hashes, deterministic captured-output replay, invalid-output/future-leak refusal and cost receipt. | Accepted research/replay contract, privacy and data-availability binding. |
+| E6. Isolated campaign and measurement | Harsha | Independent USD 10,000 arms, primary protocol, reference portfolios, all attempts and invalid runs, net/cash benchmarks, confidence and economic reports with missing evidence refused. | Accepted EXPERIMENT/ELIGIBILITY, RESULT, metrics and R4 methodology. |
+| E7. Optional news triage | Kanuj | Small offline deterministic source-screening feature only, consuming Matthew's accepted minimal SRC envelope; fixtures may precede real intake. | [#393](https://github.com/KanujVerma/drift/issues/393) and [#394](https://github.com/KanujVerma/drift/issues/394), separate issue/scope. **Not required for first selector study.** |
+
+**Known code-specific test obligations to reproduce on the frozen revision:**
+- B3's existing month-end weekday heuristic can miss a real exchange holiday. Use admitted trading calendars and an explicit eligible checkpoint. Do not silently alter historical strategy definitions to repair an experimental calendar.
+- B4 currently requires **253 completed sessions** and uses 12-minus-1 relative momentum; it lacks a positive absolute momentum guard. B5 requires **61 sessions** of sixty close-to-close returns. Both choose **ceil(n/2)** eligible ETFs. Empty targets from insufficient history must not become forced cash. Any mechanical change to B3/B4/B5 requires its own approved strategy version and comparison.
+- Independent books must not share mutable positions, orders, risk state, cost accrual or AI learning state. Historical candidate portfolios are not included in the AI account's NAV.
+- The current hard gatekeeper's optional portfolio-state path and latched refusal of subsequent sells do not prove S22's corrective execution; exercise explicit stale/missing state, risk-lowering action, pause, UNKNOWN and failed fill tests.
+- Metrics must correctly handle risk-free cash assumptions, zero-variance unavailable Sharpe, non-trading days, annualization/time conventions, unobserved outcomes and attributed operating costs. Do not adapt current M5 output labels uncritically.
+- All artifacts capture exact data/source/adjustment/cost/mandate/model/strategy/campaign versions and interpreter/environment provenance; replay determinism requires retained model responses, not trust in stochastic API re-execution.
+
+## 5. Acceptance gates and sequence
+
+| Gate | When | Required evidence and blocking condition |
+| --- | --- | --- |
+| **G0: Governed documentation** | Start | S01-S38 and this roadmap reviewed/merged; specific issue claims and independent reviewer for material revisions. Draft docs are discoverable proposals, not runtime acceptance. |
+| **G1: Source and strategy eligibility** | Prior to historical ingestion/scoring | Exact 12-fund/11-fund cohort graded with provenance/rights, calendars, actions, time-availability; B3/B4/B5 warmup and observation complete. Synthetic can proceed without G1 if unmistakably labeled. |
+| **G2: Contract and deterministic integration** | Before end-to-end offline campaign | Accepted SRC, CONTEXT/CANDIDATE, EXEC, RESULT, MANDATE/APPROVAL, EXPERIMENT/ELIGIBILITY and switch/learning memory semantics where consumed; isolated accounts and comprehensive negative-path tests. No producer drafts treated as accepted APIs. |
+| **G3: Preregistered study freeze** | **Before any scored historical run** | Accepted numeric Balanced mandate, ETF list, primary R formula, fixed AI prompts/model, risk/cost assumptions, score metrics/success thresholds, decision timing, allowed data/holdout status and seed/replay policy. Independent reviewers document acceptance. |
+| **G4: Offline historical evidence** | After G1-G3 | Fully reconciled and reproducible comparison with honest incompleteness/invalid runs, risk-matched comparisons, gross/net/economic reports, confidence and multiple-testing disclosure. No ROI guarantee; model-pretraining/historical tuning limitations remain. |
+| **G5: Prospective broker-free shadow** | After reviewed development and chosen candidate freeze | Timestamped newly observed inputs, no lookahead, no brokerage order, complete decision/cost/evidence logs, predefined minimum prospective duration and evaluation report. Do not call an unverified short run proof. |
+| **G6: Operational permission** | Separate future decision only | Broker-connected paper, paid providers, credential use, extended-hours venues and real capital each require explicit bounded owner approval, contracts, tested recovery/containment and their own evidence. Nothing above grants it. |
+
+**Gates are conjunctive:** a green CI check does not replace data rights, acceptance, approved risk parameters, experiment preregistration or operational authorization. A failed or incomplete G4/G5 run is not promoted by renaming it or averaging only the successful arms.
+
+## 6. Ordered study and exploration program
+
+**P0. Foundation validity (synthetic only):** Validate B3/B4/B5 target and feedback eligibility; candidate accounts; B3 initial state; next-open transition, partial fills, rejected switches, existing-breach correction, abstention, missing data, model-result replay, reference-portfolio isolation, deterministic risk and cost ledger. Test carefully designed crashes/gaps/holidays, not only sunny days.
+
+**P1. Primary controlled historical study:** Single AI + structured observations and auditable reflections against frozen R and R-simple, B3 start, 126-session observation, monthly eligible checkpoints, fixed Balanced risk with rejected incoming violations and independently applied protective corrections, deterministic costs. Report B3/B4/B5, passive C, cash D and a distinct risk-matched C. Primary AI versus R hypothesis only. R-ML is additional conventional sensitivity when its fitted development protocol is valid.
+
+**P2. Named sensitivities:** Initial selection from observation history; 11 ETFs excluding QQQ; alternate observation duration; stricter/looser development-derived position/class limits; incoming proposal minimum-trim policy; dynamic risk overlay; market-dependent trading costs; conventional R-ML. Each comparison must name the component changed and disclose changed market exposure.
+
+**P3. Autonomous research and multi-agent ablations:** Under equal action menu, evidence eligibility and known compute budgets, compare structured single AI with approved autonomous research and a specialized multi-agent committee, individually where possible. Do not quietly change R's information rights or model version midcampaign. Evaluate additional model retraining in a **later separate stage**, not the Stage 1 primary result.
+
+**P4. Exploratory combination grid:** Test preplanned combinations for discovery under a declared research budget, with all attempted settings logged. Use validation/development results to choose candidates; do not treat the most favorable tested configuration as an independent confirmation.
+
+**P5. Frozen prospective confirmation:** Lock selected architecture, model, data contracts, risk/cost policy and analysis plan before any scored new observations. Report even when results are inconclusive or inferior to R. Broker-free shadow first; paper trading is separately permissioned.
+
+**Separate future work:** News/content signal value versus matched-review-timing no-news control, event-driven checkpoints, permitted strategic weight mixtures, parameter learning, intraday/extended-hours fills, and arbitrary generated code belong to broader D01-D17 roadmap and require independent scope. They are not accidental additions to this primary campaign.
+
+## 7. Immediately actionable next steps after document review
+
+1. **Architecture owner:** Review S01-S38, especially the important distinction between the existing broader D01-D17 and narrower S01-S38. Confirm that primary selection includes no AI discretionary cash, starts in B3 and keeps monthly cadence. Approve the documentation PR separately from numerical parameters. **Do not merge without normal review.**
+2. **Kanuj-led research:** Produce an evidence table for candidate ETF universe/overlap and a **risk-limit feasibility sweep** using labeled synthetic or qualified development data. Then propose, do not silently fix, numeric caps and overlay controls for Matthew's [#380](https://github.com/KanujVerma/drift/issues/380) contract.
+3. **Matthew:** Review #376/#378/#379/#380/#411 and their in-flight drafts for compatibility with Stage 1 switch, risk-lowering orders and time eligibility; publish producer-owned decision packets or issue requests for uncovered behavior. Coordinate [#365](https://github.com/KanujVerma/drift/issues/365) ownership before editing a shared venue model.
+4. **Krish:** Extend [#375](https://github.com/KanujVerma/drift/issues/375) with a contract-linked S01-S38 consumption review, propose an exact mathematical R and time-eligible memory policy, and design synthetic B3/B4/B5 reference-account and monthly transition fixtures. Do not modify reserved files from unrelated PRs.
+5. **Harsha:** Resolve own access/activation evidence, review [#377](https://github.com/KanujVerma/drift/issues/377)/[#392](https://github.com/KanujVerma/drift/issues/392)/[#382](https://github.com/KanujVerma/drift/issues/382) against the narrowed primary hypothesis, and preregister comparable metrics, significance/economic threshold and forward duration with independent acceptance.
+6. **Integration steward:** After exact upstream contracts are accepted, open narrowly scoped implementation child issues with producer-owned write sets and synthetic acceptance cases E1-E6, then a separately frozen integration campaign. Existing [delivery-plan.md](delivery-plan.md) remains binding; this new roadmap does not directly authorize product-code changes.
+
+**Definition of ready for historical scoring:** We can point to accepted revision identifiers for **all G1-G3 inputs and contracts**, demonstrate on synthetic fixtures that every comparison follows identical mandate/execution/evidence rules, and verify the frozen trial manifest and its independent review. Until then, state **not ready** without converting missing values into optimistic defaults.
+
+**Do not record live completion counts or current PR states in this durable roadmap.** Read the linked GitHub issues and drafts at execution time, as another writer may have changed the dependencies.
