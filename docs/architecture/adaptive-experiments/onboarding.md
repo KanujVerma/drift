@@ -7,12 +7,14 @@ a setup ZIP, or a copied prompt. Say which workstream you are: `kanuj`, `krish`,
 ## Reading order
 
 1. [AGENTS.md](../../../AGENTS.md)
-2. [Decisions and rationale](decisions.md), including why each decision was made
-3. [Design](design.md)
-4. [Workstreams](../workstreams.md) and [ADR 0015](../../adr/0015-three-feature-workstreams-and-explicit-writer-handoffs.md)
-5. [Requirements crosswalk](requirements-crosswalk.md)
-6. [Workflow](../agent-workflow.md)
-7. The linked GitHub issue, its latest comments, pull request, reviews and blockers
+2. [Broad adaptive product decisions D01-D17](decisions.md) and their rationale
+3. [Stage 1 controlled-study decisions S01-S38](stage1-decisions.md) and their separate rationale
+4. [Stage 1 implementation roadmap](stage1-roadmap.md), gates and issue routing
+5. [Design](design.md)
+6. [Workstreams](../workstreams.md) and [ADR 0015](../../adr/0015-three-feature-workstreams-and-explicit-writer-handoffs.md)
+7. [Requirements crosswalk](requirements-crosswalk.md)
+8. [Workflow](../agent-workflow.md)
+9. The linked GitHub issue, its latest comments, pull request, reviews and blockers
 
 Accepted intent lives in the decisions, design and ADRs. Live progress lives in
 GitHub issues and pull requests. Implemented behavior lives in code, tests and
@@ -30,8 +32,13 @@ permitted learning state after outcomes actually exist. Kanuj turns a normalized
 event into a candidate alert or an explicit non-alert. Unresolved thresholds
 stay unresolved until the owning specification issue accepts them.
 
-The seventeen decisions and their rationale are D01 through D17 in
-[decisions.md](decisions.md). Do not replace them with a shorter list.
+The original seventeen broad product decisions and rationale are **D01-D17**
+in [decisions.md](decisions.md). The later, narrower portfolio-selection
+discussion consists of **S01-S38** in [stage1-decisions.md](stage1-decisions.md).
+The first seventeen S items are **not** the original D01-D17. Read both lists;
+do not replace, append as if identical, or promote draft S-study details to
+accepted runtime contracts. Scoring also requires the gates in
+[stage1-roadmap.md](stage1-roadmap.md).
 
 ## Who owns what
 
