@@ -68,6 +68,28 @@ from drift.loop.stage1_switch_preflight import (
     verify_stage1_switch_preflight_result,
 )
 
+_SENTINEL = object()
+
+
+def is_trading_day(d: date) -> bool:
+    if d.weekday() >= 5:
+        return False
+    if (d.month, d.day) in {(1, 1), (7, 4), (12, 25)}:
+        return False
+    return True
+
+
+def generate_trading_sessions(count: int, end_date: date) -> list[date]:
+    """Generate business days (Monday-Friday, excluding major holidays)."""
+    dates: list[date] = []
+    cur = end_date
+    while len(dates) < count:
+        if is_trading_day(cur):
+            dates.append(cur)
+        cur -= timedelta(days=1)
+    dates.reverse()
+    return dates
+
 
 class TestStage1SwitchPreflight(unittest.TestCase):
     """Unit and adversarial test suite for Stage 1 switch preflight."""
@@ -125,6 +147,11 @@ class TestStage1SwitchPreflight(unittest.TestCase):
 
         self.cohort_auth = self._make_valid_cohort(self.admitted_uuids)
         self.cohort_hash = self.cohort_auth.cohort_hash
+
+        self.universe_manifest = {u: sym for sym, u in self.etf_uuids.items()}
+        self.valid_adjustments: dict[UUID7, Sequence[CorporateActionAdjustment]] = {
+            u: () for u in self.admitted_uuids
+        }
 
     def _make_valid_session(
         self,
@@ -326,8 +353,8 @@ class TestStage1SwitchPreflight(unittest.TestCase):
             else:
                 base_p = self.base_prices[sym]
                 obs_list = []
-                for step in range(session_count - 1, -1, -1):
-                    d = self.today - timedelta(days=step)
+                trading_days = generate_trading_sessions(session_count, self.today)
+                for d in trading_days:
                     obs_list.append(
                         self._make_valid_observation(
                             sec_uuid, d, base_p, cohort_hash=c_hash
@@ -404,6 +431,70 @@ class TestStage1SwitchPreflight(unittest.TestCase):
             ),
         )
 
+    def _eval(
+        self,
+        *,
+        proposed_strategy: str | StrategyReference,
+        current_strategy: str | StrategyReference | None,
+        decision_context: Any = None,
+        required_universe: Any = _SENTINEL,
+        expected_universe_hash: Any = _SENTINEL,
+        universe_manifest: Any = _SENTINEL,
+        current_portfolio_state: Any = _SENTINEL,
+        allow_incumbent_continuation: bool = True,
+        adjustments_by_security: Any = _SENTINEL,
+        account_id: Any = _SENTINEL,
+        mandate: Any = _SENTINEL,
+        open_orders: Any = _SENTINEL,
+        mandate_verified: Any = _SENTINEL,
+        risk_verified: Any = _SENTINEL,
+    ) -> Stage1SwitchPreflightResult:
+        req_u = (
+            self.admitted_uuids if required_universe is _SENTINEL else required_universe
+        )
+        exp_h = (
+            self.cohort_hash
+            if expected_universe_hash is _SENTINEL
+            else expected_universe_hash
+        )
+        u_man = (
+            self.universe_manifest
+            if universe_manifest is _SENTINEL
+            else universe_manifest
+        )
+        port = (
+            self._make_valid_portfolio_state()
+            if current_portfolio_state is _SENTINEL
+            else current_portfolio_state
+        )
+        adjs = (
+            self.valid_adjustments
+            if adjustments_by_security is _SENTINEL
+            else adjustments_by_security
+        )
+        acc_id = "account-alpha" if account_id is _SENTINEL else account_id
+        man = "balanced_stage1" if mandate is _SENTINEL else mandate
+        orders = () if open_orders is _SENTINEL else open_orders
+        m_ver = True if mandate_verified is _SENTINEL else mandate_verified
+        r_ver = True if risk_verified is _SENTINEL else risk_verified
+
+        return evaluate_stage1_switch_preflight(
+            proposed_strategy=proposed_strategy,
+            current_strategy=current_strategy,
+            decision_context=decision_context,
+            required_universe=req_u,
+            expected_universe_hash=exp_h,
+            universe_manifest=u_man,
+            current_portfolio_state=port,
+            allow_incumbent_continuation=allow_incumbent_continuation,
+            adjustments_by_security=adjs,
+            account_id=acc_id,
+            mandate=man,
+            open_orders=orders,
+            mandate_verified=m_ver,
+            risk_verified=r_ver,
+        )
+
     # =========================================================================
     # Point 1: Fixed Universe Validation Tests
     # =========================================================================
@@ -412,7 +503,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         """Required universe must not be omitted (defaults to None fail closed)."""
         ctx = self._build_context(session_count=255)
         port = self._make_valid_portfolio_state()
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
@@ -428,7 +519,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         """Supplying an empty required_universe sequence fails closed."""
         ctx = self._build_context(session_count=255)
         port = self._make_valid_portfolio_state()
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
@@ -447,7 +538,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
             cohort_uuids=expanded_cohort,
         )
         port = self._make_valid_portfolio_state()
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
@@ -462,7 +553,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         ctx = self._build_context(session_count=255)
         port = self._make_valid_portfolio_state()
         duplicated_universe = (self.admitted_uuids[0],) + self.admitted_uuids
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
@@ -481,7 +572,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
 
         ctx = self._build_context(session_count=255, cohort_uuids=no_qqq)
         port = self._make_valid_portfolio_state()
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
@@ -496,7 +587,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         ctx = self._build_context(session_count=255)
         port = self._make_valid_portfolio_state()
         wrong_hash = "9" * 64
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
@@ -511,7 +602,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         """Exact 12-ETF universe with all valid evidence succeeds."""
         ctx = self._build_context(session_count=255)
         port = self._make_valid_portfolio_state()
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
@@ -531,7 +622,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
     def test_missing_portfolio_state_fails_closed(self) -> None:
         """Missing current_portfolio_state returns INDETERMINATE_SAFETY."""
         ctx = self._build_context(session_count=255)
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
@@ -548,7 +639,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         """Missing current_strategy returns INDETERMINATE_SAFETY."""
         ctx = self._build_context(session_count=255)
         port = self._make_valid_portfolio_state()
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy=None,
             decision_context=ctx,
@@ -563,7 +654,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         """Unadmitted incumbent strategy (e.g. b0_cash) fails closed."""
         ctx = self._build_context(session_count=255)
         port = self._make_valid_portfolio_state()
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="b0_cash",
             decision_context=ctx,
@@ -582,7 +673,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
             local_date=self.today - timedelta(days=1),
         )
         port = self._make_valid_portfolio_state(session_key=stale_key)
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
@@ -596,7 +687,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         """Disagreement between portfolio state NAV and context NAV fails closed."""
         ctx = self._build_context(session_count=255, nav=Decimal("100000.00"))
         port = self._make_valid_portfolio_state(cash_balance=Decimal("95000.00"))
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
@@ -631,7 +722,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
             holdings=(holding,),
             mark_prices={self.etf_uuids["VOO"]: Decimal("500.00")},
         )
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
@@ -645,7 +736,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         """Open or pending orders prevent strategy switching and safe hold."""
         ctx = self._build_context(session_count=255)
         port = self._make_valid_portfolio_state()
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
@@ -660,7 +751,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         """Unverified investment mandate fails closed."""
         ctx = self._build_context(session_count=255)
         port = self._make_valid_portfolio_state()
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
@@ -675,7 +766,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         """Unverified risk state fails closed."""
         ctx = self._build_context(session_count=255)
         port = self._make_valid_portfolio_state()
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
@@ -727,7 +818,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
             cumulative_transaction_costs=Decimal("0.00"),
         )
         ctx = self._build_context(session_count=255, nav=Decimal("100000.00"))
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
@@ -741,7 +832,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         """When candidate switch is unavailable, verified incumbent B3 safely holds."""
         ctx = self._build_context(session_count=10)  # Insufficient for B4
         port = self._make_valid_portfolio_state()
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
@@ -775,7 +866,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
             code_hash=b3_ref.code_hash,
             artifact_reference=forged_art,
         )
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy=forged_ref,
             current_strategy="B3",
             decision_context=ctx,
@@ -796,7 +887,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
             code_hash=b4_ref.code_hash,
             artifact_reference=b4_ref.artifact_reference,
         )
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy=wrong_id_ref,
             current_strategy="B3",
             decision_context=ctx,
@@ -817,7 +908,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
             code_hash=b4_ref.code_hash,
             artifact_reference=b4_ref.artifact_reference,
         )
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy=wrong_ver_ref,
             current_strategy="B3",
             decision_context=ctx,
@@ -838,7 +929,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
             code_hash="0" * 64,
             artifact_reference=b5_ref.artifact_reference,
         )
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy=tampered_ref,
             current_strategy="B3",
             decision_context=ctx,
@@ -857,7 +948,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         b4_ref = B4MomentumStrategy().strategy_reference
         b5_ref = B5LowVolatilityStrategy().strategy_reference
 
-        res_b4 = evaluate_stage1_switch_preflight(
+        res_b4 = self._eval(
             proposed_strategy=b4_ref,
             current_strategy=b3_ref,
             decision_context=ctx,
@@ -867,7 +958,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         self.assertEqual(res_b4.status, PreflightStatus.ELIGIBLE)
         self.assertEqual(res_b4.effective_strategy, "B4")
 
-        res_b5 = evaluate_stage1_switch_preflight(
+        res_b5 = self._eval(
             proposed_strategy=b5_ref,
             current_strategy=b4_ref,
             decision_context=ctx,
@@ -885,13 +976,14 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         """Missing observation for current decision session returns UNAVAILABLE."""
         # 254 bars ending yesterday (no bar for today)
         sec_voo = self.etf_uuids["VOO"]
+        trading_days = generate_trading_sessions(255, self.today)
         stale_obs = [
             self._make_valid_observation(
                 sec_voo,
-                self.today - timedelta(days=step),
+                d,
                 Decimal("500.00"),
             )
-            for step in range(254, 0, -1)
+            for d in trading_days[:-1]
         ]
         self.assertEqual(len(stale_obs), 254)
 
@@ -900,11 +992,10 @@ class TestStage1SwitchPreflight(unittest.TestCase):
             custom_observations_by_sym={"VOO": stale_obs},
         )
         port = self._make_valid_portfolio_state()
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
-            required_universe=self.admitted_uuids,
             current_portfolio_state=port,
         )
         self.assertEqual(res.status, PreflightStatus.UNAVAILABLE)
@@ -913,13 +1004,14 @@ class TestStage1SwitchPreflight(unittest.TestCase):
     def test_late_available_observation_past_cutoff(self) -> None:
         """Observation timestamped after decision cutoff returns UNAVAILABLE."""
         sec_voo = self.etf_uuids["VOO"]
+        trading_days = generate_trading_sessions(255, self.today)
         obs_list = [
             self._make_valid_observation(
                 sec_voo,
-                self.today - timedelta(days=step),
+                d,
                 Decimal("500.00"),
             )
-            for step in range(254, 0, -1)
+            for d in trading_days[:-1]
         ]
         # Current session observation arriving late
         late_obs = self._make_valid_observation(
@@ -935,11 +1027,10 @@ class TestStage1SwitchPreflight(unittest.TestCase):
             custom_observations_by_sym={"VOO": obs_list},
         )
         port = self._make_valid_portfolio_state()
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
-            required_universe=self.admitted_uuids,
             current_portfolio_state=port,
         )
         self.assertEqual(res.status, PreflightStatus.UNAVAILABLE)
@@ -957,7 +1048,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
                 )
             ]
         }
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
@@ -980,7 +1071,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
                 )
             ]
         }
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
@@ -1003,7 +1094,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
                 )
             ]
         }
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
@@ -1018,7 +1109,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         """B4 requires 253 sessions; 250 sessions returns UNAVAILABLE."""
         ctx = self._build_context(session_count=250)
         port = self._make_valid_portfolio_state()
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
@@ -1032,7 +1123,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         """B5 requires 61 sessions; 50 sessions returns UNAVAILABLE."""
         ctx = self._build_context(session_count=50)
         port = self._make_valid_portfolio_state()
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B5",
             current_strategy="B3",
             decision_context=ctx,
@@ -1048,15 +1139,16 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         """When fewer than 2 securities have valid momentum, B4 returns UNAVAILABLE."""
         # Truncate all ETF histories except VOO to 100 sessions (< 253)
         custom_obs = {}
+        trading_days = generate_trading_sessions(101, self.today)
         for sym in self.universe12_syms:
             if sym != "VOO":
                 custom_obs[sym] = [
                     self._make_valid_observation(
                         self.etf_uuids[sym],
-                        self.today - timedelta(days=step),
+                        d,
                         self.base_prices[sym],
                     )
-                    for step in range(100, -1, -1)
+                    for d in trading_days
                 ]
 
         ctx = self._build_context(
@@ -1064,11 +1156,10 @@ class TestStage1SwitchPreflight(unittest.TestCase):
             custom_observations_by_sym=custom_obs,
         )
         port = self._make_valid_portfolio_state()
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
-            required_universe=self.admitted_uuids,
             current_portfolio_state=port,
         )
         self.assertEqual(res.status, PreflightStatus.UNAVAILABLE)
@@ -1124,11 +1215,10 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         """verify_stage1_switch_preflight_result detects live portfolio state drift."""
         ctx = self._build_context(session_count=255)
         port = self._make_valid_portfolio_state()
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
-            required_universe=self.admitted_uuids,
             current_portfolio_state=port,
         )
         self.assertEqual(res.status, PreflightStatus.ELIGIBLE)
@@ -1139,7 +1229,12 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         )
         with self.assertRaises(ValueError) as cm:
             verify_stage1_switch_preflight_result(
-                res, current_portfolio_state=modified_port
+                res,
+                expected_account_id="account-alpha",
+                expected_mandate="balanced_stage1",
+                expected_session_key=self.session_key,
+                expected_cohort_hash=self.cohort_hash,
+                current_portfolio_state=modified_port,
             )
         self.assertIn("portfolio state changed", str(cm.exception))
 
@@ -1147,11 +1242,10 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         """verify_stage1_switch_preflight_result prevents cross-account replay."""
         ctx = self._build_context(session_count=255)
         port = self._make_valid_portfolio_state()
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
-            required_universe=self.admitted_uuids,
             current_portfolio_state=port,
             account_id="account-alpha",
         )
@@ -1159,7 +1253,12 @@ class TestStage1SwitchPreflight(unittest.TestCase):
 
         with self.assertRaises(ValueError) as cm:
             verify_stage1_switch_preflight_result(
-                res, expected_account_id="account-beta"
+                res,
+                expected_account_id="account-beta",
+                expected_mandate="balanced_stage1",
+                expected_session_key=self.session_key,
+                expected_cohort_hash=self.cohort_hash,
+                current_portfolio_state=port,
             )
         self.assertIn("verdict account_id mismatch", str(cm.exception))
 
@@ -1167,29 +1266,34 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         """verify_stage1_switch_preflight_result prevents mandate spoofing."""
         ctx = self._build_context(session_count=255)
         port = self._make_valid_portfolio_state()
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
-            required_universe=self.admitted_uuids,
             current_portfolio_state=port,
             mandate="balanced_stage1",
         )
         self.assertEqual(res.mandate, "balanced_stage1")
 
         with self.assertRaises(ValueError) as cm:
-            verify_stage1_switch_preflight_result(res, expected_mandate="growth_stage1")
+            verify_stage1_switch_preflight_result(
+                res,
+                expected_account_id="account-alpha",
+                expected_mandate="growth_stage1",
+                expected_session_key=self.session_key,
+                expected_cohort_hash=self.cohort_hash,
+                current_portfolio_state=port,
+            )
         self.assertIn("verdict mandate mismatch", str(cm.exception))
 
     def test_verify_result_session_mismatch_raises_error(self) -> None:
         """verify_stage1_switch_preflight_result prevents replay across sessions."""
         ctx = self._build_context(session_count=255)
         port = self._make_valid_portfolio_state()
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
-            required_universe=self.admitted_uuids,
             current_portfolio_state=port,
         )
 
@@ -1200,7 +1304,12 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         )
         with self.assertRaises(ValueError) as cm:
             verify_stage1_switch_preflight_result(
-                res, expected_session_key=future_session
+                res,
+                expected_account_id="account-alpha",
+                expected_mandate="balanced_stage1",
+                expected_session_key=future_session,
+                expected_cohort_hash=self.cohort_hash,
+                current_portfolio_state=port,
             )
         self.assertIn("verdict session key mismatch", str(cm.exception))
 
@@ -1208,11 +1317,10 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         """verify_stage1_switch_preflight_result succeeds with matching state."""
         ctx = self._build_context(session_count=255)
         port = self._make_valid_portfolio_state()
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
-            required_universe=self.admitted_uuids,
             current_portfolio_state=port,
             account_id="account-alpha",
             mandate="balanced_stage1",
@@ -1223,6 +1331,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
             expected_account_id="account-alpha",
             expected_mandate="balanced_stage1",
             expected_session_key=self.session_key,
+            expected_cohort_hash=self.cohort_hash,
         )
         self.assertTrue(verified)
 
@@ -1234,7 +1343,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         """Deliberate ABSTAIN request preserves safe incumbent B3."""
         ctx = self._build_context(session_count=255)
         port = self._make_valid_portfolio_state()
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="ABSTAIN",
             current_strategy="B3",
             decision_context=ctx,
@@ -1288,7 +1397,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
             cumulative_transaction_costs=Decimal("0.00"),
         )
         ctx = self._build_context(session_count=255, nav=Decimal("100000.00"))
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="ABSTAIN",
             current_strategy="B3",
             decision_context=ctx,
@@ -1303,7 +1412,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         """When allow_incumbent_continuation is False, unavailable switch fails."""
         ctx = self._build_context(session_count=10)
         port = self._make_valid_portfolio_state()
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
@@ -1319,7 +1428,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         """Proposed strategy 'b0_cash' is rejected."""
         ctx = self._build_context(session_count=255)
         port = self._make_valid_portfolio_state()
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="b0_cash",
             current_strategy="B3",
             decision_context=ctx,
@@ -1332,13 +1441,14 @@ class TestStage1SwitchPreflight(unittest.TestCase):
     def test_out_of_order_observations_rejected(self) -> None:
         """Observations with descending dates are rejected."""
         sec_voo = self.etf_uuids["VOO"]
+        trading_days = generate_trading_sessions(255, self.today)
         obs_list = [
             self._make_valid_observation(
                 sec_voo,
-                self.today - timedelta(days=step),
+                d,
                 Decimal("500.00"),
             )
-            for step in range(255)  # today down to past (reversed order!)
+            for d in reversed(trading_days)  # today down to past (reversed order!)
         ]
         ctx = self._build_context(
             session_count=255,
@@ -1346,11 +1456,10 @@ class TestStage1SwitchPreflight(unittest.TestCase):
             bypass_view_validator=True,
         )
         port = self._make_valid_portfolio_state()
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
-            required_universe=self.admitted_uuids,
             current_portfolio_state=port,
         )
         self.assertEqual(res.status, PreflightStatus.REJECTED)
@@ -1359,18 +1468,19 @@ class TestStage1SwitchPreflight(unittest.TestCase):
     def test_duplicate_session_observation_rejected(self) -> None:
         """Duplicate observations for the same session date are rejected."""
         sec_voo = self.etf_uuids["VOO"]
+        trading_days = generate_trading_sessions(255, self.today)
         obs_list = [
             self._make_valid_observation(
                 sec_voo,
-                self.today - timedelta(days=step),
+                d,
                 Decimal("500.00"),
             )
-            for step in range(254, -1, -1)
+            for d in trading_days
         ]
         obs_list.append(
             self._make_valid_observation(
                 sec_voo,
-                self.today - timedelta(days=1),
+                trading_days[-2],
                 Decimal("500.00"),
             )
         )
@@ -1380,11 +1490,10 @@ class TestStage1SwitchPreflight(unittest.TestCase):
             bypass_view_validator=True,
         )
         port = self._make_valid_portfolio_state()
-        res = evaluate_stage1_switch_preflight(
+        res = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
-            required_universe=self.admitted_uuids,
             current_portfolio_state=port,
         )
         self.assertEqual(res.status, PreflightStatus.REJECTED)
@@ -1393,28 +1502,285 @@ class TestStage1SwitchPreflight(unittest.TestCase):
     def test_zero_close_price_rejected(self) -> None:
         """Zero close price in observation history is rejected."""
         sec_voo = self.etf_uuids["VOO"]
+        trading_days = generate_trading_sessions(255, self.today)
         obs_list = [
             self._make_valid_observation(
                 sec_voo,
-                self.today - timedelta(days=step),
-                Decimal("500.00") if step != 5 else Decimal("0.00"),
+                d,
+                Decimal("500.00") if i != 5 else Decimal("0.00"),
             )
-            for step in range(254, -1, -1)
+            for i, d in enumerate(trading_days)
         ]
         ctx = self._build_context(
             session_count=255,
             custom_observations_by_sym={"VOO": obs_list},
         )
         port = self._make_valid_portfolio_state()
+        res = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx,
+            current_portfolio_state=port,
+        )
+        self.assertEqual(res.status, PreflightStatus.REJECTED)
+        self.assertIn("invalid_close_price", res.reason)
+
+    def test_weekend_observation_rejected(self) -> None:
+        """Observation dated on a weekend (Saturday/Sunday) is rejected."""
+        sec_voo = self.etf_uuids["VOO"]
+        saturday_date = date(2026, 1, 24)
+        trading_days = generate_trading_sessions(254, self.today)
+        obs_list = [
+            self._make_valid_observation(
+                sec_voo,
+                d,
+                Decimal("500.00"),
+            )
+            for d in trading_days
+        ]
+        saturday_obs = self._make_valid_observation(
+            sec_voo,
+            saturday_date,
+            Decimal("500.00"),
+        )
+        obs_list.append(saturday_obs)
+        ctx = self._build_context(
+            session_count=255,
+            custom_observations_by_sym={"VOO": obs_list},
+            bypass_view_validator=True,
+        )
+        port = self._make_valid_portfolio_state()
+        res = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx,
+            current_portfolio_state=port,
+        )
+        self.assertEqual(res.status, PreflightStatus.REJECTED)
+        self.assertIn("weekend_observation_detected", res.reason)
+
+    def test_omitted_risk_verification_fails_closed(self) -> None:
+        """Omitted or None risk_verified must return INDETERMINATE_SAFETY."""
+        ctx = self._build_context(session_count=255)
+        port = self._make_valid_portfolio_state()
         res = evaluate_stage1_switch_preflight(
             proposed_strategy="B4",
             current_strategy="B3",
             decision_context=ctx,
             required_universe=self.admitted_uuids,
+            expected_universe_hash=self.cohort_hash,
+            universe_manifest=self.universe_manifest,
             current_portfolio_state=port,
+            account_id="account-alpha",
+            mandate="balanced_stage1",
+            open_orders=(),
+            mandate_verified=True,
+            risk_verified=None,
+        )
+        self.assertEqual(res.status, PreflightStatus.INDETERMINATE_SAFETY)
+        self.assertFalse(res.is_tradeable)
+        self.assertFalse(res.hold_incumbent)
+        self.assertTrue(res.requires_containment)
+        self.assertIn("unverified_risk", res.reason)
+
+    def test_omitted_mandate_verification_fails_closed(self) -> None:
+        """Omitted or None mandate_verified must return INDETERMINATE_SAFETY."""
+        ctx = self._build_context(session_count=255)
+        port = self._make_valid_portfolio_state()
+        res = evaluate_stage1_switch_preflight(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx,
+            required_universe=self.admitted_uuids,
+            expected_universe_hash=self.cohort_hash,
+            universe_manifest=self.universe_manifest,
+            current_portfolio_state=port,
+            account_id="account-alpha",
+            mandate="balanced_stage1",
+            open_orders=(),
+            mandate_verified=None,
+            risk_verified=True,
+        )
+        self.assertEqual(res.status, PreflightStatus.INDETERMINATE_SAFETY)
+        self.assertFalse(res.is_tradeable)
+        self.assertFalse(res.hold_incumbent)
+        self.assertTrue(res.requires_containment)
+        self.assertIn("unverified_mandate", res.reason)
+
+    def test_unknown_open_orders_status_fails_closed(self) -> None:
+        """open_orders=None is unknown order status and must fail closed."""
+        ctx = self._build_context(session_count=255)
+        port = self._make_valid_portfolio_state()
+        res = evaluate_stage1_switch_preflight(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx,
+            required_universe=self.admitted_uuids,
+            expected_universe_hash=self.cohort_hash,
+            universe_manifest=self.universe_manifest,
+            current_portfolio_state=port,
+            account_id="account-alpha",
+            mandate="balanced_stage1",
+            open_orders=None,
+            mandate_verified=True,
+            risk_verified=True,
+        )
+        self.assertEqual(res.status, PreflightStatus.INDETERMINATE_SAFETY)
+        self.assertFalse(res.is_tradeable)
+        self.assertFalse(res.hold_incumbent)
+        self.assertTrue(res.requires_containment)
+        self.assertIn("unknown_open_orders_status", res.reason)
+
+    def test_rejected_switch_with_mismatched_holdings_cannot_claim_safe_hold(
+        self,
+    ) -> None:
+        """Rejected switch with mismatched holdings cannot safe-hold incumbent."""
+        holding_ctx = PositionViewV1(
+            security_id=self.etf_uuids["VOO"],
+            quantity=10,
+            cost_basis=Decimal("5000.00"),
+            average_cost_per_share=Decimal("500.00"),
+        )
+        ctx = self._build_context(
+            session_count=10,
+            nav=Decimal("100000.00"),
+            holdings=(holding_ctx,),
+        )
+        holding_port = SecurityHoldingV2(
+            security_id=self.etf_uuids["IJH"],
+            quantity=10,
+            basis_status="known",
+            cost_basis=Decimal("5000.00"),
+        )
+        port = self._make_valid_portfolio_state(
+            cash_balance=Decimal("95000.00"),
+            holdings=(holding_port,),
+            mark_prices={self.etf_uuids["IJH"]: Decimal("500.00")},
+        )
+        res = evaluate_stage1_switch_preflight(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx,
+            required_universe=self.admitted_uuids,
+            expected_universe_hash=self.cohort_hash,
+            universe_manifest=self.universe_manifest,
+            current_portfolio_state=port,
+            account_id="account-alpha",
+            mandate="balanced_stage1",
+            open_orders=(),
+            mandate_verified=True,
+            risk_verified=True,
+        )
+        self.assertEqual(res.status, PreflightStatus.INDETERMINATE_SAFETY)
+        self.assertFalse(res.is_tradeable)
+        self.assertFalse(res.hold_incumbent)
+        self.assertTrue(res.requires_containment)
+        self.assertIn("portfolio_context_holdings_mismatch", res.reason)
+
+    def test_rejected_switch_with_mismatched_cash_cannot_claim_safe_hold(
+        self,
+    ) -> None:
+        """Rejected switch with mismatched cash cannot safe-hold incumbent."""
+        holding_ctx = PositionViewV1(
+            security_id=self.etf_uuids["VOO"],
+            quantity=10,
+            cost_basis=Decimal("5000.00"),
+            average_cost_per_share=Decimal("500.00"),
+        )
+        ctx = self._build_context(
+            session_count=10,
+            nav=Decimal("100000.00"),
+            holdings=(holding_ctx,),
+        )
+        holding_port = SecurityHoldingV2(
+            security_id=self.etf_uuids["VOO"],
+            quantity=20,
+            basis_status="known",
+            cost_basis=Decimal("10000.00"),
+        )
+        port = self._make_valid_portfolio_state(
+            cash_balance=Decimal("90000.00"),
+            holdings=(holding_port,),
+            mark_prices={self.etf_uuids["VOO"]: Decimal("500.00")},
+        )
+        res = evaluate_stage1_switch_preflight(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx,
+            required_universe=self.admitted_uuids,
+            expected_universe_hash=self.cohort_hash,
+            universe_manifest=self.universe_manifest,
+            current_portfolio_state=port,
+            account_id="account-alpha",
+            mandate="balanced_stage1",
+            open_orders=(),
+            mandate_verified=True,
+            risk_verified=True,
+        )
+        self.assertEqual(res.status, PreflightStatus.INDETERMINATE_SAFETY)
+        self.assertFalse(res.is_tradeable)
+        self.assertFalse(res.hold_incumbent)
+        self.assertTrue(res.requires_containment)
+        self.assertIn("portfolio_context_cash_mismatch", res.reason)
+
+    def test_unrelated_etf_identities_rejected(self) -> None:
+        """12 securities mapping to foreign symbols are rejected."""
+        foreign_manifest = {
+            u: f"FOREIGN_{i}" for i, u in enumerate(self.admitted_uuids)
+        }
+        ctx = self._build_context(session_count=255)
+        port = self._make_valid_portfolio_state()
+        res = evaluate_stage1_switch_preflight(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx,
+            required_universe=self.admitted_uuids,
+            expected_universe_hash=self.cohort_hash,
+            universe_manifest=foreign_manifest,
+            current_portfolio_state=port,
+            account_id="account-alpha",
+            mandate="balanced_stage1",
+            open_orders=(),
+            mandate_verified=True,
+            risk_verified=True,
         )
         self.assertEqual(res.status, PreflightStatus.REJECTED)
-        self.assertIn("invalid_close_price", res.reason)
+        self.assertIn("unrecognized_universe_symbol", res.reason)
+
+    def test_missing_expected_universe_hash_fails_closed(self) -> None:
+        """expected_universe_hash=None must fail closed."""
+        ctx = self._build_context(session_count=255)
+        port = self._make_valid_portfolio_state()
+        res = evaluate_stage1_switch_preflight(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx,
+            required_universe=self.admitted_uuids,
+            expected_universe_hash=None,
+            universe_manifest=self.universe_manifest,
+            current_portfolio_state=port,
+            account_id="account-alpha",
+            mandate="balanced_stage1",
+            open_orders=(),
+            mandate_verified=True,
+            risk_verified=True,
+        )
+        self.assertEqual(res.status, PreflightStatus.REJECTED)
+        self.assertIn("missing_expected_universe_hash", res.reason)
+
+    def test_unknown_corporate_action_coverage_unavailable(self) -> None:
+        """adjustments_by_security=None is unknown and returns UNAVAILABLE."""
+        ctx = self._build_context(session_count=255)
+        port = self._make_valid_portfolio_state()
+        res = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx,
+            current_portfolio_state=port,
+            adjustments_by_security=None,
+        )
+        self.assertEqual(res.status, PreflightStatus.UNAVAILABLE)
+        self.assertIn("missing_adjustments_manifest", res.reason)
 
 
 if __name__ == "__main__":
