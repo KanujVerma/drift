@@ -22,8 +22,14 @@ this repository. Do not assume a particular machine path, model or editor.
 
 ## Operating rules
 
-1. Run Resume first. Resolve `kanuj`, `krish`, `matthew` or `harsha` through verified config,
-   branch/issue evidence. Stop conflicting/unresolved identity; never guess.
+1. Run Resume first. Resolve the active `kanuj`, `krish` or `matthew`
+   workstream through verified config, branch and issue evidence. Historical
+   `harsha` work is reassigned only after accepted ADR 0017 **and an authenticated
+   issue-specific transfer receipt with reconciled labels, assignee and native
+   dependencies**. Historical Harsha strings in older required-reading docs alone
+   are not an identity conflict for an already migrated issue; a missing receipt,
+   live writer conflict or inconsistent current issue evidence still requires stop.
+   Stop conflicting/unresolved identity; never guess.
    A question about ownership is read-only and does not claim a task.
 2. No issue means no product implementation. Verify READY/unblocked state and
    exact write-set. Read other paths, but do not edit them without amendment.
@@ -62,14 +68,18 @@ this repository. Do not assume a particular machine path, model or editor.
     scoped authorization. A product permission mode is not coding-agent permission.
 15. Unicode em dashes (U+2014) are not allowed in newly changed code/docs/commits.
     Do not rewrite unrelated historical files just to normalize them.
-16. Kanuj's slice is intentionally small. Do not assign him blocked infrastructure,
-    mandatory global reviews or final integration by default.
+16. Kanuj's original slice was intentionally small. The owner-directed
+    experiment transfer recorded in ADR 0017 adds experimental methodology,
+    measurement, orchestration and scientific eligibility **for each issue only
+    after its independently accepted governance and migration receipt gates**.
+    It does not assign general infrastructure, mandatory global reviews or
+    operational authority by default.
 
 ## Scope of the new plan
 
 The adaptive design is accepted intent, not a completed runtime. Existing
 milestone code and safety/evidence limitations must be checked at the relevant
-revision. Four human workstreams do not activate conditional M9 agent teams.
+revision. Historical four-person routing and its owner transfer do not activate conditional M9 agent teams.
 Partial activation of one workstream does not require every other login to be resolved.
 Use the adopting coordination issue's activation record before beginning newly
 created queue items. Unknown configuration blocks dependent runtime, not safe
