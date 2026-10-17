@@ -24,7 +24,11 @@ this repository. Do not assume a particular machine path, model or editor.
 
 1. Run Resume first. Resolve the active `kanuj`, `krish` or `matthew`
    workstream through verified config, branch and issue evidence. Historical
-   `harsha` work is reassigned only through an explicit owner transfer receipt.
+   `harsha` work is reassigned only after accepted ADR 0017 **and an authenticated
+   issue-specific transfer receipt with reconciled labels, assignee and native
+   dependencies**. Historical Harsha strings in older required-reading docs alone
+   are not an identity conflict for an already migrated issue; a missing receipt,
+   live writer conflict or inconsistent current issue evidence still requires stop.
    Stop conflicting/unresolved identity; never guess.
    A question about ownership is read-only and does not claim a task.
 2. No issue means no product implementation. Verify READY/unblocked state and
@@ -64,11 +68,12 @@ this repository. Do not assume a particular machine path, model or editor.
     scoped authorization. A product permission mode is not coding-agent permission.
 15. Unicode em dashes (U+2014) are not allowed in newly changed code/docs/commits.
     Do not rewrite unrelated historical files just to normalize them.
-16. Kanuj's original slice was intentionally small. Under the specifically
-    approved scientific experiment ownership transfer recorded in ADR 0017,
-    he also owns experimental methodology, measurement, orchestration and
-    scientific eligibility. This does not assign general infrastructure,
-    mandatory global reviews or operational authority by default.
+16. Kanuj's original slice was intentionally small. The owner-directed
+    experiment transfer recorded in ADR 0017 adds experimental methodology,
+    measurement, orchestration and scientific eligibility **for each issue only
+    after its independently accepted governance and migration receipt gates**.
+    It does not assign general infrastructure, mandatory global reviews or
+    operational authority by default.
 
 ## Scope of the new plan
 
