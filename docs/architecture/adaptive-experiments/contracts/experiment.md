@@ -431,9 +431,9 @@ Real transitions support flexible order cardinality:
 
 #### Economic Definitions
 - **Per-Arm Economic Gain:**
-  $$    ext{Economic Gain}(i) = (    ext{Terminal NAV}_{    ext{net}}(i) -     ext{Initial Capital}(i)) - \sum     ext{Attributed Operating Expenses}(i)$$
+  $$\text{EconomicGain}(i) = \text{TerminalNetNAV}(i) - \text{InitialCapital}(i) - \text{AttributedOperatingCost}(i)$$
 - **Comparative Economic Advantage (B vs. R):**
-  $$\Delta_{    ext{economic}}(B, R) =     ext{Economic Gain}(B) -     ext{Economic Gain}(R)$$
+  $$\text{ComparativeEconomicAdvantage}(B, R) = \text{EconomicGain}(B) - \text{EconomicGain}(R)$$
 - **Reporting Invariant:** An arm's absolute economic gain must **never** be labeled as
   a comparative advantage against another arm. Comparative advantage is strictly paired.
 - **Review Binding:** Independent reviewer receipts must bind to `report_revision_fingerprint`.
@@ -471,7 +471,8 @@ retries under one `logical_request_id`, and each incurred invocation produces it
 
 ### 4.2 Operating vs. Replay Costs
 - **Zero Cost for Historical Replay:** Replaying an immutable model prompt/response
-  capture from storage incurs zero new inference bill (`amount_basis: "VERIFIED_ZERO"`).
+  capture from storage incurs zero new inference bill (`amount_basis: "verified_zero"`,
+  `amount: "0"`, `currency: "USD"`, `unknown_reason: null`).
 - **New Replay Infrastructure Costs:** Any newly incurred compute or storage costs
   for running the replay harness retain their own distinct receipts.
 
@@ -482,21 +483,22 @@ retries under one `logical_request_id`, and each incurred invocation produces it
 To prevent multiple-testing fallacies, denominators are defined per operational layer:
 
 1. **Study Opportunity Completion:**
-   $$    ext{Completion Rate} = rac{N_{    ext{complete-trials}}}{N_{    ext{scheduled-arm-checkpoints}}}$$
+   $$\text{CompletionRate} = \frac{\text{CompleteTrials}}{\text{ScheduledArmCheckpointOpportunities}}$$
    (Denominator is scheduled arm-checkpoint opportunities, not merely calendar dates).
 2. **Candidate Proposal Yield:**
-   $$    ext{Proposal Yield} = rac{N_{    ext{valid-proposals}}}{N_{    ext{attempted-proposals}}}$$
+   $$\text{ProposalYield} = \frac{\text{ValidProposals}}{\text{AttemptedProposals}}$$
 3. **Inference Reliability:**
-   $$    ext{Inference Reliability} = rac{N_{    ext{successful-attempts}}}{N_{    ext{initial-attempts}} + N_{    ext{retries}}}$$
+   $$\text{InferenceReliability} = \frac{\text{SuccessfulAttempts}}{\text{InitialAttempts} + \text{Retries}}$$
    (Retries increment the attempt denominator; they are not duplicate copies of one attempt).
 4. **Order Execution Conversion:**
-   $$    ext{Order Conversion} = rac{N_{    ext{executed-orders}}}{N_{    ext{staged-orders}}}$$
+   $$\text{OrderConversion} = \frac{\text{ExecutedOrders}}{\text{StagedOrders}}$$
 
 ---
 
-## 6. Worked Contract Test Cases (22 Comprehensive Scenarios)
+## 6. Worked Contract Test Cases (22 Illustrative Scenarios)
 
-The 22 test cases demonstrate exact system behavior under all required edge conditions.
+The 22 illustrative test cases demonstrate exact contract behavior under all required edge conditions.
+These JSON blocks serve as authoritative specification fixtures demonstrating schema alignment and contract invariants; they do not represent qualified market-data provenance or real execution outcomes.
 All JSON blocks are validated for syntax and schema alignment.
 
 ---
@@ -744,7 +746,7 @@ All JSON blocks are validated for syntax and schema alignment.
 ---
 
 ### Case 10: Unknown Model Spending
-- **Scenario:** API reports completion without token usage metadata (`amount_basis: "UNKNOWN"`).
+- **Scenario:** API reports completion without token usage metadata (`amount_basis: "unknown"`).
 - **Expected:** Phase A `ELIGIBLE`, Phase D `MISSING_COST`. Portfolio return verified; economic scorecard incomplete.
 
 ```json
@@ -1076,7 +1078,7 @@ consumes research outputs through stable references:
 | `replay_id` | `model_replay_references` | Verifiable model prompt/output capture. |
 | `receipt_id` | `cost_receipt_references` | Krish's raw cost receipt ID. |
 | `amount` (DecimalText) | Scientific Cost Attribution | Monetary expense as DecimalText string. |
-| `amount_basis` | Scientific Cost Attribution | Certainty state: UNKNOWN/ESTIMATED/ACTUAL/ZERO. |
+| `amount_basis` | Scientific Cost Attribution | Producer certainty basis: strictly lowercase actual, estimate, unknown, or verified_zero. |
 | `supersedes_receipt_id` | `cost_receipt_references` lineage | Late invoice correction tracking. |
 | `memory_snapshot_id` | `memory_snapshot_reference` | Bound as time-eligible checkpoint evidence. |
 
@@ -1124,8 +1126,9 @@ the scientific runtime will be built in strictly ordered slices:
   (`TrialEventV1`) and projection engine emitting `TrialRecordV1`.
 - **Slice E3 (Deterministic Scientific Eligibility Evaluator):** Phase A preflight engine
   emitting `EligibilityDecisionV1`.
-- **Slice E4 (Scientific Cost Attribution Engine):** Dual-ledger join combining Matthew's
-  trading results with Krish's research spending receipts.
+- **Slice E4 (Scientific Cost Attribution Engine):** Single authoritative portfolio
+  ledger owned by Matthew plus Kanuj's derived scientific cost-attribution view
+  incorporating Krish's research spending receipts.
 - **Slice E5 (Study Report Aggregator):** Reproducible calculation of trial completeness,
   portfolio return differentials, and statistical metric rollups (`StudyReportV1`).
 - **Slice E6 (End-to-End Synthetic Integration):** Full vertical slice (#383) executing
