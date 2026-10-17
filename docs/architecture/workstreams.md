@@ -30,7 +30,7 @@ original slug; the decision text is the four-owner policy.
 | kanuj | Kanuj | Offline deterministic news-event triage, plus scientific experiment methodology, frozen campaign design, isolated study orchestration, metrics, trial completeness and cost attribution, reproducible comparison reports, uncertainty and scientific eligibility evidence. | No second backtester or authoritative account ledger, trading, live ingestion, platform/risk redesign, self-certified scientific acceptance, or mandatory global PR review. |
 | krish | Krish | Intelligence and bounded learning. Point-in-time context becomes grounded proposals inside approved families, plus time-eligible learning-state updates, conventional optimizer R, model replay and raw attempt/cost receipts. | No authority to redefine scientific success, authoritative account results, holdout evidence, or risk/operational permissions. No arbitrary generated-strategy execution in the MVP. |
 | matthew | Matthew | Data, simulation, accounting and enforcement. Retained inputs and proposals become timing, fills, risk/approval checks, reconciled accounts and audited results. Provenance, calendars, corporate actions, intraday/extended-hours simulation, trading costs, permission enforcement, recovery and containment mechanisms. | No unilateral scientific-success definition, no second experiment-analysis engine, and no broker connection without a separate grant. |
-\n
+
 Do not invent effort percentages or equal issue counts. Kanuj's original small triage commitment was explicitly expanded by the owner-directed experiment transfer. This is not a default duty to rescue all infrastructure or review every PR. Preserve independent scientific review and issue-specific writer permissions. Historical Harsha issues and PRs are not silently edited or reassigned without an explicit GitHub migration receipt.
 
 ## Milestone stewardship and path routing
@@ -53,8 +53,8 @@ File routing is a starting rule, never a blanket write grant:
 - Experiment files, including `src/drift/experiments/parallel_portfolios.py`, remain protected by any still-active writer reservation. Transferred ownership is not a blanket write grant.
 - Matthew: `src/drift/adapters/`, `datasets/`, `qualification/`, `markets/`,
   `evaluator/`, `ledger/`, `risk/`, `shadow/`, `execution/`, `canary/`, `autonomy/`
-  and corresponding platform configuration. One account ledger. Kanuj's scientific work does not
-  add a second backtester.
+  and corresponding platform configuration. One account ledger. Kanuj's
+  scientific work does not add a second backtester.
 - `src/drift/domain/`, scripts, integration tests, package exports and top-level
   docs are routed by the producer of the exact contract. They are not jointly
   writable. Each issue lists exact paths. Source-event types belong to Matthew;
