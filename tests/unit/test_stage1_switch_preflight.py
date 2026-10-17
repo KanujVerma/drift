@@ -57,38 +57,159 @@ from drift.domain.evaluator_reconstruction import (
     cohort_authorization_hash,
     exploratory_reconstruction_hash,
 )
-from drift.domain.evaluator_strategy import PositionViewV1
+from drift.domain.evaluator_strategy import (
+    PositionViewV1,
+    StrategyDecisionContextV1,
+    StrategyDecisionViewV1,
+)
+from drift.domain.normalization import (
+    DerivedObservationViewV1,
+    ExactRatioV1,
+    FieldTransformV1,
+    NormalizationQueryV1,
+    derived_view_output_hash,
+)
+from drift.domain.observation_query import ObservationDecisionQueryV1
 from drift.domain.securities import ListingVenue
 from drift.domain.sessions import SessionKeyV1
 from drift.domain.strategies import StrategyReference
+from drift.domain.temporal import AvailabilityChannelV1, ChannelKind
 from drift.loop.stage1_switch_preflight import (
     PreflightStatus,
     Stage1SwitchPreflightResult,
     evaluate_stage1_switch_preflight,
     verify_stage1_switch_preflight_result,
 )
+from drift.serialization.canonical import content_hash
 
 _SENTINEL = object()
 
 
-def is_trading_day(d: date) -> bool:
-    if d.weekday() >= 5:
-        return False
-    if (d.month, d.day) in {(1, 1), (7, 4), (12, 25)}:
-        return False
-    return True
+def easter_sunday(year: int) -> date:
+    """Anonymous Gregorian Computus algorithm for Easter Sunday."""
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l_val = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l_val) // 451
+    month = (h + l_val - 7 * m + 114) // 31
+    day = ((h + l_val - 7 * m + 114) % 31) + 1
+    return date(year, month, day)
 
 
-def generate_trading_sessions(count: int, end_date: date) -> list[date]:
-    """Generate business days (Monday-Friday, excluding major holidays)."""
+def good_friday(year: int) -> date:
+    """Good Friday (two days before Easter Sunday)."""
+    return easter_sunday(year) - timedelta(days=2)
+
+
+class SyntheticExchangeCalendar:
+    """Deterministic synthetic US equities exchange calendar (NYSE/NASDAQ rules)."""
+
+    @classmethod
+    def get_holidays(cls, year: int) -> set[date]:
+        holidays: set[date] = set()
+
+        def add_observed(d: date) -> None:
+            if d.weekday() == 6:  # Sunday -> observed Monday
+                holidays.add(d + timedelta(days=1))
+            elif d.weekday() == 5:  # Saturday -> observed Friday
+                holidays.add(d - timedelta(days=1))
+            else:
+                holidays.add(d)
+
+        # New Year's Day (Jan 1)
+        ny = date(year, 1, 1)
+        if ny.weekday() == 6:
+            holidays.add(date(year, 1, 2))
+        elif ny.weekday() != 5:
+            holidays.add(ny)
+
+        # Martin Luther King Jr. Day (3rd Monday in January)
+        first_jan = date(year, 1, 1)
+        mlk = first_jan + timedelta(days=((0 - first_jan.weekday()) % 7) + 14)
+        holidays.add(mlk)
+
+        # Washington's Birthday / Presidents' Day (3rd Monday in February)
+        first_feb = date(year, 2, 1)
+        pres = first_feb + timedelta(days=((0 - first_feb.weekday()) % 7) + 14)
+        holidays.add(pres)
+
+        # Good Friday
+        holidays.add(good_friday(year))
+
+        # Memorial Day (last Monday in May)
+        last_may = date(year, 5, 31)
+        mem = last_may - timedelta(days=last_may.weekday())
+        holidays.add(mem)
+
+        # Juneteenth (June 19)
+        add_observed(date(year, 6, 19))
+
+        # Independence Day (July 4)
+        add_observed(date(year, 7, 4))
+
+        # Labor Day (1st Monday in September)
+        first_sep = date(year, 9, 1)
+        labor = first_sep + timedelta(days=((0 - first_sep.weekday()) % 7))
+        holidays.add(labor)
+
+        # Thanksgiving Day (4th Thursday in November)
+        first_nov = date(year, 11, 1)
+        thanksgiving = first_nov + timedelta(days=((3 - first_nov.weekday()) % 7) + 21)
+        holidays.add(thanksgiving)
+
+        # Christmas Day (December 25)
+        add_observed(date(year, 12, 25))
+
+        return holidays
+
+    @classmethod
+    def get_half_days(cls, year: int) -> set[date]:
+        half_days: set[date] = set()
+        first_nov = date(year, 11, 1)
+        thanksgiving = first_nov + timedelta(days=((3 - first_nov.weekday()) % 7) + 21)
+        # Black Friday
+        half_days.add(thanksgiving + timedelta(days=1))
+        # Christmas Eve
+        xmas_eve = date(year, 12, 24)
+        if xmas_eve.weekday() < 5 and date(year, 12, 25).weekday() < 5:
+            half_days.add(xmas_eve)
+        # July 3
+        july_3 = date(year, 7, 3)
+        if july_3.weekday() < 5 and date(year, 7, 4).weekday() < 5:
+            half_days.add(july_3)
+        return half_days
+
+    @classmethod
+    def is_trading_session(cls, d: date) -> bool:
+        if d.weekday() >= 5:
+            return False
+        if d in cls.get_holidays(d.year):
+            return False
+        return True
+
+
+def generate_synthetic_trading_sessions(count: int, end_date: date) -> list[date]:
+    """Generate business days (Monday-Friday, excluding exchange holidays)."""
     dates: list[date] = []
     cur = end_date
     while len(dates) < count:
-        if is_trading_day(cur):
+        if SyntheticExchangeCalendar.is_trading_session(cur):
             dates.append(cur)
         cur -= timedelta(days=1)
     dates.reverse()
     return dates
+
+
+# Backward compatibility alias
+generate_trading_sessions = generate_synthetic_trading_sessions
 
 
 class TestStage1SwitchPreflight(unittest.TestCase):
@@ -152,6 +273,11 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         self.valid_adjustments: dict[UUID7, Sequence[CorporateActionAdjustment]] = {
             u: () for u in self.admitted_uuids
         }
+        self.completed_sessions: set[date | SessionKeyV1] = set(
+            generate_synthetic_trading_sessions(300, self.today)
+        )
+        self.completed_sessions.add(self.today)
+        self.completed_sessions.add(self.session_key)
 
     def _make_valid_session(
         self,
@@ -431,6 +557,148 @@ class TestStage1SwitchPreflight(unittest.TestCase):
             ),
         )
 
+    def _make_valid_derived_view(
+        self,
+        sec: UUID7,
+        d: date,
+        price: Decimal,
+        *,
+        decision_time: datetime | None = None,
+        knowledge_cutoff: datetime | None = None,
+        effective_cutoff: datetime | None = None,
+    ) -> DerivedObservationViewV1:
+        listing = UUID("018e0000-0000-7000-8000-000000000099")
+        dt = decision_time or self.closed_at
+        kc = knowledge_cutoff or self.closed_at
+        ec = effective_cutoff or self.closed_at
+        q_obs = ObservationDecisionQueryV1(
+            kind="decision",
+            source_id="synthetic-source",
+            contract_hash="1" * 64,
+            source_selection_policy_hash="2" * 64,
+            profile_hash="3" * 64,
+            requested_channel=AvailabilityChannelV1(
+                kind=ChannelKind.PUBLIC, identifier="public"
+            ),
+            availability_policy_id="public-exact",
+            availability_policy_hash="4" * 64,
+            input_context_hash="5" * 64,
+            venue=ListingVenue.XNYS,
+            listing_id=listing,
+            security_id=sec,
+            session_date=d,
+            decision_time=dt,
+            knowledge_cutoff=kc,
+            effective_cutoff=ec,
+        )
+        q = NormalizationQueryV1(
+            observation=q_obs,
+            policy_hash="6" * 64,
+            anchor_session=None,
+        )
+        q_hash = content_hash(q)
+        fields = tuple(
+            FieldTransformV1(
+                field_name=fn,
+                method_id="identity",
+                meaning="share_volume" if fn == "volume" else "price",
+                source_value=price if fn != "volume" else Decimal("1000"),
+                exact_factor=ExactRatioV1(numerator="1", denominator="1"),
+                exact_transformed_value=None,
+                quantized_value=None,
+                output_scale=None,
+                rounded_to_zero=False,
+            )
+            for fn in ("close", "high", "low", "open", "volume")
+        )
+        draft = DerivedObservationViewV1.model_construct(
+            role="decision",
+            query=q,
+            query_hash=q_hash,
+            source_session=SessionKeyV1(
+                mic="XNYS", session_scope="regular", local_date=d
+            ),
+            listing_id=listing,
+            security_id=sec,
+            basis_mode="source_basis",
+            anchor_session=None,
+            fields=fields,
+            usability_hash="7" * 64,
+            output_hash="0" * 64,
+            derivation_hash="8" * 64,
+        )
+        out_h = derived_view_output_hash(draft)
+        return DerivedObservationViewV1(
+            role="decision",
+            query=q,
+            query_hash=q_hash,
+            source_session=SessionKeyV1(
+                mic="XNYS", session_scope="regular", local_date=d
+            ),
+            listing_id=listing,
+            security_id=sec,
+            basis_mode="source_basis",
+            anchor_session=None,
+            fields=fields,
+            usability_hash="7" * 64,
+            output_hash=out_h,
+            derivation_hash="8" * 64,
+        )
+
+    def _build_strong_lane_context(
+        self,
+        session_count: int = 255,
+        *,
+        custom_views_by_sym: (
+            Mapping[str, Sequence[DerivedObservationViewV1]] | None
+        ) = None,
+        nav: Decimal = Decimal("100000.00"),
+        holdings: tuple[PositionViewV1, ...] = (),
+        universe_uuids: tuple[UUID7, ...] | None = None,
+    ) -> StrategyDecisionContextV1:
+        effective_universe = (
+            universe_uuids if universe_uuids is not None else self.admitted_uuids
+        )
+        groups = []
+        for sym in self.universe12_syms:
+            sec_uuid = self.etf_uuids.get(sym)
+            if sec_uuid not in effective_universe:
+                continue
+            if custom_views_by_sym and sym in custom_views_by_sym:
+                views_list = custom_views_by_sym[sym]
+            else:
+                base_p = self.base_prices[sym]
+                trading_days = generate_synthetic_trading_sessions(
+                    session_count, self.today
+                )
+                views_list = [
+                    self._make_valid_derived_view(sec_uuid, d, base_p)
+                    for d in trading_days
+                ]
+            groups.append(
+                StrategyDecisionViewV1(
+                    security_id=sec_uuid,
+                    views=tuple(views_list),
+                )
+            )
+
+        holdings_val = Decimal("0.00")
+        for h in holdings:
+            p = self.base_prices.get("VOO", Decimal("100.00"))
+            holdings_val += p * h.quantity
+        cash = nav - holdings_val
+
+        return StrategyDecisionContextV1(
+            session_key=self.session_key,
+            decision_session=self.session,
+            decision_cutoff=self.closed_at,
+            admitted_universe=effective_universe,
+            current_holdings=holdings,
+            current_cash=cash,
+            portfolio_nav=nav,
+            decision_views=tuple(groups),
+        )
+
     def _eval(
         self,
         *,
@@ -448,6 +716,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         open_orders: Any = _SENTINEL,
         mandate_verified: Any = _SENTINEL,
         risk_verified: Any = _SENTINEL,
+        completed_sessions: Any = _SENTINEL,
     ) -> Stage1SwitchPreflightResult:
         req_u = (
             self.admitted_uuids if required_universe is _SENTINEL else required_universe
@@ -477,6 +746,11 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         orders = () if open_orders is _SENTINEL else open_orders
         m_ver = True if mandate_verified is _SENTINEL else mandate_verified
         r_ver = True if risk_verified is _SENTINEL else risk_verified
+        comp_sess = (
+            self.completed_sessions
+            if completed_sessions is _SENTINEL
+            else completed_sessions
+        )
 
         return evaluate_stage1_switch_preflight(
             proposed_strategy=proposed_strategy,
@@ -493,6 +767,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
             open_orders=orders,
             mandate_verified=m_ver,
             risk_verified=r_ver,
+            completed_sessions=comp_sess,
         )
 
     # =========================================================================
@@ -1233,6 +1508,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
                 expected_account_id="account-alpha",
                 expected_mandate="balanced_stage1",
                 expected_session_key=self.session_key,
+                expected_decision_cutoff=self.closed_at,
                 expected_cohort_hash=self.cohort_hash,
                 current_portfolio_state=modified_port,
             )
@@ -1257,6 +1533,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
                 expected_account_id="account-beta",
                 expected_mandate="balanced_stage1",
                 expected_session_key=self.session_key,
+                expected_decision_cutoff=self.closed_at,
                 expected_cohort_hash=self.cohort_hash,
                 current_portfolio_state=port,
             )
@@ -1281,6 +1558,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
                 expected_account_id="account-alpha",
                 expected_mandate="growth_stage1",
                 expected_session_key=self.session_key,
+                expected_decision_cutoff=self.closed_at,
                 expected_cohort_hash=self.cohort_hash,
                 current_portfolio_state=port,
             )
@@ -1308,6 +1586,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
                 expected_account_id="account-alpha",
                 expected_mandate="balanced_stage1",
                 expected_session_key=future_session,
+                expected_decision_cutoff=self.closed_at,
                 expected_cohort_hash=self.cohort_hash,
                 current_portfolio_state=port,
             )
@@ -1331,6 +1610,7 @@ class TestStage1SwitchPreflight(unittest.TestCase):
             expected_account_id="account-alpha",
             expected_mandate="balanced_stage1",
             expected_session_key=self.session_key,
+            expected_decision_cutoff=self.closed_at,
             expected_cohort_hash=self.cohort_hash,
         )
         self.assertTrue(verified)
@@ -1781,6 +2061,457 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         )
         self.assertEqual(res.status, PreflightStatus.UNAVAILABLE)
         self.assertIn("missing_adjustments_manifest", res.reason)
+
+    # =========================================================================
+    # Point 7: C1-C6 Review Corrections Regression Suite
+    # =========================================================================
+
+    def test_valid_strong_lane_decision_context_b3_eligible(self) -> None:
+        """C1: Strong lane StrategyDecisionContextV1 is eligible for B3."""
+        ctx = self._build_strong_lane_context(session_count=1)
+        res = self._eval(
+            proposed_strategy="B3",
+            current_strategy="B3",
+            decision_context=ctx,
+        )
+        self.assertEqual(res.status, PreflightStatus.ELIGIBLE)
+        self.assertTrue(res.is_tradeable)
+        self.assertFalse(res.requires_containment)
+        self.assertEqual(res.effective_strategy, "B3")
+
+    def test_valid_strong_lane_decision_context_b4_eligible(self) -> None:
+        """C1: Strong lane StrategyDecisionContextV1 is eligible for B4."""
+        ctx = self._build_strong_lane_context(session_count=255)
+        res = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx,
+        )
+        self.assertEqual(res.status, PreflightStatus.ELIGIBLE)
+        self.assertTrue(res.is_tradeable)
+        self.assertFalse(res.requires_containment)
+        self.assertEqual(res.effective_strategy, "B4")
+
+    def test_valid_strong_lane_decision_context_b5_eligible(self) -> None:
+        """C1: Strong lane StrategyDecisionContextV1 is eligible for B5."""
+        ctx = self._build_strong_lane_context(session_count=65)
+        res = self._eval(
+            proposed_strategy="B5",
+            current_strategy="B3",
+            decision_context=ctx,
+        )
+        self.assertEqual(res.status, PreflightStatus.ELIGIBLE)
+        self.assertTrue(res.is_tradeable)
+        self.assertFalse(res.requires_containment)
+        self.assertEqual(res.effective_strategy, "B5")
+
+    def test_missing_strong_lane_views_returns_unavailable(self) -> None:
+        """C1: Missing views for an admitted security returns UNAVAILABLE."""
+        groups = []
+        for sym in self.universe12_syms:
+            if sym == "VOO":
+                continue
+            sec_id = self.etf_uuids[sym]
+            v = self._make_valid_derived_view(sec_id, self.today, self.base_prices[sym])
+            groups.append(StrategyDecisionViewV1(security_id=sec_id, views=(v,)))
+
+        ctx = self._build_strong_lane_context(session_count=255)
+        ctx_missing_voo = ctx.model_copy(update={"decision_views": tuple(groups)})
+        res = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx_missing_voo,
+        )
+        self.assertEqual(res.status, PreflightStatus.UNAVAILABLE)
+        self.assertIn("missing_observations", res.reason)
+
+    def test_late_available_strong_lane_observation_returns_unavailable(
+        self,
+    ) -> None:
+        """C1: Strong lane observation past cutoff returns UNAVAILABLE."""
+        sec_voo = self.etf_uuids["VOO"]
+        ctx = self._build_strong_lane_context(session_count=255)
+        late_view = self._make_valid_derived_view(
+            sec_voo,
+            self.today,
+            self.base_prices["VOO"],
+            decision_time=self.closed_at + timedelta(minutes=5),
+        )
+        new_groups = []
+        for g in ctx.decision_views:
+            if g.security_id == sec_voo:
+                new_groups.append(
+                    StrategyDecisionViewV1.model_construct(
+                        security_id=sec_voo,
+                        views=(*g.views[:-1], late_view),
+                    )
+                )
+            else:
+                new_groups.append(g)
+
+        bad_ctx = StrategyDecisionContextV1.model_construct(
+            session_key=ctx.session_key,
+            decision_session=ctx.decision_session,
+            decision_cutoff=ctx.decision_cutoff,
+            admitted_universe=ctx.admitted_universe,
+            current_holdings=ctx.current_holdings,
+            current_cash=ctx.current_cash,
+            portfolio_nav=ctx.portfolio_nav,
+            decision_views=tuple(new_groups),
+        )
+        res = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=bad_ctx,
+        )
+        self.assertEqual(res.status, PreflightStatus.UNAVAILABLE)
+        self.assertIn("late_available_observation_detected", res.reason)
+
+    def test_cross_lane_evidence_contamination_rejected(self) -> None:
+        """C1: Cross-lane evidence contamination returns REJECTED."""
+        sec_voo = self.etf_uuids["VOO"]
+        real_view = self._make_valid_derived_view(
+            sec_voo, self.today, Decimal("500.00")
+        )
+        fake_group = StrategyDecisionViewV1(
+            security_id=sec_voo,
+            views=(real_view,),
+        )
+        ctx = ExploratoryStrategyDecisionContextV1.model_construct(
+            session_key=self.session_key,
+            decision_session=self.session,
+            decision_cutoff=self.closed_at,
+            cohort_hash=self.cohort_hash,
+            admitted_cohort=self.admitted_uuids,
+            current_holdings=(),
+            current_cash=Decimal("100000.00"),
+            portfolio_nav=Decimal("100000.00"),
+            reconstructed_decision_views=(fake_group,),
+            acknowledged_limitations=(
+                ALPACA_LIMITATION_ABSENT_HALTS,
+                ALPACA_LIMITATION_BOUNDED_COHORT,
+                ALPACA_LIMITATION_RETROSPECTIVE_RECONSTRUCTION,
+                ALPACA_LIMITATION_SCHEDULED_SESSION_RECONSTRUCTION,
+                ALPACA_LIMITATION_UNVERSIONED_BARS,
+            ),
+        )
+        res = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx,
+        )
+        self.assertEqual(res.status, PreflightStatus.REJECTED)
+        self.assertIn("cross_lane_evidence_detected", res.reason)
+
+    def test_abstain_with_none_decision_context_fails_safely(self) -> None:
+        """C2: ABSTAIN with decision_context=None cannot claim safe hold."""
+        port = self._make_valid_portfolio_state()
+        res = self._eval(
+            proposed_strategy="ABSTAIN",
+            current_strategy="B3",
+            decision_context=None,
+            current_portfolio_state=port,
+        )
+        self.assertEqual(res.status, PreflightStatus.INDETERMINATE_SAFETY)
+        self.assertFalse(res.is_tradeable)
+        self.assertFalse(res.hold_incumbent)
+        self.assertTrue(res.requires_containment)
+        self.assertIn("missing_decision_context", res.reason)
+
+    def test_b4_with_none_decision_context_fails_safely(self) -> None:
+        """C2: B4 proposed with decision_context=None cannot claim safe hold."""
+        port = self._make_valid_portfolio_state()
+        res = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=None,
+            current_portfolio_state=port,
+        )
+        self.assertEqual(res.status, PreflightStatus.INDETERMINATE_SAFETY)
+        self.assertFalse(res.is_tradeable)
+        self.assertFalse(res.hold_incumbent)
+        self.assertTrue(res.requires_containment)
+        self.assertIn("missing_decision_context", res.reason)
+
+    def test_missing_decision_cutoff_fails_closed(self) -> None:
+        """C2: Missing decision_cutoff returns INDETERMINATE_SAFETY."""
+        ctx = self._build_context(session_count=255)
+        bad_ctx = ExploratoryStrategyDecisionContextV1.model_construct(
+            session_key=ctx.session_key,
+            decision_session=ctx.decision_session,
+            decision_cutoff=None,
+            cohort_hash=ctx.cohort_hash,
+            admitted_cohort=ctx.admitted_cohort,
+            current_holdings=ctx.current_holdings,
+            current_cash=ctx.current_cash,
+            portfolio_nav=ctx.portfolio_nav,
+            reconstructed_decision_views=ctx.reconstructed_decision_views,
+            acknowledged_limitations=ctx.acknowledged_limitations,
+        )
+        port = self._make_valid_portfolio_state()
+        res = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=bad_ctx,
+            current_portfolio_state=port,
+        )
+        self.assertEqual(res.status, PreflightStatus.INDETERMINATE_SAFETY)
+        self.assertFalse(res.is_tradeable)
+        self.assertFalse(res.hold_incumbent)
+        self.assertTrue(res.requires_containment)
+        self.assertIn("missing_decision_cutoff", res.reason)
+
+    def test_valid_incumbent_with_complete_context_safely_holds(self) -> None:
+        """C2: Complete context allows safe hold when switch is UNAVAILABLE."""
+        ctx = self._build_context(session_count=50)
+        port = self._make_valid_portfolio_state()
+        res = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx,
+            current_portfolio_state=port,
+        )
+        self.assertEqual(res.status, PreflightStatus.UNAVAILABLE)
+        self.assertFalse(res.is_tradeable)
+        self.assertTrue(res.hold_incumbent)
+        self.assertFalse(res.requires_containment)
+        self.assertEqual(res.effective_strategy, "B3")
+
+    def test_missing_calendar_evidence_returns_unavailable(self) -> None:
+        """C3: Missing trading calendar evidence returns UNAVAILABLE."""
+        ctx = self._build_context(session_count=255)
+        res = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx,
+            completed_sessions=None,
+        )
+        self.assertEqual(res.status, PreflightStatus.UNAVAILABLE)
+        self.assertIn("missing_trading_calendar_evidence", res.reason)
+
+    def test_weekend_observation_detected_rejected(self) -> None:
+        """C3: Observation falling on a weekend returns REJECTED."""
+        sec_voo = self.etf_uuids["VOO"]
+        saturday = date(2026, 1, 24)
+        trading_days = generate_synthetic_trading_sessions(254, self.today)
+        obs_list = [
+            self._make_valid_observation(sec_voo, d, Decimal("500.00"))
+            for d in trading_days
+        ]
+        saturday_obs = self._make_valid_observation(
+            sec_voo, saturday, Decimal("500.00")
+        )
+        obs_list.append(saturday_obs)
+        ctx = self._build_context(
+            session_count=255,
+            custom_observations_by_sym={"VOO": obs_list},
+            bypass_view_validator=True,
+        )
+        res = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx,
+        )
+        self.assertEqual(res.status, PreflightStatus.REJECTED)
+        self.assertIn("weekend_observation_detected", res.reason)
+
+    def test_closed_session_holiday_observation_rejected(self) -> None:
+        """C3: Observation on exchange holiday (MLK Day) returns REJECTED."""
+        sec_voo = self.etf_uuids["VOO"]
+        mlk_day = date(2026, 1, 19)
+        trading_days = [
+            d
+            for d in generate_synthetic_trading_sessions(255, self.today)
+            if d != mlk_day
+        ][:254]
+        obs_list = [
+            self._make_valid_observation(sec_voo, d, Decimal("500.00"))
+            for d in trading_days
+        ]
+        holiday_obs = self._make_valid_observation(sec_voo, mlk_day, Decimal("500.00"))
+        obs_list.append(holiday_obs)
+        ctx = self._build_context(
+            session_count=255,
+            custom_observations_by_sym={"VOO": obs_list},
+            bypass_view_validator=True,
+        )
+        res = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx,
+        )
+        self.assertEqual(res.status, PreflightStatus.REJECTED)
+        self.assertIn("closed_session_observation_detected", res.reason)
+
+    def test_observed_holiday_observation_rejected(self) -> None:
+        """C3: Observation on observed holiday returns REJECTED."""
+        holidays_2026 = SyntheticExchangeCalendar.get_holidays(2026)
+        self.assertIn(date(2026, 1, 19), holidays_2026)
+        self.assertIn(date(2026, 4, 3), holidays_2026)
+        self.assertIn(date(2026, 5, 25), holidays_2026)
+
+    def test_half_day_session_accepted_as_valid(self) -> None:
+        """C3: Half-day session (Black Friday) is accepted as open session."""
+        half_days = SyntheticExchangeCalendar.get_half_days(2026)
+        self.assertIn(date(2026, 11, 27), half_days)
+        self.assertTrue(
+            SyntheticExchangeCalendar.is_trading_session(date(2026, 11, 27))
+        )
+
+    def test_b4_sessions_boundary_252_vs_253(self) -> None:
+        """C3: B4 requires 253 sessions (252 UNAVAILABLE, 253 ELIGIBLE)."""
+        ctx_252 = self._build_context(session_count=252)
+        res_252 = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx_252,
+        )
+        self.assertEqual(res_252.status, PreflightStatus.UNAVAILABLE)
+
+        ctx_253 = self._build_context(session_count=253)
+        res_253 = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx_253,
+        )
+        self.assertEqual(res_253.status, PreflightStatus.ELIGIBLE)
+
+    def test_b5_sessions_boundary_60_vs_61(self) -> None:
+        """C3: B5 requires 61 sessions (60 UNAVAILABLE, 61 ELIGIBLE)."""
+        ctx_60 = self._build_context(session_count=60)
+        res_60 = self._eval(
+            proposed_strategy="B5",
+            current_strategy="B3",
+            decision_context=ctx_60,
+        )
+        self.assertEqual(res_60.status, PreflightStatus.UNAVAILABLE)
+
+        ctx_61 = self._build_context(session_count=61)
+        res_61 = self._eval(
+            proposed_strategy="B5",
+            current_strategy="B3",
+            decision_context=ctx_61,
+        )
+        self.assertEqual(res_61.status, PreflightStatus.ELIGIBLE)
+
+    def test_verify_tampered_is_tradeable_fails(self) -> None:
+        """C4: Tampered is_tradeable flag fails downstream verification."""
+        port = self._make_valid_portfolio_state()
+        res_unavail = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=self._build_context(session_count=50),
+            current_portfolio_state=port,
+        )
+        self.assertFalse(res_unavail.is_tradeable)
+        forged = Stage1SwitchPreflightResult.model_construct(**dict(res_unavail))
+        object.__setattr__(forged, "is_tradeable", True)
+        with self.assertRaises(ValueError) as cm:
+            verify_stage1_switch_preflight_result(
+                forged,
+                current_portfolio_state=port,
+                expected_account_id="account-alpha",
+                expected_mandate="balanced_stage1",
+                expected_session_key=self.session_key,
+                expected_decision_cutoff=self.closed_at,
+                expected_cohort_hash=self.cohort_hash,
+            )
+        self.assertIn("validation / coherence check", str(cm.exception))
+
+    def test_verify_tampered_status_fails(self) -> None:
+        """C4: Tampered status with unchanged hash fails verification."""
+        ctx = self._build_context(session_count=255)
+        port = self._make_valid_portfolio_state()
+        res = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx,
+            current_portfolio_state=port,
+        )
+        forged = Stage1SwitchPreflightResult.model_construct(**dict(res))
+        object.__setattr__(forged, "status", PreflightStatus.REJECTED)
+        with self.assertRaises(ValueError) as cm:
+            verify_stage1_switch_preflight_result(
+                forged,
+                current_portfolio_state=port,
+                expected_account_id="account-alpha",
+                expected_mandate="balanced_stage1",
+                expected_session_key=self.session_key,
+                expected_decision_cutoff=self.closed_at,
+                expected_cohort_hash=self.cohort_hash,
+            )
+        self.assertIn("validation / coherence check", str(cm.exception))
+
+    def test_verify_tampered_reason_fails(self) -> None:
+        """C4: Tampered reason with unchanged hash fails verification."""
+        ctx = self._build_context(session_count=255)
+        port = self._make_valid_portfolio_state()
+        res = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx,
+            current_portfolio_state=port,
+        )
+        forged = Stage1SwitchPreflightResult.model_construct(**dict(res))
+        object.__setattr__(forged, "reason", "forged_clean_reason")
+        with self.assertRaises(ValueError) as cm:
+            verify_stage1_switch_preflight_result(
+                forged,
+                current_portfolio_state=port,
+                expected_account_id="account-alpha",
+                expected_mandate="balanced_stage1",
+                expected_session_key=self.session_key,
+                expected_decision_cutoff=self.closed_at,
+                expected_cohort_hash=self.cohort_hash,
+            )
+        self.assertIn("validation / coherence check", str(cm.exception))
+
+    def test_verify_tampered_hold_incumbent_fails(self) -> None:
+        """C4: Tampered hold_incumbent flag fails verification."""
+        ctx = self._build_context(session_count=255)
+        port = self._make_valid_portfolio_state()
+        res = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx,
+            current_portfolio_state=port,
+        )
+        forged = Stage1SwitchPreflightResult.model_construct(**dict(res))
+        object.__setattr__(forged, "hold_incumbent", True)
+        with self.assertRaises(ValueError) as cm:
+            verify_stage1_switch_preflight_result(
+                forged,
+                current_portfolio_state=port,
+                expected_account_id="account-alpha",
+                expected_mandate="balanced_stage1",
+                expected_session_key=self.session_key,
+                expected_decision_cutoff=self.closed_at,
+                expected_cohort_hash=self.cohort_hash,
+            )
+        self.assertIn("validation / coherence check", str(cm.exception))
+
+    def test_verify_wrong_expected_cutoff_fails(self) -> None:
+        """C4/C6: Verification fails if expected cutoff does not match."""
+        ctx = self._build_context(session_count=255)
+        port = self._make_valid_portfolio_state()
+        res = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx,
+            current_portfolio_state=port,
+        )
+        wrong_cutoff = self.closed_at + timedelta(hours=1)
+        with self.assertRaises(ValueError) as cm:
+            verify_stage1_switch_preflight_result(
+                res,
+                current_portfolio_state=port,
+                expected_account_id="account-alpha",
+                expected_mandate="balanced_stage1",
+                expected_session_key=self.session_key,
+                expected_decision_cutoff=wrong_cutoff,
+                expected_cohort_hash=self.cohort_hash,
+            )
+        self.assertIn("decision_cutoff mismatch", str(cm.exception))
 
 
 if __name__ == "__main__":

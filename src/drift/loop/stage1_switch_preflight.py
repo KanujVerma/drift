@@ -7,8 +7,8 @@ completeness, fixed universe integrity, price validity, and incumbent
 portfolio safety before any candidate targets can reach the evaluator.
 """
 
-from collections.abc import Mapping, Sequence
-from datetime import datetime
+from collections.abc import Iterable, Mapping, Sequence
+from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Literal, Self
@@ -18,6 +18,7 @@ from pydantic import model_validator
 
 from drift.analysis.analytical_returns import (
     CorporateActionAdjustment,
+    SessionObservationRecord,
     build_analytical_return_series,
 )
 from drift.baselines.b3_monthly_equal_weight_rebalance import (
@@ -42,12 +43,18 @@ from drift.domain.common import (
     UTCDateTime,
 )
 from drift.domain.evaluator_exploratory_strategy import (
+    ExploratoryReconstructedDecisionViewV1,
     ExploratoryStrategyDecisionContextV1,
 )
 from drift.domain.evaluator_portfolio import PortfolioStateV2
+from drift.domain.evaluator_reconstruction import (
+    ExploratoryReconstructedSessionObservationV1,
+)
 from drift.domain.evaluator_strategy import (
     StrategyDecisionContextV1,
+    StrategyDecisionViewV1,
 )
+from drift.domain.normalization import DerivedObservationViewV1
 from drift.domain.sessions import SessionKeyV1
 from drift.domain.strategies import StrategyReference
 from drift.serialization.canonical import content_hash
@@ -516,54 +523,71 @@ def check_portfolio_safety(
                 "has indeterminate cost basis",
             )
 
-    if decision_context is not None:
-        if current_portfolio_state.session_key != decision_context.session_key:
-            return (
-                False,
-                "portfolio_context_session_mismatch: portfolio session "
-                f"{current_portfolio_state.session_key} does not match "
-                f"context {decision_context.session_key}",
-            )
-        if decision_context.portfolio_nav <= Decimal("0"):
-            return False, "non_positive_nav: context portfolio_nav is non-positive"
+    # Mandatory decision context verification
+    if decision_context is None:
+        return (
+            False,
+            "missing_decision_context: strategy decision context is required "
+            "for portfolio safety verification",
+        )
+    if decision_context.session_key is None:
+        return (
+            False,
+            "missing_decision_session: decision context lacks session_key",
+        )
+    if decision_context.decision_cutoff is None:
+        return (
+            False,
+            "missing_decision_cutoff: decision context lacks decision_cutoff timestamp",
+        )
+
+    if current_portfolio_state.session_key != decision_context.session_key:
+        return (
+            False,
+            "portfolio_context_session_mismatch: portfolio session "
+            f"{current_portfolio_state.session_key} does not match "
+            f"context {decision_context.session_key}",
+        )
+    if decision_context.portfolio_nav <= Decimal("0"):
+        return False, "non_positive_nav: context portfolio_nav is non-positive"
+    if abs(
+        current_portfolio_state.net_asset_value - decision_context.portfolio_nav
+    ) > Decimal("0.01"):
+        return (
+            False,
+            "portfolio_context_nav_mismatch: portfolio NAV "
+            f"{current_portfolio_state.net_asset_value} does not match "
+            f"context NAV {decision_context.portfolio_nav}",
+        )
+    if (
+        hasattr(decision_context, "current_cash")
+        and decision_context.current_cash is not None
+    ):
         if abs(
-            current_portfolio_state.net_asset_value - decision_context.portfolio_nav
+            current_portfolio_state.cash_balance - decision_context.current_cash
         ) > Decimal("0.01"):
             return (
                 False,
-                "portfolio_context_nav_mismatch: portfolio NAV "
-                f"{current_portfolio_state.net_asset_value} does not match "
-                f"context NAV {decision_context.portfolio_nav}",
+                "portfolio_context_cash_mismatch: portfolio cash "
+                f"{current_portfolio_state.cash_balance} does not match "
+                f"context cash {decision_context.current_cash}",
             )
-        if (
-            hasattr(decision_context, "current_cash")
-            and decision_context.current_cash is not None
-        ):
-            if abs(
-                current_portfolio_state.cash_balance - decision_context.current_cash
-            ) > Decimal("0.01"):
-                return (
-                    False,
-                    "portfolio_context_cash_mismatch: portfolio cash "
-                    f"{current_portfolio_state.cash_balance} does not match "
-                    f"context cash {decision_context.current_cash}",
-                )
-        if (
-            hasattr(decision_context, "current_holdings")
-            and decision_context.current_holdings is not None
-        ):
-            ctx_holdings = {
-                h.security_id: h.quantity for h in decision_context.current_holdings
-            }
-            port_holdings = {
-                h.security_id: h.quantity for h in current_portfolio_state.holdings
-            }
-            if ctx_holdings != port_holdings:
-                return (
-                    False,
-                    "portfolio_context_holdings_mismatch: "
-                    "portfolio holdings do not match context holdings",
-                )
+    if (
+        hasattr(decision_context, "current_holdings")
+        and decision_context.current_holdings is not None
+    ):
+        ctx_holdings = {
+            h.security_id: h.quantity for h in decision_context.current_holdings
+        }
+        port_holdings = {
+            h.security_id: h.quantity for h in current_portfolio_state.holdings
+        }
+        if ctx_holdings != port_holdings:
+            return (
+                False,
+                "portfolio_context_holdings_mismatch: "
+                "portfolio holdings do not match context holdings",
+            )
 
     return True, None
 
@@ -639,7 +663,7 @@ def validate_universe(
             (),
         )
 
-    if cohort_hash != expected_universe_hash:
+    if cohort_hash is not None and cohort_hash != expected_universe_hash:
         return (
             False,
             f"universe_hash_mismatch: expected {expected_universe_hash}, "
@@ -707,15 +731,54 @@ def _get_raw_observations(
     """Retrieve raw historical observation objects for a security."""
     if context is None:
         return ()
-    views = getattr(context, "views", None)
-    if views is None:
-        views = getattr(context, "reconstructed_decision_views", ())
-    if not isinstance(views, Sequence):
-        views = ()
-    for v in views:
-        if getattr(v, "security_id", None) == sec_id:
-            return getattr(v, "observations", ())
-    return ()
+
+    if isinstance(context, StrategyDecisionContextV1):
+        for group in context.decision_views:
+            if not isinstance(group, StrategyDecisionViewV1):
+                raise ValueError(
+                    "cross_lane_evidence_detected: StrategyDecisionContextV1 "
+                    f"contains non-StrategyDecisionViewV1 group {type(group)}"
+                )
+            if group.security_id == sec_id:
+                for view in group.views:
+                    if not isinstance(view, DerivedObservationViewV1):
+                        raise ValueError(
+                            "cross_lane_evidence_detected: StrategyDecisionViewV1 "
+                            f"contains non-DerivedObservationViewV1 view {type(view)}"
+                        )
+                return group.views
+        return ()
+
+    if isinstance(context, ExploratoryStrategyDecisionContextV1):
+        if context.lane != "exploratory":
+            raise ValueError(
+                "invalid_exploratory_lane: expected lane 'exploratory', "
+                f"got {context.lane!r}"
+            )
+        for recon_group in context.reconstructed_decision_views:
+            if not isinstance(recon_group, ExploratoryReconstructedDecisionViewV1):
+                raise ValueError(
+                    "cross_lane_evidence_detected: "
+                    "ExploratoryStrategyDecisionContextV1 "
+                    f"contains non-group {type(recon_group)}"
+                )
+            if recon_group.security_id == sec_id:
+                for obs in recon_group.observations:
+                    if not isinstance(
+                        obs, ExploratoryReconstructedSessionObservationV1
+                    ):
+                        raise ValueError(
+                            "cross_lane_evidence_detected: "
+                            "ExploratoryReconstructedDecisionViewV1 contains "
+                            f"non-observation record {type(obs)}"
+                        )
+                return recon_group.observations
+        return ()
+
+    raise ValueError(
+        "unsupported_context_type: unrecognized strategy decision context "
+        f"type {type(context)}"
+    )
 
 
 def validate_observations_and_adjustments(
@@ -730,14 +793,33 @@ def validate_observations_and_adjustments(
     adjustments_by_security: (
         Mapping[UUID7, Sequence[CorporateActionAdjustment]] | None
     ),
+    completed_sessions: (Iterable[date | SessionKeyV1] | None) = None,
 ) -> tuple[bool, PreflightStatus, str | None]:
-    """Validate observation ordering, timestamps, session close, and adjustments."""
+    """Validate observation ordering, timestamps, calendar, and adjustments."""
     if decision_context is None:
         return (
             False,
             PreflightStatus.UNAVAILABLE,
             "missing_decision_context: strategy decision context is required",
         )
+
+    if completed_sessions is None:
+        return (
+            False,
+            PreflightStatus.UNAVAILABLE,
+            "missing_trading_calendar_evidence: completed trading session schedule "
+            "is required to verify session count and exchange status",
+        )
+
+    completed_keys: set[SessionKeyV1] = set()
+    completed_dates: set[date] = set()
+    for item in completed_sessions:
+        if isinstance(item, SessionKeyV1):
+            completed_keys.add(item)
+            completed_dates.add(item.local_date)
+        elif isinstance(item, date):
+            completed_dates.add(item)
+
     if prop_name == "B3":
         min_required_sessions = B3_MIN_SESSIONS
     elif prop_name == "B4":
@@ -761,7 +843,11 @@ def validate_observations_and_adjustments(
     eligible_volatility_securities: list[UUID7] = []
 
     for sec_id in eval_universe:
-        raw_obs = _get_raw_observations(decision_context, sec_id)
+        try:
+            raw_obs = _get_raw_observations(decision_context, sec_id)
+        except ValueError as exc:
+            return False, PreflightStatus.REJECTED, str(exc)
+
         if not raw_obs:
             return (
                 False,
@@ -774,65 +860,132 @@ def validate_observations_and_adjustments(
             raw_s_key = getattr(raw_item, "source_session", None) or getattr(
                 raw_item, "session_key", None
             )
-            if raw_s_key is not None:
-                if raw_s_key.local_date > cutoff_date:
+            if raw_s_key is None:
+                return (
+                    False,
+                    PreflightStatus.REJECTED,
+                    f"malformed_observation: observation for security {sec_id} "
+                    "lacks session key",
+                )
+
+            if raw_s_key.local_date > cutoff_date:
+                return (
+                    False,
+                    PreflightStatus.UNAVAILABLE,
+                    f"future_observation_detected: observation for "
+                    f"security {sec_id} dated {raw_s_key.local_date} "
+                    f"exceeds cutoff {cutoff_date}",
+                )
+            if raw_s_key.local_date.weekday() >= 5:
+                return (
+                    False,
+                    PreflightStatus.REJECTED,
+                    f"weekend_observation_detected: observation for "
+                    f"security {sec_id} dated {raw_s_key.local_date} "
+                    "occurs on a weekend",
+                )
+            if (
+                raw_s_key not in completed_keys
+                and raw_s_key.local_date not in completed_dates
+            ):
+                return (
+                    False,
+                    PreflightStatus.REJECTED,
+                    f"closed_session_observation_detected: session "
+                    f"{raw_s_key.local_date} is not an evidenced open trading session",
+                )
+            if raw_s_key in seen_raw_sessions:
+                return (
+                    False,
+                    PreflightStatus.REJECTED,
+                    f"duplicate_session_observation: security {sec_id} "
+                    f"has duplicate observation for session {raw_s_key}",
+                )
+            seen_raw_sessions.add(raw_s_key)
+
+            # Check time availability
+            if isinstance(raw_item, DerivedObservationViewV1):
+                if raw_item.role != "decision":
+                    return (
+                        False,
+                        PreflightStatus.REJECTED,
+                        f"invalid_observation_role: derived view for security {sec_id} "
+                        f"has role {raw_item.role!r}, expected 'decision'",
+                    )
+                query_obs = getattr(raw_item.query, "observation", None)
+                if query_obs is None:
                     return (
                         False,
                         PreflightStatus.UNAVAILABLE,
-                        f"future_observation_detected: observation for "
-                        f"security {sec_id} dated {raw_s_key.local_date} "
-                        f"exceeds cutoff {cutoff_date}",
+                        f"missing_observation_availability_evidence: derived view for "
+                        f"security {sec_id} lacks observation query",
                     )
-                if raw_s_key.local_date.weekday() >= 5:
+                d_time = getattr(query_obs, "decision_time", None)
+                k_cutoff = getattr(query_obs, "knowledge_cutoff", None)
+                e_cutoff = getattr(query_obs, "effective_cutoff", None)
+                if d_time is None and k_cutoff is None and e_cutoff is None:
                     return (
                         False,
-                        PreflightStatus.REJECTED,
-                        f"weekend_observation_detected: observation for "
-                        f"security {sec_id} dated {raw_s_key.local_date} "
-                        "occurs on a weekend",
+                        PreflightStatus.UNAVAILABLE,
+                        f"missing_observation_availability_evidence: observation query "
+                        f"for security {sec_id} lacks temporal cutoff evidence",
                     )
-                if raw_s_key in seen_raw_sessions:
+                for t_name, t_val in (
+                    ("decision_time", d_time),
+                    ("knowledge_cutoff", k_cutoff),
+                    ("effective_cutoff", e_cutoff),
+                ):
+                    if t_val is not None and t_val > decision_cutoff:
+                        return (
+                            False,
+                            PreflightStatus.UNAVAILABLE,
+                            f"late_available_observation_detected: observation for "
+                            f"security {sec_id} {t_name} {t_val.isoformat()} exceeds "
+                            f"decision cutoff {decision_cutoff.isoformat()}",
+                        )
+            elif isinstance(raw_item, ExploratoryReconstructedSessionObservationV1):
+                t_val = raw_item.evidence_vintage_cutoff
+                if t_val is None:
                     return (
                         False,
-                        PreflightStatus.REJECTED,
-                        f"duplicate_session_observation: security {sec_id} "
-                        f"has duplicate observation for session {raw_s_key}",
+                        PreflightStatus.UNAVAILABLE,
+                        f"missing_observation_availability_evidence: observation "
+                        f"for security {sec_id} lacks evidence_vintage_cutoff",
                     )
-                seen_raw_sessions.add(raw_s_key)
-
-            # Check time-of-day availability / late-arriving timestamps
-            t_val = None
-            time_attr_found = None
-            for time_attr in (
-                "evidence_vintage_cutoff",
-                "available_at",
-                "closed_at",
-                "observed_at",
-                "timestamp",
-            ):
-                candidate_t = getattr(raw_item, time_attr, None)
-                if isinstance(candidate_t, datetime):
-                    t_val = candidate_t
-                    time_attr_found = time_attr
-                    break
-
-            if t_val is None:
-                return (
-                    False,
-                    PreflightStatus.UNAVAILABLE,
-                    f"missing_observation_availability_evidence: observation "
-                    f"for security {sec_id} lacks availability timestamp or "
+                if t_val > decision_cutoff:
+                    return (
+                        False,
+                        PreflightStatus.UNAVAILABLE,
+                        "late_available_observation_detected: observation for "
+                        f"security {sec_id} evidence_vintage_cutoff "
+                        f"{t_val.isoformat()} exceeds decision cutoff "
+                        f"{decision_cutoff.isoformat()}",
+                    )
+            else:
+                candidate_t = None
+                for attr_name in (
                     "evidence_vintage_cutoff",
-                )
-
-            if t_val > decision_cutoff:
-                return (
-                    False,
-                    PreflightStatus.UNAVAILABLE,
-                    f"late_available_observation_detected: observation for security "
-                    f"{sec_id} {time_attr_found} {t_val.isoformat()} exceeds "
-                    f"decision cutoff {decision_cutoff.isoformat()}",
-                )
+                    "available_at",
+                    "closed_at",
+                ):
+                    cand = getattr(raw_item, attr_name, None)
+                    if isinstance(cand, datetime):
+                        candidate_t = cand
+                        break
+                if candidate_t is None:
+                    return (
+                        False,
+                        PreflightStatus.UNAVAILABLE,
+                        f"missing_observation_availability_evidence: observation "
+                        f"for security {sec_id} lacks availability timestamp",
+                    )
+                if candidate_t > decision_cutoff:
+                    return (
+                        False,
+                        PreflightStatus.UNAVAILABLE,
+                        f"late_available_observation_detected: observation for "
+                        f"security {sec_id} timestamp exceeds decision cutoff",
+                    )
 
         history = extract_security_history(decision_context, sec_id)
         if not history:
@@ -846,6 +999,7 @@ def validate_observations_and_adjustments(
         # Check chronological order, non-empty, and valid price marks
         prev_date = None
         has_current_session_close = False
+        valid_history_sessions: list[SessionObservationRecord] = []
         for obs in history:
             if obs.session_key.local_date > cutoff_date:
                 return (
@@ -861,6 +1015,17 @@ def validate_observations_and_adjustments(
                     PreflightStatus.REJECTED,
                     f"weekend_observation_detected: observation for security "
                     f"{sec_id} dated {obs.session_key.local_date} occurs on a weekend",
+                )
+            if (
+                obs.session_key not in completed_keys
+                and obs.session_key.local_date not in completed_dates
+            ):
+                return (
+                    False,
+                    PreflightStatus.REJECTED,
+                    "closed_session_observation_detected: session "
+                    f"{obs.session_key.local_date} is not an evidenced "
+                    "open trading session",
                 )
             if prev_date is not None and obs.session_key.local_date < prev_date:
                 return (
@@ -889,6 +1054,8 @@ def validate_observations_and_adjustments(
 
             if obs.session_key == session_key:
                 has_current_session_close = True
+
+            valid_history_sessions.append(obs)
 
         if not has_current_session_close:
             return (
@@ -936,11 +1103,16 @@ def validate_observations_and_adjustments(
 
         # Analytical return series verification for B4 and B5
         if prop_name in {"B4", "B5"}:
+            series_grade: Literal["exploratory", "promotion"] = (
+                "promotion"
+                if isinstance(decision_context, StrategyDecisionContextV1)
+                else "exploratory"
+            )
             try:
                 series = build_analytical_return_series(
                     security_id=sec_id,
-                    grade="exploratory",
-                    observations=history,
+                    grade=series_grade,
+                    observations=valid_history_sessions,
                     adjustments=sec_adjs,
                 )
             except Exception as exc:
@@ -1143,15 +1315,17 @@ def verify_stage1_switch_preflight_result(
     expected_mandate: str,
     expected_session_key: SessionKeyV1,
     expected_cohort_hash: SHA256Hash,
+    expected_decision_cutoff: datetime,
     current_portfolio_state: PortfolioStateV2 | None = None,
-    expected_decision_cutoff: datetime | None = None,
+    expected_universe: Sequence[UUID7] | None = None,
 ) -> bool:
     """Cryptographically revalidate a preflight verdict for consumers (Issue 423).
 
-    Verifies deterministic local integrity and context binding against live caller
-    state. A return value of True confirms the verdict is intact, mathematically
-    self-consistent, and bound to the active context; it does NOT constitute
-    trading authorization or replace downstream M0 risk-engine evaluation.
+    Verifies deterministic local integrity, recomputed content hash, status/flag
+    coherence, and context binding against live caller state. A return value of
+    True confirms the verdict is intact, mathematically self-consistent, and
+    bound to the active context; it does NOT constitute trading authorization
+    or replace downstream M0 risk-engine evaluation.
 
     Raises ValueError if any binding fails, or returns True on success.
     """
@@ -1163,7 +1337,42 @@ def verify_stage1_switch_preflight_result(
         raise ValueError("expected_session_key is required for verification")
     if not expected_cohort_hash or not expected_cohort_hash.strip():
         raise ValueError("expected_cohort_hash is required for verification")
+    if expected_decision_cutoff is None:
+        raise ValueError("expected_decision_cutoff is required for verification")
 
+    # 1. Revalidate model coherence (catches model_copy tampering)
+    try:
+        Stage1SwitchPreflightResult.model_validate(result.model_dump(mode="python"))
+    except Exception as exc:
+        raise ValueError(
+            f"verdict failed model validation / coherence check: {exc}"
+        ) from exc
+
+    # 2. Recompute canonical content hash and compare
+    expected_hash = compute_preflight_hash(
+        status=result.status,
+        reason=result.reason,
+        proposed_strategy=result.proposed_strategy,
+        current_strategy=result.current_strategy,
+        effective_strategy=result.effective_strategy,
+        is_tradeable=result.is_tradeable,
+        hold_incumbent=result.hold_incumbent,
+        requires_containment=result.requires_containment,
+        session_key=result.session_key,
+        decision_cutoff=result.decision_cutoff,
+        cohort_hash=result.cohort_hash,
+        admitted_universe=result.admitted_universe,
+        portfolio_state_hash=result.portfolio_state_hash,
+        account_id=result.account_id,
+        mandate=result.mandate,
+    )
+    if result.preflight_hash != expected_hash:
+        raise ValueError(
+            f"verdict preflight hash mismatch: recomputed {expected_hash}, "
+            f"got {result.preflight_hash}"
+        )
+
+    # 3. Verify context bindings
     if result.session_key != expected_session_key:
         raise ValueError(
             f"verdict session key mismatch: expected {expected_session_key}, "
@@ -1188,15 +1397,20 @@ def verify_stage1_switch_preflight_result(
             f"got {result.cohort_hash!r}"
         )
 
-    if (
-        expected_decision_cutoff is not None
-        and result.decision_cutoff != expected_decision_cutoff
-    ):
+    if result.decision_cutoff != expected_decision_cutoff:
         raise ValueError(
             f"verdict decision_cutoff mismatch: expected {expected_decision_cutoff}, "
             f"got {result.decision_cutoff}"
         )
 
+    if expected_universe is not None:
+        if tuple(result.admitted_universe) != tuple(expected_universe):
+            raise ValueError(
+                f"verdict admitted_universe mismatch: expected {expected_universe}, "
+                f"got {result.admitted_universe}"
+            )
+
+    # 4. Verify portfolio state binding
     if current_portfolio_state is not None:
         state_hash = content_hash(current_portfolio_state.model_dump(mode="python"))
         if result.portfolio_state_hash != state_hash:
@@ -1239,6 +1453,7 @@ def evaluate_stage1_switch_preflight(
     open_orders: Sequence[object] | None = None,
     mandate_verified: bool | None = None,
     risk_verified: bool | None = None,
+    completed_sessions: (Iterable[date | SessionKeyV1] | None) = None,
 ) -> Stage1SwitchPreflightResult:
     """Evaluate whether a proposed switch is eligible for Stage 1 target staging.
 
@@ -1352,7 +1567,7 @@ def evaluate_stage1_switch_preflight(
         )
         return fail(u_status, u_reason)
 
-    # 6. Observations, timestamps, and corporate action adjustments
+    # 6. Observations, timestamps, calendar, and corporate action adjustments
     is_valid_obs, obs_status, obs_reason = validate_observations_and_adjustments(
         decision_context=decision_context,
         eval_universe=eval_universe,
@@ -1360,6 +1575,7 @@ def evaluate_stage1_switch_preflight(
         decision_cutoff=decision_cutoff,
         session_key=session_key,
         adjustments_by_security=adjustments_by_security,
+        completed_sessions=completed_sessions,
     )
     if not is_valid_obs:
         assert obs_reason is not None
@@ -1390,7 +1606,7 @@ def evaluate_stage1_switch_preflight(
         requires_containment=False,
         session_key=session_key,
         decision_cutoff=decision_cutoff,
-        cohort_hash=cohort_hash,
+        cohort_hash=cohort_hash or expected_universe_hash,
         admitted_universe=eval_universe,
         portfolio_state_hash=port_state_hash,
         account_id=account_id,
