@@ -54,7 +54,7 @@ When an agent encounters ambiguous or conflicting statements, it must strictly a
 3. **Accepted ADRs and Frozen Contracts**: Durable decisions in `docs/adr/` and accepted producer contracts.
 4. **Accepted Code and Tests at Exact Revisions**: Merged implementations under `src/drift/` and passing test suites under `tests/`.
 5. **Owner-Directed Decisions Recorded with Provenance**: Binding owner directions recorded on GitHub issues with traceable rationale.
-6. **Explicitly Labelled Proposed or Draft Specifications**: Unmerged PRs (e.g., PR #419, PR #426) and draft design documents.
+6. **Explicitly Labelled Proposed or Draft Specifications**: Unmerged draft pull requests (verified live on GitHub at Resume time) and draft design documents.
 7. **Conversation Context and Assistant Memory**: Transient chat memory and prompt history.
 
 ### Operational Precedence Rules
@@ -132,47 +132,122 @@ Implementation proceeds through six disciplined, sequential phases:
 
 ## 5. Concrete Drift Example: Self-Contained Implementation Specification
 
-The following worked example illustrates how an architect provides complete, unambiguous requirements for a hypothetical Stage 1A experiment integration test:
+The following worked example illustrates how an architect provides complete, unambiguous requirements for a hypothetical Stage 1A experiment integration test, satisfying all fifteen mandatory prompt contract components defined in Section 3:
 
 ```markdown
-### TASK SPECIFICATION: SYNTHETIC B-VERSUS-R ORCHESTRATION TEST
+### TASK SPECIFICATION: SYNTHETIC B-VERSUS-R ORCHESTRATION TEST (ILLUSTRATIVE FUTURE SPECIFICATION)
 
-1. Project: Drift (KanujVerma/drift)
-2. Owner: Kanuj | Implementer: Gemini / Antigravity
-3. Issue: #383 (Acceptance Design Verification)
-4. Mission: Verify deterministic orchestration and dual-ledger accounting for Arm B vs. Arm R on synthetic fixtures.
-5. Architecture: Stage 1A selector evaluation. Arm B (AI selector) vs. Arm R (conventional comparator) choosing among {B3, B4, B5}.
-6. Existing Components:
-   - B3: src/drift/baselines/b3_monthly_equal_weight_rebalance.py
-   - B4: src/drift/baselines/b4_momentum.py (min 253 sessions)
-   - B5: src/drift/baselines/b5_low_volatility.py (min 61 sessions)
-7. Candidate Cohort: Provisional 12-ETF universe (VOO, IJH, IJR, QQQ, VEA, VWO, SHY, IEF, TLT, TIP, LQD, GLD).
-8. Execution Timeline: 253 warmup sessions + 126 unscored observation sessions. Fresh accounts ($10,000.00 USD each) initialize for scored phase. Both start in Strategy B3. First switch evaluated after first scored month.
-9. Producer Authority:
-   - Matthew owns authoritative portfolio RESULT, cash, positions, and trading costs.
-   - Krish owns candidate proposals, attempts, model replay, and raw_cost receipts.
-   - Kanuj owns derived scientific cost-attribution view.
-10. Synthetic Input Fixture:
-   - Arm B: Initial NAV $10,000.00, Gross gain +$150.00, Trading costs $30.00 -> Net gain +$120.00, Terminal NAV $10,120.00. Operating cost $25.00.
-   - Arm R: Initial NAV $10,000.00, Gross gain +$80.00, Trading costs $20.00 -> Net gain +$60.00, Terminal NAV $10,060.00. Operating cost $5.00.
-11. Expected Analytical Calculations:
-   - Arm B Net Return: (10120 - 10000) / 10000 = 0.0120 (1.20%)
-   - Arm R Net Return: (10060 - 10000) / 10000 = 0.0060 (0.60%)
-   - Paired Net Return Difference: 0.0120 - 0.0060 = 0.0060 (0.60 percentage points)
-   - Arm B Economic Gain: 120.00 - 25.00 = 95.00 USD
-   - Arm R Economic Gain: 60.00 - 5.00 = 55.00 USD
-   - Comparative Economic Advantage: 95.00 - 55.00 = 40.00 USD
-12. Required Assertions:
-   - Account B NAV == 10120.00; Account R NAV == 10060.00.
-   - Net return difference == 0.0060; Economic advantage == 40.00 USD.
-   - Zero operating costs debited from portfolio cash balances.
-   - Trading costs deducted exactly once inside platform NAV.
-   - Accounts B and R remain strictly isolated.
-13. Status and Limitations:
-   - This example specifies a future synthetic test harness; it does not implement runtime code.
-   - It does NOT demonstrate real-world AI investment profitability.
-   - R's exact utility formula remains an open decision packet (DP-R6) requiring formal approval before scored evaluation.
+1. PROJECT AND REPOSITORY:
+   Drift, KanujVerma/drift. Target REPO_ROOT.
+
+2. ACCOUNTABLE OWNER AND ACTUAL EXECUTION AGENT:
+   Accountable Owner: Kanuj | Actual Execution Agent: Gemini / Antigravity.
+
+3. ISSUE, AUTHORIZATION, AND WRITER CLAIM:
+   Hypothetical future runtime implementation issue (e.g., #999 'Implement Synthetic Stage 1A B/R Integration Test').
+   Note: GitHub issue #383 is an acceptance design specification only and does NOT authorize creating runtime code.
+   A new, dedicated runtime issue and recorded writer claim are mandatory prior to implementation.
+
+4. MISSION AND MEASURABLE DESIRED RESULT:
+   Test one synthetic B-versus-R campaign execution end-to-end and verify account isolation, causal timing,
+   scientific eligibility evaluation, trial evidence completeness, and comparative economics without double-counting costs.
+
+5. EXACT APPROVED ARCHITECTURE:
+   Stage 1A selector evaluation under Matthew's single authoritative portfolio ledger plus Kanuj's derived scientific
+   cost-attribution view. Arm B is the adaptive AI selector; Arm R is the deterministic conventional comparator.
+   Both choose strictly among {B3, B4, B5}:
+   - B3: Monthly equal-weight rebalance.
+   - B4: 12-minus-1 cross-sectional momentum (requires >= 253 history sessions, top ceil(n/2) selection).
+   - B5: 60-return low volatility (requires >= 61 history sessions, bottom ceil(n/2) selection).
+   Both operate under the identical Balanced portfolio mandate and identical time-eligible information.
+
+6. RELEVANT EXISTING CODE AND INTERFACE LOCATIONS:
+   - B3 Baseline: src/drift/baselines/b3_monthly_equal_weight_rebalance.py
+   - B4 Baseline: src/drift/baselines/b4_momentum.py
+   - B5 Baseline: src/drift/baselines/b5_low_volatility.py
+   - Scientific Contract: docs/architecture/adaptive-experiments/contracts/experiment.md (#392)
+   - Research Contract: docs/architecture/adaptive-experiments/contracts/research.md (Krish PR #400 / #375)
+   - Platform & Accounting Contract: docs/architecture/adaptive-experiments/contracts/platform.md (Matthew PR #407 / #376)
+   - Timing Contract: docs/architecture/adaptive-experiments/contracts/execution.md (Matthew PR #412 / #379)
+   - Mandate Contract: docs/architecture/adaptive-experiments/contracts/mandate.md (Matthew PR #414 / #380)
+   No fabricated runtime interfaces or competing account ledgers.
+
+7. INPUT AND OUTPUT STRUCTURES AND UNITS:
+   - History: 253 completed synthetic warmup sessions + 126 additional unscored observation sessions.
+   - Scored Accounts: Fresh, independent $10,000.00 USD accounts for Arm B and Arm R (distinct platform account IDs).
+   - Inputs: Mock authoritative platform RESULT records and Krish raw_cost receipts.
+   - Numeric Representation: Explicit DecimalText USD values; all outputs classified SYNTHETIC_ONLY.
+
+8. DATA-FLOW AND STATE-TRANSITION RULES:
+   Sequential pipeline:
+   1. Decision Context Cutoff T(t_k) at session close.
+   2. Arm B and Arm R emit candidate strategy proposals.
+   3. Scientific input eligibility preflight (PRE_DECISION_SCIENTIFIC_INPUT).
+   4. Matthew's platform independently evaluates Balanced mandate compliance.
+   5. Authorized simulated execution scheduled for next eligible session open (t_k + 1).
+   6. Matthew's platform ledger updates cash, positions, and NAV, emitting authoritative RESULT.
+   7. Krish raw_cost receipts joined to trial event history.
+   8. Derived scientific cost-attribution view computed.
+   First switch opportunity occurs only after the first completed scored month; transitions execute at next eligible open.
+
+9. ERROR, UNAVAILABLE, AND REFUSAL BEHAVIOR:
+   - Missing lookback history or market data: UNAVAILABLE.
+   - Malformed schema, tampered bytes, or corrupted preimage: INVALID.
+   - Missing platform RESULT: PENDING_RESULT.
+   - Unknown research operating costs: MISSING_COST in derived attribution view (portfolio NAV preserved).
+   - Unknown execution outcome: UNRESOLVED.
+   - Mandate refusal: Rejects transition orders; account retains valid incumbent; never dispatches order.
+   - Duplicate event submission: Idempotent processing; zero duplicate orders or charges.
+   - Missing history: Never triggers automatic account liquidation.
+
+10. EXACT FILE WRITE-SET AND PROTECTED PATHS:
+    - Illustrative Proposed Write-Set: tests/integration/test_stage1_br_synthetic.py
+    - Protected Surfaces: All production code (src/drift/), contracts, and architecture docs remain read-only.
+    (This is an illustrative hypothetical write-set only, NOT a currently authorized write-set).
+
+11. POSITIVE AND ADVERSARIAL TEST FIXTURES:
+    - Positive Fixture: Valid B-versus-R campaign execution with compliant proposals.
+    - Negative Fixtures:
+      - Late context observation arriving after cutoff (rejected as UNAVAILABLE).
+      - Malformed proposal payload (rejected as INVALID).
+      - Cross-arm context leakage attempt (sandboxed and rejected).
+      - Missing platform RESULT (trial outcome remains PENDING_RESULT).
+      - Unknown research cost (cost marked MISSING_COST).
+      - Identical duplicate retry (asserted idempotent).
+      - Mandate refusal probe (unauthorized transition rejected).
+
+12. EXPECTED NUMERICAL OR STRUCTURAL ASSERTIONS:
+    - Arm B Platform RESULT: Initial NAV 10,000.00, Gross gain +150.00, Trading costs 30.00 -> Net gain +120.00, Terminal NAV 10,120.00 USD.
+    - Arm B Operating Cost: 25.00 USD.
+    - Arm B Net Portfolio Return: (10120 - 10000) / 10000 = 0.0120 (1.20%).
+    - Arm B Economic Gain: 120.00 - 25.00 = 95.00 USD.
+    - Arm R Platform RESULT: Initial NAV 10,000.00, Gross gain +80.00, Trading costs 20.00 -> Net gain +60.00, Terminal NAV 10,060.00 USD.
+    - Arm R Operating Cost: 5.00 USD.
+    - Arm R Net Portfolio Return: (10060 - 10000) / 10000 = 0.0060 (0.60%).
+    - Arm R Economic Gain: 60.00 - 5.00 = 55.00 USD.
+    - Paired Net Return Advantage: 0.0120 - 0.0060 = 0.0060 (0.60 percentage points).
+    - Comparative Economic Advantage: 95.00 - 55.00 = 40.00 USD.
+    - Invariants: Operating expenses NEVER debit portfolio cash; trading transaction costs are deducted inside platform NAV.
+
+13. DEPENDENCIES AND UNRESOLVED DECISIONS:
+    - Producer-integrated Level 2 execution requires accepted, merged producer contracts (#375, #376, #379, #380, #392, #382).
+    - The exact R utility formula parameters (DP-R6) and confirmatory statistical thresholds (DP-M1) remain unapproved decisions before Gate G3.
+    - Mock Level 1 verification can be separately authorized prior to Level 2.
+
+14. PUBLICATION AND REVIEW REQUIREMENTS:
+    - Execute only after a dedicated runtime issue is created, unblocked, and claimed.
+    - Implement on an issue-specific branch (e.g., kanuj/<issue>-<slug>) using exact authorized write-set.
+    - Execute real test suites and record base and head commit SHAs.
+    - Publish as draft PR; request independent reviews from platform owner (Matthew) and research owner (Krish).
+    - Never self-approve or merge pull requests autonomously.
+
+15. FINAL REPORTING FORMAT AND DEFINITION OF DONE:
+    - Structured report detailing: exact files changed, executed tests, observed vs. expected assertions, negative test outcomes, evidence references, draft PR link, remaining blockers, and next executable action.
+    - Missing runtime test execution must be reported as NOT_RUN.
+    - Synthetic test results must NOT be claimed as evidence of real-world investment efficacy.
 ```
+
+**Implementation Boundary**: The example above is documentation illustrating a complete, self-contained prompt contract. It does NOT authorize creating or modifying runtime test code in the current task.
 
 ---
 
@@ -195,7 +270,7 @@ To preserve durable continuity across sessions, agents must record checkpoints o
 - **Accepted Architecture References**:
   - [e.g., AGENTS.md, docs/architecture/workstreams.md]
 - **Draft or Unresolved Dependencies**:
-  - [e.g., PR #426 unmerged, PR #419 unmerged]
+  - [e.g., Unmerged draft PR #XYZ pending review]
 - **Tests Actually Executed**:
   - [e.g., git diff --check, relative link validation script]
 - **Observed Results**:
@@ -209,7 +284,7 @@ To preserve durable continuity across sessions, agents must record checkpoints o
 - **Remaining Blockers**:
   - [e.g., Independent review sign-off and PR merge]
 - **Next Executable Action**:
-  - [e.g., Coordinate navigation update once PR #419 releases stage1-roadmap.md]
+  - [e.g., Coordinate startup navigation link once reserved docs paths are released]
 ```
 
 ### Checkpoint Invariants
@@ -280,7 +355,9 @@ An implementation agent must immediately halt its active write-branch and formul
 2. **Issue Blocked**: The issue's native prerequisites or activation conditions are unsatisfied.
 3. **Writer Reservation Conflict**: Another active pull request or developer workstream reserves the target file path.
 4. **Missing Producer Contract**: An upstream contract required for implementation is unaccepted or unavailable.
-5. **Permission Boundary Exceeded**: The task requires live broker credentials, network access, or paid service interaction.
+5. **Permission Boundary Exceeded**: An operation requires network access, provider credentials, spending, broker capabilities, or external services outside the explicit authorization of the assigned issue.
+   - Normal authorized GitHub operations remain permitted: reading issues and PRs, fetching repository revisions, publishing authorized issue branches, running approved CI, and requesting reviews.
+   - An agent may NOT interpret ordinary GitHub access as authorization for unrelated provider API calls, broker access, paid services, or real capital.
 6. **Architectural Contradiction**: Accepted repository specifications contain mutually contradictory requirements.
 
 ### Escalation and Parallel Progress
