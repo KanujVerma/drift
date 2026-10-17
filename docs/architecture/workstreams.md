@@ -7,23 +7,11 @@ status mirror here.
 
 ## Effective ownership
 
-**Owner-directed experiment transfer:** After the independently reviewed adoption of [ADR 0017](../adr/0017-transfer-scientific-experiment-ownership-to-kanuj.md), Kanuj replaces Harsha as accountable owner of scientific experiments, metrics, trial analysis and eligibility. ADR 0015 remains the historical four-owner record. New work uses the authenticated `kanuj` workstream. No existing writer is displaced by this statement.
+**Owner-directed experiment transfer:** An independently reviewed and merged [ADR 0017](../adr/0017-transfer-scientific-experiment-ownership-to-kanuj.md) establishes the transfer policy, but **does not itself activate any inherited issue or grant a new experiment write claim**. For each transferred issue, Kanuj becomes its operative accountable owner only when the authenticated GitHub issue-specific migration receipt is published, `workstream:kanuj` replaces `workstream:harsha`, `KanujVerma` is assigned, and the obsolete #390 native dependency is explicitly reconciled without claiming Harsha's access was verified. Until that issue-level gate is complete, the issue stays blocked, and a new experiment task cannot rely on this policy table alone to bypass the incomplete migration. ADR 0015 remains historical; every active writer keeps their reservation until an explicit handoff.
 
-See [ADR 0015](../adr/0015-three-feature-workstreams-and-explicit-writer-handoffs.md). The historical 8/8 allocation
-and later all-Krish active allocation remain historical records. The feature
-ownership below applies after the adopting coordination PR merges; existing
-writers retain their files until their GitHub handoff condition is satisfied.
+See [ADR 0015](../adr/0015-three-feature-workstreams-and-explicit-writer-handoffs.md) for historical ownership. The historical 8/8 allocation and later all-Krish active allocation are not current issue claims. The table below states the intended destination of transferred responsibilities, subject to the **per-issue migration and writer-release gate above**.
 
-If README.md, the roadmap, or the architecture overview still states an
-exclusive all-Krish allocation, a two-identity rule, or the earlier three-person
-routing, this document and
-[ADR 0015](../adr/0015-three-feature-workstreams-and-explicit-writer-handoffs.md)
-govern current feature ownership after the adopting coordination PR merges.
-Those pages are updated only when no active writer reserves their paths.
-An unapplied ownership edit is open coordination work, not finished
-reconciliation. A historical COMPLETE status is not live trading, source
-qualification, or promotion authorization. The filename of ADR 0015 keeps its
-original slug; the decision text is the four-owner policy.
+**Required-reading precedence, limited to migrated scientific issues:** After ADR 0017 is merged **and the specific issue's migration receipt exists**, ADR 0017, this ownership document, and the authenticated current issue metadata supersede **only the historical Harsha owner/workstream/activation instructions** in required reading such as `docs/architecture/adaptive-experiments/onboarding.md`, `docs/architecture/adaptive-experiments/requirements-crosswalk.md`, `docs/architecture/adaptive-experiments/stage1-roadmap.md`, and the historical design/roadmap pages. A fresh agent must not treat those stale labels alone as a new identity conflict for an already migrated issue. For an unmigrated issue, conflicting identity, absent receipts, or an unreconciled blocker still requires stopping. This precedence never overrides source qualification, scientific acceptance, accepted interfaces, safety, write reservations or trading permissions. Corrections to other required-reading files must follow their own single-writer authorized issues; this PR does not edit those paths. The filename of ADR 0015 preserves historical lineage.
 
 | Workstream | Accountable feature owner | Owns | Explicit exclusions |
 |---|---|---|---|
