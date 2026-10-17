@@ -13,11 +13,11 @@ scorecards belongs to future implementation issues under the scientific workstre
 
 A fresh Antigravity agent or human reviewer should note:
 
-1. Read [AGENTS.md](../../../../AGENTS.md), [decisions.md](../decisions.md) (D01-D17),
-   [design.md](../design.md), [workstreams.md](../../workstreams.md),
-   [requirements-crosswalk.md](../requirements-crosswalk.md),
-   [stage1-decisions.md](../stage1-decisions.md) (S01-S38), and
-   [stage1-roadmap.md](../stage1-roadmap.md).
+1. Read [AGENTS.md](../../../AGENTS.md), [decisions.md](decisions.md) (D01-D17),
+   [design.md](design.md), [workstreams.md](../workstreams.md),
+   [requirements-crosswalk.md](requirements-crosswalk.md),
+   [stage1-decisions.md](stage1-decisions.md) (S01-S38), and
+   [stage1-roadmap.md](stage1-roadmap.md).
 2. **Current implementation audit:** The existing implementation in
    `src/drift/scorecards/performance.py` contains severe mathematical defects:
    - It divides geometric annualized return by sample volatility and mislabels the
