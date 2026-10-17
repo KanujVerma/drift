@@ -14,10 +14,22 @@
 
 Drift engineering workflows divide pair programming and execution into four distinct roles:
 
-### 1.1 Owner: Kanuj
-- Makes material product, scientific, scope, architectural escalation, authorization, and priority decisions.
-- Issues binding governance determinations and approves workstream transitions.
-- Authorizes release and promotion gates.
+### 1.1 Owner: Authenticated Accountable Feature Owner
+- **Resolution**: Resolved per feature and issue from:
+  - Current accepted workstream governance ([AGENTS.md](../../AGENTS.md), [workstreams.md](workstreams.md)).
+  - Assigned GitHub issue, verified assignee, and authenticated actor.
+  - Effective ownership migration receipts (e.g., ADR 0017 receipts).
+  - Exact feature and subsystem responsibility.
+- **Responsibilities**:
+  - Makes material product, scientific, scope, architectural escalation, authorization, and priority decisions for that feature.
+  - Approves bounded implementations and workstream transitions.
+  - Resolves architectural escalations formulated by the implementer.
+  - Preserves upstream and downstream contracts and producer boundaries.
+- **Workstream Ownership Boundaries**:
+  - **Kanuj**: Accountable owner of his own features and the transferred scientific experiment deliverables (under accepted [ADR 0017](../adr/0017-transfer-scientific-experiment-ownership-to-kanuj.md) and verified per-issue migration receipts).
+  - **Krish**: Accountable intelligence and research producer (owns inner learning loop, candidate generation, R optimizer, and model replay/receipts).
+  - **Matthew**: Accountable platform producer (owns data qualification, execution, mandatory risk, accounting ledger, and authoritative `RESULT`).
+  - Kanuj does not automatically become the technical owner of Krish's or Matthew's producer code.
 
 ### 1.2 Architect: ChatGPT or Designated Architect Agent
 - Understands user intent, domain requirements, and macroeconomic constraints.
@@ -60,7 +72,7 @@ When an agent encounters ambiguous or conflicting statements, it must strictly a
 ### Operational Precedence Rules
 - Conversation context helps interpret intent, but can NEVER silently override accepted repository code or live GitHub issue authority.
 - If accepted sources conflict, the coding agent must stop only the affected operation, formulate a concise decision packet, and escalate the conflict to the owner.
-- Historical Harsha ownership strings in mandatory reading documents are superseded by accepted ADR 0017 once an individual issue migration receipt is published.
+- Historical Harsha ownership strings in mandatory reading documents are superseded by accepted [ADR 0017](../adr/0017-transfer-scientific-experiment-ownership-to-kanuj.md) once an individual issue migration receipt is published. Historical Harsha records remain readable as historical evidence on older records, but do not authenticate active execution or permission.
 - Unmerged pull requests and draft designs must never be treated as accepted runtime truth.
 
 ---
@@ -118,7 +130,10 @@ Implementation proceeds through six disciplined, sequential phases:
 
 ### 4.5 PUBLISH Phase
 - Commit changes with focused, informative commit messages.
-- Push to an issue-specific branch (`kanuj/<issue>-<slug>`).
+- Push to an issue-specific branch using `<verified-workstream>/<issue>-<slug>` (e.g., `kanuj/<issue>-<slug>`, `krish/<issue>-<slug>`, or `matthew/<issue>-<slug>`).
+  - Explicit, accepted coordination-branch exceptions (e.g., `coord/<slug>`) remain permitted.
+  - Historical branches are not automatically renamed.
+  - The branch prefix alone does not authenticate its owner.
 - Open a draft pull request linking the issue.
 - Record exact base SHA, head SHA, and test outcomes on the PR.
 - Request independent review from designated contributors.
@@ -173,61 +188,110 @@ The following worked example illustrates how an architect provides complete, una
    No fabricated runtime interfaces or competing account ledgers.
 
 7. INPUT AND OUTPUT STRUCTURES AND UNITS:
-   - History: 253 completed synthetic warmup sessions + 126 additional unscored observation sessions.
-   - Scored Accounts: Fresh, independent $10,000.00 USD accounts for Arm B and Arm R (distinct platform account IDs).
-   - Inputs: Mock authoritative platform RESULT records and Krish raw_cost receipts.
+   - Concrete Fixture Identifiers:
+     - Fixture ID: `SYNTH-STAGE1A-BR-001`
+     - Campaign ID: `SYNTH-CAMPAIGN-001`
+     - Run ID: `SYNTH-RUN-001`
+   - Arms and Account Bindings:
+     - `ARM-B` -> `ACC-SYNTH-B-001` (initial capital: 10000.00 USD; initially selects B3)
+     - `ARM-R` -> `ACC-SYNTH-R-001` (initial capital: 10000.00 USD; initially selects B3)
+   - Session History Boundaries:
+     - Warmup: W001 through W253, inclusive (253 completed synthetic sessions).
+     - Observation: O001 through O126, inclusive (126 completed synthetic sessions).
+     - Total unscored history: 379 completed synthetic sessions.
+     - Scored Phase: After O126, fresh scored accounts initialize.
+     - First Scored Month: S001 through S021, inclusive (21 completed synthetic sessions).
+     - S021 completes the synthetic first scored month; no selector switch occurs prior to S021.
+   - Source and Decision Clocks:
+     - Decision Cutoff: `2026-01-30T21:00:00Z`
+     - SRC-EARLY Availability: `2026-01-30T20:59:59Z` (time-eligible; available before cutoff)
+     - SRC-LATE Availability: `2026-01-30T21:00:01Z` (ineligible; arrives after cutoff)
+     - Decision Finalized: `2026-01-30T21:00:05Z` (post-cutoff finalization does not admit late source data)
+     - Next Eligible Synthetic Execution Open: `2026-02-02T14:30:00Z` (no same-close execution)
+   - Candidate Strategy Proposals (Given Fixture Artifacts):
+     - PB-001: Arm B | Current: B3 | Proposed: B4 | Evidence: SRC-EARLY
+     - PR-001: Arm R | Current: B3 | Proposed: B3 | Evidence: SRC-EARLY
+     - Note: Proposals are GIVEN fixture artifacts; no live Gemini model or R optimizer is invoked.
+     - Mock Mandate Responses: PB-001 -> `PERMITTED_BY_MOCK`; PR-001 -> `INCUMBENT_UNCHANGED_BY_MOCK` (illustrative descriptions, not Matthew's accepted API enums).
+   - Synthetic Price Sentinels:
+     - VOO: Decision close 100.00 USD | Next eligible open 101.00 USD
+     - IEF: Decision close 50.00 USD | Next eligible open 49.50 USD
+     - Sentinels test that decision close and next open are distinct; prices do not independently generate terminal NAV.
+   - Mock Platform RESULT Payloads (Given Values, No Execution Claimed):
+     - RESULT-B-001: account_id: `ACC-SYNTH-B-001`, initial_nav: 10000.00, gross_gain: 150.00, trading_cost: 30.00, terminal_net_nav: 10120.00
+     - RESULT-R-001: account_id: `ACC-SYNTH-R-001`, initial_nav: 10000.00, gross_gain: 80.00, trading_cost: 20.00, terminal_net_nav: 10060.00
+   - Mock Research Cost References (Abbreviated Illustrative Receipts):
+     - RCPT-B-001: arm_id: `ARM-B`, amount: "25.00", currency: USD, amount_basis: actual
+     - RCPT-R-001: arm_id: `ARM-R`, amount: "5.00", currency: USD, amount_basis: actual
+     - Note: Abbreviated records are illustrative, not complete production raw_cost receipts.
    - Numeric Representation: Explicit DecimalText USD values; all outputs classified SYNTHETIC_ONLY.
 
 8. DATA-FLOW AND STATE-TRANSITION RULES:
    Sequential pipeline:
-   1. Decision Context Cutoff T(t_k) at session close.
-   2. Arm B and Arm R emit candidate strategy proposals.
-   3. Scientific input eligibility preflight (PRE_DECISION_SCIENTIFIC_INPUT).
-   4. Matthew's platform independently evaluates Balanced mandate compliance.
-   5. Authorized simulated execution scheduled for next eligible session open (t_k + 1).
-   6. Matthew's platform ledger updates cash, positions, and NAV, emitting authoritative RESULT.
-   7. Krish raw_cost receipts joined to trial event history.
-   8. Derived scientific cost-attribution view computed.
-   First switch opportunity occurs only after the first completed scored month; transitions execute at next eligible open.
+   1. Decision Context Cutoff T(t_k) at session close (`2026-01-30T21:00:00Z`).
+   2. Candidate Proposals Generated: PB-001 (B3 -> B4) and PR-001 (B3 -> B3) bound to SRC-EARLY.
+   3. Scientific Eligibility Preflight (Phase A): Validates source timestamps <= cutoff; SRC-EARLY passes, SRC-LATE rejected.
+   4. Platform Mandate Verification (Phase B): Mock mandate evaluates Balanced constraints (PB-001 permitted, PR-001 unchanged).
+   5. Execution Scheduling (Phase C): Transition scheduled for next eligible session open (`2026-02-02T14:30:00Z`); no same-close fill.
+   6. Platform Accounting (Phase D): Matthew's platform ledger updates cash, positions, and NAV, emitting RESULT-B-001 and RESULT-R-001.
+   7. Cost Attribution: Krish's research receipts RCPT-B-001 and RCPT-R-001 joined into derived scientific cost view without debiting portfolio cash.
+   8. Scorecard Generation: Computes paired return difference and comparative economic advantage.
 
 9. ERROR, UNAVAILABLE, AND REFUSAL BEHAVIOR:
    - Missing lookback history or market data: UNAVAILABLE.
    - Malformed schema, tampered bytes, or corrupted preimage: INVALID.
    - Missing platform RESULT: PENDING_RESULT.
-   - Unknown research operating costs: MISSING_COST in derived attribution view (portfolio NAV preserved).
+   - Unknown research operating costs: MISSING_COST in derived attribution view (portfolio NAV preserved; no fabricated zero).
    - Unknown execution outcome: UNRESOLVED.
    - Mandate refusal: Rejects transition orders; account retains valid incumbent; never dispatches order.
    - Duplicate event submission: Idempotent processing; zero duplicate orders or charges.
    - Missing history: Never triggers automatic account liquidation.
 
 10. EXACT FILE WRITE-SET AND PROTECTED PATHS:
-    - Illustrative Proposed Write-Set: tests/integration/test_stage1_br_synthetic.py
-    - Protected Surfaces: All production code (src/drift/), contracts, and architecture docs remain read-only.
+    - Illustrative Proposed Write-Set: `tests/integration/test_stage1_br_synthetic.py`
+    - Protected Surfaces: All production code (`src/drift/`), contracts, and architecture docs remain read-only.
     (This is an illustrative hypothetical write-set only, NOT a currently authorized write-set).
 
 11. POSITIVE AND ADVERSARIAL TEST FIXTURES:
-    - Positive Fixture: Valid B-versus-R campaign execution with compliant proposals.
-    - Negative Fixtures:
-      - Late context observation arriving after cutoff (rejected as UNAVAILABLE).
-      - Malformed proposal payload (rejected as INVALID).
-      - Cross-arm context leakage attempt (sandboxed and rejected).
-      - Missing platform RESULT (trial outcome remains PENDING_RESULT).
-      - Unknown research cost (cost marked MISSING_COST).
-      - Identical duplicate retry (asserted idempotent).
-      - Mandate refusal probe (unauthorized transition rejected).
+    - Positive Fixture: `SYNTH-STAGE1A-BR-001` as specified in Component 7 above.
+    - Negative Fixtures (Explicit Mutations to Positive Baseline):
+      - N01 (LATE SOURCE): PB-001 references SRC-LATE (`2026-01-30T21:00:01Z`). Expected: UNAVAILABLE for that decision context; no qualified proposal from late evidence.
+      - N02 (MALFORMED PROPOSAL): Remove PB-001.selected_strategy. Expected: INVALID; no mandate evaluation or transition dispatch.
+      - N03 (CROSS-ARM LEAKAGE): PB-001 references private ARM-R research evidence. Expected: INVALID; zero cross-arm evidence admission.
+      - N04 (MISSING RESULT): Remove RESULT-B-001. Expected: PENDING_RESULT; no invented B terminal NAV; paired economic report refused.
+      - N05 (UNKNOWN COST): Set RCPT-B-001.amount = null, amount_basis = unknown, currency = null, nonempty unknown_reason. Expected: Known portfolio NAV remains reportable; economic comparison classified MISSING_COST / UNAVAILABLE (no fabricated zero).
+      - N06 (IDEMPOTENT REPLAY): Resubmit identical event ID and payload. Expected: Exactly one logical event processed; zero duplicate orders; zero duplicate cost attribution.
+      - N07 (CONFLICTING DUPLICATE): Resubmit identical event ID with modified payload bytes. Expected: Rejection of conflicting duplicate; original immutable evidence preserved.
+      - N08 (MANDATE REFUSAL): Change B mandate outcome to REFUSED_BY_MOCK. Expected: No B4 transition order; Arm B retains B3 only with independently verified valid current state, evidence, and mandate compliance; do not reuse positive-case RESULT as proof.
+      - N09 (NO SELECTOR SWITCH): PR-001 selects incumbent B3. Expected: No selector-level transition; B3's fixed internal equal-weight rebalancing remains separate.
+    All expected classifications are proposed scientific semantics, not proof that runtime types exist.
 
 12. EXPECTED NUMERICAL OR STRUCTURAL ASSERTIONS:
-    - Arm B Platform RESULT: Initial NAV 10,000.00, Gross gain +150.00, Trading costs 30.00 -> Net gain +120.00, Terminal NAV 10,120.00 USD.
-    - Arm B Operating Cost: 25.00 USD.
-    - Arm B Net Portfolio Return: (10120 - 10000) / 10000 = 0.0120 (1.20%).
-    - Arm B Economic Gain: 120.00 - 25.00 = 95.00 USD.
-    - Arm R Platform RESULT: Initial NAV 10,000.00, Gross gain +80.00, Trading costs 20.00 -> Net gain +60.00, Terminal NAV 10,060.00 USD.
-    - Arm R Operating Cost: 5.00 USD.
-    - Arm R Net Portfolio Return: (10060 - 10000) / 10000 = 0.0060 (0.60%).
-    - Arm R Economic Gain: 60.00 - 5.00 = 55.00 USD.
-    - Paired Net Return Advantage: 0.0120 - 0.0060 = 0.0060 (0.60 percentage points).
-    - Comparative Economic Advantage: 95.00 - 55.00 = 40.00 USD.
-    - Invariants: Operating expenses NEVER debit portfolio cash; trading transaction costs are deducted inside platform NAV.
+    - Arm B Platform Calculations:
+      - Initial NAV: 10,000.00 USD
+      - Gross Gain: +150.00 USD
+      - Trading Costs: 30.00 USD (deducted within platform ledger)
+      - Net Gain: 150.00 - 30.00 = 120.00 USD
+      - Terminal Net NAV: 10,000.00 + 120.00 = 10,120.00 USD
+      - Portfolio Return: 120.00 / 10,000.00 = 0.0120 (1.20%)
+      - Research Operating Cost: 25.00 USD (RCPT-B-001)
+      - Economic Gain: 120.00 - 25.00 = 95.00 USD
+    - Arm R Platform Calculations:
+      - Initial NAV: 10,000.00 USD
+      - Gross Gain: +80.00 USD
+      - Trading Costs: 20.00 USD (deducted within platform ledger)
+      - Net Gain: 80.00 - 20.00 = 60.00 USD
+      - Terminal Net NAV: 10,000.00 + 60.00 = 10,060.00 USD
+      - Portfolio Return: 60.00 / 10,000.00 = 0.0060 (0.60%)
+      - Research Operating Cost: 5.00 USD (RCPT-R-001)
+      - Economic Gain: 60.00 - 5.00 = 55.00 USD
+    - Comparative Metrics:
+      - Paired Return Difference: 0.0120 - 0.0060 = 0.0060 (0.60 percentage points)
+      - Comparative Economic Advantage: 95.00 - 55.00 = 40.00 USD
+    - Accounting Invariants:
+      - Trading expenses are already accounted for inside platform NAV.
+      - Research operating expenses NEVER debit portfolio cash.
+      - Single authoritative account ledger: no secondary accounting system.
 
 13. DEPENDENCIES AND UNRESOLVED DECISIONS:
     - Producer-integrated Level 2 execution requires accepted, merged producer contracts (#375, #376, #379, #380, #392, #382).
@@ -236,7 +300,7 @@ The following worked example illustrates how an architect provides complete, una
 
 14. PUBLICATION AND REVIEW REQUIREMENTS:
     - Execute only after a dedicated runtime issue is created, unblocked, and claimed.
-    - Implement on an issue-specific branch (e.g., kanuj/<issue>-<slug>) using exact authorized write-set.
+    - Implement on an issue-specific branch (e.g., `<verified-workstream>/<issue>-<slug>`) using exact authorized write-set.
     - Execute real test suites and record base and head commit SHAs.
     - Publish as draft PR; request independent reviews from platform owner (Matthew) and research owner (Krish).
     - Never self-approve or merge pull requests autonomously.
@@ -247,7 +311,15 @@ The following worked example illustrates how an architect provides complete, una
     - Synthetic test results must NOT be claimed as evidence of real-world investment efficacy.
 ```
 
-**Implementation Boundary**: The example above is documentation illustrating a complete, self-contained prompt contract. It does NOT authorize creating or modifying runtime test code in the current task.
+**Implementation Boundary and Fixture Acceptance Boundary**:
+- The example above illustrates a complete, self-contained implementation handoff contract.
+- It DOES NOT implement the fixture.
+- It DOES NOT run Krish's research producer.
+- It DOES NOT run Matthew's execution engine.
+- It DOES NOT prove actual producer compatibility.
+- It DOES NOT establish investment profitability, scientific efficacy, broker safety, or trading authority.
+- Issue #383 is documentation-only and does NOT authorize writing runtime code.
+- A future runtime issue needs its own exact write-set.
 
 ---
 
@@ -299,7 +371,7 @@ To preserve durable continuity across sessions, agents must record checkpoints o
 A replacement agent resuming a Drift task without access to prior assistant chat memory must follow this ten-step protocol:
 
 1. **Read Universal Bootstrap**: Read [AGENTS.md](../../AGENTS.md) to understand core constraints, machine paths, and operating rules.
-2. **Resolve Workstream Identity**: Check `git config --get drift.workstream` and issue labels to confirm active workstream (`kanuj`, `krish`, or `matthew`).
+2. **Resolve Workstream Identity**: Check `git config --get drift.workstream` and issue labels to confirm active workstream (`kanuj`, `krish`, or `matthew`). Historical `harsha` labels and records remain recognizable when inspecting older GitHub evidence, but do not authenticate active execution or permission.
 3. **Read Resume Protocol**: Read the Resume and Checkpoint guidelines in [agent-workflow.md](agent-workflow.md).
 4. **Inspect Assigned Issue**: Query the active GitHub issue (`gh issue view <id>`), including all recent comments and linked PRs.
 5. **Inspect Accepted ADRs**: Review durable decisions in `docs/adr/` governing the feature area.
