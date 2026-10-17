@@ -497,8 +497,12 @@ To prevent multiple-testing fallacies, denominators are defined per operational 
 
 ## 6. Worked Contract Test Cases (22 Illustrative Scenarios)
 
-The 22 illustrative test cases demonstrate exact contract behavior under all required edge conditions.
-These JSON blocks serve as authoritative specification fixtures demonstrating schema alignment and contract invariants; they do not represent qualified market-data provenance or real execution outcomes.
+The 22 JSON examples are syntactically valid, illustrative contract scenarios.
+They are NOT:
+- Executed integration tests.
+- Accepted producer-schema instances.
+- Real empirical trial receipts.
+
 All JSON blocks are validated for syntax and schema alignment.
 
 ---
@@ -1071,7 +1075,8 @@ consumes research outputs through stable references:
 | Research Producer Field | TrialRecordV1 Semantic Binding | Notes |
 |---|---|---|
 | `context_id` | `input_evidence_references` | Pinned point-in-time context evaluated. |
-| `candidate_id` / `RawChoice` | `proposal_references` | Candidate strategy proposed by agent. |
+| `candidate_id` | `proposal_references` | Krish's normalized and accepted candidate reference after producer validation. Only an actually validated candidate identifier can become a trial proposal reference. |
+| `RawChoice` | (Internal to Krish research attempt) | Untrusted raw research/model output. Unvalidated RawChoice cannot authorize execution and cannot become a trial proposal reference. |
 | `attempt_id` | `research_attempt_references` | Complete attempt lifecycle record. |
 | `logical_request_id` | Research Attempt receipt metadata | Groups attempts and retries under logical request. |
 | `retry_of` | Research Attempt receipt metadata | Tracks incurred retry lineage on attempt records. |
@@ -1089,7 +1094,7 @@ Per [PR #407](https://github.com/KanujVerma/drift/pull/407) (`platform.md`),
 
 | Platform Producer Field | TrialRecordV1 Semantic Binding | Notes |
 |---|---|---|
-| `source_event_id` | `input_evidence_references` | Proves data point-in-time availability. |
+| `source_event_id` | `input_evidence_references` | Identifies Matthew's source event evidence. Scientific admission additionally requires verified origin and version, accepted source rights, an availability-bound upper timestamp no later than the decision cutoff, completed transformations and sufficient provenance evidence. The ID itself grants no eligibility. |
 | `mandate_verdict_id` | `phase_b_mandate_verdict_ref` | Matthew's Phase B operational risk check. |
 | `order_id` | `order_references` | Matthew's staged transition orders (0, 1, or N). |
 | `fill_id` | `fill_references` | Simulated trade fills, partial fills, slippage, and spread. |
