@@ -14,11 +14,11 @@ adaptive experiment can be promoted, certified, or granted operational authority
 
 A fresh Antigravity agent or human reviewer should note:
 
-1. Read [AGENTS.md](../../../../AGENTS.md), [decisions.md](../decisions.md) (D01-D17),
-   [design.md](../design.md), [workstreams.md](../../workstreams.md),
-   [requirements-crosswalk.md](../requirements-crosswalk.md),
-   [stage1-decisions.md](../stage1-decisions.md) (S01-S38), and
-   [stage1-roadmap.md](../stage1-roadmap.md).
+1. Read [AGENTS.md](../../../AGENTS.md), [decisions.md](decisions.md) (D01-D17),
+   [design.md](design.md), [workstreams.md](../workstreams.md),
+   [requirements-crosswalk.md](requirements-crosswalk.md),
+   [stage1-decisions.md](stage1-decisions.md) (S01-S38), and
+   [stage1-roadmap.md](stage1-roadmap.md).
 2. **Four distinct verification tiers:**
    - Tier 1: Engineering Tests Passing (unit/regression tests green).
    - Tier 2: Contract Acceptance (producers/consumers agree on interface types).
@@ -111,19 +111,19 @@ required evidence, responsible producer, and required independent reviewer.
 
 | Ref | Requirement Description | Authoritative Contract | Concrete Test Cases | Required Evidence | Producer | Independent Reviewer | Current Status |
 |---|---|---|---|---|---|---|---|
-| **REQ-01** | Preregistered primary estimand is paired net terminal return | #377, #392 | POS: Paired net returns evaluated.<br>NEG: Rejection of un-paired comparison.<br>ADV: Arithmetic return sum rejected. | TrialRecordV1, StudyReportV1 citing preregistration hash. | Kanuj | Independent Scientific Reviewer | `NOT_RUN` (blocked on #426) |
-| **REQ-02** | True periodic excess-return Sharpe ratio (never geometric) | #382 | POS: Case 1 golden fixture = 0.0000.<br>NEG: Zero volatility yields UNDEFINED.<br>ADV: Legacy ann_ret/vol rejected. | Unit test reproducing all 12 golden arithmetic cases. | Kanuj | Matthew / Independent Reviewer | `NOT_RUN` (blocked on #426) |
-| **REQ-03** | Immutable trial event log with canonical preimage hashing | #392 | POS: Monotonic event indexing.<br>NEG: Byte alteration rejected.<br>ADV: Out-of-order event rejected. | TrialEventV1 stream with valid event_hash chain. | Kanuj | Matthew | `NOT_RUN` (blocked on #426) |
+| **REQ-01** | Preregistered primary estimand is paired net terminal return | #377, #392 | POS: Paired net returns evaluated.<br>NEG: Rejection of un-paired comparison.<br>ADV: Arithmetic return sum rejected. | TrialRecordV1, StudyReportV1 citing preregistration hash. | Kanuj | Independent Scientific Reviewer | `NOT_RUN (runtime verification not yet executed; accepted implementation and evidence still required)` |
+| **REQ-02** | True periodic excess-return Sharpe ratio (never geometric) | #382 | POS: Case 1 golden fixture = 0.0000.<br>NEG: Zero volatility yields UNDEFINED.<br>ADV: Legacy ann_ret/vol rejected. | Unit test reproducing all 12 golden arithmetic cases. | Kanuj | Matthew / Independent Reviewer | `NOT_RUN (runtime verification not yet executed; accepted implementation and evidence still required)` |
+| **REQ-03** | Immutable trial event log with canonical preimage hashing | #392 | POS: Monotonic event indexing.<br>NEG: Byte alteration rejected.<br>ADV: Out-of-order event rejected. | TrialEventV1 stream with valid event_hash chain. | Kanuj | Matthew | `NOT_RUN (runtime verification not yet executed; accepted implementation and evidence still required)` |
 | **REQ-04** | Causal availability and strict cutoff timestamp enforcement | #392, #376 | POS: Pre-cutoff data admitted.<br>NEG: Post-cutoff news marked INVALID.<br>ADV: Lookahead bar rejected. | Pinned market bar timestamps <= decision_cutoff. | Matthew | Kanuj | `NOT_RUN` (blocked on #376) |
 | **REQ-05** | Research attempt tracking with exact attempt denominators | #375, #392 | POS: Multi-attempt proposal logged.<br>NEG: Retry inflating proposal count blocked.<br>ADV: Discarded attempts logged. | Krish attempt receipts with logical_request_id lineage. | Krish | Kanuj | `NOT_RUN` (blocked on #375) |
 | **REQ-06** | Single authoritative account ledger with zero duplicate trades | #376, #392 | POS: Net NAV matches platform ledger.<br>NEG: Competing scientific ledger blocked.<br>ADV: Crash recovery idempotency. | Matthew platform RESULT matching portfolio account. | Matthew | Kanuj / Independent Reviewer | `NOT_RUN` (blocked on #376) |
-| **REQ-07** | Dual-ledger scientific cost attribution without double debit | #392, #382 | POS: Case 10 attribution verified.<br>NEG: Trading costs subtracted twice blocked.<br>ADV: Unknown cost yields MISSING_COST. | StudyReportV1 economic ledger matching raw_cost. | Kanuj | Krish / Matthew | `NOT_RUN` (blocked on #426) |
+| **REQ-07** | Single portfolio ledger and derived scientific cost attribution without double debit | #392, #382 | POS: Case 10 attribution verified.<br>NEG: Trading costs subtracted twice blocked.<br>ADV: Unknown cost yields MISSING_COST. | StudyReportV1 economic scorecard matching derived cost view and raw_cost. | Kanuj | Krish / Matthew | `NOT_RUN (runtime verification not yet executed; accepted implementation and evidence still required)` |
 | **REQ-08** | Seed determinism and exact replay reproducibility | #375, #392 | POS: Replay of frozen seed matches.<br>NEG: Stochastic divergence flagged.<br>ADV: Replay zero inference bill. | Replay records yielding identical output hash. | Krish | Kanuj | `NOT_RUN` (blocked on #375) |
 | **REQ-09** | Recovery Target F: feature-off on corrected current kernel | #395 (PR #416) | POS: Kernel boots with adaptive off.<br>NEG: Adaptive execution blocked.<br>ADV: Partial state rollback clean. | Kernel verification receipt with feature flag disabled. | Matthew | Independent Reviewer | `BLOCKED` (PR #416 draft) |
 | **REQ-10** | Recovery Target O: original runtime/state reconstruction | #395 (PR #416) | POS: Isolated manifest restore.<br>NEG: Incompatible DB attach blocked.<br>ADV: Corrupt snapshot rejected. | Manifest hash matching isolated reconstruction. | Matthew | Independent Reviewer | `BLOCKED` (PR #416 draft) |
-| **REQ-11** | Recovery Target A: frozen baseline on corrected kernel | #395 (PR #416) | POS: Arm A executes baseline B3.<br>NEG: Uncertified kernel rejected.<br>ADV: Divergent baseline halted. | Authoritative RESULT for Arm A on corrected kernel. | Matthew | Kanuj | `BLOCKED` (PR #416 draft) |
+| **REQ-11** | Recovery Target A: frozen A policy/configuration on corrected kernel | #395 (PR #416) | POS: Frozen A policy/configuration executes on corrected kernel.<br>NEG: Uncertified kernel rejected.<br>ADV: Divergent baseline halted. | Authoritative RESULT for Target A on corrected kernel. | Matthew | Kanuj | `BLOCKED` (PR #416 draft) |
 | **REQ-12** | Worker containment: external filesystem & network denial | #396 (PR #417) | POS: Confined worker writes scratch.<br>NEG: Write outside scratch denied.<br>ADV: Worker unconfined retry denied. | OS sandbox denial logs (Case A01-A11 in PR #417). | Matthew | Independent Reviewer | `BLOCKED` (PR #417 draft) |
-| **REQ-13** | Multi-testing control & dependence-aware uncertainty | #377, #382 | POS: Stationary block bootstrap run.<br>NEG: Naive i.i.d. assumption blocked.<br>ADV: Holm-Bonferroni correction. | Bootstrap p-values with data-driven block length. | Kanuj | Independent Scientific Reviewer | `NOT_RUN` (blocked on #426) |
+| **REQ-13** | Multi-testing control & dependence-aware uncertainty | #377, #382 | POS: Stationary block bootstrap run.<br>NEG: Naive i.i.d. assumption blocked.<br>ADV: Holm-Bonferroni correction. | Bootstrap p-values with data-driven block length. | Kanuj | Independent Scientific Reviewer | `NOT_RUN (runtime verification not yet executed; accepted implementation and evidence still required)` |
 
 ---
 
@@ -148,11 +148,10 @@ acceptance requires concrete verification of three distinct recovery targets:
   production database or shared cache; operation is strictly blocked by network/socket isolation.
 - **Evidence Required:** Manifest SHA-256 match, isolated mount receipt, and zero-leakage attestation.
 
-### Case REC-03: Target A (Frozen Scientific Baseline on Corrected Kernel)
-- **Positive Test:** Arm A executes the frozen baseline strategy (e.g., B3 monthly rebalance)
-  on the independently accepted corrected kernel, generating valid platform `RESULT` records.
+### Case REC-03: Target A (Frozen Policy/Configuration on Corrected Kernel)
+- **Positive Test:** Target A executes the frozen baseline strategy/policy configuration (derived from the approved manifest, rather than hardcoded assumptions) on the independently accepted corrected kernel, generating valid platform `RESULT` records.
 - **Negative Test:** If the kernel commit hash does not match the certified corrected
-  kernel SHA, Arm A refuses execution (`UNCERTIFIED_KERNEL_HALT`).
+  kernel SHA, Target A refuses execution (`UNCERTIFIED_KERNEL_HALT`).
 - **Evidence Required:** Signed kernel acceptance receipt, execution log, and platform `RESULT`.
 
 ---
