@@ -1,6 +1,8 @@
 # Drift agent workflow and continuity
 
-This protocol applies to Kanuj, Krish, Matthew, Harsha and compatible coding agents.
+This protocol applies to Kanuj, Krish, Matthew and compatible coding agents.
+Harsha is a historical workstream, not an active agent identity after the
+owner-directed experiment transfer in ADR 0017.
 AGENTS.md is the universal bootstrap. Cursor commands are thin wrappers.
 GitHub is the live task/decision queue, not a claim that agents run continuously.
 
