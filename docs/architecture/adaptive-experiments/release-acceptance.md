@@ -189,38 +189,40 @@ Prompt-level rules are not security boundaries:
 
 ## 5. Independent Reviewer Certification Protocol
 
-Before any experiment can be certified for release, the following formal audit
-receipt must be signed by an independent reviewer:
+> **ILLUSTRATIVE TEMPLATE ONLY.**
+> **NOT A SIGNED OR AUTHENTICATED REVIEW RECEIPT.**
+
+The schema template below illustrates the structural format for future independent review certification. Real acceptance verdicts must come from authenticated review receipts and actual executed evidence. This template does not claim an actual reviewer certification or evaluated verdict:
 
 ```json
 {
-  "acceptance_record_id": "ACCEPT-STAGE1A-20261017-001",
-  "tested_code_commit": "5583f112dfb45b8f6e8bc652de1cc4334ef8a247",
+  "acceptance_record_id": "ACCEPT-RECORD-SYNTHETIC-TEMPLATE-001",
+  "tested_code_commit": "0000000000000000000000000000000000000000",
   "tested_contracts": {
-    "experiment_contract_hash": "a1b2c3d4...",
-    "metric_contract_hash": "e5f6a7b8...",
-    "recovery_contract_hash": "c9d0e1f2...",
-    "containment_contract_hash": "3a4b5c6d..."
+    "experiment_contract_hash": "placeholder_sha256_experiment_contract_hash",
+    "metric_contract_hash": "placeholder_sha256_metric_contract_hash",
+    "recovery_contract_hash": "placeholder_sha256_recovery_contract_hash",
+    "containment_contract_hash": "placeholder_sha256_containment_contract_hash"
   },
-  "dataset_manifest_hash": "f1e2d3c4...",
+  "dataset_manifest_hash": "placeholder_sha256_dataset_manifest_hash",
   "test_environment": {
     "os": "macOS / Linux Container",
     "python_version": "3.14.6",
-    "uv_lock_hash": "locked_hash_val"
+    "uv_lock_hash": "placeholder_uv_lock_hash"
   },
   "matrix_results": {
     "total_requirements": 13,
     "pass_count": 0,
     "fail_count": 0,
-    "not_run_count": 8,
-    "blocked_count": 5
+    "not_run_count": 13,
+    "blocked_count": 0
   },
   "independent_reviewer": {
-    "name": "Independent Scientific Auditor",
+    "name": "Placeholder Reviewer Name",
     "affiliation": "External Verification Workstream",
     "conflict_of_interest_attestation": "I certify that I am not the author of the code, contracts, or strategies under test."
   },
-  "final_verdict": "BLOCKED_ON_GOVERNANCE_AND_DEPENDENT_CONTRACTS"
+  "final_verdict": "NOT_ASSESSED_TEMPLATE"
 }
 ```
 
