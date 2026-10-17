@@ -35,11 +35,16 @@ closing #390 as if identity were verified would misstate the evidence.
    end-to-end acceptance design); #391 remains a non-executable parent.
    The Harsha-only entry #390 is superseded after migration, **not** marked
    as proof of a Harsha login. #370 is historical unresolved access.
-4. **Dependency sequence:** Start independent #377 design first, then #382
-   and #392; #397 may specify acceptance independently, while #383 stays
-   blocked on accepted producer contracts (#375, #376, #379, #380, #392),
-   methodology and metrics. Later implementation E6 requires separately
-   authorized issue(s), exact file sets and independent reviews.
+4. **Shipping order and Resume exception:** Kanuj has directed cross-owner
+   unblock #392 first, then #382 metric and #397 acceptance contracts, while
+   #377 methodology proceeds independently and #383 remains blocked on accepted
+   producer contracts (#375, #376, #379, #380, #392), methodology and metrics.
+   The normal oldest-P0-first Resume rule is not silently repealed: the scoped
+   owner-directed #392-first priority exception must be recorded on the
+   applicable issue during migration/claim. Priority does not permit work
+   before an issue is individually transferred, READY and writer-eligible.
+   Later E1-E6 implementation requires separately authorized issues, exact
+   write-sets, accepted producer interfaces and independent reviews.
 5. **Keep responsibilities separate.** Kanuj designs and runs the scientific
    study but does not create an alternative account ledger or simulator.
    Matthew alone produces authoritative account RESULT, timing, fills, source
@@ -89,10 +94,46 @@ comments, and reconcile native dependencies to #390 without misrepresenting
 access. #383 remains blocked by its substantive contracts, regardless of
 identity migration.
 
-Onboarding and the Stage 1 roadmap may have historical Harsha names in
-files currently reserved by draft PR #419. Do not edit those paths in this
-PR; route the update to that file's current writer or a later disjoint docs
-issue. Old PRs and issues remain historical evidence.
+### Required-reading precedence and reconciliation
+
+A governance merge is necessary but **not sufficient** to activate a scientific
+issue. Migrate each of #391, #377, #382, #392, #397 and #383 individually,
+preserving exact historical ownership evidence. Its GitHub receipt must identify
+the old and new accountable owners, authenticated publisher and disclosed
+implementation agent, issue/branch/writer reservation, accepted governance
+commit, assignee/label change, real native dependency reconciliation and
+remaining substantive blockers. For an unmigrated issue, the old Harsha entry
+remains blocked. Do not claim #390 or #370 was successfully authenticated.
+
+For a transferred issue **only after its own receipt has been published**, this
+ADR, `docs/architecture/workstreams.md`, and the current issue's verified
+metadata take precedence over stale Harsha owner/identity/#390 routing lines
+in other required-reading documents, including
+`docs/architecture/adaptive-experiments/onboarding.md`,
+`docs/architecture/adaptive-experiments/requirements-crosswalk.md`,
+`docs/architecture/adaptive-experiments/stage1-roadmap.md`,
+`docs/architecture/adaptive-experiments/design.md`, and
+historical roadmaps/delivery notes. A new agent performing Resume must not
+stop *solely because of these historical owner strings* when an authentic
+migration receipt resolves the identity; it must still stop for any genuine
+mismatch, missing receipt, unaccepted contract, blocker or writer conflict.
+This precedence changes **owner attribution only**. It does not override
+technical requirements, source rights, accepted D01-D17, independently
+reviewed S01-S38 revisions, permissions, safety or review obligations.
+
+### Separate-owner downstream documentation updates
+
+`onboarding.md` and `stage1-roadmap.md` are reserved under coordination
+issue [#418](https://github.com/KanujVerma/drift/issues/418) and draft
+PR [#419](https://github.com/KanujVerma/drift/pull/419); their current writer
+must reconcile stale Harsha routing, or explicitly release those paths first.
+The required `requirements-crosswalk.md` owner corrections are routed to
+[#431](https://github.com/KanujVerma/drift/issues/431) with a distinct narrow
+write-set. Neither path group is editable through this governance PR.
+Canonical implementation-agent prompt and handoff requirements are captured
+in [#427](https://github.com/KanujVerma/drift/issues/427); they do not
+automatically authorize runtime work. Old PRs and issues remain historical
+evidence.
 
 ## References
 
