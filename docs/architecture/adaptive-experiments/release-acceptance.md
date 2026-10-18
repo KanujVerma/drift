@@ -119,10 +119,10 @@ required evidence, responsible producer, and required independent reviewer.
 | **REQ-06** | Single authoritative account ledger with zero duplicate trades | #376, #392 | POS: Net NAV matches platform ledger.<br>NEG: Competing scientific ledger blocked.<br>ADV: Crash recovery idempotency. | Matthew platform RESULT matching portfolio account. | Matthew | Kanuj / Independent Reviewer | `NOT_RUN` (blocked on #376) |
 | **REQ-07** | Single portfolio ledger and derived scientific cost attribution without double debit | #392, #382 | POS: Case 10 attribution verified.<br>NEG: Trading costs subtracted twice blocked.<br>ADV: Unknown cost yields MISSING_COST. | StudyReportV1 economic scorecard matching derived cost view and raw_cost. | Kanuj | Krish / Matthew | `NOT_RUN (runtime verification not yet executed; accepted implementation and evidence still required)` |
 | **REQ-08** | Seed determinism and exact replay reproducibility | #375, #392 | POS: Replay of frozen seed matches.<br>NEG: Stochastic divergence flagged.<br>ADV: Replay zero inference bill. | Replay records yielding identical output hash. | Krish | Kanuj | `NOT_RUN` (blocked on #375) |
-| **REQ-09** | Recovery Target F: feature-off on corrected current kernel | #395 (PR #416) | POS: Kernel boots with adaptive off.<br>NEG: Adaptive execution blocked.<br>ADV: Partial state rollback clean. | Kernel verification receipt with feature flag disabled. | Matthew | Independent Reviewer | `BLOCKED` (PR #416 draft) |
-| **REQ-10** | Recovery Target O: original runtime/state reconstruction | #395 (PR #416) | POS: Isolated manifest restore.<br>NEG: Incompatible DB attach blocked.<br>ADV: Corrupt snapshot rejected. | Manifest hash matching isolated reconstruction. | Matthew | Independent Reviewer | `BLOCKED` (PR #416 draft) |
-| **REQ-11** | Recovery Target A: frozen A policy/configuration on corrected kernel | #395 (PR #416) | POS: Frozen A policy/configuration executes on corrected kernel.<br>NEG: Uncertified kernel rejected.<br>ADV: Divergent baseline halted. | Authoritative RESULT for Target A on corrected kernel. | Matthew | Kanuj | `BLOCKED` (PR #416 draft) |
-| **REQ-12** | Worker containment: external filesystem & network denial | #396 (PR #417) | POS: Confined worker writes scratch.<br>NEG: Write outside scratch denied.<br>ADV: Worker unconfined retry denied. | OS sandbox denial logs (Case A01-A11 in PR #417). | Matthew | Independent Reviewer | `BLOCKED` (PR #417 draft) |
+| **REQ-09** | Recovery Target F: feature-off on corrected current kernel | #395 (PR #416) | POS: Kernel boots with adaptive off.<br>NEG: Adaptive execution blocked.<br>ADV: Partial state rollback clean. | Separate CODE / PRIVATE_STATE / RUNTIME results (or justified N/A), configuration and kernel verification receipts with feature flag disabled. | Matthew | Independent Reviewer | `BLOCKED` (PR #416 draft) |
+| **REQ-10** | Recovery Target O: original runtime/state reconstruction | #395 (PR #416) | POS: Isolated manifest restore.<br>NEG: Incompatible DB attach blocked.<br>ADV: Corrupt snapshot rejected. | Separate CODE / PRIVATE_STATE / RUNTIME results, scoped manifest, custody/grant and isolated reconstruction receipts. | Matthew | Independent Reviewer | `BLOCKED` (PR #416 draft) |
+| **REQ-11** | Recovery Target A: frozen A policy/configuration on corrected kernel | #395 (PR #416) | POS: Frozen A policy/configuration executes on corrected kernel.<br>NEG: Uncertified kernel rejected.<br>ADV: Divergent baseline halted. | Separate CODE / PRIVATE_STATE / RUNTIME results (or justified N/A) and authoritative RESULT for Target A on corrected kernel. | Matthew | Kanuj | `BLOCKED` (PR #416 draft) |
+| **REQ-12** | Worker containment: external filesystem & network denial | #396 (PR #417) | POS: Confined worker writes scratch.<br>NEG: Write outside scratch denied.<br>ADV: Worker unconfined retry denied. | Accepted-enforcer denial and matched allowed-control receipts, protected-object before/after identities (applicable Cases A01-A11 in PR #417). | Matthew | Independent Reviewer | `BLOCKED` (PR #417 draft) |
 | **REQ-13** | Multi-testing control & dependence-aware uncertainty | #377, #382 | POS: Stationary block bootstrap run.<br>NEG: Naive i.i.d. assumption blocked.<br>ADV: Holm-Bonferroni correction. | Bootstrap p-values with data-driven block length. | Kanuj | Independent Scientific Reviewer | `NOT_RUN (runtime verification not yet executed; accepted implementation and evidence still required)` |
 
 ---
@@ -131,6 +131,17 @@ required evidence, responsible producer, and required independent reviewer.
 
 Per Matthew's recovery specification ([PR #416](https://github.com/KanujVerma/drift/pull/416) `recovery.md`),
 acceptance requires concrete verification of three distinct recovery targets:
+
+For **each** target, report `CODE`, `PRIVATE_STATE`, and `RUNTIME` separately,
+following recovery.md Section 5. Bind each component result to its exact revision,
+manifest, scope, authorization/custody reference, run and environment, supporting
+receipts, and independent verifier. A component that is not required is explicitly
+identified as not applicable with a reason; it is never silently passed. Preserve passed,
+failed, pending, cancelled, blocked, not-run and unavailable evidence separately.
+A matching manifest hash alone is not verification of reconstructed code, retained
+private state, or a working pinned runtime. Preserve subsequent trials, costs,
+losses and audit lineage; a recovery target does not authorize their deletion.
+Public receipts retain safe references rather than private bytes or credentials.
 
 ### Case REC-01: Target F (Feature-Off on Corrected Kernel)
 - **Positive Test:** System initializes with adaptive strategy selection disabled via
@@ -146,7 +157,7 @@ acceptance requires concrete verification of three distinct recovery targets:
   reconstructed in an isolated container/worktree matching a verified historical manifest.
 - **Negative Test:** Reconstructed environment attempts to connect to the current
   production database or shared cache; operation is strictly blocked by network/socket isolation.
-- **Evidence Required:** Manifest SHA-256 match, isolated mount receipt, and zero-leakage attestation.
+- **Evidence Required:** The separate `CODE`, `PRIVATE_STATE`, and `RUNTIME` results above, with the scoped manifest identity, authorized custodian/grant, isolated mount and environment receipts, verified reconstruction/replay results, and independent isolation evidence. Missing original state or unavailable runtime remains explicit even when manifest bytes match.
 
 ### Case REC-03: Target A (Frozen Policy/Configuration on Corrected Kernel)
 - **Positive Test:** Target A executes the frozen baseline strategy/policy configuration (derived from the approved manifest, rather than hardcoded assumptions) on the independently accepted corrected kernel, generating valid platform `RESULT` records.
@@ -163,21 +174,30 @@ worker confinement must be verified through actual authorized external operating
 Do not assume a particular firewall, iptables setup, container runtime, or host security policy exists unless independently evidenced.
 Prompt-level rules are not security boundaries:
 
+Acceptance follows the independently accepted **actual enforcer and tested
+environment**. For every applicable #417 A01-A11 case, retain authenticated
+commands, exits/output, matched permitted controls and effective denial receipts,
+plus protected-object before/after identities. A broken test environment, missing
+logs, or prompt refusal is not proof of containment. Syscall names, firewall
+counters and timeout behavior below are examples, not requirements to choose a
+particular OS or enforcement mechanism. No probe or host change is authorized by
+this document.
+
 ### Case CON-01: Filesystem Write Boundary Enforcement
 - **Positive Test:** Untrusted worker processes read allowed input contexts and write
   transient outputs strictly to designated scratch paths (`.local-artifacts/` or scratch directory).
 - **Negative Test (External Denial):** Worker executes a direct subprocess attempting to
   modify tracked repository files (`src/drift/`), configuration files, or parent directories.
-  The host operating system / container sandbox raises `EACCES` / permission denied.
-- **Evidence Required:** Kernel audit log showing syscall denial (`SYS_openat` with write flags blocked).
+  The accepted external enforcer denies the operation with its recorded permission-denial result (for example `EACCES`); the protected object remains unchanged.
+- **Evidence Required:** Trusted denial evidence from the accepted enforcer, matched allowed read/write controls, and protected-object before/after identities bound to the tested principal, policy and environment. A Linux audit log for blocked `SYS_openat` write flags is one possible receipt, not the only accepted mechanism.
 
 ### Case CON-02: Network Egress Confinement
 - **Positive Test:** Worker operates completely offline using pre-cached, point-in-time
   market and context fixtures.
 - **Negative Test (Network Denial):** Worker initiates an outbound socket connection
   (e.g., DNS lookup, HTTP request to external provider, raw TCP socket). The request is
-  immediately dropped by iptables / firewall rules.
-- **Evidence Required:** Packet filter drop counter increment and connection timeout receipt.
+  denied by the independently accepted network policy and actual external enforcer; record whether it rejects immediately or produces the policy's bounded timeout.
+- **Evidence Required:** Authenticated effective-egress-denial receipts from the actual enforcer, matched permitted fixture/network-stack controls within the authorized probe scope, and bound destination/principal/policy/environment identities. A packet-filter drop counter and bounded timeout are examples; an authenticated immediate denial may satisfy the accepted policy without either.
 
 ### Case CON-03: Refusal of Unconfined Fallback
 - **Negative Test:** When a confined execution path fails or encounters resource limits,
