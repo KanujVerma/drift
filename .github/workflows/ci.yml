@@ -38,6 +38,104 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Classify PR changes (only allowlisted Markdown skips full tests)
+        id: scope
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import subprocess
+
+          docs_only = False
+          if os.environ["GITHUB_EVENT_NAME"] == "pull_request":
+              base = os.environ.get("PR_BASE_SHA", "")
+              if not re.fullmatch(r"[0-9a-f]{40}", base):
+                  raise SystemExit("Invalid PR base SHA; cannot classify changes")
+              raw = subprocess.check_output(
+                  ["git", "diff", "--name-only", "--no-renames", "-z", base, "HEAD"]
+              )
+              paths = [os.fsdecode(item) for item in raw.split(b"\0") if item]
+
+              def is_documentation(path):
+                  return path in ("AGENTS.md", "README.md") or (
+                      path.startswith("docs/") and path.endswith(".md")
+                  )
+
+              docs_only = bool(paths) and all(is_documentation(p) for p in paths)
+              print("Changed PR paths:", repr(paths))
+              if not paths:
+                  print("Empty diff: full verification required")
+          else:
+              print("Push to main: full verification required")
+
+          print("Documentation-only fast path:", docs_only)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"docs_only={str(docs_only).lower()}\n")
+          PY
+      - name: Check changed Markdown links and forbidden punctuation
+        if: steps.scope.outputs.docs_only == 'true'
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+          from urllib.parse import unquote, urlsplit
+
+          root = Path.cwd().resolve()
+          raw = subprocess.check_output(
+              ["git", "diff", "--name-only", "--no-renames", "-z",
+               os.environ["PR_BASE_SHA"], "HEAD"]
+          )
+          paths = [Path(os.fsdecode(p)) for p in raw.split(b"\0") if p]
+          failures = []
+          checked = 0
+          for path in paths:
+              if not path.exists():
+                  continue  # Deleted Markdown file.
+              if path.is_symlink() or not path.is_file():
+                  failures.append(f"{path}: expected a regular Markdown file")
+                  continue
+              text = path.read_text(encoding="utf-8")
+              checked += 1
+              if "\u2014" in text:
+                  failures.append(f"{path}: forbidden U+2014 em dash")
+
+              visible_lines = []
+              fence = None
+              for line in text.splitlines():
+                  stripped = line.lstrip()
+                  marker = stripped[:3]
+                  if marker in ("```", "~~~"):
+                      if fence is None:
+                          fence = marker
+                      elif fence == marker:
+                          fence = None
+                      continue
+                  if fence is None:
+                      visible_lines.append(line)
+
+              for match in re.finditer(
+                  r"(?<!!)\[[^\]]+\]\(([^)]+)\)", "\n".join(visible_lines)
+              ):
+                  target = match.group(1).strip().split(" ", 1)[0].strip("<>")
+                  if not target or target.startswith(("#", "//")):
+                      continue
+                  parsed = urlsplit(target)
+                  if parsed.scheme or parsed.netloc or not parsed.path:
+                      continue  # External URL or same-page anchor.
+                  resolved = (path.parent / unquote(parsed.path)).resolve()
+                  if not resolved.is_relative_to(root) or not resolved.exists():
+                      failures.append(f"{path}: unresolved link {target}")
+
+          if failures:
+              raise SystemExit("\n".join(failures))
+          print(f"Documentation checks passed for {checked} changed Markdown files")
+          PY
       - name: Install uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
@@ -55,11 +153,13 @@ jobs:
         run: uv sync --locked
 
       - name: Print and verify interpreter identity
+        if: steps.scope.outputs.docs_only != 'true'
         run: |
           uv run python -c "import sys; print(sys.version); print(sys.executable)"
           uv run python -c "import sys; sys.path.insert(0, 'tests'); import _pinned_m1d as replay; print('pinned replay interpreter', replay.verify_replay_interpreter())"
 
       - name: uv run pytest
+        if: steps.scope.outputs.docs_only != 'true'
         run: uv run pytest
 
       - name: uv run ruff check .
@@ -69,9 +169,11 @@ jobs:
         run: uv run ruff format --check .
 
       - name: uv run mypy src tests
+        if: steps.scope.outputs.docs_only != 'true'
         run: uv run mypy src tests
 
       - name: uv build
+        if: steps.scope.outputs.docs_only != 'true'
         run: uv build
 
       - name: git diff --check
