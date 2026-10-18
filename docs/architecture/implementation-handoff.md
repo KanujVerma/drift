@@ -177,15 +177,20 @@ The following worked example illustrates how an architect provides complete, una
    Both operate under the identical Balanced portfolio mandate and identical time-eligible information.
 
 6. RELEVANT EXISTING CODE AND INTERFACE LOCATIONS:
-   - B3 Baseline: src/drift/baselines/b3_monthly_equal_weight_rebalance.py
-   - B4 Baseline: src/drift/baselines/b4_momentum.py
-   - B5 Baseline: src/drift/baselines/b5_low_volatility.py
-   - Scientific Contract: docs/architecture/adaptive-experiments/contracts/experiment.md (#392)
-   - Research Contract: docs/architecture/adaptive-experiments/contracts/research.md (Krish PR #400 / #375)
-   - Platform & Accounting Contract: docs/architecture/adaptive-experiments/contracts/platform.md (Matthew PR #407 / #376)
-   - Timing Contract: docs/architecture/adaptive-experiments/contracts/execution.md (Matthew PR #412 / #379)
-   - Mandate Contract: docs/architecture/adaptive-experiments/contracts/mandate.md (Matthew PR #414 / #380)
-   No fabricated runtime interfaces or competing account ledgers.
+   - Existing Implemented Source Modules (on main):
+     - B3 Baseline: src/drift/baselines/b3_monthly_equal_weight_rebalance.py
+     - B4 Baseline: src/drift/baselines/b4_momentum.py
+     - B5 Baseline: src/drift/baselines/b5_low_volatility.py
+   - Proposed Contract Dependencies (Unmerged Proposals, Not Implemented Runtime Types):
+     - Scientific Contract (#392 / PR #434): docs/architecture/adaptive-experiments/contracts/experiment.md
+     - Research Contract (#375 / PR #400): docs/architecture/adaptive-experiments/contracts/research.md
+     - Platform and Accounting Contract (#376 / PR #407): docs/architecture/adaptive-experiments/contracts/platform.md
+     - Timing and Execution Contract (#379 / PR #412): docs/architecture/adaptive-experiments/contracts/execution.md
+     - Mandate and Risk Contract (#380 / PR #414): docs/architecture/adaptive-experiments/contracts/mandate.md
+   - Interface Invariants:
+     - These contract documents are proposals until their actual accepted revisions are verified; they are NOT currently implemented interfaces or existing Python types.
+     - A future implementer must verify acceptance, availability, and pinned revisions at Resume before consumption.
+     - No fabricated runtime interfaces, synthetic Python symbol imports, or competing account ledgers.
 
 7. INPUT AND OUTPUT STRUCTURES AND UNITS:
    - Concrete Fixture Identifiers:
@@ -230,12 +235,10 @@ The following worked example illustrates how an architect provides complete, una
    Sequential pipeline:
    1. Decision Context Cutoff T(t_k) at session close (`2026-01-30T21:00:00Z`).
    2. Candidate Proposals Generated: PB-001 (B3 -> B4) and PR-001 (B3 -> B3) bound to SRC-EARLY.
-   3. Scientific Eligibility Preflight (Phase A): Validates source timestamps <= cutoff; SRC-EARLY passes, SRC-LATE rejected.
-   4. Platform Mandate Verification (Phase B): Mock mandate evaluates Balanced constraints (PB-001 permitted, PR-001 unchanged).
-   5. Execution Scheduling (Phase C): Transition scheduled for next eligible session open (`2026-02-02T14:30:00Z`); no same-close fill.
-   6. Platform Accounting (Phase D): Matthew's platform ledger updates cash, positions, and NAV, emitting RESULT-B-001 and RESULT-R-001.
-   7. Cost Attribution: Krish's research receipts RCPT-B-001 and RCPT-R-001 joined into derived scientific cost view without debiting portfolio cash.
-   8. Scorecard Generation: Computes paired return difference and comparative economic advantage.
+   3. Phase A (Scientific Pre-Decision Input Eligibility): Validates source timestamps <= cutoff; SRC-EARLY passes, SRC-LATE rejected.
+   4. Phase B (Matthew Operational Mandate Verdict): Mock mandate evaluates Balanced constraints (PB-001 permitted, PR-001 unchanged).
+   5. Phase C (Matthew Execution, Fills, Accounting, and Authoritative RESULT): Transition scheduled for next eligible session open (`2026-02-02T14:30:00Z`; no same-close fill); platform ledger updates cash, positions, and NAV, emitting RESULT-B-001 and RESULT-R-001.
+   6. Phase D (Scientific Evidence Completeness, Derived Research Cost Attribution, and Comparative Reporting): Krish research receipts RCPT-B-001 and RCPT-R-001 joined into derived scientific cost view without debiting portfolio cash; computes paired return difference and comparative economic advantage.
 
 9. ERROR, UNAVAILABLE, AND REFUSAL BEHAVIOR:
    - Missing lookback history or market data: UNAVAILABLE.
@@ -325,39 +328,28 @@ The following worked example illustrates how an architect provides complete, una
 
 ## 6. Continuity Checkpoint Template
 
-To preserve durable continuity across sessions, agents must record checkpoints on GitHub issues using this exact template:
+To preserve durable continuity across sessions, agents must record checkpoints on GitHub issues. Drift maintains a single authoritative Checkpoint specification; agents must not define or use competing templates.
 
-```markdown
-## Continuity Checkpoint
+The single authoritative source is the [Canonical Checkpoint](agent-workflow.md#checkpoint) defined in `docs/architecture/agent-workflow.md`.
 
-- **Task / Issue**: [e.g., #427 Standard Coding-Agent Implementation Handoff]
-- **Accountable Owner**: [e.g., Kanuj]
-- **Actual Execution Agent**: [e.g., Gemini / Antigravity]
-- **GitHub Publisher**: [e.g., KanujVerma]
-- **Current Branch**: [e.g., kanuj/427-implementation-handoff]
-- **Base SHA**: [e.g., 5583f112dfb45b8f6e8bc652de1cc4334ef8a247]
-- **Head SHA**: [e.g., a1b2c3d4e5f6...]
-- **Exact Modified Paths**:
-  - [e.g., docs/architecture/implementation-handoff.md]
-- **Accepted Architecture References**:
-  - [e.g., AGENTS.md, docs/architecture/workstreams.md]
-- **Draft or Unresolved Dependencies**:
-  - [e.g., Unmerged draft PR #XYZ pending review]
-- **Tests Actually Executed**:
-  - [e.g., git diff --check, relative link validation script]
-- **Observed Results**:
-  - [e.g., All checks passed; 0 whitespace errors, 0 em dashes]
-- **Tests Not Run**:
-  - [e.g., Full pytest suite (docs-only task)]
-- **Review Findings**:
-  - [e.g., None]
-- **Independent Approvals**:
-  - [e.g., Awaiting review from @Krish-Verma]
-- **Remaining Blockers**:
-  - [e.g., Independent review sign-off and PR merge]
-- **Next Executable Action**:
-  - [e.g., Coordinate startup navigation link once reserved docs paths are released]
-```
+Agents must copy the current canonical template in full at execution time without omitting or renaming mandatory fields:
+
+- Workstream and accountable owner.
+- Actual agent and GitHub actor.
+- Issue, PR, branch, base and HEAD.
+- Task state and exact objective.
+- Reserved, changed and released paths.
+- Completed verification.
+- Focused tests with interpreter and results.
+- Full CI SHA, run ID and actual status.
+- Contract versions and decision evidence.
+- Known failures and limitations.
+- Documentation impact.
+- Native blockers and affected consumers.
+- Uncommitted files.
+- Exact next action.
+
+Optional supporting information may be appended, but never replace or omit canonical fields.
 
 ### Checkpoint Invariants
 - Never claim a test result without citing concrete execution evidence.
