@@ -80,23 +80,316 @@ jobs:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           python3 - <<'PY'
+          import html
           import os
           import re
+          import string
           import subprocess
           from pathlib import Path
           from urllib.parse import unquote, urlsplit
 
+
+          def unescape(value):
+              return html.unescape(re.sub(r"\\([" + re.escape(string.punctuation) + r"])", r"\1", value))
+
+
+          def label(value):
+              return " ".join(unescape(value).split()).casefold()
+
+
+          def code_end(text, start):
+              end = start
+              while end < len(text) and text[end] == chr(96):
+                  end += 1
+              run = text[start:end]
+              boundary = re.search(r"\n[ \t]*\n", text[end:])
+              limit = end + boundary.start() if boundary else len(text)
+              close = re.search("(?<!" + chr(96) + ")" + re.escape(run) + "(?!" + chr(96) + ")", text[end:limit])
+              return end + close.end() if close else end
+
+
+          def bracket(text, start):
+              depth, pos = 1, start + 1
+              while pos < len(text):
+                  char = text[pos]
+                  if char == "\\" and pos + 1 < len(text) and text[pos + 1] in string.punctuation:
+                      pos += 2
+                      continue
+                  if char == chr(96):
+                      pos = code_end(text, pos)
+                      continue
+                  if char == "[":
+                      depth += 1
+                  elif char == "]":
+                      depth -= 1
+                      if not depth:
+                          return text[start + 1:pos], pos + 1
+                  pos += 1
+              return None
+
+
+          def destination(text, pos):
+              if pos < len(text) and text[pos] == "<":
+                  start, pos = pos + 1, pos + 1
+                  while pos < len(text):
+                      if text[pos] == "\\" and pos + 1 < len(text) and text[pos + 1] in string.punctuation:
+                          pos += 2
+                          continue
+                      if text[pos] == ">":
+                          return unescape(text[start:pos]), pos + 1
+                      if text[pos] in "<\n\r":
+                          break
+                      pos += 1
+                  raise ValueError("unterminated angle-bracket link destination")
+              start, depth = pos, 0
+              while pos < len(text):
+                  char = text[pos]
+                  if char == "\\" and pos + 1 < len(text) and text[pos + 1] in string.punctuation:
+                      pos += 2
+                      continue
+                  if char == "(":
+                      depth += 1
+                  elif char == ")":
+                      if not depth:
+                          break
+                      depth -= 1
+                  elif char.isspace():
+                      if depth:
+                          raise ValueError("whitespace inside unbracketed link destination")
+                      break
+                  elif ord(char) < 32 or char == "<":
+                      raise ValueError("unsupported link destination")
+                  pos += 1
+              if depth:
+                  raise ValueError("unbalanced link destination parentheses")
+              return unescape(text[start:pos]), pos
+
+
+          def finish_link(text, pos, inline):
+              start = pos
+              while pos < len(text) and text[pos].isspace():
+                  pos += 1
+              if pos > start and pos < len(text) and text[pos] in "\"'(":
+                  opener = text[pos]
+                  closer = ")" if opener == "(" else opener
+                  pos += 1
+                  while pos < len(text):
+                      if text[pos] == "\\" and pos + 1 < len(text):
+                          pos += 2
+                          continue
+                      if text[pos] == closer:
+                          pos += 1
+                          break
+                      pos += 1
+                  else:
+                      raise ValueError("unterminated link title")
+                  while pos < len(text) and text[pos].isspace():
+                      pos += 1
+              if inline:
+                  if pos >= len(text) or text[pos] != ")":
+                      raise ValueError("unsupported or unterminated inline link")
+                  return pos + 1
+              if pos != len(text):
+                  raise ValueError("unsupported reference definition suffix")
+              return pos
+
+
+          def visible_markdown(text):
+              lines, fence, comment, indented, blank = [], None, False, False, True
+              container, protected_until, offset = False, 0, 0
+              tick = chr(96)
+              fence_pattern = r" {0,3}(" + tick + r"{3,}|~{3,})(.*)$"
+              for raw_line in text.splitlines(keepends=True):
+                  line = raw_line.rstrip("\r\n")
+                  begin, offset = offset, offset + len(raw_line)
+                  expanded = line.expandtabs(4)
+                  if fence:
+                      if re.fullmatch(r" {0,3}" + re.escape(fence[0]) + "{" + str(fence[1]) + r",}[ \t]*", expanded):
+                          fence = None
+                      lines.append("")
+                      continue
+                  if not comment and protected_until <= begin:
+                      if re.match(r" {0,3}(?:[-+*]|\d+[.)])\s+", expanded):
+                          container = True
+                      elif expanded and not expanded[0].isspace() and not expanded.startswith(">"):
+                          container = False
+                  if not comment and expanded.startswith("    ") and (blank or indented):
+                      if container:
+                          raise ValueError("indented container content is unsupported by the fast validator")
+                      indented = True
+                      lines.append("")
+                      continue
+                  indented = False
+                  if not comment and protected_until <= begin:
+                      prefix = r" {0,3}(?:>\s*|(?:[-+*]|\d+[.)])\s+)"
+                      if re.match(prefix + ".*(?:" + tick + r"{3}|~{3})", expanded):
+                          raise ValueError("container code fences are unsupported by the fast validator")
+                      if re.match(prefix + r"\[[^\n]*\]:", expanded):
+                          raise ValueError("container reference definitions are unsupported by the fast validator")
+                      if re.match(r" {0,3}</?[A-Za-z][A-Za-z0-9-]*(?:\s|/?>)", expanded):
+                          raise ValueError("HTML blocks are unsupported by the fast validator")
+                      match = re.match(fence_pattern, expanded)
+                      if match and (match[1][0] != tick or tick not in match[2]):
+                          fence = (match[1][0], len(match[1]))
+                          lines.append("")
+                          blank = True
+                          continue
+                  cleaned, pos = "", 0
+                  while pos < len(line):
+                      if protected_until > begin + pos:
+                          end = min(len(line), protected_until - begin)
+                          cleaned += line[pos:end]
+                          pos = end
+                          continue
+                      if comment:
+                          end = line.find("-->", pos)
+                          if end < 0:
+                              break
+                          comment, pos = False, end + 3
+                          continue
+                      if line[pos] == "\\" and pos + 1 < len(line) and line[pos + 1] in string.punctuation:
+                          cleaned += line[pos:pos + 2]
+                          pos += 2
+                          continue
+                      if line[pos] == tick:
+                          run_end = begin + pos
+                          while run_end < len(text) and text[run_end] == tick:
+                              run_end += 1
+                          stop = code_end(text, begin + pos)
+                          if stop > run_end and not re.search(
+                              r"(?m)^ {0,3}(?:" + tick + r"{3,}|~{3,})", text[run_end:stop]
+                          ):
+                              protected_until = stop
+                              continue
+                      if line.startswith("<!--", pos):
+                          comment, pos = True, pos + 4
+                          continue
+                      cleaned += line[pos]
+                      pos += 1
+                  lines.append(cleaned)
+                  blank = not cleaned.strip()
+              return "\n".join(lines)
+
+
+          def local_targets(text, inherited=None):
+              visible = visible_markdown(text)
+              refs, lines = dict(inherited or {}), visible.splitlines()
+              originals = lines.copy()
+              offsets, offset = [], 0
+              for source_line in visible.splitlines(keepends=True):
+                  offsets.append(offset)
+                  offset += len(source_line)
+              code_until, definition_end = 0, -1
+              for number, line in enumerate(lines):
+                  match = re.match(r" {0,3}\[", line)
+                  parsed = bracket(line, match.end() - 1) if match else None
+                  is_definition = parsed and line[parsed[1]:].startswith(":")
+                  if code_until > offsets[number] or not is_definition:
+                      pos = max(0, code_until - offsets[number])
+                      while pos < len(line):
+                          if line[pos] == "\\" and pos + 1 < len(line) and line[pos + 1] in string.punctuation:
+                              pos += 2
+                          elif line[pos] == chr(96):
+                              stop = code_end(visible, offsets[number] + pos)
+                              run_end = offsets[number] + pos
+                              while run_end < len(visible) and visible[run_end] == chr(96):
+                                  run_end += 1
+                              if stop > run_end:
+                                  code_until = stop
+                              pos = stop - offsets[number]
+                          else:
+                              pos += 1
+                      continue
+                  if number and originals[number - 1].strip() and definition_end != number - 1:
+                      raise ValueError("paragraph-adjacent reference definitions are unsupported by the fast validator")
+                  name, end = parsed
+                  value = line[end + 1:].lstrip()
+                  consumed = number
+                  if not value and number + 1 < len(lines):
+                      consumed += 1
+                      value = lines[consumed].lstrip()
+                  target, end = destination(value, 0)
+                  if not target:
+                      raise ValueError("empty reference destination")
+                  if not value[end:].strip() and consumed + 1 < len(lines):
+                      following = lines[consumed + 1].lstrip()
+                      if following.startswith(('"', "'", "(")):
+                          consumed += 1
+                          value += "\n" + lines[consumed]
+                  while True:
+                      try:
+                          finish_link(value, end, False)
+                          break
+                      except ValueError as exc:
+                          if str(exc) != "unterminated link title" or consumed + 1 >= len(lines) or not lines[consumed + 1].strip():
+                              raise
+                          consumed += 1
+                          value += "\n" + lines[consumed]
+                  refs.setdefault(label(name), target)
+                  for index in range(number, consumed + 1):
+                      lines[index] = ""
+                  definition_end = consumed
+              visible, pos = "\n".join(lines), 0
+              while pos < len(visible):
+                  char = visible[pos]
+                  if char == "\\" and pos + 1 < len(visible) and visible[pos + 1] in string.punctuation:
+                      pos += 2
+                      continue
+                  if char == chr(96):
+                      pos = code_end(visible, pos)
+                      continue
+                  if char == "<" and re.match(r"</?(?:a|img)\b", visible[pos:], re.I):
+                      raise ValueError("HTML link/image destinations require full verification")
+                  if char != "[":
+                      pos += 1
+                      continue
+                  parsed = bracket(visible, pos)
+                  if not parsed:
+                      pos += 1
+                      continue
+                  name, end = parsed
+                  if "\n" in name and visible[end:].startswith(":"):
+                      raise ValueError("multiline reference labels are unsupported by the fast validator")
+                  yield from local_targets(name, refs)
+                  after = end
+                  if after < len(visible) and visible[after] == "(":
+                      start = after + 1
+                      while start < len(visible) and visible[start].isspace():
+                          start += 1
+                      target, stop = destination(visible, start)
+                      yield target
+                      pos = finish_link(visible, stop, True)
+                      continue
+                  if end < len(visible) and visible[end] == "[":
+                      reference = bracket(visible, end)
+                      if reference:
+                          key, stop = reference
+                          if label(key or name) in refs:
+                              yield refs[label(key or name)]
+                              pos = stop
+                              continue
+                  if label(name) in refs:
+                      yield refs[label(name)]
+                  # Continue through labels as they may contain nested image/link syntax.
+                  pos += 1
+
+
           root = Path.cwd().resolve()
-          raw = subprocess.check_output(
-              ["git", "diff", "--name-only", "--no-renames", "-z",
-               os.environ["PR_BASE_SHA"], "HEAD"]
-          )
-          paths = [Path(os.fsdecode(p)) for p in raw.split(b"\0") if p]
-          failures = []
-          checked = 0
-          for path in paths:
-              if not path.exists():
-                  continue  # Deleted Markdown file.
+          raw = subprocess.check_output([
+              "git", "diff", "--name-status", "--no-renames", "-z",
+              os.environ["PR_BASE_SHA"], "HEAD",
+          ])
+          items = raw.split(b"\0")
+          if not items or items[-1] != b"" or len(items[:-1]) % 2:
+              raise SystemExit("Malformed changed-document status list")
+          failures, checked = [], 0
+          for index in range(0, len(items) - 1, 2):
+              status = items[index].decode("ascii")
+              path = Path(os.fsdecode(items[index + 1]))
+              if status not in ("A", "M", "D", "T"):
+                  raise SystemExit(f"{path}: unsupported change status {status}")
+              if status == "D":
+                  continue
               if path.is_symlink() or not path.is_file():
                   failures.append(f"{path}: expected a regular Markdown file")
                   continue
@@ -104,34 +397,18 @@ jobs:
               checked += 1
               if "\u2014" in text:
                   failures.append(f"{path}: forbidden U+2014 em dash")
-
-              visible_lines = []
-              fence = None
-              for line in text.splitlines():
-                  stripped = line.lstrip()
-                  marker = stripped[:3]
-                  if marker in ("```", "~~~"):
-                      if fence is None:
-                          fence = marker
-                      elif fence == marker:
-                          fence = None
-                      continue
-                  if fence is None:
-                      visible_lines.append(line)
-
-              for match in re.finditer(
-                  r"(?<!!)\[[^\]]+\]\(([^)]+)\)", "\n".join(visible_lines)
-              ):
-                  target = match.group(1).strip().split(" ", 1)[0].strip("<>")
-                  if not target or target.startswith(("#", "//")):
-                      continue
-                  parsed = urlsplit(target)
-                  if parsed.scheme or parsed.netloc or not parsed.path:
-                      continue  # External URL or same-page anchor.
-                  resolved = (path.parent / unquote(parsed.path)).resolve()
-                  if not resolved.is_relative_to(root) or not resolved.exists():
-                      failures.append(f"{path}: unresolved link {target}")
-
+              try:
+                  for target in local_targets(text):
+                      if not target or target.startswith(("#", "//")):
+                          continue
+                      parsed = urlsplit(target)
+                      if parsed.scheme or parsed.netloc or not parsed.path:
+                          continue
+                      resolved = (path.parent / unquote(parsed.path)).resolve()
+                      if not resolved.is_relative_to(root) or not resolved.exists():
+                          failures.append(f"{path}: unresolved link {target}")
+              except ValueError as exc:
+                  failures.append(f"{path}: {exc}")
           if failures:
               raise SystemExit("\n".join(failures))
           print(f"Documentation checks passed for {checked} changed Markdown files")
