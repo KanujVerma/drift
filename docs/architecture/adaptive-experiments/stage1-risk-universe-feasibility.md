@@ -1,6 +1,6 @@
 # Stage 1 ETF universe and Balanced risk feasibility: research packet
 
-**Status:** OWNER-LED RESEARCH PROPOSAL, **NOT** accepted numerical limits, a qualified data configuration, a runtime contract, or evidence of strategy profitability. Prepared October 16, 2026 under [#420](https://github.com/KanujVerma/drift/issues/420). The accepted strategy-selection direction is [S01-S38](https://github.com/KanujVerma/drift/blob/coord/2026-10-16-stage1-decisions-roadmap/docs/architecture/adaptive-experiments/stage1-decisions.md) (draft PR [#419](https://github.com/KanujVerma/drift/pull/419)); the original broader [D01-D17](decisions.md) are separate and unchanged.
+**Status:** OWNER-LED RESEARCH PROPOSAL, **NOT** accepted numerical limits, a qualified data configuration, a runtime contract, or evidence of strategy profitability. Prepared October 16, 2026 under [#420](https://github.com/KanujVerma/drift/issues/420). The accepted strategy-selection direction is [S01-S38](stage1-decisions.md); the original broader [D01-D17](decisions.md) are separate and unchanged.
 
 **Scope/evidence tiers:** (a) verified current strategy source at `main` `5583f112dfb45b8f6e8bc652de1cc4334ef8a247`; (b) fund issuer public fact pages establishing fund types and dates, **not** licensed historical market-data provenance; (c) exhaustive mathematical **structural** selection feasibility from current source semantics; (d) candidate risk limits requiring further model, platform and statistical acceptance. This research **did not** request authenticated data from a broker/provider, simulate historical realized ETF prices, verify bid/ask history, measure real strategy-selection frequencies, or trade.
 
@@ -82,8 +82,8 @@ bonds = {"SHY", "IEF", "TLT", "TIP", "LQD"}
 gold = {"GLD"}
 universe = sorted(equity | bonds | gold)
 
-def valid(selected, *, equity_cap=0.70, bond_cap=0.75,
-          gold_cap=0.20, etf_cap=0.20):
+
+def valid(selected, *, equity_cap=0.70, bond_cap=0.75, gold_cap=0.20, etf_cap=0.20):
     n = len(selected)
     return (
         (1 / n) <= etf_cap
@@ -92,14 +92,16 @@ def valid(selected, *, equity_cap=0.70, bond_cap=0.75,
         and len(set(selected) & gold) / n <= gold_cap
     )
 
+
 sets12 = list(combinations(universe, 6))
 assert len(sets12) == 924
 assert sum(valid(s) for s in sets12) == 880
 assert sum(valid(s, equity_cap=0.65) for s in sets12) == 655
 assert sum(valid(s, gold_cap=0.15) for s in sets12) == 425
 assert sum(valid(s, etf_cap=0.15) for s in sets12) == 0
-assert sum(valid(s, equity_cap=0.85, bond_cap=0.85,
-                 etf_cap=0.25) for s in sets12) == 923
+assert (
+    sum(valid(s, equity_cap=0.85, bond_cap=0.85, etf_cap=0.25) for s in sets12) == 923
+)
 sets11 = list(combinations([t for t in universe if t != "QQQ"], 6))
 assert len(sets11) == 462
 assert sum(valid(s) for s in sets11) == 450
@@ -150,7 +152,7 @@ Build a *development-only* result for each eligible month, using qualified sourc
 4. Measure valid months, rejection/abstention rates, switch count, turnover, slippage sensitivity, ETF/class breaches between checkpoints, automatic drift-correction fills and their costs.
 5. Include no-QQQ 11-fund sensitivity without retrospective universe promotion. Run a *development-only* sweep of more/less restrictive caps, e.g. 65/75/20 and 85/85/20, recording how the risk limit changes the AI/R menu and exposure.
 6. Report actual portfolio volatility, drawdown and asset correlations. Any model training or threshold selection must not use final scored evaluation or a claimed pristine 2025 holdout. Model pretraining contamination remains an explicit limit.
-7. Only then fix **Balanced** numerical limits, effective system ceilings, risk-engine behavior and scientific evaluation under owner approval plus Matthew/Harsha domain acceptance. G1-G3 in [Stage 1 roadmap draft](https://github.com/KanujVerma/drift/blob/coord/2026-10-16-stage1-decisions-roadmap/docs/architecture/adaptive-experiments/stage1-roadmap.md) apply before scoring.
+7. Only then fix **Balanced** numerical limits, effective system ceilings, risk-engine behavior and scientific evaluation under owner approval plus Matthew/Harsha domain acceptance. G1-G3 in [Stage 1 roadmap](stage1-roadmap.md) apply before scoring.
 
 ### C. Risk-engine contract gaps to resolve independently
 
