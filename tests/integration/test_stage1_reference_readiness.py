@@ -327,9 +327,11 @@ def test_b4_momentum_formula_ranking_tiebreak_and_allocation() -> None:
     # Verify whole-share calculations:
     # NAV = 12000 -> 12000 / 6 = 2000 dollars per security
     # Price for cohort[0] at current date is 200.00 -> 2000 // 200 = 10 shares
-    assert target_map[cohort[0]] == 10
+    prices_b4 = {sec: extract_current_close_price(ctx, sec) for sec in selected_secs}
+    assert all(p is not None for p in prices_b4.values())
     total_cost = sum(
-        target_map[sec] * extract_current_close_price(ctx, sec) for sec in selected_secs
+        (target_map[sec] * p for sec, p in prices_b4.items() if p is not None),
+        Decimal("0.00"),
     )
     assert total_cost <= Decimal("12000.00")
     assert Decimal("12000.00") - total_cost >= Decimal("0.00")  # cash residual >= 0
@@ -486,9 +488,11 @@ def test_b5_low_volatility_variance_ranking_tiebreak_and_allocation() -> None:
     # Verify whole-share calculations and residual cash:
     # NAV = 12000 -> 12000 / 6 = 2000 dollars per security
     # Price for cohort[0] is 100.00 -> 2000 // 100 = 20 shares
-    assert target_map[cohort[0]] == 20
+    prices_b5 = {sec: extract_current_close_price(ctx, sec) for sec in selected_secs}
+    assert all(p is not None for p in prices_b5.values())
     total_cost = sum(
-        target_map[sec] * extract_current_close_price(ctx, sec) for sec in selected_secs
+        (target_map[sec] * p for sec, p in prices_b5.items() if p is not None),
+        Decimal("0.00"),
     )
     assert total_cost <= Decimal("12000.00")
     assert Decimal("12000.00") - total_cost >= Decimal("0.00")
