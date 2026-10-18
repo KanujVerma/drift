@@ -2,17 +2,22 @@
 
 A fresh agent needs this repository and GitHub. It does not need a prior chat,
 a setup ZIP, or a copied prompt. Say which workstream you are: `kanuj`, `krish`,
-`matthew` or `harsha`. Then read the pages below and run Resume.
+or `matthew`. Historical `harsha` records exist on prior issues, but active work
+is assigned across `kanuj`, `krish`, and `matthew` per
+[ADR 0017](../../adr/0017-transfer-scientific-experiment-ownership-to-kanuj.md).
+Then read the pages below and run Resume.
 
 ## Reading order
 
 1. [AGENTS.md](../../../AGENTS.md)
-2. [Decisions and rationale](decisions.md), including why each decision was made
-3. [Design](design.md)
-4. [Workstreams](../workstreams.md) and [ADR 0015](../../adr/0015-three-feature-workstreams-and-explicit-writer-handoffs.md)
-5. [Requirements crosswalk](requirements-crosswalk.md)
-6. [Workflow](../agent-workflow.md)
-7. The linked GitHub issue, its latest comments, pull request, reviews and blockers
+2. [Broad adaptive product decisions D01-D17](decisions.md) and their rationale
+3. [Stage 1 controlled-study decisions S01-S38](stage1-decisions.md) and their separate rationale
+4. [Stage 1 implementation roadmap](stage1-roadmap.md), gates and issue routing
+5. [Design](design.md)
+6. [Workstreams](../workstreams.md) and [ADR 0015](../../adr/0015-three-feature-workstreams-and-explicit-writer-handoffs.md)
+7. [Requirements crosswalk](requirements-crosswalk.md)
+8. [Workflow](../agent-workflow.md)
+9. The linked GitHub issue, its latest comments, pull request, reviews and blockers
 
 Accepted intent lives in the decisions, design and ADRs. Live progress lives in
 GitHub issues and pull requests. Implemented behavior lives in code, tests and
@@ -24,29 +29,34 @@ architectural acceptance, source qualification or permission to trade.
 Drift compares adaptive research with frozen controls under one simulator.
 Each of A, B, C, D and R is a separate simulated account starting at USD 10,000.
 They are counterfactual arms, not pooled capital. Matthew's RESULT is the
-account arithmetic. Harsha analyzes that RESULT and does not replace it.
+account arithmetic. Kanuj's scientific workstream analyzes that RESULT without
+replacing it, while keeping offline news triage independently bounded.
 Krish proposes allocations inside approved strategy families and updates only
-permitted learning state after outcomes actually exist. Kanuj turns a normalized
-event into a candidate alert or an explicit non-alert. Unresolved thresholds
+permitted learning state after outcomes actually exist. Unresolved thresholds
 stay unresolved until the owning specification issue accepts them.
 
-The seventeen decisions and their rationale are D01 through D17 in
-[decisions.md](decisions.md). Do not replace them with a shorter list.
+The original seventeen broad product decisions and rationale are **D01-D17**
+in [decisions.md](decisions.md). The later, narrower portfolio-selection
+discussion consists of **S01-S38** in [stage1-decisions.md](stage1-decisions.md).
+The first seventeen S items are **not** the original D01-D17. Read both lists;
+do not replace, append as if identical, or promote draft S-study details to
+accepted runtime contracts. Scoring also requires the gates in
+[stage1-roadmap.md](stage1-roadmap.md).
 
 ## Who owns what
 
 | Workstream | Accountable human | Owns | Does not own |
 |---|---|---|---|
-| kanuj | Kanuj | Offline triage and its tests/docs | Ingestion, models, accounting, execution, mandatory global review |
+| kanuj | Kanuj | Scientific experiments and methodology (transferred per [ADR 0017](../../adr/0017-transfer-scientific-experiment-ownership-to-kanuj.md) and per-issue migration receipts), plus independent offline news triage | General infrastructure rescue, AI training, the account ledger, execution, mandatory global review |
 | krish | Krish | Inner learning loop, proposals, optimizer R, model replay, raw attempt receipts | Scientific success criteria, the account ledger, operational permissions |
 | matthew | Matthew | Data, the one simulator, accounting, execution, risk, recovery and containment mechanisms | A second analysis engine, unilateral eligibility rules |
-| harsha | Harsha | Study orchestration, trial completeness, metrics, reports, scientific eligibility evidence | A second backtester, generic QA for every PR, self-certified acceptance |
 
 Stable login mappings, not a live assignee list: `KanujVerma` is kanuj,
 `Krish-Verma` is krish, and `matthew-philip` is matthew. Do not guess a login
-from a personal name. Harsha's login is not stored on this page. Read #370 and
-the latest activation receipt for current access and assignees. A newer receipt
-overrides this page. Do not treat an old sentence here as a current blocker.
+from a personal name. Historical Harsha records remain readable on older issues,
+but active scientific workstream tasks are migrated to Kanuj per ADR 0017 once
+authenticated migration receipts, labels, assignees, and dependencies are reconciled.
+Do not treat an old sentence here as a current blocker.
 
 Producer contracts, all still specifications rather than implemented APIs:
 
@@ -59,7 +69,7 @@ Producer contracts, all still specifications rather than implemented APIs:
 | TRIAGE behavior and output | Kanuj | #393 |
 | TRIAGE runtime | Kanuj | #381, after accepted #393 and #394 |
 | CONTEXT/CANDIDATE and attempt replay | Krish | #375 |
-| EXPERIMENT/ELIGIBILITY | Harsha | #392 |
+| EXPERIMENT/ELIGIBILITY | Kanuj | #392 (transferred per [ADR 0017](../../adr/0017-transfer-scientific-experiment-ownership-to-kanuj.md)) |
 
 ## Next legitimate task
 
@@ -75,13 +85,14 @@ preferred order.
 
 | Workstream | Entry gate | Eligible executable issues once that gate is open | Resume selects |
 |---|---|---|---|
-| kanuj | #387 | #393 is the design issue. #381 stays blocked until accepted #393 and #394 revisions are named. | #393. Branch `kanuj/393-triage-design`. |
+| kanuj | #387 (triage) / [ADR 0017](../../adr/0017-transfer-scientific-experiment-ownership-to-kanuj.md) migration receipts (experiments) | For triage: #393 is the design issue; #381 stays blocked until accepted #393 and #394 revisions are named. For scientific experiments: each issue requires its own verified migration receipt. Priority selects #392 first, followed by #382 and #397; #377 is independently required before G3 freeze; #383 retains seven substantive native blockers. | For triage: #393 (branch `kanuj/393-triage-design`). For scientific experiments: #392 first (branch `kanuj/392-experiment-contract`), then #382 and #397. |
 | krish | #388 | #375. It is not blocked by #369 or #370. | #375, the only Krish p0 design issue on this gate. Branch `krish/375-k-contract`. |
 | matthew | #389 | #376, #378, #379, #380 and #394, all p0. #376 is older than #394. | #376 first. Do not write a second triage envelope in #376. #394 is the only envelope definition and remains an independent later claim. Branch for the selected issue is `matthew/<issue>-<slug>` from that issue. |
-| harsha | #390 | #377, #382 and #392, all p0. #377 is the oldest. None blocks the others. | #377. Branch `harsha/377-k-method`. #390 also depends on #370. |
 
-The common routing gate is #386. #369 is the tracker. It does not block #386,
-#387, #388, #389 or #390. An open question on #370 blocks #390 only.
+The common routing gate for initial bootstrap was #386. #369 is the tracker.
+Harsha activation issue #390 is superseded by
+[ADR 0017](../../adr/0017-transfer-scientific-experiment-ownership-to-kanuj.md)
+and authenticated per-issue migration receipts.
 
 A parent issue such as #372, #373, #374 or #391 is not an implementation task.
 
