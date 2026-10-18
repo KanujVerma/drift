@@ -308,27 +308,149 @@ action is stored as an immutable `TrialEventV1`.
 | `producer_evidence_references`| Array[String] | Hashes of external producer evidence bound by this event. |
 | `payload_reference` | String | URI or pointer to event payload. |
 | `payload_hash` | String | SHA-256 hex digest of canonicalized payload bytes. |
-| `event_hash` | String | SHA-256 hex digest over all fields in this event envelope. |
+| `event_hash` | String | SHA-256 hex digest over all other envelope fields, excluding event_hash. |
 
 #### Canonical Event Preimage and event_hash
-`TrialEventV1.event_hash` is computed as the SHA-256 hex digest of a canonical, versioned
-event preimage that excludes `event_hash` itself:
+`TrialEventV1.event_hash` is computed as the lowercase hexadecimal SHA-256 digest of a
+canonical, versioned event preimage that excludes `event_hash` itself.
 
+#### Mandatory Canonical Serialization Contract
+Event hashing binds directly to Drift's authoritative canonical serializer
+(`src/drift/serialization/canonical.py`), specifically `canonical_data(value)`,
+`canonical_json(value)`, and `content_hash(value)`:
+
+1. Canonical serialization produces UTF-8 JSON bytes.
+2. Dictionary keys are strings, ordered lexicographically.
+3. JSON separators are exactly `(",", ":")`, with no additional whitespace.
+4. `ensure_ascii=False`, retaining valid Unicode characters in UTF-8.
+5. `allow_nan=False`, so non-finite numeric values (NaN, Infinity, -Infinity) are rejected.
+6. No byte order mark (BOM), trailing newline, indentation, or alternative JSON serialization is permitted.
+7. `content_hash(value)` is the lowercase hexadecimal SHA-256 digest of `canonical_json(value)`.
+8. JSON array ordering is preserved except where this contract explicitly requires sorting.
+9. `producer_evidence_references` is sorted lexicographically before hashing. Entries are not silently deduplicated.
+10. The event preimage includes precisely the ten semantic envelope fields and excludes `event_hash` itself.
+
+Where this specification defines other canonical-JSON fingerprints (such as `campaign_spec_fingerprint`,
+`arm_spec_fingerprint`, or `evidence_fingerprint`), each fingerprint references this identical canonical
+serializer while preserving each fingerprint's existing field-exclusion rules. Raw provider request/response
+byte hashing continues to bind raw bytes directly, not reserialized JSON.
+
+#### Timestamp Rule
+The canonical persisted event timestamp format is:
+```text
+YYYY-MM-DDTHH:MM:SS.ffffffZ
 ```
+requiring exactly six fractional digits and UTC (`Z`).
+
+For new events:
+- Accept a validated, timezone-aware `datetime` at the construction boundary.
+- Normalize it to UTC.
+- Serialize using six fractional digits and `Z`.
+- Reject naive or invalid datetimes.
+- Reject noncanonical persisted timestamp strings instead of silently rewriting an already recorded event.
+- Do not hash arbitrary incoming timestamp strings directly.
+
+`canonical_json()` normalizes typed `datetime` objects, but does not interpret or normalize a plain Python `str`.
+The reference conversion is:
+
+```python
+from datetime import UTC, datetime
+
+
+def canonical_recorded_at(value: datetime) -> str:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("recorded_at requires a timezone-aware datetime")
+    return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+```
+
+Upstream timestamp inputs expressed as offsets can be normalized before persistence, but the persisted
+`TrialEventV1.recorded_at` wire representation must use the exact UTC format above.
+
+#### DecimalText Rule
+Monetary and exact decimal fields must remain producer-valid canonical decimal strings conforming
+to Krish's proposed `research.md` DecimalText contract:
+- Finite base-10 text.
+- No exponent or scientific notation (`"e"` / `"E"`).
+- No leading plus sign (`"+"`).
+- No invalid leading zeros (e.g., `"00.42"`).
+- No negative zero (`"-0"` / `"-0.0"`).
+- No trailing fractional zeros (e.g., valid: `"0.042"`; invalid: `"0.04200000"`).
+- No implicit rounding or numeric coercion.
+
+Exact monetary text must not be converted through binary float, and retained research receipts must
+not be silently rewritten.
+
+#### Canonical Event Preimage Construction
+```python
+from drift.serialization.canonical import content_hash
+
 event_preimage = {
-  "schema_version": event.schema_version,
-  "event_id": event.event_id,
-  "trial_id": event.trial_id,
-  "event_index": event.event_index,
-  "previous_event_reference": event.previous_event_reference,
-  "event_kind": event.event_kind,
-  "recorded_at": event.recorded_at,
-  "producer_evidence_references": sorted(event.producer_evidence_references),
-  "payload_reference": event.payload_reference,
-  "payload_hash": event.payload_hash
+    "schema_version": event.schema_version,
+    "event_id": event.event_id,
+    "trial_id": event.trial_id,
+    "event_index": event.event_index,
+    "previous_event_reference": event.previous_event_reference,
+    "event_kind": event.event_kind,
+    "recorded_at": canonical_recorded_at(validated_recorded_at),
+    "producer_evidence_references": sorted(event.producer_evidence_references),
+    "payload_reference": event.payload_reference,
+    "payload_hash": event.payload_hash,
 }
-event_hash = sha256_hex(canonical_json(event_preimage))
+event_hash = content_hash(event_preimage)
 ```
+
+The pseudocode operates on validated event fields where `recorded_at` is already canonicalized.
+The actual bytes are produced by the repository's `canonical_json()`, not by independently
+reimplementing JSON encoding.
+
+#### Deterministic Golden Fixtures
+These synthetic fixtures demonstrate deterministic canonical hashing under `src/drift/serialization/canonical.py`
+and do not represent live producer receipts or actual capital:
+
+**Payload Fixture:**
+- Content object: `{"amount": "0.042", "currency": "USD", "kind": "SYNTHETIC"}`
+- Canonical UTF-8 bytes: `b'{"amount":"0.042","currency":"USD","kind":"SYNTHETIC"}'`
+- Expected SHA-256 (`content_hash`):
+  `01f8a73080e754508a23c88172de3fe6cd77b76819e7768861b68ef90290b630`
+
+**Event Preimage Fixture:**
+- `schema_version`: `"drift-experiment/1-draft"`
+- `trial_id`: `"CAMP-001:RUN-001:ARM-B:CKPT-001"`
+- `event_id`: `"CAMP-001:RUN-001:ARM-B:CKPT-001:EVT-0"`
+- `event_index`: `0`
+- `previous_event_reference`: `"ROOT"`
+- `event_kind`: `"OPPORTUNITY_CREATED"`
+- `recorded_at`: `"2026-10-18T20:20:30.000000Z"`
+- `producer_evidence_references`:
+  - `"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`
+  - `"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"`
+- `payload_reference`: `"fixture://synthetic-payload-001"`
+- `payload_hash`: `"01f8a73080e754508a23c88172de3fe6cd77b76819e7768861b68ef90290b630"`
+- Canonical UTF-8 preimage bytes:
+  ```text
+  b'{"event_id":"CAMP-001:RUN-001:ARM-B:CKPT-001:EVT-0","event_index":0,"event_kind":"OPPORTUNITY_CREATED","payload_hash":"01f8a73080e754508a23c88172de3fe6cd77b76819e7768861b68ef90290b630","payload_reference":"fixture://synthetic-payload-001","previous_event_reference":"ROOT","producer_evidence_references":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"],"recorded_at":"2026-10-18T20:20:30.000000Z","schema_version":"drift-experiment/1-draft","trial_id":"CAMP-001:RUN-001:ARM-B:CKPT-001"}'
+  ```
+- Expected SHA-256 (`content_hash`):
+  `ea79034394c3669c5ea7d884b160f6e98c3f92e43ab445711be3105926d972b9`
+
+#### Required Adversarial and Boundary Coverage
+Implementations validating this contract must enforce the following outcomes:
+- **Timestamp offset equivalence:** Equivalent UTC instants expressed with different source offsets
+  (e.g., `2026-10-18T15:20:30-05:00` and `2026-10-18T20:20:30+00:00`) normalize to identical canonical
+  persisted UTC strings (`"2026-10-18T20:20:30.000000Z"`) and produce identical canonical event hashes.
+- **Evidence order invariance:** Permutations of `producer_evidence_references` (e.g., `[f, a]` vs `[a, f]`)
+  sort lexicographically to `[a, f]` prior to canonicalization, producing identical event hashes.
+- **Field sensitivity:** Modifying any of `payload_hash`, `event_index`, or `previous_event_reference`
+  strictly alters the resulting `event_hash`.
+- **Naive timestamp rejection:** Timestamps lacking timezone information raise a validation error at
+  the construction boundary.
+- **Noncanonical persisted string rejection:** Persisted timestamp strings that deviate from the six-fractional
+  digit UTC format are rejected by schema validators rather than hashed unmodified.
+- **DecimalText rejection:** Invalid DecimalText representations (such as trailing fractional zeros
+  `"0.04200000"`) are rejected by the owning validation contract, not silently normalized.
+- **No binary float conversion:** Exact monetary amounts are never coerced through binary floating point.
+- **Append-only immutability:** Existing events cannot be rewritten to repair a digest; any hash discrepancy
+  invalidates the trial chain.
 
 #### Invariants Governing Event Ordering
 1. **Monotonic Event Index:** `event_index` must strictly increment ($0, 1, 2, \dots$).
