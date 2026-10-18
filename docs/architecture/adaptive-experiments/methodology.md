@@ -393,25 +393,23 @@ Secondary study findings never retroactively replace the preregistered primary c
 ## 13. Outcome Classifications and Stopping
 
 ### 13.1 Five Scientific Reporting Categories
-Upon conclusion of the scored study window, the experiment is classified into exactly one of five exhaustive scientific reporting states:
+**Proposed policy for independent DP-M1 review, not an accepted classifier.** Before Gate G3, independently accept and freeze the required evidence, decision predicates and precedence below. No numerical threshold or scientific acceptance follows from this proposal.
 
-1. **`SUCCESS`**:
-   - $\Delta_{\text{terminal}} > 0$ with statistical significance under the frozen bootstrap.
-   - Positive comparative economic advantage ($\Delta_{\text{economic}} > 0$).
-   - Zero mandate, leverage, or risk violations.
-   - Independent scientific replication verified.
-2. **`PROMISING_BUT_INCONCLUSIVE`**:
-   - Directionally positive point estimates failing statistical significance or power requirements.
-3. **`UNSUCCESSFUL`**:
-   - Valid experimental evidence demonstrating $\Delta_{\text{terminal}} \le 0$ or $\Delta_{\text{economic}} \le 0$.
-4. **`UNAVAILABLE`**:
-   - Required market data, corporate actions, or cost receipts absent.
-5. **`INVALID`**:
-   - Execution lookahead, causal timing breaches, corrupted trial preimages, or mandate violations.
+At the frozen reporting time, apply the following ordered decision table. The first matching row supplies exactly one of the five scientific reporting states; retain all other validity, missingness and termination reasons alongside it.
 
-**Classification Rules**:
-- Until Gate G3, automatic classifications must not be assigned based solely on a single observed positive or negative terminal return.
-- A missing research cost produces `MISSING_COST` for the derived economic view without invalidating verified portfolio NAV.
+| Priority | Condition, after excluding all earlier rows | Proposed Scientific State |
+|---|---|---|
+| 1 | A scientific validity breach is established, including lookahead, causal timing breach, corrupted trial preimages, or mandate, leverage or risk violation. | `INVALID` |
+| 2 | Required source, account, causal or cost evidence needed to establish a valid paired portfolio/economic outcome is absent or unverified. | `UNAVAILABLE` |
+| 3 | Required outcome evidence is complete and valid, and $\Delta_{\text{terminal}} \le 0$ or $\Delta_{\text{economic}} \le 0$. | `UNSUCCESSFUL` |
+| 4 | Required outcome evidence is complete and valid; both differences are positive; all frozen significance, materiality, evidence/power, minimum scored/prospective evidence, risk-comparability and independent scientific replication/acceptance conditions are satisfied. | `SUCCESS` |
+| 5 | Required outcome evidence is complete and valid; both differences are positive; at least one row 4 confirmation condition is not met or remains pending, including independent replication. | `PROMISING_BUT_INCONCLUSIVE` |
+
+**Proposed Policy Choices and Classification Rules**:
+- This completeness-first ordering preserves known invalidity ahead of missingness and places complete nonpositive portfolio or economic evidence ahead of an inconclusive positive point estimate. DP-M1 reviewers must accept or revise these choices before freezing; they are not permanent defaults.
+- Missing research cost produces `MISSING_COST` for the derived economic view without invalidating verified portfolio NAV. Under proposed row 2, report that NAV and any known nonpositive portfolio result with its limitation while the overall scientific category remains `UNAVAILABLE`.
+- Pending confirmation or independent replication is distinct from missing required outcome evidence: complete, valid positive point estimates remain `PROMISING_BUT_INCONCLUSIVE` until every frozen success condition is met.
+- DP-M1 must define the required evidence set, valid predicates, treatment of pending confirmation and precommitted reporting time so these rows remain exhaustive and mutually exclusive. Until that accepted Gate G3 freeze, do not assign automatic scientific classifications from observed returns.
 
 ### 13.2 Operational Termination Separation
 Operational termination is recorded as an independent execution attribute:
@@ -425,7 +423,12 @@ A safety termination is NOT a competing scientific outcome category. It can coex
 
 The following items are designated Decision Packets and must be formally resolved and approved prior to Gate G3 execution:
 - **DP-R6**: Mathematical formulation, risk penalty weights ($\lambda_v, \lambda_{dd}$), and fitting procedure for conventional comparator R.
-- **DP-M1**: Confirmatory uncertainty estimation parameters (bootstrap block length calibration, nominal alpha, confidence level, minimum scored duration, and materiality threshold).
+- **DP-M1**: Confirmatory uncertainty estimation parameters (bootstrap block length calibration, nominal alpha, confidence level, test statistic, number of resamples and materiality threshold), plus the following required preregistration decisions:
+  - Unit of analysis and paired sampling design; dependence across dates, overlapping windows and shared market histories; stochastic-run/replication count, seed assignment and model-sampling policy. Freeze what qualifies as independent scientific replication and its acceptance evidence.
+  - Replaying captured responses checks reproducibility; seed reuse alone does not establish deterministic model output. Neither creates additional independent investment observations or scientific replicates. Retain actual requests/responses and seed references; do not inflate the effective sample size by replaying them.
+  - Minimum scored and prospective duration/evidence, evidence/power requirements, scheduled reporting/review looks, permissible scientific stopping, extension and repeated-look treatment. Freeze these before scored outcomes; operational safety termination remains the separate attribute in Section 13.2.
+  - Declared primary/secondary/exploratory comparison families, all-attempt/variant accounting and multiplicity treatment, including how exploratory selection requires fresh validation.
+  - Section 13.1's proposed outcome precedence, required evidence set and confirmation predicates, including significance, materiality, risk comparability and pending independent replication. No values or policy choices become defaults before independent acceptance and Gate G3 freeze.
 - **DP-R8**: Memory update rules, reflection schemas, and own-arm feedback policies.
 - **Mandate Limits**: Final numerical caps for the Balanced portfolio mandate.
 - **Cohort Qualification**: Formal qualification receipts for the 12 primary ETFs.
