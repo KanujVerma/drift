@@ -419,7 +419,7 @@ Real transitions support flexible order cardinality:
 
 #### Classifications
 - `ELIGIBLE`: Market data point-in-time verified before cutoff; candidate strategy permitted in arm spec. (Does NOT grant dispatch authority).
-- `INELIGIBLE`: Strategy proposal violates study constraints (e.g., disallowed family). Switch refused; portfolio retained; no liquidation.
+- `INELIGIBLE`: Strategy proposal violates study constraints (e.g., disallowed family). Refuse the proposed switch. Retain the current portfolio only while its holdings, account state, required market/source evidence, mandate compliance, and permission state are actually verified and valid. A critical failure independently invokes Matthew's applicable accepted fail-closed containment/refusal route; scientific ineligibility neither authorizes liquidation nor suppresses separately authorized protective actions.
 - `UNAVAILABLE`: Required market data unverified at cutoff. Fails closed; no backdating.
 - `INVALID`: Contradictory, cross-arm contaminated, or malformed evidence.
 
@@ -449,13 +449,13 @@ The scientific layer consumes Krish's authoritative research spending receipts
 Every research cost receipt bound by `cost_receipt_references` conforms strictly to Krish's
 authoritative schema (`research.md` in PR #400):
 - `receipt_id`: Unique receipt identifier string.
-- `scope`: Operating scope string (e.g., `"trial_inference"`).
+- `scope`: Krish's native `Scope` object `{experiment_id, arm_id, account_id, campaign_ref}`; `campaign_ref` retains the producer's `Ref` shape. Resolve these external identities to the trial's campaign, run, arm, and bound account through accepted producer mappings; never replace the object with an operating-category string.
 - `attempt_id`: Concrete research attempt identifier (nullable for shared unassigned work).
 - `category`: Cost category: `"inference"`, `"research_compute"`, `"data"`, `"infrastructure"`.
 - `billing_identity`: Nonblank idempotency key scoped to the cost source.
 - `raw_evidence_ref`: Pointer to usage/meter/pricing evidence.
 - `incurred_start`, `incurred_end`, `recorded_at`: Chronological timestamps.
-- `amount`: Nonnegative DecimalText string (e.g., `"0.04200000"`), or `null` when unknown. Never a JSON float.
+- `amount`: Nonnegative producer-canonical DecimalText string (e.g., `"0.042"`; no exponent or trailing fractional zeros), or `null` when unknown. Never a JSON float.
 - `currency`: Currency string (e.g., `"USD"`), or `null` when unknown.
 - `amount_basis`: Lowercase producer basis: strictly `"actual"`, `"estimate"`, `"unknown"`, or `"verified_zero"`.
 - `unknown_reason`: String explaining why cost is unknown. Required when `amount_basis == "unknown"`; null otherwise.
@@ -571,6 +571,7 @@ All JSON blocks are validated for syntax and schema alignment.
 ### Case 3: Ineligible Strategy Switch (Mandate Refusal)
 - **Scenario:** Agent proposes B4 switch targeting 83.33% equities. Phase A inputs are qualified, but Matthew's Phase B gatekeeper refuses order staging due to equity cap breach.
 - **Inputs:** Target equity exposure = 83.33% (exceeds candidate Balanced cap of 70.0%).
+- **Retention precondition:** Existing holdings, account state, required market/source evidence, mandate compliance, and permissions are actually verified and valid. The refusal concerns the incoming target only. If the current-state checks fail, independently route to Matthew's applicable accepted fail-closed containment/refusal policy; this example's `CURRENT_RETAINED`, `NO_ORDERS`, and `COMPLETE` outcome does not apply.
 - **Expected:** Phase A `ELIGIBLE` (inputs valid), Phase B `REFUSED` (mandate breach), Phase C `NO_ORDERS`, Phase D `COMPLETE`.
 
 ```json
@@ -604,6 +605,7 @@ All JSON blocks are validated for syntax and schema alignment.
 
 ### Case 4: Unavailable Market-Data Input
 - **Scenario:** GLD corporate action adjustments on NYSE Arca unverified at cutoff.
+- **Retention precondition:** The unavailable GLD input is required only by the incoming proposal; the current holdings and strategy do not rely on it. Existing holdings, account state, required market/source evidence, mandate compliance, and permissions are actually verified and valid. If that independent verification fails, route to Matthew's applicable accepted fail-closed containment/refusal policy instead; do not infer `CURRENT_RETAINED` or prohibit separately authorized protective actions.
 - **Expected:** Phase A `UNAVAILABLE`, Phase B `NOT_EVALUATED`, Phase C `NO_ORDERS`, Phase D `PENDING_RESULT`.
 
 ```json
