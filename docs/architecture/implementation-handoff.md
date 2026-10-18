@@ -365,7 +365,7 @@ A replacement agent resuming a Drift task without access to prior assistant chat
 1. **Read Universal Bootstrap**: Read [AGENTS.md](../../AGENTS.md) to understand core constraints, machine paths, and operating rules.
 2. **Resolve Workstream Identity**: Check `git config --get drift.workstream` and issue labels to confirm active workstream (`kanuj`, `krish`, or `matthew`). Historical `harsha` labels and records remain recognizable when inspecting older GitHub evidence, but do not authenticate active execution or permission.
 3. **Read Resume Protocol**: Read the Resume and Checkpoint guidelines in [agent-workflow.md](agent-workflow.md).
-4. **Inspect Assigned Issue**: Query the active GitHub issue (`gh issue view <id>`), including all recent comments and linked PRs.
+4. **Inspect Assigned Issue**: Query the active GitHub issue and all recent comments (`gh issue view <id> --comments`). Separately verify linked PRs, native dependencies, and review state via dedicated GitHub queries.
 5. **Inspect Accepted ADRs**: Review durable decisions in `docs/adr/` governing the feature area.
 6. **Verify Current Git State**: Confirm current branch, remote tracking status, working tree cleanliness, and exact commit SHAs.
 7. **Locate Latest Checkpoint**: Identify the most recent GitHub continuity checkpoint comment on the issue.
