@@ -99,11 +99,38 @@ Every release requirement is bound to its authoritative contract, concrete test 
 required evidence, responsible producer, and required independent reviewer.
 
 ### Acceptance Status Definitions
-- `PASS`: Requirement independently tested and verified against exact evidence.
-- `FAIL`: Requirement tested and failed to meet acceptance criteria.
-- `NOT_RUN`: Test specification exists, but test has not been executed on current head.
-- `BLOCKED`: Test cannot run due to an unresolved dependency or unmerged PR.
-- `UNAVAILABLE`: Required source data, hardware environment, or baseline evidence missing.
+- `PASS`: The requirement was executed and independently
+  verified against authenticated evidence bound to the
+  exact tested revision and environment.
+- `FAIL`: The requirement was executed and demonstrably
+  failed its acceptance criteria. Record the actual
+  failing check and evidence.
+- `NOT_RUN`: The required check has not been executed on
+  the evaluated revision, and no specific verified
+  dependency currently prevents attempting that check.
+  This status never implies that the requirement passed
+  or that supporting contracts have been accepted.
+- `BLOCKED`: A concrete unresolved dependency, required
+  unaccepted producer contract, missing authorization,
+  or explicitly blocking upstream PR prevents execution
+  of the required check. Identify the specific blocker.
+  An unexecuted requirement with a verified blocking
+  dependency must not be classified as `NOT_RUN`.
+- `UNAVAILABLE`: Required source data, hardware
+  environment, baseline material, or other evidence is
+  unavailable. Identify the missing resource and retain
+  its distinct evidence status. Unavailability is not
+  success and must not be converted to `NOT_RUN` merely
+  because the test did not execute.
+Statuses are mutually exclusive for each requirement
+at an evaluated revision. `PASS` and `FAIL` require
+actual executed evidence. A requirement transitions
+from `BLOCKED` to `NOT_RUN` only after its relevant
+blocking conditions are verified resolved and the check
+has still not been executed. Neither status can become
+`PASS` without the independently verified test result.
+Documentation completion, green documentation CI, and
+an author's self-review are not acceptance evidence.
 
 ---
 
@@ -114,11 +141,11 @@ required evidence, responsible producer, and required independent reviewer.
 | **REQ-01** | Preregistered primary estimand is paired net terminal return | #377, #392 | POS: Paired net returns evaluated.<br>NEG: Rejection of un-paired comparison.<br>ADV: Arithmetic return sum rejected. | TrialRecordV1, StudyReportV1 citing preregistration hash. | Kanuj | Independent Scientific Reviewer | `NOT_RUN (runtime verification not yet executed; accepted implementation and evidence still required)` |
 | **REQ-02** | True periodic excess-return Sharpe ratio (never geometric) | #382 | POS: Case 1 golden fixture = 0.0000.<br>NEG: Zero volatility yields UNDEFINED.<br>ADV: Legacy ann_ret/vol rejected. | Unit test reproducing all 12 golden arithmetic cases. | Kanuj | Matthew / Independent Reviewer | `NOT_RUN (runtime verification not yet executed; accepted implementation and evidence still required)` |
 | **REQ-03** | Immutable trial event log with canonical preimage hashing | #392 | POS: Monotonic event indexing.<br>NEG: Byte alteration rejected.<br>ADV: Out-of-order event rejected. | TrialEventV1 stream with valid event_hash chain. | Kanuj | Matthew | `NOT_RUN (runtime verification not yet executed; accepted implementation and evidence still required)` |
-| **REQ-04** | Causal availability and strict cutoff timestamp enforcement | #392, #376 | POS: Pre-cutoff data admitted.<br>NEG: Post-cutoff news marked INVALID.<br>ADV: Lookahead bar rejected. | Pinned market bar timestamps <= decision_cutoff. | Matthew | Kanuj | `NOT_RUN` (blocked on #376) |
-| **REQ-05** | Research attempt tracking with exact attempt denominators | #375, #392 | POS: Multi-attempt proposal logged.<br>NEG: Retry inflating proposal count blocked.<br>ADV: Discarded attempts logged. | Krish attempt receipts with logical_request_id lineage. | Krish | Kanuj | `NOT_RUN` (blocked on #375) |
-| **REQ-06** | Single authoritative account ledger with zero duplicate trades | #376, #392 | POS: Net NAV matches platform ledger.<br>NEG: Competing scientific ledger blocked.<br>ADV: Crash recovery idempotency. | Matthew platform RESULT matching portfolio account. | Matthew | Kanuj / Independent Reviewer | `NOT_RUN` (blocked on #376) |
+| **REQ-04** | Causal availability and strict cutoff timestamp enforcement | #392, #376 | POS: Pre-cutoff data admitted.<br>NEG: Post-cutoff news marked INVALID.<br>ADV: Lookahead bar rejected. | Pinned market bar timestamps <= decision_cutoff. | Matthew | Kanuj | `BLOCKED` (required platform SRC producer contract #376 / PR #407 remains unaccepted; cutoff verification cannot yet be independently executed) |
+| **REQ-05** | Research attempt tracking with exact attempt denominators | #375, #392 | POS: Multi-attempt proposal logged.<br>NEG: Retry inflating proposal count blocked.<br>ADV: Discarded attempts logged. | Krish attempt receipts with logical_request_id lineage. | Krish | Kanuj | `BLOCKED` (required research attempt producer contract #375 / PR #400 remains unaccepted) |
+| **REQ-06** | Single authoritative account ledger with zero duplicate trades | #376, #392 | POS: Net NAV matches platform ledger.<br>NEG: Competing scientific ledger blocked.<br>ADV: Crash recovery idempotency. | Matthew platform RESULT matching portfolio account. | Matthew | Kanuj / Independent Reviewer | `BLOCKED` (required platform RESULT producer contract #376 / PR #407 remains unaccepted) |
 | **REQ-07** | Single portfolio ledger and derived scientific cost attribution without double debit | #392, #382 | POS: Case 10 attribution verified.<br>NEG: Trading costs subtracted twice blocked.<br>ADV: Unknown cost yields MISSING_COST. | StudyReportV1 economic scorecard matching derived cost view and raw_cost. | Kanuj | Krish / Matthew | `NOT_RUN (runtime verification not yet executed; accepted implementation and evidence still required)` |
-| **REQ-08** | Seed determinism and exact replay reproducibility | #375, #392 | POS: Replay of frozen seed matches.<br>NEG: Stochastic divergence flagged.<br>ADV: Replay zero inference bill. | Replay records yielding identical output hash. | Krish | Kanuj | `NOT_RUN` (blocked on #375) |
+| **REQ-08** | Seed determinism and exact replay reproducibility | #375, #392 | POS: Replay of frozen seed matches.<br>NEG: Stochastic divergence flagged.<br>ADV: Replay zero inference bill. | Replay records yielding identical output hash. | Krish | Kanuj | `BLOCKED` (required research replay producer contract #375 / PR #400 remains unaccepted) |
 | **REQ-09** | Recovery Target F: feature-off on corrected current kernel | #395 (PR #416) | POS: Kernel boots with adaptive off.<br>NEG: Adaptive execution blocked.<br>ADV: Partial state rollback clean. | Separate CODE / PRIVATE_STATE / RUNTIME results (or justified N/A), configuration and kernel verification receipts with feature flag disabled. | Matthew | Independent Reviewer | `BLOCKED` (PR #416 draft) |
 | **REQ-10** | Recovery Target O: original runtime/state reconstruction | #395 (PR #416) | POS: Isolated manifest restore.<br>NEG: Incompatible DB attach blocked.<br>ADV: Corrupt snapshot rejected. | Separate CODE / PRIVATE_STATE / RUNTIME results, scoped manifest, custody/grant and isolated reconstruction receipts. | Matthew | Independent Reviewer | `BLOCKED` (PR #416 draft) |
 | **REQ-11** | Recovery Target A: frozen A policy/configuration on corrected kernel | #395 (PR #416) | POS: Frozen A policy/configuration executes on corrected kernel.<br>NEG: Uncertified kernel rejected.<br>ADV: Divergent baseline halted. | Separate CODE / PRIVATE_STATE / RUNTIME results (or justified N/A) and authoritative RESULT for Target A on corrected kernel. | Matthew | Kanuj | `BLOCKED` (PR #416 draft) |
