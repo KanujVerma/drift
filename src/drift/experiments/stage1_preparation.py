@@ -57,10 +57,11 @@ def partition_stage1_preparation(clock: SessionClockV1) -> Stage1PreparationWind
 
     Validates that:
     1. The input is an instance of SessionClockV1.
-    2. The clock revalidates cleanly from its model dump (rejecting unvalidated
-       instances created via model_construct).
-    3. The clock_hash matches the canonical session_clock_hash.
-    4. Each session's session_hash matches evaluation_session_hash.
+    2. The caller's original clock_hash matches session_clock_hash(clock).
+    3. Each caller session's claimed session_hash matches
+       evaluation_session_hash(session).
+    4. The clock cleanly revalidates through SessionClockV1.model_validate
+       without any normalization discrepancy or contract violation.
     5. All sessions belong to a single venue MIC (multi-venue clocks are
        refused pending an accepted multi-venue calendar alignment contract).
     6. Sessions are strictly ordered chronologically with strictly increasing
@@ -77,7 +78,8 @@ def partition_stage1_preparation(clock: SessionClockV1) -> Stage1PreparationWind
     Raises:
         TypeError: If clock is not a SessionClockV1 instance.
         ValueError: If clock is invalid, empty, forged, overlapping, out-of-order,
-            contains mixed venue MICs, or has non-monotone dates.
+            contains mixed venue MICs, has non-monotone dates, or exhibits any
+            normalization discrepancy.
     """
     if not isinstance(clock, SessionClockV1):
         raise TypeError(
@@ -85,41 +87,71 @@ def partition_stage1_preparation(clock: SessionClockV1) -> Stage1PreparationWind
             f"got {type(clock).__name__}"
         )
 
-    # Revalidate from Python dictionary dump to detect model_construct bypasses
+    if not clock.sessions:
+        raise ValueError("session clock requires at least one session")
+
+    # 1. Verify original input hashes directly on caller's objects before normalization
+    expected_original_clock_hash = session_clock_hash(clock)
+    if clock.clock_hash != expected_original_clock_hash:
+        raise ValueError(
+            f"clock hash mismatch: expected {expected_original_clock_hash}, "
+            f"got {clock.clock_hash}"
+        )
+
+    for session in clock.sessions:
+        expected_original_session_hash = evaluation_session_hash(session)
+        if session.session_hash != expected_original_session_hash:
+            raise ValueError(
+                f"session hash mismatch for {session.session_key}: "
+                f"expected {expected_original_session_hash}, "
+                f"got {session.session_hash}"
+            )
+
+    # 2. Revalidate from Python dictionary dump to enforce contract invariants
     dump = clock.model_dump(mode="python")
     try:
         validated_clock = SessionClockV1.model_validate(dump)
     except Exception as err:
         raise ValueError(f"clock failed model revalidation: {err}") from err
 
-    if not validated_clock.sessions:
-        raise ValueError("session clock requires at least one session")
+    # 3. Reject any normalization discrepancy between caller's data and validated data
+    if clock.clock_hash != validated_clock.clock_hash:
+        raise ValueError("clock hash differs from validated canonical representation")
 
-    # Verify clock and session content hashes
-    expected_clock_hash = session_clock_hash(validated_clock)
-    if validated_clock.clock_hash != expected_clock_hash:
+    if clock.acknowledged_limitations != validated_clock.acknowledged_limitations:
         raise ValueError(
-            f"clock hash mismatch: expected {expected_clock_hash}, "
-            f"got {validated_clock.clock_hash}"
+            "clock acknowledged_limitations differ from "
+            "validated canonical representation"
         )
 
-    for session in validated_clock.sessions:
-        expected_session_hash = evaluation_session_hash(session)
-        if session.session_hash != expected_session_hash:
+    if len(clock.sessions) != len(validated_clock.sessions):
+        raise ValueError("clock session count differs from validated sessions")
+
+    for original_session, validated_session in zip(
+        clock.sessions, validated_clock.sessions, strict=True
+    ):
+        if (
+            original_session.session_hash != validated_session.session_hash
+            or original_session.authority_record_hashes
+            != validated_session.authority_record_hashes
+            or original_session.authority_proof_hashes
+            != validated_session.authority_proof_hashes
+            or original_session != validated_session
+        ):
             raise ValueError(
-                f"session hash mismatch for {session.session_key}: "
-                f"expected {expected_session_hash}, got {session.session_hash}"
+                f"original session {original_session.session_key} differs from "
+                "validated canonical representation"
             )
 
-    # Refuse mixed venue MICs (S38 / issue 97 alignment requirement)
-    mics = {session.session_key.mic for session in validated_clock.sessions}
+    # 4. Refuse mixed venue MICs (S38 / issue 97 alignment requirement)
+    mics = {session.session_key.mic for session in clock.sessions}
     if len(mics) > 1:
         raise ValueError(
             "mixed venue MICs are rejected without multi-venue calendar alignment: "
             f"{sorted(mics)}"
         )
 
-    # Verify strict chronological order, monotonicity, and non-overlap
+    # 5. Verify strict chronological order, monotonicity, and non-overlap
     sessions = clock.sessions
     for prev, curr in zip(sessions, sessions[1:], strict=False):
         if curr.session_key.local_date <= prev.session_key.local_date:
@@ -144,7 +176,7 @@ def partition_stage1_preparation(clock: SessionClockV1) -> Stage1PreparationWind
                 f"session closed_at must follow opened_at for {curr.session_key}"
             )
 
-    # Slice into windows without manufacturing skipped sessions
+    # 6. Slice into windows without manufacturing skipped sessions
     total_sessions = len(sessions)
     warmup_sessions = sessions[: min(total_sessions, STAGE1_WARMUP_SESSIONS)]
     observation_sessions = (
@@ -170,8 +202,8 @@ def partition_stage1_preparation(clock: SessionClockV1) -> Stage1PreparationWind
     )
 
     return Stage1PreparationWindows(
-        clock_hash=validated_clock.clock_hash,
-        clock_mode=validated_clock.mode,
+        clock_hash=clock.clock_hash,
+        clock_mode=clock.mode,
         warmup_sessions=warmup_sessions,
         observation_sessions=observation_sessions,
         post_observation_sessions=post_observation_sessions,
