@@ -282,7 +282,7 @@ class ResearchCandidate(ImmutableModel):
             if self.targets or self.cash_weight is not None:
                 raise ValueError("INCONSISTENT_NON_TRADING_DISPOSITION")
         if (
-            self.disposition in ("abstain", "unavailable")
+            self.disposition in ("abstain", "unavailable", "hold")
             and self.strategy is not None
         ):
             raise ValueError("INCONSISTENT_NON_TRADING_DISPOSITION")
