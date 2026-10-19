@@ -499,9 +499,7 @@ def validate_retained_record(
                 "registry_ref",
                 "method_ref",
             ):
-                if record.get(ref_field) != getattr(context, ref_field).model_dump(
-                    mode="python"
-                ):
+                if record.get(ref_field) != context.model_dump(mode="python")[ref_field]:
                     raise ValueError(f"rejected: context binding differs: {ref_field}")
             expected_context = {
                 "id": context.context_id,
