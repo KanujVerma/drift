@@ -282,6 +282,8 @@ class ResearchReceiptStore:
                 or attempt.attempt_event_id == prev.attempt_event_id
             ):
                 raise ValueError("INVALID_ATTEMPT_CHAIN: broken or repeated transition")
+            prior_payload = prev.model_dump(mode="python")
+            next_payload = attempt.model_dump(mode="python")
             for key in (
                 "logical_request_id",
                 "scope",
@@ -294,7 +296,7 @@ class ResearchReceiptStore:
                 "retry_of",
                 "duplicate_of",
             ):
-                if getattr(attempt, key) != getattr(prev, key):
+                if next_payload[key] != prior_payload[key]:
                     raise ValueError(f"INVALID_ATTEMPT_CHAIN: changed {key}")
             if attempt.completed_at is None or attempt.completed_at < prev.started_at:
                 raise ValueError("INVALID_ATTEMPT_CHAIN: completion time is invalid")
