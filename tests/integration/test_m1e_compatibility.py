@@ -362,13 +362,17 @@ INTELLIGENCE_CAPABILITY_ALLOWLIST = BridgeCapabilityAllowlist(
             "datetime",
             "decimal",
             "drift",
+            "hashlib",
             "json",
             "pydantic",
             "typing",
             "uuid",
         }
     ),
-    module_attributes={},
+    module_attributes={
+        "hashlib": frozenset({"sha256"}),
+        "json": frozenset({"loads"}),
+    },
     environment_reads=frozenset(),
     dunder_attributes=frozenset(),
     refused_builtins=frozenset({"open"}),
