@@ -241,3 +241,70 @@ def test_d05_defensive_only_policy_validation() -> None:
     assert ok is False
     assert reason is not None
     assert "DEFENSIVE_POLICY_VIOLATION" in reason
+
+
+def test_same_scheduled_inputs_have_stable_trigger_identity() -> None:
+    now = datetime(2024, 1, 10, 10, 0, tzinfo=UTC)
+    kwargs = {
+        "now": now,
+        "last_routine_at": now - timedelta(days=3),
+        "last_adaptation_at": now - timedelta(days=10),
+    }
+    first = evaluate_review_schedule(**kwargs)
+    again = evaluate_review_schedule(**kwargs)
+    assert first.trigger_id == again.trigger_id
+    assert first.record_hash == again.record_hash
+    with pytest.raises(ValueError, match="REVIEW_TRIGGER_HASH_MISMATCH"):
+        type(first).model_validate(
+            first.model_copy(update={"reason": "unhashed revision"}).model_dump(
+                mode="python"
+            )
+        )
+
+
+def test_feed_revision_conflict_fails_closed() -> None:
+    now = datetime(2024, 1, 10, 10, 0, tzinfo=UTC)
+    def event(digest: str) -> FeedEvent:
+        return FeedEvent(
+            event_id="same-event",
+            source_id="synthetic:feed",
+            version="v1",
+            available_at=now - timedelta(minutes=1),
+            content_hash=digest,
+            raw_text="inert",
+            is_material=True,
+        )
+    with pytest.raises(ValueError, match="SOURCE_DIGEST_CONFLICT"):
+        evaluate_review_schedule(
+            now=now, feed_events=[event("a" * 64), event("b" * 64)]
+        )
+
+
+def test_future_calendar_and_naive_time_are_not_available() -> None:
+    now = datetime(2024, 1, 10, 10, 0, tzinfo=UTC)
+    future_calendar = CalendarRevision(
+        calendar_id="synthetic:exchange-calendar",
+        revision=2,
+        effective_cutoff=now + timedelta(seconds=1),
+        content_hash="a" * 64,
+    )
+    with pytest.raises(ValueError, match="UNAVAILABLE_CALENDAR_CURRENTNESS"):
+        evaluate_review_schedule(now=now, current_calendar=future_calendar)
+    with pytest.raises(ValueError, match="INDETERMINATE_TIMEZONE"):
+        evaluate_review_schedule(now=now.replace(tzinfo=None))
+
+
+def test_bad_policy_intervals_and_unknown_defensive_hold_refused() -> None:
+    with pytest.raises(ValueError, match="INVALID_SCHEDULER_INTERVAL"):
+        SchedulerPolicy(event_cooldown=timedelta(seconds=-1))
+    targets = [TargetWeight(security_id="SPY", weight="0.25")]
+    approved, reason = validate_defensive_policy(
+        proposed_targets=targets, current_weights={}
+    )
+    assert not approved
+    assert "UNKNOWN_CURRENT_POSITION" in (reason or "")
+    approved, reason = validate_defensive_policy(
+        proposed_targets=[*targets, *targets], current_weights={"SPY": "0.5"}
+    )
+    assert not approved
+    assert "duplicate security" in (reason or "")
