@@ -70,19 +70,28 @@ def select_conventional_candidate(
     now = checked_at or context.review_started_at
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("INDETERMINATE_TIMEZONE: comparator cutoff missing offset")
-    pool_hash = content_hash(sorted(
-        content_hash(
-            choice.model_dump(mode="python") if isinstance(choice, RawChoice) else dict(choice)
-        ) for choice in candidate_pool
-    ))
-    seed = content_hash({
-        "context": context.record_hash,
-        "method": method_ref.sha256,
-        "candidate_pool": pool_hash,
-        "checked_at": now,
-    })
+    pool_hash = content_hash(
+        sorted(
+            content_hash(
+                choice.model_dump(mode="python")
+                if isinstance(choice, RawChoice)
+                else dict(choice)
+            )
+            for choice in candidate_pool
+        )
+    )
+    seed = content_hash(
+        {
+            "context": context.record_hash,
+            "method": method_ref.sha256,
+            "candidate_pool": pool_hash,
+            "checked_at": now,
+        }
+    )
     actual_attempt_id = attempt_id or str(uuid5(NAMESPACE_URL, seed))
-    actual_request_id = logical_request_id or str(uuid5(NAMESPACE_URL, seed + ":request"))
+    actual_request_id = logical_request_id or str(
+        uuid5(NAMESPACE_URL, seed + ":request")
+    )
     start_event_id = str(uuid5(NAMESPACE_URL, actual_attempt_id + ":start"))
     actual_checked_at = now
 
@@ -126,11 +135,13 @@ def select_conventional_candidate(
             score_error = "DUPLICATE_CANDIDATE_POOL_MEMBER"
             break
         seen_choice_hashes.add(choice_hash)
-        candidate_identity = content_hash({
-            "choice_hash": choice_hash,
-            "context_hash": context.record_hash,
-            "method_hash": method_ref.sha256,
-        })
+        candidate_identity = content_hash(
+            {
+                "choice_hash": choice_hash,
+                "context_hash": context.record_hash,
+                "method_hash": method_ref.sha256,
+            }
+        )
         cand_id = f"cand-r-{candidate_identity[:32]}"
         raw_dict = (
             choice_item.model_dump(mode="python")
@@ -208,11 +219,13 @@ def select_conventional_candidate(
             raw_evidence_ref=StoredArtifactRef(
                 artifact_id=f"synthetic:offline-compute:{actual_attempt_id}",
                 kind="other",
-                content_hash=content_hash({
-                    "attempt": actual_attempt_id,
-                    "method": method_ref.model_dump(mode="python"),
-                    "kind": "synthetic_no_external_provider_call",
-                }),
+                content_hash=content_hash(
+                    {
+                        "attempt": actual_attempt_id,
+                        "method": method_ref.model_dump(mode="python"),
+                        "kind": "synthetic_no_external_provider_call",
+                    }
+                ),
                 location="synthetic:offline-compute-only",
             ),
             attempt_id=actual_attempt_id,
@@ -237,8 +250,7 @@ def select_conventional_candidate(
     max_score = max(entry[0] for entry in evaluated_candidates)
     tolerance = Decimal("0.000000001")
     near_maximum = [
-        entry for entry in evaluated_candidates
-        if max_score - entry[0] <= tolerance
+        entry for entry in evaluated_candidates if max_score - entry[0] <= tolerance
     ]
     winner = min(near_maximum, key=lambda entry: (entry[1], entry[2], entry[3]))[4]
 
@@ -268,11 +280,13 @@ def select_conventional_candidate(
         raw_evidence_ref=StoredArtifactRef(
             artifact_id=f"synthetic:offline-compute:{actual_attempt_id}",
             kind="other",
-            content_hash=content_hash({
+            content_hash=content_hash(
+                {
                     "attempt": actual_attempt_id,
                     "method": method_ref.model_dump(mode="python"),
                     "kind": "synthetic_no_external_provider_call",
-                }),
+                }
+            ),
             location="synthetic:offline-compute-only",
         ),
         attempt_id=actual_attempt_id,
