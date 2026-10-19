@@ -121,6 +121,10 @@ def matching_portfolio_state(
         is_paused=False,
         has_pending_orders=False,
         observed_at=sample_candidate.completed_at + timedelta(seconds=1),
+        state_verified=True,
+        verification_ref=ArtifactReference(
+            id="fixture:verified-account-observation", version="synthetic-v1", sha256="e" * 64
+        ),
     )
 
 
@@ -262,6 +266,10 @@ def test_t08_stale_portfolio_state_refusal(
         is_paused=False,
         has_pending_orders=False,
         observed_at=dispatch_time,
+        state_verified=True,
+        verification_ref=ArtifactReference(
+            id="fixture:verified-account-observation", version="synthetic-v1", sha256="e" * 64
+        ),
     )
 
     req = bridge_candidate_to_execution(
@@ -290,6 +298,10 @@ def test_t08_mandate_mismatch_refusal(
         is_paused=False,
         has_pending_orders=False,
         observed_at=dispatch_time,
+        state_verified=True,
+        verification_ref=ArtifactReference(
+            id="fixture:verified-account-observation", version="synthetic-v1", sha256="e" * 64
+        ),
     )
 
     req = bridge_candidate_to_execution(
@@ -318,6 +330,10 @@ def test_t08_account_paused_refusal(
         is_paused=True,  # Account paused
         has_pending_orders=False,
         observed_at=dispatch_time,
+        state_verified=True,
+        verification_ref=ArtifactReference(
+            id="fixture:verified-account-observation", version="synthetic-v1", sha256="e" * 64
+        ),
     )
 
     req = bridge_candidate_to_execution(
@@ -346,6 +362,10 @@ def test_t08_pending_orders_conflict_refusal(
         is_paused=False,
         has_pending_orders=True,  # In-flight orders present
         observed_at=dispatch_time,
+        state_verified=True,
+        verification_ref=ArtifactReference(
+            id="fixture:verified-account-observation", version="synthetic-v1", sha256="e" * 64
+        ),
     )
 
     req = bridge_candidate_to_execution(
@@ -376,6 +396,10 @@ def test_a12_scope_mismatch_refusal(
         is_paused=False,
         has_pending_orders=False,
         observed_at=dispatch_time,
+        state_verified=True,
+        verification_ref=ArtifactReference(
+            id="fixture:verified-account-observation", version="synthetic-v1", sha256="e" * 64
+        ),
     )
 
     req = bridge_candidate_to_execution(
@@ -386,3 +410,85 @@ def test_a12_scope_mismatch_refusal(
 
     assert req.status == "refused"
     assert "SCOPE_MISMATCH" in (req.refusal_reason or "")
+
+
+def test_unknown_account_verification_is_not_safe(
+    sample_candidate: ResearchCandidate,
+    matching_portfolio_state: PortfolioStateBinding,
+) -> None:
+    """Missing trusted account evidence cannot be inferred as a safe hold or trade."""
+    state = matching_portfolio_state.model_copy(
+        update={"state_verified": False, "verification_ref": None}
+    )
+    request = bridge_candidate_to_execution(
+        candidate=sample_candidate,
+        portfolio_state=state,
+        current_time=sample_candidate.completed_at + timedelta(minutes=5),
+    )
+    assert request.status == "refused"
+    assert request.target_allocations == ()
+    assert "UNVERIFIED_PORTFOLIO_STATE" in (request.refusal_reason or "")
+
+
+def test_future_account_snapshot_refuses(
+    sample_candidate: ResearchCandidate,
+    matching_portfolio_state: PortfolioStateBinding,
+) -> None:
+    """No evidence from after the request instant is visible to the bridge."""
+    now = sample_candidate.completed_at + timedelta(minutes=5)
+    state = matching_portfolio_state.model_copy(
+        update={"observed_at": now + timedelta(seconds=1)}
+    )
+    request = bridge_candidate_to_execution(
+        candidate=sample_candidate, portfolio_state=state, current_time=now
+    )
+    assert request.status == "refused"
+    assert "STALE_OR_FUTURE_STATE" in (request.refusal_reason or "")
+
+
+def test_ambiguous_timezones_fail_closed(
+    sample_candidate: ResearchCandidate,
+    matching_portfolio_state: PortfolioStateBinding,
+) -> None:
+    naive = sample_candidate.completed_at.replace(tzinfo=None)
+    with pytest.raises(ValueError, match="INDETERMINATE_TIMEZONE"):
+        bridge_candidate_to_execution(
+            candidate=sample_candidate,
+            portfolio_state=matching_portfolio_state,
+            current_time=naive,
+        )
+
+
+def test_request_identity_is_stable_for_identical_inputs(
+    sample_candidate: ResearchCandidate,
+    matching_portfolio_state: PortfolioStateBinding,
+) -> None:
+    now = sample_candidate.completed_at + timedelta(minutes=5)
+    one = bridge_candidate_to_execution(
+        candidate=sample_candidate, portfolio_state=matching_portfolio_state, current_time=now
+    )
+    two = bridge_candidate_to_execution(
+        candidate=sample_candidate, portfolio_state=matching_portfolio_state, current_time=now
+    )
+    assert one.request_id == two.request_id
+    assert one.record_hash == two.record_hash
+
+
+def test_stage1_empty_propose_refuses_before_platform(
+    sample_candidate: ResearchCandidate,
+    matching_portfolio_state: PortfolioStateBinding,
+) -> None:
+    """An ineligible empty proposal never becomes an M2 sell-all instruction."""
+    payload = sample_candidate.model_dump(mode="python")
+    payload["targets"] = []
+    payload["cash_weight"] = "1"
+    payload["record_hash"] = compute_record_hash(payload)
+    candidate = ResearchCandidate.model_validate(payload)
+    request = bridge_candidate_to_execution(
+        candidate=candidate,
+        portfolio_state=matching_portfolio_state,
+        current_time=candidate.completed_at + timedelta(minutes=5),
+    )
+    assert request.status == "refused"
+    assert request.target_allocations == ()
+    assert "EMPTY_STAGE1_TARGETS" in (request.refusal_reason or "")
