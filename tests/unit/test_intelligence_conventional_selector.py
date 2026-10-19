@@ -649,15 +649,19 @@ def test_r_attempts_bind_policy_request_and_context_profile(
         assert len(store.get_cost_receipts_for_attempt(result.attempt_id)) == 1
         return result.attempt_id
 
+    policy_new_version = ArtifactReference(
+        id=policy_a.id, version="v2", sha256=policy_a.sha256
+    )
     ids = [
         run("synthetic:request-A", policy_a),
         run("synthetic:request-B", policy_a),
         run("synthetic:request-A", policy_b),
+        run("synthetic:request-A", policy_new_version),
     ]
-    assert len(set(ids)) == 3
+    assert len(set(ids)) == 4
     # Idempotent identical replay does not mint a new cost or attempt chain.
     assert run("synthetic:request-A", policy_a) == ids[0]
-    assert len(store.export_events()) == 9
+    assert len(store.export_events()) == 12
 def test_r_freezes_pool_before_objective_side_effects(
     sample_context: ResearchContext,
     sample_bindings: ResolvedDependencies,
@@ -720,4 +724,76 @@ def test_r_freezes_pool_before_objective_side_effects(
     ResearchCandidate.model_validate(
         result.selected_candidate.model_dump(mode="python")
     )
+def test_r_naive_ttl_rejected_without_incurred_attempt(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+) -> None:
+    recorder = ResearchReceiptStore()
+    with pytest.raises(ValueError, match="INDETERMINATE_TIMEZONE"):
+        select_conventional_candidate(
+            context=sample_context,
+            resolved_inputs=sample_bindings,
+            candidate_pool=[fixture_data["raw_choice"]],
+            objective_fn=lambda _candidate: Decimal("1"),
+            method_ref=ArtifactReference(
+                id="synthetic:method-R", version="v1", sha256="e" * 64
+            ),
+            validation_policy=ArtifactReference(
+                id="synthetic:policy", version="v1", sha256="f" * 64
+            ),
+            recorder=recorder,
+            checked_at=datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
+            valid_until=datetime(2024, 1, 2, 11, 0),
+        )
+    assert recorder.export_events() == []
+
+
+def test_ai_and_r_attempt_stores_do_not_leak_across_arms(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+) -> None:
+    """T13: identical context refs need not imply one mutable attempt store."""
+    ai_store = ResearchReceiptStore()
+    r_store = ResearchReceiptStore()
+    now = datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC)
+    ai = produce_proposal(
+        context=sample_context,
+        resolved_inputs=sample_bindings,
+        frozen_method=ArtifactReference(
+            id="synthetic:AI", version="v1", sha256="a" * 64
+        ),
+        validation_policy=ArtifactReference(
+            id="synthetic:policy", version="v1", sha256="b" * 64
+        ),
+        recorder=ai_store,
+        transport=FakeTransport(raw_choice=fixture_data["raw_choice"]),
+        attempt_id="synthetic:ai-isolated",
+        checked_at=now,
+    )
+    conventional = select_conventional_candidate(
+        context=sample_context,
+        resolved_inputs=sample_bindings,
+        candidate_pool=[fixture_data["raw_choice"]],
+        objective_fn=lambda _candidate: Decimal("1"),
+        method_ref=ArtifactReference(
+            id="synthetic:R", version="v1", sha256="e" * 64
+        ),
+        validation_policy=ArtifactReference(
+            id="synthetic:policy", version="v1", sha256="f" * 64
+        ),
+        recorder=r_store,
+        attempt_id="synthetic:r-isolated",
+        checked_at=now,
+    )
+    assert ai.is_success and conventional.is_success
+    ai_start = ai_store.get_attempt_events(ai.attempt_id)[0]
+    r_start = r_store.get_attempt_events(conventional.attempt_id)[0]
+    assert ai_start.context_ref.sha256 == sample_context.record_hash
+    assert r_start.context_ref.sha256 == sample_context.record_hash
+    assert ai_store.get_attempt_events(conventional.attempt_id) == ()
+    assert r_store.get_attempt_events(ai.attempt_id) == ()
+    assert len(ai_store.get_cost_receipts_for_attempt(ai.attempt_id)) == 1
+    assert len(r_store.get_cost_receipts_for_attempt(conventional.attempt_id)) == 1
 
