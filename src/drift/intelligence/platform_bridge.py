@@ -15,7 +15,7 @@ execution request wrappers under DP-R2, DP-R5, and research acceptance criteria:
 
 from datetime import UTC, datetime
 from typing import Any, Literal
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid5
 
 from drift.intelligence.contracts import (
     ArtifactReference,
@@ -38,9 +38,11 @@ class PortfolioStateBinding(ImmutableModel):
     account_id: str
     arm_id: str
     state_hash: str
-    is_paused: bool = False
-    has_pending_orders: bool = False
+    is_paused: bool
+    has_pending_orders: bool
     observed_at: datetime
+    state_verified: bool = False
+    verification_ref: ArtifactReference | None = None
 
 
 class PlatformExecutionRequest(ImmutableModel):
@@ -81,16 +83,28 @@ def bridge_candidate_to_execution(
     - Safety halts: account paused or pending orders refuse dispatch (T08).
     - Clean next-session fallback when intraday execution is unavailable (A09, T14).
     """
-    actual_request_id = request_id or str(uuid4())
-    curr_utc = (
-        current_time.astimezone(UTC)
-        if current_time.tzinfo
-        else current_time.replace(tzinfo=UTC)
-    )
-    cand_comp_utc = (
-        candidate.completed_at.astimezone(UTC)
-        if candidate.completed_at.tzinfo
-        else candidate.completed_at.replace(tzinfo=UTC)
+    if current_time.tzinfo is None or current_time.utcoffset() is None:
+        raise ValueError("INDETERMINATE_TIMEZONE: current time has no offset")
+    if (
+        candidate.completed_at.tzinfo is None
+        or candidate.completed_at.utcoffset() is None
+        or portfolio_state.observed_at.tzinfo is None
+        or portfolio_state.observed_at.utcoffset() is None
+    ):
+        raise ValueError("INDETERMINATE_TIMEZONE: input evidence timestamp has no offset")
+    curr_utc = current_time.astimezone(UTC)
+    cand_comp_utc = candidate.completed_at.astimezone(UTC)
+    actual_request_id = request_id or str(
+        uuid5(
+            NAMESPACE_URL,
+            compute_record_hash({
+                "candidate_id": candidate.candidate_id,
+                "candidate_hash": candidate.record_hash,
+                "portfolio_state_hash": portfolio_state.state_hash,
+                "mandate_hash": portfolio_state.mandate_ref.sha256,
+                "current_time": curr_utc,
+            }),
+        )
     )
     raw_dict: dict[str, Any]
 
@@ -170,6 +184,48 @@ def bridge_candidate_to_execution(
             }
             raw_dict["record_hash"] = compute_record_hash(raw_dict)
             return PlatformExecutionRequest.model_validate(raw_dict)
+
+    # A caller assertion cannot authorize execution. A trusted platform
+    # producer must attest to the complete observed state; this remains a
+    # synthetic bridge, not a broker/mandate admission or an order.
+    if not portfolio_state.state_verified or portfolio_state.verification_ref is None:
+        raw_dict = {
+            "request_id": actual_request_id,
+            "candidate_id": candidate.candidate_id,
+            "attempt_id": candidate.attempt_id,
+            "scope": candidate.scope.model_dump(mode="python"),
+            "portfolio_ref": candidate.portfolio_ref.model_dump(mode="python"),
+            "mandate_ref": candidate.mandate_ref.model_dump(mode="python"),
+            "disposition": candidate.disposition,
+            "target_allocations": [],
+            "cash_weight": None,
+            "session_target": "none",
+            "status": "refused",
+            "refusal_reason": "UNVERIFIED_PORTFOLIO_STATE: platform verification required",
+            "dispatched_at": curr_utc,
+        }
+        raw_dict["record_hash"] = compute_record_hash(raw_dict)
+        return PlatformExecutionRequest.model_validate(raw_dict)
+
+    observed_utc = portfolio_state.observed_at.astimezone(UTC)
+    if observed_utc < cand_comp_utc or observed_utc > curr_utc:
+        raw_dict = {
+            "request_id": actual_request_id,
+            "candidate_id": candidate.candidate_id,
+            "attempt_id": candidate.attempt_id,
+            "scope": candidate.scope.model_dump(mode="python"),
+            "portfolio_ref": candidate.portfolio_ref.model_dump(mode="python"),
+            "mandate_ref": candidate.mandate_ref.model_dump(mode="python"),
+            "disposition": candidate.disposition,
+            "target_allocations": [],
+            "cash_weight": None,
+            "session_target": "none",
+            "status": "refused",
+            "refusal_reason": "STALE_OR_FUTURE_STATE: account evidence unavailable at dispatch",
+            "dispatched_at": curr_utc,
+        }
+        raw_dict["record_hash"] = compute_record_hash(raw_dict)
+        return PlatformExecutionRequest.model_validate(raw_dict)
 
     # 4. Portfolio state hash change check (T08)
     if (
@@ -304,7 +360,29 @@ def bridge_candidate_to_execution(
         raw_dict["record_hash"] = compute_record_hash(raw_dict)
         return PlatformExecutionRequest.model_validate(raw_dict)
 
-    # Propose disposition: evaluate session capability
+    # Never turn missing Stage 1 targets into a discretionary all-cash order.
+    # The existing M2 complete-target liquidation rule must remain unchanged.
+    if not candidate.targets or candidate.cash_weight is None:
+        raw_dict = {
+            "request_id": actual_request_id,
+            "candidate_id": candidate.candidate_id,
+            "attempt_id": candidate.attempt_id,
+            "scope": candidate.scope.model_dump(mode="python"),
+            "portfolio_ref": candidate.portfolio_ref.model_dump(mode="python"),
+            "mandate_ref": candidate.mandate_ref.model_dump(mode="python"),
+            "disposition": candidate.disposition,
+            "target_allocations": [],
+            "cash_weight": None,
+            "session_target": "none",
+            "status": "refused",
+            "refusal_reason": "EMPTY_STAGE1_TARGETS: cannot infer a liquidation intent",
+            "dispatched_at": curr_utc,
+        }
+        raw_dict["record_hash"] = compute_record_hash(raw_dict)
+        return PlatformExecutionRequest.model_validate(raw_dict)
+
+    # Propose disposition: return a *candidate* request for separate M0
+    # admission. The status here never authorizes a broker or a fill.
     target_allocs = [t.model_dump(mode="python") for t in candidate.targets]
     if intraday_supported:
         sess_target: SessionTarget = "intraday"
