@@ -358,6 +358,7 @@ NAME_IMPORT_ALLOWLISTED_MODULES = frozenset({"builtins", "importlib", "os", "sys
 INTELLIGENCE_CAPABILITY_ALLOWLIST = BridgeCapabilityAllowlist(
     import_roots=frozenset(
         {
+            "__future__",
             "collections",
             "datetime",
             "decimal",
