@@ -1,0 +1,656 @@
+{
+  "version": "drift-research/1-draft",
+  "fixtures": {
+    "F01": {
+      "profile": "drift-research/1-draft",
+      "kind": "context",
+      "context_id": "01900000-0000-7000-8000-000000000001",
+      "scope": {
+        "experiment_id": "fixture:study",
+        "arm_id": "fixture:B",
+        "account_id": "fixture:account-B",
+        "campaign_ref": {
+          "id": "fixture:campaign",
+          "version": "fixture-1",
+          "sha256": "71fe095c4eddac2053be8a4a02b02a83fe11cf4a39195e7972245a45aa372a4e"
+        }
+      },
+      "decision_cutoff": "2024-01-02T10:00:00.000000Z",
+      "built_at": "2024-01-02T10:00:00.000000Z",
+      "review_started_at": "2024-01-02T10:00:01.000000Z",
+      "review_reason": "routine",
+      "trigger_ref": null,
+      "clock_policy_ref": {
+        "id": "fixture:clocks",
+        "version": "fixture-1",
+        "sha256": "4fd68b3c5164bc04ffa0ccea4d67bcb56524a2d33d8d97256d639afdfd1d2d64"
+      },
+      "method_ref": {
+        "id": "fixture:method",
+        "version": "fixture-1",
+        "sha256": "9a89120b7c522b7241fbfe0f098bed3489fbe058ee9c5bc141bd9e7c615112aa"
+      },
+      "budget_ref": {
+        "id": "fixture:budget",
+        "version": "fixture-1",
+        "sha256": "b4a801715509c49057a41cf47431c1ad98656a6e0b30e2c212a73101c320189c"
+      },
+      "portfolio_ref": {
+        "id": "fixture:state",
+        "version": "fixture-1",
+        "sha256": "0960db89812eaa89d3cf2f3ff9a163e6921ecb5aa0e84ada6935bf8a8574f8b0"
+      },
+      "mandate_ref": {
+        "id": "fixture:mandate",
+        "version": "fixture-1",
+        "sha256": "8d2314a80124a92144cfe329b307211a01823e032c6ecc0751f0410db2968c83"
+      },
+      "universe_ref": {
+        "id": "fixture:universe",
+        "version": "fixture-1",
+        "sha256": "745bba86aa2f2d837461a20f1f6f516e743af791643cdbe383f804e852ae5228"
+      },
+      "registry_ref": {
+        "id": "fixture:registry",
+        "version": "fixture-1",
+        "sha256": "d1f47f589a7b27ebe59e2eb7d2a73144befb2bd80b8aefecf609ee107a7c09c1"
+      },
+      "memory_snapshot_ref": {
+        "id": "fixture:empty-memory",
+        "version": "fixture-1",
+        "sha256": "b9eb2f813c73a6f6d9c813aca3596ebbd8976264cdae7fd93cff327d06b11c39"
+      },
+      "memory_cutoff": "2024-01-02T10:00:00.000000Z",
+      "inputs": [],
+      "excluded_inputs_ref": {
+        "id": "fixture:exclusions",
+        "version": "fixture-1",
+        "sha256": "de81955acb62c4c7729b87fee4b5ff455555547b983adf2829085d69aaf727df"
+      },
+      "feed_state_ref": {
+        "id": "fixture:healthy-empty-feed",
+        "version": "fixture-1",
+        "sha256": "d9e97e45c2393fb5b9bfcbc01adc8f4368705e701164dccc400a8e9aba53c02c"
+      },
+      "feedback_refs": [],
+      "source_grade": "synthetic_fixture",
+      "limitations": [
+        "Synthetic fixture only; no market evidence, eligibility or operating permission."
+      ],
+      "current_selection_ref": {
+        "id": "fixture:current-selection",
+        "version": "fixture-1",
+        "sha256": "a5bc0d5e3994aaf8edcc6636c5675bdd7331b58d853e7cb45d875f007210ee08"
+      },
+      "record_hash": "e4f6b12cee1635bb5ef18c3c0c6760d5fb6669d760970197c02b4f2da3520de7"
+    },
+    "F02": {
+      "profile": "drift-research/1-draft",
+      "kind": "candidate",
+      "candidate_id": "01900000-0000-7000-8000-000000000002",
+      "attempt_id": "01900000-0000-7000-8000-000000000003",
+      "scope": {
+        "experiment_id": "fixture:study",
+        "arm_id": "fixture:B",
+        "account_id": "fixture:account-B",
+        "campaign_ref": {
+          "id": "fixture:campaign",
+          "version": "fixture-1",
+          "sha256": "71fe095c4eddac2053be8a4a02b02a83fe11cf4a39195e7972245a45aa372a4e"
+        }
+      },
+      "context_ref": {
+        "id": "01900000-0000-7000-8000-000000000001",
+        "version": "drift-research/1-draft",
+        "sha256": "e4f6b12cee1635bb5ef18c3c0c6760d5fb6669d760970197c02b4f2da3520de7"
+      },
+      "portfolio_ref": {
+        "id": "fixture:state",
+        "version": "fixture-1",
+        "sha256": "0960db89812eaa89d3cf2f3ff9a163e6921ecb5aa0e84ada6935bf8a8574f8b0"
+      },
+      "mandate_ref": {
+        "id": "fixture:mandate",
+        "version": "fixture-1",
+        "sha256": "8d2314a80124a92144cfe329b307211a01823e032c6ecc0751f0410db2968c83"
+      },
+      "universe_ref": {
+        "id": "fixture:universe",
+        "version": "fixture-1",
+        "sha256": "745bba86aa2f2d837461a20f1f6f516e743af791643cdbe383f804e852ae5228"
+      },
+      "registry_ref": {
+        "id": "fixture:registry",
+        "version": "fixture-1",
+        "sha256": "d1f47f589a7b27ebe59e2eb7d2a73144befb2bd80b8aefecf609ee107a7c09c1"
+      },
+      "method_ref": {
+        "id": "fixture:method",
+        "version": "fixture-1",
+        "sha256": "9a89120b7c522b7241fbfe0f098bed3489fbe058ee9c5bc141bd9e7c615112aa"
+      },
+      "producer": "scripted_fixture",
+      "completed_at": "2024-01-02T10:00:02.000000Z",
+      "valid_until": "2024-01-02T10:10:00.000000Z",
+      "disposition": "propose",
+      "strategy": {
+        "family_id": "fixture.equal_weight",
+        "strategy_ref": {
+          "id": "fixture:strategy",
+          "version": "fixture-1",
+          "sha256": "f7a582c87c46a7827b7d829ace364dc66629e3ed39301e59a3f9f72ae15c1fb1"
+        },
+        "envelope_ref": {
+          "id": "fixture:zero-parameter-envelope",
+          "version": "fixture-1",
+          "sha256": "954eed434b69e3d2c274b67d714f1d684d3b9d936dae139ff76af18e8fd02c67"
+        },
+        "parameters": {},
+        "parameters_hash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "eligibility_ref": {
+          "id": "fixture:inert-eligibility",
+          "version": "fixture-1",
+          "sha256": "ff9f0abaeda972a05bd31e18793515b06b9b5f586abb182ff38441cf7234d1f6"
+        }
+      },
+      "targets": [
+        {
+          "security_id": "01900000-0000-7000-8000-000000000101",
+          "weight": "0.3"
+        },
+        {
+          "security_id": "01900000-0000-7000-8000-000000000102",
+          "weight": "0.3"
+        }
+      ],
+      "cash_weight": "0.4",
+      "evidence_refs": [],
+      "rationale": "Scripted arithmetic fixture; inert two-security allocation, no inference or market-performance claim.",
+      "reason_codes": [],
+      "model_replay_ref": null,
+      "cost_receipt_ids": [
+        "01900000-0000-7000-8000-000000000006"
+      ],
+      "record_hash": "d949e32267867a5ceb3af87c19debc35c2f707da05e2b6313d44de907119442d"
+    },
+    "F03": {
+      "profile": "drift-research/1-draft",
+      "kind": "candidate",
+      "candidate_id": "01900000-0000-7000-8000-000000000004",
+      "attempt_id": "01900000-0000-7000-8000-000000000005",
+      "scope": {
+        "experiment_id": "fixture:study",
+        "arm_id": "fixture:B",
+        "account_id": "fixture:account-B",
+        "campaign_ref": {
+          "id": "fixture:campaign",
+          "version": "fixture-1",
+          "sha256": "71fe095c4eddac2053be8a4a02b02a83fe11cf4a39195e7972245a45aa372a4e"
+        }
+      },
+      "context_ref": {
+        "id": "01900000-0000-7000-8000-000000000001",
+        "version": "drift-research/1-draft",
+        "sha256": "e4f6b12cee1635bb5ef18c3c0c6760d5fb6669d760970197c02b4f2da3520de7"
+      },
+      "portfolio_ref": {
+        "id": "fixture:state",
+        "version": "fixture-1",
+        "sha256": "0960db89812eaa89d3cf2f3ff9a163e6921ecb5aa0e84ada6935bf8a8574f8b0"
+      },
+      "mandate_ref": {
+        "id": "fixture:mandate",
+        "version": "fixture-1",
+        "sha256": "8d2314a80124a92144cfe329b307211a01823e032c6ecc0751f0410db2968c83"
+      },
+      "universe_ref": {
+        "id": "fixture:universe",
+        "version": "fixture-1",
+        "sha256": "745bba86aa2f2d837461a20f1f6f516e743af791643cdbe383f804e852ae5228"
+      },
+      "registry_ref": {
+        "id": "fixture:registry",
+        "version": "fixture-1",
+        "sha256": "d1f47f589a7b27ebe59e2eb7d2a73144befb2bd80b8aefecf609ee107a7c09c1"
+      },
+      "method_ref": {
+        "id": "fixture:method",
+        "version": "fixture-1",
+        "sha256": "9a89120b7c522b7241fbfe0f098bed3489fbe058ee9c5bc141bd9e7c615112aa"
+      },
+      "producer": "scripted_fixture",
+      "completed_at": "2024-01-02T10:00:02.000000Z",
+      "valid_until": null,
+      "disposition": "abstain",
+      "strategy": null,
+      "targets": [],
+      "cash_weight": null,
+      "evidence_refs": [],
+      "rationale": "Insufficient admitted evidence. Prespecified inert fixture output; no incurred work under this synthetic fixture policy.",
+      "reason_codes": [
+        "insufficient_evidence"
+      ],
+      "model_replay_ref": null,
+      "cost_receipt_ids": [],
+      "record_hash": "4ff139a6a1a2226f56d19877a8399a8f902493fbefe77a45013a1cbcbaa4b9d5"
+    },
+    "F04": {
+      "profile": "drift-research/1-draft",
+      "kind": "attempt",
+      "attempt_id": "01900000-0000-7000-8000-000000000003",
+      "logical_request_id": "01900000-0000-7000-8000-000000000010",
+      "attempt_event_id": "01900000-0000-7000-8000-000000000011",
+      "event_index": 0,
+      "previous_event_ref": null,
+      "retry_of": null,
+      "duplicate_of": null,
+      "scope": {
+        "experiment_id": "fixture:study",
+        "arm_id": "fixture:B",
+        "account_id": "fixture:account-B",
+        "campaign_ref": {
+          "id": "fixture:campaign",
+          "version": "fixture-1",
+          "sha256": "71fe095c4eddac2053be8a4a02b02a83fe11cf4a39195e7972245a45aa372a4e"
+        }
+      },
+      "context_ref": {
+        "id": "01900000-0000-7000-8000-000000000001",
+        "version": "drift-research/1-draft",
+        "sha256": "e4f6b12cee1635bb5ef18c3c0c6760d5fb6669d760970197c02b4f2da3520de7"
+      },
+      "method_ref": {
+        "id": "fixture:method",
+        "version": "fixture-1",
+        "sha256": "9a89120b7c522b7241fbfe0f098bed3489fbe058ee9c5bc141bd9e7c615112aa"
+      },
+      "budget_ref": {
+        "id": "fixture:budget",
+        "version": "fixture-1",
+        "sha256": "b4a801715509c49057a41cf47431c1ad98656a6e0b30e2c212a73101c320189c"
+      },
+      "producer": "scripted_fixture",
+      "started_at": "2024-01-02T10:00:01.000000Z",
+      "completed_at": null,
+      "status": "started",
+      "validation_ref": null,
+      "candidate_ref": null,
+      "model_replay_ref": null,
+      "cost_receipt_ids": [],
+      "reason_codes": [],
+      "failure_artifact_ref": null,
+      "budget_authorization_ref": {
+        "id": "fixture:attempt-budget-authorization",
+        "version": "fixture-1",
+        "sha256": "9a98593ca9359ad6e78db957a8a0bb237acb03073d3e88e2819f9926ba884456"
+      },
+      "record_hash": "b0606f450cb71fc84560c1ccb2e3ad417b0f0758e666044aaa20a1335e1492a1"
+    },
+    "F05": {
+      "profile": "drift-research/1-draft",
+      "kind": "attempt",
+      "attempt_id": "01900000-0000-7000-8000-000000000003",
+      "logical_request_id": "01900000-0000-7000-8000-000000000010",
+      "attempt_event_id": "01900000-0000-7000-8000-000000000012",
+      "event_index": 1,
+      "previous_event_ref": {
+        "id": "01900000-0000-7000-8000-000000000011",
+        "version": "drift-research/1-draft",
+        "sha256": "b0606f450cb71fc84560c1ccb2e3ad417b0f0758e666044aaa20a1335e1492a1"
+      },
+      "retry_of": null,
+      "duplicate_of": null,
+      "scope": {
+        "experiment_id": "fixture:study",
+        "arm_id": "fixture:B",
+        "account_id": "fixture:account-B",
+        "campaign_ref": {
+          "id": "fixture:campaign",
+          "version": "fixture-1",
+          "sha256": "71fe095c4eddac2053be8a4a02b02a83fe11cf4a39195e7972245a45aa372a4e"
+        }
+      },
+      "context_ref": {
+        "id": "01900000-0000-7000-8000-000000000001",
+        "version": "drift-research/1-draft",
+        "sha256": "e4f6b12cee1635bb5ef18c3c0c6760d5fb6669d760970197c02b4f2da3520de7"
+      },
+      "method_ref": {
+        "id": "fixture:method",
+        "version": "fixture-1",
+        "sha256": "9a89120b7c522b7241fbfe0f098bed3489fbe058ee9c5bc141bd9e7c615112aa"
+      },
+      "budget_ref": {
+        "id": "fixture:budget",
+        "version": "fixture-1",
+        "sha256": "b4a801715509c49057a41cf47431c1ad98656a6e0b30e2c212a73101c320189c"
+      },
+      "producer": "scripted_fixture",
+      "started_at": "2024-01-02T10:00:01.000000Z",
+      "completed_at": "2024-01-02T10:00:03.000000Z",
+      "status": "completed",
+      "validation_ref": {
+        "id": "fixture:accepted-validation",
+        "version": "fixture-1",
+        "sha256": "d77ce46854522342b1bdf70db70d146dee211210f0290e60489b9fcc16f1bef6"
+      },
+      "candidate_ref": {
+        "id": "01900000-0000-7000-8000-000000000002",
+        "version": "drift-research/1-draft",
+        "sha256": "d949e32267867a5ceb3af87c19debc35c2f707da05e2b6313d44de907119442d"
+      },
+      "model_replay_ref": null,
+      "cost_receipt_ids": [
+        "01900000-0000-7000-8000-000000000006"
+      ],
+      "reason_codes": [],
+      "failure_artifact_ref": null,
+      "budget_authorization_ref": {
+        "id": "fixture:attempt-budget-authorization",
+        "version": "fixture-1",
+        "sha256": "9a98593ca9359ad6e78db957a8a0bb237acb03073d3e88e2819f9926ba884456"
+      },
+      "record_hash": "e853ebe9fd260c68d69f3401eea6c1a2fc296889d229df1c61c75d866252d43a"
+    },
+    "F06": {
+      "profile": "drift-research/1-draft",
+      "kind": "raw_cost",
+      "receipt_id": "01900000-0000-7000-8000-000000000006",
+      "scope": {
+        "experiment_id": "fixture:study",
+        "arm_id": "fixture:B",
+        "account_id": "fixture:account-B",
+        "campaign_ref": {
+          "id": "fixture:campaign",
+          "version": "fixture-1",
+          "sha256": "71fe095c4eddac2053be8a4a02b02a83fe11cf4a39195e7972245a45aa372a4e"
+        }
+      },
+      "attempt_id": "01900000-0000-7000-8000-000000000003",
+      "category": "research_compute",
+      "billing_identity": "fixture:zero-charge-scripted-run",
+      "raw_evidence_ref": {
+        "artifact_id": "01900000-0000-7000-8000-000000000020",
+        "kind": "other",
+        "content_hash": "89fb3750b2e6350f6a5715e43ca4b91da57cbdcb334cc29b3705f5de44a38871",
+        "location": "fixture:fixture-zero-charge"
+      },
+      "incurred_start": "2024-01-02T10:00:01.000000Z",
+      "incurred_end": "2024-01-02T10:00:02.000000Z",
+      "recorded_at": "2024-01-02T10:00:03.000000Z",
+      "amount": "0",
+      "currency": "USD",
+      "amount_basis": "verified_zero",
+      "unknown_reason": null,
+      "pricing_ref": null,
+      "usage": [],
+      "shared_work_ref": null,
+      "supersedes_receipt_id": null,
+      "record_hash": "fee1e4050ed0929316013b78a852bc99ad70f53a6b53076ba1e69ce1ab2e5a24"
+    },
+    "F07": {
+      "profile": "drift-research/1-draft",
+      "kind": "raw_cost",
+      "receipt_id": "01900000-0000-7000-8000-000000000007",
+      "scope": {
+        "experiment_id": "fixture:study",
+        "arm_id": "fixture:B",
+        "account_id": "fixture:account-B",
+        "campaign_ref": {
+          "id": "fixture:campaign",
+          "version": "fixture-1",
+          "sha256": "71fe095c4eddac2053be8a4a02b02a83fe11cf4a39195e7972245a45aa372a4e"
+        }
+      },
+      "attempt_id": null,
+      "category": "inference",
+      "billing_identity": "fixture:unpriced-shared-work",
+      "raw_evidence_ref": {
+        "artifact_id": "01900000-0000-7000-8000-000000000021",
+        "kind": "other",
+        "content_hash": "ad6a58a8d44328f9fe95d959fb6369a17ac922dad2c334b4c0ddf4444b7dcb52",
+        "location": "fixture:fixture-unpriced-usage"
+      },
+      "incurred_start": "2024-01-02T09:58:00.000000Z",
+      "incurred_end": "2024-01-02T09:59:00.000000Z",
+      "recorded_at": "2024-01-02T10:00:00.000000Z",
+      "amount": null,
+      "currency": null,
+      "amount_basis": "unknown",
+      "unknown_reason": "Synthetic usage receipt has no price or billing currency evidence.",
+      "pricing_ref": null,
+      "usage": [
+        {
+          "unit": "input_tokens",
+          "quantity": 10,
+          "unknown_reason": null
+        },
+        {
+          "unit": "output_tokens",
+          "quantity": null,
+          "unknown_reason": "Fixture response usage unavailable."
+        }
+      ],
+      "shared_work_ref": {
+        "id": "fixture:shared-preprocessing",
+        "version": "fixture-1",
+        "sha256": "7ff0dedff3dbb0502b9162e9ce7e6cfd46d99716952349773816a8ca76724351"
+      },
+      "supersedes_receipt_id": null,
+      "record_hash": "c6d2291bf0dcd01077d09d585145eecd888e671439f7e699bfb8f1b0f6b9608d"
+    },
+    "F08": {
+      "profile": "drift-research/1-draft",
+      "kind": "model_replay",
+      "replay_id": "01900000-0000-7000-8000-000000000008",
+      "attempt_id": "01900000-0000-7000-8000-000000000009",
+      "scope": {
+        "experiment_id": "fixture:study",
+        "arm_id": "fixture:B",
+        "account_id": "fixture:account-B",
+        "campaign_ref": {
+          "id": "fixture:campaign",
+          "version": "fixture-1",
+          "sha256": "71fe095c4eddac2053be8a4a02b02a83fe11cf4a39195e7972245a45aa372a4e"
+        }
+      },
+      "context_ref": {
+        "id": "01900000-0000-7000-8000-000000000001",
+        "version": "drift-research/1-draft",
+        "sha256": "e4f6b12cee1635bb5ef18c3c0c6760d5fb6669d760970197c02b4f2da3520de7"
+      },
+      "method_ref": {
+        "id": "fixture:method",
+        "version": "fixture-1",
+        "sha256": "9a89120b7c522b7241fbfe0f098bed3489fbe058ee9c5bc141bd9e7c615112aa"
+      },
+      "adapter_ref": {
+        "id": "fixture:fake-transport-adapter",
+        "version": "fixture-1",
+        "sha256": "ad742d2cfb2ad940c14c08afac77c319e1d01439947b73acffc7f481b7f6cdfe"
+      },
+      "parser_schema_ref": {
+        "id": "fixture:parser",
+        "version": "fixture-1",
+        "sha256": "efddc45224f049bb95099d89a96e1d88aa0a04de6e710a3ed8162dbd2442b493"
+      },
+      "provider_identity": "fixture transport, no provider",
+      "requested_model": "fixture fake response generator",
+      "resolved_model_revision": null,
+      "resolution_limitation": "Synthetic metadata fixture does not identify model weights.",
+      "training_horizon_limitation": "No training horizon evidence; fixture only.",
+      "request_ref": {
+        "artifact_id": "01900000-0000-7000-8000-000000000022",
+        "kind": "other",
+        "content_hash": "7170083c0d289ff270230469bf4af74ab31b8fbe0f56a41bf041181ef94c7172",
+        "location": "fixture:fixture-request-bytes"
+      },
+      "response_ref": null,
+      "request_sent_at": "2024-01-02T10:00:01.000000Z",
+      "response_received_at": null,
+      "parse_completed_at": null,
+      "measured_latency_ms": null,
+      "latency_unknown_reason": "Synthetic timeout fixture.",
+      "usage_ref": null,
+      "provider_call_id": null,
+      "finish_reason": "timeout",
+      "mode": "recorded_call",
+      "original_replay_ref": null,
+      "retention_limitation": "No response received in this synthetic failed-call fixture.",
+      "replay_started_at": null,
+      "replay_completed_at": null,
+      "record_hash": "7505d5e54e5434646046dc67bd9c7e4d7be62f16a3ef72c3b58cacbccbadf508"
+    }
+  },
+  "raw_choice": {
+    "disposition": "propose",
+    "selection": {
+      "family_id": "fixture.equal_weight",
+      "strategy_version": "fixture-1",
+      "parameters": {}
+    },
+    "targets": [
+      {
+        "security_id": "01900000-0000-7000-8000-000000000101",
+        "weight": "0.3"
+      },
+      {
+        "security_id": "01900000-0000-7000-8000-000000000102",
+        "weight": "0.3"
+      }
+    ],
+    "cash_weight": "0.4",
+    "evidence_ids": [],
+    "rationale": "Scripted arithmetic fixture; inert two-security allocation, no inference or market-performance claim.",
+    "reason_codes": []
+  },
+  "negative_cases": [
+    {
+      "case": "N01",
+      "base": "F02",
+      "replace": {
+        "cash_weight": "0.3"
+      },
+      "expected": "invalid: weights sum to 0.9"
+    },
+    {
+      "case": "N02",
+      "base": "F02",
+      "replace": {
+        "targets": [
+          {
+            "security_id": "01900000-0000-7000-8000-000000000101",
+            "weight": 0.3
+          },
+          {
+            "security_id": "01900000-0000-7000-8000-000000000102",
+            "weight": "0.3"
+          }
+        ]
+      },
+      "expected": "invalid: JSON float is not Weight"
+    },
+    {
+      "case": "N03",
+      "base": "F02",
+      "replace": {
+        "strategy.parameters": {
+          "lookback_sessions": true
+        }
+      },
+      "expected": "rejected: undeclared parameter; a separate declared-integer-envelope variant rejects boolean type"
+    },
+    {
+      "case": "N04",
+      "base": "F01",
+      "replace": {
+        "inputs": [
+          {
+            "input_ref": {
+              "id": "fixture:late-revision",
+              "version": "fixture-1",
+              "sha256": "f000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "role": "news",
+            "available_at": "2024-01-02T10:01:00.000000Z",
+            "availability_basis_ref": {
+              "id": "fixture:availability",
+              "version": "fixture-1",
+              "sha256": "f000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "transformation_ref": null
+          }
+        ]
+      },
+      "expected": "refuse: input availability after 10:00 cutoff; replace ref digests with fixture hashes first to isolate causality"
+    },
+    {
+      "case": "N05",
+      "base": "F02",
+      "replace": {
+        "portfolio_ref.id": "fixture:state-older"
+      },
+      "expected": "rejected: candidate state binding differs from context; use resolvable matching fixture digest to isolate state check"
+    },
+    {
+      "case": "N06",
+      "base": "F02",
+      "replace": {
+        "disposition": "abstain"
+      },
+      "expected": "invalid: abstention cannot retain strategy/targets/cash"
+    },
+    {
+      "case": "N07",
+      "base": "F02",
+      "replace": {
+        "completed_at": "2024-01-02T09:59:59.000000Z"
+      },
+      "expected": "invalid: completion precedes review start"
+    },
+    {
+      "case": "N08",
+      "base": "F02",
+      "replace": {
+        "valid_until": "2024-01-02T10:00:02.500000Z"
+      },
+      "expected": "rejected: already expired at validation at 10:00:03"
+    },
+    {
+      "case": "N09",
+      "base": "F07",
+      "replace": {
+        "amount": "0",
+        "amount_basis": "verified_zero",
+        "unknown_reason": null
+      },
+      "expected": "rejected: missing evidence of verified zero and currency remains null"
+    },
+    {
+      "case": "N10",
+      "base": "F02",
+      "replace": {
+        "rationale": "altered without rehash"
+      },
+      "rehash": false,
+      "expected": "invalid: record_hash mismatch"
+    },
+    {
+      "case": "N11",
+      "base": "F01",
+      "remove": [
+        "mandate_ref"
+      ],
+      "expected": "invalid context shape: required mandate binding missing; builder emits unavailable preflight attempt, no candidate"
+    },
+    {
+      "case": "N12",
+      "base": "F02",
+      "replace": {
+        "profile": "drift-research/99",
+        "scope.arm_id": "fixture:other-arm"
+      },
+      "expected": "refuse unknown version; with supported version reject cross-arm scope"
+    }
+  ]
+}
