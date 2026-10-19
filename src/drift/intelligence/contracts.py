@@ -11,6 +11,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from drift.errors import CanonicalSerializationError
 from drift.serialization.canonical import content_hash
 
 # G2 has not qualified a released research wire profile. No silent upgrade.
@@ -123,6 +124,8 @@ class ResearchContext(ImmutableModel):
             raise ValueError("FUTURE_MEMORY_IN_CONTEXT")
         if self.source_grade == "exploratory" and not self.limitations:
             raise ValueError("EXPLORATORY_LIMITATIONS_REQUIRED")
+        if self.built_at < self.decision_cutoff:
+            raise ValueError("NON_CAUSAL_BUILD_CLOCK")
         if self.built_at > self.review_started_at:
             raise ValueError("NON_CAUSAL_REVIEW_CLOCK")
         for inp in self.inputs:
@@ -218,6 +221,17 @@ class CandidateStrategy(ImmutableModel):
     parameters_hash: str = Field(min_length=64, max_length=64)
     eligibility_ref: ArtifactReference
 
+    @model_validator(mode="after")
+    def verify_parameters_hash(self) -> CandidateStrategy:
+        """An outer candidate hash cannot substitute for a valid inner binding."""
+        try:
+            computed = content_hash(self.parameters)
+        except (CanonicalSerializationError, TypeError, ValueError) as error:
+            raise ValueError("INVALID_STRATEGY_PARAMETERS") from error
+        if self.parameters_hash != computed:
+            raise ValueError("STRATEGY_PARAMETERS_HASH_MISMATCH")
+        return self
+
 
 class ResearchCandidate(ImmutableModel):
     """Normalized, validated, immutable candidate decision record."""
@@ -247,6 +261,12 @@ class ResearchCandidate(ImmutableModel):
     cost_receipt_ids: tuple[str, ...] = ()
     record_hash: str = Field(min_length=64, max_length=64)
 
+    @field_validator("cash_weight", mode="before")
+    @classmethod
+    def validate_cash_weight(cls, value: Any) -> Any:
+        """Use the same DecimalText boundary for loaded and newly built choices."""
+        return RawChoice.validate_cash_weight(value)
+
     @model_validator(mode="after")
     def verify_record_hash(self) -> ResearchCandidate:
         if self.completed_at.tzinfo is None or self.completed_at.utcoffset() is None:
@@ -266,8 +286,16 @@ class ResearchCandidate(ImmutableModel):
             and self.strategy is not None
         ):
             raise ValueError("INCONSISTENT_NON_TRADING_DISPOSITION")
-        if self.disposition == "propose" and self.strategy is None:
-            raise ValueError("PROPOSAL_WITHOUT_STRATEGY")
+        if self.disposition == "propose":
+            if self.strategy is None:
+                raise ValueError("PROPOSAL_WITHOUT_STRATEGY")
+            if self.cash_weight is None:
+                raise ValueError("PROPOSAL_WITHOUT_CASH_WEIGHT")
+            total_weight = Decimal(self.cash_weight) + sum(
+                (Decimal(target.weight) for target in self.targets), Decimal("0")
+            )
+            if total_weight != Decimal("1"):
+                raise ValueError("INVALID_CANDIDATE_WEIGHT_SUM")
         if len({t.security_id for t in self.targets}) != len(self.targets):
             raise ValueError("DUPLICATE_TARGET_SECURITY")
         calc = compute_record_hash(self)
