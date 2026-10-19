@@ -97,7 +97,9 @@ def create_terminal_attempt(
         or completed_at.tzinfo is None
         or completed_at < prior_attempt.started_at
     ):
-        raise ValueError("INVALID_ATTEMPT_TIME: terminal precedes start or lacks timezone")
+        raise ValueError(
+            "INVALID_ATTEMPT_TIME: terminal precedes start or lacks timezone"
+        )
     if attempt_event_id == prior_attempt.attempt_event_id:
         raise ValueError("DUPLICATE_ATTEMPT_EVENT_ID")
     prev_ref = ArtifactReference(
@@ -267,7 +269,9 @@ class ResearchReceiptStore:
                 or attempt.started_at is None
                 or attempt.completed_at is not None
             ):
-                raise ValueError("INVALID_ATTEMPT_CHAIN: missing initial started event")
+                raise ValueError(
+                    "INVALID_ATTEMPT_CHAIN: missing initial started event"
+                )
         else:
             prev = prior_events[-1]
             backlink = attempt.previous_event_ref
@@ -280,7 +284,9 @@ class ResearchReceiptStore:
                 or backlink.sha256 != prev.record_hash
                 or attempt.attempt_event_id == prev.attempt_event_id
             ):
-                raise ValueError("INVALID_ATTEMPT_CHAIN: broken or repeated transition")
+                raise ValueError(
+                    "INVALID_ATTEMPT_CHAIN: broken or repeated transition"
+                )
             prior_payload = prev.model_dump(mode="python")
             next_payload = attempt.model_dump(mode="python")
             for key in (
