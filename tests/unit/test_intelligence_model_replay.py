@@ -257,9 +257,15 @@ def test_replay_rejects_equivalent_json_with_different_retained_bytes(
         response_payload=response["payload"],
         original_context=sample_context,
         original_bindings=sample_bindings,
-        adapter_revision=ArtifactReference(id="adapter:offline", version="v1", sha256="a"*64),
-        parser_schema_ref=ArtifactReference(id="schema:raw", version="v1", sha256="b"*64),
-        validation_policy=ArtifactReference(id="policy:fixed", version="v1", sha256="c"*64),
+        adapter_revision= ArtifactReference(
+            id="adapter:offline", version="v1", sha256="a" * 64
+        ),
+        parser_schema_ref= ArtifactReference(
+            id="schema:raw", version="v1", sha256="b" * 64
+        ),
+        validation_policy= ArtifactReference(
+            id="policy:fixed", version="v1", sha256="c" * 64
+        ),
         attempt_id="raw-byte-proof",
         checked_at=datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
     )
@@ -284,9 +290,15 @@ def test_mismatched_response_presence_cannot_be_reported_as_timeout(
         response_payload=positive["response"]["payload"],
         original_context=sample_context,
         original_bindings=sample_bindings,
-        adapter_revision=ArtifactReference(id="adapter:offline", version="v1", sha256="a"*64),
-        parser_schema_ref=ArtifactReference(id="schema:raw", version="v1", sha256="b"*64),
-        validation_policy=ArtifactReference(id="policy:fixed", version="v1", sha256="c"*64),
+        adapter_revision= ArtifactReference(
+            id="adapter:offline", version="v1", sha256="a" * 64
+        ),
+        parser_schema_ref= ArtifactReference(
+            id="schema:raw", version="v1", sha256="b" * 64
+        ),
+        validation_policy= ArtifactReference(
+            id="policy:fixed", version="v1", sha256="c" * 64
+        ),
         attempt_id="missing-response-reference",
         checked_at=datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
     )
@@ -315,9 +327,15 @@ def test_repeated_replay_produces_identical_evidence_identity(
         "response_payload": response["payload"],
         "original_context": sample_context,
         "original_bindings": sample_bindings,
-        "adapter_revision": ArtifactReference(id="adapter:offline", version="v1", sha256="a"*64),
-        "parser_schema_ref": ArtifactReference(id="schema:raw", version="v1", sha256="b"*64),
-        "validation_policy": ArtifactReference(id="policy:fixed", version="v1", sha256="c"*64),
+        "adapter_revision": ArtifactReference(
+            id="adapter:offline", version="v1", sha256="a" * 64
+        ),
+        "parser_schema_ref": ArtifactReference(
+            id="schema:raw", version="v1", sha256="b" * 64
+        ),
+        "validation_policy": ArtifactReference(
+            id="policy:fixed", version="v1", sha256="c" * 64
+        ),
         "attempt_id": "replay-stability",
         "checked_at": datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
     }
@@ -346,9 +364,15 @@ def test_absent_response_without_recorded_timeout_is_not_timeout(
         response_payload=None,
         original_context=sample_context,
         original_bindings=sample_bindings,
-        adapter_revision=ArtifactReference(id="adapter:offline", version="v1", sha256="a"*64),
-        parser_schema_ref=ArtifactReference(id="schema:raw", version="v1", sha256="b"*64),
-        validation_policy=ArtifactReference(id="policy:standard", version="v1", sha256="c"*64),
+        adapter_revision= ArtifactReference(
+            id="adapter:offline", version="v1", sha256="a" * 64
+        ),
+        parser_schema_ref= ArtifactReference(
+            id="schema:raw", version="v1", sha256="b" * 64
+        ),
+        validation_policy= ArtifactReference(
+            id="policy:standard", version="v1", sha256="c" * 64
+        ),
         attempt_id="unproven-timeout",
         checked_at=datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
     )
@@ -389,9 +413,15 @@ def test_malformed_or_ambiguous_model_json_is_not_a_valid_decision(
         response_payload=response_json,
         original_context=sample_context,
         original_bindings=sample_bindings,
-        adapter_revision=ArtifactReference(id="adapter:offline", version="v1", sha256="a" * 64),
-        parser_schema_ref=ArtifactReference(id="schema:raw", version="v1", sha256="b" * 64),
-        validation_policy=ArtifactReference(id="policy:fixed", version="v1", sha256="c" * 64),
+        adapter_revision= ArtifactReference(
+            id="adapter:offline", version="v1", sha256="a" * 64
+        ),
+        parser_schema_ref= ArtifactReference(
+            id="schema:raw", version="v1", sha256="b" * 64
+        ),
+        validation_policy= ArtifactReference(
+            id="policy:fixed", version="v1", sha256="c" * 64
+        ),
         attempt_id="strict-output",
         checked_at=datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
     )
@@ -424,9 +454,15 @@ def test_replay_accepts_valid_noncanonical_json_with_verified_byte_receipt(
         response_payload=resaved,
         original_context=sample_context,
         original_bindings=sample_bindings,
-        adapter_revision=ArtifactReference(id="adapter:offline", version="v1", sha256="a" * 64),
-        parser_schema_ref=ArtifactReference(id="schema:raw", version="v1", sha256="b" * 64),
-        validation_policy=ArtifactReference(id="policy:fixed", version="v1", sha256="c" * 64),
+        adapter_revision= ArtifactReference(
+            id="adapter:offline", version="v1", sha256="a" * 64
+        ),
+        parser_schema_ref= ArtifactReference(
+            id="schema:raw", version="v1", sha256="b" * 64
+        ),
+        validation_policy= ArtifactReference(
+            id="policy:fixed", version="v1", sha256="c" * 64
+        ),
         attempt_id="noncanonical-valid-response",
         checked_at=datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
     )

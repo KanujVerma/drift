@@ -112,7 +112,9 @@ def bridge_candidate_to_execution(
         or portfolio_state.observed_at.tzinfo is None
         or portfolio_state.observed_at.utcoffset() is None
     ):
-        raise ValueError("INDETERMINATE_TIMEZONE: input evidence timestamp has no offset")
+        raise ValueError(
+            "INDETERMINATE_TIMEZONE: input evidence timestamp has no offset"
+        )
     curr_utc = current_time.astimezone(UTC)
     cand_comp_utc = candidate.completed_at.astimezone(UTC)
     # Revalidate even frozen instances; model_copy(update=...) bypasses
@@ -228,7 +230,9 @@ def bridge_candidate_to_execution(
             "cash_weight": None,
             "session_target": "none",
             "status": "refused",
-            "refusal_reason": "UNVERIFIED_PORTFOLIO_STATE: platform verification required",
+            "refusal_reason": (
+                "UNVERIFIED_PORTFOLIO_STATE: platform verification required"
+            ),
             "dispatched_at": curr_utc,
         }
         raw_dict["record_hash"] = compute_record_hash(raw_dict)
@@ -248,7 +252,9 @@ def bridge_candidate_to_execution(
             "cash_weight": None,
             "session_target": "none",
             "status": "refused",
-            "refusal_reason": "STALE_OR_FUTURE_STATE: account evidence unavailable at dispatch",
+            "refusal_reason": (
+                "STALE_OR_FUTURE_STATE: account evidence unavailable at dispatch"
+            ),
             "dispatched_at": curr_utc,
         }
         raw_dict["record_hash"] = compute_record_hash(raw_dict)

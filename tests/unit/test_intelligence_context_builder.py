@@ -337,5 +337,9 @@ def test_generated_context_id_binds_authoritative_budget_and_scope(
             ArtifactReference(id="synthetic:feedback", version="v1", sha256="e" * 64),
         ),
     )
-    assert len({original.context_id, changed_budget.context_id, changed_feedback.context_id}) == 3
-    assert len({original.record_hash, changed_budget.record_hash, changed_feedback.record_hash}) == 3
+    assert len(
+        {original.context_id, changed_budget.context_id, changed_feedback.context_id}
+    ) == 3
+    assert len(
+        {original.record_hash, changed_budget.record_hash, changed_feedback.record_hash}
+    ) == 3

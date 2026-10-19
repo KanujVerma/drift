@@ -124,7 +124,9 @@ def matching_portfolio_state(
         observed_at=sample_candidate.completed_at + timedelta(seconds=1),
         state_verified=True,
         verification_ref=ArtifactReference(
-            id="fixture:verified-account-observation", version="synthetic-v1", sha256="e" * 64
+            id="fixture:verified-account-observation",
+            version="synthetic-v1",
+            sha256="e" * 64
         ),
     )
 
@@ -272,7 +274,9 @@ def test_t08_stale_portfolio_state_refusal(
         observed_at=dispatch_time,
         state_verified=True,
         verification_ref=ArtifactReference(
-            id="fixture:verified-account-observation", version="synthetic-v1", sha256="e" * 64
+            id="fixture:verified-account-observation",
+            version="synthetic-v1",
+            sha256="e" * 64
         ),
     )
 
@@ -304,7 +308,9 @@ def test_t08_mandate_mismatch_refusal(
         observed_at=dispatch_time,
         state_verified=True,
         verification_ref=ArtifactReference(
-            id="fixture:verified-account-observation", version="synthetic-v1", sha256="e" * 64
+            id="fixture:verified-account-observation",
+            version="synthetic-v1",
+            sha256="e" * 64
         ),
     )
 
@@ -336,7 +342,9 @@ def test_t08_account_paused_refusal(
         observed_at=dispatch_time,
         state_verified=True,
         verification_ref=ArtifactReference(
-            id="fixture:verified-account-observation", version="synthetic-v1", sha256="e" * 64
+            id="fixture:verified-account-observation",
+            version="synthetic-v1",
+            sha256="e" * 64
         ),
     )
 
@@ -368,7 +376,9 @@ def test_t08_pending_orders_conflict_refusal(
         observed_at=dispatch_time,
         state_verified=True,
         verification_ref=ArtifactReference(
-            id="fixture:verified-account-observation", version="synthetic-v1", sha256="e" * 64
+            id="fixture:verified-account-observation",
+            version="synthetic-v1",
+            sha256="e" * 64
         ),
     )
 
@@ -402,7 +412,9 @@ def test_a12_scope_mismatch_refusal(
         observed_at=dispatch_time,
         state_verified=True,
         verification_ref=ArtifactReference(
-            id="fixture:verified-account-observation", version="synthetic-v1", sha256="e" * 64
+            id="fixture:verified-account-observation",
+            version="synthetic-v1",
+            sha256="e" * 64
         ),
     )
 
@@ -469,10 +481,14 @@ def test_request_identity_is_stable_for_identical_inputs(
 ) -> None:
     now = sample_candidate.completed_at + timedelta(minutes=5)
     one = bridge_candidate_to_execution(
-        candidate=sample_candidate, portfolio_state=matching_portfolio_state, current_time=now
+        candidate=sample_candidate,
+        portfolio_state=matching_portfolio_state,
+        current_time=now
     )
     two = bridge_candidate_to_execution(
-        candidate=sample_candidate, portfolio_state=matching_portfolio_state, current_time=now
+        candidate=sample_candidate,
+        portfolio_state=matching_portfolio_state,
+        current_time=now
     )
     assert one.request_id == two.request_id
     assert one.record_hash == two.record_hash

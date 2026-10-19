@@ -338,10 +338,14 @@ def test_future_and_permuted_feed_events_do_not_change_current_trigger() -> None
     )
     baseline = evaluate_review_schedule(now=now, feed_events=[first, second])
     reversed_order = evaluate_review_schedule(now=now, feed_events=[second, first])
-    future_added = evaluate_review_schedule(now=now, feed_events=[future, second, first])
+    future_added = evaluate_review_schedule(
+        now=now, feed_events=[future, second, first]
+    )
     assert baseline.review_type == "event_driven"
     assert baseline.trigger_id == reversed_order.trigger_id == future_added.trigger_id
-    assert baseline.record_hash == reversed_order.record_hash == future_added.record_hash
+    assert (
+        baseline.record_hash == reversed_order.record_hash == future_added.record_hash
+    )
 
 
 def test_naive_calendar_history_fails_closed() -> None:
