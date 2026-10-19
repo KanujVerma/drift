@@ -329,12 +329,18 @@ def test_recovery_rejects_out_of_order_and_tampered_events_atomically(
         store.record_attempt(started.model_copy(update={"producer": "unhashed-tamper"}))
     assert store.export_events() == []
 
+    competing = create_terminal_attempt(
+        prior_attempt=started,
+        attempt_event_id="ev-chain-other",
+        completed_at=now,
+        status="completed",
+    )
     with pytest.raises(ValueError, match="INVALID_ATTEMPT_CHAIN"):
-        store.load_events([started.model_dump(mode="python"), terminal.model_dump(
-            mode="python"
-        ), terminal.model_copy(update={
-            "attempt_event_id": "another-event-id"
-        }).model_dump(mode="python")])
+        store.load_events([
+            started.model_dump(mode="python"),
+            terminal.model_dump(mode="python"),
+            competing.model_dump(mode="python"),
+        ])
     assert store.export_events() == []
 
 
