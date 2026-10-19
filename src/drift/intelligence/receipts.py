@@ -24,6 +24,28 @@ from drift.intelligence.contracts import (
 )
 
 
+def _validate_cost_chronology(cost: CostReceipt) -> None:
+    """Check retained timestamps, including self-rehashed records during recovery.
+
+    Missing fields remain unknown, not fabricated. When known, observed spend
+    cannot be recorded before it was incurred or complete before it began.
+    """
+    for field in ("incurred_start", "incurred_end", "recorded_at"):
+        stamp = getattr(cost, field)
+        if stamp is not None and (stamp.tzinfo is None or stamp.utcoffset() is None):
+            raise ValueError(f"INVALID_COST_TIMESTAMP: {field} lacks timezone")
+    start = cost.incurred_start
+    end = cost.incurred_end
+    recorded = cost.recorded_at
+    if start is not None and end is not None and end < start:
+        raise ValueError("INVALID_COST_CHRONOLOGY: end precedes start")
+    if recorded is not None and (
+        (start is not None and recorded < start)
+        or (end is not None and recorded < end)
+    ):
+        raise ValueError("INVALID_COST_CHRONOLOGY: recorded before incurred")
+
+
 def create_started_attempt(
     *,
     attempt_id: str,
@@ -174,6 +196,12 @@ def create_cost_receipt(
 ) -> CostReceipt:
     """Create a validated CostReceipt adhering strictly to DP-R3."""
     if amount_basis == "verified_zero":
+        if amount is not None and amount != "0":
+            raise ValueError("CONFLICTING_VERIFIED_ZERO_AMOUNT")
+        if unknown_reason is not None:
+            raise ValueError("CONFLICTING_VERIFIED_ZERO_UNKNOWN_REASON")
+        if currency is not None and not currency.strip():
+            raise ValueError("INVALID_VERIFIED_ZERO_CURRENCY")
         if raw_evidence_ref is None:
             raise ValueError(
                 "verified_zero requires non-null raw_evidence_ref for audit"
@@ -182,13 +210,15 @@ def create_cost_receipt(
         currency_val = currency or "USD"
         unknown_reason_val = None
     elif amount_basis == "unknown":
-        if not unknown_reason:
+        if amount is not None or currency is not None:
+            raise ValueError("CONFLICTING_UNKNOWN_COST_FIELDS")
+        if not unknown_reason or not unknown_reason.strip():
             raise ValueError("unknown amount_basis requires non-empty unknown_reason")
         amount_val = None
         currency_val = None
         unknown_reason_val = unknown_reason
     else:  # actual or estimate
-        if amount is None or not str(amount).strip():
+        if not isinstance(amount, str) or not amount.strip():
             raise ValueError(f"{amount_basis} amount_basis requires non-null amount")
         try:
             value = Decimal(amount)
@@ -231,7 +261,9 @@ def create_cost_receipt(
     }
     rec_hash = compute_record_hash(raw_dict)
     raw_dict["record_hash"] = rec_hash
-    return CostReceipt.model_validate(raw_dict)
+    receipt = CostReceipt.model_validate(raw_dict)
+    _validate_cost_chronology(receipt)
+    return receipt
 
 
 class ResearchReceiptStore:
@@ -326,6 +358,7 @@ class ResearchReceiptStore:
     def record_cost_receipt(self, cost: CostReceipt) -> None:
         """Record a cost receipt idempotently or fail on conflict."""
         cost = CostReceipt.model_validate(cost.model_dump(mode="python"))
+        _validate_cost_chronology(cost)
         receipt_id = cost.receipt_id
         if receipt_id in self._costs_by_receipt_id:
             existing = self._costs_by_receipt_id[receipt_id]
@@ -339,6 +372,13 @@ class ResearchReceiptStore:
             prior = self._costs_by_receipt_id.get(cost.supersedes_receipt_id)
             if prior is None:
                 raise ValueError("UNKNOWN_COST_SUPERSESSION: original receipt missing")
+            if any(
+                existing.supersedes_receipt_id == cost.supersedes_receipt_id
+                for existing in self._costs_by_receipt_id.values()
+            ):
+                raise ValueError(
+                    "DUPLICATE_COST_SUPERSESSION: competing correction receipts"
+                )
             if (
                 prior.attempt_id != cost.attempt_id
                 or prior.scope != cost.scope

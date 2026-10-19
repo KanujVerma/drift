@@ -13,9 +13,11 @@ import pytest
 
 from drift.intelligence.contracts import (
     ArtifactReference,
+    CostReceipt,
     Scope,
     StoredArtifactRef,
     UsageEntry,
+    compute_record_hash,
 )
 from drift.intelligence.receipts import (
     ResearchReceiptStore,
@@ -488,3 +490,149 @@ def test_cost_correction_export_orders_ancestor_before_lexically_first_child(
     recovered.load_canonical_jsonl(serialized)
     assert recovered.export_canonical_jsonl() == serialized
     assert recovered.get_cost_receipt(correction.receipt_id) == correction
+
+
+def test_k2_rejects_contradictory_cost_inputs(sample_scope: Scope) -> None:
+    """A cost maker must never silently erase supplied contradictory evidence."""
+    proof = StoredArtifactRef(
+        artifact_id="synthetic-zero",
+        kind="other",
+        content_hash="e" * 64,
+        location="synthetic:zero",
+    )
+    common: dict[str, Any] = {
+        "receipt_id": "cost-conflict",
+        "scope": sample_scope,
+        "category": "inference",
+        "billing_identity": "meter:conflict",
+    }
+    with pytest.raises(ValueError, match="CONFLICTING_VERIFIED_ZERO_AMOUNT"):
+        create_cost_receipt(
+            **common,
+            amount_basis="verified_zero",
+            amount="1",
+            raw_evidence_ref=proof,
+        )
+    with pytest.raises(ValueError, match="CONFLICTING_VERIFIED_ZERO_UNKNOWN_REASON"):
+        create_cost_receipt(
+            **common,
+            amount_basis="verified_zero",
+            raw_evidence_ref=proof,
+            unknown_reason="conflicting provider bill",
+        )
+    with pytest.raises(ValueError, match="CONFLICTING_UNKNOWN_COST_FIELDS"):
+        create_cost_receipt(
+            **common,
+            amount_basis="unknown",
+            unknown_reason="not priced",
+            amount="12.3",
+            currency="USD",
+        )
+    with pytest.raises(ValueError, match="CONFLICTING_UNKNOWN_COST_FIELDS"):
+        create_cost_receipt(
+            **common,
+            amount_basis="unknown",
+            unknown_reason="not priced",
+            currency="USD",
+        )
+
+
+def test_k2_disallows_competing_corrections_without_dropping_history(
+    sample_scope: Scope,
+) -> None:
+    """An estimate has one authoritative correction, not two billable forks."""
+    common: dict[str, Any] = {
+        "scope": sample_scope,
+        "category": "inference",
+        "billing_identity": "invoice:single-work",
+    }
+    estimate = create_cost_receipt(
+        **common,
+        receipt_id="estimate",
+        amount_basis="estimate",
+        amount="2.50",
+        currency="USD",
+    )
+    actual = create_cost_receipt(
+        **common,
+        receipt_id="corrected-a",
+        amount_basis="actual",
+        amount="2.20",
+        currency="USD",
+        supersedes_receipt_id="estimate",
+    )
+    conflicting = create_cost_receipt(
+        **common,
+        receipt_id="corrected-b",
+        amount_basis="actual",
+        amount="2.10",
+        currency="USD",
+        supersedes_receipt_id="estimate",
+    )
+    store = ResearchReceiptStore()
+    store.record_cost_receipt(estimate)
+    store.record_cost_receipt(actual)
+    store.record_cost_receipt(actual)
+    before = store.export_canonical_jsonl()
+
+    with pytest.raises(ValueError, match="DUPLICATE_COST_SUPERSESSION"):
+        store.record_cost_receipt(conflicting)
+    assert store.export_canonical_jsonl() == before
+    assert store.get_cost_receipt("corrected-b") is None
+
+    with pytest.raises(ValueError, match="DUPLICATE_COST_SUPERSESSION"):
+        store.load_events([conflicting.model_dump(mode="python")])
+    assert store.export_canonical_jsonl() == before
+
+
+def test_k2_rejects_noncausal_cost_timestamps_at_creation_and_replay(
+    sample_scope: Scope,
+) -> None:
+    """Even valid self-rehashed cost rows cannot launder impossible chronology."""
+    common: dict[str, Any] = {
+        "receipt_id": "cost-timestamp",
+        "scope": sample_scope,
+        "category": "inference",
+        "billing_identity": "meter:timestamp",
+        "amount_basis": "actual",
+        "amount": "0.12",
+        "currency": "USD",
+    }
+    start = datetime(2024, 1, 2, 10, 0, 0, tzinfo=UTC)
+    end = datetime(2024, 1, 2, 10, 1, 0, tzinfo=UTC)
+    recorded = datetime(2024, 1, 2, 10, 2, 0, tzinfo=UTC)
+    with pytest.raises(ValueError, match="INVALID_COST_CHRONOLOGY"):
+        create_cost_receipt(
+            **common,
+            incurred_start=end,
+            incurred_end=start,
+            recorded_at=recorded,
+        )
+    with pytest.raises(ValueError, match="INVALID_COST_TIMESTAMP"):
+        create_cost_receipt(
+            **common,
+            incurred_start=start.replace(tzinfo=None),
+            incurred_end=end,
+            recorded_at=recorded,
+        )
+
+    valid = create_cost_receipt(
+        **common,
+        incurred_start=start,
+        incurred_end=end,
+        recorded_at=recorded,
+    )
+    original = valid.model_dump(mode="python")
+    original["recorded_at"] = start
+    original["record_hash"] = compute_record_hash(original)
+    forged = CostReceipt.model_validate(original)
+    store = ResearchReceiptStore()
+    with pytest.raises(ValueError, match="INVALID_COST_CHRONOLOGY"):
+        store.record_cost_receipt(forged)
+    assert store.export_events() == []
+
+    # A valid historical record still round-trips across the K2 journal.
+    store.record_cost_receipt(valid)
+    restored = ResearchReceiptStore()
+    restored.load_canonical_jsonl(store.export_canonical_jsonl())
+    assert restored.get_cost_receipt(valid.receipt_id) == valid

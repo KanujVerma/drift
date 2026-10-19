@@ -214,3 +214,60 @@ Antigravity must not write production code, mark scientific success, modify prot
 ## Merge and release policy
 
 Do not merge a PR merely because an earlier source snapshot had passing unit tests. Require this exact candidate's full green CI, independent adversarial acceptance, producer/consumer review, accepted contracts, and owner-authorized merge. Research engineering acceptance cannot replace Kanuj's scientific acceptance or future operational permission. Closing original K0-K5 issues and superseding their individual draft PRs is downstream of the integrated code's final acceptance, not an automatic side effect of assembling it.
+
+## Stacked K1 and K2 integrity corrections for the final QA SHA
+
+The original K0-K5 consolidated branch is an **unaccepted implementation
+candidate**. Its K1 and K2 correctness work also has bounded follow-up branches.
+These should be integrated into the final consolidated QA revision using
+history-preserving Git operations. Until then, validating the original
+consolidated SHA alone will miss these corrections.
+
+- **K1, issue #464 / PR #465:** independently validate candidate cash/weight
+  totals, raw strategy parameter digests, hold disposition and context build
+  clock, plus registry family-key coherence. Its source branch precedes K2.
+- **K2, issue #466:** reject contradictory verified-zero/unknown raw cost
+  inputs rather than silently erasing evidence; refuse competing corrections
+  to one estimate; validate timezone-aware, ordered observed cost timestamps
+  both in producer construction and imported journal records.
+- K2's original PR #449 still supplies offline response replay, attempt
+  predecessor chaining, idempotent ledger projection and atomic canonical
+  JSONL export/import. These corrections complement rather than replace it.
+  Do not merge both the original PR and the consolidated equivalent.
+
+K2-specific non-vacuity probes in addition to the baseline T06/T09/T10/T11:
+
+1. Supply `amount="1"` under `verified_zero` together with a zero
+   evidence reference. It must be refused, not silently rewritten to zero.
+   Unknown cost with supplied amount or currency must likewise be refused.
+2. After one estimate-to-actual correction, submit a distinct second actual
+   receipt that supersedes the same estimate. It must refuse even if both
+   receipts have valid self-consistent hashes. An identical retry of the
+   first correction remains idempotent.
+3. Recompute a fully valid cost row's outer `record_hash` after moving
+   `recorded_at` before `incurred_end`. Deserialization alone is not
+   sufficient: store admission and JSONL rehydration must reject the row,
+   leaving prior store state byte-identical.
+4. Preserve historical valid unknown costs and absent optional timestamp
+   evidence as unknown; do not fabricate invoice times or monetary zero.
+5. Repeat offline replay with changed raw bytes, ambiguous JSON, a retained
+   timeout, an unsupported model response and unchanged trusted evidence;
+   compare both normalized decision and raw byte identities.
+
+For *slice development only*, run
+`uv run pytest -q tests/unit/test_intelligence_contracts.py
+tests/unit/test_intelligence_validation.py
+tests/unit/test_intelligence_receipts.py
+tests/unit/test_intelligence_model_replay.py`
+on the stacked K2 SHA. The **final** Antigravity validation must still run
+the complete pinned suite and all five independent review passes on the
+eventual integrated `krish/456-consolidated-intelligence` immutable SHA,
+not on any older green child head.
+
+**Unresolved external boundary:** K2's `ResearchReceiptStore` is an
+in-memory, append-only *projection* with canonical JSONL interchange, not a
+durably committed SQLite/M0 event log. Until Matthew's ledger interface and
+independent consumption acceptance are qualified, it does not prove fsync,
+crash-safe provider invocation admission, cross-arm economic allocation,
+provider-invoice authenticity, or monetary cap compliance. The team must not
+call K2's offline receipts an operational spending authorization.
