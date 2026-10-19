@@ -785,10 +785,11 @@ class TestStage1SwitchPreflight(unittest.TestCase):
             required_universe=None,
             current_portfolio_state=port,
         )
-        self.assertEqual(res.status, PreflightStatus.UNAVAILABLE)
+        self.assertEqual(res.status, PreflightStatus.INDETERMINATE_SAFETY)
         self.assertIn("missing_required_universe", res.reason)
         self.assertFalse(res.is_tradeable)
-        self.assertTrue(res.hold_incumbent)
+        self.assertFalse(res.hold_incumbent)
+        self.assertTrue(res.requires_containment)
 
     def test_missing_required_universe_empty_fails_closed(self) -> None:
         """Supplying an empty required_universe sequence fails closed."""
@@ -801,8 +802,11 @@ class TestStage1SwitchPreflight(unittest.TestCase):
             required_universe=(),
             current_portfolio_state=port,
         )
-        self.assertEqual(res.status, PreflightStatus.UNAVAILABLE)
+        self.assertEqual(res.status, PreflightStatus.INDETERMINATE_SAFETY)
         self.assertIn("missing_required_universe", res.reason)
+        self.assertFalse(res.is_tradeable)
+        self.assertFalse(res.hold_incumbent)
+        self.assertTrue(res.requires_containment)
 
     def test_extra_security_in_context_rejected(self) -> None:
         """Context containing an unapproved extra ETF (13 names) is rejected."""
@@ -820,8 +824,11 @@ class TestStage1SwitchPreflight(unittest.TestCase):
             required_universe=self.admitted_uuids,
             current_portfolio_state=port,
         )
-        self.assertEqual(res.status, PreflightStatus.REJECTED)
+        self.assertEqual(res.status, PreflightStatus.INDETERMINATE_SAFETY)
         self.assertIn("extra_securities_in_context", res.reason)
+        self.assertFalse(res.is_tradeable)
+        self.assertFalse(res.hold_incumbent)
+        self.assertTrue(res.requires_containment)
 
     def test_duplicate_security_in_required_universe_rejected(self) -> None:
         """Duplicate security ID in required_universe sequence is rejected."""
@@ -835,8 +842,11 @@ class TestStage1SwitchPreflight(unittest.TestCase):
             required_universe=duplicated_universe,
             current_portfolio_state=port,
         )
-        self.assertEqual(res.status, PreflightStatus.REJECTED)
+        self.assertEqual(res.status, PreflightStatus.INDETERMINATE_SAFETY)
         self.assertIn("duplicate_security_in_required_universe", res.reason)
+        self.assertFalse(res.is_tradeable)
+        self.assertFalse(res.hold_incumbent)
+        self.assertTrue(res.requires_containment)
 
     def test_mismatched_universe_size_no_qqq_treated_as_distinct_and_rejected(
         self,
@@ -854,8 +864,11 @@ class TestStage1SwitchPreflight(unittest.TestCase):
             required_universe=no_qqq,
             current_portfolio_state=port,
         )
-        self.assertEqual(res.status, PreflightStatus.REJECTED)
+        self.assertEqual(res.status, PreflightStatus.INDETERMINATE_SAFETY)
         self.assertIn("mismatched_universe_size", res.reason)
+        self.assertFalse(res.is_tradeable)
+        self.assertFalse(res.hold_incumbent)
+        self.assertTrue(res.requires_containment)
 
     def test_mismatched_universe_hash_rejected(self) -> None:
         """Context cohort hash failing to match expected_universe_hash is rejected."""
@@ -870,8 +883,11 @@ class TestStage1SwitchPreflight(unittest.TestCase):
             expected_universe_hash=wrong_hash,
             current_portfolio_state=port,
         )
-        self.assertEqual(res.status, PreflightStatus.REJECTED)
+        self.assertEqual(res.status, PreflightStatus.INDETERMINATE_SAFETY)
         self.assertIn("universe_hash_mismatch", res.reason)
+        self.assertFalse(res.is_tradeable)
+        self.assertFalse(res.hold_incumbent)
+        self.assertTrue(res.requires_containment)
 
     def test_valid_exact_12_etf_universe_eligible(self) -> None:
         """Exact 12-ETF universe with all valid evidence succeeds."""
@@ -2024,8 +2040,11 @@ class TestStage1SwitchPreflight(unittest.TestCase):
             mandate_verified=True,
             risk_verified=True,
         )
-        self.assertEqual(res.status, PreflightStatus.REJECTED)
+        self.assertEqual(res.status, PreflightStatus.INDETERMINATE_SAFETY)
         self.assertIn("unrecognized_universe_symbol", res.reason)
+        self.assertFalse(res.is_tradeable)
+        self.assertFalse(res.hold_incumbent)
+        self.assertTrue(res.requires_containment)
 
     def test_missing_expected_universe_hash_fails_closed(self) -> None:
         """expected_universe_hash=None must fail closed."""
@@ -2045,8 +2064,11 @@ class TestStage1SwitchPreflight(unittest.TestCase):
             mandate_verified=True,
             risk_verified=True,
         )
-        self.assertEqual(res.status, PreflightStatus.REJECTED)
+        self.assertEqual(res.status, PreflightStatus.INDETERMINATE_SAFETY)
         self.assertIn("missing_expected_universe_hash", res.reason)
+        self.assertFalse(res.is_tradeable)
+        self.assertFalse(res.hold_incumbent)
+        self.assertTrue(res.requires_containment)
 
     def test_unknown_corporate_action_coverage_unavailable(self) -> None:
         """adjustments_by_security=None is unknown and returns UNAVAILABLE."""
@@ -2512,6 +2534,355 @@ class TestStage1SwitchPreflight(unittest.TestCase):
                 expected_cohort_hash=self.cohort_hash,
             )
         self.assertIn("decision_cutoff mismatch", str(cm.exception))
+
+    # =========================================================================
+    # Regressions for Issue 422 / PR 424: Strong Context Cohort Binding & Hold
+    # =========================================================================
+
+    def test_regression_strong_context_b3_incumbent_abstain_verifies(self) -> None:
+        """1. Valid strong context + B3 incumbent + ABSTAIN:
+        safe hold, cohort bound, verifier passes.
+        """
+        ctx = self._build_strong_lane_context(session_count=255)
+        port = self._make_valid_portfolio_state()
+        res = self._eval(
+            proposed_strategy="ABSTAIN",
+            current_strategy="B3",
+            decision_context=ctx,
+            current_portfolio_state=port,
+        )
+        self.assertEqual(res.status, PreflightStatus.ABSTAIN)
+        self.assertFalse(res.is_tradeable)
+        self.assertTrue(res.hold_incumbent)
+        self.assertFalse(res.requires_containment)
+        self.assertEqual(res.effective_strategy, "B3")
+        self.assertEqual(res.cohort_hash, self.cohort_hash)
+        self.assertEqual(res.admitted_universe, self.admitted_uuids)
+
+        verified = verify_stage1_switch_preflight_result(
+            res,
+            expected_account_id="account-alpha",
+            expected_mandate="balanced_stage1",
+            expected_session_key=self.session_key,
+            expected_cohort_hash=self.cohort_hash,
+            expected_decision_cutoff=self.closed_at,
+            current_portfolio_state=port,
+            expected_universe=self.admitted_uuids,
+        )
+        self.assertTrue(verified)
+
+    def test_regression_strong_context_b4_short_history_safe_hold_verifies(
+        self,
+    ) -> None:
+        """2. Strong context + B4 with 252 sessions:
+        UNAVAILABLE, safe hold, verifier passes.
+        """
+        ctx = self._build_strong_lane_context(session_count=252)
+        port = self._make_valid_portfolio_state()
+        res = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx,
+            current_portfolio_state=port,
+        )
+        self.assertEqual(res.status, PreflightStatus.UNAVAILABLE)
+        self.assertFalse(res.is_tradeable)
+        self.assertTrue(res.hold_incumbent)
+        self.assertFalse(res.requires_containment)
+        self.assertEqual(res.effective_strategy, "B3")
+        self.assertEqual(res.cohort_hash, self.cohort_hash)
+        self.assertEqual(res.admitted_universe, self.admitted_uuids)
+
+        verified = verify_stage1_switch_preflight_result(
+            res,
+            expected_account_id="account-alpha",
+            expected_mandate="balanced_stage1",
+            expected_session_key=self.session_key,
+            expected_cohort_hash=self.cohort_hash,
+            expected_decision_cutoff=self.closed_at,
+            current_portfolio_state=port,
+            expected_universe=self.admitted_uuids,
+        )
+        self.assertTrue(verified)
+
+    def test_regression_strong_context_b5_short_history_safe_hold_verifies(
+        self,
+    ) -> None:
+        """3. Strong context + B5 with 60 sessions:
+        UNAVAILABLE, safe hold, verifier passes.
+        """
+        ctx = self._build_strong_lane_context(session_count=60)
+        port = self._make_valid_portfolio_state()
+        res = self._eval(
+            proposed_strategy="B5",
+            current_strategy="B3",
+            decision_context=ctx,
+            current_portfolio_state=port,
+        )
+        self.assertEqual(res.status, PreflightStatus.UNAVAILABLE)
+        self.assertFalse(res.is_tradeable)
+        self.assertTrue(res.hold_incumbent)
+        self.assertFalse(res.requires_containment)
+        self.assertEqual(res.effective_strategy, "B3")
+        self.assertEqual(res.cohort_hash, self.cohort_hash)
+        self.assertEqual(res.admitted_universe, self.admitted_uuids)
+
+        verified = verify_stage1_switch_preflight_result(
+            res,
+            expected_account_id="account-alpha",
+            expected_mandate="balanced_stage1",
+            expected_session_key=self.session_key,
+            expected_cohort_hash=self.cohort_hash,
+            expected_decision_cutoff=self.closed_at,
+            current_portfolio_state=port,
+            expected_universe=self.admitted_uuids,
+        )
+        self.assertTrue(verified)
+
+    def test_regression_controls_b4_at_253_and_b5_at_61_eligible_verifies(self) -> None:
+        """4. B4 at 253 and B5 at 61 remain eligible controls and verify."""
+        port = self._make_valid_portfolio_state()
+
+        # B4 at 253
+        ctx_b4 = self._build_strong_lane_context(session_count=253)
+        res_b4 = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx_b4,
+            current_portfolio_state=port,
+        )
+        self.assertEqual(res_b4.status, PreflightStatus.ELIGIBLE)
+        self.assertTrue(res_b4.is_tradeable)
+        self.assertFalse(res_b4.hold_incumbent)
+        self.assertEqual(res_b4.effective_strategy, "B4")
+        self.assertEqual(res_b4.cohort_hash, self.cohort_hash)
+        verified_b4 = verify_stage1_switch_preflight_result(
+            res_b4,
+            expected_account_id="account-alpha",
+            expected_mandate="balanced_stage1",
+            expected_session_key=self.session_key,
+            expected_cohort_hash=self.cohort_hash,
+            expected_decision_cutoff=self.closed_at,
+            current_portfolio_state=port,
+            expected_universe=self.admitted_uuids,
+        )
+        self.assertTrue(verified_b4)
+
+        # B5 at 61
+        ctx_b5 = self._build_strong_lane_context(session_count=61)
+        res_b5 = self._eval(
+            proposed_strategy="B5",
+            current_strategy="B3",
+            decision_context=ctx_b5,
+            current_portfolio_state=port,
+        )
+        self.assertEqual(res_b5.status, PreflightStatus.ELIGIBLE)
+        self.assertTrue(res_b5.is_tradeable)
+        self.assertFalse(res_b5.hold_incumbent)
+        self.assertEqual(res_b5.effective_strategy, "B5")
+        self.assertEqual(res_b5.cohort_hash, self.cohort_hash)
+        verified_b5 = verify_stage1_switch_preflight_result(
+            res_b5,
+            expected_account_id="account-alpha",
+            expected_mandate="balanced_stage1",
+            expected_session_key=self.session_key,
+            expected_cohort_hash=self.cohort_hash,
+            expected_decision_cutoff=self.closed_at,
+            current_portfolio_state=port,
+            expected_universe=self.admitted_uuids,
+        )
+        self.assertTrue(verified_b5)
+
+    def test_regression_invalid_missing_cohort_manifest_hash_no_safe_hold(
+        self,
+    ) -> None:
+        """5. Invalid/missing cohort, manifest, or expected hash:
+        no tradeable and no safe hold.
+        """
+        ctx = self._build_strong_lane_context(session_count=255)
+        port = self._make_valid_portfolio_state()
+
+        # ABSTAIN with missing manifest
+        res_no_man = self._eval(
+            proposed_strategy="ABSTAIN",
+            current_strategy="B3",
+            decision_context=ctx,
+            current_portfolio_state=port,
+            universe_manifest=None,
+        )
+        self.assertEqual(res_no_man.status, PreflightStatus.INDETERMINATE_SAFETY)
+        self.assertFalse(res_no_man.is_tradeable)
+        self.assertFalse(res_no_man.hold_incumbent)
+        self.assertTrue(res_no_man.requires_containment)
+        self.assertIsNone(res_no_man.cohort_hash)
+        with self.assertRaises(ValueError):
+            verify_stage1_switch_preflight_result(
+                res_no_man,
+                expected_account_id="account-alpha",
+                expected_mandate="balanced_stage1",
+                expected_session_key=self.session_key,
+                expected_cohort_hash=self.cohort_hash,
+                expected_decision_cutoff=self.closed_at,
+                current_portfolio_state=port,
+            )
+
+        # B4 short history with missing required universe
+        res_no_u = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=self._build_strong_lane_context(session_count=252),
+            current_portfolio_state=port,
+            required_universe=None,
+        )
+        self.assertEqual(res_no_u.status, PreflightStatus.INDETERMINATE_SAFETY)
+        self.assertFalse(res_no_u.is_tradeable)
+        self.assertFalse(res_no_u.hold_incumbent)
+        self.assertTrue(res_no_u.requires_containment)
+        self.assertIsNone(res_no_u.cohort_hash)
+
+        # B4 short history with wrong expected universe hash on strong context
+        # fails downstream verification
+        res_wrong_h = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=self._build_strong_lane_context(session_count=252),
+            current_portfolio_state=port,
+            expected_universe_hash="f" * 64,
+        )
+        with self.assertRaises(ValueError) as cm:
+            verify_stage1_switch_preflight_result(
+                res_wrong_h,
+                expected_account_id="account-alpha",
+                expected_mandate="balanced_stage1",
+                expected_session_key=self.session_key,
+                expected_cohort_hash=self.cohort_hash,
+                expected_decision_cutoff=self.closed_at,
+                current_portfolio_state=port,
+            )
+        self.assertIn("cohort_hash mismatch", str(cm.exception))
+
+        # On exploratory context where cohort_hash is present on context,
+        # preflight returns INDETERMINATE_SAFETY
+        res_wrong_h_ctx = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=self._build_context(session_count=252),
+            current_portfolio_state=port,
+            expected_universe_hash="f" * 64,
+        )
+        self.assertEqual(res_wrong_h_ctx.status, PreflightStatus.INDETERMINATE_SAFETY)
+        self.assertFalse(res_wrong_h_ctx.is_tradeable)
+        self.assertFalse(res_wrong_h_ctx.hold_incumbent)
+        self.assertTrue(res_wrong_h_ctx.requires_containment)
+        self.assertIsNone(res_wrong_h_ctx.cohort_hash)
+
+    def test_regression_invalid_portfolio_account_or_cutoff_fails_safe_hold(
+        self,
+    ) -> None:
+        """6. Invalid current portfolio, changed account or cutoff:
+        existing rejection/containment remains.
+        """
+        ctx = self._build_strong_lane_context(session_count=252)
+        port = self._make_valid_portfolio_state()
+
+        # Unverified risk blocks safe hold
+        res_risk = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx,
+            current_portfolio_state=port,
+            risk_verified=False,
+        )
+        self.assertEqual(res_risk.status, PreflightStatus.INDETERMINATE_SAFETY)
+        self.assertFalse(res_risk.is_tradeable)
+        self.assertFalse(res_risk.hold_incumbent)
+        self.assertTrue(res_risk.requires_containment)
+
+        # Pending orders block safe hold
+        res_orders = self._eval(
+            proposed_strategy="ABSTAIN",
+            current_strategy="B3",
+            decision_context=ctx,
+            current_portfolio_state=port,
+            open_orders=("order-1",),
+        )
+        self.assertEqual(res_orders.status, PreflightStatus.INDETERMINATE_SAFETY)
+        self.assertFalse(res_orders.is_tradeable)
+        self.assertFalse(res_orders.hold_incumbent)
+        self.assertTrue(res_orders.requires_containment)
+
+        # Changed account in verifier rejects verified preflight result
+        valid_res = self._eval(
+            proposed_strategy="ABSTAIN",
+            current_strategy="B3",
+            decision_context=ctx,
+            current_portfolio_state=port,
+            account_id="account-alpha",
+        )
+        with self.assertRaises(ValueError) as cm:
+            verify_stage1_switch_preflight_result(
+                valid_res,
+                expected_account_id="account-beta",
+                expected_mandate="balanced_stage1",
+                expected_session_key=self.session_key,
+                expected_cohort_hash=self.cohort_hash,
+                expected_decision_cutoff=self.closed_at,
+                current_portfolio_state=port,
+            )
+        self.assertIn("account_id mismatch", str(cm.exception))
+
+    def test_regression_exploratory_context_controls_continue_to_work(self) -> None:
+        """7. Exploratory-context controls continue to work as expected."""
+        ctx = self._build_context(session_count=255)
+        port = self._make_valid_portfolio_state()
+        res = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx,
+            current_portfolio_state=port,
+        )
+        self.assertEqual(res.status, PreflightStatus.ELIGIBLE)
+        self.assertTrue(res.is_tradeable)
+        self.assertEqual(res.cohort_hash, self.cohort_hash)
+
+        res_abstain = self._eval(
+            proposed_strategy="ABSTAIN",
+            current_strategy="B3",
+            decision_context=ctx,
+            current_portfolio_state=port,
+        )
+        self.assertEqual(res_abstain.status, PreflightStatus.ABSTAIN)
+        self.assertFalse(res_abstain.is_tradeable)
+        self.assertTrue(res_abstain.hold_incumbent)
+        self.assertEqual(res_abstain.cohort_hash, self.cohort_hash)
+
+    def test_regression_no_caller_state_positions_or_orders_mutate(
+        self,
+    ) -> None:
+        """8. No caller state, positions, or orders mutate during
+        preflight evaluation.
+        """
+        ctx = self._build_strong_lane_context(session_count=255)
+        port = self._make_valid_portfolio_state()
+        orders: list[str] = ["order-1", "order-2"]
+
+        ctx_holdings_before = tuple(ctx.current_holdings)
+        port_holdings_before = tuple(port.holdings)
+        orders_before = list(orders)
+        port_cash_before = port.cash_balance
+
+        _ = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx,
+            current_portfolio_state=port,
+            open_orders=orders,
+        )
+
+        self.assertEqual(tuple(ctx.current_holdings), ctx_holdings_before)
+        self.assertEqual(tuple(port.holdings), port_holdings_before)
+        self.assertEqual(orders, orders_before)
+        self.assertEqual(port.cash_balance, port_cash_before)
 
 
 if __name__ == "__main__":

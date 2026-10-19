@@ -1178,6 +1178,9 @@ def _resolve_non_eligible_outcome(
     decision_context: (
         StrategyDecisionContextV1 | ExploratoryStrategyDecisionContextV1 | None
     ),
+    required_universe: Sequence[UUID7] | None = None,
+    expected_universe_hash: SHA256Hash | None = None,
+    universe_manifest: Mapping[UUID7, str] | Mapping[str, UUID7] | None = None,
     current_portfolio_state: PortfolioStateV2 | None,
     allow_incumbent_continuation: bool,
     account_id: str | None = None,
@@ -1191,12 +1194,34 @@ def _resolve_non_eligible_outcome(
     candidate_strategy = prop_name if prop_name is not None else "UNKNOWN"
     session_key = decision_context.session_key if decision_context else None
     decision_cutoff = decision_context.decision_cutoff if decision_context else None
+
+    context_cohort = (
+        get_admitted_securities(decision_context)
+        if decision_context is not None
+        else ()
+    )
+    context_cohort_hash = (
+        getattr(decision_context, "cohort_hash", None)
+        if decision_context is not None
+        else None
+    )
+
+    is_valid_u, u_reason, eval_universe = validate_universe(
+        required_universe=required_universe,
+        expected_universe_hash=expected_universe_hash,
+        context_cohort=context_cohort,
+        cohort_hash=context_cohort_hash,
+        universe_manifest=universe_manifest,
+    )
+
     cohort_hash = (
-        getattr(decision_context, "cohort_hash", None) if decision_context else None
+        (context_cohort_hash or expected_universe_hash) if is_valid_u else None
     )
-    admitted_universe = (
-        get_admitted_securities(decision_context) if decision_context else ()
-    )
+    admitted_universe = eval_universe if is_valid_u else ()
+
+    if not is_valid_u:
+        status = PreflightStatus.INDETERMINATE_SAFETY
+        reason = f"{reason}; {u_reason or 'cohort_binding_unavailable'}"
 
     if status == PreflightStatus.INDETERMINATE_SAFETY:
         return _make_result(
@@ -1481,6 +1506,9 @@ def evaluate_stage1_switch_preflight(
             prop_name=prop_name or str(proposed_strategy),
             curr_name=curr_name,
             decision_context=decision_context,
+            required_universe=required_universe,
+            expected_universe_hash=expected_universe_hash,
+            universe_manifest=universe_manifest,
             current_portfolio_state=current_portfolio_state,
             allow_incumbent_continuation=allow_incumbent_continuation,
             account_id=account_id,
