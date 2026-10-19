@@ -68,7 +68,9 @@ In addition to the inherited K0/K1-K5 suites, independently exercise:
   event arrival ordering. Future conflicts cannot rewrite the past; conflicting
   evidence actually available by cutoff fails closed.
 - Completed learning feedback rejects NaN, Infinity, malformed or scientific-
-  notation PnL/metrics; valid complete losing trials remain eligible.
+  notation PnL/metrics, including self-rehashed historical snapshots; valid
+  complete losing trials remain eligible. Reuse under a changed learning method
+  must be refused without an explicit versioned migration.
 - Nonadmitted platform requests have **zero actionable target allocations**
   and no cash reallocation weight, including unsupported execution sessions.
 - A synthetic B3/B4/B5 fixed-family AI-versus-R choice test uses only

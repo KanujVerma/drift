@@ -15,9 +15,11 @@ import pytest
 
 from drift.intelligence.contracts import ArtifactReference
 from drift.intelligence.learning import (
+    LearningSnapshot,
     TrialFeedbackRecord,
     advance_learning,
 )
+from drift.serialization.canonical import content_hash
 
 
 @pytest.fixture
@@ -320,3 +322,60 @@ def test_learning_rejects_nonfinite_and_non_numeric_completed_feedback(
             arm_id="arm-B",
             method_ref=sample_method_ref,
         )
+
+
+
+def test_learning_refuses_method_changes_without_explicit_migration(
+    sample_method_ref: ArtifactReference,
+) -> None:
+    """A new method cannot silently reuse the previous method's memory."""
+    initial = datetime(2024, 1, 2, 10, tzinfo=UTC)
+    first = advance_learning(
+        previous_snapshot=None,
+        feedback_records=[],
+        cutoff=initial,
+        arm_id="arm-B",
+        method_ref=sample_method_ref,
+    )
+    with pytest.raises(ValueError, match="LEARNING_METHOD_CHANGED_WITHOUT_MIGRATION"):
+        advance_learning(
+            previous_snapshot=first,
+            feedback_records=[],
+            cutoff=initial + timedelta(days=1),
+            arm_id="arm-B",
+            method_ref=ArtifactReference(
+                id="method:new", version="v2", sha256="f" * 64
+            ),
+        )
+
+
+def test_self_rehashed_invalid_prior_feedback_never_enters_learning(
+    sample_method_ref: ArtifactReference,
+) -> None:
+    """Rehashing invalid old PnL cannot make corrupt feedback time-eligible."""
+    cutoff = datetime(2024, 1, 3, 10, tzinfo=UTC)
+    valid = TrialFeedbackRecord(
+        trial_id="trial:prior",
+        arm_id="arm-B",
+        decision_cutoff=cutoff - timedelta(days=2),
+        matured_at=cutoff - timedelta(days=1),
+        candidate_id="candidate:prior",
+        status="completed",
+        pnl="-10",
+        metrics={"return": "-0.01"},
+    )
+    original = advance_learning(
+        previous_snapshot=None,
+        feedback_records=[valid],
+        cutoff=cutoff,
+        arm_id="arm-B",
+        method_ref=sample_method_ref,
+    )
+    payload = original.model_dump(mode="python")
+    forged_trial = valid.model_copy(update={"pnl": "NaN"})
+    payload["matured_trials"] = (forged_trial.model_dump(mode="python"),)
+    payload["state_hash"] = content_hash(
+        {key: value for key, value in payload.items() if key != "state_hash"}
+    )
+    with pytest.raises(ValueError, match="REJECTED_INVALID_FEEDBACK_VALUE"):
+        LearningSnapshot.model_validate(payload)

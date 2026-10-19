@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from drift.intelligence.context_builder import CandidateInput, build_context
-from drift.intelligence.contracts import ArtifactReference, Scope
+from drift.intelligence.contracts import ArtifactReference, ResearchContext, Scope
 from drift.intelligence.learning import (
     TrialFeedbackRecord,
     advance_learning,
@@ -224,7 +224,7 @@ def _build_source_variant_context(
     scope: Scope,
     refs: dict[str, ArtifactReference],
     inputs: list[CandidateInput],
-):
+) -> ResearchContext:
     """Compare provenance variants under one identical synthetic cutoff."""
     return build_context(
         scope=scope,

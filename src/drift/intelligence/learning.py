@@ -41,6 +41,35 @@ class TrialFeedbackRecord(ImmutableModel):
     is_holdout: bool = False
 
 
+def _validate_completed_feedback(record: TrialFeedbackRecord) -> None:
+    """Require a complete, finite result before it enters learning memory."""
+    pnl = record.pnl
+    if (
+        record.status != "completed"
+        or not record.is_complete
+        or not record.metrics
+        or pnl is None
+    ):
+        raise ValueError(
+            "REJECTED_INCOMPLETE_EVIDENCE: trial outcome lacks mandatory metrics"
+        )
+    for label, value in [("pnl", pnl), *sorted(record.metrics.items())]:
+        if value != value.strip() or "e" in value.lower():
+            raise ValueError(
+                f"REJECTED_INVALID_FEEDBACK_VALUE: {label} must be DecimalText"
+            )
+        try:
+            amount = Decimal(value)
+        except InvalidOperation as error:
+            raise ValueError(
+                f"REJECTED_INVALID_FEEDBACK_VALUE: {label} is not numeric"
+            ) from error
+        if not amount.is_finite():
+            raise ValueError(
+                f"REJECTED_INVALID_FEEDBACK_VALUE: {label} is nonfinite"
+            )
+
+
 class LearningSnapshot(ImmutableModel):
     """Immutable, content-addressed point-in-time learning state."""
 
@@ -57,6 +86,24 @@ class LearningSnapshot(ImmutableModel):
 
     @model_validator(mode="after")
     def verify_state_hash(self) -> LearningSnapshot:
+        # A self-consistent hash cannot legitimize untrusted historical
+        # feedback. Validate the semantics of every retained member before
+        # accepting a historical state as an immutable learning snapshot.
+        cutoff = _require_aware(self.cutoff, "learning snapshot cutoff")
+        for record in self.matured_trials:
+            if (
+                record.arm_id != self.arm_id
+                or record.is_holdout
+                or record.trial_id.startswith("holdout:")
+            ):
+                raise ValueError("UNSAFE_PREVIOUS_LEARNING_STATE")
+            matured = _require_aware(record.matured_at, "stored feedback maturity")
+            decision = _require_aware(
+                record.decision_cutoff, "stored feedback decision cutoff"
+            )
+            if matured > cutoff or matured < decision:
+                raise ValueError("NON_CAUSAL_HISTORICAL_FEEDBACK")
+            _validate_completed_feedback(record)
         expected = _learning_state_hash(
             snapshot_id=self.snapshot_id,
             arm_id=self.arm_id,
@@ -137,6 +184,8 @@ def advance_learning(
             raise ValueError(
                 "CROSS_ARM_LEAKAGE: prior snapshot belongs to another arm"
             )
+        if previous_snapshot.method_ref != method_ref:
+            raise ValueError("LEARNING_METHOD_CHANGED_WITHOUT_MIGRATION")
         if _require_aware(previous_snapshot.cutoff, "previous cutoff") >= cutoff_utc:
             raise ValueError("NON_MONOTONIC_LEARNING_CUTOFF")
         for record in previous_snapshot.matured_trials:
@@ -163,32 +212,7 @@ def advance_learning(
             continue
         if record.status != "completed":
             continue
-        if not record.is_complete or not record.metrics or record.pnl is None:
-            raise ValueError(
-                "REJECTED_INCOMPLETE_EVIDENCE: trial outcome lacks mandatory metrics"
-            )
-        # Completed feedback must carry finite numeric observations. Reject
-        # NaN, Infinity, free-form strings and exponent notation before
-        # updating the learning state; a valid losing outcome is still kept.
-        numeric_inputs = [
-            ("pnl", record.pnl),
-            *sorted(record.metrics.items()),
-        ]
-        for label, value in numeric_inputs:
-            if value != value.strip() or "e" in value.lower():
-                raise ValueError(
-                    f"REJECTED_INVALID_FEEDBACK_VALUE: {label} must be DecimalText"
-                )
-            try:
-                amount = Decimal(value)
-            except InvalidOperation as error:
-                raise ValueError(
-                    f"REJECTED_INVALID_FEEDBACK_VALUE: {label} is not numeric"
-                ) from error
-            if not amount.is_finite():
-                raise ValueError(
-                    f"REJECTED_INVALID_FEEDBACK_VALUE: {label} is nonfinite"
-                )
+        _validate_completed_feedback(record)
         incumbent = historical.get(record.trial_id)
         if incumbent is not None and incumbent != record:
             # Legitimate revisions require a separately approved, source-bound
