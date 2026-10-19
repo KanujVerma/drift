@@ -139,7 +139,9 @@ def evaluate_review_schedule(
             if instant.tzinfo is None or instant.utcoffset() is None:
                 raise ValueError(f"INDETERMINATE_TIMEZONE: last {label} review")
             if instant > now_utc:
-                raise ValueError(f"FUTURE_REVIEW_CLOCK: last {label} review is after now")
+                raise ValueError(
+                    f"FUTURE_REVIEW_CLOCK: last {label} review is after now"
+                )
     identity = content_hash({
         "now": now_utc,
         "routine": last_routine_at,
@@ -227,7 +229,9 @@ def evaluate_review_schedule(
         key = (ev.event_id, ev.version)
         previous = event_versions.get(key)
         if previous is not None and previous != ev.content_hash:
-            raise ValueError("SOURCE_DIGEST_CONFLICT: feed event revision changed bytes")
+            raise ValueError(
+                "SOURCE_DIGEST_CONFLICT: feed event revision changed bytes"
+            )
         event_versions[key] = ev.content_hash
         if ev.is_material and ev.available_at.astimezone(UTC) <= now_utc:
             causal_material_events.append(ev)
@@ -356,7 +360,10 @@ def validate_defensive_policy(
             return False, "UNKNOWN_CURRENT_POSITION: no verified current weight"
         prop_weight = Decimal(target.weight)
         curr_weight = Decimal(current_weights[sec_id])
-        if not curr_weight.is_finite() or not Decimal("0") <= curr_weight <= Decimal("1"):
+        if (
+            not curr_weight.is_finite()
+            or not Decimal("0") <= curr_weight <= Decimal("1")
+        ):
             return False, "UNKNOWN_CURRENT_POSITION: invalid current weight"
 
         if prop_weight > curr_weight:
