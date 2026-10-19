@@ -181,3 +181,46 @@ def test_exploratory_context_must_acknowledge_limitations(
     changed["record_hash"] = compute_record_hash(changed)
     with pytest.raises(ValueError, match="EXPLORATORY_LIMITATIONS_REQUIRED"):
         ResearchContext.model_validate(changed)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "rejection"),
+    [
+        ("wrong_weight_sum", "INVALID_CANDIDATE_WEIGHT_SUM"),
+        ("nonfinite_cash", "Non-finite cash weight"),
+        ("forged_parameter_hash", "STRATEGY_PARAMETERS_HASH_MISMATCH"),
+        ("hold_with_strategy", "INCONSISTENT_NON_TRADING_DISPOSITION"),
+    ],
+)
+def test_a_self_rehashed_candidate_must_preserve_local_eligibility_invariants(
+    fixture_data: dict[str, Any],
+    mutation: str,
+    rejection: str,
+) -> None:
+    """An outer digest alone cannot launder invalid proposal semantics."""
+    payload = json.loads(json.dumps(fixture_data["fixtures"]["F02"]))
+    if mutation == "wrong_weight_sum":
+        payload["targets"][0]["weight"] = "0.1"
+    elif mutation == "nonfinite_cash":
+        payload["cash_weight"] = "NaN"
+    elif mutation == "forged_parameter_hash":
+        payload["strategy"]["parameters_hash"] = "0" * 64
+    elif mutation == "hold_with_strategy":
+        payload["disposition"] = "hold"
+        payload["targets"] = []
+        payload["cash_weight"] = None
+    payload["record_hash"] = compute_record_hash(payload)
+
+    with pytest.raises(ValueError, match=rejection):
+        ResearchCandidate.model_validate(payload)
+
+
+def test_a_self_rehashed_context_cannot_claim_it_was_built_before_its_cutoff(
+    fixture_data: dict[str, Any],
+) -> None:
+    """A future decision cutoff cannot be certified by an earlier build."""
+    payload = json.loads(json.dumps(fixture_data["fixtures"]["F01"]))
+    payload["built_at"] = "2024-01-02T09:59:59.000000Z"
+    payload["record_hash"] = compute_record_hash(payload)
+    with pytest.raises(ValueError, match="NON_CAUSAL_BUILD_CLOCK"):
+        ResearchContext.model_validate(payload)
