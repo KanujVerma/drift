@@ -107,10 +107,11 @@ def select_conventional_candidate(
                 if isinstance(choice, RawChoice)
                 else dict(choice)
             )
+            # Prove canonical JSON identity *before* copying caller values.
+            # An opaque object's __deepcopy__ must not be invoked at all.
+            choice_hash = _choice_identity(source)
             raw_snapshot = deepcopy(source)
-            frozen_pool.append(
-                (_choice_identity(raw_snapshot), raw_snapshot)
-            )
+            frozen_pool.append((choice_hash, raw_snapshot))
         pool_hash = content_hash(sorted(identity for identity, _ in frozen_pool))
     except (CanonicalSerializationError, TypeError, ValueError):
         if attempt_id is None:
