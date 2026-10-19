@@ -159,3 +159,25 @@ def test_artifact_reference_validation() -> None:
     # Invalid uppercase/non-hex
     with pytest.raises(ValidationError):
         ArtifactReference(id="ref-1", version="v1", sha256="Z" * 64)
+
+
+def test_rehashed_context_cannot_promote_synthetic_source(
+    fixture_data: dict[str, Any],
+) -> None:
+    """Only a separately qualified source lane can create promotion evidence."""
+    forged = dict(fixture_data["fixtures"]["F01"])
+    forged["source_grade"] = "promotion_grade"
+    forged["record_hash"] = compute_record_hash(forged)
+    with pytest.raises(ValueError):
+        ResearchContext.model_validate(forged)
+
+
+def test_exploratory_context_must_acknowledge_limitations(
+    fixture_data: dict[str, Any],
+) -> None:
+    changed = dict(fixture_data["fixtures"]["F01"])
+    changed["source_grade"] = "exploratory"
+    changed["limitations"] = []
+    changed["record_hash"] = compute_record_hash(changed)
+    with pytest.raises(ValueError, match="EXPLORATORY_LIMITATIONS_REQUIRED"):
+        ResearchContext.model_validate(changed)
