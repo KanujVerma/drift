@@ -201,6 +201,7 @@ def test_t08_hold_and_abstain_admitted_without_trade(
     hold_dict = sample_candidate.model_dump(mode="python")
     hold_dict["disposition"] = "hold"
     hold_dict["targets"] = []
+    hold_dict["cash_weight"] = None
     hold_dict["record_hash"] = compute_record_hash(hold_dict)
     hold_cand = ResearchCandidate.model_validate(hold_dict)
 
