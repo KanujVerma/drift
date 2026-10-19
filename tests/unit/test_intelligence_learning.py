@@ -197,3 +197,90 @@ def test_t01_unmatured_feedback_excluded(
 
     # Future trial must not be included
     assert len(snap.matured_trials) == 0
+
+
+def test_learning_hash_binds_method_clock_and_predecessor(
+    sample_method_ref: ArtifactReference,
+) -> None:
+    """The same trial values under another method never share evidence identity."""
+    cutoff = datetime(2024, 1, 2, 10, 0, 0, tzinfo=UTC)
+    trial = TrialFeedbackRecord(
+        trial_id="trial-method-proof",
+        arm_id="arm-B",
+        decision_cutoff=cutoff - timedelta(days=2),
+        matured_at=cutoff - timedelta(days=1),
+        candidate_id="candidate-method-proof",
+        status="completed",
+        pnl="-100",
+        metrics={"return": "-0.01"},
+    )
+    left = advance_learning(
+        previous_snapshot=None,
+        feedback_records=[trial],
+        cutoff=cutoff,
+        arm_id="arm-B",
+        method_ref=sample_method_ref,
+        snapshot_id="shared-snapshot",
+    )
+    right = advance_learning(
+        previous_snapshot=None,
+        feedback_records=[trial],
+        cutoff=cutoff,
+        arm_id="arm-B",
+        method_ref=ArtifactReference(
+            id="method:changed", version="v2", sha256="e" * 64
+        ),
+        snapshot_id="shared-snapshot",
+    )
+    assert left.state_hash != right.state_hash
+    same = advance_learning(
+        previous_snapshot=None,
+        feedback_records=[trial],
+        cutoff=cutoff,
+        arm_id="arm-B",
+        method_ref=sample_method_ref,
+        snapshot_id="shared-snapshot",
+    )
+    assert left == same
+    with pytest.raises(ValueError, match="LEARNING_STATE_HASH_MISMATCH"):
+        type(left).model_validate(
+            left.model_copy(update={"method_ref": right.method_ref}).model_dump(
+                mode="python"
+            )
+        )
+
+
+def test_learning_rejects_conflicting_trial_revision(
+    sample_method_ref: ArtifactReference,
+) -> None:
+    cutoff = datetime(2024, 1, 3, 10, 0, tzinfo=UTC)
+    trial = TrialFeedbackRecord(
+        trial_id="same-trial",
+        arm_id="arm-B",
+        decision_cutoff=cutoff - timedelta(days=2),
+        matured_at=cutoff - timedelta(days=1),
+        candidate_id="same-candidate",
+        status="completed",
+        pnl="-10",
+        metrics={"return": "-0.01"},
+    )
+    revision = trial.model_copy(update={"pnl": "10"})
+    with pytest.raises(ValueError, match="CONFLICTING_TRIAL_REVISION"):
+        advance_learning(
+            previous_snapshot=None,
+            feedback_records=[trial, revision],
+            cutoff=cutoff,
+            arm_id="arm-B",
+            method_ref=sample_method_ref,
+        )
+
+
+def test_learning_rejects_naive_cutoff(sample_method_ref: ArtifactReference) -> None:
+    with pytest.raises(ValueError, match="INDETERMINATE_TIMEZONE"):
+        advance_learning(
+            previous_snapshot=None,
+            feedback_records=[],
+            cutoff=datetime(2024, 1, 2, 10, 0),
+            arm_id="arm-B",
+            method_ref=sample_method_ref,
+        )
