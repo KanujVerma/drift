@@ -437,7 +437,11 @@ def validate_retained_record(
         # Disposition check
         disp = record.get("disposition")
         if disp in ("abstain", "unavailable"):
-            if targets or cash_weight is not None or record.get("strategy") is not None:
+            if (
+                targets
+                or cash_weight is not None
+                or record.get("strategy") is not None
+            ):
                 raise ValueError(
                     "invalid: abstention cannot retain strategy/targets/cash"
                 )
@@ -499,7 +503,10 @@ def validate_retained_record(
                 "registry_ref",
                 "method_ref",
             ):
-                if record.get(ref_field) != context.model_dump(mode="python")[ref_field]:
+                if (
+                    record.get(ref_field)
+                    != context.model_dump(mode="python")[ref_field]
+                ):
                     raise ValueError(f"rejected: context binding differs: {ref_field}")
             expected_context = {
                 "id": context.context_id,
