@@ -347,7 +347,9 @@ class ResearchReceiptStore:
             ):
                 raise ValueError("CROSS_SCOPE_COST_SUPERSESSION")
             if prior.amount_basis not in ("estimate", "unknown"):
-                raise ValueError("INVALID_COST_SUPERSESSION: only estimates or unknowns")
+                raise ValueError(
+                    "INVALID_COST_SUPERSESSION: only estimates or unknowns"
+                )
         self._costs_by_receipt_id[receipt_id] = cost
 
     def get_cost_receipt(self, receipt_id: str) -> CostReceipt | None:

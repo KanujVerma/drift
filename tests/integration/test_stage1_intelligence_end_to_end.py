@@ -13,6 +13,7 @@ from typing import Any
 
 from drift.intelligence.contracts import (
     ArtifactReference,
+    ResearchCandidate,
     ResearchContext,
     StrategySelection,
 )
@@ -281,15 +282,21 @@ def test_b3_b4_b5_fixed_family_proposals_share_causal_context_with_r() -> None:
         attempt_id="synthetic-stage1-ai",
         checked_at=at,
     )
+    def synthetic_score(candidate: ResearchCandidate) -> Decimal:
+        """Frozen fixture rank only, not an authorized market objective."""
+        if candidate.strategy is None:
+            return Decimal("-1")
+        return {
+            "B3": Decimal("0.1"),
+            "B4": Decimal("0.2"),
+            "B5": Decimal("0.3"),
+        }[candidate.strategy.family_id]
+
     comparison = select_conventional_candidate(
         context=context,
         resolved_inputs=resolved,
         candidate_pool=[choice("B3"), choice("B4"), choice("B5")],
-        objective_fn=lambda candidate: {
-            "B3": Decimal("0.1"),
-            "B4": Decimal("0.2"),
-            "B5": Decimal("0.3"),
-        }[candidate.strategy.family_id] if candidate.strategy else Decimal("-1"),
+        objective_fn=synthetic_score,
         method_ref=ArtifactReference(
             id="synthetic:registered-objective", version="v1", sha256="d" * 64
         ),

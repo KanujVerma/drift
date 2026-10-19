@@ -49,27 +49,90 @@ Main corrections include:
 - Historical data rights, calendars, corporate actions, and live/paid source qualification are out of scope.
 - M9 activation, M1e Task 8 spending, and operational M15-M17 are not authorized.
 
+## Consolidation-specific regression coverage
+
+In addition to the inherited K0/K1-K5 suites, independently exercise:
+- Context identity binding for budget, registry, memory, source grade, causal
+  feedback, review trigger and source limitations. Equivalent input orderings
+  must retain identity; distinct source identity must not be merged by raw hash.
+- Typed RawChoice normalization and exact retained response-byte proofs are
+  **different commitments**. Both legitimate JSON reserialization and
+  tampered raw bytes must have separate controlled expected outcomes.
+- Conventional R's attempt budget reference equals the supplied research
+  context budget. Verify deterministic finite Decimal scoring, immutable
+  candidate identity and rejection of semantically duplicated pool entries.
+- Receipt correction lineage survives exported JSONL replay even if
+  lexicographic correction ID precedes its original estimate. Truncated,
+  malformed or conflicting replay must never commit a partial receipt store.
+- Review trigger identity excludes future event payloads and is invariant to
+  event arrival ordering. Future conflicts cannot rewrite the past; conflicting
+  evidence actually available by cutoff fails closed.
+- Completed learning feedback rejects NaN, Infinity, malformed or scientific-
+  notation PnL/metrics; valid complete losing trials remain eligible.
+- Nonadmitted platform requests have **zero actionable target allocations**
+  and no cash reallocation weight, including unsupported execution sessions.
+- A synthetic B3/B4/B5 fixed-family AI-versus-R choice test uses only
+  preregistered fixture values, independently isolated attempts and a
+  clearly non-economic ranking function. It does NOT prove K0 warmup/source
+  eligibility, actual transition, risk approval, market efficacy or profit.
+
 ## One-shot isolated QA run
 
 Do not overwrite current working trees or start a second implementation writer. Use a fresh isolated worktree from the exact candidate head:
 
+Run precisely one consolidated validation against the **final
+immutable SHA** recorded in the PR checkpoint. A running branch may move, so
+resolve its head once and check out the commit, never test moving `HEAD`:
+  
 ~~~bash
 git fetch origin --prune
-git worktree add --detach ../drift-qa-456 origin/krish/456-consolidated-intelligence
+QA_SHA="$(git rev-parse origin/krish/456-consolidated-intelligence)"
+git worktree add --detach ../drift-qa-456 "$QA_SHA"
 cd ../drift-qa-456
+test "$(git rev-parse HEAD)" = "$QA_SHA"
 git status -sb
 git rev-parse HEAD
 git remote -v
 uv sync --locked
 uv run python --version
-uv run pytest -q -k "intelligence or stage1_switch_preflight or m1e_compatibility"
-uv run pytest
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy src tests
 uv build
 git diff --check
+git diff --check origin/main...HEAD
+uv run pytest -q -k "intelligence or stage1_switch_preflight or m1e_compatibility"
+uv run pytest
 ~~~
+
+If running Antigravity's standard **Windows PowerShell** terminal instead,
+use this equivalent isolated checkout and command sequence:
+
+~~~powershell
+git fetch origin --prune
+$QaSha = (git rev-parse origin/krish/456-consolidated-intelligence).Trim()
+git worktree add --detach ..\drift-qa-456 $QaSha
+Set-Location ..\drift-qa-456
+if ((git rev-parse HEAD).Trim() -ne $QaSha) { throw "Wrong QA commit" }
+git status -sb
+git rev-parse HEAD
+git remote -v
+uv sync --locked
+uv run python --version
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy src tests
+uv build
+git diff --check
+git diff --check origin/main...HEAD
+uv run pytest -q -k "intelligence or stage1_switch_preflight or m1e_compatibility"
+uv run pytest
+~~~
+
+Ruff/mypy/build and focused tests precede the hour-long full suite so that
+obvious failures can be classified promptly. Continue remaining independent
+checks when feasible, but **never** report a passing gate if any command failed.
+
 
 If one check fails, capture its first reproducible error and continue remaining *independent* checks if practical. Never say the gate passed unless every required check completed successfully. Record exact run ID, SHA, test counts, output and status. Verify the test collection really includes these paths:
 
