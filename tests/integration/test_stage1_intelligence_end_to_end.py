@@ -9,6 +9,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 from drift.intelligence.contracts import (
     ArtifactReference,
@@ -255,7 +256,7 @@ def test_b3_b4_b5_fixed_family_proposals_share_causal_context_with_r() -> None:
         ),
     )
 
-    def choice(family: str) -> dict:
+    def choice(family: str) -> dict[str, Any]:
         proposal = json.loads(json.dumps(fixture_choice))
         proposal["selection"] = {
             "family_id": family,
@@ -304,7 +305,10 @@ def test_b3_b4_b5_fixed_family_proposals_share_causal_context_with_r() -> None:
     assert comparison.selected_candidate.strategy is not None
     assert ai.candidate.strategy.family_id == "B4"
     assert comparison.selected_candidate.strategy.family_id == "B5"
-    assert ai.candidate.context_ref.sha256 == comparison.selected_candidate.context_ref.sha256
+    assert (
+        ai.candidate.context_ref.sha256
+        == comparison.selected_candidate.context_ref.sha256
+    )
     assert ai_store.get_attempt_events(comparison.attempt_id) == ()
     assert conventional_store.get_attempt_events(ai.attempt_id) == ()
     # Registered fixture hashes are not authenticated market eligibility:
