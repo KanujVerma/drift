@@ -79,16 +79,20 @@ def replay_model_output(
             "adapter": adapter_revision.sha256,
             "parser": parser_schema_ref.sha256,
             "policy": validation_policy.sha256,
-        "request": (
-            recorded_request.content_hash
-            if isinstance(recorded_request, StoredArtifactRef)
-            else recorded_request.get("content_hash")
-        ),
-        "response": (
-            recorded_response.content_hash
-            if isinstance(recorded_response, StoredArtifactRef)
-            else recorded_response.get("content_hash") if recorded_response else None
-        ),
+            "request": (
+                recorded_request.content_hash
+                if isinstance(recorded_request, StoredArtifactRef)
+                else recorded_request.get("content_hash")
+            ),
+            "response": (
+                recorded_response.content_hash
+                if isinstance(recorded_response, StoredArtifactRef)
+                else (
+                    recorded_response.get("content_hash")
+                    if recorded_response is not None
+                    else None
+                )
+            ),
             "cutoff": now,
         }
     )
