@@ -101,6 +101,74 @@ Every task handoff from the architect agent to the implementer agent must be sel
 
 ---
 
+## 3A. Owner-Directed Architect-First Workflow (2026-10-19)
+
+**Owner directive:** [Issue #458](https://github.com/KanujVerma/drift/issues/458) records Kanuj's standing instructions for Drift's architecture, Gemini handoffs and PR verification. This section makes the process available to a new agent without prior conversation history. It clarifies delivery responsibilities, but does not displace `AGENTS.md`, accepted ADRs, independent scientific review, producer ownership, GitHub branch protections or narrower issue-specific authorization.
+
+### A. Architect and owner resolve the design before coding
+
+1. **Kanuj and ChatGPT jointly choose material architecture.** The architect must inspect actual accepted code, tests, issue dependencies and contracts, identify genuine open questions, present concrete options with tradeoffs and recommend one, then obtain an explicit owner decision when policy, design, data, risk, statistics or cross-owner interfaces depend on it. Ask only questions that materially affect correctness; ordinary engineering details are not owner decisions.
+2. **Architect owns the intellectual implementation plan.** Select the algorithm, types, identifiers, function signatures, source-of-truth boundaries, data flow, refusal/error behavior, verification logic, and expected tests before preparing the Gemini prompt. If relevant evidence disproves an assumption, revise the plan with Kanuj instead of silently assuming the older plan is still correct.
+3. **Reason:** The owner must understand and approve substantive tradeoffs. An implementer should not unknowingly choose the experiment's scientific or safety policy while writing code. A broad user goal does not itself authorize a product implementation.
+
+### B. Record architecture and rationale in GitHub first
+
+Before writing an executable coding-agent prompt, record the authorized issue and approved decision evidence in GitHub, using the issue and the appropriate canonical architecture document rather than a parallel notes system. Include:
+
+- Problem, purpose and relationship to the shortest path toward the next measured milestone.
+- Actual current code and accepted contract revisions, including the unmerged/deferred boundaries.
+- Material alternatives considered, the choice, why the choice was made and why alternatives were rejected or deferred.
+- Exact algorithms, input/output structures, mathematical rules, IDs, states, validation and trust boundaries.
+- Positive, negative, adversarial and golden fixtures with exact expected results.
+- Explicitly unresolved facts and producer dependencies, named reviewers, exact file write-set and protected paths.
+- The owner decision, date, authoritative issue/ADR links and a clear distinction between proposed and accepted decisions.
+
+**Reason:** GitHub survives handoffs among ChatGPT, Gemini, Codex, Krish and Matthew. Conversation memory and prompt text are context, not durable authorization. Keep fast-changing PR/CI state in issue comments, not permanent architecture documents.
+
+### C. Gemini receives a fully specified executable implementation
+
+Only after the owner and architect settle the design, give Gemini/Antigravity a self-contained prompt satisfying **all 15 requirements in Section 3**, with implementation detail rather than a discovery assignment. Include exact relative paths, imports, class and function signatures, key code blocks or patch hunks when known, types and units, deterministic ordering, branching/state transitions, fail-closed error semantics, IDs and hashes, exact test examples, regression protections, pinned interpreter/tools, Git writer claims and publication steps. The prompt can be long if that removes ambiguity.
+
+Explicitly tell Gemini:
+
+- Implement the agreed design directly. Do not redefine known architecture or ask the agent to "inspect and decide" a fix for which the architect already supplied the solution.
+- Verify current repository state against the pinned evidence before editing; update the architect if the preconditions have materially changed.
+- Own ordinary mechanical coding, typing, debugging and formatting within authorized bounds.
+- **Challenge with evidence:** If source, accepted contracts or a reproducible test contradicts the plan, provide the exact conflicting paths/lines, fixture or failure, suggested correction and affected acceptance criteria. Stop only the affected architectural change; do not silently expand scope or rewrite accepted rules.
+- Report actual tests, changed paths, commit and hosted CI status, rather than repeating intended behavior as if implemented.
+
+**Reason:** Precise prompts minimize architectural drift, repeated investigation, wasted agent usage and unreviewable work. Evidence-based objections preserve the implementer's ability to catch genuine mistakes.
+
+### D. Review actual source and run Codex for each implementation PR
+
+After Gemini publishes an issue-bound PR, the architect must review its **actual current-head diff, code and tests**, not only the implementer's narrative. Inspect meaningful invariants, invalid-state refusal, producer boundaries, immutable replay, tests that would fail before the fix, and exact file scope.
+
+- Request `@codex review` on the current implementation HEAD, or use an existing verified automatic Codex PR code review at that HEAD.
+- **Verify the Codex review actually completed** and read its findings. A comment requesting review is not a completed review. No promise is made that the review is unlimited or cost-free.
+- Triage each substantive finding against accepted contract and code; direct Gemini to make a narrowly scoped correction on the same branch and PR. Re-run the appropriate verification and request review again when a materially new HEAD invalidates earlier review evidence.
+- Verify local focused/regression/adversarial tests, pinned interpreter, Ruff, mypy, relevant build, changed-path/whitespace checks and **hosted CI at the exact current HEAD**. Pending, skipped or previous-HEAD success is not current-head acceptance.
+- The architect's review and Codex's automated review are **supplemental**. Neither may be passed off as an independently authenticated scientific, risk, security or producer-consumer approval.
+
+**Reason:** Separate implementation, architectural inspection, automated review and (where applicable) independent human acceptance catch different classes of defects while retaining truthful provenance.
+
+### E. Use the minimum legitimate merge gate, without unnecessary waiting
+
+Kanuj's preference is to merge a self-contained, Kanuj-owned change promptly when its scope and writer are unconflicted, the owner has authorized it, local/current-head hosted gates have passed, actual-source architecture review and Codex review have no unresolved actionable findings, and no applicable independent acceptance or branch protection remains. Do **not** wait for unrelated Krish/Matthew work merely because they are collaborators.
+
+However, obtain independent acceptance and producer readback wherever accepted governance or issue-specific contracts require it, including cross-owner interfaces, platform `RESULT`/execution/risk changes, scientific measurements requiring reviewer independence, source qualification, important security decisions, scored benchmarks or claims of investment advantage. The accountable owner cannot self-certify those. A standing preference to move quickly is not an exception to these substantive gates, and no agent may bypass branch protections, impersonate a reviewer, force-merge or misstate a draft as accepted.
+
+Record normal merge authorization, the final reviewed HEAD, actual checks, Codex receipt, required independent reviews and exact remaining limitations in GitHub. A draft PR without required approvals must remain open. Keep one canonical PR per issue unless a separate owner-authorized integration workstream explicitly coordinates stacked branches.
+
+**Reason:** Waiting for unrelated reviewers can impede delivery, but prematurely merging a cross-owner or scientific change invalidates the experiment's evidence and governance.
+
+### F. Final handoff and cold-start continuity
+
+Every implementation concludes with the canonical issue checkpoint from [agent-workflow.md](agent-workflow.md#checkpoint), plus the PR URL, latest SHA, actual diff, final expected-versus-observed assertions, Codex result, exact-head CI, required human review status, merge decision, limitations, and next executable issue. A replacement agent must read `AGENTS.md`, this handoff standard, the relevant accepted ADR/contract, and current GitHub issue/PR evidence before resuming. If historical issue text conflicts with authenticated current migration receipts, apply the precedence rules above.
+
+**Reason:** A new agent must be able to continue the project without asking Kanuj to reconstruct the design or retesting already verified decisions.
+
+---
+
 ## 4. Implementation Execution Process
 
 Implementation proceeds through six disciplined, sequential phases:
