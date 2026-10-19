@@ -5,7 +5,7 @@ Provides deterministic scoring, alphanumeric tie-breaking, and isolated state (T
 """
 
 from collections.abc import Callable, Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
@@ -111,6 +111,7 @@ def select_conventional_candidate(
     # 2. Exhaustively evaluate valid candidates
     evaluated_candidates: list[tuple[Decimal, str, str, str, ResearchCandidate]] = []
     scores_dict: dict[str, str] = {}
+    score_error: str | None = None
 
     for choice_item in candidate_pool:
         # The candidate's identity is stable under a pool permutation.
@@ -154,9 +155,14 @@ def select_conventional_candidate(
 
         if val_res.is_valid and val_res.candidate is not None:
             cand = val_res.candidate
-            score_num = objective_fn(cand)
+            try:
+                score_num = objective_fn(cand)
+            except Exception:  # noqa: BLE001 - untrusted callback cannot pick a winner
+                score_error = "OBJECTIVE_EVALUATION_FAILED"
+                break
             if not isinstance(score_num, Decimal) or not score_num.is_finite():
-                raise ValueError("INVALID_OBJECTIVE_SCORE: finite Decimal required")
+                score_error = "INVALID_OBJECTIVE_SCORE"
+                break
             score_dec = score_num
             scores_dict[cand.candidate_id] = str(score_dec)
 
@@ -170,13 +176,15 @@ def select_conventional_candidate(
 
     # 3. Handle case where no candidate in pool was valid
     terminal_event_id = str(uuid5(NAMESPACE_URL, actual_attempt_id + ":terminal"))
+    if score_error is not None:
+        evaluated_candidates.clear()
     if not evaluated_candidates:
         terminal_attempt = create_terminal_attempt(
             prior_attempt=started_record,
             attempt_event_id=terminal_event_id,
             completed_at=now,
             status="rejected",
-            reason_codes=("NO_ELIGIBLE_CANDIDATE",),
+            reason_codes=(score_error or "NO_ELIGIBLE_CANDIDATE",),
             cost_receipt_ids=(f"cost-{actual_attempt_id}",),
         )
         recorder.record_attempt(terminal_attempt)
@@ -207,7 +215,11 @@ def select_conventional_candidate(
             status="REJECTED",
             attempt_id=actual_attempt_id,
             attempt_event_id=terminal_event_id,
-            reason="No candidate in pool satisfied validation constraints",
+            reason=(
+                "Objective scoring was unavailable or invalid"
+                if score_error is not None
+                else "No candidate in pool satisfied validation constraints"
+            ),
         )
 
     # 4. Deterministic sort and tie-breaking:
