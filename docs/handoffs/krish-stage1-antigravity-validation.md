@@ -320,6 +320,20 @@ from this separate corrective branch as acceptance of PR #457.
    arm-specific stores against the same frozen context reference.
    No callback objective is deemed scientifically accepted merely
    because the finite pool and scoring seam run.
+7. **Fixed inputs despite callback effects**: R snapshots the entire
+   pool before objective scoring begins, validates all members as one
+   unit, and passes the scoring callback a fresh candidate clone.
+   A scorer that mutates its input or the caller's later pool members
+   must neither rewrite a candidate record nor alter the precommitted
+   pool that is being ranked. A callback itself is NOT a security
+   sandbox or an approved scientific objective. An independent
+   capability-denied harness is required before claiming untrusted
+   external scorer execution is safe.
+8. **Full reference and clock binding**: Both scripted and R attempts
+   bind method and policy ID/version/hash rather than digest alone.
+   The conventional clock and expiry are normalized to UTC after
+   refusing missing timezone offsets. Changes to any of these
+   commitments require separate invocation identities.
 
 ### Dedicated K3 tests on its own stacked SHA
 
