@@ -17,7 +17,23 @@ import pytest
 REPO_ROOT = Path(__file__).parents[2]
 PINNED_M1D_COMMIT = "af75cce0f763de025f8ae3516577a9d0a1acead9"
 TASK1_M1D_PIN_COMMIT = "1c647bfc8b7c2a61a83cef4468a5a8cd17e9a060"
-ALLOWED_M1E_PRODUCTION_PATHS = frozenset(
+ALLOWED_# Reviewed K1-K5 offline intelligence modules: exact paths, no prefix exemptions.
+INTELLIGENCE_SOURCE_PATHS = frozenset(
+    {
+        "src/drift/intelligence/__init__.py",
+        "src/drift/intelligence/contracts.py",
+        "src/drift/intelligence/validation.py",
+        "src/drift/intelligence/receipts.py",
+        "src/drift/intelligence/model_replay.py",
+        "src/drift/intelligence/proposal_producer.py",
+        "src/drift/intelligence/conventional_selector.py",
+        "src/drift/intelligence/context_builder.py",
+        "src/drift/intelligence/learning.py",
+        "src/drift/intelligence/review_scheduler.py",
+        "src/drift/intelligence/platform_bridge.py",
+    }
+)
+M1E_PRODUCTION_PATHS = frozenset(
     {
         "src/drift/domain/qualification.py",
         "src/drift/qualification/__init__.py",
@@ -194,6 +210,7 @@ INERT_SOURCE_PATHS = (
     | M4_PREDICTION_TRACKING_SOURCE_PATHS
     | M5_SCORECARD_SOURCE_PATHS
     | M6_RESEARCH_MEMORY_SOURCE_PATHS
+    | INTELLIGENCE_SOURCE_PATHS
 )
 M1E_SCRIPT_PATHS = frozenset(
     path for path in ALLOWED_M1E_PRODUCTION_PATHS if path.startswith("scripts/")
@@ -337,6 +354,25 @@ NAME_IMPORT_ALLOWLISTED_MODULES = frozenset({"builtins", "importlib", "os", "sys
 #: Derived from the adapter's own source: every import root it uses, the only
 #: attributes it reads off the three modules it binds, and no environment read
 #: at all. The adapter opens no connection and reads no credential.
+# Restricted, offline capabilities for reviewed additive intelligence source files.
+INTELLIGENCE_CAPABILITY_ALLOWLIST = BridgeCapabilityAllowlist(
+    import_roots=frozenset(
+        {
+            "collections",
+            "datetime",
+            "decimal",
+            "drift",
+            "json",
+            "pydantic",
+            "typing",
+            "uuid",
+        }
+    ),
+    module_attributes={},
+    environment_reads=frozenset(),
+    dunder_attributes=frozenset(),
+    refused_builtins=frozenset({"open"}),
+)
 ALPACA_ADAPTER_ALLOWLIST = BridgeCapabilityAllowlist(
     import_roots=frozenset(
         {
@@ -944,11 +980,18 @@ def test_m1e_additions_are_allowlisted_inert_and_leave_m1d_pins_unchanged() -> N
         | M4_PREDICTION_TRACKING_SOURCE_PATHS
         | M5_SCORECARD_SOURCE_PATHS
         | M6_RESEARCH_MEMORY_SOURCE_PATHS
+        | INTELLIGENCE_SOURCE_PATHS
     )
     assert present & scanned_as_production
     for relative in present:
         source = (REPO_ROOT / relative).read_text(encoding="utf-8")
-        if relative in M2_ALPACA_BRIDGE_SOURCE_PATHS:
+        if relative in INTELLIGENCE_SOURCE_PATHS:
+            violations = _bridge_capability_violations(
+                source, relative, INTELLIGENCE_CAPABILITY_ALLOWLIST
+            )
+            assert not violations, "intelligence capability allowlist: " + "; ".join(violations)
+            _assert_m1e_production_module_allowed(source, relative)
+        elif relative in M2_ALPACA_BRIDGE_SOURCE_PATHS:
             _assert_alpaca_bridge_module_allowed(source, relative)
         elif relative in scanned_as_production:
             _assert_m1e_production_module_allowed(source, relative)
@@ -973,6 +1016,35 @@ def test_m1e_additions_are_allowlisted_inert_and_leave_m1d_pins_unchanged() -> N
         check=True,
         capture_output=True,
     ).stdout
+
+
+def test_intelligence_source_inventory_is_exact_and_nonempty() -> None:
+    """A future arbitrary intelligence module receives no automatic exemption."""
+    assert len(INTELLIGENCE_SOURCE_PATHS) == 11
+    assert "src/drift/intelligence/contracts.py" in INTELLIGENCE_SOURCE_PATHS
+    assert "src/drift/intelligence/unknown_future.py" not in INTELLIGENCE_SOURCE_PATHS
+
+
+def test_intelligence_capability_guard_is_nonvacuous() -> None:
+    """The offline source profile refuses capability escalation."""
+    allowed = "from datetime import UTC, datetime\\nfrom drift.serialization.canonical import content_hash\\n"
+    assert not _bridge_capability_violations(
+        allowed, "intelligence-good.py", INTELLIGENCE_CAPABILITY_ALLOWLIST
+    )
+    attacks = (
+        "import socket\\n",
+        "import subprocess\\n",
+        "import os\\nos.environ.get('SECRET')\\n",
+        "import importlib\\n",
+        "from builtins import open\\n",
+        "open('/proc/self/environ')\\n",
+        "getattr(object(), '__class__')\\n",
+        "import sys\\nsys.modules\\n",
+    )
+    for source in attacks:
+        assert _bridge_capability_violations(
+            source, "intelligence-attacked.py", INTELLIGENCE_CAPABILITY_ALLOWLIST
+        ), source
 
 
 def test_production_ast_guard_rejects_alias_aware_process_and_dynamic_execution() -> (
