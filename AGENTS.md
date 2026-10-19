@@ -16,6 +16,7 @@ this repository. Do not assume a particular machine path, model or editor.
 - [Workstream ownership](docs/architecture/workstreams.md)
 - [Requirements crosswalk](docs/architecture/adaptive-experiments/requirements-crosswalk.md)
 - [Resume, Checkpoint and Handoff](docs/architecture/agent-workflow.md)
+- [Implementation handoff standard](docs/architecture/implementation-handoff.md)
 - [Roadmap](docs/architecture/roadmap.md)
 - [Adaptive experiment start page](docs/architecture/adaptive-experiments/README.md)
 - The assigned GitHub issue, its latest comments, PR, dependencies and exact contracts.
