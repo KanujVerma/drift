@@ -174,8 +174,15 @@ def _validate_scope_id(value: str, field_name: str) -> None:
 
 
 def _validate_nonempty_str(value: str, field_name: str) -> None:
-    if type(value) is not str or not value:
-        raise ValueError(f"{field_name} must be a nonempty string")
+    if (
+        type(value) is not str
+        or not value
+        or not value.strip()
+        or value != value.strip()
+    ):
+        raise ValueError(
+            f"{field_name} must be a nonblank string without surrounding whitespace"
+        )
 
 
 def _validate_positive_decimal_text(value: str, field_name: str) -> None:
@@ -213,10 +220,12 @@ def _freeze_json(value: object, seen: set[int] | None = None) -> FrozenJSONValue
         if obj_id in seen:
             raise ValueError("cyclic reference detected in JSON structure")
         nested_seen = seen | {obj_id}
-        items: list[tuple[str, FrozenJSONValue]] = []
-        for k in sorted(value.keys()):
+        keys = list(value.keys())
+        for k in keys:
             if type(k) is not str:
-                raise ValueError(f"JSON mapping keys must be strings, got: {type(k)}")
+                raise ValueError("JSON mapping keys must be strings")
+        items: list[tuple[str, FrozenJSONValue]] = []
+        for k in sorted(keys):
             items.append((k, _freeze_json(value[k], nested_seen)))
         return FrozenJSONMap(tuple(items))
 
@@ -455,7 +464,7 @@ def build_arm_spec(
 ) -> ArmSpecV1:
     _validate_scope_id(arm_id, "arm_id")
     _validate_scope_id(campaign_id, "campaign_id")
-    if selector_type not in SELECTOR_TYPES:
+    if type(selector_type) is not str or selector_type not in SELECTOR_TYPES:
         raise ValueError(f"invalid selector_type: {selector_type!r}")
 
     if not isinstance(eligible_strategy_references, Sequence) or isinstance(
@@ -536,7 +545,7 @@ def verify_arm_spec(*, arm: ArmSpecV1) -> bool:
         raise ValueError(f"unsupported schema_version: {arm.schema_version!r}")
     _validate_scope_id(arm.arm_id, "arm_id")
     _validate_scope_id(arm.campaign_id, "campaign_id")
-    if arm.selector_type not in SELECTOR_TYPES:
+    if type(arm.selector_type) is not str or arm.selector_type not in SELECTOR_TYPES:
         raise ValueError(f"invalid selector_type: {arm.selector_type!r}")
 
     if type(arm.eligible_strategy_references) is not tuple:
@@ -630,7 +639,7 @@ def build_campaign_spec(
     authorization_evidence: Mapping[str, object],
 ) -> CampaignSpecV1:
     _validate_scope_id(campaign_id, "campaign_id")
-    if campaign_type not in CAMPAIGN_TYPES:
+    if type(campaign_type) is not str or campaign_type not in CAMPAIGN_TYPES:
         raise ValueError(f"invalid campaign_type: {campaign_type!r}")
     _validate_nonempty_str(study_protocol_revision, "study_protocol_revision")
 
@@ -646,12 +655,15 @@ def build_campaign_spec(
             "accepted_contract_revisions must be a mapping of "
             "contract names to git SHAs"
         )
-    revisions_list: list[tuple[str, str]] = []
-    for k in sorted(accepted_contract_revisions.keys()):
-        if type(k) is not str or not k:
+    keys = list(accepted_contract_revisions.keys())
+    for k in keys:
+        if type(k) is not str or not k or not k.strip() or k != k.strip():
             raise ValueError(
-                f"accepted_contract_revisions keys must be nonempty strings: {k!r}"
+                "accepted_contract_revisions keys must be nonblank strings "
+                "without surrounding whitespace"
             )
+    revisions_list: list[tuple[str, str]] = []
+    for k in sorted(keys):
         v = accepted_contract_revisions[k]
         if type(v) is not str or not _GIT_SHA.fullmatch(v):
             raise ValueError(
@@ -697,6 +709,8 @@ def build_campaign_spec(
     frozen_datasets = tuple(qualified_dataset_references)
     for ds_ref in frozen_datasets:
         _validate_nonempty_str(ds_ref, "qualified_dataset_reference")
+    if len(frozen_datasets) != len(set(frozen_datasets)):
+        raise ValueError("qualified_dataset_references contains duplicate values")
 
     _validate_data_window(data_window)
     _validate_session_window(warmup_window, "warmup_window")
@@ -784,7 +798,10 @@ def verify_campaign_spec(*, campaign: CampaignSpecV1) -> bool:
     if campaign.schema_version != SCHEMA_VERSION:
         raise ValueError(f"unsupported schema_version: {campaign.schema_version!r}")
     _validate_scope_id(campaign.campaign_id, "campaign_id")
-    if campaign.campaign_type not in CAMPAIGN_TYPES:
+    if (
+        type(campaign.campaign_type) is not str
+        or campaign.campaign_type not in CAMPAIGN_TYPES
+    ):
         raise ValueError(f"invalid campaign_type: {campaign.campaign_type!r}")
     _validate_nonempty_str(campaign.study_protocol_revision, "study_protocol_revision")
 
@@ -805,9 +822,10 @@ def verify_campaign_spec(*, campaign: CampaignSpecV1) -> bool:
                 "accepted_contract_revisions item must be a pair of (key, sha)"
             )
         k, v = item
-        if type(k) is not str or not k:
+        if type(k) is not str or not k or not k.strip() or k != k.strip():
             raise ValueError(
-                f"accepted_contract_revisions key must be a nonempty string: {k!r}"
+                "accepted_contract_revisions keys must be nonblank strings "
+                f"without surrounding whitespace: {k!r}"
             )
         if type(v) is not str or not _GIT_SHA.fullmatch(v):
             raise ValueError(
@@ -850,6 +868,10 @@ def verify_campaign_spec(*, campaign: CampaignSpecV1) -> bool:
         raise ValueError("qualified_dataset_references must be a tuple")
     for ds_ref in campaign.qualified_dataset_references:
         _validate_nonempty_str(ds_ref, "qualified_dataset_reference")
+    if len(campaign.qualified_dataset_references) != len(
+        set(campaign.qualified_dataset_references)
+    ):
+        raise ValueError("qualified_dataset_references contains duplicate values")
 
     _validate_data_window(campaign.data_window)
     _validate_session_window(campaign.warmup_window, "warmup_window")
@@ -1165,6 +1187,9 @@ def verify_stage1_synthetic_br_configuration(
     arms_by_id = {arm.arm_id: arm for arm in arms}
     arm_b = arms_by_id["ARM-B"]
     arm_r = arms_by_id["ARM-R"]
+
+    if arm_b.frozen_configuration_reference != arm_r.frozen_configuration_reference:
+        raise ValueError("ARM-B and ARM-R frozen_configuration_reference must match")
 
     if arm_b.selector_type != "ADAPTIVE_AI":
         raise ValueError(

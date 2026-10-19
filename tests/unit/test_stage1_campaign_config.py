@@ -2245,3 +2245,514 @@ def test_neg_g12_campaign_allowed_strategy_families_other_only() -> None:
             bindings=bindings,
             expected_run_ids=["RUN-001"],
         )
+
+
+# ==================================================
+# REGRESSION TESTS FOR PR #463 REVIEW DEFECTS
+# ==================================================
+
+
+def test_neg_g13_br_frozen_configuration_reference_mismatch() -> None:
+    arm_b = make_golden_arm_b()
+    # ARM-R with mismatched frozen_configuration_reference
+    arm_r = build_arm_spec(
+        arm_id="ARM-R",
+        campaign_id="CAMP-E1-SYNTH-001",
+        selector_type="DETERMINISTIC_COMPARATOR",
+        eligible_strategy_references=["B3", "B4", "B5"],
+        initial_strategy_reference="B3",
+        initial_capital="10000",
+        currency="USD",
+        arm_account_role="COMPARATOR",
+        mandate_reference="fixture://balanced-mandate-v1",
+        execution_policy_reference="fixture://next-open-v1",
+        research_budget_reference="fixture://budget-R",
+        information_visibility_policy="IDENTICAL_MARKET_AND_REFERENCE_COMPLETED",
+        feedback_policy_reference="fixture://matured-own-arm-v1",
+        model_configuration_reference="NONE",
+        deterministic_seed_reference="fixture://seed-R-001",
+        frozen_configuration_reference="c" * 64,  # ARM-B has "b" * 64
+    )
+    # Rebuild campaign with new ARM-R fingerprint so preimages are valid
+    camp = make_golden_campaign(
+        arm_b_hash=arm_b.arm_spec_fingerprint,
+        arm_r_hash=arm_r.arm_spec_fingerprint,
+    )
+    bindings = make_golden_bindings()
+
+    # Generic configuration verification intentionally permits
+    # distinct frozen references
+    assert (
+        verify_experiment_configuration(
+            campaign=camp,
+            arms=[arm_b, arm_r],
+            bindings=bindings,
+            expected_run_ids=["RUN-001"],
+        )
+        is True
+    )
+
+    # Stage 1 specific verification refuses mismatched frozen references
+    with pytest.raises(ValueError, match="frozen_configuration_reference"):
+        verify_stage1_synthetic_br_configuration(
+            campaign=camp,
+            arms=[arm_b, arm_r],
+            bindings=bindings,
+            expected_run_ids=["RUN-001"],
+        )
+
+
+@pytest.mark.parametrize(
+    "bad_str",
+    ["   ", "  ref", "ref  ", "\tref", "ref\n"],
+)
+def test_neg_whitespace_reference_strings(bad_str: str) -> None:
+    # 1. study_protocol_revision
+    with pytest.raises(
+        ValueError, match="nonblank string without surrounding whitespace"
+    ):
+        build_campaign_spec(
+            campaign_id="CAMP-E1-SYNTH-001",
+            campaign_type="SYNTHETIC_TEST",
+            study_protocol_revision=bad_str,
+            created_at=datetime(2026, 10, 19, 0, 0, 0, tzinfo=UTC),
+            frozen_at=datetime(2026, 10, 19, 0, 0, 1, tzinfo=UTC),
+            accepted_contract_revisions={},
+            research_question_id="RQ-STAGE1-SELECTOR-NET-ADVANTAGE",
+            primary_comparison=PrimaryComparisonV1("ARM-B", "ARM-R"),
+            control_arm_references=[],
+            arm_spec_references=[GOLDEN_ARM_B_HASH, GOLDEN_ARM_R_HASH],
+            qualified_dataset_references=[],
+            data_window=DataWindowV1(
+                "2024-01-02", "2026-01-30", "fixture://calendar-v1"
+            ),
+            warmup_window=SessionWindowV1(253),
+            observation_window=SessionWindowV1(126),
+            scoring_window=ScoringWindowV1("SC-001", "SC-021", True),
+            decision_schedule=DecisionScheduleV1(
+                "MONTHLY", "LAST_COMPLETED_SESSION", "NEXT_OPEN"
+            ),
+            allowed_strategy_families=["B3", "B4", "B5"],
+            portfolio_mandate_reference="fixture://balanced-mandate-v1",
+            source_eligibility_policy_reference="fixture://source-policy-v1",
+            execution_policy_reference="fixture://next-open-v1",
+            cost_policy_reference="fixture://cost-policy-v1",
+            model_and_prompt_policy_reference="fixture://model-B-v1",
+            learning_and_feedback_policy_reference="fixture://feedback-policy-v1",
+            evaluation_policy_reference="fixture://eval-policy-v1",
+            holdout_access_policy_reference="fixture://holdout-policy-v1",
+            stopping_policy_reference="fixture://stop-policy-v1",
+            authorization_evidence={"synthetic_fixture_only": True},
+        )
+
+    # 2. data_window.calendar_id
+    with pytest.raises(
+        ValueError, match="nonblank string without surrounding whitespace"
+    ):
+        camp = make_golden_campaign()
+        bad_camp = replace(
+            camp,
+            data_window=DataWindowV1("2024-01-02", "2026-01-30", bad_str),
+        )
+        verify_campaign_spec(campaign=bad_camp)
+
+    # 3. mandate_reference
+    with pytest.raises(
+        ValueError, match="nonblank string without surrounding whitespace"
+    ):
+        build_arm_spec(
+            arm_id="ARM-B",
+            campaign_id="CAMP-E1-SYNTH-001",
+            selector_type="ADAPTIVE_AI",
+            eligible_strategy_references=["B3"],
+            initial_strategy_reference="B3",
+            initial_capital="10000",
+            currency="USD",
+            arm_account_role="PRIMARY_TEST",
+            mandate_reference=bad_str,
+            execution_policy_reference="fixture://next-open-v1",
+            research_budget_reference="fixture://budget-B",
+            information_visibility_policy=("IDENTICAL_MARKET_AND_REFERENCE_COMPLETED"),
+            feedback_policy_reference="fixture://matured-own-arm-v1",
+            model_configuration_reference="fixture://model-B-v1",
+            deterministic_seed_reference="fixture://seed-B-001",
+            frozen_configuration_reference="b" * 64,
+        )
+
+    # 4. execution_policy_reference
+    with pytest.raises(
+        ValueError, match="nonblank string without surrounding whitespace"
+    ):
+        build_arm_spec(
+            arm_id="ARM-B",
+            campaign_id="CAMP-E1-SYNTH-001",
+            selector_type="ADAPTIVE_AI",
+            eligible_strategy_references=["B3"],
+            initial_strategy_reference="B3",
+            initial_capital="10000",
+            currency="USD",
+            arm_account_role="PRIMARY_TEST",
+            mandate_reference="fixture://balanced-mandate-v1",
+            execution_policy_reference=bad_str,
+            research_budget_reference="fixture://budget-B",
+            information_visibility_policy=("IDENTICAL_MARKET_AND_REFERENCE_COMPLETED"),
+            feedback_policy_reference="fixture://matured-own-arm-v1",
+            model_configuration_reference="fixture://model-B-v1",
+            deterministic_seed_reference="fixture://seed-B-001",
+            frozen_configuration_reference="b" * 64,
+        )
+
+    # 5. qualified_dataset_references elements
+    with pytest.raises(
+        ValueError, match="nonblank string without surrounding whitespace"
+    ):
+        build_campaign_spec(
+            campaign_id="CAMP-E1-SYNTH-001",
+            campaign_type="SYNTHETIC_TEST",
+            study_protocol_revision="fixture://methodology-v1",
+            created_at=datetime(2026, 10, 19, 0, 0, 0, tzinfo=UTC),
+            frozen_at=datetime(2026, 10, 19, 0, 0, 1, tzinfo=UTC),
+            accepted_contract_revisions={},
+            research_question_id="RQ-STAGE1-SELECTOR-NET-ADVANTAGE",
+            primary_comparison=PrimaryComparisonV1("ARM-B", "ARM-R"),
+            control_arm_references=[],
+            arm_spec_references=[GOLDEN_ARM_B_HASH, GOLDEN_ARM_R_HASH],
+            qualified_dataset_references=[bad_str],
+            data_window=DataWindowV1(
+                "2024-01-02", "2026-01-30", "fixture://calendar-v1"
+            ),
+            warmup_window=SessionWindowV1(253),
+            observation_window=SessionWindowV1(126),
+            scoring_window=ScoringWindowV1("SC-001", "SC-021", True),
+            decision_schedule=DecisionScheduleV1(
+                "MONTHLY", "LAST_COMPLETED_SESSION", "NEXT_OPEN"
+            ),
+            allowed_strategy_families=["B3", "B4", "B5"],
+            portfolio_mandate_reference="fixture://balanced-mandate-v1",
+            source_eligibility_policy_reference="fixture://source-policy-v1",
+            execution_policy_reference="fixture://next-open-v1",
+            cost_policy_reference="fixture://cost-policy-v1",
+            model_and_prompt_policy_reference="fixture://model-B-v1",
+            learning_and_feedback_policy_reference="fixture://feedback-policy-v1",
+            evaluation_policy_reference="fixture://eval-policy-v1",
+            holdout_access_policy_reference="fixture://holdout-policy-v1",
+            stopping_policy_reference="fixture://stop-policy-v1",
+            authorization_evidence={"synthetic_fixture_only": True},
+        )
+
+    # 6. portfolio_account_id
+    with pytest.raises(
+        ValueError, match="nonblank string without surrounding whitespace"
+    ):
+        build_run_account_binding(
+            campaign_id="CAMP-E1-SYNTH-001",
+            run_id="RUN-001",
+            arm_id="ARM-B",
+            portfolio_account_id=bad_str,
+            initial_cash_allocated="10000",
+            bound_at=datetime(2026, 10, 19, 0, 0, 2, tzinfo=UTC),
+        )
+
+    # 7. eligible_strategy_references elements
+    with pytest.raises(
+        ValueError, match="nonblank string without surrounding whitespace"
+    ):
+        build_arm_spec(
+            arm_id="ARM-B",
+            campaign_id="CAMP-E1-SYNTH-001",
+            selector_type="ADAPTIVE_AI",
+            eligible_strategy_references=[bad_str],
+            initial_strategy_reference=bad_str,
+            initial_capital="10000",
+            currency="USD",
+            arm_account_role="PRIMARY_TEST",
+            mandate_reference="fixture://balanced-mandate-v1",
+            execution_policy_reference="fixture://next-open-v1",
+            research_budget_reference="fixture://budget-B",
+            information_visibility_policy=("IDENTICAL_MARKET_AND_REFERENCE_COMPLETED"),
+            feedback_policy_reference="fixture://matured-own-arm-v1",
+            model_configuration_reference="fixture://model-B-v1",
+            deterministic_seed_reference="fixture://seed-B-001",
+            frozen_configuration_reference="b" * 64,
+        )
+
+
+def test_neg_dataset_references_duplicate() -> None:
+    # Builder input with duplicate dataset references raises ValueError
+    with pytest.raises(
+        ValueError,
+        match="qualified_dataset_references contains duplicate values",
+    ):
+        build_campaign_spec(
+            campaign_id="CAMP-E1-SYNTH-001",
+            campaign_type="SYNTHETIC_TEST",
+            study_protocol_revision="fixture://methodology-v1",
+            created_at=datetime(2026, 10, 19, 0, 0, 0, tzinfo=UTC),
+            frozen_at=datetime(2026, 10, 19, 0, 0, 1, tzinfo=UTC),
+            accepted_contract_revisions={},
+            research_question_id="RQ-STAGE1-SELECTOR-NET-ADVANTAGE",
+            primary_comparison=PrimaryComparisonV1("ARM-B", "ARM-R"),
+            control_arm_references=[],
+            arm_spec_references=[GOLDEN_ARM_B_HASH, GOLDEN_ARM_R_HASH],
+            qualified_dataset_references=[
+                "fixture://data-A",
+                "fixture://data-A",
+            ],
+            data_window=DataWindowV1(
+                "2024-01-02", "2026-01-30", "fixture://calendar-v1"
+            ),
+            warmup_window=SessionWindowV1(253),
+            observation_window=SessionWindowV1(126),
+            scoring_window=ScoringWindowV1("SC-001", "SC-021", True),
+            decision_schedule=DecisionScheduleV1(
+                "MONTHLY", "LAST_COMPLETED_SESSION", "NEXT_OPEN"
+            ),
+            allowed_strategy_families=["B3", "B4", "B5"],
+            portfolio_mandate_reference="fixture://balanced-mandate-v1",
+            source_eligibility_policy_reference="fixture://source-policy-v1",
+            execution_policy_reference="fixture://next-open-v1",
+            cost_policy_reference="fixture://cost-policy-v1",
+            model_and_prompt_policy_reference="fixture://model-B-v1",
+            learning_and_feedback_policy_reference="fixture://feedback-policy-v1",
+            evaluation_policy_reference="fixture://eval-policy-v1",
+            holdout_access_policy_reference="fixture://holdout-policy-v1",
+            stopping_policy_reference="fixture://stop-policy-v1",
+            authorization_evidence={"synthetic_fixture_only": True},
+        )
+
+    # Stored forged campaign containing duplicate qualified_dataset_references
+    camp = make_golden_campaign()
+    bad_camp = replace(
+        camp,
+        qualified_dataset_references=("fixture://data-A", "fixture://data-A"),
+    )
+    with pytest.raises(
+        ValueError,
+        match="qualified_dataset_references contains duplicate values",
+    ):
+        verify_campaign_spec(campaign=bad_camp)
+
+    # Two distinct references remain valid
+    camp_two_datasets = build_campaign_spec(
+        campaign_id="CAMP-E1-SYNTH-001",
+        campaign_type="SYNTHETIC_TEST",
+        study_protocol_revision="fixture://methodology-v1",
+        created_at=datetime(2026, 10, 19, 0, 0, 0, tzinfo=UTC),
+        frozen_at=datetime(2026, 10, 19, 0, 0, 1, tzinfo=UTC),
+        accepted_contract_revisions={},
+        research_question_id="RQ-STAGE1-SELECTOR-NET-ADVANTAGE",
+        primary_comparison=PrimaryComparisonV1("ARM-B", "ARM-R"),
+        control_arm_references=[],
+        arm_spec_references=[GOLDEN_ARM_B_HASH, GOLDEN_ARM_R_HASH],
+        qualified_dataset_references=["fixture://data-A", "fixture://data-B"],
+        data_window=DataWindowV1("2024-01-02", "2026-01-30", "fixture://calendar-v1"),
+        warmup_window=SessionWindowV1(253),
+        observation_window=SessionWindowV1(126),
+        scoring_window=ScoringWindowV1("SC-001", "SC-021", True),
+        decision_schedule=DecisionScheduleV1(
+            "MONTHLY", "LAST_COMPLETED_SESSION", "NEXT_OPEN"
+        ),
+        allowed_strategy_families=["B3", "B4", "B5"],
+        portfolio_mandate_reference="fixture://balanced-mandate-v1",
+        source_eligibility_policy_reference="fixture://source-policy-v1",
+        execution_policy_reference="fixture://next-open-v1",
+        cost_policy_reference="fixture://cost-policy-v1",
+        model_and_prompt_policy_reference="fixture://model-B-v1",
+        learning_and_feedback_policy_reference="fixture://feedback-policy-v1",
+        evaluation_policy_reference="fixture://eval-policy-v1",
+        holdout_access_policy_reference="fixture://holdout-policy-v1",
+        stopping_policy_reference="fixture://stop-policy-v1",
+        authorization_evidence={"synthetic_fixture_only": True},
+    )
+    assert verify_campaign_spec(campaign=camp_two_datasets) is True
+
+
+def test_neg_mixed_type_mapping_keys() -> None:
+    # 1. Mixed keys in authorization_evidence must raise ValueError, not TypeError
+    with pytest.raises(ValueError, match="JSON mapping keys must be strings"):
+        build_campaign_spec(
+            campaign_id="CAMP-E1-SYNTH-001",
+            campaign_type="SYNTHETIC_TEST",
+            study_protocol_revision="fixture://methodology-v1",
+            created_at=datetime(2026, 10, 19, 0, 0, 0, tzinfo=UTC),
+            frozen_at=datetime(2026, 10, 19, 0, 0, 1, tzinfo=UTC),
+            accepted_contract_revisions={},
+            research_question_id="RQ-STAGE1-SELECTOR-NET-ADVANTAGE",
+            primary_comparison=PrimaryComparisonV1("ARM-B", "ARM-R"),
+            control_arm_references=[],
+            arm_spec_references=[GOLDEN_ARM_B_HASH, GOLDEN_ARM_R_HASH],
+            qualified_dataset_references=[],
+            data_window=DataWindowV1(
+                "2024-01-02", "2026-01-30", "fixture://calendar-v1"
+            ),
+            warmup_window=SessionWindowV1(253),
+            observation_window=SessionWindowV1(126),
+            scoring_window=ScoringWindowV1("SC-001", "SC-021", True),
+            decision_schedule=DecisionScheduleV1(
+                "MONTHLY", "LAST_COMPLETED_SESSION", "NEXT_OPEN"
+            ),
+            allowed_strategy_families=["B3", "B4", "B5"],
+            portfolio_mandate_reference="fixture://balanced-mandate-v1",
+            source_eligibility_policy_reference="fixture://source-policy-v1",
+            execution_policy_reference="fixture://next-open-v1",
+            cost_policy_reference="fixture://cost-policy-v1",
+            model_and_prompt_policy_reference="fixture://model-B-v1",
+            learning_and_feedback_policy_reference="fixture://feedback-policy-v1",
+            evaluation_policy_reference="fixture://eval-policy-v1",
+            holdout_access_policy_reference="fixture://holdout-policy-v1",
+            stopping_policy_reference="fixture://stop-policy-v1",
+            authorization_evidence={1: "invalid", "valid": "value"},  # type: ignore[dict-item]
+        )
+
+    # 2. Mixed keys in accepted_contract_revisions must raise ValueError, not TypeError
+    with pytest.raises(
+        ValueError,
+        match="accepted_contract_revisions keys must be nonblank strings",
+    ):
+        build_campaign_spec(
+            campaign_id="CAMP-E1-SYNTH-001",
+            campaign_type="SYNTHETIC_TEST",
+            study_protocol_revision="fixture://methodology-v1",
+            created_at=datetime(2026, 10, 19, 0, 0, 0, tzinfo=UTC),
+            frozen_at=datetime(2026, 10, 19, 0, 0, 1, tzinfo=UTC),
+            accepted_contract_revisions={1: "a" * 40, "valid": "b" * 40},  # type: ignore[dict-item]
+            research_question_id="RQ-STAGE1-SELECTOR-NET-ADVANTAGE",
+            primary_comparison=PrimaryComparisonV1("ARM-B", "ARM-R"),
+            control_arm_references=[],
+            arm_spec_references=[GOLDEN_ARM_B_HASH, GOLDEN_ARM_R_HASH],
+            qualified_dataset_references=[],
+            data_window=DataWindowV1(
+                "2024-01-02", "2026-01-30", "fixture://calendar-v1"
+            ),
+            warmup_window=SessionWindowV1(253),
+            observation_window=SessionWindowV1(126),
+            scoring_window=ScoringWindowV1("SC-001", "SC-021", True),
+            decision_schedule=DecisionScheduleV1(
+                "MONTHLY", "LAST_COMPLETED_SESSION", "NEXT_OPEN"
+            ),
+            allowed_strategy_families=["B3", "B4", "B5"],
+            portfolio_mandate_reference="fixture://balanced-mandate-v1",
+            source_eligibility_policy_reference="fixture://source-policy-v1",
+            execution_policy_reference="fixture://next-open-v1",
+            cost_policy_reference="fixture://cost-policy-v1",
+            model_and_prompt_policy_reference="fixture://model-B-v1",
+            learning_and_feedback_policy_reference="fixture://feedback-policy-v1",
+            evaluation_policy_reference="fixture://eval-policy-v1",
+            holdout_access_policy_reference="fixture://holdout-policy-v1",
+            stopping_policy_reference="fixture://stop-policy-v1",
+            authorization_evidence={"synthetic_fixture_only": True},
+        )
+
+    # 3. Whitespace-only revision keys
+    with pytest.raises(
+        ValueError,
+        match="accepted_contract_revisions keys must be nonblank strings",
+    ):
+        build_campaign_spec(
+            campaign_id="CAMP-E1-SYNTH-001",
+            campaign_type="SYNTHETIC_TEST",
+            study_protocol_revision="fixture://methodology-v1",
+            created_at=datetime(2026, 10, 19, 0, 0, 0, tzinfo=UTC),
+            frozen_at=datetime(2026, 10, 19, 0, 0, 1, tzinfo=UTC),
+            accepted_contract_revisions={"   ": "a" * 40},
+            research_question_id="RQ-STAGE1-SELECTOR-NET-ADVANTAGE",
+            primary_comparison=PrimaryComparisonV1("ARM-B", "ARM-R"),
+            control_arm_references=[],
+            arm_spec_references=[GOLDEN_ARM_B_HASH, GOLDEN_ARM_R_HASH],
+            qualified_dataset_references=[],
+            data_window=DataWindowV1(
+                "2024-01-02", "2026-01-30", "fixture://calendar-v1"
+            ),
+            warmup_window=SessionWindowV1(253),
+            observation_window=SessionWindowV1(126),
+            scoring_window=ScoringWindowV1("SC-001", "SC-021", True),
+            decision_schedule=DecisionScheduleV1(
+                "MONTHLY", "LAST_COMPLETED_SESSION", "NEXT_OPEN"
+            ),
+            allowed_strategy_families=["B3", "B4", "B5"],
+            portfolio_mandate_reference="fixture://balanced-mandate-v1",
+            source_eligibility_policy_reference="fixture://source-policy-v1",
+            execution_policy_reference="fixture://next-open-v1",
+            cost_policy_reference="fixture://cost-policy-v1",
+            model_and_prompt_policy_reference="fixture://model-B-v1",
+            learning_and_feedback_policy_reference="fixture://feedback-policy-v1",
+            evaluation_policy_reference="fixture://eval-policy-v1",
+            holdout_access_policy_reference="fixture://holdout-policy-v1",
+            stopping_policy_reference="fixture://stop-policy-v1",
+            authorization_evidence={"synthetic_fixture_only": True},
+        )
+
+
+@pytest.mark.parametrize(
+    "bad_enum",
+    [[1, 2], {"a": "b"}, 123, None, "UNSUPPORTED_TYPE"],
+)
+def test_neg_enum_input_types(bad_enum: Any) -> None:
+    # 1. campaign_type builder input
+    with pytest.raises(ValueError, match="invalid campaign_type"):
+        build_campaign_spec(
+            campaign_id="CAMP-E1-SYNTH-001",
+            campaign_type=bad_enum,
+            study_protocol_revision="fixture://methodology-v1",
+            created_at=datetime(2026, 10, 19, 0, 0, 0, tzinfo=UTC),
+            frozen_at=datetime(2026, 10, 19, 0, 0, 1, tzinfo=UTC),
+            accepted_contract_revisions={},
+            research_question_id="RQ-STAGE1-SELECTOR-NET-ADVANTAGE",
+            primary_comparison=PrimaryComparisonV1("ARM-B", "ARM-R"),
+            control_arm_references=[],
+            arm_spec_references=[GOLDEN_ARM_B_HASH, GOLDEN_ARM_R_HASH],
+            qualified_dataset_references=[],
+            data_window=DataWindowV1(
+                "2024-01-02", "2026-01-30", "fixture://calendar-v1"
+            ),
+            warmup_window=SessionWindowV1(253),
+            observation_window=SessionWindowV1(126),
+            scoring_window=ScoringWindowV1("SC-001", "SC-021", True),
+            decision_schedule=DecisionScheduleV1(
+                "MONTHLY", "LAST_COMPLETED_SESSION", "NEXT_OPEN"
+            ),
+            allowed_strategy_families=["B3", "B4", "B5"],
+            portfolio_mandate_reference="fixture://balanced-mandate-v1",
+            source_eligibility_policy_reference="fixture://source-policy-v1",
+            execution_policy_reference="fixture://next-open-v1",
+            cost_policy_reference="fixture://cost-policy-v1",
+            model_and_prompt_policy_reference="fixture://model-B-v1",
+            learning_and_feedback_policy_reference="fixture://feedback-policy-v1",
+            evaluation_policy_reference="fixture://eval-policy-v1",
+            holdout_access_policy_reference="fixture://holdout-policy-v1",
+            stopping_policy_reference="fixture://stop-policy-v1",
+            authorization_evidence={"synthetic_fixture_only": True},
+        )
+
+    # 2. campaign_type stored verifier
+    camp = make_golden_campaign()
+    bad_camp = replace(camp, campaign_type=bad_enum)
+    with pytest.raises(ValueError, match="invalid campaign_type"):
+        verify_campaign_spec(campaign=bad_camp)
+
+    # 3. selector_type builder input
+    with pytest.raises(ValueError, match="invalid selector_type"):
+        build_arm_spec(
+            arm_id="ARM-B",
+            campaign_id="CAMP-E1-SYNTH-001",
+            selector_type=bad_enum,
+            eligible_strategy_references=["B3"],
+            initial_strategy_reference="B3",
+            initial_capital="10000",
+            currency="USD",
+            arm_account_role="PRIMARY_TEST",
+            mandate_reference="fixture://balanced-mandate-v1",
+            execution_policy_reference="fixture://next-open-v1",
+            research_budget_reference="fixture://budget-B",
+            information_visibility_policy=("IDENTICAL_MARKET_AND_REFERENCE_COMPLETED"),
+            feedback_policy_reference="fixture://matured-own-arm-v1",
+            model_configuration_reference="fixture://model-B-v1",
+            deterministic_seed_reference="fixture://seed-B-001",
+            frozen_configuration_reference="b" * 64,
+        )
+
+    # 4. selector_type stored verifier
+    arm = make_golden_arm_b()
+    bad_arm = replace(arm, selector_type=bad_enum)
+    with pytest.raises(ValueError, match="invalid selector_type"):
+        verify_arm_spec(arm=bad_arm)
