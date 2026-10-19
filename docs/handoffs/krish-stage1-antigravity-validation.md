@@ -287,10 +287,10 @@ from this separate corrective branch as acceptance of PR #457.
    first. No silently reduced pool, selected candidate, or score list
    survives this rejection. Preserve one synthetic zero-cost receipt
    and both lifecycle events with the error
-   \`INVALID_CANDIDATE_POOL_MEMBER\`.
+   `INVALID_CANDIDATE_POOL_MEMBER`.
 2. **Comparator tie rule**: Within the existing 1e-9 Decimal score
-   equivalence band, compare \`(family_id, parameters_hash, candidate_id)\`.
-   \`strategy_ref.sha256\` is a code artifact identity, not the actual
+   equivalence band, compare `(family_id, parameters_hash, candidate_id)`.
+   `strategy_ref.sha256` is a code artifact identity, not the actual
    strategy-parameter digest. Include an adversarial fixture in which
    candidate-ID order and parameter-digest order disagree, and permute
    the pool to demonstrate identical selection.
@@ -299,17 +299,17 @@ from this separate corrective branch as acceptance of PR #457.
    logical request ID, candidate expiry and clock. Candidate IDs also
    bind the generated attempt, so a distinct invocation cannot reuse
    an earlier candidate ID. Started context references must use the
-   actual \`context.profile\`, not a hard-coded \`v1\`.
+   actual `context.profile`, not a hard-coded `v1`.
    Exact identical offline invocation retries remain idempotent.
    An actual *new* attempt needs a distinct caller-supplied
-   \`logical_request_id\` or \`attempt_id\`; no hidden random identity.
+   `logical_request_id` or `attempt_id`; no hidden random identity.
 4. **Receipt ordering**: R persists its synthetic compute cost before
    committing a completed/rejected terminal attempt that references
    that cost. Both success and rejection preserve the cost; no
    provider usage or verified provider invoice is implied.
 5. **Scripted provider-free producer**: A fake cost recorded as
    scientific notation, non-finite text, or a nonzero amount with
-   blank currency must be classed \`unknown\` instead of throwing after
+   blank currency must be classed `unknown` instead of throwing after
    a started attempt. Invalid candidate TTL timezones are refused
    before an attempt begins. Distinct valid expiry instants or logical
    requests create separate deterministic identities. This does
@@ -323,7 +323,7 @@ from this separate corrective branch as acceptance of PR #457.
 
 ### Dedicated K3 tests on its own stacked SHA
 
-\`\`\`bash
+```bash
 uv sync --locked
 uv run pytest -q tests/unit/test_intelligence_proposal_producer.py tests/unit/test_intelligence_conventional_selector.py
 uv run pytest -q tests/unit/test_intelligence_contracts.py tests/unit/test_intelligence_validation.py tests/unit/test_intelligence_receipts.py tests/unit/test_intelligence_model_replay.py tests/unit/test_intelligence_proposal_producer.py tests/unit/test_intelligence_conventional_selector.py
@@ -332,7 +332,7 @@ uv run ruff format --check src/drift/intelligence tests/unit/test_intelligence_*
 uv run mypy src/drift/intelligence tests/unit/test_intelligence_*
 uv build
 git diff --check
-\`\`\`
+```
 
 These commands are **validation instructions, not an assertion of passing
 results**. On final consolidation, run all five independently reviewed QA
