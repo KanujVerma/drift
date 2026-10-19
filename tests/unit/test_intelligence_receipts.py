@@ -513,9 +513,7 @@ def test_k2_rejects_contradictory_cost_inputs(sample_scope: Scope) -> None:
             amount="1",
             raw_evidence_ref=proof,
         )
-    with pytest.raises(
-        ValueError, match="CONFLICTING_VERIFIED_ZERO_UNKNOWN_REASON"
-    ):
+    with pytest.raises(ValueError, match="CONFLICTING_VERIFIED_ZERO_UNKNOWN_REASON"):
         create_cost_receipt(
             **common,
             amount_basis="verified_zero",
