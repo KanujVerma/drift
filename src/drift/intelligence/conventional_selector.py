@@ -6,7 +6,7 @@ Provides deterministic scoring, alphanumeric tie-breaking, and isolated state (T
 
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
@@ -88,6 +88,13 @@ def select_conventional_candidate(
     now = checked_at or context.review_started_at
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("INDETERMINATE_TIMEZONE: comparator cutoff missing offset")
+    if valid_until is not None and (
+        valid_until.tzinfo is None or valid_until.utcoffset() is None
+    ):
+        raise ValueError("INDETERMINATE_TIMEZONE: comparator TTL requires offset")
+    now = now.astimezone(UTC)
+    if valid_until is not None:
+        valid_until = valid_until.astimezone(UTC)
     # Snapshot the complete pool before any objective callback is invoked.
     # No callback may rewrite later candidates while a frozen experiment is
     # evaluated under a previously computed pool identity.
@@ -121,9 +128,9 @@ def select_conventional_candidate(
     seed = content_hash(
         {
             "context": context.record_hash,
-            "method": method_ref.sha256,
+            "method": method_ref.model_dump(mode="python"),
             "candidate_pool": pool_hash,
-            "policy": validation_policy.sha256,
+            "policy": validation_policy.model_dump(mode="python"),
             "logical_request_id": logical_request_id,
             "valid_until": valid_until,
             "checked_at": now,
