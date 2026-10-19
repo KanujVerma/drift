@@ -1260,6 +1260,18 @@ def verify_stage1_synthetic_br_configuration(
             f"{arm_b.execution_policy_reference!r} != "
             f"{arm_r.execution_policy_reference!r}"
         )
+    if arm_b.mandate_reference != campaign.portfolio_mandate_reference:
+        raise ValueError(
+            "primary arm mandate_reference must match "
+            "campaign.portfolio_mandate_reference"
+        )
+    if arm_b.execution_policy_reference != campaign.execution_policy_reference:
+        raise ValueError(
+            "primary arm execution_policy_reference "
+            "must match campaign.execution_policy_reference"
+        )
+    if arm_b.feedback_policy_reference != arm_r.feedback_policy_reference:
+        raise ValueError("ARM-B and ARM-R feedback_policy_reference must match")
     if (
         arm_b.information_visibility_policy
         != "IDENTICAL_MARKET_AND_REFERENCE_COMPLETED"

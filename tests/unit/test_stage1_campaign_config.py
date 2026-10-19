@@ -54,7 +54,10 @@ def make_golden_arm_b() -> ArmSpecV1:
     )
 
 
-def make_golden_arm_r() -> ArmSpecV1:
+def make_golden_arm_r(
+    *,
+    feedback_policy_reference: str = "fixture://matured-own-arm-v1",
+) -> ArmSpecV1:
     return build_arm_spec(
         arm_id="ARM-R",
         campaign_id="CAMP-E1-SYNTH-001",
@@ -68,7 +71,7 @@ def make_golden_arm_r() -> ArmSpecV1:
         execution_policy_reference="fixture://next-open-v1",
         research_budget_reference="fixture://budget-R",
         information_visibility_policy="IDENTICAL_MARKET_AND_REFERENCE_COMPLETED",
-        feedback_policy_reference="fixture://matured-own-arm-v1",
+        feedback_policy_reference=feedback_policy_reference,
         model_configuration_reference="NONE",
         deterministic_seed_reference="fixture://seed-R-001",
         frozen_configuration_reference="b" * 64,
@@ -76,7 +79,11 @@ def make_golden_arm_r() -> ArmSpecV1:
 
 
 def make_golden_campaign(
-    arm_b_hash: str = GOLDEN_ARM_B_HASH, arm_r_hash: str = GOLDEN_ARM_R_HASH
+    arm_b_hash: str = GOLDEN_ARM_B_HASH,
+    arm_r_hash: str = GOLDEN_ARM_R_HASH,
+    *,
+    portfolio_mandate_reference: str = "fixture://balanced-mandate-v1",
+    execution_policy_reference: str = "fixture://next-open-v1",
 ) -> CampaignSpecV1:
     return build_campaign_spec(
         campaign_id="CAMP-E1-SYNTH-001",
@@ -111,9 +118,9 @@ def make_golden_campaign(
             execution_timing="NEXT_OPEN",
         ),
         allowed_strategy_families=["B3", "B4", "B5"],
-        portfolio_mandate_reference="fixture://balanced-mandate-v1",
+        portfolio_mandate_reference=portfolio_mandate_reference,
         source_eligibility_policy_reference="fixture://source-policy-v1",
-        execution_policy_reference="fixture://next-open-v1",
+        execution_policy_reference=execution_policy_reference,
         cost_policy_reference="fixture://cost-policy-v1",
         model_and_prompt_policy_reference="fixture://model-B-v1",
         learning_and_feedback_policy_reference="fixture://feedback-policy-v1",
@@ -2756,3 +2763,87 @@ def test_neg_enum_input_types(bad_enum: Any) -> None:
     bad_arm = replace(arm, selector_type=bad_enum)
     with pytest.raises(ValueError, match="invalid selector_type"):
         verify_arm_spec(arm=bad_arm)
+
+
+def test_neg_stage1_campaign_mandate_mismatch() -> None:
+    arm_b = make_golden_arm_b()
+    arm_r = make_golden_arm_r()
+    camp = make_golden_campaign(
+        portfolio_mandate_reference="fixture://different-mandate-v1"
+    )
+    bindings = make_golden_bindings()
+
+    assert (
+        verify_experiment_configuration(
+            campaign=camp,
+            arms=[arm_b, arm_r],
+            bindings=bindings,
+            expected_run_ids=["RUN-001"],
+        )
+        is True
+    )
+
+    with pytest.raises(ValueError, match="campaign.portfolio_mandate_reference"):
+        verify_stage1_synthetic_br_configuration(
+            campaign=camp,
+            arms=[arm_b, arm_r],
+            bindings=bindings,
+            expected_run_ids=["RUN-001"],
+        )
+
+
+def test_neg_stage1_campaign_execution_policy_mismatch() -> None:
+    arm_b = make_golden_arm_b()
+    arm_r = make_golden_arm_r()
+    camp = make_golden_campaign(
+        execution_policy_reference="fixture://different-execution-v1"
+    )
+    bindings = make_golden_bindings()
+
+    assert (
+        verify_experiment_configuration(
+            campaign=camp,
+            arms=[arm_b, arm_r],
+            bindings=bindings,
+            expected_run_ids=["RUN-001"],
+        )
+        is True
+    )
+
+    with pytest.raises(ValueError, match="campaign.execution_policy_reference"):
+        verify_stage1_synthetic_br_configuration(
+            campaign=camp,
+            arms=[arm_b, arm_r],
+            bindings=bindings,
+            expected_run_ids=["RUN-001"],
+        )
+
+
+def test_neg_stage1_br_feedback_policy_mismatch() -> None:
+    arm_b = make_golden_arm_b()
+    arm_r = make_golden_arm_r(
+        feedback_policy_reference="fixture://different-feedback-v1"
+    )
+    camp = make_golden_campaign(
+        arm_b_hash=arm_b.arm_spec_fingerprint,
+        arm_r_hash=arm_r.arm_spec_fingerprint,
+    )
+    bindings = make_golden_bindings()
+
+    assert (
+        verify_experiment_configuration(
+            campaign=camp,
+            arms=[arm_b, arm_r],
+            bindings=bindings,
+            expected_run_ids=["RUN-001"],
+        )
+        is True
+    )
+
+    with pytest.raises(ValueError, match="feedback_policy_reference"):
+        verify_stage1_synthetic_br_configuration(
+            campaign=camp,
+            arms=[arm_b, arm_r],
+            bindings=bindings,
+            expected_run_ids=["RUN-001"],
+        )
