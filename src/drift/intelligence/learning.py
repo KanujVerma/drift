@@ -137,7 +137,8 @@ def advance_learning(
         for record in previous_snapshot.matured_trials:
             if record.arm_id != arm_id or record.is_holdout:
                 raise ValueError("UNSAFE_PREVIOUS_LEARNING_STATE")
-            if _require_aware(record.matured_at, "stored feedback maturity") > previous_snapshot.cutoff:
+            maturity = _require_aware(record.matured_at, "stored feedback maturity")
+            if maturity > previous_snapshot.cutoff:
                 raise ValueError("FUTURE_FEEDBACK_IN_PREVIOUS_SNAPSHOT")
             historical[record.trial_id] = record
 
