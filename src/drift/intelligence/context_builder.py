@@ -10,6 +10,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
+from drift.serialization.canonical import content_hash
+
 from drift.intelligence.contracts import (
     ArtifactReference,
     ImmutableModel,
