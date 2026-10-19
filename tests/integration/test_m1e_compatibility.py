@@ -17,7 +17,7 @@ import pytest
 REPO_ROOT = Path(__file__).parents[2]
 PINNED_M1D_COMMIT = "af75cce0f763de025f8ae3516577a9d0a1acead9"
 TASK1_M1D_PIN_COMMIT = "1c647bfc8b7c2a61a83cef4468a5a8cd17e9a060"
-ALLOWED_# Reviewed K1-K5 offline intelligence modules: exact paths, no prefix exemptions.
+# Reviewed K1-K5 offline intelligence modules: exact paths, no prefix exemptions.
 INTELLIGENCE_SOURCE_PATHS = frozenset(
     {
         "src/drift/intelligence/__init__.py",
@@ -33,7 +33,7 @@ INTELLIGENCE_SOURCE_PATHS = frozenset(
         "src/drift/intelligence/platform_bridge.py",
     }
 )
-M1E_PRODUCTION_PATHS = frozenset(
+ALLOWED_M1E_PRODUCTION_PATHS = frozenset(
     {
         "src/drift/domain/qualification.py",
         "src/drift/qualification/__init__.py",
