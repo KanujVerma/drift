@@ -245,13 +245,16 @@ def test_d05_defensive_only_policy_validation() -> None:
 
 def test_same_scheduled_inputs_have_stable_trigger_identity() -> None:
     now = datetime(2024, 1, 10, 10, 0, tzinfo=UTC)
-    kwargs = {
-        "now": now,
-        "last_routine_at": now - timedelta(days=3),
-        "last_adaptation_at": now - timedelta(days=10),
-    }
-    first = evaluate_review_schedule(**kwargs)
-    again = evaluate_review_schedule(**kwargs)
+    first = evaluate_review_schedule(
+        now=now,
+        last_routine_at=now - timedelta(days=3),
+        last_adaptation_at=now - timedelta(days=10),
+    )
+    again = evaluate_review_schedule(
+        now=now,
+        last_routine_at=now - timedelta(days=3),
+        last_adaptation_at=now - timedelta(days=10),
+    )
     assert first.trigger_id == again.trigger_id
     assert first.record_hash == again.record_hash
     with pytest.raises(ValueError, match="REVIEW_TRIGGER_HASH_MISMATCH"):
