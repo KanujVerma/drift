@@ -271,3 +271,98 @@ independent consumption acceptance are qualified, it does not prove fsync,
 crash-safe provider invocation admission, cross-arm economic allocation,
 provider-invoice authenticity, or monetary cap compliance. The team must not
 call K2's offline receipts an operational spending authorization.
+## Stacked K3 correctness correction for the final QA SHA
+
+The original K3 implementation #403 / PR #450 is still an unmerged
+implementation candidate. K3 issue #469 supplies a separate, issue-scoped
+correction branch stacked on the K2 hardening PR #467. Only the final
+consolidated immutable QA revision can be accepted; do not count tests
+from this separate corrective branch as acceptance of PR #457.
+
+### Exact K3 behavior and adversarial acceptance
+
+1. **Whole-pool admission**: Optimizer R must reject an entire finite
+   preregistered candidate pool if *any* member fails deterministic
+   validation, including when a valid, high-scoring candidate appears
+   first. No silently reduced pool, selected candidate, or score list
+   survives this rejection. Preserve one synthetic zero-cost receipt
+   and both lifecycle events with the error
+   `INVALID_CANDIDATE_POOL_MEMBER`.
+2. **Comparator tie rule**: Within the existing 1e-9 Decimal score
+   equivalence band, compare `(family_id, parameters_hash, candidate_id)`.
+   `strategy_ref.sha256` is a code artifact identity, not the actual
+   strategy-parameter digest. Include an adversarial fixture in which
+   candidate-ID order and parameter-digest order disagree, and permute
+   the pool to demonstrate identical selection.
+3. **Invocation and candidate identity**: The comparator's deterministic
+   seed must bind context, method, pool, validation policy, explicit
+   logical request ID, candidate expiry and clock. Candidate IDs also
+   bind the generated attempt, so a distinct invocation cannot reuse
+   an earlier candidate ID. Started context references must use the
+   actual `context.profile`, not a hard-coded `v1`.
+   Exact identical offline invocation retries remain idempotent.
+   An actual *new* attempt needs a distinct caller-supplied
+   `logical_request_id` or `attempt_id`; no hidden random identity.
+4. **Receipt ordering**: R persists its synthetic compute cost before
+   committing a completed/rejected terminal attempt that references
+   that cost. Both success and rejection preserve the cost; no
+   provider usage or verified provider invoice is implied.
+5. **Scripted provider-free producer**: A fake cost recorded as
+   scientific notation, non-finite text, or a nonzero amount with
+   blank currency must be classed `unknown` instead of throwing after
+   a started attempt. Invalid candidate TTL timezones are refused
+   before an attempt begins. Distinct valid expiry instants or logical
+   requests create separate deterministic identities. This does
+   not make offline FakeTransport an authenticated live provider.
+6. **T07 / T09 / T13**: Replay a valid and invalid scripted response;
+   validate the entire conventional pool; preserve all terminal and
+   cost receipts; test distinct AI and R attempts and separate
+   arm-specific stores against the same frozen context reference.
+   No callback objective is deemed scientifically accepted merely
+   because the finite pool and scoring seam run.
+7. **Fixed inputs despite callback effects**: R snapshots the entire
+   pool before objective scoring begins, validates all members as one
+   unit, and passes the scoring callback a fresh candidate clone.
+   A scorer that mutates its input or the caller's later pool members
+   must neither rewrite a candidate record nor alter the precommitted
+   pool that is being ranked. A callback itself is NOT a security
+   sandbox or an approved scientific objective. An independent
+   capability-denied harness is required before claiming untrusted
+   external scorer execution is safe. Opaque noncanonical pool objects
+   must be refused before running custom Python `__deepcopy__` hooks, with
+   a retained explicit-attempt rejection and synthetic cost.
+8. **Full reference and clock binding**: Both scripted and R attempts
+   bind method and policy ID/version/hash rather than digest alone.
+   The conventional clock and expiry are normalized to UTC after
+   refusing missing timezone offsets. Changes to any of these
+   commitments require separate invocation identities.
+
+### Dedicated K3 tests on its own stacked SHA
+
+```bash
+uv sync --locked
+uv run pytest -q tests/unit/test_intelligence_proposal_producer.py tests/unit/test_intelligence_conventional_selector.py
+uv run pytest -q tests/unit/test_intelligence_contracts.py tests/unit/test_intelligence_validation.py tests/unit/test_intelligence_receipts.py tests/unit/test_intelligence_model_replay.py tests/unit/test_intelligence_proposal_producer.py tests/unit/test_intelligence_conventional_selector.py
+uv run ruff check src/drift/intelligence tests/unit/test_intelligence_*
+uv run ruff format --check src/drift/intelligence tests/unit/test_intelligence_*
+uv run mypy src/drift/intelligence tests/unit/test_intelligence_*
+uv build
+git diff --check
+```
+
+These commands are **validation instructions, not an assertion of passing
+results**. On final consolidation, run all five independently reviewed QA
+passes and the *full* pinned test suite documented above. Publish actual
+command output, pinned commit, Python/OS, failures and reviewer evidence.
+
+### External boundaries and release prerequisites
+
+The scorer is an injected, deterministic synthetic objective. This change
+does not authenticate a scientifically preregistered candidate universe,
+commit to a particular risk-adjusted objective, establish matched
+historical B3/B4/B5 investment performance, or authorize an LLM or trade.
+Kanuj's experiment approvals and Matthew's platform contract acceptance
+remain separate. Existing original K3 and integration branches must be
+preserved; integrate the corrective commit history without forcing or
+resetting them, then retest at the new integration SHA.
+

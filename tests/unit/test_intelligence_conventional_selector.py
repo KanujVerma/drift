@@ -479,3 +479,364 @@ def test_noncanonical_pool_without_explicit_attempt_id_cannot_claim_replay_ident
             checked_at=datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
         )
     assert recorder.export_events() == []
+def test_r_rejects_entire_pool_if_any_member_invalid(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+) -> None:
+    """Do not silently drop invalid registered candidates and pick a winner."""
+    valid = deepcopy(fixture_data["raw_choice"])
+    invalid = deepcopy(valid)
+    invalid["cash_weight"] = "0.9"
+    invalid["targets"][0]["weight"] = "0.9"
+    for index, pool in enumerate(([valid, invalid], [invalid, valid])):
+        recorder = ResearchReceiptStore()
+        scores_seen: list[str] = []
+
+        def objective(candidate: ResearchCandidate) -> Decimal:
+            scores_seen.append(candidate.candidate_id)
+            return Decimal("1")
+
+        result = select_conventional_candidate(
+            context=sample_context,
+            resolved_inputs=sample_bindings,
+            candidate_pool=pool,
+            objective_fn=objective,
+            method_ref=ArtifactReference(
+                id="synthetic:method-R", version="v1", sha256="e" * 64
+            ),
+            validation_policy=ArtifactReference(
+                id="synthetic:policy", version="v1", sha256="f" * 64
+            ),
+            recorder=recorder,
+            attempt_id=f"whole-pool-refusal-{index}",
+            checked_at=datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
+        )
+        assert not result.is_success
+        assert result.selected_candidate is None
+        assert result.candidate_scores == {}
+        events = recorder.get_attempt_events(result.attempt_id)
+        assert [event.status for event in events] == ["started", "rejected"]
+        assert "INVALID_CANDIDATE_POOL_MEMBER" in events[-1].reason_codes
+        assert len(recorder.get_cost_receipts_for_attempt(result.attempt_id)) == 1
+        assert len(scores_seen) <= 1
+
+
+def test_r_tie_breaks_on_actual_parameter_digest(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+) -> None:
+    """Two parameterizations sharing one code digest must rank by params."""
+    registration = sample_bindings.strategy_registry["fixture.equal_weight"]
+    resolved = sample_bindings.model_copy(
+        update={
+            "strategy_registry": {
+                "fixture.equal_weight": registration.model_copy(
+                    update={"allowed_parameters": {"choice_number": int}}
+                )
+            }
+        }
+    )
+    choices = []
+    for number in range(18):
+        raw = deepcopy(fixture_data["raw_choice"])
+        raw["selection"]["parameters"] = {"choice_number": number}
+        choices.append(raw)
+
+    method = ArtifactReference(
+        id="synthetic:method-R", version="v1", sha256="e" * 64
+    )
+    policy = ArtifactReference(
+        id="synthetic:policy", version="v1", sha256="f" * 64
+    )
+    cutoff = datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC)
+    observed: list[ResearchCandidate] = []
+
+    def remember(candidate: ResearchCandidate) -> Decimal:
+        observed.append(candidate)
+        return Decimal("7")
+
+    probe = select_conventional_candidate(
+        context=sample_context,
+        resolved_inputs=resolved,
+        candidate_pool=choices,
+        objective_fn=remember,
+        method_ref=method,
+        validation_policy=policy,
+        recorder=ResearchReceiptStore(),
+        attempt_id="synthetic:parameter-tie",
+        checked_at=cutoff,
+    )
+    assert probe.is_success
+    assert len(observed) == len(choices)
+    inversion = next(
+        (
+            (a, b)
+            for a in observed
+            for b in observed
+            if a.strategy is not None
+            and b.strategy is not None
+            and a.strategy.parameters_hash < b.strategy.parameters_hash
+            and a.candidate_id > b.candidate_id
+        ),
+        None,
+    )
+    assert inversion is not None
+    expected, other = inversion
+    assert expected.strategy is not None
+    assert other.strategy is not None
+    expected_number = expected.strategy.parameters["choice_number"]
+    other_number = other.strategy.parameters["choice_number"]
+
+    for pair in (
+        (choices[expected_number], choices[other_number]),
+        (choices[other_number], choices[expected_number]),
+    ):
+        result = select_conventional_candidate(
+            context=sample_context,
+            resolved_inputs=resolved,
+            candidate_pool=pair,
+            objective_fn=lambda _candidate: Decimal("7"),
+            method_ref=method,
+            validation_policy=policy,
+            recorder=ResearchReceiptStore(),
+            attempt_id="synthetic:parameter-tie",
+            checked_at=cutoff,
+        )
+        assert result.is_success
+        assert result.selected_candidate is not None
+        assert result.selected_candidate.candidate_id == expected.candidate_id
+
+
+def test_r_attempts_bind_policy_request_and_context_profile(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+) -> None:
+    """Different invocations cannot alias one started/terminal/cost identity."""
+    at = datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC)
+    method = ArtifactReference(
+        id="synthetic:method-R", version="v1", sha256="e" * 64
+    )
+    policy_a = ArtifactReference(
+        id="synthetic:policy-A", version="v1", sha256="a" * 64
+    )
+    policy_b = ArtifactReference(
+        id="synthetic:policy-B", version="v1", sha256="b" * 64
+    )
+    store = ResearchReceiptStore()
+
+    def run(request: str, policy: ArtifactReference) -> str:
+        result = select_conventional_candidate(
+            context=sample_context,
+            resolved_inputs=sample_bindings,
+            candidate_pool=[fixture_data["raw_choice"]],
+            objective_fn=lambda _candidate: Decimal("1"),
+            method_ref=method,
+            validation_policy=policy,
+            recorder=store,
+            logical_request_id=request,
+            checked_at=at,
+        )
+        assert result.is_success
+        assert result.selected_candidate is not None
+        events = store.get_attempt_events(result.attempt_id)
+        assert [event.status for event in events] == ["started", "completed"]
+        assert events[0].context_ref.version == sample_context.profile
+        assert events[1].candidate_ref is not None
+        assert events[1].candidate_ref.id == result.selected_candidate.candidate_id
+        assert events[1].candidate_ref.version == result.selected_candidate.profile
+        assert events[1].candidate_ref.sha256 == result.selected_candidate.record_hash
+        assert len(store.get_cost_receipts_for_attempt(result.attempt_id)) == 1
+        return result.attempt_id
+
+    policy_new_version = ArtifactReference(
+        id=policy_a.id, version="v2", sha256=policy_a.sha256
+    )
+    ids = [
+        run("synthetic:request-A", policy_a),
+        run("synthetic:request-B", policy_a),
+        run("synthetic:request-A", policy_b),
+        run("synthetic:request-A", policy_new_version),
+    ]
+    assert len(set(ids)) == 4
+    # Idempotent identical replay does not mint a new cost or attempt chain.
+    assert run("synthetic:request-A", policy_a) == ids[0]
+    assert len(store.export_events()) == 12
+def test_r_freezes_pool_before_objective_side_effects(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+) -> None:
+    """Scoring cannot rewrite later pool choices under an old pool hash."""
+    first = deepcopy(fixture_data["raw_choice"])
+    second = deepcopy(first)
+    second["targets"][0]["weight"] = "0.4"
+    second["targets"][1]["weight"] = "0.4"
+    second["cash_weight"] = "0.2"
+    original_second = deepcopy(second)
+    seen: list[str] = []
+
+    def untrusted_score(candidate: ResearchCandidate) -> Decimal:
+        seen.append(candidate.candidate_id)
+        if len(seen) == 1:
+            # A mutable caller-owned input changes only *after* the
+            # predeclared and prevalidated pool was snapshotted.
+            second["cash_weight"] = "0.99"
+            second["targets"][0]["weight"] = "0.99"
+            if candidate.strategy is not None and isinstance(
+                candidate.strategy.parameters, dict
+            ):
+                candidate.strategy.parameters["untrusted_mutation"] = True
+        return Decimal("1")
+
+    recorder = ResearchReceiptStore()
+    result = select_conventional_candidate(
+        context=sample_context,
+        resolved_inputs=sample_bindings,
+        candidate_pool=[first, second],
+        objective_fn=untrusted_score,
+        method_ref=ArtifactReference(
+            id="synthetic:method-R", version="v1", sha256="e" * 64
+        ),
+        validation_policy=ArtifactReference(
+            id="synthetic:policy", version="v1", sha256="f" * 64
+        ),
+        recorder=recorder,
+        attempt_id="synthetic:snapshot-side-effects",
+        checked_at=datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
+    )
+    assert result.is_success
+    assert result.selected_candidate is not None
+    assert len(seen) == 2
+    assert len(result.candidate_scores) == 2
+    assert second != original_second
+    assert all(
+        event.status == expected
+        for event, expected in zip(
+            recorder.get_attempt_events(result.attempt_id),
+            ("started", "completed"),
+            strict=True,
+        )
+    )
+    assert len(recorder.get_cost_receipts_for_attempt(result.attempt_id)) == 1
+    # The retained, scored winner still passes intrinsic hash validation even
+    # after the scoring callback tried to mutate its separate nested mapping.
+    ResearchCandidate.model_validate(
+        result.selected_candidate.model_dump(mode="python")
+    )
+def test_r_naive_ttl_rejected_without_incurred_attempt(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+) -> None:
+    recorder = ResearchReceiptStore()
+    with pytest.raises(ValueError, match="INDETERMINATE_TIMEZONE"):
+        select_conventional_candidate(
+            context=sample_context,
+            resolved_inputs=sample_bindings,
+            candidate_pool=[fixture_data["raw_choice"]],
+            objective_fn=lambda _candidate: Decimal("1"),
+            method_ref=ArtifactReference(
+                id="synthetic:method-R", version="v1", sha256="e" * 64
+            ),
+            validation_policy=ArtifactReference(
+                id="synthetic:policy", version="v1", sha256="f" * 64
+            ),
+            recorder=recorder,
+            checked_at=datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
+            valid_until=datetime(2024, 1, 2, 11, 0),
+        )
+    assert recorder.export_events() == []
+
+
+def test_ai_and_r_attempt_stores_do_not_leak_across_arms(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+) -> None:
+    """T13: identical context refs need not imply one mutable attempt store."""
+    ai_store = ResearchReceiptStore()
+    r_store = ResearchReceiptStore()
+    now = datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC)
+    ai = produce_proposal(
+        context=sample_context,
+        resolved_inputs=sample_bindings,
+        frozen_method=ArtifactReference(
+            id="synthetic:AI", version="v1", sha256="a" * 64
+        ),
+        validation_policy=ArtifactReference(
+            id="synthetic:policy", version="v1", sha256="b" * 64
+        ),
+        recorder=ai_store,
+        transport=FakeTransport(raw_choice=fixture_data["raw_choice"]),
+        attempt_id="synthetic:ai-isolated",
+        checked_at=now,
+    )
+    conventional = select_conventional_candidate(
+        context=sample_context,
+        resolved_inputs=sample_bindings,
+        candidate_pool=[fixture_data["raw_choice"]],
+        objective_fn=lambda _candidate: Decimal("1"),
+        method_ref=ArtifactReference(
+            id="synthetic:R", version="v1", sha256="e" * 64
+        ),
+        validation_policy=ArtifactReference(
+            id="synthetic:policy", version="v1", sha256="f" * 64
+        ),
+        recorder=r_store,
+        attempt_id="synthetic:r-isolated",
+        checked_at=now,
+    )
+    assert ai.is_success and conventional.is_success
+    ai_start = ai_store.get_attempt_events(ai.attempt_id)[0]
+    r_start = r_store.get_attempt_events(conventional.attempt_id)[0]
+    assert ai_start.context_ref.sha256 == sample_context.record_hash
+    assert r_start.context_ref.sha256 == sample_context.record_hash
+    assert ai_store.get_attempt_events(conventional.attempt_id) == ()
+    assert r_store.get_attempt_events(ai.attempt_id) == ()
+    assert len(ai_store.get_cost_receipts_for_attempt(ai.attempt_id)) == 1
+    assert len(r_store.get_cost_receipts_for_attempt(conventional.attempt_id)) == 1
+
+
+def test_r_opaque_pool_refuses_before_deepcopy_side_effects(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+) -> None:
+    """Invalid opaque input cannot execute custom deepcopy code."""
+    class DangerousInput:
+        touched = False
+
+        def __deepcopy__(self, memo: dict[int, object]) -> object:
+            self.touched = True
+            raise AssertionError("opaque input must not be copied")
+
+    poisoned = DangerousInput()
+    raw = deepcopy(fixture_data["raw_choice"])
+    raw["selection"]["parameters"] = {"untrusted": poisoned}
+    recorder = ResearchReceiptStore()
+    result = select_conventional_candidate(
+        context=sample_context,
+        resolved_inputs=sample_bindings,
+        candidate_pool=[raw],
+        objective_fn=lambda _candidate: Decimal("1"),
+        method_ref=ArtifactReference(
+            id="synthetic:method-R", version="v1", sha256="e" * 64
+        ),
+        validation_policy=ArtifactReference(
+            id="synthetic:policy", version="v1", sha256="f" * 64
+        ),
+        recorder=recorder,
+        attempt_id="synthetic:opaque-pool",
+        checked_at=datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
+    )
+    assert not poisoned.touched
+    assert result.status == "REJECTED"
+    assert result.selected_candidate is None
+    assert [event.status for event in recorder.get_attempt_events(result.attempt_id)] == [
+        "started",
+        "rejected",
+    ]
+    assert len(recorder.get_cost_receipts_for_attempt(result.attempt_id)) == 1
