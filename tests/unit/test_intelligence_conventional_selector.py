@@ -658,4 +658,64 @@ def test_r_attempts_bind_policy_request_and_context_profile(
     # Idempotent identical replay does not mint a new cost or attempt chain.
     assert run("synthetic:request-A", policy_a) == ids[0]
     assert len(store.export_events()) == 9
+def test_r_freezes_pool_before_objective_side_effects(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+) -> None:
+    """Scoring cannot rewrite later pool choices under an old pool hash."""
+    first = deepcopy(fixture_data["raw_choice"])
+    second = deepcopy(first)
+    second["targets"][0]["weight"] = "0.4"
+    second["targets"][1]["weight"] = "0.4"
+    second["cash_weight"] = "0.2"
+    original_second = deepcopy(second)
+    seen: list[str] = []
+
+    def untrusted_score(candidate: ResearchCandidate) -> Decimal:
+        seen.append(candidate.candidate_id)
+        if len(seen) == 1:
+            # A mutable caller-owned input changes only *after* the
+            # predeclared and prevalidated pool was snapshotted.
+            second["cash_weight"] = "0.99"
+            second["targets"][0]["weight"] = "0.99"
+            if candidate.strategy is not None:
+                candidate.strategy.parameters["untrusted_mutation"] = True
+        return Decimal("1")
+
+    recorder = ResearchReceiptStore()
+    result = select_conventional_candidate(
+        context=sample_context,
+        resolved_inputs=sample_bindings,
+        candidate_pool=[first, second],
+        objective_fn=untrusted_score,
+        method_ref=ArtifactReference(
+            id="synthetic:method-R", version="v1", sha256="e" * 64
+        ),
+        validation_policy=ArtifactReference(
+            id="synthetic:policy", version="v1", sha256="f" * 64
+        ),
+        recorder=recorder,
+        attempt_id="synthetic:snapshot-side-effects",
+        checked_at=datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
+    )
+    assert result.is_success
+    assert result.selected_candidate is not None
+    assert len(seen) == 2
+    assert len(result.candidate_scores) == 2
+    assert second != original_second
+    assert all(
+        event.status == expected
+        for event, expected in zip(
+            recorder.get_attempt_events(result.attempt_id),
+            ("started", "completed"),
+            strict=True,
+        )
+    )
+    assert len(recorder.get_cost_receipts_for_attempt(result.attempt_id)) == 1
+    # The retained, scored winner still passes intrinsic hash validation even
+    # after the scoring callback tried to mutate its separate nested mapping.
+    ResearchCandidate.model_validate(
+        result.selected_candidate.model_dump(mode="python")
+    )
 
