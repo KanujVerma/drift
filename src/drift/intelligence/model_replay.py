@@ -72,12 +72,13 @@ def replay_model_output(
     if actual_checked_at.tzinfo is None or actual_checked_at.utcoffset() is None:
         raise ValueError("INDETERMINATE_TIMEZONE: replay requires explicit cutoff")
     now = actual_checked_at.astimezone(UTC)
-    identity_seed = content_hash({
-        "attempt": attempt_id,
-        "context": original_context.record_hash,
-        "adapter": adapter_revision.sha256,
-        "parser": parser_schema_ref.sha256,
-        "policy": validation_policy.sha256,
+    identity_seed = content_hash(
+        {
+            "attempt": attempt_id,
+            "context": original_context.record_hash,
+            "adapter": adapter_revision.sha256,
+            "parser": parser_schema_ref.sha256,
+            "policy": validation_policy.sha256,
         "request": (
             recorded_request.content_hash
             if isinstance(recorded_request, StoredArtifactRef)
@@ -88,10 +89,13 @@ def replay_model_output(
             if isinstance(recorded_response, StoredArtifactRef)
             else recorded_response.get("content_hash") if recorded_response else None
         ),
-        "cutoff": now,
-    })
+            "cutoff": now,
+        }
+    )
     actual_replay_id = replay_id or str(uuid5(NAMESPACE_URL, identity_seed))
-    actual_candidate_id = candidate_id or str(uuid5(NAMESPACE_URL, identity_seed + ":candidate"))
+    actual_candidate_id = candidate_id or str(
+        uuid5(NAMESPACE_URL, identity_seed + ":candidate")
+    )
 
     # Convert request ref
     if isinstance(recorded_request, StoredArtifactRef):
