@@ -5,7 +5,6 @@ under Decision Packets DP-R3 (Spend/Unknowns) and DP-R4 (Persistence/Recovery).
 """
 
 import json
-
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import datetime
