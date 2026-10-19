@@ -367,3 +367,30 @@ def test_naive_calendar_history_fails_closed() -> None:
         evaluate_review_schedule(
             now=now, current_calendar=current, calendar_history=[historical]
         )
+
+
+def test_future_event_revision_cannot_invalidate_past_review() -> None:
+    """Later-arriving contradictory events are not visible at this cutoff."""
+    now = datetime(2024, 1, 10, 10, 0, tzinfo=UTC)
+    past = FeedEvent(
+        event_id="synthetic:one",
+        source_id="synthetic:feed",
+        version="v1",
+        available_at=now - timedelta(minutes=1),
+        content_hash="a" * 64,
+        raw_text="inert",
+        is_material=True,
+    )
+    future = FeedEvent(
+        event_id="synthetic:one",
+        source_id="synthetic:feed",
+        version="v1",
+        available_at=now + timedelta(minutes=1),
+        content_hash="b" * 64,
+        raw_text="future revision cannot invalidate the earlier decision",
+        is_material=True,
+    )
+    baseline = evaluate_review_schedule(now=now, feed_events=[past])
+    later = evaluate_review_schedule(now=now, feed_events=[future, past])
+    assert baseline.trigger_id == later.trigger_id
+    assert baseline.record_hash == later.record_hash

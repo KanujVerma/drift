@@ -206,7 +206,8 @@ def evaluate_review_schedule(
                 raise ValueError("STALE_CALENDAR_REVISION")
         for past_cal in calendar_history:
             if (
-                past_cal.calendar_id == current_calendar.calendar_id
+                past_cal.effective_cutoff <= now_utc
+                and past_cal.calendar_id == current_calendar.calendar_id
                 and past_cal.revision == current_calendar.revision
                 and past_cal.content_hash != current_calendar.content_hash
             ):
@@ -250,6 +251,11 @@ def evaluate_review_schedule(
     for ev in feed_events:
         if ev.available_at.tzinfo is None or ev.available_at.utcoffset() is None:
             raise ValueError("INDETERMINATE_TIMEZONE: feed availability lacks offset")
+        # Evidence received after the current cutoff cannot alter this
+        # review's admissibility or event-revision conflict result.
+        ev_available_utc = ev.available_at.astimezone(UTC)
+        if ev_available_utc > now_utc:
+            continue
         key = (ev.event_id, ev.version)
         previous = event_versions.get(key)
         if previous is not None and previous != ev.content_hash:

@@ -385,10 +385,26 @@ class ResearchReceiptStore:
             ),
         ):
             exported.append(att.model_dump(mode="python"))
-        for cost in sorted(
-            self._costs_by_receipt_id.values(), key=lambda item: item.receipt_id
-        ):
-            exported.append(cost.model_dump(mode="python"))
+        # Deterministic topological order: the original estimate/unknown
+        # receipt must precede its superseding correction, even when the
+        # correction ID sorts first lexicographically. Otherwise export and
+        # reload of valid lineage can fail closed on its own snapshots.
+        pending = dict(self._costs_by_receipt_id)
+        while pending:
+            ready = sorted(
+                (
+                    cost for cost in pending.values()
+                    if cost.supersedes_receipt_id not in pending
+                ),
+                key=lambda cost: cost.receipt_id,
+            )
+            if not ready:
+                raise ValueError(
+                    "INVALID_COST_LINEAGE: correction graph contains a cycle"
+                )
+            for cost in ready:
+                exported.append(cost.model_dump(mode="python"))
+                del pending[cost.receipt_id]
         return exported
 
     def load_events(self, events: Sequence[Mapping[str, Any]]) -> None:

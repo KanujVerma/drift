@@ -449,3 +449,42 @@ def test_export_is_deterministic_under_independent_ingestion_order(
     for ev in reversed(events):
         right.record_attempt(ev)
     assert left.export_canonical_jsonl() == right.export_canonical_jsonl()
+
+
+def test_cost_correction_export_orders_ancestor_before_lexically_first_child(
+    sample_scope: Scope,
+) -> None:
+    """A valid correction chain must round-trip regardless of receipt ID sort."""
+    now = datetime(2024, 1, 2, 10, 0, tzinfo=UTC)
+    original = create_cost_receipt(
+        receipt_id="z-original-estimate",
+        scope=sample_scope,
+        category="model_inference",
+        billing_identity="synthetic:test",
+        amount_basis="estimate",
+        amount="0.50",
+        currency="USD",
+        recorded_at=now,
+    )
+    correction = create_cost_receipt(
+        receipt_id="a-corrected-actual",
+        scope=sample_scope,
+        category="model_inference",
+        billing_identity="synthetic:test",
+        amount_basis="actual",
+        amount="0.25",
+        currency="USD",
+        recorded_at=now,
+        supersedes_receipt_id=original.receipt_id,
+    )
+    source = ResearchReceiptStore()
+    source.record_cost_receipt(original)
+    source.record_cost_receipt(correction)
+    serialized = source.export_canonical_jsonl()
+    assert serialized.find(b"z-original-estimate") < serialized.find(
+        b"a-corrected-actual"
+    )
+    recovered = ResearchReceiptStore()
+    recovered.load_canonical_jsonl(serialized)
+    assert recovered.export_canonical_jsonl() == serialized
+    assert recovered.get_cost_receipt(correction.receipt_id) == correction
