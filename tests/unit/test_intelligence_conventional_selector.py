@@ -646,6 +646,8 @@ def test_r_attempts_bind_policy_request_and_context_profile(
         assert events[0].context_ref.version == sample_context.profile
         assert events[1].candidate_ref is not None
         assert events[1].candidate_ref.id == result.selected_candidate.candidate_id
+        assert events[1].candidate_ref.version == result.selected_candidate.profile
+        assert events[1].candidate_ref.sha256 == result.selected_candidate.record_hash
         assert len(store.get_cost_receipts_for_attempt(result.attempt_id)) == 1
         return result.attempt_id
 
