@@ -229,3 +229,100 @@ def test_t06_negative_replay_cases(
     assert res.status == exp_status
     assert res.reason is not None
     assert exp_reason in res.reason
+
+
+def test_replay_rejects_equivalent_json_with_different_retained_bytes(
+    replay_fixtures: dict[str, Any],
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+) -> None:
+    """Hashing the parsed JSON is not evidence that the raw bytes match."""
+    positive = replay_fixtures["positive_replay"]
+    request = positive["request"]
+    response = positive["response"]
+    altered_request = request["payload"].replace("{", "{ ", 1)
+    assert json.loads(altered_request) == json.loads(request["payload"])
+    result = replay_model_output(
+        recorded_request=StoredArtifactRef(
+            artifact_id="req-art-01", kind="other",
+            content_hash=request["content_hash"], location=request["location"],
+        ),
+        recorded_response=StoredArtifactRef(
+            artifact_id="resp-art-01", kind="other",
+            content_hash=response["content_hash"], location=response["location"],
+        ),
+        request_payload=altered_request,
+        response_payload=response["payload"],
+        original_context=sample_context,
+        original_bindings=sample_bindings,
+        adapter_revision=ArtifactReference(id="adapter:offline", version="v1", sha256="a"*64),
+        parser_schema_ref=ArtifactReference(id="schema:raw", version="v1", sha256="b"*64),
+        validation_policy=ArtifactReference(id="policy:fixed", version="v1", sha256="c"*64),
+        attempt_id="raw-byte-proof",
+        checked_at=datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
+    )
+    assert result.status == "UNAVAILABLE"
+    assert "request digest mismatch" in (result.reason or "")
+
+
+def test_mismatched_response_presence_cannot_be_reported_as_timeout(
+    replay_fixtures: dict[str, Any],
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+) -> None:
+    positive = replay_fixtures["positive_replay"]
+    request = positive["request"]
+    result = replay_model_output(
+        recorded_request=StoredArtifactRef(
+            artifact_id="req-art-01", kind="other",
+            content_hash=request["content_hash"], location=request["location"],
+        ),
+        recorded_response=None,
+        request_payload=request["payload"],
+        response_payload=positive["response"]["payload"],
+        original_context=sample_context,
+        original_bindings=sample_bindings,
+        adapter_revision=ArtifactReference(id="adapter:offline", version="v1", sha256="a"*64),
+        parser_schema_ref=ArtifactReference(id="schema:raw", version="v1", sha256="b"*64),
+        validation_policy=ArtifactReference(id="policy:fixed", version="v1", sha256="c"*64),
+        attempt_id="missing-response-reference",
+        checked_at=datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
+    )
+    assert result.status == "UNAVAILABLE"
+    assert result.replay_record is None
+
+
+def test_repeated_replay_produces_identical_evidence_identity(
+    replay_fixtures: dict[str, Any],
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+) -> None:
+    positive = replay_fixtures["positive_replay"]
+    request = positive["request"]
+    response = positive["response"]
+    kwargs: dict[str, Any] = {
+        "recorded_request": StoredArtifactRef(
+            artifact_id="req-art-01", kind="other",
+            content_hash=request["content_hash"], location=request["location"],
+        ),
+        "recorded_response": StoredArtifactRef(
+            artifact_id="resp-art-01", kind="other",
+            content_hash=response["content_hash"], location=response["location"],
+        ),
+        "request_payload": request["payload"],
+        "response_payload": response["payload"],
+        "original_context": sample_context,
+        "original_bindings": sample_bindings,
+        "adapter_revision": ArtifactReference(id="adapter:offline", version="v1", sha256="a"*64),
+        "parser_schema_ref": ArtifactReference(id="schema:raw", version="v1", sha256="b"*64),
+        "validation_policy": ArtifactReference(id="policy:fixed", version="v1", sha256="c"*64),
+        "attempt_id": "replay-stability",
+        "checked_at": datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
+    }
+    one = replay_model_output(**kwargs)
+    two = replay_model_output(**kwargs)
+    assert one.is_success and two.is_success
+    assert one.candidate is not None and two.candidate is not None
+    assert one.replay_record is not None and two.replay_record is not None
+    assert one.candidate.record_hash == two.candidate.record_hash
+    assert one.replay_record.record_hash == two.replay_record.record_hash
