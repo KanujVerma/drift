@@ -19,6 +19,8 @@ from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import model_validator
 
+from drift.serialization.canonical import content_hash
+
 from drift.intelligence.contracts import (
     ArtifactReference,
     ImmutableModel,
