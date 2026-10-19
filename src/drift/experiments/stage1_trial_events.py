@@ -391,6 +391,7 @@ def append_stage1_trial_event(
         verify_stage1_trial_chain(trial_id=event.trial_id, events=res)
         return res
 
+    _validate_stage1_trial_event(events[0])
     verify_stage1_trial_chain(trial_id=events[0].trial_id, events=events)
 
     if event.trial_id != events[0].trial_id:

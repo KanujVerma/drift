@@ -966,3 +966,40 @@ def test_reject_append_to_invalid_existing_chain() -> None:
     # Replay corrupt_ev0 also fails: chain validated before replay check
     with pytest.raises(ValueError, match="event_hash mismatch"):
         append_stage1_trial_event(events=corrupt_chain, event=corrupt_ev0)
+
+
+def test_reject_append_non_event_first_element_in_existing_chain() -> None:
+    """Validate that append rejects malformed chain with non-event first element."""
+    trial_id = "CAMP-001:RUN-001:ARM-B:CKPT-001"
+    t0 = datetime(2026, 10, 18, 20, 0, 0, tzinfo=UTC)
+
+    incoming_ev = build_stage1_trial_event(
+        trial_id=trial_id,
+        event_index=0,
+        previous_event_reference="ROOT",
+        event_kind="OPPORTUNITY_CREATED",
+        recorded_at=t0,
+        producer_evidence_references=[],
+        payload_reference="ref0",
+        payload_hash="a" * 64,
+    )
+
+    # Test with None as first element
+    none_chain: tuple[object, ...] = (None,)
+    with pytest.raises(ValueError, match="event must be a Stage1TrialEvent instance"):
+        append_stage1_trial_event(
+            events=none_chain,  # type: ignore[arg-type]
+            event=incoming_ev,
+        )
+    assert len(none_chain) == 1
+    assert none_chain[0] is None
+
+    # Test with non-event object as first element
+    non_event_chain: tuple[object, ...] = ("not-an-event",)
+    with pytest.raises(ValueError, match="event must be a Stage1TrialEvent instance"):
+        append_stage1_trial_event(
+            events=non_event_chain,  # type: ignore[arg-type]
+            event=incoming_ev,
+        )
+    assert len(non_event_chain) == 1
+    assert non_event_chain[0] == "not-an-event"
