@@ -8,7 +8,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid5
 
 from drift.intelligence.contracts import (
     ArtifactReference,
@@ -49,7 +49,7 @@ def select_conventional_candidate(
     context: ResearchContext,
     resolved_inputs: ResolvedDependencies,
     candidate_pool: Sequence[Mapping[str, Any] | RawChoice],
-    objective_fn: Callable[[ResearchCandidate], Decimal | float],
+    objective_fn: Callable[[ResearchCandidate], Decimal],
     method_ref: ArtifactReference,
     validation_policy: ArtifactReference,
     recorder: ResearchReceiptStore,
@@ -66,11 +66,25 @@ def select_conventional_candidate(
     - Deterministic tie-breaking on (score, family_id, params_hash, candidate_id).
     - Full attempt lifecycle recording in recorder store.
     """
-    now = datetime.now(UTC)
-    actual_attempt_id = attempt_id or str(uuid4())
-    actual_request_id = logical_request_id or str(uuid4())
-    start_event_id = str(uuid4())
-    actual_checked_at = checked_at or now
+    # Offline selection must not depend on the host wall clock.
+    now = checked_at or context.review_started_at
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("INDETERMINATE_TIMEZONE: comparator cutoff missing offset")
+    pool_hash = content_hash(sorted(
+        content_hash(
+            choice.model_dump(mode="python") if isinstance(choice, RawChoice) else dict(choice)
+        ) for choice in candidate_pool
+    ))
+    seed = content_hash({
+        "context": context.record_hash,
+        "method": method_ref.sha256,
+        "candidate_pool": pool_hash,
+        "checked_at": now,
+    })
+    actual_attempt_id = attempt_id or str(uuid5(NAMESPACE_URL, seed))
+    actual_request_id = logical_request_id or str(uuid5(NAMESPACE_URL, seed + ":request"))
+    start_event_id = str(uuid5(NAMESPACE_URL, actual_attempt_id + ":start"))
+    actual_checked_at = now
 
     # 1. Record started attempt event
     started_record = create_started_attempt(
@@ -98,8 +112,15 @@ def select_conventional_candidate(
     evaluated_candidates: list[tuple[Decimal, str, str, str, ResearchCandidate]] = []
     scores_dict: dict[str, str] = {}
 
-    for idx, choice_item in enumerate(candidate_pool):
-        cand_id = f"cand-r-{actual_attempt_id[:8]}-{idx}"
+    for choice_item in candidate_pool:
+        # The candidate's identity is stable under a pool permutation.
+        raw_source = (
+            choice_item.model_dump(mode="python")
+            if isinstance(choice_item, RawChoice)
+            else dict(choice_item)
+        )
+        choice_hash = content_hash(raw_source)
+        cand_id = f"cand-r-{choice_hash[:32]}"
         raw_dict = (
             choice_item.model_dump(mode="python")
             if isinstance(choice_item, RawChoice)
@@ -109,12 +130,12 @@ def select_conventional_candidate(
         inv_binding = TrustedInvocationBinding(
             attempt_id=actual_attempt_id,
             candidate_id=cand_id,
-            validation_id=str(uuid4()),
+            validation_id=str(uuid5(NAMESPACE_URL, cand_id + ":validation")),
             policy_ref=validation_policy,
             raw_output_ref=ArtifactReference(
-                id=f"fixture:pool-choice-{idx}",
+                id=f"synthetic:pool-choice-{choice_hash[:16]}",
                 version="v1",
-                sha256=content_hash(raw_dict),
+                sha256=choice_hash,
             ),
             producer="conventional_selector",
             completed_at=now,
@@ -134,7 +155,9 @@ def select_conventional_candidate(
         if val_res.is_valid and val_res.candidate is not None:
             cand = val_res.candidate
             score_num = objective_fn(cand)
-            score_dec = Decimal(str(score_num))
+            if not isinstance(score_num, Decimal) or not score_num.is_finite():
+                raise ValueError("INVALID_OBJECTIVE_SCORE: finite Decimal required")
+            score_dec = score_num
             scores_dict[cand.candidate_id] = str(score_dec)
 
             family = cand.strategy.family_id if cand.strategy else "no_strategy"
@@ -146,7 +169,7 @@ def select_conventional_candidate(
             )
 
     # 3. Handle case where no candidate in pool was valid
-    terminal_event_id = str(uuid4())
+    terminal_event_id = str(uuid5(NAMESPACE_URL, actual_attempt_id + ":terminal"))
     if not evaluated_candidates:
         terminal_attempt = create_terminal_attempt(
             prior_attempt=started_record,
@@ -165,10 +188,14 @@ def select_conventional_candidate(
             billing_identity="conventional_billing",
             amount_basis="verified_zero",
             raw_evidence_ref=StoredArtifactRef(
-                artifact_id="art-zero",
+                artifact_id=f"synthetic:offline-compute:{actual_attempt_id}",
                 kind="other",
-                content_hash="0" * 64,
-                location="fixture:zero",
+                content_hash=content_hash({
+                    "attempt": actual_attempt_id,
+                    "method": method_ref.model_dump(mode="python"),
+                    "kind": "synthetic_no_external_provider_call",
+                }),
+                location="synthetic:offline-compute-only",
             ),
             attempt_id=actual_attempt_id,
             recorded_at=now,
@@ -212,10 +239,14 @@ def select_conventional_candidate(
         billing_identity="conventional_billing",
         amount_basis="verified_zero",
         raw_evidence_ref=StoredArtifactRef(
-            artifact_id="art-zero",
+            artifact_id=f"synthetic:offline-compute:{actual_attempt_id}",
             kind="other",
-            content_hash="0" * 64,
-            location="fixture:zero",
+            content_hash=content_hash({
+                    "attempt": actual_attempt_id,
+                    "method": method_ref.model_dump(mode="python"),
+                    "kind": "synthetic_no_external_provider_call",
+                }),
+            location="synthetic:offline-compute-only",
         ),
         attempt_id=actual_attempt_id,
         recorded_at=now,
