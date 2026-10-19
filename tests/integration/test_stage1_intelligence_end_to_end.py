@@ -216,3 +216,96 @@ def test_k0_unavailable_without_evidence_cannot_become_a_sell_all() -> None:
     assert not verdict.hold_incumbent
     assert verdict.requires_containment
     # No Stage 1 proposer has authority to manufacture a sell-all order here.
+
+
+def test_b3_b4_b5_fixed_family_proposals_share_causal_context_with_r() -> None:
+    """Prove the bounded family choice seam without inventing market eligibility."""
+    context, inputs, fixture_choice = _context_and_bindings()
+    selections = {}
+    for index, family in enumerate(("B3", "B4", "B5"), start=1):
+        selections[family] = StrategyRegistration(
+            family_id=family,
+            strategy_ref=ArtifactReference(
+                id=f"synthetic:{family}:strategy",
+                version="synthetic-v1",
+                sha256=f"{index}" * 64,
+            ),
+            envelope_ref=ArtifactReference(
+                id=f"synthetic:{family}:envelope",
+                version="synthetic-v1",
+                sha256="8" * 64,
+            ),
+            eligibility_ref=ArtifactReference(
+                id=f"synthetic:{family}:eligibility",
+                version="synthetic-v1",
+                sha256="a" * 64,
+            ),
+            allowed_parameters={},
+        )
+    resolved = ResolvedDependencies(
+        portfolio_ref=inputs.portfolio_ref,
+        mandate_ref=inputs.mandate_ref,
+        universe_ref=inputs.universe_ref,
+        registry_ref=inputs.registry_ref,
+        method_ref=inputs.method_ref,
+        admitted_securities=inputs.admitted_securities,
+        strategy_registry=selections,
+        current_selection=StrategySelection(
+            family_id="B3", strategy_version="synthetic-v1", parameters={}
+        ),
+    )
+
+    def choice(family: str) -> dict:
+        proposal = json.loads(json.dumps(fixture_choice))
+        proposal["selection"] = {
+            "family_id": family,
+            "strategy_version": "synthetic-v1",
+            "parameters": {},
+        }
+        return proposal
+
+    at = datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC)
+    policy = ArtifactReference(id="synthetic:policy", version="v1", sha256="b" * 64)
+    ai_store = ResearchReceiptStore()
+    conventional_store = ResearchReceiptStore()
+    ai = produce_proposal(
+        context=context,
+        resolved_inputs=resolved,
+        frozen_method=ArtifactReference(
+            id="synthetic:scripted-ai", version="v1", sha256="c" * 64
+        ),
+        validation_policy=policy,
+        recorder=ai_store,
+        transport=FakeTransport(raw_choice=choice("B4")),
+        attempt_id="synthetic-stage1-ai",
+        checked_at=at,
+    )
+    comparison = select_conventional_candidate(
+        context=context,
+        resolved_inputs=resolved,
+        candidate_pool=[choice("B3"), choice("B4"), choice("B5")],
+        objective_fn=lambda candidate: {
+            "B3": Decimal("0.1"),
+            "B4": Decimal("0.2"),
+            "B5": Decimal("0.3"),
+        }[candidate.strategy.family_id] if candidate.strategy else Decimal("-1"),
+        method_ref=ArtifactReference(
+            id="synthetic:registered-objective", version="v1", sha256="d" * 64
+        ),
+        validation_policy=policy,
+        recorder=conventional_store,
+        attempt_id="synthetic-stage1-r",
+        checked_at=at,
+    )
+    assert ai.is_success and comparison.is_success
+    assert ai.candidate is not None
+    assert comparison.selected_candidate is not None
+    assert ai.candidate.strategy is not None
+    assert comparison.selected_candidate.strategy is not None
+    assert ai.candidate.strategy.family_id == "B4"
+    assert comparison.selected_candidate.strategy.family_id == "B5"
+    assert ai.candidate.context_ref.sha256 == comparison.selected_candidate.context_ref.sha256
+    assert ai_store.get_attempt_events(comparison.attempt_id) == ()
+    assert conventional_store.get_attempt_events(ai.attempt_id) == ()
+    # Registered fixture hashes are not authenticated market eligibility:
+    # no fill, broker call or scored scientific experiment follows this choice.
