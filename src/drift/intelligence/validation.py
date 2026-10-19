@@ -9,6 +9,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+from drift.errors import CanonicalSerializationError
 from drift.intelligence.contracts import (
     SUPPORTED_PROFILES,
     ArtifactReference,
@@ -100,7 +101,17 @@ def validate_candidate(
     # The producer's claimed raw-output reference must bind the actual
     # untrusted choice bytes after canonical parsing. A self-hashed candidate
     # is not enough to prove which output the producer validated.
-    observed_output_hash = content_hash(choice.model_dump(mode="python"))
+    try:
+        observed_output_hash = content_hash(choice.model_dump(mode="python"))
+    except (CanonicalSerializationError, TypeError, ValueError):
+        # Pydantic's Mapping[str, Any] can hold opaque or non-finite
+        # parameters. Neither can become a canonical candidate or make a
+        # research attempt vanish through an uncaught serialization error.
+        return ValidationResult(
+            is_valid=False,
+            status="INVALID",
+            reason="INVALID_RAW_CHOICE_SERIALIZATION",
+        )
     if trusted_invocation.raw_output_ref.sha256 != observed_output_hash:
         return ValidationResult(
             is_valid=False,
@@ -307,7 +318,14 @@ def validate_candidate(
                 reason=f"invalid: weights sum to {total_weight}",
             )
 
-        params_hash = content_hash(choice.selection.parameters)
+        try:
+            params_hash = content_hash(choice.selection.parameters)
+        except (CanonicalSerializationError, TypeError, ValueError):
+            return ValidationResult(
+                is_valid=False,
+                status="INVALID",
+                reason="INVALID_STRATEGY_PARAMETER_SERIALIZATION",
+            )
         candidate_strategy = CandidateStrategy(
             family_id=reg.family_id,
             strategy_ref=reg.strategy_ref,

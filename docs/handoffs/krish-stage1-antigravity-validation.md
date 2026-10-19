@@ -69,6 +69,9 @@ In addition to the inherited K0/K1-K5 suites, independently exercise:
   evidence actually available by cutoff fails closed. Source-local event IDs
   must be namespaced; contradictory availability stamps for one source event
   fail closed. A material-event feed signal without a causal event is unavailable.
+- Untrusted structured proposal parameters with non-finite or opaque values
+  must return typed INVALID and retain terminal attempt/cost receipts; no
+  serialization exception may strand started work.
 - Completed learning feedback rejects NaN, Infinity, malformed or scientific-
   notation PnL/metrics, including self-rehashed historical snapshots; valid
   complete losing trials remain eligible. Reuse under a changed learning method

@@ -274,3 +274,25 @@ def test_negative_cases_n01_to_n12(
         or "refuse unknown version" in error_msg
         or "reject cross-arm scope" in error_msg
     ), f"Case {case_name}: got '{error_msg}', expected to match '{first_clause}'"
+
+
+
+def test_noncanonical_raw_choice_is_typed_invalid_not_an_exception(
+    fixture_data: dict[str, Any],
+    resolved_dependencies: ResolvedDependencies,
+    trusted_invocation: TrustedInvocationBinding,
+) -> None:
+    """Opaque or non-finite arbitrary parameters cannot escape normalization."""
+    context = ResearchContext.model_validate(fixture_data["fixtures"]["F01"])
+    for invalid_param in (float("nan"), object()):
+        payload = json.loads(json.dumps(fixture_data["raw_choice"]))
+        payload["selection"]["parameters"] = {"unsafe": invalid_param}
+        result = validate_candidate(
+            raw_choice=payload,
+            context=context,
+            resolved_dependencies=resolved_dependencies,
+            trusted_invocation=trusted_invocation,
+        )
+        assert result.status == "INVALID"
+        assert result.candidate is None
+        assert "INVALID_RAW_CHOICE_SERIALIZATION" in result.reason

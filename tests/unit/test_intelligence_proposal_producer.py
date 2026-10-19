@@ -370,3 +370,40 @@ def test_scripted_minimal_abstention_uses_typed_output_binding(
     assert result.candidate.targets == ()
     assert len(store.get_attempt_events(result.attempt_id)) == 2
     assert len(store.get_cost_receipts_for_attempt(result.attempt_id)) == 1
+
+
+
+@pytest.mark.parametrize("invalid_param", [float("nan"), object()])
+def test_noncanonical_scripted_output_retains_failure_and_cost(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+    invalid_param: object,
+) -> None:
+    """A failed serializer must not strand a billed attempt in started status."""
+    raw_choice = json.loads(json.dumps(fixture_data["raw_choice"]))
+    raw_choice["selection"]["parameters"] = {"unsafe": invalid_param}
+    recorder = ResearchReceiptStore()
+    result = produce_proposal(
+        context=sample_context,
+        resolved_inputs=sample_bindings,
+        frozen_method=ArtifactReference(
+            id="synthetic:method", version="v1", sha256="a" * 64
+        ),
+        validation_policy=ArtifactReference(
+            id="synthetic:policy", version="v1", sha256="b" * 64
+        ),
+        recorder=recorder,
+        transport=FakeTransport(raw_choice=raw_choice, cost_amount="0.20"),
+        attempt_id="synthetic:invalid-parameter",
+        checked_at=datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
+    )
+    assert result.status == "INVALID"
+    assert result.candidate is None
+    assert [event.status for event in recorder.get_attempt_events(result.attempt_id)] == [
+        "started", "failed",
+    ]
+    costs = recorder.get_cost_receipts_for_attempt(result.attempt_id)
+    assert len(costs) == 1
+    assert costs[0].amount_basis == "estimate"
+    assert costs[0].amount == "0.20"

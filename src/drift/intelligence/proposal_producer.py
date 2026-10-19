@@ -31,6 +31,7 @@ from drift.intelligence.validation import (
     ValidationResult,
     validate_candidate,
 )
+from drift.errors import CanonicalSerializationError
 from drift.serialization.canonical import content_hash
 
 
@@ -229,41 +230,48 @@ def produce_proposal(
             if isinstance(transport.raw_choice, RawChoice)
             else dict(transport.raw_choice)
         )
-        # FakeTransport supplies structured data rather than retained wire
-        # bytes. Bind the same typed RawChoice projection the validator checks,
-        # while the separately versioned replay path owns exact raw bytes.
+        # Parse the untrusted structured choice before hashing. A permitted
+        # Mapping[str, Any] may contain non-finite or opaque values that the
+        # canonical encoder must refuse. This still records an invalid
+        # terminal attempt and its incurred cost instead of crashing.
         try:
             parsed_choice = RawChoice.model_validate(raw_choice)
             raw_digest = content_hash(parsed_choice.model_dump(mode="python"))
-        except ValueError:
-            # Invalid choices retain a diagnosable rejection, not an exception
-            # that loses the attempt/cost receipt.
-            raw_digest = content_hash(raw_choice)
-        binding = TrustedInvocationBinding(
-            attempt_id=selected_attempt_id,
-            candidate_id=selected_candidate_id,
-            validation_id=str(
-                uuid5(NAMESPACE_URL, selected_attempt_id + ":validation")
-            ),
-            policy_ref=validation_policy,
-            raw_output_ref=ArtifactReference(
-                id=f"synthetic:scripted-output:{selected_attempt_id}",
-                version="v1",
-                sha256=raw_digest,
-            ),
-            producer="scripted_producer",
-            completed_at=now,
-            checked_at=now,
-            valid_until=valid_until,
-            model_replay_ref=None,
-            cost_receipt_ids=(cost_id,),
-        )
-        result = validate_candidate(
-            raw_choice=raw_choice,
-            context=context,
-            resolved_dependencies=resolved_inputs,
-            trusted_invocation=binding,
-        )
+        except (ValueError, TypeError, CanonicalSerializationError):
+            try:
+                raw_digest = content_hash(raw_choice)
+            except (CanonicalSerializationError, TypeError, ValueError):
+                result = ValidationResult(
+                    is_valid=False,
+                    status="INVALID",
+                    reason="INVALID_RAW_CHOICE_SERIALIZATION",
+                )
+        if result is None:
+            binding = TrustedInvocationBinding(
+                attempt_id=selected_attempt_id,
+                candidate_id=selected_candidate_id,
+                validation_id=str(
+                    uuid5(NAMESPACE_URL, selected_attempt_id + ":validation")
+                ),
+                policy_ref=validation_policy,
+                raw_output_ref=ArtifactReference(
+                    id=f"synthetic:scripted-output:{selected_attempt_id}",
+                    version="v1",
+                    sha256=raw_digest,
+                ),
+                producer="scripted_producer",
+                completed_at=now,
+                checked_at=now,
+                valid_until=valid_until,
+                model_replay_ref=None,
+                cost_receipt_ids=(cost_id,),
+            )
+            result = validate_candidate(
+                raw_choice=raw_choice,
+                context=context,
+                resolved_dependencies=resolved_inputs,
+                trusted_invocation=binding,
+            )
         status = result.status
         reason = result.reason
         if result.is_valid and result.candidate is not None:
