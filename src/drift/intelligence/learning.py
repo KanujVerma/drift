@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Literal
 from uuid import NAMESPACE_URL, uuid5
 
@@ -166,6 +167,28 @@ def advance_learning(
             raise ValueError(
                 "REJECTED_INCOMPLETE_EVIDENCE: trial outcome lacks mandatory metrics"
             )
+        # Completed feedback must carry finite numeric observations. Reject
+        # NaN, Infinity, free-form strings and exponent notation before
+        # updating the learning state; a valid losing outcome is still kept.
+        numeric_inputs = [
+            ("pnl", record.pnl),
+            *sorted(record.metrics.items()),
+        ]
+        for label, value in numeric_inputs:
+            if value != value.strip() or "e" in value.lower():
+                raise ValueError(
+                    f"REJECTED_INVALID_FEEDBACK_VALUE: {label} must be DecimalText"
+                )
+            try:
+                amount = Decimal(value)
+            except InvalidOperation as error:
+                raise ValueError(
+                    f"REJECTED_INVALID_FEEDBACK_VALUE: {label} is not numeric"
+                ) from error
+            if not amount.is_finite():
+                raise ValueError(
+                    f"REJECTED_INVALID_FEEDBACK_VALUE: {label} is nonfinite"
+                )
         incumbent = historical.get(record.trial_id)
         if incumbent is not None and incumbent != record:
             # Legitimate revisions require a separately approved, source-bound

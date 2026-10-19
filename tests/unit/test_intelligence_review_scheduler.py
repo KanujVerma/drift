@@ -311,6 +311,11 @@ def test_bad_policy_intervals_and_unknown_defensive_hold_refused() -> None:
     )
     assert not approved
     assert "duplicate security" in (reason or "")
+    approved, reason = validate_defensive_policy(
+        proposed_targets=targets, current_weights={"SPY": "not-a-decimal"}
+    )
+    assert not approved
+    assert "UNKNOWN_CURRENT_POSITION" in (reason or "")
 
 
 def test_future_and_permuted_feed_events_do_not_change_current_trigger() -> None:
@@ -337,3 +342,24 @@ def test_future_and_permuted_feed_events_do_not_change_current_trigger() -> None
     assert baseline.review_type == "event_driven"
     assert baseline.trigger_id == reversed_order.trigger_id == future_added.trigger_id
     assert baseline.record_hash == reversed_order.record_hash == future_added.record_hash
+
+
+def test_naive_calendar_history_fails_closed() -> None:
+    """An unknown timezone in retained calendar history is not assumed UTC."""
+    now = datetime(2024, 1, 10, 10, 0, tzinfo=UTC)
+    current = CalendarRevision(
+        calendar_id="synthetic:calendar",
+        revision=2,
+        effective_cutoff=now - timedelta(minutes=1),
+        content_hash="a" * 64,
+    )
+    historical = CalendarRevision(
+        calendar_id="synthetic:calendar",
+        revision=1,
+        effective_cutoff=(now - timedelta(days=1)).replace(tzinfo=None),
+        content_hash="b" * 64,
+    )
+    with pytest.raises(ValueError, match="INDETERMINATE_TIMEZONE"):
+        evaluate_review_schedule(
+            now=now, current_calendar=current, calendar_history=[historical]
+        )

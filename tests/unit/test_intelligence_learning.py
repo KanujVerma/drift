@@ -284,3 +284,39 @@ def test_learning_rejects_naive_cutoff(sample_method_ref: ArtifactReference) -> 
             arm_id="arm-B",
             method_ref=sample_method_ref,
         )
+
+
+@pytest.mark.parametrize(
+    ("pnl", "metrics"),
+    [
+        ("NaN", {"return": "0.01"}),
+        ("1", {"return": "Infinity"}),
+        ("1e9", {"return": "0.01"}),
+        ("3.2", {"return": "not-a-number"}),
+    ],
+)
+def test_learning_rejects_nonfinite_and_non_numeric_completed_feedback(
+    sample_method_ref: ArtifactReference,
+    pnl: str,
+    metrics: dict[str, str],
+) -> None:
+    """Malformed numeric feedback cannot enter a causally mature learning state."""
+    cutoff = datetime(2024, 1, 2, 10, 0, tzinfo=UTC)
+    trial = TrialFeedbackRecord(
+        trial_id="synthetic:numeric-invalid",
+        arm_id="arm-B",
+        decision_cutoff=cutoff - timedelta(days=1),
+        matured_at=cutoff - timedelta(hours=1),
+        candidate_id="synthetic:candidate",
+        status="completed",
+        pnl=pnl,
+        metrics=metrics,
+    )
+    with pytest.raises(ValueError, match="REJECTED_INVALID_FEEDBACK_VALUE"):
+        advance_learning(
+            previous_snapshot=None,
+            feedback_records=[trial],
+            cutoff=cutoff,
+            arm_id="arm-B",
+            method_ref=sample_method_ref,
+        )

@@ -13,7 +13,7 @@ Implements Slice K5 review and adaptation scheduling logic under D04, D05, DP-R2
 
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 from uuid import NAMESPACE_URL, uuid5
 
@@ -157,9 +157,11 @@ def evaluate_review_schedule(
     causal_event_identity.sort()
     identity = content_hash({
         "now": now_utc,
-        "routine": last_routine_at,
-        "adaptation": last_adaptation_at,
-        "event": last_event_review_at,
+        "routine": last_routine_at.astimezone(UTC) if last_routine_at else None,
+        "adaptation": (
+            last_adaptation_at.astimezone(UTC) if last_adaptation_at else None
+        ),
+        "event": last_event_review_at.astimezone(UTC) if last_event_review_at else None,
         "events": causal_event_identity,
         "feed_condition": feed_condition,
         "policy": (
@@ -172,6 +174,7 @@ def evaluate_review_schedule(
         "calendar": (
             current_calendar.calendar_id,
             current_calendar.revision,
+            current_calendar.effective_cutoff,
             current_calendar.content_hash,
         ) if current_calendar else None,
     })
@@ -186,6 +189,14 @@ def evaluate_review_schedule(
             or current_calendar.effective_cutoff > now_utc
         ):
             raise ValueError("UNAVAILABLE_CALENDAR_CURRENTNESS")
+        for past_cal in calendar_history:
+            if (
+                past_cal.effective_cutoff.tzinfo is None
+                or past_cal.effective_cutoff.utcoffset() is None
+            ):
+                raise ValueError(
+                    "INDETERMINATE_TIMEZONE: historical calendar lacks offset"
+                )
         for past_cal in calendar_history:
             if (
                 past_cal.effective_cutoff <= now_utc
@@ -372,7 +383,10 @@ def validate_defensive_policy(
         if sec_id not in current_weights:
             return False, "UNKNOWN_CURRENT_POSITION: no verified current weight"
         prop_weight = Decimal(target.weight)
-        curr_weight = Decimal(current_weights[sec_id])
+        try:
+            curr_weight = Decimal(current_weights[sec_id])
+        except InvalidOperation:
+            return False, "UNKNOWN_CURRENT_POSITION: invalid current weight"
         if (
             not curr_weight.is_finite()
             or not Decimal("0") <= curr_weight <= Decimal("1")
