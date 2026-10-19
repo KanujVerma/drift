@@ -19,14 +19,13 @@ from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import model_validator
 
-from drift.serialization.canonical import content_hash
-
 from drift.intelligence.contracts import (
     ArtifactReference,
     ImmutableModel,
     TargetWeight,
     compute_record_hash,
 )
+from drift.serialization.canonical import content_hash
 
 FeedCondition = Literal[
     "healthy_empty", "material_event", "broken_feed", "unknown_coverage"
@@ -144,12 +143,24 @@ def evaluate_review_schedule(
                 raise ValueError(
                     f"FUTURE_REVIEW_CLOCK: last {label} review is after now"
                 )
+    # A scheduled review identity must not change when future events arrive,
+    # or when the same completed event set is supplied in a different order.
+    causal_event_identity: list[tuple[str, str, str, datetime]] = []
+    for event in feed_events:
+        if event.available_at.tzinfo is None or event.available_at.utcoffset() is None:
+            raise ValueError("INDETERMINATE_TIMEZONE: feed availability lacks offset")
+        availability = event.available_at.astimezone(UTC)
+        if availability <= now_utc:
+            causal_event_identity.append(
+                (event.event_id, event.version, event.content_hash, availability)
+            )
+    causal_event_identity.sort()
     identity = content_hash({
         "now": now_utc,
         "routine": last_routine_at,
         "adaptation": last_adaptation_at,
         "event": last_event_review_at,
-        "events": [(ev.event_id, ev.version, ev.content_hash) for ev in feed_events],
+        "events": causal_event_identity,
         "feed_condition": feed_condition,
         "policy": (
             str(active_policy.routine_interval),

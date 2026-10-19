@@ -298,3 +298,44 @@ def test_unknown_timing_authority_is_not_implicitly_utc(
             sample_scope, sample_refs, [], cutoff=aware,
             source_grade="exploratory",
         )
+
+
+def test_generated_context_id_binds_authoritative_budget_and_scope(
+    sample_scope: Scope, sample_refs: dict[str, ArtifactReference]
+) -> None:
+    """A changed budget or feedback reference cannot reuse the old context ID."""
+    cutoff = datetime(2024, 1, 2, 10, 0, tzinfo=UTC)
+    original = _context_with_sources(sample_scope, sample_refs, [], cutoff=cutoff)
+    changed_budget = build_context(
+        scope=sample_scope,
+        decision_cutoff=cutoff,
+        portfolio_ref=sample_refs["portfolio_ref"],
+        mandate_ref=sample_refs["mandate_ref"],
+        universe_ref=sample_refs["universe_ref"],
+        registry_ref=sample_refs["registry_ref"],
+        method_ref=sample_refs["method_ref"],
+        clock_policy_ref=sample_refs["clock_policy_ref"],
+        budget_ref=ArtifactReference(
+            id=sample_refs["budget_ref"].id,
+            version=sample_refs["budget_ref"].version,
+            sha256="f" * 64,
+        ),
+        memory_snapshot_ref=sample_refs["memory_snapshot_ref"],
+    )
+    changed_feedback = build_context(
+        scope=sample_scope,
+        decision_cutoff=cutoff,
+        portfolio_ref=sample_refs["portfolio_ref"],
+        mandate_ref=sample_refs["mandate_ref"],
+        universe_ref=sample_refs["universe_ref"],
+        registry_ref=sample_refs["registry_ref"],
+        method_ref=sample_refs["method_ref"],
+        clock_policy_ref=sample_refs["clock_policy_ref"],
+        budget_ref=sample_refs["budget_ref"],
+        memory_snapshot_ref=sample_refs["memory_snapshot_ref"],
+        feedback_refs=(
+            ArtifactReference(id="synthetic:feedback", version="v1", sha256="e" * 64),
+        ),
+    )
+    assert len({original.context_id, changed_budget.context_id, changed_feedback.context_id}) == 3
+    assert len({original.record_hash, changed_budget.record_hash, changed_feedback.record_hash}) == 3

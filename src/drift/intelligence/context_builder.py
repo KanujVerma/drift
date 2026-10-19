@@ -10,8 +10,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
-from drift.serialization.canonical import content_hash
-
 from drift.intelligence.contracts import (
     ArtifactReference,
     ImmutableModel,
@@ -20,6 +18,7 @@ from drift.intelligence.contracts import (
     SourceGrade,
     compute_record_hash,
 )
+from drift.serialization.canonical import content_hash
 
 
 class CandidateInput(ImmutableModel):
@@ -175,18 +174,46 @@ def build_context(
         )
     )
 
-    derived_id = content_hash({
-        "scope": scope.model_dump(mode="python"),
-        "cutoff": cutoff_utc,
-        "review_started_at": actual_review_started,
-        "built_at": actual_built_at,
-        "inputs": admitted_inputs,
-        "method": method_ref.sha256,
-        "portfolio": portfolio_ref.sha256,
-        "mandate": mandate_ref.sha256,
-        "universe": universe_ref.sha256,
-        "memory": memory_snapshot_ref.sha256,
-    })
+    # Generated identity binds every authority and causal input that shapes the
+    # context. Hash-only correlation without these fields could reuse an ID for
+    # a different mandate, source grade, review trigger or feedback scope.
+    ordered_feedback = sorted(
+        feedback_refs, key=lambda ref: (ref.id, ref.version, ref.sha256)
+    )
+    ordered_limitations = sorted(set(limitations))
+    derived_id = content_hash(
+        {
+            "scope": scope.model_dump(mode="python"),
+            "cutoff": cutoff_utc,
+            "review_started_at": actual_review_started,
+            "built_at": actual_built_at,
+            "review_reason": review_reason,
+            "trigger": trigger_ref.model_dump(mode="python") if trigger_ref else None,
+            "clock_policy": clock_policy_ref.model_dump(mode="python"),
+            "inputs": admitted_inputs,
+            "method": method_ref.model_dump(mode="python"),
+            "budget": budget_ref.model_dump(mode="python"),
+            "portfolio": portfolio_ref.model_dump(mode="python"),
+            "mandate": mandate_ref.model_dump(mode="python"),
+            "universe": universe_ref.model_dump(mode="python"),
+            "registry": registry_ref.model_dump(mode="python"),
+            "memory": memory_snapshot_ref.model_dump(mode="python"),
+            "excluded_inputs": (
+                excluded_inputs_ref.model_dump(mode="python")
+                if excluded_inputs_ref else None
+            ),
+            "feed_state": (
+                feed_state_ref.model_dump(mode="python") if feed_state_ref else None
+            ),
+            "feedback": [ref.model_dump(mode="python") for ref in ordered_feedback],
+            "source_grade": source_grade,
+            "limitations": ordered_limitations,
+            "current_selection": (
+                current_selection_ref.model_dump(mode="python")
+                if current_selection_ref else None
+            ),
+        }
+    )
     actual_context_id = context_id or str(uuid5(NAMESPACE_URL, derived_id))
 
     raw_dict: dict[str, Any] = {
@@ -217,9 +244,9 @@ def build_context(
         "feed_state_ref": (
             feed_state_ref.model_dump(mode="python") if feed_state_ref else None
         ),
-        "feedback_refs": [ref.model_dump(mode="python") for ref in feedback_refs],
+        "feedback_refs": [ref.model_dump(mode="python") for ref in ordered_feedback],
         "source_grade": source_grade,
-        "limitations": list(limitations),
+        "limitations": ordered_limitations,
         "current_selection_ref": (
             current_selection_ref.model_dump(mode="python")
             if current_selection_ref

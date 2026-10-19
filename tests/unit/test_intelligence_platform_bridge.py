@@ -188,6 +188,8 @@ def test_t14_unsupported_intraday_without_fallback(
 
     assert req.status == "unsupported"
     assert req.session_target == "none"
+    assert req.target_allocations == ()
+    assert req.cash_weight is None
     assert "UNSUPPORTED_SESSION" in (req.refusal_reason or "")
 
 

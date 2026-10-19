@@ -397,3 +397,41 @@ def test_malformed_or_ambiguous_model_json_is_not_a_valid_decision(
     )
     assert result.status == "MALFORMED_OUTPUT"
     assert result.candidate is None
+
+
+def test_replay_accepts_valid_noncanonical_json_with_verified_byte_receipt(
+    replay_fixtures: dict[str, Any],
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+) -> None:
+    """Typed output binding is distinct from the exact retained byte digest."""
+    positive = replay_fixtures["positive_replay"]
+    request = positive["request"]
+    response = positive["response"]
+    resaved = json.dumps(json.loads(response["payload"]), indent=2, sort_keys=True)
+    raw_digest = hashlib.sha256(resaved.encode("utf-8")).hexdigest()
+    assert raw_digest != response["content_hash"]
+    result = replay_model_output(
+        recorded_request=StoredArtifactRef(
+            artifact_id="req:reserialized", kind="other",
+            content_hash=request["content_hash"], location=request["location"],
+        ),
+        recorded_response=StoredArtifactRef(
+            artifact_id="resp:reserialized", kind="other",
+            content_hash=raw_digest, location=response["location"],
+        ),
+        request_payload=request["payload"],
+        response_payload=resaved,
+        original_context=sample_context,
+        original_bindings=sample_bindings,
+        adapter_revision=ArtifactReference(id="adapter:offline", version="v1", sha256="a" * 64),
+        parser_schema_ref=ArtifactReference(id="schema:raw", version="v1", sha256="b" * 64),
+        validation_policy=ArtifactReference(id="policy:fixed", version="v1", sha256="c" * 64),
+        attempt_id="noncanonical-valid-response",
+        checked_at=datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
+    )
+    assert result.is_success
+    assert result.status == "VALID"
+    assert result.replay_record is not None
+    assert result.replay_record.response_ref is not None
+    assert result.replay_record.response_ref.content_hash == raw_digest

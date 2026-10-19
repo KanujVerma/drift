@@ -311,3 +311,29 @@ def test_bad_policy_intervals_and_unknown_defensive_hold_refused() -> None:
     )
     assert not approved
     assert "duplicate security" in (reason or "")
+
+
+def test_future_and_permuted_feed_events_do_not_change_current_trigger() -> None:
+    """Unavailable future evidence cannot enter a scheduled decision identity."""
+    now = datetime(2024, 1, 10, 10, 0, tzinfo=UTC)
+    first = FeedEvent(
+        event_id="synthetic:one", source_id="synthetic:feed", version="v1",
+        available_at=now - timedelta(minutes=2), content_hash="a" * 64,
+        raw_text="inert", is_material=True,
+    )
+    second = FeedEvent(
+        event_id="synthetic:two", source_id="synthetic:feed", version="v1",
+        available_at=now - timedelta(minutes=1), content_hash="b" * 64,
+        raw_text="inert", is_material=True,
+    )
+    future = FeedEvent(
+        event_id="synthetic:future", source_id="synthetic:feed", version="v1",
+        available_at=now + timedelta(seconds=1), content_hash="c" * 64,
+        raw_text="inert", is_material=True,
+    )
+    baseline = evaluate_review_schedule(now=now, feed_events=[first, second])
+    reversed_order = evaluate_review_schedule(now=now, feed_events=[second, first])
+    future_added = evaluate_review_schedule(now=now, feed_events=[future, second, first])
+    assert baseline.review_type == "event_driven"
+    assert baseline.trigger_id == reversed_order.trigger_id == future_added.trigger_id
+    assert baseline.record_hash == reversed_order.record_hash == future_added.record_hash

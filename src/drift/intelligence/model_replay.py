@@ -16,6 +16,7 @@ from drift.intelligence.contracts import (
     ArtifactReference,
     ImmutableModel,
     ModelReplayRecord,
+    RawChoice,
     ResearchCandidate,
     ResearchContext,
     StoredArtifactRef,
@@ -239,6 +240,19 @@ def replay_model_output(
             reason="malformed JSON in response payload",
         )
 
+    # Two separate commitments are required: ModelReplayRecord.response_ref
+    # binds exact retained bytes, while the candidate validator binds the
+    # normalized typed RawChoice. Cosmetic JSON serialization changes affect
+    # the raw byte proof but must not falsely invalidate a matched output.
+    try:
+        parsed_choice = RawChoice.model_validate(raw_choice_data)
+        normalized_choice_hash = content_hash(
+            parsed_choice.model_dump(mode="python")
+        )
+    except ValueError:
+        # Invalid typed choices are rejected by validate_candidate below.
+        normalized_choice_hash = content_hash(raw_choice_data)
+
     # 5. Build trusted invocation binding and validate candidate
     inv_binding = TrustedInvocationBinding(
         attempt_id=attempt_id,
@@ -246,9 +260,9 @@ def replay_model_output(
         validation_id=str(uuid5(NAMESPACE_URL, identity_seed + ":validation")),
         policy_ref=validation_policy,
         raw_output_ref=ArtifactReference(
-            id=resp_ref.artifact_id,
-            version="v1",
-            sha256=resp_ref.content_hash,
+            id=f"{resp_ref.artifact_id}:normalized-choice",
+            version="raw-choice/1",
+            sha256=normalized_choice_hash,
         ),
         producer="offline_replay",
         completed_at=now,
