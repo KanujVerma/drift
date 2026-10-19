@@ -175,6 +175,7 @@ def test_conventional_selection_optimal_candidate(
 
     events = recorder.get_attempt_events("att-r-001")
     assert len(events) == 2
+    assert events[0].budget_ref == sample_context.budget_ref
     assert events[1].status == "completed"
 
     costs = recorder.get_cost_receipts_for_attempt("att-r-001")

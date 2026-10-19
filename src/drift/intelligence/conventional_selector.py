@@ -107,11 +107,7 @@ def select_conventional_candidate(
             sha256=context.record_hash,
         ),
         method_ref=method_ref,
-        budget_ref=ArtifactReference(
-            id="fixture:budget",
-            version="v1",
-            sha256="0" * 64,
-        ),
+        budget_ref=context.budget_ref,
         producer="conventional_selector",
         started_at=now,
     )

@@ -70,7 +70,11 @@ class PlatformExecutionRequest(ImmutableModel):
         if self.record_hash != compute_record_hash(self):
             raise ValueError("PLATFORM_REQUEST_HASH_MISMATCH")
         if self.status != "admitted":
-            if self.session_target != "none" or self.target_allocations:
+            if (
+                self.session_target != "none"
+                or self.target_allocations
+                or self.cash_weight is not None
+            ):
                 raise ValueError("NON_ACTIONABLE_PLATFORM_REQUEST_HAS_TARGETS")
         if self.disposition == "propose" and self.status == "admitted":
             if not self.target_allocations or self.session_target == "none":
@@ -145,7 +149,7 @@ def bridge_candidate_to_execution(
             "mandate_ref": candidate.mandate_ref.model_dump(mode="python"),
             "disposition": candidate.disposition,
             "target_allocations": [],
-            "cash_weight": candidate.cash_weight,
+            "cash_weight": None,
             "session_target": "none",
             "status": "refused",
             "refusal_reason": (
@@ -169,7 +173,7 @@ def bridge_candidate_to_execution(
             "mandate_ref": candidate.mandate_ref.model_dump(mode="python"),
             "disposition": candidate.disposition,
             "target_allocations": [],
-            "cash_weight": candidate.cash_weight,
+            "cash_weight": None,
             "session_target": "none",
             "status": "refused",
             "refusal_reason": (
@@ -197,7 +201,7 @@ def bridge_candidate_to_execution(
                 "mandate_ref": candidate.mandate_ref.model_dump(mode="python"),
                 "disposition": candidate.disposition,
                 "target_allocations": [],
-                "cash_weight": candidate.cash_weight,
+                "cash_weight": None,
                 "session_target": "none",
                 "status": "refused",
                 "refusal_reason": (
@@ -264,7 +268,7 @@ def bridge_candidate_to_execution(
             "mandate_ref": candidate.mandate_ref.model_dump(mode="python"),
             "disposition": candidate.disposition,
             "target_allocations": [],
-            "cash_weight": candidate.cash_weight,
+            "cash_weight": None,
             "session_target": "none",
             "status": "refused",
             "refusal_reason": (
@@ -287,7 +291,7 @@ def bridge_candidate_to_execution(
             "mandate_ref": candidate.mandate_ref.model_dump(mode="python"),
             "disposition": candidate.disposition,
             "target_allocations": [],
-            "cash_weight": candidate.cash_weight,
+            "cash_weight": None,
             "session_target": "none",
             "status": "refused",
             "refusal_reason": (
@@ -309,7 +313,7 @@ def bridge_candidate_to_execution(
             "mandate_ref": candidate.mandate_ref.model_dump(mode="python"),
             "disposition": candidate.disposition,
             "target_allocations": [],
-            "cash_weight": candidate.cash_weight,
+            "cash_weight": None,
             "session_target": "none",
             "status": "refused",
             "refusal_reason": "ACCOUNT_PAUSED: trading paused for target account",
@@ -329,7 +333,7 @@ def bridge_candidate_to_execution(
             "mandate_ref": candidate.mandate_ref.model_dump(mode="python"),
             "disposition": candidate.disposition,
             "target_allocations": [],
-            "cash_weight": candidate.cash_weight,
+            "cash_weight": None,
             "session_target": "none",
             "status": "refused",
             "refusal_reason": (
@@ -351,7 +355,7 @@ def bridge_candidate_to_execution(
             "mandate_ref": candidate.mandate_ref.model_dump(mode="python"),
             "disposition": candidate.disposition,
             "target_allocations": [],
-            "cash_weight": candidate.cash_weight,
+            "cash_weight": None,
             "session_target": "none",
             "status": "refused",
             "refusal_reason": (
@@ -374,7 +378,7 @@ def bridge_candidate_to_execution(
             "mandate_ref": candidate.mandate_ref.model_dump(mode="python"),
             "disposition": candidate.disposition,
             "target_allocations": [],
-            "cash_weight": candidate.cash_weight,
+            "cash_weight": None,
             "session_target": "none",
             "status": "admitted",
             "refusal_reason": None,

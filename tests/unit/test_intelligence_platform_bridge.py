@@ -21,6 +21,7 @@ from drift.intelligence.contracts import (
     compute_record_hash,
 )
 from drift.intelligence.platform_bridge import (
+    PlatformExecutionRequest,
     PortfolioStateBinding,
     bridge_candidate_to_execution,
 )
@@ -513,3 +514,25 @@ def test_untrusted_model_copy_cannot_relabel_refusal_as_admission(
     attacked = rejected.model_copy(update={"status": "admitted"})
     with pytest.raises(ValueError, match="PLATFORM_REQUEST_HASH_MISMATCH"):
         type(rejected).model_validate(attacked.model_dump(mode="python"))
+
+
+def test_refusal_cannot_be_laundered_with_cash_weight(
+    sample_candidate: ResearchCandidate,
+    matching_portfolio_state: PortfolioStateBinding,
+) -> None:
+    """A refused request cannot carry an executable cash/target allocation."""
+    dispatch_time = sample_candidate.completed_at + timedelta(minutes=5)
+    paused_state = matching_portfolio_state.model_copy(update={"is_paused": True})
+    refused = bridge_candidate_to_execution(
+        candidate=sample_candidate,
+        portfolio_state=paused_state,
+        current_time=dispatch_time,
+    )
+    assert refused.status == "refused"
+    assert refused.target_allocations == ()
+    assert refused.cash_weight is None
+    tampered = refused.model_dump(mode="python")
+    tampered["cash_weight"] = "0.40"
+    tampered["record_hash"] = compute_record_hash(tampered)
+    with pytest.raises(ValueError, match="NON_ACTIONABLE_PLATFORM_REQUEST_HAS_TARGETS"):
+        PlatformExecutionRequest.model_validate(tampered)
