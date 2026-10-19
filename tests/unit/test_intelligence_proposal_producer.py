@@ -246,3 +246,96 @@ def test_t07_timeout_failure(
     costs = recorder.get_cost_receipts_for_attempt("att-timeout-001")
     assert len(costs) == 1
     assert costs[0].amount_basis == "unknown"
+
+
+def test_scripted_nonzero_cost_is_an_estimate_not_an_actual_bill(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+) -> None:
+    at = datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC)
+    store = ResearchReceiptStore()
+    result = produce_proposal(
+        context=sample_context,
+        resolved_inputs=sample_bindings,
+        frozen_method=ArtifactReference(
+            id="synthetic:method", version="v1", sha256="a" * 64
+        ),
+        validation_policy=ArtifactReference(
+            id="synthetic:policy", version="v1", sha256="b" * 64
+        ),
+        recorder=store,
+        transport=FakeTransport(
+            raw_choice=fixture_data["raw_choice"], cost_amount="0.17"
+        ),
+        attempt_id="synthetic-estimated-cost",
+        checked_at=at,
+    )
+    assert result.is_success
+    costs = store.get_cost_receipts_for_attempt(result.attempt_id)
+    assert len(costs) == 1
+    assert costs[0].amount_basis == "estimate"
+    assert costs[0].amount == "0.17"
+    assert costs[0].billing_identity == "scripted_offline"
+
+
+def test_malformed_response_also_records_cost_and_terminal_receipt(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+) -> None:
+    store = ResearchReceiptStore()
+    result = produce_proposal(
+        context=sample_context,
+        resolved_inputs=sample_bindings,
+        frozen_method=ArtifactReference(
+            id="synthetic:method", version="v1", sha256="a" * 64
+        ),
+        validation_policy=ArtifactReference(
+            id="synthetic:policy", version="v1", sha256="b" * 64
+        ),
+        recorder=store,
+        transport=FakeTransport(
+            malformed_json="{malformed", cost_amount="0.21"
+        ),
+        attempt_id="synthetic-malformed-billed",
+    )
+    assert result.status == "MALFORMED_OUTPUT"
+    assert result.candidate is None
+    assert [e.status for e in store.get_attempt_events(result.attempt_id)] == [
+        "started", "failed"
+    ]
+    costs = store.get_cost_receipts_for_attempt(result.attempt_id)
+    assert len(costs) == 1
+    assert costs[0].amount_basis == "estimate"
+    assert costs[0].amount == "0.21"
+
+
+def test_identical_scripted_replay_retains_identical_candidate_and_event_hashes(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+) -> None:
+    at = datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC)
+    def run() -> tuple[str, str, tuple[str, ...]]:
+        store = ResearchReceiptStore()
+        result = produce_proposal(
+            context=sample_context,
+            resolved_inputs=sample_bindings,
+            frozen_method=ArtifactReference(
+                id="synthetic:method", version="v1", sha256="a" * 64
+            ),
+            validation_policy=ArtifactReference(
+                id="synthetic:policy", version="v1", sha256="b" * 64
+            ),
+            recorder=store,
+            transport=FakeTransport(raw_choice=fixture_data["raw_choice"]),
+            attempt_id="synthetic-repeatable",
+            checked_at=at,
+        )
+        assert result.is_success and result.candidate is not None
+        return (
+            result.attempt_id,
+            result.candidate.record_hash,
+            tuple(e.record_hash for e in store.get_attempt_events(result.attempt_id)),
+        )
+    assert run() == run()
