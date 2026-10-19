@@ -296,3 +296,57 @@ def test_noncanonical_raw_choice_is_typed_invalid_not_an_exception(
         assert result.status == "INVALID"
         assert result.candidate is None
         assert "INVALID_RAW_CHOICE_SERIALIZATION" in result.reason
+
+
+
+def test_forged_frozen_context_and_invocation_cannot_authorize_choice(
+    fixture_data: dict[str, Any],
+    resolved_dependencies: ResolvedDependencies,
+    trusted_invocation: TrustedInvocationBinding,
+) -> None:
+    """Rehashing a choice is not enough if the authority object was modified."""
+    context = ResearchContext.model_validate(fixture_data["fixtures"]["F01"])
+    choice = fixture_data["raw_choice"]
+    forged_context = context.model_copy(update={"record_hash": "0" * 64})
+    response = validate_candidate(
+        raw_choice=choice,
+        context=forged_context,
+        resolved_dependencies=resolved_dependencies,
+        trusted_invocation=trusted_invocation,
+    )
+    assert response.status == "INVALID"
+    assert response.candidate is None
+    assert "INVALID_RESEARCH_INVOCATION_CONTEXT" in response.reason
+
+    forged_invocation = trusted_invocation.model_copy(update={"candidate_id": ""})
+    response = validate_candidate(
+        raw_choice=choice,
+        context=context,
+        resolved_dependencies=resolved_dependencies,
+        trusted_invocation=forged_invocation,
+    )
+    assert response.status == "INVALID"
+    assert response.candidate is None
+    assert "INVALID_RESEARCH_INVOCATION_CONTEXT" in response.reason
+
+
+def test_forged_typed_choice_is_not_trusted_without_revalidation(
+    fixture_data: dict[str, Any],
+    resolved_dependencies: ResolvedDependencies,
+    trusted_invocation: TrustedInvocationBinding,
+) -> None:
+    """A model_copy override must pass the same weight parsing as raw JSON."""
+    from drift.intelligence.contracts import RawChoice
+
+    context = ResearchContext.model_validate(fixture_data["fixtures"]["F01"])
+    typed_choice = RawChoice.model_validate(fixture_data["raw_choice"])
+    forged = typed_choice.model_copy(update={"cash_weight": float("nan")})
+    response = validate_candidate(
+        raw_choice=forged,
+        context=context,
+        resolved_dependencies=resolved_dependencies,
+        trusted_invocation=trusted_invocation,
+    )
+    assert response.status == "INVALID"
+    assert response.candidate is None
+    assert "INVALID_RAW_CHOICE_STRUCTURE" in response.reason

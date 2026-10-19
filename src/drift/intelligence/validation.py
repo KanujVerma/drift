@@ -86,17 +86,36 @@ def validate_candidate(
     Returns a ValidationResult with status VALID and the normalized candidate,
     or a non-valid status with the specific reason.
     """
-    if isinstance(raw_choice, Mapping):
-        try:
-            choice = validate_raw_choice(raw_choice)
-        except Exception as e:
-            return ValidationResult(
-                is_valid=False,
-                status="INVALID",
-                reason=f"invalid raw choice: {e}",
-            )
-    else:
-        choice = raw_choice
+    # Even frozen Pydantic objects may have been altered with
+    # model_copy(update=...), which bypasses their validators. Re-deserialize
+    # all caller-supplied authority objects before evaluating a candidate.
+    try:
+        context = ResearchContext.model_validate(context.model_dump(mode="python"))
+        resolved_dependencies = ResolvedDependencies.model_validate(
+            resolved_dependencies.model_dump(mode="python")
+        )
+        trusted_invocation = TrustedInvocationBinding.model_validate(
+            trusted_invocation.model_dump(mode="python")
+        )
+    except (CanonicalSerializationError, TypeError, ValueError):
+        return ValidationResult(
+            is_valid=False,
+            status="INVALID",
+            reason="INVALID_RESEARCH_INVOCATION_CONTEXT",
+        )
+
+    try:
+        candidate_input = (
+            raw_choice if isinstance(raw_choice, Mapping)
+            else raw_choice.model_dump(mode="python")
+        )
+        choice = validate_raw_choice(candidate_input)
+    except (CanonicalSerializationError, TypeError, ValueError):
+        return ValidationResult(
+            is_valid=False,
+            status="INVALID",
+            reason="INVALID_RAW_CHOICE_STRUCTURE",
+        )
 
     # The producer's claimed raw-output reference must bind the actual
     # untrusted choice bytes after canonical parsing. A self-hashed candidate
