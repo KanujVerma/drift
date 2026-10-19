@@ -329,6 +329,19 @@ class ResearchReceiptStore:
                 f"Integrity conflict: cost receipt {receipt_id} already exists "
                 f"with differing content"
             )
+        if cost.supersedes_receipt_id is not None:
+            prior = self._costs_by_receipt_id.get(cost.supersedes_receipt_id)
+            if prior is None:
+                raise ValueError("UNKNOWN_COST_SUPERSESSION: original receipt missing")
+            if (
+                prior.attempt_id != cost.attempt_id
+                or prior.scope != cost.scope
+                or prior.category != cost.category
+                or prior.billing_identity != cost.billing_identity
+            ):
+                raise ValueError("CROSS_SCOPE_COST_SUPERSESSION")
+            if prior.amount_basis not in ("estimate", "unknown"):
+                raise ValueError("INVALID_COST_SUPERSESSION: only estimates or unknowns")
         self._costs_by_receipt_id[receipt_id] = cost
 
     def get_cost_receipt(self, receipt_id: str) -> CostReceipt | None:
@@ -338,7 +351,14 @@ class ResearchReceiptStore:
     def get_cost_receipts_for_attempt(self, attempt_id: str) -> tuple[CostReceipt, ...]:
         """Retrieve all cost receipts linked to a given attempt ID."""
         return tuple(
-            c for c in self._costs_by_receipt_id.values() if c.attempt_id == attempt_id
+            sorted(
+                (
+                    c
+                    for c in self._costs_by_receipt_id.values()
+                    if c.attempt_id == attempt_id
+                ),
+                key=lambda cost: cost.receipt_id,
+            )
         )
 
     def get_unresolved_attempts(self) -> tuple[AttemptRecord, ...]:
@@ -347,14 +367,21 @@ class ResearchReceiptStore:
         for events in self._attempts_by_attempt_id.values():
             if events and events[-1].status == "started":
                 unresolved.append(events[-1])
-        return tuple(unresolved)
+        return tuple(sorted(unresolved, key=lambda event: event.attempt_id))
 
     def export_events(self) -> list[dict[str, Any]]:
         """Export all recorded attempt events and cost receipts for persistence."""
         exported: list[dict[str, Any]] = []
-        for att in self._attempts_by_event_id.values():
+        for att in sorted(
+            self._attempts_by_event_id.values(),
+            key=lambda event: (
+                event.attempt_id, event.event_index, event.attempt_event_id
+            ),
+        ):
             exported.append(att.model_dump(mode="python"))
-        for cost in self._costs_by_receipt_id.values():
+        for cost in sorted(
+            self._costs_by_receipt_id.values(), key=lambda item: item.receipt_id
+        ):
             exported.append(cost.model_dump(mode="python"))
         return exported
 
