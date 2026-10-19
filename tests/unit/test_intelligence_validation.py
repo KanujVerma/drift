@@ -245,12 +245,18 @@ def test_negative_cases_n01_to_n12(
         if case_name == "N08"
         else None
     )
+    expected_context = (
+        ResearchContext.model_validate(fixture_data["fixtures"]["F01"])
+        if case_name in {"N05", "N07"}
+        else None
+    )
 
     with pytest.raises(ValueError) as exc:
         validate_retained_record(
             mutated,
             expected_kind=expected_kind,
             checked_at=checked_at,
+            context=expected_context,
         )
 
     # Check that error matches expected reason
