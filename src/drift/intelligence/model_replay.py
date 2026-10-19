@@ -5,11 +5,12 @@ Reconstructs execution from immutable stored request/response artifacts, verifyi
 exact content hashes, parsing raw choices, and constructing ModelReplayRecord.
 """
 
+import hashlib
 import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid5
 
 from drift.intelligence.contracts import (
     ArtifactReference,
@@ -65,10 +66,31 @@ def replay_model_output(
     - Fails closed with 'MALFORMED_OUTPUT' if response payload is invalid JSON.
     - Re-validates candidate against original context and bindings.
     """
-    now = datetime.now(UTC)
-    actual_replay_id = replay_id or str(uuid4())
-    actual_candidate_id = candidate_id or str(uuid4())
-    actual_checked_at = checked_at or now
+    # Offline replay is defined by retained evidence, not today's wall clock.
+    actual_checked_at = checked_at or original_context.review_started_at
+    if actual_checked_at.tzinfo is None or actual_checked_at.utcoffset() is None:
+        raise ValueError("INDETERMINATE_TIMEZONE: replay requires explicit cutoff")
+    now = actual_checked_at.astimezone(UTC)
+    identity_seed = content_hash({
+        "attempt": attempt_id,
+        "context": original_context.record_hash,
+        "adapter": adapter_revision.sha256,
+        "parser": parser_schema_ref.sha256,
+        "policy": validation_policy.sha256,
+        "request": (
+            recorded_request.content_hash
+            if isinstance(recorded_request, StoredArtifactRef)
+            else recorded_request.get("content_hash")
+        ),
+        "response": (
+            recorded_response.content_hash
+            if isinstance(recorded_response, StoredArtifactRef)
+            else recorded_response.get("content_hash") if recorded_response else None
+        ),
+        "cutoff": now,
+    })
+    actual_replay_id = replay_id or str(uuid5(NAMESPACE_URL, identity_seed))
+    actual_candidate_id = candidate_id or str(uuid5(NAMESPACE_URL, identity_seed + ":candidate"))
 
     # Convert request ref
     if isinstance(recorded_request, StoredArtifactRef):
@@ -76,29 +98,31 @@ def replay_model_output(
     else:
         req_ref = StoredArtifactRef.model_validate(recorded_request)
 
-    import hashlib
-
-    # 1. Verify request content hash
+    # 1. Verify the exact retained request bytes, not merely parsed JSON.
     req_bytes = (
         request_payload.encode("utf-8")
         if isinstance(request_payload, str)
         else request_payload
     )
     req_raw_hash = hashlib.sha256(req_bytes).hexdigest()
-    try:
-        req_canon_hash = content_hash(json.loads(req_bytes.decode("utf-8")))
-    except Exception:
-        req_canon_hash = None
-
-    if req_ref.content_hash not in (req_raw_hash, req_canon_hash):
+    if req_ref.content_hash != req_raw_hash:
         return ModelReplayResult(
             is_success=False,
             status="UNAVAILABLE",
             reason="request digest mismatch",
         )
 
+    # Absent response evidence must be consistent. A one-sided absence is not
+    # proof of a historical timeout or a provider completion.
+    if (recorded_response is None) != (response_payload is None):
+        return ModelReplayResult(
+            is_success=False,
+            status="UNAVAILABLE",
+            reason="inconsistent missing response evidence",
+        )
+
     # 2. Check for recorded timeout / missing response
-    if recorded_response is None or response_payload is None:
+    if recorded_response is None and response_payload is None:
         raw_replay_record: dict[str, Any] = {
             "profile": "drift-research/1-draft",
             "kind": "model_replay",
@@ -157,12 +181,7 @@ def replay_model_output(
         else response_payload
     )
     resp_raw_hash = hashlib.sha256(resp_bytes).hexdigest()
-    try:
-        resp_canon_hash = content_hash(json.loads(resp_bytes.decode("utf-8")))
-    except Exception:
-        resp_canon_hash = None
-
-    if resp_ref.content_hash not in (resp_raw_hash, resp_canon_hash):
+    if resp_ref.content_hash != resp_raw_hash:
         return ModelReplayResult(
             is_success=False,
             status="UNAVAILABLE",
@@ -172,6 +191,8 @@ def replay_model_output(
     # 4. Parse response JSON
     try:
         raw_choice_data = json.loads(resp_bytes.decode("utf-8"))
+        if not isinstance(raw_choice_data, dict):
+            raise ValueError("model output is not a JSON object")
     except Exception:
         return ModelReplayResult(
             is_success=False,
@@ -183,7 +204,7 @@ def replay_model_output(
     inv_binding = TrustedInvocationBinding(
         attempt_id=attempt_id,
         candidate_id=actual_candidate_id,
-        validation_id=str(uuid4()),
+        validation_id=str(uuid5(NAMESPACE_URL, identity_seed + ":validation")),
         policy_ref=validation_policy,
         raw_output_ref=ArtifactReference(
             id=resp_ref.artifact_id,
@@ -228,16 +249,17 @@ def replay_model_output(
         "request_ref": req_ref.model_dump(mode="python"),
         "response_ref": resp_ref.model_dump(mode="python"),
         "request_sent_at": original_context.review_started_at,
-        "response_received_at": now,
-        "parse_completed_at": now,
-        "measured_latency_ms": 0,
-        "latency_unknown_reason": None,
+        # Original provider timestamps are not recovered by replay.
+        "response_received_at": None,
+        "parse_completed_at": None,
+        "measured_latency_ms": None,
+        "latency_unknown_reason": "offline replay cannot measure provider latency",
         "usage_ref": None,
         "provider_call_id": None,
         "finish_reason": "stop",
         "mode": "offline_deterministic",
         "original_replay_ref": None,
-        "retention_limitation": None,
+        "retention_limitation": "historical provider timestamps unavailable",
         "replay_started_at": now,
         "replay_completed_at": now,
     }
