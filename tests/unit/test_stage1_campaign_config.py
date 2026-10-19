@@ -33,7 +33,11 @@ GOLDEN_CAMPAIGN_HASH = (
 )
 
 
-def make_golden_arm_b() -> ArmSpecV1:
+def make_golden_arm_b(
+    *,
+    arm_account_role: str = "PRIMARY_TEST",
+    model_configuration_reference: str = "fixture://model-B-v1",
+) -> ArmSpecV1:
     return build_arm_spec(
         arm_id="ARM-B",
         campaign_id="CAMP-E1-SYNTH-001",
@@ -42,13 +46,13 @@ def make_golden_arm_b() -> ArmSpecV1:
         initial_strategy_reference="B3",
         initial_capital="10000",
         currency="USD",
-        arm_account_role="PRIMARY_TEST",
+        arm_account_role=arm_account_role,
         mandate_reference="fixture://balanced-mandate-v1",
         execution_policy_reference="fixture://next-open-v1",
         research_budget_reference="fixture://budget-B",
         information_visibility_policy="IDENTICAL_MARKET_AND_REFERENCE_COMPLETED",
         feedback_policy_reference="fixture://matured-own-arm-v1",
-        model_configuration_reference="fixture://model-B-v1",
+        model_configuration_reference=model_configuration_reference,
         deterministic_seed_reference="fixture://seed-B-001",
         frozen_configuration_reference="b" * 64,
     )
@@ -56,7 +60,9 @@ def make_golden_arm_b() -> ArmSpecV1:
 
 def make_golden_arm_r(
     *,
+    arm_account_role: str = "COMPARATOR",
     feedback_policy_reference: str = "fixture://matured-own-arm-v1",
+    model_configuration_reference: str = "NONE",
 ) -> ArmSpecV1:
     return build_arm_spec(
         arm_id="ARM-R",
@@ -66,13 +72,13 @@ def make_golden_arm_r(
         initial_strategy_reference="B3",
         initial_capital="10000",
         currency="USD",
-        arm_account_role="COMPARATOR",
+        arm_account_role=arm_account_role,
         mandate_reference="fixture://balanced-mandate-v1",
         execution_policy_reference="fixture://next-open-v1",
         research_budget_reference="fixture://budget-R",
         information_visibility_policy="IDENTICAL_MARKET_AND_REFERENCE_COMPLETED",
         feedback_policy_reference=feedback_policy_reference,
-        model_configuration_reference="NONE",
+        model_configuration_reference=model_configuration_reference,
         deterministic_seed_reference="fixture://seed-R-001",
         frozen_configuration_reference="b" * 64,
     )
@@ -84,6 +90,7 @@ def make_golden_campaign(
     *,
     portfolio_mandate_reference: str = "fixture://balanced-mandate-v1",
     execution_policy_reference: str = "fixture://next-open-v1",
+    model_and_prompt_policy_reference: str = "fixture://model-B-v1",
 ) -> CampaignSpecV1:
     return build_campaign_spec(
         campaign_id="CAMP-E1-SYNTH-001",
@@ -122,7 +129,7 @@ def make_golden_campaign(
         source_eligibility_policy_reference="fixture://source-policy-v1",
         execution_policy_reference=execution_policy_reference,
         cost_policy_reference="fixture://cost-policy-v1",
-        model_and_prompt_policy_reference="fixture://model-B-v1",
+        model_and_prompt_policy_reference=model_and_prompt_policy_reference,
         learning_and_feedback_policy_reference="fixture://feedback-policy-v1",
         evaluation_policy_reference="fixture://eval-policy-v1",
         holdout_access_policy_reference="fixture://holdout-policy-v1",
@@ -2847,3 +2854,196 @@ def test_neg_stage1_br_feedback_policy_mismatch() -> None:
             bindings=bindings,
             expected_run_ids=["RUN-001"],
         )
+
+
+def test_neg_stage1_swapped_account_roles() -> None:
+    arm_b = make_golden_arm_b(arm_account_role="COMPARATOR")
+    arm_r = make_golden_arm_r(arm_account_role="PRIMARY_TEST")
+    camp = make_golden_campaign(
+        arm_b_hash=arm_b.arm_spec_fingerprint,
+        arm_r_hash=arm_r.arm_spec_fingerprint,
+    )
+    bindings = make_golden_bindings()
+
+    assert (
+        verify_experiment_configuration(
+            campaign=camp,
+            arms=[arm_b, arm_r],
+            bindings=bindings,
+            expected_run_ids=["RUN-001"],
+        )
+        is True
+    )
+
+    with pytest.raises(ValueError, match="arm_account_role"):
+        verify_stage1_synthetic_br_configuration(
+            campaign=camp,
+            arms=[arm_b, arm_r],
+            bindings=bindings,
+            expected_run_ids=["RUN-001"],
+        )
+
+
+def test_neg_stage1_arbitrary_account_roles() -> None:
+    # 1. ARM-B with arbitrary role OTHER
+    arm_b_other = make_golden_arm_b(arm_account_role="OTHER")
+    arm_r = make_golden_arm_r()
+    camp_b = make_golden_campaign(
+        arm_b_hash=arm_b_other.arm_spec_fingerprint,
+        arm_r_hash=arm_r.arm_spec_fingerprint,
+    )
+    bindings = make_golden_bindings()
+
+    assert (
+        verify_experiment_configuration(
+            campaign=camp_b,
+            arms=[arm_b_other, arm_r],
+            bindings=bindings,
+            expected_run_ids=["RUN-001"],
+        )
+        is True
+    )
+    with pytest.raises(ValueError, match="ARM-B arm_account_role"):
+        verify_stage1_synthetic_br_configuration(
+            campaign=camp_b,
+            arms=[arm_b_other, arm_r],
+            bindings=bindings,
+            expected_run_ids=["RUN-001"],
+        )
+
+    # 2. ARM-R with arbitrary role OTHER
+    arm_b = make_golden_arm_b()
+    arm_r_other = make_golden_arm_r(arm_account_role="OTHER")
+    camp_r = make_golden_campaign(
+        arm_b_hash=arm_b.arm_spec_fingerprint,
+        arm_r_hash=arm_r_other.arm_spec_fingerprint,
+    )
+
+    assert (
+        verify_experiment_configuration(
+            campaign=camp_r,
+            arms=[arm_b, arm_r_other],
+            bindings=bindings,
+            expected_run_ids=["RUN-001"],
+        )
+        is True
+    )
+    with pytest.raises(ValueError, match="ARM-R arm_account_role"):
+        verify_stage1_synthetic_br_configuration(
+            campaign=camp_r,
+            arms=[arm_b, arm_r_other],
+            bindings=bindings,
+            expected_run_ids=["RUN-001"],
+        )
+
+
+def test_neg_stage1_arm_b_model_policy_mismatch() -> None:
+    arm_b = make_golden_arm_b(model_configuration_reference="fixture://model-B-v2")
+    arm_r = make_golden_arm_r()
+    camp = make_golden_campaign(
+        arm_b_hash=arm_b.arm_spec_fingerprint,
+        arm_r_hash=arm_r.arm_spec_fingerprint,
+        model_and_prompt_policy_reference="fixture://model-B-v1",
+    )
+    bindings = make_golden_bindings()
+
+    assert (
+        verify_experiment_configuration(
+            campaign=camp,
+            arms=[arm_b, arm_r],
+            bindings=bindings,
+            expected_run_ids=["RUN-001"],
+        )
+        is True
+    )
+
+    with pytest.raises(ValueError, match="model_configuration_reference"):
+        verify_stage1_synthetic_br_configuration(
+            campaign=camp,
+            arms=[arm_b, arm_r],
+            bindings=bindings,
+            expected_run_ids=["RUN-001"],
+        )
+
+
+def test_neg_stage1_arm_b_model_none() -> None:
+    arm_b = make_golden_arm_b(model_configuration_reference="NONE")
+    arm_r = make_golden_arm_r()
+    camp = make_golden_campaign(
+        arm_b_hash=arm_b.arm_spec_fingerprint,
+        arm_r_hash=arm_r.arm_spec_fingerprint,
+    )
+    bindings = make_golden_bindings()
+
+    assert (
+        verify_experiment_configuration(
+            campaign=camp,
+            arms=[arm_b, arm_r],
+            bindings=bindings,
+            expected_run_ids=["RUN-001"],
+        )
+        is True
+    )
+
+    with pytest.raises(ValueError, match="model_configuration_reference"):
+        verify_stage1_synthetic_br_configuration(
+            campaign=camp,
+            arms=[arm_b, arm_r],
+            bindings=bindings,
+            expected_run_ids=["RUN-001"],
+        )
+
+
+def test_neg_stage1_arm_r_must_remain_model_free() -> None:
+    arm_b = make_golden_arm_b()
+    arm_r = make_golden_arm_r(model_configuration_reference="fixture://model-R-v1")
+    camp = make_golden_campaign(
+        arm_b_hash=arm_b.arm_spec_fingerprint,
+        arm_r_hash=arm_r.arm_spec_fingerprint,
+    )
+    bindings = make_golden_bindings()
+
+    assert (
+        verify_experiment_configuration(
+            campaign=camp,
+            arms=[arm_b, arm_r],
+            bindings=bindings,
+            expected_run_ids=["RUN-001"],
+        )
+        is True
+    )
+
+    with pytest.raises(ValueError, match="model_configuration_reference"):
+        verify_stage1_synthetic_br_configuration(
+            campaign=camp,
+            arms=[arm_b, arm_r],
+            bindings=bindings,
+            expected_run_ids=["RUN-001"],
+        )
+
+
+def test_stage1_generic_extensibility_alternative_roles_and_models() -> None:
+    arm_b = make_golden_arm_b(
+        arm_account_role="RESEARCH_EXPLORATORY",
+        model_configuration_reference="fixture://custom-llm-v1",
+    )
+    arm_r = make_golden_arm_r(
+        arm_account_role="BENCHMARK_INDEX",
+        model_configuration_reference="fixture://heuristic-v1",
+    )
+    camp = make_golden_campaign(
+        arm_b_hash=arm_b.arm_spec_fingerprint,
+        arm_r_hash=arm_r.arm_spec_fingerprint,
+        model_and_prompt_policy_reference="fixture://global-policy-v1",
+    )
+    bindings = make_golden_bindings()
+
+    assert (
+        verify_experiment_configuration(
+            campaign=camp,
+            arms=[arm_b, arm_r],
+            bindings=bindings,
+            expected_run_ids=["RUN-001"],
+        )
+        is True
+    )

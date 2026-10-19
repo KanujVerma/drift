@@ -1188,6 +1188,11 @@ def verify_stage1_synthetic_br_configuration(
     arm_b = arms_by_id["ARM-B"]
     arm_r = arms_by_id["ARM-R"]
 
+    if arm_b.arm_account_role != "PRIMARY_TEST":
+        raise ValueError("ARM-B arm_account_role must be PRIMARY_TEST")
+    if arm_r.arm_account_role != "COMPARATOR":
+        raise ValueError("ARM-R arm_account_role must be COMPARATOR")
+
     if arm_b.frozen_configuration_reference != arm_r.frozen_configuration_reference:
         raise ValueError("ARM-B and ARM-R frozen_configuration_reference must match")
 
@@ -1290,6 +1295,19 @@ def verify_stage1_synthetic_br_configuration(
             "IDENTICAL_MARKET_AND_REFERENCE_COMPLETED, "
             f"got: {arm_r.information_visibility_policy!r}"
         )
+
+    if arm_b.model_configuration_reference == "NONE":
+        raise ValueError("ARM-B requires a non-NONE model_configuration_reference")
+    if (
+        arm_b.model_configuration_reference
+        != campaign.model_and_prompt_policy_reference
+    ):
+        raise ValueError(
+            "ARM-B model_configuration_reference must "
+            "match campaign.model_and_prompt_policy_reference"
+        )
+    if arm_r.model_configuration_reference != "NONE":
+        raise ValueError("ARM-R model_configuration_reference must be NONE")
 
     if campaign.warmup_window.sessions_count < 253:
         raise ValueError(
