@@ -2,7 +2,7 @@
 
 Tests all 12 analytical golden fixtures from PR #435 Section 5 (#382),
 individual calculation functions, and adversarial/negative failure cases
-per Issue #445.
+per Issue #445 and PR #446 review.
 """
 
 import math
@@ -34,6 +34,7 @@ from drift.experiments.stage1_metric_math import (
     calculate_calmar_ratio,
     calculate_comparative_economic_advantage,
     calculate_economic_gain,
+    calculate_endpoint_return,
     calculate_geometric_annualized_return,
     calculate_maximum_drawdown,
     calculate_paired_return_differences,
@@ -65,11 +66,13 @@ def test_golden_case_1_standard_evaluation_sequence() -> None:
     mar = [Decimal("0"), Decimal("0"), Decimal("0")]
     k = 252
 
+    # Verified spacing explicitly provided
     metrics = calculate_stage1_arithmetic(
         nav_marks=nav,
         risk_free_period_returns=rf,
         mar_period_returns=mar,
         periods_per_year=k,
+        spacing_verified=True,
     )
 
     # 1. Periodic returns: +0.10, -0.20, +0.10
@@ -108,6 +111,30 @@ def test_golden_case_1_standard_evaluation_sequence() -> None:
     assert metrics.calmar.value is not None
     assert str(metrics.calmar.value).startswith("-4.6745")
 
+    # Default spacing_verified is False: fails closed to UNAVAILABLE/IRREGULAR_SPACING
+    default_metrics = calculate_stage1_arithmetic(
+        nav_marks=nav,
+        risk_free_period_returns=rf,
+        mar_period_returns=mar,
+        periods_per_year=k,
+    )
+    assert default_metrics.geometric_annualized_return.state == "UNAVAILABLE"
+    assert (
+        default_metrics.geometric_annualized_return.reason_code
+        == REASON_IRREGULAR_SPACING
+    )
+    assert default_metrics.periodic_excess_sharpe.state == "UNAVAILABLE"
+    assert (
+        default_metrics.periodic_excess_sharpe.reason_code == REASON_IRREGULAR_SPACING
+    )
+    assert default_metrics.sortino.state == "UNAVAILABLE"
+    assert default_metrics.sortino.reason_code == REASON_IRREGULAR_SPACING
+    assert default_metrics.calmar.state == "UNAVAILABLE"
+    assert default_metrics.calmar.reason_code == REASON_IRREGULAR_SPACING
+    # Terminal, MDD, and periodic returns remain KNOWN
+    assert default_metrics.terminal_return.state == "KNOWN"
+    assert default_metrics.maximum_drawdown.state == "KNOWN"
+
 
 def test_golden_case_2_constant_cash_zero_volatility() -> None:
     """Golden Case 2: Constant Cash Account (Zero Volatility).
@@ -127,6 +154,7 @@ def test_golden_case_2_constant_cash_zero_volatility() -> None:
         risk_free_period_returns=rf,
         mar_period_returns=mar,
         periods_per_year=k,
+        spacing_verified=True,
     )
 
     assert metrics.terminal_return.state == "KNOWN"
@@ -168,6 +196,7 @@ def test_golden_case_3_one_period_insufficient_observations() -> None:
         risk_free_period_returns=rf,
         mar_period_returns=mar,
         periods_per_year=k,
+        spacing_verified=True,
     )
 
     assert metrics.terminal_return.state == "KNOWN"
@@ -198,6 +227,7 @@ def test_golden_case_4_identical_positive_returns() -> None:
         risk_free_period_returns=rf,
         mar_period_returns=mar,
         periods_per_year=k,
+        spacing_verified=True,
     )
 
     assert metrics.terminal_return.state == "KNOWN"
@@ -226,6 +256,7 @@ def test_golden_case_5_large_loss_partial_recovery() -> None:
         risk_free_period_returns=rf,
         mar_period_returns=mar,
         periods_per_year=k,
+        spacing_verified=True,
     )
 
     assert metrics.terminal_return.state == "KNOWN"
@@ -242,7 +273,9 @@ def test_golden_case_6_missing_session_valuation_mark() -> None:
     """Golden Case 6: Missing Session Valuation Mark.
 
     NAV: [10000, 11000, None, 9680]
-    Dependent path metrics = UNAVAILABLE (MISSING_VALUATION_MARK)
+    Dependent path metrics and full-sequence terminal return evaluate to
+    UNAVAILABLE (MISSING_VALUATION_MARK).
+    Standalone endpoint-only calculation is explicitly separate.
     """
     nav = [Decimal("10000"), Decimal("11000"), None, Decimal("9680")]
     rf = [Decimal("0"), Decimal("0"), Decimal("0")]
@@ -254,6 +287,7 @@ def test_golden_case_6_missing_session_valuation_mark() -> None:
         risk_free_period_returns=rf,
         mar_period_returns=mar,
         periods_per_year=k,
+        spacing_verified=True,
     )
 
     assert isinstance(metrics.periodic_returns, tuple)
@@ -263,6 +297,10 @@ def test_golden_case_6_missing_session_valuation_mark() -> None:
     assert metrics.periodic_returns[1].reason_code == REASON_MISSING_VALUATION_MARK
     assert metrics.periodic_returns[2].state == "UNAVAILABLE"
     assert metrics.periodic_returns[2].reason_code == REASON_MISSING_VALUATION_MARK
+
+    # Sequence terminal return fails closed on missing interior mark
+    assert metrics.terminal_return.state == "UNAVAILABLE"
+    assert metrics.terminal_return.reason_code == REASON_MISSING_VALUATION_MARK
 
     # Path metrics are UNAVAILABLE
     assert metrics.periodic_excess_sharpe.state == "UNAVAILABLE"
@@ -282,18 +320,26 @@ def test_golden_case_6_missing_session_valuation_mark() -> None:
     assert metrics.calmar.state == "UNAVAILABLE"
     assert metrics.calmar.reason_code == REASON_MISSING_VALUATION_MARK
 
+    # Separate standalone endpoint-only arithmetic is independently available
+    ep = calculate_endpoint_return(Decimal("10000"), Decimal("9680"))
+    assert ep.state == "KNOWN"
+    assert ep.value == Decimal("-0.0320")
+
 
 def test_golden_case_7_mixed_irregular_session_spacing() -> None:
     """Golden Case 7: Mixed or Irregular Session Spacing.
 
-    When spacing is not certified uniform, annualization evaluates to
-    UNAVAILABLE (IRREGULAR_SPACING).
+    When spacing is not certified uniform (spacing_verified=False), all
+    annualized/spacing-dependent metrics evaluate to UNAVAILABLE (IRREGULAR_SPACING).
+    Terminal return, periodic returns, and drawdown remain independently KNOWN.
     """
-    nav = [Decimal("10000"), Decimal("10100"), Decimal("10200")]
+    # Architect regression: nonconstant returns that would otherwise be KNOWN
+    nav = [Decimal("10000"), Decimal("11000"), Decimal("10500")]
     rf = [Decimal("0"), Decimal("0")]
     mar = [Decimal("0"), Decimal("0")]
     k = 252
 
+    # Unverified spacing (default or explicit False)
     metrics = calculate_stage1_arithmetic(
         nav_marks=nav,
         risk_free_period_returns=rf,
@@ -302,8 +348,34 @@ def test_golden_case_7_mixed_irregular_session_spacing() -> None:
         spacing_verified=False,
     )
 
+    # All four annualized metrics evaluate to UNAVAILABLE / IRREGULAR_SPACING
     assert metrics.geometric_annualized_return.state == "UNAVAILABLE"
     assert metrics.geometric_annualized_return.reason_code == REASON_IRREGULAR_SPACING
+    assert metrics.periodic_excess_sharpe.state == "UNAVAILABLE"
+    assert metrics.periodic_excess_sharpe.reason_code == REASON_IRREGULAR_SPACING
+    assert metrics.sortino.state == "UNAVAILABLE"
+    assert metrics.sortino.reason_code == REASON_IRREGULAR_SPACING
+    assert metrics.calmar.state == "UNAVAILABLE"
+    assert metrics.calmar.reason_code == REASON_IRREGULAR_SPACING
+
+    # Terminal return and maximum drawdown remain mathematically KNOWN
+    assert metrics.terminal_return.state == "KNOWN"
+    assert metrics.terminal_return.value == Decimal("0.05")
+    assert metrics.maximum_drawdown.state == "KNOWN"
+    assert metrics.maximum_drawdown.value is not None
+
+    # When spacing_verified=True, they evaluate to KNOWN
+    verified_metrics = calculate_stage1_arithmetic(
+        nav_marks=nav,
+        risk_free_period_returns=rf,
+        mar_period_returns=mar,
+        periods_per_year=k,
+        spacing_verified=True,
+    )
+    assert verified_metrics.geometric_annualized_return.state == "KNOWN"
+    assert verified_metrics.periodic_excess_sharpe.state == "KNOWN"
+    assert verified_metrics.sortino.state == "KNOWN"
+    assert verified_metrics.calmar.state == "KNOWN"
 
 
 def test_golden_case_8_zero_variance_nonzero_excess_return() -> None:
@@ -323,6 +395,7 @@ def test_golden_case_8_zero_variance_nonzero_excess_return() -> None:
         risk_free_period_returns=rf,
         mar_period_returns=mar,
         periods_per_year=k,
+        spacing_verified=True,
     )
 
     assert metrics.periodic_excess_sharpe.state == "UNDEFINED"
@@ -348,6 +421,7 @@ def test_golden_case_9_negative_portfolio_return_valid_volatility() -> None:
         risk_free_period_returns=rf,
         mar_period_returns=mar,
         periods_per_year=k,
+        spacing_verified=True,
     )
 
     assert metrics.periodic_excess_sharpe.state == "KNOWN"
@@ -568,6 +642,7 @@ def test_negative_invalid_initial_nav() -> None:
             risk_free_period_returns=[Decimal("0")],
             mar_period_returns=[Decimal("0")],
             periods_per_year=252,
+            spacing_verified=True,
         )
         assert metrics.terminal_return.state == "INVALID"
         assert metrics.terminal_return.reason_code == REASON_NONPOSITIVE_STARTING_NAV
@@ -581,6 +656,7 @@ def test_negative_nav_in_series() -> None:
         risk_free_period_returns=[Decimal("0"), Decimal("0")],
         mar_period_returns=[Decimal("0"), Decimal("0")],
         periods_per_year=252,
+        spacing_verified=True,
     )
     assert metrics.terminal_return.state == "INVALID"
     assert metrics.terminal_return.reason_code == REASON_NEGATIVE_NAV
@@ -593,6 +669,7 @@ def test_negative_missing_risk_free_series() -> None:
         risk_free_period_returns=None,
         mar_period_returns=[Decimal("0"), Decimal("0")],
         periods_per_year=252,
+        spacing_verified=True,
     )
     assert metrics.periodic_excess_sharpe.state == "UNAVAILABLE"
     assert metrics.periodic_excess_sharpe.reason_code == REASON_MISSING_RISK_FREE_SERIES
@@ -604,6 +681,7 @@ def test_negative_missing_risk_free_series() -> None:
         risk_free_period_returns=[Decimal("0"), Decimal("0")],
         mar_period_returns=None,
         periods_per_year=252,
+        spacing_verified=True,
     )
     assert metrics_mar.sortino.state == "UNAVAILABLE"
     assert metrics_mar.sortino.reason_code == REASON_MISSING_MAR_SERIES
@@ -619,6 +697,7 @@ def test_negative_mismatched_array_lengths() -> None:
         risk_free_period_returns=[Decimal("0")],
         mar_period_returns=[Decimal("0"), Decimal("0")],
         periods_per_year=252,
+        spacing_verified=True,
     )
     assert metrics.periodic_excess_sharpe.state == "INVALID"
     assert metrics.periodic_excess_sharpe.reason_code == REASON_SERIES_LENGTH_MISMATCH
@@ -629,6 +708,7 @@ def test_negative_mismatched_array_lengths() -> None:
         risk_free_period_returns=[Decimal("0"), Decimal("0")],
         mar_period_returns=[Decimal("0"), Decimal("0"), Decimal("0")],
         periods_per_year=252,
+        spacing_verified=True,
     )
     assert metrics_mar.sortino.state == "INVALID"
     assert metrics_mar.sortino.reason_code == REASON_SERIES_LENGTH_MISMATCH
@@ -642,6 +722,7 @@ def test_negative_float_input_contamination() -> None:
         risk_free_period_returns=[Decimal("0")],
         mar_period_returns=[Decimal("0")],
         periods_per_year=252,
+        spacing_verified=True,
     )
     assert metrics.terminal_return.state == "INVALID"
     assert metrics.terminal_return.reason_code == REASON_FLOAT_INPUT_PROHIBITED
@@ -652,6 +733,7 @@ def test_negative_float_input_contamination() -> None:
         risk_free_period_returns=[0.0],  # type: ignore[list-item]
         mar_period_returns=[Decimal("0")],
         periods_per_year=252,
+        spacing_verified=True,
     )
     assert metrics_rf.periodic_excess_sharpe.state == "INVALID"
     assert (
@@ -676,24 +758,10 @@ def test_negative_nan_or_infinity_contamination() -> None:
             risk_free_period_returns=[Decimal("0")],
             mar_period_returns=[Decimal("0")],
             periods_per_year=252,
+            spacing_verified=True,
         )
         assert metrics.terminal_return.state == "INVALID"
         assert metrics.terminal_return.reason_code == REASON_NAN_OR_INFINITY_INPUT
-
-
-def test_negative_invalid_periods_per_year() -> None:
-    """periods_per_year < 1 fails closed with INVALID_PERIODS_PER_YEAR."""
-    metrics = calculate_stage1_arithmetic(
-        nav_marks=[Decimal("10000"), Decimal("11000")],
-        risk_free_period_returns=[Decimal("0")],
-        mar_period_returns=[Decimal("0")],
-        periods_per_year=0,
-    )
-    assert metrics.geometric_annualized_return.state == "INVALID"
-    assert (
-        metrics.geometric_annualized_return.reason_code
-        == REASON_INVALID_PERIODS_PER_YEAR
-    )
 
 
 def test_negative_empty_or_singleton_nav() -> None:
@@ -704,6 +772,7 @@ def test_negative_empty_or_singleton_nav() -> None:
         risk_free_period_returns=[],
         mar_period_returns=[],
         periods_per_year=252,
+        spacing_verified=True,
     )
     assert metrics_empty.terminal_return.state == "INVALID"
     assert metrics_empty.terminal_return.reason_code == REASON_EMPTY_SERIES
@@ -714,6 +783,7 @@ def test_negative_empty_or_singleton_nav() -> None:
         risk_free_period_returns=[],
         mar_period_returns=[],
         periods_per_year=252,
+        spacing_verified=True,
     )
     assert metrics_single.terminal_return.state == "KNOWN"
     assert metrics_single.terminal_return.value == Decimal("0")
@@ -736,27 +806,167 @@ def test_negative_operating_cost() -> None:
     assert gain.reason_code == REASON_NEGATIVE_OPERATING_COST
 
 
+def test_negative_incomplete_nav_in_terminal_return() -> None:
+    """Incomplete NAV series with missing intermediate marks fails closed."""
+    # Full sequence with missing interior mark fails closed
+    nav = [Decimal("10000"), None, Decimal("11000")]
+    term = calculate_terminal_return(nav)
+    assert term.state == "UNAVAILABLE"
+    assert term.reason_code == REASON_MISSING_VALUATION_MARK
+    assert term.value is None
+
+    # Standalone endpoint-only arithmetic is explicitly separate
+    ep = calculate_endpoint_return(Decimal("10000"), Decimal("11000"))
+    assert ep.state == "KNOWN"
+    assert ep.value == Decimal("0.10")
+
+    # Endpoint calculation with missing or invalid inputs
+    assert calculate_endpoint_return(None, Decimal("11000")).state == "UNAVAILABLE"
+    assert calculate_endpoint_return(Decimal("10000"), None).state == "UNAVAILABLE"
+    assert calculate_endpoint_return(Decimal("0"), Decimal("11000")).state == "INVALID"
+    assert calculate_endpoint_return(Decimal("10000"), Decimal("-1")).state == "INVALID"
+
+
+def test_negative_annualization_parameters_validation() -> None:
+    """completed_periods and periods_per_year must be positive non-Boolean ints."""
+    invalid_cases = [252.5, Decimal("252.5"), True, False, None, 0, -1]
+
+    for bad in invalid_cases:
+        # In orchestrator
+        m = calculate_stage1_arithmetic(
+            nav_marks=[Decimal("10000"), Decimal("11000")],
+            risk_free_period_returns=[Decimal("0")],
+            mar_period_returns=[Decimal("0")],
+            periods_per_year=bad,  # type: ignore[arg-type]
+            spacing_verified=True,
+        )
+        assert m.geometric_annualized_return.state == "INVALID"
+        assert (
+            m.geometric_annualized_return.reason_code == REASON_INVALID_PERIODS_PER_YEAR
+        )
+
+        # In calculate_geometric_annualized_return for periods_per_year
+        t_ret = MetricArithmeticValue("t", state="KNOWN", value=Decimal("0.05"))
+        g_ppy = calculate_geometric_annualized_return(
+            terminal_return=t_ret,
+            completed_periods=1,
+            periods_per_year=bad,  # type: ignore[arg-type]
+        )
+        assert g_ppy.state == "INVALID"
+        assert g_ppy.reason_code == REASON_INVALID_PERIODS_PER_YEAR
+
+        # In calculate_geometric_annualized_return for completed_periods
+        g_cp = calculate_geometric_annualized_return(
+            terminal_return=t_ret,
+            completed_periods=bad,  # type: ignore[arg-type]
+            periods_per_year=252,
+        )
+        assert g_cp.state == "UNAVAILABLE"
+        assert g_cp.reason_code == REASON_INSUFFICIENT_OBSERVATIONS
+
+        # In calculate_sample_excess_variance_and_volatility
+        e_ret = [
+            MetricArithmeticValue("e1", state="KNOWN", value=Decimal("0.01")),
+            MetricArithmeticValue("e2", state="KNOWN", value=Decimal("-0.01")),
+        ]
+        v1, v2, v3 = calculate_sample_excess_variance_and_volatility(
+            excess_returns=e_ret,
+            periods_per_year=bad,  # type: ignore[arg-type]
+        )
+        assert v1.state == "INVALID"
+        assert v1.reason_code == REASON_INVALID_PERIODS_PER_YEAR
+
+        # In calculate_periodic_excess_sharpe
+        sh = calculate_periodic_excess_sharpe(
+            excess_returns=e_ret,
+            periods_per_year=bad,  # type: ignore[arg-type]
+        )
+        assert sh.state == "INVALID"
+        assert sh.reason_code == REASON_INVALID_PERIODS_PER_YEAR
+
+        # In calculate_sortino_ratio
+        p_ret = [MetricArithmeticValue("r", state="KNOWN", value=Decimal("0.01"))]
+        so = calculate_sortino_ratio(
+            periodic_returns=p_ret,
+            mar_period_returns=[Decimal("0")],
+            periods_per_year=bad,  # type: ignore[arg-type]
+        )
+        assert so.state == "INVALID"
+        assert so.reason_code == REASON_INVALID_PERIODS_PER_YEAR
+
+
 def test_metric_arithmetic_value_invariants() -> None:
     """Assert MetricArithmeticValue invariants and immutability."""
-    # Cannot create KNOWN with None value
+    # KNOWN requires finite Decimal value and reason_code=None
     with pytest.raises(ValueError, match="must have a non-None value"):
         MetricArithmeticValue(metric_name="test", state="KNOWN", value=None)
 
-    # Cannot create non-KNOWN with a value
-    with pytest.raises(ValueError, match="must have value=None"):
+    with pytest.raises(ValueError, match="cannot have reason_code"):
         MetricArithmeticValue(
-            metric_name="test", state="UNDEFINED", value=Decimal("1.0")
+            metric_name="test",
+            state="KNOWN",
+            value=Decimal("1"),
+            reason_code="CORRUPT",
         )
 
-    # Cannot pass float as value
-    with pytest.raises(TypeError, match="cannot be a float"):
+    # Cannot pass float or bool as value
+    with pytest.raises(TypeError, match="cannot be a float or bool"):
         MetricArithmeticValue(
             metric_name="test",
             state="KNOWN",
             value=1.5,  # type: ignore[arg-type]
         )
+    with pytest.raises(TypeError, match="cannot be a float or bool"):
+        MetricArithmeticValue(
+            metric_name="test",
+            state="KNOWN",
+            value=True,  # type: ignore[arg-type]
+        )
+
+    # Non-KNOWN requires value=None and non-empty reason_code
+    for bad_state in ["UNDEFINED", "UNAVAILABLE", "INVALID"]:
+        # With value
+        with pytest.raises(ValueError, match="must have value=None"):
+            MetricArithmeticValue(
+                metric_name="test",
+                state=bad_state,  # type: ignore[arg-type]
+                value=Decimal("1.0"),
+                reason_code="ERR",
+            )
+        # Without reason_code
+        with pytest.raises(ValueError, match="must have a non-empty reason_code"):
+            MetricArithmeticValue(
+                metric_name="test",
+                state=bad_state,  # type: ignore[arg-type]
+                value=None,
+                reason_code=None,
+            )
+        # With whitespace reason_code
+        with pytest.raises(ValueError, match="must have a non-empty reason_code"):
+            MetricArithmeticValue(
+                metric_name="test",
+                state=bad_state,  # type: ignore[arg-type]
+                value=None,
+                reason_code="   ",
+            )
+
+    # Valid constructions
+    v_known = MetricArithmeticValue(
+        metric_name="test", state="KNOWN", value=Decimal("1.5")
+    )
+    assert v_known.state == "KNOWN"
+    assert v_known.value == Decimal("1.5")
+    assert v_known.reason_code is None
+
+    v_undef = MetricArithmeticValue(
+        metric_name="test",
+        state="UNDEFINED",
+        reason_code=REASON_ZERO_SAMPLE_VARIANCE,
+    )
+    assert v_undef.state == "UNDEFINED"
+    assert v_undef.value is None
+    assert v_undef.reason_code == REASON_ZERO_SAMPLE_VARIANCE
 
     # Immutability
-    val = MetricArithmeticValue(metric_name="test", state="KNOWN", value=Decimal("1.5"))
     with pytest.raises(AttributeError):
-        val.state = "INVALID"  # type: ignore[misc]
+        v_known.state = "INVALID"  # type: ignore[misc]

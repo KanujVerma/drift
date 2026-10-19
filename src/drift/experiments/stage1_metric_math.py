@@ -71,19 +71,29 @@ class MetricArithmeticValue:
         if self.state == "KNOWN":
             if self.value is None:
                 raise ValueError("Metric with state 'KNOWN' must have a non-None value")
-            if isinstance(self.value, float):
-                raise TypeError("Metric value cannot be a float")
+            if isinstance(self.value, (float, bool)):
+                raise TypeError("Metric value cannot be a float or bool")
             if not isinstance(self.value, Decimal):
                 raise TypeError(
                     f"Metric value must be Decimal, got {type(self.value).__name__}"
                 )
             if self.value.is_nan() or self.value.is_infinite():
                 raise ValueError("Metric value cannot be NaN or Infinity")
+            if self.reason_code is not None:
+                raise ValueError(
+                    f"Metric with state 'KNOWN' cannot have reason_code: "
+                    f"{self.reason_code}"
+                )
         else:
             if self.value is not None:
                 raise ValueError(
                     f"Metric with state '{self.state}' must have value=None, "
                     f"got {self.value}"
+                )
+            if self.reason_code is None or not self.reason_code.strip():
+                raise ValueError(
+                    f"Metric with state '{self.state}' must have a non-empty "
+                    "reason_code"
                 )
 
     @property
@@ -107,6 +117,11 @@ class Stage1ArithmeticMetrics:
 
 def _get_context() -> Context:
     return Context(prec=CALCULATION_PRECISION)
+
+
+def _is_positive_int(val: object) -> bool:
+    """Check if value is a strictly positive int, explicitly excluding bool."""
+    return isinstance(val, int) and not isinstance(val, bool) and val > 0
 
 
 def _check_decimal_input(
@@ -224,7 +239,11 @@ def calculate_periodic_returns(
 def calculate_terminal_return(
     nav_marks: Sequence[Decimal | None],
 ) -> MetricArithmeticValue:
-    """Compute terminal cumulative return R = NAV[T] / NAV[0] - 1."""
+    """Compute terminal cumulative return R = NAV[T] / NAV[0] - 1.
+
+    Requires a complete verified series: any missing valuation mark within the
+    sequence fails closed to UNAVAILABLE with MISSING_VALUATION_MARK.
+    """
     if not isinstance(nav_marks, Sequence) or len(nav_marks) == 0:
         return MetricArithmeticValue(
             metric_name="terminal_return",
@@ -241,15 +260,16 @@ def calculate_terminal_return(
                 reason_code=err,
             )
 
-    first = nav_marks[0]
-    last = nav_marks[-1]
-
-    if first is None or last is None:
+    if any(mark is None for mark in nav_marks):
         return MetricArithmeticValue(
             metric_name="terminal_return",
             state="UNAVAILABLE",
             reason_code=REASON_MISSING_VALUATION_MARK,
         )
+
+    first = nav_marks[0]
+    last = nav_marks[-1]
+    assert first is not None and last is not None
 
     if first <= Decimal("0"):
         return MetricArithmeticValue(
@@ -259,7 +279,8 @@ def calculate_terminal_return(
         )
 
     for mark in nav_marks:
-        if mark is not None and mark < Decimal("0"):
+        assert mark is not None
+        if mark < Decimal("0"):
             return MetricArithmeticValue(
                 metric_name="terminal_return",
                 state="INVALID",
@@ -270,6 +291,54 @@ def calculate_terminal_return(
         val = (last / first) - Decimal("1")
         return MetricArithmeticValue(
             metric_name="terminal_return",
+            state="KNOWN",
+            value=val,
+        )
+
+
+def calculate_endpoint_return(
+    initial_nav: Decimal | None,
+    terminal_nav: Decimal | None,
+) -> MetricArithmeticValue:
+    """Calculate standalone endpoint-only return without mark verification.
+
+    Explicitly labeled as endpoint-only; does not represent a complete verified
+    benchmark portfolio return across intermediate sessions.
+    """
+    for name, val in [("initial_nav", initial_nav), ("terminal_nav", terminal_nav)]:
+        _, err = _check_decimal_input(val, name)
+        if err is not None:
+            return MetricArithmeticValue(
+                metric_name="endpoint_return",
+                state="INVALID",
+                reason_code=err,
+            )
+
+    if initial_nav is None or terminal_nav is None:
+        return MetricArithmeticValue(
+            metric_name="endpoint_return",
+            state="UNAVAILABLE",
+            reason_code=REASON_MISSING_VALUATION_MARK,
+        )
+
+    if initial_nav <= Decimal("0"):
+        return MetricArithmeticValue(
+            metric_name="endpoint_return",
+            state="INVALID",
+            reason_code=REASON_NONPOSITIVE_STARTING_NAV,
+        )
+
+    if terminal_nav < Decimal("0"):
+        return MetricArithmeticValue(
+            metric_name="endpoint_return",
+            state="INVALID",
+            reason_code=REASON_NEGATIVE_NAV,
+        )
+
+    with decimal.localcontext(_get_context()):
+        val = (terminal_nav / initial_nav) - Decimal("1")
+        return MetricArithmeticValue(
+            metric_name="endpoint_return",
             state="KNOWN",
             value=val,
         )
@@ -297,14 +366,14 @@ def calculate_geometric_annualized_return(
             reason_code=terminal_return.reason_code,
         )
 
-    if completed_periods < 1:
+    if not _is_positive_int(completed_periods):
         return MetricArithmeticValue(
             metric_name="geometric_annualized_return",
             state="UNAVAILABLE",
             reason_code=REASON_INSUFFICIENT_OBSERVATIONS,
         )
 
-    if periods_per_year < 1:
+    if not _is_positive_int(periods_per_year):
         return MetricArithmeticValue(
             metric_name="geometric_annualized_return",
             state="INVALID",
@@ -412,7 +481,7 @@ def calculate_sample_excess_variance_and_volatility(
     Returns (sample_variance, sample_std, annualized_volatility).
     Sample variance uses denominator n - 1.
     """
-    if periods_per_year < 1:
+    if not _is_positive_int(periods_per_year):
         err = MetricArithmeticValue(
             metric_name="excess_volatility",
             state="INVALID",
@@ -611,7 +680,7 @@ def calculate_sortino_ratio(
             reason_code=REASON_SERIES_LENGTH_MISMATCH,
         )
 
-    if periods_per_year < 1:
+    if not _is_positive_int(periods_per_year):
         return MetricArithmeticValue(
             metric_name="sortino",
             state="INVALID",
@@ -884,7 +953,7 @@ def calculate_stage1_arithmetic(
     risk_free_period_returns: Sequence[Decimal | None] | None,
     mar_period_returns: Sequence[Decimal | None] | None,
     periods_per_year: int,
-    spacing_verified: bool = True,
+    spacing_verified: bool = False,
 ) -> Stage1ArithmeticMetrics:
     """Calculate complete Stage 1 arithmetic metrics suite.
 
@@ -964,7 +1033,7 @@ def calculate_stage1_arithmetic(
             )
 
     # Check periods_per_year
-    if periods_per_year < 1:
+    if not _is_positive_int(periods_per_year):
         err = MetricArithmeticValue(
             metric_name="stage1_arithmetic",
             state="INVALID",
@@ -1025,73 +1094,89 @@ def calculate_stage1_arithmetic(
     # 2. Terminal return
     term_ret = calculate_terminal_return(nav_marks)
 
-    # 3. Geometric annualized return
+    # 4. Maximum drawdown
+    mdd = calculate_maximum_drawdown(nav_marks)
+
+    # 3. Geometric annualized return, 5. Sharpe, 6. Sortino, 7. Calmar
     if not spacing_verified:
         geom_ann_ret = MetricArithmeticValue(
             metric_name="geometric_annualized_return",
             state="UNAVAILABLE",
             reason_code=REASON_IRREGULAR_SPACING,
         )
-    elif any(m is None for m in nav_marks):
-        # Missing intermediate mark invalidates spacing invariance
-        geom_ann_ret = MetricArithmeticValue(
-            metric_name="geometric_annualized_return",
+        sharpe = MetricArithmeticValue(
+            metric_name="periodic_excess_sharpe",
             state="UNAVAILABLE",
-            reason_code=REASON_MISSING_VALUATION_MARK,
+            reason_code=REASON_IRREGULAR_SPACING,
+        )
+        sortino = MetricArithmeticValue(
+            metric_name="sortino",
+            state="UNAVAILABLE",
+            reason_code=REASON_IRREGULAR_SPACING,
+        )
+        calmar = MetricArithmeticValue(
+            metric_name="calmar",
+            state="UNAVAILABLE",
+            reason_code=REASON_IRREGULAR_SPACING,
         )
     else:
-        geom_ann_ret = calculate_geometric_annualized_return(
-            terminal_return=term_ret,
-            completed_periods=n_expected,
-            periods_per_year=periods_per_year,
-        )
-
-    # 4. Maximum drawdown
-    mdd = calculate_maximum_drawdown(nav_marks)
-
-    # 5. Excess returns and Sharpe
-    if isinstance(periodic_rets, tuple):
-        excess_rets = calculate_periodic_excess_returns(
-            periodic_returns=periodic_rets,
-            risk_free_period_returns=risk_free_period_returns,
-        )
-        if isinstance(excess_rets, tuple):
-            sharpe = calculate_periodic_excess_sharpe(
-                excess_returns=excess_rets,
+        if any(m is None for m in nav_marks):
+            # Missing intermediate mark invalidates spacing invariance
+            geom_ann_ret = MetricArithmeticValue(
+                metric_name="geometric_annualized_return",
+                state="UNAVAILABLE",
+                reason_code=REASON_MISSING_VALUATION_MARK,
+            )
+        else:
+            geom_ann_ret = calculate_geometric_annualized_return(
+                terminal_return=term_ret,
+                completed_periods=n_expected,
                 periods_per_year=periods_per_year,
             )
+
+        # Excess returns and Sharpe
+        if isinstance(periodic_rets, tuple):
+            excess_rets = calculate_periodic_excess_returns(
+                periodic_returns=periodic_rets,
+                risk_free_period_returns=risk_free_period_returns,
+            )
+            if isinstance(excess_rets, tuple):
+                sharpe = calculate_periodic_excess_sharpe(
+                    excess_returns=excess_rets,
+                    periods_per_year=periods_per_year,
+                )
+            else:
+                sharpe = MetricArithmeticValue(
+                    metric_name="periodic_excess_sharpe",
+                    state=excess_rets.state,
+                    reason_code=excess_rets.reason_code,
+                )
         else:
             sharpe = MetricArithmeticValue(
                 metric_name="periodic_excess_sharpe",
-                state=excess_rets.state,
-                reason_code=excess_rets.reason_code,
+                state=periodic_rets.state,
+                reason_code=periodic_rets.reason_code,
             )
-    else:
-        sharpe = MetricArithmeticValue(
-            metric_name="periodic_excess_sharpe",
-            state=periodic_rets.state,
-            reason_code=periodic_rets.reason_code,
-        )
 
-    # 6. Sortino
-    if isinstance(periodic_rets, tuple):
-        sortino = calculate_sortino_ratio(
-            periodic_returns=periodic_rets,
-            mar_period_returns=mar_period_returns,
-            periods_per_year=periods_per_year,
-        )
-    else:
-        sortino = MetricArithmeticValue(
-            metric_name="sortino",
-            state=periodic_rets.state,
-            reason_code=periodic_rets.reason_code,
-        )
+        # Sortino
+        if isinstance(periodic_rets, tuple):
+            sortino = calculate_sortino_ratio(
+                periodic_returns=periodic_rets,
+                mar_period_returns=mar_period_returns,
+                periods_per_year=periods_per_year,
+            )
+        else:
+            sortino = MetricArithmeticValue(
+                metric_name="sortino",
+                state=periodic_rets.state,
+                reason_code=periodic_rets.reason_code,
+            )
 
-    # 7. Calmar
-    calmar = calculate_calmar_ratio(
-        geometric_annualized_return=geom_ann_ret,
-        maximum_drawdown=mdd,
-    )
+        # Calmar
+        calmar = calculate_calmar_ratio(
+            geometric_annualized_return=geom_ann_ret,
+            maximum_drawdown=mdd,
+        )
 
     return Stage1ArithmeticMetrics(
         terminal_return=term_ret,
