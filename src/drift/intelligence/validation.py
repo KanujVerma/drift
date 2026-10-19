@@ -12,11 +12,11 @@ from typing import Any
 from drift.intelligence.contracts import (
     SUPPORTED_PROFILES,
     ArtifactReference,
+    AttemptRecord,
     CandidateStrategy,
     CostReceipt,
-    AttemptRecord,
-    ModelReplayRecord,
     ImmutableModel,
+    ModelReplayRecord,
     RawChoice,
     ResearchCandidate,
     ResearchContext,
