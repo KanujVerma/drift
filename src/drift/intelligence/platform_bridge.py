@@ -17,6 +17,8 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import NAMESPACE_URL, uuid5
 
+from pydantic import Field, model_validator
+
 from drift.intelligence.contracts import (
     ArtifactReference,
     ImmutableModel,
@@ -38,10 +40,10 @@ class PortfolioStateBinding(ImmutableModel):
     account_id: str
     arm_id: str
     state_hash: str
-    is_paused: bool
-    has_pending_orders: bool
+    is_paused: bool = Field(strict=True)
+    has_pending_orders: bool = Field(strict=True)
     observed_at: datetime
-    state_verified: bool = False
+    state_verified: bool = Field(default=False, strict=True)
     verification_ref: ArtifactReference | None = None
 
 
@@ -62,6 +64,21 @@ class PlatformExecutionRequest(ImmutableModel):
     refusal_reason: str | None = None
     dispatched_at: datetime
     record_hash: str
+
+    @model_validator(mode="after")
+    def verify_request_identity(self) -> "PlatformExecutionRequest":
+        if self.record_hash != compute_record_hash(self):
+            raise ValueError("PLATFORM_REQUEST_HASH_MISMATCH")
+        if self.status != "admitted":
+            if self.session_target != "none" or self.target_allocations:
+                raise ValueError("NON_ACTIONABLE_PLATFORM_REQUEST_HAS_TARGETS")
+        if self.disposition == "propose" and self.status == "admitted":
+            if not self.target_allocations or self.session_target == "none":
+                raise ValueError("UNSAFE_EMPTY_STAGE1_DISPATCH")
+        if self.disposition in ("hold", "abstain", "unavailable"):
+            if self.target_allocations or self.session_target != "none":
+                raise ValueError("NON_TRADING_REQUEST_HAS_TARGETS")
+        return self
 
 
 def bridge_candidate_to_execution(
@@ -94,6 +111,12 @@ def bridge_candidate_to_execution(
         raise ValueError("INDETERMINATE_TIMEZONE: input evidence timestamp has no offset")
     curr_utc = current_time.astimezone(UTC)
     cand_comp_utc = candidate.completed_at.astimezone(UTC)
+    # Revalidate even frozen instances; model_copy(update=...) bypasses
+    # Pydantic's normal validation and must not change dispatch authority.
+    candidate = ResearchCandidate.model_validate(candidate.model_dump(mode="python"))
+    portfolio_state = PortfolioStateBinding.model_validate(
+        portfolio_state.model_dump(mode="python")
+    )
     actual_request_id = request_id or str(
         uuid5(
             NAMESPACE_URL,
