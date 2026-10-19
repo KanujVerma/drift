@@ -153,6 +153,14 @@ def build_context(
             item["available_at"],
             item["role"],
             item["input_ref"]["id"],
+            item["input_ref"]["version"],
+            item["input_ref"]["sha256"],
+            item["availability_basis_ref"]["sha256"],
+            (
+                item["transformation_ref"]["sha256"]
+                if item["transformation_ref"] is not None
+                else ""
+            ),
         )
     )
 
