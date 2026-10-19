@@ -16,6 +16,7 @@ from drift.serialization.canonical import content_hash
 # G2 has not qualified a released research wire profile. No silent upgrade.
 SUPPORTED_PROFILES = ("drift-research/1-draft",)
 type ProfileLiteral = Literal["drift-research/1-draft"]
+type SourceGrade = Literal["synthetic_fixture", "exploratory"]
 
 
 class ImmutableModel(BaseModel):
@@ -103,7 +104,7 @@ class ResearchContext(ImmutableModel):
     excluded_inputs_ref: ArtifactReference | None = None
     feed_state_ref: ArtifactReference | None = None
     feedback_refs: tuple[ArtifactReference, ...] = ()
-    source_grade: str = Field(min_length=1)
+    source_grade: SourceGrade
     limitations: tuple[str, ...] = ()
     current_selection_ref: ArtifactReference | None = None
     record_hash: str = Field(min_length=64, max_length=64)
@@ -120,6 +121,8 @@ class ResearchContext(ImmutableModel):
             raise ValueError("INDETERMINATE_TIMEZONE: context timestamps need offsets")
         if self.memory_cutoff > self.decision_cutoff:
             raise ValueError("FUTURE_MEMORY_IN_CONTEXT")
+        if self.source_grade == "exploratory" and not self.limitations:
+            raise ValueError("EXPLORATORY_LIMITATIONS_REQUIRED")
         if self.built_at > self.review_started_at:
             raise ValueError("NON_CAUSAL_REVIEW_CLOCK")
         for inp in self.inputs:
