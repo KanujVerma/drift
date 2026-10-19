@@ -7,6 +7,7 @@ Verifies acceptance criteria T06 from research.md and DP-R4:
 - Zero network calls during offline replay.
 """
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -354,3 +355,45 @@ def test_absent_response_without_recorded_timeout_is_not_timeout(
     assert result.status == "UNAVAILABLE"
     assert result.replay_record is None
     assert "no proven timeout" in (result.reason or "")
+
+
+@pytest.mark.parametrize(
+    "response_json",
+    [
+        '{"disposition":"abstain","disposition":"propose"}',
+        '{"disposition":"propose","cash_weight":NaN}',
+        '{"disposition":"propose","cash_weight":Infinity}',
+    ],
+)
+def test_malformed_or_ambiguous_model_json_is_not_a_valid_decision(
+    replay_fixtures: dict[str, Any],
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    response_json: str,
+) -> None:
+    data = replay_fixtures["positive_replay"]["request"]
+    result = replay_model_output(
+        recorded_request=StoredArtifactRef(
+            artifact_id="request:strict",
+            kind="other",
+            content_hash=data["content_hash"],
+            location=data["location"],
+        ),
+        recorded_response=StoredArtifactRef(
+            artifact_id="response:strict",
+            kind="other",
+            content_hash=hashlib.sha256(response_json.encode("utf-8")).hexdigest(),
+            location="synthetic:strict-response",
+        ),
+        request_payload=data["payload"],
+        response_payload=response_json,
+        original_context=sample_context,
+        original_bindings=sample_bindings,
+        adapter_revision=ArtifactReference(id="adapter:offline", version="v1", sha256="a" * 64),
+        parser_schema_ref=ArtifactReference(id="schema:raw", version="v1", sha256="b" * 64),
+        validation_policy=ArtifactReference(id="policy:fixed", version="v1", sha256="c" * 64),
+        attempt_id="strict-output",
+        checked_at=datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
+    )
+    assert result.status == "MALFORMED_OUTPUT"
+    assert result.candidate is None
