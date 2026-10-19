@@ -388,3 +388,64 @@ def test_cost_receipt_rejects_nonfinite_or_negative_amount(
             amount=amount,
             currency="USD",
         )
+
+
+def test_cost_correction_requires_actual_predecessor_and_same_scope(
+    sample_scope: Scope,
+) -> None:
+    now = datetime(2024, 1, 2, 10, 0, tzinfo=UTC)
+    correction = create_cost_receipt(
+        receipt_id="corrected",
+        scope=sample_scope,
+        category="model_inference",
+        billing_identity="synthetic",
+        amount_basis="actual",
+        amount="0.01",
+        currency="USD",
+        supersedes_receipt_id="original-estimate",
+        recorded_at=now,
+    )
+    store = ResearchReceiptStore()
+    with pytest.raises(ValueError, match="UNKNOWN_COST_SUPERSESSION"):
+        store.record_cost_receipt(correction)
+    assert store.export_events() == []
+    estimate = create_cost_receipt(
+        receipt_id="original-estimate",
+        scope=sample_scope,
+        category="model_inference",
+        billing_identity="synthetic",
+        amount_basis="estimate",
+        amount="0.02",
+        currency="USD",
+        recorded_at=now,
+    )
+    store.record_cost_receipt(estimate)
+    store.record_cost_receipt(correction)
+    assert store.get_cost_receipt("original-estimate") == estimate
+    assert store.get_cost_receipt("corrected") == correction
+
+
+def test_export_is_deterministic_under_independent_ingestion_order(
+    sample_scope: Scope, sample_artifact_refs: dict[str, ArtifactReference]
+) -> None:
+    now = datetime(2024, 1, 2, 10, 0, tzinfo=UTC)
+    events = [
+        create_started_attempt(
+            attempt_id=f"attempt-{i}",
+            logical_request_id=f"request-{i}",
+            attempt_event_id=f"event-{i}",
+            scope=sample_scope,
+            context_ref=sample_artifact_refs["context_ref"],
+            method_ref=sample_artifact_refs["method_ref"],
+            budget_ref=sample_artifact_refs["budget_ref"],
+            producer="synthetic",
+            started_at=now,
+        )
+        for i in range(2)
+    ]
+    left, right = ResearchReceiptStore(), ResearchReceiptStore()
+    for ev in events:
+        left.record_attempt(ev)
+    for ev in reversed(events):
+        right.record_attempt(ev)
+    assert left.export_canonical_jsonl() == right.export_canonical_jsonl()
