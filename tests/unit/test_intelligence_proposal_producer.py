@@ -6,7 +6,7 @@ Verifies acceptance criteria T07, T09 from research.md and DP-R3/DP-R4:
 """
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -407,3 +407,119 @@ def test_noncanonical_scripted_output_retains_failure_and_cost(
     assert len(costs) == 1
     assert costs[0].amount_basis == "estimate"
     assert costs[0].amount == "0.20"
+@pytest.mark.parametrize(
+    ("amount", "currency"),
+    [
+        ("1e2", "USD"),
+        (" 0.20", "USD"),
+        ("Infinity", "USD"),
+        ("0.20", ""),
+    ],
+)
+def test_invalid_synthetic_billing_retains_a_terminal_and_unknown_cost(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+    amount: str,
+    currency: str,
+) -> None:
+    """Malformed synthetic price metadata cannot strand incurred work."""
+    recorder = ResearchReceiptStore()
+    result = produce_proposal(
+        context=sample_context,
+        resolved_inputs=sample_bindings,
+        frozen_method=ArtifactReference(
+            id="synthetic:method", version="v1", sha256="a" * 64
+        ),
+        validation_policy=ArtifactReference(
+            id="synthetic:policy", version="v1", sha256="b" * 64
+        ),
+        recorder=recorder,
+        transport=FakeTransport(
+            raw_choice=fixture_data["raw_choice"],
+            cost_amount=amount,
+            cost_currency=currency,
+        ),
+        attempt_id="synthetic:invalid-billing",
+        checked_at=datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
+    )
+    assert result.is_success
+    assert result.status == "VALID"
+    assert [e.status for e in recorder.get_attempt_events(result.attempt_id)] == [
+        "started",
+        "completed",
+    ]
+    costs = recorder.get_cost_receipts_for_attempt(result.attempt_id)
+    assert len(costs) == 1
+    assert costs[0].amount_basis == "unknown"
+    assert costs[0].amount is None
+    assert costs[0].unknown_reason
+
+
+def test_scripted_identity_binds_request_and_candidate_ttl(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+) -> None:
+    """Different explicit request IDs or TTLs retain independent receipts."""
+    at = datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC)
+    recorder = ResearchReceiptStore()
+    method = ArtifactReference(
+        id="synthetic:method", version="v1", sha256="a" * 64
+    )
+    policy = ArtifactReference(
+        id="synthetic:policy", version="v1", sha256="b" * 64
+    )
+
+    def run(request: str, expires: datetime) -> str:
+        result = produce_proposal(
+            context=sample_context,
+            resolved_inputs=sample_bindings,
+            frozen_method=method,
+            validation_policy=policy,
+            recorder=recorder,
+            transport=FakeTransport(raw_choice=fixture_data["raw_choice"]),
+            logical_request_id=request,
+            checked_at=at,
+            valid_until=expires,
+        )
+        assert result.is_success
+        assert result.candidate is not None
+        assert result.candidate.valid_until == expires
+        assert len(recorder.get_attempt_events(result.attempt_id)) == 2
+        return result.attempt_id
+
+    soon = at + timedelta(minutes=1)
+    later = at + timedelta(minutes=2)
+    identities = [
+        run("synthetic:request-A", soon),
+        run("synthetic:request-B", soon),
+        run("synthetic:request-A", later),
+    ]
+    assert len(set(identities)) == 3
+    assert run("synthetic:request-A", soon) == identities[0]
+    assert len(recorder.export_events()) == 9
+
+
+def test_scripted_naive_ttl_refused_before_recording_attempt(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+) -> None:
+    recorder = ResearchReceiptStore()
+    with pytest.raises(ValueError, match="INDETERMINATE_TIMEZONE"):
+        produce_proposal(
+            context=sample_context,
+            resolved_inputs=sample_bindings,
+            frozen_method=ArtifactReference(
+                id="synthetic:method", version="v1", sha256="a" * 64
+            ),
+            validation_policy=ArtifactReference(
+                id="synthetic:policy", version="v1", sha256="b" * 64
+            ),
+            recorder=recorder,
+            transport=FakeTransport(raw_choice=fixture_data["raw_choice"]),
+            valid_until=datetime(2024, 1, 2, 11, 0),
+        )
+    assert recorder.export_events() == []
+
