@@ -799,3 +799,44 @@ def test_ai_and_r_attempt_stores_do_not_leak_across_arms(
     assert len(ai_store.get_cost_receipts_for_attempt(ai.attempt_id)) == 1
     assert len(r_store.get_cost_receipts_for_attempt(conventional.attempt_id)) == 1
 
+
+def test_r_opaque_pool_refuses_before_deepcopy_side_effects(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+) -> None:
+    """Invalid opaque input cannot execute custom deepcopy code."""
+    class DangerousInput:
+        touched = False
+
+        def __deepcopy__(self, memo: dict[int, object]) -> object:
+            self.touched = True
+            raise AssertionError("opaque input must not be copied")
+
+    poisoned = DangerousInput()
+    raw = deepcopy(fixture_data["raw_choice"])
+    raw["selection"]["parameters"] = {"untrusted": poisoned}
+    recorder = ResearchReceiptStore()
+    result = select_conventional_candidate(
+        context=sample_context,
+        resolved_inputs=sample_bindings,
+        candidate_pool=[raw],
+        objective_fn=lambda _candidate: Decimal("1"),
+        method_ref=ArtifactReference(
+            id="synthetic:method-R", version="v1", sha256="e" * 64
+        ),
+        validation_policy=ArtifactReference(
+            id="synthetic:policy", version="v1", sha256="f" * 64
+        ),
+        recorder=recorder,
+        attempt_id="synthetic:opaque-pool",
+        checked_at=datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
+    )
+    assert not poisoned.touched
+    assert result.status == "REJECTED"
+    assert result.selected_candidate is None
+    assert [event.status for event in recorder.get_attempt_events(result.attempt_id)] == [
+        "started",
+        "rejected",
+    ]
+    assert len(recorder.get_cost_receipts_for_attempt(result.attempt_id)) == 1
