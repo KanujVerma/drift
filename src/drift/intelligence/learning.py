@@ -66,7 +66,9 @@ class LearningSnapshot(ImmutableModel):
             matured_trials=self.matured_trials,
         )
         if self.state_hash != expected:
-            raise ValueError("LEARNING_STATE_HASH_MISMATCH: state identity was altered")
+            raise ValueError(
+                "LEARNING_STATE_HASH_MISMATCH: state identity was altered"
+            )
         return self
 
 
@@ -131,7 +133,9 @@ def advance_learning(
         # Re-validation catches changes to the serialized hashed state.
         LearningSnapshot.model_validate(previous_snapshot.model_dump(mode="python"))
         if previous_snapshot.arm_id != arm_id:
-            raise ValueError("CROSS_ARM_LEAKAGE: prior snapshot belongs to another arm")
+            raise ValueError(
+                "CROSS_ARM_LEAKAGE: prior snapshot belongs to another arm"
+            )
         if _require_aware(previous_snapshot.cutoff, "previous cutoff") >= cutoff_utc:
             raise ValueError("NON_MONOTONIC_LEARNING_CUTOFF")
         for record in previous_snapshot.matured_trials:
@@ -145,7 +149,9 @@ def advance_learning(
     for record in feedback_records:
         # A sealed report stays forbidden even if delayed or from another arm.
         if record.is_holdout or record.trial_id.startswith("holdout:"):
-            raise ValueError("HOLDOUT_ACCESS_VIOLATION: sealed feedback cannot enter memory")
+            raise ValueError(
+                "HOLDOUT_ACCESS_VIOLATION: sealed feedback cannot enter memory"
+            )
         if record.arm_id != arm_id:
             continue
         matured = _require_aware(record.matured_at, "feedback maturity")
@@ -164,11 +170,16 @@ def advance_learning(
         if incumbent is not None and incumbent != record:
             # Legitimate revisions require a separately approved, source-bound
             # supersession event, not last-write-wins on a trial id.
-            raise ValueError("CONFLICTING_TRIAL_REVISION: explicit supersession required")
+            raise ValueError(
+                "CONFLICTING_TRIAL_REVISION: explicit supersession required"
+            )
         historical[record.trial_id] = record
 
     sorted_trials = tuple(
-        sorted(historical.values(), key=lambda record: (record.matured_at, record.trial_id))
+        sorted(
+            historical.values(),
+            key=lambda record: (record.matured_at, record.trial_id),
+        )
     )
     version = 1 if previous_snapshot is None else previous_snapshot.version + 1
     prev_ref = (
