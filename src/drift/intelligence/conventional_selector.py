@@ -290,9 +290,9 @@ def select_conventional_candidate(
             attempt_id=actual_attempt_id,
             attempt_event_id=terminal_event_id,
             reason=(
-                "Objective scoring was unavailable or invalid"
+                score_error
                 if score_error is not None
-                else "No candidate in pool satisfied validation constraints"
+                else "NO_ELIGIBLE_CANDIDATE"
             ),
         )
 
