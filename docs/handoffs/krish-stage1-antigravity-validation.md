@@ -328,7 +328,9 @@ from this separate corrective branch as acceptance of PR #457.
    pool that is being ranked. A callback itself is NOT a security
    sandbox or an approved scientific objective. An independent
    capability-denied harness is required before claiming untrusted
-   external scorer execution is safe.
+   external scorer execution is safe. Opaque noncanonical pool objects
+   must be refused before running custom Python `__deepcopy__` hooks, with
+   a retained explicit-attempt rejection and synthetic cost.
 8. **Full reference and clock binding**: Both scripted and R attempts
    bind method and policy ID/version/hash rather than digest alone.
    The conventional clock and expiry are normalized to UTC after
