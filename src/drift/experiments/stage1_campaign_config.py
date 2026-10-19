@@ -239,7 +239,10 @@ def _freeze_json(value: object, seen: set[int] | None = None) -> FrozenJSONValue
     raise ValueError(f"unsupported JSON value type: {type(value)}")
 
 
-def _verify_frozen_json(value: object) -> None:
+def _verify_frozen_json(
+    value: object,
+    ancestors: set[int] | None = None,
+) -> None:
     if value is None:
         return
     if type(value) is bool:
@@ -248,7 +251,16 @@ def _verify_frozen_json(value: object) -> None:
         return
     if type(value) is str:
         return
+
+    if ancestors is None:
+        ancestors = set()
+
     if type(value) is FrozenJSONMap:
+        object_id = id(value)
+        if object_id in ancestors:
+            raise ValueError("cyclic reference detected in frozen JSON")
+        next_ancestors = ancestors | {object_id}
+
         if type(value.items) is not tuple:
             raise ValueError("FrozenJSONMap items must be a tuple")
         seen_keys: set[str] = set()
@@ -267,14 +279,21 @@ def _verify_frozen_json(value: object) -> None:
                 )
             seen_keys.add(k)
             prev_key = k
-            _verify_frozen_json(v)
+            _verify_frozen_json(v, next_ancestors)
         return
+
     if type(value) is FrozenJSONArray:
+        object_id = id(value)
+        if object_id in ancestors:
+            raise ValueError("cyclic reference detected in frozen JSON")
+        next_ancestors = ancestors | {object_id}
+
         if type(value.items) is not tuple:
             raise ValueError("FrozenJSONArray items must be a tuple")
         for item in value.items:
-            _verify_frozen_json(item)
+            _verify_frozen_json(item, next_ancestors)
         return
+
     raise ValueError(f"invalid persisted frozen JSON value: {type(value)}")
 
 

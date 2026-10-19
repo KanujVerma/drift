@@ -11,11 +11,13 @@ from drift.experiments.stage1_campaign_config import (
     CampaignSpecV1,
     DataWindowV1,
     DecisionScheduleV1,
+    FrozenJSONArray,
     FrozenJSONMap,
     PrimaryComparisonV1,
     RunAccountBindingV1,
     ScoringWindowV1,
     SessionWindowV1,
+    _verify_frozen_json,
     build_arm_spec,
     build_campaign_spec,
     build_run_account_binding,
@@ -3047,3 +3049,35 @@ def test_stage1_generic_extensibility_alternative_roles_and_models() -> None:
         )
         is True
     )
+
+
+def test_neg_frozen_json_direct_array_cycle() -> None:
+    arr = FrozenJSONArray(items=())
+    object.__setattr__(arr, "items", (arr,))
+    forged = FrozenJSONMap(items=(("cycle", arr),))
+    camp = replace(make_golden_campaign(), authorization_evidence=forged)
+
+    with pytest.raises(ValueError, match="cyclic"):
+        verify_campaign_spec(campaign=camp)
+
+
+def test_neg_frozen_json_indirect_map_array_map_cycle() -> None:
+    nested_map = FrozenJSONMap(items=())
+    nested_array = FrozenJSONArray(items=(nested_map,))
+    object.__setattr__(nested_map, "items", (("cycle", nested_array),))
+    forged = FrozenJSONMap(items=(("root", nested_map),))
+    camp = replace(make_golden_campaign(), authorization_evidence=forged)
+
+    with pytest.raises(ValueError, match="cyclic"):
+        verify_campaign_spec(campaign=camp)
+
+
+def test_frozen_json_valid_shared_immutable_child() -> None:
+    shared_child = FrozenJSONArray(items=(1, "test", True))
+    shared_map = FrozenJSONMap(
+        items=(
+            ("a_ref", shared_child),
+            ("b_ref", shared_child),
+        )
+    )
+    _verify_frozen_json(shared_map)
