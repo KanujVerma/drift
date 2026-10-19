@@ -309,10 +309,15 @@ def replay_model_output(
         "latency_unknown_reason": "offline replay cannot measure provider latency",
         "usage_ref": None,
         "provider_call_id": None,
-        "finish_reason": "stop",
+        # Retained response bytes alone do not prove a provider finish code.
+        "finish_reason": recorded_finish_reason or "unknown",
         "mode": "offline_deterministic",
         "original_replay_ref": None,
-        "retention_limitation": "historical provider timestamps unavailable",
+        "retention_limitation": (
+            "historical provider timestamps unavailable; provider finish unknown"
+            if recorded_finish_reason != "stop"
+            else "historical provider timestamps unavailable"
+        ),
         "replay_started_at": now,
         "replay_completed_at": now,
     }

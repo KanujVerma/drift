@@ -129,6 +129,7 @@ def test_t06_positive_model_replay_and_zero_network(
             ),
             attempt_id="att-replay-001",
             checked_at=now,
+            recorded_finish_reason="stop",
         )
         assert mock_sock.call_count == 0
 
@@ -471,3 +472,48 @@ def test_replay_accepts_valid_noncanonical_json_with_verified_byte_receipt(
     assert result.replay_record is not None
     assert result.replay_record.response_ref is not None
     assert result.replay_record.response_ref.content_hash == raw_digest
+
+
+
+@pytest.mark.parametrize("retained_finish", [None, "unknown"])
+def test_replay_cannot_invent_a_provider_stop_reason(
+    replay_fixtures: dict[str, Any],
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    retained_finish: str | None,
+) -> None:
+    """Response existence is not evidence of a provider finish classification."""
+    positive = replay_fixtures["positive_replay"]
+    request = positive["request"]
+    response = positive["response"]
+    result = replay_model_output(
+        recorded_request=StoredArtifactRef(
+            artifact_id="req:unknown-finish", kind="other",
+            content_hash=request["content_hash"], location=request["location"],
+        ),
+        recorded_response=StoredArtifactRef(
+            artifact_id="resp:unknown-finish", kind="other",
+            content_hash=response["content_hash"], location=response["location"],
+        ),
+        request_payload=request["payload"],
+        response_payload=response["payload"],
+        original_context=sample_context,
+        original_bindings=sample_bindings,
+        adapter_revision=ArtifactReference(
+            id="adapter:offline", version="v1", sha256="a" * 64
+        ),
+        parser_schema_ref=ArtifactReference(
+            id="schema:raw-choice", version="v1", sha256="b" * 64
+        ),
+        validation_policy=ArtifactReference(
+            id="policy:standard", version="v1", sha256="c" * 64
+        ),
+        attempt_id="unknown-finish-classification",
+        checked_at=datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
+        recorded_finish_reason=retained_finish,
+    )
+    assert result.replay_record is not None
+    assert result.replay_record.finish_reason == "unknown"
+    assert "provider finish unknown" in (
+        result.replay_record.retention_limitation or ""
+    )

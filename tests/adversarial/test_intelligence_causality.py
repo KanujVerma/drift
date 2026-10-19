@@ -217,3 +217,84 @@ def test_adversarial_order_perturbation_invariance(
     )
 
     assert ctx_order_a.record_hash == ctx_order_b.record_hash
+
+
+
+def _build_source_variant_context(
+    scope: Scope,
+    refs: dict[str, ArtifactReference],
+    inputs: list[CandidateInput],
+):
+    """Compare provenance variants under one identical synthetic cutoff."""
+    return build_context(
+        scope=scope,
+        decision_cutoff=datetime(2024, 1, 2, 10, tzinfo=UTC),
+        portfolio_ref=refs["portfolio_ref"],
+        mandate_ref=refs["mandate_ref"],
+        universe_ref=refs["universe_ref"],
+        registry_ref=refs["registry_ref"],
+        method_ref=refs["method_ref"],
+        clock_policy_ref=refs["clock_policy_ref"],
+        budget_ref=refs["budget_ref"],
+        memory_snapshot_ref=refs["memory_snapshot_ref"],
+        inputs=inputs,
+    )
+
+
+def test_distinct_transformations_survive_source_deduplication(
+    sample_scope_b: Scope,
+    sample_refs: dict[str, ArtifactReference],
+) -> None:
+    """Do not erase transformations just because they share raw bytes."""
+    first = CandidateInput(
+        input_ref=ArtifactReference(
+            id="news:shared-raw", version="v1", sha256="a" * 64
+        ),
+        role="news",
+        available_at=datetime(2024, 1, 2, 9, 45, tzinfo=UTC),
+        availability_basis_ref=ArtifactReference(
+            id="basis:arrival", version="v1", sha256="b" * 64
+        ),
+        transformation_ref=ArtifactReference(
+            id="transform:A", version="v1", sha256="c" * 64
+        ),
+    )
+    second = first.model_copy(
+        update={
+            "transformation_ref": ArtifactReference(
+                id="transform:B", version="v1", sha256="d" * 64
+            )
+        }
+    )
+    context = _build_source_variant_context(
+        sample_scope_b, sample_refs, [first, second, first]
+    )
+    assert len(context.inputs) == 2
+    assert {
+        item.transformation_ref.sha256
+        for item in context.inputs
+        if item.transformation_ref is not None
+    } == {"c" * 64, "d" * 64}
+
+
+def test_conflicting_source_availability_does_not_depend_on_input_order(
+    sample_scope_b: Scope,
+    sample_refs: dict[str, ArtifactReference],
+) -> None:
+    """Reject both orders of contradictory first-available claims."""
+    first = CandidateInput(
+        input_ref=ArtifactReference(
+            id="news:arrival", version="v1", sha256="a" * 64
+        ),
+        role="news",
+        available_at=datetime(2024, 1, 2, 9, 45, tzinfo=UTC),
+        availability_basis_ref=ArtifactReference(
+            id="basis:arrival", version="v1", sha256="b" * 64
+        ),
+    )
+    second = first.model_copy(
+        update={"available_at":first.available_at + timedelta(minutes=1)}
+    )
+    for entries in ([first, second], [second, first]):
+        with pytest.raises(ValueError, match="INPUT_AVAILABILITY_CONFLICT"):
+            _build_source_variant_context(sample_scope_b, sample_refs, entries)

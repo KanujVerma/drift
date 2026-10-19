@@ -552,3 +552,39 @@ def test_refusal_cannot_be_laundered_with_cash_weight(
     tampered["record_hash"] = compute_record_hash(tampered)
     with pytest.raises(ValueError, match="NON_ACTIONABLE_PLATFORM_REQUEST_HAS_TARGETS"):
         PlatformExecutionRequest.model_validate(tampered)
+
+
+
+@pytest.mark.parametrize(
+    ("weights", "cash"),
+    [
+        (("0.80", "0.40"), "0.0"),
+        (("0.30", "0.30"), "0.2"),
+        (("0.60", "0.40"), "NaN"),
+        (("0.60", "0.40"), "Infinity"),
+        (("0.60", "0.40"), "1e-3"),
+    ],
+)
+def test_self_rehashed_invalid_weights_never_make_a_platform_request(
+    sample_candidate: ResearchCandidate,
+    matching_portfolio_state: PortfolioStateBinding,
+    weights: tuple[str, str],
+    cash: str,
+) -> None:
+    """A valid-looking hash cannot replace a real weight-sum check."""
+    payload = sample_candidate.model_dump(mode="python")
+    payload["targets"][0]["weight"] = weights[0]
+    payload["targets"][1]["weight"] = weights[1]
+    payload["cash_weight"] = cash
+    payload["record_hash"] = compute_record_hash(payload)
+    candidate = ResearchCandidate.model_validate(payload)
+    request = bridge_candidate_to_execution(
+        candidate=candidate,
+        portfolio_state=matching_portfolio_state,
+        current_time=candidate.completed_at + timedelta(minutes=5),
+    )
+    assert request.status == "refused"
+    assert request.session_target == "none"
+    assert request.target_allocations == ()
+    assert request.cash_weight is None
+    assert "INVALID_STAGE1_TARGET_WEIGHTS" in (request.refusal_reason or "")

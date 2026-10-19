@@ -90,8 +90,9 @@ def build_context(
         raise ValueError("NON_CAUSAL_REVIEW_CLOCK")
 
     admitted_inputs: list[dict[str, Any]] = []
-    seen_records: set[tuple[str, str, str, str, str]] = set()
+    seen_records: set[tuple[str, ...]] = set()
     seen_versions: dict[tuple[str, str], str] = {}
+    seen_availability: dict[tuple[str, ...], tuple[str, ...]] = {}
 
     # Pre-aggregation validation and filtering
     for inp in inputs:
@@ -133,10 +134,39 @@ def build_context(
                 "INPUT_REVISION_CONFLICT: same source version changed bytes"
             )
         seen_versions[rev_key] = inp.input_ref.sha256
-        identity = (
-            inp.input_ref.id, inp.input_ref.version, inp.input_ref.sha256,
-            inp.role, inp.availability_basis_ref.sha256,
+        # Identical source bytes can have distinct lawful transformations.
+        # Contradictory availability claims for one source/role/transform
+        # must fail closed, not disappear via first-seen deduplication.
+        transform_key = (
+            (
+                inp.transformation_ref.id,
+                inp.transformation_ref.version,
+                inp.transformation_ref.sha256,
+            )
+            if inp.transformation_ref is not None
+            else ("", "", "")
         )
+        source_role = (
+            inp.input_ref.id,
+            inp.input_ref.version,
+            inp.input_ref.sha256,
+            inp.role,
+            *transform_key,
+        )
+        availability = (
+            inp_avail_utc.isoformat(),
+            inp.availability_basis_ref.id,
+            inp.availability_basis_ref.version,
+            inp.availability_basis_ref.sha256,
+        )
+        previous = seen_availability.get(source_role)
+        if previous is not None and previous != availability:
+            raise ValueError(
+                "INPUT_AVAILABILITY_CONFLICT: source revision has "
+                "contradictory availability evidence"
+            )
+        seen_availability[source_role] = availability
+        identity = source_role + availability
         if identity in seen_records:
             continue
         seen_records.add(identity)

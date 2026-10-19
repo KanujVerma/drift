@@ -14,6 +14,7 @@ execution request wrappers under DP-R2, DP-R5, and research acceptance criteria:
 """
 
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 from uuid import NAMESPACE_URL, uuid5
 
@@ -409,6 +410,44 @@ def bridge_candidate_to_execution(
             "session_target": "none",
             "status": "refused",
             "refusal_reason": "EMPTY_STAGE1_TARGETS: cannot infer a liquidation intent",
+            "dispatched_at": curr_utc,
+        }
+        raw_dict["record_hash"] = compute_record_hash(raw_dict)
+        return PlatformExecutionRequest.model_validate(raw_dict)
+
+    # An independently re-hashed ResearchCandidate is not proof that its
+    # proposed weights were validated against a coherent allocation. Never
+    # emit an actionable Stage 1 request with an invalid cash/target total.
+    try:
+        cash_text = candidate.cash_weight or ""
+        cash_amount = Decimal(cash_text)
+        target_amounts = [Decimal(target.weight) for target in candidate.targets]
+        allocation_valid = (
+            cash_amount.is_finite()
+            and Decimal("0") <= cash_amount <= Decimal("1")
+            and "e" not in cash_text.lower()
+            and all(
+                amount.is_finite() and Decimal("0") <= amount <= Decimal("1")
+                for amount in target_amounts
+            )
+            and sum(target_amounts, cash_amount) == Decimal("1")
+        )
+    except (InvalidOperation, TypeError):
+        allocation_valid = False
+    if not allocation_valid:
+        raw_dict = {
+            "request_id": actual_request_id,
+            "candidate_id": candidate.candidate_id,
+            "attempt_id": candidate.attempt_id,
+            "scope": candidate.scope.model_dump(mode="python"),
+            "portfolio_ref": candidate.portfolio_ref.model_dump(mode="python"),
+            "mandate_ref": candidate.mandate_ref.model_dump(mode="python"),
+            "disposition": candidate.disposition,
+            "target_allocations": [],
+            "cash_weight": None,
+            "session_target": "none",
+            "status": "refused",
+            "refusal_reason": "INVALID_STAGE1_TARGET_WEIGHTS",
             "dispatched_at": curr_utc,
         }
         raw_dict["record_hash"] = compute_record_hash(raw_dict)

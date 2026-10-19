@@ -76,6 +76,15 @@ In addition to the inherited K0/K1-K5 suites, independently exercise:
   clearly non-economic ranking function. It does NOT prove K0 warmup/source
   eligibility, actual transition, risk approval, market efficacy or profit.
 
+Additional source-review regressions to execute on the final pinned head:
+- Two distinct transformations of one retained source must both survive context
+  deduplication; contradictory first-available claims for one revision must
+  fail closed regardless of input order.
+- A replay with retained response bytes but no recorded provider finish reason
+  must preserve an explicit UNKNOWN classification, not invent `stop`.
+- A self-rehashed Stage 1 candidate with weights not summing exactly to one
+  or with nonfinite/ambiguous cash weight must produce a non-actionable refusal.
+
 ## One-shot isolated QA run
 
 Do not overwrite current working trees or start a second implementation writer. Use a fresh isolated worktree from the exact candidate head:
