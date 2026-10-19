@@ -7,6 +7,7 @@ Verifies acceptance criteria T07, T09, T13 from research.md and DP-R6:
 """
 
 import json
+from copy import deepcopy
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -317,3 +318,69 @@ def test_t13_control_isolation(
     assert len(ai_events) == 2
     assert len(r_events) == 2
     assert ai_events[1].record_hash != r_events[1].record_hash
+
+
+def test_r_selector_does_not_depend_on_pool_order(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+) -> None:
+    """A permutation of the same preregistered set cannot change R's winner."""
+    a = deepcopy(fixture_data["raw_choice"])
+    b = deepcopy(a)
+    b["targets"][0]["weight"] = "0.4"
+    b["targets"][1]["weight"] = "0.4"
+    b["cash_weight"] = "0.2"
+    at = datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC)
+    method = ArtifactReference(id="method:R", version="v1", sha256="e" * 64)
+    policy = ArtifactReference(id="policy:fixed", version="v1", sha256="f" * 64)
+
+    def run(pool: list[dict[str, Any]]) -> tuple[str, str, str]:
+        result = select_conventional_candidate(
+            context=sample_context,
+            resolved_inputs=sample_bindings,
+            candidate_pool=pool,
+            objective_fn=lambda c: Decimal("1") - Decimal(c.cash_weight or "1"),
+            method_ref=method,
+            validation_policy=policy,
+            recorder=ResearchReceiptStore(),
+            checked_at=at,
+        )
+        assert result.is_success and result.selected_candidate is not None
+        return (
+            result.attempt_id,
+            result.selected_candidate.record_hash,
+            result.selected_candidate.candidate_id,
+        )
+
+    assert run([a, b]) == run([b, a])
+
+
+def test_r_invalid_objective_never_selects_a_candidate(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+) -> None:
+    """No NaN/Infinity score may be mistaken for a winning objective."""
+    for bad in (Decimal("NaN"), Decimal("Infinity")):
+        recorder = ResearchReceiptStore()
+        result = select_conventional_candidate(
+            context=sample_context,
+            resolved_inputs=sample_bindings,
+            candidate_pool=[fixture_data["raw_choice"]],
+            objective_fn=lambda _c: bad,
+            method_ref=ArtifactReference(
+                id="method:R", version="v1", sha256="e" * 64
+            ),
+            validation_policy=ArtifactReference(
+                id="policy:fixed", version="v1", sha256="f" * 64
+            ),
+            recorder=recorder,
+            attempt_id=f"att-R-{str(bad)}",
+            checked_at=datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
+        )
+        assert result.is_success is False
+        assert result.selected_candidate is None
+        assert result.status == "REJECTED"
+        assert len(recorder.get_attempt_events(result.attempt_id)) == 2
+        assert len(recorder.get_cost_receipts_for_attempt(result.attempt_id)) == 1
