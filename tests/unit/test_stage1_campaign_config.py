@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from drift.experiments.stage1_campaign_config import (
+    SCHEMA_VERSION,
     ArmSpecV1,
     CampaignSpecV1,
     DataWindowV1,
@@ -17,6 +18,8 @@ from drift.experiments.stage1_campaign_config import (
     RunAccountBindingV1,
     ScoringWindowV1,
     SessionWindowV1,
+    _arm_preimage,
+    _campaign_preimage,
     _verify_frozen_json,
     build_arm_spec,
     build_campaign_spec,
@@ -27,6 +30,7 @@ from drift.experiments.stage1_campaign_config import (
     verify_run_account_binding,
     verify_stage1_synthetic_br_configuration,
 )
+from drift.serialization.canonical import content_hash
 
 GOLDEN_ARM_B_HASH = "84c4e89c1c1a06e4b3041f07fea316e051fd5b6b5502a5f8a3c17912db1fd831"
 GOLDEN_ARM_R_HASH = "c958ea89ded96aa8aafad3eac1756083ec9145b041c6c6f1fae4afc9216278cd"
@@ -3081,3 +3085,120 @@ def test_frozen_json_valid_shared_immutable_child() -> None:
         )
     )
     _verify_frozen_json(shared_map)
+
+
+class ImpostorString(str):
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+    __hash__ = str.__hash__
+
+
+def test_neg_build_arm_spec_impostor_currency() -> None:
+    with pytest.raises(ValueError, match="currency"):
+        build_arm_spec(
+            arm_id="ARM-B",
+            campaign_id="CAMP-E1-SYNTH-001",
+            selector_type="ADAPTIVE_AI",
+            eligible_strategy_references=["B3", "B4", "B5"],
+            initial_strategy_reference="B3",
+            initial_capital="10000",
+            currency=ImpostorString("EUR"),
+            arm_account_role="PRIMARY_TEST",
+            mandate_reference="fixture://balanced-mandate-v1",
+            execution_policy_reference="fixture://next-open-v1",
+            research_budget_reference="fixture://budget-B",
+            information_visibility_policy="IDENTICAL_MARKET_AND_REFERENCE_COMPLETED",
+            feedback_policy_reference="fixture://matured-own-arm-v1",
+            model_configuration_reference="fixture://model-B-v1",
+            deterministic_seed_reference="fixture://seed-B-001",
+            frozen_configuration_reference="b" * 64,
+        )
+
+
+def test_neg_verify_arm_spec_impostor_currency_recomputed_hash() -> None:
+    golden_arm = make_golden_arm_b()
+    forged_arm = replace(golden_arm, currency=ImpostorString("EUR"))
+    recomputed_hash = content_hash(_arm_preimage(forged_arm))
+    forged_arm = replace(forged_arm, arm_spec_fingerprint=recomputed_hash)
+
+    with pytest.raises(ValueError, match="currency"):
+        verify_arm_spec(arm=forged_arm)
+
+
+def test_neg_verify_arm_spec_impostor_schema_version_recomputed_hash() -> None:
+    golden_arm = make_golden_arm_b()
+    forged_arm = replace(golden_arm, schema_version=ImpostorString("wrong-schema"))
+    recomputed_hash = content_hash(_arm_preimage(forged_arm))
+    forged_arm = replace(forged_arm, arm_spec_fingerprint=recomputed_hash)
+
+    with pytest.raises(ValueError, match="schema_version"):
+        verify_arm_spec(arm=forged_arm)
+
+
+def test_neg_verify_campaign_spec_impostor_schema_version_recomputed_hash() -> None:
+    golden_camp = make_golden_campaign()
+    forged_camp = replace(golden_camp, schema_version=ImpostorString("wrong-schema"))
+    recomputed_hash = content_hash(_campaign_preimage(forged_camp))
+    forged_camp = replace(forged_camp, campaign_spec_fingerprint=recomputed_hash)
+
+    with pytest.raises(ValueError, match="schema_version"):
+        verify_campaign_spec(campaign=forged_camp)
+
+
+def test_neg_verify_run_account_binding_impostor_schema_version() -> None:
+    binding = make_golden_bindings()[0]
+    forged_binding = replace(binding, schema_version=ImpostorString("wrong-schema"))
+
+    with pytest.raises(ValueError, match="schema_version"):
+        verify_run_account_binding(binding=forged_binding)
+
+
+def test_neg_verify_run_account_binding_impostor_binding_id() -> None:
+    binding = make_golden_bindings()[0]
+    forged_binding = replace(binding, binding_id=ImpostorString("WRONG-BINDING"))
+
+    with pytest.raises(ValueError, match="binding_id"):
+        verify_run_account_binding(binding=forged_binding)
+
+
+def test_strict_type_valid_builtin_strings() -> None:
+    arm_b = make_golden_arm_b()
+    arm_r = make_golden_arm_r()
+    camp = make_golden_campaign()
+    bindings = make_golden_bindings()
+
+    assert type(arm_b.currency) is str and arm_b.currency == "USD"
+    assert type(arm_b.schema_version) is str and arm_b.schema_version == SCHEMA_VERSION
+    assert type(camp.schema_version) is str and camp.schema_version == SCHEMA_VERSION
+    assert (
+        type(bindings[0].schema_version) is str
+        and bindings[0].schema_version == SCHEMA_VERSION
+    )
+    assert type(bindings[0].binding_id) is str
+
+    assert verify_arm_spec(arm=arm_b) is True
+    assert verify_arm_spec(arm=arm_r) is True
+    assert verify_campaign_spec(campaign=camp) is True
+    assert verify_run_account_binding(binding=bindings[0]) is True
+    assert (
+        verify_experiment_configuration(
+            campaign=camp,
+            arms=[arm_b, arm_r],
+            bindings=bindings,
+            expected_run_ids=["RUN-001"],
+        )
+        is True
+    )
+    assert (
+        verify_stage1_synthetic_br_configuration(
+            campaign=camp,
+            arms=[arm_b, arm_r],
+            bindings=bindings,
+            expected_run_ids=["RUN-001"],
+        )
+        is True
+    )

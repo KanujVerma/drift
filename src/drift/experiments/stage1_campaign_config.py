@@ -506,7 +506,7 @@ def build_arm_spec(
         )
 
     _validate_positive_decimal_text(initial_capital, "initial_capital")
-    if currency != "USD":
+    if type(currency) is not str or currency != "USD":
         raise ValueError(f"currency must be USD, got: {currency!r}")
 
     _validate_nonempty_str(arm_account_role, "arm_account_role")
@@ -560,7 +560,7 @@ def verify_arm_spec(*, arm: ArmSpecV1) -> bool:
     if type(arm) is not ArmSpecV1:
         raise ValueError("arm must be an ArmSpecV1 instance")
 
-    if arm.schema_version != SCHEMA_VERSION:
+    if type(arm.schema_version) is not str or arm.schema_version != SCHEMA_VERSION:
         raise ValueError(f"unsupported schema_version: {arm.schema_version!r}")
     _validate_scope_id(arm.arm_id, "arm_id")
     _validate_scope_id(arm.campaign_id, "campaign_id")
@@ -586,7 +586,7 @@ def verify_arm_spec(*, arm: ArmSpecV1) -> bool:
         )
 
     _validate_positive_decimal_text(arm.initial_capital, "initial_capital")
-    if arm.currency != "USD":
+    if type(arm.currency) is not str or arm.currency != "USD":
         raise ValueError(f"currency must be USD, got: {arm.currency!r}")
 
     _validate_nonempty_str(arm.arm_account_role, "arm_account_role")
@@ -814,7 +814,10 @@ def verify_campaign_spec(*, campaign: CampaignSpecV1) -> bool:
     if type(campaign) is not CampaignSpecV1:
         raise ValueError("campaign must be a CampaignSpecV1 instance")
 
-    if campaign.schema_version != SCHEMA_VERSION:
+    if (
+        type(campaign.schema_version) is not str
+        or campaign.schema_version != SCHEMA_VERSION
+    ):
         raise ValueError(f"unsupported schema_version: {campaign.schema_version!r}")
     _validate_scope_id(campaign.campaign_id, "campaign_id")
     if (
@@ -994,7 +997,10 @@ def verify_run_account_binding(*, binding: RunAccountBindingV1) -> bool:
     if type(binding) is not RunAccountBindingV1:
         raise ValueError("binding must be a RunAccountBindingV1 instance")
 
-    if binding.schema_version != SCHEMA_VERSION:
+    if (
+        type(binding.schema_version) is not str
+        or binding.schema_version != SCHEMA_VERSION
+    ):
         raise ValueError(f"unsupported schema_version: {binding.schema_version!r}")
     _validate_scope_id(binding.campaign_id, "campaign_id")
     _validate_scope_id(binding.run_id, "run_id")
@@ -1003,10 +1009,11 @@ def verify_run_account_binding(*, binding: RunAccountBindingV1) -> bool:
     expected_binding_id = (
         f"{binding.campaign_id}:{binding.run_id}:{binding.arm_id}:BINDING"
     )
-    if binding.binding_id != expected_binding_id:
+    if type(binding.binding_id) is not str or binding.binding_id != expected_binding_id:
         raise ValueError(
             "binding_id mismatch: "
-            f"expected {expected_binding_id!r}, got {binding.binding_id!r}"
+            f"expected {expected_binding_id!r}, "
+            f"got {binding.binding_id!r}"
         )
 
     _validate_nonempty_str(binding.portfolio_account_id, "portfolio_account_id")
