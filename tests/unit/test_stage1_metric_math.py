@@ -16,6 +16,7 @@ from drift.experiments.stage1_metric_math import (
     REASON_FLOAT_INPUT_PROHIBITED,
     REASON_INSUFFICIENT_OBSERVATIONS,
     REASON_INVALID_PERIODS_PER_YEAR,
+    REASON_INVALID_SPACING_FLAG,
     REASON_IRREGULAR_SPACING,
     REASON_MISSING_MAR_SERIES,
     REASON_MISSING_OPERATING_COST,
@@ -970,3 +971,150 @@ def test_metric_arithmetic_value_invariants() -> None:
     # Immutability
     with pytest.raises(AttributeError):
         v_known.state = "INVALID"  # type: ignore[misc]
+
+
+def test_spacing_verified_type_validation() -> None:
+    """Non-boolean spacing_verified parameter fails closed with INVALID_SPACING_FLAG."""
+    invalid_flags: list[object] = [
+        "false",
+        "true",
+        "",
+        0,
+        1,
+        None,
+        [],
+        {},
+        object(),
+    ]
+    for bad_flag in invalid_flags:
+        metrics = calculate_stage1_arithmetic(
+            nav_marks=[Decimal("10000"), Decimal("10500")],
+            risk_free_period_returns=[Decimal("0")],
+            mar_period_returns=[Decimal("0")],
+            periods_per_year=252,
+            spacing_verified=bad_flag,  # type: ignore[arg-type]
+        )
+        assert metrics.terminal_return.state == "INVALID"
+        assert metrics.terminal_return.reason_code == REASON_INVALID_SPACING_FLAG
+        assert metrics.geometric_annualized_return.state == "INVALID"
+        assert (
+            metrics.geometric_annualized_return.reason_code
+            == REASON_INVALID_SPACING_FLAG
+        )
+        assert metrics.periodic_excess_sharpe.state == "INVALID"
+        assert metrics.periodic_excess_sharpe.reason_code == REASON_INVALID_SPACING_FLAG
+        assert metrics.maximum_drawdown.state == "INVALID"
+        assert metrics.maximum_drawdown.reason_code == REASON_INVALID_SPACING_FLAG
+        assert metrics.sortino.state == "INVALID"
+        assert metrics.sortino.reason_code == REASON_INVALID_SPACING_FLAG
+        assert metrics.calmar.state == "INVALID"
+        assert metrics.calmar.reason_code == REASON_INVALID_SPACING_FLAG
+
+    # Valid boolean False preserves UNAVAILABLE for annualized metrics
+    metrics_false = calculate_stage1_arithmetic(
+        nav_marks=[Decimal("10000"), Decimal("10500")],
+        risk_free_period_returns=[Decimal("0")],
+        mar_period_returns=[Decimal("0")],
+        periods_per_year=252,
+        spacing_verified=False,
+    )
+    assert metrics_false.terminal_return.state == "KNOWN"
+    assert metrics_false.geometric_annualized_return.state == "UNAVAILABLE"
+    assert (
+        metrics_false.geometric_annualized_return.reason_code
+        == REASON_IRREGULAR_SPACING
+    )
+
+    # Valid boolean True computes annualized metrics
+    metrics_true = calculate_stage1_arithmetic(
+        nav_marks=[Decimal("10000"), Decimal("10500")],
+        risk_free_period_returns=[Decimal("0")],
+        mar_period_returns=[Decimal("0")],
+        periods_per_year=252,
+        spacing_verified=True,
+    )
+    assert metrics_true.terminal_return.state == "KNOWN"
+    assert metrics_true.geometric_annualized_return.state == "KNOWN"
+
+
+def test_economic_gain_valuation_marks_and_cost_validation() -> None:
+    """Missing valuation marks, invalid NAVs, and unknown costs in economic gain."""
+    # 1. Missing initial NAV -> UNAVAILABLE / MISSING_VALUATION_MARK
+    g_miss_init = calculate_economic_gain(
+        initial_net_nav=None,
+        terminal_net_nav=Decimal("10000.00"),
+        attributed_operating_cost=Decimal("80.00"),
+    )
+    assert g_miss_init.state == "UNAVAILABLE"
+    assert g_miss_init.reason_code == REASON_MISSING_VALUATION_MARK
+
+    # 2. Missing terminal NAV -> UNAVAILABLE / MISSING_VALUATION_MARK
+    g_miss_term = calculate_economic_gain(
+        initial_net_nav=Decimal("10000.00"),
+        terminal_net_nav=None,
+        attributed_operating_cost=Decimal("80.00"),
+    )
+    assert g_miss_term.state == "UNAVAILABLE"
+    assert g_miss_term.reason_code == REASON_MISSING_VALUATION_MARK
+
+    # 3. Missing both NAVs -> UNAVAILABLE / MISSING_VALUATION_MARK
+    g_miss_both = calculate_economic_gain(
+        initial_net_nav=None,
+        terminal_net_nav=None,
+        attributed_operating_cost=Decimal("80.00"),
+    )
+    assert g_miss_both.state == "UNAVAILABLE"
+    assert g_miss_both.reason_code == REASON_MISSING_VALUATION_MARK
+
+    # 4. Missing NAV with unknown cost -> UNAVAILABLE / MISSING_VALUATION_MARK
+    g_miss_nav_unk_cost = calculate_economic_gain(
+        initial_net_nav=None,
+        terminal_net_nav=Decimal("10000.00"),
+        attributed_operating_cost=None,
+    )
+    assert g_miss_nav_unk_cost.state == "UNAVAILABLE"
+    assert g_miss_nav_unk_cost.reason_code == REASON_MISSING_VALUATION_MARK
+
+    # 5. Invalid starting NAV with unknown cost -> INVALID / NONPOSITIVE_STARTING_NAV
+    g_zero_init_unk_cost = calculate_economic_gain(
+        initial_net_nav=Decimal("0.00"),
+        terminal_net_nav=Decimal("10000.00"),
+        attributed_operating_cost=None,
+    )
+    assert g_zero_init_unk_cost.state == "INVALID"
+    assert g_zero_init_unk_cost.reason_code == REASON_NONPOSITIVE_STARTING_NAV
+
+    g_neg_init_unk_cost = calculate_economic_gain(
+        initial_net_nav=Decimal("-100.00"),
+        terminal_net_nav=Decimal("10000.00"),
+        attributed_operating_cost=None,
+    )
+    assert g_neg_init_unk_cost.state == "INVALID"
+    assert g_neg_init_unk_cost.reason_code == REASON_NONPOSITIVE_STARTING_NAV
+
+    # 6. Negative terminal NAV with unknown cost -> INVALID / NEGATIVE_NAV
+    g_neg_term_unk_cost = calculate_economic_gain(
+        initial_net_nav=Decimal("10000.00"),
+        terminal_net_nav=Decimal("-50.00"),
+        attributed_operating_cost=None,
+    )
+    assert g_neg_term_unk_cost.state == "INVALID"
+    assert g_neg_term_unk_cost.reason_code == REASON_NEGATIVE_NAV
+
+    # 7. Unknown operating cost with valid NAVs -> UNAVAILABLE / MISSING_OPERATING_COST
+    g_unk_cost = calculate_economic_gain(
+        initial_net_nav=Decimal("10000.00"),
+        terminal_net_nav=Decimal("9960.00"),
+        attributed_operating_cost=None,
+    )
+    assert g_unk_cost.state == "UNAVAILABLE"
+    assert g_unk_cost.reason_code == REASON_MISSING_OPERATING_COST
+
+    # 8. Existing -120 economic gain fixture preserved
+    g_valid = calculate_economic_gain(
+        initial_net_nav=Decimal("10000.00"),
+        terminal_net_nav=Decimal("9960.00"),
+        attributed_operating_cost=Decimal("80.00"),
+    )
+    assert g_valid.state == "KNOWN"
+    assert g_valid.value == Decimal("-120.00")

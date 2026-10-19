@@ -46,6 +46,7 @@ REASON_FLOAT_INPUT_PROHIBITED = "FLOAT_INPUT_PROHIBITED"
 REASON_NAN_OR_INFINITY_INPUT = "NAN_OR_INFINITY_INPUT"
 REASON_SERIES_LENGTH_MISMATCH = "SERIES_LENGTH_MISMATCH"
 REASON_INVALID_PERIODS_PER_YEAR = "INVALID_PERIODS_PER_YEAR"
+REASON_INVALID_SPACING_FLAG = "INVALID_SPACING_FLAG"
 REASON_EMPTY_SERIES = "EMPTY_SERIES"
 
 MetricState = Literal["KNOWN", "UNDEFINED", "UNAVAILABLE", "INVALID"]
@@ -799,8 +800,8 @@ def calculate_calmar_ratio(
 
 def calculate_economic_gain(
     *,
-    initial_net_nav: Decimal,
-    terminal_net_nav: Decimal,
+    initial_net_nav: Decimal | None,
+    terminal_net_nav: Decimal | None,
     attributed_operating_cost: Decimal | None,
 ) -> MetricArithmeticValue:
     """Calculate per-arm total economic gain in View 3.
@@ -810,6 +811,7 @@ def calculate_economic_gain(
     Trading transaction costs are already embedded in platform net NAV and
     must not be subtracted a second time.
     Unknown operating cost yields UNAVAILABLE with reason MISSING_OPERATING_COST.
+    Missing valuation mark yields UNAVAILABLE with reason MISSING_VALUATION_MARK.
     """
     for name, val in [
         ("initial_net_nav", initial_net_nav),
@@ -824,32 +826,45 @@ def calculate_economic_gain(
                 reason_code=err,
             )
 
-    if attributed_operating_cost is None:
-        return MetricArithmeticValue(
-            metric_name="economic_gain",
-            state="UNAVAILABLE",
-            reason_code=REASON_MISSING_OPERATING_COST,
-        )
-
-    if initial_net_nav <= Decimal("0"):
+    # Validate nonpositive starting NAV and negative terminal NAV before
+    # missing operating cost
+    if initial_net_nav is not None and initial_net_nav <= Decimal("0"):
         return MetricArithmeticValue(
             metric_name="economic_gain",
             state="INVALID",
             reason_code=REASON_NONPOSITIVE_STARTING_NAV,
         )
 
-    if terminal_net_nav < Decimal("0"):
+    if terminal_net_nav is not None and terminal_net_nav < Decimal("0"):
         return MetricArithmeticValue(
             metric_name="economic_gain",
             state="INVALID",
             reason_code=REASON_NEGATIVE_NAV,
         )
 
-    if attributed_operating_cost < Decimal("0"):
+    if attributed_operating_cost is not None and attributed_operating_cost < Decimal(
+        "0"
+    ):
         return MetricArithmeticValue(
             metric_name="economic_gain",
             state="INVALID",
             reason_code=REASON_NEGATIVE_OPERATING_COST,
+        )
+
+    # Handle missing initial or terminal NAV before comparison/subtraction
+    if initial_net_nav is None or terminal_net_nav is None:
+        return MetricArithmeticValue(
+            metric_name="economic_gain",
+            state="UNAVAILABLE",
+            reason_code=REASON_MISSING_VALUATION_MARK,
+        )
+
+    # Then operating cost None
+    if attributed_operating_cost is None:
+        return MetricArithmeticValue(
+            metric_name="economic_gain",
+            state="UNAVAILABLE",
+            reason_code=REASON_MISSING_OPERATING_COST,
         )
 
     with decimal.localcontext(_get_context()):
@@ -961,6 +976,23 @@ def calculate_stage1_arithmetic(
     Fails closed into INVALID or UNAVAILABLE states on missing, corrupt,
     or irregular inputs without silently imputing zero.
     """
+    # Strict validation of spacing_verified type
+    if type(spacing_verified) is not bool:
+        err = MetricArithmeticValue(
+            metric_name="stage1_arithmetic",
+            state="INVALID",
+            reason_code=REASON_INVALID_SPACING_FLAG,
+        )
+        return Stage1ArithmeticMetrics(
+            terminal_return=err,
+            geometric_annualized_return=err,
+            periodic_excess_sharpe=err,
+            maximum_drawdown=err,
+            sortino=err,
+            calmar=err,
+            periodic_returns=err,
+        )
+
     # Check general sequence validity
     if not isinstance(nav_marks, Sequence) or len(nav_marks) == 0:
         err = MetricArithmeticValue(
