@@ -177,7 +177,9 @@ def produce_proposal(
         }
     )
     selected_attempt_id = attempt_id or str(uuid5(NAMESPACE_URL, seed))
-    selected_request_id = logical_request_id or str(uuid5(NAMESPACE_URL, seed + ":request"))
+    selected_request_id = logical_request_id or str(
+        uuid5(NAMESPACE_URL, seed + ":request")
+    )
     started_id = str(uuid5(NAMESPACE_URL, selected_attempt_id + ":started"))
     completed_id = str(uuid5(NAMESPACE_URL, selected_attempt_id + ":terminal"))
     selected_candidate_id = candidate_id or str(
@@ -217,7 +219,8 @@ def produce_proposal(
     if transport is None or transport.should_timeout:
         status, reason = "TIMEOUT", "Scripted transport timed out without a response"
     elif transport.malformed_json is not None:
-        status, reason = "MALFORMED_OUTPUT", "Scripted transport supplied malformed JSON"
+        status = "MALFORMED_OUTPUT"
+        reason = "Scripted transport supplied malformed JSON"
     elif transport.raw_choice is None:
         status, reason = "FAILED", "No choice emitted by scripted transport"
     else:
@@ -230,7 +233,9 @@ def produce_proposal(
         binding = TrustedInvocationBinding(
             attempt_id=selected_attempt_id,
             candidate_id=selected_candidate_id,
-            validation_id=str(uuid5(NAMESPACE_URL, selected_attempt_id + ":validation")),
+            validation_id=str(
+                uuid5(NAMESPACE_URL, selected_attempt_id + ":validation")
+            ),
             policy_ref=validation_policy,
             raw_output_ref=ArtifactReference(
                 id=f"synthetic:scripted-output:{selected_attempt_id}",
