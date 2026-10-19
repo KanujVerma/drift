@@ -15,6 +15,7 @@ from drift.intelligence.contracts import (
     ImmutableModel,
     ResearchContext,
     Scope,
+    SourceGrade,
     compute_record_hash,
 )
 
@@ -46,7 +47,7 @@ def build_context(
     excluded_inputs_ref: ArtifactReference | None = None,
     feed_state_ref: ArtifactReference | None = None,
     feedback_refs: Sequence[ArtifactReference] = (),
-    source_grade: str = "synthetic_fixture",
+    source_grade: SourceGrade = "synthetic_fixture",
     limitations: Sequence[str] = (),
     inputs: Sequence[CandidateInput] = (),
     context_id: str | None = None,
