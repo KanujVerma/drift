@@ -269,6 +269,12 @@ def validate_candidate(
                     f"rejected: undeclared strategy family {choice.selection.family_id}"
                 ),
             )
+        if reg.family_id != choice.selection.family_id:
+            return ValidationResult(
+                is_valid=False,
+                status="REJECTED",
+                reason="STRATEGY_REGISTRY_FAMILY_MISMATCH",
+            )
 
         if choice.selection.strategy_version != reg.strategy_ref.version:
             return ValidationResult(
