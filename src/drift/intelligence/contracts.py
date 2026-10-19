@@ -124,7 +124,9 @@ class ResearchContext(ImmutableModel):
             raise ValueError("NON_CAUSAL_REVIEW_CLOCK")
         for inp in self.inputs:
             if inp.available_at.tzinfo is None or inp.available_at.utcoffset() is None:
-                raise ValueError("INDETERMINATE_TIMEZONE: input availability lacks offset")
+                raise ValueError(
+                "INDETERMINATE_TIMEZONE: input availability lacks offset"
+            )
             if inp.available_at > self.decision_cutoff:
                 raise ValueError("FUTURE_INPUT_IN_CONTEXT")
         calc = compute_record_hash(self)
@@ -245,7 +247,9 @@ class ResearchCandidate(ImmutableModel):
     @model_validator(mode="after")
     def verify_record_hash(self) -> ResearchCandidate:
         if self.completed_at.tzinfo is None or self.completed_at.utcoffset() is None:
-            raise ValueError("INDETERMINATE_TIMEZONE: candidate completion lacks offset")
+            raise ValueError(
+                "INDETERMINATE_TIMEZONE: candidate completion lacks offset"
+            )
         if self.valid_until is not None:
             if self.valid_until.tzinfo is None or self.valid_until.utcoffset() is None:
                 raise ValueError("INDETERMINATE_TIMEZONE: candidate TTL lacks offset")
@@ -254,7 +258,10 @@ class ResearchCandidate(ImmutableModel):
         if self.disposition in ("abstain", "unavailable", "hold"):
             if self.targets or self.cash_weight is not None:
                 raise ValueError("INCONSISTENT_NON_TRADING_DISPOSITION")
-        if self.disposition in ("abstain", "unavailable") and self.strategy is not None:
+        if (
+            self.disposition in ("abstain", "unavailable")
+            and self.strategy is not None
+        ):
             raise ValueError("INCONSISTENT_NON_TRADING_DISPOSITION")
         if self.disposition == "propose" and self.strategy is None:
             raise ValueError("PROPOSAL_WITHOUT_STRATEGY")
@@ -360,7 +367,11 @@ class CostReceipt(ImmutableModel):
     @model_validator(mode="after")
     def verify_record_hash(self) -> CostReceipt:
         if self.amount_basis == "unknown":
-            if self.amount is not None or self.currency is not None or not self.unknown_reason:
+            if (
+                self.amount is not None
+                or self.currency is not None
+                or not self.unknown_reason
+            ):
                 raise ValueError("UNKNOWN_COST_MUST_RETAIN_UNKNOWN_AMOUNT")
         elif self.amount_basis == "verified_zero":
             if (
@@ -369,7 +380,11 @@ class CostReceipt(ImmutableModel):
             ):
                 raise ValueError("INVALID_VERIFIED_ZERO_COST")
         else:
-            if self.amount is None or not self.currency or self.unknown_reason is not None:
+            if (
+                self.amount is None
+                or not self.currency
+                or self.unknown_reason is not None
+            ):
                 raise ValueError("MISSING_MEASURED_OR_ESTIMATED_COST")
             try:
                 amount = Decimal(self.amount)
@@ -381,7 +396,9 @@ class CostReceipt(ImmutableModel):
                 or "e" in self.amount.lower()
                 or self.amount.strip() != self.amount
             ):
-                raise ValueError("INVALID_COST: finite nonnegative DecimalText required")
+                raise ValueError(
+                    "INVALID_COST: finite nonnegative DecimalText required"
+                )
         calc = compute_record_hash(self)
         if self.record_hash != calc:
             raise ValueError(
@@ -434,7 +451,9 @@ class ModelReplayRecord(ImmutableModel):
         if self.finish_reason == "stop" and self.response_ref is None:
             raise ValueError("COMPLETION_WITHOUT_RESPONSE_EVIDENCE")
         if self.measured_latency_ms == 0 and self.mode == "offline_deterministic":
-            raise ValueError("FABRICATED_PROVIDER_LATENCY: offline replay has no measured call")
+            raise ValueError(
+                "FABRICATED_PROVIDER_LATENCY: offline replay has no measured call"
+            )
         calc = compute_record_hash(self)
         if self.record_hash != calc:
             raise ValueError(
