@@ -9,7 +9,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import NAMESPACE_URL, uuid5
 
 from drift.intelligence.contracts import (
@@ -57,6 +57,7 @@ def replay_model_output(
     candidate_id: str | None = None,
     checked_at: datetime | None = None,
     valid_until: datetime | None = None,
+    recorded_finish_reason: Literal["stop", "timeout", "unknown"] | None = None,
 ) -> ModelReplayResult:
     """Replay recorded model output offline with deterministic verification (T06).
 
@@ -121,8 +122,15 @@ def replay_model_output(
             reason="inconsistent missing response evidence",
         )
 
-    # 2. Check for recorded timeout / missing response
+    # Absence is not a historical timeout unless the retained call-status
+    # evidence explicitly says so. Do not manufacture a provider failure.
     if recorded_response is None and response_payload is None:
+        if recorded_finish_reason != "timeout":
+            return ModelReplayResult(
+                is_success=False,
+                status="UNAVAILABLE",
+                reason="missing retained response and no proven timeout status",
+            )
         raw_replay_record: dict[str, Any] = {
             "profile": "drift-research/1-draft",
             "kind": "model_replay",
@@ -166,6 +174,13 @@ def replay_model_output(
             status="TIMEOUT",
             replay_record=replay_rec,
             reason="Recorded model call timed out without response",
+        )
+
+    if recorded_finish_reason == "timeout":
+        return ModelReplayResult(
+            is_success=False,
+            status="UNAVAILABLE",
+            reason="timeout claim conflicts with retained response",
         )
 
     # Convert response ref
