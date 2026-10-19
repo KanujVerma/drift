@@ -67,8 +67,12 @@ def build_context(
     if decision_cutoff.tzinfo is None or decision_cutoff.utcoffset() is None:
         raise ValueError("INDETERMINATE_TIMEZONE: decision cutoff missing offset")
     cutoff_utc = decision_cutoff.astimezone(UTC)
-    if source_grade != "synthetic_fixture" and (review_started_at is None or built_at is None):
-        raise ValueError("CLOCK_AUTHORITY_REQUIRED: real review and build times must be supplied")
+    if source_grade != "synthetic_fixture" and (
+        review_started_at is None or built_at is None
+    ):
+        raise ValueError(
+            "CLOCK_AUTHORITY_REQUIRED: real review and build times must be supplied"
+        )
     actual_review_started = review_started_at or cutoff_utc + timedelta(seconds=1)
     actual_built_at = built_at or cutoff_utc
     if (
@@ -102,7 +106,9 @@ def build_context(
 
         # 2. Causality verification (T01, T02, N04)
         if inp.available_at.tzinfo is None or inp.available_at.utcoffset() is None:
-            raise ValueError("INDETERMINATE_TIMEZONE: input availability missing offset")
+            raise ValueError(
+                "INDETERMINATE_TIMEZONE: input availability missing offset"
+            )
         inp_avail_utc = inp.available_at.astimezone(UTC)
         if inp_avail_utc > cutoff_utc:
             cutoff_str = cutoff_utc.strftime("%H:%M")
@@ -121,7 +127,9 @@ def build_context(
         rev_key = (inp.input_ref.id, inp.input_ref.version)
         old_digest = seen_versions.get(rev_key)
         if old_digest is not None and old_digest != inp.input_ref.sha256:
-            raise ValueError("INPUT_REVISION_CONFLICT: same source version changed bytes")
+            raise ValueError(
+                "INPUT_REVISION_CONFLICT: same source version changed bytes"
+            )
         seen_versions[rev_key] = inp.input_ref.sha256
         identity = (
             inp.input_ref.id, inp.input_ref.version, inp.input_ref.sha256,
