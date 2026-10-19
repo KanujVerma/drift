@@ -17,6 +17,8 @@ from decimal import Decimal
 from typing import Any, Literal
 from uuid import NAMESPACE_URL, uuid5
 
+from pydantic import model_validator
+
 from drift.intelligence.contracts import (
     ArtifactReference,
     ImmutableModel,
@@ -63,6 +65,18 @@ class SchedulerPolicy(ImmutableModel):
     decision_ttl: timedelta = timedelta(seconds=86400)
     default_event_policy: EventActionPolicy = "full_response"
 
+    @model_validator(mode="after")
+    def check_positive_intervals(self) -> "SchedulerPolicy":
+        for name, span in (
+            ("routine", self.routine_interval),
+            ("adaptation", self.adaptation_interval),
+            ("event_cooldown", self.event_cooldown),
+            ("decision_ttl", self.decision_ttl),
+        ):
+            if span <= timedelta(0):
+                raise ValueError(f"INVALID_SCHEDULER_INTERVAL: {name}")
+        return self
+
 
 class ReviewTriggerVerdict(ImmutableModel):
     """Immutable verdict emitted by the review scheduler."""
@@ -76,6 +90,16 @@ class ReviewTriggerVerdict(ImmutableModel):
     action_policy: EventActionPolicy = "full_response"
     event_ref: ArtifactReference | None = None
     record_hash: str
+
+    @model_validator(mode="after")
+    def verify_verdict_hash(self) -> "ReviewTriggerVerdict":
+        if self.record_hash != compute_record_hash(self):
+            raise ValueError("REVIEW_TRIGGER_HASH_MISMATCH")
+        if self.action == "review" and self.review_type is None:
+            raise ValueError("REVIEW_TRIGGER_MISSING_REVIEW_TYPE")
+        if self.action != "review" and self.review_type is not None:
+            raise ValueError("NON_ACTIONABLE_TRIGGER_HAS_REVIEW_TYPE")
+        return self
 
 
 def evaluate_review_schedule(
