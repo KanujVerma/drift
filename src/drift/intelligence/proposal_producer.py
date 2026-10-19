@@ -93,7 +93,16 @@ def _record_scripted_cost(
             recorded_at=completed_at,
         )
     else:
+        # Offline transport metadata is not a provider invoice. Reject even
+        # syntactically valid scientific notation rather than allowing the
+        # downstream plain-Decimal cost constructor to strand the attempt.
         try:
+            if (
+                not isinstance(transport.cost_amount, str)
+                or "e" in transport.cost_amount.lower()
+                or transport.cost_amount.strip() != transport.cost_amount
+            ):
+                raise ValueError("Synthetic cost is not plain DecimalText")
             amount = Decimal(transport.cost_amount)
         except (InvalidOperation, TypeError, ValueError):
             amount = Decimal("NaN")
@@ -106,6 +115,20 @@ def _record_scripted_cost(
                 amount_basis="unknown",
                 attempt_id=attempt_id,
                 unknown_reason="Synthetic cost amount is invalid or missing",
+                recorded_at=completed_at,
+            )
+        elif amount > 0 and (
+            not isinstance(transport.cost_currency, str)
+            or not transport.cost_currency.strip()
+        ):
+            cost = create_cost_receipt(
+                receipt_id=receipt_id,
+                scope=context.scope,
+                category="model_inference",
+                billing_identity="scripted_offline",
+                amount_basis="unknown",
+                attempt_id=attempt_id,
+                unknown_reason="Synthetic nonzero cost has no valid currency",
                 recorded_at=completed_at,
             )
         elif amount == 0:
@@ -167,6 +190,10 @@ def produce_proposal(
     logical_clock = checked_at or context.review_started_at
     if logical_clock.tzinfo is None or logical_clock.utcoffset() is None:
         raise ValueError("INDETERMINATE_TIMEZONE: producer requires explicit time")
+    if valid_until is not None and (
+        valid_until.tzinfo is None or valid_until.utcoffset() is None
+    ):
+        raise ValueError("INDETERMINATE_TIMEZONE: candidate TTL requires offset")
     now = logical_clock.astimezone(UTC)
     seed = content_hash(
         {
@@ -175,6 +202,7 @@ def produce_proposal(
             "policy": validation_policy.sha256,
             "at": now,
             "logical_request_id": logical_request_id,
+            "valid_until": valid_until,
         }
     )
     selected_attempt_id = attempt_id or str(uuid5(NAMESPACE_URL, seed))
