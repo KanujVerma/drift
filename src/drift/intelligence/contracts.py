@@ -13,8 +13,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from drift.serialization.canonical import content_hash
 
-SUPPORTED_PROFILES = ("drift-research/1-draft", "drift-research/1")
-type ProfileLiteral = Literal["drift-research/1-draft", "drift-research/1"]
+# G2 has not qualified a released research wire profile. No silent upgrade.
+SUPPORTED_PROFILES = ("drift-research/1-draft",)
+type ProfileLiteral = Literal["drift-research/1-draft"]
 
 
 class ImmutableModel(BaseModel):
@@ -49,6 +50,13 @@ class StoredArtifactRef(ImmutableModel):
     kind: str = Field(min_length=1)
     content_hash: str = Field(min_length=64, max_length=64)
     location: str = Field(min_length=1)
+
+    @field_validator("content_hash")
+    @classmethod
+    def validate_content_hash(cls, value: str) -> str:
+        if len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+            raise ValueError("stored artifact content_hash must be lowercase SHA-256")
+        return value
 
 
 class Scope(ImmutableModel):
@@ -102,6 +110,23 @@ class ResearchContext(ImmutableModel):
 
     @model_validator(mode="after")
     def verify_record_hash(self) -> ResearchContext:
+        # The wire hash proves only byte consistency; temporal semantics must
+        # also be validated before a context can be treated as causal.
+        instants = (
+            self.decision_cutoff, self.built_at,
+            self.review_started_at, self.memory_cutoff,
+        )
+        if any(ts.tzinfo is None or ts.utcoffset() is None for ts in instants):
+            raise ValueError("INDETERMINATE_TIMEZONE: context timestamps need offsets")
+        if self.memory_cutoff > self.decision_cutoff:
+            raise ValueError("FUTURE_MEMORY_IN_CONTEXT")
+        if self.built_at > self.review_started_at:
+            raise ValueError("NON_CAUSAL_REVIEW_CLOCK")
+        for inp in self.inputs:
+            if inp.available_at.tzinfo is None or inp.available_at.utcoffset() is None:
+                raise ValueError("INDETERMINATE_TIMEZONE: input availability lacks offset")
+            if inp.available_at > self.decision_cutoff:
+                raise ValueError("FUTURE_INPUT_IN_CONTEXT")
         calc = compute_record_hash(self)
         if self.record_hash != calc:
             raise ValueError(
@@ -219,6 +244,22 @@ class ResearchCandidate(ImmutableModel):
 
     @model_validator(mode="after")
     def verify_record_hash(self) -> ResearchCandidate:
+        if self.completed_at.tzinfo is None or self.completed_at.utcoffset() is None:
+            raise ValueError("INDETERMINATE_TIMEZONE: candidate completion lacks offset")
+        if self.valid_until is not None:
+            if self.valid_until.tzinfo is None or self.valid_until.utcoffset() is None:
+                raise ValueError("INDETERMINATE_TIMEZONE: candidate TTL lacks offset")
+            if self.valid_until < self.completed_at:
+                raise ValueError("INVALID_CANDIDATE_TTL")
+        if self.disposition in ("abstain", "unavailable", "hold"):
+            if self.targets or self.cash_weight is not None:
+                raise ValueError("INCONSISTENT_NON_TRADING_DISPOSITION")
+        if self.disposition in ("abstain", "unavailable") and self.strategy is not None:
+            raise ValueError("INCONSISTENT_NON_TRADING_DISPOSITION")
+        if self.disposition == "propose" and self.strategy is None:
+            raise ValueError("PROPOSAL_WITHOUT_STRATEGY")
+        if len({t.security_id for t in self.targets}) != len(self.targets):
+            raise ValueError("DUPLICATE_TARGET_SECURITY")
         calc = compute_record_hash(self)
         if self.record_hash != calc:
             raise ValueError(
