@@ -493,3 +493,21 @@ def test_stage1_empty_propose_refuses_before_platform(
     assert request.status == "refused"
     assert request.target_allocations == ()
     assert "EMPTY_STAGE1_TARGETS" in (request.refusal_reason or "")
+
+
+def test_untrusted_model_copy_cannot_relabel_refusal_as_admission(
+    sample_candidate: ResearchCandidate,
+    matching_portfolio_state: PortfolioStateBinding,
+) -> None:
+    state = matching_portfolio_state.model_copy(
+        update={"state_verified": False, "verification_ref": None}
+    )
+    rejected = bridge_candidate_to_execution(
+        candidate=sample_candidate,
+        portfolio_state=state,
+        current_time=sample_candidate.completed_at + timedelta(minutes=5),
+    )
+    assert rejected.status == "refused"
+    attacked = rejected.model_copy(update={"status": "admitted"})
+    with pytest.raises(ValueError, match="PLATFORM_REQUEST_HASH_MISMATCH"):
+        type(rejected).model_validate(attacked.model_dump(mode="python"))
