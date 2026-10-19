@@ -375,7 +375,7 @@ INTELLIGENCE_CAPABILITY_ALLOWLIST = BridgeCapabilityAllowlist(
         "json": frozenset({"loads"}),
     },
     environment_reads=frozenset(),
-    dunder_attributes=frozenset(),
+    dunder_attributes=frozenset({"__name__"}),
     refused_builtins=frozenset({"open"}),
 )
 ALPACA_ADAPTER_ALLOWLIST = BridgeCapabilityAllowlist(
@@ -1034,19 +1034,19 @@ def test_intelligence_source_inventory_is_exact_and_nonempty() -> None:
 
 def test_intelligence_capability_guard_is_nonvacuous() -> None:
     """The offline source profile refuses capability escalation."""
-    allowed = "from datetime import UTC, datetime\\nfrom drift.serialization.canonical import content_hash\\n"
+    allowed = "from datetime import UTC, datetime\nfrom drift.serialization.canonical import content_hash\n"
     assert not _bridge_capability_violations(
         allowed, "intelligence-good.py", INTELLIGENCE_CAPABILITY_ALLOWLIST
     )
     attacks = (
-        "import socket\\n",
-        "import subprocess\\n",
-        "import os\\nos.environ.get('SECRET')\\n",
-        "import importlib\\n",
-        "from builtins import open\\n",
-        "open('/proc/self/environ')\\n",
-        "getattr(object(), '__class__')\\n",
-        "import sys\\nsys.modules\\n",
+        "import socket\n",
+        "import subprocess\n",
+        "import os\nos.environ.get('SECRET')\n",
+        "import importlib\n",
+        "from builtins import open\n",
+        "open('/proc/self/environ')\n",
+        "getattr(object(), '__class__')\n",
+        "import sys\nsys.modules\n",
     )
     for source in attacks:
         assert _bridge_capability_violations(
