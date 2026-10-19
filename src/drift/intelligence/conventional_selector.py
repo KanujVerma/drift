@@ -5,6 +5,7 @@ Provides deterministic scoring, alphanumeric tie-breaking, and isolated state (T
 """
 
 from collections.abc import Callable, Mapping, Sequence
+from copy import deepcopy
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -87,20 +88,30 @@ def select_conventional_candidate(
     now = checked_at or context.review_started_at
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("INDETERMINATE_TIMEZONE: comparator cutoff missing offset")
-    # A candidate pool may contain opaque objects in Any-typed strategy
-    # parameters. No canonical hash can represent those bytes safely.
-    # Refuse such a pool rather than crashing after beginning an attempt.
+    # Snapshot the complete pool before any objective callback is invoked.
+    # No callback may rewrite later candidates while a frozen experiment is
+    # evaluated under a previously computed pool identity.
     invalid_pool = False
+    frozen_pool: list[tuple[str, dict[str, Any]]] = []
     try:
-        pool_hash = content_hash(
-            sorted(_choice_identity(choice) for choice in candidate_pool)
-        )
+        for choice in candidate_pool:
+            source = (
+                choice.model_dump(mode="python")
+                if isinstance(choice, RawChoice)
+                else dict(choice)
+            )
+            raw_snapshot = deepcopy(source)
+            frozen_pool.append(
+                (_choice_identity(raw_snapshot), raw_snapshot)
+            )
+        pool_hash = content_hash(sorted(identity for identity, _ in frozen_pool))
     except (CanonicalSerializationError, TypeError, ValueError):
         if attempt_id is None:
             raise ValueError(
                 "NONCANONICAL_POOL_REQUIRES_EXPLICIT_ATTEMPT_ID"
             ) from None
         invalid_pool = True
+        frozen_pool.clear()
         pool_hash = content_hash(
             {
                 "invalid_pool": True,
@@ -168,17 +179,17 @@ def select_conventional_candidate(
     )
     recorder.record_cost_receipt(cost)
 
-    # 2. Exhaustively validate and score the complete finite candidate pool
+    # 2. Validate every pool member before objective scoring begins.
+    # Rejected or unavailable members cannot silently shrink the experiment.
     evaluated_candidates: list[tuple[Decimal, str, str, str, ResearchCandidate]] = []
     scores_dict: dict[str, str] = {}
     score_error: str | None = (
         "INVALID_CANDIDATE_POOL_SERIALIZATION" if invalid_pool else None
     )
     seen_choice_hashes: set[str] = set()
+    validated_candidates: list[ResearchCandidate] = []
 
-    for choice_item in (() if invalid_pool else candidate_pool):
-        # The candidate's identity is stable under a pool permutation.
-        choice_hash = _choice_identity(choice_item)
+    for choice_hash, raw_dict in frozen_pool:
         if choice_hash in seen_choice_hashes:
             score_error = "DUPLICATE_CANDIDATE_POOL_MEMBER"
             break
@@ -192,12 +203,6 @@ def select_conventional_candidate(
             }
         )
         cand_id = f"cand-r-{candidate_identity[:32]}"
-        raw_dict = (
-            choice_item.model_dump(mode="python")
-            if isinstance(choice_item, RawChoice)
-            else dict(choice_item)
-        )
-
         inv_binding = TrustedInvocationBinding(
             attempt_id=actual_attempt_id,
             candidate_id=cand_id,
@@ -215,39 +220,46 @@ def select_conventional_candidate(
             model_replay_ref=None,
             cost_receipt_ids=(f"cost-{actual_attempt_id}",),
         )
-
-        val_res = validate_candidate(
+        verdict = validate_candidate(
             raw_choice=raw_dict,
             context=context,
             resolved_dependencies=resolved_inputs,
             trusted_invocation=inv_binding,
         )
-
-        # A preregistered comparison pool is one fixed experiment input.
-        # Dropping an invalid member would silently change that experiment.
-        if not val_res.is_valid or val_res.candidate is None:
+        if not verdict.is_valid or verdict.candidate is None:
             score_error = "INVALID_CANDIDATE_POOL_MEMBER"
             break
+        validated_candidates.append(verdict.candidate)
 
-        cand = val_res.candidate
-        try:
-            score_num = objective_fn(cand)
-        except Exception:  # noqa: BLE001 - untrusted callback cannot pick a winner
-            score_error = "OBJECTIVE_EVALUATION_FAILED"
-            break
-        if not isinstance(score_num, Decimal) or not score_num.is_finite():
-            score_error = "INVALID_OBJECTIVE_SCORE"
-            break
-        score_dec = score_num
-        scores_dict[cand.candidate_id] = str(score_dec)
-
-        family = cand.strategy.family_id if cand.strategy else "no_strategy"
-        params_hash = (
-            cand.strategy.parameters_hash if cand.strategy else "0" * 64
-        )
-        evaluated_candidates.append(
-            (score_dec, family, params_hash, cand.candidate_id, cand)
-        )
+    if score_error is None:
+        for candidate in validated_candidates:
+            # Pydantic frozen models may still hold mutable nested Mapping
+            # values. Give the untrusted scorer a clone, never our receipt.
+            try:
+                scoring_view = ResearchCandidate.model_validate(
+                    candidate.model_dump(mode="python")
+                )
+                score_num = objective_fn(scoring_view)
+            except Exception:  # noqa: BLE001 - callback cannot pick a winner
+                score_error = "OBJECTIVE_EVALUATION_FAILED"
+                break
+            if not isinstance(score_num, Decimal) or not score_num.is_finite():
+                score_error = "INVALID_OBJECTIVE_SCORE"
+                break
+            scores_dict[candidate.candidate_id] = str(score_num)
+            family = (
+                candidate.strategy.family_id
+                if candidate.strategy
+                else "no_strategy"
+            )
+            params_hash = (
+                candidate.strategy.parameters_hash
+                if candidate.strategy
+                else "0" * 64
+            )
+            evaluated_candidates.append(
+                (score_num, family, params_hash, candidate.candidate_id, candidate)
+            )
 
     # 3. Handle case where no candidate in pool was valid
     terminal_event_id = str(uuid5(NAMESPACE_URL, actual_attempt_id + ":terminal"))
