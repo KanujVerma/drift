@@ -4,11 +4,15 @@ Implements Slice K2 persistence store, immutable attempt events, and cost receip
 under Decision Packets DP-R3 (Spend/Unknowns) and DP-R4 (Persistence/Recovery).
 """
 
+import json
+
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
+
+from drift.serialization.canonical import canonical_json
 
 from drift.intelligence.contracts import (
     ArtifactReference,
@@ -242,6 +246,9 @@ class ResearchReceiptStore:
 
     def record_attempt(self, attempt: AttemptRecord) -> None:
         """Record an attempt lifecycle event idempotently or fail on conflict."""
+        # model_copy(update=...) bypasses Pydantic validation. Re-deserialize
+        # at the trust boundary before accepting a supposedly immutable value.
+        attempt = AttemptRecord.model_validate(attempt.model_dump(mode="python"))
         event_id = attempt.attempt_event_id
         if event_id in self._attempts_by_event_id:
             existing = self._attempts_by_event_id[event_id]
@@ -311,6 +318,7 @@ class ResearchReceiptStore:
 
     def record_cost_receipt(self, cost: CostReceipt) -> None:
         """Record a cost receipt idempotently or fail on conflict."""
+        cost = CostReceipt.model_validate(cost.model_dump(mode="python"))
         receipt_id = cost.receipt_id
         if receipt_id in self._costs_by_receipt_id:
             existing = self._costs_by_receipt_id[receipt_id]
@@ -369,3 +377,43 @@ class ResearchReceiptStore:
         self._attempts_by_event_id = staged._attempts_by_event_id
         self._attempts_by_attempt_id = staged._attempts_by_attempt_id
         self._costs_by_receipt_id = staged._costs_by_receipt_id
+
+
+    def export_canonical_jsonl(self) -> bytes:
+        """Expose exact canonical bytes for a separate durable M0 ledger adapter.
+
+        This in-memory projection DOES NOT itself provide fsync or a committed
+        M0 event. The platform persistence owner must durably append the bytes.
+        """
+        return b"".join(
+            canonical_json(record) + b"\n" for record in self.export_events()
+        )
+
+    def load_canonical_jsonl(self, payload: bytes) -> None:
+        """Atomically verify a complete retained JSONL snapshot on replay."""
+        if payload and not payload.endswith(b"\n"):
+            raise ValueError("TRUNCATED_RECEIPT_JOURNAL: final newline is missing")
+
+        def no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("DUPLICATE_RECEIPT_JSON_KEY")
+                result[key] = value
+            return result
+
+        records: list[Mapping[str, Any]] = []
+        for line in payload.splitlines():
+            if not line:
+                raise ValueError("INVALID_RECEIPT_JOURNAL: empty row")
+            decoded = json.loads(
+                line,
+                object_pairs_hook=no_duplicate_keys,
+                parse_constant=lambda _c: (_ for _ in ()).throw(
+                    ValueError("INVALID_RECEIPT_JOURNAL: non-finite JSON")
+                ),
+            )
+            if not isinstance(decoded, dict):
+                raise ValueError("INVALID_RECEIPT_JOURNAL: object required")
+            records.append(decoded)
+        self.load_events(records)
