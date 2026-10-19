@@ -679,7 +679,9 @@ def test_r_freezes_pool_before_objective_side_effects(
             # predeclared and prevalidated pool was snapshotted.
             second["cash_weight"] = "0.99"
             second["targets"][0]["weight"] = "0.99"
-            if candidate.strategy is not None:
+            if candidate.strategy is not None and isinstance(
+                candidate.strategy.parameters, dict
+            ):
                 candidate.strategy.parameters["untrusted_mutation"] = True
         return Decimal("1")
 
