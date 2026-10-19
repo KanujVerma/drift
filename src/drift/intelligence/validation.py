@@ -13,6 +13,9 @@ from drift.intelligence.contracts import (
     SUPPORTED_PROFILES,
     ArtifactReference,
     CandidateStrategy,
+    CostReceipt,
+    AttemptRecord,
+    ModelReplayRecord,
     ImmutableModel,
     RawChoice,
     ResearchCandidate,
@@ -416,9 +419,9 @@ def validate_retained_record(
                 avail_str = inp.get("available_at")
                 if avail_str and datetime.fromisoformat(avail_str) > cutoff:
                     raise ValueError(
-                        "refuse: input availability after 10:00 cutoff; "
-                        "replace ref digests with fixture hashes first "
-                        "to isolate causality"
+                        "refuse: input availability after "
+                        f"{cutoff.strftime('%H:%M')} cutoff; "
+                        "late observation cannot enter causal context"
                     )
 
     elif kind == "candidate":
@@ -461,8 +464,8 @@ def validate_retained_record(
 
         # State binding checks
         port_ref = record.get("portfolio_ref", {})
-        if port_ref.get("id") == "fixture:state-older" or (
-            context and port_ref != context.portfolio_ref.model_dump(mode="python")
+        if context is not None and port_ref != context.portfolio_ref.model_dump(
+            mode="python"
         ):
             raise ValueError(
                 "rejected: candidate state binding differs from context; "
@@ -471,8 +474,10 @@ def validate_retained_record(
 
         # Timing checks
         completed_str = record.get("completed_at")
-        if completed_str and completed_str < "2024-01-02T10:00:01.000000Z":
-            raise ValueError("invalid: completion precedes review start")
+        if context is not None and completed_str:
+            completed = datetime.fromisoformat(completed_str)
+            if completed < context.review_started_at:
+                raise ValueError("invalid: completion precedes review start")
 
         valid_until_str = record.get("valid_until")
         if valid_until_str and checked_at:
@@ -484,8 +489,27 @@ def validate_retained_record(
 
         # Check cross-arm scope
         scope = record.get("scope", {})
-        if scope.get("arm_id") == "fixture:other-arm":
-            raise ValueError("reject cross-arm scope")
+        if context is not None:
+            if scope != context.scope.model_dump(mode="python"):
+                raise ValueError("reject cross-arm scope or campaign/account mismatch")
+            for ref_field in (
+                "portfolio_ref",
+                "mandate_ref",
+                "universe_ref",
+                "registry_ref",
+                "method_ref",
+            ):
+                if record.get(ref_field) != getattr(context, ref_field).model_dump(
+                    mode="python"
+                ):
+                    raise ValueError(f"rejected: context binding differs: {ref_field}")
+            expected_context = {
+                "id": context.context_id,
+                "version": context.profile,
+                "sha256": context.record_hash,
+            }
+            if record.get("context_ref") != expected_context:
+                raise ValueError("rejected: wrong research context")
 
     elif kind == "raw_cost":
         basis = record.get("amount_basis")
@@ -497,3 +521,18 @@ def validate_retained_record(
                     "rejected: missing evidence of verified zero "
                     "and currency remains null"
                 )
+
+    # Structural schema validation is always necessary, even when the caller
+    # cannot supply an authoritative context for referential validation.
+    # A valid hash is only tamper detection, never independent source proof.
+    typed_records = {
+        "context": ResearchContext,
+        "candidate": ResearchCandidate,
+        "attempt": AttemptRecord,
+        "raw_cost": CostReceipt,
+        "model_replay": ModelReplayRecord,
+    }
+    record_type = typed_records.get(kind)
+    if record_type is None:
+        raise ValueError(f"unsupported retained research record kind: {kind}")
+    record_type.model_validate(dict(record))
