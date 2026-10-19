@@ -112,6 +112,9 @@ def select_conventional_candidate(
             "context": context.record_hash,
             "method": method_ref.sha256,
             "candidate_pool": pool_hash,
+            "policy": validation_policy.sha256,
+            "logical_request_id": logical_request_id,
+            "valid_until": valid_until,
             "checked_at": now,
         }
     )
@@ -130,7 +133,7 @@ def select_conventional_candidate(
         scope=context.scope,
         context_ref=ArtifactReference(
             id=context.context_id,
-            version="v1",
+            version=context.profile,
             sha256=context.record_hash,
         ),
         method_ref=method_ref,
@@ -140,7 +143,32 @@ def select_conventional_candidate(
     )
     recorder.record_attempt(started_record)
 
-    # 2. Exhaustively evaluate valid candidates
+    # Retain the deterministic synthetic compute cost before committing a
+    # terminal event that references it. No external provider call is made.
+    cost = create_cost_receipt(
+        receipt_id=f"cost-{actual_attempt_id}",
+        scope=context.scope,
+        category="selector_compute",
+        billing_identity="conventional_billing",
+        amount_basis="verified_zero",
+        raw_evidence_ref=StoredArtifactRef(
+            artifact_id=f"synthetic:offline-compute:{actual_attempt_id}",
+            kind="other",
+            content_hash=content_hash(
+                {
+                    "attempt": actual_attempt_id,
+                    "method": method_ref.model_dump(mode="python"),
+                    "kind": "synthetic_no_external_provider_call",
+                }
+            ),
+            location="synthetic:offline-compute-only",
+        ),
+        attempt_id=actual_attempt_id,
+        recorded_at=now,
+    )
+    recorder.record_cost_receipt(cost)
+
+    # 2. Exhaustively validate and score the complete finite candidate pool
     evaluated_candidates: list[tuple[Decimal, str, str, str, ResearchCandidate]] = []
     scores_dict: dict[str, str] = {}
     score_error: str | None = (
@@ -150,11 +178,6 @@ def select_conventional_candidate(
 
     for choice_item in (() if invalid_pool else candidate_pool):
         # The candidate's identity is stable under a pool permutation.
-        raw_source = (
-            choice_item.model_dump(mode="python")
-            if isinstance(choice_item, RawChoice)
-            else dict(choice_item)
-        )
         choice_hash = _choice_identity(choice_item)
         if choice_hash in seen_choice_hashes:
             score_error = "DUPLICATE_CANDIDATE_POOL_MEMBER"
@@ -165,6 +188,7 @@ def select_conventional_candidate(
                 "choice_hash": choice_hash,
                 "context_hash": context.record_hash,
                 "method_hash": method_ref.sha256,
+                "attempt_id": actual_attempt_id,
             }
         )
         cand_id = f"cand-r-{candidate_identity[:32]}"
@@ -199,26 +223,31 @@ def select_conventional_candidate(
             trusted_invocation=inv_binding,
         )
 
-        if val_res.is_valid and val_res.candidate is not None:
-            cand = val_res.candidate
-            try:
-                score_num = objective_fn(cand)
-            except Exception:  # noqa: BLE001 - untrusted callback cannot pick a winner
-                score_error = "OBJECTIVE_EVALUATION_FAILED"
-                break
-            if not isinstance(score_num, Decimal) or not score_num.is_finite():
-                score_error = "INVALID_OBJECTIVE_SCORE"
-                break
-            score_dec = score_num
-            scores_dict[cand.candidate_id] = str(score_dec)
+        # A preregistered comparison pool is one fixed experiment input.
+        # Dropping an invalid member would silently change that experiment.
+        if not val_res.is_valid or val_res.candidate is None:
+            score_error = "INVALID_CANDIDATE_POOL_MEMBER"
+            break
 
-            family = cand.strategy.family_id if cand.strategy else "no_strategy"
-            params_hash = (
-                cand.strategy.strategy_ref.sha256 if cand.strategy else "0" * 64
-            )
-            evaluated_candidates.append(
-                (score_dec, family, params_hash, cand.candidate_id, cand)
-            )
+        cand = val_res.candidate
+        try:
+            score_num = objective_fn(cand)
+        except Exception:  # noqa: BLE001 - untrusted callback cannot pick a winner
+            score_error = "OBJECTIVE_EVALUATION_FAILED"
+            break
+        if not isinstance(score_num, Decimal) or not score_num.is_finite():
+            score_error = "INVALID_OBJECTIVE_SCORE"
+            break
+        score_dec = score_num
+        scores_dict[cand.candidate_id] = str(score_dec)
+
+        family = cand.strategy.family_id if cand.strategy else "no_strategy"
+        params_hash = (
+            cand.strategy.parameters_hash if cand.strategy else "0" * 64
+        )
+        evaluated_candidates.append(
+            (score_dec, family, params_hash, cand.candidate_id, cand)
+        )
 
     # 3. Handle case where no candidate in pool was valid
     terminal_event_id = str(uuid5(NAMESPACE_URL, actual_attempt_id + ":terminal"))
@@ -234,29 +263,6 @@ def select_conventional_candidate(
             cost_receipt_ids=(f"cost-{actual_attempt_id}",),
         )
         recorder.record_attempt(terminal_attempt)
-
-        cost = create_cost_receipt(
-            receipt_id=f"cost-{actual_attempt_id}",
-            scope=context.scope,
-            category="selector_compute",
-            billing_identity="conventional_billing",
-            amount_basis="verified_zero",
-            raw_evidence_ref=StoredArtifactRef(
-                artifact_id=f"synthetic:offline-compute:{actual_attempt_id}",
-                kind="other",
-                content_hash=content_hash(
-                    {
-                        "attempt": actual_attempt_id,
-                        "method": method_ref.model_dump(mode="python"),
-                        "kind": "synthetic_no_external_provider_call",
-                    }
-                ),
-                location="synthetic:offline-compute-only",
-            ),
-            attempt_id=actual_attempt_id,
-            recorded_at=now,
-        )
-        recorder.record_cost_receipt(cost)
 
         return ConventionalSelectorResult(
             is_success=False,
@@ -296,29 +302,6 @@ def select_conventional_candidate(
     recorder.record_attempt(terminal_attempt)
 
     # Record verified zero cost receipt for deterministic local compute
-    cost = create_cost_receipt(
-        receipt_id=f"cost-{actual_attempt_id}",
-        scope=context.scope,
-        category="selector_compute",
-        billing_identity="conventional_billing",
-        amount_basis="verified_zero",
-        raw_evidence_ref=StoredArtifactRef(
-            artifact_id=f"synthetic:offline-compute:{actual_attempt_id}",
-            kind="other",
-            content_hash=content_hash(
-                {
-                    "attempt": actual_attempt_id,
-                    "method": method_ref.model_dump(mode="python"),
-                    "kind": "synthetic_no_external_provider_call",
-                }
-            ),
-            location="synthetic:offline-compute-only",
-        ),
-        attempt_id=actual_attempt_id,
-        recorded_at=now,
-    )
-    recorder.record_cost_receipt(cost)
-
     return ConventionalSelectorResult(
         is_success=True,
         status="VALID",
