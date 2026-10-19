@@ -300,6 +300,22 @@ class AttemptRecord(ImmutableModel):
 
     @model_validator(mode="after")
     def verify_record_hash(self) -> AttemptRecord:
+        if self.started_at is None or self.started_at.tzinfo is None:
+            raise ValueError("INVALID_ATTEMPT_TIME: start must be timezone-aware")
+        if self.status == "started":
+            if (
+                self.event_index != 0 or self.previous_event_ref is not None
+                or self.completed_at is not None
+            ):
+                raise ValueError("INVALID_ATTEMPT_CHAIN: malformed start event")
+        else:
+            if (
+                self.event_index != 1 or self.previous_event_ref is None
+                or self.completed_at is None
+                or self.completed_at.tzinfo is None
+                or self.completed_at < self.started_at
+            ):
+                raise ValueError("INVALID_ATTEMPT_CHAIN: malformed terminal event")
         calc = compute_record_hash(self)
         if self.record_hash != calc:
             raise ValueError(
@@ -343,6 +359,29 @@ class CostReceipt(ImmutableModel):
 
     @model_validator(mode="after")
     def verify_record_hash(self) -> CostReceipt:
+        if self.amount_basis == "unknown":
+            if self.amount is not None or self.currency is not None or not self.unknown_reason:
+                raise ValueError("UNKNOWN_COST_MUST_RETAIN_UNKNOWN_AMOUNT")
+        elif self.amount_basis == "verified_zero":
+            if (
+                self.amount != "0" or not self.currency or
+                self.raw_evidence_ref is None or self.unknown_reason is not None
+            ):
+                raise ValueError("INVALID_VERIFIED_ZERO_COST")
+        else:
+            if self.amount is None or not self.currency or self.unknown_reason is not None:
+                raise ValueError("MISSING_MEASURED_OR_ESTIMATED_COST")
+            try:
+                amount = Decimal(self.amount)
+            except InvalidOperation as error:
+                raise ValueError("INVALID_COST_DECIMAL") from error
+            if (
+                not amount.is_finite()
+                or amount < 0
+                or "e" in self.amount.lower()
+                or self.amount.strip() != self.amount
+            ):
+                raise ValueError("INVALID_COST: finite nonnegative DecimalText required")
         calc = compute_record_hash(self)
         if self.record_hash != calc:
             raise ValueError(
@@ -388,6 +427,14 @@ class ModelReplayRecord(ImmutableModel):
 
     @model_validator(mode="after")
     def verify_record_hash(self) -> ModelReplayRecord:
+        if self.request_sent_at.tzinfo is None:
+            raise ValueError("INDETERMINATE_REPLAY_CLOCK")
+        if self.finish_reason == "timeout" and self.response_ref is not None:
+            raise ValueError("TIMEOUT_WITH_RESPONSE_EVIDENCE")
+        if self.finish_reason == "stop" and self.response_ref is None:
+            raise ValueError("COMPLETION_WITHOUT_RESPONSE_EVIDENCE")
+        if self.measured_latency_ms == 0 and self.mode == "offline_deterministic":
+            raise ValueError("FABRICATED_PROVIDER_LATENCY: offline replay has no measured call")
         calc = compute_record_hash(self)
         if self.record_hash != calc:
             raise ValueError(
