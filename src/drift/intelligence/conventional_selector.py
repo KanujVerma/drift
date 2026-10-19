@@ -112,6 +112,7 @@ def select_conventional_candidate(
     evaluated_candidates: list[tuple[Decimal, str, str, str, ResearchCandidate]] = []
     scores_dict: dict[str, str] = {}
     score_error: str | None = None
+    seen_choice_hashes: set[str] = set()
 
     for choice_item in candidate_pool:
         # The candidate's identity is stable under a pool permutation.
@@ -121,7 +122,16 @@ def select_conventional_candidate(
             else dict(choice_item)
         )
         choice_hash = content_hash(raw_source)
-        cand_id = f"cand-r-{choice_hash[:32]}"
+        if choice_hash in seen_choice_hashes:
+            score_error = "DUPLICATE_CANDIDATE_POOL_MEMBER"
+            break
+        seen_choice_hashes.add(choice_hash)
+        candidate_identity = content_hash({
+            "choice_hash": choice_hash,
+            "context_hash": context.record_hash,
+            "method_hash": method_ref.sha256,
+        })
+        cand_id = f"cand-r-{candidate_identity[:32]}"
         raw_dict = (
             choice_item.model_dump(mode="python")
             if isinstance(choice_item, RawChoice)
@@ -222,10 +232,15 @@ def select_conventional_candidate(
             ),
         )
 
-    # 4. Deterministic sort and tie-breaking:
-    # Sort key: (-score, family, params_hash, candidate_id)
-    evaluated_candidates.sort(key=lambda item: (-item[0], item[1], item[2], item[3]))
-    winner = evaluated_candidates[0][4]
+    # DP-R6: scores within the frozen 1e-9 equivalence band tie, even when
+    # their raw Decimal values differ. Resolve ties without pool-order bias.
+    max_score = max(entry[0] for entry in evaluated_candidates)
+    tolerance = Decimal("0.000000001")
+    near_maximum = [
+        entry for entry in evaluated_candidates
+        if max_score - entry[0] <= tolerance
+    ]
+    winner = min(near_maximum, key=lambda entry: (entry[1], entry[2], entry[3]))[4]
 
     cand_ref = ArtifactReference(
         id=winner.candidate_id,
