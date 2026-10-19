@@ -94,6 +94,17 @@ def validate_candidate(
     else:
         choice = raw_choice
 
+    # The producer's claimed raw-output reference must bind the actual
+    # untrusted choice bytes after canonical parsing. A self-hashed candidate
+    # is not enough to prove which output the producer validated.
+    observed_output_hash = content_hash(choice.model_dump(mode="python"))
+    if trusted_invocation.raw_output_ref.sha256 != observed_output_hash:
+        return ValidationResult(
+            is_valid=False,
+            status="REJECTED",
+            reason="RAW_OUTPUT_BINDING_MISMATCH: retained choice digest differs",
+        )
+
     # 1. Profile support
     if context.profile not in SUPPORTED_PROFILES:
         return ValidationResult(
@@ -103,6 +114,23 @@ def validate_candidate(
         )
 
     # 2. Timing invariants
+    if (
+        trusted_invocation.completed_at.tzinfo is None
+        or trusted_invocation.checked_at.tzinfo is None
+        or trusted_invocation.completed_at.utcoffset() is None
+        or trusted_invocation.checked_at.utcoffset() is None
+    ):
+        return ValidationResult(
+            is_valid=False,
+            status="INVALID",
+            reason="INDETERMINATE_TIMEZONE: research timestamps need an offset",
+        )
+    if trusted_invocation.completed_at > trusted_invocation.checked_at:
+        return ValidationResult(
+            is_valid=False,
+            status="INVALID",
+            reason="FUTURE_COMPLETION_AT_VALIDATION",
+        )
     if trusted_invocation.completed_at < context.review_started_at:
         return ValidationResult(
             is_valid=False,
@@ -136,6 +164,18 @@ def validate_candidate(
             status="REJECTED",
             reason="rejected: candidate mandate binding differs from context",
         )
+
+    for label, actual, expected in (
+        ("universe", resolved_dependencies.universe_ref, context.universe_ref),
+        ("registry", resolved_dependencies.registry_ref, context.registry_ref),
+        ("method", resolved_dependencies.method_ref, context.method_ref),
+    ):
+        if actual != expected:
+            return ValidationResult(
+                is_valid=False,
+                status="REJECTED",
+                reason=f"RESEARCH_CONTEXT_BINDING_MISMATCH: {label}",
+            )
 
     # 4. Disposition semantics
     disposition = choice.disposition
@@ -197,6 +237,13 @@ def validate_candidate(
                 ),
             )
 
+        if choice.selection.strategy_version != reg.strategy_ref.version:
+            return ValidationResult(
+                is_valid=False,
+                status="REJECTED",
+                reason="STRATEGY_VERSION_MISMATCH",
+            )
+
         # Check parameter envelope
         for param_name, param_val in choice.selection.parameters.items():
             if param_name not in reg.allowed_parameters:
@@ -231,7 +278,15 @@ def validate_candidate(
             )
 
         total_weight = Decimal(choice.cash_weight)
+        seen_security_ids: set[str] = set()
         for tw in choice.targets:
+            if tw.security_id in seen_security_ids:
+                return ValidationResult(
+                    is_valid=False,
+                    status="REJECTED",
+                    reason="DUPLICATE_TARGET_SECURITY",
+                )
+            seen_security_ids.add(tw.security_id)
             if tw.security_id not in resolved_dependencies.admitted_securities:
                 return ValidationResult(
                     is_valid=False,
