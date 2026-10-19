@@ -8,7 +8,7 @@ isolation (T05).
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid5
 
 from drift.intelligence.contracts import (
     ArtifactReference,
@@ -50,6 +50,8 @@ def build_context(
     limitations: Sequence[str] = (),
     inputs: Sequence[CandidateInput] = (),
     context_id: str | None = None,
+    review_started_at: datetime | None = None,
+    built_at: datetime | None = None,
     review_reason: str = "routine",
     trigger_ref: ArtifactReference | None = None,
     current_selection_ref: ArtifactReference | None = None,
@@ -62,15 +64,28 @@ def build_context(
     - Arm isolation: inputs restricted to different arms are excluded (T04).
     - Pre-aggregation deterministic deduplication and sorting.
     """
-    actual_context_id = context_id or str(uuid4())
-    cutoff_utc = (
-        decision_cutoff.astimezone(UTC)
-        if decision_cutoff.tzinfo
-        else decision_cutoff.replace(tzinfo=UTC)
-    )
+    if decision_cutoff.tzinfo is None or decision_cutoff.utcoffset() is None:
+        raise ValueError("INDETERMINATE_TIMEZONE: decision cutoff missing offset")
+    cutoff_utc = decision_cutoff.astimezone(UTC)
+    if source_grade != "synthetic_fixture" and (review_started_at is None or built_at is None):
+        raise ValueError("CLOCK_AUTHORITY_REQUIRED: real review and build times must be supplied")
+    actual_review_started = review_started_at or cutoff_utc + timedelta(seconds=1)
+    actual_built_at = built_at or cutoff_utc
+    if (
+        actual_review_started.tzinfo is None
+        or actual_review_started.utcoffset() is None
+        or actual_built_at.tzinfo is None
+        or actual_built_at.utcoffset() is None
+    ):
+        raise ValueError("INDETERMINATE_TIMEZONE: build and review times need offsets")
+    actual_review_started = actual_review_started.astimezone(UTC)
+    actual_built_at = actual_built_at.astimezone(UTC)
+    if actual_review_started < actual_built_at or actual_built_at < cutoff_utc:
+        raise ValueError("NON_CAUSAL_REVIEW_CLOCK")
 
     admitted_inputs: list[dict[str, Any]] = []
-    seen_digests: set[str] = set()
+    seen_records: set[tuple[str, str, str, str, str]] = set()
+    seen_versions: dict[tuple[str, str], str] = {}
 
     # Pre-aggregation validation and filtering
     for inp in inputs:
@@ -86,11 +101,9 @@ def build_context(
             )
 
         # 2. Causality verification (T01, T02, N04)
-        inp_avail_utc = (
-            inp.available_at.astimezone(UTC)
-            if inp.available_at.tzinfo
-            else inp.available_at.replace(tzinfo=UTC)
-        )
+        if inp.available_at.tzinfo is None or inp.available_at.utcoffset() is None:
+            raise ValueError("INDETERMINATE_TIMEZONE: input availability missing offset")
+        inp_avail_utc = inp.available_at.astimezone(UTC)
         if inp_avail_utc > cutoff_utc:
             cutoff_str = cutoff_utc.strftime("%H:%M")
             raise ValueError(
@@ -102,11 +115,21 @@ def build_context(
         if inp.arm_id is not None and inp.arm_id != scope.arm_id:
             continue
 
-        # 4. Deduplication by content hash
-        digest = inp.input_ref.sha256
-        if digest in seen_digests:
+        # 4. Different securities/roles may legitimately have identical bytes.
+        # Never collapse solely by content hash. Reused source revision identity
+        # with different bytes, however, is a provenance conflict.
+        rev_key = (inp.input_ref.id, inp.input_ref.version)
+        old_digest = seen_versions.get(rev_key)
+        if old_digest is not None and old_digest != inp.input_ref.sha256:
+            raise ValueError("INPUT_REVISION_CONFLICT: same source version changed bytes")
+        seen_versions[rev_key] = inp.input_ref.sha256
+        identity = (
+            inp.input_ref.id, inp.input_ref.version, inp.input_ref.sha256,
+            inp.role, inp.availability_basis_ref.sha256,
+        )
+        if identity in seen_records:
             continue
-        seen_digests.add(digest)
+        seen_records.add(identity)
 
         admitted_inputs.append(
             {
@@ -133,8 +156,19 @@ def build_context(
         )
     )
 
-    built_at = cutoff_utc
-    review_started_at = cutoff_utc + timedelta(seconds=1)
+    derived_id = content_hash({
+        "scope": scope.model_dump(mode="python"),
+        "cutoff": cutoff_utc,
+        "review_started_at": actual_review_started,
+        "built_at": actual_built_at,
+        "inputs": admitted_inputs,
+        "method": method_ref.sha256,
+        "portfolio": portfolio_ref.sha256,
+        "mandate": mandate_ref.sha256,
+        "universe": universe_ref.sha256,
+        "memory": memory_snapshot_ref.sha256,
+    })
+    actual_context_id = context_id or str(uuid5(NAMESPACE_URL, derived_id))
 
     raw_dict: dict[str, Any] = {
         "profile": "drift-research/1-draft",
@@ -142,8 +176,8 @@ def build_context(
         "context_id": actual_context_id,
         "scope": scope.model_dump(mode="python"),
         "decision_cutoff": cutoff_utc,
-        "built_at": built_at,
-        "review_started_at": review_started_at,
+        "built_at": actual_built_at,
+        "review_started_at": actual_review_started,
         "review_reason": review_reason,
         "trigger_ref": (trigger_ref.model_dump(mode="python") if trigger_ref else None),
         "clock_policy_ref": clock_policy_ref.model_dump(mode="python"),
