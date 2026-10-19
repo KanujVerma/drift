@@ -173,6 +173,7 @@ def test_t06_timeout_model_replay(
             id="policy:standard", version="v1", sha256="c" * 64
         ),
         attempt_id="att-timeout-001",
+        recorded_finish_reason="timeout",
     )
 
     assert res.is_success is False
@@ -326,3 +327,30 @@ def test_repeated_replay_produces_identical_evidence_identity(
     assert one.replay_record is not None and two.replay_record is not None
     assert one.candidate.record_hash == two.candidate.record_hash
     assert one.replay_record.record_hash == two.replay_record.record_hash
+
+
+def test_absent_response_without_recorded_timeout_is_not_timeout(
+    replay_fixtures: dict[str, Any],
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+) -> None:
+    request = replay_fixtures["timeout_replay"]["request"]
+    result = replay_model_output(
+        recorded_request=StoredArtifactRef(
+            artifact_id="req-timeout-unknown", kind="other",
+            content_hash=request["content_hash"], location=request["location"],
+        ),
+        recorded_response=None,
+        request_payload=request["payload"],
+        response_payload=None,
+        original_context=sample_context,
+        original_bindings=sample_bindings,
+        adapter_revision=ArtifactReference(id="adapter:offline", version="v1", sha256="a"*64),
+        parser_schema_ref=ArtifactReference(id="schema:raw", version="v1", sha256="b"*64),
+        validation_policy=ArtifactReference(id="policy:standard", version="v1", sha256="c"*64),
+        attempt_id="unproven-timeout",
+        checked_at=datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
+    )
+    assert result.status == "UNAVAILABLE"
+    assert result.replay_record is None
+    assert "no proven timeout" in (result.reason or "")
