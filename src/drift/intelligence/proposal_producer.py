@@ -198,8 +198,8 @@ def produce_proposal(
     seed = content_hash(
         {
             "context": context.record_hash,
-            "method": frozen_method.sha256,
-            "policy": validation_policy.sha256,
+            "method": frozen_method.model_dump(mode="python"),
+            "policy": validation_policy.model_dump(mode="python"),
             "at": now,
             "logical_request_id": logical_request_id,
             "valid_until": valid_until,
