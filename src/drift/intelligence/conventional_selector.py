@@ -306,7 +306,7 @@ def select_conventional_candidate(
 
     cand_ref = ArtifactReference(
         id=winner.candidate_id,
-        version="v1",
+        version=winner.profile,
         sha256=winner.record_hash,
     )
 
