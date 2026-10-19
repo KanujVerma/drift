@@ -210,3 +210,91 @@ def test_t04_cross_arm_input_filtering(
 
     # Input should be filtered out
     assert len(ctx.inputs) == 0
+
+
+def _context_with_sources(
+    scope: Scope,
+    refs: dict[str, ArtifactReference],
+    inputs: list[CandidateInput],
+    *,
+    cutoff: datetime,
+    source_grade: str = "synthetic_fixture",
+) -> object:
+    return build_context(
+        scope=scope,
+        decision_cutoff=cutoff,
+        portfolio_ref=refs["portfolio_ref"],
+        mandate_ref=refs["mandate_ref"],
+        universe_ref=refs["universe_ref"],
+        registry_ref=refs["registry_ref"],
+        method_ref=refs["method_ref"],
+        clock_policy_ref=refs["clock_policy_ref"],
+        budget_ref=refs["budget_ref"],
+        memory_snapshot_ref=refs["memory_snapshot_ref"],
+        inputs=inputs,
+        source_grade=source_grade,
+    )
+
+
+def test_equal_bytes_different_sources_preserved_and_permutation_stable(
+    sample_scope: Scope, sample_refs: dict[str, ArtifactReference]
+) -> None:
+    cutoff = datetime(2024, 1, 2, 10, 0, tzinfo=UTC)
+    a = CandidateInput(
+        input_ref=ArtifactReference(id="source:A", version="v1", sha256="a" * 64),
+        role="security_a_close",
+        available_at=cutoff - timedelta(seconds=1),
+        availability_basis_ref=ArtifactReference(
+            id="basis:A", version="v1", sha256="c" * 64
+        ),
+    )
+    b = CandidateInput(
+        input_ref=ArtifactReference(id="source:B", version="v1", sha256="a" * 64),
+        role="security_b_close",
+        available_at=cutoff - timedelta(seconds=1),
+        availability_basis_ref=ArtifactReference(
+            id="basis:B", version="v1", sha256="d" * 64
+        ),
+    )
+    one = _context_with_sources(sample_scope, sample_refs, [a, b], cutoff=cutoff)
+    two = _context_with_sources(sample_scope, sample_refs, [b, a], cutoff=cutoff)
+    assert len(one.inputs) == 2
+    assert one.record_hash == two.record_hash
+    assert one.context_id == two.context_id
+
+
+def test_same_source_revision_conflicting_bytes_rejected(
+    sample_scope: Scope, sample_refs: dict[str, ArtifactReference]
+) -> None:
+    cutoff = datetime(2024, 1, 2, 10, 0, tzinfo=UTC)
+    def source(digest: str) -> CandidateInput:
+        return CandidateInput(
+            input_ref=ArtifactReference(
+                id="source:one", version="v1", sha256=digest
+            ),
+            role="close",
+            available_at=cutoff - timedelta(seconds=1),
+            availability_basis_ref=ArtifactReference(
+                id="basis:one", version="v1", sha256="b" * 64
+            ),
+        )
+    with pytest.raises(ValueError, match="INPUT_REVISION_CONFLICT"):
+        _context_with_sources(
+            sample_scope, sample_refs, [source("a" * 64), source("c" * 64)],
+            cutoff=cutoff,
+        )
+
+
+def test_unknown_timing_authority_is_not_implicitly_utc(
+    sample_scope: Scope, sample_refs: dict[str, ArtifactReference]
+) -> None:
+    aware = datetime(2024, 1, 2, 10, 0, tzinfo=UTC)
+    with pytest.raises(ValueError, match="INDETERMINATE_TIMEZONE"):
+        _context_with_sources(
+            sample_scope, sample_refs, [], cutoff=aware.replace(tzinfo=None)
+        )
+    with pytest.raises(ValueError, match="CLOCK_AUTHORITY_REQUIRED"):
+        _context_with_sources(
+            sample_scope, sample_refs, [], cutoff=aware,
+            source_grade="exploratory",
+        )
