@@ -15,7 +15,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid5
 
 from drift.intelligence.contracts import (
     ArtifactReference,
@@ -104,12 +104,56 @@ def evaluate_review_schedule(
     - Distinct routine (weekly) and adaptation (monthly) clock cadences (D04).
     """
     active_policy = policy or SchedulerPolicy()
-    actual_trigger_id = trigger_id or str(uuid4())
-    now_utc = now.astimezone(UTC) if now.tzinfo else now.replace(tzinfo=UTC)
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("INDETERMINATE_TIMEZONE: scheduler now lacks an offset")
+    now_utc = now.astimezone(UTC)
+    for label, instant in (
+        ("routine", last_routine_at), ("adaptation", last_adaptation_at),
+        ("event", last_event_review_at),
+    ):
+        if instant is not None:
+            if instant.tzinfo is None or instant.utcoffset() is None:
+                raise ValueError(f"INDETERMINATE_TIMEZONE: last {label} review")
+            if instant > now_utc:
+                raise ValueError(f"FUTURE_REVIEW_CLOCK: last {label} review is after now")
+    identity = content_hash({
+        "now": now_utc,
+        "routine": last_routine_at,
+        "adaptation": last_adaptation_at,
+        "event": last_event_review_at,
+        "events": [(ev.event_id, ev.version, ev.content_hash) for ev in feed_events],
+        "feed_condition": feed_condition,
+        "policy": (
+            str(active_policy.routine_interval),
+            str(active_policy.adaptation_interval),
+            str(active_policy.event_cooldown),
+            str(active_policy.decision_ttl),
+            active_policy.default_event_policy,
+        ),
+        "calendar": (
+            current_calendar.calendar_id,
+            current_calendar.revision,
+            current_calendar.content_hash,
+        ) if current_calendar else None,
+    })
+    actual_trigger_id = trigger_id or str(uuid5(NAMESPACE_URL, identity))
     raw_dict: dict[str, Any]
 
     # 1. Calendar revision currentness check (T02)
     if current_calendar is not None:
+        if (
+            current_calendar.effective_cutoff.tzinfo is None
+            or current_calendar.effective_cutoff.utcoffset() is None
+            or current_calendar.effective_cutoff > now_utc
+        ):
+            raise ValueError("UNAVAILABLE_CALENDAR_CURRENTNESS")
+        for past_cal in calendar_history:
+            if (
+                past_cal.effective_cutoff <= now_utc
+                and past_cal.calendar_id == current_calendar.calendar_id
+                and past_cal.revision > current_calendar.revision
+            ):
+                raise ValueError("STALE_CALENDAR_REVISION")
         for past_cal in calendar_history:
             if (
                 past_cal.calendar_id == current_calendar.calendar_id
@@ -151,26 +195,23 @@ def evaluate_review_schedule(
         return ReviewTriggerVerdict.model_validate(raw_dict)
 
     # 3. Event-driven trigger evaluation (D03, D04, T03)
-    causal_material_events = [
-        ev
-        for ev in feed_events
-        if ev.is_material
-        and (
-            ev.available_at.astimezone(UTC)
-            if ev.available_at.tzinfo
-            else ev.available_at.replace(tzinfo=UTC)
-        )
-        <= now_utc
-    ]
+    event_versions: dict[tuple[str, str], str] = {}
+    causal_material_events: list[FeedEvent] = []
+    for ev in feed_events:
+        if ev.available_at.tzinfo is None or ev.available_at.utcoffset() is None:
+            raise ValueError("INDETERMINATE_TIMEZONE: feed availability lacks offset")
+        key = (ev.event_id, ev.version)
+        previous = event_versions.get(key)
+        if previous is not None and previous != ev.content_hash:
+            raise ValueError("SOURCE_DIGEST_CONFLICT: feed event revision changed bytes")
+        event_versions[key] = ev.content_hash
+        if ev.is_material and ev.available_at.astimezone(UTC) <= now_utc:
+            causal_material_events.append(ev)
 
     if causal_material_events:
         # Check cooldown
         if last_event_review_at is not None:
-            last_event_utc = (
-                last_event_review_at.astimezone(UTC)
-                if last_event_review_at.tzinfo
-                else last_event_review_at.replace(tzinfo=UTC)
-            )
+            last_event_utc = last_event_review_at.astimezone(UTC)
             if (now_utc - last_event_utc) < active_policy.event_cooldown:
                 raw_dict = {
                     "trigger_id": actual_trigger_id,
@@ -186,7 +227,10 @@ def evaluate_review_schedule(
                 return ReviewTriggerVerdict.model_validate(raw_dict)
 
         # Trigger event review; raw_text is strictly untrusted and stays inert (T03)
-        latest_event = max(causal_material_events, key=lambda ev: ev.available_at)
+        latest_event = max(
+            causal_material_events,
+            key=lambda ev: (ev.available_at, ev.event_id, ev.content_hash),
+        )
         raw_dict = {
             "trigger_id": actual_trigger_id,
             "action": "review",
@@ -211,11 +255,7 @@ def evaluate_review_schedule(
     if last_adaptation_at is None:
         adaptation_due = True
     else:
-        last_adapt_utc = (
-            last_adaptation_at.astimezone(UTC)
-            if last_adaptation_at.tzinfo
-            else last_adaptation_at.replace(tzinfo=UTC)
-        )
+        last_adapt_utc = last_adaptation_at.astimezone(UTC)
         if (now_utc - last_adapt_utc) >= active_policy.adaptation_interval:
             adaptation_due = True
 
@@ -238,11 +278,7 @@ def evaluate_review_schedule(
     if last_routine_at is None:
         routine_due = True
     else:
-        last_rout_utc = (
-            last_routine_at.astimezone(UTC)
-            if last_routine_at.tzinfo
-            else last_routine_at.replace(tzinfo=UTC)
-        )
+        last_rout_utc = last_routine_at.astimezone(UTC)
         if (now_utc - last_rout_utc) >= active_policy.routine_interval:
             routine_due = True
 
@@ -286,11 +322,18 @@ def validate_defensive_policy(
     - Decreasing positions or holding is permitted.
     - Increasing existing positions or opening new positions is forbidden.
     """
+    seen: set[str] = set()
     for target in proposed_targets:
         sec_id = target.security_id
+        if sec_id in seen:
+            return False, "DEFENSIVE_POLICY_VIOLATION: duplicate security target"
+        seen.add(sec_id)
+        if sec_id not in current_weights:
+            return False, "UNKNOWN_CURRENT_POSITION: no verified current weight"
         prop_weight = Decimal(target.weight)
-        curr_weight_str = current_weights.get(sec_id, "0.0")
-        curr_weight = Decimal(curr_weight_str)
+        curr_weight = Decimal(current_weights[sec_id])
+        if not curr_weight.is_finite() or not Decimal("0") <= curr_weight <= Decimal("1"):
+            return False, "UNKNOWN_CURRENT_POSITION: invalid current weight"
 
         if prop_weight > curr_weight:
             return (
