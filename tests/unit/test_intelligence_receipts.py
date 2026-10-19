@@ -296,3 +296,89 @@ def test_t11_crash_recovery_preserves_unresolved(
     clean_latest = store_recovered.get_latest_attempt("att-clean")
     assert clean_latest is not None
     assert clean_latest.status == "completed"
+
+
+def test_recovery_rejects_out_of_order_and_tampered_events_atomically(
+    sample_scope: Scope, sample_artifact_refs: dict[str, ArtifactReference]
+) -> None:
+    """An absent predecessor or tampered frozen instance never enters a store."""
+    now = datetime(2024, 1, 2, 10, 0, 1, tzinfo=UTC)
+    started = create_started_attempt(
+        attempt_id="att-chain",
+        logical_request_id="req-chain",
+        attempt_event_id="ev-chain-start",
+        scope=sample_scope,
+        context_ref=sample_artifact_refs["context_ref"],
+        method_ref=sample_artifact_refs["method_ref"],
+        budget_ref=sample_artifact_refs["budget_ref"],
+        producer="scripted_fixture",
+        started_at=now,
+    )
+    terminal = create_terminal_attempt(
+        prior_attempt=started,
+        attempt_event_id="ev-chain-end",
+        completed_at=now,
+        status="completed",
+    )
+    store = ResearchReceiptStore()
+    with pytest.raises(ValueError, match="INVALID_ATTEMPT_CHAIN"):
+        store.record_attempt(terminal)
+    assert store.export_events() == []
+
+    with pytest.raises(ValueError, match="record_hash mismatch"):
+        store.record_attempt(started.model_copy(update={"producer": "unhashed-tamper"}))
+    assert store.export_events() == []
+
+    with pytest.raises(ValueError, match="INVALID_ATTEMPT_CHAIN"):
+        store.load_events([started.model_dump(mode="python"), terminal.model_dump(
+            mode="python"
+        ), terminal.model_copy(update={
+            "attempt_event_id": "another-event-id"
+        }).model_dump(mode="python")])
+    assert store.export_events() == []
+
+
+def test_canonical_receipt_bytes_roundtrip_and_truncation(
+    sample_scope: Scope, sample_artifact_refs: dict[str, ArtifactReference]
+) -> None:
+    """Crash recovery consumes complete, tamper-checked canonical JSONL only."""
+    now = datetime(2024, 1, 2, 10, 0, 1, tzinfo=UTC)
+    started = create_started_attempt(
+        attempt_id="att-journal",
+        logical_request_id="req-journal",
+        attempt_event_id="ev-journal",
+        scope=sample_scope,
+        context_ref=sample_artifact_refs["context_ref"],
+        method_ref=sample_artifact_refs["method_ref"],
+        budget_ref=sample_artifact_refs["budget_ref"],
+        producer="scripted_fixture",
+        started_at=now,
+    )
+    source = ResearchReceiptStore()
+    source.record_attempt(started)
+    canonical = source.export_canonical_jsonl()
+    recovered = ResearchReceiptStore()
+    recovered.load_canonical_jsonl(canonical)
+    assert recovered.get_unresolved_attempts() == (started,)
+    assert recovered.export_canonical_jsonl() == canonical
+
+    other = ResearchReceiptStore()
+    with pytest.raises(ValueError, match="TRUNCATED_RECEIPT_JOURNAL"):
+        other.load_canonical_jsonl(canonical.rstrip(b"\n"))
+    assert other.export_events() == []
+
+
+@pytest.mark.parametrize("amount", ["NaN", "Infinity", "-0.01"])
+def test_cost_receipt_rejects_nonfinite_or_negative_amount(
+    sample_scope: Scope, amount: str
+) -> None:
+    with pytest.raises(ValueError, match="INVALID_COST"):
+        create_cost_receipt(
+            receipt_id="cost-bad",
+            scope=sample_scope,
+            category="model_inference",
+            billing_identity="synthetic",
+            amount_basis="estimate",
+            amount=amount,
+            currency="USD",
+        )
