@@ -203,12 +203,28 @@ def replay_model_output(
             reason="response digest mismatch",
         )
 
-    # 4. Parse response JSON
+    # 4. Parse the retained response without silent last-key-wins or
+    # non-standard JSON constants such as NaN and Infinity.
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("DUPLICATE_MODEL_OUTPUT_JSON_KEY")
+            result[key] = value
+        return result
+
+    def refuse_constant(value: str) -> None:
+        raise ValueError(f"NONFINITE_MODEL_OUTPUT_CONSTANT: {value}")
+
     try:
-        raw_choice_data = json.loads(resp_bytes.decode("utf-8"))
+        raw_choice_data = json.loads(
+            resp_bytes.decode("utf-8"),
+            object_pairs_hook=unique_object,
+            parse_constant=refuse_constant,
+        )
         if not isinstance(raw_choice_data, dict):
             raise ValueError("model output is not a JSON object")
-    except Exception:
+    except (ValueError, UnicodeDecodeError):
         return ModelReplayResult(
             is_success=False,
             status="MALFORMED_OUTPUT",
