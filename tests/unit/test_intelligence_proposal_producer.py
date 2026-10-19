@@ -339,3 +339,34 @@ def test_identical_scripted_replay_retains_identical_candidate_and_event_hashes(
             tuple(e.record_hash for e in store.get_attempt_events(result.attempt_id)),
         )
     assert run() == run()
+
+
+def test_scripted_minimal_abstention_uses_typed_output_binding(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+) -> None:
+    """Omitting optional JSON keys cannot break a valid abstention receipt."""
+    store = ResearchReceiptStore()
+    result = produce_proposal(
+        context=sample_context,
+        resolved_inputs=sample_bindings,
+        frozen_method=ArtifactReference(
+            id="method:scripted", version="v1", sha256="a" * 64
+        ),
+        validation_policy=ArtifactReference(
+            id="policy:standard", version="v1", sha256="b" * 64
+        ),
+        recorder=store,
+        transport=FakeTransport(
+            raw_choice={"disposition": "abstain", "rationale": "Insufficient signal"}
+        ),
+        attempt_id="synthetic-minimal-abstain",
+        checked_at=datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
+    )
+    assert result.is_success
+    assert result.status == "VALID"
+    assert result.candidate is not None
+    assert result.candidate.disposition == "abstain"
+    assert result.candidate.targets == ()
+    assert len(store.get_attempt_events(result.attempt_id)) == 2
+    assert len(store.get_cost_receipts_for_attempt(result.attempt_id)) == 1

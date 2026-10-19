@@ -229,7 +229,16 @@ def produce_proposal(
             if isinstance(transport.raw_choice, RawChoice)
             else dict(transport.raw_choice)
         )
-        raw_digest = content_hash(raw_choice)
+        # FakeTransport supplies structured data rather than retained wire
+        # bytes. Bind the same typed RawChoice projection the validator checks,
+        # while the separately versioned replay path owns exact raw bytes.
+        try:
+            parsed_choice = RawChoice.model_validate(raw_choice)
+            raw_digest = content_hash(parsed_choice.model_dump(mode="python"))
+        except ValueError:
+            # Invalid choices retain a diagnosable rejection, not an exception
+            # that loses the attempt/cost receipt.
+            raw_digest = content_hash(raw_choice)
         binding = TrustedInvocationBinding(
             attempt_id=selected_attempt_id,
             candidate_id=selected_candidate_id,

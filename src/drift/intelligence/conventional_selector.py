@@ -44,6 +44,22 @@ class ConventionalSelectorResult(ImmutableModel):
     reason: str | None = None
 
 
+def _choice_identity(choice: Mapping[str, Any] | RawChoice) -> str:
+    """Bind a candidate pool entry to its typed semantic choice, not key order."""
+    raw_choice = (
+        choice.model_dump(mode="python")
+        if isinstance(choice, RawChoice)
+        else dict(choice)
+    )
+    try:
+        typed = RawChoice.model_validate(raw_choice)
+        return content_hash(typed.model_dump(mode="python"))
+    except ValueError:
+        # Invalid entries are rejected by validate_candidate; keep a stable
+        # diagnostic identity for the failed attempt.
+        return content_hash(raw_choice)
+
+
 def select_conventional_candidate(
     *,
     context: ResearchContext,
@@ -72,11 +88,7 @@ def select_conventional_candidate(
         raise ValueError("INDETERMINATE_TIMEZONE: comparator cutoff missing offset")
     pool_hash = content_hash(
         sorted(
-            content_hash(
-                choice.model_dump(mode="python")
-                if isinstance(choice, RawChoice)
-                else dict(choice)
-            )
+            _choice_identity(choice)
             for choice in candidate_pool
         )
     )
@@ -126,7 +138,7 @@ def select_conventional_candidate(
             if isinstance(choice_item, RawChoice)
             else dict(choice_item)
         )
-        choice_hash = content_hash(raw_source)
+        choice_hash = _choice_identity(choice_item)
         if choice_hash in seen_choice_hashes:
             score_error = "DUPLICATE_CANDIDATE_POOL_MEMBER"
             break

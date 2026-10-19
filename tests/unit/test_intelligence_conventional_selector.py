@@ -385,3 +385,34 @@ def test_r_invalid_objective_never_selects_a_candidate(
         assert result.status == "REJECTED"
         assert len(recorder.get_attempt_events(result.attempt_id)) == 2
         assert len(recorder.get_cost_receipts_for_attempt(result.attempt_id)) == 1
+
+
+def test_conventional_pool_rejects_semantically_duplicate_optional_fields(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+) -> None:
+    """An omitted optional key is not a distinct candidate in a frozen pool."""
+    explicit = deepcopy(fixture_data["raw_choice"])
+    shortened = deepcopy(explicit)
+    shortened.pop("evidence_ids", None)
+    shortened.pop("reason_codes", None)
+    recorder = ResearchReceiptStore()
+    result = select_conventional_candidate(
+        context=sample_context,
+        resolved_inputs=sample_bindings,
+        candidate_pool=[explicit, shortened],
+        objective_fn=lambda _candidate: Decimal("1"),
+        method_ref=ArtifactReference(id="method:R", version="v1", sha256="e" * 64),
+        validation_policy=ArtifactReference(
+            id="policy:fixed", version="v1", sha256="f" * 64
+        ),
+        recorder=recorder,
+        attempt_id="semantic-duplicate-pool",
+        checked_at=datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
+    )
+    assert result.status == "REJECTED"
+    assert not result.is_success
+    events = recorder.get_attempt_events(result.attempt_id)
+    assert len(events) == 2
+    assert "DUPLICATE_CANDIDATE_POOL_MEMBER" in events[-1].reason_codes
