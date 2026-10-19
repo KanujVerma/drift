@@ -301,7 +301,7 @@ def select_conventional_candidate(
     )
     recorder.record_attempt(terminal_attempt)
 
-    # Record verified zero cost receipt for deterministic local compute
+    # The verified-zero synthetic compute receipt was stored before completion.
     return ConventionalSelectorResult(
         is_success=True,
         status="VALID",
