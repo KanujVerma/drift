@@ -394,3 +394,72 @@ def test_future_event_revision_cannot_invalidate_past_review() -> None:
     later = evaluate_review_schedule(now=now, feed_events=[future, past])
     assert baseline.trigger_id == later.trigger_id
     assert baseline.record_hash == later.record_hash
+
+
+
+def test_event_revision_identity_is_namespaced_by_source() -> None:
+    """Two sources can publish the same event id without a false conflict."""
+    now = datetime(2024, 1, 10, 10, 0, tzinfo=UTC)
+    first = FeedEvent(
+        event_id="opaque-123",
+        source_id="feed:A",
+        version="v1",
+        available_at=now - timedelta(minutes=5),
+        content_hash="a" * 64,
+        raw_text="Source A news.",
+    )
+    second = first.model_copy(
+        update={"source_id": "feed:B", "content_hash": "b" * 64}
+    )
+    combined = evaluate_review_schedule(
+        now=now, feed_events=[first, second], feed_condition="material_event"
+    )
+    left = evaluate_review_schedule(
+        now=now, feed_events=[first], feed_condition="material_event"
+    )
+    right = evaluate_review_schedule(
+        now=now, feed_events=[second], feed_condition="material_event"
+    )
+    assert combined.action == "review"
+    assert left.trigger_id != right.trigger_id
+
+
+def test_event_available_at_conflict_fails_closed_in_both_orders() -> None:
+    """Do not silently select a favorable time stamp for one feed revision."""
+    now = datetime(2024, 1, 10, 10, 0, tzinfo=UTC)
+    first = FeedEvent(
+        event_id="same-event",
+        source_id="feed:A",
+        version="v1",
+        available_at=now - timedelta(minutes=5),
+        content_hash="c" * 64,
+        raw_text="A time-eligible observation.",
+    )
+    later = first.model_copy(
+        update={"available_at":first.available_at + timedelta(minutes=1)}
+    )
+    for ordered in ([first, later], [later, first]):
+        with pytest.raises(ValueError, match="EVENT_AVAILABILITY_CONFLICT"):
+            evaluate_review_schedule(now=now, feed_events=ordered)
+
+
+def test_material_event_signal_without_time_eligible_event_is_unavailable() -> None:
+    """A claimed material feed cannot become healthy empty when proof is absent."""
+    now = datetime(2024, 1, 10, 10, 0, tzinfo=UTC)
+    future = FeedEvent(
+        event_id="not-yet-available",
+        source_id="feed:A",
+        version="v1",
+        available_at=now + timedelta(minutes=1),
+        content_hash="d" * 64,
+        raw_text="Future news is not reviewable yet.",
+    )
+    verdict = evaluate_review_schedule(
+        now=now,
+        last_routine_at=now,
+        last_adaptation_at=now,
+        feed_events=[future],
+        feed_condition="material_event",
+    )
+    assert verdict.action == "unavailable"
+    assert "material_event_without_causal_evidence" in verdict.reason

@@ -145,14 +145,20 @@ def evaluate_review_schedule(
                 )
     # A scheduled review identity must not change when future events arrive,
     # or when the same completed event set is supplied in a different order.
-    causal_event_identity: list[tuple[str, str, str, datetime]] = []
+    causal_event_identity: list[tuple[str, str, str, str, datetime]] = []
     for event in feed_events:
         if event.available_at.tzinfo is None or event.available_at.utcoffset() is None:
             raise ValueError("INDETERMINATE_TIMEZONE: feed availability lacks offset")
         availability = event.available_at.astimezone(UTC)
         if availability <= now_utc:
             causal_event_identity.append(
-                (event.event_id, event.version, event.content_hash, availability)
+                (
+                    event.source_id,
+                    event.event_id,
+                    event.version,
+                    event.content_hash,
+                    availability,
+                )
             )
     causal_event_identity.sort()
     identity = content_hash({
@@ -246,7 +252,8 @@ def evaluate_review_schedule(
         return ReviewTriggerVerdict.model_validate(raw_dict)
 
     # 3. Event-driven trigger evaluation (D03, D04, T03)
-    event_versions: dict[tuple[str, str], str] = {}
+    event_versions: dict[tuple[str, str, str], str] = {}
+    event_availability: dict[tuple[str, str, str], datetime] = {}
     causal_material_events: list[FeedEvent] = []
     for ev in feed_events:
         if ev.available_at.tzinfo is None or ev.available_at.utcoffset() is None:
@@ -256,15 +263,39 @@ def evaluate_review_schedule(
         ev_available_utc = ev.available_at.astimezone(UTC)
         if ev_available_utc > now_utc:
             continue
-        key = (ev.event_id, ev.version)
+        # Provider-local event identifiers must not collide across sources.
+        # Repeated claims for one exact source event must agree about BOTH
+        # bytes and first availability, independent of their input order.
+        key = (ev.source_id, ev.event_id, ev.version)
         previous = event_versions.get(key)
         if previous is not None and previous != ev.content_hash:
             raise ValueError(
                 "SOURCE_DIGEST_CONFLICT: feed event revision changed bytes"
             )
+        previous_available = event_availability.get(key)
+        if previous_available is not None and previous_available != ev_available_utc:
+            raise ValueError(
+                "EVENT_AVAILABILITY_CONFLICT: source event has conflicting "
+                "time-availability claims"
+            )
         event_versions[key] = ev.content_hash
+        event_availability[key] = ev_available_utc
         if ev.is_material and ev.available_at.astimezone(UTC) <= now_utc:
             causal_material_events.append(ev)
+
+    if feed_condition == "material_event" and not causal_material_events:
+        raw_dict = {
+            "trigger_id": actual_trigger_id,
+            "action": "unavailable",
+            "review_type": None,
+            "reason": "material_event_without_causal_evidence",
+            "evaluated_at": now_utc,
+            "decision_cutoff": now_utc,
+            "action_policy": active_policy.default_event_policy,
+            "event_ref": None,
+        }
+        raw_dict["record_hash"] = compute_record_hash(raw_dict)
+        return ReviewTriggerVerdict.model_validate(raw_dict)
 
     if causal_material_events:
         # Check cooldown

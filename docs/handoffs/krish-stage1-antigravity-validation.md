@@ -66,7 +66,9 @@ In addition to the inherited K0/K1-K5 suites, independently exercise:
   malformed or conflicting replay must never commit a partial receipt store.
 - Review trigger identity excludes future event payloads and is invariant to
   event arrival ordering. Future conflicts cannot rewrite the past; conflicting
-  evidence actually available by cutoff fails closed.
+  evidence actually available by cutoff fails closed. Source-local event IDs
+  must be namespaced; contradictory availability stamps for one source event
+  fail closed. A material-event feed signal without a causal event is unavailable.
 - Completed learning feedback rejects NaN, Infinity, malformed or scientific-
   notation PnL/metrics, including self-rehashed historical snapshots; valid
   complete losing trials remain eligible. Reuse under a changed learning method
