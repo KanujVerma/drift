@@ -1,0 +1,75 @@
+{
+  "version": "1",
+  "positive_replay": {
+    "request": {
+      "payload": "{\"model\":\"mock-offline-model\",\"prompt\":\"Generate candidate allocation for fixture portfolio.\",\"temperature\":\"0.0\"}",
+      "content_hash": "a2d6daf332ceaae3cab0da2519b86e82110b9ac8b5adb0521bd08200bcd271f4",
+      "location": "fixture:request-bytes"
+    },
+    "response": {
+      "payload": "{\"cash_weight\":\"0.4\",\"disposition\":\"propose\",\"evidence_ids\":[\"fixture:evidence-1\"],\"rationale\":\"Equal weight allocation across 2 admitted securities with 40% cash reserve.\",\"reason_codes\":[\"PROPOSAL_GENERATED\"],\"selection\":{\"family_id\":\"fixture.equal_weight\",\"parameters\":{},\"strategy_version\":\"fixture-1\"},\"targets\":[{\"security_id\":\"01900000-0000-7000-8000-000000000101\",\"weight\":\"0.3\"},{\"security_id\":\"01900000-0000-7000-8000-000000000102\",\"weight\":\"0.3\"}]}",
+      "content_hash": "f3e9ba2bd0de050e6b2b28652948b241bf3cb01e9ffd0802d4a0714f06b026a7",
+      "location": "fixture:response-bytes"
+    },
+    "finish_reason": "stop"
+  },
+  "timeout_replay": {
+    "request": {
+      "payload": "{\"model\":\"mock-offline-model\",\"prompt\":\"Generate candidate allocation for fixture portfolio.\",\"temperature\":\"0.0\"}",
+      "content_hash": "a2d6daf332ceaae3cab0da2519b86e82110b9ac8b5adb0521bd08200bcd271f4",
+      "location": "fixture:request-bytes"
+    },
+    "response": null,
+    "finish_reason": "timeout"
+  },
+  "negative_cases": [
+    {
+      "case": "MR_N01",
+      "desc": "request digest mismatch",
+      "request": {
+        "payload": "{\"model\":\"mock-offline-model\",\"prompt\":\"Generate candidate allocation for fixture portfolio.\",\"temperature\":\"0.0\"}",
+        "content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "location": "fixture:request-bytes"
+      },
+      "response": {
+        "payload": "{\"cash_weight\":\"0.4\",\"disposition\":\"propose\",\"evidence_ids\":[\"fixture:evidence-1\"],\"rationale\":\"Equal weight allocation across 2 admitted securities with 40% cash reserve.\",\"reason_codes\":[\"PROPOSAL_GENERATED\"],\"selection\":{\"family_id\":\"fixture.equal_weight\",\"parameters\":{},\"strategy_version\":\"fixture-1\"},\"targets\":[{\"security_id\":\"01900000-0000-7000-8000-000000000101\",\"weight\":\"0.3\"},{\"security_id\":\"01900000-0000-7000-8000-000000000102\",\"weight\":\"0.3\"}]}",
+        "content_hash": "f3e9ba2bd0de050e6b2b28652948b241bf3cb01e9ffd0802d4a0714f06b026a7",
+        "location": "fixture:response-bytes"
+      },
+      "expected_status": "UNAVAILABLE",
+      "expected_reason": "request digest mismatch"
+    },
+    {
+      "case": "MR_N02",
+      "desc": "response digest mismatch",
+      "request": {
+        "payload": "{\"model\":\"mock-offline-model\",\"prompt\":\"Generate candidate allocation for fixture portfolio.\",\"temperature\":\"0.0\"}",
+        "content_hash": "a2d6daf332ceaae3cab0da2519b86e82110b9ac8b5adb0521bd08200bcd271f4",
+        "location": "fixture:request-bytes"
+      },
+      "response": {
+        "payload": "{\"cash_weight\":\"0.4\",\"disposition\":\"propose\",\"evidence_ids\":[\"fixture:evidence-1\"],\"rationale\":\"Equal weight allocation across 2 admitted securities with 40% cash reserve.\",\"reason_codes\":[\"PROPOSAL_GENERATED\"],\"selection\":{\"family_id\":\"fixture.equal_weight\",\"parameters\":{},\"strategy_version\":\"fixture-1\"},\"targets\":[{\"security_id\":\"01900000-0000-7000-8000-000000000101\",\"weight\":\"0.3\"},{\"security_id\":\"01900000-0000-7000-8000-000000000102\",\"weight\":\"0.3\"}]}",
+        "content_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "location": "fixture:response-bytes"
+      },
+      "expected_status": "UNAVAILABLE",
+      "expected_reason": "response digest mismatch"
+    },
+    {
+      "case": "MR_N03",
+      "desc": "malformed response json",
+      "request": {
+        "payload": "{\"model\":\"mock-offline-model\",\"prompt\":\"Generate candidate allocation for fixture portfolio.\",\"temperature\":\"0.0\"}",
+        "content_hash": "a2d6daf332ceaae3cab0da2519b86e82110b9ac8b5adb0521bd08200bcd271f4",
+        "location": "fixture:request-bytes"
+      },
+      "response": {
+        "payload": "{\"broken_json: unclosed",
+        "content_hash": "fa4c5b59e9836d755ed45993a5d9698921e3c46d5c7d2396baf04c6f1cc9c9c6",
+        "location": "fixture:response-broken"
+      },
+      "expected_status": "MALFORMED_OUTPUT",
+      "expected_reason": "malformed JSON in response payload"
+    }
+  ]
+}
