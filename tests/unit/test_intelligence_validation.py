@@ -24,6 +24,7 @@ from drift.intelligence.validation import (
     validate_candidate,
     validate_retained_record,
 )
+from drift.serialization.canonical import content_hash
 
 FIXTURES_PATH = Path("tests/fixtures/adaptive_research/research_v1.json")
 
@@ -96,7 +97,7 @@ def trusted_invocation(
         raw_output_ref=ArtifactReference(
             id="fixture:raw-output",
             version="fixture-1",
-            sha256="b" * 64,
+            sha256=content_hash(fixture_data["raw_choice"]),
         ),
         producer=f02["producer"],
         completed_at=datetime.fromisoformat(f02["completed_at"]),
@@ -160,7 +161,7 @@ def test_positive_abstention_validation_matches_f03(
             id="fixture:policy", version="v1", sha256="c" * 64
         ),
         raw_output_ref=ArtifactReference(
-            id="fixture:raw", version="v1", sha256="d" * 64
+            id="fixture:raw", version="v1", sha256=content_hash(raw_abstain)
         ),
         producer=f03["producer"],
         completed_at=datetime.fromisoformat(f03["completed_at"]),
