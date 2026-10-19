@@ -92,6 +92,10 @@ Additional source-review regressions to execute on the final pinned head:
   must preserve an explicit UNKNOWN classification, not invent `stop`.
 - A self-rehashed Stage 1 candidate with weights not summing exactly to one
   or with nonfinite/ambiguous cash weight must produce a non-actionable refusal.
+- A comparator pool containing noncanonical arbitrary parameter data must
+  reject the pool with an explicit attempt and retained cost, never select a
+  winner; without a unique supplied attempt ID it must refuse to fabricate
+  replay identity before starting work.
 
 ## One-shot isolated QA run
 

@@ -10,6 +10,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
+from drift.errors import CanonicalSerializationError
 from drift.intelligence.contracts import (
     ArtifactReference,
     ImmutableModel,
@@ -86,12 +87,26 @@ def select_conventional_candidate(
     now = checked_at or context.review_started_at
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("INDETERMINATE_TIMEZONE: comparator cutoff missing offset")
-    pool_hash = content_hash(
-        sorted(
-            _choice_identity(choice)
-            for choice in candidate_pool
+    # A candidate pool may contain opaque objects in Any-typed strategy
+    # parameters. No canonical hash can represent those bytes safely.
+    # Refuse such a pool rather than crashing after beginning an attempt.
+    invalid_pool = False
+    try:
+        pool_hash = content_hash(
+            sorted(_choice_identity(choice) for choice in candidate_pool)
         )
-    )
+    except (CanonicalSerializationError, TypeError, ValueError):
+        if attempt_id is None:
+            raise ValueError(
+                "NONCANONICAL_POOL_REQUIRES_EXPLICIT_ATTEMPT_ID"
+            ) from None
+        invalid_pool = True
+        pool_hash = content_hash(
+            {
+                "invalid_pool": True,
+                "explicit_attempt_id": attempt_id,
+            }
+        )
     seed = content_hash(
         {
             "context": context.record_hash,
@@ -128,10 +143,12 @@ def select_conventional_candidate(
     # 2. Exhaustively evaluate valid candidates
     evaluated_candidates: list[tuple[Decimal, str, str, str, ResearchCandidate]] = []
     scores_dict: dict[str, str] = {}
-    score_error: str | None = None
+    score_error: str | None = (
+        "INVALID_CANDIDATE_POOL_SERIALIZATION" if invalid_pool else None
+    )
     seen_choice_hashes: set[str] = set()
 
-    for choice_item in candidate_pool:
+    for choice_item in (() if invalid_pool else candidate_pool):
         # The candidate's identity is stable under a pool permutation.
         raw_source = (
             choice_item.model_dump(mode="python")

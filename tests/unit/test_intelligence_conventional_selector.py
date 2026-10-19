@@ -416,3 +416,66 @@ def test_conventional_pool_rejects_semantically_duplicate_optional_fields(
     events = recorder.get_attempt_events(result.attempt_id)
     assert len(events) == 2
     assert "DUPLICATE_CANDIDATE_POOL_MEMBER" in events[-1].reason_codes
+
+
+
+@pytest.mark.parametrize("invalid_param", [float("nan"), object()])
+def test_noncanonical_pool_retains_explicit_attempt_and_cost(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+    invalid_param: object,
+) -> None:
+    """Invalid candidate bytes are never silently assigned a winning score."""
+    bad = deepcopy(fixture_data["raw_choice"])
+    bad["selection"]["parameters"] = {"unsafe": invalid_param}
+    recorder = ResearchReceiptStore()
+    result = select_conventional_candidate(
+        context=sample_context,
+        resolved_inputs=sample_bindings,
+        candidate_pool=[bad],
+        objective_fn=lambda _candidate: Decimal("1"),
+        method_ref=ArtifactReference(
+            id="synthetic:method", version="v1", sha256="e" * 64
+        ),
+        validation_policy=ArtifactReference(
+            id="synthetic:policy", version="v1", sha256="f" * 64
+        ),
+        recorder=recorder,
+        attempt_id="synthetic:noncanonical-pool",
+        checked_at=datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
+    )
+    assert not result.is_success
+    assert result.status == "REJECTED"
+    assert result.selected_candidate is None
+    events = recorder.get_attempt_events(result.attempt_id)
+    assert [event.status for event in events] == ["started", "rejected"]
+    assert "INVALID_CANDIDATE_POOL_SERIALIZATION" in events[-1].reason_codes
+    assert len(recorder.get_cost_receipts_for_attempt(result.attempt_id)) == 1
+
+
+def test_noncanonical_pool_without_explicit_attempt_id_cannot_claim_replay_identity(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+) -> None:
+    """No invented stable hash for unknown opaque candidate objects."""
+    bad = deepcopy(fixture_data["raw_choice"])
+    bad["selection"]["parameters"] = {"unsafe": object()}
+    recorder = ResearchReceiptStore()
+    with pytest.raises(ValueError, match="NONCANONICAL_POOL_REQUIRES_EXPLICIT_ATTEMPT_ID"):
+        select_conventional_candidate(
+            context=sample_context,
+            resolved_inputs=sample_bindings,
+            candidate_pool=[bad],
+            objective_fn=lambda _candidate: Decimal("1"),
+            method_ref=ArtifactReference(
+                id="synthetic:method", version="v1", sha256="e" * 64
+            ),
+            validation_policy=ArtifactReference(
+                id="synthetic:policy", version="v1", sha256="f" * 64
+            ),
+            recorder=recorder,
+            checked_at=datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
+        )
+    assert recorder.export_events() == []
