@@ -350,3 +350,32 @@ def test_forged_typed_choice_is_not_trusted_without_revalidation(
     assert response.status == "INVALID"
     assert response.candidate is None
     assert "INVALID_RAW_CHOICE_STRUCTURE" in response.reason
+
+
+def test_a_mismapped_registry_family_cannot_be_selected(
+    fixture_data: dict[str, Any],
+    resolved_dependencies: ResolvedDependencies,
+    trusted_invocation: TrustedInvocationBinding,
+) -> None:
+    """An injected registry entry cannot silently change the selected family."""
+    context = ResearchContext.model_validate(fixture_data["fixtures"]["F01"])
+    original = resolved_dependencies.strategy_registry["fixture.equal_weight"]
+    mismatch = StrategyRegistration(
+        family_id="fixture.other_family",
+        strategy_ref=original.strategy_ref,
+        envelope_ref=original.envelope_ref,
+        eligibility_ref=original.eligibility_ref,
+        allowed_parameters=original.allowed_parameters,
+    )
+    inconsistent = resolved_dependencies.model_copy(
+        update={"strategy_registry": {"fixture.equal_weight": mismatch}}
+    )
+    verdict = validate_candidate(
+        raw_choice=fixture_data["raw_choice"],
+        context=context,
+        resolved_dependencies=inconsistent,
+        trusted_invocation=trusted_invocation,
+    )
+    assert verdict.status == "REJECTED"
+    assert verdict.candidate is None
+    assert verdict.reason == "STRATEGY_REGISTRY_FAMILY_MISMATCH"
