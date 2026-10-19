@@ -32,9 +32,7 @@ def _validate_cost_chronology(cost: CostReceipt) -> None:
     """
     for field in ("incurred_start", "incurred_end", "recorded_at"):
         stamp = getattr(cost, field)
-        if stamp is not None and (
-            stamp.tzinfo is None or stamp.utcoffset() is None
-        ):
+        if stamp is not None and (stamp.tzinfo is None or stamp.utcoffset() is None):
             raise ValueError(f"INVALID_COST_TIMESTAMP: {field} lacks timezone")
     start = cost.incurred_start
     end = cost.incurred_end
