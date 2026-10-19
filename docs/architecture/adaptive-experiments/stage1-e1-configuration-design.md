@@ -84,8 +84,8 @@ Expose exactly these functions in addition to the above value classes:
 - `verify_arm_spec(*, arm: ArmSpecV1) -> bool`.
 - `build_run_account_binding(*, campaign_id: str, run_id: str, arm_id: str, portfolio_account_id: str, initial_cash_allocated: str, bound_at: datetime) -> RunAccountBindingV1`.
 - `verify_run_account_binding(*, binding: RunAccountBindingV1) -> bool`.
-- `verify_experiment_configuration(*, campaign: CampaignSpecV1, arms: Sequence[ArmSpecV1], bindings: Sequence[RunAccountBindingV1]) -> bool`.
-- `verify_stage1_synthetic_br_configuration(*, campaign: CampaignSpecV1, arms: Sequence[ArmSpecV1], bindings: Sequence[RunAccountBindingV1]) -> bool`, a separate optional Stage 1-specific check after the generic collection verifier.
+- `verify_experiment_configuration(*, campaign: CampaignSpecV1, arms: Sequence[ArmSpecV1], bindings: Sequence[RunAccountBindingV1], expected_run_ids: Sequence[str]) -> bool`. The caller supplies the complete expected run manifest for this verification snapshot, not one run at a time.
+- `verify_stage1_synthetic_br_configuration(*, campaign: CampaignSpecV1, arms: Sequence[ArmSpecV1], bindings: Sequence[RunAccountBindingV1], expected_run_ids: Sequence[str]) -> bool`, a separate optional Stage 1-specific check after the generic collection verifier.
 
 **Return discipline:** every verifier returns `True` only on intact input and otherwise raises `ValueError`, never an optimistic fallback or `False` on corruption. Builders raise `ValueError` on invalid fields and never coerce malformed values. No public mutator or default clock.
 
@@ -127,13 +127,15 @@ A direct dataclass constructor or `dataclasses.replace` does not authenticate an
 
 `verify_experiment_configuration`:
 
-1. Verify the campaign and every supplied arm/binding independently. Reject empty arms or bindings; reject strings, maps, unexpected types and duplicate objects where a sequence is required.
+1. Verify the campaign and every supplied arm/binding independently. Reject empty arms or bindings; reject strings, maps, unexpected types and duplicate objects where a sequence is required. Require a caller-supplied, nonempty, duplicate-free, strictly validated `expected_run_ids` manifest. The manifest's exact run IDs must match the set represented in supplied bindings. Neither absent runs nor extra runs may be ignored.
 2. Every arm's `campaign_id` equals the campaign ID. Arm IDs and arm fingerprints are unique.
 3. Campaign `arm_spec_references` (hashes) exactly identifies the supplied arm set, with equal cardinality; order of the **supplied arm sequence** does not matter. The declared `arm_spec_references` array order remains hash-significant inside CampaignSpec.
 4. Both primary comparison arm IDs are present and distinct. Every declared control arm ID exists, is unique and is disjoint from the primary comparison; a campaign may have zero controls.
 5. Every binding refers to the campaign and an existing arm, and has exact `binding_id = campaign_id + ":" + run_id + ":" + arm_id + ":BINDING"`. All triples `(campaign_id, run_id, arm_id)`, binding IDs, and concrete `portfolio_account_id` values are unique across the **entire collection**, including different runs.
-6. Every represented run binds **every declared arm exactly once**. This collection completeness rule cannot be proven by validating an individual binding. Every binding's `initial_cash_allocated` exactly equals its matched arm's canonical `initial_capital` text, both already valid DecimalText. Its `bound_at` is not earlier than the campaign's `frozen_at`. A reference value itself does not prove Matthew issued/verified the account.
-7. On any mismatch or missing/duplicate arm/account/ref, raise `ValueError`. No partial materialization, fill, cash movement, account lookup or mutation. On success, return `True`.
+6. Every run in `expected_run_ids` binds **every declared arm exactly once**. This collection completeness rule cannot be proven by validating an individual binding. Every binding's `initial_cash_allocated` exactly equals its matched arm's canonical `initial_capital` text, both already valid DecimalText. Its `bound_at` is not earlier than the campaign's `frozen_at`. A reference value itself does not prove Matthew issued/verified the account.
+7. On any mismatch or missing/duplicate arm/account/ref/run manifest, raise `ValueError`. No partial materialization, fill, cash movement, account lookup or mutation. On success, return `True`.
+
+**Explicit proof boundary:** E1 proves non-reuse **only across the complete caller-declared manifest and all its supplied bindings in the current call**. Separate calls with independently incomplete manifests cannot establish global uniqueness. The authoritative complete manifest and reconciliation with historical Matthew account identities are separate accepted producer obligations. Do not invent a persistent registry or label local uniqueness globally verified.
 
 ## 8. Explicit optional Stage 1 synthetic B/R profile
 
@@ -141,9 +143,9 @@ A direct dataclass constructor or `dataclasses.replace` does not authenticate an
 
 - `campaign_type == "SYNTHETIC_TEST"` and primary comparison exactly `ARM-B` vs. `ARM-R`.
 - B `selector_type == "ADAPTIVE_AI"`, R `selector_type == "DETERMINISTIC_COMPARATOR"`.
-- B and R each have initial strategy `B3`, admitted strategy *set* exactly `{B3,B4,B5}` (input order retained in fingerprints), exact `initial_capital == "10000"` and currency USD.
+- B and R each have initial strategy `B3`, admitted strategy *set* exactly `{B3,B4,B5}` (input order retained in fingerprints), exact `initial_capital == "10000"` and currency USD. **Every other active declared control arm also has `initial_capital == "10000"` and USD**, with its own isolated full binding per expected run.
 - B and R have matching `mandate_reference`, `execution_policy_reference`, and `information_visibility_policy == "IDENTICAL_MARKET_AND_REFERENCE_COMPLETED"`. This checks equality only, not validity of a numeric Balanced mandate.
-- `warmup_window.sessions_count >= 253`, `observation_window.sessions_count == 126`, `decision_schedule.frequency == "MONTHLY"` and fresh accounts true.
+- `warmup_window.sessions_count >= 253`, `observation_window.sessions_count == 126`, `decision_schedule.frequency == "MONTHLY"`, `decision_schedule.alignment == "LAST_COMPLETED_SESSION"`, `decision_schedule.execution_timing == "NEXT_OPEN"` and fresh accounts true. This alignment token is an **E1 synthetic fixture marker**, not an accepted exchange calendar enum; real last eligible month-end close and next eligible open must be proved with the qualified session clock. `SAME_CLOSE` and other earlier execution requests are rejected.
 - Optional controls can declare other frozen families/strategies and need not start in B3.
 - Do NOT certify qualification of a real 12-ETF cohort, account provisioning, scored duration, actual month-end exchange calendar, first-switch timing, AI/R information equality at a future cutoff, G3 freeze, strategy performance, or empirical advantage. Those require other accepted producers/gates.
 
@@ -247,15 +249,15 @@ The exact oracles were independently calculated from Drift's documented canonica
 
 Required focused tests in the authorized new unit test file:
 
-1. Goldens: exact Arm B, Arm R, campaign SHA-256, field/array counts and two exact derived binding IDs. Verify structural and optional Stage 1 profile.
+1. Goldens: exact Arm B, Arm R, campaign SHA-256, field/array counts and two exact derived binding IDs. Use `expected_run_ids=("RUN-001",)` in collection and optional Stage 1 verification.
 2. Same canonical hash with different object-map insertion order and equivalent UTC timezone offsets; same constructed bytes on replay; no wall-clock default.
 3. Preserve declared array order, duplicate array elements inside opaque JSON, empty control/data/accepted revision collections. Reordered *hashed arrays* should create different legitimate fingerprints; reordered map keys should not.
 4. Deep immutability: mutate caller-owned lists, dictionaries, nested map/array *after* building, verify frozen objects and fingerprints unchanged; frozen assignment fails; `dataclasses.replace` of hashed fields without new digest fails.
 5. Corruption: mismatched/uppercase/wrong-length fingerprint, wrong schema, bad selector/currency, invalid seed/policy refs, bad or duplicated strategy/ref/member lists, tampered nested authorization object even with a newly forged matching digest when map ordering itself is noncanonical.
 6. Reject malformed IDs containing `:`/whitespace, wrong derived binding ID, noncanonical/out-of-range/naive timestamps, created after frozen, binding earlier than frozen, invalid/descending Gregorian date strings, nonbool `fresh_accounts`, negative/boolean/nonint session counts.
 7. Monetary refusal table: `10000.00`, `00`, `01`, `0.0`, `-0`, `+1`, `1e2`, `1.`, `.5`, ` 10000`, whitespace, float, bool, NaN, Infinity, nonpositive amounts. Valid: `10000`, `0.5`, `10000.5`.
-8. Collection: swapped input arm order remains valid; absent arm, extra arm, unknown primary/control, duplicate arm/fingerprint, same account across arms, same account across two runs, duplicate binding ID/scope, missing arm in a represented run, wrong campaign/arm, mismatched initial cash and cross-run account reuse all fail closed.
-9. Generic independence: valid alternative campaign with controls and non-B3 starting strategies remains structurally valid; optional Stage 1 profile rejects it if it does not match B/R requirements. No universal $10k, B3, 253 or 126 defaults.
+8. Collection: swapped input arm order remains valid; absent arm, extra arm, unknown primary/control, duplicate arm/fingerprint, same account across arms, same account across two runs, duplicate binding ID/scope, wrong campaign/arm, mismatched initial cash and cross-run account reuse all fail closed. Manifest adversaries: empty/duplicate expected runs, missing declared RUN-002 binding, unexpected RUN-003 binding, missing one arm for RUN-002. Test that separate single-run verifications cannot prove *global* uniqueness: require combined expected-run snapshot.
+9. Generic independence: valid alternative campaign with controls and non-B3 starting strategies remains structurally valid; optional Stage 1 profile rejects it if it does not match B/R requirements. All active Stage 1 controls require USD 10,000: reject a `"1"` control arm even when its binding matches. Reject Stage 1 `SAME_CLOSE` and wrong alignment. No **generic** $10k, B3, 253 or 126 defaults.
 10. Scope boundaries: zero provider/broker/disk/system clock calls; hashes/refs alone are not authentic approvals, filled trades or qualified historical source. No imports of unmerged K0/K1-K5 or PR #455 code.
 
 Exact refusal API: `ValueError` on every malformed/unsafe object or collection, including caller type confusion; `True` for valid verification. No automatic correction/rehashing of a mutated *persisted* object and no verifier that reports success by omitting invalid participants.
@@ -267,3 +269,14 @@ Use the repository's required [implementation handoff standard](../implementatio
 Architect independently reviews actual diff and tests, requests Codex review on exact HEAD and verifies its completion, fixes findings and rechecks final HEAD. Matthew's independent account/RESULT consumer review is required before claiming this shared scientific-to-platform binding semantics accepted. No auto merge without separately recorded exact-PR/HEAD merge authorization by Kanuj; no G3 or scored historical run from this code.
 
 **Next scientific integration after E1:** #448/#455 event integrity, trial projection, producer admission/RESULT, research receipts, metric aggregation, E6 synthetic B/R, and only later source-qualified preregistered historical benchmarking.
+
+
+## 12. Codex-reviewed architecture corrections (October 19, 2026)
+
+Owner-approved Option A and E1-A through E1-E are preserved. The first exact-head Codex review of PR #461 reported three actionable design faults: [complete run universe](https://github.com/KanujVerma/drift/pull/461#discussion_r4317401516), [next-open timing](https://github.com/KanujVerma/drift/pull/461#discussion_r4317401526), and [all-arm capital](https://github.com/KanujVerma/drift/pull/461#discussion_r4317401534).
+
+- **Run manifest:** E1 must not claim global cross-run account isolation if it only checked a selected subset. Every collection verifier requires an explicit complete expected-run ID manifest, rejects omitted/extra/duplicate runs, and checks all run-arm bindings and account IDs together. The guarantee is scoped to the supplied manifest, not unseen platform history. Actual manifest provenance remains Matthew's future work. Rejected a competing global mutable account registry.
+- **Next eligible open:** The Stage 1 synthetic profile must require `decision_schedule.execution_timing == "NEXT_OPEN"` and fixed synthetic marker `decision_schedule.alignment == "LAST_COMPLETED_SESSION"`, in addition to monthly frequency. Neither token proves exchange-calendar eligibility; the simulator/source producer must do so later. Rejected `SAME_CLOSE` to prevent lookahead.
+- **Equal initial accounts:** Every active Stage 1 control arm, not merely B/R, must have canonical `initial_capital == "10000"`, matching the owner's accepted primary scientific method. The generic models remain capital configurable. Rejected unequal cash controls in a supposedly matched study.
+
+These changes are architect-owned verification obligations in the Kanuj scientific E1 workstream, not a revision of Krish/Matthew producer contracts, an approved scored study, or a real cash-account certification.
