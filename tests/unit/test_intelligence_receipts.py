@@ -14,10 +14,10 @@ import pytest
 from drift.intelligence.contracts import (
     ArtifactReference,
     CostReceipt,
-    compute_record_hash,
     Scope,
     StoredArtifactRef,
     UsageEntry,
+    compute_record_hash,
 )
 from drift.intelligence.receipts import (
     ResearchReceiptStore,
@@ -500,30 +500,41 @@ def test_k2_rejects_contradictory_cost_inputs(sample_scope: Scope) -> None:
         content_hash="e" * 64,
         location="synthetic:zero",
     )
-    common = dict(
-        receipt_id="cost-conflict",
-        scope=sample_scope,
-        category="inference",
-        billing_identity="meter:conflict",
-    )
+    common: dict[str, Any] = {
+        "receipt_id": "cost-conflict",
+        "scope": sample_scope,
+        "category": "inference",
+        "billing_identity": "meter:conflict",
+    }
     with pytest.raises(ValueError, match="CONFLICTING_VERIFIED_ZERO_AMOUNT"):
         create_cost_receipt(
-            **common, amount_basis="verified_zero", amount="1",
+            **common,
+            amount_basis="verified_zero",
+            amount="1",
             raw_evidence_ref=proof,
         )
-    with pytest.raises(ValueError, match="CONFLICTING_VERIFIED_ZERO_UNKNOWN_REASON"):
+    with pytest.raises(
+        ValueError, match="CONFLICTING_VERIFIED_ZERO_UNKNOWN_REASON"
+    ):
         create_cost_receipt(
-            **common, amount_basis="verified_zero", raw_evidence_ref=proof,
+            **common,
+            amount_basis="verified_zero",
+            raw_evidence_ref=proof,
             unknown_reason="conflicting provider bill",
         )
     with pytest.raises(ValueError, match="CONFLICTING_UNKNOWN_COST_FIELDS"):
         create_cost_receipt(
-            **common, amount_basis="unknown", unknown_reason="not priced",
-            amount="12.3", currency="USD",
+            **common,
+            amount_basis="unknown",
+            unknown_reason="not priced",
+            amount="12.3",
+            currency="USD",
         )
     with pytest.raises(ValueError, match="CONFLICTING_UNKNOWN_COST_FIELDS"):
         create_cost_receipt(
-            **common, amount_basis="unknown", unknown_reason="not priced",
+            **common,
+            amount_basis="unknown",
+            unknown_reason="not priced",
             currency="USD",
         )
 
@@ -532,22 +543,33 @@ def test_k2_disallows_competing_corrections_without_dropping_history(
     sample_scope: Scope,
 ) -> None:
     """An estimate has one authoritative correction, not two billable forks."""
-    common = dict(
-        scope=sample_scope,
-        category="inference",
-        billing_identity="invoice:single-work",
-    )
+    common: dict[str, Any] = {
+        "scope": sample_scope,
+        "category": "inference",
+        "billing_identity": "invoice:single-work",
+    }
     estimate = create_cost_receipt(
-        **common, receipt_id="estimate", amount_basis="estimate",
-        amount="2.50", currency="USD",
+        **common,
+        receipt_id="estimate",
+        amount_basis="estimate",
+        amount="2.50",
+        currency="USD",
     )
     actual = create_cost_receipt(
-        **common, receipt_id="corrected-a", amount_basis="actual",
-        amount="2.20", currency="USD", supersedes_receipt_id="estimate",
+        **common,
+        receipt_id="corrected-a",
+        amount_basis="actual",
+        amount="2.20",
+        currency="USD",
+        supersedes_receipt_id="estimate",
     )
     conflicting = create_cost_receipt(
-        **common, receipt_id="corrected-b", amount_basis="actual",
-        amount="2.10", currency="USD", supersedes_receipt_id="estimate",
+        **common,
+        receipt_id="corrected-b",
+        amount_basis="actual",
+        amount="2.10",
+        currency="USD",
+        supersedes_receipt_id="estimate",
     )
     store = ResearchReceiptStore()
     store.record_cost_receipt(estimate)
@@ -569,31 +591,37 @@ def test_k2_rejects_noncausal_cost_timestamps_at_creation_and_replay(
     sample_scope: Scope,
 ) -> None:
     """Even valid self-rehashed cost rows cannot launder impossible chronology."""
-    common = dict(
-        receipt_id="cost-timestamp",
-        scope=sample_scope,
-        category="inference",
-        billing_identity="meter:timestamp",
-        amount_basis="actual",
-        amount="0.12",
-        currency="USD",
-    )
+    common: dict[str, Any] = {
+        "receipt_id": "cost-timestamp",
+        "scope": sample_scope,
+        "category": "inference",
+        "billing_identity": "meter:timestamp",
+        "amount_basis": "actual",
+        "amount": "0.12",
+        "currency": "USD",
+    }
     start = datetime(2024, 1, 2, 10, 0, 0, tzinfo=UTC)
     end = datetime(2024, 1, 2, 10, 1, 0, tzinfo=UTC)
     recorded = datetime(2024, 1, 2, 10, 2, 0, tzinfo=UTC)
     with pytest.raises(ValueError, match="INVALID_COST_CHRONOLOGY"):
         create_cost_receipt(
-            **common, incurred_start=end, incurred_end=start,
+            **common,
+            incurred_start=end,
+            incurred_end=start,
             recorded_at=recorded,
         )
     with pytest.raises(ValueError, match="INVALID_COST_TIMESTAMP"):
         create_cost_receipt(
-            **common, incurred_start=start.replace(tzinfo=None),
-            incurred_end=end, recorded_at=recorded,
+            **common,
+            incurred_start=start.replace(tzinfo=None),
+            incurred_end=end,
+            recorded_at=recorded,
         )
 
     valid = create_cost_receipt(
-        **common, incurred_start=start, incurred_end=end,
+        **common,
+        incurred_start=start,
+        incurred_end=end,
         recorded_at=recorded,
     )
     original = valid.model_dump(mode="python")
