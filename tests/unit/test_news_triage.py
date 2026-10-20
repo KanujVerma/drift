@@ -468,3 +468,24 @@ def test_unrelated_prior_reordering_does_not_change_screening() -> None:
     b = run(source, prior=(unrelated, inconclusive))
     assert a.outcome == b.outcome == "CANDIDATE_ALERT"
     assert a.record_hash == b.record_hash
+
+
+def test_none_or_custom_untrusted_prior_collection_cannot_run_side_effects() -> None:
+    """Untrusted iterators are not permitted to execute while screening."""
+    unknown = cast(tuple[PriorScreening, ...], None)
+    verdict = run(event(), prior=unknown)
+    assert verdict.outcome == "ABSTAIN"
+    assert verdict.reason == "MALFORMED_PRIOR_COLLECTION"
+
+    class HostileIterator:
+        touched = False
+
+        def __iter__(self):
+            self.touched = True
+            raise AssertionError("untrusted prior iterable executed")
+
+    supplied = HostileIterator()
+    forged = cast(tuple[PriorScreening, ...], supplied)
+    answer = run(event(), prior=forged)
+    assert answer.outcome == "ABSTAIN"
+    assert not supplied.touched
