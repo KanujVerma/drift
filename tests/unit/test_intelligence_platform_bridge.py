@@ -602,3 +602,87 @@ def test_self_rehashed_invalid_weights_never_make_a_platform_request(
             portfolio_state=matching_portfolio_state,
             current_time=sample_candidate.completed_at + timedelta(minutes=5),
         )
+
+
+def test_full_portfolio_and_mandate_refs_must_match_even_with_same_hash(
+    sample_candidate: ResearchCandidate,
+    matching_portfolio_state: PortfolioStateBinding,
+) -> None:
+    now = sample_candidate.completed_at + timedelta(minutes=5)
+    wrong_portfolio = matching_portfolio_state.model_copy(
+        update={"portfolio_ref": ArtifactReference(
+            id="port:other", version=matching_portfolio_state.portfolio_ref.version,
+            sha256=matching_portfolio_state.portfolio_ref.sha256,
+        )}
+    )
+    portfolio_refusal = bridge_candidate_to_execution(
+        candidate=sample_candidate, portfolio_state=wrong_portfolio,
+        current_time=now,
+    )
+    assert portfolio_refusal.status == "refused"
+    assert "STALE_PORTFOLIO_STATE" in (portfolio_refusal.refusal_reason or "")
+    wrong_mandate = matching_portfolio_state.model_copy(
+        update={"mandate_ref": ArtifactReference(
+            id=matching_portfolio_state.mandate_ref.id, version="v2",
+            sha256=matching_portfolio_state.mandate_ref.sha256,
+        )}
+    )
+    mandate_refusal = bridge_candidate_to_execution(
+        candidate=sample_candidate, portfolio_state=wrong_mandate,
+        current_time=now,
+    )
+    assert mandate_refusal.status == "refused"
+    assert "MANDATE_MISMATCH" in (mandate_refusal.refusal_reason or "")
+    assert portfolio_refusal.target_allocations == ()
+    assert mandate_refusal.target_allocations == ()
+
+
+def test_bridge_request_identity_binds_session_and_verification_state(
+    sample_candidate: ResearchCandidate,
+    matching_portfolio_state: PortfolioStateBinding,
+) -> None:
+    now = sample_candidate.completed_at + timedelta(minutes=5)
+    baseline = bridge_candidate_to_execution(
+        candidate=sample_candidate, portfolio_state=matching_portfolio_state,
+        current_time=now, intraday_supported=True,
+    )
+    next_open = bridge_candidate_to_execution(
+        candidate=sample_candidate, portfolio_state=matching_portfolio_state,
+        current_time=now, intraday_supported=False,
+    )
+    no_session = bridge_candidate_to_execution(
+        candidate=sample_candidate, portfolio_state=matching_portfolio_state,
+        current_time=now, intraday_supported=False,
+        allow_next_open_fallback=False,
+    )
+    other_proof = matching_portfolio_state.model_copy(
+        update={"verification_ref": ArtifactReference(
+            id="synthetic:alternate-proof", version="v1", sha256="f" * 64
+        )}
+    )
+    different_verification = bridge_candidate_to_execution(
+        candidate=sample_candidate, portfolio_state=other_proof,
+        current_time=now, intraday_supported=True,
+    )
+    paused = bridge_candidate_to_execution(
+        candidate=sample_candidate,
+        portfolio_state=matching_portfolio_state.model_copy(
+            update={"is_paused": True}
+        ),
+        current_time=now, intraday_supported=True,
+    )
+    assert baseline.status == "admitted"
+    assert next_open.session_target == "next_open"
+    assert no_session.status == "unsupported"
+    assert paused.status == "refused"
+    ids = [
+        baseline.request_id, next_open.request_id, no_session.request_id,
+        different_verification.request_id, paused.request_id,
+    ]
+    assert len(set(ids)) == len(ids)
+    replay = bridge_candidate_to_execution(
+        candidate=sample_candidate, portfolio_state=matching_portfolio_state,
+        current_time=now, intraday_supported=True,
+    )
+    assert baseline.request_id == replay.request_id
+    assert baseline.record_hash == replay.record_hash
