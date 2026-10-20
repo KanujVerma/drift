@@ -200,13 +200,13 @@ def evaluate_review_schedule(
     feed_events = validated_events
     # A scheduled review identity must not change when future events arrive,
     # or when the same completed event set is supplied in a different order.
-    causal_event_identity: list[tuple[str, str, str, str, datetime, str, bool]] = []
+    causal_event_identity: set[tuple[str, str, str, str, datetime, str, bool]] = set()
     for event in feed_events:
         if event.available_at.tzinfo is None or event.available_at.utcoffset() is None:
             raise ValueError("INDETERMINATE_TIMEZONE: feed availability lacks offset")
         availability = event.available_at.astimezone(UTC)
         if availability <= now_utc:
-            causal_event_identity.append(
+            causal_event_identity.add(
                 (
                     event.source_id,
                     event.event_id,
@@ -217,7 +217,6 @@ def evaluate_review_schedule(
                     event.is_material,
                 )
             )
-    causal_event_identity.sort()
     identity = content_hash({
         "now": now_utc,
         "routine": last_routine_at.astimezone(UTC) if last_routine_at else None,
@@ -225,7 +224,7 @@ def evaluate_review_schedule(
             last_adaptation_at.astimezone(UTC) if last_adaptation_at else None
         ),
         "event": last_event_review_at.astimezone(UTC) if last_event_review_at else None,
-        "events": causal_event_identity,
+        "events": sorted(causal_event_identity),
         "feed_condition": feed_condition,
         "policy": (
             str(active_policy.routine_interval),
@@ -246,6 +245,7 @@ def evaluate_review_schedule(
 
     # 1. Calendar revision currentness check (T02)
     known_calendar_revisions: dict[tuple[str, int], str] = {}
+    known_calendar_clocks: dict[tuple[str, int], datetime] = {}
     for past_cal in calendar_history:
         if (
             past_cal.effective_cutoff.tzinfo is None
@@ -258,7 +258,12 @@ def evaluate_review_schedule(
         existing_hash = known_calendar_revisions.get(rev_key)
         if existing_hash is not None and existing_hash != past_cal.content_hash:
             raise ValueError("SOURCE_DIGEST_CONFLICT: historical calendar revision")
+        previous_cutoff = known_calendar_clocks.get(rev_key)
+        effective_cutoff = past_cal.effective_cutoff.astimezone(UTC)
+        if previous_cutoff is not None and previous_cutoff != effective_cutoff:
+            raise ValueError("CALENDAR_AVAILABILITY_CONFLICT")
         known_calendar_revisions[rev_key] = past_cal.content_hash
+        known_calendar_clocks[rev_key] = effective_cutoff
     if current_calendar is not None:
         if (
             current_calendar.effective_cutoff.tzinfo is None
@@ -281,6 +286,15 @@ def evaluate_review_schedule(
                 and past_cal.revision > current_calendar.revision
             ):
                 raise ValueError("STALE_CALENDAR_REVISION")
+        for past_cal in calendar_history:
+            if (
+                past_cal.effective_cutoff <= now_utc
+                and past_cal.calendar_id == current_calendar.calendar_id
+                and past_cal.revision == current_calendar.revision
+                and past_cal.effective_cutoff.astimezone(UTC)
+                != current_calendar.effective_cutoff.astimezone(UTC)
+            ):
+                raise ValueError("CALENDAR_AVAILABILITY_CONFLICT")
         for past_cal in calendar_history:
             if (
                 past_cal.effective_cutoff <= now_utc
