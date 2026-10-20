@@ -675,6 +675,7 @@ def test_n14_forged_retained_checkpoint_declaration_refused() -> None:
     with pytest.raises(ValueError):
         _verify(forged, fixture)
 
+
 # ---------------------------------------------------------------------------
 # Issue #505: no mutable second read after a verified E1/E6A input view
 # ---------------------------------------------------------------------------
