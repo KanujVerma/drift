@@ -250,7 +250,7 @@ def _audit_preimage(audit: Stage1CheckpointCoverageAuditV1) -> dict[str, object]
     }
 
 
-def build_stage1_checkpoint_coverage_audit(
+def _assemble_audit(
     *,
     campaign: CampaignSpecV1,
     arms: Sequence[ArmSpecV1],
@@ -394,7 +394,27 @@ def build_stage1_checkpoint_coverage_audit(
         counts=counts,
         audit_fingerprint="",
     )
-    result = replace(before, audit_fingerprint=content_hash(_audit_preimage(before)))
+    return replace(before, audit_fingerprint=content_hash(_audit_preimage(before)))
+
+
+def build_stage1_checkpoint_coverage_audit(
+    *,
+    campaign: CampaignSpecV1,
+    arms: Sequence[ArmSpecV1],
+    bindings: Sequence[RunAccountBindingV1],
+    expected_run_ids: Sequence[str],
+    checkpoint_declarations: Sequence[Stage1RunCheckpointDeclarationV1],
+    submitted_snapshots: Sequence[Stage1TrialProvenanceSnapshotV1],
+) -> Stage1CheckpointCoverageAuditV1:
+    """Build and independently verify a deterministic immutable coverage audit."""
+    result = _assemble_audit(
+        campaign=campaign,
+        arms=arms,
+        bindings=bindings,
+        expected_run_ids=expected_run_ids,
+        checkpoint_declarations=checkpoint_declarations,
+        submitted_snapshots=submitted_snapshots,
+    )
     verify_stage1_checkpoint_coverage_audit(
         audit=result,
         campaign=campaign,
@@ -514,7 +534,7 @@ def verify_stage1_checkpoint_coverage_audit(
 
     # The canonical builder independently reconstructs all expected slots,
     # rejects duplicate submissions, and recalculates every pair and count.
-    expected = build_stage1_checkpoint_coverage_audit(
+    expected = _assemble_audit(
         campaign=campaign,
         arms=arms,
         bindings=bindings,
