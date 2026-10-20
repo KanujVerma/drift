@@ -9,6 +9,8 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+from pydantic import BaseModel
+
 from drift.errors import CanonicalSerializationError
 from drift.intelligence.contracts import (
     SUPPORTED_PROFILES,
@@ -570,7 +572,7 @@ def validate_retained_record(
     # Structural schema validation is always necessary, even when the caller
     # cannot supply an authoritative context for referential validation.
     # A valid hash is only tamper detection, never independent source proof.
-    typed_records = {
+    typed_records: dict[str, type[BaseModel]] = {
         "context": ResearchContext,
         "candidate": ResearchCandidate,
         "attempt": AttemptRecord,

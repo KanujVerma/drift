@@ -204,6 +204,13 @@ def replay_model_output(
         if isinstance(response_payload, str)
         else response_payload
     )
+    # Missing retained response bytes cannot be authenticated or replayed.
+    if resp_bytes is None:
+        return ModelReplayResult(
+            is_success=False,
+            status="UNAVAILABLE",
+            reason="inconsistent missing response evidence",
+        )
     resp_raw_hash = hashlib.sha256(resp_bytes).hexdigest()
     if resp_ref.content_hash != resp_raw_hash:
         return ModelReplayResult(

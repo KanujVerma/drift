@@ -349,7 +349,11 @@ class ResearchReceiptStore:
             ):
                 if next_payload[key] != prior_payload[key]:
                     raise ValueError(f"INVALID_ATTEMPT_CHAIN: changed {key}")
-            if attempt.completed_at is None or attempt.completed_at < prev.started_at:
+            if (
+                attempt.completed_at is None
+                or prev.started_at is None
+                or attempt.completed_at < prev.started_at
+            ):
                 raise ValueError("INVALID_ATTEMPT_CHAIN: completion time is invalid")
         self._attempts_by_event_id[event_id] = attempt
         self._attempts_by_attempt_id[attempt.attempt_id].append(attempt)
@@ -479,8 +483,8 @@ class ResearchReceiptStore:
         staged = ResearchReceiptStore()
         for existing in self._attempts_by_event_id.values():
             staged.record_attempt(existing)
-        for existing in self._costs_by_receipt_id.values():
-            staged.record_cost_receipt(existing)
+        for cost_existing in self._costs_by_receipt_id.values():
+            staged.record_cost_receipt(cost_existing)
         for ev in events:
             kind = ev.get("kind")
             if kind == "attempt":

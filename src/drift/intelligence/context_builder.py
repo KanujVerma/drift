@@ -224,11 +224,13 @@ def build_context(
     # Nevertheless, reject malformed, sealed or contradictory references
     # rather than laundering them into a new, self-consistent context hash.
     feedback_by_revision: dict[tuple[str, str], ArtifactReference] = {}
-    for supplied in feedback_refs:
-        if not isinstance(supplied, ArtifactReference):
+    for supplied_ref in feedback_refs:
+        if not isinstance(supplied_ref, ArtifactReference):
             raise ValueError("INVALID_FEEDBACK_REFERENCE")
         try:
-            ref = ArtifactReference.model_validate(supplied.model_dump(mode="python"))
+            ref = ArtifactReference.model_validate(
+                supplied_ref.model_dump(mode="python")
+            )
         except (TypeError, ValueError) as error:
             raise ValueError("INVALID_FEEDBACK_REFERENCE") from error
         if ref.id.casefold().startswith(("holdout:", "sealed_holdout:")):
