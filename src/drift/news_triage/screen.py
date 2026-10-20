@@ -321,7 +321,8 @@ def screen_event(
     rights, retained bytes and original availability. A local `usable` flag
     and self-consistent SHA do not prove those external claims.
     """
-    if _utc(decision_cutoff) is None or not _token(context_id):
+    cutoff_utc = _utc(decision_cutoff)
+    if cutoff_utc is None or not _token(context_id):
         return _result(
             "UNAVAILABLE",
             "INVALID_DECISION_CONTEXT",
@@ -406,7 +407,7 @@ def screen_event(
             context_id,
             decision_cutoff,
         )
-    if available > _utc(decision_cutoff):
+    if available > cutoff_utc:
         return _result(
             "UNAVAILABLE",
             "EVENT_AFTER_DECISION_CUTOFF",
@@ -440,19 +441,42 @@ def screen_event(
         )
 
     duplicate_ref: EvidenceRef | None = None
+    seen_receipts: dict[str, str] = {}
     for earlier in prior:
+        if type(earlier) is not PriorScreening:
+            return _result(
+                "ABSTAIN",
+                "MALFORMED_PRIOR_SCREENING",
+                evidence,
+                policy,
+                context_id,
+                decision_cutoff,
+            )
+        prior_utc = _utc(earlier.evidence_available_at)
+        if prior_utc is None:
+            return _result(
+                "ABSTAIN",
+                "MALFORMED_PRIOR_SCREENING",
+                evidence,
+                policy,
+                context_id,
+                decision_cutoff,
+            )
+        if prior_utc > cutoff_utc:
+            # Known future records cannot influence this historical screening,
+            # even when their other fields are inconsistent or malformed.
+            continue
         if (
-            type(earlier) is not PriorScreening
-            or not _key(earlier.event_key)
+            not _key(earlier.event_key)
             or not _reference(earlier.result_ref)
             or not _token(earlier.context_id)
             or not _token(earlier.policy_id)
             or not _token(earlier.policy_version)
             or not _digest(earlier.policy_sha256)
             or not _digest(earlier.quality_evidence_sha256)
-            or _utc(earlier.evidence_available_at) is None
-            or earlier.outcome
-            not in ("CANDIDATE_ALERT", "NO_ALERT", "ABSTAIN", "UNAVAILABLE")
+            or earlier.outcome not in (
+                "CANDIDATE_ALERT", "NO_ALERT", "ABSTAIN", "UNAVAILABLE"
+            )
         ):
             return _result(
                 "ABSTAIN",
@@ -462,9 +486,6 @@ def screen_event(
                 context_id,
                 decision_cutoff,
             )
-        if _utc(earlier.evidence_available_at) > _utc(decision_cutoff):
-            # No future screening record may alter this earlier decision.
-            continue
         same_event = (
             earlier.event_key.source_id == evidence.key.source_id
             and earlier.event_key.event_id == evidence.key.event_id
@@ -492,6 +513,20 @@ def screen_event(
             and earlier.quality_evidence_sha256 == evidence.quality_ref.sha256
             and earlier.outcome in ("CANDIDATE_ALERT", "NO_ALERT")
         ):
+            incumbent_digest = seen_receipts.get(earlier.result_ref.ref_id)
+            if (
+                incumbent_digest is not None
+                and incumbent_digest != earlier.result_ref.sha256
+            ):
+                return _result(
+                    "ABSTAIN",
+                    "CONFLICTING_PRIOR_RECEIPT",
+                    evidence,
+                    policy,
+                    context_id,
+                    decision_cutoff,
+                )
+            seen_receipts[earlier.result_ref.ref_id] = earlier.result_ref.sha256
             if duplicate_ref is None or (
                 earlier.result_ref.ref_id,
                 earlier.result_ref.sha256,
@@ -567,13 +602,21 @@ def screen_feed_coverage(
     if not good:
         status: FeedDisposition = "UNAVAILABLE"
         reason = "INVALID_OR_UNAVAILABLE_COVERAGE"
-    elif coverage.state == "covered_empty" and coverage.event_count == 0:
+    elif (
+        coverage is not None
+        and coverage.state == "covered_empty"
+        and coverage.event_count == 0
+    ):
         status = "EMPTY"
         reason = "COMPLETE_COVERED_EMPTY_INTERVAL"
-    elif coverage.state == "covered_with_events" and coverage.event_count > 0:
+    elif (
+        coverage is not None
+        and coverage.state == "covered_with_events"
+        and coverage.event_count > 0
+    ):
         status = "EVENTS_PRESENT"
         reason = "COMPLETE_COVERED_INTERVAL_WITH_EVENTS"
-    elif coverage.state == "partial":
+    elif coverage is not None and coverage.state == "partial":
         status = "INCOMPLETE"
         reason = "PARTIAL_COVERAGE"
     else:
