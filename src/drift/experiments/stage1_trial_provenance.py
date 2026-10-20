@@ -213,7 +213,7 @@ def build_stage1_trial_provenance_snapshot(
 
     matching_bindings = [
         b
-        for b in bindings
+        for b in bindings_once
         if b.campaign_id == campaign.campaign_id
         and b.run_id == run_id
         and b.arm_id == arm_id
@@ -394,7 +394,7 @@ def verify_stage1_trial_provenance_snapshot(
 
     matching_bindings = [
         b
-        for b in bindings
+        for b in bindings_once
         if b.campaign_id == scope.campaign_id
         and b.run_id == scope.run_id
         and b.arm_id == scope.arm_id
