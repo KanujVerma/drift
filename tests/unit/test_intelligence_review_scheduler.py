@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from drift.intelligence.contracts import TargetWeight
+from drift.serialization.canonical import content_hash
 from drift.intelligence.review_scheduler import (
     CalendarRevision,
     FeedEvent,
@@ -88,7 +89,9 @@ def test_t03_event_driven_trigger_and_cooldown() -> None:
     assert verdict1.action == "review"
     assert verdict1.review_type == "event_driven"
     assert verdict1.event_ref is not None
-    assert verdict1.event_ref.id == "event-001"
+    assert verdict1.event_ref.id == "event:" + content_hash(
+        {"source_id": "news:reuters", "event_id": "event-001"}
+    )
 
     # Second event arriving 10 minutes later within 1-hour cooldown is suppressed
     now2 = now + timedelta(minutes=10)
@@ -177,7 +180,9 @@ def test_t03_malicious_raw_text_stays_inert() -> None:
     assert verdict.review_type == "event_driven"
     assert verdict.action_policy == "defensive_only"
     assert verdict.event_ref is not None
-    assert verdict.event_ref.id == "event-exploit"
+    assert verdict.event_ref.id == "event:" + content_hash(
+        {"source_id": "untrusted:social", "event_id": "event-exploit"}
+    )
 
 
 def test_t02_calendar_revision_conflict_refusal() -> None:
