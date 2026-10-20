@@ -382,7 +382,9 @@ def test_self_rehashed_invalid_prior_feedback_never_enters_learning(
 
 
 def _completed_feedback(
-    trial_id: str, cutoff: datetime, *,
+    trial_id: str,
+    cutoff: datetime,
+    *,
     mature_hours_ago: int = 2,
     pnl: str = "-50.00",
 ) -> TrialFeedbackRecord:
@@ -501,9 +503,10 @@ def test_learning_uses_independent_copy_of_caller_feedback_metrics(
     original_hash = state.state_hash
     source.metrics["return"] = "999"
     assert state.matured_trials[0].metrics["return"] == original_amount
-    assert LearningSnapshot.model_validate(
-        state.model_dump(mode="python")
-    ).state_hash == original_hash
+    assert (
+        LearningSnapshot.model_validate(state.model_dump(mode="python")).state_hash
+        == original_hash
+    )
 
 
 def test_forged_feedback_model_copy_is_revalidated_before_learning(

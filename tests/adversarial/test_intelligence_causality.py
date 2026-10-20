@@ -325,6 +325,7 @@ def test_adversarial_future_revision_cannot_rewrite_matured_memory(
     peer_arm = earlier.model_copy(
         update={"trial_id": "synthetic:peer-only", "arm_id": "fixture:C"}
     )
+ 
     def evaluate(records: list[TrialFeedbackRecord]) -> tuple[str, str]:
         snapshot = advance_learning(
             previous_snapshot=None,
@@ -337,12 +338,8 @@ def test_adversarial_future_revision_cannot_rewrite_matured_memory(
         assert snapshot.matured_trials[0].pnl == "-25"
         return snapshot.snapshot_id, snapshot.state_hash
 
-    assert evaluate([earlier]) == evaluate(
-        [peer_arm, late_correction, earlier]
-    )
-    assert evaluate([earlier]) == evaluate(
-        [earlier, late_correction, peer_arm]
-    )
+    assert evaluate([earlier]) == evaluate([peer_arm, late_correction, earlier])
+    assert evaluate([earlier]) == evaluate([earlier, late_correction, peer_arm])
 
 
 def test_adversarial_sealed_peer_arm_input_refused_before_filtering(
@@ -363,6 +360,4 @@ def test_adversarial_sealed_peer_arm_input_refused_before_filtering(
         arm_id="fixture:C",
     )
     with pytest.raises(ValueError, match="HOLDOUT_ACCESS_VIOLATION"):
-        _build_source_variant_context(
-            sample_scope_b, sample_refs, [sealed]
-        )
+        _build_source_variant_context(sample_scope_b, sample_refs, [sealed])

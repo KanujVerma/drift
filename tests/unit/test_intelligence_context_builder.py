@@ -388,9 +388,7 @@ def test_forged_frozen_context_inputs_are_reparsed_before_aggregation(
     )
     for entry in forged_inputs:
         with pytest.raises(ValueError, match="INVALID_CONTEXT_INPUT"):
-            _context_with_sources(
-                sample_scope, sample_refs, [entry], cutoff=cutoff
-            )
+            _context_with_sources(sample_scope, sample_refs, [entry], cutoff=cutoff)
 
 
 def test_feedback_refs_refuse_forgery_sealed_access_and_revision_conflicts(

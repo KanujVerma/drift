@@ -229,9 +229,7 @@ def advance_learning(
         # Re-parse even a frozen model: model_copy(update=...) and mutable
         # nested metrics can evade the original constructor's validators.
         try:
-            record = TrialFeedbackRecord.model_validate(
-                supplied.model_dump(mode="python")
-            )
+            record = TrialFeedbackRecord.model_validate(supplied.model_dump(mode="python"))
         except (TypeError, ValueError) as error:
             raise ValueError("INVALID_FEEDBACK_RECORD: malformed typed input") from error
         matured = _require_aware(record.matured_at, "feedback maturity")

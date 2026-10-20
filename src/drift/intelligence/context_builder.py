@@ -102,9 +102,7 @@ def build_context(
         if not isinstance(supplied, CandidateInput):
             raise ValueError("INVALID_CONTEXT_INPUT: expected CandidateInput")
         try:
-            inp = CandidateInput.model_validate(
-                supplied.model_dump(mode="python")
-            )
+            inp = CandidateInput.model_validate(supplied.model_dump(mode="python"))
         except (TypeError, ValueError) as error:
             raise ValueError("INVALID_CONTEXT_INPUT: invalid source record") from error
 
@@ -228,9 +226,7 @@ def build_context(
         if not isinstance(supplied, ArtifactReference):
             raise ValueError("INVALID_FEEDBACK_REFERENCE")
         try:
-            ref = ArtifactReference.model_validate(
-                supplied.model_dump(mode="python")
-            )
+            ref = ArtifactReference.model_validate(supplied.model_dump(mode="python"))
         except (TypeError, ValueError) as error:
             raise ValueError("INVALID_FEEDBACK_REFERENCE") from error
         if ref.id.casefold().startswith(("holdout:", "sealed_holdout:")):
