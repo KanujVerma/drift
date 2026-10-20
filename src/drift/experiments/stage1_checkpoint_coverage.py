@@ -148,7 +148,10 @@ def _checked_declarations(
         if declaration.run_id in seen:
             raise ValueError(f"duplicate checkpoint declaration: {declaration.run_id}")
         seen.add(declaration.run_id)
-        if type(declaration.checkpoint_ids) is not tuple or not declaration.checkpoint_ids:
+        if (
+            type(declaration.checkpoint_ids) is not tuple
+            or not declaration.checkpoint_ids
+        ):
             raise ValueError("checkpoint_ids must be a nonempty immutable tuple")
         checkpoints: set[str] = set()
         for checkpoint in declaration.checkpoint_ids:
@@ -170,7 +173,9 @@ def _checked_declarations(
     canonical = tuple(sorted(detached, key=lambda declaration: declaration.run_id))
     if require_sorted and tuple(declarations) != canonical:
         # Do not silently sort or repair an already persisted audit.
-        raise ValueError("stored checkpoint declarations are not in canonical run order")
+        raise ValueError(
+            "stored checkpoint declarations are not in canonical run order"
+        )
     return canonical
 
 
@@ -331,7 +336,9 @@ def _assemble_audit(
         for checkpoint_id in declaration.checkpoint_ids:
             for arm_id in ordered_arms:
                 snap = submissions.get((declaration.run_id, checkpoint_id, arm_id))
-                state = snap.observation_state if snap is not None else "MISSING_SNAPSHOT"
+                state = (
+                    snap.observation_state if snap is not None else "MISSING_SNAPSHOT"
+                )
                 slots.append(
                     Stage1CoverageSlotV1(
                         run_id=declaration.run_id,
@@ -436,7 +443,10 @@ def verify_stage1_checkpoint_coverage_audit(
     """Fail closed on original stored coverage data, even if an attacker rehashes it."""
     if type(audit) is not Stage1CheckpointCoverageAuditV1:
         raise ValueError("audit must be an exact Stage1CheckpointCoverageAuditV1")
-    if type(audit.schema_version) is not str or audit.schema_version != COVERAGE_SCHEMA_VERSION:
+    if (
+        type(audit.schema_version) is not str
+        or audit.schema_version != COVERAGE_SCHEMA_VERSION
+    ):
         raise ValueError("invalid coverage schema version")
 
     verify_experiment_configuration(
@@ -465,7 +475,9 @@ def verify_stage1_checkpoint_coverage_audit(
     declarations = _checked_declarations(
         audit.checkpoint_declarations, expected_run_ids, require_sorted=True
     )
-    _require_sha(audit.checkpoint_manifest_fingerprint, "checkpoint manifest fingerprint")
+    _require_sha(
+        audit.checkpoint_manifest_fingerprint, "checkpoint manifest fingerprint"
+    )
     expected_checkpoint_sha = _checkpoint_manifest_fingerprint(
         campaign=campaign, complete_manifest_fingerprint=manifest_hash,
         declarations=declarations,
