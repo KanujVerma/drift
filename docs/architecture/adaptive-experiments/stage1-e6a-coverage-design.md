@@ -56,9 +56,7 @@ from drift.experiments.stage1_trial_provenance import (
 
 COVERAGE_SCHEMA_VERSION = "drift-stage1-coverage/1-draft"
 CHECKPOINT_MANIFEST_SCHEMA_VERSION = "drift-stage1-checkpoint-manifest/1-draft"
-COVERAGE_STATES = frozenset(
-    {"MISSING_SNAPSHOT", "UNOBSERVED", "EVENTS_RECORDED"}
-)
+COVERAGE_STATES = frozenset({"MISSING_SNAPSHOT", "UNOBSERVED", "EVENTS_RECORDED"})
 PAIR_STATES = frozenset(
     {"BOTH_SUBMITTED", "TEST_MISSING", "COMPARATOR_MISSING", "BOTH_MISSING"}
 )
