@@ -604,3 +604,43 @@ def test_defensive_policy_rejects_malformed_and_missing_weights() -> None:
     assert not validate_defensive_policy(
         proposed_targets=[forged], current_weights={"SPY": "0.5"}
     )[0]
+
+
+def test_exact_duplicate_feed_event_is_idempotent() -> None:
+    now = datetime(2024, 1, 10, 10, tzinfo=UTC)
+    event = FeedEvent(
+        event_id="one", source_id="feed:A", version="v1",
+        available_at=now - timedelta(seconds=1),
+        content_hash="a" * 64, raw_text="inert",
+    )
+    one = evaluate_review_schedule(now=now, feed_events=[event])
+    duplicate = evaluate_review_schedule(now=now, feed_events=[event, event])
+    assert one.action == duplicate.action == "review"
+    assert one.trigger_id == duplicate.trigger_id
+    assert one.record_hash == duplicate.record_hash
+
+
+def test_calendar_first_available_conflict_fails_even_with_equal_bytes() -> None:
+    now = datetime(2024, 1, 10, 10, tzinfo=UTC)
+    current = CalendarRevision(
+        calendar_id="cal:A", revision=2,
+        effective_cutoff=now - timedelta(hours=1),
+        content_hash="c" * 64,
+    )
+    changed_clock = current.model_copy(
+        update={"effective_cutoff": current.effective_cutoff - timedelta(seconds=1)}
+    )
+    with pytest.raises(ValueError, match="CALENDAR_AVAILABILITY_CONFLICT"):
+        evaluate_review_schedule(
+            now=now, current_calendar=current, calendar_history=[changed_clock]
+        )
+    newer = CalendarRevision(
+        calendar_id="cal:A", revision=3,
+        effective_cutoff=now - timedelta(minutes=5),
+        content_hash="d" * 64,
+    )
+    for order in ([current, changed_clock], [changed_clock, current]):
+        with pytest.raises(ValueError, match="CALENDAR_AVAILABILITY_CONFLICT"):
+            evaluate_review_schedule(
+                now=now, current_calendar=newer, calendar_history=order
+            )
