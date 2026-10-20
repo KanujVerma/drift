@@ -437,10 +437,9 @@ def test_p11b_snapshot_original_detachment() -> None:
     assert audit.slots[0].provenance_snapshot is not b
     object.__setattr__(b.scope.run_account_binding, "portfolio_account_id", "TAMPERED")
     assert audit.slots[0].provenance_snapshot is not None
-    assert (
-        audit.slots[0].provenance_snapshot.scope.run_account_binding.portfolio_account_id
-        == "SYNTH-ACC-B-001"
-    )
+    retained = audit.slots[0].provenance_snapshot
+    assert retained is not None
+    assert retained.scope.run_account_binding.portfolio_account_id == "SYNTH-ACC-B-001"
     assert audit.audit_fingerprint == old_sha
     assert _verify(audit, fixture) is True
 
