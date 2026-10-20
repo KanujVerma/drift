@@ -8,7 +8,8 @@
 - **Merged logical contract:** [`contracts/experiment.md`](contracts/experiment.md), Sections 3.1 and 3.2, PR #434.
 - **Stage 1 direction:** [`stage1-decisions.md`](stage1-decisions.md), [`methodology.md`](methodology.md).
 - **Existing hashing primitive:** `drift.serialization.canonical.canonical_json` and `content_hash`.
-- **Approval:** Owner-approved **local implementation design**. This document is not an accepted producer wire schema, historical source qualification, independent scientific approval, G3 protocol freeze, or permission to create accounts/trades. Its documentation PR must pass its own review; a separate READY code issue with exclusive file claims authorizes implementation.
+- **Implementation readback, October 20, 2026:** The two-file E1 implementation has already merged under [#462](https://github.com/KanujVerma/drift/issues/462) / [PR #463](https://github.com/KanujVerma/drift/pull/463). [#489 / PR #495](https://github.com/KanujVerma/drift/pull/495) is a separate, still-unaccepted verifier hardening correction; do not treat its draft as merged.
+- **Approval:** Owner-approved **local E1 implementation design**, retained for reproducible decisions and golden fixtures. This design document is pending its own PR acceptance. Merged E1 code provides synthetic structural validation only, not an accepted producer wire schema, historical source qualification, independent scientific approval, G3 freeze, account creation or trading permission.
 
 ## 1. Decisions and reasons
 
@@ -24,12 +25,12 @@
 
 ## 2. Exact implementation boundary
 
-**Proposed code issue, to be created separately: exactly two new tracked files**
+**Implemented via separate issue #462 and merged PR #463: exactly two tracked files**
 
 1. `src/drift/experiments/stage1_campaign_config.py`
 2. `tests/unit/test_stage1_campaign_config.py`
 
-This architecture document is authored under #460, **not** under the eventual implementation issue. Do not edit existing `__init__.py`, `stage1_trial_events.py` (#448/#455), `stage1_preparation.py`, `stage1_metric_math.py`, `parallel_portfolios.py`, platform ledger/evaluator, Krish producer code, old M1c/M1d evidence, tests outside this unit file, CI or `uv.lock`. Use direct module imports. Reuse existing canonical serializer. CPython 3.14.6 pinned.
+This architecture document belongs to #460; the shipped implementation belongs to #462 / PR #463. The original implementation reservation authorized only those two code/test files. It never authorized edits to existing `__init__.py`, `stage1_trial_events.py` (#448/#455), `stage1_preparation.py`, `stage1_metric_math.py`, `parallel_portfolios.py`, platform ledger/evaluator, Krish producer code, old M1c/M1d evidence, unrelated tests, CI or `uv.lock`. Any subsequent repair, including #489, needs its own issue and writer claim. Use direct module imports and the existing canonical serializer; the pinned interpreter is CPython 3.14.6.
 
 **Zero side effects:** no file, provider, database, network, broker, API, clock default, account creation, mutable global registries, alternate simulator, metrics scoring or claim that `drift-experiment/1-draft` is an accepted external persisted schema.
 
@@ -271,11 +272,11 @@ Exact refusal API: `ValueError` on every malformed/unsafe object or collection, 
 
 ## 11. Delivery and review
 
-Use the repository's required [implementation handoff standard](../implementation-handoff.md), [AGENTS.md](../../../AGENTS.md), and [agent workflow](../agent-workflow.md). A separate READY implementation issue reserves exactly the two code/test paths. Gemini executes the approved design and may challenge with exact file/line/test/contract evidence; it must not reinterpret undecided producer authority or change files outside its write-set. Run pinned CPython 3.14.6 focused and relevant Stage 1 tests, Ruff, mypy, build, full hosted CI, git whitespace/unauthorized-file checks and zero U+2014. One issue branch, one draft PR, actual SHA and checkpoint.
+The implementation used the required [implementation handoff standard](../implementation-handoff.md), [AGENTS.md](../../../AGENTS.md), and [agent workflow](../agent-workflow.md) under separately authorized #462 and merged PR #463, with only the two specified code/test paths. The implementation's published exact-head tests and reviews, not this design document, establish its accepted synthetic scope. Future corrections (including open #489) require fresh exact-path reservations, pinned CPython 3.14.6 checks, Ruff, mypy, build, hosted full CI, Git integrity and zero U+2014. Do not reinterpret undecided producer authority or extend this design to operational/scored validation.
 
 Architect independently reviews actual diff and tests, requests Codex review on exact HEAD and verifies its completion, fixes findings and rechecks final HEAD. Matthew's independent account/RESULT consumer review is required before claiming this shared scientific-to-platform binding semantics accepted. No auto merge without separately recorded exact-PR/HEAD merge authorization by Kanuj; no G3 or scored historical run from this code.
 
-**Next scientific integration after E1:** #448/#455 event integrity, trial projection, producer admission/RESULT, research receipts, metric aggregation, E6 synthetic B/R, and only later source-qualified preregistered historical benchmarking.
+**Post-E1 integration status:** Trial-event integrity [PR #455](https://github.com/KanujVerma/drift/pull/455), trial provenance [PR #477](https://github.com/KanujVerma/drift/pull/477), E6A checkpoint coverage [PR #484](https://github.com/KanujVerma/drift/pull/484) and scientific metric arithmetic [PR #446](https://github.com/KanujVerma/drift/pull/446) are merged. E1 hardening [#489](https://github.com/KanujVerma/drift/issues/489) is still under review. End-to-end B/R integration [#383](https://github.com/KanujVerma/drift/issues/383) and E6B typed producer-evidence admission [#485](https://github.com/KanujVerma/drift/issues/485) remain dependent on accepted Krish/Matthew RESULT/research contracts, risk/execution admission and later G1-G3 study gates. No historical efficacy claim is implied.
 
 
 ## 12. Codex-reviewed architecture corrections (October 19, 2026)
