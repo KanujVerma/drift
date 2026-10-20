@@ -19,7 +19,7 @@
 | TP-A | Minimal reusable producer-neutral provenance **core**, not full scientific projection yet | Freeze stable trial identity and event integrity without guessing research/platform interfaces | B/R-only one-off object, mutable plugin bag, fabricated results |
 | TP-B | Explicit zero-event `UNOBSERVED` structural snapshot | Preserve declared-but-unrecorded local checkpoints for later coverage audits | Dropping every empty checkpoint or treating it as independently scheduled |
 | TP-C | Retain **full immutable ordered event envelopes** | Future adapters can read event metadata locally and replay it | Retain only hashes and require another event store now |
-| TP-D | Bind snapshot to **campaign fingerprint, arm fingerprint, run/account binding, checkpoint and trial ID**, plus event lineage | Prevent accidental relabeling of a valid chain into another arm, account or frozen study | `trial_id` string alone |
+| TP-D | Bind snapshot to **campaign fingerprint, arm fingerprint, full declared-run manifest fingerprint, selected run/account binding, checkpoint and trial ID**, plus event lineage | Prevent accidental relabeling of a valid chain into another arm, account or frozen study | `trial_id` string alone |
 | TP-E | Future Krish/Matthew evidence as **separate immutable versioned artifacts** referencing the snapshot fingerprint | Preserve earlier provenance bytes and support future producer contract revisions | In-place annotations, generic executable plugin registry, automatic `COMPLETE` |
 
 **Scope of this module:** offline, deterministic local provenance construction and verification. It is arm-generic; B/R constraints remain in the **separate** `verify_stage1_synthetic_br_configuration` check. A structural proof never authenticates producer origin, permits execution, validates cost or scores a study.
@@ -44,6 +44,7 @@ from drift.experiments.stage1_campaign_config import RunAccountBindingV1
 from drift.experiments.stage1_trial_events import Stage1TrialEvent
 
 PROVENANCE_SCHEMA_VERSION = "drift-trial-provenance/1-draft"
+MANIFEST_SCHEMA_VERSION = "drift-trial-manifest/1-draft"
 PROVENANCE_STATES = frozenset({"UNOBSERVED", "EVENTS_RECORDED"})
 
 
@@ -56,6 +57,7 @@ class Stage1TrialScopeV1:
     trial_id: str
     campaign_spec_fingerprint: str
     arm_spec_fingerprint: str
+    complete_manifest_fingerprint: str
     run_account_binding: RunAccountBindingV1
 
 
@@ -70,7 +72,7 @@ class Stage1TrialProvenanceSnapshotV1:
     snapshot_fingerprint: str
 ```
 
-The scope is a versioned logical value **within** the versioned snapshot and has no independently invented digest. The complete upstream `RunAccountBindingV1` is stored by value, including all eight fields. `event_envelopes` are copies of the exact 11-field existing `Stage1TrialEvent` objects, not an extra event wire type. No `producer_verified` Boolean, clock, cost, NAV, dynamic memory state, data rights or arbitrary extension map.
+The scope is a versioned logical value **within** the versioned snapshot and has no independently invented digest of the scope. The `complete_manifest_fingerprint` binds the entire caller-declared E1 verified run manifest, every supplied arm fingerprint, and every full run-account binding, not merely the selected binding. The selected upstream `RunAccountBindingV1` is also stored by value, including all eight fields. `event_envelopes` are copies of the exact 11-field existing `Stage1TrialEvent` objects, not an extra event wire type. No `producer_verified` Boolean, clock, cost, NAV, dynamic memory state, data rights or arbitrary extension map.
 
 Expose these exact APIs:
 
@@ -125,12 +127,12 @@ All new verification failures raise `ValueError`. A valid verification returns `
 
 **Generic E1 validation is mandatory before building OR independently verifying any snapshot**:
 
-1. Call `verify_experiment_configuration(campaign=campaign, arms=arms, bindings=bindings, expected_run_ids=expected_run_ids)` on the original caller-supplied full collection. Do **not** merely verify one matching binding and silently ignore other run/account duplicates.
+1. Call `verify_experiment_configuration(campaign=campaign, arms=arms, bindings=bindings, expected_run_ids=expected_run_ids)` on the original caller-supplied full collection. Do **not** merely verify one matching binding and silently ignore other run/account duplicates. Compute and retain a canonical `complete_manifest_fingerprint` over the full **verified** expected-run list, all arm fingerprints and all bindings (Section 5).
 2. Require `run_id` and `arm_id` to be exact built-in strings obeying the existing E1 scope-token regex `[A-Za-z0-9][A-Za-z0-9._-]*`. Require the new `checkpoint_id` to obey the **same** ASCII regex, so `:` never appears within a component. No surrounding whitespace, subclassed strings, empty IDs, floating-point IDs or guessed checkpoint.
 3. Require the supplied run and arm to be present in the verified **complete caller-declared** manifest. Select exactly one E1 `ArmSpecV1` for `arm_id` and exactly one `RunAccountBindingV1` for the tuple `(campaign_id,run_id,arm_id)`. Do not create or query a platform account.
-4. Derive the scope's `trial_id` **only** by `f"{campaign.campaign_id}:{run_id}:{arm_id}:{checkpoint_id}"` and bind the already-verified campaign/arm fingerprints and complete selected binding, including its existing `binding_id`.
+4. Derive the scope's `trial_id` **only** by `f"{campaign.campaign_id}:{run_id}:{arm_id}:{checkpoint_id}"` and bind the already-verified campaign/arm fingerprints, **the full manifest fingerprint** and complete selected binding, including its existing `binding_id`.
 5. Make **defensive value copies** of the selected frozen binding and every verified event envelope rather than retaining caller-owned object references. `dataclasses.replace(binding)` and `dataclasses.replace(event)` after exact type and verifier checks are suitable for these already-immutable leaf records. Copy the caller's event list into a new tuple. Revalidate copied records/chain before fingerprinting. This prevents a caller from changing a snapshot indirectly by mutating an originally supplied event/list after construction.
-6. Any forged stored scope or binding field, mismatch against supplied verified E1 originals, changed campaign/arm fingerprint, cross-run account binding, ambiguous colon-delimited component, duplicate or missing run, or mismatched `trial_id` raises `ValueError`. Do not use equality on an unvalidated user-subclassed field.
+6. Any forged stored scope or binding field, mismatch against supplied verified E1 originals, changed campaign/arm fingerprint, **changed full manifest fingerprint**, cross-run account binding, ambiguous colon-delimited component, duplicate or missing run, or mismatched `trial_id` raises `ValueError`. A previously valid snapshot must refuse verification or append when the caller supplies a **different but separately E1-valid subset/superset** of its original run manifest; call-level E1 completeness alone is insufficient to prove this is the same manifest. Do not use equality on an unvalidated user-subclassed field.
 7. The E1 manifest is **caller declared** and does not certify all external historical producer accounts. Authentic account identity and global run/ledger reconciliation remain Matthew's job.
 
 The scope is not limited to B/R IDs. A generic declared control arm can be represented structurally. Its actual scientific eligibility and strategy-family authorization remain separately gated by accepted producer contracts.
@@ -160,6 +162,7 @@ Use ONLY existing `drift.serialization.canonical.content_hash`, with the reposit
     "trial_id": "CAMP-E1-SYNTH-001:RUN-001:ARM-B:CKPT-001",
     "campaign_spec_fingerprint": "2c9cad6f55847c20bf9c7f5a5eaa1ec6f828c7f107bc32ad8a1516a4b2e88be4",
     "arm_spec_fingerprint": "84c4e89c1c1a06e4b3041f07fea316e051fd5b6b5502a5f8a3c17912db1fd831",
+    "complete_manifest_fingerprint": "57a000a61c2cb64a64239d2e52249bbe1ddffe01fbaa2772cd03e162b5a50a29",
     "run_account_binding": {
       "schema_version": "drift-experiment/1-draft",
       "binding_id": "CAMP-E1-SYNTH-001:RUN-001:ARM-B:BINDING",
@@ -180,6 +183,54 @@ Use ONLY existing `drift.serialization.canonical.content_hash`, with the reposit
 
 The ordered `event_hashes` array contains exactly one hash per retained verified envelope and **preserves their order**. Do not store full envelopes in this preimage a second time: the upstream verified `event_hash` already commits to each envelope's exact ten-field preimage. However, the snapshot value **must retain the full tuple** per TP-C. Include all eight run-binding fields, because E1 does not specify a binding-level fingerprint. Exclude `snapshot_fingerprint` from its own preimage. Arrays and nulls must not be silently normalized or replaced.
 
+### Complete-manifest identity: exact canonical preimage and refusal rule
+
+A **second private canonical helper** `_complete_manifest_preimage(campaign, arms, bindings, expected_run_ids)` constructs the following logical object **only after** `verify_experiment_configuration` has validated the original full caller-declared collection. Hash it using the same existing `content_hash`, never a parallel serializer:
+
+```json
+{
+  "schema_version": "drift-trial-manifest/1-draft",
+  "campaign_spec_fingerprint": "2c9cad6f55847c20bf9c7f5a5eaa1ec6f828c7f107bc32ad8a1516a4b2e88be4",
+  "expected_run_ids": ["RUN-001"],
+  "arm_spec_references": [
+    "84c4e89c1c1a06e4b3041f07fea316e051fd5b6b5502a5f8a3c17912db1fd831",
+    "c958ea89ded96aa8aafad3eac1756083ec9145b041c6c6f1fae4afc9216278cd"
+  ],
+  "run_account_bindings": [
+    {
+      "schema_version": "drift-experiment/1-draft",
+      "binding_id": "CAMP-E1-SYNTH-001:RUN-001:ARM-B:BINDING",
+      "campaign_id": "CAMP-E1-SYNTH-001",
+      "run_id": "RUN-001",
+      "arm_id": "ARM-B",
+      "portfolio_account_id": "SYNTH-ACC-B-001",
+      "initial_cash_allocated": "10000",
+      "bound_at": "2026-10-19T00:00:02.000000Z"
+    },
+    {
+      "schema_version": "drift-experiment/1-draft",
+      "binding_id": "CAMP-E1-SYNTH-001:RUN-001:ARM-R:BINDING",
+      "campaign_id": "CAMP-E1-SYNTH-001",
+      "run_id": "RUN-001",
+      "arm_id": "ARM-R",
+      "portfolio_account_id": "SYNTH-ACC-R-001",
+      "initial_cash_allocated": "10000",
+      "bound_at": "2026-10-19T00:00:02.000000Z"
+    }
+  ]
+}
+```
+
+**Exact mechanical rules:** Set `schema_version` to `MANIFEST_SCHEMA_VERSION = "drift-trial-manifest/1-draft"`. Sort `expected_run_ids` lexicographically, sort the supplied arm fingerprints lexicographically, and sort all validated run bindings by `(campaign_id, run_id, arm_id)`. The binding JSON objects contain **all eight existing E1 logical fields** exactly as shown; no new per-binding digest or invented producer mapping. The three sorted arrays make the manifest hash insensitive to a harmless reordering of input collections while preserving its full contents. E1 enforces no duplicates or missing run/arm/account bindings. A change to **any** run ID, arm spec fingerprint, account ID, allocated cash, bound_at, binding ID or campaign fingerprint necessarily changes the manifest digest.
+
+**Independently computed complete-manifest SHA-256:**
+
+```text
+57a000a61c2cb64a64239d2e52249bbe1ddffe01fbaa2772cd03e162b5a50a29
+```
+
+The snapshot stores this digest as `scope.complete_manifest_fingerprint`, and its **snapshot fingerprint preimage includes that field**. When verifying or appending, recompute the full manifest hash from the newly supplied verified collection and require **exact built-in string** equality with the immutable stored scope field. A snapshot built from a two-run manifest **must reject** a later call with a one-run manifest even if the one-run subset independently passes generic E1 validation. Never infer historical global-account completeness outside the declared manifest. The hash binds declared inputs, not Matthew-authenticated global account history.
+
 ### Independently computed golden synthetic fixtures
 
 Reuse **unchanged** complete E1 fixtures from PR #461 / PR #463:
@@ -192,7 +243,7 @@ Reuse **unchanged** complete E1 fixtures from PR #461 / PR #463:
 **Golden 0: zero events.** The JSON preimage above, with `"UNOBSERVED"`, `0`, `null`, and `[]`, has independent SHA-256:
 
 ```text
-4af22745881f33eb772db1d1d30c7b9f60c35089c741d89df303a9ddb465c13a
+09593b447f4c7a49fba0bd143ac5cd217a5d0cb5add50dd66bfeb7d682c990a7
 ```
 
 **Golden event 0:** Build using the existing `build_stage1_trial_event` with these exact arguments (the payload pointer is **inert**, never fetched):
@@ -230,16 +281,16 @@ This yields independent **event SHA-256**:
 Retain `schema_version` and the **entire unchanged `scope` above**; this block shows only replaced fields, not a second complete standalone preimage. Independent **one-event snapshot SHA-256**:
 
 ```text
-667c4927f703db79b3915810a34976230e86f42872882f0f8fa34933951bca0e
+833de9527e2ced32ec2f2f80620bd071b2b9b8c2c06dcd5bbb072e60df9582b2
 ```
 
-The three new witnesses (empty snapshot, event, one-event snapshot) were calculated separately from production code using `hashlib.sha256(json.dumps(..., sort_keys=True, separators=(",",":"), ensure_ascii=False, allow_nan=False).encode("utf-8"))`. Never edit goldens to match a failing implementation. Do not infer the `payload_hash` was authenticated by recalculating a referenced but unavailable payload.
+The four new witnesses (full manifest, empty snapshot, event, one-event snapshot) were calculated separately from production code using `hashlib.sha256(json.dumps(..., sort_keys=True, separators=(",",":"), ensure_ascii=False, allow_nan=False).encode("utf-8"))`. Never edit goldens to match a failing implementation. Do not infer the `payload_hash` was authenticated by recalculating a referenced but unavailable payload.
 
 ## 6. Pure append behavior
 
 Implement `append_stage1_trial_provenance_event`:
 
-1. Fully verify the original immutable `snapshot` against the **same complete E1 manifest** and explicitly supplied campaign/arms/bindings.
+1. Fully verify the original immutable `snapshot` against the **same complete E1 manifest fingerprint** and explicitly supplied campaign/arms/bindings. Refuse a changed-but-independently-valid subset/superset manifest.
 2. Call the existing `append_stage1_trial_event(events=snapshot.event_envelopes, event=event)`. For a zero-event history, that existing helper accepts only index-zero/`ROOT`. For nonempty history it validates the entire chain, next index/parent and idempotent duplicate ID behavior. Do not rewrite/replace this helper.
 3. Rebuild through `build_stage1_trial_provenance_snapshot` using the original verified scope's run, arm, checkpoint and the new tuple. Re-run verification on the newly created snapshot.
 4. Exact duplicate replay that the existing append returns unchanged must return the **original unchanged snapshot** (or a content-identical one) with exactly the same fingerprint, not a new logical revision. A conflicting duplicate or unexpected event is `ValueError`. Successful append returns a *new* immutable snapshot; earlier snapshots remain bit-for-bit stable. There is no mutable history pointer or wall-clock revision.
@@ -256,8 +307,8 @@ An authenticated producer annotation is a **separate immutable, versioned artifa
 
 **Positive cases:**
 
-1. Golden 0 `UNOBSERVED`, no head; repeat identical scope yields exact hash `4af227...`; event chain verifier is **not** called on zero events.
-2. Golden 1 full immutable envelope, `EVENTS_RECORDED`, head=event hash, exact golden `667c49...`. Replayed equivalent timezone input produces same event and snapshot hashes.
+1. Golden 0 `UNOBSERVED`, no head; repeat identical scope yields exact hash `09593b...`; event chain verifier is **not** called on zero events.
+2. Golden 1 full immutable envelope, `EVENTS_RECORDED`, head=event hash, exact golden `833de9...`. Replayed equivalent timezone input produces same event and snapshot hashes.
 3. Add another sequential valid event using existing append helper: event count/head/hash change, old snapshot unchanged. Rebuilding from the same complete chain reproduces the new snapshot exactly.
 4. Idempotent duplicate replay produces the same original snapshot identity/hash.
 5. Event array order retained and caller list mutation cannot change previously built snapshot. Caller-provided event/binding instance tampering after construction must not mutate a detached snapshot.
@@ -274,8 +325,9 @@ An authenticated producer annotation is a **separate immutable, versioned artifa
 6. `RESULT_BOUND` or `TRIAL_FINALIZED` event alone must **still** report `EVENTS_RECORDED` only, never a financial/scientific `COMPLETE`.
 7. Unexpected mapping/string as events, event/record dataclass subtype, float/bool event count, stale/incorrect ordered event hashes.
 8. Original input lists, binding records and event envelopes remain unchanged after any failure.
-9. Claims that a local checkpoint automatically enters `ScheduledArmCheckpointOpportunities` or is an independently scheduled study opportunity are **out of scope and prohibited**.
-10. All originally accepted E1 and trial-event golden hashes/tests remain unchanged; no replacement of their API or serialization.
+9. A valid snapshot built from the complete two-run declared manifest must refuse verification and append with the valid one-run subset, despite the subset separately passing generic E1 validation. Reject missing/extra run/arm/binding in the full caller-declared manifest without 'repairing' or silently reanchoring snapshot identity.
+10. Claims that a local checkpoint automatically enters `ScheduledArmCheckpointOpportunities` or is an independently scheduled study opportunity are **out of scope and prohibited**.
+11. All originally accepted E1 and trial-event golden hashes/tests remain unchanged; no replacement of their API or serialization.
 
 Test all errors using `pytest.raises(ValueError)` and assert no mutation. No network, file-backed producer adapters, credentials, paid data, orders, actual accounts or stage-specific scoring.
 
@@ -301,3 +353,11 @@ Also run the repo's actual required full test gate, Unicode U+2014 scan, staged-
 ## 10. Why this stops before full TrialRecordV1
 
 The next phase may define authentic accepted adapters for Krish's matured proposals and cost receipts and Matthew's account, mandate, fills and authoritative RESULT. Those records require accepted producer-specific contracts, point-in-time validity and independent scientific review. A local `Stage1TrialProvenanceSnapshotV1` is a **content-addressed structural witness**, not evidence that an investment decision was valid, a transaction occurred, a score was calculable or a particular control strategy was allowed. This boundary must remain explicit in future documentation, API names and PR descriptions.
+
+## 11. Codex exact-head architecture correction: bind the full E1 manifest (October 19, 2026)
+
+Codex's [P2 finding on PR #471](https://github.com/KanujVerma/drift/pull/471#discussion_r4320158377) correctly observed that merely calling `verify_experiment_configuration` again does **not** guarantee the previously stored snapshot was built from the same complete caller-declared run manifest. A reduced subset may independently be internally complete while dropping an earlier run/account. This is a real provenance/replay safety gap.
+
+**Architect resolution within TP-D:** Add `complete_manifest_fingerprint` to `Stage1TrialScopeV1`, derived deterministically from the validated campaign SHA, sorted full expected-run IDs, sorted all arm-spec fingerprints, and every exact eight-field run-account binding sorted by its unambiguous campaign/run/arm tuple. Hash with the existing canonical serializer and include the digest in the immutable snapshot preimage. Independent synthetic hashes are pinned in Section 5 and must be treated as regression oracles. A changed caller-declared manifest, even if E1-valid on its own, cannot verify an old snapshot or append events to it.
+
+This is a **versioned local design correction**, not a Matthew account-source authentication contract. Full producer-led reconciliation remains separately gated. Do not relax the original requirement or change hashes without explicit reviewed design revision.
