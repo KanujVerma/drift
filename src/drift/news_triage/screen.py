@@ -12,7 +12,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Literal, TypeGuard
 
 from drift.serialization.canonical import content_hash
 
@@ -142,7 +142,7 @@ def _digest(value: object) -> bool:
     return type(value) is str and _SHA256.fullmatch(value) is not None
 
 
-def _reference(value: object) -> bool:
+def _reference(value: object) -> TypeGuard[EvidenceRef]:
     return (
         type(value) is EvidenceRef
         and _token(value.ref_id)
@@ -156,7 +156,7 @@ def _utc(value: object) -> str | None:
     return value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
-def _key(value: object) -> bool:
+def _key(value: object) -> TypeGuard[EventKey]:
     return (
         type(value) is EventKey
         and _token(value.source_id)
@@ -198,7 +198,7 @@ def policy_digest(
     )
 
 
-def _valid_policy(policy: object) -> bool:
+def _valid_policy(policy: object) -> TypeGuard[ScreeningPolicy]:
     if type(policy) is not ScreeningPolicy:
         return False
     if not _token(policy.policy_id) or not _token(policy.version):
@@ -278,8 +278,16 @@ def _result(
         "event_normalized": _utc(evidence.normalized_at) if evidence else None,
         "event_available": _utc(evidence.available_at) if evidence else None,
         "event_published": _utc(evidence.published_at) if evidence else None,
-        "quality_state": evidence.quality_state if evidence else None,
-        "coverage_state": evidence.coverage_state if evidence else None,
+        "quality_state": (
+            evidence.quality_state
+            if evidence is not None and type(evidence.quality_state) is str
+            else None
+        ),
+        "coverage_state": (
+            evidence.coverage_state
+            if evidence is not None and type(evidence.coverage_state) is str
+            else None
+        ),
         "revision_of": _key_dict(revision),
         "evidence_refs": [_ref_dict(ref) for ref in refs],
         "duplicate_of": _ref_dict(duplicate_of),
@@ -455,7 +463,11 @@ def screen_feed_coverage(
             "observed_at": _utc(coverage.observed_at) if type(coverage) is FeedCoverage else None,
             "available_at": _utc(coverage.available_at) if type(coverage) is FeedCoverage else None,
             "count": coverage.event_count if type(coverage) is FeedCoverage and type(coverage.event_count) is int else None,
-            "state": coverage.state if type(coverage) is FeedCoverage else None,
+            "state": (
+                coverage.state
+                if type(coverage) is FeedCoverage and type(coverage.state) is str
+                else None
+            ),
             "decision_cutoff": _utc(decision_cutoff),
         }
     )
