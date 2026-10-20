@@ -1036,7 +1036,10 @@ def test_intelligence_source_inventory_is_exact_and_nonempty() -> None:
 
 def test_intelligence_capability_guard_is_nonvacuous() -> None:
     """The offline source profile refuses capability escalation."""
-    allowed = "from datetime import UTC, datetime\nfrom drift.serialization.canonical import content_hash\n"
+    allowed = (
+        "from datetime import UTC, datetime\n"
+        "from drift.serialization.canonical import content_hash\n"
+    )
     assert not _bridge_capability_violations(
         allowed, "intelligence-good.py", INTELLIGENCE_CAPABILITY_ALLOWLIST
     )

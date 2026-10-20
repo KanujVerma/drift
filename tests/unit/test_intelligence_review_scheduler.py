@@ -491,10 +491,17 @@ def test_materiality_changes_trigger_identity() -> None:
         content_hash="a" * 64,
         raw_text="inert",
     )
-    clocks = {"now": now, "last_routine_at": now, "last_adaptation_at": now}
-    yes = evaluate_review_schedule(**clocks, feed_events=[event])
+    yes = evaluate_review_schedule(
+        now=now,
+        last_routine_at=now,
+        last_adaptation_at=now,
+        feed_events=[event],
+    )
     no = evaluate_review_schedule(
-        **clocks, feed_events=[event.model_copy(update={"is_material": False})]
+        now=now,
+        last_routine_at=now,
+        last_adaptation_at=now,
+        feed_events=[event.model_copy(update={"is_material": False})],
     )
     assert yes.action == "review" and no.action == "no_review"
     assert yes.trigger_id != no.trigger_id
@@ -594,17 +601,19 @@ def test_event_cooldown_does_not_block_routine_or_adaptation() -> None:
         content_hash="a" * 64,
         raw_text="inert",
     )
-    common = {
-        "now": now,
-        "feed_events": [event],
-        "last_event_review_at": now - timedelta(minutes=5),
-        "last_routine_at": now - timedelta(days=8),
-    }
     routine = evaluate_review_schedule(
-        **common, last_adaptation_at=now - timedelta(days=2)
+        now=now,
+        feed_events=[event],
+        last_event_review_at=now - timedelta(minutes=5),
+        last_routine_at=now - timedelta(days=8),
+        last_adaptation_at=now - timedelta(days=2),
     )
     adaptation = evaluate_review_schedule(
-        **common, last_adaptation_at=now - timedelta(days=31)
+        now=now,
+        feed_events=[event],
+        last_event_review_at=now - timedelta(minutes=5),
+        last_routine_at=now - timedelta(days=8),
+        last_adaptation_at=now - timedelta(days=31),
     )
     assert routine.review_type == "routine"
     assert adaptation.review_type == "planned_adaptation"

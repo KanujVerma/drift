@@ -12,7 +12,12 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from drift.intelligence.context_builder import CandidateInput, build_context
-from drift.intelligence.contracts import ArtifactReference, ResearchContext, Scope
+from drift.intelligence.contracts import (
+    ArtifactReference,
+    ResearchContext,
+    Scope,
+    SourceGrade,
+)
 
 
 @pytest.fixture
@@ -218,7 +223,7 @@ def _context_with_sources(
     inputs: list[CandidateInput],
     *,
     cutoff: datetime,
-    source_grade: str = "synthetic_fixture",
+    source_grade: SourceGrade = "synthetic_fixture",
 ) -> ResearchContext:
     return build_context(
         scope=scope,

@@ -369,7 +369,7 @@ def test_r_invalid_objective_never_selects_a_candidate(
             context=sample_context,
             resolved_inputs=sample_bindings,
             candidate_pool=[fixture_data["raw_choice"]],
-            objective_fn=lambda _c: bad,
+            objective_fn=lambda _c, score=bad: score,
             method_ref=ArtifactReference(id="method:R", version="v1", sha256="e" * 64),
             validation_policy=ArtifactReference(
                 id="policy:fixed", version="v1", sha256="f" * 64
@@ -494,8 +494,10 @@ def test_r_rejects_entire_pool_if_any_member_invalid(
         recorder = ResearchReceiptStore()
         scores_seen: list[str] = []
 
-        def objective(candidate: ResearchCandidate) -> Decimal:
-            scores_seen.append(candidate.candidate_id)
+        def objective(
+            candidate: ResearchCandidate, collector: list[str] = scores_seen
+        ) -> Decimal:
+            collector.append(candidate.candidate_id)
             return Decimal("1")
 
         result = select_conventional_candidate(

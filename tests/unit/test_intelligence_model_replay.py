@@ -11,7 +11,7 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from unittest.mock import patch
 
 import pytest
@@ -495,7 +495,7 @@ def test_replay_cannot_invent_a_provider_stop_reason(
     replay_fixtures: dict[str, Any],
     sample_context: ResearchContext,
     sample_bindings: ResolvedDependencies,
-    retained_finish: str | None,
+    retained_finish: Literal["stop", "timeout", "unknown"] | None,
 ) -> None:
     """Response existence is not evidence of a provider finish classification."""
     positive = replay_fixtures["positive_replay"]

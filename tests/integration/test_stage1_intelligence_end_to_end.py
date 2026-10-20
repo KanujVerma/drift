@@ -33,7 +33,9 @@ from drift.loop.stage1_switch_preflight import (
 FIXTURE = Path("tests/fixtures/adaptive_research/research_v1.json")
 
 
-def _context_and_bindings() -> tuple[ResearchContext, ResolvedDependencies, dict]:
+def _context_and_bindings() -> tuple[
+    ResearchContext, ResolvedDependencies, dict[str, Any]
+]:
     data = json.loads(FIXTURE.read_text(encoding="utf-8"))
     context = ResearchContext.model_validate(data["fixtures"]["F01"])
     candidate = data["fixtures"]["F02"]
@@ -65,7 +67,10 @@ def _context_and_bindings() -> tuple[ResearchContext, ResolvedDependencies, dict
         },
         current_selection=selection,
     )
-    return context, resolved, data["raw_choice"]
+    raw_choice = data["raw_choice"]
+    if not isinstance(raw_choice, dict):
+        raise ValueError("INVALID_SYNTHETIC_CHOICE_FIXTURE")
+    return context, resolved, raw_choice
 
 
 def test_ai_and_r_share_context_but_not_mutable_receipts() -> None:
@@ -254,7 +259,7 @@ def test_b3_b4_b5_fixed_family_proposals_share_causal_context_with_r() -> None:
     )
 
     def choice(family: str) -> dict[str, Any]:
-        proposal = json.loads(json.dumps(fixture_choice))
+        proposal: dict[str, Any] = json.loads(json.dumps(fixture_choice))
         proposal["selection"] = {
             "family_id": family,
             "strategy_version": "synthetic-v1",
