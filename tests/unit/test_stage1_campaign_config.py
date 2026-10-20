@@ -3204,6 +3204,7 @@ def test_strict_type_valid_builtin_strings() -> None:
         is True
     )
 
+
 # ---------------------------------------------------------------------------
 # Issue #489: Snapshot each caller-provided E1 collection exactly once
 # ---------------------------------------------------------------------------
