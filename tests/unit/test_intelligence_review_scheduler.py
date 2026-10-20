@@ -15,7 +15,6 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from drift.intelligence.contracts import TargetWeight
-from drift.serialization.canonical import content_hash
 from drift.intelligence.review_scheduler import (
     CalendarRevision,
     FeedEvent,
@@ -23,6 +22,7 @@ from drift.intelligence.review_scheduler import (
     evaluate_review_schedule,
     validate_defensive_policy,
 )
+from drift.serialization.canonical import content_hash
 
 
 def test_routine_review_trigger_due() -> None:
@@ -272,6 +272,7 @@ def test_same_scheduled_inputs_have_stable_trigger_identity() -> None:
 
 def test_feed_revision_conflict_fails_closed() -> None:
     now = datetime(2024, 1, 10, 10, 0, tzinfo=UTC)
+
     def event(digest: str) -> FeedEvent:
         return FeedEvent(
             event_id="same-event",
@@ -282,6 +283,7 @@ def test_feed_revision_conflict_fails_closed() -> None:
             raw_text="inert",
             is_material=True,
         )
+
     with pytest.raises(ValueError, match="SOURCE_DIGEST_CONFLICT"):
         evaluate_review_schedule(
             now=now, feed_events=[event("a" * 64), event("b" * 64)]
@@ -327,19 +329,31 @@ def test_future_and_permuted_feed_events_do_not_change_current_trigger() -> None
     """Unavailable future evidence cannot enter a scheduled decision identity."""
     now = datetime(2024, 1, 10, 10, 0, tzinfo=UTC)
     first = FeedEvent(
-        event_id="synthetic:one", source_id="synthetic:feed", version="v1",
-        available_at=now - timedelta(minutes=2), content_hash="a" * 64,
-        raw_text="inert", is_material=True,
+        event_id="synthetic:one",
+        source_id="synthetic:feed",
+        version="v1",
+        available_at=now - timedelta(minutes=2),
+        content_hash="a" * 64,
+        raw_text="inert",
+        is_material=True,
     )
     second = FeedEvent(
-        event_id="synthetic:two", source_id="synthetic:feed", version="v1",
-        available_at=now - timedelta(minutes=1), content_hash="b" * 64,
-        raw_text="inert", is_material=True,
+        event_id="synthetic:two",
+        source_id="synthetic:feed",
+        version="v1",
+        available_at=now - timedelta(minutes=1),
+        content_hash="b" * 64,
+        raw_text="inert",
+        is_material=True,
     )
     future = FeedEvent(
-        event_id="synthetic:future", source_id="synthetic:feed", version="v1",
-        available_at=now + timedelta(seconds=1), content_hash="c" * 64,
-        raw_text="inert", is_material=True,
+        event_id="synthetic:future",
+        source_id="synthetic:feed",
+        version="v1",
+        available_at=now + timedelta(seconds=1),
+        content_hash="c" * 64,
+        raw_text="inert",
+        is_material=True,
     )
     baseline = evaluate_review_schedule(now=now, feed_events=[first, second])
     reversed_order = evaluate_review_schedule(now=now, feed_events=[second, first])
@@ -401,7 +415,6 @@ def test_future_event_revision_cannot_invalidate_past_review() -> None:
     assert baseline.record_hash == later.record_hash
 
 
-
 def test_event_revision_identity_is_namespaced_by_source() -> None:
     """Two sources can publish the same event id without a false conflict."""
     now = datetime(2024, 1, 10, 10, 0, tzinfo=UTC)
@@ -413,9 +426,7 @@ def test_event_revision_identity_is_namespaced_by_source() -> None:
         content_hash="a" * 64,
         raw_text="Source A news.",
     )
-    second = first.model_copy(
-        update={"source_id": "feed:B", "content_hash": "b" * 64}
-    )
+    second = first.model_copy(update={"source_id": "feed:B", "content_hash": "b" * 64})
     combined = evaluate_review_schedule(
         now=now, feed_events=[first, second], feed_condition="material_event"
     )
@@ -441,7 +452,7 @@ def test_event_available_at_conflict_fails_closed_in_both_orders() -> None:
         raw_text="A time-eligible observation.",
     )
     later = first.model_copy(
-        update={"available_at":first.available_at + timedelta(minutes=1)}
+        update={"available_at": first.available_at + timedelta(minutes=1)}
     )
     for ordered in ([first, later], [later, first]):
         with pytest.raises(ValueError, match="EVENT_AVAILABILITY_CONFLICT"):
@@ -473,9 +484,12 @@ def test_material_event_signal_without_time_eligible_event_is_unavailable() -> N
 def test_materiality_changes_trigger_identity() -> None:
     now = datetime(2024, 1, 10, 10, tzinfo=UTC)
     event = FeedEvent(
-        event_id="evt", source_id="feed", version="v1",
+        event_id="evt",
+        source_id="feed",
+        version="v1",
         available_at=now - timedelta(seconds=1),
-        content_hash="a" * 64, raw_text="inert",
+        content_hash="a" * 64,
+        raw_text="inert",
     )
     clocks = {"now": now, "last_routine_at": now, "last_adaptation_at": now}
     yes = evaluate_review_schedule(**clocks, feed_events=[event])
@@ -488,12 +502,17 @@ def test_materiality_changes_trigger_identity() -> None:
 
 def test_feed_event_ref_namespaces_delimiter_ambiguity() -> None:
     now = datetime(2024, 1, 10, 10, tzinfo=UTC)
+
     def one(source: str, event_id: str) -> FeedEvent:
         return FeedEvent(
-            event_id=event_id, source_id=source, version="v1",
+            event_id=event_id,
+            source_id=source,
+            version="v1",
             available_at=now - timedelta(seconds=1),
-            content_hash="a" * 64, raw_text="inert",
+            content_hash="a" * 64,
+            raw_text="inert",
         )
+
     a = evaluate_review_schedule(now=now, feed_events=[one("a:b", "c")])
     b = evaluate_review_schedule(now=now, feed_events=[one("a", "b:c")])
     assert a.event_ref is not None and b.event_ref is not None
@@ -503,14 +522,22 @@ def test_feed_event_ref_namespaces_delimiter_ambiguity() -> None:
 def test_feed_problem_precedence_is_invariant_to_order() -> None:
     now = datetime(2024, 1, 10, 10, tzinfo=UTC)
     first = FeedEvent(
-        event_id="broken", source_id="feed:A", version="v1",
-        available_at=now, content_hash="a" * 64, raw_text="inert",
+        event_id="broken",
+        source_id="feed:A",
+        version="v1",
+        available_at=now,
+        content_hash="a" * 64,
+        raw_text="inert",
         condition="broken_feed",
     )
-    second = first.model_copy(update={
-        "event_id": "unknown", "source_id": "feed:B",
-        "content_hash": "b" * 64, "condition": "unknown_coverage",
-    })
+    second = first.model_copy(
+        update={
+            "event_id": "unknown",
+            "source_id": "feed:B",
+            "content_hash": "b" * 64,
+            "condition": "unknown_coverage",
+        }
+    )
     for ordered in ([first, second], [second, first]):
         verdict = evaluate_review_schedule(now=now, feed_events=ordered)
         assert verdict.action == "unavailable"
@@ -520,8 +547,12 @@ def test_feed_problem_precedence_is_invariant_to_order() -> None:
 def test_conflicting_event_condition_refused_in_both_orders() -> None:
     now = datetime(2024, 1, 10, 10, tzinfo=UTC)
     event = FeedEvent(
-        event_id="one", source_id="feed:A", version="v1",
-        available_at=now, content_hash="a" * 64, raw_text="inert",
+        event_id="one",
+        source_id="feed:A",
+        version="v1",
+        available_at=now,
+        content_hash="a" * 64,
+        raw_text="inert",
     )
     nonmaterial = event.model_copy(update={"is_material": False})
     for order in ([event, nonmaterial], [nonmaterial, event]):
@@ -532,13 +563,17 @@ def test_conflicting_event_condition_refused_in_both_orders() -> None:
 def test_old_calendar_revision_conflict_is_not_hidden_by_current_revision() -> None:
     now = datetime(2024, 1, 10, 10, tzinfo=UTC)
     old = CalendarRevision(
-        calendar_id="cal:A", revision=1,
-        effective_cutoff=now - timedelta(days=2), content_hash="a" * 64,
+        calendar_id="cal:A",
+        revision=1,
+        effective_cutoff=now - timedelta(days=2),
+        content_hash="a" * 64,
     )
     forged = old.model_copy(update={"content_hash": "b" * 64})
     current = CalendarRevision(
-        calendar_id="cal:A", revision=2,
-        effective_cutoff=now - timedelta(days=1), content_hash="c" * 64,
+        calendar_id="cal:A",
+        revision=2,
+        effective_cutoff=now - timedelta(days=1),
+        content_hash="c" * 64,
     )
     for records in ([old, forged], [forged, old]):
         with pytest.raises(ValueError, match="SOURCE_DIGEST_CONFLICT"):
@@ -552,12 +587,16 @@ def test_old_calendar_revision_conflict_is_not_hidden_by_current_revision() -> N
 def test_event_cooldown_does_not_block_routine_or_adaptation() -> None:
     now = datetime(2024, 1, 10, 10, tzinfo=UTC)
     event = FeedEvent(
-        event_id="event", source_id="feed:A", version="v1",
+        event_id="event",
+        source_id="feed:A",
+        version="v1",
         available_at=now - timedelta(seconds=1),
-        content_hash="a" * 64, raw_text="inert",
+        content_hash="a" * 64,
+        raw_text="inert",
     )
     common = {
-        "now": now, "feed_events": [event],
+        "now": now,
+        "feed_events": [event],
         "last_event_review_at": now - timedelta(minutes=5),
         "last_routine_at": now - timedelta(days=8),
     }
@@ -574,9 +613,12 @@ def test_event_cooldown_does_not_block_routine_or_adaptation() -> None:
 def test_scheduler_revalidates_forged_typed_inputs_and_policy() -> None:
     now = datetime(2024, 1, 10, 10, tzinfo=UTC)
     valid = FeedEvent(
-        event_id="one", source_id="feed:A", version="v1",
+        event_id="one",
+        source_id="feed:A",
+        version="v1",
         available_at=now - timedelta(seconds=1),
-        content_hash="a" * 64, raw_text="inert",
+        content_hash="a" * 64,
+        raw_text="inert",
     )
     forged = valid.model_copy(update={"content_hash": "not-a-digest"})
     with pytest.raises(ValueError):
@@ -591,7 +633,9 @@ def test_scheduler_revalidates_forged_typed_inputs_and_policy() -> None:
 def test_defensive_policy_rejects_malformed_and_missing_weights() -> None:
     valid = [TargetWeight(security_id="SPY", weight="0.3")]
     for state in (
-        {"SPY": "NaN"}, {"SPY": "1.5"}, {"SPY": ""},
+        {"SPY": "NaN"},
+        {"SPY": "1.5"},
+        {"SPY": ""},
         {"SPY": "0.8", "TLT": "0.8"},
     ):
         assert not validate_defensive_policy(
@@ -609,9 +653,12 @@ def test_defensive_policy_rejects_malformed_and_missing_weights() -> None:
 def test_exact_duplicate_feed_event_is_idempotent() -> None:
     now = datetime(2024, 1, 10, 10, tzinfo=UTC)
     event = FeedEvent(
-        event_id="one", source_id="feed:A", version="v1",
+        event_id="one",
+        source_id="feed:A",
+        version="v1",
         available_at=now - timedelta(seconds=1),
-        content_hash="a" * 64, raw_text="inert",
+        content_hash="a" * 64,
+        raw_text="inert",
     )
     one = evaluate_review_schedule(now=now, feed_events=[event])
     duplicate = evaluate_review_schedule(now=now, feed_events=[event, event])
@@ -623,7 +670,8 @@ def test_exact_duplicate_feed_event_is_idempotent() -> None:
 def test_calendar_first_available_conflict_fails_even_with_equal_bytes() -> None:
     now = datetime(2024, 1, 10, 10, tzinfo=UTC)
     current = CalendarRevision(
-        calendar_id="cal:A", revision=2,
+        calendar_id="cal:A",
+        revision=2,
         effective_cutoff=now - timedelta(hours=1),
         content_hash="c" * 64,
     )
@@ -635,7 +683,8 @@ def test_calendar_first_available_conflict_fails_even_with_equal_bytes() -> None
             now=now, current_calendar=current, calendar_history=[changed_clock]
         )
     newer = CalendarRevision(
-        calendar_id="cal:A", revision=3,
+        calendar_id="cal:A",
+        revision=3,
         effective_cutoff=now - timedelta(minutes=5),
         content_hash="d" * 64,
     )
@@ -649,9 +698,12 @@ def test_calendar_first_available_conflict_fails_even_with_equal_bytes() -> None
 def test_contradictory_feed_status_cannot_be_hidden_by_unavailable_result() -> None:
     now = datetime(2024, 1, 10, 10, tzinfo=UTC)
     event = FeedEvent(
-        event_id="same", source_id="feed:A", version="v1",
+        event_id="same",
+        source_id="feed:A",
+        version="v1",
         available_at=now - timedelta(seconds=1),
-        content_hash="a" * 64, raw_text="inert",
+        content_hash="a" * 64,
+        raw_text="inert",
         condition="material_event",
     )
     broken = event.model_copy(update={"condition": "broken_feed"})

@@ -55,12 +55,8 @@ def _context_and_bindings() -> tuple[ResearchContext, ResolvedDependencies, dict
         strategy_registry={
             selection.family_id: StrategyRegistration(
                 family_id=selection.family_id,
-                strategy_ref=ArtifactReference.model_validate(
-                    strategy["strategy_ref"]
-                ),
-                envelope_ref=ArtifactReference.model_validate(
-                    strategy["envelope_ref"]
-                ),
+                strategy_ref=ArtifactReference.model_validate(strategy["strategy_ref"]),
+                envelope_ref=ArtifactReference.model_validate(strategy["envelope_ref"]),
                 eligibility_ref=ArtifactReference.model_validate(
                     strategy["eligibility_ref"]
                 ),
@@ -282,6 +278,7 @@ def test_b3_b4_b5_fixed_family_proposals_share_causal_context_with_r() -> None:
         attempt_id="synthetic-stage1-ai",
         checked_at=at,
     )
+
     def synthetic_score(candidate: ResearchCandidate) -> Decimal:
         """Frozen fixture rank only, not an authorized market objective."""
         if candidate.strategy is None:

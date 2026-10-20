@@ -338,11 +338,13 @@ def test_recovery_rejects_out_of_order_and_tampered_events_atomically(
         status="completed",
     )
     with pytest.raises(ValueError, match="INVALID_ATTEMPT_CHAIN"):
-        store.load_events([
-            started.model_dump(mode="python"),
-            terminal.model_dump(mode="python"),
-            competing.model_dump(mode="python"),
-        ])
+        store.load_events(
+            [
+                started.model_dump(mode="python"),
+                terminal.model_dump(mode="python"),
+                competing.model_dump(mode="python"),
+            ]
+        )
     assert store.export_events() == []
 
 
@@ -657,9 +659,7 @@ def test_naive_cost_copy_refused_before_store_hash_and_without_partial_state(
     )
     recorder = ResearchReceiptStore()
     unchanged = recorder.export_canonical_jsonl()
-    forged = valid.model_copy(
-        update={"recorded_at": start.replace(tzinfo=None)}
-    )
+    forged = valid.model_copy(update={"recorded_at": start.replace(tzinfo=None)})
     with pytest.raises(ValueError, match="INVALID_COST_TIMESTAMP: recorded_at"):
         recorder.record_cost_receipt(forged)
     assert recorder.export_canonical_jsonl() == unchanged

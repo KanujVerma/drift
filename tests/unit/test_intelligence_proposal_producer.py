@@ -294,15 +294,14 @@ def test_malformed_response_also_records_cost_and_terminal_receipt(
             id="synthetic:policy", version="v1", sha256="b" * 64
         ),
         recorder=store,
-        transport=FakeTransport(
-            malformed_json="{malformed", cost_amount="0.21"
-        ),
+        transport=FakeTransport(malformed_json="{malformed", cost_amount="0.21"),
         attempt_id="synthetic-malformed-billed",
     )
     assert result.status == "MALFORMED_OUTPUT"
     assert result.candidate is None
     assert [e.status for e in store.get_attempt_events(result.attempt_id)] == [
-        "started", "failed"
+        "started",
+        "failed",
     ]
     costs = store.get_cost_receipts_for_attempt(result.attempt_id)
     assert len(costs) == 1
@@ -316,6 +315,7 @@ def test_identical_scripted_replay_retains_identical_candidate_and_event_hashes(
     fixture_data: dict[str, Any],
 ) -> None:
     at = datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC)
+
     def run() -> tuple[str, str, tuple[str, ...]]:
         store = ResearchReceiptStore()
         result = produce_proposal(
@@ -338,6 +338,7 @@ def test_identical_scripted_replay_retains_identical_candidate_and_event_hashes(
             result.candidate.record_hash,
             tuple(e.record_hash for e in store.get_attempt_events(result.attempt_id)),
         )
+
     assert run() == run()
 
 
@@ -370,7 +371,6 @@ def test_scripted_minimal_abstention_uses_typed_output_binding(
     assert result.candidate.targets == ()
     assert len(store.get_attempt_events(result.attempt_id)) == 2
     assert len(store.get_cost_receipts_for_attempt(result.attempt_id)) == 1
-
 
 
 @pytest.mark.parametrize("invalid_param", [float("nan"), object()])
@@ -465,12 +465,8 @@ def test_scripted_identity_binds_request_and_candidate_ttl(
     """Different explicit request IDs or TTLs retain independent receipts."""
     at = datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC)
     recorder = ResearchReceiptStore()
-    method = ArtifactReference(
-        id="synthetic:method", version="v1", sha256="a" * 64
-    )
-    policy = ArtifactReference(
-        id="synthetic:policy", version="v1", sha256="b" * 64
-    )
+    method = ArtifactReference(id="synthetic:method", version="v1", sha256="a" * 64)
+    policy = ArtifactReference(id="synthetic:policy", version="v1", sha256="b" * 64)
 
     def run(request: str, expires: datetime) -> str:
         result = produce_proposal(
@@ -523,4 +519,3 @@ def test_scripted_naive_ttl_refused_before_recording_attempt(
             valid_until=datetime(2024, 1, 2, 11, 0),
         )
     assert recorder.export_events() == []
-

@@ -127,7 +127,7 @@ def matching_portfolio_state(
         verification_ref=ArtifactReference(
             id="fixture:verified-account-observation",
             version="synthetic-v1",
-            sha256="e" * 64
+            sha256="e" * 64,
         ),
     )
 
@@ -278,7 +278,7 @@ def test_t08_stale_portfolio_state_refusal(
         verification_ref=ArtifactReference(
             id="fixture:verified-account-observation",
             version="synthetic-v1",
-            sha256="e" * 64
+            sha256="e" * 64,
         ),
     )
 
@@ -312,7 +312,7 @@ def test_t08_mandate_mismatch_refusal(
         verification_ref=ArtifactReference(
             id="fixture:verified-account-observation",
             version="synthetic-v1",
-            sha256="e" * 64
+            sha256="e" * 64,
         ),
     )
 
@@ -346,7 +346,7 @@ def test_t08_account_paused_refusal(
         verification_ref=ArtifactReference(
             id="fixture:verified-account-observation",
             version="synthetic-v1",
-            sha256="e" * 64
+            sha256="e" * 64,
         ),
     )
 
@@ -380,7 +380,7 @@ def test_t08_pending_orders_conflict_refusal(
         verification_ref=ArtifactReference(
             id="fixture:verified-account-observation",
             version="synthetic-v1",
-            sha256="e" * 64
+            sha256="e" * 64,
         ),
     )
 
@@ -416,7 +416,7 @@ def test_a12_scope_mismatch_refusal(
         verification_ref=ArtifactReference(
             id="fixture:verified-account-observation",
             version="synthetic-v1",
-            sha256="e" * 64
+            sha256="e" * 64,
         ),
     )
 
@@ -485,12 +485,12 @@ def test_request_identity_is_stable_for_identical_inputs(
     one = bridge_candidate_to_execution(
         candidate=sample_candidate,
         portfolio_state=matching_portfolio_state,
-        current_time=now
+        current_time=now,
     )
     two = bridge_candidate_to_execution(
         candidate=sample_candidate,
         portfolio_state=matching_portfolio_state,
-        current_time=now
+        current_time=now,
     )
     assert one.request_id == two.request_id
     assert one.record_hash == two.record_hash
@@ -556,7 +556,6 @@ def test_refusal_cannot_be_laundered_with_cash_weight(
         PlatformExecutionRequest.model_validate(tampered)
 
 
-
 @pytest.mark.parametrize(
     ("weights", "cash"),
     [
@@ -610,25 +609,33 @@ def test_full_portfolio_and_mandate_refs_must_match_even_with_same_hash(
 ) -> None:
     now = sample_candidate.completed_at + timedelta(minutes=5)
     wrong_portfolio = matching_portfolio_state.model_copy(
-        update={"portfolio_ref": ArtifactReference(
-            id="port:other", version=matching_portfolio_state.portfolio_ref.version,
-            sha256=matching_portfolio_state.portfolio_ref.sha256,
-        )}
+        update={
+            "portfolio_ref": ArtifactReference(
+                id="port:other",
+                version=matching_portfolio_state.portfolio_ref.version,
+                sha256=matching_portfolio_state.portfolio_ref.sha256,
+            )
+        }
     )
     portfolio_refusal = bridge_candidate_to_execution(
-        candidate=sample_candidate, portfolio_state=wrong_portfolio,
+        candidate=sample_candidate,
+        portfolio_state=wrong_portfolio,
         current_time=now,
     )
     assert portfolio_refusal.status == "refused"
     assert "STALE_PORTFOLIO_STATE" in (portfolio_refusal.refusal_reason or "")
     wrong_mandate = matching_portfolio_state.model_copy(
-        update={"mandate_ref": ArtifactReference(
-            id=matching_portfolio_state.mandate_ref.id, version="v2",
-            sha256=matching_portfolio_state.mandate_ref.sha256,
-        )}
+        update={
+            "mandate_ref": ArtifactReference(
+                id=matching_portfolio_state.mandate_ref.id,
+                version="v2",
+                sha256=matching_portfolio_state.mandate_ref.sha256,
+            )
+        }
     )
     mandate_refusal = bridge_candidate_to_execution(
-        candidate=sample_candidate, portfolio_state=wrong_mandate,
+        candidate=sample_candidate,
+        portfolio_state=wrong_mandate,
         current_time=now,
     )
     assert mandate_refusal.status == "refused"
@@ -643,46 +650,60 @@ def test_bridge_request_identity_binds_session_and_verification_state(
 ) -> None:
     now = sample_candidate.completed_at + timedelta(minutes=5)
     baseline = bridge_candidate_to_execution(
-        candidate=sample_candidate, portfolio_state=matching_portfolio_state,
-        current_time=now, intraday_supported=True,
+        candidate=sample_candidate,
+        portfolio_state=matching_portfolio_state,
+        current_time=now,
+        intraday_supported=True,
     )
     next_open = bridge_candidate_to_execution(
-        candidate=sample_candidate, portfolio_state=matching_portfolio_state,
-        current_time=now, intraday_supported=False,
+        candidate=sample_candidate,
+        portfolio_state=matching_portfolio_state,
+        current_time=now,
+        intraday_supported=False,
     )
     no_session = bridge_candidate_to_execution(
-        candidate=sample_candidate, portfolio_state=matching_portfolio_state,
-        current_time=now, intraday_supported=False,
+        candidate=sample_candidate,
+        portfolio_state=matching_portfolio_state,
+        current_time=now,
+        intraday_supported=False,
         allow_next_open_fallback=False,
     )
     other_proof = matching_portfolio_state.model_copy(
-        update={"verification_ref": ArtifactReference(
-            id="synthetic:alternate-proof", version="v1", sha256="f" * 64
-        )}
+        update={
+            "verification_ref": ArtifactReference(
+                id="synthetic:alternate-proof", version="v1", sha256="f" * 64
+            )
+        }
     )
     different_verification = bridge_candidate_to_execution(
-        candidate=sample_candidate, portfolio_state=other_proof,
-        current_time=now, intraday_supported=True,
+        candidate=sample_candidate,
+        portfolio_state=other_proof,
+        current_time=now,
+        intraday_supported=True,
     )
     paused = bridge_candidate_to_execution(
         candidate=sample_candidate,
-        portfolio_state=matching_portfolio_state.model_copy(
-            update={"is_paused": True}
-        ),
-        current_time=now, intraday_supported=True,
+        portfolio_state=matching_portfolio_state.model_copy(update={"is_paused": True}),
+        current_time=now,
+        intraday_supported=True,
     )
     assert baseline.status == "admitted"
     assert next_open.session_target == "next_open"
     assert no_session.status == "unsupported"
     assert paused.status == "refused"
     ids = [
-        baseline.request_id, next_open.request_id, no_session.request_id,
-        different_verification.request_id, paused.request_id,
+        baseline.request_id,
+        next_open.request_id,
+        no_session.request_id,
+        different_verification.request_id,
+        paused.request_id,
     ]
     assert len(set(ids)) == len(ids)
     replay = bridge_candidate_to_execution(
-        candidate=sample_candidate, portfolio_state=matching_portfolio_state,
-        current_time=now, intraday_supported=True,
+        candidate=sample_candidate,
+        portfolio_state=matching_portfolio_state,
+        current_time=now,
+        intraday_supported=True,
     )
     assert baseline.request_id == replay.request_id
     assert baseline.record_hash == replay.record_hash
@@ -758,12 +779,11 @@ def test_model_copy_state_flag_cannot_forge_verified_permission(
     sample_candidate: ResearchCandidate,
     matching_portfolio_state: PortfolioStateBinding,
 ) -> None:
-    forged = matching_portfolio_state.model_copy(
-        update={"state_verified": "true"}
-    )
+    forged = matching_portfolio_state.model_copy(update={"state_verified": "true"})
     with pytest.raises(ValueError):
         bridge_candidate_to_execution(
-            candidate=sample_candidate, portfolio_state=forged,
+            candidate=sample_candidate,
+            portfolio_state=forged,
             current_time=sample_candidate.completed_at + timedelta(minutes=5),
         )
 
@@ -773,10 +793,14 @@ def test_abstention_is_nonactionable_even_with_valid_state(
     matching_portfolio_state: PortfolioStateBinding,
 ) -> None:
     payload = sample_candidate.model_dump(mode="python")
-    payload.update({
-        "disposition": "abstain", "strategy": None,
-        "targets": [], "cash_weight": None,
-    })
+    payload.update(
+        {
+            "disposition": "abstain",
+            "strategy": None,
+            "targets": [],
+            "cash_weight": None,
+        }
+    )
     payload["record_hash"] = compute_record_hash(payload)
     abstention = ResearchCandidate.model_validate(payload)
     request = bridge_candidate_to_execution(

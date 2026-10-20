@@ -67,7 +67,7 @@ class PlatformExecutionRequest(ImmutableModel):
     record_hash: str
 
     @model_validator(mode="after")
-    def verify_request_identity(self) -> "PlatformExecutionRequest":
+    def verify_request_identity(self) -> PlatformExecutionRequest:
         """Even a caller-rehashed request must be intrinsically non-actionable
         unless its entire proposed allocation and disposition are coherent.
         """
@@ -128,6 +128,7 @@ class PlatformExecutionRequest(ImmutableModel):
         ):
             raise ValueError("INVALID_PLATFORM_TARGET_WEIGHTS")
         return self
+
 
 def bridge_candidate_to_execution(
     *,
@@ -484,7 +485,7 @@ def bridge_candidate_to_execution(
             )
             and sum(target_amounts, cash_amount) == Decimal("1")
         )
-    except (InvalidOperation, TypeError):
+    except InvalidOperation, TypeError:
         allocation_valid = False
     if not allocation_valid:
         raw_dict = {

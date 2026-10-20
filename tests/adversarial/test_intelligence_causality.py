@@ -219,7 +219,6 @@ def test_adversarial_order_perturbation_invariance(
     assert ctx_order_a.record_hash == ctx_order_b.record_hash
 
 
-
 def _build_source_variant_context(
     scope: Scope,
     refs: dict[str, ArtifactReference],
@@ -283,9 +282,7 @@ def test_conflicting_source_availability_does_not_depend_on_input_order(
 ) -> None:
     """Reject both orders of contradictory first-available claims."""
     first = CandidateInput(
-        input_ref=ArtifactReference(
-            id="news:arrival", version="v1", sha256="a" * 64
-        ),
+        input_ref=ArtifactReference(id="news:arrival", version="v1", sha256="a" * 64),
         role="news",
         available_at=datetime(2024, 1, 2, 9, 45, tzinfo=UTC),
         availability_basis_ref=ArtifactReference(
@@ -293,7 +290,7 @@ def test_conflicting_source_availability_does_not_depend_on_input_order(
         ),
     )
     second = first.model_copy(
-        update={"available_at":first.available_at + timedelta(minutes=1)}
+        update={"available_at": first.available_at + timedelta(minutes=1)}
     )
     for entries in ([first, second], [second, first]):
         with pytest.raises(ValueError, match="INPUT_AVAILABILITY_CONFLICT"):

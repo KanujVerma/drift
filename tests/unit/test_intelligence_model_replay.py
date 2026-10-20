@@ -247,12 +247,16 @@ def test_replay_rejects_equivalent_json_with_different_retained_bytes(
     assert json.loads(altered_request) == json.loads(request["payload"])
     result = replay_model_output(
         recorded_request=StoredArtifactRef(
-            artifact_id="req-art-01", kind="other",
-            content_hash=request["content_hash"], location=request["location"],
+            artifact_id="req-art-01",
+            kind="other",
+            content_hash=request["content_hash"],
+            location=request["location"],
         ),
         recorded_response=StoredArtifactRef(
-            artifact_id="resp-art-01", kind="other",
-            content_hash=response["content_hash"], location=response["location"],
+            artifact_id="resp-art-01",
+            kind="other",
+            content_hash=response["content_hash"],
+            location=response["location"],
         ),
         request_payload=altered_request,
         response_payload=response["payload"],
@@ -283,8 +287,10 @@ def test_mismatched_response_presence_cannot_be_reported_as_timeout(
     request = positive["request"]
     result = replay_model_output(
         recorded_request=StoredArtifactRef(
-            artifact_id="req-art-01", kind="other",
-            content_hash=request["content_hash"], location=request["location"],
+            artifact_id="req-art-01",
+            kind="other",
+            content_hash=request["content_hash"],
+            location=request["location"],
         ),
         recorded_response=None,
         request_payload=request["payload"],
@@ -317,12 +323,16 @@ def test_repeated_replay_produces_identical_evidence_identity(
     response = positive["response"]
     kwargs: dict[str, Any] = {
         "recorded_request": StoredArtifactRef(
-            artifact_id="req-art-01", kind="other",
-            content_hash=request["content_hash"], location=request["location"],
+            artifact_id="req-art-01",
+            kind="other",
+            content_hash=request["content_hash"],
+            location=request["location"],
         ),
         "recorded_response": StoredArtifactRef(
-            artifact_id="resp-art-01", kind="other",
-            content_hash=response["content_hash"], location=response["location"],
+            artifact_id="resp-art-01",
+            kind="other",
+            content_hash=response["content_hash"],
+            location=response["location"],
         ),
         "request_payload": request["payload"],
         "response_payload": response["payload"],
@@ -357,8 +367,10 @@ def test_absent_response_without_recorded_timeout_is_not_timeout(
     request = replay_fixtures["timeout_replay"]["request"]
     result = replay_model_output(
         recorded_request=StoredArtifactRef(
-            artifact_id="req-timeout-unknown", kind="other",
-            content_hash=request["content_hash"], location=request["location"],
+            artifact_id="req-timeout-unknown",
+            kind="other",
+            content_hash=request["content_hash"],
+            location=request["location"],
         ),
         recorded_response=None,
         request_payload=request["payload"],
@@ -444,12 +456,16 @@ def test_replay_accepts_valid_noncanonical_json_with_verified_byte_receipt(
     assert raw_digest != response["content_hash"]
     result = replay_model_output(
         recorded_request=StoredArtifactRef(
-            artifact_id="req:reserialized", kind="other",
-            content_hash=request["content_hash"], location=request["location"],
+            artifact_id="req:reserialized",
+            kind="other",
+            content_hash=request["content_hash"],
+            location=request["location"],
         ),
         recorded_response=StoredArtifactRef(
-            artifact_id="resp:reserialized", kind="other",
-            content_hash=raw_digest, location=response["location"],
+            artifact_id="resp:reserialized",
+            kind="other",
+            content_hash=raw_digest,
+            location=response["location"],
         ),
         request_payload=request["payload"],
         response_payload=resaved,
@@ -474,7 +490,6 @@ def test_replay_accepts_valid_noncanonical_json_with_verified_byte_receipt(
     assert result.replay_record.response_ref.content_hash == raw_digest
 
 
-
 @pytest.mark.parametrize("retained_finish", [None, "unknown"])
 def test_replay_cannot_invent_a_provider_stop_reason(
     replay_fixtures: dict[str, Any],
@@ -488,12 +503,16 @@ def test_replay_cannot_invent_a_provider_stop_reason(
     response = positive["response"]
     result = replay_model_output(
         recorded_request=StoredArtifactRef(
-            artifact_id="req:unknown-finish", kind="other",
-            content_hash=request["content_hash"], location=request["location"],
+            artifact_id="req:unknown-finish",
+            kind="other",
+            content_hash=request["content_hash"],
+            location=request["location"],
         ),
         recorded_response=StoredArtifactRef(
-            artifact_id="resp:unknown-finish", kind="other",
-            content_hash=response["content_hash"], location=response["location"],
+            artifact_id="resp:unknown-finish",
+            kind="other",
+            content_hash=response["content_hash"],
+            location=response["location"],
         ),
         request_payload=request["payload"],
         response_payload=response["payload"],

@@ -65,9 +65,7 @@ def _validate_completed_feedback(record: TrialFeedbackRecord) -> None:
                 f"REJECTED_INVALID_FEEDBACK_VALUE: {label} is not numeric"
             ) from error
         if not amount.is_finite():
-            raise ValueError(
-                f"REJECTED_INVALID_FEEDBACK_VALUE: {label} is nonfinite"
-            )
+            raise ValueError(f"REJECTED_INVALID_FEEDBACK_VALUE: {label} is nonfinite")
 
 
 class LearningSnapshot(ImmutableModel):
@@ -132,9 +130,7 @@ class LearningSnapshot(ImmutableModel):
             matured_trials=self.matured_trials,
         )
         if self.state_hash != expected:
-            raise ValueError(
-                "LEARNING_STATE_HASH_MISMATCH: state identity was altered"
-            )
+            raise ValueError("LEARNING_STATE_HASH_MISMATCH: state identity was altered")
         return self
 
 
@@ -201,9 +197,7 @@ def advance_learning(
             previous_snapshot.model_dump(mode="python")
         )
         if previous_snapshot.arm_id != arm_id:
-            raise ValueError(
-                "CROSS_ARM_LEAKAGE: prior snapshot belongs to another arm"
-            )
+            raise ValueError("CROSS_ARM_LEAKAGE: prior snapshot belongs to another arm")
         if previous_snapshot.method_ref != method_ref:
             raise ValueError("LEARNING_METHOD_CHANGED_WITHOUT_MIGRATION")
         if _require_aware(previous_snapshot.cutoff, "previous cutoff") >= cutoff_utc:

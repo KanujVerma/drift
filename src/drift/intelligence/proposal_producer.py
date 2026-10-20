@@ -11,6 +11,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 from uuid import NAMESPACE_URL, uuid5
 
+from drift.errors import CanonicalSerializationError
 from drift.intelligence.contracts import (
     ArtifactReference,
     ImmutableModel,
@@ -31,7 +32,6 @@ from drift.intelligence.validation import (
     ValidationResult,
     validate_candidate,
 )
-from drift.errors import CanonicalSerializationError
 from drift.serialization.canonical import content_hash
 
 
@@ -104,7 +104,7 @@ def _record_scripted_cost(
             ):
                 raise ValueError("Synthetic cost is not plain DecimalText")
             amount = Decimal(transport.cost_amount)
-        except (InvalidOperation, TypeError, ValueError):
+        except InvalidOperation, TypeError, ValueError:
             amount = Decimal("NaN")
         if not amount.is_finite() or amount < 0:
             cost = create_cost_receipt(
@@ -265,10 +265,10 @@ def produce_proposal(
         try:
             parsed_choice = RawChoice.model_validate(raw_choice)
             raw_digest = content_hash(parsed_choice.model_dump(mode="python"))
-        except (ValueError, TypeError, CanonicalSerializationError):
+        except ValueError, TypeError, CanonicalSerializationError:
             try:
                 raw_digest = content_hash(raw_choice)
-            except (CanonicalSerializationError, TypeError, ValueError):
+            except CanonicalSerializationError, TypeError, ValueError:
                 result = ValidationResult(
                     is_valid=False,
                     status="INVALID",

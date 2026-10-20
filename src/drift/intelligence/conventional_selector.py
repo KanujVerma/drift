@@ -117,11 +117,9 @@ def select_conventional_candidate(
                 raise ValueError("POOL_SNAPSHOT_IDENTITY_MISMATCH")
             frozen_pool.append((choice_hash, raw_snapshot))
         pool_hash = content_hash(sorted(identity for identity, _ in frozen_pool))
-    except (CanonicalSerializationError, TypeError, ValueError):
+    except CanonicalSerializationError, TypeError, ValueError:
         if attempt_id is None:
-            raise ValueError(
-                "NONCANONICAL_POOL_REQUIRES_EXPLICIT_ATTEMPT_ID"
-            ) from None
+            raise ValueError("NONCANONICAL_POOL_REQUIRES_EXPLICIT_ATTEMPT_ID") from None
         invalid_pool = True
         frozen_pool.clear()
         pool_hash = content_hash(
@@ -260,14 +258,10 @@ def select_conventional_candidate(
                 break
             scores_dict[candidate.candidate_id] = str(score_num)
             family = (
-                candidate.strategy.family_id
-                if candidate.strategy
-                else "no_strategy"
+                candidate.strategy.family_id if candidate.strategy else "no_strategy"
             )
             params_hash = (
-                candidate.strategy.parameters_hash
-                if candidate.strategy
-                else "0" * 64
+                candidate.strategy.parameters_hash if candidate.strategy else "0" * 64
             )
             evaluated_candidates.append(
                 (score_num, family, params_hash, candidate.candidate_id, candidate)
@@ -294,9 +288,7 @@ def select_conventional_candidate(
             attempt_id=actual_attempt_id,
             attempt_event_id=terminal_event_id,
             reason=(
-                score_error
-                if score_error is not None
-                else "NO_ELIGIBLE_CANDIDATE"
+                score_error if score_error is not None else "NO_ELIGIBLE_CANDIDATE"
             ),
         )
 

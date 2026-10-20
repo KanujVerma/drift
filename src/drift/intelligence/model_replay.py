@@ -233,7 +233,7 @@ def replay_model_output(
         )
         if not isinstance(raw_choice_data, dict):
             raise ValueError("model output is not a JSON object")
-    except (ValueError, UnicodeDecodeError):
+    except ValueError, UnicodeDecodeError:
         return ModelReplayResult(
             is_success=False,
             status="MALFORMED_OUTPUT",
@@ -246,9 +246,7 @@ def replay_model_output(
     # the raw byte proof but must not falsely invalidate a matched output.
     try:
         parsed_choice = RawChoice.model_validate(raw_choice_data)
-        normalized_choice_hash = content_hash(
-            parsed_choice.model_dump(mode="python")
-        )
+        normalized_choice_hash = content_hash(parsed_choice.model_dump(mode="python"))
     except ValueError:
         # Invalid typed choices are rejected by validate_candidate below.
         normalized_choice_hash = content_hash(raw_choice_data)

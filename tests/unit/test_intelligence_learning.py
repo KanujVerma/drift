@@ -324,7 +324,6 @@ def test_learning_rejects_nonfinite_and_non_numeric_completed_feedback(
         )
 
 
-
 def test_learning_refuses_method_changes_without_explicit_migration(
     sample_method_ref: ArtifactReference,
 ) -> None:

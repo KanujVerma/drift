@@ -276,7 +276,6 @@ def test_negative_cases_n01_to_n12(
     ), f"Case {case_name}: got '{error_msg}', expected to match '{first_clause}'"
 
 
-
 def test_noncanonical_raw_choice_is_typed_invalid_not_an_exception(
     fixture_data: dict[str, Any],
     resolved_dependencies: ResolvedDependencies,
@@ -296,7 +295,6 @@ def test_noncanonical_raw_choice_is_typed_invalid_not_an_exception(
         assert result.status == "INVALID"
         assert result.candidate is None
         assert "INVALID_RAW_CHOICE_SERIALIZATION" in result.reason
-
 
 
 def test_forged_frozen_context_and_invocation_cannot_authorize_choice(

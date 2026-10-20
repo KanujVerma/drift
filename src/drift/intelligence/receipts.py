@@ -319,9 +319,7 @@ class ResearchReceiptStore:
                 or attempt.started_at is None
                 or attempt.completed_at is not None
             ):
-                raise ValueError(
-                    "INVALID_ATTEMPT_CHAIN: missing initial started event"
-                )
+                raise ValueError("INVALID_ATTEMPT_CHAIN: missing initial started event")
         else:
             prev = prior_events[-1]
             backlink = attempt.previous_event_ref
@@ -334,9 +332,7 @@ class ResearchReceiptStore:
                 or backlink.sha256 != prev.record_hash
                 or attempt.attempt_event_id == prev.attempt_event_id
             ):
-                raise ValueError(
-                    "INVALID_ATTEMPT_CHAIN: broken or repeated transition"
-                )
+                raise ValueError("INVALID_ATTEMPT_CHAIN: broken or repeated transition")
             prior_payload = prev.model_dump(mode="python")
             next_payload = attempt.model_dump(mode="python")
             for key in (
@@ -447,7 +443,9 @@ class ResearchReceiptStore:
         for att in sorted(
             self._attempts_by_event_id.values(),
             key=lambda event: (
-                event.attempt_id, event.event_index, event.attempt_event_id
+                event.attempt_id,
+                event.event_index,
+                event.attempt_event_id,
             ),
         ):
             exported.append(att.model_dump(mode="python"))
@@ -459,7 +457,8 @@ class ResearchReceiptStore:
         while pending:
             ready = sorted(
                 (
-                    cost for cost in pending.values()
+                    cost
+                    for cost in pending.values()
                     if cost.supersedes_receipt_id not in pending
                 ),
                 key=lambda cost: cost.receipt_id,
@@ -493,7 +492,6 @@ class ResearchReceiptStore:
         self._attempts_by_event_id = staged._attempts_by_event_id
         self._attempts_by_attempt_id = staged._attempts_by_attempt_id
         self._costs_by_receipt_id = staged._costs_by_receipt_id
-
 
     def export_canonical_jsonl(self) -> bytes:
         """Expose exact canonical bytes for a separate durable M0 ledger adapter.

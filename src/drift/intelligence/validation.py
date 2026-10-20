@@ -97,7 +97,7 @@ def validate_candidate(
         trusted_invocation = TrustedInvocationBinding.model_validate(
             trusted_invocation.model_dump(mode="python")
         )
-    except (CanonicalSerializationError, TypeError, ValueError):
+    except CanonicalSerializationError, TypeError, ValueError:
         return ValidationResult(
             is_valid=False,
             status="INVALID",
@@ -106,11 +106,12 @@ def validate_candidate(
 
     try:
         candidate_input = (
-            raw_choice if isinstance(raw_choice, Mapping)
+            raw_choice
+            if isinstance(raw_choice, Mapping)
             else raw_choice.model_dump(mode="python")
         )
         choice = validate_raw_choice(candidate_input)
-    except (CanonicalSerializationError, TypeError, ValueError):
+    except CanonicalSerializationError, TypeError, ValueError:
         return ValidationResult(
             is_valid=False,
             status="INVALID",
@@ -122,7 +123,7 @@ def validate_candidate(
     # is not enough to prove which output the producer validated.
     try:
         observed_output_hash = content_hash(choice.model_dump(mode="python"))
-    except (CanonicalSerializationError, TypeError, ValueError):
+    except CanonicalSerializationError, TypeError, ValueError:
         # Pydantic's Mapping[str, Any] can hold opaque or non-finite
         # parameters. Neither can become a canonical candidate or make a
         # research attempt vanish through an uncaught serialization error.
@@ -345,7 +346,7 @@ def validate_candidate(
 
         try:
             params_hash = content_hash(choice.selection.parameters)
-        except (CanonicalSerializationError, TypeError, ValueError):
+        except CanonicalSerializationError, TypeError, ValueError:
             return ValidationResult(
                 is_valid=False,
                 status="INVALID",
@@ -480,11 +481,7 @@ def validate_retained_record(
         # Disposition check
         disp = record.get("disposition")
         if disp in ("abstain", "unavailable"):
-            if (
-                targets
-                or cash_weight is not None
-                or record.get("strategy") is not None
-            ):
+            if targets or cash_weight is not None or record.get("strategy") is not None:
                 raise ValueError(
                     "invalid: abstention cannot retain strategy/targets/cash"
                 )

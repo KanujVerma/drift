@@ -115,8 +115,10 @@ class ResearchContext(ImmutableModel):
         # The wire hash proves only byte consistency; temporal semantics must
         # also be validated before a context can be treated as causal.
         instants = (
-            self.decision_cutoff, self.built_at,
-            self.review_started_at, self.memory_cutoff,
+            self.decision_cutoff,
+            self.built_at,
+            self.review_started_at,
+            self.memory_cutoff,
         )
         if any(ts.tzinfo is None or ts.utcoffset() is None for ts in instants):
             raise ValueError("INDETERMINATE_TIMEZONE: context timestamps need offsets")
@@ -131,8 +133,8 @@ class ResearchContext(ImmutableModel):
         for inp in self.inputs:
             if inp.available_at.tzinfo is None or inp.available_at.utcoffset() is None:
                 raise ValueError(
-                "INDETERMINATE_TIMEZONE: input availability lacks offset"
-            )
+                    "INDETERMINATE_TIMEZONE: input availability lacks offset"
+                )
             if inp.available_at > self.decision_cutoff:
                 raise ValueError("FUTURE_INPUT_IN_CONTEXT")
         calc = compute_record_hash(self)
@@ -342,13 +344,15 @@ class AttemptRecord(ImmutableModel):
             raise ValueError("INVALID_ATTEMPT_TIME: start must be timezone-aware")
         if self.status == "started":
             if (
-                self.event_index != 0 or self.previous_event_ref is not None
+                self.event_index != 0
+                or self.previous_event_ref is not None
                 or self.completed_at is not None
             ):
                 raise ValueError("INVALID_ATTEMPT_CHAIN: malformed start event")
         else:
             if (
-                self.event_index != 1 or self.previous_event_ref is None
+                self.event_index != 1
+                or self.previous_event_ref is None
                 or self.completed_at is None
                 or self.completed_at.tzinfo is None
                 or self.completed_at < self.started_at
@@ -406,8 +410,10 @@ class CostReceipt(ImmutableModel):
                 raise ValueError("UNKNOWN_COST_MUST_RETAIN_UNKNOWN_AMOUNT")
         elif self.amount_basis == "verified_zero":
             if (
-                self.amount != "0" or not self.currency or
-                self.raw_evidence_ref is None or self.unknown_reason is not None
+                self.amount != "0"
+                or not self.currency
+                or self.raw_evidence_ref is None
+                or self.unknown_reason is not None
             ):
                 raise ValueError("INVALID_VERIFIED_ZERO_COST")
         else:

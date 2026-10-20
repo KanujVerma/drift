@@ -262,7 +262,8 @@ def build_context(
             "memory": memory_snapshot_ref.model_dump(mode="python"),
             "excluded_inputs": (
                 excluded_inputs_ref.model_dump(mode="python")
-                if excluded_inputs_ref else None
+                if excluded_inputs_ref
+                else None
             ),
             "feed_state": (
                 feed_state_ref.model_dump(mode="python") if feed_state_ref else None
@@ -272,7 +273,8 @@ def build_context(
             "limitations": ordered_limitations,
             "current_selection": (
                 current_selection_ref.model_dump(mode="python")
-                if current_selection_ref else None
+                if current_selection_ref
+                else None
             ),
         }
     )

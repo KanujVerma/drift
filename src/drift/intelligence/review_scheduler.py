@@ -81,7 +81,7 @@ class SchedulerPolicy(ImmutableModel):
     default_event_policy: EventActionPolicy = "full_response"
 
     @model_validator(mode="after")
-    def check_positive_intervals(self) -> "SchedulerPolicy":
+    def check_positive_intervals(self) -> SchedulerPolicy:
         for name, span in (
             ("routine", self.routine_interval),
             ("adaptation", self.adaptation_interval),
@@ -107,16 +107,14 @@ class ReviewTriggerVerdict(ImmutableModel):
     record_hash: str
 
     @model_validator(mode="after")
-    def verify_verdict_hash(self) -> "ReviewTriggerVerdict":
+    def verify_verdict_hash(self) -> ReviewTriggerVerdict:
         if self.record_hash != compute_record_hash(self):
             raise ValueError("REVIEW_TRIGGER_HASH_MISMATCH")
         if self.action == "review" and self.review_type is None:
             raise ValueError("REVIEW_TRIGGER_MISSING_REVIEW_TYPE")
         if self.action != "review" and self.review_type is not None:
             raise ValueError("NON_ACTIONABLE_TRIGGER_HAS_REVIEW_TYPE")
-        if (
-            self.action != "review" and self.event_ref is not None
-        ) or (
+        if (self.action != "review" and self.event_ref is not None) or (
             self.review_type == "event_driven" and self.event_ref is None
         ):
             raise ValueError("INVALID_TRIGGER_EVENT_REFERENCE")
@@ -161,14 +159,18 @@ def evaluate_review_schedule(
         (policy or SchedulerPolicy()).model_dump(mode="python")
     )
     if feed_condition not in (
-        "healthy_empty", "material_event", "broken_feed", "unknown_coverage"
+        "healthy_empty",
+        "material_event",
+        "broken_feed",
+        "unknown_coverage",
     ):
         raise ValueError("UNKNOWN_FEED_CONDITION")
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("INDETERMINATE_TIMEZONE: scheduler now lacks an offset")
     now_utc = now.astimezone(UTC)
     for label, instant in (
-        ("routine", last_routine_at), ("adaptation", last_adaptation_at),
+        ("routine", last_routine_at),
+        ("adaptation", last_adaptation_at),
         ("event", last_event_review_at),
     ):
         if instant is not None:
@@ -217,29 +219,35 @@ def evaluate_review_schedule(
                     event.is_material,
                 )
             )
-    identity = content_hash({
-        "now": now_utc,
-        "routine": last_routine_at.astimezone(UTC) if last_routine_at else None,
-        "adaptation": (
-            last_adaptation_at.astimezone(UTC) if last_adaptation_at else None
-        ),
-        "event": last_event_review_at.astimezone(UTC) if last_event_review_at else None,
-        "events": sorted(causal_event_identity),
-        "feed_condition": feed_condition,
-        "policy": (
-            str(active_policy.routine_interval),
-            str(active_policy.adaptation_interval),
-            str(active_policy.event_cooldown),
-            str(active_policy.decision_ttl),
-            active_policy.default_event_policy,
-        ),
-        "calendar": (
-            current_calendar.calendar_id,
-            current_calendar.revision,
-            current_calendar.effective_cutoff,
-            current_calendar.content_hash,
-        ) if current_calendar else None,
-    })
+    identity = content_hash(
+        {
+            "now": now_utc,
+            "routine": last_routine_at.astimezone(UTC) if last_routine_at else None,
+            "adaptation": (
+                last_adaptation_at.astimezone(UTC) if last_adaptation_at else None
+            ),
+            "event": last_event_review_at.astimezone(UTC)
+            if last_event_review_at
+            else None,
+            "events": sorted(causal_event_identity),
+            "feed_condition": feed_condition,
+            "policy": (
+                str(active_policy.routine_interval),
+                str(active_policy.adaptation_interval),
+                str(active_policy.event_cooldown),
+                str(active_policy.decision_ttl),
+                active_policy.default_event_policy,
+            ),
+            "calendar": (
+                current_calendar.calendar_id,
+                current_calendar.revision,
+                current_calendar.effective_cutoff,
+                current_calendar.content_hash,
+            )
+            if current_calendar
+            else None,
+        }
+    )
     actual_trigger_id = trigger_id or str(uuid5(NAMESPACE_URL, identity))
     raw_dict: dict[str, Any]
 
@@ -432,7 +440,8 @@ def evaluate_review_schedule(
             "decision_cutoff": now_utc,
             "action_policy": active_policy.default_event_policy,
             "event_ref": ArtifactReference(
-                id="event:" + content_hash(
+                id="event:"
+                + content_hash(
                     {
                         "source_id": latest_event.source_id,
                         "event_id": latest_event.event_id,
@@ -530,13 +539,9 @@ def validate_defensive_policy(
             return False, "UNKNOWN_CURRENT_POSITION: malformed current security"
         try:
             weight = Decimal(text)
-        except (InvalidOperation, TypeError):
+        except InvalidOperation, TypeError:
             return False, "UNKNOWN_CURRENT_POSITION: invalid current weight"
-        if (
-            not weight.is_finite()
-            or weight < Decimal("0")
-            or weight > Decimal("1")
-        ):
+        if not weight.is_finite() or weight < Decimal("0") or weight > Decimal("1"):
             return False, "UNKNOWN_CURRENT_POSITION: invalid current weight"
         current[security] = weight
     if sum(current.values(), Decimal("0")) > Decimal("1"):
@@ -547,7 +552,7 @@ def validate_defensive_policy(
     for supplied in proposed_targets:
         try:
             target = TargetWeight.model_validate(supplied.model_dump(mode="python"))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return False, "DEFENSIVE_POLICY_VIOLATION: invalid target"
         security = target.security_id
         if security in seen:

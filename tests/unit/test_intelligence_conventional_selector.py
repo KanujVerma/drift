@@ -370,9 +370,7 @@ def test_r_invalid_objective_never_selects_a_candidate(
             resolved_inputs=sample_bindings,
             candidate_pool=[fixture_data["raw_choice"]],
             objective_fn=lambda _c: bad,
-            method_ref=ArtifactReference(
-                id="method:R", version="v1", sha256="e" * 64
-            ),
+            method_ref=ArtifactReference(id="method:R", version="v1", sha256="e" * 64),
             validation_policy=ArtifactReference(
                 id="policy:fixed", version="v1", sha256="f" * 64
             ),
@@ -416,7 +414,6 @@ def test_conventional_pool_rejects_semantically_duplicate_optional_fields(
     events = recorder.get_attempt_events(result.attempt_id)
     assert len(events) == 2
     assert "DUPLICATE_CANDIDATE_POOL_MEMBER" in events[-1].reason_codes
-
 
 
 @pytest.mark.parametrize("invalid_param", [float("nan"), object()])
@@ -481,6 +478,8 @@ def test_noncanonical_pool_without_explicit_attempt_id_cannot_claim_replay_ident
             checked_at=datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
         )
     assert recorder.export_events() == []
+
+
 def test_r_rejects_entire_pool_if_any_member_invalid(
     sample_context: ResearchContext,
     sample_bindings: ResolvedDependencies,
@@ -546,12 +545,8 @@ def test_r_tie_breaks_on_actual_parameter_digest(
         raw["selection"]["parameters"] = {"choice_number": number}
         choices.append(raw)
 
-    method = ArtifactReference(
-        id="synthetic:method-R", version="v1", sha256="e" * 64
-    )
-    policy = ArtifactReference(
-        id="synthetic:policy", version="v1", sha256="f" * 64
-    )
+    method = ArtifactReference(id="synthetic:method-R", version="v1", sha256="e" * 64)
+    policy = ArtifactReference(id="synthetic:policy", version="v1", sha256="f" * 64)
     cutoff = datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC)
     observed: list[ResearchCandidate] = []
 
@@ -618,15 +613,9 @@ def test_r_attempts_bind_policy_request_and_context_profile(
 ) -> None:
     """Different invocations cannot alias one started/terminal/cost identity."""
     at = datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC)
-    method = ArtifactReference(
-        id="synthetic:method-R", version="v1", sha256="e" * 64
-    )
-    policy_a = ArtifactReference(
-        id="synthetic:policy-A", version="v1", sha256="a" * 64
-    )
-    policy_b = ArtifactReference(
-        id="synthetic:policy-B", version="v1", sha256="b" * 64
-    )
+    method = ArtifactReference(id="synthetic:method-R", version="v1", sha256="e" * 64)
+    policy_a = ArtifactReference(id="synthetic:policy-A", version="v1", sha256="a" * 64)
+    policy_b = ArtifactReference(id="synthetic:policy-B", version="v1", sha256="b" * 64)
     store = ResearchReceiptStore()
 
     def run(request: str, policy: ArtifactReference) -> str:
@@ -666,6 +655,8 @@ def test_r_attempts_bind_policy_request_and_context_profile(
     # Idempotent identical replay does not mint a new cost or attempt chain.
     assert run("synthetic:request-A", policy_a) == ids[0]
     assert len(store.export_events()) == 12
+
+
 def test_r_freezes_pool_before_objective_side_effects(
     sample_context: ResearchContext,
     sample_bindings: ResolvedDependencies,
@@ -728,6 +719,8 @@ def test_r_freezes_pool_before_objective_side_effects(
     ResearchCandidate.model_validate(
         result.selected_candidate.model_dump(mode="python")
     )
+
+
 def test_r_naive_ttl_rejected_without_incurred_attempt(
     sample_context: ResearchContext,
     sample_bindings: ResolvedDependencies,
@@ -781,9 +774,7 @@ def test_ai_and_r_attempt_stores_do_not_leak_across_arms(
         resolved_inputs=sample_bindings,
         candidate_pool=[fixture_data["raw_choice"]],
         objective_fn=lambda _candidate: Decimal("1"),
-        method_ref=ArtifactReference(
-            id="synthetic:R", version="v1", sha256="e" * 64
-        ),
+        method_ref=ArtifactReference(id="synthetic:R", version="v1", sha256="e" * 64),
         validation_policy=ArtifactReference(
             id="synthetic:policy", version="v1", sha256="f" * 64
         ),
@@ -808,6 +799,7 @@ def test_r_opaque_pool_refuses_before_deepcopy_side_effects(
     fixture_data: dict[str, Any],
 ) -> None:
     """Invalid opaque input cannot execute custom deepcopy code."""
+
     class DangerousInput:
         touched = False
 

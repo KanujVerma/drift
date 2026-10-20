@@ -994,7 +994,9 @@ def test_m1e_additions_are_allowlisted_inert_and_leave_m1d_pins_unchanged() -> N
             violations = _bridge_capability_violations(
                 source, relative, INTELLIGENCE_CAPABILITY_ALLOWLIST
             )
-            assert not violations, "intelligence capability allowlist: " + "; ".join(violations)
+            assert not violations, "intelligence capability allowlist: " + "; ".join(
+                violations
+            )
             # The positive capability guard applies to these exact K1-K5
             # paths. Do not apply M1e's unrelated definition-name ban:
             # ordinary intelligence domain types may name a portfolio.

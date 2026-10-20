@@ -267,20 +267,22 @@ def test_same_source_revision_conflicting_bytes_rejected(
     sample_scope: Scope, sample_refs: dict[str, ArtifactReference]
 ) -> None:
     cutoff = datetime(2024, 1, 2, 10, 0, tzinfo=UTC)
+
     def source(digest: str) -> CandidateInput:
         return CandidateInput(
-            input_ref=ArtifactReference(
-                id="source:one", version="v1", sha256=digest
-            ),
+            input_ref=ArtifactReference(id="source:one", version="v1", sha256=digest),
             role="close",
             available_at=cutoff - timedelta(seconds=1),
             availability_basis_ref=ArtifactReference(
                 id="basis:one", version="v1", sha256="b" * 64
             ),
         )
+
     with pytest.raises(ValueError, match="INPUT_REVISION_CONFLICT"):
         _context_with_sources(
-            sample_scope, sample_refs, [source("a" * 64), source("c" * 64)],
+            sample_scope,
+            sample_refs,
+            [source("a" * 64), source("c" * 64)],
             cutoff=cutoff,
         )
 
@@ -295,7 +297,10 @@ def test_unknown_timing_authority_is_not_implicitly_utc(
         )
     with pytest.raises(ValueError, match="CLOCK_AUTHORITY_REQUIRED"):
         _context_with_sources(
-            sample_scope, sample_refs, [], cutoff=aware,
+            sample_scope,
+            sample_refs,
+            [],
+            cutoff=aware,
             source_grade="exploratory",
         )
 
@@ -337,12 +342,26 @@ def test_generated_context_id_binds_authoritative_budget_and_scope(
             ArtifactReference(id="synthetic:feedback", version="v1", sha256="e" * 64),
         ),
     )
-    assert len(
-        {original.context_id, changed_budget.context_id, changed_feedback.context_id}
-    ) == 3
-    assert len(
-        {original.record_hash, changed_budget.record_hash, changed_feedback.record_hash}
-    ) == 3
+    assert (
+        len(
+            {
+                original.context_id,
+                changed_budget.context_id,
+                changed_feedback.context_id,
+            }
+        )
+        == 3
+    )
+    assert (
+        len(
+            {
+                original.record_hash,
+                changed_budget.record_hash,
+                changed_feedback.record_hash,
+            }
+        )
+        == 3
+    )
 
 
 def _context_with_feedback(
@@ -372,9 +391,7 @@ def test_forged_frozen_context_inputs_are_reparsed_before_aggregation(
     """model_copy may bypass a ref validator but never K4 readback."""
     cutoff = datetime(2024, 1, 2, 10, tzinfo=UTC)
     original = CandidateInput(
-        input_ref=ArtifactReference(
-            id="synthetic:news", version="v1", sha256="a" * 64
-        ),
+        input_ref=ArtifactReference(id="synthetic:news", version="v1", sha256="a" * 64),
         role="news",
         available_at=cutoff - timedelta(seconds=1),
         availability_basis_ref=ArtifactReference(
@@ -396,12 +413,8 @@ def test_feedback_refs_refuse_forgery_sealed_access_and_revision_conflicts(
     sample_scope: Scope, sample_refs: dict[str, ArtifactReference]
 ) -> None:
     """Bare refs do not certify feedback, but obvious invalid proof is refused."""
-    valid = ArtifactReference(
-        id="synthetic:feedback", version="v1", sha256="a" * 64
-    )
-    altered = ArtifactReference(
-        id=valid.id, version=valid.version, sha256="b" * 64
-    )
+    valid = ArtifactReference(id="synthetic:feedback", version="v1", sha256="a" * 64)
+    altered = ArtifactReference(id=valid.id, version=valid.version, sha256="b" * 64)
     corrupted = valid.model_copy(update={"sha256": "not-a-sha256"})
     sealed = ArtifactReference(
         id="HOLDOUT:sealed-feedback", version="v1", sha256="c" * 64
@@ -419,12 +432,8 @@ def test_repeated_or_reordered_identical_feedback_revisions_are_idempotent(
     sample_scope: Scope, sample_refs: dict[str, ArtifactReference]
 ) -> None:
     """One exact feedback ref cannot manufacture extra learned evidence."""
-    first = ArtifactReference(
-        id="synthetic:feedback:A", version="v1", sha256="a" * 64
-    )
-    second = ArtifactReference(
-        id="synthetic:feedback:B", version="v1", sha256="b" * 64
-    )
+    first = ArtifactReference(id="synthetic:feedback:A", version="v1", sha256="a" * 64)
+    second = ArtifactReference(id="synthetic:feedback:B", version="v1", sha256="b" * 64)
     one = _context_with_feedback(sample_scope, sample_refs, (first, second))
     replay = _context_with_feedback(
         sample_scope, sample_refs, (second, first, first, second)
