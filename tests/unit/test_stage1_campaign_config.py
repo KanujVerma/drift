@@ -3343,7 +3343,9 @@ def test_e1_unmodified_golden_controls_still_validate() -> None:
         )
         with pytest.raises(ValueError, match="expected_run_ids cannot be empty"):
             verifier(campaign=campaign, arms=arms, bindings=[], expected_run_ids=[])
-        shared = replace(bindings[1], portfolio_account_id=bindings[0].portfolio_account_id)
+        shared = replace(
+            bindings[1], portfolio_account_id=bindings[0].portfolio_account_id
+        )
         with pytest.raises(ValueError, match="reused across bindings"):
             verifier(
                 campaign=campaign,
