@@ -279,8 +279,7 @@ def test_level0_positive_then_remove_submitted_b_snapshot() -> None:
     assert b.scope.run_account_binding.portfolio_account_id == "SYNTH-ACC-B-001"
     assert r.scope.run_account_binding.portfolio_account_id == "SYNTH-ACC-R-001"
     assert (
-        b.scope.complete_manifest_fingerprint
-        == r.scope.complete_manifest_fingerprint
+        b.scope.complete_manifest_fingerprint == r.scope.complete_manifest_fingerprint
     )
     declarations = _decls(runs=runs, checkpoint_ids=("CKPT-001",))
     positive = _build(*fixture, declarations, snapshots=[b, r])
@@ -304,10 +303,8 @@ def test_level0_positive_then_remove_submitted_b_snapshot() -> None:
     assert removed.slots[1].provenance_snapshot is not None
     assert removed.pairs[0].pair_state == "TEST_MISSING"
     assert removed.audit_fingerprint != positive.audit_fingerprint
-    assert (
-        removed.checkpoint_manifest_fingerprint
-        == positive.checkpoint_manifest_fingerprint
-    )
+    expected_checkpoint_hash = positive.checkpoint_manifest_fingerprint
+    assert removed.checkpoint_manifest_fingerprint == expected_checkpoint_hash
     assert positive.slots[0].provenance_snapshot is not None
     assert positive.pairs[0].pair_state == "BOTH_SUBMITTED"
     assert _verify(removed, fixture)
@@ -360,6 +357,7 @@ def test_pure_mock_br_oracles_include_unknown_costs_and_losing_ai() -> None:
         b_returns=(b_return,),
         r_returns=(r_return,),
     )
+    assert isinstance(diff, tuple)
     assert len(diff) == 1
     assert (diff[0].state, diff[0].value) == ("KNOWN", Decimal("0.006"))
 
