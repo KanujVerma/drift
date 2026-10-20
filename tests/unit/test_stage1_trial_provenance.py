@@ -1519,5 +1519,5 @@ def test_provenance_refuses_invalid_events_hidden_by_false_empty_len() -> None:
     bad_item: Any = "not-a-trial-event"
     supplied = _MisleadingLengthEvents([bad_item], reported_size=0)
     assert len(supplied) == 0
-    with pytest.raises(ValueError, match="events\[0\] must be a Stage1TrialEvent"):
+    with pytest.raises(ValueError, match=r"events\[0\] must be a Stage1TrialEvent"):
         _snapshot_from_caller_events(supplied)
