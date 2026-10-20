@@ -6,6 +6,7 @@ import ast
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -20,6 +21,7 @@ from drift.news_triage import (
     screen_event,
     screen_feed_coverage,
 )
+from drift.news_triage.screen import CoverageState, Outcome
 
 T = datetime(2026, 1, 30, 21, tzinfo=UTC)
 
@@ -72,10 +74,11 @@ def previous(
     pol: ScreeningPolicy | None = None,
     *,
     context_id: str = "arm:B",
-    outcome: str = "CANDIDATE_ALERT",
+    outcome: Outcome = "CANDIDATE_ALERT",
     available_at: datetime = T - timedelta(seconds=1),
 ) -> PriorScreening:
     selected = pol or policy()
+    assert observation.quality_ref is not None
     return PriorScreening(
         event_key=observation.key,
         policy_id=selected.policy_id,
@@ -140,6 +143,7 @@ def test_case04_new_version_preserves_revision_and_realerts() -> None:
     answer = run(corrected, prior=(previous(original),))
     assert answer.outcome == "CANDIDATE_ALERT"
     assert answer.revision_of == original.key
+    assert answer.event_key is not None
     assert answer.event_key.version == "v2"
 
 
@@ -250,7 +254,7 @@ def test_case12_changed_policy_rechecks_identity_and_category() -> None:
 
 @pytest.mark.parametrize("old_outcome", ["ABSTAIN", "UNAVAILABLE"])
 def test_case13_previous_inconclusive_result_is_not_proven_duplicate(
-    old_outcome: str,
+    old_outcome: Outcome,
 ) -> None:
     source = event()
     earlier = previous(source, outcome=old_outcome)
@@ -281,7 +285,8 @@ def test_available_event_still_usable_during_partial_or_broken_broader_feed() ->
 def test_invalid_source_quality_refuses_or_abstains() -> None:
     assert run(replace(event(), quality_state="missing")).outcome == "UNAVAILABLE"
     assert run(replace(event(), quality_state="conflicting")).outcome == "ABSTAIN"
-    assert run(replace(event(), coverage_state="unknown-bogus")).outcome == "UNAVAILABLE"
+    bad_coverage = cast(CoverageState, "unknown-bogus")
+    assert run(replace(event(), coverage_state=bad_coverage)).outcome == "UNAVAILABLE"
 
 
 def test_malformed_and_missing_policy_never_auto_select_finance_categories() -> None:
