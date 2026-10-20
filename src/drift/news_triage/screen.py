@@ -19,7 +19,9 @@ from drift.serialization.canonical import content_hash
 Outcome = Literal["CANDIDATE_ALERT", "NO_ALERT", "ABSTAIN", "UNAVAILABLE"]
 QualityState = Literal["usable", "missing", "conflicting"]
 CoverageState = Literal["covered", "partial", "failed", "unknown"]
-FeedState = Literal["covered_empty", "covered_with_events", "partial", "failed", "unknown"]
+FeedState = Literal[
+    "covered_empty", "covered_with_events", "partial", "failed", "unknown"
+]
 FeedDisposition = Literal["EMPTY", "EVENTS_PRESENT", "INCOMPLETE", "UNAVAILABLE"]
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -143,17 +145,15 @@ def _digest(value: object) -> bool:
 
 
 def _reference(value: object) -> TypeGuard[EvidenceRef]:
-    return (
-        type(value) is EvidenceRef
-        and _token(value.ref_id)
-        and _digest(value.sha256)
-    )
+    return type(value) is EvidenceRef and _token(value.ref_id) and _digest(value.sha256)
 
 
 def _utc(value: object) -> str | None:
     if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
         return None
-    return value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    return (
+        value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    )
 
 
 def _key(value: object) -> TypeGuard[EventKey]:
@@ -207,19 +207,17 @@ def _valid_policy(policy: object) -> TypeGuard[ScreeningPolicy]:
         return False
     if type(policy.excluded_categories) is not frozenset:
         return False
-    if any(not _token(c) for c in policy.allowed_categories | policy.excluded_categories):
+    if any(
+        not _token(c) for c in policy.allowed_categories | policy.excluded_categories
+    ):
         return False
     if policy.allowed_categories & policy.excluded_categories:
         return False
-    return (
-        _digest(policy.policy_sha256)
-        and policy.policy_sha256
-        == policy_digest(
-            policy.policy_id,
-            policy.version,
-            policy.allowed_categories,
-            policy.excluded_categories,
-        )
+    return _digest(policy.policy_sha256) and policy.policy_sha256 == policy_digest(
+        policy.policy_id,
+        policy.version,
+        policy.allowed_categories,
+        policy.excluded_categories,
     )
 
 
@@ -324,42 +322,122 @@ def screen_event(
     and self-consistent SHA do not prove those external claims.
     """
     if _utc(decision_cutoff) is None or not _token(context_id):
-        return _result("UNAVAILABLE", "INVALID_DECISION_CONTEXT", evidence, policy, context_id, decision_cutoff)
+        return _result(
+            "UNAVAILABLE",
+            "INVALID_DECISION_CONTEXT",
+            evidence,
+            policy,
+            context_id,
+            decision_cutoff,
+        )
     if type(evidence) is not EventEvidence or not _key(evidence.key):
-        return _result("UNAVAILABLE", "MALFORMED_SOURCE_IDENTITY", None, policy, context_id, decision_cutoff)
+        return _result(
+            "UNAVAILABLE",
+            "MALFORMED_SOURCE_IDENTITY",
+            None,
+            policy,
+            context_id,
+            decision_cutoff,
+        )
     if (
         not _reference(evidence.availability_ref)
         or not _reference(evidence.content_ref)
         or not _reference(evidence.quality_ref)
         or evidence.content_ref.sha256 != evidence.key.content_sha256
     ):
-        return _result("UNAVAILABLE", "MISSING_OR_CONTRADICTORY_SOURCE_PROOF", evidence, policy, context_id, decision_cutoff)
+        return _result(
+            "UNAVAILABLE",
+            "MISSING_OR_CONTRADICTORY_SOURCE_PROOF",
+            evidence,
+            policy,
+            context_id,
+            decision_cutoff,
+        )
     if evidence.quality_state == "conflicting":
-        return _result("ABSTAIN", "CONFLICTING_SOURCE_EVIDENCE", evidence, policy, context_id, decision_cutoff)
+        return _result(
+            "ABSTAIN",
+            "CONFLICTING_SOURCE_EVIDENCE",
+            evidence,
+            policy,
+            context_id,
+            decision_cutoff,
+        )
     if evidence.quality_state != "usable" or evidence.coverage_state not in (
-        "covered", "partial", "failed", "unknown"
+        "covered",
+        "partial",
+        "failed",
+        "unknown",
     ):
-        return _result("UNAVAILABLE", "SOURCE_QUALITY_OR_STATE_UNAVAILABLE", evidence, policy, context_id, decision_cutoff)
+        return _result(
+            "UNAVAILABLE",
+            "SOURCE_QUALITY_OR_STATE_UNAVAILABLE",
+            evidence,
+            policy,
+            context_id,
+            decision_cutoff,
+        )
     receipt = _utc(evidence.received_at)
     normalized = _utc(evidence.normalized_at)
     available = _utc(evidence.available_at)
     if receipt is None or normalized is None or available is None:
-        return _result("UNAVAILABLE", "MISSING_VERIFIED_EVENT_CLOCK", evidence, policy, context_id, decision_cutoff)
+        return _result(
+            "UNAVAILABLE",
+            "MISSING_VERIFIED_EVENT_CLOCK",
+            evidence,
+            policy,
+            context_id,
+            decision_cutoff,
+        )
     if evidence.published_at is not None and _utc(evidence.published_at) is None:
-        return _result("UNAVAILABLE", "INVALID_PUBLICATION_CLOCK", evidence, policy, context_id, decision_cutoff)
+        return _result(
+            "UNAVAILABLE",
+            "INVALID_PUBLICATION_CLOCK",
+            evidence,
+            policy,
+            context_id,
+            decision_cutoff,
+        )
     if available < receipt or available < normalized or normalized < receipt:
-        return _result("UNAVAILABLE", "INVALID_EVENT_CLOCK_ORDER", evidence, policy, context_id, decision_cutoff)
+        return _result(
+            "UNAVAILABLE",
+            "INVALID_EVENT_CLOCK_ORDER",
+            evidence,
+            policy,
+            context_id,
+            decision_cutoff,
+        )
     if available > _utc(decision_cutoff):
-        return _result("UNAVAILABLE", "EVENT_AFTER_DECISION_CUTOFF", evidence, policy, context_id, decision_cutoff)
+        return _result(
+            "UNAVAILABLE",
+            "EVENT_AFTER_DECISION_CUTOFF",
+            evidence,
+            policy,
+            context_id,
+            decision_cutoff,
+        )
     if evidence.revision_of is not None and (
         not _key(evidence.revision_of)
         or evidence.revision_of.source_id != evidence.key.source_id
         or evidence.revision_of.event_id != evidence.key.event_id
         or evidence.revision_of.version == evidence.key.version
     ):
-        return _result("ABSTAIN", "CONFLICTING_REVISION_RELATION", evidence, policy, context_id, decision_cutoff)
+        return _result(
+            "ABSTAIN",
+            "CONFLICTING_REVISION_RELATION",
+            evidence,
+            policy,
+            context_id,
+            decision_cutoff,
+        )
     if not _valid_policy(policy):
-        return _result("ABSTAIN", "MISSING_OR_INVALID_SCREENING_POLICY", evidence, None, context_id, decision_cutoff)
+        return _result(
+            "ABSTAIN",
+            "MISSING_OR_INVALID_SCREENING_POLICY",
+            evidence,
+            None,
+            context_id,
+            decision_cutoff,
+        )
 
     duplicate_ref: EvidenceRef | None = None
     for earlier in prior:
@@ -373,11 +451,17 @@ def screen_event(
             or not _digest(earlier.policy_sha256)
             or not _digest(earlier.quality_evidence_sha256)
             or _utc(earlier.evidence_available_at) is None
-            or earlier.outcome not in (
-                "CANDIDATE_ALERT", "NO_ALERT", "ABSTAIN", "UNAVAILABLE"
-            )
+            or earlier.outcome
+            not in ("CANDIDATE_ALERT", "NO_ALERT", "ABSTAIN", "UNAVAILABLE")
         ):
-            return _result("ABSTAIN", "MALFORMED_PRIOR_SCREENING", evidence, policy, context_id, decision_cutoff)
+            return _result(
+                "ABSTAIN",
+                "MALFORMED_PRIOR_SCREENING",
+                evidence,
+                policy,
+                context_id,
+                decision_cutoff,
+            )
         if _utc(earlier.evidence_available_at) > _utc(decision_cutoff):
             # No future screening record may alter this earlier decision.
             continue
@@ -386,8 +470,18 @@ def screen_event(
             and earlier.event_key.event_id == evidence.key.event_id
             and earlier.event_key.version == evidence.key.version
         )
-        if same_event and earlier.event_key.content_sha256 != evidence.key.content_sha256:
-            return _result("ABSTAIN", "CONFLICTING_SOURCE_VERSION", evidence, policy, context_id, decision_cutoff)
+        if (
+            same_event
+            and earlier.event_key.content_sha256 != evidence.key.content_sha256
+        ):
+            return _result(
+                "ABSTAIN",
+                "CONFLICTING_SOURCE_VERSION",
+                evidence,
+                policy,
+                context_id,
+                decision_cutoff,
+            )
         if (
             same_event
             and earlier.event_key.content_sha256 == evidence.key.content_sha256
@@ -399,18 +493,55 @@ def screen_event(
             and earlier.outcome in ("CANDIDATE_ALERT", "NO_ALERT")
         ):
             if duplicate_ref is None or (
-                earlier.result_ref.ref_id, earlier.result_ref.sha256
+                earlier.result_ref.ref_id,
+                earlier.result_ref.sha256,
             ) < (duplicate_ref.ref_id, duplicate_ref.sha256):
                 duplicate_ref = earlier.result_ref
     if duplicate_ref is not None:
-        return _result("NO_ALERT", "PROVEN_CONTEXT_SCOPED_DUPLICATE", evidence, policy, context_id, decision_cutoff, duplicate_ref)
+        return _result(
+            "NO_ALERT",
+            "PROVEN_CONTEXT_SCOPED_DUPLICATE",
+            evidence,
+            policy,
+            context_id,
+            decision_cutoff,
+            duplicate_ref,
+        )
     if not _token(evidence.category):
-        return _result("ABSTAIN", "UNKNOWN_EVENT_CATEGORY", evidence, policy, context_id, decision_cutoff)
+        return _result(
+            "ABSTAIN",
+            "UNKNOWN_EVENT_CATEGORY",
+            evidence,
+            policy,
+            context_id,
+            decision_cutoff,
+        )
     if evidence.category in policy.allowed_categories:
-        return _result("CANDIDATE_ALERT", "EXPLICIT_ALLOWED_CATEGORY", evidence, policy, context_id, decision_cutoff)
+        return _result(
+            "CANDIDATE_ALERT",
+            "EXPLICIT_ALLOWED_CATEGORY",
+            evidence,
+            policy,
+            context_id,
+            decision_cutoff,
+        )
     if evidence.category in policy.excluded_categories:
-        return _result("NO_ALERT", "EXPLICIT_EXCLUDED_CATEGORY", evidence, policy, context_id, decision_cutoff)
-    return _result("ABSTAIN", "UNSPECIFIED_POLICY_CATEGORY", evidence, policy, context_id, decision_cutoff)
+        return _result(
+            "NO_ALERT",
+            "EXPLICIT_EXCLUDED_CATEGORY",
+            evidence,
+            policy,
+            context_id,
+            decision_cutoff,
+        )
+    return _result(
+        "ABSTAIN",
+        "UNSPECIFIED_POLICY_CATEGORY",
+        evidence,
+        policy,
+        context_id,
+        decision_cutoff,
+    )
 
 
 def screen_feed_coverage(
@@ -430,9 +561,8 @@ def screen_feed_coverage(
         and coverage.event_count >= 0
         and coverage.start_at < coverage.end_at
         and coverage.observed_at <= coverage.available_at <= decision_cutoff
-        and coverage.state in (
-            "covered_empty", "covered_with_events", "partial", "failed", "unknown"
-        )
+        and coverage.state
+        in ("covered_empty", "covered_with_events", "partial", "failed", "unknown")
     )
     if not good:
         status: FeedDisposition = "UNAVAILABLE"
@@ -449,8 +579,16 @@ def screen_feed_coverage(
     else:
         status = "UNAVAILABLE"
         reason = "SOURCE_COVERAGE_NOT_CONFIRMED"
-    source_id = coverage.source_id if type(coverage) is FeedCoverage and _token(coverage.source_id) else None
-    scope_ref = coverage.scope_ref if type(coverage) is FeedCoverage and _reference(coverage.scope_ref) else None
+    source_id = (
+        coverage.source_id
+        if type(coverage) is FeedCoverage and _token(coverage.source_id)
+        else None
+    )
+    scope_ref = (
+        coverage.scope_ref
+        if type(coverage) is FeedCoverage and _reference(coverage.scope_ref)
+        else None
+    )
     hash_value = content_hash(
         {
             "profile": "drift-news-triage-feed/1-synthetic",
@@ -458,11 +596,19 @@ def screen_feed_coverage(
             "reason": reason,
             "source_id": source_id,
             "scope_ref": _ref_dict(scope_ref),
-            "start_at": _utc(coverage.start_at) if type(coverage) is FeedCoverage else None,
+            "start_at": _utc(coverage.start_at)
+            if type(coverage) is FeedCoverage
+            else None,
             "end_at": _utc(coverage.end_at) if type(coverage) is FeedCoverage else None,
-            "observed_at": _utc(coverage.observed_at) if type(coverage) is FeedCoverage else None,
-            "available_at": _utc(coverage.available_at) if type(coverage) is FeedCoverage else None,
-            "count": coverage.event_count if type(coverage) is FeedCoverage and type(coverage.event_count) is int else None,
+            "observed_at": _utc(coverage.observed_at)
+            if type(coverage) is FeedCoverage
+            else None,
+            "available_at": _utc(coverage.available_at)
+            if type(coverage) is FeedCoverage
+            else None,
+            "count": coverage.event_count
+            if type(coverage) is FeedCoverage and type(coverage.event_count) is int
+            else None,
             "state": (
                 coverage.state
                 if type(coverage) is FeedCoverage and type(coverage.state) is str

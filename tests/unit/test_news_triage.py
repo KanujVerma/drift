@@ -137,9 +137,7 @@ def test_case03_same_full_identity_is_suppressed_once() -> None:
 
 def test_case04_new_version_preserves_revision_and_realerts() -> None:
     original = event()
-    corrected = replace(
-        event(version="v2", digest="d"), revision_of=original.key
-    )
+    corrected = replace(event(version="v2", digest="d"), revision_of=original.key)
     answer = run(corrected, prior=(previous(original),))
     assert answer.outcome == "CANDIDATE_ALERT"
     assert answer.revision_of == original.key
@@ -180,9 +178,12 @@ def test_case08_malformed_source_fields_refuse_without_external_repair() -> None
         replace(event(), content_ref=ref("wrong-content", "f")),
     ):
         assert run(malformed).outcome == "UNAVAILABLE"
-    assert screen_event(
-        evidence=None, policy=policy(), context_id="arm:B", decision_cutoff=T
-    ).outcome == "UNAVAILABLE"
+    assert (
+        screen_event(
+            evidence=None, policy=policy(), context_id="arm:B", decision_cutoff=T
+        ).outcome
+        == "UNAVAILABLE"
+    )
 
 
 def test_case09_hostile_article_text_is_inert() -> None:
@@ -209,22 +210,37 @@ def test_case10_known_empty_feed_is_not_a_fabricated_alert() -> None:
         event_count=0,
     )
     assert screen_feed_coverage(coverage=base, decision_cutoff=T).disposition == "EMPTY"
-    assert screen_feed_coverage(
-        coverage=replace(base, state="failed"), decision_cutoff=T
-    ).disposition == "UNAVAILABLE"
-    assert screen_feed_coverage(
-        coverage=replace(base, state="unknown"), decision_cutoff=T
-    ).disposition == "UNAVAILABLE"
-    assert screen_feed_coverage(
-        coverage=replace(base, state="partial"), decision_cutoff=T
-    ).disposition == "INCOMPLETE"
-    assert screen_feed_coverage(
-        coverage=replace(base, state="covered_with_events", event_count=2),
-        decision_cutoff=T,
-    ).disposition == "EVENTS_PRESENT"
-    assert screen_feed_coverage(
-        coverage=replace(base, event_count=1), decision_cutoff=T
-    ).disposition == "UNAVAILABLE"
+    assert (
+        screen_feed_coverage(
+            coverage=replace(base, state="failed"), decision_cutoff=T
+        ).disposition
+        == "UNAVAILABLE"
+    )
+    assert (
+        screen_feed_coverage(
+            coverage=replace(base, state="unknown"), decision_cutoff=T
+        ).disposition
+        == "UNAVAILABLE"
+    )
+    assert (
+        screen_feed_coverage(
+            coverage=replace(base, state="partial"), decision_cutoff=T
+        ).disposition
+        == "INCOMPLETE"
+    )
+    assert (
+        screen_feed_coverage(
+            coverage=replace(base, state="covered_with_events", event_count=2),
+            decision_cutoff=T,
+        ).disposition
+        == "EVENTS_PRESENT"
+    )
+    assert (
+        screen_feed_coverage(
+            coverage=replace(base, event_count=1), decision_cutoff=T
+        ).disposition
+        == "UNAVAILABLE"
+    )
 
 
 def test_case11_future_revision_and_late_normalization_never_rewrite_past() -> None:
@@ -238,7 +254,12 @@ def test_case11_future_revision_and_late_normalization_never_rewrite_past() -> N
     )
     assert run(later).outcome == "UNAVAILABLE"
     original = run(early)
-    assert run(early, prior=(previous(later, available_at=T + timedelta(seconds=1)),)).record_hash == original.record_hash
+    assert (
+        run(
+            early, prior=(previous(later, available_at=T + timedelta(seconds=1)),)
+        ).record_hash
+        == original.record_hash
+    )
 
 
 def test_case12_changed_policy_rechecks_identity_and_category() -> None:
@@ -266,7 +287,12 @@ def test_case14_independent_arms_and_future_prior_records_do_not_leak() -> None:
     earlier = previous(source, context_id="arm:B")
     other_arm = run(source, context="arm:R", prior=(earlier,))
     assert other_arm.outcome == "CANDIDATE_ALERT"
-    assert run(source, prior=(previous(source, available_at=T + timedelta(seconds=5)),)).record_hash == run(source).record_hash
+    assert (
+        run(
+            source, prior=(previous(source, available_at=T + timedelta(seconds=5)),)
+        ).record_hash
+        == run(source).record_hash
+    )
 
 
 def test_duplicate_scoped_to_compatible_source_quality_evidence() -> None:
@@ -291,18 +317,29 @@ def test_invalid_source_quality_refuses_or_abstains() -> None:
 
 def test_malformed_and_missing_policy_never_auto_select_finance_categories() -> None:
     source = event()
-    assert screen_event(
-        evidence=source, policy=None, context_id="arm:B", decision_cutoff=T
-    ).outcome == "ABSTAIN"
+    assert (
+        screen_event(
+            evidence=source, policy=None, context_id="arm:B", decision_cutoff=T
+        ).outcome
+        == "ABSTAIN"
+    )
     forged = replace(policy(), policy_sha256="f" * 64)
     assert run(source, forged).outcome == "ABSTAIN"
-    overlap = policy(allowed=frozenset({"EXAMPLE_ALLOWED"}), excluded=frozenset({"EXAMPLE_ALLOWED"}))
+    overlap = policy(
+        allowed=frozenset({"EXAMPLE_ALLOWED"}), excluded=frozenset({"EXAMPLE_ALLOWED"})
+    )
     assert run(source, overlap).outcome == "ABSTAIN"
 
 
 def test_impossible_clock_order_and_naive_cutoff_refuse() -> None:
-    assert run(replace(event(), available_at=T - timedelta(seconds=4))).outcome == "UNAVAILABLE"
-    assert run(replace(event(), normalized_at=T - timedelta(seconds=4))).outcome == "UNAVAILABLE"
+    assert (
+        run(replace(event(), available_at=T - timedelta(seconds=4))).outcome
+        == "UNAVAILABLE"
+    )
+    assert (
+        run(replace(event(), normalized_at=T - timedelta(seconds=4))).outcome
+        == "UNAVAILABLE"
+    )
     assert run(cutoff=T.replace(tzinfo=None)).outcome == "UNAVAILABLE"
     assert run(context=" ").outcome == "UNAVAILABLE"
 
@@ -349,22 +386,31 @@ def test_feed_coverage_requires_complete_scoped_and_causal_evidence() -> None:
         state="covered_empty",
         event_count=0,
     )
-    assert screen_feed_coverage(
-        coverage=replace(covered, available_at=T + timedelta(seconds=1)),
-        decision_cutoff=T,
-    ).disposition == "UNAVAILABLE"
-    assert screen_feed_coverage(
-        coverage=replace(covered, event_count=True),
-        decision_cutoff=T,
-    ).disposition == "UNAVAILABLE"
-    assert screen_feed_coverage(
-        coverage=None, decision_cutoff=T
-    ).disposition == "UNAVAILABLE"
+    assert (
+        screen_feed_coverage(
+            coverage=replace(covered, available_at=T + timedelta(seconds=1)),
+            decision_cutoff=T,
+        ).disposition
+        == "UNAVAILABLE"
+    )
+    assert (
+        screen_feed_coverage(
+            coverage=replace(covered, event_count=True),
+            decision_cutoff=T,
+        ).disposition
+        == "UNAVAILABLE"
+    )
+    assert (
+        screen_feed_coverage(coverage=None, decision_cutoff=T).disposition
+        == "UNAVAILABLE"
+    )
 
 
 def test_offline_capabilities_are_lexically_inert() -> None:
     """No import, call, network, filesystem write or broker-side effect in core."""
-    tree = ast.parse(Path("src/drift/news_triage/screen.py").read_text(encoding="utf-8"))
+    tree = ast.parse(
+        Path("src/drift/news_triage/screen.py").read_text(encoding="utf-8")
+    )
     imported = {
         alias.name.split(".")[0]
         for node in ast.walk(tree)
