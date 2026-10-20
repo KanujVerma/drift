@@ -103,17 +103,17 @@ Every task handoff from the architect agent to the implementer agent must be sel
 
 ## 3A. Owner-Directed Architect-First Workflow (2026-10-19)
 
-**Owner directive:** [Issue #458](https://github.com/KanujVerma/drift/issues/458) records Kanuj's standing instructions for Drift's architecture, Gemini handoffs and PR verification. This section makes the process available to a new agent without prior conversation history. It clarifies delivery responsibilities, but does not displace `AGENTS.md`, accepted ADRs, independent scientific review, producer ownership, GitHub branch protections or narrower issue-specific authorization.
+**Owner directive:** [Issue #458](https://github.com/KanujVerma/drift/issues/458) records Kanuj's standing instructions for Drift's architecture, direct ChatGPT implementation, optional Gemini/Antigravity fallback and PR verification. This section makes the process available to a new agent without prior conversation history. It clarifies delivery responsibilities, but does not displace `AGENTS.md`, accepted ADRs, independent scientific review, producer ownership, GitHub branch protections or narrower issue-specific authorization.
 
 ### A. Architect and owner resolve the design before coding
 
 1. **Kanuj and ChatGPT jointly choose architecture for Kanuj-owned surfaces.** The architect must inspect actual accepted code, tests, issue dependencies and contracts, identify genuine open questions, present concrete options with tradeoffs and recommend one, then obtain Kanuj's explicit issue-specific decision for material scientific design, methods and policy within Kanuj's workstream. Cross-owner producer APIs, algorithms, platform/risk, execution, source qualification or research internals require the relevant accountable producer (Krish or Matthew) to decide and record their own contract/ruling in the producer-owned GitHub issue; a Kanuj-owned issue cannot silently redefine another workstream's interface. Kanuj and the architect may propose consumer requirements and review compatibility, but cannot replace the producer's recorded authority. Ask only questions that materially affect correctness; ordinary engineering details are not owner decisions.
-2. **Architect owns the intellectual implementation plan within accepted and producer-authorized boundaries.** Select the algorithm, types, identifiers, function signatures, source-of-truth boundaries, data flow, refusal/error behavior, verification logic, and expected tests for the assigned Kanuj-owned implementation. For any interface owned by Krish or Matthew, bind to its accepted, producer-authorized revision and request a producer-owned ruling on unresolved modifications; do not dictate an unapproved cross-owner API in a Gemini prompt. If relevant evidence disproves an assumption, revise Kanuj-owned choices with Kanuj and escalate producer choices to their accountable owner rather than silently assuming the older plan is still correct.
+2. **Architect owns the intellectual implementation plan within accepted and producer-authorized boundaries.** Select the algorithm, types, identifiers, function signatures, source-of-truth boundaries, data flow, refusal/error behavior, verification logic, and expected tests for the assigned Kanuj-owned implementation. For any interface owned by Krish or Matthew, bind to its accepted, producer-authorized revision and request a producer-owned ruling on unresolved modifications; do not dictate an unapproved cross-owner API in direct code or a fallback implementation prompt. If relevant evidence disproves an assumption, revise Kanuj-owned choices with Kanuj and escalate producer choices to their accountable owner rather than silently assuming the older plan is still correct.
 3. **Reason:** The owner must understand and approve substantive tradeoffs. An implementer should not unknowingly choose the experiment's scientific or safety policy while writing code. A broad user goal does not itself authorize a product implementation.
 
 ### B. Record architecture and rationale in GitHub first
 
-Before writing an executable coding-agent prompt, record the authorized issue and approved decision evidence in GitHub, using the issue and the appropriate canonical architecture document rather than a parallel notes system. Include:
+Before direct implementation or an executable fallback coding-agent prompt, record the authorized issue and approved decision evidence in GitHub, using the issue and the appropriate canonical architecture document rather than a parallel notes system. Include:
 
 - Problem, purpose and relationship to the shortest path toward the next measured milestone.
 - Actual current code and accepted contract revisions, including the unmerged/deferred boundaries.
@@ -125,11 +125,13 @@ Before writing an executable coding-agent prompt, record the authorized issue an
 
 **Reason:** GitHub survives handoffs among ChatGPT, Gemini, Codex, Krish and Matthew. Conversation memory and prompt text are context, not durable authorization. Keep fast-changing PR/CI state in issue comments, not permanent architecture documents.
 
-### C. Gemini receives a fully specified executable implementation
+### C. Use direct ChatGPT implementation when possible; keep Gemini as a precise fallback
 
-Only after the owner and architect settle the design, give Gemini/Antigravity a self-contained prompt satisfying **all 15 requirements in Section 3**, with implementation detail rather than a discovery assignment. Include exact relative paths, imports, class and function signatures, key code blocks or patch hunks when known, types and units, deterministic ordering, branching/state transitions, fail-closed error semantics, IDs and hashes, exact test examples, regression protections, pinned interpreter/tools, Git writer claims and publication steps. The prompt can be long if that removes ambiguity.
+Once the owner and architect settle the design and the issue's actual runtime and writer gates are satisfied, **prefer ChatGPT/GPT-6 as the bounded implementation executor for Kanuj-owned paths when connected GitHub tooling can read, edit, commit and review the required files**. The actual executor and authenticated publisher must be disclosed, with one issue, one exclusive writer, one branch and an exact file write-set. Author concrete code and tests directly rather than automatically delegating the implementation to Gemini. Record exact source HEADs, verified behavior and failures in GitHub. Direct implementation does not authorize editing Krish/Matthew source or making a self-review count as independent acceptance.
 
-Explicitly tell Gemini:
+**Use Gemini/Antigravity as fallback** when specific required implementation or validation cannot be completed by ChatGPT, Codex or hosted GitHub Actions (for example an unavailable local environment, GUI-only dependency or reproduction outside the available runner). Describe the exact missing capability and why fallback is needed. For fallback implementation, give Gemini a self-contained executable prompt satisfying **all 15 requirements in Section 3**, with specific relative paths, imports, class and function signatures, known code/patch hunks, types/units, deterministic ordering, fail-closed error semantics, IDs/hashes, goldens, tests, interpreter and Git publication steps. A prompt may be long if it removes ambiguity. Avoid spawning a second writer on paths already claimed by an active ChatGPT implementation.
+
+When invoking a fallback Gemini/Antigravity executor, explicitly require:
 
 - Implement the agreed design directly. Do not redefine known architecture or ask the agent to "inspect and decide" a fix for which the architect already supplied the solution.
 - Verify current repository state against the pinned evidence before editing; update the architect if the preconditions have materially changed.
@@ -137,19 +139,19 @@ Explicitly tell Gemini:
 - **Challenge with evidence:** If source, accepted contracts or a reproducible test contradicts the plan, provide the exact conflicting paths/lines, fixture or failure, suggested correction and affected acceptance criteria. Stop only the affected architectural change; do not silently expand scope or rewrite accepted rules.
 - Report actual tests, changed paths, commit and hosted CI status, rather than repeating intended behavior as if implemented.
 
-**Reason:** Precise prompts minimize architectural drift, repeated investigation, wasted agent usage and unreviewable work. Evidence-based objections preserve the implementer's ability to catch genuine mistakes.
+**Reason:** Direct implementation avoids unnecessary agent handoffs. Fully specified fallback prompts minimize drift, repeated investigation and wasted usage, while preserving evidence-based objections that catch real mistakes. Neither execution mode bypasses source/CI/review gates.
 
 ### D. Review actual source and run Codex for Kanuj-owned implementation PRs
 
-For **Kanuj-owned implementation PRs**, after Gemini publishes an issue-bound PR, the architect must review its **actual current-head diff, code and tests**, not only the implementer's narrative. Inspect meaningful invariants, invalid-state refusal, producer boundaries, immutable replay, tests that would fail before the fix, and exact file scope. Krish-owned and Matthew-owned PRs follow their own issues and accountable owners' review policies; Codex is requested on those PRs only when that owner or the issue-specific accepted contract authorizes it. This section does not create a mandatory global review gate or give Kanuj write/review control over all producer PRs.
+For **Kanuj-owned implementation PRs**, after ChatGPT or an authorized fallback executor publishes an issue-bound PR, the architect must review its **actual current-head diff, code and tests**, not only its own or a fallback implementer's narrative. Inspect meaningful invariants, invalid-state refusal, producer boundaries, immutable replay, tests that would fail before the fix, and exact file scope. Krish-owned and Matthew-owned PRs follow their own issues and accountable owners' review policies; Codex is requested on those PRs only when that owner or the issue-specific accepted contract authorizes it. This section does not create a mandatory global review gate or give Kanuj write/review control over all producer PRs.
 
 - Request `@codex review` on the current implementation HEAD, or use an existing verified automatic Codex PR code review at that HEAD.
 - **Verify the Codex review actually completed** and read its findings. A comment requesting review is not a completed review. No promise is made that the review is unlimited or cost-free.
-- Triage each substantive finding against accepted contract and code; direct Gemini to make a narrowly scoped correction on the same branch and PR. Re-run the appropriate verification and request review again when a materially new HEAD invalidates earlier review evidence.
-- Verify local focused/regression/adversarial tests, pinned interpreter, Ruff, mypy, relevant build, changed-path/whitespace checks and **hosted CI at the exact current HEAD**. Pending, skipped or previous-HEAD success is not current-head acceptance.
+- Triage each substantive finding against accepted contract and code; ChatGPT should make narrowly scoped corrections to its own authorized branch, or direct the approved fallback executor to correct its own branch, without two overlapping writers. Re-run the appropriate verification and request review again when a materially new HEAD invalidates earlier review evidence.
+- Run available focused/regression/adversarial tests using the pinned interpreter, Ruff, mypy, relevant build and changed-path/whitespace checks; **verify hosted CI at the exact current HEAD**. If local execution is unavailable, record it as NOT_RUN and rely on actual hosted CI results instead of claiming local verification. Pending, skipped or previous-HEAD success is not current-head acceptance.
 - The architect's review and Codex's automated review are **supplemental**. Neither may be passed off as an independently authenticated scientific, risk, security or producer-consumer approval.
 
-**Reason:** Separate implementation, architectural inspection, automated review and (where applicable) independent human acceptance catch different classes of defects while retaining truthful provenance.
+**Reason:** Direct authorship, explicit source inspection, automated checks and independent human/producer acceptance have different evidentiary roles. The architect inspecting its own code is not independent review; Codex is supplemental.
 
 ### E. Use the minimum legitimate merge gate, without unnecessary waiting
 
@@ -163,7 +165,7 @@ Record the separate exact-HEAD merge-action authorization, named merge actor, fi
 
 ### F. Final handoff and cold-start continuity
 
-Every implementation concludes with the canonical issue checkpoint from [agent-workflow.md](agent-workflow.md#checkpoint), plus the PR URL, latest SHA, actual diff, final expected-versus-observed assertions, Codex result, exact-head CI, required human review status, merge decision, limitations, and next executable issue. A replacement agent must read `AGENTS.md`, this handoff standard, the relevant accepted ADR/contract, and current GitHub issue/PR evidence before resuming. If historical issue text conflicts with authenticated current migration receipts, apply the precedence rules above.
+Every direct or fallback implementation concludes with the canonical issue checkpoint from [agent-workflow.md](agent-workflow.md#checkpoint), plus the PR URL, latest SHA, actual diff, final expected-versus-observed assertions, Codex result, exact-head CI, required human review status, merge decision, limitations, and next executable issue. A replacement agent must read `AGENTS.md`, this handoff standard, the relevant accepted ADR/contract, and current GitHub issue/PR evidence before resuming. If historical issue text conflicts with authenticated current migration receipts, apply the precedence rules above.
 
 **Reason:** A new agent must be able to continue the project without asking Kanuj to reconstruct the design or retesting already verified decisions.
 
@@ -224,7 +226,7 @@ The following worked example illustrates how an architect provides complete, una
    Drift, KanujVerma/drift. Target REPO_ROOT.
 
 2. ACCOUNTABLE OWNER AND ACTUAL EXECUTION AGENT:
-   Accountable Owner: Kanuj | Actual Execution Agent: Gemini / Antigravity.
+   Accountable Owner: Kanuj | Actual Execution Agent: ChatGPT / GPT-6 when issue-authorized and connected; Gemini / Antigravity only as a disclosed fallback.
 
 3. ISSUE, AUTHORIZATION, AND WRITER CLAIM:
    Hypothetical future runtime implementation issue (e.g., #999 'Implement Synthetic Stage 1A B/R Integration Test').
