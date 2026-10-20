@@ -45,8 +45,12 @@ E1_TWO_RUN_HASH = "7cd97e7e6884d608888497b8688053d51aab11edb4a43cce8c6437fa5ec16
 CHECKPOINT_HASH = "6e8ba6d836a02c0f27bc0bc67e253325c96d81a909972177f0bdb876450c79b5"
 ALL_MISSING_HASH = "4ba2fcc7cdfa78a3549efb8d7942fd70a9b5f5537db21906ea0c597ee2095ed3"
 MIXED_HASH = "87379a6e2147b3d9e1796cc90bf03fcfe32cec325c9b652b92add5270d6232da"
-B_TWO_RUN_SNAPSHOT_HASH = "8e2b7a89d9c1aea9c1da6b35bebb995ae414c786c50ec6f0498c98e6c975e91a"
-R_TWO_RUN_SNAPSHOT_HASH = "271d5198d917597e3083f498e3c10f09871598022ebda6284f97e6a8ed033130"
+B_TWO_RUN_SNAPSHOT_HASH = (
+    "8e2b7a89d9c1aea9c1da6b35bebb995ae414c786c50ec6f0498c98e6c975e91a"
+)
+R_TWO_RUN_SNAPSHOT_HASH = (
+    "271d5198d917597e3083f498e3c10f09871598022ebda6284f97e6a8ed033130"
+)
 ROOT_EVENT_HASH = "2999edc6f859b6ef17a6b0c99728bab01d7d80cad65e28f59ffd3a5dd5a7f9f4"
 
 RUNS = ["RUN-001", "RUN-002"]
@@ -270,7 +274,9 @@ def _build(
 
 def _verify(
     audit: Stage1CheckpointCoverageAuditV1,
-    fixture: tuple[CampaignSpecV1, list[ArmSpecV1], list[RunAccountBindingV1], list[str]],
+    fixture: tuple[
+        CampaignSpecV1, list[ArmSpecV1], list[RunAccountBindingV1], list[str]
+    ],
 ) -> bool:
     campaign, arms, bindings, runs = fixture
     return verify_stage1_checkpoint_coverage_audit(
@@ -312,7 +318,10 @@ def test_p02_mixed_independent_golden_and_preserved_envelopes() -> None:
     assert audit.slots[0].coverage_state == "EVENTS_RECORDED"
     assert audit.slots[1].coverage_state == "UNOBSERVED"
     assert audit.slots[0].provenance_snapshot is not None
-    assert audit.slots[0].provenance_snapshot.event_envelopes[0].event_hash == ROOT_EVENT_HASH
+    assert (
+        audit.slots[0].provenance_snapshot.event_envelopes[0].event_hash
+        == ROOT_EVENT_HASH
+    )
     assert audit.pairs[0].pair_state == "BOTH_SUBMITTED"
     assert _verify(audit, fixture) is True
 
@@ -331,7 +340,9 @@ def test_p03_p05_missing_pair_states(
     fixture = _fixture()
     camp, arms, bindings, runs = fixture
     snapshots = (
-        [] if submitted_arm is None else [_snapshot(camp, arms, bindings, runs, submitted_arm)]
+        []
+        if submitted_arm is None
+        else [_snapshot(camp, arms, bindings, runs, submitted_arm)]
     )
     audit = _build(*fixture, _decls(), snapshots)
     assert audit.pairs[0].pair_state == expected
@@ -369,7 +380,10 @@ def test_p08_within_run_checkpoint_order_changes_identity() -> None:
     fixture = _fixture()
     baseline = _build(*fixture, _decls())
     rearranged = _build(*fixture, _decls(checkpoint_ids=tuple(reversed(CKPTS))))
-    assert baseline.checkpoint_manifest_fingerprint != rearranged.checkpoint_manifest_fingerprint
+    assert (
+        baseline.checkpoint_manifest_fingerprint
+        != rearranged.checkpoint_manifest_fingerprint
+    )
     assert baseline.audit_fingerprint != rearranged.audit_fingerprint
     assert _verify(rearranged, fixture) is True
 
@@ -423,8 +437,9 @@ def test_p11b_snapshot_original_detachment() -> None:
     assert audit.slots[0].provenance_snapshot is not b
     object.__setattr__(b.scope.run_account_binding, "portfolio_account_id", "TAMPERED")
     assert audit.slots[0].provenance_snapshot is not None
-    assert audit.slots[0].provenance_snapshot.scope.run_account_binding.portfolio_account_id == (
-        "SYNTH-ACC-B-001"
+    assert (
+        audit.slots[0].provenance_snapshot.scope.run_account_binding.portfolio_account_id
+        == "SYNTH-ACC-B-001"
     )
     assert audit.audit_fingerprint == old_sha
     assert _verify(audit, fixture) is True
@@ -454,7 +469,16 @@ class ImpostorString(str):
 
 @pytest.mark.parametrize(
     "invalid",
-    ["", " ", "CKPT:1", "CKPT/1", "CKPT 1", " CKPT-001", "CKPT-001 ", ImpostorString("OK")],
+    [
+        "",
+        " ",
+        "CKPT:1",
+        "CKPT/1",
+        "CKPT 1",
+        " CKPT-001",
+        "CKPT-001 ",
+        ImpostorString("OK"),
+    ],
 )
 def test_n01_bad_checkpoint_tokens(invalid: str) -> None:
     fixture = _fixture()
@@ -512,7 +536,9 @@ def test_n05_stored_slots_and_pair_tampering_refused_even_with_new_hash() -> Non
     audit = _build(*fixture, _decls())
     bad_slot = replace(audit.slots[0], coverage_state="UNOBSERVED")
     modified = replace(audit, slots=(bad_slot, *audit.slots[1:]))
-    modified = replace(modified, audit_fingerprint=content_hash(_audit_preimage(modified)))
+    modified = replace(
+        modified, audit_fingerprint=content_hash(_audit_preimage(modified))
+    )
     with pytest.raises(ValueError):
         _verify(modified, fixture)
     bad_pair = replace(audit.pairs[0], pair_state="BOTH_SUBMITTED")
@@ -530,7 +556,7 @@ def test_n06_corrupted_counters_and_hashes_refused() -> None:
     corruptions = [
         replace(audit, counts=replace(audit.counts, declared_slots=13)),
         replace(audit, counts=replace(audit.counts, submitted_snapshots=True)),
-        replace(audit, counts=replace(audit.counts, declared_pairs=1.5)),
+        replace(audit, counts=replace(audit.counts, declared_pairs=cast(Any, 1.5))),
         replace(audit, checkpoint_manifest_fingerprint="f" * 64),
         replace(audit, complete_manifest_fingerprint="f" * 64),
         replace(audit, audit_fingerprint="f" * 64),
@@ -566,7 +592,10 @@ def test_n09_mutable_stored_collections_and_subclasses_refused() -> None:
     fixture = _fixture()
     audit = _build(*fixture, _decls())
     variants = [
-        replace(audit, checkpoint_declarations=cast(Any, list(audit.checkpoint_declarations))),
+        replace(
+            audit,
+            checkpoint_declarations=cast(Any, list(audit.checkpoint_declarations)),
+        ),
         replace(audit, slots=cast(Any, list(audit.slots))),
         replace(audit, pairs=cast(Any, list(audit.pairs))),
         replace(audit, campaign_id=ImpostorString(audit.campaign_id)),
@@ -574,7 +603,9 @@ def test_n09_mutable_stored_collections_and_subclasses_refused() -> None:
         replace(
             audit,
             slots=(
-                replace(audit.slots[0], coverage_state=ImpostorString("MISSING_SNAPSHOT")),
+                replace(
+                    audit.slots[0], coverage_state=ImpostorString("MISSING_SNAPSHOT")
+                ),
                 *audit.slots[1:],
             ),
         ),
@@ -628,7 +659,10 @@ def test_n13_control_snapshot_does_not_change_primary_pair_count() -> None:
 def test_n14_forged_retained_checkpoint_declaration_refused() -> None:
     fixture = _fixture()
     audit = _build(*fixture, _decls())
-    first = replace(audit.checkpoint_declarations[0], checkpoint_ids=("CKPT-003", "CKPT-002", "CKPT-001"))
+    first = replace(
+        audit.checkpoint_declarations[0],
+        checkpoint_ids=("CKPT-003", "CKPT-002", "CKPT-001"),
+    )
     forged = replace(
         audit,
         checkpoint_declarations=(first, audit.checkpoint_declarations[1]),
