@@ -325,7 +325,7 @@ def test_adversarial_future_revision_cannot_rewrite_matured_memory(
     peer_arm = earlier.model_copy(
         update={"trial_id": "synthetic:peer-only", "arm_id": "fixture:C"}
     )
- 
+
     def evaluate(records: list[TrialFeedbackRecord]) -> tuple[str, str]:
         snapshot = advance_learning(
             previous_snapshot=None,
