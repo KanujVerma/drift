@@ -644,3 +644,17 @@ def test_calendar_first_available_conflict_fails_even_with_equal_bytes() -> None
             evaluate_review_schedule(
                 now=now, current_calendar=newer, calendar_history=order
             )
+
+
+def test_contradictory_feed_status_cannot_be_hidden_by_unavailable_result() -> None:
+    now = datetime(2024, 1, 10, 10, tzinfo=UTC)
+    event = FeedEvent(
+        event_id="same", source_id="feed:A", version="v1",
+        available_at=now - timedelta(seconds=1),
+        content_hash="a" * 64, raw_text="inert",
+        condition="material_event",
+    )
+    broken = event.model_copy(update={"condition": "broken_feed"})
+    for order in ([event, broken], [broken, event]):
+        with pytest.raises(ValueError, match="EVENT_CONDITION_CONFLICT"):
+            evaluate_review_schedule(now=now, feed_events=order)
