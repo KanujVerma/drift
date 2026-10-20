@@ -150,7 +150,10 @@ def bridge_candidate_to_execution(
     """
     if current_time.tzinfo is None or current_time.utcoffset() is None:
         raise ValueError("INDETERMINATE_TIMEZONE: current time has no offset")
-    if type(intraday_supported) is not bool or type(allow_next_open_fallback) is not bool:
+    if (
+        type(intraday_supported) is not bool
+        or type(allow_next_open_fallback) is not bool
+    ):
         raise ValueError("INVALID_SESSION_CAPABILITY: expected strict booleans")
     # Refuse model_copy(update=...) forgery before accessing nested timestamps
     # or treating caller-provided account flags as authority.
