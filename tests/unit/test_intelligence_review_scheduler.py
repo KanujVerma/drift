@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from drift.intelligence.contracts import TargetWeight
+from drift.serialization.canonical import content_hash
 from drift.intelligence.review_scheduler import (
     CalendarRevision,
     FeedEvent,
@@ -88,7 +89,9 @@ def test_t03_event_driven_trigger_and_cooldown() -> None:
     assert verdict1.action == "review"
     assert verdict1.review_type == "event_driven"
     assert verdict1.event_ref is not None
-    assert verdict1.event_ref.id == "event-001"
+    assert verdict1.event_ref.id == "event:" + content_hash(
+        {"source_id": "news:reuters", "event_id": "event-001"}
+    )
 
     # Second event arriving 10 minutes later within 1-hour cooldown is suppressed
     now2 = now + timedelta(minutes=10)
@@ -177,7 +180,9 @@ def test_t03_malicious_raw_text_stays_inert() -> None:
     assert verdict.review_type == "event_driven"
     assert verdict.action_policy == "defensive_only"
     assert verdict.event_ref is not None
-    assert verdict.event_ref.id == "event-exploit"
+    assert verdict.event_ref.id == "event:" + content_hash(
+        {"source_id": "untrusted:social", "event_id": "event-exploit"}
+    )
 
 
 def test_t02_calendar_revision_conflict_refusal() -> None:
@@ -463,3 +468,193 @@ def test_material_event_signal_without_time_eligible_event_is_unavailable() -> N
     )
     assert verdict.action == "unavailable"
     assert "material_event_without_causal_evidence" in verdict.reason
+
+
+def test_materiality_changes_trigger_identity() -> None:
+    now = datetime(2024, 1, 10, 10, tzinfo=UTC)
+    event = FeedEvent(
+        event_id="evt", source_id="feed", version="v1",
+        available_at=now - timedelta(seconds=1),
+        content_hash="a" * 64, raw_text="inert",
+    )
+    clocks = {"now": now, "last_routine_at": now, "last_adaptation_at": now}
+    yes = evaluate_review_schedule(**clocks, feed_events=[event])
+    no = evaluate_review_schedule(
+        **clocks, feed_events=[event.model_copy(update={"is_material": False})]
+    )
+    assert yes.action == "review" and no.action == "no_review"
+    assert yes.trigger_id != no.trigger_id
+
+
+def test_feed_event_ref_namespaces_delimiter_ambiguity() -> None:
+    now = datetime(2024, 1, 10, 10, tzinfo=UTC)
+    def one(source: str, event_id: str) -> FeedEvent:
+        return FeedEvent(
+            event_id=event_id, source_id=source, version="v1",
+            available_at=now - timedelta(seconds=1),
+            content_hash="a" * 64, raw_text="inert",
+        )
+    a = evaluate_review_schedule(now=now, feed_events=[one("a:b", "c")])
+    b = evaluate_review_schedule(now=now, feed_events=[one("a", "b:c")])
+    assert a.event_ref is not None and b.event_ref is not None
+    assert a.event_ref.id != b.event_ref.id
+
+
+def test_feed_problem_precedence_is_invariant_to_order() -> None:
+    now = datetime(2024, 1, 10, 10, tzinfo=UTC)
+    first = FeedEvent(
+        event_id="broken", source_id="feed:A", version="v1",
+        available_at=now, content_hash="a" * 64, raw_text="inert",
+        condition="broken_feed",
+    )
+    second = first.model_copy(update={
+        "event_id": "unknown", "source_id": "feed:B",
+        "content_hash": "b" * 64, "condition": "unknown_coverage",
+    })
+    for ordered in ([first, second], [second, first]):
+        verdict = evaluate_review_schedule(now=now, feed_events=ordered)
+        assert verdict.action == "unavailable"
+        assert "broken_feed" in verdict.reason
+
+
+def test_conflicting_event_condition_refused_in_both_orders() -> None:
+    now = datetime(2024, 1, 10, 10, tzinfo=UTC)
+    event = FeedEvent(
+        event_id="one", source_id="feed:A", version="v1",
+        available_at=now, content_hash="a" * 64, raw_text="inert",
+    )
+    nonmaterial = event.model_copy(update={"is_material": False})
+    for order in ([event, nonmaterial], [nonmaterial, event]):
+        with pytest.raises(ValueError, match="EVENT_CONDITION_CONFLICT"):
+            evaluate_review_schedule(now=now, feed_events=order)
+
+
+def test_old_calendar_revision_conflict_is_not_hidden_by_current_revision() -> None:
+    now = datetime(2024, 1, 10, 10, tzinfo=UTC)
+    old = CalendarRevision(
+        calendar_id="cal:A", revision=1,
+        effective_cutoff=now - timedelta(days=2), content_hash="a" * 64,
+    )
+    forged = old.model_copy(update={"content_hash": "b" * 64})
+    current = CalendarRevision(
+        calendar_id="cal:A", revision=2,
+        effective_cutoff=now - timedelta(days=1), content_hash="c" * 64,
+    )
+    for records in ([old, forged], [forged, old]):
+        with pytest.raises(ValueError, match="SOURCE_DIGEST_CONFLICT"):
+            evaluate_review_schedule(
+                now=now, current_calendar=current, calendar_history=records
+            )
+    with pytest.raises(ValueError, match="UNAVAILABLE_CALENDAR_CURRENTNESS"):
+        evaluate_review_schedule(now=now, calendar_history=[old])
+
+
+def test_event_cooldown_does_not_block_routine_or_adaptation() -> None:
+    now = datetime(2024, 1, 10, 10, tzinfo=UTC)
+    event = FeedEvent(
+        event_id="event", source_id="feed:A", version="v1",
+        available_at=now - timedelta(seconds=1),
+        content_hash="a" * 64, raw_text="inert",
+    )
+    common = {
+        "now": now, "feed_events": [event],
+        "last_event_review_at": now - timedelta(minutes=5),
+        "last_routine_at": now - timedelta(days=8),
+    }
+    routine = evaluate_review_schedule(
+        **common, last_adaptation_at=now - timedelta(days=2)
+    )
+    adaptation = evaluate_review_schedule(
+        **common, last_adaptation_at=now - timedelta(days=31)
+    )
+    assert routine.review_type == "routine"
+    assert adaptation.review_type == "planned_adaptation"
+
+
+def test_scheduler_revalidates_forged_typed_inputs_and_policy() -> None:
+    now = datetime(2024, 1, 10, 10, tzinfo=UTC)
+    valid = FeedEvent(
+        event_id="one", source_id="feed:A", version="v1",
+        available_at=now - timedelta(seconds=1),
+        content_hash="a" * 64, raw_text="inert",
+    )
+    forged = valid.model_copy(update={"content_hash": "not-a-digest"})
+    with pytest.raises(ValueError):
+        evaluate_review_schedule(now=now, feed_events=[forged])
+    policy = SchedulerPolicy().model_copy(
+        update={"event_cooldown": timedelta(seconds=-1)}
+    )
+    with pytest.raises(ValueError, match="INVALID_SCHEDULER_INTERVAL"):
+        evaluate_review_schedule(now=now, policy=policy)
+
+
+def test_defensive_policy_rejects_malformed_and_missing_weights() -> None:
+    valid = [TargetWeight(security_id="SPY", weight="0.3")]
+    for state in (
+        {"SPY": "NaN"}, {"SPY": "1.5"}, {"SPY": ""},
+        {"SPY": "0.8", "TLT": "0.8"},
+    ):
+        assert not validate_defensive_policy(
+            proposed_targets=valid, current_weights=state
+        )[0]
+    assert not validate_defensive_policy(
+        proposed_targets=[], current_weights={"SPY": "0.5"}
+    )[0]
+    forged = valid[0].model_copy(update={"weight": "NaN"})
+    assert not validate_defensive_policy(
+        proposed_targets=[forged], current_weights={"SPY": "0.5"}
+    )[0]
+
+
+def test_exact_duplicate_feed_event_is_idempotent() -> None:
+    now = datetime(2024, 1, 10, 10, tzinfo=UTC)
+    event = FeedEvent(
+        event_id="one", source_id="feed:A", version="v1",
+        available_at=now - timedelta(seconds=1),
+        content_hash="a" * 64, raw_text="inert",
+    )
+    one = evaluate_review_schedule(now=now, feed_events=[event])
+    duplicate = evaluate_review_schedule(now=now, feed_events=[event, event])
+    assert one.action == duplicate.action == "review"
+    assert one.trigger_id == duplicate.trigger_id
+    assert one.record_hash == duplicate.record_hash
+
+
+def test_calendar_first_available_conflict_fails_even_with_equal_bytes() -> None:
+    now = datetime(2024, 1, 10, 10, tzinfo=UTC)
+    current = CalendarRevision(
+        calendar_id="cal:A", revision=2,
+        effective_cutoff=now - timedelta(hours=1),
+        content_hash="c" * 64,
+    )
+    changed_clock = current.model_copy(
+        update={"effective_cutoff": current.effective_cutoff - timedelta(seconds=1)}
+    )
+    with pytest.raises(ValueError, match="CALENDAR_AVAILABILITY_CONFLICT"):
+        evaluate_review_schedule(
+            now=now, current_calendar=current, calendar_history=[changed_clock]
+        )
+    newer = CalendarRevision(
+        calendar_id="cal:A", revision=3,
+        effective_cutoff=now - timedelta(minutes=5),
+        content_hash="d" * 64,
+    )
+    for order in ([current, changed_clock], [changed_clock, current]):
+        with pytest.raises(ValueError, match="CALENDAR_AVAILABILITY_CONFLICT"):
+            evaluate_review_schedule(
+                now=now, current_calendar=newer, calendar_history=order
+            )
+
+
+def test_contradictory_feed_status_cannot_be_hidden_by_unavailable_result() -> None:
+    now = datetime(2024, 1, 10, 10, tzinfo=UTC)
+    event = FeedEvent(
+        event_id="same", source_id="feed:A", version="v1",
+        available_at=now - timedelta(seconds=1),
+        content_hash="a" * 64, raw_text="inert",
+        condition="material_event",
+    )
+    broken = event.model_copy(update={"condition": "broken_feed"})
+    for order in ([event, broken], [broken, event]):
+        with pytest.raises(ValueError, match="EVENT_CONDITION_CONFLICT"):
+            evaluate_review_schedule(now=now, feed_events=order)

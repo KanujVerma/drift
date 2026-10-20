@@ -25,6 +25,7 @@ from drift.intelligence.platform_bridge import (
     PortfolioStateBinding,
     bridge_candidate_to_execution,
 )
+from drift.serialization.canonical import content_hash
 
 
 @pytest.fixture
@@ -88,8 +89,8 @@ def sample_candidate(sample_scope: Scope) -> ResearchCandidate:
                 id="strat:001", version="v1", sha256="7" * 64
             ),
             envelope_ref=ArtifactReference(id="env:001", version="v1", sha256="8" * 64),
-            parameters={"threshold": 0.5},
-            parameters_hash="9" * 64,
+            parameters={"threshold": "0.5"},
+            parameters_hash=content_hash({"threshold": "0.5"}),
             eligibility_ref=ArtifactReference(
                 id="elig:001", version="v1", sha256="a" * 64
             ),
@@ -205,6 +206,7 @@ def test_t08_hold_and_abstain_admitted_without_trade(
 
     hold_dict = sample_candidate.model_dump(mode="python")
     hold_dict["disposition"] = "hold"
+    hold_dict["strategy"] = None
     hold_dict["targets"] = []
     hold_dict["cash_weight"] = None
     hold_dict["record_hash"] = compute_record_hash(hold_dict)
@@ -577,14 +579,213 @@ def test_self_rehashed_invalid_weights_never_make_a_platform_request(
     payload["targets"][1]["weight"] = weights[1]
     payload["cash_weight"] = cash
     payload["record_hash"] = compute_record_hash(payload)
-    candidate = ResearchCandidate.model_validate(payload)
-    request = bridge_candidate_to_execution(
-        candidate=candidate,
-        portfolio_state=matching_portfolio_state,
-        current_time=candidate.completed_at + timedelta(minutes=5),
+    # A self-rehashed record must fail *intrinsic K1 validation* before
+    # it could become a K5 research execution request.
+    with pytest.raises(ValueError):
+        ResearchCandidate.model_validate(payload)
+
+    # model_copy(update=...) can bypass Pydantic validators at construction.
+    # K5 must still reject that forged object at its own trust boundary.
+    forged = sample_candidate.model_copy(
+        update={
+            "targets": tuple(
+                target.model_copy(update={"weight": value})
+                for target, value in zip(sample_candidate.targets, weights, strict=True)
+            ),
+            "cash_weight": cash,
+            "record_hash": payload["record_hash"],
+        }
     )
-    assert request.status == "refused"
+    with pytest.raises(ValueError):
+        bridge_candidate_to_execution(
+            candidate=forged,
+            portfolio_state=matching_portfolio_state,
+            current_time=sample_candidate.completed_at + timedelta(minutes=5),
+        )
+
+
+def test_full_portfolio_and_mandate_refs_must_match_even_with_same_hash(
+    sample_candidate: ResearchCandidate,
+    matching_portfolio_state: PortfolioStateBinding,
+) -> None:
+    now = sample_candidate.completed_at + timedelta(minutes=5)
+    wrong_portfolio = matching_portfolio_state.model_copy(
+        update={"portfolio_ref": ArtifactReference(
+            id="port:other", version=matching_portfolio_state.portfolio_ref.version,
+            sha256=matching_portfolio_state.portfolio_ref.sha256,
+        )}
+    )
+    portfolio_refusal = bridge_candidate_to_execution(
+        candidate=sample_candidate, portfolio_state=wrong_portfolio,
+        current_time=now,
+    )
+    assert portfolio_refusal.status == "refused"
+    assert "STALE_PORTFOLIO_STATE" in (portfolio_refusal.refusal_reason or "")
+    wrong_mandate = matching_portfolio_state.model_copy(
+        update={"mandate_ref": ArtifactReference(
+            id=matching_portfolio_state.mandate_ref.id, version="v2",
+            sha256=matching_portfolio_state.mandate_ref.sha256,
+        )}
+    )
+    mandate_refusal = bridge_candidate_to_execution(
+        candidate=sample_candidate, portfolio_state=wrong_mandate,
+        current_time=now,
+    )
+    assert mandate_refusal.status == "refused"
+    assert "MANDATE_MISMATCH" in (mandate_refusal.refusal_reason or "")
+    assert portfolio_refusal.target_allocations == ()
+    assert mandate_refusal.target_allocations == ()
+
+
+def test_bridge_request_identity_binds_session_and_verification_state(
+    sample_candidate: ResearchCandidate,
+    matching_portfolio_state: PortfolioStateBinding,
+) -> None:
+    now = sample_candidate.completed_at + timedelta(minutes=5)
+    baseline = bridge_candidate_to_execution(
+        candidate=sample_candidate, portfolio_state=matching_portfolio_state,
+        current_time=now, intraday_supported=True,
+    )
+    next_open = bridge_candidate_to_execution(
+        candidate=sample_candidate, portfolio_state=matching_portfolio_state,
+        current_time=now, intraday_supported=False,
+    )
+    no_session = bridge_candidate_to_execution(
+        candidate=sample_candidate, portfolio_state=matching_portfolio_state,
+        current_time=now, intraday_supported=False,
+        allow_next_open_fallback=False,
+    )
+    other_proof = matching_portfolio_state.model_copy(
+        update={"verification_ref": ArtifactReference(
+            id="synthetic:alternate-proof", version="v1", sha256="f" * 64
+        )}
+    )
+    different_verification = bridge_candidate_to_execution(
+        candidate=sample_candidate, portfolio_state=other_proof,
+        current_time=now, intraday_supported=True,
+    )
+    paused = bridge_candidate_to_execution(
+        candidate=sample_candidate,
+        portfolio_state=matching_portfolio_state.model_copy(
+            update={"is_paused": True}
+        ),
+        current_time=now, intraday_supported=True,
+    )
+    assert baseline.status == "admitted"
+    assert next_open.session_target == "next_open"
+    assert no_session.status == "unsupported"
+    assert paused.status == "refused"
+    ids = [
+        baseline.request_id, next_open.request_id, no_session.request_id,
+        different_verification.request_id, paused.request_id,
+    ]
+    assert len(set(ids)) == len(ids)
+    replay = bridge_candidate_to_execution(
+        candidate=sample_candidate, portfolio_state=matching_portfolio_state,
+        current_time=now, intraday_supported=True,
+    )
+    assert baseline.request_id == replay.request_id
+    assert baseline.record_hash == replay.record_hash
+
+
+@pytest.mark.parametrize(
+    ("weights", "cash"),
+    [
+        (("0.80", "0.40"), "0"),
+        (("0.60", "0.40"), "NaN"),
+        (("0.60", "0.40"), "Infinity"),
+        (("0.60", "0.40"), "-0.10"),
+        (("0.60", "0.40"), "1e-3"),
+    ],
+)
+def test_self_rehashed_platform_request_refuses_bad_actionable_weights(
+    sample_candidate: ResearchCandidate,
+    matching_portfolio_state: PortfolioStateBinding,
+    weights: tuple[str, str],
+    cash: str,
+) -> None:
+    approved = bridge_candidate_to_execution(
+        candidate=sample_candidate,
+        portfolio_state=matching_portfolio_state,
+        current_time=sample_candidate.completed_at + timedelta(minutes=5),
+        intraday_supported=True,
+    )
+    assert approved.status == "admitted"
+    payload = approved.model_dump(mode="python")
+    payload["target_allocations"][0]["weight"] = weights[0]
+    payload["target_allocations"][1]["weight"] = weights[1]
+    payload["cash_weight"] = cash
+    payload["record_hash"] = compute_record_hash(payload)
+    with pytest.raises(ValueError, match="INVALID_PLATFORM_TARGET_WEIGHTS"):
+        PlatformExecutionRequest.model_validate(payload)
+
+
+def test_direct_rehashed_request_refuses_duplicate_target_id(
+    sample_candidate: ResearchCandidate,
+    matching_portfolio_state: PortfolioStateBinding,
+) -> None:
+    approved = bridge_candidate_to_execution(
+        candidate=sample_candidate,
+        portfolio_state=matching_portfolio_state,
+        current_time=sample_candidate.completed_at + timedelta(minutes=5),
+        intraday_supported=True,
+    )
+    payload = approved.model_dump(mode="python")
+    payload["target_allocations"][1]["security_id"] = "SPY"
+    payload["record_hash"] = compute_record_hash(payload)
+    with pytest.raises(ValueError, match="DUPLICATE_PLATFORM_TARGET"):
+        PlatformExecutionRequest.model_validate(payload)
+
+
+def test_admitted_request_cannot_be_rehashed_from_unavailable_disposition(
+    sample_candidate: ResearchCandidate,
+    matching_portfolio_state: PortfolioStateBinding,
+) -> None:
+    approved = bridge_candidate_to_execution(
+        candidate=sample_candidate,
+        portfolio_state=matching_portfolio_state,
+        current_time=sample_candidate.completed_at + timedelta(minutes=5),
+        intraday_supported=True,
+    )
+    payload = approved.model_dump(mode="python")
+    payload["disposition"] = "unavailable"
+    payload["record_hash"] = compute_record_hash(payload)
+    with pytest.raises(ValueError, match="INVALID_ADMITTED_PLATFORM_REQUEST"):
+        PlatformExecutionRequest.model_validate(payload)
+
+
+def test_model_copy_state_flag_cannot_forge_verified_permission(
+    sample_candidate: ResearchCandidate,
+    matching_portfolio_state: PortfolioStateBinding,
+) -> None:
+    forged = matching_portfolio_state.model_copy(
+        update={"state_verified": "true"}
+    )
+    with pytest.raises(ValueError):
+        bridge_candidate_to_execution(
+            candidate=sample_candidate, portfolio_state=forged,
+            current_time=sample_candidate.completed_at + timedelta(minutes=5),
+        )
+
+
+def test_abstention_is_nonactionable_even_with_valid_state(
+    sample_candidate: ResearchCandidate,
+    matching_portfolio_state: PortfolioStateBinding,
+) -> None:
+    payload = sample_candidate.model_dump(mode="python")
+    payload.update({
+        "disposition": "abstain", "strategy": None,
+        "targets": [], "cash_weight": None,
+    })
+    payload["record_hash"] = compute_record_hash(payload)
+    abstention = ResearchCandidate.model_validate(payload)
+    request = bridge_candidate_to_execution(
+        candidate=abstention,
+        portfolio_state=matching_portfolio_state,
+        current_time=sample_candidate.completed_at + timedelta(minutes=5),
+    )
+    assert request.status == "admitted"
+    assert request.disposition == "abstain"
     assert request.session_target == "none"
     assert request.target_allocations == ()
     assert request.cash_weight is None
-    assert "INVALID_STAGE1_TARGET_WEIGHTS" in (request.refusal_reason or "")
