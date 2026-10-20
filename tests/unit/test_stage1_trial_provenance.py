@@ -25,8 +25,6 @@ from drift.experiments.stage1_trial_events import (
     Stage1TrialEvent,
     build_stage1_trial_event,
 )
-from drift.serialization.canonical import content_hash
-
 from drift.experiments.stage1_trial_provenance import (
     PROVENANCE_SCHEMA_VERSION,
     Stage1TrialProvenanceSnapshotV1,
@@ -36,6 +34,7 @@ from drift.experiments.stage1_trial_provenance import (
     build_stage1_trial_provenance_snapshot,
     verify_stage1_trial_provenance_snapshot,
 )
+from drift.serialization.canonical import content_hash
 
 GOLDEN_ARM_B_HASH = "84c4e89c1c1a06e4b3041f07fea316e051fd5b6b5502a5f8a3c17912db1fd831"
 GOLDEN_ARM_R_HASH = "c958ea89ded96aa8aafad3eac1756083ec9145b041c6c6f1fae4afc9216278cd"
@@ -1526,6 +1525,7 @@ def test_provenance_refuses_invalid_events_hidden_by_false_empty_len() -> None:
     with pytest.raises(ValueError, match=r"events\[0\] must be a Stage1TrialEvent"):
         _snapshot_from_caller_events(supplied)
 
+
 # ---------------------------------------------------------------------------
 # Issue #511: E1 input capture across provenance build, verify and append
 # ---------------------------------------------------------------------------
@@ -1586,17 +1586,12 @@ def test_n511_rehashed_invalid_binding_cannot_cross_validation(
 ) -> None:
     camp, arms, good, runs = _golden_manifest_args()
     original = _empty_snapshot(camp, arms, good, runs)
-    bad_b = (
-        replace(good[0], initial_cash_allocated="1")
-        if mutation == "cash"
-        else (
-            replace(good[0], portfolio_account_id=good[1].portfolio_account_id)
-            if mutation == "account"
-            else replace(
-                good[0], bound_at="2026-10-18T00:00:00.000000Z"
-            )
-        )
-    )
+    if mutation == "cash":
+        bad_b = replace(good[0], initial_cash_allocated="1")
+    elif mutation == "account":
+        bad_b = replace(good[0], portfolio_account_id=good[1].portfolio_account_id)
+    else:
+        bad_b = replace(good[0], bound_at="2026-10-18T00:00:00.000000Z")
     bad = [bad_b, good[1]]
 
     # Forge a self-consistent persisted hash using genuinely invalid E1 input.
