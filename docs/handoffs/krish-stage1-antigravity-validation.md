@@ -1,5 +1,75 @@
 # Drift Stage 1: Consolidated Antigravity Validation Handoff
 
+## AntiGravity audit DEF-01 to DEF-04 remediation (issue #482)
+
+The independent AntiGravity report for commit
+`d84fbf1a31b55136a93167f40fe88ce0aabb087d`
+is at https://github.com/KanujVerma/drift/pull/457#issuecomment-6282879010.
+Its **REJECT** conclusion remains valid for that old SHA; never relabel that
+audit a pass. Source corrections are in issue #482 and draft PR #483, and
+the final unified PR #457 must publish a **new exact HEAD** for the next
+independent AntiGravity evaluation.
+
+Four static gate corrections, all without changing the fixed research
+contracts, weakening tests or relaxing the positive offline capability guard:
+
+1. **DEF-01, Git whitespace:** Removed extra blank lines at EOF in this
+   handoff and `tests/unit/test_intelligence_proposal_producer.py`. Verify
+   `git diff --check origin/main...HEAD` and no U+2014 on the new QA SHA.
+2. **DEF-02, Ruff lint:** Applied pinned `ruff check --fix .` results,
+   corrected the test import order and quoted annotations, wrapped the
+   M1e non-vacuity probe line without changing its asserted source, and
+   explicitly captured per-iteration objective callbacks (B023).
+3. **DEF-03, Ruff formatting:** Applied actual pinned `ruff format .`
+   output to the 22 affected Python source/test files; preserved original
+   CRLF convention in the historical M1e compatibility test. Do not change
+   the CI rule set or historical replay/lockfile pins.
+4. **DEF-04, Mypy strict:** Preserved all explicit validation contracts
+   while narrowing registry `type[BaseModel]`, prior receipt time/record
+   types, feedback reference loop identities, missing response bytes,
+   typed test strategy/source-grade literals and fixtures. Removed
+   problematic untyped `**dict` expansion in the scheduler tests.
+   No type ignores or blanket typing exemptions were introduced.
+
+### Verified corrective source evidence
+
+- **Read-only focused/static verification:** GitHub Actions
+  https://github.com/KanujVerma/drift/actions/runs/39367938465
+  completed **SUCCESS** with:
+  `ruff check .` exit 0, `ruff format --check .` exit 0,
+  `mypy src tests` exit 0 (466 source files), `uv build` exit 0 and
+  focused K0-K5/compatibility checks **342 passed, 0 failed,
+  5,597 deselected, 6 Pydantic adversarial-fixture warnings**.
+- **Scope:** That read-only probe checked the corrected source SHA
+  `e649e9aef4d584baa02a110c10302312ee07b696`
+  plus a temporary `contents:read` diagnostic workflow in a disposable
+  branch. It never pushed code, committed fixes, altered main or ran
+  a live broker/model. The source changes subsequently receive a new
+  final QA SHA after documentation and main reconciliation.
+- **Canonical acceptance remains separate:** Only full pinned pytest,
+  source-inventory/replay checks, Ruff, format, Mypy, build, Git diff
+  hygiene, five adversarial QA passes and independent review on
+  **the new PR #457 HEAD** can establish engineering acceptance.
+  The previous successful focused checks are strong corrective evidence,
+  not a substitute for the final all-repository gate.
+- **Windows portability:** AntiGravity's 114 Windows-only legacy
+  failures depend on POSIX timezone/symlink paths. Report these
+  distinctly from the canonical Linux CI result. Never modify the
+  protected historical M1d/M2 baselines merely to relabel them as passing.
+
+### What to hand AntiGravity
+
+Give AntiGravity only
+https://github.com/KanujVerma/drift/pull/457
+and this canonical handoff at the **matching pinned HEAD**. It should
+check out that exact SHA in a fresh isolated worktree, re-run the entire
+independent QA checklist below, compare accepted main, and post one
+ACCEPT / REJECT / INDETERMINATE engineering report to PR #457
+and issue #456. A failure goes back to the original writer; the next
+fixed commit requires a new independent QA run.
+
+---
+
 ## START HERE: Final unified K0-K5 QA source and authority
 
 **This section supersedes older status paragraphs later in this file.** The
