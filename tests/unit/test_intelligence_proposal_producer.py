@@ -400,13 +400,14 @@ def test_noncanonical_scripted_output_retains_failure_and_cost(
     )
     assert result.status == "INVALID"
     assert result.candidate is None
-    assert [event.status for event in recorder.get_attempt_events(result.attempt_id)] == [
-        "started", "failed",
-    ]
+    events = recorder.get_attempt_events(result.attempt_id)
+    assert [event.status for event in events] == ["started", "failed"]
     costs = recorder.get_cost_receipts_for_attempt(result.attempt_id)
     assert len(costs) == 1
     assert costs[0].amount_basis == "estimate"
     assert costs[0].amount == "0.20"
+
+
 @pytest.mark.parametrize(
     ("amount", "currency"),
     [

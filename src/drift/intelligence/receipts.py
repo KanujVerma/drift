@@ -11,8 +11,6 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
-from drift.serialization.canonical import canonical_json
-
 from drift.intelligence.contracts import (
     ArtifactReference,
     AttemptRecord,
@@ -22,6 +20,7 @@ from drift.intelligence.contracts import (
     UsageEntry,
     compute_record_hash,
 )
+from drift.serialization.canonical import canonical_json
 
 
 def _validate_cost_chronology(

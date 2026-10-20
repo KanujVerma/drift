@@ -463,7 +463,9 @@ def test_noncanonical_pool_without_explicit_attempt_id_cannot_claim_replay_ident
     bad = deepcopy(fixture_data["raw_choice"])
     bad["selection"]["parameters"] = {"unsafe": object()}
     recorder = ResearchReceiptStore()
-    with pytest.raises(ValueError, match="NONCANONICAL_POOL_REQUIRES_EXPLICIT_ATTEMPT_ID"):
+    with pytest.raises(
+        ValueError, match="NONCANONICAL_POOL_REQUIRES_EXPLICIT_ATTEMPT_ID"
+    ):
         select_conventional_candidate(
             context=sample_context,
             resolved_inputs=sample_bindings,
@@ -835,8 +837,6 @@ def test_r_opaque_pool_refuses_before_deepcopy_side_effects(
     assert not poisoned.touched
     assert result.status == "REJECTED"
     assert result.selected_candidate is None
-    assert [event.status for event in recorder.get_attempt_events(result.attempt_id)] == [
-        "started",
-        "rejected",
-    ]
+    events = recorder.get_attempt_events(result.attempt_id)
+    assert [event.status for event in events] == ["started", "rejected"]
     assert len(recorder.get_cost_receipts_for_attempt(result.attempt_id)) == 1
