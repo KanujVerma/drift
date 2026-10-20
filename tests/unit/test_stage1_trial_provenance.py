@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
 from dataclasses import fields, replace
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
@@ -1418,3 +1419,105 @@ def test_append_valid_ordinary_replay_and_conflict_rejection() -> None:
             bindings=bindings,
             expected_run_ids=expected_runs,
         )
+
+# ---------------------------------------------------------------------------
+# Issue #503: one captured event view, not caller-controlled length/iterator
+# ---------------------------------------------------------------------------
+
+
+class _MisleadingLengthEvents(list[Stage1TrialEvent]):
+    def __init__(self, values: list[Stage1TrialEvent], reported_size: int) -> None:
+        super().__init__(values)
+        self.reported_size = reported_size
+
+    def __len__(self) -> int:
+        return self.reported_size
+
+
+class _ChangingIterationEvents(list[Stage1TrialEvent]):
+    def __init__(
+        self,
+        first: Sequence[Stage1TrialEvent],
+        later: Sequence[Stage1TrialEvent],
+    ) -> None:
+        super().__init__(first)
+        self.first = tuple(first)
+        self.later = tuple(later)
+        self.read_count = 0
+
+    def __iter__(self) -> Iterator[Stage1TrialEvent]:
+        self.read_count += 1
+        return iter(self.first if self.read_count == 1 else self.later)
+
+
+def _snapshot_from_caller_events(
+    events: Sequence[Stage1TrialEvent],
+) -> Stage1TrialProvenanceSnapshotV1:
+    return build_stage1_trial_provenance_snapshot(
+        campaign=make_golden_campaign(),
+        arms=[make_golden_arm_b(), make_golden_arm_r()],
+        bindings=make_golden_bindings(),
+        expected_run_ids=["RUN-001"],
+        run_id="RUN-001",
+        arm_id="ARM-B",
+        checkpoint_id="CKPT-001",
+        events=events,
+    )
+
+
+def test_provenance_does_not_erase_real_event_on_false_empty_length() -> None:
+    root = make_golden_root_event()
+    supplied = _MisleadingLengthEvents([root], reported_size=0)
+    assert len(supplied) == 0
+    assert tuple(supplied) == (root,)
+
+    snapshot = _snapshot_from_caller_events(supplied)
+    assert snapshot.observation_state == "EVENTS_RECORDED"
+    assert snapshot.event_count == 1
+    assert snapshot.event_envelopes[0].event_hash == GOLDEN_ROOT_EVENT_HASH
+    assert snapshot.chain_head_event_hash == GOLDEN_ROOT_EVENT_HASH
+    assert snapshot.snapshot_fingerprint == GOLDEN_ONE_EVENT_SNAPSHOT_HASH
+    assert tuple(supplied) == (root,)
+
+
+def test_provenance_actual_empty_view_stays_unobserved_despite_length() -> None:
+    supplied = _MisleadingLengthEvents([], reported_size=1)
+    assert len(supplied) == 1
+    assert tuple(supplied) == ()
+
+    snapshot = _snapshot_from_caller_events(supplied)
+    assert snapshot.observation_state == "UNOBSERVED"
+    assert snapshot.event_count == 0
+    assert snapshot.event_envelopes == ()
+    assert snapshot.chain_head_event_hash is None
+    assert snapshot.snapshot_fingerprint == GOLDEN_ZERO_EVENT_SNAPSHOT_HASH
+
+
+def test_provenance_reads_mutable_iterable_once_into_stable_snapshot() -> None:
+    valid_root = make_golden_root_event()
+    changed_root = build_stage1_trial_event(
+        trial_id=valid_root.trial_id,
+        event_index=0,
+        previous_event_reference="ROOT",
+        event_kind="OPPORTUNITY_CREATED",
+        recorded_at=datetime(2026, 10, 19, 0, 0, 3, tzinfo=UTC),
+        producer_evidence_references=["b" * 64],
+        payload_reference="fixture://altered-payload-002",
+        payload_hash="e" * 64,
+    )
+    assert changed_root.event_hash != valid_root.event_hash
+    supplied = _ChangingIterationEvents([valid_root], [changed_root])
+
+    snapshot = _snapshot_from_caller_events(supplied)
+    assert supplied.read_count == 1
+    assert snapshot.observation_state == "EVENTS_RECORDED"
+    assert snapshot.event_envelopes[0].event_hash == valid_root.event_hash
+    assert snapshot.snapshot_fingerprint == GOLDEN_ONE_EVENT_SNAPSHOT_HASH
+
+
+def test_provenance_refuses_invalid_events_hidden_by_false_empty_len() -> None:
+    bad_item: Any = "not-a-trial-event"
+    supplied = _MisleadingLengthEvents([bad_item], reported_size=0)
+    assert len(supplied) == 0
+    with pytest.raises(ValueError, match="events\[0\] must be a Stage1TrialEvent"):
+        _snapshot_from_caller_events(supplied)
