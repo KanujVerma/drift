@@ -502,12 +502,16 @@ Child-PR CI is not the final engineering qualification.
    preventing collisions when either contains a delimiter. Event materiality
    and condition join the trigger's identity. A changed feed signal or same
    revision with contradictory bytes/times refuses in both input orders.
-   Future feed observations do not rewrite the current cutoff, while observed
-   feed failures have a deterministic broken-before-unknown precedence.
+   Exact duplicate events are idempotent, while conflicting status
+   or availability for one source revision refuses. Future feed observations
+   do not rewrite the current cutoff, while observed feed failures have a
+   deterministic broken-before-unknown precedence.
 6. **Calendar and distinct review clocks:** Revalidate caller-supplied
    calendar/policy/event objects at the boundary, refuse contradictory
-   historical revisions even when the current revision is newer, and refuse
-   history without an identified current calendar. Event cooldown may
+   historical revisions even when the current revision is newer, refuse
+   contradictory effective times for the same revision even with identical
+   content bytes, and refuse history without an identified current calendar.
+   Event cooldown may
    suppress an event-driven review but must not suppress an independently due
    routine weekly or planned monthly review.
 7. **Defensive-only policy:** In a locally checked candidate allocation,
