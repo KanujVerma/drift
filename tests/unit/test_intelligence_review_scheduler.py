@@ -468,3 +468,50 @@ def test_material_event_signal_without_time_eligible_event_is_unavailable() -> N
     )
     assert verdict.action == "unavailable"
     assert "material_event_without_causal_evidence" in verdict.reason
+
+
+def test_materiality_changes_trigger_identity() -> None:
+    now = datetime(2024, 1, 10, 10, tzinfo=UTC)
+    event = FeedEvent(
+        event_id="evt", source_id="feed", version="v1",
+        available_at=now - timedelta(seconds=1),
+        content_hash="a" * 64, raw_text="inert",
+    )
+    clocks = {"now": now, "last_routine_at": now, "last_adaptation_at": now}
+    yes = evaluate_review_schedule(**clocks, feed_events=[event])
+    no = evaluate_review_schedule(
+        **clocks, feed_events=[event.model_copy(update={"is_material": False})]
+    )
+    assert yes.action == "review" and no.action == "no_review"
+    assert yes.trigger_id != no.trigger_id
+
+
+def test_feed_event_ref_namespaces_delimiter_ambiguity() -> None:
+    now = datetime(2024, 1, 10, 10, tzinfo=UTC)
+    def one(source: str, event_id: str) -> FeedEvent:
+        return FeedEvent(
+            event_id=event_id, source_id=source, version="v1",
+            available_at=now - timedelta(seconds=1),
+            content_hash="a" * 64, raw_text="inert",
+        )
+    a = evaluate_review_schedule(now=now, feed_events=[one("a:b", "c")])
+    b = evaluate_review_schedule(now=now, feed_events=[one("a", "b:c")])
+    assert a.event_ref is not None and b.event_ref is not None
+    assert a.event_ref.id != b.event_ref.id
+
+
+def test_feed_problem_precedence_is_invariant_to_order() -> None:
+    now = datetime(2024, 1, 10, 10, tzinfo=UTC)
+    first = FeedEvent(
+        event_id="broken", source_id="feed:A", version="v1",
+        available_at=now, content_hash="a" * 64, raw_text="inert",
+        condition="broken_feed",
+    )
+    second = first.model_copy(update={
+        "event_id": "unknown", "source_id": "feed:B",
+        "content_hash": "b" * 64, "condition": "unknown_coverage",
+    })
+    for ordered in ([first, second], [second, first]):
+        verdict = evaluate_review_schedule(now=now, feed_events=ordered)
+        assert verdict.action == "unavailable"
+        assert "broken_feed" in verdict.reason
