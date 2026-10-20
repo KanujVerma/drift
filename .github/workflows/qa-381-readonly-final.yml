@@ -1,0 +1,68 @@
+name: Temp #381 final read-only Python QA
+on:
+  push:
+    branches:
+      - coord/381-readonly-qa3-20261020
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      UV_LOCKED: "1"
+      UV_PYTHON_PREFERENCE: only-managed
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          enable-cache: false
+      - name: Pinned environment
+        run: |
+          uv python install
+          uv sync --locked
+      - name: Style and focused tests with no commit or push
+        shell: bash
+        run: |
+          set +e
+          uv run ruff check --fix src/drift/news_triage tests/unit/test_news_triage.py
+          uv run ruff format src/drift/news_triage tests/unit/test_news_triage.py
+          echo "__RUFF_LINT__"
+          uv run ruff check src/drift/news_triage tests/unit/test_news_triage.py
+          lint=$?
+          echo "__RUFF_FORMAT__"
+          uv run ruff format --check src/drift/news_triage tests/unit/test_news_triage.py
+          format=$?
+          echo "__MYPY_BEGIN__"
+          uv run mypy src/drift/news_triage tests/unit/test_news_triage.py
+          mypy=$?
+          echo "__MYPY_END__"
+          echo "__PYTEST_BEGIN__"
+          uv run pytest -q tests/unit/test_news_triage.py
+          pytest=$?
+          echo "__PYTEST_END__"
+          echo "__FORMATTED_FILES_BEGIN__"
+          uv run python - <<'PY'
+          import base64
+          import json
+          import pathlib
+          import subprocess
+
+          for name in subprocess.check_output(
+              ["git", "diff", "--name-only"], text=True
+          ).splitlines():
+              assert name in {
+                  "src/drift/news_triage/screen.py",
+                  "src/drift/news_triage/__init__.py",
+                  "tests/unit/test_news_triage.py",
+              }, name
+              payload = base64.b64encode(pathlib.Path(name).read_bytes()).decode("ascii")
+              print("__FILE__" + json.dumps(
+                  {"path": name, "base64": payload}, separators=(",", ":")
+              ))
+          print("__FORMATTED_FILES_END__")
+          PY
+          echo "__PROBE_EXIT__ lint=$lint format=$format mypy=$mypy pytest=$pytest"
+          test "$lint" -eq 0 && test "$format" -eq 0
