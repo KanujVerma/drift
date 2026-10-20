@@ -220,6 +220,8 @@ def advance_learning(
         # A sealed report stays forbidden even if delayed or from another arm.
         if not isinstance(supplied, TrialFeedbackRecord):
             raise ValueError("INVALID_FEEDBACK_RECORD: expected typed feedback")
+        if type(supplied.is_holdout) is not bool:
+            raise ValueError("INVALID_FEEDBACK_RECORD: nonboolean holdout evidence")
         if supplied.is_holdout or supplied.trial_id.startswith("holdout:"):
             raise ValueError(
                 "HOLDOUT_ACCESS_VIOLATION: sealed feedback cannot enter memory"
