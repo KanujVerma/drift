@@ -107,6 +107,13 @@ enums. Final code must map them only through accepted, versioned contracts.
 | Complete original account NAV but unknown operating cost | Trading return may remain known; economic gain unavailable |
 | Later correction or invoice | New immutable as-of version, no retroactive decision admission |
 
+For research, `decision_cutoff` bounds **information admitted into context**,
+not the wall-clock completion of the subsequent model request. A frozen
+time-eligible context may be built and reviewed after cutoff, and an eligible
+candidate may complete later within its separately accepted timing/expiry
+rules. Only actual post-cutoff evidence read into that decision or a later
+response improperly reused as an earlier input constitutes lookahead.
+
 ## 5. Synthetic acceptance matrix for both producer teams
 
 Each row below is a **test specification**; it is **not an executed test**.
@@ -122,7 +129,7 @@ coverage in #500. Cases marked `BLOCKED_ON_507`, `BLOCKED_ON_508`, or
 | R01 | Trusted research context, accepted candidate and terminal attempt, matched E1 full manifest and checkpoint | Admitted **research association only**, not fill or RESULT | BLOCKED_ON_507 |
 | R02 | Same arm/account, wrong `run_id` or `checkpoint_id` | Refuse E1 association even if raw `Scope` strings match | BLOCKED_ON_507 |
 | R03 | Wrong research account, modified complete manifest, wrong issuer or original hash | Refuse, preserve unmodified source records | BLOCKED_ON_507 |
-| R04 | Late context input or response actually consumed, e.g. cutoff `2026-01-30T21:00:00Z`, availability `21:00:01Z` | Invalid causal lookahead, not a time-eligible decision | BLOCKED_ON_507 |
+| R04 | A market/context input or matured feedback first available at `2026-01-30T21:00:01Z` is consumed despite decision cutoff `21:00:00Z` | Invalid causal lookahead from **input evidence**; refuse the decision | BLOCKED_ON_507 |
 | R05 | A valid `hold`, then `abstain` and `unavailable` in separately identified cases | Real decision/attempt retained, zero manufactured target orders | BLOCKED_ON_507 |
 | R06 | Failed or rejected attempt, missing accepted candidate, retained raw failure evidence | Retain failure, genuine nullable candidate and cost basis; no fake `VALID` | BLOCKED_ON_507 |
 | R07 | Same attempt/replay id with conflicting retained content, or duplicate exact replay | Conflicting content refused; genuine exact replay remains idempotent and not another independent sample | BLOCKED_ON_507 |
@@ -130,7 +137,9 @@ coverage in #500. Cases marked `BLOCKED_ON_507`, `BLOCKED_ON_508`, or
 | P01 | Proven E1 account provisioning, M0 run, M2 result/book/trace and matched cutoff | Admit **platform association** with retained original artifact hashes | BLOCKED_ON_508 |
 | P02 | Result assigned to another B/R account or run/checkpoint despite matching result hash | Refuse original account/run join | BLOCKED_ON_508 |
 | P03 | Same deterministic M2 result hash under two distinct operational/account associations | Do not collapse separate operational runs into one scored observation | BLOCKED_ON_508 |
-| P04 | Staged zero orders by a true hold/refusal, separately from an unknown outcome | Never invent fill or mark a pending order as completed | BLOCKED_ON_508 |
+| P04a | Trusted no-order `hold` and valid current account state | Preserve incumbent, retain zero actual staged/fill orders; do not interpret as mandate refusal | BLOCKED_ON_508 |
+| P04b | Explicit mandate/admission `REFUSED` with no orders | Retain refusal/trace/reason and zero verified fills; no completed trade or silent `hold` | BLOCKED_ON_508 |
+| P04c | Order status `UNKNOWN` or evidence unavailable with no confirmed fills | Preserve unresolved/unknown status and non-complete scientific result; do not infer no-order completion from absent fills | BLOCKED_ON_508 |
 | P05 | N staged orders, some partial fills and one unresolved order | Count only verified actual fills; remain unresolved for dependent completion | BLOCKED_ON_508 |
 | P06 | Evaluation `COMPLETE` but missing valuation, reconciliation or required disposal basis | Preserve raw evaluator classification, refuse stronger scientific completeness | BLOCKED_ON_508 |
 | P07 | Result, trace, bundle or admission hash contradicts the original retained pair | Refuse association; no new result by rehashing disputed bytes | BLOCKED_ON_508 |
