@@ -474,9 +474,8 @@ def screen_event(
             or not _token(earlier.policy_version)
             or not _digest(earlier.policy_sha256)
             or not _digest(earlier.quality_evidence_sha256)
-            or earlier.outcome not in (
-                "CANDIDATE_ALERT", "NO_ALERT", "ABSTAIN", "UNAVAILABLE"
-            )
+            or earlier.outcome
+            not in ("CANDIDATE_ALERT", "NO_ALERT", "ABSTAIN", "UNAVAILABLE")
         ):
             return _result(
                 "ABSTAIN",
