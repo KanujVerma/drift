@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import fields, replace
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, cast
 
