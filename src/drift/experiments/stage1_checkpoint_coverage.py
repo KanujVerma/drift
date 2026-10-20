@@ -402,6 +402,23 @@ def _assemble_audit(
     return replace(before, audit_fingerprint=content_hash(_audit_preimage(before)))
 
 
+def _snapshot_manifest_collections(
+    *,
+    arms: Sequence[ArmSpecV1],
+    bindings: Sequence[RunAccountBindingV1],
+    expected_run_ids: Sequence[str],
+) -> tuple[
+    tuple[ArmSpecV1, ...],
+    tuple[RunAccountBindingV1, ...],
+    tuple[str, ...],
+]:
+    """Capture untrusted E1 collections once for the entire E6A operation."""
+    _require_sequence(arms, "arms")
+    _require_sequence(bindings, "bindings")
+    _require_sequence(expected_run_ids, "expected_run_ids")
+    return tuple(arms), tuple(bindings), tuple(expected_run_ids)
+
+
 def build_stage1_checkpoint_coverage_audit(
     *,
     campaign: CampaignSpecV1,
@@ -412,20 +429,28 @@ def build_stage1_checkpoint_coverage_audit(
     submitted_snapshots: Sequence[Stage1TrialProvenanceSnapshotV1],
 ) -> Stage1CheckpointCoverageAuditV1:
     """Build and independently verify a deterministic immutable coverage audit."""
+    arms_once, bindings_once, runs_once = _snapshot_manifest_collections(
+        arms=arms, bindings=bindings, expected_run_ids=expected_run_ids
+    )
+    _require_sequence(checkpoint_declarations, "checkpoint_declarations")
+    _require_sequence(submitted_snapshots, "submitted_snapshots")
+    declarations_once = tuple(checkpoint_declarations)
+    submitted_once = tuple(submitted_snapshots)
+
     result = _assemble_audit(
         campaign=campaign,
-        arms=arms,
-        bindings=bindings,
-        expected_run_ids=expected_run_ids,
-        checkpoint_declarations=checkpoint_declarations,
-        submitted_snapshots=submitted_snapshots,
+        arms=arms_once,
+        bindings=bindings_once,
+        expected_run_ids=runs_once,
+        checkpoint_declarations=declarations_once,
+        submitted_snapshots=submitted_once,
     )
     verify_stage1_checkpoint_coverage_audit(
         audit=result,
         campaign=campaign,
-        arms=arms,
-        bindings=bindings,
-        expected_run_ids=expected_run_ids,
+        arms=arms_once,
+        bindings=bindings_once,
+        expected_run_ids=runs_once,
     )
     return result
 
@@ -447,11 +472,14 @@ def verify_stage1_checkpoint_coverage_audit(
     ):
         raise ValueError("invalid coverage schema version")
 
+    arms_once, bindings_once, runs_once = _snapshot_manifest_collections(
+        arms=arms_once, bindings=bindings_once, expected_run_ids=expected_run_ids
+    )
     verify_experiment_configuration(
         campaign=campaign,
-        arms=arms,
-        bindings=bindings,
-        expected_run_ids=expected_run_ids,
+        arms=arms_once,
+        bindings=bindings_once,
+        expected_run_ids=runs_once,
     )
     if type(audit.campaign_id) is not str or audit.campaign_id != campaign.campaign_id:
         raise ValueError("coverage campaign ID mismatch")
@@ -460,9 +488,9 @@ def verify_stage1_checkpoint_coverage_audit(
         raise ValueError("coverage campaign fingerprint mismatch")
     manifest_hash = _full_manifest_fingerprint(
         campaign=campaign,
-        arms=arms,
-        bindings=bindings,
-        expected_run_ids=expected_run_ids,
+        arms=arms_once,
+        bindings=bindings_once,
+        expected_run_ids=runs_once,
     )
     _require_sha(audit.complete_manifest_fingerprint, "complete manifest fingerprint")
     if audit.complete_manifest_fingerprint != manifest_hash:
@@ -471,7 +499,7 @@ def verify_stage1_checkpoint_coverage_audit(
     if type(audit.checkpoint_declarations) is not tuple:
         raise ValueError("stored checkpoint declarations must be tuple")
     declarations = _checked_declarations(
-        audit.checkpoint_declarations, expected_run_ids, require_sorted=True
+        audit.checkpoint_declarations, runs_once, require_sorted=True
     )
     _require_sha(
         audit.checkpoint_manifest_fingerprint, "checkpoint manifest fingerprint"
@@ -517,9 +545,9 @@ def verify_stage1_checkpoint_coverage_audit(
             verify_stage1_trial_provenance_snapshot(
                 snapshot=snap,
                 campaign=campaign,
-                arms=arms,
-                bindings=bindings,
-                expected_run_ids=expected_run_ids,
+                arms=arms_once,
+                bindings=bindings_once,
+                expected_run_ids=runs_once,
             )
             if slot.coverage_state != snap.observation_state:
                 raise ValueError("slot state disagrees with submitted provenance")
@@ -547,9 +575,9 @@ def verify_stage1_checkpoint_coverage_audit(
     # rejects duplicate submissions, and recalculates every pair and count.
     expected = _assemble_audit(
         campaign=campaign,
-        arms=arms,
-        bindings=bindings,
-        expected_run_ids=expected_run_ids,
+        arms=arms_once,
+        bindings=bindings_once,
+        expected_run_ids=runs_once,
         checkpoint_declarations=declarations,
         submitted_snapshots=original_submissions,
     )
