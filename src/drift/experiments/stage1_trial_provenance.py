@@ -510,6 +510,9 @@ def append_stage1_trial_provenance_event(
         expected_run_ids=expected_run_ids,
     )
 
+    if type(event) is not Stage1TrialEvent:
+        raise ValueError("event must be an exact Stage1TrialEvent instance")
+
     new_envelopes = append_stage1_trial_event(
         events=snapshot.event_envelopes,
         event=event,

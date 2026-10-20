@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import fields, replace
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
@@ -1262,6 +1262,157 @@ def test_impostor_string_rejections() -> None:
     with pytest.raises(ValueError, match="scope.campaign_id"):
         verify_stage1_trial_provenance_snapshot(
             snapshot=t_scope_camp,
+            campaign=camp,
+            arms=arms,
+            bindings=bindings,
+            expected_run_ids=expected_runs,
+        )
+
+
+class ImpostorTrialEvent(Stage1TrialEvent):
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+    __hash__ = Stage1TrialEvent.__hash__
+
+
+def make_impostor_event(event: Stage1TrialEvent) -> ImpostorTrialEvent:
+    kwargs = {f.name: getattr(event, f.name) for f in fields(Stage1TrialEvent)}
+    return ImpostorTrialEvent(**kwargs)
+
+
+def test_regression_append_conflicting_subclass_event_rejected() -> None:
+    camp = make_golden_campaign()
+    arms = [make_golden_arm_b(), make_golden_arm_r()]
+    bindings = make_golden_bindings()
+    expected_runs = ["RUN-001"]
+
+    ev0 = make_golden_root_event()
+    s0 = build_stage1_trial_provenance_snapshot(
+        campaign=camp,
+        arms=arms,
+        bindings=bindings,
+        expected_run_ids=expected_runs,
+        run_id="RUN-001",
+        arm_id="ARM-B",
+        checkpoint_id="CKPT-001",
+        events=[ev0],
+    )
+    old_fingerprint = s0.snapshot_fingerprint
+
+    ev_diff = build_stage1_trial_event(
+        trial_id=ev0.trial_id,
+        event_index=0,
+        previous_event_reference="ROOT",
+        event_kind="OPPORTUNITY_CREATED",
+        recorded_at=datetime(2026, 10, 19, 0, 0, 3, tzinfo=UTC),
+        producer_evidence_references=["b" * 64],
+        payload_reference="fixture://diff-payload-002",
+        payload_hash="e" * 64,
+    )
+    assert ev_diff.event_hash != ev0.event_hash
+    assert ev_diff.event_id == ev0.event_id
+
+    impostor = make_impostor_event(ev_diff)
+    assert impostor == ev0
+
+    with pytest.raises(
+        ValueError, match="event must be an exact Stage1TrialEvent instance"
+    ):
+        append_stage1_trial_provenance_event(
+            snapshot=s0,
+            event=impostor,
+            campaign=camp,
+            arms=arms,
+            bindings=bindings,
+            expected_run_ids=expected_runs,
+        )
+
+    assert s0.snapshot_fingerprint == old_fingerprint
+    assert s0.event_count == 1
+    assert s0.event_envelopes[0].event_hash == ev0.event_hash
+
+
+def test_regression_append_identical_subclass_event_rejected() -> None:
+    camp = make_golden_campaign()
+    arms = [make_golden_arm_b(), make_golden_arm_r()]
+    bindings = make_golden_bindings()
+    expected_runs = ["RUN-001"]
+
+    ev0 = make_golden_root_event()
+    s0 = build_stage1_trial_provenance_snapshot(
+        campaign=camp,
+        arms=arms,
+        bindings=bindings,
+        expected_run_ids=expected_runs,
+        run_id="RUN-001",
+        arm_id="ARM-B",
+        checkpoint_id="CKPT-001",
+        events=[ev0],
+    )
+
+    impostor_same = make_impostor_event(ev0)
+
+    with pytest.raises(
+        ValueError, match="event must be an exact Stage1TrialEvent instance"
+    ):
+        append_stage1_trial_provenance_event(
+            snapshot=s0,
+            event=impostor_same,
+            campaign=camp,
+            arms=arms,
+            bindings=bindings,
+            expected_run_ids=expected_runs,
+        )
+
+
+def test_append_valid_ordinary_replay_and_conflict_rejection() -> None:
+    camp = make_golden_campaign()
+    arms = [make_golden_arm_b(), make_golden_arm_r()]
+    bindings = make_golden_bindings()
+    expected_runs = ["RUN-001"]
+
+    ev0 = make_golden_root_event()
+    s0 = build_stage1_trial_provenance_snapshot(
+        campaign=camp,
+        arms=arms,
+        bindings=bindings,
+        expected_run_ids=expected_runs,
+        run_id="RUN-001",
+        arm_id="ARM-B",
+        checkpoint_id="CKPT-001",
+        events=[ev0],
+    )
+
+    # 1. Valid ordinary replay returns the exact original snapshot object
+    s_replay = append_stage1_trial_provenance_event(
+        snapshot=s0,
+        event=ev0,
+        campaign=camp,
+        arms=arms,
+        bindings=bindings,
+        expected_run_ids=expected_runs,
+    )
+    assert s_replay is s0
+
+    # 2. Different valid base-type event with existing event ID raises ValueError
+    ev_conflict = build_stage1_trial_event(
+        trial_id=ev0.trial_id,
+        event_index=0,
+        previous_event_reference="ROOT",
+        event_kind="OPPORTUNITY_CREATED",
+        recorded_at=datetime(2026, 10, 19, 0, 0, 3, tzinfo=UTC),
+        producer_evidence_references=["b" * 64],
+        payload_reference="fixture://diff-payload-002",
+        payload_hash="e" * 64,
+    )
+    with pytest.raises(ValueError):
+        append_stage1_trial_provenance_event(
+            snapshot=s0,
+            event=ev_conflict,
             campaign=camp,
             arms=arms,
             bindings=bindings,
