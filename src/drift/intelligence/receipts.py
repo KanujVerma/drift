@@ -24,24 +24,38 @@ from drift.intelligence.contracts import (
 )
 
 
-def _validate_cost_chronology(cost: CostReceipt) -> None:
-    """Check retained timestamps, including self-rehashed records during recovery.
+def _validate_cost_chronology(
+    *,
+    incurred_start: datetime | None,
+    incurred_end: datetime | None,
+    recorded_at: datetime | None,
+) -> None:
+    """Reject impossible or ambiguous known spend clocks before hashing.
 
-    Missing fields remain unknown, not fabricated. When known, observed spend
-    cannot be recorded before it was incurred or complete before it began.
+    An unknown timestamp remains None. A supplied timestamp is never silently
+    assumed to be UTC, because semantic refusal must precede canonical JSON
+    serialization, which cannot encode naive datetimes.
     """
-    for field in ("incurred_start", "incurred_end", "recorded_at"):
-        stamp = getattr(cost, field)
-        if stamp is not None and (stamp.tzinfo is None or stamp.utcoffset() is None):
-            raise ValueError(f"INVALID_COST_TIMESTAMP: {field} lacks timezone")
-    start = cost.incurred_start
-    end = cost.incurred_end
-    recorded = cost.recorded_at
-    if start is not None and end is not None and end < start:
+    for label, stamp in (
+        ("incurred_start", incurred_start),
+        ("incurred_end", incurred_end),
+        ("recorded_at", recorded_at),
+    ):
+        if stamp is not None and (
+            not isinstance(stamp, datetime)
+            or stamp.tzinfo is None
+            or stamp.utcoffset() is None
+        ):
+            raise ValueError(f"INVALID_COST_TIMESTAMP: {label} lacks timezone")
+    if (
+        incurred_start is not None
+        and incurred_end is not None
+        and incurred_end < incurred_start
+    ):
         raise ValueError("INVALID_COST_CHRONOLOGY: end precedes start")
-    if recorded is not None and (
-        (start is not None and recorded < start)
-        or (end is not None and recorded < end)
+    if recorded_at is not None and (
+        (incurred_start is not None and recorded_at < incurred_start)
+        or (incurred_end is not None and recorded_at < incurred_end)
     ):
         raise ValueError("INVALID_COST_CHRONOLOGY: recorded before incurred")
 
@@ -234,6 +248,12 @@ def create_cost_receipt(
         currency_val = str(currency)
         unknown_reason_val = None
 
+    # Named chronology errors must precede hashing or model construction.
+    _validate_cost_chronology(
+        incurred_start=incurred_start,
+        incurred_end=incurred_end,
+        recorded_at=recorded_at,
+    )
     raw_dict: dict[str, Any] = {
         "profile": "drift-research/1-draft",
         "kind": "raw_cost",
@@ -262,7 +282,6 @@ def create_cost_receipt(
     rec_hash = compute_record_hash(raw_dict)
     raw_dict["record_hash"] = rec_hash
     receipt = CostReceipt.model_validate(raw_dict)
-    _validate_cost_chronology(receipt)
     return receipt
 
 
@@ -357,8 +376,14 @@ class ResearchReceiptStore:
 
     def record_cost_receipt(self, cost: CostReceipt) -> None:
         """Record a cost receipt idempotently or fail on conflict."""
+        # Check the supplied object before record-hash serialization too.
+        # model_copy(update=...) may contain a naive datetime or a bad type.
+        _validate_cost_chronology(
+            incurred_start=cost.incurred_start,
+            incurred_end=cost.incurred_end,
+            recorded_at=cost.recorded_at,
+        )
         cost = CostReceipt.model_validate(cost.model_dump(mode="python"))
-        _validate_cost_chronology(cost)
         receipt_id = cost.receipt_id
         if receipt_id in self._costs_by_receipt_id:
             existing = self._costs_by_receipt_id[receipt_id]
