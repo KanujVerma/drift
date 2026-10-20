@@ -208,7 +208,8 @@ def _valid_policy(policy: object) -> TypeGuard[ScreeningPolicy]:
     if type(policy.excluded_categories) is not frozenset:
         return False
     if any(
-        not _token(c) for c in policy.allowed_categories | policy.excluded_categories
+        not _token(c)
+        for c in (*policy.allowed_categories, *policy.excluded_categories)
     ):
         return False
     if policy.allowed_categories & policy.excluded_categories:
@@ -436,6 +437,16 @@ def screen_event(
             "MISSING_OR_INVALID_SCREENING_POLICY",
             evidence,
             None,
+            context_id,
+            decision_cutoff,
+        )
+
+    if type(prior) not in (tuple, list):
+        return _result(
+            "ABSTAIN",
+            "MALFORMED_PRIOR_COLLECTION",
+            evidence,
+            policy,
             context_id,
             decision_cutoff,
         )
