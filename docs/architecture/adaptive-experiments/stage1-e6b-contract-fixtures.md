@@ -9,7 +9,7 @@ execution permission.
 and Matthew [#508](https://github.com/KanujVerma/drift/issues/508).
 **Parent:** [E6B #485](https://github.com/KanujVerma/drift/issues/485).
 **Source readback:** accepted `main` at
-`fcb53d3683e6d01a1a5a5cd0bdd2dbdbe0b096d6), on October 20, 2026.
+`fcb53d3683e6d01a1a5a5cd0bdd2dbdbe0b096d6`, on October 20, 2026.
 
 ## 1. Acceptance boundary
 
@@ -33,6 +33,10 @@ RESULT, financial orders or authenticated provider data. The bounded
 [#504](https://github.com/KanujVerma/drift/pull/504) and
 [#506](https://github.com/KanujVerma/drift/pull/506) hardening PRs are
 independent and must not silently supply missing producer authority.
+Matthew's executed [#511](https://github.com/KanujVerma/drift/issues/511)
+provenance account-binding defect is a separate prerequisite for any trial
+projection claiming a fully consistent E1 account/manifest join. #504's
+event-sequence fix does not repair #511.
 
 ## 2. Fixed accepted synthetic fixture identity
 
@@ -80,7 +84,11 @@ book and numerical result. None alone binds the original E1
 `RunAccountBindingV1` to a trusted account-provisioning event and exact
 `(campaign,run,arm,checkpoint)`. A deterministic result hash can legitimately
 occur under distinct **operational** runs; it cannot be used as a sole account
-join or a counter of independent experiments.
+join or a counter of independent experiments. Distinct verified operational
+associations are retained even when a replay returns the same result hash.
+Neither new run IDs nor repeat content hashes alone prove new independent
+scientific samples. The accepted trial/replication protocol determines sample
+identity.
 
 For each producer, the future accepted evidence must identify its **actual
 trusted issuer/retention authority, version/profile, original source reference
@@ -130,13 +138,16 @@ coverage in #500. Cases marked `BLOCKED_ON_507`, `BLOCKED_ON_508`, or
 | R02 | Same arm/account, wrong `run_id` or `checkpoint_id` | Refuse E1 association even if raw `Scope` strings match | BLOCKED_ON_507 |
 | R03 | Wrong research account, modified complete manifest, wrong issuer or original hash | Refuse, preserve unmodified source records | BLOCKED_ON_507 |
 | R04 | A market/context input or matured feedback first available at `2026-01-30T21:00:01Z` is consumed despite decision cutoff `21:00:00Z` | Invalid causal lookahead from **input evidence**; refuse the decision | BLOCKED_ON_507 |
-| R05 | A valid `hold`, then `abstain` and `unavailable` in separately identified cases | Real decision/attempt retained, zero manufactured target orders | BLOCKED_ON_507 |
+| R05a | Verified `hold` with a resolved matching incumbent | Assert `hold` and incumbent match; no target order; retain attempt/reason | BLOCKED_ON_507 |
+| R05b | Verified `abstain` without strategy, targets or cash | Assert `abstain`, separate reason/status and no order | BLOCKED_ON_507 |
+| R05c | Verified `unavailable` from missing eligible input | Assert `unavailable` and missing-input reason, not hold/abstain | BLOCKED_ON_507 |
 | R06 | Failed or rejected attempt, missing accepted candidate, retained raw failure evidence | Retain failure, genuine nullable candidate and cost basis; no fake `VALID` | BLOCKED_ON_507 |
 | R07 | Same attempt/replay id with conflicting retained content, or duplicate exact replay | Conflicting content refused; genuine exact replay remains idempotent and not another independent sample | BLOCKED_ON_507 |
 | R08 | Raw cost `unknown` vs evidenced `verified_zero`, shared work and superseding correction | Preserve distinctions and correction lineage; no silent zero or double count | BLOCKED_ON_507 |
 | P01 | Proven E1 account provisioning, M0 run, M2 result/book/trace and matched cutoff | Admit **platform association** with retained original artifact hashes | BLOCKED_ON_508 |
 | P02 | Result assigned to another B/R account or run/checkpoint despite matching result hash | Refuse original account/run join | BLOCKED_ON_508 |
-| P03 | Same deterministic M2 result hash under two distinct operational/account associations | Do not collapse separate operational runs into one scored observation | BLOCKED_ON_508 |
+| P03a | Two trusted operational account/run associations share one M2 result hash | Retain both original associations, no join on result hash alone; scored units follow accepted replication policy | BLOCKED_ON_508 |
+| P03b | Exact M2 evidence replayed under a new operational ID, no new scientific unit | Retain original and replay lineage; do not increment independent scored samples | BLOCKED_ON_508 |
 | P04a | Trusted no-order `hold` and valid current account state | Preserve incumbent, retain zero actual staged/fill orders; do not interpret as mandate refusal | BLOCKED_ON_508 |
 | P04b | Explicit mandate/admission `REFUSED` with no orders | Retain refusal/trace/reason and zero verified fills; no completed trade or silent `hold` | BLOCKED_ON_508 |
 | P04c | Order status `UNKNOWN` or evidence unavailable with no confirmed fills | Preserve unresolved/unknown status and non-complete scientific result; do not infer no-order completion from absent fills | BLOCKED_ON_508 |
@@ -181,7 +192,9 @@ platform book and its separate attributable research-cost evidence.
 ## 7. Required order of checks for a future trial projection
 
 1. Independently revalidate original E1 campaign/arms/full run-account binding,
-   immutable trial provenance and E6A checkpoint declaration/snapshot audit.
+   immutable trial provenance and E6A checkpoint declaration/snapshot audit,
+   including the #511 single-view provenance-account correction before
+   asserting accepted structural binding.
 2. Resolve producer **accepted contract revisions** and verifiers, not names
    or hashes copied from a caller's envelope. Reject missing/unrecognized
    issuer or version before interpreting its claims.
