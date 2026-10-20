@@ -42,6 +42,7 @@ jobs:
         id: scope
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           python3 - <<'PY'
           import os
@@ -49,35 +50,67 @@ jobs:
           import subprocess
 
           docs_only = False
+          diff_base = ""
           if os.environ["GITHUB_EVENT_NAME"] == "pull_request":
-              base = os.environ.get("PR_BASE_SHA", "")
-              if not re.fullmatch(r"[0-9a-f]{40}", base):
-                  raise SystemExit("Invalid PR base SHA; cannot classify changes")
-              raw = subprocess.check_output(
-                  ["git", "diff", "--name-only", "--no-renames", "-z", base, "HEAD"]
-              )
-              paths = [os.fsdecode(item) for item in raw.split(b"\0") if item]
+              event_base = os.environ.get("PR_BASE_SHA", "")
+              event_head = os.environ.get("PR_HEAD_SHA", "")
+              sha_pattern = r"[0-9a-f]{40}"
 
-              def is_documentation(path):
-                  return path in ("AGENTS.md", "README.md") or (
-                      path.startswith("docs/") and path.endswith(".md")
-                  )
+              # The checkout is GitHub's synthetic PR merge commit. Its first
+              # parent is the base version ACTUALLY tested by this workflow,
+              # which may be newer than the PR event's recorded base SHA.
+              # Never trust an arbitrary checkout or a caller-chosen diff base.
+              if not (
+                  re.fullmatch(sha_pattern, event_base)
+                  and re.fullmatch(sha_pattern, event_head)
+              ):
+                  print("Missing/invalid PR identity: full verification required")
+              else:
+                  parents = subprocess.check_output(
+                      ["git", "rev-list", "--parents", "-n", "1", "HEAD"],
+                      text=True,
+                  ).split()
+                  if len(parents) != 3 or parents[2] != event_head:
+                      print("Unverified PR synthetic merge: full verification required")
+                  elif subprocess.run(
+                      ["git", "merge-base", "--is-ancestor", event_base, parents[1]],
+                      check=False,
+                  ).returncode != 0:
+                      print("PR event base ancestry unverified: full verification required")
+                  else:
+                      diff_base = parents[1]
+                      raw = subprocess.check_output(
+                          [
+                              "git", "diff", "--name-only", "--no-renames",
+                              "-z", diff_base, "HEAD",
+                          ]
+                      )
+                      paths = [os.fsdecode(item) for item in raw.split(b"\0") if item]
 
-              docs_only = bool(paths) and all(is_documentation(p) for p in paths)
-              print("Changed PR paths:", repr(paths))
-              if not paths:
-                  print("Empty diff: full verification required")
+                      def is_documentation(path):
+                          return path in ("AGENTS.md", "README.md") or (
+                              path.startswith("docs/") and path.endswith(".md")
+                          )
+
+                      docs_only = bool(paths) and all(
+                          is_documentation(path) for path in paths
+                      )
+                      print("Verified PR merge base:", diff_base)
+                      print("Changed PR paths:", repr(paths))
+                      if not paths:
+                          print("Empty diff: full verification required")
           else:
               print("Push to main: full verification required")
 
           print("Documentation-only fast path:", docs_only)
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
               out.write(f"docs_only={str(docs_only).lower()}\n")
+              out.write(f"diff_base={diff_base}\n")
           PY
       - name: Check changed Markdown links and forbidden punctuation
         if: steps.scope.outputs.docs_only == 'true'
         env:
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_BASE_SHA: ${{ steps.scope.outputs.diff_base }}
         run: |
           python3 - <<'PY'
           import html
@@ -459,7 +492,7 @@ jobs:
       - name: git diff --check against the pull request base
         if: github.event_name == 'pull_request'
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_SHA: ${{ steps.scope.outputs.diff_base || github.event.pull_request.base.sha }}
         run: git diff --check "$BASE_SHA" HEAD
 
       - name: Verify CI changed no tracked file
