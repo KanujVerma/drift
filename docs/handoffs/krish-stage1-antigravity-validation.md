@@ -462,4 +462,100 @@ still requires trusted readback at every consumer boundary, not direct
 use of mutable internals. No local test can establish live LLM
 learning quality, scientific superiority, safe broker execution,
 model spend authorization or a valid trading mandate.
+## Stacked K5 schedule and platform bridge acceptance
+
+**Status:** K5 original #405/PR #452 exists but remains unmerged and not
+independently accepted. K5 issue #475 records a bounded, stacked correction
+branch on the frozen K4 source #474. This section supplements, rather than
+replaces, the five QA passes and complete pinned tests above. The K0-K5
+consolidation #456/#457 must be moved by a history-preserving, writer-owned
+operation to a final **immutable** QA SHA after all accepted corrections.
+Child-PR CI is not the final engineering qualification.
+
+### K5 changes to verify
+
+1. **K1 and K5 compatibility:** K5 synthetic candidate fixture parameters
+   now use exact canonical `parameters_hash`, not an arbitrary 64-character
+   placeholder. Invalid/forged K1 candidates must fail their own
+   `ResearchCandidate` constructor or K5 trust-boundary validation, not
+   deserialize as authorized proposals. A `hold` fixture cannot retain a
+   proposed strategy, allocation or cash target. Never weaken K1 to get K5 green.
+2. **Trusted request identity:** K5-generated `request_id` commits to the
+   candidate, full observed account state and verification reference,
+   observation time, pause/order flags, dispatch time, and intraday/fallback
+   capability. Distinct policy or state inputs must not alias one request.
+   Replay-identical inputs yield exactly identical request IDs and record
+   digests. Consumer idempotency still requires an independent M0 ledger.
+3. **Complete reference checks:** Equal SHA-256 bytes do not make a different
+   portfolio ID/version or mandate ID/version authorized. Both full references
+   must match exactly. Unverified, stale/future, paused, pending, wrong-account
+   or wrong-arm states must refuse with **zero target allocations and no cash
+   reallocation**. Unknown timezone evidence refuses.
+4. **Intrinsic request integrity:** Even a self-rehashed
+   `PlatformExecutionRequest` marked admitted must reject empty targets,
+   duplicated securities, out-of-range/nonfinite/scientific-notation weights,
+   sums not exactly one including cash, unavailable dispositions, or
+   contradictory refusal state. Nonadmitted states cannot contain actionable
+   allocations and cannot be relabeled to valid admissions.
+5. **Event references and causal scheduling:** A feed event reference is
+   derived from the canonical hash of BOTH `source_id` and `event_id`,
+   preventing collisions when either contains a delimiter. Event materiality
+   and condition join the trigger's identity. A changed feed signal or same
+   revision with contradictory bytes/times refuses in both input orders.
+   Future feed observations do not rewrite the current cutoff, while observed
+   feed failures have a deterministic broken-before-unknown precedence.
+6. **Calendar and distinct review clocks:** Revalidate caller-supplied
+   calendar/policy/event objects at the boundary, refuse contradictory
+   historical revisions even when the current revision is newer, and refuse
+   history without an identified current calendar. Event cooldown may
+   suppress an event-driven review but must not suppress an independently due
+   routine weekly or planned monthly review.
+7. **Defensive-only policy:** In a locally checked candidate allocation,
+   refuse an empty implied liquidation, unknown or nonfinite current
+   positions, negative weights, inconsistent current totals, duplicate
+   targets or an increase in an existing security. This function is *not*
+   a platform-authenticated risk gate, position accounting rule or order.
+   M0 must authorize any actual consequence and tie policy to the specific
+   immutable accepted review trigger.
+
+### Isolated K5 commands (new exact stacked SHA)
+
+```bash
+uv sync --locked
+uv run pytest -q tests/unit/test_intelligence_review_scheduler.py tests/unit/test_intelligence_platform_bridge.py
+uv run pytest -q tests/unit/test_intelligence_contracts.py tests/unit/test_intelligence_validation.py tests/unit/test_intelligence_review_scheduler.py tests/unit/test_intelligence_platform_bridge.py
+uv run ruff check src/drift/intelligence tests/unit/test_intelligence_*
+uv run ruff format --check src/drift/intelligence tests/unit/test_intelligence_*
+uv run mypy src/drift/intelligence tests/unit/test_intelligence_*
+uv build
+git diff --check
+```
+
+**These commands are planned checks, not passing evidence.** The exact
+K5 PR and canonical CI report must record actual outcomes. Inspect mutation
+tests, positive controls, failure-path zero allocations and strict typed
+readback. The final Anti-Gravity run remains the entire pinned offline
+repository test suite, coverage/source guard, Ruff, mypy, build, Git checks,
+five adversarial QA passes and independent consumer/scientific review on
+the final integrated SHA.
+
+### Existing integration blockers and authority boundary
+
+Prior exact-head K3 canonical CI run
+https://github.com/KanujVerma/drift/actions/runs/39344312724
+reported 5,731 passing, 2 failing and 23 erroring tests. It contains
+a K2 `getattr` source-capability refusal, a K2 naive-cost-clock hashing
+exception, and K5 fixture violations of the new K1 parameter-hash
+invariant. This K5 correction addresses the **fixture violations only**.
+The two K2 problems must be repaired within a distinct K2-owned
+corrective write-set and retested before final integration acceptance.
+No broad static guard disablement or K1 schema relaxation is permitted.
+
+Matthew's proposed/under-review source, risk and execution interfaces
+(#379, #380, #423) are not proof of an accepted M0 consumer. Kanuj owns
+independent campaign science. Research requests marked `admitted` at
+this synthetic seam are **not orders, approved fills, authorized
+trades, risk-enforced dispatches, or evidence of strategy performance**.
+No provider credential, network inference, paid data, paper/shadow/live
+broker call, promotion or capital permission is introduced.
 
