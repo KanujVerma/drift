@@ -702,9 +702,7 @@ def test_n15_e6a_builder_keeps_one_valid_account_manifest_view() -> None:
     camp, arms, bindings, runs = _fixture(runs=["RUN-001"])
     declarations = _decls(runs, checkpoint_ids=("CKPT-001",))
     oracle = _build(camp, arms, bindings, runs, declarations)
-    bad = replace(
-        bindings[1], portfolio_account_id=bindings[0].portfolio_account_id
-    )
+    bad = replace(bindings[1], portfolio_account_id=bindings[0].portfolio_account_id)
     changing = _ChangingInput(bindings, [bindings[0], bad])
 
     built = _build(camp, arms, changing, runs, declarations)
@@ -722,9 +720,7 @@ def test_n16_e6a_verifier_keeps_one_valid_account_manifest_view() -> None:
     audit = _build(
         camp, arms, bindings, runs, _decls(runs, checkpoint_ids=("CKPT-001",))
     )
-    bad = replace(
-        bindings[1], portfolio_account_id=bindings[0].portfolio_account_id
-    )
+    bad = replace(bindings[1], portfolio_account_id=bindings[0].portfolio_account_id)
     changing = _ChangingInput(bindings, [bindings[0], bad])
 
     assert verify_stage1_checkpoint_coverage_audit(
