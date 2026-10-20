@@ -654,4 +654,3 @@ this synthetic seam are **not orders, approved fills, authorized
 trades, risk-enforced dispatches, or evidence of strategy performance**.
 No provider credential, network inference, paid data, paper/shadow/live
 broker call, promotion or capital permission is introduced.
-
