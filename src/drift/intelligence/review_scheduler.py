@@ -17,7 +17,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 from uuid import NAMESPACE_URL, uuid5
 
-from pydantic import model_validator
+from pydantic import Field, field_validator, model_validator
 
 from drift.intelligence.contracts import (
     ArtifactReference,
@@ -38,23 +38,37 @@ VerdictAction = Literal["review", "no_review", "unavailable"]
 class FeedEvent(ImmutableModel):
     """Timestamped informational or market feed event."""
 
-    event_id: str
-    source_id: str
-    version: str
+    event_id: str = Field(min_length=1)
+    source_id: str = Field(min_length=1)
+    version: str = Field(min_length=1)
     available_at: datetime
-    content_hash: str
+    content_hash: str = Field(min_length=64, max_length=64)
     raw_text: str
     condition: FeedCondition = "material_event"
-    is_material: bool = True
+    is_material: bool = Field(default=True, strict=True)
+
+    @field_validator("content_hash")
+    @classmethod
+    def require_digest(cls, value: str) -> str:
+        if any(c not in "0123456789abcdef" for c in value):
+            raise ValueError("INVALID_FEED_EVENT_HASH")
+        return value
 
 
 class CalendarRevision(ImmutableModel):
     """Calendar revision record with effective cutoff and content digest."""
 
-    calendar_id: str
-    revision: int
+    calendar_id: str = Field(min_length=1)
+    revision: int = Field(ge=1, strict=True)
     effective_cutoff: datetime
-    content_hash: str
+    content_hash: str = Field(min_length=64, max_length=64)
+
+    @field_validator("content_hash")
+    @classmethod
+    def require_digest(cls, value: str) -> str:
+        if any(c not in "0123456789abcdef" for c in value):
+            raise ValueError("INVALID_CALENDAR_HASH")
+        return value
 
 
 class SchedulerPolicy(ImmutableModel):
@@ -100,6 +114,21 @@ class ReviewTriggerVerdict(ImmutableModel):
             raise ValueError("REVIEW_TRIGGER_MISSING_REVIEW_TYPE")
         if self.action != "review" and self.review_type is not None:
             raise ValueError("NON_ACTIONABLE_TRIGGER_HAS_REVIEW_TYPE")
+        if (
+            self.action != "review" and self.event_ref is not None
+        ) or (
+            self.review_type == "event_driven" and self.event_ref is None
+        ):
+            raise ValueError("INVALID_TRIGGER_EVENT_REFERENCE")
+        if (
+            self.evaluated_at.tzinfo is None
+            or self.evaluated_at.utcoffset() is None
+            or self.decision_cutoff.tzinfo is None
+            or self.decision_cutoff.utcoffset() is None
+        ):
+            raise ValueError("INDETERMINATE_TIMEZONE: review verdict")
+        if self.decision_cutoff > self.evaluated_at:
+            raise ValueError("NON_CAUSAL_REVIEW_CUTOFF")
         return self
 
 
@@ -128,7 +157,13 @@ def evaluate_review_schedule(
     - Event cooldown throttling (DP-R2).
     - Distinct routine (weekly) and adaptation (monthly) clock cadences (D04).
     """
-    active_policy = policy or SchedulerPolicy()
+    active_policy = SchedulerPolicy.model_validate(
+        (policy or SchedulerPolicy()).model_dump(mode="python")
+    )
+    if feed_condition not in (
+        "healthy_empty", "material_event", "broken_feed", "unknown_coverage"
+    ):
+        raise ValueError("UNKNOWN_FEED_CONDITION")
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("INDETERMINATE_TIMEZONE: scheduler now lacks an offset")
     now_utc = now.astimezone(UTC)
@@ -143,9 +178,29 @@ def evaluate_review_schedule(
                 raise ValueError(
                     f"FUTURE_REVIEW_CLOCK: last {label} review is after now"
                 )
+    # Verify the actual typed input values before trusting frozen-model fields.
+    # model_copy(update=...) bypasses Pydantic validation.
+    validated_events = tuple(
+        FeedEvent.model_validate(event.model_dump(mode="python"))
+        for event in feed_events
+    )
+    validated_calendar = (
+        CalendarRevision.model_validate(current_calendar.model_dump(mode="python"))
+        if current_calendar is not None
+        else None
+    )
+    validated_history = tuple(
+        CalendarRevision.model_validate(cal.model_dump(mode="python"))
+        for cal in calendar_history
+    )
+    if validated_history and validated_calendar is None:
+        raise ValueError("UNAVAILABLE_CALENDAR_CURRENTNESS")
+    current_calendar = validated_calendar
+    calendar_history = validated_history
+    feed_events = validated_events
     # A scheduled review identity must not change when future events arrive,
     # or when the same completed event set is supplied in a different order.
-    causal_event_identity: list[tuple[str, str, str, str, datetime]] = []
+    causal_event_identity: list[tuple[str, str, str, str, datetime, str, bool]] = []
     for event in feed_events:
         if event.available_at.tzinfo is None or event.available_at.utcoffset() is None:
             raise ValueError("INDETERMINATE_TIMEZONE: feed availability lacks offset")
@@ -158,6 +213,8 @@ def evaluate_review_schedule(
                     event.version,
                     event.content_hash,
                     availability,
+                    event.condition,
+                    event.is_material,
                 )
             )
     causal_event_identity.sort()
@@ -188,6 +245,20 @@ def evaluate_review_schedule(
     raw_dict: dict[str, Any]
 
     # 1. Calendar revision currentness check (T02)
+    known_calendar_revisions: dict[tuple[str, int], str] = {}
+    for past_cal in calendar_history:
+        if (
+            past_cal.effective_cutoff.tzinfo is None
+            or past_cal.effective_cutoff.utcoffset() is None
+        ):
+            raise ValueError("INDETERMINATE_TIMEZONE: historical calendar lacks offset")
+        if past_cal.effective_cutoff.astimezone(UTC) > now_utc:
+            continue
+        rev_key = (past_cal.calendar_id, past_cal.revision)
+        existing_hash = known_calendar_revisions.get(rev_key)
+        if existing_hash is not None and existing_hash != past_cal.content_hash:
+            raise ValueError("SOURCE_DIGEST_CONFLICT: historical calendar revision")
+        known_calendar_revisions[rev_key] = past_cal.content_hash
     if current_calendar is not None:
         if (
             current_calendar.effective_cutoff.tzinfo is None
@@ -223,7 +294,17 @@ def evaluate_review_schedule(
                 )
 
     # 2. Feed condition evaluation (T03)
-    if feed_condition == "broken_feed":
+
+    causal_feed_problem = next(
+        (
+            event.condition
+            for event in feed_events
+            if event.available_at.astimezone(UTC) <= now_utc
+            and event.condition in ("broken_feed", "unknown_coverage")
+        ),
+        None,
+    )
+    if feed_condition == "broken_feed" or causal_feed_problem == "broken_feed":
         raw_dict = {
             "trigger_id": actual_trigger_id,
             "action": "unavailable",
@@ -237,7 +318,7 @@ def evaluate_review_schedule(
         raw_dict["record_hash"] = compute_record_hash(raw_dict)
         return ReviewTriggerVerdict.model_validate(raw_dict)
 
-    if feed_condition == "unknown_coverage":
+    if feed_condition == "unknown_coverage" or causal_feed_problem == "unknown_coverage":
         raw_dict = {
             "trigger_id": actual_trigger_id,
             "action": "unavailable",
@@ -280,7 +361,11 @@ def evaluate_review_schedule(
             )
         event_versions[key] = ev.content_hash
         event_availability[key] = ev_available_utc
-        if ev.is_material and ev.available_at.astimezone(UTC) <= now_utc:
+        if (
+            ev.is_material
+            and ev.condition == "material_event"
+            and ev_available_utc <= now_utc
+        ):
             causal_material_events.append(ev)
 
     if feed_condition == "material_event" and not causal_material_events:
@@ -297,28 +382,22 @@ def evaluate_review_schedule(
         raw_dict["record_hash"] = compute_record_hash(raw_dict)
         return ReviewTriggerVerdict.model_validate(raw_dict)
 
-    if causal_material_events:
-        # Check cooldown
-        if last_event_review_at is not None:
-            last_event_utc = last_event_review_at.astimezone(UTC)
-            if (now_utc - last_event_utc) < active_policy.event_cooldown:
-                raw_dict = {
-                    "trigger_id": actual_trigger_id,
-                    "action": "no_review",
-                    "review_type": None,
-                    "reason": "cooldown_active: event review suppressed by cooldown",
-                    "evaluated_at": now_utc,
-                    "decision_cutoff": now_utc,
-                    "action_policy": active_policy.default_event_policy,
-                    "event_ref": None,
-                }
-                raw_dict["record_hash"] = compute_record_hash(raw_dict)
-                return ReviewTriggerVerdict.model_validate(raw_dict)
-
+    cooldown_active = bool(
+        causal_material_events
+        and last_event_review_at is not None
+        and now_utc - last_event_review_at.astimezone(UTC)
+        < active_policy.event_cooldown
+    )
+    if causal_material_events and not cooldown_active:
         # Trigger event review; raw_text is strictly untrusted and stays inert (T03)
         latest_event = max(
             causal_material_events,
-            key=lambda ev: (ev.available_at, ev.event_id, ev.content_hash),
+            key=lambda ev: (
+                ev.available_at.astimezone(UTC),
+                ev.source_id,
+                ev.event_id,
+                ev.content_hash,
+            ),
         )
         raw_dict = {
             "trigger_id": actual_trigger_id,
@@ -331,7 +410,7 @@ def evaluate_review_schedule(
             "decision_cutoff": now_utc,
             "action_policy": active_policy.default_event_policy,
             "event_ref": ArtifactReference(
-                id=latest_event.event_id,
+                id=f"{latest_event.source_id}:{latest_event.event_id}",
                 version=latest_event.version,
                 sha256=latest_event.content_hash,
             ).model_dump(mode="python"),
@@ -390,7 +469,11 @@ def evaluate_review_schedule(
         "trigger_id": actual_trigger_id,
         "action": "no_review",
         "review_type": None,
-        "reason": "healthy_empty: no review triggers due",
+        "reason": (
+            "cooldown_active: event review suppressed by cooldown"
+            if cooldown_active
+            else "healthy_empty: no review triggers due"
+        ),
         "evaluated_at": now_utc,
         "decision_cutoff": now_utc,
         "action_policy": active_policy.default_event_policy,
