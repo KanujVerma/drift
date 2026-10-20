@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Sequence
 from dataclasses import fields, replace
 from datetime import UTC, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, TypeVar
 
 import pytest
 
@@ -25,6 +25,8 @@ from drift.experiments.stage1_trial_events import (
     Stage1TrialEvent,
     build_stage1_trial_event,
 )
+from drift.serialization.canonical import content_hash
+
 from drift.experiments.stage1_trial_provenance import (
     PROVENANCE_SCHEMA_VERSION,
     Stage1TrialProvenanceSnapshotV1,
@@ -1523,3 +1525,190 @@ def test_provenance_refuses_invalid_events_hidden_by_false_empty_len() -> None:
     assert len(supplied) == 0
     with pytest.raises(ValueError, match=r"events\[0\] must be a Stage1TrialEvent"):
         _snapshot_from_caller_events(supplied)
+
+# ---------------------------------------------------------------------------
+# Issue #511: E1 input capture across provenance build, verify and append
+# ---------------------------------------------------------------------------
+
+
+_Input = TypeVar("_Input")
+
+
+class _ChangingManifestInput(list[_Input]):
+    """Expose an E1-valid first iterator and an inconsistent later one."""
+
+    def __init__(self, first: Sequence[_Input], later: Sequence[_Input]) -> None:
+        super().__init__(first)
+        self.first = tuple(first)
+        self.later = tuple(later)
+        self.read_count = 0
+
+    def __iter__(self) -> Iterator[_Input]:
+        self.read_count += 1
+        return iter(self.first if self.read_count == 1 else self.later)
+
+
+def _golden_manifest_args() -> tuple[
+    CampaignSpecV1,
+    list[ArmSpecV1],
+    list[RunAccountBindingV1],
+    list[str],
+]:
+    return (
+        make_golden_campaign(),
+        [make_golden_arm_b(), make_golden_arm_r()],
+        make_golden_bindings(),
+        ["RUN-001"],
+    )
+
+
+def _empty_snapshot(
+    campaign: CampaignSpecV1,
+    arms: Sequence[ArmSpecV1],
+    bindings: Sequence[RunAccountBindingV1],
+    runs: Sequence[str],
+) -> Stage1TrialProvenanceSnapshotV1:
+    return build_stage1_trial_provenance_snapshot(
+        campaign=campaign,
+        arms=arms,
+        bindings=bindings,
+        expected_run_ids=runs,
+        run_id="RUN-001",
+        arm_id="ARM-B",
+        checkpoint_id="CKPT-001",
+        events=(),
+    )
+
+
+@pytest.mark.parametrize("mutation", ["cash", "account", "bound_at"])
+def test_n511_rehashed_invalid_binding_cannot_cross_validation(
+    mutation: str,
+) -> None:
+    camp, arms, good, runs = _golden_manifest_args()
+    original = _empty_snapshot(camp, arms, good, runs)
+    bad_b = (
+        replace(good[0], initial_cash_allocated="1")
+        if mutation == "cash"
+        else (
+            replace(good[0], portfolio_account_id=good[1].portfolio_account_id)
+            if mutation == "account"
+            else replace(
+                good[0], bound_at="2026-10-18T00:00:00.000000Z"
+            )
+        )
+    )
+    bad = [bad_b, good[1]]
+
+    # Forge a self-consistent persisted hash using genuinely invalid E1 input.
+    altered_scope = replace(
+        original.scope,
+        run_account_binding=bad_b,
+        complete_manifest_fingerprint=_complete_manifest_fingerprint(
+            campaign=camp,
+            arms=arms,
+            bindings=bad,
+            expected_run_ids=runs,
+        ),
+    )
+    forged = replace(
+        original,
+        scope=altered_scope,
+        snapshot_fingerprint="",
+    )
+    forged = replace(
+        forged, snapshot_fingerprint=content_hash(_provenance_preimage(forged))
+    )
+    with pytest.raises(ValueError):
+        verify_stage1_trial_provenance_snapshot(
+            snapshot=forged,
+            campaign=camp,
+            arms=arms,
+            bindings=bad,
+            expected_run_ids=runs,
+        )
+
+    changing = _ChangingManifestInput(good, bad)
+    with pytest.raises(ValueError):
+        verify_stage1_trial_provenance_snapshot(
+            snapshot=forged,
+            campaign=camp,
+            arms=arms,
+            bindings=changing,
+            expected_run_ids=runs,
+        )
+    assert changing.read_count == 1
+    assert original.snapshot_fingerprint == GOLDEN_ZERO_EVENT_SNAPSHOT_HASH
+
+
+def test_n511_valid_first_view_keeps_builder_and_verifier_golden() -> None:
+    camp, arms, good, runs = _golden_manifest_args()
+    bad = [
+        replace(good[0], portfolio_account_id=good[1].portfolio_account_id),
+        good[1],
+    ]
+    changing = _ChangingManifestInput(good, bad)
+    snapshot = _empty_snapshot(camp, arms, changing, runs)
+    assert changing.read_count == 1
+    assert snapshot.snapshot_fingerprint == GOLDEN_ZERO_EVENT_SNAPSHOT_HASH
+
+    verifier_changing = _ChangingManifestInput(good, bad)
+    assert verify_stage1_trial_provenance_snapshot(
+        snapshot=snapshot,
+        campaign=camp,
+        arms=arms,
+        bindings=verifier_changing,
+        expected_run_ids=runs,
+    )
+    assert verifier_changing.read_count == 1
+
+
+def test_n511_builder_refuses_invalid_first_view_before_later_valid() -> None:
+    camp, arms, good, runs = _golden_manifest_args()
+    bad = [replace(good[0], initial_cash_allocated="1"), good[1]]
+    changing = _ChangingManifestInput(bad, good)
+    with pytest.raises(ValueError):
+        _empty_snapshot(camp, arms, changing, runs)
+    assert changing.read_count == 1
+    assert good[0].initial_cash_allocated == "10000"
+
+
+def test_n511_manifest_arms_and_runs_each_captured_once() -> None:
+    camp, arms, good, runs = _golden_manifest_args()
+    changing_arms = _ChangingManifestInput(arms, [arms[0]])
+    changing_runs = _ChangingManifestInput(runs, ["RUN-002"])
+    snapshot = _empty_snapshot(camp, changing_arms, good, changing_runs)
+    assert snapshot.snapshot_fingerprint == GOLDEN_ZERO_EVENT_SNAPSHOT_HASH
+    assert changing_arms.read_count == 1
+    assert changing_runs.read_count == 1
+
+    valid = _empty_snapshot(camp, arms, good, runs)
+    arm_verifier = _ChangingManifestInput(arms, [arms[0]])
+    run_verifier = _ChangingManifestInput(runs, ["RUN-002"])
+    assert verify_stage1_trial_provenance_snapshot(
+        snapshot=valid,
+        campaign=camp,
+        arms=arm_verifier,
+        bindings=good,
+        expected_run_ids=run_verifier,
+    )
+    assert arm_verifier.read_count == 1
+    assert run_verifier.read_count == 1
+
+
+def test_n511_append_carries_same_original_manifest_into_rebuild() -> None:
+    camp, arms, good, runs = _golden_manifest_args()
+    empty = _empty_snapshot(camp, arms, good, runs)
+    bad = [replace(good[0], initial_cash_allocated="1"), good[1]]
+    changing = _ChangingManifestInput(good, bad)
+    recorded = append_stage1_trial_provenance_event(
+        snapshot=empty,
+        event=make_golden_root_event(),
+        campaign=camp,
+        arms=arms,
+        bindings=changing,
+        expected_run_ids=runs,
+    )
+    assert changing.read_count == 1
+    assert recorded.snapshot_fingerprint == GOLDEN_ONE_EVENT_SNAPSHOT_HASH
+    assert recorded.event_count == 1
+    assert empty.event_count == 0
