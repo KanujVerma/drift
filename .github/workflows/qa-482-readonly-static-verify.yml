@@ -1,0 +1,56 @@
+name: Temporary Drift read-only final static QA
+on:
+  push:
+    branches:
+      - krish/482-readonly-static-verify-20261020
+permissions:
+  contents: read
+jobs:
+  static-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      UV_LOCKED: "1"
+      UV_PYTHON_PREFERENCE: only-managed
+    steps:
+      - name: Checkout without credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          enable-cache: false
+      - name: Pinned environment
+        run: |
+          uv python install
+          uv sync --locked
+      - name: Independent static gates and focused regression
+        shell: bash
+        run: |
+          set +e
+          echo "__RUFF_LINT_BEGIN__"
+          uv run ruff check .
+          lint=$?
+          echo "__RUFF_LINT_END__"
+          echo "__RUFF_FORMAT_BEGIN__"
+          uv run ruff format --check .
+          format=$?
+          echo "__RUFF_FORMAT_END__"
+          echo "__MYPY_BEGIN__"
+          uv run mypy src tests
+          mypy=$?
+          echo "__MYPY_END__"
+          echo "__BUILD_BEGIN__"
+          uv build
+          build=$?
+          echo "__BUILD_END__"
+          echo "__FOCUSED_BEGIN__"
+          uv run pytest -q -k 'intelligence or stage1_switch_preflight or m1e_compatibility'
+          tests=$?
+          echo "__FOCUSED_END__"
+          echo "__RESULT_CODES__ lint=$lint format=$format mypy=$mypy build=$build focused=$tests"
+          if [ "$lint" -ne 0 ] || [ "$format" -ne 0 ] || [ "$mypy" -ne 0 ] || [ "$build" -ne 0 ] || [ "$tests" -ne 0 ]; then
+            exit 1
+          fi
