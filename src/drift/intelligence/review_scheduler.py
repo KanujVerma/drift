@@ -415,7 +415,12 @@ def evaluate_review_schedule(
             "decision_cutoff": now_utc,
             "action_policy": active_policy.default_event_policy,
             "event_ref": ArtifactReference(
-                id=f"{latest_event.source_id}:{latest_event.event_id}",
+                id="event:" + content_hash(
+                    {
+                        "source_id": latest_event.source_id,
+                        "event_id": latest_event.event_id,
+                    }
+                ),
                 version=latest_event.version,
                 sha256=latest_event.content_hash,
             ).model_dump(mode="python"),
