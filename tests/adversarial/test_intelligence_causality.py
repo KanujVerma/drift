@@ -298,3 +298,66 @@ def test_conflicting_source_availability_does_not_depend_on_input_order(
     for entries in ([first, second], [second, first]):
         with pytest.raises(ValueError, match="INPUT_AVAILABILITY_CONFLICT"):
             _build_source_variant_context(sample_scope_b, sample_refs, entries)
+
+
+def test_adversarial_future_revision_cannot_rewrite_matured_memory(
+    sample_refs: dict[str, ArtifactReference],
+) -> None:
+    """T01/T02: conflicting outcome received later never alters past cutoff."""
+    cutoff = datetime(2024, 1, 5, 10, tzinfo=UTC)
+    earlier = TrialFeedbackRecord(
+        trial_id="synthetic:trial-same",
+        arm_id="fixture:B",
+        decision_cutoff=cutoff - timedelta(days=3),
+        matured_at=cutoff - timedelta(hours=1),
+        candidate_id="synthetic:candidate",
+        status="completed",
+        pnl="-25",
+        metrics={"return": "-0.03"},
+    )
+    late_correction = earlier.model_copy(
+        update={
+            "matured_at": cutoff + timedelta(hours=1),
+            "pnl": "300",
+            "metrics": {"return": "0.30"},
+        }
+    )
+    peer_arm = earlier.model_copy(
+        update={"trial_id": "synthetic:peer-only", "arm_id": "fixture:C"}
+    )
+
+    def evaluate(records: list[TrialFeedbackRecord]) -> tuple[str, str]:
+        snapshot = advance_learning(
+            previous_snapshot=None,
+            feedback_records=records,
+            cutoff=cutoff,
+            arm_id="fixture:B",
+            method_ref=sample_refs["method_ref"],
+        )
+        assert len(snapshot.matured_trials) == 1
+        assert snapshot.matured_trials[0].pnl == "-25"
+        return snapshot.snapshot_id, snapshot.state_hash
+
+    assert evaluate([earlier]) == evaluate([peer_arm, late_correction, earlier])
+    assert evaluate([earlier]) == evaluate([earlier, late_correction, peer_arm])
+
+
+def test_adversarial_sealed_peer_arm_input_refused_before_filtering(
+    sample_scope_b: Scope,
+    sample_refs: dict[str, ArtifactReference],
+) -> None:
+    """T05: arm mismatches cannot make sealed holdout references innocuous."""
+    sealed = CandidateInput(
+        input_ref=ArtifactReference(
+            id="holdout:restricted", version="v1", sha256="a" * 64
+        ),
+        role="news",
+        available_at=datetime(2024, 1, 2, 9, tzinfo=UTC),
+        availability_basis_ref=ArtifactReference(
+            id="synthetic:source", version="v1", sha256="b" * 64
+        ),
+        is_holdout=True,
+        arm_id="fixture:C",
+    )
+    with pytest.raises(ValueError, match="HOLDOUT_ACCESS_VIOLATION"):
+        _build_source_variant_context(sample_scope_b, sample_refs, [sealed])

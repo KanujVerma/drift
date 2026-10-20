@@ -365,4 +365,101 @@ Kanuj's experiment approvals and Matthew's platform contract acceptance
 remain separate. Existing original K3 and integration branches must be
 preserved; integrate the corrective commit history without forcing or
 resetting them, then retest at the new integration SHA.
+## Stacked K4 causal memory correction and final QA additions
+
+**Scope/lineage:** Original K4 #404 / PR #451 is an unaccepted
+implementation candidate and already appears in the original consolidated
+PR #457. K4 correction issue #473 branches from the K3 corrective head
+`936c97236a85b1b768b2c9ad8e5cef7e068506f8`. Its independent
+source/test write-set consists of `context_builder.py`, `learning.py`,
+their two corresponding unit-test files, `test_intelligence_causality.py`,
+and this consolidated handoff. K0-K3, K5 and platform paths remain protected.
+
+### K4 trust-boundary changes to independently validate
+
+1. **Typed causal input readback:** Even Pydantic frozen objects can be
+   forged through `model_copy(update=...)`. K4 now validates the entire
+   `CandidateInput` payload including nested `ArtifactReference`
+   immediately before looking at holdout flags, availability timestamps,
+   arm identity or deduplication. Tampered digests and invalid timestamps
+   must be refused with `INVALID_CONTEXT_INPUT`; these inputs may never
+   silently become a new hash-valid context. Boolean holdout flags
+   must be actual booleans, not coerced strings such as `"false"`.
+
+2. **Feedback reference hygiene:** Every `feedback_refs` entry is
+   revalidated. A `holdout:` or `sealed_holdout:` reference must be
+   refused (case-insensitive); two entries with the same ID/version but
+   different digests must produce `FEEDBACK_REVISION_CONFLICT`.
+   Exact repeated references are idempotently deduplicated and input
+   order is irrelevant to the resulting `ResearchContext` hash.
+
+3. **Historical learning-state integrity:** An attacker must not be able
+   to rehash an old `LearningSnapshot` with duplicate `trial_id` values,
+   out-of-order matured feedback or impossible version/previous-reference
+   relationships and make that history admissible. Version one has no
+   predecessor; higher versions have a preceding `vN` reference and
+   cannot refer to their own snapshot ID. All historical members must
+   be same-arm, complete, finite, causal and outside sealed holdouts.
+
+4. **Causal feedback ingestion:** The update path must reparse caller
+   feedback before incorporating any matured same-arm result, and
+   store an independent nested metrics copy. Holdout and completion flags
+   must be strict booleans, and snapshot versions strict positive integers.
+   Subsequent caller mutation
+   must not change the stored learning snapshot. Valid complete losing
+   trials are included (T12), while malformed same-arm completed
+   trials refuse; feedback that matures after cutoff remains excluded
+   (T01/T02) even when it contradicts a previously mature trial.
+   Peer-arm outcomes cannot enter the arm snapshot (T04), and
+   sealed reports are refused even if they nominally belong to a
+   different arm (T05). Both input-order permutations must agree.
+
+5. **Negative and mutation cases:** Rehash forged duplicates and
+   reordered snapshots with the repository's canonical hash function.
+   Force impossible predecessor version and self-cycle variants.
+   Supply forged nested digest and non-datetime `model_copy` inputs,
+   unparseable metric values, tampered source metrics, conflicting
+   same-revision feedback references, and a delayed contrary result.
+   Each check must fail for its intended causal/security reason, not
+   through an unrelated setup exception.
+
+### Dedicated K4 verification commands on its pinned corrective SHA
+
+```bash
+uv sync --locked
+uv run pytest -q tests/unit/test_intelligence_context_builder.py tests/unit/test_intelligence_learning.py tests/adversarial/test_intelligence_causality.py
+uv run pytest -q tests/unit/test_intelligence_*.py tests/adversarial/test_intelligence_causality.py
+uv run ruff check src/drift/intelligence tests/unit/test_intelligence_* tests/adversarial/test_intelligence_causality.py
+uv run ruff format --check src/drift/intelligence tests/unit/test_intelligence_* tests/adversarial/test_intelligence_causality.py
+uv run mypy src/drift/intelligence tests/unit/test_intelligence_* tests/adversarial/test_intelligence_causality.py
+uv build
+git diff --check
+```
+
+Commands above are the **test plan**, not reported passing results.
+Use the canonical pinned interpreter and exact GitHub Actions run for
+observed results. The final Antigravity run remains the *full*
+repository-wide pinned suite and five adversarial passes on a newly
+integrated, immutable K0-K5 SHA with these K4 corrections included.
+
+### Scientific and operational limits unchanged
+
+A supplied `ArtifactReference`, `CandidateInput.available_at`, or
+`TrialFeedbackRecord.matured_at` is not independent evidence of source
+publication, original receipt time, trial maturity, source rights or
+scientific feedback eligibility. An unauthenticated caller can still
+lie by supplying internally consistent references/timestamps. Kanuj's
+independent EXPERIMENT/ELIGIBILITY producer and Matthew's accepted
+source/RESULT and M0 interfaces must authenticate their own records
+before qualified use. This K4 slice performs *intrinsic* fail-closed
+validation, not origin attestation.
+
+Likewise, `feed_state_ref` binds a supplied feed-status revision but
+does not itself classify or authenticate an external data feed; T03
+requires independently qualified source/feed evidence and separate
+consumer acceptance. A Pydantic frozen model with nested dictionaries
+still requires trusted readback at every consumer boundary, not direct
+use of mutable internals. No local test can establish live LLM
+learning quality, scientific superiority, safe broker execution,
+model spend authorization or a valid trading mandate.
 

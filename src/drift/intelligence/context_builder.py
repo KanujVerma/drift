@@ -10,6 +10,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
+from pydantic import Field
+
 from drift.intelligence.contracts import (
     ArtifactReference,
     ImmutableModel,
@@ -25,11 +27,11 @@ class CandidateInput(ImmutableModel):
     """Specification of an informational or market input into context."""
 
     input_ref: ArtifactReference
-    role: str
+    role: str = Field(min_length=1)
     available_at: datetime
     availability_basis_ref: ArtifactReference
     transformation_ref: ArtifactReference | None = None
-    is_holdout: bool = False
+    is_holdout: bool = Field(default=False, strict=True)
     arm_id: str | None = None
 
 
@@ -94,8 +96,18 @@ def build_context(
     seen_versions: dict[tuple[str, str], str] = {}
     seen_availability: dict[tuple[str, ...], tuple[str, ...]] = {}
 
-    # Pre-aggregation validation and filtering
-    for inp in inputs:
+    # Do not trust the constructor history of nominally frozen Pydantic
+    # objects: model_copy(update=...) can bypass nested ref/type validators.
+    # Re-parse every source before looking at its timestamps or aggregate key.
+    # This protects deterministic causal filtering from forged typed values.
+    for supplied in inputs:
+        if not isinstance(supplied, CandidateInput):
+            raise ValueError("INVALID_CONTEXT_INPUT: expected CandidateInput")
+        try:
+            inp = CandidateInput.model_validate(supplied.model_dump(mode="python"))
+        except (TypeError, ValueError) as error:
+            raise ValueError("INVALID_CONTEXT_INPUT: invalid source record") from error
+
         # 1. Sealed holdout isolation (T05)
         if (
             inp.is_holdout
@@ -207,8 +219,28 @@ def build_context(
     # Generated identity binds every authority and causal input that shapes the
     # context. Hash-only correlation without these fields could reuse an ID for
     # a different mandate, source grade, review trigger or feedback scope.
+    # Bare ArtifactReferences have no arrival or trial-maturity proof. They
+    # may only refer to already-qualified causal feedback at this seam.
+    # Nevertheless, reject malformed, sealed or contradictory references
+    # rather than laundering them into a new, self-consistent context hash.
+    feedback_by_revision: dict[tuple[str, str], ArtifactReference] = {}
+    for supplied in feedback_refs:
+        if not isinstance(supplied, ArtifactReference):
+            raise ValueError("INVALID_FEEDBACK_REFERENCE")
+        try:
+            ref = ArtifactReference.model_validate(supplied.model_dump(mode="python"))
+        except (TypeError, ValueError) as error:
+            raise ValueError("INVALID_FEEDBACK_REFERENCE") from error
+        if ref.id.casefold().startswith(("holdout:", "sealed_holdout:")):
+            raise ValueError("HOLDOUT_ACCESS_VIOLATION: feedback ref is sealed")
+        key = (ref.id, ref.version)
+        incumbent = feedback_by_revision.get(key)
+        if incumbent is not None and incumbent.sha256 != ref.sha256:
+            raise ValueError("FEEDBACK_REVISION_CONFLICT: same ref changed digest")
+        feedback_by_revision[key] = ref
     ordered_feedback = sorted(
-        feedback_refs, key=lambda ref: (ref.id, ref.version, ref.sha256)
+        feedback_by_revision.values(),
+        key=lambda ref: (ref.id, ref.version, ref.sha256),
     )
     ordered_limitations = sorted(set(limitations))
     derived_id = content_hash(
