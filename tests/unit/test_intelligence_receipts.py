@@ -636,3 +636,33 @@ def test_k2_rejects_noncausal_cost_timestamps_at_creation_and_replay(
     restored = ResearchReceiptStore()
     restored.load_canonical_jsonl(store.export_canonical_jsonl())
     assert restored.get_cost_receipt(valid.receipt_id) == valid
+
+
+def test_naive_cost_copy_refused_before_store_hash_and_without_partial_state(
+    sample_scope: Scope,
+) -> None:
+    """A model_copy forgery cannot bypass the named cost-clock check."""
+    start = datetime(2024, 1, 2, 10, 0, tzinfo=UTC)
+    valid = create_cost_receipt(
+        receipt_id="cost-clock-copy",
+        scope=sample_scope,
+        category="model_inference",
+        billing_identity="synthetic:invoice",
+        amount_basis="estimate",
+        amount="0.12",
+        currency="USD",
+        incurred_start=start,
+        incurred_end=start,
+        recorded_at=start,
+    )
+    recorder = ResearchReceiptStore()
+    unchanged = recorder.export_canonical_jsonl()
+    forged = valid.model_copy(
+        update={"recorded_at": start.replace(tzinfo=None)}
+    )
+    with pytest.raises(ValueError, match="INVALID_COST_TIMESTAMP: recorded_at"):
+        recorder.record_cost_receipt(forged)
+    assert recorder.export_canonical_jsonl() == unchanged
+    assert recorder.get_cost_receipt(valid.receipt_id) is None
+    recorder.record_cost_receipt(valid)
+    assert recorder.get_cost_receipt(valid.receipt_id) == valid
