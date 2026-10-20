@@ -1004,6 +1004,7 @@ def test_reject_append_non_event_first_element_in_existing_chain() -> None:
     assert len(non_event_chain) == 1
     assert non_event_chain[0] == "not-an-event"
 
+
 # ---------------------------------------------------------------------------
 # Issue #488: Canonical duplicate identity, not user-overridable __eq__
 # ---------------------------------------------------------------------------
