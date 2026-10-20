@@ -4,8 +4,8 @@ Implements Slice K3 conventional selector over preregistered finite pools under 
 Provides deterministic scoring, alphanumeric tie-breaking, and isolated state (T13).
 """
 
+import json
 from collections.abc import Callable, Mapping, Sequence
-from copy import deepcopy
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -31,7 +31,7 @@ from drift.intelligence.validation import (
     ResolvedDependencies,
     validate_candidate,
 )
-from drift.serialization.canonical import content_hash
+from drift.serialization.canonical import canonical_json, content_hash
 
 
 class ConventionalSelectorResult(ImmutableModel):
@@ -107,10 +107,14 @@ def select_conventional_candidate(
                 if isinstance(choice, RawChoice)
                 else dict(choice)
             )
-            # Prove canonical JSON identity *before* copying caller values.
-            # An opaque object's __deepcopy__ must not be invoked at all.
+            # Canonical JSON takes a safe, independent snapshot using only
+            # the offline, explicitly permitted serializer and json.loads.
+            # Do not invoke untrusted __deepcopy__ hooks, dynamic imports or
+            # an external provider while freezing an experiment input.
             choice_hash = _choice_identity(source)
-            raw_snapshot = deepcopy(source)
+            raw_snapshot: dict[str, Any] = json.loads(canonical_json(source))
+            if _choice_identity(raw_snapshot) != choice_hash:
+                raise ValueError("POOL_SNAPSHOT_IDENTITY_MISMATCH")
             frozen_pool.append((choice_hash, raw_snapshot))
         pool_hash = content_hash(sorted(identity for identity, _ in frozen_pool))
     except (CanonicalSerializationError, TypeError, ValueError):
