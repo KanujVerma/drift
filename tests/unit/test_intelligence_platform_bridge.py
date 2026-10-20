@@ -686,3 +686,83 @@ def test_bridge_request_identity_binds_session_and_verification_state(
     )
     assert baseline.request_id == replay.request_id
     assert baseline.record_hash == replay.record_hash
+
+
+@pytest.mark.parametrize(
+    ("weights", "cash"),
+    [
+        (("0.80", "0.40"), "0"),
+        (("0.60", "0.40"), "NaN"),
+        (("0.60", "0.40"), "Infinity"),
+        (("0.60", "0.40"), "-0.10"),
+        (("0.60", "0.40"), "1e-3"),
+    ],
+)
+def test_self_rehashed_platform_request_refuses_bad_actionable_weights(
+    sample_candidate: ResearchCandidate,
+    matching_portfolio_state: PortfolioStateBinding,
+    weights: tuple[str, str],
+    cash: str,
+) -> None:
+    approved = bridge_candidate_to_execution(
+        candidate=sample_candidate,
+        portfolio_state=matching_portfolio_state,
+        current_time=sample_candidate.completed_at + timedelta(minutes=5),
+        intraday_supported=True,
+    )
+    assert approved.status == "admitted"
+    payload = approved.model_dump(mode="python")
+    payload["target_allocations"][0]["weight"] = weights[0]
+    payload["target_allocations"][1]["weight"] = weights[1]
+    payload["cash_weight"] = cash
+    payload["record_hash"] = compute_record_hash(payload)
+    with pytest.raises(ValueError, match="INVALID_PLATFORM_TARGET_WEIGHTS"):
+        PlatformExecutionRequest.model_validate(payload)
+
+
+def test_direct_rehashed_request_refuses_duplicate_target_id(
+    sample_candidate: ResearchCandidate,
+    matching_portfolio_state: PortfolioStateBinding,
+) -> None:
+    approved = bridge_candidate_to_execution(
+        candidate=sample_candidate,
+        portfolio_state=matching_portfolio_state,
+        current_time=sample_candidate.completed_at + timedelta(minutes=5),
+        intraday_supported=True,
+    )
+    payload = approved.model_dump(mode="python")
+    payload["target_allocations"][1]["security_id"] = "SPY"
+    payload["record_hash"] = compute_record_hash(payload)
+    with pytest.raises(ValueError, match="DUPLICATE_PLATFORM_TARGET"):
+        PlatformExecutionRequest.model_validate(payload)
+
+
+def test_admitted_request_cannot_be_rehashed_from_unavailable_disposition(
+    sample_candidate: ResearchCandidate,
+    matching_portfolio_state: PortfolioStateBinding,
+) -> None:
+    approved = bridge_candidate_to_execution(
+        candidate=sample_candidate,
+        portfolio_state=matching_portfolio_state,
+        current_time=sample_candidate.completed_at + timedelta(minutes=5),
+        intraday_supported=True,
+    )
+    payload = approved.model_dump(mode="python")
+    payload["disposition"] = "unavailable"
+    payload["record_hash"] = compute_record_hash(payload)
+    with pytest.raises(ValueError, match="INVALID_ADMITTED_PLATFORM_REQUEST"):
+        PlatformExecutionRequest.model_validate(payload)
+
+
+def test_model_copy_state_flag_cannot_forge_verified_permission(
+    sample_candidate: ResearchCandidate,
+    matching_portfolio_state: PortfolioStateBinding,
+) -> None:
+    forged = matching_portfolio_state.model_copy(
+        update={"state_verified": "true"}
+    )
+    with pytest.raises(ValueError):
+        bridge_candidate_to_execution(
+            candidate=sample_candidate, portfolio_state=forged,
+            current_time=sample_candidate.completed_at + timedelta(minutes=5),
+        )
