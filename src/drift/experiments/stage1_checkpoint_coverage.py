@@ -161,9 +161,7 @@ def _checked_declarations(
             checkpoints.add(checkpoint)
 
         # Reconstruct an independent frozen value, not the caller's object.
-        copy = replace(
-            declaration, checkpoint_ids=tuple(declaration.checkpoint_ids)
-        )
+        copy = replace(declaration, checkpoint_ids=tuple(declaration.checkpoint_ids))
         if type(copy) is not Stage1RunCheckpointDeclarationV1:
             raise ValueError("invalid copied checkpoint declaration")
         detached.append(copy)
@@ -352,11 +350,11 @@ def _assemble_audit(
                         provenance_snapshot=snap,
                     )
                 )
-            test_present = (
-                declaration.run_id, checkpoint_id, test_arm
-            ) in submissions
+            test_present = (declaration.run_id, checkpoint_id, test_arm) in submissions
             comparator_present = (
-                declaration.run_id, checkpoint_id, comparator_arm
+                declaration.run_id,
+                checkpoint_id,
+                comparator_arm,
             ) in submissions
             if test_present and comparator_present:
                 pair_state = "BOTH_SUBMITTED"
@@ -479,7 +477,8 @@ def verify_stage1_checkpoint_coverage_audit(
         audit.checkpoint_manifest_fingerprint, "checkpoint manifest fingerprint"
     )
     expected_checkpoint_sha = _checkpoint_manifest_fingerprint(
-        campaign=campaign, complete_manifest_fingerprint=manifest_hash,
+        campaign=campaign,
+        complete_manifest_fingerprint=manifest_hash,
         declarations=declarations,
     )
     if audit.checkpoint_manifest_fingerprint != expected_checkpoint_sha:
