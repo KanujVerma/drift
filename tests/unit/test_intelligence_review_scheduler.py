@@ -515,3 +515,57 @@ def test_feed_problem_precedence_is_invariant_to_order() -> None:
         verdict = evaluate_review_schedule(now=now, feed_events=ordered)
         assert verdict.action == "unavailable"
         assert "broken_feed" in verdict.reason
+
+
+def test_conflicting_event_condition_refused_in_both_orders() -> None:
+    now = datetime(2024, 1, 10, 10, tzinfo=UTC)
+    event = FeedEvent(
+        event_id="one", source_id="feed:A", version="v1",
+        available_at=now, content_hash="a" * 64, raw_text="inert",
+    )
+    nonmaterial = event.model_copy(update={"is_material": False})
+    for order in ([event, nonmaterial], [nonmaterial, event]):
+        with pytest.raises(ValueError, match="EVENT_CONDITION_CONFLICT"):
+            evaluate_review_schedule(now=now, feed_events=order)
+
+
+def test_old_calendar_revision_conflict_is_not_hidden_by_current_revision() -> None:
+    now = datetime(2024, 1, 10, 10, tzinfo=UTC)
+    old = CalendarRevision(
+        calendar_id="cal:A", revision=1,
+        effective_cutoff=now - timedelta(days=2), content_hash="a" * 64,
+    )
+    forged = old.model_copy(update={"content_hash": "b" * 64})
+    current = CalendarRevision(
+        calendar_id="cal:A", revision=2,
+        effective_cutoff=now - timedelta(days=1), content_hash="c" * 64,
+    )
+    for records in ([old, forged], [forged, old]):
+        with pytest.raises(ValueError, match="SOURCE_DIGEST_CONFLICT"):
+            evaluate_review_schedule(
+                now=now, current_calendar=current, calendar_history=records
+            )
+    with pytest.raises(ValueError, match="UNAVAILABLE_CALENDAR_CURRENTNESS"):
+        evaluate_review_schedule(now=now, calendar_history=[old])
+
+
+def test_event_cooldown_does_not_block_routine_or_adaptation() -> None:
+    now = datetime(2024, 1, 10, 10, tzinfo=UTC)
+    event = FeedEvent(
+        event_id="event", source_id="feed:A", version="v1",
+        available_at=now - timedelta(seconds=1),
+        content_hash="a" * 64, raw_text="inert",
+    )
+    common = {
+        "now": now, "feed_events": [event],
+        "last_event_review_at": now - timedelta(minutes=5),
+        "last_routine_at": now - timedelta(days=8),
+    }
+    routine = evaluate_review_schedule(
+        **common, last_adaptation_at=now - timedelta(days=2)
+    )
+    adaptation = evaluate_review_schedule(
+        **common, last_adaptation_at=now - timedelta(days=31)
+    )
+    assert routine.review_type == "routine"
+    assert adaptation.review_type == "planned_adaptation"
