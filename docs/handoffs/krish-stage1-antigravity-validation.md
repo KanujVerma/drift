@@ -196,7 +196,7 @@ Do not overwrite current working trees or start a second implementation writer. 
 Run precisely one consolidated validation against the **final
 immutable SHA** recorded in the PR checkpoint. A running branch may move, so
 resolve its head once and check out the commit, never test moving `HEAD`:
-  
+
 ~~~bash
 git fetch origin --prune
 QA_SHA="$(git rev-parse origin/krish/456-consolidated-intelligence)"
