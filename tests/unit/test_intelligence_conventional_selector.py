@@ -365,11 +365,17 @@ def test_r_invalid_objective_never_selects_a_candidate(
     """No NaN/Infinity score may be mistaken for a winning objective."""
     for bad in (Decimal("NaN"), Decimal("Infinity")):
         recorder = ResearchReceiptStore()
+
+        def constant_score(
+            _candidate: ResearchCandidate, score: Decimal = bad
+        ) -> Decimal:
+            return score
+
         result = select_conventional_candidate(
             context=sample_context,
             resolved_inputs=sample_bindings,
             candidate_pool=[fixture_data["raw_choice"]],
-            objective_fn=lambda _c, score=bad: score,
+            objective_fn=constant_score,
             method_ref=ArtifactReference(id="method:R", version="v1", sha256="e" * 64),
             validation_policy=ArtifactReference(
                 id="policy:fixed", version="v1", sha256="f" * 64
