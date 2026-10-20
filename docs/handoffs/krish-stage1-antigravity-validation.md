@@ -1,5 +1,97 @@
 # Drift Stage 1: Consolidated Antigravity Validation Handoff
 
+## START HERE: Final unified K0-K5 QA source and authority
+
+**This section supersedes older status paragraphs later in this file.** The
+later K1-K5 sections are retained as historical regression designs, not
+claims that the earlier unresolved defects still exist at the final head.
+
+- **Repository:** https://github.com/KanujVerma/drift
+- **One integration PR:** https://github.com/KanujVerma/drift/pull/457
+- **Single source branch:** `krish/456-consolidated-intelligence`.
+- **Final pinned SHA:** take the exact 40-character `head_sha` from PR #457
+  and the matching latest checkpoint on issue #456. Checkout that **commit**,
+  not the moving branch or the unmerged source PRs. Check both values agree.
+- **Responsible implementer:** ChatGPT / Krish workstream. **Independent
+  tester:** Antigravity, read-only against an isolated checkout.
+- **Stage:** implementation + corrective tests published. Engineering acceptance
+  requires exact-head green CI, five QA passes, independent review and
+  accepted producer/consumer contracts. Do **not** imply scientific or
+  operational approval from a green synthetic test.
+
+### Source ancestry and work covered
+
+| Feature | Code origin | Corrections carried into the consolidated ancestry |
+|---|---|---|
+| K0 safe switching | #422 / PR #424 | #456; independent Matthew #423 consumer acceptance still outstanding |
+| K1 contracts, validation | #401 / PR #447 | #464 / PR #465 |
+| K2 receipts, offline replay | #402 / PR #449 | #466 / PR #467; final CI repair #478 |
+| K3 AI FakeTransport and R selector | #403 / PR #450 | #469 / PR #470; final CI repair #478 |
+| K4 causal context and learning | #404 / PR #451 | #473 / PR #474 |
+| K5 scheduler, synthetic platform bridge | #405 / PR #452 | #475 / PR #476 |
+| Shared offline capability gate | #453 / PR #454 | Consolidated positive allowlist #456, NOT disabled |
+
+All original source PRs remain separate and unmerged. Do not merge both original
+and consolidated implementations into main. A fast-forward of the consolidated
+feature branch is a source integration step, **not** a release acceptance.
+
+### CI failures resolved in source by final remediation #478
+
+The latest pre-remediation K5 full CI run
+https://github.com/KanujVerma/drift/actions/runs/39351538328
+reported **5,786 passed, 2 failed, 2 xfailed and zero errors**. Both
+failures were K2: forbidden builtin `getattr` in `receipts.py`, and
+a timezone-naive cost clock reaching canonical hashing before it raised
+`INVALID_COST_TIMESTAMP`. Both are repaired in this source ancestry:
+the chronology checker uses explicit fields and validates before hash
+construction and store admission. The added store-failure regression
+must prove malformed `model_copy` clocks cannot mutate the journal.
+
+The earlier K4 run
+https://github.com/KanujVerma/drift/actions/runs/39348668275
+also exposed K3's `copy` import as a positive capability violation.
+Final remediation replaces that import and its deep-copy call with
+`canonical_json` and `json.loads`, preserving an independent, deterministic,
+offline and non-executable JSON input snapshot. A noncanonical object with
+a hostile copy hook must refuse before its hook executes. **Do not widen or
+skip the capability guard to make these checks pass.**
+
+These fixes are source-level, **not yet an observed green rerun**.
+The authoritative acceptance result is only the full QA on the new pinned
+PR #457 SHA. Older green, failed, cancelled, pending or differently based
+runs cannot be reclassified as accepted.
+
+### First reproduce the corrected failures on the final pinned SHA
+
+Use the checkout in the `One-shot isolated QA run` section below, then run:
+
+```bash
+uv run pytest -q tests/unit/test_intelligence_receipts.py::test_k2_rejects_noncausal_cost_timestamps_at_creation_and_replay tests/unit/test_intelligence_receipts.py::test_naive_cost_copy_refused_before_store_hash_and_without_partial_state
+uv run pytest -q tests/unit/test_intelligence_conventional_selector.py
+uv run pytest -q tests/integration/test_m1e_compatibility.py::test_m1e_additions_are_allowlisted_inert_and_leave_m1d_pins_unchanged
+```
+
+Then run **all** checks, on the **same SHA**, from `One-shot isolated QA run`:
+locked/pinned environment, full pytest, Ruff check/format, mypy, build,
+diff/source inventory, adversarial mutation/causality and exact acceptance
+trace. No skipping the long full suite or changing repository code to pass.
+
+### Required report and boundaries
+
+Report the exact SHA and main compare base, GitHub run ID, OS/Python/uv,
+every command's exit status and test counts, fixed-defect repros, all five
+adversarial pass findings, accepted/rejected/indeterminate recommendation,
+and the first actionable file/line/reproducer for every failure. Post
+read-only evidence to issue #456 and PR #457. If a fix is required, return
+it as a scoped finding to the Krish writer; do not edit protected sources.
+
+Passing engineering QA must not claim actual model-provider interaction,
+historical market qualification, performance superiority, durable M0 ledger
+commit, risk authorization, approved execution, broker connection, paper
+or shadow trading, live orders, real capital or promotion eligibility.
+
+---
+
 ## STATUS: IMPLEMENTATION CANDIDATE, NOT ACCEPTED
 
 Repository: https://github.com/KanujVerma/drift
