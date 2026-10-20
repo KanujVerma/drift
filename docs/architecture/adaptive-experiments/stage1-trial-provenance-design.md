@@ -46,6 +46,7 @@ from drift.experiments.stage1_trial_events import Stage1TrialEvent
 PROVENANCE_SCHEMA_VERSION = "drift-trial-provenance/1-draft"
 PROVENANCE_STATES = frozenset({"UNOBSERVED", "EVENTS_RECORDED"})
 
+
 @dataclass(frozen=True, slots=True)
 class Stage1TrialScopeV1:
     campaign_id: str
@@ -56,6 +57,7 @@ class Stage1TrialScopeV1:
     campaign_spec_fingerprint: str
     arm_spec_fingerprint: str
     run_account_binding: RunAccountBindingV1
+
 
 @dataclass(frozen=True, slots=True)
 class Stage1TrialProvenanceSnapshotV1:
@@ -82,6 +84,7 @@ from drift.experiments.stage1_campaign_config import (
 )
 from drift.experiments.stage1_trial_events import Stage1TrialEvent
 
+
 def build_stage1_trial_provenance_snapshot(
     *,
     campaign: CampaignSpecV1,
@@ -92,8 +95,8 @@ def build_stage1_trial_provenance_snapshot(
     arm_id: str,
     checkpoint_id: str,
     events: Sequence[Stage1TrialEvent],
-) -> Stage1TrialProvenanceSnapshotV1:
-    ...
+) -> Stage1TrialProvenanceSnapshotV1: ...
+
 
 def verify_stage1_trial_provenance_snapshot(
     *,
@@ -102,8 +105,8 @@ def verify_stage1_trial_provenance_snapshot(
     arms: Sequence[ArmSpecV1],
     bindings: Sequence[RunAccountBindingV1],
     expected_run_ids: Sequence[str],
-) -> bool:
-    ...
+) -> bool: ...
+
 
 def append_stage1_trial_provenance_event(
     *,
@@ -113,8 +116,7 @@ def append_stage1_trial_provenance_event(
     arms: Sequence[ArmSpecV1],
     bindings: Sequence[RunAccountBindingV1],
     expected_run_ids: Sequence[str],
-) -> Stage1TrialProvenanceSnapshotV1:
-    ...
+) -> Stage1TrialProvenanceSnapshotV1: ...
 ```
 
 All new verification failures raise `ValueError`. A valid verification returns `True`. Do not return a nominally verified false-positive snapshot or normalize a forged stored object into legitimacy.
