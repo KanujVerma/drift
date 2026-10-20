@@ -38,9 +38,9 @@ class PortfolioStateBinding(ImmutableModel):
 
     portfolio_ref: ArtifactReference
     mandate_ref: ArtifactReference
-    account_id: str
-    arm_id: str
-    state_hash: str
+    account_id: str = Field(min_length=1)
+    arm_id: str = Field(min_length=1)
+    state_hash: str = Field(min_length=64, max_length=64)
     is_paused: bool = Field(strict=True)
     has_pending_orders: bool = Field(strict=True)
     observed_at: datetime
@@ -51,9 +51,9 @@ class PortfolioStateBinding(ImmutableModel):
 class PlatformExecutionRequest(ImmutableModel):
     """Validated execution dispatch request presented to platform executors."""
 
-    request_id: str
-    candidate_id: str
-    attempt_id: str
+    request_id: str = Field(min_length=1)
+    candidate_id: str = Field(min_length=1)
+    attempt_id: str = Field(min_length=1)
     scope: Scope
     portfolio_ref: ArtifactReference
     mandate_ref: ArtifactReference
@@ -68,8 +68,13 @@ class PlatformExecutionRequest(ImmutableModel):
 
     @model_validator(mode="after")
     def verify_request_identity(self) -> "PlatformExecutionRequest":
+        """Even a caller-rehashed request must be intrinsically non-actionable
+        unless its entire proposed allocation and disposition are coherent.
+        """
         if self.record_hash != compute_record_hash(self):
             raise ValueError("PLATFORM_REQUEST_HASH_MISMATCH")
+        if self.dispatched_at.tzinfo is None or self.dispatched_at.utcoffset() is None:
+            raise ValueError("INDETERMINATE_TIMEZONE: request dispatch")
         if self.status != "admitted":
             if (
                 self.session_target != "none"
@@ -77,14 +82,52 @@ class PlatformExecutionRequest(ImmutableModel):
                 or self.cash_weight is not None
             ):
                 raise ValueError("NON_ACTIONABLE_PLATFORM_REQUEST_HAS_TARGETS")
-        if self.disposition == "propose" and self.status == "admitted":
-            if not self.target_allocations or self.session_target == "none":
-                raise ValueError("UNSAFE_EMPTY_STAGE1_DISPATCH")
-        if self.disposition in ("hold", "abstain", "unavailable"):
-            if self.target_allocations or self.session_target != "none":
+            if not self.refusal_reason:
+                raise ValueError("UNREASONED_PLATFORM_REFUSAL")
+            return self
+        if self.refusal_reason is not None or self.disposition == "unavailable":
+            raise ValueError("INVALID_ADMITTED_PLATFORM_REQUEST")
+        if self.disposition in ("hold", "abstain"):
+            if (
+                self.target_allocations
+                or self.cash_weight is not None
+                or self.session_target != "none"
+            ):
                 raise ValueError("NON_TRADING_REQUEST_HAS_TARGETS")
+            return self
+        if (
+            self.session_target == "none"
+            or not self.target_allocations
+            or self.cash_weight is None
+        ):
+            raise ValueError("UNSAFE_EMPTY_STAGE1_DISPATCH")
+        if len({target.security_id for target in self.target_allocations}) != len(
+            self.target_allocations
+        ):
+            raise ValueError("DUPLICATE_PLATFORM_TARGET")
+        try:
+            amounts = [
+                Decimal(self.cash_weight),
+                *(Decimal(target.weight) for target in self.target_allocations),
+            ]
+        except (InvalidOperation, TypeError) as error:
+            raise ValueError("INVALID_PLATFORM_TARGET_WEIGHTS") from error
+        texts = [self.cash_weight, *(t.weight for t in self.target_allocations)]
+        if (
+            any(
+                not isinstance(value, str)
+                or value != value.strip()
+                or "e" in value.lower()
+                for value in texts
+            )
+            or any(
+                not value.is_finite() or not Decimal("0") <= value <= Decimal("1")
+                for value in amounts
+            )
+            or sum(amounts, Decimal("0")) != Decimal("1")
+        ):
+            raise ValueError("INVALID_PLATFORM_TARGET_WEIGHTS")
         return self
-
 
 def bridge_candidate_to_execution(
     *,
@@ -107,6 +150,14 @@ def bridge_candidate_to_execution(
     """
     if current_time.tzinfo is None or current_time.utcoffset() is None:
         raise ValueError("INDETERMINATE_TIMEZONE: current time has no offset")
+    if type(intraday_supported) is not bool or type(allow_next_open_fallback) is not bool:
+        raise ValueError("INVALID_SESSION_CAPABILITY: expected strict booleans")
+    # Refuse model_copy(update=...) forgery before accessing nested timestamps
+    # or treating caller-provided account flags as authority.
+    candidate = ResearchCandidate.model_validate(candidate.model_dump(mode="python"))
+    portfolio_state = PortfolioStateBinding.model_validate(
+        portfolio_state.model_dump(mode="python")
+    )
     if (
         candidate.completed_at.tzinfo is None
         or candidate.completed_at.utcoffset() is None
@@ -118,22 +169,19 @@ def bridge_candidate_to_execution(
         )
     curr_utc = current_time.astimezone(UTC)
     cand_comp_utc = candidate.completed_at.astimezone(UTC)
-    # Revalidate even frozen instances; model_copy(update=...) bypasses
-    # Pydantic's normal validation and must not change dispatch authority.
-    candidate = ResearchCandidate.model_validate(candidate.model_dump(mode="python"))
-    portfolio_state = PortfolioStateBinding.model_validate(
-        portfolio_state.model_dump(mode="python")
-    )
     actual_request_id = request_id or str(
         uuid5(
             NAMESPACE_URL,
-            compute_record_hash({
-                "candidate_id": candidate.candidate_id,
-                "candidate_hash": candidate.record_hash,
-                "portfolio_state_hash": portfolio_state.state_hash,
-                "mandate_hash": portfolio_state.mandate_ref.sha256,
-                "current_time": curr_utc,
-            }),
+            compute_record_hash(
+                {
+                    "candidate_id": candidate.candidate_id,
+                    "candidate_hash": candidate.record_hash,
+                    "portfolio_state": portfolio_state.model_dump(mode="python"),
+                    "current_time": curr_utc,
+                    "intraday_supported": intraday_supported,
+                    "allow_next_open_fallback": allow_next_open_fallback,
+                }
+            ),
         )
     )
     raw_dict: dict[str, Any]
@@ -189,11 +237,12 @@ def bridge_candidate_to_execution(
 
     # 3. Decision TTL expiration check (T08, DP-R2)
     if candidate.valid_until is not None:
-        cand_exp_utc = (
-            candidate.valid_until.astimezone(UTC)
-            if candidate.valid_until.tzinfo
-            else candidate.valid_until.replace(tzinfo=UTC)
-        )
+        if (
+            candidate.valid_until.tzinfo is None
+            or candidate.valid_until.utcoffset() is None
+        ):
+            raise ValueError("INDETERMINATE_TIMEZONE: candidate expiry")
+        cand_exp_utc = candidate.valid_until.astimezone(UTC)
         if curr_utc > cand_exp_utc:
             raw_dict = {
                 "request_id": actual_request_id,
@@ -263,7 +312,7 @@ def bridge_candidate_to_execution(
 
     # 4. Portfolio state hash change check (T08)
     if (
-        candidate.portfolio_ref.sha256 != portfolio_state.portfolio_ref.sha256
+        candidate.portfolio_ref != portfolio_state.portfolio_ref
         or portfolio_state.state_hash != candidate.portfolio_ref.sha256
     ):
         raw_dict = {
@@ -288,7 +337,7 @@ def bridge_candidate_to_execution(
         return PlatformExecutionRequest.model_validate(raw_dict)
 
     # 5. Mandate reference change check (T08)
-    if candidate.mandate_ref.sha256 != portfolio_state.mandate_ref.sha256:
+    if candidate.mandate_ref != portfolio_state.mandate_ref:
         raw_dict = {
             "request_id": actual_request_id,
             "candidate_id": candidate.candidate_id,
