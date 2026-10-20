@@ -262,7 +262,6 @@ def _verify(
     )
 
 
-
 def test_level0_positive_then_remove_submitted_b_snapshot() -> None:
     fixture = _fixture(runs=["RUN-001"])
     camp, arms, bindings, runs = fixture
