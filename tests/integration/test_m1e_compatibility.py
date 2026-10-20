@@ -1063,9 +1063,7 @@ def test_triage_offline_source_inventory_and_ast_scanner_are_nonvacuous() -> Non
             "\neval('1 + 1')\n",
         ):
             with pytest.raises(AssertionError):
-                _assert_m1e_production_module_allowed(
-                    original + injection, relative
-                )
+                _assert_m1e_production_module_allowed(original + injection, relative)
 
 
 def test_intelligence_source_inventory_is_exact_and_nonempty() -> None:
