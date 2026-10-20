@@ -229,6 +229,7 @@ def _result(
     context_id: str | None,
     cutoff: datetime,
     duplicate_of: EvidenceRef | None = None,
+    supporting_refs: tuple[EvidenceRef, ...] = (),
 ) -> ScreeningResult:
     key = evidence.key if evidence is not None and _key(evidence.key) else None
     revision = (
@@ -248,6 +249,17 @@ def _result(
                         evidence.content_ref,
                         evidence.quality_ref,
                     )
+                    if _reference(ref)
+                }.values(),
+                key=lambda x: (x.ref_id, x.sha256),
+            )
+        )
+    if supporting_refs:
+        refs = tuple(
+            sorted(
+                {
+                    (ref.ref_id, ref.sha256): ref
+                    for ref in (*refs, *supporting_refs)
                     if _reference(ref)
                 }.values(),
                 key=lambda x: (x.ref_id, x.sha256),
@@ -331,11 +343,20 @@ def screen_event(
             context_id,
             decision_cutoff,
         )
-    if type(evidence) is not EventEvidence or not _key(evidence.key):
+    if type(evidence) is not EventEvidence:
         return _result(
             "UNAVAILABLE",
             "MALFORMED_SOURCE_IDENTITY",
             None,
+            policy,
+            context_id,
+            decision_cutoff,
+        )
+    if not _key(evidence.key):
+        return _result(
+            "UNAVAILABLE",
+            "MALFORMED_SOURCE_IDENTITY",
+            evidence,
             policy,
             context_id,
             decision_cutoff,
@@ -511,6 +532,7 @@ def screen_event(
                 policy,
                 context_id,
                 decision_cutoff,
+                supporting_refs=(earlier.result_ref,),
             )
         if (
             same_event
@@ -534,6 +556,10 @@ def screen_event(
                     policy,
                     context_id,
                     decision_cutoff,
+                    supporting_refs=(
+                        EvidenceRef(earlier.result_ref.ref_id, incumbent_digest),
+                        earlier.result_ref,
+                    ),
                 )
             seen_receipts[earlier.result_ref.ref_id] = earlier.result_ref.sha256
             if duplicate_ref is None or (
