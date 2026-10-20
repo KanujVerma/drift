@@ -307,45 +307,6 @@ def evaluate_review_schedule(
                     f"{current_calendar.calendar_id} rev {current_calendar.revision}"
                 )
 
-    # 2. Feed condition evaluation (T03)
-
-    causal_feed_problems = {
-        event.condition
-        for event in feed_events
-        if event.available_at.astimezone(UTC) <= now_utc
-        and event.condition in ("broken_feed", "unknown_coverage")
-    }
-    if feed_condition == "broken_feed" or "broken_feed" in causal_feed_problems:
-        raw_dict = {
-            "trigger_id": actual_trigger_id,
-            "action": "unavailable",
-            "review_type": None,
-            "reason": "broken_feed: feed offline or corrupt",
-            "evaluated_at": now_utc,
-            "decision_cutoff": now_utc,
-            "action_policy": active_policy.default_event_policy,
-            "event_ref": None,
-        }
-        raw_dict["record_hash"] = compute_record_hash(raw_dict)
-        return ReviewTriggerVerdict.model_validate(raw_dict)
-
-    if (
-        feed_condition == "unknown_coverage"
-        or "unknown_coverage" in causal_feed_problems
-    ):
-        raw_dict = {
-            "trigger_id": actual_trigger_id,
-            "action": "unavailable",
-            "review_type": None,
-            "reason": "unknown_coverage: insufficient feed coverage",
-            "evaluated_at": now_utc,
-            "decision_cutoff": now_utc,
-            "action_policy": active_policy.default_event_policy,
-            "event_ref": None,
-        }
-        raw_dict["record_hash"] = compute_record_hash(raw_dict)
-        return ReviewTriggerVerdict.model_validate(raw_dict)
-
     # 3. Event-driven trigger evaluation (D03, D04, T03)
     event_versions: dict[tuple[str, str, str], str] = {}
     event_availability: dict[tuple[str, str, str], datetime] = {}
@@ -389,6 +350,45 @@ def evaluate_review_schedule(
             and ev_available_utc <= now_utc
         ):
             causal_material_events.append(ev)
+
+    # 2. Feed condition evaluation (T03)
+
+    causal_feed_problems = {
+        event.condition
+        for event in feed_events
+        if event.available_at.astimezone(UTC) <= now_utc
+        and event.condition in ("broken_feed", "unknown_coverage")
+    }
+    if feed_condition == "broken_feed" or "broken_feed" in causal_feed_problems:
+        raw_dict = {
+            "trigger_id": actual_trigger_id,
+            "action": "unavailable",
+            "review_type": None,
+            "reason": "broken_feed: feed offline or corrupt",
+            "evaluated_at": now_utc,
+            "decision_cutoff": now_utc,
+            "action_policy": active_policy.default_event_policy,
+            "event_ref": None,
+        }
+        raw_dict["record_hash"] = compute_record_hash(raw_dict)
+        return ReviewTriggerVerdict.model_validate(raw_dict)
+
+    if (
+        feed_condition == "unknown_coverage"
+        or "unknown_coverage" in causal_feed_problems
+    ):
+        raw_dict = {
+            "trigger_id": actual_trigger_id,
+            "action": "unavailable",
+            "review_type": None,
+            "reason": "unknown_coverage: insufficient feed coverage",
+            "evaluated_at": now_utc,
+            "decision_cutoff": now_utc,
+            "action_policy": active_policy.default_event_policy,
+            "event_ref": None,
+        }
+        raw_dict["record_hash"] = compute_record_hash(raw_dict)
+        return ReviewTriggerVerdict.model_validate(raw_dict)
 
     if feed_condition == "material_event" and not causal_material_events:
         raw_dict = {
