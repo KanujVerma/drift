@@ -208,8 +208,7 @@ def _valid_policy(policy: object) -> TypeGuard[ScreeningPolicy]:
     if type(policy.excluded_categories) is not frozenset:
         return False
     if any(
-        not _token(c)
-        for c in (*policy.allowed_categories, *policy.excluded_categories)
+        not _token(c) for c in (*policy.allowed_categories, *policy.excluded_categories)
     ):
         return False
     if policy.allowed_categories & policy.excluded_categories:

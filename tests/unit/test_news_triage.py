@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -480,7 +481,7 @@ def test_none_or_custom_untrusted_prior_collection_cannot_run_side_effects() -> 
     class HostileIterator:
         touched = False
 
-        def __iter__(self):
+        def __iter__(self) -> Iterator[PriorScreening]:
             self.touched = True
             raise AssertionError("untrusted prior iterable executed")
 
