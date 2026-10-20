@@ -473,7 +473,7 @@ def verify_stage1_checkpoint_coverage_audit(
         raise ValueError("invalid coverage schema version")
 
     arms_once, bindings_once, runs_once = _snapshot_manifest_collections(
-        arms=arms_once, bindings=bindings_once, expected_run_ids=expected_run_ids
+        arms=arms, bindings=bindings, expected_run_ids=expected_run_ids
     )
     verify_experiment_configuration(
         campaign=campaign,
