@@ -385,6 +385,7 @@ def test_forged_frozen_context_inputs_are_reparsed_before_aggregation(
     forged_inputs = (
         original.model_copy(update={"input_ref": forged_ref}),
         original.model_copy(update={"available_at": "unknown"}),
+        original.model_copy(update={"is_holdout": "false"}),
     )
     for entry in forged_inputs:
         with pytest.raises(ValueError, match="INVALID_CONTEXT_INPUT"):

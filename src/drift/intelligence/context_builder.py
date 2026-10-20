@@ -10,6 +10,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
+from pydantic import Field
+
 from drift.intelligence.contracts import (
     ArtifactReference,
     ImmutableModel,
@@ -25,11 +27,11 @@ class CandidateInput(ImmutableModel):
     """Specification of an informational or market input into context."""
 
     input_ref: ArtifactReference
-    role: str
+    role: str = Field(min_length=1)
     available_at: datetime
     availability_basis_ref: ArtifactReference
     transformation_ref: ArtifactReference | None = None
-    is_holdout: bool = False
+    is_holdout: bool = Field(default=False, strict=True)
     arm_id: str | None = None
 
 

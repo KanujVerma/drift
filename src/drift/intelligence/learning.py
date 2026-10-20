@@ -37,8 +37,8 @@ class TrialFeedbackRecord(ImmutableModel):
     status: Literal["completed", "failed", "rejected"]
     pnl: str | None = None
     metrics: dict[str, str] = Field(default_factory=dict)
-    is_complete: bool = True
-    is_holdout: bool = False
+    is_complete: bool = Field(default=True, strict=True)
+    is_holdout: bool = Field(default=False, strict=True)
 
 
 def _validate_completed_feedback(record: TrialFeedbackRecord) -> None:
@@ -77,7 +77,7 @@ class LearningSnapshot(ImmutableModel):
     kind: Literal["learning_snapshot"] = "learning_snapshot"
     snapshot_id: str = Field(min_length=1)
     arm_id: str = Field(min_length=1)
-    version: int = Field(ge=1)
+    version: int = Field(ge=1, strict=True)
     cutoff: datetime
     method_ref: ArtifactReference
     previous_snapshot_ref: ArtifactReference | None = None

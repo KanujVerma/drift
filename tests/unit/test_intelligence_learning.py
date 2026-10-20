@@ -514,15 +514,19 @@ def test_forged_feedback_model_copy_is_revalidated_before_learning(
 ) -> None:
     cutoff = datetime(2024, 1, 4, 10, tzinfo=UTC)
     record = _completed_feedback("synthetic:forged", cutoff)
-    forged = record.model_copy(update={"metrics": {"return": object()}})
-    with pytest.raises(ValueError, match="INVALID_FEEDBACK_RECORD"):
-        advance_learning(
-            previous_snapshot=None,
-            feedback_records=[forged],
-            cutoff=cutoff,
-            arm_id="arm-B",
-            method_ref=sample_method_ref,
-        )
+    for forged in (
+        record.model_copy(update={"metrics": {"return": object()}}),
+        record.model_copy(update={"is_complete": "true"}),
+        record.model_copy(update={"is_holdout": "false"}),
+    ):
+        with pytest.raises(ValueError, match="INVALID_FEEDBACK_RECORD"):
+            advance_learning(
+                previous_snapshot=None,
+                feedback_records=[forged],
+                cutoff=cutoff,
+                arm_id="arm-B",
+                method_ref=sample_method_ref,
+            )
     # A valid complete losing feedback remains eligible after the refusal.
     legitimate = advance_learning(
         previous_snapshot=None,

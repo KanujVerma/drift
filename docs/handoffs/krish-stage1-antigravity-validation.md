@@ -383,7 +383,8 @@ and this consolidated handoff. K0-K3, K5 and platform paths remain protected.
    immediately before looking at holdout flags, availability timestamps,
    arm identity or deduplication. Tampered digests and invalid timestamps
    must be refused with `INVALID_CONTEXT_INPUT`; these inputs may never
-   silently become a new hash-valid context.
+   silently become a new hash-valid context. Boolean holdout flags
+   must be actual booleans, not coerced strings such as `"false"`.
 
 2. **Feedback reference hygiene:** Every `feedback_refs` entry is
    revalidated. A `holdout:` or `sealed_holdout:` reference must be
@@ -402,7 +403,9 @@ and this consolidated handoff. K0-K3, K5 and platform paths remain protected.
 
 4. **Causal feedback ingestion:** The update path must reparse caller
    feedback before incorporating any matured same-arm result, and
-   store an independent nested metrics copy. Subsequent caller mutation
+   store an independent nested metrics copy. Holdout and completion flags
+   must be strict booleans, and snapshot versions strict positive integers.
+   Subsequent caller mutation
    must not change the stored learning snapshot. Valid complete losing
    trials are included (T12), while malformed same-arm completed
    trials refuse; feedback that matures after cutoff remains excluded
