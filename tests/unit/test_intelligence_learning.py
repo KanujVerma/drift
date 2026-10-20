@@ -379,3 +379,153 @@ def test_self_rehashed_invalid_prior_feedback_never_enters_learning(
     )
     with pytest.raises(ValueError, match="REJECTED_INVALID_FEEDBACK_VALUE"):
         LearningSnapshot.model_validate(payload)
+
+
+def _completed_feedback(
+    trial_id: str, cutoff: datetime, *,
+    mature_hours_ago: int = 2,
+    pnl: str = "-50.00",
+) -> TrialFeedbackRecord:
+    """Synthetic complete feedback with fully causal clocks and a real loss."""
+    return TrialFeedbackRecord(
+        trial_id=trial_id,
+        arm_id="arm-B",
+        decision_cutoff=cutoff - timedelta(days=2),
+        matured_at=cutoff - timedelta(hours=mature_hours_ago),
+        candidate_id=f"candidate:{trial_id}",
+        status="completed",
+        pnl=pnl,
+        metrics={"return": "-0.01"},
+    )
+
+
+def _self_rehash_snapshot(payload: dict[str, object]) -> dict[str, object]:
+    payload["state_hash"] = content_hash(
+        {key: value for key, value in payload.items() if key != "state_hash"}
+    )
+    return payload
+
+
+def test_self_rehashed_duplicate_trial_history_is_refused(
+    sample_method_ref: ArtifactReference,
+) -> None:
+    cutoff = datetime(2024, 1, 4, 10, tzinfo=UTC)
+    valid = _completed_feedback("synthetic:duplicate", cutoff)
+    original = advance_learning(
+        previous_snapshot=None,
+        feedback_records=[valid],
+        cutoff=cutoff,
+        arm_id="arm-B",
+        method_ref=sample_method_ref,
+    )
+    payload = original.model_dump(mode="python")
+    payload["matured_trials"] = (
+        valid.model_dump(mode="python"),
+        valid.model_dump(mode="python"),
+    )
+    with pytest.raises(ValueError, match="DUPLICATE_HISTORICAL_TRIAL"):
+        LearningSnapshot.model_validate(_self_rehash_snapshot(payload))
+
+
+def test_self_rehashed_unsorted_history_is_refused(
+    sample_method_ref: ArtifactReference,
+) -> None:
+    cutoff = datetime(2024, 1, 4, 10, tzinfo=UTC)
+    older = _completed_feedback("synthetic:older", cutoff, mature_hours_ago=3)
+    newer = _completed_feedback("synthetic:newer", cutoff, mature_hours_ago=2)
+    original = advance_learning(
+        previous_snapshot=None,
+        feedback_records=[newer, older],
+        cutoff=cutoff,
+        arm_id="arm-B",
+        method_ref=sample_method_ref,
+    )
+    assert [x.trial_id for x in original.matured_trials] == [
+        "synthetic:older",
+        "synthetic:newer",
+    ]
+    payload = original.model_dump(mode="python")
+    payload["matured_trials"] = (
+        newer.model_dump(mode="python"),
+        older.model_dump(mode="python"),
+    )
+    with pytest.raises(ValueError, match="UNSORTED_HISTORICAL_FEEDBACK"):
+        LearningSnapshot.model_validate(_self_rehash_snapshot(payload))
+
+
+def test_self_rehashed_snapshot_must_have_coherent_version_ancestry(
+    sample_method_ref: ArtifactReference,
+) -> None:
+    cutoff = datetime(2024, 1, 4, 10, tzinfo=UTC)
+    original = advance_learning(
+        previous_snapshot=None,
+        feedback_records=[],
+        cutoff=cutoff,
+        arm_id="arm-B",
+        method_ref=sample_method_ref,
+    )
+    prior_ref = ArtifactReference(
+        id="synthetic:prior", version="v1", sha256="e" * 64
+    ).model_dump(mode="python")
+    for update in (
+        {"version": 1, "previous_snapshot_ref": prior_ref},
+        {"version": 2, "previous_snapshot_ref": None},
+        {"version": 2, "previous_snapshot_ref": {**prior_ref, "version": "v9"}},
+        {
+            "version": 2,
+            "previous_snapshot_ref": {
+                **prior_ref,
+                "id": original.snapshot_id,
+            },
+        },
+    ):
+        payload = original.model_dump(mode="python")
+        payload.update(update)
+        with pytest.raises(ValueError, match="INVALID_LEARNING_SNAPSHOT_ANCESTRY"):
+            LearningSnapshot.model_validate(_self_rehash_snapshot(payload))
+
+
+def test_learning_uses_independent_copy_of_caller_feedback_metrics(
+    sample_method_ref: ArtifactReference,
+) -> None:
+    cutoff = datetime(2024, 1, 4, 10, tzinfo=UTC)
+    source = _completed_feedback("synthetic:mutable-source", cutoff)
+    original_amount = source.metrics["return"]
+    state = advance_learning(
+        previous_snapshot=None,
+        feedback_records=[source],
+        cutoff=cutoff,
+        arm_id="arm-B",
+        method_ref=sample_method_ref,
+    )
+    original_hash = state.state_hash
+    source.metrics["return"] = "999"
+    assert state.matured_trials[0].metrics["return"] == original_amount
+    assert LearningSnapshot.model_validate(
+        state.model_dump(mode="python")
+    ).state_hash == original_hash
+
+
+def test_forged_feedback_model_copy_is_revalidated_before_learning(
+    sample_method_ref: ArtifactReference,
+) -> None:
+    cutoff = datetime(2024, 1, 4, 10, tzinfo=UTC)
+    record = _completed_feedback("synthetic:forged", cutoff)
+    forged = record.model_copy(update={"metrics": {"return": object()}})
+    with pytest.raises(ValueError, match="INVALID_FEEDBACK_RECORD"):
+        advance_learning(
+            previous_snapshot=None,
+            feedback_records=[forged],
+            cutoff=cutoff,
+            arm_id="arm-B",
+            method_ref=sample_method_ref,
+        )
+    # A valid complete losing feedback remains eligible after the refusal.
+    legitimate = advance_learning(
+        previous_snapshot=None,
+        feedback_records=[record],
+        cutoff=cutoff,
+        arm_id="arm-B",
+        method_ref=sample_method_ref,
+    )
+    assert legitimate.matured_trials[0].pnl == "-50.00"
