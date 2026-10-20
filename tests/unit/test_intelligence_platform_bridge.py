@@ -766,3 +766,26 @@ def test_model_copy_state_flag_cannot_forge_verified_permission(
             candidate=sample_candidate, portfolio_state=forged,
             current_time=sample_candidate.completed_at + timedelta(minutes=5),
         )
+
+
+def test_abstention_is_nonactionable_even_with_valid_state(
+    sample_candidate: ResearchCandidate,
+    matching_portfolio_state: PortfolioStateBinding,
+) -> None:
+    payload = sample_candidate.model_dump(mode="python")
+    payload.update({
+        "disposition": "abstain", "strategy": None,
+        "targets": [], "cash_weight": None,
+    })
+    payload["record_hash"] = compute_record_hash(payload)
+    abstention = ResearchCandidate.model_validate(payload)
+    request = bridge_candidate_to_execution(
+        candidate=abstention,
+        portfolio_state=matching_portfolio_state,
+        current_time=sample_candidate.completed_at + timedelta(minutes=5),
+    )
+    assert request.status == "admitted"
+    assert request.disposition == "abstain"
+    assert request.session_target == "none"
+    assert request.target_allocations == ()
+    assert request.cash_weight is None
