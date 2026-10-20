@@ -569,3 +569,38 @@ def test_event_cooldown_does_not_block_routine_or_adaptation() -> None:
     )
     assert routine.review_type == "routine"
     assert adaptation.review_type == "planned_adaptation"
+
+
+def test_scheduler_revalidates_forged_typed_inputs_and_policy() -> None:
+    now = datetime(2024, 1, 10, 10, tzinfo=UTC)
+    valid = FeedEvent(
+        event_id="one", source_id="feed:A", version="v1",
+        available_at=now - timedelta(seconds=1),
+        content_hash="a" * 64, raw_text="inert",
+    )
+    forged = valid.model_copy(update={"content_hash": "not-a-digest"})
+    with pytest.raises(ValueError):
+        evaluate_review_schedule(now=now, feed_events=[forged])
+    policy = SchedulerPolicy().model_copy(
+        update={"event_cooldown": timedelta(seconds=-1)}
+    )
+    with pytest.raises(ValueError, match="INVALID_SCHEDULER_INTERVAL"):
+        evaluate_review_schedule(now=now, policy=policy)
+
+
+def test_defensive_policy_rejects_malformed_and_missing_weights() -> None:
+    valid = [TargetWeight(security_id="SPY", weight="0.3")]
+    for state in (
+        {"SPY": "NaN"}, {"SPY": "1.5"}, {"SPY": ""},
+        {"SPY": "0.8", "TLT": "0.8"},
+    ):
+        assert not validate_defensive_policy(
+            proposed_targets=valid, current_weights=state
+        )[0]
+    assert not validate_defensive_policy(
+        proposed_targets=[], current_weights={"SPY": "0.5"}
+    )[0]
+    forged = valid[0].model_copy(update={"weight": "NaN"})
+    assert not validate_defensive_policy(
+        proposed_targets=[forged], current_weights={"SPY": "0.5"}
+    )[0]
