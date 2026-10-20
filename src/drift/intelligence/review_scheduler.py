@@ -295,16 +295,13 @@ def evaluate_review_schedule(
 
     # 2. Feed condition evaluation (T03)
 
-    causal_feed_problem = next(
-        (
-            event.condition
-            for event in feed_events
-            if event.available_at.astimezone(UTC) <= now_utc
-            and event.condition in ("broken_feed", "unknown_coverage")
-        ),
-        None,
-    )
-    if feed_condition == "broken_feed" or causal_feed_problem == "broken_feed":
+    causal_feed_problems = {
+        event.condition
+        for event in feed_events
+        if event.available_at.astimezone(UTC) <= now_utc
+        and event.condition in ("broken_feed", "unknown_coverage")
+    }
+    if feed_condition == "broken_feed" or "broken_feed" in causal_feed_problems:
         raw_dict = {
             "trigger_id": actual_trigger_id,
             "action": "unavailable",
@@ -318,7 +315,7 @@ def evaluate_review_schedule(
         raw_dict["record_hash"] = compute_record_hash(raw_dict)
         return ReviewTriggerVerdict.model_validate(raw_dict)
 
-    if feed_condition == "unknown_coverage" or causal_feed_problem == "unknown_coverage":
+    if feed_condition == "unknown_coverage" or "unknown_coverage" in causal_feed_problems:
         raw_dict = {
             "trigger_id": actual_trigger_id,
             "action": "unavailable",
@@ -335,6 +332,7 @@ def evaluate_review_schedule(
     # 3. Event-driven trigger evaluation (D03, D04, T03)
     event_versions: dict[tuple[str, str, str], str] = {}
     event_availability: dict[tuple[str, str, str], datetime] = {}
+    event_signals: dict[tuple[str, str, str], tuple[str, bool]] = {}
     causal_material_events: list[FeedEvent] = []
     for ev in feed_events:
         if ev.available_at.tzinfo is None or ev.available_at.utcoffset() is None:
@@ -359,8 +357,15 @@ def evaluate_review_schedule(
                 "EVENT_AVAILABILITY_CONFLICT: source event has conflicting "
                 "time-availability claims"
             )
+        existing_signal = event_signals.get(key)
+        current_signal = (ev.condition, ev.is_material)
+        if existing_signal is not None and existing_signal != current_signal:
+            raise ValueError(
+                "EVENT_CONDITION_CONFLICT: source event status has changed"
+            )
         event_versions[key] = ev.content_hash
         event_availability[key] = ev_available_utc
+        event_signals[key] = current_signal
         if (
             ev.is_material
             and ev.condition == "material_event"
@@ -488,36 +493,59 @@ def validate_defensive_policy(
     proposed_targets: Sequence[TargetWeight],
     current_weights: dict[str, str],
 ) -> tuple[bool, str | None]:
-    """Validate whether proposed target weights satisfy defensive-only policy (D05).
+    """Check candidate reductions only against explicit current weight evidence.
 
-    Under defensive-only policy:
-    - Decreasing positions or holding is permitted.
-    - Increasing existing positions or opening new positions is forbidden.
+    This offline policy check does not authenticate the weights or authorize
+    a real order. Omitted/empty targets are not an inferred sell-all request.
     """
-    seen: set[str] = set()
-    for target in proposed_targets:
-        sec_id = target.security_id
-        if sec_id in seen:
-            return False, "DEFENSIVE_POLICY_VIOLATION: duplicate security target"
-        seen.add(sec_id)
-        if sec_id not in current_weights:
-            return False, "UNKNOWN_CURRENT_POSITION: no verified current weight"
-        prop_weight = Decimal(target.weight)
+    if not proposed_targets:
+        return False, "DEFENSIVE_POLICY_VIOLATION: empty targets not authorized"
+    if not current_weights:
+        return False, "UNKNOWN_CURRENT_POSITION: current weights unavailable"
+    current: dict[str, Decimal] = {}
+    for security, text in current_weights.items():
+        if not security or not isinstance(text, str) or text.strip() != text:
+            return False, "UNKNOWN_CURRENT_POSITION: malformed current security"
         try:
-            curr_weight = Decimal(current_weights[sec_id])
-        except InvalidOperation:
+            weight = Decimal(text)
+        except (InvalidOperation, TypeError):
             return False, "UNKNOWN_CURRENT_POSITION: invalid current weight"
         if (
-            not curr_weight.is_finite()
-            or not Decimal("0") <= curr_weight <= Decimal("1")
+            not weight.is_finite()
+            or weight < Decimal("0")
+            or weight > Decimal("1")
         ):
             return False, "UNKNOWN_CURRENT_POSITION: invalid current weight"
+        current[security] = weight
+    if sum(current.values(), Decimal("0")) > Decimal("1"):
+        return False, "UNKNOWN_CURRENT_POSITION: inconsistent current totals"
 
-        if prop_weight > curr_weight:
+    seen: set[str] = set()
+    proposed_sum = Decimal("0")
+    for supplied in proposed_targets:
+        try:
+            target = TargetWeight.model_validate(supplied.model_dump(mode="python"))
+        except (TypeError, ValueError):
+            return False, "DEFENSIVE_POLICY_VIOLATION: invalid target"
+        security = target.security_id
+        if security in seen:
+            return False, "DEFENSIVE_POLICY_VIOLATION: duplicate security target"
+        seen.add(security)
+        if security not in current:
+            return False, "UNKNOWN_CURRENT_POSITION: no verified current weight"
+        try:
+            weight = Decimal(target.weight)
+        except InvalidOperation:
+            return False, "DEFENSIVE_POLICY_VIOLATION: invalid target"
+        if not weight.is_finite() or not Decimal("0") <= weight <= Decimal("1"):
+            return False, "DEFENSIVE_POLICY_VIOLATION: invalid target"
+        proposed_sum += weight
+        if weight > current[security]:
             return (
                 False,
-                f"DEFENSIVE_POLICY_VIOLATION: target weight {prop_weight} for "
-                f"{sec_id} exceeds current weight {curr_weight}",
+                f"DEFENSIVE_POLICY_VIOLATION: target weight {weight} for "
+                f"{security} exceeds current weight {current[security]}",
             )
-
+    if proposed_sum > Decimal("1"):
+        return False, "DEFENSIVE_POLICY_VIOLATION: overallocated targets"
     return True, None
