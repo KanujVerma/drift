@@ -27,6 +27,7 @@ from drift.experiments.stage1_trial_events import (
 )
 from drift.experiments.stage1_trial_provenance import (
     PROVENANCE_SCHEMA_VERSION,
+    Stage1TrialProvenanceSnapshotV1,
     _complete_manifest_fingerprint,
     _provenance_preimage,
     append_stage1_trial_provenance_event,
@@ -1419,6 +1420,7 @@ def test_append_valid_ordinary_replay_and_conflict_rejection() -> None:
             bindings=bindings,
             expected_run_ids=expected_runs,
         )
+
 
 # ---------------------------------------------------------------------------
 # Issue #503: one captured event view, not caller-controlled length/iterator
