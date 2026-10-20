@@ -17,6 +17,7 @@ from drift.news_triage import (
     FeedCoverage,
     PriorScreening,
     ScreeningPolicy,
+    ScreeningResult,
     policy_digest,
     screen_event,
     screen_feed_coverage,
@@ -99,7 +100,7 @@ def run(
     context: str = "arm:B",
     cutoff: datetime = T,
     prior: tuple[PriorScreening, ...] = (),
-):
+) -> ScreeningResult:
     return screen_event(
         evidence=observation if observation is not None else event(),
         policy=pol if pol is not None else policy(),
@@ -431,3 +432,39 @@ def test_offline_capabilities_are_lexically_inert() -> None:
         and node.func.id in {"open", "eval", "exec", "getattr", "setattr"}
         for node in ast.walk(tree)
     )
+
+
+def test_future_malformed_prior_record_is_not_a_past_decision_input() -> None:
+    source = event()
+    future_malformed = replace(
+        previous(source, available_at=T + timedelta(seconds=5)),
+        result_ref=EvidenceRef("untrusted:future-record", "invalid-digest"),
+        context_id=" ",
+    )
+    baseline = run(source)
+    observed = run(source, prior=(future_malformed,))
+    assert observed.outcome == baseline.outcome == "CANDIDATE_ALERT"
+    assert observed.record_hash == baseline.record_hash
+
+
+def test_conflicting_conclusive_prior_receipt_same_id_abstains() -> None:
+    source = event()
+    first = previous(source)
+    conflicting = replace(
+        first,
+        result_ref=EvidenceRef(first.result_ref.ref_id, "e" * 64),
+    )
+    for ordered in ((first, conflicting), (conflicting, first)):
+        response = run(source, prior=ordered)
+        assert response.outcome == "ABSTAIN"
+        assert response.reason == "CONFLICTING_PRIOR_RECEIPT"
+
+
+def test_unrelated_prior_reordering_does_not_change_screening() -> None:
+    source = event()
+    unrelated = previous(event(event_id="other"))
+    inconclusive = previous(source, outcome="ABSTAIN")
+    a = run(source, prior=(inconclusive, unrelated))
+    b = run(source, prior=(unrelated, inconclusive))
+    assert a.outcome == b.outcome == "CANDIDATE_ALERT"
+    assert a.record_hash == b.record_hash
