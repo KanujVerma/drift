@@ -329,7 +329,10 @@ def evaluate_review_schedule(
         raw_dict["record_hash"] = compute_record_hash(raw_dict)
         return ReviewTriggerVerdict.model_validate(raw_dict)
 
-    if feed_condition == "unknown_coverage" or "unknown_coverage" in causal_feed_problems:
+    if (
+        feed_condition == "unknown_coverage"
+        or "unknown_coverage" in causal_feed_problems
+    ):
         raw_dict = {
             "trigger_id": actual_trigger_id,
             "action": "unavailable",
