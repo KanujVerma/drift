@@ -16,7 +16,7 @@ from drift.domain.evaluator_strategy import (
     StrategyDecisionIntentV1,
     position_view,
 )
-from drift.evaluator.stage1_switch_admission import (
+from drift.loop.stage1_switch_admission import (
     AdmissionStatus,
     admit_stage1_switch,
 )
@@ -131,11 +131,9 @@ def test_real_producer_history_boundaries(
 def test_noneligible_results_never_call_either_stager(proposed: str) -> None:
     inputs = fixture_inputs("strong", 1, proposed)
     with (
+        patch("drift.loop.stage1_switch_admission.stage_decision_targets") as strong,
         patch(
-            "drift.evaluator.stage1_switch_admission.stage_decision_targets"
-        ) as strong,
-        patch(
-            "drift.evaluator.stage1_switch_admission.stage_exploratory_decision_targets"
+            "drift.loop.stage1_switch_admission.stage_exploratory_decision_targets"
         ) as exploratory,
     ):
         result = call(inputs)
@@ -169,9 +167,7 @@ def test_noneligible_results_never_call_either_stager(proposed: str) -> None:
 )
 def test_stale_or_incomplete_evidence_never_stages(changes: dict[str, Any]) -> None:
     inputs = fixture_inputs()
-    with patch(
-        "drift.evaluator.stage1_switch_admission.stage_decision_targets"
-    ) as staging:
+    with patch("drift.loop.stage1_switch_admission.stage_decision_targets") as staging:
         result = call(inputs, changes=changes)
     assert result.status == AdmissionStatus.CONTAINMENT
     assert not result.hold_incumbent
@@ -270,9 +266,7 @@ def test_missing_required_fund_is_refused_without_staging_or_mutation() -> None:
         update={"decision_views": original_context.decision_views[:-1]}
     )
     before = inputs["current_portfolio_state"].model_dump_json()
-    with patch(
-        "drift.evaluator.stage1_switch_admission.stage_decision_targets"
-    ) as staging:
+    with patch("drift.loop.stage1_switch_admission.stage_decision_targets") as staging:
         result = call(inputs)
     assert result.status == AdmissionStatus.REFUSED
     assert result.hold_incumbent
@@ -343,9 +337,7 @@ def test_ambiguous_manifest_identity_cannot_be_overwritten(kind: str) -> None:
         manifest["VOO"] = voo
     else:
         manifest[UUID("018e0000-0000-7000-8000-000000009999")] = "vOo"
-    with patch(
-        "drift.evaluator.stage1_switch_admission.stage_decision_targets"
-    ) as staging:
+    with patch("drift.loop.stage1_switch_admission.stage_decision_targets") as staging:
         result = call(inputs, changes={"universe_manifest": manifest})
     assert result.status == AdmissionStatus.CONTAINMENT
     assert not result.hold_incumbent
