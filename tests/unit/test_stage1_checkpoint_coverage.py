@@ -127,9 +127,7 @@ def _campaign(
     comparator_arm_id: str = "ARM-R",
 ) -> CampaignSpecV1:
     controls = [
-        a.arm_id
-        for a in arms
-        if a.arm_id not in {test_arm_id, comparator_arm_id}
+        a.arm_id for a in arms if a.arm_id not in {test_arm_id, comparator_arm_id}
     ]
     return build_campaign_spec(
         campaign_id="CAMP-E1-SYNTH-001",
@@ -334,9 +332,7 @@ def test_p02_mixed_independent_golden_and_preserved_envelopes() -> None:
         ("ARM-R", "TEST_MISSING"),
     ],
 )
-def test_p03_p05_missing_pair_states(
-    submitted_arm: str | None, expected: str
-) -> None:
+def test_p03_p05_missing_pair_states(submitted_arm: str | None, expected: str) -> None:
     fixture = _fixture()
     camp, arms, bindings, runs = fixture
     snapshots = (
@@ -353,8 +349,7 @@ def test_p06_submitted_unobserved_counts_for_pair() -> None:
     fixture = _fixture()
     camp, arms, bindings, runs = fixture
     both = [
-        _snapshot(camp, arms, bindings, runs, arm_id)
-        for arm_id in ("ARM-R", "ARM-B")
+        _snapshot(camp, arms, bindings, runs, arm_id) for arm_id in ("ARM-R", "ARM-B")
     ]
     audit = _build(*fixture, _decls(), both)
     assert audit.counts == Stage1CoverageCountsV1(12, 10, 2, 0, 2, 6, 1)
@@ -369,8 +364,12 @@ def test_p07_canonical_input_collection_order() -> None:
     r = _snapshot(camp, arms, bindings, runs, "ARM-R")
     baseline = _build(*fixture, _decls(), [b, r])
     permuted = _build(
-        camp, list(reversed(arms)), list(reversed(bindings)),
-        list(reversed(runs)), list(reversed(_decls())), [r, b]
+        camp,
+        list(reversed(arms)),
+        list(reversed(bindings)),
+        list(reversed(runs)),
+        list(reversed(_decls())),
+        [r, b],
     )
     assert baseline == permuted
     assert baseline.audit_fingerprint == permuted.audit_fingerprint
@@ -450,9 +449,12 @@ def test_p12_complete_manifest_contract() -> None:
     assert camp.campaign_spec_fingerprint == CAMPAIGN_HASH
     assert arms[0].arm_spec_fingerprint == ARM_B_HASH
     assert arms[1].arm_spec_fingerprint == ARM_R_HASH
-    assert _full_manifest_fingerprint(
-        campaign=camp, arms=arms, bindings=bindings, expected_run_ids=runs
-    ) == E1_TWO_RUN_HASH
+    assert (
+        _full_manifest_fingerprint(
+            campaign=camp, arms=arms, bindings=bindings, expected_run_ids=runs
+        )
+        == E1_TWO_RUN_HASH
+    )
     assert _build(*fixture, _decls()).complete_manifest_fingerprint == E1_TWO_RUN_HASH
 
 
@@ -622,8 +624,11 @@ def test_n10_swapped_primary_pair_does_not_reinterpret_audit() -> None:
     assert swapped.campaign_spec_fingerprint != camp.campaign_spec_fingerprint
     with pytest.raises(ValueError):
         verify_stage1_checkpoint_coverage_audit(
-            audit=audit, campaign=swapped,
-            arms=arms, bindings=bindings, expected_run_ids=runs
+            audit=audit,
+            campaign=swapped,
+            arms=arms,
+            bindings=bindings,
+            expected_run_ids=runs,
         )
 
 
