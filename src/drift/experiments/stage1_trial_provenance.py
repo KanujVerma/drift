@@ -535,7 +535,7 @@ def append_stage1_trial_provenance_event(
     expected_run_ids: Sequence[str],
 ) -> Stage1TrialProvenanceSnapshotV1:
     arms_once, bindings_once, runs_once = _capture_e1_manifest_view(
-        arms=arms_once, bindings=bindings_once, expected_run_ids=expected_run_ids
+        arms=arms, bindings=bindings, expected_run_ids=expected_run_ids
     )
     verify_stage1_trial_provenance_snapshot(
         snapshot=snapshot,
