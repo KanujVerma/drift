@@ -12,7 +12,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Literal
 from uuid import NAMESPACE_URL, uuid5
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 
 from drift.intelligence.contracts import (
     ArtifactReference,
@@ -29,14 +29,14 @@ class TrialFeedbackRecord(ImmutableModel):
     source. The experiment consumer must verify the referenced trial separately.
     """
 
-    trial_id: str
-    arm_id: str
+    trial_id: str = Field(min_length=1)
+    arm_id: str = Field(min_length=1)
     decision_cutoff: datetime
     matured_at: datetime
-    candidate_id: str
+    candidate_id: str = Field(min_length=1)
     status: Literal["completed", "failed", "rejected"]
     pnl: str | None = None
-    metrics: dict[str, str] = {}
+    metrics: dict[str, str] = Field(default_factory=dict)
     is_complete: bool = True
     is_holdout: bool = False
 
@@ -75,9 +75,9 @@ class LearningSnapshot(ImmutableModel):
 
     profile: ProfileLiteral = "drift-research/1-draft"
     kind: Literal["learning_snapshot"] = "learning_snapshot"
-    snapshot_id: str
-    arm_id: str
-    version: int
+    snapshot_id: str = Field(min_length=1)
+    arm_id: str = Field(min_length=1)
+    version: int = Field(ge=1)
     cutoff: datetime
     method_ref: ArtifactReference
     previous_snapshot_ref: ArtifactReference | None = None
@@ -90,6 +90,17 @@ class LearningSnapshot(ImmutableModel):
         # feedback. Validate the semantics of every retained member before
         # accepting a historical state as an immutable learning snapshot.
         cutoff = _require_aware(self.cutoff, "learning snapshot cutoff")
+        if self.version == 1:
+            if self.previous_snapshot_ref is not None:
+                raise ValueError("INVALID_LEARNING_SNAPSHOT_ANCESTRY")
+        elif (
+            self.previous_snapshot_ref is None
+            or self.previous_snapshot_ref.version != f"v{self.version - 1}"
+            or self.previous_snapshot_ref.id == self.snapshot_id
+        ):
+            raise ValueError("INVALID_LEARNING_SNAPSHOT_ANCESTRY")
+        seen_trials: set[str] = set()
+        previous_order: tuple[datetime, str] | None = None
         for record in self.matured_trials:
             if (
                 record.arm_id != self.arm_id
@@ -103,6 +114,13 @@ class LearningSnapshot(ImmutableModel):
             )
             if matured > cutoff or matured < decision:
                 raise ValueError("NON_CAUSAL_HISTORICAL_FEEDBACK")
+            if record.trial_id in seen_trials:
+                raise ValueError("DUPLICATE_HISTORICAL_TRIAL")
+            seen_trials.add(record.trial_id)
+            ordering = (matured, record.trial_id)
+            if previous_order is not None and ordering < previous_order:
+                raise ValueError("UNSORTED_HISTORICAL_FEEDBACK")
+            previous_order = ordering
             _validate_completed_feedback(record)
         expected = _learning_state_hash(
             snapshot_id=self.snapshot_id,
@@ -179,7 +197,9 @@ def advance_learning(
     if previous_snapshot is not None:
         # Pydantic frozen instances can contain mutable nested dictionaries.
         # Re-validation catches changes to the serialized hashed state.
-        LearningSnapshot.model_validate(previous_snapshot.model_dump(mode="python"))
+        previous_snapshot = LearningSnapshot.model_validate(
+            previous_snapshot.model_dump(mode="python")
+        )
         if previous_snapshot.arm_id != arm_id:
             raise ValueError(
                 "CROSS_ARM_LEAKAGE: prior snapshot belongs to another arm"
@@ -196,14 +216,24 @@ def advance_learning(
                 raise ValueError("FUTURE_FEEDBACK_IN_PREVIOUS_SNAPSHOT")
             historical[record.trial_id] = record
 
-    for record in feedback_records:
+    for supplied in feedback_records:
         # A sealed report stays forbidden even if delayed or from another arm.
-        if record.is_holdout or record.trial_id.startswith("holdout:"):
+        if not isinstance(supplied, TrialFeedbackRecord):
+            raise ValueError("INVALID_FEEDBACK_RECORD: expected typed feedback")
+        if supplied.is_holdout or supplied.trial_id.startswith("holdout:"):
             raise ValueError(
                 "HOLDOUT_ACCESS_VIOLATION: sealed feedback cannot enter memory"
             )
-        if record.arm_id != arm_id:
+        if supplied.arm_id != arm_id:
             continue
+        # Re-parse even a frozen model: model_copy(update=...) and mutable
+        # nested metrics can evade the original constructor's validators.
+        try:
+            record = TrialFeedbackRecord.model_validate(
+                supplied.model_dump(mode="python")
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError("INVALID_FEEDBACK_RECORD: malformed typed input") from error
         matured = _require_aware(record.matured_at, "feedback maturity")
         decision = _require_aware(record.decision_cutoff, "feedback decision cutoff")
         if matured < decision:
