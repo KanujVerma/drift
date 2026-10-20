@@ -403,7 +403,11 @@ def append_stage1_trial_event(
 
     for existing_event in events:
         if existing_event.event_id == event.event_id:
-            if existing_event == event:
+            # Compare validated canonical content, never a subclass's __eq__.
+            # The existing chain and incoming event have both been hash-checked.
+            if existing_event.event_hash == event.event_hash and _event_preimage(
+                existing_event
+            ) == _event_preimage(event):
                 return events
             raise ValueError(
                 f"conflicting event with existing event_id {event.event_id}"
