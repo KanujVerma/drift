@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
@@ -3202,3 +3203,157 @@ def test_strict_type_valid_builtin_strings() -> None:
         )
         is True
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #489: Snapshot each caller-provided E1 collection exactly once
+# ---------------------------------------------------------------------------
+
+
+class _FalseNonemptyRuns(list[str]):
+    def __bool__(self) -> bool:
+        return True
+
+
+class _ChangingBindings(list[RunAccountBindingV1]):
+    def __init__(
+        self,
+        first: list[RunAccountBindingV1],
+        later: list[RunAccountBindingV1],
+    ) -> None:
+        super().__init__(later)
+        self.first = first
+        self.later = later
+        self.read_count = 0
+
+    def __iter__(self) -> Iterator[RunAccountBindingV1]:
+        self.read_count += 1
+        return iter(self.first if self.read_count == 1 else self.later)
+
+
+class _ChangingArms(list[ArmSpecV1]):
+    def __init__(self, first: list[ArmSpecV1], later: list[ArmSpecV1]) -> None:
+        super().__init__(later)
+        self.first = first
+        self.later = later
+        self.read_count = 0
+
+    def __iter__(self) -> Iterator[ArmSpecV1]:
+        self.read_count += 1
+        return iter(self.first if self.read_count == 1 else self.later)
+
+
+class _ChangingRuns(list[str]):
+    def __init__(self, first: list[str], later: list[str]) -> None:
+        super().__init__(later)
+        self.first = first
+        self.later = later
+        self.read_count = 0
+
+    def __iter__(self) -> Iterator[str]:
+        self.read_count += 1
+        return iter(self.first if self.read_count == 1 else self.later)
+
+
+@pytest.mark.parametrize(
+    "verifier",
+    [verify_experiment_configuration, verify_stage1_synthetic_br_configuration],
+)
+def test_e1_rejects_false_nonempty_empty_run_manifest(verifier: Any) -> None:
+    with pytest.raises(ValueError, match="expected_run_ids cannot be empty"):
+        verifier(
+            campaign=make_golden_campaign(),
+            arms=(make_golden_arm_b(), make_golden_arm_r()),
+            bindings=[],
+            expected_run_ids=_FalseNonemptyRuns(),
+        )
+
+
+@pytest.mark.parametrize(
+    "verifier",
+    [verify_experiment_configuration, verify_stage1_synthetic_br_configuration],
+)
+def test_e1_rejects_changing_binding_completeness(verifier: Any) -> None:
+    b, r = make_golden_bindings()
+    invalid_r = replace(
+        r,
+        portfolio_account_id=b.portfolio_account_id,
+        initial_cash_allocated="1",
+        bound_at="2026-10-18T00:00:00.000000Z",
+    )
+    bindings = _ChangingBindings(first=[b], later=[b, invalid_r])
+    with pytest.raises(ValueError, match="does not bind exactly every declared arm"):
+        verifier(
+            campaign=make_golden_campaign(),
+            arms=(make_golden_arm_b(), make_golden_arm_r()),
+            bindings=bindings,
+            expected_run_ids=["RUN-001"],
+        )
+    assert bindings.read_count == 1
+    assert bindings.first == [b]
+    assert bindings.later == [b, invalid_r]
+
+
+@pytest.mark.parametrize(
+    "verifier",
+    [verify_experiment_configuration, verify_stage1_synthetic_br_configuration],
+)
+def test_e1_rejects_changing_expected_run_set(verifier: Any) -> None:
+    runs = _ChangingRuns(first=["RUN-001", "RUN-002"], later=["RUN-001"])
+    with pytest.raises(ValueError, match="bindings run set"):
+        verifier(
+            campaign=make_golden_campaign(),
+            arms=(make_golden_arm_b(), make_golden_arm_r()),
+            bindings=make_golden_bindings(),
+            expected_run_ids=runs,
+        )
+    assert runs.read_count == 1
+
+
+def test_stage1_uses_original_arm_snapshot_across_generic_and_profile() -> None:
+    arm_b, arm_r = make_golden_arm_b(), make_golden_arm_r()
+    arms = _ChangingArms(first=[arm_b, arm_r], later=[arm_b])
+    assert (
+        verify_stage1_synthetic_br_configuration(
+            campaign=make_golden_campaign(),
+            arms=arms,
+            bindings=make_golden_bindings(),
+            expected_run_ids=["RUN-001"],
+        )
+        is True
+    )
+    assert arms.read_count == 1
+
+
+def test_e1_unmodified_golden_controls_still_validate() -> None:
+    campaign = make_golden_campaign()
+    arms = [make_golden_arm_b(), make_golden_arm_r()]
+    bindings = make_golden_bindings()
+    for verifier in (
+        verify_experiment_configuration,
+        verify_stage1_synthetic_br_configuration,
+    ):
+        assert (
+            verifier(
+                campaign=campaign,
+                arms=arms,
+                bindings=bindings,
+                expected_run_ids=["RUN-001"],
+            )
+            is True
+        )
+        with pytest.raises(ValueError, match="expected_run_ids cannot be empty"):
+            verifier(campaign=campaign, arms=arms, bindings=[], expected_run_ids=[])
+        shared = replace(
+            bindings[1], portfolio_account_id=bindings[0].portfolio_account_id
+        )
+        with pytest.raises(ValueError, match="reused across bindings"):
+            verifier(
+                campaign=campaign,
+                arms=arms,
+                bindings=[bindings[0], shared],
+                expected_run_ids=["RUN-001"],
+            )
+    assert campaign.campaign_spec_fingerprint == GOLDEN_CAMPAIGN_HASH
+    assert arms[0].arm_spec_fingerprint == GOLDEN_ARM_B_HASH
+    assert arms[1].arm_spec_fingerprint == GOLDEN_ARM_R_HASH
