@@ -1,0 +1,45 @@
+name: Temporary #381 final read-only static/focused proof
+on:
+  push:
+    branches:
+      - coord/381-final-static-proof-20261020
+permissions:
+  contents: read
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      UV_LOCKED: "1"
+      UV_PYTHON_PREFERENCE: only-managed
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          enable-cache: false
+      - name: Pinned environment
+        run: |
+          uv python install
+          uv sync --locked
+      - name: Static checks and relevant tests
+        shell: bash
+        run: |
+          set +e
+          uv run ruff check .
+          lint=$?
+          uv run ruff format --check .
+          format=$?
+          uv run mypy src tests
+          types=$?
+          uv run pytest -q -k 'intelligence or stage1_switch_preflight or m1e_compatibility or news_triage'
+          tests=$?
+          uv build
+          build=$?
+          git diff --check
+          diff=$?
+          echo "__FINAL_QA_EXIT__ lint=$lint format=$format mypy=$types tests=$tests build=$build diff=$diff"
+          test "$lint" -eq 0 && test "$format" -eq 0 &&
+          test "$types" -eq 0 && test "$tests" -eq 0 &&
+          test "$build" -eq 0 && test "$diff" -eq 0
