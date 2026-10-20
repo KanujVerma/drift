@@ -1039,8 +1039,12 @@ def _replay_root(payload_reference: str) -> Stage1TrialEvent:
     )
 
 
-def _as_subclass(event: Stage1TrialEvent, kind: type[Stage1TrialEvent]) -> Stage1TrialEvent:
-    return kind(**{field.name: getattr(event, field.name) for field in fields(Stage1TrialEvent)})
+def _as_subclass(
+    event: Stage1TrialEvent, kind: type[Stage1TrialEvent]
+) -> Stage1TrialEvent:
+    return kind(
+        **{field.name: getattr(event, field.name) for field in fields(Stage1TrialEvent)}
+    )
 
 
 @pytest.mark.parametrize("position", ["incoming", "stored"])
