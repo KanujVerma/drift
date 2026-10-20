@@ -228,19 +228,22 @@ def build_stage1_trial_provenance_snapshot(
     if not isinstance(events, Sequence):
         raise ValueError("events must be a sequence of Stage1TrialEvent objects")
 
-    if len(events) == 0:
+    # Materialize the caller's view exactly once before counting events.
+    # Sequence.__len__ may disagree with iteration or a later caller reread.
+    captured_events = tuple(events)
+    if not captured_events:
         observation_state = "UNOBSERVED"
         event_envelopes: tuple[Stage1TrialEvent, ...] = ()
         event_count = 0
         chain_head_event_hash = None
     else:
-        for idx, ev in enumerate(events):
+        for idx, ev in enumerate(captured_events):
             if type(ev) is not Stage1TrialEvent:
                 raise ValueError(
                     f"events[{idx}] must be a Stage1TrialEvent instance, "
                     f"got: {type(ev)}"
                 )
-        copied_events = tuple(replace(ev) for ev in events)
+        copied_events = tuple(replace(ev) for ev in captured_events)
         verify_stage1_trial_chain(trial_id=trial_id, events=copied_events)
         observation_state = "EVENTS_RECORDED"
         event_envelopes = copied_events
