@@ -33,6 +33,14 @@ INTELLIGENCE_SOURCE_PATHS = frozenset(
         "src/drift/intelligence/platform_bridge.py",
     }
 )
+# Issue #496: two exact synthetic-only triage sources; no blanket exemptions.
+# These modules remain subject to the original positive production AST scan.
+TRIAGE_OFFLINE_SOURCE_PATHS = frozenset(
+    {
+        "src/drift/news_triage/__init__.py",
+        "src/drift/news_triage/screen.py",
+    }
+)
 ALLOWED_M1E_PRODUCTION_PATHS = frozenset(
     {
         "src/drift/domain/qualification.py",
@@ -211,6 +219,7 @@ INERT_SOURCE_PATHS = (
     | M5_SCORECARD_SOURCE_PATHS
     | M6_RESEARCH_MEMORY_SOURCE_PATHS
     | INTELLIGENCE_SOURCE_PATHS
+    | TRIAGE_OFFLINE_SOURCE_PATHS
 )
 M1E_SCRIPT_PATHS = frozenset(
     path for path in ALLOWED_M1E_PRODUCTION_PATHS if path.startswith("scripts/")
@@ -986,6 +995,7 @@ def test_m1e_additions_are_allowlisted_inert_and_leave_m1d_pins_unchanged() -> N
         | M5_SCORECARD_SOURCE_PATHS
         | M6_RESEARCH_MEMORY_SOURCE_PATHS
         | INTELLIGENCE_SOURCE_PATHS
+        | TRIAGE_OFFLINE_SOURCE_PATHS
     )
     assert present & scanned_as_production
     for relative in present:
@@ -1025,6 +1035,37 @@ def test_m1e_additions_are_allowlisted_inert_and_leave_m1d_pins_unchanged() -> N
         check=True,
         capture_output=True,
     ).stdout
+
+
+def test_triage_offline_source_inventory_and_ast_scanner_are_nonvacuous() -> None:
+    """Named synthetic source is scanned, never exempted as a directory."""
+    expected = {
+        "src/drift/news_triage/__init__.py",
+        "src/drift/news_triage/screen.py",
+    }
+    assert TRIAGE_OFFLINE_SOURCE_PATHS == expected
+    assert TRIAGE_OFFLINE_SOURCE_PATHS <= INERT_SOURCE_PATHS
+    unknown = "src/drift/news_triage/extra.py"
+    assert unknown not in INERT_SOURCE_PATHS
+    assert not (_m1e_paths_on_disk() | {unknown}) <= INERT_SOURCE_PATHS
+
+    for relative in sorted(TRIAGE_OFFLINE_SOURCE_PATHS):
+        path = REPO_ROOT / relative
+        assert path.is_file(), relative
+        original = path.read_text(encoding="utf-8")
+        _assert_m1e_production_module_allowed(original, relative)
+
+        # The negative controls are in-memory only. Retained bytes are unchanged.
+        for injection in (
+            "\nimport socket\n",
+            "\nimport os\nos.getenv('SECRET')\n",
+            "\nimport subprocess\nsubprocess.run(['true'])\n",
+            "\neval('1 + 1')\n",
+        ):
+            with pytest.raises(AssertionError):
+                _assert_m1e_production_module_allowed(
+                    original + injection, relative
+                )
 
 
 def test_intelligence_source_inventory_is_exact_and_nonempty() -> None:
