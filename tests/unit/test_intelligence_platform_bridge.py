@@ -25,6 +25,7 @@ from drift.intelligence.platform_bridge import (
     PortfolioStateBinding,
     bridge_candidate_to_execution,
 )
+from drift.serialization.canonical import content_hash
 
 
 @pytest.fixture
@@ -88,8 +89,8 @@ def sample_candidate(sample_scope: Scope) -> ResearchCandidate:
                 id="strat:001", version="v1", sha256="7" * 64
             ),
             envelope_ref=ArtifactReference(id="env:001", version="v1", sha256="8" * 64),
-            parameters={"threshold": 0.5},
-            parameters_hash="9" * 64,
+            parameters={"threshold": "0.5"},
+            parameters_hash=content_hash({"threshold": "0.5"}),
             eligibility_ref=ArtifactReference(
                 id="elig:001", version="v1", sha256="a" * 64
             ),
@@ -205,6 +206,7 @@ def test_t08_hold_and_abstain_admitted_without_trade(
 
     hold_dict = sample_candidate.model_dump(mode="python")
     hold_dict["disposition"] = "hold"
+    hold_dict["strategy"] = None
     hold_dict["targets"] = []
     hold_dict["cash_weight"] = None
     hold_dict["record_hash"] = compute_record_hash(hold_dict)
@@ -577,14 +579,26 @@ def test_self_rehashed_invalid_weights_never_make_a_platform_request(
     payload["targets"][1]["weight"] = weights[1]
     payload["cash_weight"] = cash
     payload["record_hash"] = compute_record_hash(payload)
-    candidate = ResearchCandidate.model_validate(payload)
-    request = bridge_candidate_to_execution(
-        candidate=candidate,
-        portfolio_state=matching_portfolio_state,
-        current_time=candidate.completed_at + timedelta(minutes=5),
+    # A self-rehashed record must fail *intrinsic K1 validation* before
+    # it could become a K5 research execution request.
+    with pytest.raises(ValueError):
+        ResearchCandidate.model_validate(payload)
+
+    # model_copy(update=...) can bypass Pydantic validators at construction.
+    # K5 must still reject that forged object at its own trust boundary.
+    forged = sample_candidate.model_copy(
+        update={
+            "targets": tuple(
+                target.model_copy(update={"weight": value})
+                for target, value in zip(sample_candidate.targets, weights, strict=True)
+            ),
+            "cash_weight": cash,
+            "record_hash": payload["record_hash"],
+        }
     )
-    assert request.status == "refused"
-    assert request.session_target == "none"
-    assert request.target_allocations == ()
-    assert request.cash_weight is None
-    assert "INVALID_STAGE1_TARGET_WEIGHTS" in (request.refusal_reason or "")
+    with pytest.raises(ValueError):
+        bridge_candidate_to_execution(
+            candidate=forged,
+            portfolio_state=matching_portfolio_state,
+            current_time=sample_candidate.completed_at + timedelta(minutes=5),
+        )
