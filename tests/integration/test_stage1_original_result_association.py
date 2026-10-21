@@ -31,9 +31,16 @@ from test_stage1_campaign_config import (
 )
 
 from drift.domain.evaluator_results import EvaluationClassification
+from drift.domain.evaluator_strategy import (
+    StrategyDecisionContextV1,
+    StrategyDecisionIntentV1,
+)
 from drift.domain.experiments import ExperimentRun, ExperimentRunStatus
 from drift.evaluator.engine import SessionEvaluatorEngine
-from drift.evaluator.experiment_runner import execute_experiment_run
+from drift.evaluator.experiment_runner import (
+    ExperimentRunnerContext,
+    execute_experiment_run,
+)
 from drift.experiments.stage1_trial_provenance import (
     build_stage1_trial_provenance_snapshot,
 )
@@ -273,3 +280,49 @@ def test_observer_requires_a_real_original_m0_audit_before_stepping(
         "stage1.synthetic_account.allocation",
         "stage1.synthetic_account.allocation_observed",
     ]
+
+
+def test_strategy_cannot_suppress_original_result_observer_during_decide(
+    tmp_path: Path,
+) -> None:
+    """A mutable caller context cannot downgrade M0 V2 to V1 mid-run."""
+    engine, original, store = _setup(tmp_path)
+
+    class ObserverErasingStrategy(FixedTargetStrategy):
+        run_context: ExperimentRunnerContext | None = None
+
+        def decide(
+            self, context: StrategyDecisionContextV1
+        ) -> StrategyDecisionIntentV1:
+            assert self.run_context is not None
+            object.__setattr__(
+                self.run_context, "original_result_observer", None
+            )
+            return super().decide(context)
+
+    strategy = ObserverErasingStrategy({})
+    ctx = replace(
+        _context(
+            engine,
+            ledger=SQLiteLedger(store.origin.ledger_path),
+            started_at=M0_START,
+            completed_at=M0_COMPLETE,
+            strategy=strategy,
+        ),
+        original_result_observer=original,
+    )
+    strategy.run_context = ctx
+    run = execute_experiment_run(_specification(), ctx)
+    assert run.status is ExperimentRunStatus.COMPLETED
+    assert ctx.original_result_observer is None
+    recorded_m0 = [
+        e for e in store.origin.verified_events()
+        if e.event_type == "m2.evaluation.run.recorded"
+    ]
+    assert len(recorded_m0) == 1
+    assert recorded_m0[0].schema_version == "2"
+    retained = original.readback()
+    assert retained.result_hash in {
+        r.content_hash for r in run.artifact_references
+    }
+    assert not retained.scientifically_qualified
