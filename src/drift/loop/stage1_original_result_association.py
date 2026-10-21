@@ -244,7 +244,7 @@ class Stage1OriginalResultAssociationV1:
 
     def _verified_chain(
         self, *, identity_hash: str, m0_event_id: UUID, m0_run_id: UUID,
-        result_hash: str, trace_hash: str,
+        result_hash: str, trace_hash: str, final_book_hash: str,
     ) -> tuple[tuple[AuditEvent, ...], AuditEvent, AuditEvent, AuditEvent]:
         events = self._origin.verified_events()
         proof = self._account.verified_original()
@@ -315,8 +315,12 @@ class Stage1OriginalResultAssociationV1:
         if (
             m0_event.event_id != m0_event_id
             or m0_event.entity_type != "experiment_run"
+            or m0_event.schema_version != "2"
             or m0_payload.get("status") != "completed"
             or m0_payload.get("artifact_hashes") != (result_hash, trace_hash)
+            # The opt-in M0 V2 audit itself commits to the real final book,
+            # before this observer receives any post-hoc artifact copy.
+            or m0_payload.get("original_final_book_hash") != final_book_hash
             or i_m0 <= i_cons
             or m0_event.timestamp < consumed.timestamp
         ):
@@ -382,6 +386,7 @@ class Stage1OriginalResultAssociationV1:
             m0_run_id=canonical_run.run_id,
             result_hash=result.result_hash,
             trace_hash=trace.trace_hash,
+            final_book_hash=content_hash(book),
         )
         if m0.timestamp != canonical_run.completed_at:
             raise OriginalResultAssociationError("M0_COMPLETION_TIMESTAMP_CONFLICT")
@@ -436,26 +441,17 @@ class Stage1OriginalResultAssociationV1:
         # holds original allocation + M0, not one named by a caller receipt.
         writer = SQLiteLedger(self._origin.ledger_path)
         try:
-            writer.append(draft)
+            appended = writer.append(draft)
         except DuplicateEventError as error:
             raise OriginalResultAssociationError(
                 "DUPLICATE_ORIGINAL_RESULT"
             ) from error
-        matches = [
-            event
-            for event in self._origin.verified_events()
-            if event.event_id == draft.event_id
-            and event.event_type == RESULT_EVENT
-        ]
-        if len(matches) != 1:
-            raise OriginalResultAssociationError(
-                "ORIGINAL_RESULT_WRITE_NOT_READABLE"
-            )
-        expected_ref = LocalEventReferenceV1(
-            draft.event_id, matches[0].event_hash
+        # No fallible clock/readback operation AFTER this durable commit.
+        # A later explicit readback may independently refuse evidence; that
+        # does not retroactively classify this successful append as failed.
+        self._receipt = LocalEventReferenceV1(
+            appended.event_id, appended.event_hash
         )
-        self._receipt = expected_ref
-        self.readback()
 
     def readback(self) -> LocalOriginalResultReadbackV1:
         """Independently re-open and verify original local result event bytes."""
@@ -523,6 +519,7 @@ class Stage1OriginalResultAssociationV1:
             m0_run_id=m0_run_id,
             result_hash=artifacts.result.result_hash,
             trace_hash=artifacts.trace.trace_hash,
+            final_book_hash=content_hash(artifacts.final_state),
         )
         m0_position = next(
             index for index, event in enumerate(history)
