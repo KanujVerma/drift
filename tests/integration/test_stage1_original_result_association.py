@@ -5,7 +5,7 @@ These are offline structural tests, not historical G3/scientific eligibility.
 
 # ruff: noqa: E402
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -179,7 +179,9 @@ def test_actual_m0_result_trace_book_and_e1_account_are_retained(
     ]
     assert len(m0_audit) == 1
     assert m0_audit[0].schema_version == "2"
-    assert m0_audit[0].payload["original_final_book_hash"] == retained.final_book_hash
+    m0_data = m0_audit[0].payload
+    assert isinstance(m0_data, Mapping)
+    assert m0_data["original_final_book_hash"] == retained.final_book_hash
     types = [event.event_type for event in original_events]
     assert types == [
         "stage1.synthetic_account.allocation",
