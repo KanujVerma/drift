@@ -5,8 +5,9 @@ from __future__ import annotations
 from decimal import Decimal
 from fractions import Fraction
 
-import pytest
 from typing import cast
+
+import pytest
 
 from drift.risk.stage1_balanced_feasibility import (
     AssetRole,
@@ -92,7 +93,10 @@ def test_owner_development_policy_grid_is_exact_not_approved(
     assert observed.total_possible_subsets == 924
     assert observed.feasible_subsets == accepted
     assert observed.infeasible_subsets == 924 - accepted
-    assert observed.rejection_examples if accepted < 924 else True
+    if accepted < 924:
+        assert observed.rejection_examples
+    else:
+        assert observed.rejection_examples == ()
     assert not observed.approves_mandate_or_execution
 
 
