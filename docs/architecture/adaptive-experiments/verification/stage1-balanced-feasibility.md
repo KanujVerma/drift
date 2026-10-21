@@ -12,7 +12,7 @@ Read [AGENTS.md](../../../../AGENTS.md), [agent workflow](../../agent-workflow.m
 
 ## Exact new files, no overlap
 
-- `scripts/stage1_balanced_feasibility.py`: typed, in-memory Decimal/Fraction arithmetic and exhaustive subset enumeration.
+- `src/drift/risk/stage1_balanced_feasibility.py`: typed, in-memory Decimal/Fraction arithmetic and exhaustive subset enumeration.
 - `tests/unit/test_stage1_balanced_feasibility.py`: intentionally unrun numeric and adversarial regression tests.
 - `docs/architecture/adaptive-experiments/verification/stage1-balanced-feasibility.md`: this source/fixture/test and acceptance handoff.
 
@@ -62,8 +62,8 @@ Per user instruction, **no tests, Ruff, mypy, build or scientific simulation hav
 
 ```bash
 uv run pytest tests/unit/test_stage1_balanced_feasibility.py -q
-uv run ruff check scripts/stage1_balanced_feasibility.py tests/unit/test_stage1_balanced_feasibility.py
-uv run ruff format --check scripts/stage1_balanced_feasibility.py tests/unit/test_stage1_balanced_feasibility.py
+uv run ruff check src/drift/risk/stage1_balanced_feasibility.py tests/unit/test_stage1_balanced_feasibility.py
+uv run ruff format --check src/drift/risk/stage1_balanced_feasibility.py tests/unit/test_stage1_balanced_feasibility.py
 uv run mypy src tests
 uv run pytest
 uv build
