@@ -21,8 +21,10 @@ The accepted E1 `CampaignSpecV1`, `ArmSpecV1` and
 Provenance and E6A bind structurally correct checkpoint and trial hashes.
 They **do not authenticate the original account allocation or who initiated
 a research request**. The separate [#511](https://github.com/KanujVerma/drift/issues/511)
-provenance TOCTOU repair in [#504](https://github.com/KanujVerma/drift/pull/504)
-is needed for structural account consistency, but is not an issuer proof.
+public **provenance verifier** correction is implemented in still-open
+[#504](https://github.com/KanujVerma/drift/pull/504), whereas merged
+[#506](https://github.com/KanujVerma/drift/pull/506) repairs the different
+E6A checkpoint-audit caller boundary. Neither is an original issuer proof.
 
 Merged K1 `Scope(experiment_id, arm_id, account_id, campaign_ref)` lacks
 the exact E1 run/checkpoint. `TrustedInvocationBinding` is a caller wrapper,
@@ -81,7 +83,7 @@ Neither is an accepted Python class or wire revision.
   `predecessor_grant_ref?` and `grant_record_hash`.
 - **Complete E1 binding:** `campaign_id`,
   `campaign_spec_fingerprint`, `complete_manifest_fingerprint`,
-  `arm_spec_fingerprint`, original `run_account_binding_id`,
+  `arm_spec_fingerprint`, original `RunAccountBindingV1.binding_id`,
   `run_id`, `arm_id`, `portfolio_account_id`, `checkpoint_id`
   and `trial_id`. Verify against the *entire* manifest, not one row.
 - **Platform account origin:** `account_provisioning_receipt_ref`,
@@ -123,7 +125,9 @@ new network service, executor identity or source-file implementation**.
   refuses; an accepted correction/revocation adds a retained version.
 - A `hold` requires verified matching incumbent and current
   account/risk state. `abstain`, `unavailable`, failed and rejected
-  attempts remain distinct, retain reason/cost, and imply no order.
+  attempts remain distinct, retain reason/cost, and authorize no
+  new order on their own. Existing pending and independently authorized
+  protective orders remain part of Matthew's verified account state.
 - Two M0 operational run IDs or a repeated deterministic `result_hash`
   do not determine independent scored sample count. The approved
   scientific trial/replication protocol owns that identity.
@@ -197,8 +201,10 @@ Each vector is a **design expectation, not an executed test**.
   grant, model completes after cutoff but within decision deadline.
   Do not reject solely for completion time. **BLOCKED_ON_507**.
 - **G10, terminal absence:** hold, abstain, unavailable or failed
-  K1 attempt under grant. Preserve exact outcomes, costs and
-  denominator, no invented order/RESULT. **BLOCKED_ON_507**.
+  K1 attempt under grant. Preserve distinct outcomes, costs and
+  denominator; the attempt authorizes/evidences no new order, but
+  does not erase existing pending/protective orders or assert RESULT.
+  **BLOCKED_ON_507**.
 - **G11, replay/conflict:** exact identical original grant replay
   idempotent; same grant ID and different original bytes invalid.
   **BLOCKED_ON_SCHEDULER**.
