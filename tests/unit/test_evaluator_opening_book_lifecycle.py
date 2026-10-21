@@ -103,10 +103,14 @@ class _Recorder:
 def _refuse_session_start(
     engine: evaluator_engine.SessionEvaluatorEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def forbidden(*args: object, **kwargs: object) -> None:
-        pytest.fail("a session began despite a failed opening-book lifecycle")
+    original_emit = type(engine)._emit_session_start
 
-    monkeypatch.setattr(engine, "_emit_session_start", forbidden)
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        if args[0] is engine:
+            pytest.fail("a session began despite a failed opening-book lifecycle")
+        original_emit(*args, **kwargs)
+
+    monkeypatch.setattr(type(engine), "_emit_session_start", forbidden)
 
 
 def test_prepared_engine_consumes_same_original_and_matches_legacy(
@@ -142,16 +146,16 @@ def test_prepared_engine_consumes_same_original_and_matches_legacy(
     assert lifecycle.retained.pending_cash_claims == ()
     assert lifecycle.seen == ["retain"]
     saw_private_original = False
-    emit_original = engine._emit_session_start
+    emit_original = type(engine)._emit_session_start
 
     def inspect_original(*args: Any, **kwargs: Any) -> None:
         nonlocal saw_private_original
-        if args[1] == 0:
+        if args[0] is engine and args[2] == 0:
             saw_private_original = True
-            assert args[0].state is originals[0]
+            assert args[1].state is originals[0]
         emit_original(*args, **kwargs)
 
-    monkeypatch.setattr(engine, "_emit_session_start", inspect_original)
+    monkeypatch.setattr(type(engine), "_emit_session_start", inspect_original)
     prepared_artifacts = _run(engine)
     assert originals == [lifecycle.retained]
     assert lifecycle.retained is lifecycle.claimed is lifecycle.consumed
@@ -474,21 +478,21 @@ def test_post_callback_async_observer_tamper_cannot_change_original_run(
     engine.prepare_opening_book(lifecycle=lifecycle)
     assert lifecycle.retained is not None
     assert not hasattr(engine, "_prepared_opening_book")
-    actual_emit = engine._emit_session_start
+    actual_emit = type(engine)._emit_session_start
     changed = False
 
     def after_last_callback(*args: Any, **kwargs: Any) -> None:
         nonlocal changed
-        if not changed:
+        if args[0] is engine and not changed:
             changed = True
-            # Deterministically simulate an observer worker modifying its
-            # retained book after observe_consumption and the last guard,
-            # immediately before the engine emits the first session.
+            # The test harness signals a retained-witness mutation after
+            # observe_consumption and the last guard, immediately before the
+            # engine emits its first session.
             object.__setattr__(lifecycle.retained, "cash_balance", Decimal("1"))
             object.__setattr__(lifecycle.retained, "net_asset_value", Decimal("1"))
         actual_emit(*args, **kwargs)
 
-    monkeypatch.setattr(engine, "_emit_session_start", after_last_callback)
+    monkeypatch.setattr(type(engine), "_emit_session_start", after_last_callback)
     artifacts = _run(engine)
     assert changed
     assert canonical_json(artifacts) == baseline
@@ -542,7 +546,11 @@ def test_captured_engine_callback_cannot_reach_original(
     class CapturedEngine(_Recorder):
         def _visit(self, phase: str, book: PortfolioStateV2) -> None:
             assert not hasattr(engine, "_prepared_opening_book")
-            assert book is getattr(engine, "_observer_opening_book", book)
+            if phase == "retain":
+                # The engine publishes the twin after retain succeeds.
+                assert engine._observer_opening_book is None
+            else:
+                assert engine._observer_opening_book is book
             super()._visit(phase, book)
 
     lifecycle = CapturedEngine()
@@ -550,3 +558,30 @@ def test_captured_engine_callback_cannot_reach_original(
     assert not hasattr(engine, "_prepared_opening_book")
     assert canonical_json(_run(engine)) == baseline
     assert lifecycle.seen == ["retain", "claim", "consume"]
+
+
+def test_callback_installed_instance_hook_cannot_mutate_prepared_book() -> None:
+    """Reject post-consumption dispatch injection without changing legacy hooks."""
+    engine = _engine()
+    expected = canonical_json(_run(_engine()))
+    calls = 0
+
+    class HookInstallingObserver(_Recorder):
+        def _visit(self, phase: str, book: PortfolioStateV2) -> None:
+            nonlocal calls
+            if phase == "consume":
+                def injected(loop: Any, index: int, session: Any) -> None:
+                    nonlocal calls
+                    calls += 1
+                    object.__setattr__(loop.state, "cash_balance", Decimal("1"))
+                    object.__setattr__(loop.state, "net_asset_value", Decimal("1"))
+
+                engine._emit_session_start = injected  # type: ignore[method-assign]
+            super()._visit(phase, book)
+
+    observer = HookInstallingObserver()
+    engine.prepare_opening_book(lifecycle=observer)
+    outcome = _run(engine)
+    assert canonical_json(outcome) == expected
+    assert calls == 0
+    assert observer.seen == ["retain", "claim", "consume"]
