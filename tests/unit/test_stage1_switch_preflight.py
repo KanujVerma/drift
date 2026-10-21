@@ -956,7 +956,9 @@ class TestStage1SwitchPreflight(unittest.TestCase):
             decision_context=ctx,
             current_portfolio_state=port,
         )
-        inverse = {symbol.lower(): sec for sec, symbol in self.universe_manifest.items()}
+        inverse = {
+            symbol.lower(): sec for sec, symbol in self.universe_manifest.items()
+        }
         reverse = self._eval(
             proposed_strategy="B4",
             current_strategy="B3",
