@@ -21,7 +21,15 @@ from drift.domain.evaluator_portfolio import PortfolioStateV2
 from drift.domain.evaluator_protocol import EvaluationProtocolV1
 from drift.domain.sessions import SessionKeyV1
 from drift.evaluator.opening_book_lifecycle import OpeningBookLifecycleError
+from drift.evaluator.portfolio import initial_portfolio_state
 from drift.serialization.canonical import canonical_json
+
+
+class _SpoofedCash(Decimal):
+    """Value 1 whose string representation impersonates original 10000 cash."""
+
+    def __str__(self) -> str:
+        return "10000"
 
 
 @dataclass
@@ -30,6 +38,7 @@ class _Recorder:
 
     fail: str | None = None
     tamper: str | None = None
+    spoof_at: str | None = None
     mutate_identity_at: str | None = None
     mutate_retention_config: bool = False
     seen: list[str] = field(default_factory=list)
@@ -42,6 +51,8 @@ class _Recorder:
         self.seen.append(phase)
         if self.tamper == phase:
             object.__setattr__(book, "cash_balance", Decimal("1"))
+        if self.spoof_at == phase:
+            object.__setattr__(book, "cash_balance", _SpoofedCash("1"))
         if self.fail == phase:
             raise RuntimeError(f"synthetic observer {phase} failed")
 
@@ -100,7 +111,7 @@ def test_prepared_engine_consumes_same_original_and_matches_legacy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     legacy_artifacts = _run(_engine())
-    actual_initializer = evaluator_engine.initial_portfolio_state
+    actual_initializer = initial_portfolio_state
     originals: list[PortfolioStateV2] = []
 
     def counted(
@@ -202,11 +213,15 @@ def test_invalid_run_identity_does_not_claim_or_consume() -> None:
         cost_model=engine.cost_model,
         evidence_hash=engine.evaluator_evidence_hash,
     )
-    forged = good.model_copy(update={"admission_hash": "0" * 64})
+    # Construct malformed input without invoking FrozenModel.model_copy's
+    # *own* validator before the engine can inspect it.
+    forged = type(good).model_construct(
+        **(good.model_dump(mode="python") | {"admission_hash": "0" * 64})
+    )
     with pytest.raises(ValueError):
         engine.run(strategy=_buy_ten(), run_identity=forged)
     assert lifecycle.seen == ["retain"]
-    assert _run(engine).result.classification.value == "COMPLETE"
+    assert _run(engine).result.classification.value == "complete"
     assert lifecycle.seen == ["retain", "claim", "consume"]
 
 
@@ -278,3 +293,44 @@ def test_retention_observer_cannot_rewrite_engine_policy_inputs() -> None:
     assert lifecycle.retained is not None
     assert engine.admission.admission_hash == lifecycle.retained.admission_hash
     assert canonical_json(_run(engine)) == baseline
+
+
+@pytest.mark.parametrize("phase", ["retain", "claim", "consume"])
+def test_spoofed_decimal_cash_cannot_pass_original_book_hash(
+    monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    """The exact engine-created instance must remain type-valid after callbacks."""
+    engine = _engine()
+    _refuse_session_start(engine, monkeypatch)
+    lifecycle = _Recorder(spoof_at=phase)
+    if phase == "retain":
+        with pytest.raises(OpeningBookLifecycleError, match="untrusted field types"):
+            engine.prepare_opening_book(lifecycle=lifecycle)
+    else:
+        engine.prepare_opening_book(lifecycle=lifecycle)
+        with pytest.raises(OpeningBookLifecycleError, match="untrusted field types"):
+            _run(engine)
+    with pytest.raises(OpeningBookLifecycleError, match="not available"):
+        _run(engine)
+    expected = ["retain"]
+    if phase in ("claim", "consume"):
+        expected.append("claim")
+    if phase == "consume":
+        expected.append("consume")
+    assert lifecycle.seen == expected
+
+
+def test_spoofed_book_between_prepare_and_claim_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _engine()
+    _refuse_session_start(engine, monkeypatch)
+    lifecycle = _Recorder()
+    engine.prepare_opening_book(lifecycle=lifecycle)
+    assert lifecycle.retained is not None
+    object.__setattr__(lifecycle.retained, "cash_balance", _SpoofedCash("1"))
+    with pytest.raises(OpeningBookLifecycleError, match="untrusted field types"):
+        _run(engine)
+    assert lifecycle.seen == ["retain"]
+    with pytest.raises(OpeningBookLifecycleError, match="not available"):
+        _run(engine)
