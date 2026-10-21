@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 from collections.abc import Iterator
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import cast
 
@@ -406,6 +406,100 @@ def test_feed_coverage_requires_complete_scoped_and_causal_evidence() -> None:
         screen_feed_coverage(coverage=None, decision_cutoff=T).disposition
         == "UNAVAILABLE"
     )
+
+
+def test_issue492_complete_coverage_requires_closed_interval() -> None:
+    """No COMPLETE feed claims for an interval extending beyond observation."""
+    observed = T - timedelta(seconds=2)
+    covered = FeedCoverage(
+        source_id="source",
+        scope_ref=ref("scope"),
+        start_at=T - timedelta(hours=1),
+        end_at=observed - timedelta(seconds=1),
+        observed_at=observed,
+        available_at=T - timedelta(seconds=1),
+        state="covered_empty",
+        event_count=0,
+    )
+    for state, count, complete in (
+        ("covered_empty", 0, "EMPTY"),
+        ("covered_with_events", 2, "EVENTS_PRESENT"),
+    ):
+        fixture = replace(covered, state=state, event_count=count)
+        complete_result = screen_feed_coverage(
+            coverage=fixture, decision_cutoff=T
+        )
+        assert complete_result.disposition == complete
+        assert complete_result == screen_feed_coverage(
+            coverage=fixture, decision_cutoff=T
+        )
+        at_observation = replace(fixture, end_at=observed)
+        assert screen_feed_coverage(
+            coverage=at_observation, decision_cutoff=T
+        ).disposition == complete
+
+        # An interval ending *after observation* is not complete even when
+        # it ends before the current decision cutoff or the data arrival.
+        for end in (
+            observed + timedelta(microseconds=1),
+            T + timedelta(seconds=1),
+        ):
+            future = replace(fixture, end_at=end)
+            outcome = screen_feed_coverage(coverage=future, decision_cutoff=T)
+            assert outcome.disposition == "UNAVAILABLE"
+            assert outcome.reason == "INVALID_OR_UNAVAILABLE_COVERAGE"
+            assert outcome.record_hash != complete_result.record_hash
+
+    # A genuinely PARTIAL interval stays incomplete, not falsely COMPLETE.
+    ongoing = replace(
+        covered,
+        state="partial",
+        end_at=T + timedelta(seconds=1),
+    )
+    assert screen_feed_coverage(
+        coverage=ongoing, decision_cutoff=T
+    ).disposition == "INCOMPLETE"
+
+
+def test_issue492_utc_offset_boundary_uses_actual_instant() -> None:
+    """Offset encodings cannot convert a future interval into completed news."""
+    observed = T - timedelta(seconds=2)
+    normal = FeedCoverage(
+        source_id="source",
+        scope_ref=ref("scope"),
+        start_at=observed - timedelta(hours=1),
+        end_at=observed,
+        observed_at=observed,
+        available_at=T - timedelta(seconds=1),
+        state="covered_empty",
+        event_count=0,
+    )
+    utc_result = screen_feed_coverage(coverage=normal, decision_cutoff=T)
+    assert utc_result.disposition == "EMPTY"
+
+    different_offsets = replace(
+        normal,
+        start_at=normal.start_at.astimezone(timezone(timedelta(hours=9))),
+        end_at=observed.astimezone(timezone(timedelta(hours=5, minutes=30))),
+        observed_at=observed.astimezone(timezone(-timedelta(hours=8))),
+        available_at=normal.available_at.astimezone(timezone(timedelta(hours=2))),
+    )
+    alternate = screen_feed_coverage(
+        coverage=different_offsets,
+        decision_cutoff=T.astimezone(timezone(-timedelta(hours=7))),
+    )
+    assert alternate.disposition == "EMPTY"
+    assert alternate.record_hash == utc_result.record_hash
+
+    late = replace(
+        different_offsets,
+        end_at=(observed + timedelta(microseconds=1)).astimezone(
+            timezone(timedelta(hours=5, minutes=30))
+        ),
+    )
+    refused = screen_feed_coverage(coverage=late, decision_cutoff=T)
+    assert refused.disposition == "UNAVAILABLE"
+    assert refused.record_hash != utc_result.record_hash
 
 
 def test_offline_capabilities_are_lexically_inert() -> None:
