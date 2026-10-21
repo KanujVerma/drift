@@ -31,7 +31,8 @@ from test_stage1_campaign_config import (
 )
 
 from drift.domain.evaluator_results import EvaluationClassification
-from drift.domain.experiments import ExperimentRunStatus
+from drift.domain.experiments import ExperimentRun, ExperimentRunStatus
+from drift.evaluator.engine import SessionEvaluatorEngine
 from drift.evaluator.experiment_runner import execute_experiment_run
 from drift.experiments.stage1_trial_provenance import (
     build_stage1_trial_provenance_snapshot,
@@ -75,7 +76,7 @@ def _setup(
     store: LocalSyntheticAccountReceiptStoreV1 | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> tuple[
-    object,
+    SessionEvaluatorEngine,
     Stage1OriginalResultAssociationV1,
     LocalSyntheticAccountReceiptStoreV1,
 ]:
@@ -125,15 +126,12 @@ def _setup(
 
 
 def _execute(
-    engine: object,
+    engine: SessionEvaluatorEngine,
     observer: Stage1OriginalResultAssociationV1,
     store: LocalSyntheticAccountReceiptStoreV1,
     *,
     strategy: FixedTargetStrategy | None = None,
-) -> object:
-    from drift.evaluator.engine import SessionEvaluatorEngine
-
-    assert isinstance(engine, SessionEvaluatorEngine)
+) -> ExperimentRun:
     context = replace(
         _context(
             engine,
@@ -251,9 +249,6 @@ def test_observer_requires_a_real_original_m0_audit_before_stepping(
     tmp_path: Path,
 ) -> None:
     engine, observer, store = _setup(tmp_path)
-    from drift.evaluator.engine import SessionEvaluatorEngine
-
-    assert isinstance(engine, SessionEvaluatorEngine)
     context = replace(
         _context(engine, started_at=M0_START, completed_at=M0_COMPLETE),
         original_result_observer=observer,
