@@ -74,7 +74,10 @@ def test_foreign_m0_ledger_does_not_authenticate_original_result(
         execute_experiment_run(_specification(), ctx)
     assert all(e.event_type != RESULT_EVENT for e in store.origin.verified_events())
     foreign = SQLiteLedger(tmp_path / "forged-m0.sqlite3")
-    assert any(e.event_type == "m2.evaluation.run.recorded" for e in foreign.verified_events())
+    assert any(
+        e.event_type == "m2.evaluation.run.recorded"
+        for e in foreign.verified_events()
+    )
 
 
 def test_result_observation_clock_cannot_precede_actual_original_m0(
