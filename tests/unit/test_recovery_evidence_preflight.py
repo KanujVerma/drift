@@ -66,7 +66,10 @@ def fixture(target: str = "FEATURE_OFF") -> dict[str, object]:
     return record
 
 
-@pytest.mark.parametrize("target", ["FEATURE_OFF", "ISOLATED_ORIGINAL", "FROZEN_CONTROL"])
+@pytest.mark.parametrize(
+    "target",
+    ["FEATURE_OFF", "ISOLATED_ORIGINAL", "FROZEN_CONTROL"],
+)
 def test_complete_synthetic_record_is_only_reviewable(target: str) -> None:
     verdict = preflight_recovery_evidence(fixture(target))
     assert verdict.structurally_reviewable
@@ -126,6 +129,14 @@ def test_frozen_control_is_arm_a_not_campaign_c() -> None:
     item = fixture("FROZEN_CONTROL")
     item["frozen_arm"] = "C"
     assert "frozen_control.requires_arm_A" in preflight_recovery_evidence(item).reasons
+
+
+def test_unhashable_nested_status_is_refused_not_raised() -> None:
+    item = fixture()
+    components = cast(dict[str, object], item["components"])
+    code = cast(dict[str, object], components["CODE"])
+    code["status"] = {"unexpected": "passed"}
+    assert "CODE.status.invalid" in preflight_recovery_evidence(item).reasons
 
 
 def test_unverified_manifest_hash_rejected() -> None:
