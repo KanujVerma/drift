@@ -26,11 +26,19 @@ class OpeningBookLifecycleError(DriftError, RuntimeError):
 
 
 class OpeningBookLifecycleV1(Protocol):
-    """Only callbacks observing an engine-created fresh opening book.
+    """Callbacks for a canonical twin of the actual engine-owned opening book.
 
-    PR B will supply a Matthew-owned producer with a configured trust root,
-    original-byte retention and verified durable acknowledgements. No
-    caller-provided book is ever accepted into the engine.
+    The evaluator creates exactly one internal original portfolio from its
+    validated admission, calendar and cash. A callback may retain a reference
+    indefinitely, or mutate a frozen model via object.__setattr__; therefore
+    the private original used for accounting is NEVER exposed. All callbacks
+    receive the SAME separately validated twin of those exact original
+    bytes. The evaluator consumes its own single original, without recrediting
+    or swapping a caller-defined book into the accounting loop.
+
+    PR B provides a local origin ledger, but acceptance of the original
+    issuer trust root is a separate Matthew decision, not implied by calling
+    this observer.
     """
 
     def retain_original_book(
@@ -41,7 +49,7 @@ class OpeningBookLifecycleV1(Protocol):
         protocol: EvaluationProtocolV1,
         currency_code: str,
     ) -> None:
-        """Retain the real original book before research or an invocation."""
+        """Retain a detached canonical witness of the original book bytes."""
         ...
 
     def claim_invocation(
@@ -59,5 +67,5 @@ class OpeningBookLifecycleV1(Protocol):
         opening_book: PortfolioStateV2,
         run_identity: EvaluationRunIdentityV1 | EvaluationRunIdentityV2,
     ) -> None:
-        """Observe the same book installed in the evaluator loop."""
+        """Observe consumption using the original witness, not engine state."""
         ...

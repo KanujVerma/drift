@@ -8,6 +8,7 @@ grant, or original M0 RESULT. Those are separately gated PR B and PR C.
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
+from typing import Any
 
 import pytest
 from test_evaluator_engine import _buy_ten, _engine, _run, _run_identity
@@ -132,17 +133,30 @@ def test_prepared_engine_consumes_same_original_and_matches_legacy(
     lifecycle = _Recorder()
     engine.prepare_opening_book(lifecycle=lifecycle)
     assert originals == [lifecycle.retained]
-    assert lifecycle.retained is originals[0]
     assert lifecycle.retained is not None
+    assert lifecycle.retained is not originals[0]
+    assert canonical_json(lifecycle.retained) == canonical_json(originals[0])
     assert lifecycle.currency == "USD"
     assert lifecycle.retained.net_asset_value == Decimal("10000")
     assert lifecycle.retained.holdings == ()
     assert lifecycle.retained.pending_cash_claims == ()
     assert lifecycle.seen == ["retain"]
+    saw_private_original = False
+    emit_original = engine._emit_session_start
 
+    def inspect_original(*args: Any, **kwargs: Any) -> None:
+        nonlocal saw_private_original
+        if args[1] == 0:
+            saw_private_original = True
+            assert args[0].state is originals[0]
+        emit_original(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "_emit_session_start", inspect_original)
     prepared_artifacts = _run(engine)
     assert originals == [lifecycle.retained]
     assert lifecycle.retained is lifecycle.claimed is lifecycle.consumed
+    assert saw_private_original
+    assert not hasattr(engine, "_prepared_opening_book")
     assert lifecycle.seen == ["retain", "claim", "consume"]
     assert canonical_json(prepared_artifacts) == canonical_json(legacy_artifacts)
     assert prepared_artifacts.result.result_hash == legacy_artifacts.result.result_hash
@@ -379,7 +393,7 @@ class _MutatingFieldKey(str):
 
     def __new__(
         cls, spelling: str, owner: PortfolioStateV2 | SessionKeyV1, bad: object
-    ) -> "_MutatingFieldKey":
+    ) -> _MutatingFieldKey:
         return str.__new__(cls, spelling)
 
     def __init__(
@@ -448,3 +462,91 @@ def test_forged_session_field_key_is_refused_before_lookup(
         engine.prepare_opening_book(lifecycle=observer)
     with pytest.raises(OpeningBookLifecycleError, match="not available"):
         _run(engine)
+
+
+def test_post_callback_async_observer_tamper_cannot_change_original_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Observer-held books cannot change execution after the last check."""
+    baseline = canonical_json(_run(_engine()))
+    engine = _engine()
+    lifecycle = _Recorder()
+    engine.prepare_opening_book(lifecycle=lifecycle)
+    assert lifecycle.retained is not None
+    assert not hasattr(engine, "_prepared_opening_book")
+    actual_emit = engine._emit_session_start
+    changed = False
+
+    def after_last_callback(*args: Any, **kwargs: Any) -> None:
+        nonlocal changed
+        if not changed:
+            changed = True
+            # Deterministically simulate an observer worker modifying its
+            # retained book after observe_consumption and the last guard,
+            # immediately before the engine emits the first session.
+            object.__setattr__(lifecycle.retained, "cash_balance", Decimal("1"))
+            object.__setattr__(lifecycle.retained, "net_asset_value", Decimal("1"))
+        actual_emit(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "_emit_session_start", after_last_callback)
+    artifacts = _run(engine)
+    assert changed
+    assert canonical_json(artifacts) == baseline
+    assert lifecycle.retained.cash_balance == Decimal("1")
+    assert artifacts.result.metrics.initial_cash == Decimal("10000")
+    assert not hasattr(engine, "_prepared_opening_book")
+
+
+def test_private_original_not_exposed_to_retention_claim_or_consumption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The genuine initializer book is used, without an exposed attribute."""
+    source_initializer = initial_portfolio_state
+    issued: list[PortfolioStateV2] = []
+
+    def issue(
+        *,
+        session_key: SessionKeyV1,
+        initial_cash: Decimal,
+        admission: EvaluationAdmissionV1,
+    ) -> PortfolioStateV2:
+        book = source_initializer(
+            session_key=session_key, initial_cash=initial_cash, admission=admission
+        )
+        issued.append(book)
+        return book
+
+    monkeypatch.setattr(evaluator_engine, "initial_portfolio_state", issue)
+    engine = _engine()
+    lifecycle = _Recorder()
+    engine.prepare_opening_book(lifecycle=lifecycle)
+    assert len(issued) == 1
+    original = issued[0]
+    twin = lifecycle.retained
+    assert twin is not None and original is not twin
+    assert canonical_json(original) == canonical_json(twin)
+    assert not hasattr(engine, "_prepared_opening_book")
+    _run(engine)
+    assert lifecycle.retained is lifecycle.claimed is lifecycle.consumed
+    assert lifecycle.claimed is not original
+    assert original.cash_balance == Decimal("10000")
+
+
+def test_captured_engine_callback_cannot_reach_original(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A callback holding the engine cannot fetch a mutable original field."""
+    engine = _engine()
+    baseline = canonical_json(_run(_engine()))
+
+    class CapturedEngine(_Recorder):
+        def _visit(self, phase: str, book: PortfolioStateV2) -> None:
+            assert not hasattr(engine, "_prepared_opening_book")
+            assert book is getattr(engine, "_observer_opening_book", book)
+            super()._visit(phase, book)
+
+    lifecycle = CapturedEngine()
+    engine.prepare_opening_book(lifecycle=lifecycle)
+    assert not hasattr(engine, "_prepared_opening_book")
+    assert canonical_json(_run(engine)) == baseline
+    assert lifecycle.seen == ["retain", "claim", "consume"]
