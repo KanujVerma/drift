@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 import pytest
 
@@ -673,3 +674,119 @@ def test_n14_forged_retained_checkpoint_declaration_refused() -> None:
     )
     with pytest.raises(ValueError):
         _verify(forged, fixture)
+
+
+# ---------------------------------------------------------------------------
+# Issue #505: no mutable second read after a verified E1/E6A input view
+# ---------------------------------------------------------------------------
+
+
+_T = TypeVar("_T")
+
+
+class _ChangingInput(list[_T]):
+    """Valid first iteration, different later iteration without mutation."""
+
+    def __init__(self, first: list[_T], later: list[_T]) -> None:
+        super().__init__(first)
+        self.first = tuple(first)
+        self.later = tuple(later)
+        self.read_count = 0
+
+    def __iter__(self) -> Iterator[_T]:
+        self.read_count += 1
+        return iter(self.first if self.read_count == 1 else self.later)
+
+
+def test_n15_e6a_builder_keeps_one_valid_account_manifest_view() -> None:
+    camp, arms, bindings, runs = _fixture(runs=["RUN-001"])
+    declarations = _decls(runs, checkpoint_ids=("CKPT-001",))
+    oracle = _build(camp, arms, bindings, runs, declarations)
+    bad = replace(bindings[1], portfolio_account_id=bindings[0].portfolio_account_id)
+    changing = _ChangingInput(bindings, [bindings[0], bad])
+
+    built = _build(camp, arms, changing, runs, declarations)
+
+    assert changing.read_count == 1
+    assert built.audit_fingerprint == oracle.audit_fingerprint
+    assert built.complete_manifest_fingerprint == oracle.complete_manifest_fingerprint
+    assert built.counts == oracle.counts
+    assert all(slot.coverage_state == "MISSING_SNAPSHOT" for slot in built.slots)
+    assert bindings[1].portfolio_account_id == "SYNTH-ACC-R-001"
+
+
+def test_n16_e6a_verifier_keeps_one_valid_account_manifest_view() -> None:
+    camp, arms, bindings, runs = _fixture(runs=["RUN-001"])
+    audit = _build(
+        camp, arms, bindings, runs, _decls(runs, checkpoint_ids=("CKPT-001",))
+    )
+    bad = replace(bindings[1], portfolio_account_id=bindings[0].portfolio_account_id)
+    changing = _ChangingInput(bindings, [bindings[0], bad])
+
+    assert verify_stage1_checkpoint_coverage_audit(
+        audit=audit,
+        campaign=camp,
+        arms=arms,
+        bindings=changing,
+        expected_run_ids=runs,
+    )
+    assert changing.read_count == 1
+    assert audit.counts.declared_slots == 2
+
+
+def test_n17_e6a_builder_keeps_one_run_and_arm_manifest_view() -> None:
+    camp, arms, bindings, runs = _fixture(runs=["RUN-001"])
+    declarations = _decls(runs, checkpoint_ids=("CKPT-001",))
+    oracle = _build(camp, arms, bindings, runs, declarations)
+    changing_runs = _ChangingInput(runs, ["RUN-002"])
+    changing_arms = _ChangingInput(arms, [arms[0]])
+
+    built = _build(camp, changing_arms, bindings, changing_runs, declarations)
+
+    assert changing_runs.read_count == 1
+    assert changing_arms.read_count == 1
+    assert built.audit_fingerprint == oracle.audit_fingerprint
+    assert built.counts.declared_pairs == 1
+
+
+def test_n18_e6a_builder_captures_submissions_and_declarations_once() -> None:
+    camp, arms, bindings, runs = _fixture(runs=["RUN-001"])
+    declarations = _decls(runs, checkpoint_ids=("CKPT-001",))
+    b = _snapshot(camp, arms, bindings, runs, "ARM-B", recorded=True)
+    r = _snapshot(camp, arms, bindings, runs, "ARM-R")
+    expected = _build(camp, arms, bindings, runs, declarations, [b, r])
+    changing_declarations = _ChangingInput(
+        declarations, _decls(runs, checkpoint_ids=("CKPT-002",))
+    )
+    changing_submissions = _ChangingInput([b, r], [r])
+
+    result = _build(
+        camp,
+        arms,
+        bindings,
+        runs,
+        changing_declarations,
+        changing_submissions,
+    )
+
+    assert changing_declarations.read_count == 1
+    assert changing_submissions.read_count == 1
+    assert result.audit_fingerprint == expected.audit_fingerprint
+    assert result.slots[0].coverage_state == "EVENTS_RECORDED"
+    assert result.slots[1].coverage_state == "UNOBSERVED"
+    assert result.pairs[0].pair_state == "BOTH_SUBMITTED"
+
+
+def test_n19_e6a_invalid_first_view_stays_rejected() -> None:
+    camp, arms, bindings, runs = _fixture(runs=["RUN-001"])
+    invalid = replace(
+        bindings[1], portfolio_account_id=bindings[0].portfolio_account_id
+    )
+    changing = _ChangingInput([bindings[0], invalid], bindings)
+    declarations = _decls(runs, checkpoint_ids=("CKPT-001",))
+
+    with pytest.raises(ValueError, match="reused across bindings"):
+        _build(camp, arms, changing, runs, declarations)
+
+    assert changing.read_count == 1
+    assert bindings[1].portfolio_account_id == "SYNTH-ACC-R-001"
