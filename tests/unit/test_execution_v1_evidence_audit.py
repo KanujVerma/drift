@@ -20,7 +20,7 @@ from drift.domain.execution import (
     build_order_intent,
 )
 from drift.domain.sessions import SessionKeyV1
-from scripts.execution_v1_evidence_audit import (
+from drift.execution.v1_evidence_audit import (
     SourceClaim,
     V1ExecutionAudit,
     V1OriginalEvidenceClaim,
