@@ -244,14 +244,18 @@ class Stage1SyntheticAccountLifecycleV1:
                 currency=currency_code,
             )
             allocation_id, receipt_ref = self._store.append_allocation(
-                fields=fields, original_book=original,
+                fields=fields,
+                original_book=original,
             )
             witness_ref = self._store.witness_original_readback(
-                allocation_id=allocation_id, allocation_ref=receipt_ref,
+                allocation_id=allocation_id,
+                allocation_ref=receipt_ref,
             )
             readback = self._store.readback_allocation(
-                allocation_id=allocation_id, allocation_ref=receipt_ref,
-                witness_ref=witness_ref, expected_fields=fields,
+                allocation_id=allocation_id,
+                allocation_ref=receipt_ref,
+                witness_ref=witness_ref,
+                expected_fields=fields,
             )
             if readback.original_book_bytes != original:
                 raise LocalAccountReceiptError("ORIGINAL_BOOK_READBACK_DIFFERENT")
@@ -314,7 +318,8 @@ class Stage1SyntheticAccountLifecycleV1:
             ):
                 raise LocalAccountReceiptError("RUN_IDENTITY_ACCOUNT_MISMATCH")
             claim = self._store.append_invocation_claim(
-                original=readback, identity_hash=run_identity.run_identity_hash,
+                original=readback,
+                identity_hash=run_identity.run_identity_hash,
             )
             self._claim = claim
         except BaseException:
