@@ -138,13 +138,14 @@ def _execute(
     store: LocalSyntheticAccountReceiptStoreV1,
     *,
     strategy: FixedTargetStrategy | None = None,
+    completed_at: datetime = M0_COMPLETE,
 ) -> ExperimentRun:
     context = replace(
         _context(
             engine,
             ledger=SQLiteLedger(store.origin.ledger_path),
             started_at=M0_START,
-            completed_at=M0_COMPLETE,
+            completed_at=completed_at,
             strategy=strategy,
         ),
         original_result_observer=observer,
@@ -210,7 +211,15 @@ def test_independent_b_r_accounts_keep_separate_original_results(
     b_engine, b_observer, _ = _setup(tmp_path, arm="ARM-B", store=store)
     r_engine, r_observer, _ = _setup(tmp_path, arm="ARM-R", store=store)
     b = _execute(b_engine, b_observer, store)
-    r = _execute(r_engine, r_observer, store)
+    # Both original allocations precede B's run. R's later invocation
+    # consumes more ledger time, so its original M0 completion must follow
+    # the R consumption event. Never backdate it to the B completion time.
+    r = _execute(
+        r_engine,
+        r_observer,
+        store,
+        completed_at=BASE + timedelta(seconds=12),
+    )
     assert b.status is ExperimentRunStatus.COMPLETED
     assert r.status is ExperimentRunStatus.COMPLETED
     pb, pr = b_observer.readback(), r_observer.readback()
