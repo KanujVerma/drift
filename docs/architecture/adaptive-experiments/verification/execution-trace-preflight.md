@@ -17,6 +17,18 @@ No modification to existing source adapters, venue/calendar, M2 account ledger, 
 
 `preflight_execution_trace(payload: object) -> ExecutionTracePreflight` accepts only an in-memory, JSON-shaped, **untrusted** candidate trace and returns stable diagnostic reason strings. It does not read a file, schedule work, connect to a provider, call a broker, modify a ledger, submit/cancel/resend an order, model fill probability or authenticate any claimed receipt.
 
+Quote and report records also carry exact original request/listing/venue
+identifiers: a quote's venue must match the declared capability venue and its
+listing must match the request; each fill report repeats the exact
+run/arm/account/client-token/request hash. The preflight refuses cross-arm,
+cross-account, cross-listing or changed-request strings and report receipt/event
+timestamps that move backwards across cumulative increments. Such equality
+checks are necessary for fixture consistency but **do not prove** that a
+platform custodian actually provisioned the original E1 account or that a
+report was issued by the authoritative execution/ledger producer. #508 and the
+accepted M2 account/result association must independently establish that
+binding before a result can be scientific evidence.
+
 The provisional payload has exact top-level fields `profile`, `request`, `evidence`, `timeline`, `tie_proofs`, `quote`, `attempts`, `reports` and `state`. The request names run/arm/account, original client token and SHA-256 request preimage identity, side, positive whole-share quantity, session, order type and optional exact decimal limit. Evidence names retained input, cutoff, mandate/risk, true venue, order and session capability, policy revision and halt-at-arrival state. All those fields are unverified **references**, not trusted grants.
 
 The proposed timeline includes distinct source receipt, normalization availability, analysis completion, decision, approval and risk checks, submission and modeled arrival. Arrival cannot precede known checks. The quote must have an observed event and received clock no later than the decision, be no older than the **caller supplied synthetic freshness bound** at arrival, and carry a quoted evidence reference. This bound is not an accepted production threshold. Unknown quote age, out-of-order timestamp, future receipt and an impossible timezone refuse. Equality at a coarse clock resolution requires an explicit `tie_proofs` reference for the particular causal edge; the helper **cannot verify** the external processing/order proof. An ID sort order is not accepted as a substitute.
