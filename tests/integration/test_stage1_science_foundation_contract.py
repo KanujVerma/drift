@@ -473,9 +473,7 @@ def test_two_runs_preserve_distinct_scientific_coverage() -> None:
     )
     assert _verify(complete, fixture)
     assert complete.counts == Stage1CoverageCountsV1(4, 0, 3, 1, 4, 2, 2)
-    assert [
-        (pair.run_id, pair.pair_state) for pair in complete.pairs
-    ] == [
+    assert [(pair.run_id, pair.pair_state) for pair in complete.pairs] == [
         ("RUN-001", "BOTH_SUBMITTED"),
         ("RUN-002", "BOTH_SUBMITTED"),
     ]
