@@ -38,7 +38,7 @@ from drift.intelligence.contracts import (
     StoredArtifactRef,
     compute_record_hash,
 )
-from drift.intelligence.e1_trial_association import (
+from drift.loop.e1_trial_association import (
     VALIDATION_CANDIDATE_PROFILE,
     append_local_validation_original,
     build_retained_validation_candidate,
