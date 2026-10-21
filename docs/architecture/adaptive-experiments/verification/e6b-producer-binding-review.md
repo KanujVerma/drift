@@ -1,7 +1,7 @@
 # E6B original K1 research binding and platform issuer reconciliation
 
-**Issue:** [Krish implementation assist #540](https://github.com/KanujVerma/drift/issues/540), consuming original [P0 research producer #507](https://github.com/KanujVerma/drift/issues/507).  
-**Related owner decision:** [Matthew P0 #508](https://github.com/KanujVerma/drift/issues/508), latest proposed original book lifecycle, **not yet accepted**.  
+**Issue:** [Krish implementation assist #540](https://github.com/KanujVerma/drift/issues/540), consuming original [P0 research producer #507](https://github.com/KanujVerma/drift/issues/507).
+**Related owner decision:** [Matthew P0 #508](https://github.com/KanujVerma/drift/issues/508), latest proposed original book lifecycle, **not yet accepted**.
 **State:** Candidate source and tests published for AntiGravity review. No original producer grant/issuer certified, no full E6B result admitted, no broker or live operation.
 
 ## 1. Actual repository and authority
