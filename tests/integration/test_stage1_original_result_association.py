@@ -172,7 +172,15 @@ def test_actual_m0_result_trace_book_and_e1_account_are_retained(
     by_kind = {ref.kind: ref.content_hash for ref in run.artifact_references}
     assert by_kind[ArtifactKind.RESULT] == retained.result_hash
     assert by_kind[ArtifactKind.LOG] == retained.trace_hash
-    types = [event.event_type for event in store.origin.verified_events()]
+    original_events = store.origin.verified_events()
+    m0_audit = [
+        event for event in original_events
+        if event.event_type == "m2.evaluation.run.recorded"
+    ]
+    assert len(m0_audit) == 1
+    assert m0_audit[0].schema_version == "2"
+    assert m0_audit[0].payload["original_final_book_hash"] == retained.final_book_hash
+    types = [event.event_type for event in original_events]
     assert types == [
         "stage1.synthetic_account.allocation",
         "stage1.synthetic_account.allocation_observed",
