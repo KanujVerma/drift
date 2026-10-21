@@ -426,17 +426,16 @@ def test_issue492_complete_coverage_requires_closed_interval() -> None:
         ("covered_with_events", 2, "EVENTS_PRESENT"),
     ):
         fixture = replace(covered, state=state, event_count=count)
-        complete_result = screen_feed_coverage(
-            coverage=fixture, decision_cutoff=T
-        )
+        complete_result = screen_feed_coverage(coverage=fixture, decision_cutoff=T)
         assert complete_result.disposition == complete
         assert complete_result == screen_feed_coverage(
             coverage=fixture, decision_cutoff=T
         )
         at_observation = replace(fixture, end_at=observed)
-        assert screen_feed_coverage(
-            coverage=at_observation, decision_cutoff=T
-        ).disposition == complete
+        assert (
+            screen_feed_coverage(coverage=at_observation, decision_cutoff=T).disposition
+            == complete
+        )
 
         # An interval ending *after observation* is not complete even when
         # it ends before the current decision cutoff or the data arrival.
@@ -456,9 +455,10 @@ def test_issue492_complete_coverage_requires_closed_interval() -> None:
         state="partial",
         end_at=T + timedelta(seconds=1),
     )
-    assert screen_feed_coverage(
-        coverage=ongoing, decision_cutoff=T
-    ).disposition == "INCOMPLETE"
+    assert (
+        screen_feed_coverage(coverage=ongoing, decision_cutoff=T).disposition
+        == "INCOMPLETE"
+    )
 
 
 def test_issue492_utc_offset_boundary_uses_actual_instant() -> None:
