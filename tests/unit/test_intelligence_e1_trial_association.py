@@ -698,3 +698,56 @@ def test_original_rejected_with_no_raw_still_keeps_rejection_reason(
     assert rec.candidate.status == "REFUSED"
     assert rec.raw_output_bytes_sha256 is None
     assert not rec.can_admit_e6b
+
+
+def test_original_durable_readback_binds_proposed_k1_e1_association(
+    tmp_path: Path,
+) -> None:
+    data = fixture()
+    ledger = SQLiteLedger(tmp_path / "retained-original-joined.db")
+    readback = append_local_validation_original(
+        ledger=ledger, event_id=uuid7(), entity_id=uuid7(),
+        observed_at=T0 + timedelta(seconds=6),
+        validation_id="new-original-validation-for-E1",
+        attempt_id=data["started"].attempt_id,
+        original_validation=data["validation"],
+        raw_output_bytes=b'{"disposition":"propose"}',
+        issuer_claim=ArtifactReference(
+            id="unverified-local-validator", version="candidate-1",
+            sha256=SHA,
+        ),
+    )
+    data["terminal"] = create_terminal_attempt(
+        prior_attempt=data["started"],
+        attempt_event_id="synthetic-attempt-event-1",
+        completed_at=T0 + timedelta(seconds=7),
+        status="completed",
+        validation_ref=ArtifactReference(
+            id=readback.candidate.validation_id,
+            version=VALIDATION_CANDIDATE_PROFILE,
+            sha256=readback.candidate.record_hash,
+        ),
+        candidate_ref=ArtifactReference(
+            id=data["candidate"].candidate_id,
+            version="drift-research/1-draft",
+            sha256=data["candidate"].record_hash,
+        ),
+        cost_receipt_ids=(),
+    )
+    data["retained_validation"] = readback.candidate
+    data["local_validation_readback"] = readback
+    associated = review_research_e1_binding(**data)
+    assert associated.structural_consistency
+    assert associated.candidate_association_hash is not None
+    assert not associated.admitted_for_e6b_or_trading
+    assert "MISSING_MATTHEW_ORIGINAL_ACCOUNT_ISSUER_508" in (
+        associated.missing_trusted_producers
+    )
+    data["local_validation_readback"] = replace(
+        readback, audit_event_hash="f" * 64,
+    )
+    altered = review_research_e1_binding(**data)
+    assert altered.candidate_association_hash != (
+        associated.candidate_association_hash
+    )
+    assert not altered.original_issuer_verified
