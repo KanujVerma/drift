@@ -685,12 +685,16 @@ def _same_rebuilt_record_content(
             )
             for name in type(derived).model_fields
         )
-    if type(derived) in (tuple, list):
+    if isinstance(derived, tuple | list):
+        if not isinstance(claimed, tuple | list):
+            return False
         return len(derived) == len(claimed) and all(
             _same_rebuilt_record_content(left, right)
             for left, right in zip(derived, claimed, strict=True)
         )
-    if type(derived) is dict:
+    if isinstance(derived, Mapping):
+        if not isinstance(claimed, Mapping):
+            return False
         if len(derived) != len(claimed):
             return False
         if any(type(key) is not str for key in derived):
@@ -703,7 +707,9 @@ def _same_rebuilt_record_content(
             _same_rebuilt_record_content(value, claimed[key])
             for key, value in derived.items()
         )
-    if type(derived) in (set, frozenset):
+    if isinstance(derived, set | frozenset):
+        if not isinstance(claimed, set | frozenset):
+            return False
         if len(derived) != len(claimed):
             return False
         unmatched = list(claimed)
