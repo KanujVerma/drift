@@ -8,9 +8,15 @@ No existing K1/E1 record or hash preimage is changed.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
+import json
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Sequence, cast
+from uuid import UUID
 
 from pydantic import BaseModel
 
@@ -34,7 +40,8 @@ from drift.intelligence.contracts import (
 )
 from drift.intelligence.receipts import ResearchReceiptStore
 from drift.intelligence.validation import ValidationResult
-from drift.serialization.canonical import content_hash
+from drift.ledger.interface import AuditEventDraft, Ledger
+from drift.serialization.canonical import canonical_json, content_hash
 
 VALIDATION_CANDIDATE_PROFILE = "drift-research-validation-e1/1-candidate"
 ASSOCIATION_CANDIDATE_PROFILE = "drift-research-e1-association/1-candidate"
@@ -554,3 +561,243 @@ def review_research_e1_binding(
         tuple(sorted(included_cost_hashes)),
         tuple(sorted(late_costs)), (), blocked,
     )
+
+
+# K1 original-byte recorder, with no scheduler or broker capability.
+_LOCAL_RETENTION_PROFILE = "drift-k1-validation-retention/1-candidate"
+_LOCAL_RETENTION_EVENT = "k1.validation.original_candidate_recorded"
+_LOCAL_RETENTION_PAYLOAD_KEYS = frozenset(
+    {"profile", "validation_id", "attempt_id", "validation_utf8",
+     "raw_output_base64", "retained_candidate_hash", "issuer_claim"}
+)
+_MAX_LOCAL_RAW_BYTES = 1_048_576
+
+
+@dataclass(frozen=True, slots=True)
+class LocalValidationReadback:
+    """Durable event-integrity evidence, not independent issuer authentication."""
+
+    candidate: RetainedValidationCandidateV1
+    audit_event_id: UUID
+    audit_event_hash: str
+    validation_bytes_sha256: str
+    raw_output_bytes_sha256: str | None
+
+    @property
+    def trusted_research_issuer_authenticated(self) -> bool:
+        return False
+
+    @property
+    def can_admit_e6b(self) -> bool:
+        return False
+
+
+def _retained_original_ref(event_id: UUID, original: bytes) -> StoredArtifactRef:
+    return StoredArtifactRef(
+        artifact_id=str(event_id),
+        kind="k1_validation_canonical_candidate",
+        content_hash=hashlib.sha256(original).hexdigest(),
+        location=f"ledger-event://{event_id}/validation",
+    )
+
+
+def _retained_raw_ref(event_id: UUID, raw: bytes) -> StoredArtifactRef:
+    return StoredArtifactRef(
+        artifact_id=str(event_id),
+        kind="k1_raw_output_candidate",
+        content_hash=hashlib.sha256(raw).hexdigest(),
+        location=f"ledger-event://{event_id}/raw",
+    )
+
+
+def _parse_exact_validation(original: bytes) -> ValidationResult:
+    """Reject duplicate JSON keys and noncanonical bytes before reconstruction."""
+    def reject_duplicate(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("DUPLICATE_ORIGINAL_VALIDATION_JSON_KEY")
+            result[key] = value
+        return result
+
+    decoded = json.loads(
+        original,
+        object_pairs_hook=reject_duplicate,
+        parse_constant=lambda value: (_ for _ in ()).throw(
+            ValueError(f"INVALID_VALIDATION_CONSTANT:{value}")
+        ),
+    )
+    if type(decoded) is not dict or canonical_json(decoded) != original:
+        raise ValueError("NONCANONICAL_ORIGINAL_VALIDATION_BYTES")
+    return ValidationResult.model_validate(decoded)
+
+
+def readback_local_validation_original(
+    *,
+    ledger: Ledger,
+    event_id: UUID,
+    expected_event_hash: str,
+) -> LocalValidationReadback:
+    """Verify retained original bytes against a supplied ledger snapshot.
+
+    IMPORTANT: Passing an arbitrary caller-chosen Ledger grants no issuer
+    provenance. Actual trust in the registered instance/root requires a
+    separate #507 owner and independent verifier acceptance.
+    """
+    if type(event_id) is not UUID or event_id.version != 7:
+        raise ValueError("INVALID_ORIGINAL_VALIDATION_EVENT_ID")
+    if (
+        type(expected_event_hash) is not str
+        or len(expected_event_hash) != 64
+        or any(c not in "0123456789abcdef" for c in expected_event_hash)
+    ):
+        raise ValueError("INVALID_ORIGINAL_VALIDATION_EVENT_HASH")
+
+    events = ledger.verified_events()
+    matches = [e for e in events if e.event_id == event_id]
+    if len(matches) != 1:
+        raise ValueError("ORIGINAL_VALIDATION_EVENT_NOT_UNIQUE_OR_MISSING")
+    event = matches[0]
+    if (
+        event.event_hash != expected_event_hash
+        or event.event_type != _LOCAL_RETENTION_EVENT
+        or event.entity_type != "k1_validation"
+        or event.schema_version != "1"
+        or event.deduplication_key is None
+    ):
+        raise ValueError("ORIGINAL_VALIDATION_EVENT_BINDING_MISMATCH")
+    payload = event.payload
+    if not isinstance(payload, Mapping) or set(payload) != _LOCAL_RETENTION_PAYLOAD_KEYS:
+        raise ValueError("ORIGINAL_VALIDATION_PAYLOAD_NOT_EXACT")
+    if payload["profile"] != _LOCAL_RETENTION_PROFILE:
+        raise ValueError("ORIGINAL_VALIDATION_PROFILE_MISMATCH")
+    validation_id = payload["validation_id"]
+    attempt_id = payload["attempt_id"]
+    if not isinstance(validation_id, str) or not validation_id:
+        raise ValueError("ORIGINAL_VALIDATION_ID_INVALID")
+    if not isinstance(attempt_id, str) or not attempt_id:
+        raise ValueError("ORIGINAL_VALIDATION_ATTEMPT_ID_INVALID")
+    if event.deduplication_key != f"k1:validation:{validation_id}":
+        raise ValueError("ORIGINAL_VALIDATION_DEDUP_MISMATCH")
+    original_text = payload["validation_utf8"]
+    if not isinstance(original_text, str):
+        raise ValueError("ORIGINAL_VALIDATION_NOT_UTF8")
+    original = original_text.encode("utf-8")
+    if len(original) > _MAX_LOCAL_RAW_BYTES:
+        raise ValueError("ORIGINAL_VALIDATION_TOO_LARGE")
+    decision = _parse_exact_validation(original)
+    raw_b64 = payload["raw_output_base64"]
+    if raw_b64 is None:
+        raw = None
+    else:
+        if not isinstance(raw_b64, str) or len(raw_b64) > 1_400_000:
+            raise ValueError("ORIGINAL_RAW_NOT_BOUNDED_BASE64")
+        try:
+            raw = base64.b64decode(raw_b64, validate=True)
+        except binascii.Error as error:
+            raise ValueError("ORIGINAL_RAW_BAD_BASE64") from error
+        if len(raw) > _MAX_LOCAL_RAW_BYTES:
+            raise ValueError("ORIGINAL_RAW_TOO_LARGE")
+    issuer_claim = ArtifactReference.model_validate(payload["issuer_claim"])
+    candidate = build_retained_validation_candidate(
+        validation_id=validation_id,
+        attempt_id=attempt_id,
+        original_validation=decision,
+        raw_output_ref=(
+            None if raw is None else _retained_raw_ref(event_id, raw)
+        ),
+        original_validation_ref=_retained_original_ref(event_id, original),
+        validator_issuer_ref=issuer_claim,
+        first_available_at=event.timestamp,
+    )
+    if payload["retained_candidate_hash"] != candidate.record_hash:
+        raise ValueError("ORIGINAL_VALIDATION_CANDIDATE_HASH_MISMATCH")
+    return LocalValidationReadback(
+        candidate=candidate,
+        audit_event_id=event_id,
+        audit_event_hash=event.event_hash,
+        validation_bytes_sha256=hashlib.sha256(original).hexdigest(),
+        raw_output_bytes_sha256=(
+            None if raw is None else hashlib.sha256(raw).hexdigest()
+        ),
+    )
+
+
+def append_local_validation_original(
+    *,
+    ledger: Ledger,
+    event_id: UUID,
+    entity_id: UUID,
+    observed_at: datetime,
+    validation_id: str,
+    attempt_id: str,
+    original_validation: ValidationResult,
+    raw_output_bytes: bytes | None,
+    issuer_claim: ArtifactReference,
+) -> LocalValidationReadback:
+    """Durably append/re-read a canonical validation decision plus raw bytes.
+
+    Writes one event to the *supplied* append-only Ledger. The supplied
+    ledger, event identity, timestamp and issuer claim are not independently
+    authenticated. The caller must retain and verify the readback against a
+    separately accepted configured issuer and original clock before E6B use.
+    """
+    _utc(observed_at, "observed_at")
+    for field, identifier in (("event_id", event_id), ("entity_id", entity_id)):
+        if type(identifier) is not UUID or identifier.version != 7:
+            raise ValueError(f"{field}: original UUID7 required")
+    if (
+        raw_output_bytes is not None
+        and (type(raw_output_bytes) is not bytes
+             or len(raw_output_bytes) > _MAX_LOCAL_RAW_BYTES)
+    ):
+        raise ValueError("ORIGINAL_RAW_NOT_BOUNDED_BYTES")
+    decision = _model_copy(
+        ValidationResult, original_validation, "original_validation"
+    )
+    issuer = _model_copy(ArtifactReference, issuer_claim, "issuer_claim")
+    original = canonical_json(decision.model_dump(mode="python"))
+    if len(original) > _MAX_LOCAL_RAW_BYTES:
+        raise ValueError("ORIGINAL_VALIDATION_TOO_LARGE")
+    candidate = build_retained_validation_candidate(
+        validation_id=validation_id,
+        attempt_id=attempt_id,
+        original_validation=decision,
+        raw_output_ref=(
+            None if raw_output_bytes is None
+            else _retained_raw_ref(event_id, raw_output_bytes)
+        ),
+        original_validation_ref=_retained_original_ref(event_id, original),
+        validator_issuer_ref=issuer,
+        first_available_at=observed_at,
+    )
+    draft = AuditEventDraft(
+        event_id=event_id,
+        event_type=_LOCAL_RETENTION_EVENT,
+        timestamp=observed_at,
+        entity_type="k1_validation",
+        entity_id=entity_id,
+        payload={
+            "profile": _LOCAL_RETENTION_PROFILE,
+            "validation_id": validation_id,
+            "attempt_id": attempt_id,
+            "validation_utf8": original.decode("utf-8"),
+            "raw_output_base64": (
+                None if raw_output_bytes is None
+                else base64.b64encode(raw_output_bytes).decode("ascii")
+            ),
+            "retained_candidate_hash": candidate.record_hash,
+            "issuer_claim": issuer.model_dump(mode="python"),
+        },
+        deduplication_key=f"k1:validation:{validation_id}",
+        schema_version="1",
+    )
+    result = ledger.append(draft)
+    # No use of caller asserted success without a same-ledger chain readback.
+    checked = readback_local_validation_original(
+        ledger=ledger, event_id=result.event_id,
+        expected_event_hash=result.event_hash,
+    )
+    if checked.candidate != candidate:
+        raise ValueError("ORIGINAL_VALIDATION_READBACK_CONFLICT")
+    return checked
