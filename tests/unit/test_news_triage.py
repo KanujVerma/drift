@@ -23,7 +23,7 @@ from drift.news_triage import (
     screen_event,
     screen_feed_coverage,
 )
-from drift.news_triage.screen import CoverageState, Outcome
+from drift.news_triage.screen import CoverageState, FeedState, Outcome
 
 T = datetime(2026, 1, 30, 21, tzinfo=UTC)
 
@@ -421,10 +421,11 @@ def test_issue492_complete_coverage_requires_closed_interval() -> None:
         state="covered_empty",
         event_count=0,
     )
-    for state, count, complete in (
+    cases: tuple[tuple[FeedState, int, str], ...] = (
         ("covered_empty", 0, "EMPTY"),
         ("covered_with_events", 2, "EVENTS_PRESENT"),
-    ):
+    )
+    for state, count, complete in cases:
         fixture = replace(covered, state=state, event_count=count)
         complete_result = screen_feed_coverage(coverage=fixture, decision_cutoff=T)
         assert complete_result.disposition == complete
