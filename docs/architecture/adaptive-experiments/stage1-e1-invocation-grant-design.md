@@ -154,6 +154,20 @@ new network service, executor identity or source-file implementation**.
   if all timestamps are before the deadline. Verified
   no-model-call terminal refusals do not need invented replay
   response or parse clocks.
+- The accepted `ResearchContext` internally orders cutoff,
+  build and review, but this cross-record verifier also needs
+  `ResearchContext.review_started_at <= AttemptRecord.started_at`.
+  A K1 attempt cannot use a context whose original review began
+  only after invocation. Authentic contradiction is `INVALID`,
+  independent of the eventual context content hash.
+- The original account/scheduler issuance chain requires
+  `allocation_first_available_at <= grant_issued_at
+  <= grant_first_available_at <= AttemptRecord.started_at`,
+  with times independently retained by the authentic Matthew
+  account and Kanuj scheduler issuers. Original grant issuance
+  before the account allocator's first eligible receipt, or
+  grant availability before issuance, is `INVALID`, not
+  rescued by a matching E1 string or hash.
 - Original scheduler grant issuance and verified availability must
   precede its designated logical K1 invocation. A grant first issued
   after the attempt cannot be accepted retroactively. Also require
@@ -210,7 +224,12 @@ new network service, executor identity or source-file implementation**.
    full manifest. Refuse arbitrary matching caller account strings.
 3. Retrieve the original scheduler grant from the approved issuer;
    check original bytes, issuer and version, issuance and availability,
-   and original **invocation/attempt-start timestamp**. Require the
+   and original **invocation/attempt-start timestamp**. Verify
+   the account provisioner receipt was genuinely first available
+   no later than grant issuance, and grant first availability was
+   not earlier than the original grant issuance. Confirm the
+   original K1 `ResearchContext.review_started_at` was not
+   later than its `AttemptRecord.started_at`. Require the
    attempt start at/after `invocation_not_before_at` and before the
    exclusive `grant_expires_at` when present. Evaluate revocation
    as of that original start, using independently verified effective,
@@ -251,7 +270,7 @@ original grant-at-start check. Genuine future input is lookahead,
 not a normal after-cutoff model completion. No generic `dict[str, Any]`
 evidence resolver or second financial ledger is allowed.
 
-## 6. Thirty synthetic original-grant test vectors
+## 6. Thirty-three synthetic original-grant test vectors
 
 Each vector is a **design expectation, not an executed test**.
 `READY_STRUCTURAL` has accepted E1 fixture verification only.
@@ -408,6 +427,25 @@ Each vector is a **design expectation, not an executed test**.
   preserve original terminal and cost receipts, and never
   backdate validation to claim timely eligibility.
   **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+
+- **G16d, context reviewed after attempt start:** original
+  `ResearchContext.built_at` precedes `review_started_at`
+  internally, but authentic `review_started_at` occurs
+  AFTER original `AttemptRecord.started_at`. Refuse
+  `INVALID` cross-record chronology despite matching
+  grant/account/attempt and other model timestamps.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G17a, grant issued before original allocation:** trusted
+  `allocation_first_available_at` from Matthew's retained
+  original account issuer is after `grant_issued_at`,
+  even though both precede K1 invocation. Refuse `INVALID`
+  ordering; no original capital allocation was available.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER**.
+- **G17b, grant available before grant issuance:** authentic
+  original `grant_first_available_at` precedes actual
+  `grant_issued_at`. Refuse `INVALID` chronology, not a
+  backdated grant with valid appearance.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER**.
 
 For each issuer-dependent positive case, the eventual producer test
 must independently prove a forged or missing original issuer **fails**.
