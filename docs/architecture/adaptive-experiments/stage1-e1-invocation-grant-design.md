@@ -116,11 +116,22 @@ new network service, executor identity or source-file implementation**.
   availability. A post-cutoff input consumed as past knowledge must fail.
 - Grant issuance and candidate completion may occur after the input
   cutoff if separately permitted by the authentic scheduler deadline.
-  Completion **at or before** `decision_deadline` can be eligible
-  under the other checks. Completion **after** that deadline must
-  refuse that checkpoint's decision admission as `DEADLINE_EXPIRED`,
-  while retaining original attempt/evidence/cost. Neither case
-  may be backdated or misclassified as future source input.
+  For **scientific decision admission**, the accepted K1 original
+  `AttemptRecord.completed_at` on the verified terminal event is the
+  conservative decision-ready classification clock, **not** the raw
+  provider response timestamp. Require that trusted terminal
+  `completed_at <= decision_deadline`. For a model call, independently
+  verify the original `ModelReplayRecord.response_received_at`,
+  `parse_completed_at`, and the retained validator's actual first
+  availability against that terminal; none may establish a usable
+  candidate later than the deadline. Their precise producer issuer
+  remains pending #507. Completion after deadline must refuse the
+  checkpoint's decision admission as `DEADLINE_EXPIRED`, retaining
+  original attempt/evidence/cost. Missing or unverifiable required
+  clocks mean `UNAVAILABLE`, not fabricated timely completion.
+  A raw response before deadline with a parser/terminal event after
+  deadline is **not** an eligible decision for that checkpoint.
+  No timestamps may be backdated or mistaken for future source input.
 - Original scheduler grant issuance and verified availability must
   precede its designated logical K1 invocation. A grant first issued
   after the attempt cannot be accepted retroactively. Also require
@@ -185,8 +196,13 @@ new network service, executor identity or source-file implementation**.
    revocation without retroactive validity changes.
 4. Krish independently verifies his original K1 context, attempt
    start/terminal, retained validator decision, candidate or absence,
-   model replay and raw research costs. Never promote a grant into
-   an accepted research output.
+   model replay and raw research costs. For a checkpoint's decision
+   deadline use the actual retained terminal
+   `AttemptRecord.completed_at` as the conservative ready clock,
+   with verified response/parse/validation clocks where applicable.
+   Missing required issuer clocks are unavailable; late terminal
+   classification cannot be backdated by timely raw responses.
+   Never promote a grant into an accepted research output.
 5. Matthew separately verifies actual M0/M2 admission, result/trace,
    account book, order/fill/refusal/UNKNOWN, valuation and posted
    trading costs without reinterpreting its original hashes.
@@ -204,7 +220,7 @@ original grant-at-start check. Genuine future input is lookahead,
 not a normal after-cutoff model completion. No generic `dict[str, Any]`
 evidence resolver or second financial ledger is allowed.
 
-## 6. Twenty synthetic original-grant test vectors
+## 6. Twenty-two synthetic original-grant test vectors
 
 Each vector is a **design expectation, not an executed test**.
 `READY_STRUCTURAL` has accepted E1 fixture verification only.
@@ -252,9 +268,11 @@ Each vector is a **design expectation, not an executed test**.
   causal lookahead independently of whether a grant exists.
   **BLOCKED_ON_507**.
 - **G09, valid completion:** no future input, original allowed
-  grant, model completes after input cutoff but **at or before**
-  the accepted `decision_deadline`. Preserve an eligible
-  completion if the issuer/validator otherwise accepts it.
+  grant. Verify `ModelReplayRecord.response_received_at`,
+  `parse_completed_at`, original retained validator availability,
+  and terminal `AttemptRecord.completed_at` are all authentic
+  and at/before the decision deadline, although after input cutoff.
+  Preserve an eligible completion only with verified issuer/receipt.
   **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
 - **G10a, valid hold:** completed K1 research disposition `hold`,
   independently verified matching current incumbent and valid
@@ -292,13 +310,23 @@ Each vector is a **design expectation, not an executed test**.
   `invocation_not_before_at`. Refuse the early attempt with its
   original timestamp and reason even if all account/scope hashes match.
   **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
-- **G14, late model completion:** original grant, eligible context
-  and attempt start are valid, but the model response first completes
-  **after** the accepted `decision_deadline`. Refuse its admission
-  to that scheduled checkpoint as `DEADLINE_EXPIRED`; retain actual
-  attempt, response time and cost. Do not backdate or convert it
-  into a completed or executable decision. Existing platform orders
-  and independently authorized protection remain separate.
+- **G14a, late raw model response:** eligible original input/grant,
+  but trusted `ModelReplayRecord.response_received_at` is after
+  `decision_deadline`. Refuse checkpoint decision admission as
+  `DEADLINE_EXPIRED`; retain genuine replay, attempt and cost.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G14b, timely response but late validated decision:** raw
+  `response_received_at` is at/before deadline, but
+  `parse_completed_at`, original validation availability or the
+  terminal `AttemptRecord.completed_at` is later. Refuse the
+  checkpoint decision as `DEADLINE_EXPIRED` even though a raw
+  model response arrived on time. Do not backdate validation.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G14c, unknown terminal/validation clock:** an otherwise valid
+  grant has no independently verified `AttemptRecord.completed_at`
+  or retained original validation availability. Report
+  `UNAVAILABLE` with exact cause, never `VALID` or a phantom
+  within-deadline completion. Preserve attempted denominator.
   **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
 
 For each issuer-dependent positive case, the eventual producer test
