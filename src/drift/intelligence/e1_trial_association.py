@@ -8,9 +8,11 @@ No existing K1/E1 record or hash preimage is changed.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Literal, Sequence, cast
+from typing import Sequence, cast
+
+from pydantic import BaseModel
 
 from drift.experiments.stage1_campaign_config import (
     ArmSpecV1,
@@ -29,7 +31,6 @@ from drift.intelligence.contracts import (
     ResearchCandidate,
     ResearchContext,
     StoredArtifactRef,
-    compute_record_hash,
 )
 from drift.intelligence.receipts import ResearchReceiptStore
 from drift.intelligence.validation import ValidationResult
@@ -93,15 +94,12 @@ def _utc(value: datetime, field: str) -> None:
         raise ValueError(f"{field}: non-UTC timestamp")
 
 
-def _model_copy[T](cls: type[T], value: object, field: str) -> T:
-    """Reparse exact accepted K1 model through Python data and its validators."""
+def _model_copy[T: BaseModel](cls: type[T], value: object, field: str) -> T:
+    """Reparse exact accepted K1 model through its original validation rules."""
     if type(value) is not cls:
         raise ValueError(f"{field}: wrong accepted original class")
-    # The correct model's serializer is used, not a caller-provided duck type.
-    parser = cast(object, cls)
-    if not hasattr(parser, "model_validate"):
-        raise ValueError(f"{field}: missing canonical model parser")
-    return cast(T, cls.model_validate(value.model_dump(mode="python")))  # type: ignore[attr-defined]
+    original = cast(T, value)
+    return cls.model_validate(original.model_dump(mode="python"))
 
 
 def _retained_preimage(record: RetainedValidationCandidateV1) -> dict[str, object]:
@@ -158,6 +156,8 @@ def build_retained_validation_candidate(
     if validation.status == "VALID":
         if validation.is_valid is not True or validation.candidate is None:
             raise ValueError("VALID_REQUIRES_ORIGINAL_CANDIDATE")
+        if raw is None:
+            raise ValueError("VALIDATION_RAW_OUTPUT_NOT_RETAINED")
     elif validation.is_valid is not False or validation.candidate is not None:
         raise ValueError("FAILURE_CANNOT_CARRY_CANDIDATE")
     candidate = validation.candidate
@@ -187,19 +187,24 @@ def build_retained_validation_candidate(
         first_available_at=first_available_at,
         record_hash="",
     )
-    from dataclasses import replace
-
     return replace(
         preliminary,
         record_hash=content_hash(_retained_preimage(preliminary)),
     )
 
 
-def _ref(ref: ArtifactReference | None, key: str, digest: str) -> bool:
+def _ref(
+    ref: ArtifactReference | None,
+    key: str,
+    digest: str,
+    *,
+    version: str | None = None,
+) -> bool:
     return (
         type(ref) is ArtifactReference
         and ref.id == key
         and ref.sha256 == digest
+        and (version is None or ref.version == version)
     )
 
 
@@ -325,7 +330,7 @@ def review_research_e1_binding(
              and initial.completed_at is None)
     _problem(reasons, "ATTEMPT_ORIGINAL_BACKLINK_INVALID",
              _ref(final.previous_event_ref, initial.attempt_event_id,
-                  initial.record_hash))
+                  initial.record_hash, version="v1"))
     _problem(reasons, "ATTEMPT_CONTEXT_OR_SCOPE_MISMATCH",
              initial.scope == ctx.scope and final.scope == ctx.scope
              and _ref(initial.context_ref, ctx.context_id, ctx.record_hash)
@@ -355,6 +360,12 @@ def review_research_e1_binding(
                  initial.started_at is not None
                  and final.completed_at is not None
                  and initial.started_at <= choice.completed_at <= final.completed_at)
+        if choice.valid_until is not None:
+            _problem(reasons, "CANDIDATE_EXPIRED_BEFORE_TERMINAL",
+                     final.completed_at is not None
+                     and choice.valid_until >= final.completed_at)
+        _problem(reasons, "CANDIDATE_COST_RECEIPT_SET_MISMATCH",
+                 set(choice.cost_receipt_ids) == set(final.cost_receipt_ids))
         if choice.disposition == "hold":
             _problem(reasons, "HOLD_NO_RECORDED_INCUMBENT",
                      ctx.current_selection_ref is not None)
@@ -366,6 +377,8 @@ def review_research_e1_binding(
     if final.status == "completed":
         _problem(reasons, "COMPLETED_ATTEMPT_WITHOUT_CANDIDATE",
                  choice is not None)
+    if choice is not None and choice.disposition == "hold":
+        blocked = (*blocked, "MISSING_VERIFIED_MATCHING_INCUMBENT_FOR_HOLD")
     elif choice is not None:
         reasons.append("FAILED_ATTEMPT_MUST_NOT_CARRY_CANDIDATE")
 
