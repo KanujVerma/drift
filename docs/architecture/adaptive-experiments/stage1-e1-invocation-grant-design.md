@@ -94,6 +94,15 @@ Neither is an accepted Python class or wire revision.
   `request_kind`, `method_or_selector_policy_ref`,
   `allowed_strategy_refs`, `context_policy_ref`,
   `decision_cutoff` and `decision_deadline`.
+  The original retained `AttemptRecord.logical_request_id` must
+  equal the grant's logical request. Resolve its `method_ref`,
+  `ResearchContext.method_ref` and any applicable
+  `ModelReplayRecord.method_ref` to the granted method via an
+  accepted #507 producer mapping. The original attempt's
+  `context_ref` must reference that retained context, with the
+  same decision cutoff by instant and the same E1 arm/account.
+  An account/checkpoint string match alone cannot grant another
+  method or logical request permission.
 - **Original scheduler authority:** `scheduler_issuer_id`,
   `issuer_version`, `original_issuance_ref` and
   `issuer_proof_ref`. The verifier must retrieve the actual
@@ -132,6 +141,19 @@ new network service, executor identity or source-file implementation**.
   A raw response before deadline with a parser/terminal event after
   deadline is **not** an eligible decision for that checkpoint.
   No timestamps may be backdated or mistaken for future source input.
+- For an actual model call, verify original retained instants:
+  `AttemptRecord.started_at <= ModelReplayRecord.request_sent_at
+  <= ModelReplayRecord.response_received_at
+  <= ModelReplayRecord.parse_completed_at
+  <= original_validation_first_available_at
+  <= AttemptRecord.completed_at <= decision_deadline`.
+  Validation availability remains an **unaccepted #507 issuer
+  fact**, not a new source field invented by the consumer.
+  Missing trusted clock proof yields `UNAVAILABLE`; present
+  but causally impossible chronology is `INVALID`, even
+  if all timestamps are before the deadline. Verified
+  no-model-call terminal refusals do not need invented replay
+  response or parse clocks.
 - Original scheduler grant issuance and verified availability must
   precede its designated logical K1 invocation. A grant first issued
   after the attempt cannot be accepted retroactively. Also require
@@ -202,7 +224,16 @@ new network service, executor identity or source-file implementation**.
    with verified response/parse/validation clocks where applicable.
    Missing required issuer clocks are unavailable; late terminal
    classification cannot be backdated by timely raw responses.
-   Never promote a grant into an accepted research output.
+   Match the original `AttemptRecord.logical_request_id` against
+   the grant, original `method_ref` and the referenced retained
+   `ResearchContext.method_ref` against the accepted #507 granted
+   method mapping, and its original context cutoff and E1
+   arm/account scope against the SAME grant. For model calls,
+   verify request/response/parse/original-validation/terminal
+   order before declaring decision readiness. Refuse
+   independently verifiable contradictions even when every
+   clock precedes the deadline. Never promote a grant into
+   an accepted research output.
 5. Matthew separately verifies actual M0/M2 admission, result/trace,
    account book, order/fill/refusal/UNKNOWN, valuation and posted
    trading costs without reinterpreting its original hashes.
