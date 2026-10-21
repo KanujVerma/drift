@@ -8,7 +8,14 @@
 - **Merged logical contract:** [`contracts/experiment.md`](contracts/experiment.md), Sections 3.1 and 3.2, PR #434.
 - **Stage 1 direction:** [`stage1-decisions.md`](stage1-decisions.md), [`methodology.md`](methodology.md).
 - **Existing hashing primitive:** `drift.serialization.canonical.canonical_json` and `content_hash`.
-- **Implementation readback, October 20, 2026:** The two-file E1 implementation has already merged under [#462](https://github.com/KanujVerma/drift/issues/462) / [PR #463](https://github.com/KanujVerma/drift/pull/463). [#489 / PR #495](https://github.com/KanujVerma/drift/pull/495) is a separate, still-unaccepted verifier hardening correction; do not treat its draft as merged.
+- **Implementation readback, October 20, 2026:** The original E1 implementation
+  merged under [#462](https://github.com/KanujVerma/drift/issues/462) /
+  [PR #463](https://github.com/KanujVerma/drift/pull/463). The independent
+  one-pass collection hardening [#489](https://github.com/KanujVerma/drift/issues/489) /
+  [PR #495](https://github.com/KanujVerma/drift/pull/495) also merged, after
+  full CI, Codex and Krish review under Kanuj's recorded limited waiver of
+  the additional Matthew review. This is actual merge history, not
+  retroactive Matthew acceptance or authenticated platform RESULT.
 - **Approval:** Owner-approved **local E1 implementation design**, retained for reproducible decisions and golden fixtures. This design document is pending its own PR acceptance. Merged E1 code provides synthetic structural validation only, not an accepted producer wire schema, historical source qualification, independent scientific approval, G3 freeze, account creation or trading permission.
 
 ## 1. Decisions and reasons
@@ -266,17 +273,26 @@ Required focused tests in the authorized new unit test file:
 8. Collection: swapped input arm order remains valid; absent arm, extra arm, unknown primary/control, duplicate arm/fingerprint, same account across arms, same account across two runs, duplicate binding ID/scope, wrong campaign/arm, mismatched initial cash and cross-run account reuse all fail closed. Manifest adversaries: empty/duplicate expected runs, missing declared RUN-002 binding, unexpected RUN-003 binding, missing one arm for RUN-002. Test that separate single-run verifications cannot prove *global* uniqueness: require combined expected-run snapshot.
 9. Generic independence: valid alternative campaign with controls and non-B3 starting strategies remains structurally valid; optional Stage 1 profile rejects it if it does not match B/R requirements. All supplied active Stage 1 arms require USD 10,000: reject a `"1"` control arm even when its binding matches, **and** reject undeclared extra `ARM-X` despite a correct $10,000 binding. Reject a Stage 1 campaign with `allowed_strategy_families=("OTHER",)` lacking B3/B4/B5 even when both arms individually admit them. Reject Stage 1 `SAME_CLOSE` and wrong alignment. No **generic** $10k, B3, 253 or 126 defaults.
 10. Stage 1 primary role/model binding adversaries: swap ARM-B/ARM-R `arm_account_role` values and rebuild arm+campaign hashes; use arbitrary roles; create valid ARM-B with `model_configuration_reference="fixture://model-B-v2"` but unchanged campaign model policy ref and rebuild all hashes; set ARM-B model to `"NONE"`; set deterministic ARM-R model to a non-`"NONE"` ref and rebuild its hash/campaign. Generic verification may succeed when structurally valid, but the Stage 1 synthetic checker refuses each of these cases. Original B/R/campaign golden hash bytes remain intact.
-10. Scope boundaries: zero provider/broker/disk/system clock calls; hashes/refs alone are not authentic approvals, filled trades or qualified historical source. No imports of unmerged K0/K1-K5 or PR #455 code.
+10. Scope boundaries: zero provider/broker/disk/system clock calls; hashes/refs
+    alone are not authentic approvals, fills or historical source qualification.
+    The original E1 two-file scope did not import K0-K5 or #455 when unmerged.
+    Those modules have since merged, but their public accepted interfaces and
+    separate producer authority still govern their use.
 
 Exact refusal API: `ValueError` on every malformed/unsafe object or collection, including caller type confusion; `True` for valid verification. No automatic correction/rehashing of a mutated *persisted* object and no verifier that reports success by omitting invalid participants.
 
 ## 11. Delivery and review
 
-The implementation used the required [implementation handoff standard](../implementation-handoff.md), [AGENTS.md](../../../AGENTS.md), and [agent workflow](../agent-workflow.md) under separately authorized #462 and merged PR #463, with only the two specified code/test paths. The implementation's published exact-head tests and reviews, not this design document, establish its accepted synthetic scope. Future corrections (including open #489) require fresh exact-path reservations, pinned CPython 3.14.6 checks, Ruff, mypy, build, hosted full CI, Git integrity and zero U+2014. Do not reinterpret undecided producer authority or extend this design to operational/scored validation.
+The implementation used the required [implementation handoff standard](../implementation-handoff.md), [AGENTS.md](../../../AGENTS.md), and [agent workflow](../agent-workflow.md) under separately authorized #462 and merged PR #463, with only the two specified code/test paths. The implementation's published exact-head tests and reviews, not this design document, establish its accepted synthetic scope. Future corrections after completed #489 require fresh exact-path reservations,
+pinned CPython 3.14.6 checks, Ruff, mypy, build, hosted full CI, Git integrity
+and zero U+2014. Do not reinterpret undecided producer authority or extend this design to operational/scored validation.
 
 Architect independently reviews actual diff and tests, requests Codex review on exact HEAD and verifies its completion, fixes findings and rechecks final HEAD. Matthew's independent account/RESULT consumer review is required before claiming this shared scientific-to-platform binding semantics accepted. No auto merge without separately recorded exact-PR/HEAD merge authorization by Kanuj; no G3 or scored historical run from this code.
 
-**Post-E1 integration status:** Trial-event integrity [PR #455](https://github.com/KanujVerma/drift/pull/455), trial provenance [PR #477](https://github.com/KanujVerma/drift/pull/477), E6A checkpoint coverage [PR #484](https://github.com/KanujVerma/drift/pull/484) and scientific metric arithmetic [PR #446](https://github.com/KanujVerma/drift/pull/446) are merged. E1 hardening [#489](https://github.com/KanujVerma/drift/issues/489) is still under review. End-to-end B/R integration [#383](https://github.com/KanujVerma/drift/issues/383) and E6B typed producer-evidence admission [#485](https://github.com/KanujVerma/drift/issues/485) remain dependent on accepted Krish/Matthew RESULT/research contracts, risk/execution admission and later G1-G3 study gates. No historical efficacy claim is implied.
+**Post-E1 integration status:** Trial-event integrity [PR #455](https://github.com/KanujVerma/drift/pull/455), trial provenance [PR #477](https://github.com/KanujVerma/drift/pull/477), E6A checkpoint coverage [PR #484](https://github.com/KanujVerma/drift/pull/484) and scientific metric arithmetic [PR #446](https://github.com/KanujVerma/drift/pull/446) are merged. E1 collection hardening [#489](https://github.com/KanujVerma/drift/issues/489)
+and [PR #495](https://github.com/KanujVerma/drift/pull/495) merged and closed.
+Separate provenance-account hardening [#503/#511](https://github.com/KanujVerma/drift/pull/504)
+remains unmerged at this readback. End-to-end B/R integration [#383](https://github.com/KanujVerma/drift/issues/383) and E6B typed producer-evidence admission [#485](https://github.com/KanujVerma/drift/issues/485) remain dependent on accepted Krish/Matthew RESULT/research contracts, risk/execution admission and later G1-G3 study gates. No historical efficacy claim is implied.
 
 
 ## 12. Codex-reviewed architecture corrections (October 19, 2026)
