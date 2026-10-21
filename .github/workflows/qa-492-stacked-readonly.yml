@@ -1,0 +1,40 @@
+name: Issue 492 stacked read-only verification of 496 plus 492
+on:
+  push:
+    branches:
+      - coord/492-stacked-readonly-qa-20261020
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      UV_LOCKED: "1"
+      UV_PYTHON_PREFERENCE: only-managed
+    steps:
+      - name: Checkout whole source history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install pinned uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          enable-cache: false
+      - name: Locked environment
+        run: |
+          uv python install
+          uv sync --locked
+      - name: Combined source-capability and interval regression
+        run: uv run pytest -q tests/integration/test_m1e_compatibility.py tests/unit/test_news_triage.py
+      - name: Entire repository style and strict types
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+          uv run mypy src tests
+      - name: Package build and clean diff
+        run: |
+          uv build
+          git diff --check 4578642c559324ae5c4a83a6d60a94de841d9c63 HEAD
+          test -z "$(git status --porcelain --untracked-files=no)"
