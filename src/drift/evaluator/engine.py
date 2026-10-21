@@ -1583,7 +1583,6 @@ def _bind_reconstruction(
     require_scheduled_calendar_row(observation, session)
 
 
-
 def _verify_untampered_original_book(
     book: PortfolioStateV2, expected_digest: str
 ) -> None:
