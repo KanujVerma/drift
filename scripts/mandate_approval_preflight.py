@@ -112,6 +112,10 @@ def _text(value: object) -> bool:
     return type(value) is str and bool(value.strip())
 
 
+def _member(value: object, choices: frozenset[str]) -> bool:
+    return type(value) is str and value in choices
+
+
 def _digest(value: object) -> bool:
     return type(value) is str and _HEX.fullmatch(value) is not None
 
@@ -358,9 +362,6 @@ def _smart_route(
     )
     if not _text(policy.get("policy_ref")):
         issues.append("smart_policy.policy_ref.missing")
-    if policy.get("policy_ref") == mandatory_policy.get("policy_ref"):
-        # A distinct policy ref is required for a separately accepted Smart rule.
-        issues.append("smart_policy.separate_revision_required")
     if not _text(observed.get("window_evidence_ref")):
         issues.append("smart_observed.window_evidence_ref.missing")
 
@@ -381,7 +382,7 @@ def _smart_route(
 
     beyond = False
     for key, value in measurements.items():
-        bound = _decimal(policy.get(key), positive=True)
+        bound = _decimal(policy.get(key))
         if bound is None or value is None or value < 0:
             issues.append(f"smart_policy.{key}.measurement_or_bound_invalid")
         elif value > bound:
@@ -389,7 +390,7 @@ def _smart_route(
 
     for key in ("max_orders_window", "window_seconds"):
         value = policy.get(key)
-        if type(value) is not int or value <= 0:
+        if type(value) is not int or value < (1 if key == "window_seconds" else 0):
             issues.append(f"smart_policy.{key}.invalid")
     count = observed.get("orders_in_window")
     if type(count) is not int or count < 0:
@@ -410,8 +411,10 @@ def _history(
     request: dict[str, object],
     approval: dict[str, object],
     state: dict[str, object],
+    as_of: datetime | None,
     issues: list[str],
 ) -> tuple[bool, int | None]:
+    previous_issue_count = len(issues)
     records = _exact(history, _HISTORY, "history", issues)
     attempts = records.get("attempts")
     effects = records.get("fill_effects")
@@ -446,9 +449,11 @@ def _history(
                 != approval.get("bound_intent_sha256")
             ):
                 issues.append(f"{prefix}.intent_changed")
+            used = True
             if attempt["dispatch_started"]:
-                used = True
                 issues.append("history.original_operation_already_dispatched")
+            else:
+                issues.append("history.original_operation_already_reserved")
         # A different historical operation never grants or restores this request.
 
     pause = state.get("pause_time_utc")
@@ -457,6 +462,10 @@ def _history(
         issues.append("state.pause_time_utc.invalid")
     if pause is not None and state.get("paused") is not True:
         issues.append("state.pause_time_requires_current_pause")
+    if state.get("paused") is True and pause is None:
+        issues.append("state.pause_evidence_missing")
+    if pause_time is not None and as_of is not None and pause_time > as_of:
+        issues.append("state.pause_time_from_future")
 
     seen_effects: dict[str, dict[str, object]] = {}
     post_pause = 0
@@ -487,12 +496,18 @@ def _history(
         occurred = _time(effect.get("occurred_utc"))
         if occurred is None:
             issues.append(f"{prefix}.occurred_utc.invalid")
+        elif as_of is not None and occurred > as_of:
+            issues.append(f"{prefix}.future_fill_cannot_be_observed")
         if effect.get("fee_state") not in ("KNOWN", "UNKNOWN"):
             issues.append(f"{prefix}.fee_state.invalid")
+        elif effect.get("fee_state") == "UNKNOWN" and (
+            state.get("portfolio_status") == "COMPLETE"
+        ):
+            issues.append(f"{prefix}.unknown_fee_blocks_complete_state")
         if pause_time is not None and occurred is not None:
             if occurred >= pause_time:
                 post_pause += quantity
-    return used, post_pause if not issues else None
+    return used, post_pause if len(issues) == previous_issue_count else None
 
 
 def preflight_mandate_approval(payload: object) -> MandateApprovalPreflight:
@@ -522,7 +537,7 @@ def preflight_mandate_approval(payload: object) -> MandateApprovalPreflight:
     )
 
     _check_bindings(request, mandate, approval, state, mandatory, problems)
-    if mandate.get("approval_mode") not in _MODES:
+    if not _member(mandate.get("approval_mode"), _MODES):
         problems.append("mandate.approval_mode.invalid")
     if mandate.get("approval_mode") != approval.get("grant_mode"):
         problems.append("approval.mode_mismatch")
@@ -554,8 +569,8 @@ def preflight_mandate_approval(payload: object) -> MandateApprovalPreflight:
     state_age, quote_age = _check_times(
         mandate, approval, state, now, problems
     )
-    max_state = _decimal(mandatory.get("max_state_age_seconds"), positive=True)
-    max_quote = _decimal(mandatory.get("max_quote_age_seconds"), positive=True)
+    max_state = _decimal(mandatory.get("max_state_age_seconds"))
+    max_quote = _decimal(mandatory.get("max_quote_age_seconds"))
     if max_state is None:
         problems.append("mandatory_policy.max_state_age_seconds.invalid")
     if max_quote is None:
@@ -582,14 +597,14 @@ def preflight_mandate_approval(payload: object) -> MandateApprovalPreflight:
         problems.append("smart.undeclared_in_mode")
 
     used, post_pause = _history(
-        root.get("history"), request, approval, state, problems,
+        root.get("history"), request, approval, state, now, problems,
     )
 
     if problems:
         return MandateApprovalPreflight(
             False,
             route if problems == ["smart.outside_proposed_bounds"] else "REFUSED",
-            used, None, tuple(problems),
+            used, post_pause, tuple(problems),
         )
     return MandateApprovalPreflight(
         True, route, used, post_pause, (),
