@@ -231,6 +231,8 @@ def review_research_e1_binding(
     logical_request_id: str,
     decision_deadline: datetime,
     association_first_available_at: datetime,
+    original_scheduler_grant_ref: ArtifactReference | None = None,
+    original_account_provisioning_ref: ArtifactReference | None = None,
 ) -> ResearchE1BindingReview:
     """Check the accepted original source records, never issue a trusted grant.
 
@@ -243,6 +245,7 @@ def review_research_e1_binding(
         "MISSING_MATTHEW_ORIGINAL_ACCOUNT_ISSUER_508",
         "MISSING_KANUJ_ORIGINAL_SCHEDULER_ISSUER_512",
         "MISSING_KRISH_ORIGINAL_VALIDATION_RETENTION_507",
+        "MISSING_KRISH_ORIGINAL_INPUT_AVAILABILITY_VERIFIER_507",
         "INDEPENDENT_E1_PROVENANCE_511_ACCEPTANCE_REQUIRED",
     )
     try:
@@ -287,6 +290,16 @@ def review_research_e1_binding(
             _model_copy(CostReceipt, c, f"cost[{i}]")
             for i, c in enumerate(costs)
         )
+        grant = (
+            None if original_scheduler_grant_ref is None
+            else _model_copy(ArtifactReference, original_scheduler_grant_ref,
+                             "original_scheduler_grant_ref")
+        )
+        allocation = (
+            None if original_account_provisioning_ref is None
+            else _model_copy(ArtifactReference, original_account_provisioning_ref,
+                             "original_account_provisioning_ref")
+        )
         _utc(decision_deadline, "decision_deadline")
         _utc(association_first_available_at, "association_first_available_at")
     except (ValueError, TypeError, AttributeError) as error:
@@ -302,7 +315,9 @@ def review_research_e1_binding(
              ctx.scope.account_id == binding.portfolio_account_id)
     _problem(reasons, "E1_SCOPE_WRONG_ARM", ctx.scope.arm_id == e1.arm_id)
     _problem(reasons, "E1_CAMPAIGN_REF_MISMATCH",
-             ctx.scope.campaign_ref.sha256 == e1.campaign_spec_fingerprint)
+             ctx.scope.campaign_ref.id == e1.campaign_id
+             and ctx.scope.campaign_ref.sha256
+             == e1.campaign_spec_fingerprint)
     _problem(reasons, "BAD_CONTEXT_ORIGINAL_AVAILABILITY",
              ctx.decision_cutoff <= ctx.built_at <= ctx.review_started_at)
     _problem(reasons, "BAD_REVIEW_ATTEMPT_ORDER",
@@ -417,7 +432,8 @@ def review_research_e1_binding(
         else:
             _problem(reasons, "TERMINAL_VALIDATION_REF_MISMATCH",
                      _ref(final.validation_ref, retained_validation.validation_id,
-                          retained_validation.record_hash))
+                          retained_validation.record_hash,
+                          version=VALIDATION_CANDIDATE_PROFILE))
             _problem(reasons, "VALIDATION_ATTEMPT_MISMATCH",
                      retained_validation.attempt_id == initial.attempt_id)
             _problem(reasons, "VALIDATION_STATUS_CANDIDATE_MISMATCH",
@@ -526,6 +542,12 @@ def review_research_e1_binding(
         "cost_hashes_as_of": tuple(sorted(included_cost_hashes)),
         "cost_receipt_ids_late": tuple(sorted(late_costs)),
         "logical_request_id": logical_request_id,
+        "original_scheduler_grant_claim": (
+            None if grant is None else grant.model_dump(mode="python")
+        ),
+        "original_account_provisioning_claim": (
+            None if allocation is None else allocation.model_dump(mode="python")
+        ),
         "decision_deadline": decision_deadline,
         "association_first_available_at": association_first_available_at,
     })
