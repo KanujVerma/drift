@@ -12,6 +12,7 @@ from dataclasses import asdict
 from decimal import Decimal
 from threading import Lock
 from typing import Sequence
+from uuid import UUID
 
 from drift.domain.evaluator_bundles import (
     EvaluationRunIdentityV1,
@@ -52,8 +53,17 @@ def _fresh_book_bytes(
         raise LocalAccountReceiptError("ORIGINAL_BOOK_WRONG_EXACT_TYPE")
     if type(opening_book.cash_balance) is not Decimal:
         raise LocalAccountReceiptError("ORIGINAL_BOOK_FORGED_DECIMAL_TYPE")
-    if type(opening_book.net_asset_value) is not Decimal:
-        raise LocalAccountReceiptError("ORIGINAL_NAV_FORGED_DECIMAL_TYPE")
+    money = (
+        opening_book.cash_balance,
+        opening_book.net_asset_value,
+        opening_book.holdings_market_value,
+        opening_book.pending_claims_value,
+        opening_book.realized_gross_pnl,
+        opening_book.realized_net_pnl,
+        opening_book.cumulative_transaction_costs,
+    )
+    if any(type(value) is not Decimal for value in money):
+        raise LocalAccountReceiptError("ORIGINAL_BOOK_FORGED_DECIMAL_TYPE")
     if (
         opening_book.admission_hash != admission.admission_hash
         or opening_book.cash_balance != protocol.initial_cash
@@ -134,8 +144,9 @@ class Stage1SyntheticAccountLifecycleV1:
         self._original_book: PortfolioStateV2 | None = None
         self._original_bytes: bytes | None = None
         self._allocation: tuple[
-            object, LocalEventReferenceV1, LocalEventReferenceV1
+            UUID, LocalEventReferenceV1, LocalEventReferenceV1
         ] | None = None
+        self._fields: AccountAllocationFieldsV1 | None = None
         self._claim: LocalEventReferenceV1 | None = None
         self._consumption: LocalEventReferenceV1 | None = None
 
@@ -209,6 +220,7 @@ class Stage1SyntheticAccountLifecycleV1:
             # read from this host's configured read-only ledger.
             self._original_book = opening_book
             self._original_bytes = original
+            self._fields = fields
             self._allocation = (allocation_id, receipt_ref, witness_ref)
         except BaseException:
             self._fail()
@@ -216,36 +228,29 @@ class Stage1SyntheticAccountLifecycleV1:
         self._transition("retaining", "ready")
 
     def verified_original(self) -> OriginalLocalAccountReadbackV1:
-        if self._allocation is None or self._original_book is None:
+        if self._allocation is None or self._fields is None:
             raise LocalAccountReceiptError("ORIGINAL_ACCOUNT_NOT_RETAINED")
         allocation_id, allocation_ref, witness_ref = self._allocation
-        fields = AccountAllocationFieldsV1(
-            campaign_id=self._campaign.campaign_id,
-            run_id=self._binding.run_id,
-            arm_id=self._binding.arm_id,
-            portfolio_account_id=self._binding.portfolio_account_id,
-            binding_id=self._binding.binding_id,
-            binding_hash=content_hash(asdict(self._binding)),
-            campaign_fingerprint=self._campaign.campaign_spec_fingerprint,
-            arm_fingerprint=self._arm.arm_spec_fingerprint,
-            complete_manifest_fingerprint=self._manifest,
-            admission_hash=self._original_book.admission_hash,
-            protocol_hash=self._protocol_hash,
-            first_session_fingerprint=content_hash(self._original_book.session_key),
-            initial_cash=self._binding.initial_cash_allocated,
-            currency=self._arm.currency,
-        )
         return self._store.readback_allocation(
             allocation_id=allocation_id,
             allocation_ref=allocation_ref,
             witness_ref=witness_ref,
-            expected_fields=fields,
+            expected_fields=self._fields,
         )
 
     def _require_same_original(self, opening_book: PortfolioStateV2) -> None:
         if opening_book is not self._original_book or self._original_bytes is None:
             raise LocalAccountReceiptError("NOT_ORIGINAL_ENGINE_BOOK_INSTANCE")
-        if type(opening_book.cash_balance) is not Decimal:
+        money = (
+            opening_book.cash_balance,
+            opening_book.net_asset_value,
+            opening_book.holdings_market_value,
+            opening_book.pending_claims_value,
+            opening_book.realized_gross_pnl,
+            opening_book.realized_net_pnl,
+            opening_book.cumulative_transaction_costs,
+        )
+        if any(type(value) is not Decimal for value in money):
             raise LocalAccountReceiptError("ORIGINAL_BOOK_FORGED_DECIMAL_TYPE")
         if canonical_json(opening_book) != self._original_bytes:
             raise LocalAccountReceiptError("ORIGINAL_ENGINE_BOOK_CHANGED")
