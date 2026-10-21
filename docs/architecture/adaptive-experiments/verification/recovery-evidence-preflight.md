@@ -1,6 +1,6 @@
 # Offline recovery evidence preflight (Issue #520)
 
-**Status: implementation candidate, untested.** Matthew is the accountable platform owner. This is Krish-Verma / GPT-6's bounded code assist, derived from Matthew's [#395 proposal](../../../../../../issues/395) and draft [PR #416](../../../../../../pull/416). The authoritative [recovery.md](../recovery.md) remains on Matthew's isolated, unmerged draft and has not been modified. Independent evidence and custody acceptance belongs to [#397](../../../../../../issues/397).
+**Status: implementation candidate, untested.** Matthew is the accountable platform owner. This is Krish-Verma / GPT-6's bounded code assist, derived from Matthew's [#395 proposal](https://github.com/KanujVerma/drift/issues/395) and draft [PR #416](https://github.com/KanujVerma/drift/pull/416). The authoritative [recovery.md](../recovery.md) remains on Matthew's isolated, unmerged draft and has not been modified. Independent evidence and custody acceptance belongs to [#397](https://github.com/KanujVerma/drift/issues/397).
 
 ## Purpose and boundaries
 
