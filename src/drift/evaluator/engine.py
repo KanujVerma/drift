@@ -1989,8 +1989,13 @@ class SessionEvaluatorEngine:
         try:
             # This is the same initializer and exact set of arguments that
             # the legacy run used. No caller can inject arbitrary holdings.
+            # The opening book must not expose the bundle's actual nested
+            # SessionKeyV1 object to a lifecycle callback. Its serialized
+            # contents are identical, but its object identity is independent.
             opening_book = initial_portfolio_state(
-                session_key=self._bundle.session_clock.sessions[0].session_key,
+                session_key=_revalidated(
+                    SessionKeyV1, self._bundle.session_clock.sessions[0].session_key
+                ),
                 initial_cash=self._protocol.initial_cash,
                 admission=self._admission,
             )
