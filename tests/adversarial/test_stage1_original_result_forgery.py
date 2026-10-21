@@ -9,7 +9,7 @@ import sys
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from uuid import uuid7
+from uuid import UUID, uuid7
 
 import pytest
 
@@ -29,10 +29,13 @@ from test_stage1_campaign_config import (
 from test_stage1_original_result_association import (
     M0_COMPLETE,
     M0_START,
+    RESULT_OBSERVED,
     _execute,
     _setup,
 )
 
+from drift.domain.evaluator_results import EvaluationRunArtifactsV2
+from drift.domain.experiments import ExperimentRun, ExperimentRunStatus
 from drift.evaluator.engine import SessionEvaluatorEngine
 from drift.evaluator.experiment_runner import (
     ExperimentRunnerContext,
@@ -174,4 +177,84 @@ def test_fake_original_trial_record_cannot_mint_an_accepted_issuer(
     assert len([
         event for event in store.origin.verified_events()
         if event.event_type == RESULT_EVENT
+    ]) == 1
+
+
+class _SourceResultCapture:
+    """Hold the actual canonical M0 callback without writing PR C's RESULT."""
+
+    def __init__(self) -> None:
+        self.run: ExperimentRun | None = None
+        self.artifacts: EvaluationRunArtifactsV2 | None = None
+        self.m0_event_id: UUID | None = None
+
+    def observe_canonical_result(
+        self,
+        *,
+        run: ExperimentRun,
+        artifacts: EvaluationRunArtifactsV2,
+        m0_audit_event_id: UUID,
+    ) -> None:
+        self.run = run
+        self.artifacts = artifacts
+        self.m0_event_id = m0_audit_event_id
+
+
+def test_altered_final_book_cannot_borrow_original_result_trace_hashes(
+    tmp_path: Path,
+) -> None:
+    engine, observer, store = _setup(tmp_path)
+    original = _SourceResultCapture()
+    ctx = replace(
+        _context_with_origin(engine, store.origin.ledger_path),
+        original_result_observer=original,
+    )
+    run = execute_experiment_run(_specification(), ctx)
+    assert run.status is ExperimentRunStatus.COMPLETED
+    assert original.artifacts is not None
+    assert original.m0_event_id is not None
+
+    # This is a valid V2 book with the same admission and ending NAV but a
+    # counterfeit settled claim. The original M0 V2 audit did not contain it.
+    fake_book = original.artifacts.final_state.model_copy(
+        update={"settled_claim_ids": ("a" * 64,)}
+    )
+    altered = original.artifacts.model_copy(
+        update={"final_state": fake_book}
+    )
+    assert altered.result.result_hash == original.artifacts.result.result_hash
+    assert altered.trace.trace_hash == original.artifacts.trace.trace_hash
+    assert altered.final_state != original.artifacts.final_state
+
+    with pytest.raises(
+        OriginalResultAssociationError, match="NOT_THE_ORIGINAL_COMPLETED_M0"
+    ):
+        observer.observe_canonical_result(
+            run=run,
+            artifacts=altered,
+            m0_audit_event_id=original.m0_event_id,
+        )
+    assert all(e.event_type != RESULT_EVENT for e in store.origin.verified_events())
+
+
+def test_result_append_success_is_not_undone_by_later_readback_clock(
+    tmp_path: Path,
+) -> None:
+    times = iter((RESULT_OBSERVED, M0_COMPLETE - timedelta(seconds=1)))
+    engine, observer, store = _setup(tmp_path, clock=lambda: next(times))
+    # Only the first clock sample is used during the M0 observer's append.
+    run = _execute(engine, observer, store)
+    assert run.status is ExperimentRunStatus.COMPLETED
+    originals = [
+        e for e in store.origin.verified_events() if e.event_type == RESULT_EVENT
+    ]
+    assert len(originals) == 1
+    # Independent readback can refuse its own impossible observation clock.
+    # It must not erase or recategorize the already-committed M0/RESULT.
+    with pytest.raises(
+        OriginalResultAssociationError, match="RESULT_READBACK_CLOCK_ROLLBACK"
+    ):
+        observer.readback()
+    assert len([
+        e for e in store.origin.verified_events() if e.event_type == RESULT_EVENT
     ]) == 1
