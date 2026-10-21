@@ -4,6 +4,7 @@ All outcomes are synthetic engineering evidence only, not scientific G3
 admission or authenticated original producer approval for live accounts.
 """
 
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -171,9 +172,11 @@ def test_readonly_independent_reopen_verifies_original_after_writer_exit(
     ).verified_events()
     assert events[0].event_hash == original.allocation_ref.event_hash
     assert events[1].event_hash == original.witness_ref.event_hash
-    assert original.opening_book.admission_hash == events[0].payload["fields"][
-        "admission_hash"
-    ]
+    payload = events[0].payload
+    assert isinstance(payload, Mapping)
+    fields = payload["fields"]
+    assert isinstance(fields, Mapping)
+    assert original.opening_book.admission_hash == fields["admission_hash"]
 
 
 def test_missing_retention_witness_does_not_make_an_account_ready(
@@ -205,3 +208,42 @@ def test_missing_retention_witness_does_not_make_an_account_ready(
     other = _coordinator(store)
     with pytest.raises(LocalAccountReceiptError, match="DUPLICATE"):
         _engine().prepare_opening_book(lifecycle=other)
+
+
+def test_account_allocation_refuses_observed_time_before_bound_at(
+    tmp_path: Path,
+) -> None:
+    bound_at = datetime(2026, 10, 19, 0, 0, 2, tzinfo=UTC)
+    origin = ConfiguredLocalSyntheticOriginV1(
+        ledger_path=tmp_path / "prebinding.db", issuer_instance_id=uuid7()
+    )
+    early = LocalSyntheticAccountReceiptStoreV1(
+        origin=origin, clock=lambda: bound_at - timedelta(microseconds=1)
+    )
+    coordinator = _coordinator(early)
+    with pytest.raises(
+        LocalAccountReceiptError, match="CLOCK_ROLLBACK_BEFORE_ORIGINAL"
+    ):
+        _engine().prepare_opening_book(lifecycle=coordinator)
+    assert coordinator.local_phase == "failed"
+    assert origin.verified_events() == ()
+
+
+def test_allocation_at_exact_e1_binding_time_is_not_backdated(
+    tmp_path: Path,
+) -> None:
+    bound_at = datetime(2026, 10, 19, 0, 0, 2, tzinfo=UTC)
+    origin = ConfiguredLocalSyntheticOriginV1(
+        ledger_path=tmp_path / "exactbinding.db", issuer_instance_id=uuid7()
+    )
+    store = LocalSyntheticAccountReceiptStoreV1(
+        origin=origin, clock=lambda: bound_at
+    )
+    coord = _coordinator(store)
+    _engine().prepare_opening_book(lifecycle=coord)
+    receipt = coord.verified_original()
+    events = origin.verified_events()
+    assert [e.event_type for e in events] == [ALLOCATION, WITNESS]
+    assert events[0].timestamp == bound_at
+    assert receipt.receipt_observed_available_by_at >= bound_at
+    assert receipt.fields.bound_at == "2026-10-19T00:00:02.000000Z"
