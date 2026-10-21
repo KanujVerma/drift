@@ -5,12 +5,15 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from uuid import uuid7
+from typing import Sequence
+from uuid import UUID, uuid7
 
 import pytest
 
 from drift.domain.execution import (
+    ExecutionReportV1,
     ExecutionStatus,
+    OrderIntentV1,
     OrderSide,
     OrderType,
     build_execution_report,
@@ -18,6 +21,8 @@ from drift.domain.execution import (
 )
 from drift.domain.sessions import SessionKeyV1
 from scripts.execution_v1_evidence_audit import (
+    SourceClaim,
+    V1ExecutionAudit,
     V1OriginalEvidenceClaim,
     audit_execution_v1_originals,
 )
@@ -30,7 +35,7 @@ SESSION = SessionKeyV1(
 )
 
 
-def intent():
+def intent() -> OrderIntentV1:
     return build_order_intent(
         intent_id=uuid7(), client_order_id="synthetic-client-token-1",
         session_key=SESSION, security_id=uuid7(),
@@ -40,15 +45,15 @@ def intent():
 
 
 def report(
-    order,
+    order: OrderIntentV1,
     *, seconds: int = 1,
     status: ExecutionStatus = ExecutionStatus.ACKNOWLEDGED,
     quantity: int = 0, leaves: int = 5,
     broker_id: str | None = "mock-order",
     reason: str | None = None,
     fee: str = "0",
-    report_id=None,
-):
+    report_id: UUID | None = None,
+) -> ExecutionReportV1:
     return build_execution_report(
         report_id=report_id or uuid7(),
         intent_id=order.intent_id,
@@ -66,13 +71,13 @@ def report(
 
 
 def claim(
-    rep,
+    rep: ExecutionReportV1,
     *,
-    source_kind="BROKER_OBSERVED",
-    source_ref="unverified-native-broker-receipt",
+    source_kind: SourceClaim = "BROKER_OBSERVED",
+    source_ref: str | None = "unverified-native-broker-receipt",
     available_seconds: int | None = 2,
     fee_ref: str | None = None,
-):
+) -> V1OriginalEvidenceClaim:
     return V1OriginalEvidenceClaim(
         report_id=rep.report_id,
         source_kind=source_kind,
@@ -85,13 +90,19 @@ def claim(
     )
 
 
-def examine(order, reps, evidences, *, as_of=T0 + timedelta(seconds=30)):
+def examine(
+    order: OrderIntentV1,
+    reps: Sequence[ExecutionReportV1],
+    evidences: Sequence[V1OriginalEvidenceClaim],
+    *,
+    as_of: datetime = T0 + timedelta(seconds=30),
+) -> V1ExecutionAudit:
     return audit_execution_v1_originals(
         intent=order, reports=reps, claims=evidences, as_of_utc=as_of,
     )
 
 
-def refuse(out, code: str) -> None:
+def refuse(out: V1ExecutionAudit, code: str) -> None:
     assert not out.structurally_reviewable
     assert out.conservative_broker_knowledge == "UNKNOWN"
     assert out.largest_claimed_cumulative_fill is None
@@ -301,7 +312,7 @@ def test_regressing_or_overfilled_cumulative_report_is_not_valid() -> None:
     )
 
 
-def test_filled_v1_incomplete_quantity_is_not_final_account_reconciliation():
+def test_filled_v1_incomplete_quantity_is_not_final_account_reconciliation() -> None:
     order = intent()
     bad = report(
         order, status=ExecutionStatus.FILLED, quantity=2, leaves=0,
