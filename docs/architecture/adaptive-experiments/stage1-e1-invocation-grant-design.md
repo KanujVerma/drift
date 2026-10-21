@@ -96,9 +96,12 @@ Neither is an accepted Python class or wire revision.
   `decision_cutoff` and `decision_deadline`.
   The original retained `AttemptRecord.logical_request_id` must
   equal the grant's logical request. Resolve its `method_ref`,
-  `ResearchContext.method_ref` and any applicable
-  `ModelReplayRecord.method_ref` to the granted method via an
-  accepted #507 producer mapping. The original attempt's
+  `ResearchContext.method_ref`, any applicable
+  `ModelReplayRecord.method_ref`, and every original retained
+  `ResearchCandidate.method_ref` to the granted method via the
+  same accepted #507 producer mapping. A completed nontrading
+  candidate also retains its actual method; only an absent candidate
+  on a genuinely failed/rejected attempt skips this candidate check. The original attempt's
   `context_ref` must reference that retained context, with the
   same decision cutoff by instant and the same E1 arm/account.
   A retained attempt is not admitted merely by matching IDs.
@@ -110,8 +113,11 @@ Neither is an accepted Python class or wire revision.
     is `UNAVAILABLE`, not an assumed string equivalence.
   - Resolve `method_or_selector_policy_ref` against the original
     `ResearchContext.method_ref`, both `AttemptRecord.method_ref`
-    records and any `ModelReplayRecord.method_ref`. For an actual
-    proposed selection also verify its original
+    records, any `ModelReplayRecord.method_ref`, and any retained
+    `ResearchCandidate.method_ref` (including nontrading
+    dispositions). Refuse an authentic candidate-method mismatch
+    even if the attempt, context and replay methods agree. For an
+    actual proposed selection also verify its original
     `ResearchCandidate.strategy.envelope_ref` and
     `eligibility_ref` against the issuer-verified selector-policy
     mapping. A valid method alone does not approve another selector.
@@ -287,8 +293,9 @@ new network service, executor identity or source-file implementation**.
    arm/account scope against the SAME grant. Resolve and verify
    `request_kind` using original K1 review/trigger evidence and
    the explicit #507 mapping. Verify the granted selector policy
-   against the original method and, for proposals, retained
-   strategy envelope/eligibility evidence. Verify exact full
+   against the original method, every retained
+   `ResearchCandidate.method_ref` where a candidate exists, and,
+   for proposals, retained strategy envelope/eligibility evidence. Verify exact full
    `ResearchCandidate.strategy.strategy_ref` membership in the
    grant's `allowed_strategy_refs` and its family in the frozen
    E1 arm/campaign pools; do not invent a strategy for genuine
@@ -318,7 +325,7 @@ original grant-at-start check. Genuine future input is lookahead,
 not a normal after-cutoff model completion. No generic `dict[str, Any]`
 evidence resolver or second financial ledger is allowed.
 
-## 6. Thirty-eight synthetic original-grant test vectors
+## 6. Forty synthetic original-grant test vectors
 
 Each vector is a **design expectation, not an executed test**.
 `READY_STRUCTURAL` has accepted E1 fixture verification only.
@@ -449,10 +456,11 @@ Each vector is a **design expectation, not an executed test**.
   request cannot reuse another request's original grant.
   **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
 - **G15b, wrong research method:** independently retained
-  `AttemptRecord.method_ref`, `ResearchContext.method_ref`
-  or applicable `ModelReplayRecord.method_ref` differs
-  from the grant through #507's accepted mapping. Refuse
-  rather than trusting a method string or copied hash.
+  `AttemptRecord.method_ref`, `ResearchContext.method_ref`,
+  applicable `ModelReplayRecord.method_ref`, or any retained
+  `ResearchCandidate.method_ref` differs from the grant through
+  the same #507 accepted mapping. Refuse rather than trusting
+  a method string or copied hash.
   **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
 - **G15c, mismatched original context:** retained
   `AttemptRecord.context_ref` references another context,
@@ -488,6 +496,23 @@ Each vector is a **design expectation, not an executed test**.
   `envelope_ref` or `eligibility_ref` belongs to a different
   selector-policy lineage than the granted method/selector.
   Refuse `INVALID`; strategy membership alone is insufficient.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G15i, candidate method differs from granted method:** original
+  K1 context, both attempt records and any model replay all have
+  the verified granted `method_ref`, but retained
+  `ResearchCandidate.method_ref` resolves to a different method.
+  Refuse `INVALID` even for a `hold`, `abstain` or
+  `unavailable` candidate; do not manufacture a candidate on a
+  genuinely failed/rejected original attempt.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G15j, wrong feedback-policy lineage:** original context clock,
+  input and memory policies are valid, but the actual
+  `ResearchContext.feedback_refs` and original feedback producer
+  lineage resolve under #507 to a policy conflicting with the
+  grant's `context_policy_ref`. Refuse `INVALID` with the
+  feedback mismatch reason, even though all other policy checks
+  succeed. Missing authentic feedback-policy mapping is
+  `UNAVAILABLE` under G15g, not a fabricated match.
   **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
 - **G16a, response predates request:** original authentic
   `ModelReplayRecord.response_received_at` precedes
