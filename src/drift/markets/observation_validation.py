@@ -665,6 +665,66 @@ def validate_m1d_resolution_context(context: M1dResolutionContext) -> None:
         )
 
 
+def _same_rebuilt_record_content(
+    derived: object, claimed: object
+) -> bool:
+    """Compare retained-source values without invoking caller-defined equality.
+
+    The left side is rederived from authenticated retained partition bytes.
+    Reject caller subclasses before inspecting their scalar formatting or
+    equality methods. Compare exact concrete model, collection and leaf types
+    recursively, then canonical primitive values. A Decimal subclass can
+    otherwise report 500 as 100 via __str__ and compare equal to everything.
+    """
+    if type(derived) is not type(claimed):
+        return False
+    if isinstance(derived, BaseModel):
+        return all(
+            _same_rebuilt_record_content(
+                getattr(derived, name), getattr(claimed, name)
+            )
+            for name in type(derived).model_fields
+        )
+    if type(derived) in (tuple, list):
+        return len(derived) == len(claimed) and all(
+            _same_rebuilt_record_content(left, right)
+            for left, right in zip(derived, claimed, strict=True)
+        )
+    if type(derived) is dict:
+        if len(derived) != len(claimed):
+            return False
+        if any(type(key) is not str for key in derived):
+            return False
+        if any(type(key) is not str for key in claimed):
+            return False
+        if derived.keys() != claimed.keys():
+            return False
+        return all(
+            _same_rebuilt_record_content(value, claimed[key])
+            for key, value in derived.items()
+        )
+    if type(derived) in (set, frozenset):
+        if len(derived) != len(claimed):
+            return False
+        unmatched = list(claimed)
+        for left in derived:
+            match = next(
+                (
+                    index
+                    for index, right in enumerate(unmatched)
+                    if _same_rebuilt_record_content(left, right)
+                ),
+                None,
+            )
+            if match is None:
+                return False
+            unmatched.pop(match)
+        return not unmatched
+    # Primitive types match exactly, so the caller cannot install reflected
+    # __eq__, Decimal.__str__, or a custom collection iterator here.
+    return canonical_json(derived) == canonical_json(claimed)
+
+
 def validate_m1d_dataset_input(
     dataset: M1dDatasetInput[ObservationInputRecordV1]
     | M1dDatasetInput[SessionInputRecordV1],
@@ -695,9 +755,17 @@ def validate_m1d_dataset_input(
         prefix = "session"
     else:
         raise DatasetValidationError.single("unsupported_m1d_dataset_role")
-    if decision != dataset.decision:
+    # Both checks use trusted rederived values on the left. Ordinary equality
+    # would let a forged model/Decimal subclass on the caller side claim PASS.
+    try:
+        decision_matches = _same_rebuilt_record_content(decision, dataset.decision)
+        records_match = _same_rebuilt_record_content(records, dataset.records)
+    except (CanonicalSerializationError, TypeError, ValueError):
+        decision_matches = False
+        records_match = False
+    if not decision_matches:
         raise DatasetValidationError.single(f"{prefix}_validation_decision_mismatch")
-    if records != dataset.records:
+    if not records_match:
         raise DatasetValidationError.single(f"{prefix}_parsed_records_mismatch")
     if decision.result is not ValidationResult.PASS:
         raise DatasetValidationError.single(f"{prefix}_validation_decision_not_pass")
