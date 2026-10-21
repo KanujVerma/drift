@@ -7,7 +7,7 @@ from fractions import Fraction
 
 import pytest
 
-from scripts.stage1_balanced_feasibility import (
+from drift.risk.stage1_balanced_feasibility import (
     DevelopmentTargetCaps,
     ETFStudyMember,
     enumerate_equal_target_subsets,
