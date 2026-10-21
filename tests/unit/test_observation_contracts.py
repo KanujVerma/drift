@@ -32,6 +32,7 @@ from drift.domain.assertions import (
 )
 from drift.domain.common import FrozenModel
 from drift.domain.dataset_validation import (
+    DatasetValidationDecisionV2,
     DatasetValidationError,
     ValidationResult,
     ValidationScope,
@@ -1248,6 +1249,80 @@ def test_dataset_input_and_resolution_context_snapshot_all_mappings() -> None:
     assert context.supporting_artifacts
     assert m1d_context_hash(context) == expected_hash
     validate_m1d_resolution_context(context)
+
+
+def test_issue135_replayed_leaf_rejects_reflected_decimal_equality() -> None:
+    """A caller cannot claim its actual 500 price equals replayed 99.500."""
+    dataset, support = observation_dataset()
+    original = dataset.records[0]
+    assert isinstance(original, DailySourceObservationVersionV1)
+    assert original.fields
+    original_field = original.fields[0]
+    assert original_field.value is not None
+
+    class SpoofedDecimal(Decimal):
+        def __str__(self) -> str:
+            return str(original_field.value)
+
+        def __eq__(self, other: object) -> bool:
+            return True
+
+    injected = SpoofedDecimal("500.000")
+    assert Decimal(injected) != original_field.value
+    changed = original_field.model_copy(update={"value": injected})
+    claimed = original.model_copy(update={"fields": (changed,)})
+    forged = replace(dataset, records=(claimed,))
+
+    with pytest.raises(DatasetValidationError) as error:
+        validate_m1d_dataset_input(forged, support)
+    assert tuple(item.code for item in error.value.findings) == (
+        "observation_parsed_records_mismatch",
+    )
+    # Refusal does not modify the retained original record.
+    validate_m1d_dataset_input(dataset, support)
+
+
+def test_issue135_replayed_record_refuses_untrusted_eq_subclass() -> None:
+    """A model subclass returning True for everything is not retained bytes."""
+    dataset, support = observation_dataset()
+    original = dataset.records[0]
+    assert isinstance(original, DailySourceObservationVersionV1)
+
+    class AlwaysEqualRecord(DailySourceObservationVersionV1):
+        def __eq__(self, other: object) -> bool:
+            return True
+
+    fields = {
+        name: getattr(original, name) for name in type(original).model_fields
+    }
+    tampered = AlwaysEqualRecord.model_construct(**fields)
+    forged = replace(dataset, records=(tampered,))
+    with pytest.raises(DatasetValidationError) as error:
+        validate_m1d_dataset_input(forged, support)
+    assert tuple(item.code for item in error.value.findings) == (
+        "observation_parsed_records_mismatch",
+    )
+
+
+def test_issue135_replayed_decision_refuses_forged_eq_subclass() -> None:
+    """An author-controlled PASS equality cannot replace validator output."""
+    dataset, support = observation_dataset()
+
+    class AlwaysEqualDecision(DatasetValidationDecisionV2):
+        def __eq__(self, other: object) -> bool:
+            return True
+
+    fields = {
+        name: getattr(dataset.decision, name)
+        for name in type(dataset.decision).model_fields
+    }
+    fake = AlwaysEqualDecision.model_construct(**fields)
+    forged = replace(dataset, decision=fake)
+    with pytest.raises(DatasetValidationError) as error:
+        validate_m1d_dataset_input(forged, support)
+    assert tuple(item.code for item in error.value.findings) == (
+        "observation_validation_decision_mismatch",
+    )
 
 
 def test_dataset_input_replay_rejects_constructor_bypassed_claimed_records() -> None:
