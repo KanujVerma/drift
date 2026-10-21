@@ -165,9 +165,11 @@ new network service, executor identity or source-file implementation**.
   <= grant_first_available_at <= AttemptRecord.started_at`,
   with times independently retained by the authentic Matthew
   account and Kanuj scheduler issuers. Original grant issuance
-  before the account allocator's first eligible receipt, or
-  grant availability before issuance, is `INVALID`, not
-  rescued by a matching E1 string or hash.
+  before the original account-provisioning receipt was first
+  available, or grant availability before issuance, is `INVALID`,
+  not rescued by a matching E1 string or hash. This receipt clock
+  establishes when trusted evidence was available to the scheduler,
+  not when the account was actually assigned or capital was funded.
 - Original scheduler grant issuance and verified availability must
   precede its designated logical K1 invocation. A grant first issued
   after the attempt cannot be accepted retroactively. Also require
@@ -435,11 +437,13 @@ Each vector is a **design expectation, not an executed test**.
   `INVALID` cross-record chronology despite matching
   grant/account/attempt and other model timestamps.
   **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
-- **G17a, grant issued before original allocation:** trusted
-  `allocation_first_available_at` from Matthew's retained
-  original account issuer is after `grant_issued_at`,
+- **G17a, grant issued before provisioning evidence was available:**
+  trusted `allocation_first_available_at` of Matthew's retained
+  original account-provisioning receipt is after `grant_issued_at`,
   even though both precede K1 invocation. Refuse `INVALID`
-  ordering; no original capital allocation was available.
+  ordering: the scheduler did not yet have the required original
+  receipt. This does not establish whether underlying account
+  assignment or capital funding had already occurred.
   **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER**.
 - **G17b, grant available before grant issuance:** authentic
   original `grant_first_available_at` precedes actual
