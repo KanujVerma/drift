@@ -134,7 +134,10 @@ def test_equal_hash_book_from_another_engine_is_not_original_instance(
         cost_model=another_engine.cost_model,
         evidence_hash=another_engine.evaluator_evidence_hash,
     )
-    assert other_book.cash_balance == coordinator.verified_original().opening_book.cash_balance
+    assert (
+        other_book.cash_balance
+        == coordinator.verified_original().opening_book.cash_balance
+    )
     with pytest.raises(
         LocalAccountReceiptError, match="NOT_ORIGINAL_ENGINE_BOOK_INSTANCE"
     ):
@@ -158,7 +161,9 @@ def test_claim_clock_rollback_cannot_create_success_or_fresh_cash(
     origin = ConfiguredLocalSyntheticOriginV1(
         ledger_path=tmp_path / "timing.db", issuer_instance_id=uuid7(),
     )
-    store = LocalSyntheticAccountReceiptStoreV1(origin=origin, clock=lambda: next(moments))
+    store = LocalSyntheticAccountReceiptStoreV1(
+        origin=origin, clock=lambda: next(moments)
+    )
     coordinator = _coordinator(store)
     engine = _engine()
     engine.prepare_opening_book(lifecycle=coordinator)
