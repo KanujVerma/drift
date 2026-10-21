@@ -23,9 +23,6 @@ from drift.evaluator.opening_book_lifecycle import OpeningBookLifecycleError
 from drift.experiments.stage1_trial_provenance import (
     build_stage1_trial_provenance_snapshot,
 )
-from drift.loop.stage1_synthetic_account_lifecycle import (
-    Stage1SyntheticAccountLifecycleV1,
-)
 from drift.ledger.stage1_synthetic_account_receipts import (
     ALLOCATION,
     ConfiguredLocalSyntheticOriginV1,
@@ -33,6 +30,9 @@ from drift.ledger.stage1_synthetic_account_receipts import (
     LocalEventReferenceV1,
     LocalSyntheticAccountReceiptStoreV1,
     read_configured_original,
+)
+from drift.loop.stage1_synthetic_account_lifecycle import (
+    Stage1SyntheticAccountLifecycleV1,
 )
 
 
