@@ -1,6 +1,6 @@
 # Offline containment evidence preflight (Issue #521)
 
-**Status: bounded code candidate, not executed or accepted.** Matthew remains the accountable platform producer for [#396](https://github.com/KanujVerma/drift/issues/396) and its existing draft [PR #417](https://github.com/KanujVerma/drift/pull/417). The proposed original [containment.md](../containment.md) (revision C2, unmerged) belongs to that writer; independent acceptance/evidence conflict handling remains with [#397](https://github.com/KanujVerma/drift/issues/397). Krish-Verma publishes the separate helper code under explicit user instruction.
+**Status: bounded code candidate, not executed or accepted.** Matthew remains the accountable platform producer for [#396](https://github.com/KanujVerma/drift/issues/396) and its existing draft [PR #417](https://github.com/KanujVerma/drift/pull/417). The proposed original [containment.md on Matthew\'s draft branch](https://github.com/KanujVerma/drift/blob/matthew/396-m-contain/docs/architecture/adaptive-experiments/containment.md) (revision C2, unmerged) belongs to that writer; independent acceptance/evidence conflict handling remains with [#397](https://github.com/KanujVerma/drift/issues/397). Krish-Verma publishes the separate helper code under explicit user instruction.
 
 ## What the code does
 
