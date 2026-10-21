@@ -19,6 +19,8 @@ def trace_fixture() -> dict[str, object]:
             "run_id": "mock-run",
             "arm_id": "A",
             "account_id": "mock-account-A",
+            "listing_ref": "mock-listed-instrument",
+            "original_account_binding_ref": "mock-original-account-binding",
             "client_token": "original-token-A",
             "request_hash": SHA,
             "side": "BUY",
@@ -55,6 +57,8 @@ def trace_fixture() -> dict[str, object]:
             "quote_received_utc": "2026-01-02T10:32:07Z",
             "max_age_seconds": "10",
             "quote_receipt_ref": "mock-quote",
+            "venue_ref": "mock-listed-venue",
+            "listing_ref": "mock-listed-instrument",
         },
         "attempts": [
             {
@@ -66,6 +70,11 @@ def trace_fixture() -> dict[str, object]:
         "reports": [
             {
                 "report_id": "fill-1",
+                "run_id": "mock-run",
+                "arm_id": "A",
+                "account_id": "mock-account-A",
+                "client_token": "original-token-A",
+                "request_hash": SHA,
                 "cumulative_qty": 100,
                 "execution_utc": "2026-01-02T10:32:13Z",
                 "received_utc": "2026-01-02T10:32:14Z",
@@ -287,3 +296,34 @@ def test_malformed_payload_or_bools_cannot_be_accepted_as_counts() -> None:
     _reports(payload)[0]["cumulative_qty"] = True
     _fail(payload, "reports.0.cumulative_qty.invalid")
     assert not preflight_execution_trace([]).review_ready
+
+
+def test_quote_and_report_identity_mismatch_are_refused() -> None:
+    payload = trace_fixture()
+    _inner(payload, "quote")["venue_ref"] = "unrelated-venue"
+    _fail(payload, "quote.venue_mismatch")
+    payload = trace_fixture()
+    _inner(payload, "quote")["listing_ref"] = "unrelated-security"
+    _fail(payload, "quote.listing_mismatch")
+    payload = trace_fixture()
+    _reports(payload)[0]["arm_id"] = "B"
+    _fail(payload, "reports.0.arm_id.identity_mismatch")
+    payload = trace_fixture()
+    _reports(payload)[0]["account_id"] = "wrong-account"
+    _fail(payload, "reports.0.account_id.identity_mismatch")
+
+
+def test_late_report_with_earlier_event_time_is_refused() -> None:
+    payload = trace_fixture()
+    earlier = _reports(payload)[0]
+    earlier["cumulative_qty"] = 25
+    earlier["execution_utc"] = "2026-01-02T10:32:18Z"
+    earlier["received_utc"] = "2026-01-02T10:32:19Z"
+    later = deepcopy(earlier)
+    later["report_id"] = "fill-backdated"
+    later["cumulative_qty"] = 100
+    later["effect_ref"] = "new-ledger-effect"
+    later["execution_utc"] = "2026-01-02T10:32:16Z"
+    later["received_utc"] = "2026-01-02T10:32:17Z"
+    _reports(payload).append(later)
+    _fail(payload, "reports.1.execution_time_reversed")
