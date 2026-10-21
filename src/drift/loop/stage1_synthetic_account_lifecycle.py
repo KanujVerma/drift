@@ -8,10 +8,11 @@ The origin configuration must be supplied by the trusted local host/harness.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from copy import deepcopy
 from dataclasses import asdict
 from decimal import Decimal
 from threading import Lock
-from typing import Sequence
 from uuid import UUID
 
 from drift.domain.evaluator_bundles import (
@@ -107,22 +108,32 @@ class Stage1SyntheticAccountLifecycleV1:
         provenance: Stage1TrialProvenanceSnapshotV1,
         store: LocalSyntheticAccountReceiptStoreV1,
     ) -> None:
-        captured_arms = tuple(arms)
-        captured_bindings = tuple(bindings)
-        captured_runs = tuple(expected_run_ids)
-        if campaign.campaign_type != "SYNTHETIC_TEST":
+        # Freeze an independent value graph BEFORE any E1 verifier runs.
+        # Slots/frozen dataclasses can still be mutated via object.__setattr__.
+        # No later allocation field reads a caller-owned E1 object.
+        captured_campaign = deepcopy(campaign)
+        captured_arms = deepcopy(tuple(arms))
+        captured_bindings = deepcopy(tuple(bindings))
+        captured_runs = deepcopy(tuple(expected_run_ids))
+        captured_provenance = deepcopy(provenance)
+        if captured_campaign.campaign_type != "SYNTHETIC_TEST":
             raise LocalAccountReceiptError("ONLY_SYNTHETIC_E1_ALLOCATIONS")
         verify_stage1_synthetic_br_configuration(
-            campaign=campaign, arms=captured_arms,
-            bindings=captured_bindings, expected_run_ids=captured_runs,
+            campaign=captured_campaign,
+            arms=captured_arms,
+            bindings=captured_bindings,
+            expected_run_ids=captured_runs,
         )
         verify_stage1_trial_provenance_snapshot(
-            snapshot=provenance, campaign=campaign, arms=captured_arms,
-            bindings=captured_bindings, expected_run_ids=captured_runs,
+            snapshot=captured_provenance,
+            campaign=captured_campaign,
+            arms=captured_arms,
+            bindings=captured_bindings,
+            expected_run_ids=captured_runs,
         )
-        selected = provenance.scope.run_account_binding
+        selected = captured_provenance.scope.run_account_binding
         selected_arms = [
-            a for a in captured_arms if a.arm_id == provenance.scope.arm_id
+            a for a in captured_arms if a.arm_id == captured_provenance.scope.arm_id
         ]
         matching = [
             b for b in captured_bindings
@@ -134,10 +145,17 @@ class Stage1SyntheticAccountLifecycleV1:
             or matching[0] != selected
         ):
             raise LocalAccountReceiptError("E1_ACCOUNT_NOT_IN_FULL_MANIFEST")
-        self._campaign = campaign
+        self._campaign = captured_campaign
+        self._arms = captured_arms
+        self._bindings = captured_bindings
+        self._runs = captured_runs
+        self._provenance = captured_provenance
+        # Source reference is observed only for tamper detection. It is NEVER
+        # authoritative for retained account fields or hashes after this point.
+        self._source_provenance = provenance
         self._arm = selected_arms[0]
         self._binding = selected
-        self._manifest = provenance.scope.complete_manifest_fingerprint
+        self._manifest = captured_provenance.scope.complete_manifest_fingerprint
         self._store = store
         self._lock = Lock()
         self._phase = "new"
@@ -170,6 +188,25 @@ class Stage1SyntheticAccountLifecycleV1:
         with self._lock:
             self._phase = "failed"
 
+    def _assert_e1_source_unchanged(self) -> None:
+        """Refuse changed caller provenance, using only trusted captured E1."""
+        try:
+            verify_stage1_trial_provenance_snapshot(
+                snapshot=self._source_provenance,
+                campaign=self._campaign,
+                arms=self._arms,
+                bindings=self._bindings,
+                expected_run_ids=self._runs,
+            )
+        except (TypeError, ValueError) as error:
+            raise LocalAccountReceiptError(
+                "E1_PROVENANCE_MUTATED_AFTER_VALIDATION"
+            ) from error
+        if self._source_provenance != self._provenance:
+            raise LocalAccountReceiptError(
+                "E1_PROVENANCE_MUTATED_AFTER_VALIDATION"
+            )
+
     def retain_original_book(
         self,
         *,
@@ -180,6 +217,7 @@ class Stage1SyntheticAccountLifecycleV1:
     ) -> None:
         self._transition("new", "retaining")
         try:
+            self._assert_e1_source_unchanged()
             if type(currency_code) is not str or currency_code != self._arm.currency:
                 raise LocalAccountReceiptError("ORIGINAL_BOOK_CURRENCY_MISMATCH")
             original = _fresh_book_bytes(
@@ -194,6 +232,7 @@ class Stage1SyntheticAccountLifecycleV1:
                 arm_id=self._binding.arm_id,
                 portfolio_account_id=self._binding.portfolio_account_id,
                 binding_id=self._binding.binding_id,
+                bound_at=self._binding.bound_at,
                 binding_hash=content_hash(asdict(self._binding)),
                 campaign_fingerprint=self._campaign.campaign_spec_fingerprint,
                 arm_fingerprint=self._arm.arm_spec_fingerprint,
