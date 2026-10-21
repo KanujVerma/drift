@@ -33,7 +33,11 @@ from test_stage1_original_result_association import (
     _setup,
 )
 
-from drift.evaluator.experiment_runner import execute_experiment_run
+from drift.evaluator.engine import SessionEvaluatorEngine
+from drift.evaluator.experiment_runner import (
+    ExperimentRunnerContext,
+    execute_experiment_run,
+)
 from drift.experiments.stage1_trial_provenance import (
     build_stage1_trial_provenance_snapshot,
 )
@@ -45,10 +49,9 @@ from drift.loop.stage1_original_result_association import (
 )
 
 
-def _context_with_origin(engine: object, path: Path) -> object:
-    from drift.evaluator.engine import SessionEvaluatorEngine
-
-    assert isinstance(engine, SessionEvaluatorEngine)
+def _context_with_origin(
+    engine: SessionEvaluatorEngine, path: Path
+) -> ExperimentRunnerContext:
     return _context(
         engine,
         ledger=SQLiteLedger(path),
@@ -127,9 +130,6 @@ def test_fake_m0_event_id_is_refused_even_with_valid_result_hashes(
 ) -> None:
     engine, observer, store = _setup(tmp_path)
     context = _context_with_origin(engine, store.origin.ledger_path)
-    from drift.evaluator.engine import SessionEvaluatorEngine
-
-    assert isinstance(engine, SessionEvaluatorEngine)
     run = execute_experiment_run(_specification(), context)
     same_content = _run(_engine())
     with pytest.raises(
