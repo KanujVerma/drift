@@ -185,7 +185,6 @@ def _costs(
                 problems.append(f"{label}.receipt_id.conflicting_redelivery")
             continue
         seen_receipts[receipt_id] = rec
-        known_charge_ids.add(charge_id)
         if rec.get("arm_id") != arm_id:
             problems.append(f"{label}.arm_id.mismatch")
         if rec.get("category") != "RESEARCH_OPERATING_NOT_BOOKED":
@@ -225,8 +224,11 @@ def _costs(
                 problems.append(f"{label}.correction_not_later")
         by_charge[charge_id] = rec
 
-        if cutoff is not None and available is not None and available > cutoff:
-            late.append(receipt_id)
+        if cutoff is not None and available is not None:
+            if available > cutoff:
+                late.append(receipt_id)
+            else:
+                known_charge_ids.add(charge_id)
 
     if not known_charge_ids.issubset(expected_ids):
         problems.append("cost_scope.unexpected_charge_id")
@@ -271,9 +273,11 @@ def _costs(
 
 def preflight_result_economics(payload: object) -> ResultEconomicsPreflight:
     """Compute honest USD/no-flow fixture arithmetic with no producer trust."""
-    refused = lambda causes: ResultEconomicsPreflight(
-        False, False, None, None, None, None, "UNAVAILABLE", (), tuple(causes)
-    )
+    def refused(causes: list[str]) -> ResultEconomicsPreflight:
+        return ResultEconomicsPreflight(
+            False, False, None, None, None, None,
+            "UNAVAILABLE", (), tuple(causes),
+        )
     if not _plain_json(payload, 0, [4096]):
         return refused(["payload.not_plain_json"])
     problems: list[str] = []
@@ -363,6 +367,10 @@ def preflight_result_economics(payload: object) -> ResultEconomicsPreflight:
     if book.get("fees_embedded_in_net_nav") is not True:
         problems.append("book.trading_fees_not_proven_embedded")
 
+    if book.get("open_execution_state") not in (
+        "NONE", "OPEN", "UNKNOWN",
+    ):
+        problems.append("book.open_execution_state.invalid")
     costs, cost_completeness, late = _costs(
         root.get("operating_receipts"), scope, identity.get("arm_id"),
         cutoff, problems,
@@ -370,7 +378,9 @@ def preflight_result_economics(payload: object) -> ResultEconomicsPreflight:
     structural = not problems
     mark_value = (
         cast(Decimal, figures["end_net_nav_usd"])
-        if structural and marked_ok else None
+        if structural and marked_ok
+        and cutoff is not None and available_result is not None
+        and available_result <= cutoff else None
     )
     scope_ok = (
         structural
@@ -383,24 +393,23 @@ def preflight_result_economics(payload: object) -> ResultEconomicsPreflight:
         ))
         and book.get("open_execution_state") == "NONE"
     )
+    scope_reasons: list[str] = []
     if structural and not scope_ok:
         if available_result is not None and cutoff is not None:
             if available_result > cutoff:
-                problems.append("result.not_available_at_cutoff")
-        if book.get("open_execution_state") not in (
-            "NONE", "OPEN", "UNKNOWN",
-        ):
-            problems.append("book.open_execution_state.invalid")
+                scope_reasons.append("result.not_available_at_cutoff")
         if book.get("open_execution_state") != "NONE":
-            problems.append("book.unresolved_execution_not_a_complete_result")
+            scope_reasons.append(
+                "book.unresolved_execution_not_a_complete_result"
+            )
         if identity.get("evaluation_classification") != "COMPLETE":
-            problems.append("result.evaluator_not_complete")
+            scope_reasons.append("result.evaluator_not_complete")
         for field in (
             "marks_complete", "trading_costs_complete",
             "realized_pnl_complete", "requested_interval_complete",
         ):
             if book.get(field) is not True:
-                problems.append(f"book.{field}.not_complete")
+                scope_reasons.append(f"book.{field}.not_complete")
 
     trading_gain: Decimal | None = None
     trading_return: Decimal | None = None
@@ -415,5 +424,5 @@ def preflight_result_economics(payload: object) -> ResultEconomicsPreflight:
     return ResultEconomicsPreflight(
         structural, marked_ok and structural, mark_value,
         trading_gain, trading_return, economic_gain,
-        cost_completeness, late, tuple(problems),
+        cost_completeness, late, tuple([*problems, *scope_reasons]),
     )
