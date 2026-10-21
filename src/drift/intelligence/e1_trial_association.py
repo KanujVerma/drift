@@ -237,6 +237,7 @@ def review_research_e1_binding(
     association_first_available_at: datetime,
     original_scheduler_grant_ref: ArtifactReference | None = None,
     original_account_provisioning_ref: ArtifactReference | None = None,
+    local_validation_readback: LocalValidationReadback | None = None,
 ) -> ResearchE1BindingReview:
     """Check the accepted original source records, never issue a trusted grant.
 
@@ -454,6 +455,14 @@ def review_research_e1_binding(
                      <= retained_validation.first_available_at
                      <= final.completed_at)
 
+    if local_validation_readback is not None:
+        if (
+            type(local_validation_readback) is not LocalValidationReadback
+            or retained_validation is None
+            or local_validation_readback.candidate != retained_validation
+            or local_validation_readback.trusted_research_issuer_authenticated
+        ):
+            reasons.append("ORIGINAL_VALIDATION_LOCAL_READBACK_MISMATCH")
     if model is None:
         _problem(reasons, "UNEXPECTED_MODEL_REPLAY_REFERENCE",
                  final.model_replay_ref is None
@@ -540,6 +549,10 @@ def review_research_e1_binding(
         "validation_candidate_hash": (
             None if retained_validation is None
             else retained_validation.record_hash
+        ),
+        "validation_local_audit_event_hash": (
+            None if local_validation_readback is None
+            else local_validation_readback.audit_event_hash
         ),
         "candidate_hash": None if choice is None else choice.record_hash,
         "model_replay_hash": None if model is None else model.record_hash,
@@ -667,7 +680,10 @@ def readback_local_validation_original(
     ):
         raise ValueError("ORIGINAL_VALIDATION_EVENT_BINDING_MISMATCH")
     payload = event.payload
-    if not isinstance(payload, Mapping) or set(payload) != _LOCAL_RETENTION_PAYLOAD_KEYS:
+    if (
+        not isinstance(payload, Mapping)
+        or set(payload) != _LOCAL_RETENTION_PAYLOAD_KEYS
+    ):
         raise ValueError("ORIGINAL_VALIDATION_PAYLOAD_NOT_EXACT")
     if payload["profile"] != _LOCAL_RETENTION_PROFILE:
         raise ValueError("ORIGINAL_VALIDATION_PROFILE_MISMATCH")
