@@ -123,6 +123,27 @@ new network service, executor identity or source-file implementation**.
   linked attempts. Duplicate identical replay is idempotent, not
   an independent trial. Same grant ID with changed original bytes
   refuses; an accepted correction/revocation adds a retained version.
+- **Grant validity is assessed as of the original, independently
+  authenticated invocation/attempt start**, not when a replay verifier
+  happens to run. Issuance and first availability must precede that start.
+  Expiry is exclusive: an attempt starting at or after
+  `grant_expires_at` cannot use that grant. A later expiry does not
+  invalidate an already started historical attempt.
+- A revocation has its own issuer-verified original record,
+  `revocation_effective_at`, `revocation_recorded_at`, and
+  `revocation_first_available_at`. Under the default prospective
+  policy, it cannot become effective before its independently proven
+  original issuance/first availability. An attempt starting at or after
+  the effective instant is refused; an attempt that started earlier
+  remains valid **for its original grant-at-start check**. A later
+  revocation does not silently reclassify that historical attempt.
+  Any extraordinary retroactive invalidation requires a separate,
+  explicitly accepted owner policy and immutable correction lineage.
+  None is authorized by this proposal.
+- A later revocation never authorizes a new retry or additional order.
+  A still-running model completion remains subject to its separate
+  decision deadline, context, risk and containment policies; grant
+  validity at start alone does not certify the final candidate or RESULT.
 - A `hold` requires verified matching incumbent and current
   account/risk state. `abstain`, `unavailable`, failed and rejected
   attempts remain distinct, retain reason/cost, and authorize no
@@ -131,8 +152,10 @@ new network service, executor identity or source-file implementation**.
 - Two M0 operational run IDs or a repeated deterministic `result_hash`
   do not determine independent scored sample count. The approved
   scientific trial/replication protocol owns that identity.
-- An absent or invalid platform allocation or revoked grant cannot
-  be rehabilitated by computing a new local E1 hash.
+- An absent or invalid platform allocation or grant **already invalid
+  at the attempt-start instant** cannot be rehabilitated by computing
+  a new local E1 hash. Preserve later revocation facts without
+  rewriting a previously valid retained attempt.
 
 ## 5. Proposed consumer verification order
 
@@ -143,10 +166,12 @@ new network service, executor identity or source-file implementation**.
 2. Verify **Matthew's original account allocation issuer and retained
    receipt** independently, including account, arm, run, cutoff and
    full manifest. Refuse arbitrary matching caller account strings.
-3. Retrieve the original scheduler grant from the approved issuer,
-   check original bytes and version/hash, signer/authority,
-   actual issuance and first-availability, grant lineage and
-   request/cutoff/expiry/revocation.
+3. Retrieve the original scheduler grant from the approved issuer;
+   check original bytes, issuer and version, issuance and availability,
+   and original **invocation/attempt-start timestamp**. Evaluate
+   expiry and revocation as of that start, using independently verified
+   original effective/recorded/first-available times. Retain any
+   subsequent revocation without retroactive validity changes.
 4. Krish independently verifies his original K1 context, attempt
    start/terminal, retained validator decision, candidate or absence,
    model replay and raw research costs. Never promote a grant into
@@ -189,22 +214,35 @@ Each vector is a **design expectation, not an executed test**.
 - **G05, self-claimed trust:** valid hash without original scheduler
   issuance/accepted independent verifier. Unavailable, no admitted
   grant. **BLOCKED_ON_SCHEDULER**.
-- **G06, revocation/forgery:** expired, revoked, conflicting same
-  grant ID or forged issuer. Refuse while preserving original
-  revision history. **BLOCKED_ON_SCHEDULER**.
+- **G06a, historical valid replay:** original valid grant and attempt
+  started before its expiry/revocation-effective time, then genuine
+  later revocation before replay verification. Retain historical
+  grant-at-start validity and appended revocation lineage; never
+  infer a new attempt or independent sample.
+  **BLOCKED_ON_SCHEDULER**.
+- **G06b, new attempt after revocation:** an original attempt or retry
+  starts at/after effective revocation or exclusive expiry. Refuse
+  the new invocation without changing the earlier accepted attempt.
+  **BLOCKED_ON_SCHEDULER**.
+- **G06c, forged issuer/conflicting grant:** same ID with changed
+  original bytes, unverifiable revocation origin or fabricated
+  retroactive effective time. Refuse invalid original proof, and
+  retain the earlier immutable record. **BLOCKED_ON_SCHEDULER**.
 - **G07, backdated request:** grant was issued or first available
   after logical K1 invocation. Refuse. **BLOCKED_ON_SCHEDULER**.
-- **G08, future input:** input first available at `21:00:01Z`
-  consumed under `21:00:00Z` cutoff. Invalid causal lookahead.
+- **G08, K1-only future-input control:** source first available at
+  `21:00:01Z` consumed under `21:00:00Z` input cutoff. Invalid
+  causal lookahead independently of whether a grant exists.
   **BLOCKED_ON_507**.
 - **G09, valid completion:** no future input, original allowed
   grant, model completes after cutoff but within decision deadline.
-  Do not reject solely for completion time. **BLOCKED_ON_507**.
+  Do not reject solely for completion time.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
 - **G10, terminal absence:** hold, abstain, unavailable or failed
-  K1 attempt under grant. Preserve distinct outcomes, costs and
-  denominator; the attempt authorizes/evidences no new order, but
-  does not erase existing pending/protective orders or assert RESULT.
-  **BLOCKED_ON_507**.
+  K1 attempt under original grant. Preserve distinct outcomes,
+  costs and denominator. That research attempt authorizes no new
+  order, and cannot erase pending/protective orders or assert RESULT.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
 - **G11, replay/conflict:** exact identical original grant replay
   idempotent; same grant ID and different original bytes invalid.
   **BLOCKED_ON_SCHEDULER**.
