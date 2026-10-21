@@ -71,6 +71,29 @@ def _plain(value: object) -> dict[str, object] | None:
     return cast(dict[str, object], value)
 
 
+def _is_plain_json(value: object, depth: int, budget: list[int]) -> bool:
+    """Only untrusted primitive JSON values, never caller-defined equality."""
+    budget[0] -= 1
+    if budget[0] < 0 or depth > 12:
+        return False
+    if value is None or type(value) in (bool, int):
+        return True
+    if type(value) is str:
+        return len(value) <= 4096
+    if type(value) is list:
+        return len(value) <= 512 and all(
+            _is_plain_json(item, depth + 1, budget) for item in value
+        )
+    if type(value) is dict:
+        return len(value) <= 128 and all(
+            type(key) is str
+            and len(key) <= 128
+            and _is_plain_json(item, depth + 1, budget)
+            for key, item in value.items()
+        )
+    return False
+
+
 def _nonblank(value: object) -> bool:
     return type(value) is str and bool(value.strip())
 
@@ -118,6 +141,10 @@ def preflight_source_envelope_replay(payload: object) -> EnvelopeReplayPreflight
     if root is None:
         return EnvelopeReplayPreflight(
             False, (), (), (), "UNKNOWN", ("payload.not_plain_object",)
+        )
+    if not _is_plain_json(root, 0, [4096]):
+        return EnvelopeReplayPreflight(
+            False, (), (), (), "UNKNOWN", ("payload.not_plain_json",)
         )
     issues: list[str] = []
     if set(root) != _ROOT:
