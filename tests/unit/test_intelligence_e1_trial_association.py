@@ -484,3 +484,49 @@ def test_bogus_original_inference_validation_receipt_cannot_be_valid() -> None:
         receipt, first_available_at=T0 + timedelta(seconds=15),
     )
     _assert_refusal(data, "INVALID_RETAINED_VALIDATION")
+
+
+def test_claimed_issuer_references_change_candidate_hash_not_admission() -> None:
+    data = fixture()
+    original = review_research_e1_binding(**data)
+    data["original_scheduler_grant_ref"] = ArtifactReference(
+        id="unverified-grant", version="proposed-1", sha256="c" * 64,
+    )
+    data["original_account_provisioning_ref"] = ArtifactReference(
+        id="unverified-original-book", version="proposed-1", sha256="d" * 64,
+    )
+    with_unverified_claims = review_research_e1_binding(**data)
+    assert original.structural_consistency
+    assert with_unverified_claims.structural_consistency
+    assert original.candidate_association_hash != (
+        with_unverified_claims.candidate_association_hash
+    )
+    assert not with_unverified_claims.original_issuer_verified
+    assert not with_unverified_claims.admitted_for_e6b_or_trading
+
+
+def test_validation_failure_cannot_carry_valid_candidate() -> None:
+    data = fixture()
+    real_validated = data["validation"]
+    forged = real_validated.model_copy(
+        update={"status": "REJECTED", "is_valid": False}
+    )
+    with pytest.raises(ValueError, match="FAILURE_CANNOT_CARRY_CANDIDATE"):
+        build_retained_validation_candidate(
+            validation_id="forged-rejection",
+            attempt_id=data["started"].attempt_id,
+            original_validation=forged,
+            raw_output_ref=StoredArtifactRef(
+                artifact_id="raw", kind="fixture", content_hash=SHA,
+                location="fixture://raw",
+            ),
+            original_validation_ref=StoredArtifactRef(
+                artifact_id="decision", kind="fixture",
+                content_hash=content_hash(forged.model_dump(mode="python")),
+                location="fixture://decision",
+            ),
+            validator_issuer_ref=ArtifactReference(
+                id="label-only", version="proposed-1", sha256=SHA,
+            ),
+            first_available_at=T0 + timedelta(seconds=6),
+        )
