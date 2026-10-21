@@ -6,6 +6,7 @@ grant, or original M0 RESULT. Those are separately gated PR B and PR C.
 """
 
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal
 
 import pytest
@@ -332,5 +333,118 @@ def test_spoofed_book_between_prepare_and_claim_is_refused(
     with pytest.raises(OpeningBookLifecycleError, match="untrusted field types"):
         _run(engine)
     assert lifecycle.seen == ["retain"]
+    with pytest.raises(OpeningBookLifecycleError, match="not available"):
+        _run(engine)
+
+
+def test_prepared_book_session_key_cannot_alias_mutable_bundle_clock() -> None:
+    """A callback replacing its book key may not mutate the input clock."""
+    baseline = canonical_json(_run(_engine()))
+    engine = _engine()
+    first_session = engine.bundle.session_clock.sessions[0].session_key
+    original_day = first_session.local_date
+
+    class KeySwappingObserver(_Recorder):
+        def retain_original_book(
+            self,
+            *,
+            opening_book: PortfolioStateV2,
+            admission: EvaluationAdmissionV1,
+            protocol: EvaluationProtocolV1,
+            currency_code: str,
+        ) -> None:
+            held = opening_book.session_key
+            assert held is not first_session
+            equivalent = SessionKeyV1.model_validate_json(held.model_dump_json())
+            object.__setattr__(opening_book, "session_key", equivalent)
+            object.__setattr__(held, "local_date", date(2000, 1, 1))
+            super().retain_original_book(
+                opening_book=opening_book,
+                admission=admission,
+                protocol=protocol,
+                currency_code=currency_code,
+            )
+
+    observer = KeySwappingObserver()
+    engine.prepare_opening_book(lifecycle=observer)
+    assert first_session.local_date == original_day
+    assert observer.retained is not None
+    assert observer.retained.session_key.local_date == original_day
+    assert canonical_json(_run(engine)) == baseline
+    assert observer.seen == ["retain", "claim", "consume"]
+
+
+class _MutatingFieldKey(str):
+    """A str subclass that modifies model storage during equal-text lookups."""
+
+    def __new__(
+        cls, spelling: str, owner: PortfolioStateV2 | SessionKeyV1, bad: object
+    ) -> "_MutatingFieldKey":
+        return str.__new__(cls, spelling)
+
+    def __init__(
+        self, spelling: str, owner: PortfolioStateV2 | SessionKeyV1, bad: object
+    ) -> None:
+        self.owner = owner
+        self.bad = bad
+        self.lookups = 0
+
+    def __hash__(self) -> int:
+        return str.__hash__(self)
+
+    def __eq__(self, other: object) -> bool:
+        self.lookups += 1
+        if self.lookups == 3:
+            vars(self.owner)[self] = self.bad
+        return str.__eq__(self, other) is True
+
+
+@pytest.mark.parametrize("phase", ["retain", "claim", "consume"])
+def test_forged_cash_field_key_is_refused_before_any_comparison(
+    monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    engine = _engine()
+    _refuse_session_start(engine, monkeypatch)
+
+    class KeyPoison(_Recorder):
+        def _visit(self, where: str, book: PortfolioStateV2) -> None:
+            if where == phase:
+                values = vars(book)
+                original = values.pop("cash_balance")
+                values[_MutatingFieldKey("cash_balance", book, Decimal("1"))] = original
+            super()._visit(where, book)
+
+    observer = KeyPoison()
+    if phase == "retain":
+        with pytest.raises(OpeningBookLifecycleError, match="untrusted field types"):
+            engine.prepare_opening_book(lifecycle=observer)
+    else:
+        engine.prepare_opening_book(lifecycle=observer)
+        with pytest.raises(OpeningBookLifecycleError, match="untrusted field types"):
+            _run(engine)
+    with pytest.raises(OpeningBookLifecycleError, match="not available"):
+        _run(engine)
+
+
+def test_forged_session_field_key_is_refused_before_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _engine()
+    _refuse_session_start(engine, monkeypatch)
+
+    class SessionKeyPoison(_Recorder):
+        def _visit(self, phase: str, book: PortfolioStateV2) -> None:
+            if phase == "retain":
+                session = book.session_key
+                values = vars(session)
+                original = values.pop("local_date")
+                values[_MutatingFieldKey("local_date", session, date(2000, 1, 1))] = (
+                    original
+                )
+            super()._visit(phase, book)
+
+    observer = SessionKeyPoison()
+    with pytest.raises(OpeningBookLifecycleError, match="untrusted field types"):
+        engine.prepare_opening_book(lifecycle=observer)
     with pytest.raises(OpeningBookLifecycleError, match="not available"):
         _run(engine)
