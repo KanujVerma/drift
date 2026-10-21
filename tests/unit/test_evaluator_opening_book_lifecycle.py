@@ -30,6 +30,8 @@ class _Recorder:
 
     fail: str | None = None
     tamper: str | None = None
+    mutate_identity_at: str | None = None
+    mutate_retention_config: bool = False
     seen: list[str] = field(default_factory=list)
     retained: PortfolioStateV2 | None = None
     claimed: PortfolioStateV2 | None = None
@@ -56,6 +58,9 @@ class _Recorder:
         self.retained = opening_book
         self.currency = currency_code
         self._visit("retain", opening_book)
+        if self.mutate_retention_config:
+            object.__setattr__(admission, "admission_hash", "0" * 64)
+            object.__setattr__(protocol, "initial_cash", Decimal("1"))
 
     def claim_invocation(
         self,
@@ -66,6 +71,8 @@ class _Recorder:
         assert run_identity.admission_hash == opening_book.admission_hash
         self.claimed = opening_book
         self._visit("claim", opening_book)
+        if self.mutate_identity_at == "claim":
+            object.__setattr__(run_identity, "code_version_hash", "1" * 64)
 
     def observe_consumption(
         self,
@@ -76,6 +83,8 @@ class _Recorder:
         assert run_identity.admission_hash == opening_book.admission_hash
         self.consumed = opening_book
         self._visit("consume", opening_book)
+        if self.mutate_identity_at == "consume":
+            object.__setattr__(run_identity, "code_version_hash", "1" * 64)
 
 
 def _refuse_session_start(
@@ -244,3 +253,27 @@ def test_reentrant_preparation_is_refused_before_original_ack() -> None:
     assert lifecycle.seen == ["retain"]
     _run(engine)
     assert lifecycle.seen == ["retain", "claim", "consume"]
+
+
+@pytest.mark.parametrize("phase", ["claim", "consume"])
+def test_observer_cannot_relabel_the_sealed_run_identity(phase: str) -> None:
+    """An observer may mutate its input, but never the engine's original."""
+    baseline = canonical_json(_run(_engine()))
+    engine = _engine()
+    lifecycle = _Recorder(mutate_identity_at=phase)
+    engine.prepare_opening_book(lifecycle=lifecycle)
+    result = _run(engine)
+    assert canonical_json(result) == baseline
+    assert lifecycle.seen == ["retain", "claim", "consume"]
+
+
+def test_retention_observer_cannot_rewrite_engine_policy_inputs() -> None:
+    """Admission and protocol passed to a callback are detached copies."""
+    baseline = canonical_json(_run(_engine()))
+    engine = _engine()
+    lifecycle = _Recorder(mutate_retention_config=True)
+    engine.prepare_opening_book(lifecycle=lifecycle)
+    assert engine.protocol.initial_cash == Decimal("10000")
+    assert lifecycle.retained is not None
+    assert engine.admission.admission_hash == lifecycle.retained.admission_hash
+    assert canonical_json(_run(engine)) == baseline
