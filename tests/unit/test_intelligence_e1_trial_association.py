@@ -54,6 +54,11 @@ T0 = datetime(2026, 10, 20, 10, 0, 0, tzinfo=UTC)
 SHA = "a" * 64
 
 
+def original_utc_text(moment: datetime) -> str:
+    """Match repository canonical_json datetime spelling before source hashing."""
+    return moment.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 def e1_originals() -> tuple[
     CampaignSpecV1,
     tuple[ArmSpecV1, ...],
@@ -175,10 +180,10 @@ def fixture(disposition: str = "propose", *, failure: bool = False,
         },
     }
     context_dict.update({
-        "decision_cutoff": T0.isoformat(),
-        "memory_cutoff": T0.isoformat(),
-        "built_at": (T0 + timedelta(seconds=1)).isoformat(),
-        "review_started_at": (T0 + timedelta(seconds=2)).isoformat(),
+        "decision_cutoff": original_utc_text(T0),
+        "memory_cutoff": original_utc_text(T0),
+        "built_at": original_utc_text(T0 + timedelta(seconds=1)),
+        "review_started_at": original_utc_text(T0 + timedelta(seconds=2)),
     })
     context_dict["record_hash"] = compute_record_hash(context_dict)
     context = ResearchContext.model_validate(context_dict)
@@ -205,8 +210,8 @@ def fixture(disposition: str = "propose", *, failure: bool = False,
             "attempt_id": started.attempt_id,
             "scope": context.scope.model_dump(mode="python"),
             "context_ref": context_ref.model_dump(mode="python"),
-            "completed_at": (T0 + timedelta(seconds=5)).isoformat(),
-            "valid_until": (T0 + timedelta(minutes=1)).isoformat(),
+            "completed_at": original_utc_text(T0 + timedelta(seconds=5)),
+            "valid_until": original_utc_text(T0 + timedelta(minutes=1)),
             "cost_receipt_ids": (),
         })
         if disposition != "propose":
