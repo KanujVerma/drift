@@ -972,6 +972,24 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         self.assertEqual(reverse.cohort_hash, baseline.cohort_hash)
         self.assertEqual(reverse.preflight_hash, baseline.preflight_hash)
 
+        # A genuinely unique mixed-direction manifest remains permitted and
+        # does not change the historical canonical preflight result.
+        mixed: dict[Any, Any] = {}
+        for position, (sec, symbol) in enumerate(self.universe_manifest.items()):
+            if position % 2:
+                mixed[symbol.lower()] = sec
+            else:
+                mixed[sec] = symbol.lower()
+        mixed_result = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx,
+            current_portfolio_state=port,
+            universe_manifest=mixed,
+        )
+        self.assertEqual(mixed_result.status, PreflightStatus.ELIGIBLE)
+        self.assertEqual(mixed_result.preflight_hash, baseline.preflight_hash)
+
     def test_valid_exact_12_etf_universe_eligible(self) -> None:
         """Exact 12-ETF universe with all valid evidence succeeds."""
         ctx = self._build_context(session_count=255)
