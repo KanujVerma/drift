@@ -1600,8 +1600,12 @@ def _verify_untampered_original_book(
     if type(book) is not PortfolioStateV2:
         raise invalid
     values = vars(book)
+    # Check raw key types before any set, equality, attribute lookup or
+    # serialization. A str subclass with a forged __eq__ can mutate the
+    # exposed dict during a seemingly harmless set membership comparison.
     if (
         type(values) is not dict
+        or any(type(key) is not str for key in values)
         or set(values) != set(PortfolioStateV2.model_fields)
         or getattr(book, "__pydantic_extra__", None) is not None
         or getattr(book, "__pydantic_private__", None) is not None
@@ -1637,6 +1641,7 @@ def _verify_untampered_original_book(
     session_fields = vars(session)
     if (
         type(session_fields) is not dict
+        or any(type(key) is not str for key in session_fields)
         or set(session_fields) != set(SessionKeyV1.model_fields)
         or any(
             type(session_fields[name]) is not str
