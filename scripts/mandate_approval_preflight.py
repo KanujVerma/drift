@@ -108,6 +108,29 @@ def _object(value: object) -> dict[str, object] | None:
     return cast(dict[str, object], value)
 
 
+def _is_plain_json(value: object, depth: int, budget: list[int]) -> bool:
+    """Reject objects with mutable or caller-defined comparison behavior."""
+    budget[0] -= 1
+    if budget[0] < 0 or depth > 12:
+        return False
+    if value is None or type(value) in (bool, int):
+        return True
+    if type(value) is str:
+        return len(value) <= 4096
+    if type(value) is list:
+        return len(value) <= 512 and all(
+            _is_plain_json(item, depth + 1, budget) for item in value
+        )
+    if type(value) is dict:
+        return len(value) <= 128 and all(
+            type(key) is str
+            and len(key) <= 128
+            and _is_plain_json(item, depth + 1, budget)
+            for key, item in value.items()
+        )
+    return False
+
+
 def _text(value: object) -> bool:
     return type(value) is str and bool(value.strip())
 
@@ -516,6 +539,10 @@ def preflight_mandate_approval(payload: object) -> MandateApprovalPreflight:
     if root is None:
         return MandateApprovalPreflight(
             False, "REFUSED", False, None, ("payload.not_plain_object",)
+        )
+    if not _is_plain_json(root, 0, [4096]):
+        return MandateApprovalPreflight(
+            False, "REFUSED", False, None, ("payload.not_plain_json",)
         )
     problems: list[str] = []
     if set(root) != _ROOT:
