@@ -220,7 +220,7 @@ original grant-at-start check. Genuine future input is lookahead,
 not a normal after-cutoff model completion. No generic `dict[str, Any]`
 evidence resolver or second financial ledger is allowed.
 
-## 6. Twenty-two synthetic original-grant test vectors
+## 6. Twenty-four synthetic original-grant test vectors
 
 Each vector is a **design expectation, not an executed test**.
 `READY_STRUCTURAL` has accepted E1 fixture verification only.
@@ -324,9 +324,22 @@ Each vector is a **design expectation, not an executed test**.
   **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
 - **G14c, unknown terminal/validation clock:** an otherwise valid
   grant has no independently verified `AttemptRecord.completed_at`
-  or retained original validation availability. Report
-  `UNAVAILABLE` with exact cause, never `VALID` or a phantom
-  within-deadline completion. Preserve attempted denominator.
+  or original retained validation availability. Report
+  `UNAVAILABLE` with exact cause, never a phantom timely decision.
+  Preserve the attempted denominator.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G14d, unknown model response clock:** a model-call attempt has
+  valid grant, terminal and validation records but no authentic
+  `ModelReplayRecord.response_received_at` (or its original issuer
+  is unverifiable). Mark checkpoint decision `UNAVAILABLE`,
+  not within-deadline, while retaining original attempt and costs.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G14e, unknown model parsing clock:** a model-call attempt has
+  valid grant, terminal, validation and response clocks but no
+  independently verified `ModelReplayRecord.parse_completed_at`.
+  Mark checkpoint decision `UNAVAILABLE`, not timely success.
+  Do not impose model-replay fields on a verified no-call terminal
+  refusal. Retain attempted denominator and original cost basis.
   **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
 
 For each issuer-dependent positive case, the eventual producer test
