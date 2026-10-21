@@ -17,7 +17,7 @@ Accountable code producer for this child is Krish, authenticated actor `Krish-Ve
 ## 2. Exact source ownership and scope
 
 This draft PR adds only:
-- `src/drift/intelligence/e1_trial_association.py` (real E1/K1 source-bound structural joining code)
+- `src/drift/loop/e1_trial_association.py` (real E1/K1 source-bound structural joining code)
 - `tests/unit/test_intelligence_e1_trial_association.py` (source-backed positive and adversarial fixtures, **not run**)
 - `docs/architecture/adaptive-experiments/verification/e6b-producer-binding-review.md` (this contract, cross-owner response and AntiGravity packet)
 
@@ -149,8 +149,8 @@ At the exact published PR head, inspect the three new files and source-bound con
 
 ```bash
 uv run pytest tests/unit/test_intelligence_e1_trial_association.py -q
-uv run ruff check src/drift/intelligence/e1_trial_association.py tests/unit/test_intelligence_e1_trial_association.py
-uv run ruff format --check src/drift/intelligence/e1_trial_association.py tests/unit/test_intelligence_e1_trial_association.py
+uv run ruff check src/drift/loop/e1_trial_association.py tests/unit/test_intelligence_e1_trial_association.py
+uv run ruff format --check src/drift/loop/e1_trial_association.py tests/unit/test_intelligence_e1_trial_association.py
 uv run mypy src tests
 uv run pytest
 uv build
