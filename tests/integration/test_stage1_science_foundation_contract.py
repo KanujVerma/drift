@@ -402,6 +402,7 @@ def test_pure_mock_br_oracles_include_unknown_costs_and_losing_ai() -> None:
     losing_adv = calculate_comparative_economic_advantage(losing_gain, r_gain)
     assert (losing_adv.state, losing_adv.value) == ("KNOWN", Decimal("-100"))
 
+
 # ---------------------------------------------------------------------------
 # #518: Two-run E1/E6A structural witnesses, never producer RESULT
 # ---------------------------------------------------------------------------
@@ -447,23 +448,21 @@ def test_two_runs_preserve_distinct_scientific_coverage() -> None:
     missing = _build(*fixture, declarations, snapshots=[second_r, first_b, first_r])
     assert _verify(missing, fixture)
     assert missing.counts == Stage1CoverageCountsV1(4, 1, 2, 1, 3, 2, 1)
-    assert {
-        (pair.run_id, pair.checkpoint_id): pair.pair_state
-        for pair in missing.pairs
-    } == {
-        ("RUN-001", "CKPT-001"): "BOTH_SUBMITTED",
-        ("RUN-002", "CKPT-001"): "TEST_MISSING",
-    }
-    slots_by_identity = {
-        (slot.run_id, slot.arm_id): slot for slot in missing.slots
-    }
-    assert {key: slot.coverage_state for key, slot in slots_by_identity.items()} == {
-        ("RUN-001", "ARM-B"): "EVENTS_RECORDED",
-        ("RUN-001", "ARM-R"): "UNOBSERVED",
-        ("RUN-002", "ARM-B"): "MISSING_SNAPSHOT",
-        ("RUN-002", "ARM-R"): "UNOBSERVED",
-    }
-    assert slots_by_identity[("RUN-002", "ARM-B")].provenance_snapshot is None
+    assert [
+        (pair.run_id, pair.checkpoint_id, pair.pair_state) for pair in missing.pairs
+    ] == [
+        ("RUN-001", "CKPT-001", "BOTH_SUBMITTED"),
+        ("RUN-002", "CKPT-001", "TEST_MISSING"),
+    ]
+    assert [
+        (slot.run_id, slot.arm_id, slot.coverage_state) for slot in missing.slots
+    ] == [
+        ("RUN-001", "ARM-B", "EVENTS_RECORDED"),
+        ("RUN-001", "ARM-R", "UNOBSERVED"),
+        ("RUN-002", "ARM-B", "MISSING_SNAPSHOT"),
+        ("RUN-002", "ARM-R", "UNOBSERVED"),
+    ]
+    assert missing.slots[2].provenance_snapshot is None
 
     second_b = _snapshot(camp, arms, bindings, runs, "ARM-B", run_id="RUN-002")
     assert (second_b.observation_state, second_b.event_count) == ("UNOBSERVED", 0)
@@ -474,10 +473,14 @@ def test_two_runs_preserve_distinct_scientific_coverage() -> None:
     )
     assert _verify(complete, fixture)
     assert complete.counts == Stage1CoverageCountsV1(4, 0, 3, 1, 4, 2, 2)
-    assert all(pair.pair_state == "BOTH_SUBMITTED" for pair in complete.pairs)
-    assert complete.checkpoint_manifest_fingerprint == (
-        missing.checkpoint_manifest_fingerprint
-    )
+    assert [
+        (pair.run_id, pair.pair_state) for pair in complete.pairs
+    ] == [
+        ("RUN-001", "BOTH_SUBMITTED"),
+        ("RUN-002", "BOTH_SUBMITTED"),
+    ]
+    expected_checkpoint_hash = missing.checkpoint_manifest_fingerprint
+    assert complete.checkpoint_manifest_fingerprint == expected_checkpoint_hash
     assert complete.audit_fingerprint != missing.audit_fingerprint
     assert first_b.event_envelopes[0].event_hash == ROOT_EVENT_HASH
     assert camp.campaign_spec_fingerprint == CAMPAIGN_HASH
@@ -510,9 +513,7 @@ def test_cross_run_reused_account_and_omitted_binding_are_refused() -> None:
             expected_run_ids=runs,
         )
     with pytest.raises(ValueError):
-        _build(
-            camp, arms, reused_account_bindings, runs, declarations
-        )
+        _build(camp, arms, reused_account_bindings, runs, declarations)
 
     omitted_second_b = [*bindings[:2], bindings[3]]
     with pytest.raises(ValueError):
