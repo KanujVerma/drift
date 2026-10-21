@@ -124,8 +124,9 @@ new network service, executor identity or source-file implementation**.
 - Original scheduler grant issuance and verified availability must
   precede its designated logical K1 invocation. A grant first issued
   after the attempt cannot be accepted retroactively. Also require
-  `attempt_started_at >= invocation_not_before_at`, using authentic
-  original timestamps: prior issuer availability alone does not
+  `AttemptRecord.started_at >= invocation_not_before_at`, using the
+  original verified timezone-aware K1 start event, not a new field.
+  Prior issuer availability alone does not
   authorize a research attempt before its scheduled start.
 - A stable grant and request identity can have multiple genuine
   linked attempts. Duplicate identical replay is idempotent, not
