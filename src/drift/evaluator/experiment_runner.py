@@ -29,6 +29,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+from typing import Protocol
 from uuid import UUID
 
 from pydantic import TypeAdapter
@@ -80,6 +81,27 @@ class ForeignRunArtifactsError(DriftError, ValueError):
     """
 
 
+class CanonicalM0ResultObserverV1(Protocol):
+    """Optional post-audit observer of actual canonical M0/M2 results.
+
+    This evaluator-neutral interface does not import E1, permit scoring, or
+    authenticate an external issuer. An observer must independently verify
+    the original M0 audit record and source evidence before retaining an E1
+    association. Callback failure leaves the already-written original M0
+    event unchanged and propagates to the caller.
+    """
+
+    def observe_canonical_result(
+        self,
+        *,
+        run: ExperimentRun,
+        artifacts: EvaluationRunArtifactsV2,
+        m0_audit_event_id: UUID,
+    ) -> None:
+        """Receive detached validated artifacts after original M0 audit."""
+        ...
+
+
 @dataclass(frozen=True)
 class ExperimentRunnerContext:
     """Everything an execution needs that the evaluation itself must not own.
@@ -100,6 +122,7 @@ class ExperimentRunnerContext:
     trace_artifact_location: str
     ledger: Ledger | None = None
     audit_event_id: UUID7 | None = None
+    original_result_observer: CanonicalM0ResultObserverV1 | None = None
 
 
 @dataclass(frozen=True)
@@ -472,6 +495,14 @@ def execute_experiment_run(
     inputs = _caller_inputs(specification, context)
     _validate_context(inputs)
     parameters_hash = _bound_parameters_hash(specification, inputs)
+    # A Stage 1 original RESULT observer requires a recorded original M0
+    # event. Refuse before engine invocation if the audit root is absent.
+    if context.original_result_observer is not None and (
+        context.ledger is None or inputs.audit_event_id is None
+    ):
+        raise ValueError(
+            "original-result observation requires an M0 audit ledger and event ID"
+        )
     common: dict[str, object] = {
         "run_id": inputs.run_id,
         "experiment_id": inputs.experiment_id,
@@ -518,4 +549,14 @@ def execute_experiment_run(
         }
     )
     _record_audit_event(context, inputs, run)
+    if context.original_result_observer is not None:
+        # The original M0 row and event already exist, so the observer can
+        # independently re-open them and refuse any forged association.
+        # Never pass it objects subsequently used to seal M0 or M2 output.
+        assert inputs.audit_event_id is not None
+        context.original_result_observer.observe_canonical_result(
+            run=ExperimentRun.model_validate_json(run.model_dump_json()),
+            artifacts=_rebuilt_artifacts(recorded),
+            m0_audit_event_id=inputs.audit_event_id,
+        )
     return run
