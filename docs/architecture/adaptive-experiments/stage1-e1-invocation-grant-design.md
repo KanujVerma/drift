@@ -100,7 +100,8 @@ Neither is an accepted Python class or wire revision.
   retained issuance, not trust a caller's asserted URL or boolean.
 - **Issuance and corrections:** `grant_issued_at`,
   `grant_first_available_at`, `invocation_not_before_at`,
-  `grant_expires_at?`, `revoked_at?`,
+  `grant_expires_at?`, `revocation_effective_at?`,
+  `revocation_recorded_at?`, `revocation_first_available_at?`,
   `revocation_proof_ref?` and `supersedes_grant_ref?`.
 
 Original bytes and a content hash prove consistency only. Issuer
@@ -190,7 +191,7 @@ is `INVALID`. Genuine future input consumption is causal lookahead,
 not a normal after-cutoff model completion. No generic `dict[str, Any]`
 evidence resolver or second financial ledger is allowed.
 
-## 6. Twelve synthetic original-grant test vectors
+## 6. Fourteen synthetic original-grant test vectors
 
 Each vector is a **design expectation, not an executed test**.
 `READY_STRUCTURAL` has accepted E1 fixture verification only.
