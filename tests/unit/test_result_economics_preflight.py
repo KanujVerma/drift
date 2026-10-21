@@ -207,6 +207,9 @@ def test_available_correction_replaces_not_accumulates_expense() -> None:
         }
     )
     _costs(data).append(later)
+    _map(data, "cost_scope")["coverage_available_utc"] = (
+        "2026-01-06T11:30:00Z"
+    )
     assert preflight_result_economics(data).economic_gain_usd == Decimal("90")
 
 
@@ -333,3 +336,9 @@ def test_nested_spoofed_equality_never_invoked() -> None:
     _map(data, "identity")["result_hash"] = Spoofed()
     result = preflight_result_economics(data)
     assert result.reasons == ("payload.not_plain_json",)
+
+
+def test_claimed_charge_coverage_cannot_close_before_known_invoice() -> None:
+    data = fixture()
+    _costs(data)[0]["first_available_utc"] = "2026-01-06T11:30:00Z"
+    _refuse(data, "cost_scope.coverage_before_latest_charge")
