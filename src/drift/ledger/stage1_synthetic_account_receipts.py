@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
+from decimal import Decimal
 from uuid import UUID, uuid7
 
 from drift.domain.evaluator_portfolio import PortfolioStateV2
@@ -303,7 +303,7 @@ class LocalSyntheticAccountReceiptStoreV1:
         if (
             book.admission_hash != expected_fields.admission_hash
             or content_hash(book.session_key) != expected_fields.first_session_fingerprint
-            or str(book.cash_balance) != expected_fields.initial_cash
+            or book.cash_balance != Decimal(expected_fields.initial_cash)
             or book.net_asset_value != book.cash_balance
             or book.holdings or book.pending_cash_claims or book.mark is not None
             or book.settled_claim_ids or book.applied_effect_ids
