@@ -637,8 +637,7 @@ def screen_feed_coverage(
         # Convert both aware endpoints to UTC for the closure comparison.
         and (
             coverage.state not in ("covered_empty", "covered_with_events")
-            or coverage.end_at.astimezone(UTC)
-            <= coverage.observed_at.astimezone(UTC)
+            or coverage.end_at.astimezone(UTC) <= coverage.observed_at.astimezone(UTC)
         )
         and coverage.state
         in ("covered_empty", "covered_with_events", "partial", "failed", "unknown")
