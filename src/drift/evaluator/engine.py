@@ -2170,7 +2170,16 @@ class SessionEvaluatorEngine:
             try:
                 if index > 0:
                     loop.state = self._advance(loop.state, session.session_key)
-                self._emit_session_start(loop, index, session)
+                if prepared_digest is None:
+                    # Legacy callers retain their existing extension hooks.
+                    self._emit_session_start(loop, index, session)
+                else:
+                    # An observer that captured the engine must not be able
+                    # to inject an instance-level hook that sees the private
+                    # original book after our last integrity check.
+                    SessionEvaluatorEngine._emit_session_start(
+                        self, loop, index, session
+                    )
                 halt = self._step_session(loop, index, session, decide)
             except (
                 PromotionLaneDisabledError,
