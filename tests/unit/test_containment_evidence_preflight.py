@@ -147,6 +147,14 @@ def test_mismatched_environment_and_self_review() -> None:
     assert "independent_verifier.self_review" in reasons
 
 
+def test_unhashable_nested_status_is_refused_not_raised() -> None:
+    item = fixture()
+    _cases(item)[0]["denial_status"] = {"claim": "passed"}
+    assert "A01.denial_status.invalid" in preflight_containment_evidence(
+        item
+    ).reasons
+
+
 def test_incomplete_evidence_never_authorizes_launch() -> None:
     item = fixture()
     item["cases"] = "I passed all probes"
