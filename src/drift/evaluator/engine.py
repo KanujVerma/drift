@@ -1975,7 +1975,11 @@ class SessionEvaluatorEngine:
                 prepared_book = self._prepared_opening_book
                 lifecycle = self._opening_book_lifecycle
                 prepared_digest = self._prepared_opening_digest
-                if prepared_book is None or lifecycle is None or prepared_digest is None:
+                if (
+                    prepared_book is None
+                    or lifecycle is None
+                    or prepared_digest is None
+                ):
                     self._opening_book_phase = "failed"
                     raise OpeningBookLifecycleError(
                         "prepared opening-book state is incomplete"
