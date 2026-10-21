@@ -58,6 +58,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from functools import cache
+from threading import Lock
 from types import NoneType, UnionType
 from typing import (
     Any,
@@ -207,6 +208,10 @@ from drift.evaluator.corporate_action_coverage import CorporateActionCoverageInd
 from drift.evaluator.corporate_actions import CorporateActionProcessor
 from drift.evaluator.execution import AtomicRebalanceEngine, resolve_execution_listings
 from drift.evaluator.exploratory_dividends import ExploratoryDividendPolicyV1
+from drift.evaluator.opening_book_lifecycle import (
+    OpeningBookLifecycleError,
+    OpeningBookLifecycleV1,
+)
 from drift.evaluator.portfolio import (
     PortfolioAccountingKernel,
     initial_portfolio_state,
@@ -1682,6 +1687,16 @@ class SessionEvaluatorEngine:
         self._rebalance = AtomicRebalanceEngine(
             cost_model=cost_model, session_clock=bundle.session_clock
         )
+        # #508 PR A: optional original-book preparation is an isolated engine
+        # lifecycle. An unprepared engine preserves the existing run behavior.
+        self._opening_book_lock = Lock()
+        self._opening_book_phase: Literal[
+            "new", "preparing", "prepared", "claimed", "consumed", "failed"
+        ] = "new"
+        self._legacy_run_started = False
+        self._opening_book_lifecycle: OpeningBookLifecycleV1 | None = None
+        self._prepared_opening_book: PortfolioStateV2 | None = None
+        self._prepared_opening_digest: str | None = None
 
     # -- accessors ---------------------------------------------------------
 
@@ -1878,6 +1893,54 @@ class SessionEvaluatorEngine:
         # with. A V1 identity binds none, and the strategy is not read for them.
         require_bound_strategy_parameters(run_identity, strategy)
 
+    # -- optional original opening-book lifecycle --------------------------
+
+    def prepare_opening_book(self, *, lifecycle: OpeningBookLifecycleV1) -> None:
+        """Prepare one actual engine-created fresh book before an invocation.
+
+        The observer must retain its original book through a separately
+        accepted producer. Callback success is *not* issuer authentication:
+        PR B must prove original retention and the trusted ledger origin.
+        Once preparation is attempted this engine never falls back to fresh
+        capital, even when the observer fails.
+        """
+        with self._opening_book_lock:
+            if self._opening_book_phase != "new" or self._legacy_run_started:
+                raise OpeningBookLifecycleError(
+                    "opening-book preparation requires a fresh, unused engine"
+                )
+            self._opening_book_phase = "preparing"
+
+        try:
+            # This is the same initializer and exact set of arguments that
+            # the legacy run used. No caller can inject arbitrary holdings.
+            opening_book = initial_portfolio_state(
+                session_key=self._bundle.session_clock.sessions[0].session_key,
+                initial_cash=self._protocol.initial_cash,
+                admission=self._admission,
+            )
+            original_digest = content_hash(opening_book)
+            lifecycle.retain_original_book(
+                opening_book=opening_book,
+                admission=self._admission,
+                protocol=self._protocol,
+                currency_code=self._book_currency_code,
+            )
+            if content_hash(opening_book) != original_digest:
+                raise OpeningBookLifecycleError(
+                    "preparation observer changed the original opening book"
+                )
+        except BaseException:
+            with self._opening_book_lock:
+                self._opening_book_phase = "failed"
+            raise
+
+        with self._opening_book_lock:
+            self._prepared_opening_book = opening_book
+            self._prepared_opening_digest = original_digest
+            self._opening_book_lifecycle = lifecycle
+            self._opening_book_phase = "prepared"
+
     # -- run ----------------------------------------------------------------
 
     def run(
@@ -1900,13 +1963,63 @@ class SessionEvaluatorEngine:
         self._require_bound_identity(run_identity, strategy)
         decide = self._lane_decision(strategy)
         sessions = self._bundle.session_clock.sessions
-        loop = _Loop(
-            state=initial_portfolio_state(
-                session_key=sessions[0].session_key,
-                initial_cash=self._protocol.initial_cash,
-                admission=self._admission,
+        with self._opening_book_lock:
+            if self._opening_book_phase == "new":
+                # Existing direct engine callers may still run/replay freely,
+                # but cannot switch into provisioned mode after the fact.
+                self._legacy_run_started = True
+                prepared_book = None
+                lifecycle = None
+                prepared_digest = None
+            elif self._opening_book_phase == "prepared":
+                prepared_book = self._prepared_opening_book
+                lifecycle = self._opening_book_lifecycle
+                prepared_digest = self._prepared_opening_digest
+                if prepared_book is None or lifecycle is None or prepared_digest is None:
+                    self._opening_book_phase = "failed"
+                    raise OpeningBookLifecycleError(
+                        "prepared opening-book state is incomplete"
+                    )
+                # Make the claim single-winner before invoking any callback.
+                # A failed or uncertain claim must not be retried as new cash.
+                self._opening_book_phase = "claimed"
+            else:
+                raise OpeningBookLifecycleError(
+                    "prepared opening book is not available for another run"
+                )
+
+        if prepared_book is None:
+            loop = _Loop(
+                state=initial_portfolio_state(
+                    session_key=sessions[0].session_key,
+                    initial_cash=self._protocol.initial_cash,
+                    admission=self._admission,
+                )
             )
-        )
+        else:
+            assert lifecycle is not None and prepared_digest is not None
+            if content_hash(prepared_book) != prepared_digest:
+                raise OpeningBookLifecycleError(
+                    "prepared original book changed before the invocation claim"
+                )
+            lifecycle.claim_invocation(
+                opening_book=prepared_book, run_identity=run_identity
+            )
+            if content_hash(prepared_book) != prepared_digest:
+                raise OpeningBookLifecycleError(
+                    "invocation observer changed the original opening book"
+                )
+            loop = _Loop(state=prepared_book)
+            with self._opening_book_lock:
+                self._opening_book_phase = "consumed"
+            lifecycle.observe_consumption(
+                opening_book=loop.state, run_identity=run_identity
+            )
+            if content_hash(loop.state) != prepared_digest:
+                raise OpeningBookLifecycleError(
+                    "consumption observer changed the original opening book"
+                )
+
         halt: _Halt | None = None
         for index, session in enumerate(sessions):
             try:
