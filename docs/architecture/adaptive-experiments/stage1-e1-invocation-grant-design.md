@@ -251,7 +251,7 @@ original grant-at-start check. Genuine future input is lookahead,
 not a normal after-cutoff model completion. No generic `dict[str, Any]`
 evidence resolver or second financial ledger is allowed.
 
-## 6. Twenty-four synthetic original-grant test vectors
+## 6. Thirty synthetic original-grant test vectors
 
 Each vector is a **design expectation, not an executed test**.
 `READY_STRUCTURAL` has accepted E1 fixture verification only.
@@ -371,6 +371,42 @@ Each vector is a **design expectation, not an executed test**.
   Mark checkpoint decision `UNAVAILABLE`, not timely success.
   Do not impose model-replay fields on a verified no-call terminal
   refusal. Retain attempted denominator and original cost basis.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+
+- **G15a, wrong logical request:** authentic
+  `AttemptRecord.logical_request_id` differs from the grant
+  despite matching E1 account/arm/checkpoint. Refuse; one
+  request cannot reuse another request's original grant.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G15b, wrong research method:** independently retained
+  `AttemptRecord.method_ref`, `ResearchContext.method_ref`
+  or applicable `ModelReplayRecord.method_ref` differs
+  from the grant through #507's accepted mapping. Refuse
+  rather than trusting a method string or copied hash.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G15c, mismatched original context:** retained
+  `AttemptRecord.context_ref` references another context,
+  the original `ResearchContext.decision_cutoff` differs
+  from the grant by instant, or context account/arm scope
+  disagrees. Refuse this grant/attempt association.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G16a, response predates request:** original authentic
+  `ModelReplayRecord.response_received_at` precedes
+  `request_sent_at`, or request precedes the actual
+  `AttemptRecord.started_at`. Refuse `INVALID` chronology
+  even if all clock values are before decision deadline.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G16b, parsing predates response:** authentic
+  `ModelReplayRecord.parse_completed_at` precedes the
+  original `response_received_at`. Refuse `INVALID`
+  chronology; a deadline alone cannot validate it.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G16c, terminal predates validation:** original
+  `AttemptRecord.completed_at` predates retained
+  validator first availability, though both precede
+  the decision deadline. Refuse `INVALID` chronology,
+  preserve original terminal and cost receipts, and never
+  backdate validation to claim timely eligibility.
   **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
 
 For each issuer-dependent positive case, the eventual producer test
