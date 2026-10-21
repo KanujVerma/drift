@@ -516,13 +516,18 @@ def execute_experiment_run(
     re-raised exactly as ``PromotionLaneDisabledError`` is, never recorded as
     a FAILED run. A V1 run is unchanged.
     """
+    # A strategy can retain/mutate the context object during decide().
+    # Capture the authorized observer ONCE before any strategy execution,
+    # and use the same object for the admission requirement, event schema,
+    # and callback. Re-reading context afterward allows false V1 downgrades.
+    original_result_observer = context.original_result_observer
     refuse_promotion_lane(context.engine.admission, site="the experiment runner")
     inputs = _caller_inputs(specification, context)
     _validate_context(inputs)
     parameters_hash = _bound_parameters_hash(specification, inputs)
     # A Stage 1 original RESULT observer requires a recorded original M0
     # event. Refuse before engine invocation if the audit root is absent.
-    if context.original_result_observer is not None and (
+    if original_result_observer is not None and (
         context.ledger is None or inputs.audit_event_id is None
     ):
         raise ValueError(
@@ -579,16 +584,16 @@ def execute_experiment_run(
         run,
         original_final_book_hash=(
             content_hash(recorded.final_state)
-            if context.original_result_observer is not None
+            if original_result_observer is not None
             else None
         ),
     )
-    if context.original_result_observer is not None:
+    if original_result_observer is not None:
         # The original M0 row and event already exist, so the observer can
         # independently re-open them and refuse any forged association.
         # Never pass it objects subsequently used to seal M0 or M2 output.
         assert inputs.audit_event_id is not None
-        context.original_result_observer.observe_canonical_result(
+        original_result_observer.observe_canonical_result(
             run=ExperimentRun.model_validate_json(run.model_dump_json()),
             artifacts=_rebuilt_artifacts(recorded),
             m0_audit_event_id=inputs.audit_event_id,
