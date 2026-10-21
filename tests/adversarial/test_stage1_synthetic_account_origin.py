@@ -11,9 +11,21 @@ from uuid import uuid7
 
 import pytest
 from test_evaluator_engine import _engine, _run, _run_identity
+from test_stage1_campaign_config import (
+    make_golden_arm_b,
+    make_golden_arm_r,
+    make_golden_bindings,
+    make_golden_campaign,
+)
 from test_stage1_synthetic_account_lifecycle import _coordinator, _store
 
 from drift.evaluator.opening_book_lifecycle import OpeningBookLifecycleError
+from drift.experiments.stage1_trial_provenance import (
+    build_stage1_trial_provenance_snapshot,
+)
+from drift.loop.stage1_synthetic_account_lifecycle import (
+    Stage1SyntheticAccountLifecycleV1,
+)
 from drift.ledger.stage1_synthetic_account_receipts import (
     ALLOCATION,
     ConfiguredLocalSyntheticOriginV1,
@@ -178,3 +190,40 @@ def test_claim_clock_rollback_cannot_create_success_or_fresh_cash(
     ]
     with pytest.raises(OpeningBookLifecycleError, match="not available"):
         _run(engine)
+
+
+def test_caller_mutation_after_e1_verification_cannot_redirect_account(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    camp = make_golden_campaign()
+    arms = (make_golden_arm_b(), make_golden_arm_r())
+    bindings = tuple(make_golden_bindings())
+    provenance = build_stage1_trial_provenance_snapshot(
+        campaign=camp,
+        arms=arms,
+        bindings=bindings,
+        expected_run_ids=("RUN-001",),
+        run_id="RUN-001",
+        arm_id="ARM-B",
+        checkpoint_id="CKPT-001",
+        events=(),
+    )
+    coordinator = Stage1SyntheticAccountLifecycleV1(
+        campaign=camp,
+        arms=arms,
+        bindings=bindings,
+        expected_run_ids=("RUN-001",),
+        provenance=provenance,
+        store=store,
+    )
+    original_account = provenance.scope.run_account_binding
+    object.__setattr__(
+        original_account, "portfolio_account_id", "SYNTH-ACC-R-001"
+    )
+    with pytest.raises(
+        LocalAccountReceiptError, match="E1_PROVENANCE_MUTATED_AFTER_VALIDATION"
+    ):
+        _engine().prepare_opening_book(lifecycle=coordinator)
+    assert store.origin.verified_events() == ()
+    assert coordinator.local_phase == "failed"
