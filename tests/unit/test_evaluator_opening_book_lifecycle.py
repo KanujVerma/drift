@@ -132,8 +132,9 @@ def test_prepared_engine_consumes_same_original_and_matches_legacy(
     lifecycle = _Recorder()
     engine.prepare_opening_book(lifecycle=lifecycle)
     assert originals == [lifecycle.retained]
-    assert lifecycle.retained is originals[0]
     assert lifecycle.retained is not None
+    assert lifecycle.retained is not originals[0]
+    assert canonical_json(lifecycle.retained) == canonical_json(originals[0])
     assert lifecycle.currency == "USD"
     assert lifecycle.retained.net_asset_value == Decimal("10000")
     assert lifecycle.retained.holdings == ()
@@ -143,6 +144,8 @@ def test_prepared_engine_consumes_same_original_and_matches_legacy(
     prepared_artifacts = _run(engine)
     assert originals == [lifecycle.retained]
     assert lifecycle.retained is lifecycle.claimed is lifecycle.consumed
+    assert engine._prepared_opening_book is originals[0]
+    assert engine._prepared_opening_book is not lifecycle.retained
     assert lifecycle.seen == ["retain", "claim", "consume"]
     assert canonical_json(prepared_artifacts) == canonical_json(legacy_artifacts)
     assert prepared_artifacts.result.result_hash == legacy_artifacts.result.result_hash
@@ -379,7 +382,7 @@ class _MutatingFieldKey(str):
 
     def __new__(
         cls, spelling: str, owner: PortfolioStateV2 | SessionKeyV1, bad: object
-    ) -> "_MutatingFieldKey":
+    ) -> _MutatingFieldKey:
         return str.__new__(cls, spelling)
 
     def __init__(
@@ -448,3 +451,52 @@ def test_forged_session_field_key_is_refused_before_lookup(
         engine.prepare_opening_book(lifecycle=observer)
     with pytest.raises(OpeningBookLifecycleError, match="not available"):
         _run(engine)
+
+
+def test_post_callback_async_observer_tamper_cannot_change_original_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Observer-held books cannot change execution after the last check."""
+    baseline = canonical_json(_run(_engine()))
+    engine = _engine()
+    lifecycle = _Recorder()
+    engine.prepare_opening_book(lifecycle=lifecycle)
+    assert lifecycle.retained is not None
+    assert engine._prepared_opening_book is not lifecycle.retained
+    actual_emit = engine._emit_session_start
+    changed = False
+
+    def after_last_callback(*args: object, **kwargs: object) -> None:
+        nonlocal changed
+        if not changed:
+            changed = True
+            # Deterministically simulate an observer worker modifying its
+            # retained book after observe_consumption and the last guard,
+            # immediately before the engine emits the first session.
+            object.__setattr__(lifecycle.retained, "cash_balance", Decimal("1"))
+            object.__setattr__(lifecycle.retained, "net_asset_value", Decimal("1"))
+        actual_emit(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(engine, "_emit_session_start", after_last_callback)
+    artifacts = _run(engine)
+    assert changed
+    assert canonical_json(artifacts) == baseline
+    assert lifecycle.retained.cash_balance == Decimal("1")
+    assert artifacts.result.metrics.initial_cash == Decimal("10000")
+    assert engine._prepared_opening_book is not lifecycle.retained
+
+
+def test_private_original_not_exposed_to_retention_claim_or_consumption() -> None:
+    """All callbacks retain one detached twin with original source bytes."""
+    engine = _engine()
+    lifecycle = _Recorder()
+    engine.prepare_opening_book(lifecycle=lifecycle)
+    original = engine._prepared_opening_book
+    twin = lifecycle.retained
+    assert original is not None and twin is not None
+    assert original is not twin
+    assert canonical_json(original) == canonical_json(twin)
+    _run(engine)
+    assert lifecycle.retained is lifecycle.claimed is lifecycle.consumed
+    assert lifecycle.claimed is not original
+    assert original.cash_balance == Decimal("10000")
