@@ -84,14 +84,11 @@ class ResearchE1BindingReview:
 
 
 def _utc(value: datetime, field: str) -> None:
-    if (
-        type(value) is not datetime
-        or value.tzinfo is None
-        or value.utcoffset() is None
-    ):
+    if type(value) is not datetime or value.tzinfo is None:
         raise ValueError(f"{field}: UTC instant required")
-    if value.utcoffset().total_seconds() != 0:
-        raise ValueError(f"{field}: non-UTC timestamp")
+    offset = value.utcoffset()
+    if offset is None or offset.total_seconds() != 0:
+        raise ValueError(f"{field}: UTC instant required")
 
 
 def _model_copy[T: BaseModel](cls: type[T], value: object, field: str) -> T:
@@ -241,7 +238,7 @@ def review_research_e1_binding(
     still require separately accepted, original producer verifiers.
     """
     reasons: list[str] = []
-    blocked = (
+    blocked: tuple[str, ...] = (
         "MISSING_MATTHEW_ORIGINAL_ACCOUNT_ISSUER_508",
         "MISSING_KANUJ_ORIGINAL_SCHEDULER_ISSUER_512",
         "MISSING_KRISH_ORIGINAL_VALIDATION_RETENTION_507",
