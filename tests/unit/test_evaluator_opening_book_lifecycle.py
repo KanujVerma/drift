@@ -6,6 +6,7 @@ grant, or original M0 RESULT. Those are separately gated PR B and PR C.
 """
 
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal
 
 import pytest
@@ -334,3 +335,40 @@ def test_spoofed_book_between_prepare_and_claim_is_refused(
     assert lifecycle.seen == ["retain"]
     with pytest.raises(OpeningBookLifecycleError, match="not available"):
         _run(engine)
+
+
+def test_prepared_book_session_key_cannot_alias_mutable_bundle_clock() -> None:
+    """A callback replacing its book key may not mutate the input clock."""
+    baseline = canonical_json(_run(_engine()))
+    engine = _engine()
+    first_session = engine.bundle.session_clock.sessions[0].session_key
+    original_day = first_session.local_date
+
+    class KeySwappingObserver(_Recorder):
+        def retain_original_book(
+            self,
+            *,
+            opening_book: PortfolioStateV2,
+            admission: EvaluationAdmissionV1,
+            protocol: EvaluationProtocolV1,
+            currency_code: str,
+        ) -> None:
+            held = opening_book.session_key
+            assert held is not first_session
+            equivalent = SessionKeyV1.model_validate_json(held.model_dump_json())
+            object.__setattr__(opening_book, "session_key", equivalent)
+            object.__setattr__(held, "local_date", date(2000, 1, 1))
+            super().retain_original_book(
+                opening_book=opening_book,
+                admission=admission,
+                protocol=protocol,
+                currency_code=currency_code,
+            )
+
+    observer = KeySwappingObserver()
+    engine.prepare_opening_book(lifecycle=observer)
+    assert first_session.local_date == original_day
+    assert observer.retained is not None
+    assert observer.retained.session_key.local_date == original_day
+    assert canonical_json(_run(engine)) == baseline
+    assert observer.seen == ["retain", "claim", "consume"]
