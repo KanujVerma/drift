@@ -119,7 +119,10 @@ new network service, executor identity or source-file implementation**.
   They must not be backdated or misclassified as future input.
 - Original scheduler grant issuance and verified availability must
   precede its designated logical K1 invocation. A grant first issued
-  after the attempt cannot be accepted retroactively.
+  after the attempt cannot be accepted retroactively. Also require
+  `attempt_started_at >= invocation_not_before_at`, using authentic
+  original timestamps: prior issuer availability alone does not
+  authorize a research attempt before its scheduled start.
 - A stable grant and request identity can have multiple genuine
   linked attempts. Duplicate identical replay is idempotent, not
   an independent trial. Same grant ID with changed original bytes
@@ -169,10 +172,12 @@ new network service, executor identity or source-file implementation**.
    full manifest. Refuse arbitrary matching caller account strings.
 3. Retrieve the original scheduler grant from the approved issuer;
    check original bytes, issuer and version, issuance and availability,
-   and original **invocation/attempt-start timestamp**. Evaluate
-   expiry and revocation as of that start, using independently verified
-   original effective/recorded/first-available times. Retain any
-   subsequent revocation without retroactive validity changes.
+   and original **invocation/attempt-start timestamp**. Require the
+   attempt start at/after `invocation_not_before_at` and before the
+   exclusive `grant_expires_at` when present. Evaluate revocation
+   as of that original start, using independently verified effective,
+   recorded and first-available instants. Retain any subsequent
+   revocation without retroactive validity changes.
 4. Krish independently verifies his original K1 context, attempt
    start/terminal, retained validator decision, candidate or absence,
    model replay and raw research costs. Never promote a grant into
@@ -186,12 +191,15 @@ new network service, executor identity or source-file implementation**.
    the attempted/opportunity denominator.
 
 Missing original issuer or producer evidence is `UNAVAILABLE` with
-a reason. Forged, revoked, conflicting or scope-mismatched evidence
-is `INVALID`. Genuine future input consumption is causal lookahead,
+a reason. Forged, conflicting or scope-mismatched evidence, a grant
+revoked or expired **at/before its original attempt start**, or
+an invocation starting **before `invocation_not_before_at`** is
+`INVALID`. A later revocation does not invalidate the earlier
+original grant-at-start check. Genuine future input is lookahead,
 not a normal after-cutoff model completion. No generic `dict[str, Any]`
 evidence resolver or second financial ledger is allowed.
 
-## 6. Fourteen synthetic original-grant test vectors
+## 6. Fifteen synthetic original-grant test vectors
 
 Each vector is a **design expectation, not an executed test**.
 `READY_STRUCTURAL` has accepted E1 fixture verification only.
@@ -209,28 +217,31 @@ Each vector is a **design expectation, not an executed test**.
   issuance claim. **READY_STRUCTURAL**.
 - **G03, wrong scope:** mutate run, checkpoint or full E1 manifest
   while retaining original grant. Reject, even if a wrapper was
-  rehashed. **BLOCKED_ON_SCHEDULER**.
+  rehashed. **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER**.
 - **G04, crossed account:** ARM-B grant references ARM-R's actual
-  original allocation. Reject. **BLOCKED_ON_508**.
+  original allocation. Reject.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER**.
 - **G05, self-claimed trust:** valid hash without original scheduler
   issuance/accepted independent verifier. Unavailable, no admitted
-  grant. **BLOCKED_ON_SCHEDULER**.
+  grant. **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER**.
 - **G06a, historical valid replay:** original valid grant and attempt
   started before its expiry/revocation-effective time, then genuine
   later revocation before replay verification. Retain historical
   grant-at-start validity and appended revocation lineage; never
   infer a new attempt or independent sample.
-  **BLOCKED_ON_SCHEDULER**.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
 - **G06b, new attempt after revocation:** an original attempt or retry
   starts at/after effective revocation or exclusive expiry. Refuse
   the new invocation without changing the earlier accepted attempt.
-  **BLOCKED_ON_SCHEDULER**.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
 - **G06c, forged issuer/conflicting grant:** same ID with changed
   original bytes, unverifiable revocation origin or fabricated
   retroactive effective time. Refuse invalid original proof, and
-  retain the earlier immutable record. **BLOCKED_ON_SCHEDULER**.
+  retain the earlier immutable record.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER**.
 - **G07, backdated request:** grant was issued or first available
-  after logical K1 invocation. Refuse. **BLOCKED_ON_SCHEDULER**.
+  after logical K1 invocation. Refuse.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
 - **G08, K1-only future-input control:** source first available at
   `21:00:01Z` consumed under `21:00:00Z` input cutoff. Invalid
   causal lookahead independently of whether a grant exists.
@@ -246,11 +257,16 @@ Each vector is a **design expectation, not an executed test**.
   **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
 - **G11, replay/conflict:** exact identical original grant replay
   idempotent; same grant ID and different original bytes invalid.
-  **BLOCKED_ON_SCHEDULER**.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER**.
 - **G12, repeated M2 result:** identical deterministic result hash
   but another operational ID. Retain genuine association lineage;
   never add independent scientific sample from ID alone.
   **BLOCKED_ON_508**.
+- **G13, premature invocation:** an original grant is valid and
+  already available, but the K1 attempt started before
+  `invocation_not_before_at`. Refuse the early attempt with its
+  original timestamp and reason even if all account/scope hashes match.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
 
 For each issuer-dependent positive case, the eventual producer test
 must independently prove a forged or missing original issuer **fails**.
