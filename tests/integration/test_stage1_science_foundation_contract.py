@@ -454,19 +454,16 @@ def test_two_runs_preserve_distinct_scientific_coverage() -> None:
         ("RUN-001", "CKPT-001"): "BOTH_SUBMITTED",
         ("RUN-002", "CKPT-001"): "TEST_MISSING",
     }
-    assert {
-        (slot.run_id, slot.arm_id): slot.coverage_state
-        for slot in missing.slots
-    } == {
+    slots_by_identity = {
+        (slot.run_id, slot.arm_id): slot for slot in missing.slots
+    }
+    assert {key: slot.coverage_state for key, slot in slots_by_identity.items()} == {
         ("RUN-001", "ARM-B"): "EVENTS_RECORDED",
         ("RUN-001", "ARM-R"): "UNOBSERVED",
         ("RUN-002", "ARM-B"): "MISSING_SNAPSHOT",
         ("RUN-002", "ARM-R"): "UNOBSERVED",
     }
-    assert next(
-        slot for slot in missing.slots
-        if slot.run_id == "RUN-002" and slot.arm_id == "ARM-B"
-    ).provenance_snapshot is None
+    assert slots_by_identity[("RUN-002", "ARM-B")].provenance_snapshot is None
 
     second_b = _snapshot(camp, arms, bindings, runs, "ARM-B", run_id="RUN-002")
     assert (second_b.observation_state, second_b.event_count) == ("UNOBSERVED", 0)
