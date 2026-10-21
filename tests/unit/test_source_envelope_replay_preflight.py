@@ -48,7 +48,7 @@ def fixture() -> dict[str, object]:
         "coverage": {
             "query_scope_ref": "synthetic-query-scope-1",
             "interval_start_utc": "2026-01-02T10:00:00Z",
-            "interval_end_utc": "2026-01-02T11:00:00Z",
+            "interval_end_utc": "2026-01-02T10:35:00Z",
             "available_utc": "2026-01-02T10:35:04Z",
             "state": "COVERED_WITH_EVENTS",
             "matching_event_count": 1,
@@ -327,3 +327,40 @@ def test_plain_containers_are_required_to_avoid_spoofed_values() -> None:
 
     result = preflight_source_envelope_replay(DeceptiveMap(fixture()))
     assert result.reasons == ("payload.not_plain_object",)
+
+
+def test_coverage_interval_cannot_close_before_its_end() -> None:
+    data = fixture()
+    _coverage(data)["interval_end_utc"] = "2026-01-02T11:00:00Z"
+    _assert_refusal(data, "coverage.closed_before_interval_end")
+
+
+def test_empty_claim_refuses_already_known_event_but_not_future_delivery() -> None:
+    data = fixture()
+    _coverage(data)["state"] = "COVERED_EMPTY"
+    _coverage(data)["matching_event_count"] = 0
+    _assert_refusal(data, "coverage.claims_empty_despite_event_receipts")
+
+    data = fixture()
+    _coverage(data)["state"] = "COVERED_EMPTY"
+    _coverage(data)["matching_event_count"] = 0
+    _event(data)["published_utc"] = "2026-01-02T10:34:58Z"
+    _event(data)["first_received_utc"] = "2026-01-02T10:36:01Z"
+    _event(data)["normalized_available_utc"] = "2026-01-02T10:36:02Z"
+    _event(data)["usable_available_utc"] = "2026-01-02T10:36:03Z"
+    result = preflight_source_envelope_replay(data)
+    assert result.structurally_reviewable
+    assert result.coverage_at_cutoff == "COVERED_EMPTY"
+    assert result.eligible_receipt_ids == ()
+
+
+def test_nested_untrusted_custom_objects_fail_before_equality() -> None:
+    data = fixture()
+
+    class HostileValue:
+        def __eq__(self, _: object) -> bool:
+            raise AssertionError("Untrusted __eq__ must never be called")
+
+    _event(data)["source_version_id"] = HostileValue()
+    result = preflight_source_envelope_replay(data)
+    assert result.reasons == ("payload.not_plain_json",)
