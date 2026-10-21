@@ -203,7 +203,10 @@ def test_independent_b_r_accounts_keep_separate_original_results(
     assert pb.operational_m0_run_id != pr.operational_m0_run_id
     assert pb.result_hash == pr.result_hash
     assert pb.trace_hash == pr.trace_hash
-    assert len([e for e in origin.verified_events() if e.event_type == RESULT_EVENT]) == 2
+    original_results = [
+        event for event in origin.verified_events() if event.event_type == RESULT_EVENT
+    ]
+    assert len(original_results) == 2
 
 
 def test_no_order_original_result_does_not_invent_fills(
