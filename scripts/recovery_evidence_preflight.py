@@ -149,7 +149,7 @@ def preflight_recovery_evidence(payload: object) -> RecoveryPreflight:
             problems.append(f"{dimension}.missing_or_malformed")
             continue
         status = entry.get("status")
-        if status not in _STATUSES or type(status) is not str:
+        if type(status) is not str or status not in _STATUSES:
             problems.append(f"{dimension}.status.invalid")
         elif status != "passed":
             problems.append(f"{dimension}.status.not_passed")
