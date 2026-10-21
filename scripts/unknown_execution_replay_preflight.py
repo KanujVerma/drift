@@ -277,7 +277,8 @@ def preflight_unknown_execution_replay(payload: object) -> UnknownReplayPrefligh
                 "NOT_SENT_CLAIMED", "RESUMED_CLAIMED",
             ):
                 problems.append(f"{tag}.unknown_without_possible_send")
-            if event.get("reason_code") not in _UNKNOWN_REASONS:
+            reason = event.get("reason_code")
+            if type(reason) is not str or reason not in _UNKNOWN_REASONS:
                 problems.append(f"{tag}.unknown_reason.invalid")
             phase = "UNKNOWN"
             knowledge = "UNKNOWN"
