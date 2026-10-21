@@ -121,6 +121,7 @@ def test_prepared_engine_consumes_same_original_and_matches_legacy(
     engine.prepare_opening_book(lifecycle=lifecycle)
     assert originals == [lifecycle.retained]
     assert lifecycle.retained is originals[0]
+    assert lifecycle.retained is not None
     assert lifecycle.currency == "USD"
     assert lifecycle.retained.net_asset_value == Decimal("10000")
     assert lifecycle.retained.holdings == ()
