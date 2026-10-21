@@ -14,7 +14,7 @@ Read [AGENTS.md](../../../../AGENTS.md), [current V1 execution](../../../../src/
 
 ## Exact new, nonoverlapping files
 
-- `scripts/execution_v1_evidence_audit.py`: read-only actual `OrderIntentV1` and `ExecutionReportV1` audit.
+- `src/drift/execution/v1_evidence_audit.py`: read-only actual `OrderIntentV1` and `ExecutionReportV1` audit.
 - `tests/unit/test_execution_v1_evidence_audit.py`: actual public-builder unrun synthetic/adversarial V1 source tests.
 - `docs/architecture/adaptive-experiments/verification/execution-v1-evidence-audit.md`: this contract and AntiGravity packet.
 
@@ -47,8 +47,8 @@ AntiGravity should check the exact published PR HEAD, only these three additive 
 
 ```bash
 uv run pytest tests/unit/test_execution_v1_evidence_audit.py -q
-uv run ruff check scripts/execution_v1_evidence_audit.py tests/unit/test_execution_v1_evidence_audit.py
-uv run ruff format --check scripts/execution_v1_evidence_audit.py tests/unit/test_execution_v1_evidence_audit.py
+uv run ruff check src/drift/execution/v1_evidence_audit.py tests/unit/test_execution_v1_evidence_audit.py
+uv run ruff format --check src/drift/execution/v1_evidence_audit.py tests/unit/test_execution_v1_evidence_audit.py
 uv run mypy src tests
 uv run pytest
 uv build
