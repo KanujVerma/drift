@@ -11,9 +11,9 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
-from decimal import Decimal
 from uuid import UUID, uuid7
 
 from drift.domain.evaluator_portfolio import PortfolioStateV2
