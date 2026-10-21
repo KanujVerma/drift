@@ -100,7 +100,7 @@ class ConfiguredLocalSyntheticOriginV1:
     issuer_instance_id: UUID
 
     def __post_init__(self) -> None:
-        if type(self.ledger_path) is not Path or not self.ledger_path.is_absolute():
+        if not isinstance(self.ledger_path, Path) or not self.ledger_path.is_absolute():
             raise LocalAccountReceiptError("LOCAL_ORIGIN_NEEDS_ABSOLUTE_HOST_PATH")
         if (
             type(self.issuer_instance_id) is not UUID
