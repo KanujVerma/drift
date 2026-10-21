@@ -116,7 +116,11 @@ new network service, executor identity or source-file implementation**.
   availability. A post-cutoff input consumed as past knowledge must fail.
 - Grant issuance and candidate completion may occur after the input
   cutoff if separately permitted by the authentic scheduler deadline.
-  They must not be backdated or misclassified as future input.
+  Completion **at or before** `decision_deadline` can be eligible
+  under the other checks. Completion **after** that deadline must
+  refuse that checkpoint's decision admission as `DEADLINE_EXPIRED`,
+  while retaining original attempt/evidence/cost. Neither case
+  may be backdated or misclassified as future source input.
 - Original scheduler grant issuance and verified availability must
   precede its designated logical K1 invocation. A grant first issued
   after the attempt cannot be accepted retroactively. Also require
@@ -199,7 +203,7 @@ original grant-at-start check. Genuine future input is lookahead,
 not a normal after-cutoff model completion. No generic `dict[str, Any]`
 evidence resolver or second financial ledger is allowed.
 
-## 6. Fifteen synthetic original-grant test vectors
+## 6. Twenty synthetic original-grant test vectors
 
 Each vector is a **design expectation, not an executed test**.
 `READY_STRUCTURAL` has accepted E1 fixture verification only.
@@ -247,13 +251,33 @@ Each vector is a **design expectation, not an executed test**.
   causal lookahead independently of whether a grant exists.
   **BLOCKED_ON_507**.
 - **G09, valid completion:** no future input, original allowed
-  grant, model completes after cutoff but within decision deadline.
-  Do not reject solely for completion time.
+  grant, model completes after input cutoff but **at or before**
+  the accepted `decision_deadline`. Preserve an eligible
+  completion if the issuer/validator otherwise accepts it.
   **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
-- **G10, terminal absence:** hold, abstain, unavailable or failed
-  K1 attempt under original grant. Preserve distinct outcomes,
-  costs and denominator. That research attempt authorizes no new
-  order, and cannot erase pending/protective orders or assert RESULT.
+- **G10a, valid hold:** completed K1 research disposition `hold`,
+  independently verified matching current incumbent and valid
+  selection state. Retain actual attempt/reason; no executable
+  target supplied by this attempt. A mismatched or unresolved
+  incumbent must be refused, not assumed.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G10b, abstain:** disposition `abstain`, distinct terminal
+  reason and no proposed allocation; retain attempt and actual
+  research cost. Do not infer platform-wide no-order state.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G10c, unavailable:** disposition `unavailable` because a
+  required eligible research input is missing. Retain the precise
+  missing-input reason and attempt, not a fabricated hold/abstain.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G10d, failed attempt:** genuinely terminal `failed` original
+  K1 attempt, retained failure/validation evidence, nullable
+  candidate and actual or explicitly unknown research cost.
+  Never mark `VALID` or infer an executable allocation.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G10e, rejected attempt:** genuinely terminal `rejected` with
+  independently retained rejection reason/validation evidence,
+  nullable candidate and its actual/unknown costs, separately
+  asserted from `failed` and never `VALID`.
   **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
 - **G11, replay/conflict:** exact identical original grant replay
   idempotent; same grant ID and different original bytes invalid.
@@ -266,6 +290,14 @@ Each vector is a **design expectation, not an executed test**.
   already available, but the K1 attempt started before
   `invocation_not_before_at`. Refuse the early attempt with its
   original timestamp and reason even if all account/scope hashes match.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G14, late model completion:** original grant, eligible context
+  and attempt start are valid, but the model response first completes
+  **after** the accepted `decision_deadline`. Refuse its admission
+  to that scheduled checkpoint as `DEADLINE_EXPIRED`; retain actual
+  attempt, response time and cost. Do not backdate or convert it
+  into a completed or executable decision. Existing platform orders
+  and independently authorized protection remain separate.
   **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
 
 For each issuer-dependent positive case, the eventual producer test
