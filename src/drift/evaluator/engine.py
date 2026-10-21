@@ -60,7 +60,6 @@ from decimal import Decimal
 from functools import cache
 from threading import Lock
 from types import NoneType, UnionType
-from weakref import WeakKeyDictionary
 from typing import (
     Any,
     Literal,
@@ -73,6 +72,7 @@ from typing import (
     get_type_hints,
 )
 from uuid import UUID
+from weakref import WeakKeyDictionary
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from pydantic_core import PydanticSerializationError
