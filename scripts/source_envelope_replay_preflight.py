@@ -75,6 +75,10 @@ def _nonblank(value: object) -> bool:
     return type(value) is str and bool(value.strip())
 
 
+def _member(value: object, choices: frozenset[str]) -> bool:
+    return type(value) is str and value in choices
+
+
 def _utc(value: object) -> datetime | None:
     if type(value) is not str or _UTC.fullmatch(value) is None:
         return None
@@ -155,15 +159,15 @@ def preflight_source_envelope_replay(payload: object) -> EnvelopeReplayPreflight
         for field in ("source_event_id", "source_version_id"):
             if not _nonblank(event.get(field)):
                 issues.append(f"{prefix}.{field}.missing")
-        if event.get("version_basis") not in _VERSION_BASIS:
+        if not _member(event.get("version_basis"), _VERSION_BASIS):
             issues.append(f"{prefix}.version_basis.invalid")
-        if event.get("content_state") not in _CONTENT_STATE:
+        if not _member(event.get("content_state"), _CONTENT_STATE):
             issues.append(f"{prefix}.content_state.invalid")
-        if event.get("quality_state") not in _QUALITY:
+        if not _member(event.get("quality_state"), _QUALITY):
             issues.append(f"{prefix}.quality_state.invalid")
-        if event.get("relation") not in _RELATIONS:
+        if not _member(event.get("relation"), _RELATIONS):
             issues.append(f"{prefix}.relation.invalid")
-        if event.get("availability_basis") not in _AVAILABILITY:
+        if not _member(event.get("availability_basis"), _AVAILABILITY):
             issues.append(f"{prefix}.availability_basis.invalid")
 
         digest = event.get("content_sha256")
@@ -188,6 +192,9 @@ def preflight_source_envelope_replay(payload: object) -> EnvelopeReplayPreflight
             if raw is not None and instant is None:
                 issues.append(f"{prefix}.{field}.invalid")
 
+        published = _utc(publication) if publication is not None else None
+        if published is not None and received is not None and published > received:
+            issues.append(f"{prefix}.publication_after_local_receipt")
         if received is not None and normalized is not None and received > normalized:
             issues.append(f"{prefix}.normalized_before_receipt")
         if normalized is not None and usable is not None and normalized > usable:
@@ -295,7 +302,7 @@ def preflight_source_envelope_replay(payload: object) -> EnvelopeReplayPreflight
         issues.append("coverage.available_utc.invalid")
 
     status = coverage.get("state")
-    if status not in _COVERAGE_STATES:
+    if not _member(status, _COVERAGE_STATES):
         issues.append("coverage.state.invalid")
         status = "UNKNOWN"
     count = coverage.get("matching_event_count")
@@ -315,8 +322,14 @@ def preflight_source_envelope_replay(payload: object) -> EnvelopeReplayPreflight
             status == "COVERED_EMPTY" and count != 0
         ) or (status == "COVERED_WITH_EVENTS" and count <= 0):
             issues.append("coverage.complete_count_inconsistent")
-        if status == "COVERED_EMPTY" and items:
-            issues.append("coverage.claims_empty_despite_event_receipts")
+        if status == "COVERED_EMPTY" and observed_available is not None:
+            # Later receipts must never rewrite an earlier covered-empty snapshot.
+            if any(
+                (version_available := _utc(e.get("usable_available_utc")))
+                is not None and version_available <= observed_available
+                for e in known_receipts.values()
+            ):
+                issues.append("coverage.claims_empty_despite_event_receipts")
         if (
             cutoff is not None and observed_available is not None
             and observed_available < cutoff
