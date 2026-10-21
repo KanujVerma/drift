@@ -52,6 +52,7 @@ class AccountAllocationFieldsV1:
     arm_id: str
     portfolio_account_id: str
     binding_id: str
+    bound_at: str
     binding_hash: str
     campaign_fingerprint: str
     arm_fingerprint: str
@@ -234,10 +235,23 @@ class LocalSyntheticAccountReceiptStoreV1:
             or len(original_book) > MAX_BOOK_BYTES
         ):
             raise LocalAccountReceiptError("INVALID_OR_OVERSIZE_ORIGINAL_BOOK")
+        if type(fields.bound_at) is not str:
+            raise LocalAccountReceiptError("NONCANONICAL_ACCOUNT_BOUND_AT")
+        try:
+            bound_at = datetime.fromisoformat(
+                fields.bound_at.replace("Z", "+00:00")
+            ).astimezone(UTC)
+        except (TypeError, ValueError) as error:
+            raise LocalAccountReceiptError(
+                "NONCANONICAL_ACCOUNT_BOUND_AT"
+            ) from error
+        if bound_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ") != fields.bound_at:
+            raise LocalAccountReceiptError("NONCANONICAL_ACCOUNT_BOUND_AT")
         allocation_id = uuid7()
         ref = self._append(
             kind=ALLOCATION, allocation_id=allocation_id,
             dedup_key=f"stage1:allocation:{fields.allocation_key}",
+            minimum_time=bound_at,
             payload={
                 "allocation_id": str(allocation_id),
                 "fields": asdict(fields),
