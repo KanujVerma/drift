@@ -250,6 +250,13 @@ def _costs(
                 ),
             )
 
+    if covered_at is not None and scope.get("coverage_complete") is True:
+        if any(
+            (observed := _utc(rec.get("first_available_utc"))) is not None
+            and observed > covered_at
+            for rec in available_latest.values()
+        ):
+            problems.append("cost_scope.coverage_before_latest_charge")
     if (
         cutoff is None or covered_at is None or covered_at > cutoff
         or scope.get("coverage_complete") is not True
