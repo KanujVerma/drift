@@ -102,7 +102,10 @@ class ConfiguredLocalSyntheticOriginV1:
     def __post_init__(self) -> None:
         if type(self.ledger_path) is not Path or not self.ledger_path.is_absolute():
             raise LocalAccountReceiptError("LOCAL_ORIGIN_NEEDS_ABSOLUTE_HOST_PATH")
-        if type(self.issuer_instance_id) is not UUID or self.issuer_instance_id.version != 7:
+        if (
+            type(self.issuer_instance_id) is not UUID
+            or self.issuer_instance_id.version != 7
+        ):
             raise LocalAccountReceiptError("LOCAL_ORIGIN_NEEDS_UUID7_ISSUER")
 
     def verified_events(self) -> tuple[AuditEvent, ...]:
@@ -283,11 +286,14 @@ class LocalSyntheticAccountReceiptStoreV1:
         if (
             alloc.payload.get("allocation_id") != str(allocation_id)
             or alloc.payload.get("fields") != asdict(expected_fields)
-            or witness.payload.get("allocation_event_id") != str(allocation_ref.event_id)
+            or witness.payload.get("allocation_event_id")
+            != str(allocation_ref.event_id)
             or witness.payload.get("allocation_event_hash") != allocation_ref.event_hash
             or witness.timestamp < alloc.timestamp
         ):
-            raise LocalAccountReceiptError("ORIGINAL_ALLOCATION_SCOPE_OR_WITNESS_MISMATCH")
+            raise LocalAccountReceiptError(
+                "ORIGINAL_ALLOCATION_SCOPE_OR_WITNESS_MISMATCH"
+            )
         text = alloc.payload.get("original_book_utf8")
         if type(text) is not str:
             raise LocalAccountReceiptError("ORIGINAL_BOOK_BYTES_MISSING")
@@ -302,7 +308,8 @@ class LocalSyntheticAccountReceiptStoreV1:
             raise LocalAccountReceiptError("ORIGINAL_BOOK_BYTES_NOT_CANONICAL")
         if (
             book.admission_hash != expected_fields.admission_hash
-            or content_hash(book.session_key) != expected_fields.first_session_fingerprint
+            or content_hash(book.session_key)
+            != expected_fields.first_session_fingerprint
             or book.cash_balance != Decimal(expected_fields.initial_cash)
             or book.net_asset_value != book.cash_balance
             or book.holdings or book.pending_cash_claims or book.mark is not None
@@ -346,8 +353,10 @@ class LocalSyntheticAccountReceiptStoreV1:
             event_type=CLAIM, allocation_id=original.allocation_id,
         )
         if (
-            claim.payload.get("allocation_event_hash") != original.allocation_ref.event_hash
-            or claim.payload.get("witness_event_hash") != original.witness_ref.event_hash
+            claim.payload.get("allocation_event_hash")
+            != original.allocation_ref.event_hash
+            or claim.payload.get("witness_event_hash")
+            != original.witness_ref.event_hash
             or claim.payload.get("identity_hash") != identity_hash
         ):
             raise LocalAccountReceiptError("CONSUMPTION_CLAIM_SCOPE_MISMATCH")
@@ -359,6 +368,8 @@ class LocalSyntheticAccountReceiptStoreV1:
                 "claim_event_hash": claim_ref.event_hash,
                 "allocation_event_hash": original.allocation_ref.event_hash,
                 "identity_hash": identity_hash,
-                "original_book_sha256": sha256(original.original_book_bytes).hexdigest(),
+                "original_book_sha256": sha256(
+                    original.original_book_bytes
+                ).hexdigest(),
             },
         )
