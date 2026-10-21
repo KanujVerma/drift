@@ -1583,6 +1583,82 @@ def _bind_reconstruction(
     require_scheduled_calendar_row(observation, session)
 
 
+
+def _verify_untampered_original_book(
+    book: PortfolioStateV2, expected_digest: str
+) -> None:
+    """Refuse object-level tampering before trusting the original book digest.
+
+    A mutable reference exposed to an observer can bypass Pydantic freezing via
+    object.__setattr__. Hashing alone cannot detect a Decimal subclass that
+    numerically equals 1 but renders "10000" through its forged __str__.
+    Inspect the exact engine-created object's actual stored types before any
+    serializer or accounting operation; never rebuild or replace that object.
+    """
+    invalid = OpeningBookLifecycleError(
+        "prepared original book changed or carries untrusted field types"
+    )
+    if type(book) is not PortfolioStateV2:
+        raise invalid
+    values = vars(book)
+    if (
+        type(values) is not dict
+        or set(values) != set(PortfolioStateV2.model_fields)
+        or getattr(book, "__pydantic_extra__", None) is not None
+        or getattr(book, "__pydantic_private__", None) is not None
+    ):
+        raise invalid
+    for field_name in ("schema_version", "lane", "admission_hash"):
+        if type(values[field_name]) is not str:
+            raise invalid
+    money_fields = (
+        "cash_balance",
+        "holdings_market_value",
+        "pending_claims_value",
+        "net_asset_value",
+        "realized_gross_pnl",
+        "realized_net_pnl",
+        "cumulative_transaction_costs",
+    )
+    if any(type(values[name]) is not Decimal for name in money_fields):
+        raise invalid
+    tuple_fields = (
+        "holdings",
+        "pending_cash_claims",
+        "settled_claim_ids",
+        "applied_effect_ids",
+    )
+    if any(type(values[name]) is not tuple or values[name] for name in tuple_fields):
+        raise invalid
+    if values["mark"] is not None:
+        raise invalid
+    session = values["session_key"]
+    if type(session) is not SessionKeyV1:
+        raise invalid
+    session_fields = vars(session)
+    if (
+        type(session_fields) is not dict
+        or set(session_fields) != set(SessionKeyV1.model_fields)
+        or any(
+            type(session_fields[name]) is not str
+            for name in ("schema_version", "mic", "session_scope")
+        )
+        or type(session_fields["local_date"]) is not date
+        or getattr(session, "__pydantic_extra__", None) is not None
+        or getattr(session, "__pydantic_private__", None) is not None
+    ):
+        raise invalid
+    try:
+        rebuilt = _revalidated(PortfolioStateV2, book)
+    except (TypeError, ValueError) as error:
+        raise invalid from error
+    if (
+        content_hash(book) != expected_digest
+        or content_hash(rebuilt) != expected_digest
+    ):
+        raise invalid
+
+
 class SessionEvaluatorEngine:
     """Runs the canonical five-phase evaluation loop over one input bundle."""
 
@@ -1920,6 +1996,7 @@ class SessionEvaluatorEngine:
                 admission=self._admission,
             )
             original_digest = content_hash(opening_book)
+            _verify_untampered_original_book(opening_book, original_digest)
             # Observers see detached copies of the configuration, never the
             # engine's canonical admission or protocol objects. Callback code
             # may otherwise mutate a frozen model through object.__setattr__.
@@ -1929,10 +2006,7 @@ class SessionEvaluatorEngine:
                 protocol=_revalidated(EvaluationProtocolV1, self._protocol),
                 currency_code=self._book_currency_code,
             )
-            if content_hash(opening_book) != original_digest:
-                raise OpeningBookLifecycleError(
-                    "preparation observer changed the original opening book"
-                )
+            _verify_untampered_original_book(opening_book, original_digest)
         except BaseException:
             with self._opening_book_lock:
                 self._opening_book_phase = "failed"
@@ -2005,20 +2079,14 @@ class SessionEvaluatorEngine:
             )
         else:
             assert lifecycle is not None and prepared_digest is not None
-            if content_hash(prepared_book) != prepared_digest:
-                raise OpeningBookLifecycleError(
-                    "prepared original book changed before the invocation claim"
-                )
+            _verify_untampered_original_book(prepared_book, prepared_digest)
             # Do not expose the identity used by _seal_result to callback
             # mutation. Each callback receives its own revalidated copy.
             lifecycle.claim_invocation(
                 opening_book=prepared_book,
                 run_identity=_revalidated_run_identity(run_identity),
             )
-            if content_hash(prepared_book) != prepared_digest:
-                raise OpeningBookLifecycleError(
-                    "invocation observer changed the original opening book"
-                )
+            _verify_untampered_original_book(prepared_book, prepared_digest)
             loop = _Loop(state=prepared_book)
             with self._opening_book_lock:
                 self._opening_book_phase = "consumed"
@@ -2026,10 +2094,7 @@ class SessionEvaluatorEngine:
                 opening_book=loop.state,
                 run_identity=_revalidated_run_identity(run_identity),
             )
-            if content_hash(loop.state) != prepared_digest:
-                raise OpeningBookLifecycleError(
-                    "consumption observer changed the original opening book"
-                )
+            _verify_untampered_original_book(loop.state, prepared_digest)
 
         halt: _Halt | None = None
         for index, session in enumerate(sessions):
