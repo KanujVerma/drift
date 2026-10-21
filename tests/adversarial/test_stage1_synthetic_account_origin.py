@@ -154,7 +154,8 @@ def test_equal_hash_book_from_another_engine_is_not_original_instance(
         LocalAccountReceiptError, match="NOT_ORIGINAL_ENGINE_BOOK_INSTANCE"
     ):
         coordinator.claim_invocation(
-            opening_book=other_book, run_identity=identity,
+            opening_book=other_book,
+            run_identity=identity,
         )
     assert coordinator.local_phase == "failed"
     assert len(store.origin.verified_events()) == 2
@@ -171,7 +172,8 @@ def test_claim_clock_rollback_cannot_create_success_or_fresh_cash(
         )
     )
     origin = ConfiguredLocalSyntheticOriginV1(
-        ledger_path=tmp_path / "timing.db", issuer_instance_id=uuid7(),
+        ledger_path=tmp_path / "timing.db",
+        issuer_instance_id=uuid7(),
     )
     store = LocalSyntheticAccountReceiptStoreV1(
         origin=origin, clock=lambda: next(moments)
