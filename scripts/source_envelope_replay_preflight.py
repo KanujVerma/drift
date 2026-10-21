@@ -349,11 +349,17 @@ def preflight_source_envelope_replay(payload: object) -> EnvelopeReplayPreflight
             status == "COVERED_EMPTY" and count != 0
         ) or (status == "COVERED_WITH_EVENTS" and count <= 0):
             issues.append("coverage.complete_count_inconsistent")
-        if status == "COVERED_EMPTY" and observed_available is not None:
-            # Later receipts must never rewrite an earlier covered-empty snapshot.
+        if (
+            observed_available is not None and end is not None
+            and observed_available < end
+        ):
+            issues.append("coverage.closed_before_interval_end")
+        if status == "COVERED_EMPTY" and cutoff is not None:
+            # Only versions known by this cutoff can contradict a scoped-empty
+            # claim; do not leak future deliveries backward into prior decisions.
             if any(
                 (version_available := _utc(e.get("usable_available_utc")))
-                is not None and version_available <= observed_available
+                is not None and version_available < cutoff
                 for e in known_receipts.values()
             ):
                 issues.append("coverage.claims_empty_despite_event_receipts")
