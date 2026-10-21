@@ -72,6 +72,7 @@ from typing import (
     get_type_hints,
 )
 from uuid import UUID
+from weakref import WeakKeyDictionary
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from pydantic_core import PydanticSerializationError
@@ -1663,6 +1664,41 @@ def _verify_untampered_original_book(
         raise invalid
 
 
+def _private_original_book_escrow() -> tuple[
+    Callable[[object, PortfolioStateV2], None],
+    Callable[[object], PortfolioStateV2 | None],
+]:
+    """Keep originals outside engine attributes, with one-time atomic take.
+
+    The observer may close over the engine, so even a private-looking
+    engine._prepared_opening_book attribute would expose the actual mutable
+    source to callback code. This module-local escrow holds the real prepared
+    book weakly keyed by the engine, then removes it before any invocation
+    callbacks execute. Only the detached observer twin stays on the engine.
+    A hostile actor with arbitrary process-frame/closure introspection is
+    outside a Python in-process trust boundary and must be isolated by host.
+    """
+    states: WeakKeyDictionary[object, PortfolioStateV2] = WeakKeyDictionary()
+    lock = Lock()
+
+    def retain(owner: object, book: PortfolioStateV2) -> None:
+        with lock:
+            if owner in states:
+                raise OpeningBookLifecycleError(
+                    "an original opening book is already retained"
+                )
+            states[owner] = book
+
+    def consume(owner: object) -> PortfolioStateV2 | None:
+        with lock:
+            return states.pop(owner, None)
+
+    return retain, consume
+
+
+_RETAIN_ORIGINAL_BOOK, _CONSUME_ORIGINAL_BOOK = _private_original_book_escrow()
+
+
 class SessionEvaluatorEngine:
     """Runs the canonical five-phase evaluation loop over one input bundle."""
 
@@ -1775,7 +1811,11 @@ class SessionEvaluatorEngine:
         ] = "new"
         self._legacy_run_started = False
         self._opening_book_lifecycle: OpeningBookLifecycleV1 | None = None
-        self._prepared_opening_book: PortfolioStateV2 | None = None
+        # The actual original lives in module-local single-use escrow, never
+        # in an attribute a captured-engine lifecycle observer can read.
+        # Untrusted observers only ever see this canonically detached twin.
+        # The engine's original book is NEVER exposed outside the evaluator.
+        self._observer_opening_book: PortfolioStateV2 | None = None
         self._prepared_opening_digest: str | None = None
 
     # -- accessors ---------------------------------------------------------
@@ -2006,15 +2046,21 @@ class SessionEvaluatorEngine:
             )
             original_digest = content_hash(opening_book)
             _verify_untampered_original_book(opening_book, original_digest)
-            # Observers see detached copies of the configuration, never the
-            # engine's canonical admission or protocol objects. Callback code
-            # may otherwise mutate a frozen model through object.__setattr__.
+            # The original book stays private to the engine. Python's frozen
+            # models can still be mutated via object.__setattr__, including
+            # asynchronously after any last check. An observer receives one
+            # detached, revalidated twin with identical original book bytes,
+            # reused across all three callbacks. Its identity is not the
+            # actual evaluator state object. The engine consumes its original.
+            observed_book = _revalidated(PortfolioStateV2, opening_book)
+            _verify_untampered_original_book(observed_book, original_digest)
             lifecycle.retain_original_book(
-                opening_book=opening_book,
+                opening_book=observed_book,
                 admission=_revalidated_admission(self._admission),
                 protocol=_revalidated(EvaluationProtocolV1, self._protocol),
                 currency_code=self._book_currency_code,
             )
+            _verify_untampered_original_book(observed_book, original_digest)
             _verify_untampered_original_book(opening_book, original_digest)
         except BaseException:
             with self._opening_book_lock:
@@ -2022,7 +2068,8 @@ class SessionEvaluatorEngine:
             raise
 
         with self._opening_book_lock:
-            self._prepared_opening_book = opening_book
+            _RETAIN_ORIGINAL_BOOK(self, opening_book)
+            self._observer_opening_book = observed_book
             self._prepared_opening_digest = original_digest
             self._opening_book_lifecycle = lifecycle
             self._opening_book_phase = "prepared"
@@ -2055,14 +2102,19 @@ class SessionEvaluatorEngine:
                 # but cannot switch into provisioned mode after the fact.
                 self._legacy_run_started = True
                 prepared_book = None
+                observer_book = None
                 lifecycle = None
                 prepared_digest = None
             elif self._opening_book_phase == "prepared":
-                prepared_book = self._prepared_opening_book
+                # Take the same actual prepared object out of escrow BEFORE
+                # a callback that closes over this engine could run.
+                prepared_book = _CONSUME_ORIGINAL_BOOK(self)
+                observer_book = self._observer_opening_book
                 lifecycle = self._opening_book_lifecycle
                 prepared_digest = self._prepared_opening_digest
                 if (
                     prepared_book is None
+                    or observer_book is None
                     or lifecycle is None
                     or prepared_digest is None
                 ):
@@ -2087,22 +2139,30 @@ class SessionEvaluatorEngine:
                 )
             )
         else:
-            assert lifecycle is not None and prepared_digest is not None
+            assert (
+                lifecycle is not None
+                and observer_book is not None
+                and prepared_digest is not None
+            )
             _verify_untampered_original_book(prepared_book, prepared_digest)
-            # Do not expose the identity used by _seal_result to callback
-            # mutation. Each callback receives its own revalidated copy.
+            _verify_untampered_original_book(observer_book, prepared_digest)
+            # Never expose either the evaluator's internal original book or
+            # the identity used to seal RESULT. The observer sees one stable
+            # detached twin for its original-retention ledger receipts.
             lifecycle.claim_invocation(
-                opening_book=prepared_book,
+                opening_book=observer_book,
                 run_identity=_revalidated_run_identity(run_identity),
             )
+            _verify_untampered_original_book(observer_book, prepared_digest)
             _verify_untampered_original_book(prepared_book, prepared_digest)
             loop = _Loop(state=prepared_book)
             with self._opening_book_lock:
                 self._opening_book_phase = "consumed"
             lifecycle.observe_consumption(
-                opening_book=loop.state,
+                opening_book=observer_book,
                 run_identity=_revalidated_run_identity(run_identity),
             )
+            _verify_untampered_original_book(observer_book, prepared_digest)
             _verify_untampered_original_book(loop.state, prepared_digest)
 
         halt: _Halt | None = None
