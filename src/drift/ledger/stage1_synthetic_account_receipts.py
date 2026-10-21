@@ -16,6 +16,7 @@ from hashlib import sha256
 from pathlib import Path
 from uuid import UUID, uuid7
 
+from drift.domain.common import ImmutableJSONValue
 from drift.domain.evaluator_portfolio import PortfolioStateV2
 from drift.domain.events import AuditEvent
 from drift.errors import DuplicateEventError
@@ -119,6 +120,14 @@ def _event_ref(event: AuditEvent) -> LocalEventReferenceV1:
     return LocalEventReferenceV1(event.event_id, event.event_hash)
 
 
+def _event_payload(event: AuditEvent) -> Mapping[str, ImmutableJSONValue]:
+    """Verify a structured original event, not the general JSON scalar union."""
+    payload = event.payload
+    if not isinstance(payload, Mapping):
+        raise LocalAccountReceiptError("ORIGINAL_EVENT_PAYLOAD_NOT_MAPPING")
+    return payload
+
+
 def _require_ref(ref: LocalEventReferenceV1) -> None:
     if (
         type(ref) is not LocalEventReferenceV1
@@ -146,14 +155,15 @@ def read_configured_original(
     if len(matches) != 1:
         raise LocalAccountReceiptError("ORIGINAL_EVENT_NOT_IN_CONFIGURED_LEDGER")
     event = matches[0]
+    payload = _event_payload(event)
     if (
         event.event_hash != reference.event_hash
         or event.event_type != event_type
         or event.entity_type != ENTITY
         or event.entity_id != allocation_id
         or event.schema_version != "1"
-        or event.payload.get("profile") != PROFILE
-        or event.payload.get("issuer_instance_id") != str(origin.issuer_instance_id)
+        or payload.get("profile") != PROFILE
+        or payload.get("issuer_instance_id") != str(origin.issuer_instance_id)
     ):
         raise LocalAccountReceiptError("ORIGINAL_EVENT_OR_ISSUER_MISMATCH")
     return event
@@ -193,7 +203,7 @@ class LocalSyntheticAccountReceiptStoreV1:
         kind: str,
         allocation_id: UUID,
         dedup_key: str,
-        payload: Mapping[str, object],
+        payload: Mapping[str, ImmutableJSONValue],
         minimum_time: datetime | None = None,
     ) -> LocalEventReferenceV1:
         now = _utc_now(self._clock)
@@ -297,24 +307,29 @@ class LocalSyntheticAccountReceiptStoreV1:
             origin=self.origin, reference=witness_ref,
             event_type=WITNESS, allocation_id=allocation_id,
         )
+        allocation_payload = _event_payload(alloc)
+        witness_payload = _event_payload(witness)
         if (
-            alloc.payload.get("allocation_id") != str(allocation_id)
-            or alloc.payload.get("fields") != asdict(expected_fields)
-            or witness.payload.get("allocation_event_id")
+            allocation_payload.get("allocation_id") != str(allocation_id)
+            or allocation_payload.get("fields") != asdict(expected_fields)
+            or witness_payload.get("allocation_event_id")
             != str(allocation_ref.event_id)
-            or witness.payload.get("allocation_event_hash") != allocation_ref.event_hash
+            or witness_payload.get("allocation_event_hash")
+            != allocation_ref.event_hash
             or witness.timestamp < alloc.timestamp
         ):
             raise LocalAccountReceiptError(
                 "ORIGINAL_ALLOCATION_SCOPE_OR_WITNESS_MISMATCH"
             )
-        text = alloc.payload.get("original_book_utf8")
+        text = allocation_payload.get("original_book_utf8")
         if type(text) is not str:
             raise LocalAccountReceiptError("ORIGINAL_BOOK_BYTES_MISSING")
         original = text.encode("utf-8")
         if (
             len(original) > MAX_BOOK_BYTES
-            or sha256(original).hexdigest() != alloc.payload.get("original_book_sha256")
+            or sha256(original).hexdigest() != allocation_payload.get(
+                "original_book_sha256"
+            )
         ):
             raise LocalAccountReceiptError("ORIGINAL_BOOK_BYTES_HASH_MISMATCH")
         book = PortfolioStateV2.model_validate_json(original)
@@ -366,12 +381,13 @@ class LocalSyntheticAccountReceiptStoreV1:
             origin=self.origin, reference=claim_ref,
             event_type=CLAIM, allocation_id=original.allocation_id,
         )
+        claim_payload = _event_payload(claim)
         if (
-            claim.payload.get("allocation_event_hash")
+            claim_payload.get("allocation_event_hash")
             != original.allocation_ref.event_hash
-            or claim.payload.get("witness_event_hash")
+            or claim_payload.get("witness_event_hash")
             != original.witness_ref.event_hash
-            or claim.payload.get("identity_hash") != identity_hash
+            or claim_payload.get("identity_hash") != identity_hash
         ):
             raise LocalAccountReceiptError("CONSUMPTION_CLAIM_SCOPE_MISMATCH")
         return self._append(
