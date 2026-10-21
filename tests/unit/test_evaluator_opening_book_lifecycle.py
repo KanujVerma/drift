@@ -8,6 +8,7 @@ grant, or original M0 RESULT. Those are separately gated PR B and PR C.
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
+from typing import Any
 
 import pytest
 from test_evaluator_engine import _buy_ten, _engine, _run, _run_identity
@@ -466,7 +467,7 @@ def test_post_callback_async_observer_tamper_cannot_change_original_run(
     actual_emit = engine._emit_session_start
     changed = False
 
-    def after_last_callback(*args: object, **kwargs: object) -> None:
+    def after_last_callback(*args: Any, **kwargs: Any) -> None:
         nonlocal changed
         if not changed:
             changed = True
@@ -475,7 +476,7 @@ def test_post_callback_async_observer_tamper_cannot_change_original_run(
             # immediately before the engine emits the first session.
             object.__setattr__(lifecycle.retained, "cash_balance", Decimal("1"))
             object.__setattr__(lifecycle.retained, "net_asset_value", Decimal("1"))
-        actual_emit(*args, **kwargs)  # type: ignore[arg-type]
+        actual_emit(*args, **kwargs)
 
     monkeypatch.setattr(engine, "_emit_session_start", after_last_callback)
     artifacts = _run(engine)
