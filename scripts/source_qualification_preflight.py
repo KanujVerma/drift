@@ -271,4 +271,4 @@ def preflight_source_qualification(payload: object) -> SourcePreflight:
             selected = admitted[-1][1]
             if chosen != selected:
                 problems.append("sample.selected_version_not_causally_available")
-    return SourcePreflight(not problems, selected, tuple(problems))
+    return SourcePreflight(not problems, selected if not problems else None, tuple(problems))
