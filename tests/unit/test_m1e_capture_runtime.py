@@ -124,8 +124,9 @@ def test_capture_path_reads_repo_pin_before_identity(
 def test_staging_runtime_does_not_override_measured_host(
     measured: capture._RuntimeObservation, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    stale = replace(measured, version="3.14.5")
     monkeypatch.setattr(
-        capture, "_current_runtime_observation", lambda: replace(measured, version="3.14.5")
+        capture, "_current_runtime_observation", lambda: stale
     )
     with pytest.raises(ValueError, match="M1E_RUNTIME_PIN_MISMATCH"):
         capture._measure_pinned_runtime(
