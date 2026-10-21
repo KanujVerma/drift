@@ -10,6 +10,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from uuid import uuid7
 
 import pytest
 
@@ -39,7 +40,9 @@ from drift.intelligence.contracts import (
 )
 from drift.intelligence.e1_trial_association import (
     VALIDATION_CANDIDATE_PROFILE,
+    append_local_validation_original,
     build_retained_validation_candidate,
+    readback_local_validation_original,
     review_research_e1_binding,
 )
 from drift.intelligence.receipts import (
@@ -48,6 +51,7 @@ from drift.intelligence.receipts import (
     create_terminal_attempt,
 )
 from drift.intelligence.validation import ValidationResult
+from drift.ledger.sqlite import SQLiteLedger
 from drift.serialization.canonical import content_hash
 
 T0 = datetime(2026, 10, 20, 10, 0, 0, tzinfo=UTC)
@@ -535,3 +539,162 @@ def test_validation_failure_cannot_carry_valid_candidate() -> None:
             ),
             first_available_at=T0 + timedelta(seconds=6),
         )
+
+
+def test_actual_sqlite_ledger_records_and_replays_rejected_original(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "k1-original.db"
+    ledger = SQLiteLedger(path)
+    issued = T0 + timedelta(seconds=6)
+    original = ValidationResult(
+        is_valid=False, status="REJECTED",
+        reason="synthetic source lacks required input", candidate=None,
+    )
+    issued_receipt = append_local_validation_original(
+        ledger=ledger, event_id=uuid7(), entity_id=uuid7(),
+        observed_at=issued, validation_id="original-validation-rejection",
+        attempt_id="original-attempt",
+        original_validation=original,
+        raw_output_bytes=b'{"invalid":"source"}',
+        issuer_claim=ArtifactReference(
+            id="untrusted-validator-issuer", version="candidate-1",
+            sha256=SHA,
+        ),
+    )
+    assert issued_receipt.candidate.status == "REJECTED"
+    assert issued_receipt.candidate.candidate_ref is None
+    assert issued_receipt.audit_event_hash
+    assert issued_receipt.raw_output_bytes_sha256 is not None
+    reopened = SQLiteLedger.open_existing(path)
+    reread = readback_local_validation_original(
+        ledger=reopened,
+        event_id=issued_receipt.audit_event_id,
+        expected_event_hash=issued_receipt.audit_event_hash,
+    )
+    assert reread == issued_receipt
+    assert not reread.trusted_research_issuer_authenticated
+    assert not reread.can_admit_e6b
+
+
+def test_actual_sqlite_ledger_preserves_valid_candidate_original(
+    tmp_path: Path,
+) -> None:
+    data = fixture()
+    path = tmp_path / "original-validation.db"
+    ledger = SQLiteLedger(path)
+    record = append_local_validation_original(
+        ledger=ledger, event_id=uuid7(), entity_id=uuid7(),
+        observed_at=T0 + timedelta(seconds=6),
+        validation_id="valid-original",
+        attempt_id=data["started"].attempt_id,
+        original_validation=data["validation"],
+        raw_output_bytes=b'{"disposition":"propose"}',
+        issuer_claim=ArtifactReference(
+            id="untrusted-original-issuer", version="candidate-1",
+            sha256=SHA,
+        ),
+    )
+    assert record.candidate.status == "VALID"
+    assert record.candidate.candidate_ref is not None
+    assert record.candidate.candidate_ref.id == data["candidate"].candidate_id
+    assert not record.trusted_research_issuer_authenticated
+
+
+def test_replayed_validation_id_is_unique_not_double_issued(
+    tmp_path: Path,
+) -> None:
+    from drift.errors import DuplicateEventError
+
+    ledger = SQLiteLedger(tmp_path / "dedupe.db")
+    kw: dict[str, Any] = {
+        "ledger": ledger, "entity_id": uuid7(),
+        "observed_at": T0 + timedelta(seconds=6),
+        "validation_id": "same-original-validation-id",
+        "attempt_id": "same-original-attempt",
+        "original_validation": ValidationResult(
+            is_valid=False, status="INVALID", reason="invalid source",
+            candidate=None,
+        ),
+        "raw_output_bytes": b'{"reason":"failure"}',
+        "issuer_claim": ArtifactReference(
+            id="mock-issuer", version="candidate-1", sha256=SHA,
+        ),
+    }
+    append_local_validation_original(event_id=uuid7(), **kw)
+    with pytest.raises(DuplicateEventError):
+        append_local_validation_original(event_id=uuid7(), **kw)
+
+
+def test_original_ledger_expected_event_hash_cannot_be_substituted(
+    tmp_path: Path,
+) -> None:
+    ledger = SQLiteLedger(tmp_path / "original.db")
+    original = append_local_validation_original(
+        ledger=ledger, event_id=uuid7(), entity_id=uuid7(),
+        observed_at=T0 + timedelta(seconds=6),
+        validation_id="unique-rejected", attempt_id="attempt",
+        original_validation=ValidationResult(
+            is_valid=False, status="REJECTED",
+            reason="synthetic missing input", candidate=None,
+        ),
+        raw_output_bytes=b'{"missing":"input"}',
+        issuer_claim=ArtifactReference(
+            id="not-an-issuer-proof", version="candidate-1", sha256=SHA,
+        ),
+    )
+    with pytest.raises(ValueError, match="EVENT_BINDING_MISMATCH"):
+        readback_local_validation_original(
+            ledger=ledger, event_id=original.audit_event_id,
+            expected_event_hash="f" * 64,
+        )
+    with pytest.raises(ValueError, match="NOT_UNIQUE_OR_MISSING"):
+        readback_local_validation_original(
+            ledger=SQLiteLedger(tmp_path / "other-ledger.db"),
+            event_id=original.audit_event_id,
+            expected_event_hash=original.audit_event_hash,
+        )
+
+
+def test_original_validation_raw_cannot_exceed_bounded_retention(
+    tmp_path: Path,
+) -> None:
+    ledger = SQLiteLedger(tmp_path / "too-big.db")
+    with pytest.raises(ValueError, match="ORIGINAL_RAW_NOT_BOUNDED_BYTES"):
+        append_local_validation_original(
+            ledger=ledger, event_id=uuid7(), entity_id=uuid7(),
+            observed_at=T0 + timedelta(seconds=6),
+            validation_id="too-large", attempt_id="attempt",
+            original_validation=ValidationResult(
+                is_valid=False, status="REFUSED",
+                reason="synthetic rejection", candidate=None,
+            ),
+            raw_output_bytes=b"x" * 1_048_577,
+            issuer_claim=ArtifactReference(
+                id="not-an-issuer", version="candidate-1", sha256=SHA,
+            ),
+        )
+    assert ledger.verified_events() == ()
+
+
+def test_original_rejected_with_no_raw_still_keeps_rejection_reason(
+    tmp_path: Path,
+) -> None:
+    ledger = SQLiteLedger(tmp_path / "rejection-without-response.db")
+    rec = append_local_validation_original(
+        ledger=ledger, event_id=uuid7(), entity_id=uuid7(),
+        observed_at=T0 + timedelta(seconds=6),
+        validation_id="no-response", attempt_id="attempt",
+        original_validation=ValidationResult(
+            is_valid=False, status="REFUSED",
+            reason="request never dispatched", candidate=None,
+        ),
+        raw_output_bytes=None,
+        issuer_claim=ArtifactReference(
+            id="not-an-issuer", version="candidate-1", sha256=SHA,
+        ),
+    )
+    assert rec.candidate.raw_output_ref is None
+    assert rec.candidate.status == "REFUSED"
+    assert rec.raw_output_bytes_sha256 is None
+    assert not rec.can_admit_e6b
