@@ -101,8 +101,43 @@ Neither is an accepted Python class or wire revision.
   accepted #507 producer mapping. The original attempt's
   `context_ref` must reference that retained context, with the
   same decision cutoff by instant and the same E1 arm/account.
-  An account/checkpoint string match alone cannot grant another
-  method or logical request permission.
+  A retained attempt is not admitted merely by matching IDs.
+  The proposed cross-producer intent verification MUST additionally:
+  - Bind `request_kind` through a #507 issuer-verified mapping to the
+    original `ResearchContext.review_reason` and applicable
+    `trigger_ref`/scheduling evidence. Those K1 fields are not
+    themselves a canonical request-kind enum; absent accepted mapping
+    is `UNAVAILABLE`, not an assumed string equivalence.
+  - Resolve `method_or_selector_policy_ref` against the original
+    `ResearchContext.method_ref`, both `AttemptRecord.method_ref`
+    records and any `ModelReplayRecord.method_ref`. For an actual
+    proposed selection also verify its original
+    `ResearchCandidate.strategy.envelope_ref` and
+    `eligibility_ref` against the issuer-verified selector-policy
+    mapping. A valid method alone does not approve another selector.
+  - Freeze the meaning of `allowed_strategy_refs` as full,
+    versioned `ArtifactReference` identities for concrete proposed
+    strategies, not a family-ID string or caller-created name. For
+    `disposition="propose"`, the original
+    `ResearchCandidate.strategy.strategy_ref` must exactly match
+    one granted `(id, version, sha256)` reference, and its
+    `family_id` must also belong to the verified E1 arm's
+    `eligible_strategy_references` and campaign strategy pool.
+    Retained `hold`/ `abstain`/ `unavailable` or failed/rejected
+    no-proposal attempts do not invent a candidate strategy to
+    satisfy that membership check. `hold` separately requires
+    verified incumbent selection and original state.
+  - Resolve `context_policy_ref` through an accepted #507 mapping
+    to the retained `ResearchContext.clock_policy_ref` and
+    applicable original input/memory/feedback policy lineage.
+    Merely matching a free-form `review_reason` or a caller ref
+    does not authenticate this policy.
+  Every comparison consumes original retained K1 evidence and the
+  same authenticated original grant revision. An authenticated
+  mismatch is `INVALID`; an absent producer mapping or original
+  policy/selector proof is `UNAVAILABLE` and blocked on #507.
+  An account/checkpoint string match alone cannot grant a different
+  method, request kind, context policy or strategy permission.
 - **Original scheduler authority:** `scheduler_issuer_id`,
   `issuer_version`, `original_issuance_ref` and
   `issuer_proof_ref`. The verifier must retrieve the actual
@@ -249,7 +284,18 @@ new network service, executor identity or source-file implementation**.
    the grant, original `method_ref` and the referenced retained
    `ResearchContext.method_ref` against the accepted #507 granted
    method mapping, and its original context cutoff and E1
-   arm/account scope against the SAME grant. For model calls,
+   arm/account scope against the SAME grant. Resolve and verify
+   `request_kind` using original K1 review/trigger evidence and
+   the explicit #507 mapping. Verify the granted selector policy
+   against the original method and, for proposals, retained
+   strategy envelope/eligibility evidence. Verify exact full
+   `ResearchCandidate.strategy.strategy_ref` membership in the
+   grant's `allowed_strategy_refs` and its family in the frozen
+   E1 arm/campaign pools; do not invent a strategy for genuine
+   nontrading or failed attempts. Verify `context_policy_ref`
+   through #507's original K1 clock/input/memory/feedback policy
+   mapping. Unresolved mappings are `UNAVAILABLE`, not implied
+   acceptance; authentic conflicts are `INVALID`. For model calls,
    verify request/response/parse/original-validation/terminal
    order before declaring decision readiness. Refuse
    independently verifiable contradictions even when every
@@ -272,7 +318,7 @@ original grant-at-start check. Genuine future input is lookahead,
 not a normal after-cutoff model completion. No generic `dict[str, Any]`
 evidence resolver or second financial ledger is allowed.
 
-## 6. Thirty-three synthetic original-grant test vectors
+## 6. Thirty-eight synthetic original-grant test vectors
 
 Each vector is a **design expectation, not an executed test**.
 `READY_STRUCTURAL` has accepted E1 fixture verification only.
@@ -320,7 +366,10 @@ Each vector is a **design expectation, not an executed test**.
   causal lookahead independently of whether a grant exists.
   **BLOCKED_ON_507**.
 - **G09, valid completion:** no future input, original allowed
-  grant. Verify `ModelReplayRecord.response_received_at`,
+  grant; all logical request, request kind, method/selector,
+  allowed strategy (for `propose`), context-policy and cutoff
+  restrictions are originally verified. Verify
+  `ModelReplayRecord.response_received_at`,
   `parse_completed_at`, original retained validator availability,
   and terminal `AttemptRecord.completed_at` are all authentic
   and at/before the decision deadline, although after input cutoff.
@@ -410,6 +459,35 @@ Each vector is a **design expectation, not an executed test**.
   the original `ResearchContext.decision_cutoff` differs
   from the grant by instant, or context account/arm scope
   disagrees. Refuse this grant/attempt association.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G15d, wrong scheduled request kind:** attempt/context
+  appear otherwise valid but original K1 review/trigger evidence
+  maps to a different `request_kind`. Refuse `INVALID`, not
+  caller-declared kind equality.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G15e, strategy outside granted set:** a valid `propose`
+  returns a `ResearchCandidate.strategy.strategy_ref` with
+  `(id, version, sha256)` not in the original grant's
+  `allowed_strategy_refs`, or an unapproved E1 arm/campaign
+  family. Refuse even when method and scope are authentic.
+  Non-proposal dispositions must not invent a strategy.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G15f, wrong context policy:** otherwise authentic
+  `ResearchContext.clock_policy_ref`/original input or
+  memory policy lineage does not map to the grant's
+  `context_policy_ref`. Refuse the conflicting policy.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G15g, no original producer policy mapping:** matching
+  account, method and candidate hashes but no verified #507
+  request-kind, selector or context-policy mapping. Report
+  `UNAVAILABLE` with the precise missing mapping, never
+  default to a valid grant. Retain the attempt denominator.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G15h, wrong selector authorization:** `propose` selects
+  a granted strategy, but its retained `CandidateStrategy`
+  `envelope_ref` or `eligibility_ref` belongs to a different
+  selector-policy lineage than the granted method/selector.
+  Refuse `INVALID`; strategy membership alone is insufficient.
   **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
 - **G16a, response predates request:** original authentic
   `ModelReplayRecord.response_received_at` precedes
