@@ -5,7 +5,7 @@ cannot authenticate an allocation under an independent configured origin.
 """
 
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid7
 
@@ -13,6 +13,7 @@ import pytest
 from test_evaluator_engine import _engine, _run, _run_identity
 from test_stage1_synthetic_account_lifecycle import _coordinator, _store
 
+from drift.evaluator.opening_book_lifecycle import OpeningBookLifecycleError
 from drift.ledger.stage1_synthetic_account_receipts import (
     ALLOCATION,
     ConfiguredLocalSyntheticOriginV1,
@@ -108,7 +109,7 @@ def test_forged_hash_and_wrong_original_event_type_are_refused(
             event_type=ALLOCATION,
             allocation_id=proof.allocation_id,
         )
-    with pytest.raises(LocalAccountReceiptError, match="SCOPE_OR_WITNESS"):
+    with pytest.raises(LocalAccountReceiptError, match="ORIGINAL_EVENT"):
         store.readback_allocation(
             allocation_id=proof.allocation_id,
             allocation_ref=proof.allocation_ref,
@@ -170,5 +171,5 @@ def test_claim_clock_rollback_cannot_create_success_or_fresh_cash(
         "stage1.synthetic_account.allocation",
         "stage1.synthetic_account.allocation_observed",
     ]
-    with pytest.raises(Exception, match="not available"):
+    with pytest.raises(OpeningBookLifecycleError, match="not available"):
         _run(engine)
