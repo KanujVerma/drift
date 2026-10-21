@@ -1,0 +1,41 @@
+name: Temp #492 final read-only QA
+on:
+  push:
+    branches:
+      - coord/492-readonly-final-qa-20261020
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      UV_LOCKED: "1"
+      UV_PYTHON_PREFERENCE: only-managed
+    steps:
+      - name: Checkout full history without credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          enable-cache: false
+      - name: Pinned sync
+        run: |
+          uv python install
+          uv sync --locked
+      - name: Reproduce issue #492 focused regressions
+        run: uv run pytest -q tests/unit/test_news_triage.py
+      - name: Ruff lint and exact format
+        run: |
+          uv run ruff check src/drift/news_triage/screen.py tests/unit/test_news_triage.py
+          uv run ruff format --check src/drift/news_triage/screen.py tests/unit/test_news_triage.py
+      - name: Strict mypy across repository
+        run: uv run mypy src tests
+      - name: Package build and clean checkout
+        run: |
+          uv build
+          git diff --check
+          test -z "$(git status --porcelain --untracked-files=no)"
