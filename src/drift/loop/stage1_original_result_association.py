@@ -26,6 +26,7 @@ from drift.domain.common import ImmutableJSONValue
 from drift.domain.evaluator_results import EvaluationRunArtifactsV2
 from drift.domain.events import AuditEvent
 from drift.domain.experiments import ExperimentRun, ExperimentRunStatus
+from drift.errors import DuplicateEventError
 from drift.experiments.stage1_campaign_config import (
     ArmSpecV1,
     CampaignSpecV1,
@@ -434,13 +435,24 @@ class Stage1OriginalResultAssociationV1:
         # The configured original ledger is the same trusted-host root that
         # holds original allocation + M0, not one named by a caller receipt.
         writer = SQLiteLedger(self._origin.ledger_path)
-        writer.append(draft)
+        try:
+            writer.append(draft)
+        except DuplicateEventError as error:
+            raise OriginalResultAssociationError(
+                "DUPLICATE_ORIGINAL_RESULT"
+            ) from error
+        matches = [
+            event
+            for event in self._origin.verified_events()
+            if event.event_id == draft.event_id
+            and event.event_type == RESULT_EVENT
+        ]
+        if len(matches) != 1:
+            raise OriginalResultAssociationError(
+                "ORIGINAL_RESULT_WRITE_NOT_READABLE"
+            )
         expected_ref = LocalEventReferenceV1(
-            draft.event_id,
-            next(
-                e.event_hash for e in self._origin.verified_events()
-                if e.event_id == draft.event_id
-            ),
+            draft.event_id, matches[0].event_hash
         )
         self._receipt = expected_ref
         self.readback()
@@ -505,12 +517,21 @@ class Stage1OriginalResultAssociationV1:
             raise OriginalResultAssociationError("RESULT_M0_ID_INVALID") from error
         if position == 0:
             raise OriginalResultAssociationError("RESULT_WITHOUT_PREDECESSORS")
-        _, claim, used, m0 = self._verified_chain(
+        history, claim, used, m0 = self._verified_chain(
             identity_hash=artifacts.result.run_identity.run_identity_hash,
-            m0_event_id=m0_id, m0_run_id=m0_run_id,
+            m0_event_id=m0_id,
+            m0_run_id=m0_run_id,
             result_hash=artifacts.result.result_hash,
             trace_hash=artifacts.trace.trace_hash,
         )
+        m0_position = next(
+            index for index, event in enumerate(history)
+            if event.event_id == m0.event_id
+        )
+        if position <= m0_position:
+            raise OriginalResultAssociationError(
+                "RESULT_PREDATES_ORIGINAL_M0_EVENT"
+            )
         if (
             data.get("allocation_event_hash")
             != self._original_allocation.allocation_ref.event_hash
