@@ -1920,10 +1920,13 @@ class SessionEvaluatorEngine:
                 admission=self._admission,
             )
             original_digest = content_hash(opening_book)
+            # Observers see detached copies of the configuration, never the
+            # engine's canonical admission or protocol objects. Callback code
+            # may otherwise mutate a frozen model through object.__setattr__.
             lifecycle.retain_original_book(
                 opening_book=opening_book,
-                admission=self._admission,
-                protocol=self._protocol,
+                admission=_revalidated_admission(self._admission),
+                protocol=_revalidated(EvaluationProtocolV1, self._protocol),
                 currency_code=self._book_currency_code,
             )
             if content_hash(opening_book) != original_digest:
@@ -2006,8 +2009,11 @@ class SessionEvaluatorEngine:
                 raise OpeningBookLifecycleError(
                     "prepared original book changed before the invocation claim"
                 )
+            # Do not expose the identity used by _seal_result to callback
+            # mutation. Each callback receives its own revalidated copy.
             lifecycle.claim_invocation(
-                opening_book=prepared_book, run_identity=run_identity
+                opening_book=prepared_book,
+                run_identity=_revalidated_run_identity(run_identity),
             )
             if content_hash(prepared_book) != prepared_digest:
                 raise OpeningBookLifecycleError(
@@ -2017,7 +2023,8 @@ class SessionEvaluatorEngine:
             with self._opening_book_lock:
                 self._opening_book_phase = "consumed"
             lifecycle.observe_consumption(
-                opening_book=loop.state, run_identity=run_identity
+                opening_book=loop.state,
+                run_identity=_revalidated_run_identity(run_identity),
             )
             if content_hash(loop.state) != prepared_digest:
                 raise OpeningBookLifecycleError(
