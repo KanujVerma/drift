@@ -78,8 +78,9 @@ class _Recorder:
         self._visit("consume", opening_book)
 
 
-def _refuse_session_start(engine: evaluator_engine.SessionEvaluatorEngine,
-                          monkeypatch: pytest.MonkeyPatch) -> None:
+def _refuse_session_start(
+    engine: evaluator_engine.SessionEvaluatorEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
     def forbidden(*args: object, **kwargs: object) -> None:
         pytest.fail("a session began despite a failed opening-book lifecycle")
 
@@ -122,14 +123,8 @@ def test_prepared_engine_consumes_same_original_and_matches_legacy(
     assert lifecycle.retained is lifecycle.claimed is lifecycle.consumed
     assert lifecycle.seen == ["retain", "claim", "consume"]
     assert canonical_json(prepared_artifacts) == canonical_json(legacy_artifacts)
-    assert (
-        prepared_artifacts.result.result_hash
-        == legacy_artifacts.result.result_hash
-    )
-    assert (
-        prepared_artifacts.trace.trace_hash
-        == legacy_artifacts.trace.trace_hash
-    )
+    assert prepared_artifacts.result.result_hash == legacy_artifacts.result.result_hash
+    assert prepared_artifacts.trace.trace_hash == legacy_artifacts.trace.trace_hash
 
 
 def test_prepared_run_cannot_execute_twice_or_reset_cash() -> None:
@@ -178,10 +173,10 @@ def test_claim_or_consume_failure_prevents_sessions_and_replay(
     engine.prepare_opening_book(lifecycle=lifecycle)
     with pytest.raises(RuntimeError, match=f"observer {phase} failed"):
         _run(engine)
-    assert lifecycle.seen == (
-        ["retain", "claim"] if phase == "claim"
-        else ["retain", "claim", "consume"]
-    )
+    expected = ["retain", "claim"]
+    if phase == "consume":
+        expected.append("consume")
+    assert lifecycle.seen == expected
     with pytest.raises(OpeningBookLifecycleError, match="not available"):
         _run(engine)
 
