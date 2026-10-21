@@ -30,7 +30,7 @@ All accepted K1/E1/E6A records, schema versions, original hashes, source grade, 
 - Known `VALID` requires `is_valid=True`, an actual `ResearchCandidate` linked to the same attempt, and a raw output reference.
 - `REJECTED` / `INVALID` / `REFUSED` require `is_valid=False` and no candidate; a failure without a candidate remains a first-class research observation.
 - The declared retained canonical ValidationResult digest matches `content_hash(validation.model_dump(mode="python"))` at the caller's specified original bytes profile. The proposed candidate `RetainedValidationCandidateV1` binds the validation ID, status/reason, original raw/output storage claims, original candidate reference if applicable, externally claimed issuer, timestamp, and its own versioned canonical record hash.
-- No `ValidationResult` existing on main has an original permanent `validation_id` or issuer. This builder **does not call or impersonate a trusted validator recorder, retain bytes, authenticate the issuer or prove a durable journal record.** The output is an explicitly candidate reference, not a trusted capability.
+- No `ValidationResult` existing on main has an original permanent `validation_id` or issuer. This builder alone does not persist anything. The separate local ledger adapter described below now retains its canonical decision and caller-supplied raw bytes under a bounded append-only audit event and verifies readback. That verifies integrity against the **supplied ledger instance**, not original issuer authority; it is not an accepted K1 end-to-end production wire.
 
 `review_research_e1_binding(...)` consumes accepted full `CampaignSpecV1`, `ArmSpecV1` collection, `RunAccountBindingV1` collection, expected runs, genuine `Stage1TrialProvenanceSnapshotV1` and original K1 `ResearchContext`, started/terminal `AttemptRecord`, optional original validation receipt, candidate, optional `ModelReplayRecord`, K1 `CostReceipt` records, exact logical request, deadline and review availability. Optional exact grant/allocation `ArtifactReference` values are hashed into **a candidate** for later comparison, but are never treated as issuer verification.
 
@@ -47,6 +47,76 @@ The outcome is `ResearchE1BindingReview`: structural consistency, a **candidate-
 - `abstain` / `unavailable`: remain different non-order outcomes with original reasons and no strategy/target trade authority.
 - `failed` / `rejected`: actual started and terminal attempts with original failure evidence and no candidate stay present in the denominator; missing billing remains UNKNOWN, not free.
 - K1 `CostReceipt` is raw inference/research spending. It does **not** change the authoritative trading NAV or paid trading fees. A correction is appended under current `ResearchReceiptStore` semantics, never silently overwritten. A cost receipt recorded later than an earlier as-of association is reported as late; a repeated deterministic candidate is not another independent scored trial.
+
+## 3A. Actual local validation original-byte append/readback implemented
+
+The source now includes `append_local_validation_original(...)` and
+`readback_local_validation_original(...)`, using the already merged
+`Ledger`/`AuditEventDraft` abstraction and no new SQLite schema. The
+append procedure:
+
+1. Revalidates the accepted real `ValidationResult`, exact original
+   `ArtifactReference`, UUID7 audit event and subject IDs, and one explicit
+   UTC timestamp. It accepts raw model/output bytes or explicit absence.
+   Original raw output is bounded to 1 MiB. All content is inert.
+2. Serializes the validation result through Drift's existing
+   `canonical_json`, hashes the exact canonical bytes and stores the
+   **actual bytes as a UTF-8 string** within an immutable audit event.
+   If supplied, raw output bytes are stored as exact base64 with a separate
+   SHA-256 and typed `StoredArtifactRef`. No raw output, including
+   failed/no-call absence, is invented.
+3. Emits a uniquely keyed
+   `k1.validation.original_candidate_recorded` event with the validation
+   ID, attempt, original canonical decision bytes, raw bytes and claimed
+   issuer. Existing ledger uniqueness refuses double issuance of the same
+   validation ID.
+4. After the real append, calls `ledger.verified_events()`, locates the
+   exact event and verifies its event hash/type, full closed payload,
+   original canonical JSON, absence of duplicate keys, reconstructed real
+   K1 `ValidationResult`, raw base64 and both byte digests, and the
+   declared candidate hash. An alternate blank/copy ledger or mismatched
+   expected event digest refuses.
+5. Returns `LocalValidationReadback` with the actual audit event ID/hash,
+   original validation digest, original raw byte digest if any, and the
+   typed retention candidate. The assessment accepts an optional
+   `local_validation_readback` and binds its actual event hash into the
+   proposed E1 association preimage.
+
+**Important trust boundary:** The `Ledger` supplied to these routines is
+not independently authenticated by these functions. The issuer claim and
+the `timestamp` inside today's `AuditEventDraft` remain caller-supplied.
+Thus `trusted_research_issuer_authenticated=False`, `can_admit_e6b=False`,
+`original_issuer_verified=False` and `admitted_for_e6b_or_trading=False`
+remain unconditional. Attaching an auditor-selected trusted read-only
+retention context, real collector/scheduler invocation hook, independently
+measured availability witness, and source isolation/capability enforcement
+requires an explicit accepted producer and independent review. The local
+append itself is a genuine side effect **when a caller invokes it on a
+real supplied ledger**; the author did not invoke it in this session and
+the test uses only a temporary, offline synthetic ledger. No application
+has yet been wired to record its validator's original decision at issuance
+time, so a later copied `ValidationResult` cannot be described as an
+authentic original production result.
+
+### Added regression oracles (written, intentionally unrun)
+
+- Append a genuine synthetic `REJECTED` or `VALID` K1 decision and literal
+  raw output to temporary `SQLiteLedger`, reopen read-only, verify exact
+  event, original decision and raw-byte hashes.
+- Reissue the same validation ID with a new event ID; the already merged
+  unique audit dedup key must refuse instead of producing a second original.
+- Re-read the original under a wrong event hash or another ledger; refuse.
+- Oversized raw output never creates an audit event; REFUSED with no raw output
+  retains the reason and exact missingness.
+- Join a re-read canonical validation candidate to actual E1/K1 original
+  records. Its candidate association hash binds the durable event hash,
+  but still does not authenticate the original issuer, scheduler or book.
+- Fraudulent retained-validation status/candidate mismatch and forged
+  self-consistent issuer ref never grant original E1/scientific admission.
+
+These checks exercise genuine local persistence **only when AntiGravity runs
+the synthetic tests later**. They are not a claim of currently passing
+pytest, full CI or independent review.
 
 ## 4. Research consumer NARROW of Matthew's #508 opening-book proposal
 
@@ -91,7 +161,7 @@ Then run the canonical [Drift verification gate](../../agent-workflow.md), confi
 
 The authored, **unexecuted** cases include actual accepted E1 `CampaignSpecV1/ArmSpecV1/RunAccountBindingV1` and provenance builder, accepted K1 original context/attempt/candidate and real `ResearchReceiptStore`, then wrong account, run, checkpoint and entire manifest; loss of original validation receipt; wrong validation/candidate hash; a late candidate deadline; hold, abstain, unavailable and failed no-candidate; unknown billing; forged source clock, changed logical request; stable replay hash without extra sample. AntiGravity should independently add: valid post-cutoff but pre-deadline model completion, model response or parse after deadline, cost correction after as-of, overlapping model/ref identity, duplicate and conflicting retained validator originals, issuer-forged grants, trust-root reassignment, replay after revocation and actual Matthew book readback once their accepted producer endpoints exist. Non-vacuous trusted positive controls require #508 and #512 sources; inventing a fake signature to make these pass would be invalid.
 
-**No tests, build, dependency changes, private-source reads, issuer registration, real ledger writes, broker operations, schema migration, GitHub merge or independent acceptance are claimed by this publication.** Any automatically started CI must be assessed at the exact new HEAD and remains distinct from AntiGravity review.
+**No tests, build, dependency changes, private-source reads, real ledger writes during this authoring session, issuer registration, broker operations, schema migration, GitHub merge or independent acceptance are claimed by this publication.** Any automatically started CI must be assessed at the exact new HEAD and remains distinct from AntiGravity review.
 
 ## 7. Release disposition and accurate issue status
 
