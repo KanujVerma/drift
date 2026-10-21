@@ -69,6 +69,7 @@ from drift.serialization.canonical import content_hash
 EXPERIMENT_RUN_EVENT_TYPE = "m2.evaluation.run.recorded"
 EXPERIMENT_RUN_ENTITY_TYPE = "experiment_run"
 EXPERIMENT_RUN_EVENT_SCHEMA_VERSION = "1"
+EXPERIMENT_RUN_BOOK_EVENT_SCHEMA_VERSION = "2"
 
 
 class ForeignRunArtifactsError(DriftError, ValueError):
@@ -397,14 +398,29 @@ def _bound_parameters_hash(
 
 
 def _record_audit_event(
-    context: ExperimentRunnerContext, inputs: _CallerInputs, run: ExperimentRun
+    context: ExperimentRunnerContext,
+    inputs: _CallerInputs,
+    run: ExperimentRun,
+    *,
+    original_final_book_hash: str | None = None,
 ) -> None:
-    """Append the run's audit event, from canonical values only (issue 123)."""
+    """Append an original M0 event; V2 opt-in also binds the final book.
+
+    V1 payloads and source hashes stay byte-for-byte unchanged when no
+    original-result observer is installed. The V2 local synthetic extension
+    hashes the *actual rebuilt* M2 final book before any consumer receives
+    that object, preventing a forged post-hoc final-book association.
+    """
     ledger = context.ledger
     if ledger is None:
         return
     if inputs.audit_event_id is None:
         raise ValueError("recording an experiment run requires an audit event id")
+    if (
+        original_final_book_hash is not None
+        and run.status is not ExperimentRunStatus.COMPLETED
+    ):
+        raise ValueError("a non-completed M0 run has no original final book")
     ledger.append(
         AuditEventDraft(
             event_id=inputs.audit_event_id,
@@ -422,8 +438,17 @@ def _record_audit_event(
                 if isinstance(run.metrics, Mapping)
                 else {},
                 "error_details": run.error_details,
+                **(
+                    {"original_final_book_hash": original_final_book_hash}
+                    if original_final_book_hash is not None
+                    else {}
+                ),
             },
-            schema_version=EXPERIMENT_RUN_EVENT_SCHEMA_VERSION,
+            schema_version=(
+                EXPERIMENT_RUN_BOOK_EVENT_SCHEMA_VERSION
+                if original_final_book_hash is not None
+                else EXPERIMENT_RUN_EVENT_SCHEMA_VERSION
+            ),
         )
     )
 
@@ -548,7 +573,16 @@ def execute_experiment_run(
             "artifact_references": _artifact_references(context, inputs, recorded),
         }
     )
-    _record_audit_event(context, inputs, run)
+    _record_audit_event(
+        context,
+        inputs,
+        run,
+        original_final_book_hash=(
+            content_hash(recorded.final_state)
+            if context.original_result_observer is not None
+            else None
+        ),
+    )
     if context.original_result_observer is not None:
         # The original M0 row and event already exist, so the observer can
         # independently re-open them and refuse any forged association.
