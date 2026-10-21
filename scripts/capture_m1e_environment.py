@@ -7,6 +7,10 @@ without downloading packages or accessing external networks.
 import argparse
 import hashlib
 import json
+import platform
+import re
+import sys
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid7
@@ -25,6 +29,91 @@ from drift.qualification.environment import build_environment_closure
 def _hash_file(path: Path) -> tuple[SHA256Hash, int, bytes]:
     data = path.read_bytes()
     return hashlib.sha256(data).hexdigest(), len(data), data
+
+
+@dataclass(frozen=True, slots=True)
+class _RuntimeObservation:
+    """Raw host observations, never a caller-asserted replay identity."""
+
+    implementation: str
+    version: str
+    build: str
+    executable: str
+    operating_system: str
+    machine: str
+
+
+def _current_runtime_observation() -> _RuntimeObservation:
+    """Read the running interpreter and current host rather than old fixtures."""
+    version = sys.version_info
+    return _RuntimeObservation(
+        implementation=sys.implementation.name,
+        version=f"{version.major}.{version.minor}.{version.micro}",
+        build=sys.version.replace("\n", " ").strip(),
+        executable=sys.executable,
+        operating_system=platform.system(),
+        machine=platform.machine(),
+    )
+
+
+def _validated_runtime_identity(
+    *,
+    observed: _RuntimeObservation,
+    pinned_version: str,
+    stdlib_hash: SHA256Hash,
+    distribution_hash: SHA256Hash,
+) -> PythonRuntimeIdentityV1:
+    """Validate measured CPython on the macOS arm64 closure target.
+
+    Observations passed here are internal test fixtures only. Production calls
+    _current_runtime_observation() and reads the repository pin itself.
+    Distribution and native-library provenance must still be established by
+    separately accepted M1e evidence; a staged tar hash does not prove which
+    interpreter is executing.
+    """
+    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", pinned_version) is None:
+        raise ValueError("M1E_INVALID_PYTHON_PIN")
+    if observed.implementation != "cpython" or observed.version != pinned_version:
+        raise ValueError(
+            "M1E_RUNTIME_PIN_MISMATCH: measured interpreter is not the "
+            "exact repository CPython pin"
+        )
+    if (
+        observed.operating_system != "Darwin"
+        or observed.machine.lower() not in ("arm64", "aarch64")
+    ):
+        raise ValueError("M1E_UNSUPPORTED_CAPTURE_PLATFORM: macOS arm64 required")
+    if not observed.build:
+        raise ValueError("M1E_RUNTIME_BUILD_UNAVAILABLE")
+    if not observed.executable:
+        raise ValueError("M1E_RUNTIME_EXECUTABLE_UNAVAILABLE")
+    executable = Path(observed.executable)
+    if not executable.is_absolute() or not executable.is_file():
+        raise ValueError("M1E_RUNTIME_EXECUTABLE_UNVERIFIED")
+    return PythonRuntimeIdentityV1(
+        schema_version="1",
+        implementation=observed.implementation,
+        version=observed.version,
+        build=observed.build,
+        executable=str(executable.resolve(strict=True)),
+        standard_library_inventory_hash=stdlib_hash,
+        distribution_artifact_hash=distribution_hash,
+        # No unmeasured, hard-coded dynamic-library claims.
+        native_library_links=(),
+    )
+
+
+def _measure_pinned_runtime(
+    *, stdlib_hash: SHA256Hash, distribution_hash: SHA256Hash
+) -> PythonRuntimeIdentityV1:
+    pin_path = Path(__file__).resolve().parents[1] / ".python-version"
+    pinned_version = pin_path.read_text(encoding="utf-8").strip()
+    return _validated_runtime_identity(
+        observed=_current_runtime_observation(),
+        pinned_version=pinned_version,
+        stdlib_hash=stdlib_hash,
+        distribution_hash=distribution_hash,
+    )
 
 
 def capture_m1e_environment(
@@ -95,15 +184,11 @@ def capture_m1e_environment(
             content_hash=stdlib_inv_hash,
         )
 
-    python_runtime = PythonRuntimeIdentityV1(
-        schema_version="1",
-        implementation="cpython",
-        version="3.14.5",
-        build="cpython-3.14.5+20260901-aarch64-apple-darwin-install_only",
-        executable="/opt/homebrew/bin/python3.14",
-        standard_library_inventory_hash=stdlib_inv_hash,
-        distribution_artifact_hash=python_dist_hash,
-        native_library_links=("libSystem.B.dylib",),
+    # Before a closure is emitted, bind its interpreter to the observed host
+    # and the exact repository pin. A stale staged runtime is not admissible.
+    python_runtime = _measure_pinned_runtime(
+        stdlib_hash=stdlib_inv_hash,
+        distribution_hash=python_dist_hash,
     )
 
     package_artifacts: list[PackageArtifactV1] = []
