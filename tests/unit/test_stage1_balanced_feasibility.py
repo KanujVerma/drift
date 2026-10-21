@@ -6,8 +6,10 @@ from decimal import Decimal
 from fractions import Fraction
 
 import pytest
+from typing import cast
 
 from drift.risk.stage1_balanced_feasibility import (
+    AssetRole,
     DevelopmentTargetCaps,
     ETFStudyMember,
     enumerate_equal_target_subsets,
@@ -90,9 +92,7 @@ def test_owner_development_policy_grid_is_exact_not_approved(
     assert observed.total_possible_subsets == 924
     assert observed.feasible_subsets == accepted
     assert observed.infeasible_subsets == 924 - accepted
-    assert observed.rejection_examples == (
-        () if accepted == 924 else observed.rejection_examples
-    )
+    assert observed.rejection_examples if accepted < 924 else True
     assert not observed.approves_mandate_or_execution
 
 
@@ -197,7 +197,7 @@ def test_duplicate_member_ticker_is_not_new_asset_class_slot() -> None:
 
 
 def test_invalid_foreign_asset_role_refuses() -> None:
-    members = (*universe()[:-1], ETFStudyMember("ABC", "CASH"))
+    members = (*universe()[:-1], ETFStudyMember("ABC", cast(AssetRole, "CASH")))
     with pytest.raises(ValueError, match="STUDY_ROLE_INVALID"):
         enumerate_equal_target_subsets(
             members=members, policy=caps(),
