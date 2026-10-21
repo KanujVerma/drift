@@ -23,7 +23,8 @@ _ROOT = frozenset(
 )
 _REQUEST = frozenset(
     {"run_id", "arm_id", "account_id", "client_token", "request_hash",
-     "side", "order_type", "session", "requested_qty", "limit_price"}
+     "side", "order_type", "session", "requested_qty", "limit_price",
+     "listing_ref", "original_account_binding_ref"}
 )
 _EVIDENCE = frozenset(
     {"source_version_ref", "input_cutoff_utc", "mandate_ref", "risk_ref",
@@ -37,12 +38,13 @@ _TIMELINE = frozenset(
 )
 _QUOTE = frozenset(
     {"kind", "quote_event_utc", "quote_received_utc",
-     "max_age_seconds", "quote_receipt_ref"}
+     "max_age_seconds", "quote_receipt_ref", "venue_ref", "listing_ref"}
 )
 _ATTEMPT = frozenset({"client_token", "request_hash", "dispatched"})
 _REPORT = frozenset(
     {"report_id", "cumulative_qty", "execution_utc", "received_utc",
-     "price", "fee", "fee_status", "effect_ref"}
+     "price", "fee", "fee_status", "effect_ref",
+     "run_id", "arm_id", "account_id", "client_token", "request_hash"}
 )
 _STATE = frozenset(
     {"dispatch_knowledge", "lifecycle", "claimed_accounting_complete",
@@ -184,7 +186,10 @@ def preflight_execution_trace(payload: object) -> ExecutionTracePreflight:
     if any(name not in _EDGE_NAMES or not _text(ref) for name, ref in ties.items()):
         problems.append("tie_proofs.invalid_edge_or_ref")
 
-    for field in ("run_id", "arm_id", "account_id", "client_token"):
+    for field in (
+        "run_id", "arm_id", "account_id", "client_token",
+        "listing_ref", "original_account_binding_ref",
+    ):
         if not _text(request.get(field)):
             problems.append(f"request.{field}.missing")
     request_hash = request.get("request_hash")
@@ -242,6 +247,14 @@ def preflight_execution_trace(payload: object) -> ExecutionTracePreflight:
         problems.append("quote.kind.invalid")
     if not _text(quote.get("quote_receipt_ref")):
         problems.append("quote.quote_receipt_ref.missing")
+    if not _text(quote.get("venue_ref")) or (
+        quote.get("venue_ref") != evidence.get("venue_ref")
+    ):
+        problems.append("quote.venue_mismatch")
+    if not _text(quote.get("listing_ref")) or (
+        quote.get("listing_ref") != request.get("listing_ref")
+    ):
+        problems.append("quote.listing_mismatch")
     max_age = _amount(quote.get("max_age_seconds"), positive=False)
     if max_age is None:
         problems.append("quote.max_age_seconds.invalid")
@@ -280,6 +293,8 @@ def preflight_execution_trace(payload: object) -> ExecutionTracePreflight:
     used_effects: set[str] = set()
     cumulative = 0
     unknown_fee = False
+    prior_report_execution: datetime | None = None
+    prior_report_receipt: datetime | None = None
     for index, value in enumerate(reports):
         report = _exact(_map(value), _REPORT, f"reports.{index}", problems)
         report_id = report.get("report_id")
@@ -287,6 +302,12 @@ def preflight_execution_trace(payload: object) -> ExecutionTracePreflight:
             problems.append(f"reports.{index}.report_id.missing")
             continue
         assert isinstance(report_id, str)
+        for name in (
+            "run_id", "arm_id", "account_id", "client_token",
+            "request_hash",
+        ):
+            if report.get(name) != request.get(name):
+                problems.append(f"reports.{index}.{name}.identity_mismatch")
         original = report_ids.get(report_id)
         if original is not None:
             if report != original:
@@ -313,6 +334,20 @@ def preflight_execution_trace(payload: object) -> ExecutionTracePreflight:
         received = _time(report.get("received_utc"))
         if execution is None or received is None:
             problems.append(f"reports.{index}.time.invalid")
+        if execution is not None:
+            if (
+                prior_report_execution is not None
+                and execution < prior_report_execution
+            ):
+                problems.append(f"reports.{index}.execution_time_reversed")
+            prior_report_execution = execution
+        if received is not None:
+            if (
+                prior_report_receipt is not None
+                and received < prior_report_receipt
+            ):
+                problems.append(f"reports.{index}.receipt_time_reversed")
+            prior_report_receipt = received
         _ordered(
             arrival, execution, "arrival_utc", "execution_utc",
             ties, problems,
