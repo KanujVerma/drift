@@ -576,7 +576,7 @@ def test_callback_installed_instance_hook_cannot_mutate_prepared_book() -> None:
                     object.__setattr__(loop.state, "cash_balance", Decimal("1"))
                     object.__setattr__(loop.state, "net_asset_value", Decimal("1"))
 
-                engine._emit_session_start = injected  # type: ignore[method-assign]
+                setattr(engine, "_emit_session_start", injected)
             super()._visit(phase, book)
 
     observer = HookInstallingObserver()
