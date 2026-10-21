@@ -631,6 +631,15 @@ def screen_feed_coverage(
         and coverage.event_count >= 0
         and coverage.start_at < coverage.end_at
         and coverage.observed_at <= coverage.available_at <= decision_cutoff
+        # A claimed COMPLETE half-open interval [start, end) is not evidence
+        # of full coverage until its end has actually been observed. An
+        # ongoing partial interval may still truthfully be INCOMPLETE.
+        # Convert both aware endpoints to UTC for the closure comparison.
+        and (
+            coverage.state not in ("covered_empty", "covered_with_events")
+            or coverage.end_at.astimezone(UTC)
+            <= coverage.observed_at.astimezone(UTC)
+        )
         and coverage.state
         in ("covered_empty", "covered_with_events", "partial", "failed", "unknown")
     )
