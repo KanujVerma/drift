@@ -188,8 +188,9 @@ def audit_execution_v1_originals(
     known_broker_order_id: str | None = None
     last_reported_status: str | None = None
     largest_cum: int | None = None
-    fee_claimed_complete = True
+    fee_claimed_complete = bool(first_seq)
     unknown_outcome = not first_seq
+    local_before_send = False
     for index, report in enumerate(first_seq):
         if report.intent_id != original_intent.intent_id:
             issues.append(f"REPORT_{index}_FOREIGN_INTENT")
@@ -269,11 +270,14 @@ def audit_execution_v1_originals(
                 ExecutionStatus.EXPIRED,
             ):
                 issues.append(f"REPORT_{index}_UNCONFIRMED_AS_TERMINAL_V1")
-        if claim.source_kind == "LOCAL_BEFORE_SEND" and (
-            report.status not in (ExecutionStatus.REJECTED,)
-            or report.cum_quantity != 0
-        ):
-            issues.append(f"REPORT_{index}_LOCAL_REFUSAL_CONTRADICTS_FILL")
+        if claim.source_kind == "LOCAL_BEFORE_SEND":
+            local_before_send = True
+            if (
+                report.status is not ExecutionStatus.REJECTED
+                or report.cum_quantity != 0
+                or report.broker_order_id is not None
+            ):
+                issues.append(f"REPORT_{index}_LOCAL_REFUSAL_CONTRADICTS_FILL")
         if (
             claim.source_kind == "BROKER_OBSERVED"
             and report.status is ExecutionStatus.REJECTED
@@ -291,7 +295,9 @@ def audit_execution_v1_originals(
         )
     return V1ExecutionAudit(
         True, last_reported_status,
-        ("UNKNOWN" if unknown_outcome else "V1_ORIGIN_CLAIM_ONLY"),
+        ("UNKNOWN" if unknown_outcome else
+         "LOCAL_NO_SEND_CLAIM" if local_before_send else
+         "V1_ORIGIN_CLAIM_ONLY"),
         largest_cum,
         fee_claimed_complete,
         tuple(report.report_hash for report in first_seq),
