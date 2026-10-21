@@ -229,7 +229,9 @@ class LocalSyntheticAccountReceiptStoreV1:
             raise LocalAccountReceiptError("DUPLICATE_OR_CONFLICTING_ORIGINAL") from exc
         ref = _event_ref(appended)
         read_configured_original(
-            origin=self.origin, reference=ref, event_type=kind,
+            origin=self.origin,
+            reference=ref,
+            event_type=kind,
             allocation_id=allocation_id,
         )
         return ref
@@ -259,7 +261,8 @@ class LocalSyntheticAccountReceiptStoreV1:
             raise LocalAccountReceiptError("NONCANONICAL_ACCOUNT_BOUND_AT")
         allocation_id = uuid7()
         ref = self._append(
-            kind=ALLOCATION, allocation_id=allocation_id,
+            kind=ALLOCATION,
+            allocation_id=allocation_id,
             dedup_key=f"stage1:allocation:{fields.allocation_key}",
             minimum_time=bound_at,
             payload={
@@ -275,14 +278,17 @@ class LocalSyntheticAccountReceiptStoreV1:
         self, *, allocation_id: UUID, allocation_ref: LocalEventReferenceV1
     ) -> LocalEventReferenceV1:
         alloc = read_configured_original(
-            origin=self.origin, reference=allocation_ref, event_type=ALLOCATION,
+            origin=self.origin,
+            reference=allocation_ref,
+            event_type=ALLOCATION,
             allocation_id=allocation_id,
         )
         # The clock is sampled only AFTER confirmed durable original readback.
         # This is a conservative observed-by instant for the ALLOCATION receipt,
         # not the exact moment the WITNESS itself first became visible.
         return self._append(
-            kind=WITNESS, allocation_id=allocation_id,
+            kind=WITNESS,
+            allocation_id=allocation_id,
             dedup_key=f"stage1:allocation-witness:{allocation_id}",
             minimum_time=alloc.timestamp,
             payload={
@@ -300,12 +306,16 @@ class LocalSyntheticAccountReceiptStoreV1:
         expected_fields: AccountAllocationFieldsV1,
     ) -> OriginalLocalAccountReadbackV1:
         alloc = read_configured_original(
-            origin=self.origin, reference=allocation_ref,
-            event_type=ALLOCATION, allocation_id=allocation_id,
+            origin=self.origin,
+            reference=allocation_ref,
+            event_type=ALLOCATION,
+            allocation_id=allocation_id,
         )
         witness = read_configured_original(
-            origin=self.origin, reference=witness_ref,
-            event_type=WITNESS, allocation_id=allocation_id,
+            origin=self.origin,
+            reference=witness_ref,
+            event_type=WITNESS,
+            allocation_id=allocation_id,
         )
         allocation_payload = _event_payload(alloc)
         witness_payload = _event_payload(witness)
@@ -350,8 +360,10 @@ class LocalSyntheticAccountReceiptStoreV1:
             raise LocalAccountReceiptError("ORIGINAL_BOOK_NOT_FRESH_ENGINE_SHAPE")
         return OriginalLocalAccountReadbackV1(
             fields=expected_fields,
-            allocation_ref=allocation_ref, witness_ref=witness_ref,
-            allocation_id=allocation_id, original_book_bytes=original,
+            allocation_ref=allocation_ref,
+            witness_ref=witness_ref,
+            allocation_id=allocation_id,
+            original_book_bytes=original,
             opening_book=book,
             receipt_observed_available_by_at=witness.timestamp,
         )
@@ -360,7 +372,8 @@ class LocalSyntheticAccountReceiptStoreV1:
         self, *, original: OriginalLocalAccountReadbackV1, identity_hash: str
     ) -> LocalEventReferenceV1:
         return self._append(
-            kind=CLAIM, allocation_id=original.allocation_id,
+            kind=CLAIM,
+            allocation_id=original.allocation_id,
             dedup_key=f"stage1:invocation:{original.allocation_id}",
             minimum_time=original.receipt_observed_available_by_at,
             payload={
@@ -378,8 +391,10 @@ class LocalSyntheticAccountReceiptStoreV1:
         identity_hash: str,
     ) -> LocalEventReferenceV1:
         claim = read_configured_original(
-            origin=self.origin, reference=claim_ref,
-            event_type=CLAIM, allocation_id=original.allocation_id,
+            origin=self.origin,
+            reference=claim_ref,
+            event_type=CLAIM,
+            allocation_id=original.allocation_id,
         )
         claim_payload = _event_payload(claim)
         if (
@@ -391,7 +406,8 @@ class LocalSyntheticAccountReceiptStoreV1:
         ):
             raise LocalAccountReceiptError("CONSUMPTION_CLAIM_SCOPE_MISMATCH")
         return self._append(
-            kind=CONSUMED, allocation_id=original.allocation_id,
+            kind=CONSUMED,
+            allocation_id=original.allocation_id,
             dedup_key=f"stage1:consumed:{original.allocation_id}",
             minimum_time=claim.timestamp,
             payload={
