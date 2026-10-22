@@ -271,6 +271,10 @@ class Stage1SyntheticAccountLifecycleV1:
         self._transition("retaining", "ready")
 
     def verified_original(self) -> OriginalLocalAccountReadbackV1:
+        # A producer-visible E1 source can be mutated after successful
+        # allocation even though the store's retained original is immutable.
+        # Refuse a public readback if it no longer describes that source.
+        self._assert_e1_source_unchanged()
         if self._allocation is None or self._fields is None:
             raise LocalAccountReceiptError("ORIGINAL_ACCOUNT_NOT_RETAINED")
         allocation_id, allocation_ref, witness_ref = self._allocation
@@ -306,6 +310,7 @@ class Stage1SyntheticAccountLifecycleV1:
     ) -> None:
         self._transition("ready", "claiming")
         try:
+            self._assert_e1_source_unchanged()
             self._require_same_original(opening_book)
             if type(run_identity) not in (
                 EvaluationRunIdentityV1, EvaluationRunIdentityV2
@@ -335,6 +340,7 @@ class Stage1SyntheticAccountLifecycleV1:
     ) -> None:
         self._transition("claimed", "consuming")
         try:
+            self._assert_e1_source_unchanged()
             self._require_same_original(opening_book)
             if self._claim is None:
                 raise LocalAccountReceiptError("ORIGINAL_INVOCATION_CLAIM_MISSING")
