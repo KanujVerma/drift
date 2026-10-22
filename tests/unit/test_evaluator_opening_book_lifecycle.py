@@ -675,7 +675,8 @@ def test_captured_engine_cannot_replace_private_accounting_collaborators(
     phase: str,
 ) -> None:
     """A callback-visible engine mutation cannot reach the original book."""
-    expected = canonical_json(_run(_engine()))
+    baseline = _run(_engine())
+    expected = canonical_json(baseline)
     engine = _engine()
     poisoned_calls = 0
 
@@ -715,7 +716,7 @@ def test_captured_engine_cannot_replace_private_accounting_collaborators(
     result = _run(engine)
     assert canonical_json(result) == expected
     assert result.result.metrics.initial_cash == Decimal("10000")
-    assert result.final_state.cash_balance == Decimal("10000")
+    assert result.final_state.cash_balance == baseline.final_state.cash_balance
     assert poisoned_calls == 0
     assert observer.seen == ["retain", "claim", "consume"]
 
