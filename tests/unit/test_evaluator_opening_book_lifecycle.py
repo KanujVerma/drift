@@ -933,7 +933,6 @@ def test_lifecycle_cannot_replace_public_class_accounting_dispatch(
     class ReplacesPublicClass(_Recorder):
         def _visit(self, where: str, book: PortfolioStateV2) -> None:
             if where == phase:
-
                 def injected(*args: Any, **kwargs: Any) -> Any:
                     nonlocal calls
                     calls += 1
@@ -964,7 +963,6 @@ def test_reconstructed_class_hook_cannot_intercept_prepared_dispatch(
     class Poison(_Recorder):
         def _visit(self, where: str, book: PortfolioStateV2) -> None:
             if where == "consume":
-
                 def injected(*args: Any, **kwargs: Any) -> Any:
                     nonlocal called
                     called += 1
@@ -1005,3 +1003,17 @@ def test_abandoned_prepared_callback_cycle_is_collectable() -> None:
     gc.collect()
     assert engine_ref() is None
     assert observer_ref() is None
+
+
+def test_replacing_lifecycle_lifetime_anchor_fails_without_original() -> None:
+    """An attacker can stop a run but cannot substitute a new callback."""
+    engine = _engine()
+    engine.prepare_opening_book(lifecycle=_Recorder())
+    substitute = _Recorder()
+    object.__setattr__(engine, "_lifecycle_lifetime_anchor", substitute)
+    gc.collect()
+    with pytest.raises(OpeningBookLifecycleError, match="state is incomplete"):
+        _run(engine)
+    assert substitute.seen == []
+    with pytest.raises(OpeningBookLifecycleError, match="not available"):
+        _run(engine)
