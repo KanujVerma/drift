@@ -587,6 +587,7 @@ def test_callback_installed_instance_hook_cannot_mutate_prepared_book() -> None:
         def _visit(self, phase: str, book: PortfolioStateV2) -> None:
             nonlocal calls
             if phase == "consume":
+
                 def injected(loop: Any, index: int, session: Any) -> None:
                     nonlocal calls
                     calls += 1
@@ -933,6 +934,7 @@ def test_lifecycle_cannot_replace_public_class_accounting_dispatch(
     class ReplacesPublicClass(_Recorder):
         def _visit(self, where: str, book: PortfolioStateV2) -> None:
             if where == phase:
+
                 def injected(*args: Any, **kwargs: Any) -> Any:
                     nonlocal calls
                     calls += 1
@@ -963,6 +965,7 @@ def test_reconstructed_class_hook_cannot_intercept_prepared_dispatch(
     class Poison(_Recorder):
         def _visit(self, where: str, book: PortfolioStateV2) -> None:
             if where == "consume":
+
                 def injected(*args: Any, **kwargs: Any) -> Any:
                     nonlocal called
                     called += 1
