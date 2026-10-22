@@ -410,6 +410,17 @@ new network service, executor identity or source-file implementation**.
   a real no-work preflight refusal follows its separately proved
   null-authorization exception. Unknown incurred costs remain
   unknown and are still retained.
+- An original per-attempt budget reservation also constrains the
+  actual attributable research costs, not just the nominal permission
+  fields. Independently link all original raw `CostReceipt`s,
+  subsequent superseding corrections and approved shared-work
+  allocations to the same attempt/arm and reservation. Proven
+  charge-over-ceiling, off-category spend or exhausted cumulative
+  permission is `INVALID` without erasing incurred work. Missing
+  receipt completeness, unknown spend, disputed shared attribution
+  or unsettled correction is `UNAVAILABLE`, not assumed within
+  budget. A post-hoc receipt never authorizes previously unreserved
+  paid work.
 - A `hold` requires verified matching incumbent and current
   account/risk state. `abstain`, `unavailable`, failed and rejected
   attempts remain distinct, retain reason/cost, and authorize no
@@ -469,7 +480,16 @@ new network service, executor identity or source-file implementation**.
    E1 arm/campaign pools; do not invent a strategy for genuine
    nontrading or failed attempts. Verify `context_policy_ref`
    through #507's original K1 clock/input/memory/feedback policy
-   mapping.
+   mapping AND through the original grant's
+   `context_e1_policy_binding_ref` to the frozen E1 arm's
+   `information_visibility_policy` and
+   `feedback_policy_reference`, plus the campaign's
+   `source_eligibility_policy_reference` and
+   `learning_and_feedback_policy_reference`.
+   Require all original context, input, memory and feedback
+   lineage to satisfy BOTH the grant and the frozen E1 rules;
+   equal grant/context refs under a changed E1 policy cannot
+   authorize another experiment treatment.
    **Verify the frozen producer/model lane independently:** check
    the original E1 `ArmSpecV1.selector_type`,
    `model_configuration_reference` and campaign
@@ -485,7 +505,12 @@ new network service, executor identity or source-file implementation**.
    original replay method, provider, requested and resolved
    model identity/limitation, adapter, parser, and raw
    request/configuration against the arm and campaign's frozen
-   policies. No authentic mapping means `UNAVAILABLE`;
+   policies. Also require the issuer-verified mapping from
+   `ArmSpecV1.deterministic_seed_reference` and
+   `frozen_configuration_reference` to original algorithm,
+   strategy-parameter and supported model-generation seed
+   evidence. For R, verify the frozen conventional comparator
+   revision without relying on an absent model replay. No authentic mapping means `UNAVAILABLE`;
    an authenticated wrong producer, model or configuration
    means `INVALID`. Do not invent replay evidence for
    no-call terminal refusal.
@@ -506,6 +531,17 @@ new network service, executor identity or source-file implementation**.
    refusal can lack the authorization, retaining its reason
    and any unknown cost evidence. Do not replace authorization
    with a billing or M2 cash receipt.
+   Independently reconcile original `CostReceipt` events from
+   every attempt/candidate receipt reference plus later
+   correction and shared-work allocations against the exact
+   reservation and frozen per-attempt/aggregate budget.
+   An authenticated actual charge over the ceiling or from an
+   unauthorized category is `INVALID`, even when the
+   authorization itself was nominally valid. Missing original
+   complete costs, accepted attribution or reliable currency
+   evidence is `UNAVAILABLE`; do not invent paid-call zero
+   costs, alter the original receipts or overstate grant-based
+   research eligibility.
    For model calls, verify request/response/parse/
    original-validation/terminal order before declaring
    decision readiness. Refuse independently verifiable
