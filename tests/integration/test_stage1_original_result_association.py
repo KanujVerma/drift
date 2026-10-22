@@ -50,6 +50,7 @@ from drift.ledger.stage1_synthetic_account_receipts import (
     LocalSyntheticAccountReceiptStoreV1,
 )
 from drift.loop.stage1_original_result_association import (
+    M0_USE_EVENT,
     RESULT_EVENT,
     OriginalResultAssociationError,
     Stage1OriginalResultAssociationV1,
@@ -197,6 +198,7 @@ def test_actual_m0_result_trace_book_and_e1_account_are_retained(
         "stage1.synthetic_account.invocation_claim",
         "stage1.synthetic_account.book_consumed",
         "m2.evaluation.run.recorded",
+        M0_USE_EVENT,
         RESULT_EVENT,
     ]
 
@@ -232,7 +234,14 @@ def test_independent_b_r_accounts_keep_separate_original_results(
     original_results = [
         event for event in origin.verified_events() if event.event_type == RESULT_EVENT
     ]
+    original_m0_uses = [
+        event
+        for event in origin.verified_events()
+        if event.event_type == M0_USE_EVENT
+    ]
     assert len(original_results) == 2
+    assert len(original_m0_uses) == 2
+    assert len({event.deduplication_key for event in original_m0_uses}) == 2
 
 
 def test_no_order_original_result_does_not_invent_fills(
