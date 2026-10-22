@@ -246,19 +246,25 @@ class Stage1SyntheticAccountLifecycleV1:
             allocation_id, receipt_ref = self._store.append_allocation(
                 fields=fields,
                 original_book=original,
+                precommit_guard=self._assert_e1_source_unchanged,
             )
+            self._assert_e1_source_unchanged()
             witness_ref = self._store.witness_original_readback(
                 allocation_id=allocation_id,
                 allocation_ref=receipt_ref,
+                precommit_guard=self._assert_e1_source_unchanged,
             )
+            self._assert_e1_source_unchanged()
             readback = self._store.readback_allocation(
                 allocation_id=allocation_id,
                 allocation_ref=receipt_ref,
                 witness_ref=witness_ref,
                 expected_fields=fields,
+                postread_guard=self._assert_e1_source_unchanged,
             )
             if readback.original_book_bytes != original:
                 raise LocalAccountReceiptError("ORIGINAL_BOOK_READBACK_DIFFERENT")
+            self._assert_e1_source_unchanged()
             # Only after original bytes and the witness are independently
             # read from this host's configured read-only ledger.
             self._original_book = opening_book
@@ -271,9 +277,9 @@ class Stage1SyntheticAccountLifecycleV1:
         self._transition("retaining", "ready")
 
     def verified_original(self) -> OriginalLocalAccountReadbackV1:
-        # A producer-visible E1 source can be mutated after successful
-        # allocation even though the store's retained original is immutable.
-        # Refuse a public readback if it no longer describes that source.
+        # Only the detached original E1 values are allowed to label ledger
+        # evidence. A mutable caller-owned alias may change while SQLite
+        # readback runs, so verify on both sides of the readback boundary.
         self._assert_e1_source_unchanged()
         if self._allocation is None or self._fields is None:
             raise LocalAccountReceiptError("ORIGINAL_ACCOUNT_NOT_RETAINED")
@@ -283,6 +289,7 @@ class Stage1SyntheticAccountLifecycleV1:
             allocation_ref=allocation_ref,
             witness_ref=witness_ref,
             expected_fields=self._fields,
+            postread_guard=self._assert_e1_source_unchanged,
         )
 
     def _require_same_original(self, opening_book: PortfolioStateV2) -> None:
@@ -325,7 +332,12 @@ class Stage1SyntheticAccountLifecycleV1:
             claim = self._store.append_invocation_claim(
                 original=readback,
                 identity_hash=run_identity.run_identity_hash,
+                precommit_guard=self._assert_e1_source_unchanged,
             )
+            # If untrusted source data changes inside an injected ledger
+            # adapter after append, preserve the original durable audit
+            # event but fail this transition rather than claiming success.
+            self._assert_e1_source_unchanged()
             self._claim = claim
         except BaseException:
             self._fail()
@@ -349,7 +361,9 @@ class Stage1SyntheticAccountLifecycleV1:
                 original=readback,
                 claim_ref=self._claim,
                 identity_hash=run_identity.run_identity_hash,
+                precommit_guard=self._assert_e1_source_unchanged,
             )
+            self._assert_e1_source_unchanged()
             self._consumption = event_ref
         except BaseException:
             self._fail()
