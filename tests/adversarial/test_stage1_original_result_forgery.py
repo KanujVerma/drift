@@ -27,9 +27,11 @@ from test_stage1_campaign_config import (
     make_golden_campaign,
 )
 from test_stage1_original_result_association import (
+    BASE,
     M0_COMPLETE,
     M0_START,
     RESULT_OBSERVED,
+    _Tick,
     _execute,
     _setup,
 )
@@ -45,7 +47,12 @@ from drift.experiments.stage1_trial_provenance import (
     build_stage1_trial_provenance_snapshot,
 )
 from drift.ledger.sqlite import SQLiteLedger
+from drift.ledger.stage1_synthetic_account_receipts import (
+    ConfiguredLocalSyntheticOriginV1,
+    LocalSyntheticAccountReceiptStoreV1,
+)
 from drift.loop.stage1_original_result_association import (
+    M0_USE_EVENT,
     RESULT_EVENT,
     OriginalResultAssociationError,
     Stage1OriginalResultAssociationV1,
@@ -258,3 +265,53 @@ def test_result_append_success_is_not_undone_by_later_readback_clock(
     assert len([
         e for e in store.origin.verified_events() if e.event_type == RESULT_EVENT
     ]) == 1
+
+
+def test_same_original_m0_event_cannot_be_used_for_two_distinct_accounts(
+    tmp_path: Path,
+) -> None:
+    """Ledger-unique M0 reservation prevents reusing B's execution for R."""
+    origin = ConfiguredLocalSyntheticOriginV1(
+        ledger_path=tmp_path / "same-m0.sqlite3",
+        issuer_instance_id=uuid7(),
+    )
+    store = LocalSyntheticAccountReceiptStoreV1(
+        origin=origin,
+        clock=_Tick(),
+    )
+    b_engine, b_observer, _ = _setup(
+        tmp_path, arm="ARM-B", store=store
+    )
+    r_engine, r_observer, _ = _setup(
+        tmp_path, arm="ARM-R", store=store
+    )
+    # Both accounts have independently claimed/consumed their opening books
+    # before this sole operational M0 event. Identical genuine result hashes
+    # are permitted, but cannot authenticate two independent M0 executions.
+    _run(r_engine)
+    b = _execute(
+        b_engine,
+        b_observer,
+        store,
+        completed_at=BASE + timedelta(seconds=25),
+    )
+    retained_b = b_observer.readback()
+    m0_events = [
+        event
+        for event in origin.verified_events()
+        if event.event_type == "m2.evaluation.run.recorded"
+    ]
+    assert len(m0_events) == 1
+    with pytest.raises(
+        OriginalResultAssociationError,
+        match="ORIGINAL_M0_EVENT_ALREADY_ASSOCIATED",
+    ):
+        r_observer.observe_canonical_result(
+            run=b,
+            artifacts=retained_b.original_artifacts,
+            m0_audit_event_id=m0_events[0].event_id,
+        )
+    history = origin.verified_events()
+    assert len([e for e in history if e.event_type == M0_USE_EVENT]) == 1
+    assert len([e for e in history if e.event_type == RESULT_EVENT]) == 1
+    assert b_observer.readback().account_id == "SYNTH-ACC-B-001"
