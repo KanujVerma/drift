@@ -1715,6 +1715,40 @@ _RETAIN_ORIGINAL_BOOK, _PEEK_PREPARED_EXECUTOR, _CONSUME_ORIGINAL_BOOK = (
 )
 
 
+def _private_opening_book_reservation() -> tuple[
+    Callable[[object], None],
+    Callable[[object], bool],
+]:
+    """Keep a permanent per-engine prepared-attempt bit outside observer reach.
+
+    The original-book escrow removes its entry on invocation, so it cannot
+    alone distinguish an unused legacy engine from a consumed prepared engine.
+    A lifecycle callback can mutate the public engine's _opening_book_phase or
+    _legacy_run_started attributes through object.__setattr__. Never let that
+    mutable metadata authorize reinitializing cash. The private weak-key mark
+    persists for the engine lifetime, including failed preparation and runs.
+    """
+    attempted: WeakKeyDictionary[object, bool] = WeakKeyDictionary()
+    lock = Lock()
+
+    def reserve(owner: object) -> None:
+        with lock:
+            if owner in attempted:
+                raise OpeningBookLifecycleError(
+                    "opening-book preparation requires a fresh, unused engine"
+                )
+            attempted[owner] = True
+
+    def was_prepared(owner: object) -> bool:
+        with lock:
+            return owner in attempted
+
+    return reserve, was_prepared
+
+
+_RESERVE_OPENING_BOOK, _WAS_PREPARED = _private_opening_book_reservation()
+
+
 class SessionEvaluatorEngine:
     """Runs the canonical five-phase evaluation loop over one input bundle."""
 
@@ -2042,10 +2076,18 @@ class SessionEvaluatorEngine:
         capital, even when the observer fails.
         """
         with self._opening_book_lock:
-            if self._opening_book_phase != "new" or self._legacy_run_started:
+            if (
+                self._opening_book_phase != "new"
+                or self._legacy_run_started
+                or _WAS_PREPARED(self)
+            ):
                 raise OpeningBookLifecycleError(
                     "opening-book preparation requires a fresh, unused engine"
                 )
+            # Reserve before the first callback, initializer or other
+            # potentially failing operation. This outlives escrow consumption
+            # and cannot be reset by changing the public engine's phase.
+            _RESERVE_OPENING_BOOK(self)
             self._opening_book_phase = "preparing"
 
         try:
@@ -2126,9 +2168,17 @@ class SessionEvaluatorEngine:
         # and cannot be redirected by replacing fields/methods on this public
         # engine during claim/consume. Legacy execution stays on self.
         with self._opening_book_lock:
+            phase = self._opening_book_phase
+            previously_prepared = _WAS_PREPARED(self)
+            if (previously_prepared and phase != "prepared") or (
+                phase == "prepared" and not previously_prepared
+            ):
+                raise OpeningBookLifecycleError(
+                    "prepared opening book is not available for another run"
+                )
             executor = (
                 _PEEK_PREPARED_EXECUTOR(self)
-                if self._opening_book_phase == "prepared"
+                if phase == "prepared"
                 else self
             )
         if executor is None:
@@ -2152,6 +2202,13 @@ class SessionEvaluatorEngine:
         sessions = executor._bundle.session_clock.sessions
         with self._opening_book_lock:
             if self._opening_book_phase == "new":
+                # Double-check after strategy validation and before any fresh
+                # seed book is constructed. A callback cannot turn an engine
+                # that ever attempted preparation into a legacy engine.
+                if _WAS_PREPARED(self):
+                    raise OpeningBookLifecycleError(
+                        "prepared opening book is not available for another run"
+                    )
                 # Existing direct engine callers may still run/replay freely,
                 # but cannot switch into provisioned mode after the fact.
                 self._legacy_run_started = True
@@ -2233,6 +2290,12 @@ class SessionEvaluatorEngine:
             )
             _verify_untampered_original_book(observer_book, prepared_digest)
             _verify_untampered_original_book(loop.state, prepared_digest)
+            with self._opening_book_lock:
+                if self._opening_book_phase != "consumed":
+                    self._opening_book_phase = "failed"
+                    raise OpeningBookLifecycleError(
+                        "opening-book lifecycle phase changed during consumption"
+                    )
 
         halt: _Halt | None = None
         for index, session in enumerate(sessions):
