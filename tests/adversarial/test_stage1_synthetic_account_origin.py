@@ -5,7 +5,7 @@ cannot authenticate an allocation under an independent configured origin.
 """
 
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 from pathlib import Path
 from uuid import uuid7
@@ -279,10 +279,9 @@ def test_mutation_during_original_commit_clock_refuses_before_append(
             coordinator.observe_consumption(opening_book=book, run_identity=identity)
 
     assert coordinator.local_phase == "failed"
-    assert [event.event_type for event in store.origin.verified_events()] == (
-        expected_events
-    )
-    assert CONSUMED not in expected_events
+    observed = [event.event_type for event in store.origin.verified_events()]
+    assert observed == expected_events
+    assert CONSUMED not in observed
     with pytest.raises(LocalAccountReceiptError, match="INVALID_TRANSITION"):
         coordinator.claim_invocation(opening_book=book, run_identity=identity)
 
