@@ -740,3 +740,111 @@ def test_consume_observer_cannot_replace_private_evidence_and_bundle() -> None:
     result = _run(engine)
     assert canonical_json(result) == expected
     assert observer.seen == ["retain", "claim", "consume"]
+
+@pytest.mark.parametrize("spoofed_phase", ["new", "prepared", "failed"])
+def test_consumed_engine_phase_spoof_never_restores_fresh_cash(
+    spoofed_phase: str,
+) -> None:
+    """Even a forged 'new' phase cannot make the prepared engine legacy."""
+    baseline = canonical_json(_run(_engine()))
+    engine = _engine()
+    observer = _Recorder()
+    engine.prepare_opening_book(lifecycle=observer)
+    assert canonical_json(_run(engine)) == baseline
+    assert observer.seen == ["retain", "claim", "consume"]
+
+    object.__setattr__(engine, "_opening_book_phase", spoofed_phase)
+    object.__setattr__(engine, "_legacy_run_started", False)
+    with pytest.raises(OpeningBookLifecycleError, match="not available"):
+        _run(engine)
+    with pytest.raises(OpeningBookLifecycleError, match="fresh, unused"):
+        engine.prepare_opening_book(lifecycle=_Recorder())
+
+
+def test_consumption_phase_spoof_refuses_before_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claimed original cannot step or be replayed after phase tampering."""
+    actual_initializer = initial_portfolio_state
+    initialized: list[PortfolioStateV2] = []
+
+    def tracked_initializer(
+        *,
+        session_key: SessionKeyV1,
+        initial_cash: Decimal,
+        admission: EvaluationAdmissionV1,
+    ) -> PortfolioStateV2:
+        book = actual_initializer(
+            session_key=session_key, initial_cash=initial_cash, admission=admission
+        )
+        initialized.append(book)
+        return book
+
+    monkeypatch.setattr(evaluator_engine, "initial_portfolio_state", tracked_initializer)
+    engine = _engine()
+    _refuse_session_start(engine, monkeypatch)
+
+    class ResetsDuringConsume(_Recorder):
+        def _visit(self, phase: str, book: PortfolioStateV2) -> None:
+            if phase == "consume":
+                object.__setattr__(engine, "_opening_book_phase", "new")
+                object.__setattr__(engine, "_legacy_run_started", False)
+            super()._visit(phase, book)
+
+    observer = ResetsDuringConsume()
+    engine.prepare_opening_book(lifecycle=observer)
+    assert len(initialized) == 1
+    with pytest.raises(OpeningBookLifecycleError, match="phase changed"):
+        _run(engine)
+    assert observer.seen == ["retain", "claim", "consume"]
+    with pytest.raises(OpeningBookLifecycleError, match="not available"):
+        _run(engine)
+    object.__setattr__(engine, "_opening_book_phase", "new")
+    with pytest.raises(OpeningBookLifecycleError, match="not available"):
+        _run(engine)
+    with pytest.raises(OpeningBookLifecycleError, match="fresh, unused"):
+        engine.prepare_opening_book(lifecycle=_Recorder())
+    assert len(initialized) == 1
+
+
+def test_retention_phase_spoof_cannot_reenter_or_reset_original() -> None:
+    """The private reservation exists before any observer executes."""
+    baseline = canonical_json(_run(_engine()))
+    engine = _engine()
+
+    class ResetsDuringRetain(_Recorder):
+        def _visit(self, phase: str, book: PortfolioStateV2) -> None:
+            if phase == "retain":
+                object.__setattr__(engine, "_opening_book_phase", "new")
+                with pytest.raises(OpeningBookLifecycleError, match="fresh, unused"):
+                    engine.prepare_opening_book(lifecycle=_Recorder())
+                with pytest.raises(OpeningBookLifecycleError, match="not available"):
+                    _run(engine)
+            super()._visit(phase, book)
+
+    observer = ResetsDuringRetain()
+    engine.prepare_opening_book(lifecycle=observer)
+    assert canonical_json(_run(engine)) == baseline
+    with pytest.raises(OpeningBookLifecycleError, match="not available"):
+        _run(engine)
+
+
+def test_failed_retention_cannot_be_relabelled_as_unused() -> None:
+    """Failed pre-claim retention permanently forbids new seed capital."""
+    engine = _engine()
+
+    class FailedRetain(_Recorder):
+        def _visit(self, phase: str, book: PortfolioStateV2) -> None:
+            if phase == "retain":
+                object.__setattr__(engine, "_opening_book_phase", "new")
+                raise RuntimeError("synthetic retain unavailable")
+            super()._visit(phase, book)
+
+    with pytest.raises(RuntimeError, match="synthetic retain unavailable"):
+        engine.prepare_opening_book(lifecycle=FailedRetain())
+    object.__setattr__(engine, "_opening_book_phase", "new")
+    object.__setattr__(engine, "_legacy_run_started", False)
+    with pytest.raises(OpeningBookLifecycleError, match="not available"):
+        _run(engine)
+    with pytest.raises(OpeningBookLifecycleError, match="fresh, unused"):
+        engine.prepare_opening_book(lifecycle=_Recorder())
