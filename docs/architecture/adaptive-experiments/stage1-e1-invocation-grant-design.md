@@ -192,6 +192,47 @@ Neither is an accepted Python class or wire revision.
     offline source is not evidence of a provider call. A real AI
     model-produced candidate without its required original replay
     remains `UNAVAILABLE`, not an admitted selection.
+- **Frozen research-budget policy:** the grant must bind the exact
+  `ArmSpecV1.research_budget_reference` from the verified full E1
+  manifest and a proposed `budget_policy_binding_ref` for the
+  original #507 issuer-approved budget policy, including its
+  version, effective scope, currency, allowed resource categories,
+  per-attempt ceiling and applicable run/arm aggregate limits.
+  These are references to future accepted producer evidence, not
+  invented budget amounts, credential allocations or new K1 fields.
+  The scheduler cannot expand the arm's frozen spending permission.
+  - Independently resolve and require both original retained
+    `ResearchContext.budget_ref` and the start/terminal
+    `AttemptRecord.budget_ref` to map to that same frozen
+    `research_budget_reference` and versioned budget policy,
+    under the same arm/account/run/trial and original attempt.
+    Similar labels or independently rehashed refs are not enough.
+  - Before any potentially costly work, verify the actual original
+    `AttemptRecord.budget_authorization_ref` through #507's
+    trusted per-attempt reservation issuer, binding its original
+    attempt ID, logical request, effective issuance/availability
+    clock, scope, allowed resource categories and amounts to the
+    frozen policy. The authorization must be available by the
+    first chargeable action and cannot authorize a greater or
+    different budget than the frozen arm permits. Compare
+    supported amounts as exact decimal values in the original
+    currency; unknown conversions or remaining balance cannot
+    silently establish authority.
+  - A verified *direct preflight refusal* with no chargeable work
+    may have a null budget authorization only under the accepted
+    #507 exception, with original reason and failure evidence.
+    That exception never admits a costly attempt or treats
+    unknown later charges as verified zero. Actual `CostReceipt`
+    and late correction/shared-work receipts remain evidence of
+    incurred spending, not retroactive spending permission.
+  - Conflicting original policy, wrong-arm authorization, excessive
+    ceiling, exhausted run/arm quota, late reservation or
+    off-policy work is `INVALID` for scheduler admission while
+    retaining actual attempts and costs. Missing original budget
+    mapping, reservation/verifier, currency conversion or trusted
+    remaining-capacity proof is `UNAVAILABLE`; the consumer
+    cannot compute a larger authorization from nominal account
+    cash or assume a no-spend outcome.
 - **Original scheduler authority:** `scheduler_issuer_id`,
   `issuer_version`, `original_issuance_ref` and
   `issuer_proof_ref`. The verifier must retrieve the actual
