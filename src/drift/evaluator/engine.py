@@ -2169,7 +2169,14 @@ class SessionEvaluatorEngine:
         for index, session in enumerate(sessions):
             try:
                 if index > 0:
-                    loop.state = self._advance(loop.state, session.session_key)
+                    if prepared_digest is None:
+                        loop.state = self._advance(
+                            loop.state, session.session_key
+                        )
+                    else:
+                        loop.state = SessionEvaluatorEngine._advance(
+                            self, loop.state, session.session_key
+                        )
                 if prepared_digest is None:
                     # Legacy callers retain their existing extension hooks.
                     self._emit_session_start(loop, index, session)
@@ -2180,7 +2187,12 @@ class SessionEvaluatorEngine:
                     SessionEvaluatorEngine._emit_session_start(
                         self, loop, index, session
                     )
-                halt = self._step_session(loop, index, session, decide)
+                if prepared_digest is None:
+                    halt = self._step_session(loop, index, session, decide)
+                else:
+                    halt = SessionEvaluatorEngine._step_session(
+                        self, loop, index, session, decide, trusted_dispatch=True
+                    )
             except (
                 PromotionLaneDisabledError,
                 StrategyParametersBindingError,
@@ -2201,12 +2213,23 @@ class SessionEvaluatorEngine:
             if halt is not None:
                 break
         trace = seal_evaluation_trace_log(loop.events)
-        result = self._seal_result(
-            run_identity=run_identity,
-            halt=halt,
-            metrics=self._metrics(loop),
-            trace=trace,
-        )
+        if prepared_digest is None:
+            metrics = self._metrics(loop)
+            result = self._seal_result(
+                run_identity=run_identity,
+                halt=halt,
+                metrics=metrics,
+                trace=trace,
+            )
+        else:
+            metrics = SessionEvaluatorEngine._metrics(self, loop)
+            result = SessionEvaluatorEngine._seal_result(
+                self,
+                run_identity=run_identity,
+                halt=halt,
+                metrics=metrics,
+                trace=trace,
+            )
         return EvaluationRunArtifactsV2(
             result=result, trace=trace, final_state=loop.state
         )
@@ -2240,18 +2263,38 @@ class SessionEvaluatorEngine:
         index: int,
         session: EvaluationSessionV1,
         decide: _DecisionPhase,
+        *,
+        trusted_dispatch: bool = False,
     ) -> _Halt | None:
         phase = EvaluationPhase.PRE_OPEN_EFFECTS
         try:
-            self._pre_open_effects(loop, index, session)
+            if trusted_dispatch:
+                SessionEvaluatorEngine._pre_open_effects(
+                    self, loop, index, session
+                )
+            else:
+                self._pre_open_effects(loop, index, session)
             phase = EvaluationPhase.OPEN_EXECUTION
-            rejected = self._open_execution(loop, index, session)
+            if trusted_dispatch:
+                rejected = SessionEvaluatorEngine._open_execution(
+                    self, loop, index, session
+                )
+            else:
+                rejected = self._open_execution(loop, index, session)
             if rejected is not None:
                 return rejected
             phase = EvaluationPhase.INTRASESSION_ECONOMIC_EFFECTS
-            self._intrasession_effects(loop, index, session)
+            if trusted_dispatch:
+                SessionEvaluatorEngine._intrasession_effects(
+                    self, loop, index, session
+                )
+            else:
+                self._intrasession_effects(loop, index, session)
             phase = EvaluationPhase.CLOSE_MARK
-            self._close_mark(loop, index, session)
+            if trusted_dispatch:
+                SessionEvaluatorEngine._close_mark(self, loop, index, session)
+            else:
+                self._close_mark(loop, index, session)
             phase = EvaluationPhase.POST_CLOSE_DECISION
             return decide(loop, index, session)
         except (IndeterminateValuationError, IndeterminateExecutionError) as error:

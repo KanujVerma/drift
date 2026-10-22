@@ -585,3 +585,45 @@ def test_callback_installed_instance_hook_cannot_mutate_prepared_book() -> None:
     assert canonical_json(outcome) == expected
     assert calls == 0
     assert observer.seen == ["retain", "claim", "consume"]
+
+
+@pytest.mark.parametrize(
+    "hook_name",
+    [
+        "_step_session",
+        "_advance",
+        "_pre_open_effects",
+        "_open_execution",
+        "_intrasession_effects",
+        "_close_mark",
+        "_metrics",
+        "_seal_result",
+    ],
+)
+def test_observer_cannot_inject_prepared_accounting_phase_hooks(
+    hook_name: str,
+) -> None:
+    """Only trusted declared platform phase methods handle original book."""
+    baseline = canonical_json(_run(_engine()))
+    engine = _engine()
+    calls = 0
+
+    class HookInstallingObserver(_Recorder):
+        def _visit(self, phase: str, book: PortfolioStateV2) -> None:
+            nonlocal calls
+            if phase == "consume":
+
+                def injected(*args: Any, **kwargs: Any) -> Any:
+                    nonlocal calls
+                    calls += 1
+                    raise AssertionError("observer-injected accounting hook executed")
+
+                setattr(engine, hook_name, injected)
+            super()._visit(phase, book)
+
+    lifecycle = HookInstallingObserver()
+    engine.prepare_opening_book(lifecycle=lifecycle)
+    outcome = _run(engine)
+    assert canonical_json(outcome) == baseline
+    assert calls == 0
+    assert lifecycle.seen == ["retain", "claim", "consume"]
