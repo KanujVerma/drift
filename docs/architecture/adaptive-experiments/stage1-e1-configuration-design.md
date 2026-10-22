@@ -291,12 +291,14 @@ Architect independently reviews actual diff and tests, requests Codex review on 
 
 **Post-E1 integration status:** Trial-event integrity [PR #455](https://github.com/KanujVerma/drift/pull/455), trial provenance [PR #477](https://github.com/KanujVerma/drift/pull/477), E6A checkpoint coverage [PR #484](https://github.com/KanujVerma/drift/pull/484) and scientific metric arithmetic [PR #446](https://github.com/KanujVerma/drift/pull/446) are merged. E1 collection hardening [#489](https://github.com/KanujVerma/drift/issues/489)
 and [PR #495](https://github.com/KanujVerma/drift/pull/495) merged and closed.
-Separate provenance hardening is tracked under
+Separate provenance hardening was completed under
 [#503](https://github.com/KanujVerma/drift/issues/503), with the account
 binding defect tracked independently in
-[#511](https://github.com/KanujVerma/drift/issues/511). Both use the same
-Kanuj-owned [PR #504](https://github.com/KanujVerma/drift/pull/504),
-which remains unmerged at this readback. End-to-end B/R integration [#383](https://github.com/KanujVerma/drift/issues/383) and E6B typed producer-evidence admission [#485](https://github.com/KanujVerma/drift/issues/485) remain dependent on accepted Krish/Matthew RESULT/research contracts, risk/execution admission and later G1-G3 study gates. No historical efficacy claim is implied.
+[#511](https://github.com/KanujVerma/drift/issues/511). Both issues closed on
+October 21, 2026, after their shared Kanuj-owned
+[PR #504](https://github.com/KanujVerma/drift/pull/504) merged at
+`750968c7b96f15e6213cf18fee7bab0cf7fc79f3`. This completed E1
+provenance hardening, not the separate original research producer [#507](https://github.com/KanujVerma/drift/issues/507) or platform RESULT/account issuer [#508](https://github.com/KanujVerma/drift/issues/508) acceptance. End-to-end B/R integration [#383](https://github.com/KanujVerma/drift/issues/383) and E6B typed producer-evidence admission [#485](https://github.com/KanujVerma/drift/issues/485) remain dependent on accepted Krish/Matthew RESULT/research contracts, risk/execution admission and later G1-G3 study gates. No historical efficacy claim is implied.
 
 
 ## 12. Codex-reviewed architecture corrections (October 19, 2026)
