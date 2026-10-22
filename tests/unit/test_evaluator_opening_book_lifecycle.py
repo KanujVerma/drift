@@ -110,12 +110,8 @@ class _Recorder:
 def _refuse_session_start(
     engine: evaluator_engine.SessionEvaluatorEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    original_emit = type(engine)._emit_session_start
-
     def forbidden(*args: Any, **kwargs: Any) -> None:
-        if args[0] is engine:
-            pytest.fail("a session began despite a failed opening-book lifecycle")
-        original_emit(*args, **kwargs)
+        pytest.fail("a session began despite a failed opening-book lifecycle")
 
     monkeypatch.setattr(type(engine), "_emit_session_start", forbidden)
 
@@ -157,8 +153,10 @@ def test_prepared_engine_consumes_same_original_and_matches_legacy(
 
     def inspect_original(*args: Any, **kwargs: Any) -> None:
         nonlocal saw_private_original
-        if args[0] is engine and args[2] == 0:
+        if args[2] == 0:
             saw_private_original = True
+            # Only the privately revalidated runner receives the original.
+            assert args[0] is not engine
             assert args[1].state is originals[0]
         emit_original(*args, **kwargs)
 
@@ -490,7 +488,7 @@ def test_post_callback_async_observer_tamper_cannot_change_original_run(
 
     def after_last_callback(*args: Any, **kwargs: Any) -> None:
         nonlocal changed
-        if args[0] is engine and not changed:
+        if args[0] is not engine and not changed:
             changed = True
             # The test harness signals a retained-witness mutation after
             # observe_consumption and the last guard, immediately before the
@@ -669,4 +667,75 @@ def test_reconstructed_prepared_decision_ignores_instance_injection() -> None:
     result = run_engine(engine, ReconstructedTargetStrategy({}))
     assert canonical_json(result) == baseline
     assert called == 0
+    assert observer.seen == ["retain", "claim", "consume"]
+
+
+@pytest.mark.parametrize("phase", ["retain", "claim", "consume"])
+def test_captured_engine_cannot_replace_private_accounting_collaborators(
+    phase: str,
+) -> None:
+    """A callback-visible engine mutation cannot reach the original book."""
+    expected = canonical_json(_run(_engine()))
+    engine = _engine()
+    poisoned_calls = 0
+
+    class PoisonCorporateActions:
+        def apply_pre_open_actions(self, *args: Any, **kwargs: Any) -> Any:
+            nonlocal poisoned_calls
+            poisoned_calls += 1
+            state = args[0]
+            object.__setattr__(state, "cash_balance", Decimal("1"))
+            object.__setattr__(state, "net_asset_value", Decimal("1"))
+            raise AssertionError("observer replaced the actual accounting processor")
+
+    class PoisonRebalance:
+        def rebalance(self, *args: Any, **kwargs: Any) -> Any:
+            nonlocal poisoned_calls
+            poisoned_calls += 1
+            raise AssertionError("observer replaced the actual rebalance processor")
+
+    class CapturedEngineObserver(_Recorder):
+        def _visit(self, at: str, book: PortfolioStateV2) -> None:
+            if at == phase:
+                # These fields are directly accessible on the engine captured
+                # by a lifecycle closure. A shared execution self would invoke
+                # the forged collaborator after the final book-integrity check.
+                object.__setattr__(
+                    engine, "_corporate_actions", PoisonCorporateActions()
+                )
+                object.__setattr__(engine, "_rebalance", PoisonRebalance())
+                assert not any(
+                    isinstance(value, evaluator_engine.SessionEvaluatorEngine)
+                    for value in vars(engine).values()
+                )
+            super()._visit(at, book)
+
+    observer = CapturedEngineObserver()
+    engine.prepare_opening_book(lifecycle=observer)
+    result = _run(engine)
+    assert canonical_json(result) == expected
+    assert result.result.metrics.initial_cash == Decimal("10000")
+    assert result.final_state.cash_balance == Decimal("10000")
+    assert poisoned_calls == 0
+    assert observer.seen == ["retain", "claim", "consume"]
+
+
+def test_consume_observer_cannot_replace_private_evidence_and_bundle() -> None:
+    """The actual run must not consult post-claim public engine references."""
+    expected = canonical_json(_run(_engine()))
+    engine = _engine()
+
+    class CorruptPublicEngine(_Recorder):
+        def _visit(self, phase: str, book: PortfolioStateV2) -> None:
+            if phase == "consume":
+                object.__setattr__(engine, "_bundle", object())
+                object.__setattr__(engine, "_evidence", object())
+                object.__setattr__(engine, "_accounting_index", object())
+                object.__setattr__(engine, "_protocol", object())
+            super()._visit(phase, book)
+
+    observer = CorruptPublicEngine()
+    engine.prepare_opening_book(lifecycle=observer)
+    result = _run(engine)
+    assert canonical_json(result) == expected
     assert observer.seen == ["retain", "claim", "consume"]
