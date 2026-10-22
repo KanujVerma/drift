@@ -565,7 +565,7 @@ original grant-at-start check. Genuine future input is lookahead,
 not a normal after-cutoff model completion. No generic `dict[str, Any]`
 evidence resolver or second financial ledger is allowed.
 
-## 6. Forty-nine synthetic original-grant test vectors
+## 6. Fifty-four synthetic original-grant test vectors
 
 Each vector is a **design expectation, not an executed test**.
 `READY_STRUCTURAL` has accepted E1 fixture verification only.
@@ -754,6 +754,18 @@ Each vector is a **design expectation, not an executed test**.
   succeed. Missing authentic feedback-policy mapping is
   `UNAVAILABLE` under G15g, not a fabricated match.
   **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G15k, context matches grant but violates frozen E1:** the
+  authentic grant and K1 `context_policy_ref` mapping match
+  each other, but the original mapping conflicts with the
+  E1 arm's `information_visibility_policy` or
+  `feedback_policy_reference`, or the campaign's
+  `source_eligibility_policy_reference` or
+  `learning_and_feedback_policy_reference`. Independently
+  vary each of these four fields while keeping K1/grant
+  context references unchanged. Each authenticated mismatch
+  refuses `INVALID`, and a missing versioned E1-to-K1 policy
+  mapping reports `UNAVAILABLE`.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
 - **G16a, response predates request:** original authentic
   `ModelReplayRecord.response_received_at` precedes
   `request_sent_at`, or request precedes the actual
@@ -831,6 +843,27 @@ Each vector is a **design expectation, not an executed test**.
   original source clocks, grant scope and distinct account
   proofs, not identical models or science-scored observations.
   **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G18e, frozen seed mismatch:** all producer/model/strategy
+  refs match the grant, but the actual original K1 method,
+  model options or normalized parameters resolve under #507
+  to a different seed from
+  `ArmSpecV1.deterministic_seed_reference`. Refuse
+  `INVALID` where the frozen algorithm declared seed
+  support; missing original seed proof or unsupported model
+  determinism must remain `UNAVAILABLE` or an explicitly
+  accepted limitation, never a fabricated reproducible seed.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G18f, changed frozen comparator algorithm:** authentic
+  ARM-R `producer="conventional_r"`, matching method,
+  budget, and `model_configuration_reference="NONE"`,
+  but its original algorithm code/parameter revision
+  conflicts with `ArmSpecV1.frozen_configuration_reference`.
+  Refuse `INVALID` without relying on a model replay;
+  also refuse a model-produced ARM-B configuration that
+  diverges from its frozen algorithm binding. A missing
+  issuer-verified original configuration mapping remains
+  `UNAVAILABLE`.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
 - **G19a, wrong frozen budget policy:** grant is for ARM-B
   with `research_budget_reference="fixture://budget-B"`,
   but original `ResearchContext.budget_ref` or started/
@@ -872,6 +905,29 @@ Each vector is a **design expectation, not an executed test**.
   later cost cannot be recorded as verified zero.
   **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
 
+- **G19f, actual charges exceed valid authorization:** an
+  authentic USD 10 K1 reservation correctly matches ARM-B,
+  but the original attributable `CostReceipt.amount`
+  totals USD 100 for the same authorized attempt. The
+  grant, model, cutoff and nominal reservation all match;
+  verified actual spending over the reserved ceiling must
+  refuse `INVALID`, retain the incurred cost and record
+  the attempted opportunity rather than marking a
+  scientific result eligible.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G19g, prohibited late or shared-work charge:** original
+  reservation/initial receipts appear compliant, but a
+  later original correction via `supersedes_receipt_id`
+  or issuer-attributed `shared_work_ref` adds a charge
+  beyond the reserved ceiling, in a different category,
+  currency or arm. Proven prohibited or excessive spend
+  refuses `INVALID` and preserves the full immutable
+  correction chain. Missing original late-receipt
+  completeness, accepted shared allocation or FX basis
+  returns `UNAVAILABLE`, never a fabricated within-budget
+  or zero-cost claim.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+
 For each issuer-dependent positive case, the eventual producer test
 must independently prove a forged or missing original issuer **fails**.
 A syntactically valid user-created grant object is insufficient evidence.
@@ -893,12 +949,22 @@ then define original M0/M2 account/result association.
 producer/model treatment mapping for original start/terminal
 `AttemptRecord.producer`, optional `ResearchCandidate.producer`
 and any genuine `ModelReplayRecord` provider/model/adapter/parser
-configuration under the frozen E1 `selector_type` and model policy.
+configuration under the frozen E1 `selector_type` and model policy,
+including exact `deterministic_seed_reference` and
+`frozen_configuration_reference` algorithm/parameter binding.
+Confirm issuer-verified context-policy translation against
+the arm's `information_visibility_policy` and
+`feedback_policy_reference` and the campaign's
+`source_eligibility_policy_reference` and
+`learning_and_feedback_policy_reference`.
 Also accept the budget policy and per-attempt authorization issuer
 mapping for `ResearchContext.budget_ref`,
 `AttemptRecord.budget_ref` and `budget_authorization_ref`,
-including original effective times, currency/categories and
-remaining-capacity proof or direct no-work preflight exception.
+including original effective times, currency/categories,
+remaining-capacity proof and independent reconciliation of all
+attributable `CostReceipt`s and late/shared-work corrections
+against the actual reservation, or the direct no-work preflight
+exception.
 Confirm original grant consumption, `logical_request_id`,
 attempt/retained validation origin and no-candidate outcomes.
 His proposed `ResearchE1DecisionAssociationV1` remains
