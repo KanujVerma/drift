@@ -2146,6 +2146,12 @@ class SessionEvaluatorEngine:
             )
             _verify_untampered_original_book(prepared_book, prepared_digest)
             _verify_untampered_original_book(observer_book, prepared_digest)
+            # Phase five also needs trusted class dispatch: the default
+            # decision closure resolves post-close methods on self, which a
+            # callback retaining engine can replace after verification.
+            decide = SessionEvaluatorEngine._lane_decision(
+                self, strategy, trusted_dispatch=True
+            )
             # Never expose either the evaluator's internal original book or
             # the identity used to seal RESULT. The observer sees one stable
             # detached twin for its original-retention ledger receipts.
@@ -2904,7 +2910,9 @@ class SessionEvaluatorEngine:
             for security_id in sorted(grouped, key=_security_order)
         )
 
-    def _lane_decision(self, strategy: LaneDispatchStrategy) -> _DecisionPhase:
+    def _lane_decision(
+        self, strategy: LaneDispatchStrategy, *, trusted_dispatch: bool = False
+    ) -> _DecisionPhase:
         """Bind the strategy to the one decision method this engine's lane allows.
 
         Checked once, before any session is stepped, so a strategy that cannot
@@ -2922,6 +2930,10 @@ class SessionEvaluatorEngine:
             def realized_decision(
                 loop: _Loop, index: int, session: EvaluationSessionV1
             ) -> _Halt | None:
+                if trusted_dispatch:
+                    return SessionEvaluatorEngine._post_close_decision(
+                        self, loop, index, session, realized
+                    )
                 return self._post_close_decision(loop, index, session, realized)
 
             return realized_decision
@@ -2936,6 +2948,10 @@ class SessionEvaluatorEngine:
         def reconstructed_decision(
             loop: _Loop, index: int, session: EvaluationSessionV1
         ) -> _Halt | None:
+            if trusted_dispatch:
+                return SessionEvaluatorEngine._post_close_reconstructed_decision(
+                    self, loop, index, session, exploratory, lane
+                )
             return self._post_close_reconstructed_decision(
                 loop, index, session, exploratory, lane
             )
