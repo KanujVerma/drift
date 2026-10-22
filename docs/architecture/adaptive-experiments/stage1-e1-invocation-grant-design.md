@@ -21,8 +21,10 @@ The accepted E1 `CampaignSpecV1`, `ArmSpecV1` and
 Provenance and E6A bind structurally correct checkpoint and trial hashes.
 They **do not authenticate the original account allocation or who initiated
 a research request**. The separate [#511](https://github.com/KanujVerma/drift/issues/511)
-public **provenance verifier** correction is implemented in still-open
-[#504](https://github.com/KanujVerma/drift/pull/504), whereas merged
+public **provenance verifier** correction was completed through merged
+[#504](https://github.com/KanujVerma/drift/pull/504), alongside
+[#503](https://github.com/KanujVerma/drift/issues/503). Those two issues
+closed on October 21, 2026. Merged
 [#506](https://github.com/KanujVerma/drift/pull/506) repairs the different
 E6A checkpoint-audit caller boundary. Neither is an original issuer proof.
 
@@ -144,6 +146,52 @@ Neither is an accepted Python class or wire revision.
   policy/selector proof is `UNAVAILABLE` and blocked on #507.
   An account/checkpoint string match alone cannot grant a different
   method, request kind, context policy or strategy permission.
+- **Frozen producer and model treatment:** retain the exact
+  `ArmSpecV1.selector_type`, `model_configuration_reference`,
+  campaign `model_and_prompt_policy_reference`, and a proposed
+  `producer_model_policy_binding_ref` naming the versioned, original
+  #507 issuer-verified mapping. This does not assert that the scheduler
+  itself verifies raw provider calls, or that the two model-policy refs
+  are interchangeable in a real deployment.
+  - The synthetic ARM-B `ADAPTIVE_AI` lane requires an originally
+    authorized `producer="ai"` for a model-produced attempt/candidate,
+    plus the correct frozen model/prompt configuration. The synthetic
+    ARM-R `DETERMINISTIC_COMPARATOR` lane uses
+    `producer="conventional_r"` and has
+    `model_configuration_reference="NONE"`; it must not gain AI
+    treatment via a matching method, account or strategy hash.
+    `producer="scripted_fixture"` is allowed only in an explicitly
+    separately scoped structural fixture, never silently substituted
+    into a claimed original ARM-B or ARM-R result. Future producer lanes
+    require separately accepted policy, not a default enum coercion.
+  - An original #507 producer-owned mapping must verify both
+    `AttemptRecord.producer` on its start and terminal events and
+    `ResearchCandidate.producer` when a candidate exists. A genuine
+    missing-candidate refusal retains its original attempt producer
+    without inventing a candidate; candidate existence alone does not
+    prove that producer. Contradictory authentic producer values are
+    `INVALID` even when every method and policy ref matches.
+  - For actual AI calls, resolve the original
+    `ModelReplayRecord.provider_identity`, `requested_model`,
+    `resolved_model_revision` (or the exact accepted unknown-revision
+    limitation), `adapter_ref`, `parser_schema_ref`,
+    `method_ref` and original raw request/configuration evidence
+    through that same accepted mapping to the arm's frozen model
+    configuration, campaign model/prompt policy and K1 method.
+    The mapping's original revision and effective scope must be
+    verified as of invocation, not inferred from a current model name
+    or rewritten after execution. A changed provider/model, adapter,
+    parser, prompt/method or unauthorized producer is `INVALID`;
+    a missing original replay, issuer-verifiable policy mapping or
+    required model-resolution evidence is `UNAVAILABLE`, never
+    an implicit match. If the accepted frozen policy explicitly
+    permits unknown model revision, preserve its limitations instead
+    of claiming identical known model weights.
+  - Genuine preflight and no-call refusals require original negative
+    call evidence and do not fabricate a model replay; a scripted
+    offline source is not evidence of a provider call. A real AI
+    model-produced candidate without its required original replay
+    remains `UNAVAILABLE`, not an admitted selection.
 - **Original scheduler authority:** `scheduler_issuer_id`,
   `issuer_version`, `original_issuance_ref` and
   `issuer_proof_ref`. The verifier must retrieve the actual
