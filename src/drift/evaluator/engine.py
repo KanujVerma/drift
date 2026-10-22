@@ -72,7 +72,7 @@ from typing import (
     get_type_hints,
 )
 from uuid import UUID
-from weakref import WeakKeyDictionary
+from weakref import ReferenceType, WeakKeyDictionary, ref
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from pydantic_core import PydanticSerializationError
@@ -1668,7 +1668,7 @@ type _PreparedBookEscrow = tuple[
     PortfolioStateV2,
     SessionEvaluatorEngine,
     PortfolioStateV2,
-    OpeningBookLifecycleV1,
+    ReferenceType[OpeningBookLifecycleV1],
     str,
 ]
 
@@ -1691,12 +1691,13 @@ def _private_original_book_escrow() -> tuple[
     """Escrow the original book, private executor and exact observer binding.
 
     Callback-visible engine fields are not trusted as authoritative lifecycle
-    references. The validated observer witness, receiving lifecycle instance,
-    original digest and real accounting object must be retained together
-    before any invocation. A captured engine, including one modified during
-    strategy-identity validation, must not substitute a canonically equal
-    witness or an unrelated callback implementation. This still assumes an
-    independently trusted Python host rather than hostile frame introspection.
+    references. The book, executor, observer witness, original digest and a
+    weak reference to the exact lifecycle are retained before any invocation.
+    The public engine alone keeps the observer alive, so an abandoned engine
+    and callback closure cannot stay alive through a WeakKeyDictionary value.
+    Replacing the public lifetime anchor may fail closed, but cannot replace
+    the escrowed callback. This assumes an independently trusted Python host,
+    not hostile process/frame introspection.
     """
     states: WeakKeyDictionary[object, _PreparedBookEscrow] = WeakKeyDictionary()
     lock = Lock()
@@ -1718,7 +1719,7 @@ def _private_original_book_escrow() -> tuple[
                 book,
                 executor,
                 observer_book,
-                lifecycle,
+                ref(lifecycle),
                 original_digest,
             )
 
@@ -1885,9 +1886,11 @@ class SessionEvaluatorEngine:
             "new", "preparing", "prepared", "claimed", "consumed", "failed"
         ] = "new"
         self._legacy_run_started = False
-        # All authoritative lifecycle references are stored only in the
-        # private single-use escrow. The public engine exposes no mutable
-        # observer/book/digest slots that can redirect later callbacks.
+        # The only strong lifecycle reference lives on the engine itself.
+        # Escrow stores a weak reference to that exact observer, never a
+        # strong value that can retain a callback closing over the weak key.
+        # This anchor controls lifetime only, never callback authority.
+        self._lifecycle_lifetime_anchor: OpeningBookLifecycleV1 | None = None
 
     # -- accessors ---------------------------------------------------------
 
@@ -2095,6 +2098,12 @@ class SessionEvaluatorEngine:
         Once preparation is attempted this engine never falls back to fresh
         capital, even when the observer fails.
         """
+        try:
+            ref(lifecycle)
+        except TypeError as error:
+            raise OpeningBookLifecycleError(
+                "opening-book lifecycle must support weak references"
+            ) from error
         with self._opening_book_lock:
             if (
                 self._opening_book_phase != "new"
@@ -2131,7 +2140,7 @@ class SessionEvaluatorEngine:
             # account/portfolio or another call to initial_portfolio_state.
             # Keep the executor in escrow, never in an engine attribute that
             # lifecycle code capturing self could replace or inspect.
-            execution_engine = SessionEvaluatorEngine(
+            execution_engine = _PREPARED_EXECUTOR_TYPE(
                 bundle=self._bundle,
                 admission=self._admission,
                 protocol=self._protocol,
@@ -2170,6 +2179,9 @@ class SessionEvaluatorEngine:
                 lifecycle,
                 original_digest,
             )
+            # Keep the exact lifecycle alive without adding an escrow value
+            # reference to its captured owner engine.
+            self._lifecycle_lifetime_anchor = lifecycle
             self._opening_book_phase = "prepared"
 
     # -- run ----------------------------------------------------------------
@@ -2200,11 +2212,7 @@ class SessionEvaluatorEngine:
                 raise OpeningBookLifecycleError(
                     "prepared opening book is not available for another run"
                 )
-            executor = (
-                _PEEK_PREPARED_EXECUTOR(self)
-                if phase == "prepared"
-                else self
-            )
+            executor = _PEEK_PREPARED_EXECUTOR(self) if phase == "prepared" else self
         if executor is None:
             raise OpeningBookLifecycleError(
                 "prepared opening-book executor is not available"
@@ -2217,10 +2225,10 @@ class SessionEvaluatorEngine:
             self._require_bound_identity(run_identity, strategy)
             decide = self._lane_decision(strategy)
         else:
-            SessionEvaluatorEngine._require_bound_identity(
+            type(executor)._require_bound_identity(
                 executor, run_identity, strategy
             )
-            decide = SessionEvaluatorEngine._lane_decision(
+            decide = type(executor)._lane_decision(
                 executor, strategy, trusted_dispatch=True
             )
         sessions = executor._bundle.session_clock.sessions
@@ -2255,9 +2263,10 @@ class SessionEvaluatorEngine:
                     prepared_book,
                     claimed_executor,
                     observer_book,
-                    lifecycle,
+                    lifecycle_reference,
                     prepared_digest,
                 ) = prepared_pair
+                lifecycle = lifecycle_reference()
                 if claimed_executor is not executor:
                     self._opening_book_phase = "failed"
                     raise OpeningBookLifecycleError(
@@ -2329,11 +2338,9 @@ class SessionEvaluatorEngine:
             try:
                 if index > 0:
                     if prepared_digest is None:
-                        loop.state = self._advance(
-                            loop.state, session.session_key
-                        )
+                        loop.state = self._advance(loop.state, session.session_key)
                     else:
-                        loop.state = SessionEvaluatorEngine._advance(
+                        loop.state = type(executor)._advance(
                             executor, loop.state, session.session_key
                         )
                 if prepared_digest is None:
@@ -2343,13 +2350,13 @@ class SessionEvaluatorEngine:
                     # An observer that captured the engine must not be able
                     # to inject an instance-level hook that sees the private
                     # original book after our last integrity check.
-                    SessionEvaluatorEngine._emit_session_start(
+                    type(executor)._emit_session_start(
                         executor, loop, index, session
                     )
                 if prepared_digest is None:
                     halt = self._step_session(loop, index, session, decide)
                 else:
-                    halt = SessionEvaluatorEngine._step_session(
+                    halt = type(executor)._step_session(
                         executor, loop, index, session, decide, trusted_dispatch=True
                     )
             except (
@@ -2381,8 +2388,8 @@ class SessionEvaluatorEngine:
                 trace=trace,
             )
         else:
-            metrics = SessionEvaluatorEngine._metrics(executor, loop)
-            result = SessionEvaluatorEngine._seal_result(
+            metrics = type(executor)._metrics(executor, loop)
+            result = type(executor)._seal_result(
                 executor,
                 run_identity=run_identity,
                 halt=halt,
@@ -2428,14 +2435,12 @@ class SessionEvaluatorEngine:
         phase = EvaluationPhase.PRE_OPEN_EFFECTS
         try:
             if trusted_dispatch:
-                SessionEvaluatorEngine._pre_open_effects(
-                    self, loop, index, session
-                )
+                type(self)._pre_open_effects(self, loop, index, session)
             else:
                 self._pre_open_effects(loop, index, session)
             phase = EvaluationPhase.OPEN_EXECUTION
             if trusted_dispatch:
-                rejected = SessionEvaluatorEngine._open_execution(
+                rejected = type(self)._open_execution(
                     self, loop, index, session
                 )
             else:
@@ -2444,14 +2449,12 @@ class SessionEvaluatorEngine:
                 return rejected
             phase = EvaluationPhase.INTRASESSION_ECONOMIC_EFFECTS
             if trusted_dispatch:
-                SessionEvaluatorEngine._intrasession_effects(
-                    self, loop, index, session
-                )
+                type(self)._intrasession_effects(self, loop, index, session)
             else:
                 self._intrasession_effects(loop, index, session)
             phase = EvaluationPhase.CLOSE_MARK
             if trusted_dispatch:
-                SessionEvaluatorEngine._close_mark(self, loop, index, session)
+                type(self)._close_mark(self, loop, index, session)
             else:
                 self._close_mark(loop, index, session)
             phase = EvaluationPhase.POST_CLOSE_DECISION
@@ -3084,7 +3087,7 @@ class SessionEvaluatorEngine:
                 loop: _Loop, index: int, session: EvaluationSessionV1
             ) -> _Halt | None:
                 if trusted_dispatch:
-                    return SessionEvaluatorEngine._post_close_decision(
+                    return type(self)._post_close_decision(
                         self, loop, index, session, realized
                     )
                 return self._post_close_decision(loop, index, session, realized)
@@ -3102,7 +3105,7 @@ class SessionEvaluatorEngine:
             loop: _Loop, index: int, session: EvaluationSessionV1
         ) -> _Halt | None:
             if trusted_dispatch:
-                return SessionEvaluatorEngine._post_close_reconstructed_decision(
+                return type(self)._post_close_reconstructed_decision(
                     self, loop, index, session, exploratory, lane
                 )
             return self._post_close_reconstructed_decision(
@@ -3384,3 +3387,22 @@ def _seal[T: ExploratoryEvaluationResultV1 | PromotionEvaluationResultV1](
         **cast(Any, dict(draft) | {"result_hash": evaluation_result_hash(draft)}),
     )
     return cast(T, model.model_validate(dict(sealed)))
+
+
+# A lifecycle callback may modify methods on the public evaluator class.
+# Snapshot its complete declared method/property table once, before any user
+# callback, for a callback-inaccessible private evaluator subtype. Prepared
+# dispatch (including transitive self._helper calls) resolves against this
+# snapshot rather than methods subsequently replaced on SessionEvaluatorEngine.
+# This addresses ordinary class monkeypatching. Arbitrary module/global state
+# changes or introspecting private subtypes need process isolation, not a
+# Python-local security claim.
+_PREPARED_EXECUTOR_TYPE: type[SessionEvaluatorEngine] = type(
+    "_PreparedSessionEvaluatorEngine",
+    (SessionEvaluatorEngine,),
+    {
+        name: descriptor
+        for name, descriptor in vars(SessionEvaluatorEngine).items()
+        if name not in {"__module__", "__dict__", "__weakref__", "__doc__"}
+    },
+)
