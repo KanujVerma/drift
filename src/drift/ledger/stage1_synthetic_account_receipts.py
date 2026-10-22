@@ -205,10 +205,17 @@ class LocalSyntheticAccountReceiptStoreV1:
         dedup_key: str,
         payload: Mapping[str, ImmutableJSONValue],
         minimum_time: datetime | None = None,
+        precommit_guard: Callable[[], None] | None = None,
     ) -> LocalEventReferenceV1:
         now = _utc_now(self._clock)
         if minimum_time is not None and now < minimum_time:
             raise LocalAccountReceiptError("CLOCK_ROLLBACK_BEFORE_ORIGINAL")
+        # A test-harness observation clock may be a callback into the
+        # caller-owned E1 source. Recheck the captured-snapshot binding
+        # *after* that callback, immediately before the append. This is a
+        # refusal gate, not a cryptographic lock on other Python threads.
+        if precommit_guard is not None:
+            precommit_guard()
         draft = AuditEventDraft(
             event_id=uuid7(),
             event_type=kind,
@@ -237,7 +244,11 @@ class LocalSyntheticAccountReceiptStoreV1:
         return ref
 
     def append_allocation(
-        self, *, fields: AccountAllocationFieldsV1, original_book: bytes
+        self,
+        *,
+        fields: AccountAllocationFieldsV1,
+        original_book: bytes,
+        precommit_guard: Callable[[], None] | None = None,
     ) -> tuple[UUID, LocalEventReferenceV1]:
         if type(fields) is not AccountAllocationFieldsV1:
             raise LocalAccountReceiptError("INVALID_ALLOCATION_FIELDS")
@@ -265,6 +276,7 @@ class LocalSyntheticAccountReceiptStoreV1:
             allocation_id=allocation_id,
             dedup_key=f"stage1:allocation:{fields.allocation_key}",
             minimum_time=bound_at,
+            precommit_guard=precommit_guard,
             payload={
                 "allocation_id": str(allocation_id),
                 "fields": asdict(fields),
@@ -275,7 +287,11 @@ class LocalSyntheticAccountReceiptStoreV1:
         return allocation_id, ref
 
     def witness_original_readback(
-        self, *, allocation_id: UUID, allocation_ref: LocalEventReferenceV1
+        self,
+        *,
+        allocation_id: UUID,
+        allocation_ref: LocalEventReferenceV1,
+        precommit_guard: Callable[[], None] | None = None,
     ) -> LocalEventReferenceV1:
         alloc = read_configured_original(
             origin=self.origin,
@@ -291,6 +307,7 @@ class LocalSyntheticAccountReceiptStoreV1:
             allocation_id=allocation_id,
             dedup_key=f"stage1:allocation-witness:{allocation_id}",
             minimum_time=alloc.timestamp,
+            precommit_guard=precommit_guard,
             payload={
                 "allocation_event_id": str(allocation_ref.event_id),
                 "allocation_event_hash": allocation_ref.event_hash,
@@ -304,6 +321,7 @@ class LocalSyntheticAccountReceiptStoreV1:
         allocation_ref: LocalEventReferenceV1,
         witness_ref: LocalEventReferenceV1,
         expected_fields: AccountAllocationFieldsV1,
+        postread_guard: Callable[[], None] | None = None,
     ) -> OriginalLocalAccountReadbackV1:
         alloc = read_configured_original(
             origin=self.origin,
@@ -358,6 +376,8 @@ class LocalSyntheticAccountReceiptStoreV1:
             or book.realized_gross_pnl != 0 or book.realized_net_pnl != 0
         ):
             raise LocalAccountReceiptError("ORIGINAL_BOOK_NOT_FRESH_ENGINE_SHAPE")
+        if postread_guard is not None:
+            postread_guard()
         return OriginalLocalAccountReadbackV1(
             fields=expected_fields,
             allocation_ref=allocation_ref,
@@ -369,13 +389,18 @@ class LocalSyntheticAccountReceiptStoreV1:
         )
 
     def append_invocation_claim(
-        self, *, original: OriginalLocalAccountReadbackV1, identity_hash: str
+        self,
+        *,
+        original: OriginalLocalAccountReadbackV1,
+        identity_hash: str,
+        precommit_guard: Callable[[], None] | None = None,
     ) -> LocalEventReferenceV1:
         return self._append(
             kind=CLAIM,
             allocation_id=original.allocation_id,
             dedup_key=f"stage1:invocation:{original.allocation_id}",
             minimum_time=original.receipt_observed_available_by_at,
+            precommit_guard=precommit_guard,
             payload={
                 "allocation_event_hash": original.allocation_ref.event_hash,
                 "witness_event_hash": original.witness_ref.event_hash,
@@ -389,6 +414,7 @@ class LocalSyntheticAccountReceiptStoreV1:
         original: OriginalLocalAccountReadbackV1,
         claim_ref: LocalEventReferenceV1,
         identity_hash: str,
+        precommit_guard: Callable[[], None] | None = None,
     ) -> LocalEventReferenceV1:
         claim = read_configured_original(
             origin=self.origin,
@@ -410,6 +436,7 @@ class LocalSyntheticAccountReceiptStoreV1:
             allocation_id=original.allocation_id,
             dedup_key=f"stage1:consumed:{original.allocation_id}",
             minimum_time=claim.timestamp,
+            precommit_guard=precommit_guard,
             payload={
                 "claim_event_hash": claim_ref.event_hash,
                 "allocation_event_hash": original.allocation_ref.event_hash,
