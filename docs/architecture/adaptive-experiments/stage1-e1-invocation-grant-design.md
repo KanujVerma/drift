@@ -92,6 +92,15 @@ Neither is an accepted Python class or wire revision.
   `account_issuer_ref` and `allocation_first_available_at`,
   independently verified under Matthew's accepted issuer. These
   field names are placeholders until #508 settles actual types.
+  In particular, a trusted `receipt_observed_available_by_at`
+  witness from a bounded synthetic host proves the provisioning
+  receipt was available **by** that observed instant; it does
+  not establish an exact first-visibility instant, cash funding
+  or an account creation event. #508 must accept the actual
+  receipt/witness semantics before the grant can claim the
+  required evidence was available to its issuer at issuance.
+  No consumer may silently rename the witness into stronger
+  original availability evidence.
 - **Scheduled research intent:** `logical_request_id`,
   `request_kind`, `method_or_selector_policy_ref`,
   `allowed_strategy_refs`, `context_policy_ref`,
@@ -723,8 +732,9 @@ Each vector is a **design expectation, not an executed test**.
   verify an original ARM-B `ADAPTIVE_AI` model call with
   issuer-bound `producer="ai"` and matching replay policy;
   separately verify an original ARM-R conventional
-  `producer="conventional_r"` with `model_configuration_reference
-  ="NONE"` and no invented AI replay. Both retain their
+  `producer="conventional_r"` and its frozen
+  `model_configuration_reference` set to `NONE`, with no
+  invented AI replay. Both retain their
   original source clocks, grant scope and distinct account
   proofs, not identical models or science-scored observations.
   **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
@@ -786,10 +796,21 @@ receipt/original issuer/retention verifier. Confirm whether that
 primitive exists now or must be separately built for synthetic use;
 then define original M0/M2 account/result association.
 
-**Krish #507:** Confirm grant consumption and `logical_request_id`,
-original attempt/retained validation origin and no-candidate
-outcomes. His proposed `ResearchE1DecisionAssociationV1` is
-still provisional until account + scheduler grant are verifiable.
+**Krish #507:** Independently ACCEPT/NARROW/REJECT the versioned
+producer/model treatment mapping for original start/terminal
+`AttemptRecord.producer`, optional `ResearchCandidate.producer`
+and any genuine `ModelReplayRecord` provider/model/adapter/parser
+configuration under the frozen E1 `selector_type` and model policy.
+Also accept the budget policy and per-attempt authorization issuer
+mapping for `ResearchContext.budget_ref`,
+`AttemptRecord.budget_ref` and `budget_authorization_ref`,
+including original effective times, currency/categories and
+remaining-capacity proof or direct no-work preflight exception.
+Confirm original grant consumption, `logical_request_id`,
+attempt/retained validation origin and no-candidate outcomes.
+His proposed `ResearchE1DecisionAssociationV1` remains
+provisional until account + scheduler grant and both mappings
+are independently verifiable.
 
 **E6B B2/B3:** A final typed trial-record design and implementation
 can only import accepted public producer types after these
