@@ -147,8 +147,25 @@ Neither is an accepted Python class or wire revision.
   - Resolve `context_policy_ref` through an accepted #507 mapping
     to the retained `ResearchContext.clock_policy_ref` and
     applicable original input/memory/feedback policy lineage.
-    Merely matching a free-form `review_reason` or a caller ref
-    does not authenticate this policy.
+    The same original issuer mapping must also bind the grant
+    to the exact frozen E1 `ArmSpecV1.information_visibility_policy`
+    and `feedback_policy_reference`, and to the campaign's
+    `source_eligibility_policy_reference` and
+    `learning_and_feedback_policy_reference`. Add the proposed
+    `context_e1_policy_binding_ref` to the retained grant.
+    These campaign and arm policies have distinct meanings;
+    compare via a versioned issuer-verified translation rather
+    than asserting that all four strings are equal. Verify
+    original K1 input/memory/feedback lineage, cutoff and
+    available evidence against both the grant's context
+    policy and those frozen E1 policy revisions.
+    Matching grant and K1 refs under a DIFFERENT frozen
+    arm visibility, feedback or campaign source/learning
+    policy is `INVALID`; missing authentic E1-to-K1
+    translation is `UNAVAILABLE`, even if K1 and grant
+    hashes independently match. Merely matching a free-form
+    `review_reason` or a caller ref does not authenticate
+    this policy.
   Every comparison consumes original retained K1 evidence and the
   same authenticated original grant revision. An authenticated
   mismatch is `INVALID`; an absent producer mapping or original
@@ -157,7 +174,9 @@ Neither is an accepted Python class or wire revision.
   method, request kind, context policy or strategy permission.
 - **Frozen producer and model treatment:** retain the exact
   `ArmSpecV1.selector_type`, `model_configuration_reference`,
-  campaign `model_and_prompt_policy_reference`, and a proposed
+  `deterministic_seed_reference`,
+  `frozen_configuration_reference`, campaign
+  `model_and_prompt_policy_reference`, and a proposed
   `producer_model_policy_binding_ref` naming the versioned, original
   #507 issuer-verified mapping. This does not assert that the scheduler
   itself verifies raw provider calls, or that the two model-policy refs
@@ -196,6 +215,22 @@ Neither is an accepted Python class or wire revision.
     an implicit match. If the accepted frozen policy explicitly
     permits unknown model revision, preserve its limitations instead
     of claiming identical known model weights.
+  - The same original producer-owned mapping must bind the frozen
+    `deterministic_seed_reference` and
+    `frozen_configuration_reference` to the actual method,
+    strategy/algorithm implementation, normalized parameters
+    and applicable replay-generation seed/options. For ARM-R,
+    the exact comparator algorithm/configuration revision must
+    match the frozen value despite having no model replay.
+    For ARM-B, verify the declared original model/algorithm
+    seed where the frozen method supports it; a model/provider
+    that cannot guarantee reproducible seeding requires an
+    explicit originally accepted limitation and may not claim
+    a verified deterministic seed. A genuine seed or comparator
+    algorithm mismatch is `INVALID`; absent authorized
+    configuration-to-original mapping is `UNAVAILABLE`,
+    never an implicit match because the method ref or result
+    hash happens to agree.
   - Genuine preflight and no-call refusals require original negative
     call evidence and do not fabricate a model replay; a scripted
     offline source is not evidence of a provider call. A real AI
@@ -227,6 +262,28 @@ Neither is an accepted Python class or wire revision.
     supported amounts as exact decimal values in the original
     currency; unknown conversions or remaining balance cannot
     silently establish authority.
+  - Independently join **all** original attributable
+    `CostReceipt` records, including `cost_receipt_ids`
+    on the attempt and candidate, late receipts, corrections via
+    `supersedes_receipt_id` and shared work via
+    `shared_work_ref`, under the accepted #507 allocation rule.
+    Verify actual attempt/scope, billing identity/category,
+    currency, `amount_basis` and exact decimal amount against
+    the original per-attempt authorization and the arm's
+    aggregate remaining capacity. A correctly scoped reservation
+    cannot make a USD 100 charge valid under a USD 10 ceiling.
+    Nor may an otherwise affordable receipt use an unauthorized
+    category or a different arm's shared-work entitlement.
+    A proven actual overrun or prohibited category is `INVALID`
+    for grant-dependent scientific admission even if the original
+    attempt completed; preserve the original cost and failed
+    admission, never conceal or rewrite it. Missing original
+    receipt completeness, verified shared-work allocation,
+    currency/FX basis, actual-versus-estimate basis or later
+    unsettled cost is `UNAVAILABLE` until accepted evidence
+    supports the budget-compliance conclusion. A late correction
+    can revise eligibility with immutable lineage, but cannot
+    backdate a grant or erase incurred cost.
   - A verified *direct preflight refusal* with no chargeable work
     may have a null budget authorization only under the accepted
     #507 exception, with original reason and failure evidence.
