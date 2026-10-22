@@ -551,11 +551,11 @@ def test_captured_engine_callback_cannot_reach_original(
     class CapturedEngine(_Recorder):
         def _visit(self, phase: str, book: PortfolioStateV2) -> None:
             assert not hasattr(engine, "_prepared_opening_book")
-            if phase == "retain":
-                # The engine publishes the twin after retain succeeds.
-                assert engine._observer_opening_book is None
-            else:
-                assert engine._observer_opening_book is book
+            # All three callbacks share one detached witness, but the engine
+            # must never publish it through a replaceable instance field.
+            assert not hasattr(engine, "_observer_opening_book")
+            assert not hasattr(engine, "_opening_book_lifecycle")
+            assert not hasattr(engine, "_prepared_opening_digest")
             super()._visit(phase, book)
 
     lifecycle = CapturedEngine()
@@ -780,7 +780,9 @@ def test_consumption_phase_spoof_refuses_before_session(
         initialized.append(book)
         return book
 
-    monkeypatch.setattr(evaluator_engine, "initial_portfolio_state", tracked_initializer)
+    monkeypatch.setattr(
+        evaluator_engine, "initial_portfolio_state", tracked_initializer
+    )
     engine = _engine()
     _refuse_session_start(engine, monkeypatch)
 
@@ -848,3 +850,47 @@ def test_failed_retention_cannot_be_relabelled_as_unused() -> None:
         _run(engine)
     with pytest.raises(OpeningBookLifecycleError, match="fresh, unused"):
         engine.prepare_opening_book(lifecycle=_Recorder())
+
+
+@pytest.mark.parametrize("replacement_phase", ["before_run", "claim", "consume"])
+def test_lifecycle_observer_and_witness_cannot_be_swapped(
+    replacement_phase: str,
+) -> None:
+    """A replacement engine attribute cannot redirect original ledger callbacks."""
+    baseline = canonical_json(_run(_engine()))
+    engine = _engine()
+    substitute = _Recorder()
+    replacements: list[PortfolioStateV2] = []
+
+    def corrupt_public_fields(opening_book: PortfolioStateV2) -> None:
+        cloned = PortfolioStateV2.model_validate_json(
+            opening_book.model_dump_json()
+        )
+        assert cloned is not opening_book
+        replacements.append(cloned)
+        # These were replaceable engine fields in a vulnerable revision.
+        object.__setattr__(engine, "_observer_opening_book", cloned)
+        object.__setattr__(engine, "_opening_book_lifecycle", substitute)
+        object.__setattr__(engine, "_prepared_opening_digest", "0" * 64)
+
+    class OriginalObserver(_Recorder):
+        def _visit(self, phase: str, book: PortfolioStateV2) -> None:
+            if phase == replacement_phase:
+                corrupt_public_fields(book)
+            super()._visit(phase, book)
+
+    original = OriginalObserver()
+    engine.prepare_opening_book(lifecycle=original)
+    retained = original.retained
+    assert retained is not None
+    if replacement_phase == "before_run":
+        corrupt_public_fields(retained)
+    result = _run(engine)
+    assert canonical_json(result) == baseline
+    assert original.seen == ["retain", "claim", "consume"]
+    assert original.retained is original.claimed is original.consumed
+    assert substitute.seen == []
+    assert len(replacements) == 1
+    assert original.retained is not replacements[0]
+    with pytest.raises(OpeningBookLifecycleError, match="not available"):
+        _run(engine)
