@@ -313,3 +313,66 @@ def test_provenance_mutation_at_readback_return_refuses_original(
     assert [event.event_type for event in store.origin.verified_events()] == [
         ALLOCATION, WITNESS
     ]
+
+
+@pytest.mark.parametrize("transition", ["claim", "consume"])
+def test_provenance_change_after_ledger_append_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    transition: str,
+) -> None:
+    """Already-committed audit evidence remains original, never a success."""
+    store = _store(tmp_path)
+    coordinator = _coordinator(store)
+    engine = _engine()
+    engine.prepare_opening_book(lifecycle=coordinator)
+    book = coordinator._original_book
+    assert book is not None
+    identity = _run_identity(
+        admission=engine.admission,
+        bundle=engine.bundle,
+        protocol=engine.protocol,
+        cost_model=engine.cost_model,
+        evidence_hash=engine.evaluator_evidence_hash,
+    )
+    retained_events = [ALLOCATION, WITNESS]
+    if transition == "consume":
+        coordinator.claim_invocation(opening_book=book, run_identity=identity)
+        retained_events.append(CLAIM)
+
+    actual_append = LocalSyntheticAccountReceiptStoreV1._append
+
+    def mutate_after_write(
+        source_store: LocalSyntheticAccountReceiptStoreV1, **kwargs: Any
+    ) -> Any:
+        receipt = actual_append(source_store, **kwargs)
+        if kwargs["kind"] == (CLAIM if transition == "claim" else CONSUMED):
+            object.__setattr__(
+                coordinator._source_provenance.scope.run_account_binding,
+                "portfolio_account_id",
+                "SYNTH-ACC-R-001",
+            )
+        return receipt
+
+    monkeypatch.setattr(
+        LocalSyntheticAccountReceiptStoreV1, "_append", mutate_after_write
+    )
+    with pytest.raises(
+        LocalAccountReceiptError,
+        match="E1_PROVENANCE_MUTATED_AFTER_VALIDATION",
+    ):
+        if transition == "claim":
+            coordinator.claim_invocation(opening_book=book, run_identity=identity)
+        else:
+            coordinator.observe_consumption(opening_book=book, run_identity=identity)
+
+    # The original append-only event cannot be erased. It binds only the
+    # verified original E1 allocation and the transition is not acknowledged.
+    events = store.origin.verified_events()
+    assert [event.event_type for event in events] == [
+        *retained_events,
+        CLAIM if transition == "claim" else CONSUMED,
+    ]
+    assert coordinator.local_phase == "failed"
+    with pytest.raises(LocalAccountReceiptError, match="INVALID_TRANSITION"):
+        coordinator.claim_invocation(opening_book=book, run_identity=identity)
