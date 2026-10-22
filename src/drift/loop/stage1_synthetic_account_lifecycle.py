@@ -284,13 +284,17 @@ class Stage1SyntheticAccountLifecycleV1:
         if self._allocation is None or self._fields is None:
             raise LocalAccountReceiptError("ORIGINAL_ACCOUNT_NOT_RETAINED")
         allocation_id, allocation_ref, witness_ref = self._allocation
-        return self._store.readback_allocation(
+        readback = self._store.readback_allocation(
             allocation_id=allocation_id,
             allocation_ref=allocation_ref,
             witness_ref=witness_ref,
             expected_fields=self._fields,
             postread_guard=self._assert_e1_source_unchanged,
         )
+        # Also guard the return boundary if an injected adapter changes
+        # caller-owned provenance after the underlying readback completes.
+        self._assert_e1_source_unchanged()
+        return readback
 
     def _require_same_original(self, opening_book: PortfolioStateV2) -> None:
         if opening_book is not self._original_book or self._original_bytes is None:
