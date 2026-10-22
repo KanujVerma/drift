@@ -11,6 +11,13 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from exploratory_decision_test_support import (
+    ReconstructedTargetStrategy,
+    bundle_of,
+    reconstructed_engine,
+    run_engine,
+    three_regular_sessions,
+)
 from test_evaluator_engine import _buy_ten, _engine, _run, _run_identity
 
 import drift.evaluator.engine as evaluator_engine
@@ -628,3 +635,38 @@ def test_observer_cannot_inject_prepared_accounting_phase_hooks(
     assert canonical_json(outcome) == baseline
     assert calls == 0
     assert lifecycle.seen == ["retain", "claim", "consume"]
+
+
+def test_reconstructed_prepared_decision_ignores_instance_injection() -> None:
+    """The weaker exploratory lane needs the same class-bound phase five."""
+    bundle = bundle_of(three_regular_sessions())
+    baseline = canonical_json(
+        run_engine(
+            reconstructed_engine(bundle),
+            ReconstructedTargetStrategy({}),
+        )
+    )
+    engine = reconstructed_engine(bundle)
+    called = 0
+
+    class ReconstructedPoison(_Recorder):
+        def _visit(self, phase: str, book: PortfolioStateV2) -> None:
+            nonlocal called
+            if phase == "consume":
+
+                def injected(*args: Any, **kwargs: Any) -> Any:
+                    nonlocal called
+                    called += 1
+                    raise AssertionError("observer intercepted reconstructed decision")
+
+                object.__setattr__(
+                    engine, "_post_close_reconstructed_decision", injected
+                )
+            super()._visit(phase, book)
+
+    observer = ReconstructedPoison()
+    engine.prepare_opening_book(lifecycle=observer)
+    result = run_engine(engine, ReconstructedTargetStrategy({}))
+    assert canonical_json(result) == baseline
+    assert called == 0
+    assert observer.seen == ["retain", "claim", "consume"]
