@@ -1665,9 +1665,9 @@ def _verify_untampered_original_book(
 
 
 def _private_original_book_escrow() -> tuple[
-    Callable[[object, PortfolioStateV2, "SessionEvaluatorEngine"], None],
-    Callable[[object], "SessionEvaluatorEngine | None"],
-    Callable[[object], "tuple[PortfolioStateV2, SessionEvaluatorEngine] | None"],
+    Callable[[object, PortfolioStateV2, SessionEvaluatorEngine], None],
+    Callable[[object], SessionEvaluatorEngine | None],
+    Callable[[object], tuple[PortfolioStateV2, SessionEvaluatorEngine] | None],
 ]:
     """Escrow the one original book alongside an isolated execution engine.
 
@@ -1687,7 +1687,7 @@ def _private_original_book_escrow() -> tuple[
     lock = Lock()
 
     def retain(
-        owner: object, book: PortfolioStateV2, executor: "SessionEvaluatorEngine"
+        owner: object, book: PortfolioStateV2, executor: SessionEvaluatorEngine
     ) -> None:
         with lock:
             if owner in states:
@@ -1696,14 +1696,14 @@ def _private_original_book_escrow() -> tuple[
                 )
             states[owner] = (book, executor)
 
-    def inspect(owner: object) -> "SessionEvaluatorEngine | None":
+    def inspect(owner: object) -> SessionEvaluatorEngine | None:
         with lock:
             prepared = states.get(owner)
             return prepared[1] if prepared is not None else None
 
     def consume(
         owner: object,
-    ) -> "tuple[PortfolioStateV2, SessionEvaluatorEngine] | None":
+    ) -> tuple[PortfolioStateV2, SessionEvaluatorEngine] | None:
         with lock:
             return states.pop(owner, None)
 
@@ -2138,16 +2138,17 @@ class SessionEvaluatorEngine:
         # Issue 79 ruling, at use: construction already refused promotion.
         refuse_promotion_lane(executor._admission, site="an engine run")
         run_identity = _revalidated_run_identity(run_identity)
-        SessionEvaluatorEngine._require_bound_identity(
-            executor, run_identity, strategy
-        )
-        decide = (
-            self._lane_decision(strategy)
-            if executor is self
-            else SessionEvaluatorEngine._lane_decision(
+        if executor is self:
+            # Preserve the entire legacy/direct extension path.
+            self._require_bound_identity(run_identity, strategy)
+            decide = self._lane_decision(strategy)
+        else:
+            SessionEvaluatorEngine._require_bound_identity(
+                executor, run_identity, strategy
+            )
+            decide = SessionEvaluatorEngine._lane_decision(
                 executor, strategy, trusted_dispatch=True
             )
-        )
         sessions = executor._bundle.session_clock.sessions
         with self._opening_book_lock:
             if self._opening_book_phase == "new":
