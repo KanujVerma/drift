@@ -56,6 +56,7 @@ from drift.loop.stage1_synthetic_account_lifecycle import (
 from drift.serialization.canonical import canonical_json, content_hash
 
 RESULT_EVENT = "stage1.synthetic_result.original_retained"
+M0_USE_EVENT = "stage1.synthetic_result.original_m0_claim"
 RESULT_ENTITY = "stage1_synthetic_result"
 RESULT_PROFILE = "stage1-m0-original-association/1-candidate"
 M0_EVENT = "m2.evaluation.run.recorded"
@@ -421,8 +422,39 @@ class Stage1OriginalResultAssociationV1:
             "original_artifacts_utf8": original_bytes.decode("utf-8"),
             "scientifically_qualified": False,
         }
-        # A single original invocation cannot become multiple independent
-        # results merely by changing an M0 UUID or E1 checkpoint.
+        # Reserve the operational M0 event with its own ledger-unique key
+        # BEFORE publishing the account-scoped RESULT. A key scoped only to
+        # the allocation cannot stop ARM-B and ARM-R from consuming the same
+        # M0 event when both have matching evaluator hashes. This first
+        # append is a durable fail-closed claim, even if a later RESULT append
+        # fails and must remain UNKNOWN rather than become a phantom result.
+        writer = SQLiteLedger(self._origin.ledger_path)
+        m0_use = AuditEventDraft(
+            event_id=uuid7(),
+            event_type=M0_USE_EVENT,
+            timestamp=observed,
+            entity_type=RESULT_ENTITY,
+            entity_id=original.allocation_id,
+            payload={
+                "profile": RESULT_PROFILE,
+                "issuer_instance_id": str(self._origin.issuer_instance_id),
+                "m0_event_id": str(m0.event_id),
+                "m0_event_hash": m0.event_hash,
+                "allocation_event_hash": original.allocation_ref.event_hash,
+                "consumption_event_hash": consumed.event_hash,
+            },
+            deduplication_key=f"stage1:original-m0-use:{m0.event_id}",
+            schema_version="1",
+        )
+        try:
+            reserved = writer.append(m0_use)
+        except DuplicateEventError as error:
+            raise OriginalResultAssociationError(
+                "ORIGINAL_M0_EVENT_ALREADY_ASSOCIATED"
+            ) from error
+        # A single original invocation also cannot become multiple independent
+        # results merely by changing the M0 UUID or E1 checkpoint.
+        fields["m0_use_event_hash"] = reserved.event_hash
         draft = AuditEventDraft(
             event_id=uuid7(),
             event_type=RESULT_EVENT,
@@ -439,7 +471,6 @@ class Stage1OriginalResultAssociationV1:
         )
         # The configured original ledger is the same trusted-host root that
         # holds original allocation + M0, not one named by a caller receipt.
-        writer = SQLiteLedger(self._origin.ledger_path)
         try:
             appended = writer.append(draft)
         except DuplicateEventError as error:
@@ -525,9 +556,44 @@ class Stage1OriginalResultAssociationV1:
             index for index, event in enumerate(history)
             if event.event_id == m0.event_id
         )
-        if position <= m0_position:
+        # The ledger's unique deduplication key on original M0 event ID
+        # ensures two different accounts cannot both reserve one operational
+        # run. Independently verify that reservation's scope, original event,
+        # issuer and position before accepting a retained result.
+        uses = [
+            (index, event)
+            for index, event in enumerate(history)
+            if event.event_type == M0_USE_EVENT
+            and isinstance(event.payload, Mapping)
+            and event.payload.get("m0_event_id") == str(m0.event_id)
+        ]
+        if len(uses) != 1:
             raise OriginalResultAssociationError(
-                "RESULT_PREDATES_ORIGINAL_M0_EVENT"
+                "M0_EVENT_NOT_UNIQUELY_RESERVED"
+            )
+        use_position, m0_use = uses[0]
+        use_payload = _mapping(
+            m0_use.payload, "M0_USE_ORIGINAL_PAYLOAD_INVALID"
+        )
+        if (
+            m0_use.entity_type != RESULT_ENTITY
+            or m0_use.entity_id != self._original_allocation.allocation_id
+            or m0_use.schema_version != "1"
+            or m0_use.deduplication_key
+            != f"stage1:original-m0-use:{m0.event_id}"
+            or use_payload.get("issuer_instance_id")
+            != str(self._origin.issuer_instance_id)
+            or use_payload.get("profile") != RESULT_PROFILE
+            or use_payload.get("m0_event_hash") != m0.event_hash
+            or use_payload.get("allocation_event_hash")
+            != self._original_allocation.allocation_ref.event_hash
+            or use_payload.get("consumption_event_hash") != used.event_hash
+            or data.get("m0_use_event_hash") != m0_use.event_hash
+            or not m0_position < use_position < position
+            or not m0.timestamp <= m0_use.timestamp <= receipt.timestamp
+        ):
+            raise OriginalResultAssociationError(
+                "M0_EVENT_RESERVATION_SCOPE_MISMATCH"
             )
         if (
             data.get("allocation_event_hash")
