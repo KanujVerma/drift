@@ -2225,9 +2225,7 @@ class SessionEvaluatorEngine:
             self._require_bound_identity(run_identity, strategy)
             decide = self._lane_decision(strategy)
         else:
-            type(executor)._require_bound_identity(
-                executor, run_identity, strategy
-            )
+            type(executor)._require_bound_identity(executor, run_identity, strategy)
             decide = type(executor)._lane_decision(
                 executor, strategy, trusted_dispatch=True
             )
@@ -2350,9 +2348,7 @@ class SessionEvaluatorEngine:
                     # An observer that captured the engine must not be able
                     # to inject an instance-level hook that sees the private
                     # original book after our last integrity check.
-                    type(executor)._emit_session_start(
-                        executor, loop, index, session
-                    )
+                    type(executor)._emit_session_start(executor, loop, index, session)
                 if prepared_digest is None:
                     halt = self._step_session(loop, index, session, decide)
                 else:
@@ -2440,9 +2436,7 @@ class SessionEvaluatorEngine:
                 self._pre_open_effects(loop, index, session)
             phase = EvaluationPhase.OPEN_EXECUTION
             if trusted_dispatch:
-                rejected = type(self)._open_execution(
-                    self, loop, index, session
-                )
+                rejected = type(self)._open_execution(self, loop, index, session)
             else:
                 rejected = self._open_execution(loop, index, session)
             if rejected is not None:
