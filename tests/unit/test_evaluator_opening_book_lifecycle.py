@@ -5,6 +5,8 @@ authenticate a Matthew account provisioner, retained SQLite event, research
 grant, or original M0 RESULT. Those are separately gated PR B and PR C.
 """
 
+import gc
+import weakref
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -113,7 +115,9 @@ def _refuse_session_start(
     def forbidden(*args: Any, **kwargs: Any) -> None:
         pytest.fail("a session began despite a failed opening-book lifecycle")
 
-    monkeypatch.setattr(type(engine), "_emit_session_start", forbidden)
+    monkeypatch.setattr(
+        evaluator_engine._PREPARED_EXECUTOR_TYPE, "_emit_session_start", forbidden
+    )
 
 
 def test_prepared_engine_consumes_same_original_and_matches_legacy(
@@ -149,7 +153,7 @@ def test_prepared_engine_consumes_same_original_and_matches_legacy(
     assert lifecycle.retained.pending_cash_claims == ()
     assert lifecycle.seen == ["retain"]
     saw_private_original = False
-    emit_original = type(engine)._emit_session_start
+    emit_original = evaluator_engine._PREPARED_EXECUTOR_TYPE._emit_session_start
 
     def inspect_original(*args: Any, **kwargs: Any) -> None:
         nonlocal saw_private_original
@@ -160,7 +164,11 @@ def test_prepared_engine_consumes_same_original_and_matches_legacy(
             assert args[1].state is originals[0]
         emit_original(*args, **kwargs)
 
-    monkeypatch.setattr(type(engine), "_emit_session_start", inspect_original)
+    monkeypatch.setattr(
+        evaluator_engine._PREPARED_EXECUTOR_TYPE,
+        "_emit_session_start",
+        inspect_original,
+    )
     prepared_artifacts = _run(engine)
     assert originals == [lifecycle.retained]
     assert lifecycle.retained is lifecycle.claimed is lifecycle.consumed
@@ -483,7 +491,7 @@ def test_post_callback_async_observer_tamper_cannot_change_original_run(
     engine.prepare_opening_book(lifecycle=lifecycle)
     assert lifecycle.retained is not None
     assert not hasattr(engine, "_prepared_opening_book")
-    actual_emit = type(engine)._emit_session_start
+    actual_emit = evaluator_engine._PREPARED_EXECUTOR_TYPE._emit_session_start
     changed = False
 
     def after_last_callback(*args: Any, **kwargs: Any) -> None:
@@ -497,7 +505,11 @@ def test_post_callback_async_observer_tamper_cannot_change_original_run(
             object.__setattr__(lifecycle.retained, "net_asset_value", Decimal("1"))
         actual_emit(*args, **kwargs)
 
-    monkeypatch.setattr(type(engine), "_emit_session_start", after_last_callback)
+    monkeypatch.setattr(
+        evaluator_engine._PREPARED_EXECUTOR_TYPE,
+        "_emit_session_start",
+        after_last_callback,
+    )
     artifacts = _run(engine)
     assert changed
     assert canonical_json(artifacts) == baseline
@@ -741,6 +753,7 @@ def test_consume_observer_cannot_replace_private_evidence_and_bundle() -> None:
     assert canonical_json(result) == expected
     assert observer.seen == ["retain", "claim", "consume"]
 
+
 @pytest.mark.parametrize("spoofed_phase", ["new", "prepared", "failed"])
 def test_consumed_engine_phase_spoof_never_restores_fresh_cash(
     spoofed_phase: str,
@@ -863,15 +876,14 @@ def test_lifecycle_observer_and_witness_cannot_be_swapped(
     replacements: list[PortfolioStateV2] = []
 
     def corrupt_public_fields(opening_book: PortfolioStateV2) -> None:
-        cloned = PortfolioStateV2.model_validate_json(
-            opening_book.model_dump_json()
-        )
+        cloned = PortfolioStateV2.model_validate_json(opening_book.model_dump_json())
         assert cloned is not opening_book
         replacements.append(cloned)
         # These were replaceable engine fields in a vulnerable revision.
         object.__setattr__(engine, "_observer_opening_book", cloned)
         object.__setattr__(engine, "_opening_book_lifecycle", substitute)
         object.__setattr__(engine, "_prepared_opening_digest", "0" * 64)
+        object.__setattr__(engine, "_lifecycle_lifetime_anchor", substitute)
 
     class OriginalObserver(_Recorder):
         def _visit(self, phase: str, book: PortfolioStateV2) -> None:
@@ -894,3 +906,102 @@ def test_lifecycle_observer_and_witness_cannot_be_swapped(
     assert original.retained is not replacements[0]
     with pytest.raises(OpeningBookLifecycleError, match="not available"):
         _run(engine)
+
+
+@pytest.mark.parametrize("phase", ["retain", "claim", "consume"])
+@pytest.mark.parametrize(
+    "method_name",
+    [
+        "_emit_session_start",
+        "_step_session",
+        "_pre_open_effects",
+        "_post_close_decision",
+        "_accounting_view",
+        "admitted_universe_at",
+    ],
+)
+def test_lifecycle_cannot_replace_public_class_accounting_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    method_name: str,
+) -> None:
+    """Only the snapshotted private evaluator receives the original book."""
+    expected = canonical_json(_run(_engine()))
+    engine = _engine()
+    calls = 0
+
+    class ReplacesPublicClass(_Recorder):
+        def _visit(self, where: str, book: PortfolioStateV2) -> None:
+            if where == phase:
+
+                def injected(*args: Any, **kwargs: Any) -> Any:
+                    nonlocal calls
+                    calls += 1
+                    raise AssertionError("callback-mutated public engine dispatched")
+
+                monkeypatch.setattr(type(engine), method_name, injected)
+            super()._visit(where, book)
+
+    lifecycle = ReplacesPublicClass()
+    engine.prepare_opening_book(lifecycle=lifecycle)
+    result = _run(engine)
+    assert canonical_json(result) == expected
+    assert calls == 0
+    assert lifecycle.seen == ["retain", "claim", "consume"]
+
+
+def test_reconstructed_class_hook_cannot_intercept_prepared_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The weak reconstructed decision lane uses frozen dispatch as well."""
+    bundle = bundle_of(three_regular_sessions())
+    expected = canonical_json(
+        run_engine(reconstructed_engine(bundle), ReconstructedTargetStrategy({}))
+    )
+    engine = reconstructed_engine(bundle)
+    called = 0
+
+    class Poison(_Recorder):
+        def _visit(self, where: str, book: PortfolioStateV2) -> None:
+            if where == "consume":
+
+                def injected(*args: Any, **kwargs: Any) -> Any:
+                    nonlocal called
+                    called += 1
+                    raise AssertionError("reconstructed class hook reached original")
+
+                monkeypatch.setattr(
+                    type(engine), "_post_close_reconstructed_decision", injected
+                )
+            super()._visit(where, book)
+
+    lifecycle = Poison()
+    engine.prepare_opening_book(lifecycle=lifecycle)
+    actual = run_engine(engine, ReconstructedTargetStrategy({}))
+    assert canonical_json(actual) == expected
+    assert called == 0
+
+
+def test_abandoned_prepared_callback_cycle_is_collectable() -> None:
+    """The weak escrow must not keep an unused engine alive indefinitely."""
+
+    def make_refs() -> tuple[
+        weakref.ReferenceType[evaluator_engine.SessionEvaluatorEngine],
+        weakref.ReferenceType[_Recorder],
+    ]:
+        engine = _engine()
+
+        class CapturesEngine(_Recorder):
+            def _visit(self, where: str, book: PortfolioStateV2) -> None:
+                assert engine.bundle is not None
+                super()._visit(where, book)
+
+        observer = CapturesEngine()
+        engine.prepare_opening_book(lifecycle=observer)
+        assert observer.seen == ["retain"]
+        return weakref.ref(engine), weakref.ref(observer)
+
+    engine_ref, observer_ref = make_refs()
+    gc.collect()
+    assert engine_ref() is None
+    assert observer_ref() is None
