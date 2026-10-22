@@ -1664,46 +1664,70 @@ def _verify_untampered_original_book(
         raise invalid
 
 
+type _PreparedBookEscrow = tuple[
+    PortfolioStateV2,
+    SessionEvaluatorEngine,
+    PortfolioStateV2,
+    OpeningBookLifecycleV1,
+    str,
+]
+
+
 def _private_original_book_escrow() -> tuple[
-    Callable[[object, PortfolioStateV2, SessionEvaluatorEngine], None],
+    Callable[
+        [
+            object,
+            PortfolioStateV2,
+            SessionEvaluatorEngine,
+            PortfolioStateV2,
+            OpeningBookLifecycleV1,
+            str,
+        ],
+        None,
+    ],
     Callable[[object], SessionEvaluatorEngine | None],
-    Callable[[object], tuple[PortfolioStateV2, SessionEvaluatorEngine] | None],
+    Callable[[object], _PreparedBookEscrow | None],
 ]:
-    """Escrow the one original book alongside an isolated execution engine.
+    """Escrow the original book, private executor and exact observer binding.
 
-    A lifecycle callback is allowed to capture and edit its *public* engine.
-    It never receives the actual book or the separately revalidated runner
-    and cannot redirect the runner's accounting collaborators by replacing
-    attributes of that public engine. Both are retained together and claimed
-    atomically; no second portfolio book is initialized or recredited.
-
-    This isolates ordinary engine-instance changes by callbacks. Arbitrary
-    same-process introspection, module/class mutation and process compromise
-    remain outside the trusted-host boundary and require separate isolation.
+    Callback-visible engine fields are not trusted as authoritative lifecycle
+    references. The validated observer witness, receiving lifecycle instance,
+    original digest and real accounting object must be retained together
+    before any invocation. A captured engine, including one modified during
+    strategy-identity validation, must not substitute a canonically equal
+    witness or an unrelated callback implementation. This still assumes an
+    independently trusted Python host rather than hostile frame introspection.
     """
-    states: WeakKeyDictionary[
-        object, tuple[PortfolioStateV2, SessionEvaluatorEngine]
-    ] = WeakKeyDictionary()
+    states: WeakKeyDictionary[object, _PreparedBookEscrow] = WeakKeyDictionary()
     lock = Lock()
 
     def retain(
-        owner: object, book: PortfolioStateV2, executor: SessionEvaluatorEngine
+        owner: object,
+        book: PortfolioStateV2,
+        executor: SessionEvaluatorEngine,
+        observer_book: PortfolioStateV2,
+        lifecycle: OpeningBookLifecycleV1,
+        original_digest: str,
     ) -> None:
         with lock:
             if owner in states:
                 raise OpeningBookLifecycleError(
                     "an original opening book is already retained"
                 )
-            states[owner] = (book, executor)
+            states[owner] = (
+                book,
+                executor,
+                observer_book,
+                lifecycle,
+                original_digest,
+            )
 
     def inspect(owner: object) -> SessionEvaluatorEngine | None:
         with lock:
             prepared = states.get(owner)
             return prepared[1] if prepared is not None else None
 
-    def consume(
-        owner: object,
-    ) -> tuple[PortfolioStateV2, SessionEvaluatorEngine] | None:
+    def consume(owner: object) -> _PreparedBookEscrow | None:
         with lock:
             return states.pop(owner, None)
 
@@ -1861,13 +1885,9 @@ class SessionEvaluatorEngine:
             "new", "preparing", "prepared", "claimed", "consumed", "failed"
         ] = "new"
         self._legacy_run_started = False
-        self._opening_book_lifecycle: OpeningBookLifecycleV1 | None = None
-        # The actual original lives in module-local single-use escrow, never
-        # in an attribute a captured-engine lifecycle observer can read.
-        # Untrusted observers only ever see this canonically detached twin.
-        # The engine's original book is NEVER exposed outside the evaluator.
-        self._observer_opening_book: PortfolioStateV2 | None = None
-        self._prepared_opening_digest: str | None = None
+        # All authoritative lifecycle references are stored only in the
+        # private single-use escrow. The public engine exposes no mutable
+        # observer/book/digest slots that can redirect later callbacks.
 
     # -- accessors ---------------------------------------------------------
 
@@ -2142,10 +2162,14 @@ class SessionEvaluatorEngine:
             raise
 
         with self._opening_book_lock:
-            _RETAIN_ORIGINAL_BOOK(self, opening_book, execution_engine)
-            self._observer_opening_book = observed_book
-            self._prepared_opening_digest = original_digest
-            self._opening_book_lifecycle = lifecycle
+            _RETAIN_ORIGINAL_BOOK(
+                self,
+                opening_book,
+                execution_engine,
+                observed_book,
+                lifecycle,
+                original_digest,
+            )
             self._opening_book_phase = "prepared"
 
     # -- run ----------------------------------------------------------------
@@ -2227,15 +2251,18 @@ class SessionEvaluatorEngine:
                     raise OpeningBookLifecycleError(
                         "prepared opening-book state is incomplete"
                     )
-                prepared_book, claimed_executor = prepared_pair
+                (
+                    prepared_book,
+                    claimed_executor,
+                    observer_book,
+                    lifecycle,
+                    prepared_digest,
+                ) = prepared_pair
                 if claimed_executor is not executor:
                     self._opening_book_phase = "failed"
                     raise OpeningBookLifecycleError(
                         "prepared opening-book executor identity changed"
                     )
-                observer_book = self._observer_opening_book
-                lifecycle = self._opening_book_lifecycle
-                prepared_digest = self._prepared_opening_digest
                 if (
                     prepared_book is None
                     or observer_book is None
