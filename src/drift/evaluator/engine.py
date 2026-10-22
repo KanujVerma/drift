@@ -1665,38 +1665,54 @@ def _verify_untampered_original_book(
 
 
 def _private_original_book_escrow() -> tuple[
-    Callable[[object, PortfolioStateV2], None],
-    Callable[[object], PortfolioStateV2 | None],
+    Callable[[object, PortfolioStateV2, "SessionEvaluatorEngine"], None],
+    Callable[[object], "SessionEvaluatorEngine | None"],
+    Callable[[object], "tuple[PortfolioStateV2, SessionEvaluatorEngine] | None"],
 ]:
-    """Keep originals outside engine attributes, with one-time atomic take.
+    """Escrow the one original book alongside an isolated execution engine.
 
-    The observer may close over the engine, so even a private-looking
-    engine._prepared_opening_book attribute would expose the actual mutable
-    source to callback code. This module-local escrow holds the real prepared
-    book weakly keyed by the engine, then removes it before any invocation
-    callbacks execute. Only the detached observer twin stays on the engine.
-    A hostile actor with arbitrary process-frame/closure introspection is
-    outside a Python in-process trust boundary and must be isolated by host.
+    A lifecycle callback is allowed to capture and edit its *public* engine.
+    It never receives the actual book or the separately revalidated runner
+    and cannot redirect the runner's accounting collaborators by replacing
+    attributes of that public engine. Both are retained together and claimed
+    atomically; no second portfolio book is initialized or recredited.
+
+    This isolates ordinary engine-instance changes by callbacks. Arbitrary
+    same-process introspection, module/class mutation and process compromise
+    remain outside the trusted-host boundary and require separate isolation.
     """
-    states: WeakKeyDictionary[object, PortfolioStateV2] = WeakKeyDictionary()
+    states: WeakKeyDictionary[
+        object, tuple[PortfolioStateV2, SessionEvaluatorEngine]
+    ] = WeakKeyDictionary()
     lock = Lock()
 
-    def retain(owner: object, book: PortfolioStateV2) -> None:
+    def retain(
+        owner: object, book: PortfolioStateV2, executor: "SessionEvaluatorEngine"
+    ) -> None:
         with lock:
             if owner in states:
                 raise OpeningBookLifecycleError(
                     "an original opening book is already retained"
                 )
-            states[owner] = book
+            states[owner] = (book, executor)
 
-    def consume(owner: object) -> PortfolioStateV2 | None:
+    def inspect(owner: object) -> "SessionEvaluatorEngine | None":
+        with lock:
+            prepared = states.get(owner)
+            return prepared[1] if prepared is not None else None
+
+    def consume(
+        owner: object,
+    ) -> "tuple[PortfolioStateV2, SessionEvaluatorEngine] | None":
         with lock:
             return states.pop(owner, None)
 
-    return retain, consume
+    return retain, inspect, consume
 
 
-_RETAIN_ORIGINAL_BOOK, _CONSUME_ORIGINAL_BOOK = _private_original_book_escrow()
+_RETAIN_ORIGINAL_BOOK, _PEEK_PREPARED_EXECUTOR, _CONSUME_ORIGINAL_BOOK = (
+    _private_original_book_escrow()
+)
 
 
 class SessionEvaluatorEngine:
@@ -1770,6 +1786,7 @@ class SessionEvaluatorEngine:
             book_currency_code=book_currency_code,
         )
         self._accounting_index = self._index_accounting_views(bundle)
+        self._book_currency_namespace = book_currency_namespace
         self._book_currency_code = book_currency_code
         # Issue 54: only the reconstructed lane reads this index, and only
         # after its gate re-derived every reconstruction (issue 55).
@@ -2046,6 +2063,21 @@ class SessionEvaluatorEngine:
             )
             original_digest = content_hash(opening_book)
             _verify_untampered_original_book(opening_book, original_digest)
+            # Independently revalidate every accounting collaborator before
+            # any observer can mutate the public engine. This is the same M2
+            # implementation over the same canonical inputs, NOT a second
+            # account/portfolio or another call to initial_portfolio_state.
+            # Keep the executor in escrow, never in an engine attribute that
+            # lifecycle code capturing self could replace or inspect.
+            execution_engine = SessionEvaluatorEngine(
+                bundle=self._bundle,
+                admission=self._admission,
+                protocol=self._protocol,
+                cost_model=self._cost_model,
+                evidence=self._evidence,
+                book_currency_namespace=self._book_currency_namespace,
+                book_currency_code=self._book_currency_code,
+            )
             # The original book stays private to the engine. Python's frozen
             # models can still be mutated via object.__setattr__, including
             # asynchronously after any last check. An observer receives one
@@ -2068,7 +2100,7 @@ class SessionEvaluatorEngine:
             raise
 
         with self._opening_book_lock:
-            _RETAIN_ORIGINAL_BOOK(self, opening_book)
+            _RETAIN_ORIGINAL_BOOK(self, opening_book, execution_engine)
             self._observer_opening_book = observed_book
             self._prepared_opening_digest = original_digest
             self._opening_book_lifecycle = lifecycle
@@ -2089,13 +2121,34 @@ class SessionEvaluatorEngine:
         an ``EvaluationRunIdentityV2`` the strategy's exposed parameters are
         bound to the identity first (issue 112); a V1 run is unchanged.
         """
-        # Issue 79 ruling, at use: construction already refused a promotion
-        # admission, and nothing past it is stepped under one either.
-        refuse_promotion_lane(self._admission, site="an engine run")
+        # Decide which evaluator owns accounting *before* any callbacks.
+        # For a prepared run the private runner was revalidated before retain
+        # and cannot be redirected by replacing fields/methods on this public
+        # engine during claim/consume. Legacy execution stays on self.
+        with self._opening_book_lock:
+            executor = (
+                _PEEK_PREPARED_EXECUTOR(self)
+                if self._opening_book_phase == "prepared"
+                else self
+            )
+        if executor is None:
+            raise OpeningBookLifecycleError(
+                "prepared opening-book executor is not available"
+            )
+        # Issue 79 ruling, at use: construction already refused promotion.
+        refuse_promotion_lane(executor._admission, site="an engine run")
         run_identity = _revalidated_run_identity(run_identity)
-        self._require_bound_identity(run_identity, strategy)
-        decide = self._lane_decision(strategy)
-        sessions = self._bundle.session_clock.sessions
+        SessionEvaluatorEngine._require_bound_identity(
+            executor, run_identity, strategy
+        )
+        decide = (
+            self._lane_decision(strategy)
+            if executor is self
+            else SessionEvaluatorEngine._lane_decision(
+                executor, strategy, trusted_dispatch=True
+            )
+        )
+        sessions = executor._bundle.session_clock.sessions
         with self._opening_book_lock:
             if self._opening_book_phase == "new":
                 # Existing direct engine callers may still run/replay freely,
@@ -2108,7 +2161,20 @@ class SessionEvaluatorEngine:
             elif self._opening_book_phase == "prepared":
                 # Take the same actual prepared object out of escrow BEFORE
                 # a callback that closes over this engine could run.
-                prepared_book = _CONSUME_ORIGINAL_BOOK(self)
+                # The original and its isolated executor have one atomic
+                # claim. Neither can be substituted or re-credited later.
+                prepared_pair = _CONSUME_ORIGINAL_BOOK(self)
+                if prepared_pair is None:
+                    self._opening_book_phase = "failed"
+                    raise OpeningBookLifecycleError(
+                        "prepared opening-book state is incomplete"
+                    )
+                prepared_book, claimed_executor = prepared_pair
+                if claimed_executor is not executor:
+                    self._opening_book_phase = "failed"
+                    raise OpeningBookLifecycleError(
+                        "prepared opening-book executor identity changed"
+                    )
                 observer_book = self._observer_opening_book
                 lifecycle = self._opening_book_lifecycle
                 prepared_digest = self._prepared_opening_digest
@@ -2146,12 +2212,8 @@ class SessionEvaluatorEngine:
             )
             _verify_untampered_original_book(prepared_book, prepared_digest)
             _verify_untampered_original_book(observer_book, prepared_digest)
-            # Phase five also needs trusted class dispatch: the default
-            # decision closure resolves post-close methods on self, which a
-            # callback retaining engine can replace after verification.
-            decide = SessionEvaluatorEngine._lane_decision(
-                self, strategy, trusted_dispatch=True
-            )
+            # The prepared decision closure already targets the separately
+            # revalidated private executor, not callback-visible self.
             # Never expose either the evaluator's internal original book or
             # the identity used to seal RESULT. The observer sees one stable
             # detached twin for its original-retention ledger receipts.
@@ -2181,7 +2243,7 @@ class SessionEvaluatorEngine:
                         )
                     else:
                         loop.state = SessionEvaluatorEngine._advance(
-                            self, loop.state, session.session_key
+                            executor, loop.state, session.session_key
                         )
                 if prepared_digest is None:
                     # Legacy callers retain their existing extension hooks.
@@ -2191,13 +2253,13 @@ class SessionEvaluatorEngine:
                     # to inject an instance-level hook that sees the private
                     # original book after our last integrity check.
                     SessionEvaluatorEngine._emit_session_start(
-                        self, loop, index, session
+                        executor, loop, index, session
                     )
                 if prepared_digest is None:
                     halt = self._step_session(loop, index, session, decide)
                 else:
                     halt = SessionEvaluatorEngine._step_session(
-                        self, loop, index, session, decide, trusted_dispatch=True
+                        executor, loop, index, session, decide, trusted_dispatch=True
                     )
             except (
                 PromotionLaneDisabledError,
@@ -2228,9 +2290,9 @@ class SessionEvaluatorEngine:
                 trace=trace,
             )
         else:
-            metrics = SessionEvaluatorEngine._metrics(self, loop)
+            metrics = SessionEvaluatorEngine._metrics(executor, loop)
             result = SessionEvaluatorEngine._seal_result(
-                self,
+                executor,
                 run_identity=run_identity,
                 halt=halt,
                 metrics=metrics,
