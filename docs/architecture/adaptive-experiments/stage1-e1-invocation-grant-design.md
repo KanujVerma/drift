@@ -332,6 +332,18 @@ new network service, executor identity or source-file implementation**.
   A still-running model completion remains subject to its separate
   decision deadline, context, risk and containment policies; grant
   validity at start alone does not certify the final candidate or RESULT.
+- For chargeable research, the original #507 per-attempt budget
+  authorization must be issued and independently available before
+  the first chargeable action, with the scope and ceiling of the
+  frozen E1 arm's research budget. A timely scheduler grant alone
+  does not authorize paid provider calls, and an after-the-fact
+  cost receipt cannot backdate spending permission. If accepted
+  #507 evidence cannot establish the authorization-before-work
+  ordering, classify `UNAVAILABLE` rather than inventing a
+  reservation clock. Verified contrary ordering is `INVALID`;
+  a real no-work preflight refusal follows its separately proved
+  null-authorization exception. Unknown incurred costs remain
+  unknown and are still retained.
 - A `hold` requires verified matching incumbent and current
   account/risk state. `abstain`, `unavailable`, failed and rejected
   attempts remain distinct, retain reason/cost, and authorize no
@@ -349,8 +361,9 @@ new network service, executor identity or source-file implementation**.
 
 1. Capture E1 caller collections once. Verify full campaign/arms/run
    account binding, checkpoint and provenance/E6A original fingerprints
-   through the accepted single-view APIs. #511 must be accepted
-   before integrated account-binding claims.
+   through the accepted single-view APIs. The #511 single-view
+   provenance correction is merged under #504; it is structural
+   verification only, not accepted original account issuance.
 2. Verify **Matthew's original account allocation issuer and retained
    receipt** independently, including account, arm, run, cutoff and
    full manifest. Refuse arbitrary matching caller account strings.
@@ -390,13 +403,49 @@ new network service, executor identity or source-file implementation**.
    E1 arm/campaign pools; do not invent a strategy for genuine
    nontrading or failed attempts. Verify `context_policy_ref`
    through #507's original K1 clock/input/memory/feedback policy
-   mapping. Unresolved mappings are `UNAVAILABLE`, not implied
-   acceptance; authentic conflicts are `INVALID`. For model calls,
-   verify request/response/parse/original-validation/terminal
-   order before declaring decision readiness. Refuse
-   independently verifiable contradictions even when every
-   clock precedes the deadline. Never promote a grant into
-   an accepted research output.
+   mapping.
+   **Verify the frozen producer/model lane independently:** check
+   the original E1 `ArmSpecV1.selector_type`,
+   `model_configuration_reference` and campaign
+   `model_and_prompt_policy_reference` against the exact granted
+   `producer_model_policy_binding_ref` and #507 issuer-verified
+   producer mapping. Compare both original start/terminal
+   `AttemptRecord.producer` values and the original
+   `ResearchCandidate.producer` whenever a candidate exists.
+   ARM-B `ADAPTIVE_AI` and ARM-R
+   `DETERMINISTIC_COMPARATOR` may not swap `ai`,
+   `conventional_r` or `scripted_fixture` under a matching
+   method/strategy hash. For genuine model calls, check
+   original replay method, provider, requested and resolved
+   model identity/limitation, adapter, parser, and raw
+   request/configuration against the arm and campaign's frozen
+   policies. No authentic mapping means `UNAVAILABLE`;
+   an authenticated wrong producer, model or configuration
+   means `INVALID`. Do not invent replay evidence for
+   no-call terminal refusal.
+   **Verify the frozen research budget independently:** bind
+   the exact arm `research_budget_reference` through the
+   granted `budget_policy_binding_ref` to both the retained
+   `ResearchContext.budget_ref` and start/terminal
+   `AttemptRecord.budget_ref`. For potentially costly work,
+   resolve the original per-attempt
+   `AttemptRecord.budget_authorization_ref` through the #507
+   reservation issuer and verify original scope, effective time,
+   permitted categories, currency, per-attempt ceiling and
+   applicable run/arm remaining capacity before that work.
+   An authorization under a different or larger budget must
+   refuse `INVALID` even if actual spending was lower. A
+   missing producer mapping, trusted reservation or cap proof
+   means `UNAVAILABLE`. Only a proven no-work preflight
+   refusal can lack the authorization, retaining its reason
+   and any unknown cost evidence. Do not replace authorization
+   with a billing or M2 cash receipt.
+   For model calls, verify request/response/parse/
+   original-validation/terminal order before declaring
+   decision readiness. Refuse independently verifiable
+   contradictions even when every clock precedes the
+   deadline. Never promote a grant into an accepted
+   research output.
 5. Matthew separately verifies actual M0/M2 admission, result/trace,
    account book, order/fill/refusal/UNKNOWN, valuation and posted
    trading costs without reinterpreting its original hashes.
