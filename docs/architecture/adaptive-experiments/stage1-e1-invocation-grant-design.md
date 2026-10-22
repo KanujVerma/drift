@@ -463,7 +463,7 @@ original grant-at-start check. Genuine future input is lookahead,
 not a normal after-cutoff model completion. No generic `dict[str, Any]`
 evidence resolver or second financial ledger is allowed.
 
-## 6. Forty synthetic original-grant test vectors
+## 6. Forty-nine synthetic original-grant test vectors
 
 Each vector is a **design expectation, not an executed test**.
 `READY_STRUCTURAL` has accepted E1 fixture verification only.
@@ -691,6 +691,83 @@ Each vector is a **design expectation, not an executed test**.
   `grant_issued_at`. Refuse `INVALID` chronology, not a
   backdated grant with valid appearance.
   **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER**.
+- **G18a, crossed producer lane:** frozen ARM-B is
+  `ADAPTIVE_AI`, but its authentic started/terminal
+  `AttemptRecord.producer` or normalized
+  `ResearchCandidate.producer` is `conventional_r` or
+  `scripted_fixture`. Separately inject `ai` into genuine
+  `DETERMINISTIC_COMPARATOR` ARM-R; keep method and all
+  strategy refs matching to prove the producer check itself
+  rejects `INVALID`.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G18b, wrong original model configuration:** an ARM-B
+  attempt has authentic `producer="ai"` and matching grant
+  method, but the original `ModelReplayRecord` uses a
+  different provider/requested or resolved model revision,
+  `adapter_ref`, `parser_schema_ref`, or raw prompt/config
+  than the frozen arm/campaign policy and issuer mapping.
+  Each changed dimension independently refuses `INVALID`;
+  the raw result hash and matching strategy cannot bypass
+  that comparison.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G18c, no authenticated producer/model mapping:** original
+  attempt/candidate/model replay are individually well formed,
+  but #507 cannot independently resolve the frozen selector
+  or arm-model-policy-to-replay configuration and effective
+  revision. Expect `UNAVAILABLE`, with missing producer
+  evidence named; never infer authentic matching from the
+  literal model string or a caller-signed blob. A required
+  missing original AI replay is also `UNAVAILABLE`.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G18d, verified B/R producer positive:** independently
+  verify an original ARM-B `ADAPTIVE_AI` model call with
+  issuer-bound `producer="ai"` and matching replay policy;
+  separately verify an original ARM-R conventional
+  `producer="conventional_r"` with `model_configuration_reference
+  ="NONE"` and no invented AI replay. Both retain their
+  original source clocks, grant scope and distinct account
+  proofs, not identical models or science-scored observations.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G19a, wrong frozen budget policy:** grant is for ARM-B
+  with `research_budget_reference="fixture://budget-B"`,
+  but original `ResearchContext.budget_ref` or started/
+  terminal `AttemptRecord.budget_ref` resolves to the
+  authentic ARM-R budget or another policy revision. Refuse
+  `INVALID`, even when the attempt's cost receipt shows zero.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G19b, excessive or crossed authorization:** original
+  `AttemptRecord.budget_ref` matches ARM-B, but its actual
+  `budget_authorization_ref` resolves to a different arm,
+  a larger per-attempt ceiling, an exceeded run/arm aggregate
+  cap, or a wrong spending category or currency. Each
+  independently refuses `INVALID`; a cheap actual call
+  cannot validate an overly permissive authorization.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G19c, absent trusted budget reservation:** otherwise
+  coherent attempt has no verifiable #507 budget-policy
+  mapping, original per-attempt authorization, remaining-cap
+  proof or authentic authorization-first-available clock.
+  Expect `UNAVAILABLE`, retain actual or unknown incurred
+  cost and the attempted denominator; do not synthesize
+  a permission from the grant or nominal portfolio cash.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G19d, verified bounded authorization positive:** the
+  original #507 budget issuer independently attests both
+  context and start/terminal budget refs under the frozen
+  B (or separately R) arm budget; one actual per-attempt
+  reservation was effective and available before costly work,
+  with verified unexceeded per-call and aggregate limits.
+  Accept only this spending-policy precondition, not a
+  candidate's risk, fill, profitability or G3 status.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G19e, no-work preflight exception:** original rejected
+  preflight attempt has no cost-bearing action and records
+  its original failure/reason and verifiable no-work
+  evidence. Null `budget_authorization_ref` is permitted
+  only by the accepted #507 policy for this refused attempt;
+  no strategy or RESULT becomes eligible, and an unknown
+  later cost cannot be recorded as verified zero.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
 
 For each issuer-dependent positive case, the eventual producer test
 must independently prove a forged or missing original issuer **fails**.
