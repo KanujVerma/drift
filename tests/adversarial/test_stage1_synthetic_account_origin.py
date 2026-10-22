@@ -5,7 +5,8 @@ cannot authenticate an allocation under an independent configured origin.
 """
 
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from typing import Any
 from pathlib import Path
 from uuid import uuid7
 
@@ -25,6 +26,9 @@ from drift.experiments.stage1_trial_provenance import (
 )
 from drift.ledger.stage1_synthetic_account_receipts import (
     ALLOCATION,
+    CLAIM,
+    CONSUMED,
+    WITNESS,
     ConfiguredLocalSyntheticOriginV1,
     LocalAccountReceiptError,
     LocalEventReferenceV1,
@@ -229,3 +233,84 @@ def test_caller_mutation_after_e1_verification_cannot_redirect_account(
         _engine().prepare_opening_book(lifecycle=coordinator)
     assert store.origin.verified_events() == ()
     assert coordinator.local_phase == "failed"
+
+
+@pytest.mark.parametrize("transition", ["claim", "consume"])
+def test_mutation_during_original_commit_clock_refuses_before_append(
+    tmp_path: Path, transition: str
+) -> None:
+    """A callback mutating E1 inside the clock cannot publish a new event."""
+    store = _store(tmp_path)
+    coordinator = _coordinator(store)
+    engine = _engine()
+    engine.prepare_opening_book(lifecycle=coordinator)
+    assert coordinator.local_phase == "ready"
+    book = coordinator._original_book
+    assert book is not None
+    identity = _run_identity(
+        admission=engine.admission,
+        bundle=engine.bundle,
+        protocol=engine.protocol,
+        cost_model=engine.cost_model,
+        evidence_hash=engine.evaluator_evidence_hash,
+    )
+
+    expected_events = [ALLOCATION, WITNESS]
+    if transition == "consume":
+        coordinator.claim_invocation(opening_book=book, run_identity=identity)
+        expected_events.append(CLAIM)
+
+    def mutating_clock() -> datetime:
+        object.__setattr__(
+            coordinator._source_provenance.scope.run_account_binding,
+            "portfolio_account_id",
+            "SYNTH-ACC-R-001",
+        )
+        return datetime(2026, 10, 21, 19, 0, 10, tzinfo=UTC)
+
+    object.__setattr__(store, "_clock", mutating_clock)
+    with pytest.raises(
+        LocalAccountReceiptError,
+        match="E1_PROVENANCE_MUTATED_AFTER_VALIDATION",
+    ):
+        if transition == "claim":
+            coordinator.claim_invocation(opening_book=book, run_identity=identity)
+        else:
+            coordinator.observe_consumption(opening_book=book, run_identity=identity)
+
+    assert coordinator.local_phase == "failed"
+    assert [event.event_type for event in store.origin.verified_events()] == (
+        expected_events
+    )
+    assert CONSUMED not in expected_events
+    with pytest.raises(LocalAccountReceiptError, match="INVALID_TRANSITION"):
+        coordinator.claim_invocation(opening_book=book, run_identity=identity)
+
+
+def test_provenance_mutation_at_readback_return_refuses_original(
+    tmp_path: Path,
+) -> None:
+    """An injected read adapter cannot return after changing source identity."""
+    store = _store(tmp_path)
+    coordinator = _coordinator(store)
+    _engine().prepare_opening_book(lifecycle=coordinator)
+    actual_readback = store.readback_allocation
+
+    def mutate_after_readback(**kwargs: Any) -> Any:
+        readback = actual_readback(**kwargs)
+        object.__setattr__(
+            coordinator._source_provenance.scope.run_account_binding,
+            "portfolio_account_id",
+            "SYNTH-ACC-R-001",
+        )
+        return readback
+
+    object.__setattr__(store, "readback_allocation", mutate_after_readback)
+    with pytest.raises(
+        LocalAccountReceiptError,
+        match="E1_PROVENANCE_MUTATED_AFTER_VALIDATION",
+    ):
+        coordinator.verified_original()
+    assert [event.event_type for event in store.origin.verified_events()] == [
+        ALLOCATION, WITNESS
+    ]
