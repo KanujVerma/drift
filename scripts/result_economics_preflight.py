@@ -10,40 +10,84 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from fractions import Fraction
 from typing import cast
 
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
 _UTC = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z\Z")
 _DECIMAL = re.compile(r"(?:0|[1-9]\d*)(?:\.\d{1,12})?\Z")
 
-_ROOT = frozenset({
-    "profile", "as_of_utc", "identity", "book", "cost_scope",
-    "operating_receipts", "prior_result_hashes",
-})
-_IDENTITY = frozenset({
-    "campaign_id", "run_id", "arm_id", "checkpoint_id", "trial_id",
-    "portfolio_account_id", "e1_binding_hash", "result_hash",
-    "trace_hash", "bundle_hash", "book_hash", "allocation_receipt_ref",
-    "evaluation_classification", "result_available_utc", "source_lane",
-})
-_BOOK = frozenset({
-    "currency", "flow_basis", "begin_nav_usd", "end_cash_usd",
-    "end_holdings_value_usd", "end_pending_claims_value_usd",
-    "end_net_nav_usd", "trading_fees_already_posted_usd",
-    "fees_embedded_in_net_nav", "marks_complete",
-    "trading_costs_complete", "realized_pnl_complete",
-    "requested_interval_complete", "open_execution_state",
-    "book_reconciliation_receipt_ref",
-})
-_SCOPE = frozenset({
-    "expected_charge_ids", "coverage_complete", "coverage_receipt_ref",
-    "coverage_available_utc", "attribution_policy_ref",
-})
-_RECEIPT = frozenset({
-    "receipt_id", "charge_id", "arm_id", "category",
-    "status", "amount_usd", "first_available_utc",
-    "supersedes_receipt_id", "evidence_ref",
-})
+_ROOT = frozenset(
+    {
+        "profile",
+        "as_of_utc",
+        "identity",
+        "book",
+        "cost_scope",
+        "operating_receipts",
+        "prior_result_hashes",
+    }
+)
+_IDENTITY = frozenset(
+    {
+        "campaign_id",
+        "run_id",
+        "arm_id",
+        "checkpoint_id",
+        "trial_id",
+        "portfolio_account_id",
+        "e1_binding_hash",
+        "result_hash",
+        "trace_hash",
+        "bundle_hash",
+        "book_hash",
+        "allocation_receipt_ref",
+        "evaluation_classification",
+        "result_available_utc",
+        "source_lane",
+    }
+)
+_BOOK = frozenset(
+    {
+        "currency",
+        "flow_basis",
+        "begin_nav_usd",
+        "end_cash_usd",
+        "end_holdings_value_usd",
+        "end_pending_claims_value_usd",
+        "end_net_nav_usd",
+        "trading_fees_already_posted_usd",
+        "fees_embedded_in_net_nav",
+        "marks_complete",
+        "trading_costs_complete",
+        "realized_pnl_complete",
+        "requested_interval_complete",
+        "open_execution_state",
+        "book_reconciliation_receipt_ref",
+    }
+)
+_SCOPE = frozenset(
+    {
+        "expected_charge_ids",
+        "coverage_complete",
+        "coverage_receipt_ref",
+        "coverage_available_utc",
+        "attribution_policy_ref",
+    }
+)
+_RECEIPT = frozenset(
+    {
+        "receipt_id",
+        "charge_id",
+        "arm_id",
+        "category",
+        "status",
+        "amount_usd",
+        "first_available_utc",
+        "supersedes_receipt_id",
+        "evidence_ref",
+    }
+)
 _COST_STATUS = frozenset({"ACTUAL", "VERIFIED_ZERO", "ESTIMATE", "UNKNOWN"})
 
 
@@ -84,7 +128,8 @@ def _plain_json(value: object, depth: int, budget: list[int]) -> bool:
         )
     if type(value) is dict:
         return len(value) <= 128 and all(
-            type(key) is str and len(key) <= 128
+            type(key) is str
+            and len(key) <= 128
             and _plain_json(item, depth + 1, budget)
             for key, item in value.items()
         )
@@ -135,6 +180,30 @@ def _money(value: object, *, positive: bool = False) -> Decimal | None:
     return d
 
 
+def _finite_decimal(value: Fraction) -> Decimal | None:
+    """Construct an exact finite Decimal without an ambient rounding context.
+
+    A reduced rational terminates in base ten only when its denominator has
+    no prime factors other than two and five. All accepted monetary inputs,
+    their sums and differences satisfy that condition. A derived return may
+    not; return None instead of choosing a financial rounding convention.
+    """
+    denominator = value.denominator
+    twos = fives = 0
+    while denominator % 2 == 0:
+        denominator //= 2
+        twos += 1
+    while denominator % 5 == 0:
+        denominator //= 5
+        fives += 1
+    if denominator != 1:
+        return None
+    places = max(twos, fives)
+    coefficient = abs(value.numerator) * 2 ** (places - twos) * 5 ** (places - fives)
+    digits = tuple(int(digit) for digit in str(coefficient))
+    return Decimal((int(value.numerator < 0), digits, -places))
+
+
 def _costs(
     records: object,
     scope: dict[str, object],
@@ -148,9 +217,11 @@ def _costs(
         return None, "UNAVAILABLE", ()
 
     expected = scope.get("expected_charge_ids")
-    if type(expected) is not list or any(
-        not _text(charge) for charge in expected
-    ) or len(set(cast(list[str], expected))) != len(expected):
+    if (
+        type(expected) is not list
+        or any(not _text(charge) for charge in expected)
+        or len(set(cast(list[str], expected))) != len(expected)
+    ):
         problems.append("cost_scope.expected_charge_ids.invalid")
         expected_ids: set[str] = set()
     else:
@@ -217,10 +288,7 @@ def _costs(
             if supersedes != prior.get("receipt_id"):
                 problems.append(f"{label}.correction_lineage_mismatch")
             prior_at = _utc(prior.get("first_available_utc"))
-            if (
-                prior_at is not None and available is not None
-                and available <= prior_at
-            ):
+            if prior_at is not None and available is not None and available <= prior_at:
                 problems.append(f"{label}.correction_not_later")
         by_charge[charge_id] = rec
 
@@ -236,7 +304,8 @@ def _costs(
     available_latest: dict[str, dict[str, object]] = {}
     for charge_id in sorted(known_charge_ids):
         candidates = [
-            rec for rec in seen_receipts.values()
+            rec
+            for rec in seen_receipts.values()
             if rec.get("charge_id") == charge_id
             and cutoff is not None
             and (at := _utc(rec.get("first_available_utc"))) is not None
@@ -245,9 +314,7 @@ def _costs(
         if candidates:
             available_latest[charge_id] = max(
                 candidates,
-                key=lambda rec: cast(
-                    datetime, _utc(rec["first_available_utc"])
-                ),
+                key=lambda rec: cast(datetime, _utc(rec["first_available_utc"])),
             )
 
     if covered_at is not None and scope.get("coverage_complete") is True:
@@ -258,7 +325,9 @@ def _costs(
         ):
             problems.append("cost_scope.coverage_before_latest_charge")
     if (
-        cutoff is None or covered_at is None or covered_at > cutoff
+        cutoff is None
+        or covered_at is None
+        or covered_at > cutoff
         or scope.get("coverage_complete") is not True
         or set(available_latest) != expected_ids
     ):
@@ -269,22 +338,34 @@ def _costs(
     ):
         return None, "UNAVAILABLE", tuple(late)
 
-    total = Decimal("0")
+    total = Fraction(0)
     for rec in available_latest.values():
         amount = _money(rec.get("amount_usd"))
         if amount is None:
             return None, "UNAVAILABLE", tuple(late)
-        total += amount
-    return total, "COMPLETE", tuple(late)
+        total += Fraction(amount)
+    # A sum of finite base-ten money amounts is itself finite in base ten.
+    exact_total = _finite_decimal(total)
+    assert exact_total is not None
+    return exact_total, "COMPLETE", tuple(late)
 
 
 def preflight_result_economics(payload: object) -> ResultEconomicsPreflight:
     """Compute honest USD/no-flow fixture arithmetic with no producer trust."""
+
     def refused(causes: list[str]) -> ResultEconomicsPreflight:
         return ResultEconomicsPreflight(
-            False, False, None, None, None, None,
-            "UNAVAILABLE", (), tuple(causes),
+            False,
+            False,
+            None,
+            None,
+            None,
+            None,
+            "UNAVAILABLE",
+            (),
+            tuple(causes),
         )
+
     if not _plain_json(payload, 0, [4096]):
         return refused(["payload.not_plain_json"])
     problems: list[str] = []
@@ -299,14 +380,21 @@ def preflight_result_economics(payload: object) -> ResultEconomicsPreflight:
     scope = _mapping(root.get("cost_scope"), _SCOPE, "cost_scope", problems)
 
     for field in (
-        "campaign_id", "run_id", "arm_id", "checkpoint_id",
-        "trial_id", "portfolio_account_id",
+        "campaign_id",
+        "run_id",
+        "arm_id",
+        "checkpoint_id",
+        "trial_id",
+        "portfolio_account_id",
     ):
         if not _text(identity.get(field)):
             problems.append(f"identity.{field}.missing")
     for field in (
-        "e1_binding_hash", "result_hash", "trace_hash",
-        "bundle_hash", "book_hash",
+        "e1_binding_hash",
+        "result_hash",
+        "trace_hash",
+        "bundle_hash",
+        "book_hash",
     ):
         if not _sha(identity.get(field)):
             problems.append(f"identity.{field}.invalid")
@@ -318,7 +406,9 @@ def preflight_result_economics(payload: object) -> ResultEconomicsPreflight:
     if identity.get("source_lane") != "SYNTHETIC":
         problems.append("identity.source_lane.must_be_synthetic")
     if identity.get("evaluation_classification") not in (
-        "COMPLETE", "REJECTED", "INDETERMINATE",
+        "COMPLETE",
+        "REJECTED",
+        "INDETERMINATE",
     ):
         problems.append("identity.evaluation_classification.invalid")
     available_result = _utc(identity.get("result_available_utc"))
@@ -326,9 +416,7 @@ def preflight_result_economics(payload: object) -> ResultEconomicsPreflight:
         problems.append("identity.result_available_utc.invalid")
 
     old_hashes = root.get("prior_result_hashes")
-    if type(old_hashes) is not list or any(
-        not _sha(value) for value in old_hashes
-    ):
+    if type(old_hashes) is not list or any(not _sha(value) for value in old_hashes):
         problems.append("prior_result_hashes.invalid")
     else:
         if len(set(cast(list[str], old_hashes))) != len(old_hashes):
@@ -344,29 +432,32 @@ def preflight_result_economics(payload: object) -> ResultEconomicsPreflight:
         problems.append("book.book_reconciliation_receipt_ref.missing")
     figures: dict[str, Decimal | None] = {}
     for field in (
-        "begin_nav_usd", "end_cash_usd",
-        "end_holdings_value_usd", "end_pending_claims_value_usd",
-        "end_net_nav_usd", "trading_fees_already_posted_usd",
+        "begin_nav_usd",
+        "end_cash_usd",
+        "end_holdings_value_usd",
+        "end_pending_claims_value_usd",
+        "end_net_nav_usd",
+        "trading_fees_already_posted_usd",
     ):
-        figures[field] = _money(
-            book.get(field), positive=(field == "begin_nav_usd")
-        )
+        figures[field] = _money(book.get(field), positive=(field == "begin_nav_usd"))
         if figures[field] is None:
             problems.append(f"book.{field}.invalid")
     marked_ok = all(value is not None for value in figures.values())
     if marked_ok:
         marked_sum = (
-            cast(Decimal, figures["end_cash_usd"])
-            + cast(Decimal, figures["end_holdings_value_usd"])
-            + cast(Decimal, figures["end_pending_claims_value_usd"])
+            Fraction(cast(Decimal, figures["end_cash_usd"]))
+            + Fraction(cast(Decimal, figures["end_holdings_value_usd"]))
+            + Fraction(cast(Decimal, figures["end_pending_claims_value_usd"]))
         )
-        if marked_sum != figures["end_net_nav_usd"]:
+        if marked_sum != Fraction(cast(Decimal, figures["end_net_nav_usd"])):
             problems.append("book.nav_cash_holdings_claims_mismatch")
             marked_ok = False
 
     for field in (
-        "fees_embedded_in_net_nav", "marks_complete",
-        "trading_costs_complete", "realized_pnl_complete",
+        "fees_embedded_in_net_nav",
+        "marks_complete",
+        "trading_costs_complete",
+        "realized_pnl_complete",
         "requested_interval_complete",
     ):
         if type(book.get(field)) is not bool:
@@ -375,29 +466,43 @@ def preflight_result_economics(payload: object) -> ResultEconomicsPreflight:
         problems.append("book.trading_fees_not_proven_embedded")
 
     if book.get("open_execution_state") not in (
-        "NONE", "OPEN", "UNKNOWN",
+        "NONE",
+        "OPEN",
+        "UNKNOWN",
     ):
         problems.append("book.open_execution_state.invalid")
     costs, cost_completeness, late = _costs(
-        root.get("operating_receipts"), scope, identity.get("arm_id"),
-        cutoff, problems,
+        root.get("operating_receipts"),
+        scope,
+        identity.get("arm_id"),
+        cutoff,
+        problems,
     )
     structural = not problems
     mark_value = (
         cast(Decimal, figures["end_net_nav_usd"])
-        if structural and marked_ok
-        and cutoff is not None and available_result is not None
-        and available_result <= cutoff else None
+        if structural
+        and marked_ok
+        and cutoff is not None
+        and available_result is not None
+        and available_result <= cutoff
+        else None
     )
     scope_ok = (
         structural
         and identity.get("evaluation_classification") == "COMPLETE"
-        and cutoff is not None and available_result is not None
+        and cutoff is not None
+        and available_result is not None
         and available_result <= cutoff
-        and all(book.get(k) is True for k in (
-            "marks_complete", "trading_costs_complete",
-            "realized_pnl_complete", "requested_interval_complete",
-        ))
+        and all(
+            book.get(k) is True
+            for k in (
+                "marks_complete",
+                "trading_costs_complete",
+                "realized_pnl_complete",
+                "requested_interval_complete",
+            )
+        )
         and book.get("open_execution_state") == "NONE"
     )
     scope_reasons: list[str] = []
@@ -406,14 +511,14 @@ def preflight_result_economics(payload: object) -> ResultEconomicsPreflight:
             if available_result > cutoff:
                 scope_reasons.append("result.not_available_at_cutoff")
         if book.get("open_execution_state") != "NONE":
-            scope_reasons.append(
-                "book.unresolved_execution_not_a_complete_result"
-            )
+            scope_reasons.append("book.unresolved_execution_not_a_complete_result")
         if identity.get("evaluation_classification") != "COMPLETE":
             scope_reasons.append("result.evaluator_not_complete")
         for field in (
-            "marks_complete", "trading_costs_complete",
-            "realized_pnl_complete", "requested_interval_complete",
+            "marks_complete",
+            "trading_costs_complete",
+            "realized_pnl_complete",
+            "requested_interval_complete",
         ):
             if book.get(field) is not True:
                 scope_reasons.append(f"book.{field}.not_complete")
@@ -423,13 +528,24 @@ def preflight_result_economics(payload: object) -> ResultEconomicsPreflight:
     economic_gain: Decimal | None = None
     if scope_ok and mark_value is not None:
         begin = cast(Decimal, figures["begin_nav_usd"])
-        trading_gain = mark_value - begin
-        trading_return = trading_gain / begin
+        exact_gain = Fraction(mark_value) - Fraction(begin)
+        trading_return = _finite_decimal(exact_gain / Fraction(begin))
+        if trading_return is None:
+            return refused(["book.trading_return_nonterminating_decimal"])
+        trading_gain = _finite_decimal(exact_gain)
+        assert trading_gain is not None
         # Trading fees are already posted in net NAV. Never charge them again.
         if cost_completeness == "COMPLETE" and costs is not None:
-            economic_gain = trading_gain - costs
+            economic_gain = _finite_decimal(exact_gain - Fraction(costs))
+            assert economic_gain is not None
     return ResultEconomicsPreflight(
-        structural, marked_ok and structural, mark_value,
-        trading_gain, trading_return, economic_gain,
-        cost_completeness, late, tuple([*problems, *scope_reasons]),
+        structural,
+        marked_ok and structural,
+        mark_value,
+        trading_gain,
+        trading_return,
+        economic_gain,
+        cost_completeness,
+        late,
+        tuple([*problems, *scope_reasons]),
     )

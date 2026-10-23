@@ -1,9 +1,10 @@
-"""Synthetic regression vectors for #532, intentionally NOT executed here."""
+"""Synthetic RESULT economics regression vectors for #532."""
 
 from __future__ import annotations
 
 from copy import deepcopy
-from decimal import Decimal
+from decimal import Decimal, localcontext
+from fractions import Fraction
 from typing import cast
 
 import pytest
@@ -207,9 +208,7 @@ def test_available_correction_replaces_not_accumulates_expense() -> None:
         }
     )
     _costs(data).append(later)
-    _map(data, "cost_scope")["coverage_available_utc"] = (
-        "2026-01-06T11:30:00Z"
-    )
+    _map(data, "cost_scope")["coverage_available_utc"] = "2026-01-06T11:30:00Z"
     assert preflight_result_economics(data).economic_gain_usd == Decimal("90")
 
 
@@ -247,8 +246,7 @@ def test_marked_pending_claim_is_not_cash() -> None:
         ("end_net_nav_usd", "NaN", "book.end_net_nav_usd.invalid"),
         ("begin_nav_usd", "0", "book.begin_nav_usd.invalid"),
         ("currency", "EUR", "book.currency.unsupported"),
-        ("fees_embedded_in_net_nav", False,
-         "book.trading_fees_not_proven_embedded"),
+        ("fees_embedded_in_net_nav", False, "book.trading_fees_not_proven_embedded"),
     ],
 )
 def test_invalid_account_math_or_double_cost_contract_refuses(
@@ -281,9 +279,7 @@ def test_incomplete_realized_pnl_does_not_become_complete() -> None:
 
 def test_future_result_cannot_be_scored_at_prior_cutoff() -> None:
     data = fixture()
-    _map(data, "identity")["result_available_utc"] = (
-        "2026-01-06T13:00:00Z"
-    )
+    _map(data, "identity")["result_available_utc"] = "2026-01-06T13:00:00Z"
     result = preflight_result_economics(data)
     assert result.structurally_reviewable
     assert result.marked_nav_usd is None
@@ -324,7 +320,7 @@ def test_unsupported_source_grade_or_bogus_float_refuses() -> None:
     _refuse(data, "identity.source_lane.must_be_synthetic")
     data = fixture()
     _map(data, "book")["end_cash_usd"] = 10120.0
-    _refuse(data, "book.end_cash_usd.invalid")
+    _refuse(data, "payload.not_plain_json")
 
 
 def test_nested_spoofed_equality_never_invoked() -> None:
@@ -342,3 +338,149 @@ def test_claimed_charge_coverage_cannot_close_before_known_invoice() -> None:
     data = fixture()
     _costs(data)[0]["first_available_utc"] = "2026-01-06T11:30:00Z"
     _refuse(data, "cost_scope.coverage_before_latest_charge")
+
+
+@pytest.mark.parametrize("precision", [6, 28, 60, 80])
+@pytest.mark.parametrize("correct_nav", [False, True])
+def test_large_nav_reconciliation_preserves_low_digits(
+    precision: int, correct_nav: bool
+) -> None:
+    cash = "10000000000000000000000000000"
+    data = fixture(end_nav=cash, operating_cost="0")
+    book = _map(data, "book")
+    book["begin_nav_usd"] = cash
+    book["end_holdings_value_usd"] = "1"
+    if correct_nav:
+        book["end_net_nav_usd"] = "10000000000000000000000000001"
+    with localcontext() as context:
+        context.prec = precision
+        result = preflight_result_economics(data)
+    if correct_nav:
+        assert result.structurally_reviewable
+        assert result.marked_nav_reconciled
+        assert result.trading_net_gain_usd == Decimal("1")
+        assert result.trading_return_fraction == Decimal("1e-28")
+        assert result.economic_gain_usd == Decimal("1")
+    else:
+        assert not result.structurally_reviewable
+        assert not result.marked_nav_reconciled
+        assert result.marked_nav_usd is None
+        assert result.trading_net_gain_usd is None
+        assert result.trading_return_fraction is None
+        assert result.economic_gain_usd is None
+        assert "book.nav_cash_holdings_claims_mismatch" in result.reasons
+    assert not result.proves_account_provisioning_or_result_binding
+    assert not result.qualifies_scientific_result_or_execution
+
+
+@pytest.mark.parametrize("precision", [6, 28, 60, 80])
+def test_supported_fractional_dollar_units_survive_nav_addition(
+    precision: int,
+) -> None:
+    cash = "10000000000000000000000000000"
+    data = fixture(end_nav=cash, operating_cost="0")
+    book = _map(data, "book")
+    book["begin_nav_usd"] = cash
+    book["end_pending_claims_value_usd"] = "0.000000000001"
+    book["end_net_nav_usd"] = f"{cash}.000000000001"
+    with localcontext() as context:
+        context.prec = precision
+        result = preflight_result_economics(data)
+    assert result.structurally_reviewable
+    assert result.marked_nav_reconciled
+    assert result.trading_net_gain_usd == Decimal("0.000000000001")
+    assert result.trading_return_fraction == Decimal("1e-40")
+    assert result.economic_gain_usd == Decimal("0.000000000001")
+
+
+@pytest.mark.parametrize("precision", [6, 28, 60, 80])
+def test_largest_admitted_money_retains_exact_gain_and_return(
+    precision: int,
+) -> None:
+    largest = "9" * 42
+    data = fixture(end_nav=largest, operating_cost="0")
+    _map(data, "book")["begin_nav_usd"] = "1"
+    expected = Decimal(str(int(largest) - 1))
+    with localcontext() as context:
+        context.prec = precision
+        result = preflight_result_economics(data)
+    assert result.structurally_reviewable
+    assert result.trading_net_gain_usd == expected
+    assert result.trading_return_fraction == expected
+    assert result.economic_gain_usd == expected
+
+
+@pytest.mark.parametrize("precision", [6, 28, 60, 80])
+def test_exact_operating_cost_sum_can_exceed_one_input_money_width(
+    precision: int,
+) -> None:
+    largest = "9" * 42
+    data = fixture(operating_cost=largest)
+    additional = deepcopy(_costs(data)[0])
+    additional["receipt_id"] = "second-distinct-receipt"
+    additional["charge_id"] = "second-distinct-charge"
+    _costs(data).append(additional)
+    _map(data, "cost_scope")["expected_charge_ids"] = [
+        "research-B",
+        "second-distinct-charge",
+    ]
+    expected = Decimal(str(120 - 2 * int(largest)))
+    with localcontext() as context:
+        context.prec = precision
+        result = preflight_result_economics(data)
+    assert result.structurally_reviewable
+    assert result.cost_completeness == "COMPLETE"
+    assert result.trading_net_gain_usd == Decimal("120")
+    assert result.trading_return_fraction == Decimal("0.012")
+    assert result.economic_gain_usd == expected
+
+
+@pytest.mark.parametrize("precision", [6, 28, 60, 80])
+def test_terminating_return_beyond_ambient_precision_remains_exact(
+    precision: int,
+) -> None:
+    begin = 2**139
+    data = fixture(end_nav=str(begin + 1), operating_cost="0")
+    _map(data, "book")["begin_nav_usd"] = str(begin)
+    with localcontext() as context:
+        context.prec = precision
+        result = preflight_result_economics(data)
+    assert result.structurally_reviewable
+    assert result.trading_net_gain_usd == Decimal("1")
+    assert result.trading_return_fraction is not None
+    assert Fraction(result.trading_return_fraction) == Fraction(1, begin)
+    assert result.economic_gain_usd == Decimal("1")
+
+
+@pytest.mark.parametrize("precision", [6, 28, 60, 80])
+@pytest.mark.parametrize("end_nav", ["2", "4"])
+def test_nonterminating_return_is_explicitly_refused_without_rounding(
+    precision: int, end_nav: str
+) -> None:
+    data = fixture(end_nav=end_nav, operating_cost="0")
+    _map(data, "book")["begin_nav_usd"] = "3"
+    with localcontext() as context:
+        context.prec = precision
+        _refuse(data, "book.trading_return_nonterminating_decimal")
+        assert preflight_result_economics(data).trading_return_fraction is None
+
+
+@pytest.mark.parametrize("precision", [6, 28, 60, 80])
+@pytest.mark.parametrize(
+    ("begin_nav", "end_nav", "expected_return"),
+    [("8", "9", "0.125"), ("3", "3", "0"), ("8", "7", "-0.125")],
+)
+def test_exact_positive_zero_and_losing_returns_preserve_decimal_outputs(
+    precision: int, begin_nav: str, end_nav: str, expected_return: str
+) -> None:
+    data = fixture(end_nav=end_nav, operating_cost="0")
+    _map(data, "book")["begin_nav_usd"] = begin_nav
+    with localcontext() as context:
+        context.prec = precision
+        result = preflight_result_economics(data)
+    assert result.structurally_reviewable
+    assert isinstance(result.trading_return_fraction, Decimal)
+    assert result.trading_return_fraction == Decimal(expected_return)
+    assert result.economic_gain_usd == result.trading_net_gain_usd
+    assert not result.proves_account_provisioning_or_result_binding
+    assert not result.qualifies_scientific_result_or_execution
