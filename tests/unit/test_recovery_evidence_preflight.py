@@ -1,4 +1,4 @@
-"""Unrun, synthetic-only vectors for AntiGravity #520 verification."""
+"""Synthetic-only recovery evidence vectors for #520 verification."""
 
 from __future__ import annotations
 
@@ -86,19 +86,26 @@ def test_original_private_state_absent_cannot_be_restored() -> None:
     dimensions = cast(dict[str, object], item["components"])
     state = cast(dict[str, object], dimensions["PRIVATE_STATE"])
     state["status"] = "unavailable"
-    assert "PRIVATE_STATE.status.not_passed" in preflight_recovery_evidence(item).reasons
+    assert (
+        "PRIVATE_STATE.status.not_passed" in preflight_recovery_evidence(item).reasons
+    )
 
 
 def test_missing_transactional_snapshot_ref_refused() -> None:
     item = fixture("ISOLATED_ORIGINAL")
     item.pop("snapshot_consistency_receipt_ref")
-    assert "snapshot_consistency_receipt_ref.missing" in preflight_recovery_evidence(item).reasons
+    assert (
+        "snapshot_consistency_receipt_ref.missing"
+        in preflight_recovery_evidence(item).reasons
+    )
 
 
 def test_self_review_is_not_independence() -> None:
     item = fixture()
     item["independent_verifier"] = "builder"
-    assert "independent_verifier.self_review" in preflight_recovery_evidence(item).reasons
+    assert (
+        "independent_verifier.self_review" in preflight_recovery_evidence(item).reasons
+    )
 
 
 def test_component_manifest_mismatch_fails_closed() -> None:
@@ -114,7 +121,10 @@ def test_same_receipt_is_not_three_independent_dimensions() -> None:
     components = cast(dict[str, object], item["components"])
     runtime = cast(dict[str, object], components["RUNTIME"])
     runtime["receipt_ref"] = "distinct-CODE"
-    assert "RUNTIME.receipt_reused_across_dimensions" in preflight_recovery_evidence(item).reasons
+    assert (
+        "RUNTIME.receipt_reused_across_dimensions"
+        in preflight_recovery_evidence(item).reasons
+    )
 
 
 def test_hold_not_cleared_by_preflight() -> None:
@@ -143,3 +153,88 @@ def test_unverified_manifest_hash_rejected() -> None:
     item = fixture()
     item["manifest_sha256"] = "123"
     assert "manifest_sha256.invalid" in preflight_recovery_evidence(item).reasons
+
+
+def _hostile_scalar(kind: str, text: str, callbacks: list[str]) -> object:
+    class Hostile:
+        def __eq__(self, _: object) -> bool:
+            callbacks.append("equality")
+            raise AssertionError("untrusted scalar equality invoked")
+
+        def __ne__(self, _: object) -> bool:
+            callbacks.append("inequality")
+            raise AssertionError("untrusted scalar inequality invoked")
+
+        def __hash__(self) -> int:
+            callbacks.append("hash")
+            raise AssertionError("untrusted scalar hash invoked")
+
+    class HostileText(Hostile, str):
+        pass
+
+    return HostileText(text) if kind == "string_subclass" else Hostile()
+
+
+@pytest.mark.parametrize(
+    ("field", "reason"),
+    [
+        ("target", "target.invalid"),
+        ("execution_hold_state", "execution_hold_state.invalid"),
+        ("independent_verifier", "independent_verifier.missing"),
+        ("mechanism_author", "mechanism_author.missing"),
+        ("manifest_sha256", "manifest_sha256.invalid"),
+        ("frozen_arm", "frozen_arm.missing"),
+    ],
+)
+@pytest.mark.parametrize("kind", ["object", "string_subclass"])
+def test_malformed_root_scalars_refuse_without_attacker_callbacks(
+    field: str, reason: str, kind: str
+) -> None:
+    item = fixture("FROZEN_CONTROL")
+    callbacks: list[str] = []
+    item[field] = _hostile_scalar(kind, cast(str, item[field]), callbacks)
+    report = preflight_recovery_evidence(item)
+    assert not report.structurally_reviewable
+    assert reason in report.reasons
+    assert report.authorizes_recovery_or_execution is False
+    assert callbacks == []
+
+
+@pytest.mark.parametrize("dimension", ["CODE", "PRIVATE_STATE", "RUNTIME"])
+@pytest.mark.parametrize(
+    ("field", "suffix"),
+    [
+        ("status", "status.invalid"),
+        ("receipt_ref", "receipt_ref.missing"),
+        ("manifest_sha256", "manifest_sha256.invalid"),
+    ],
+)
+@pytest.mark.parametrize("kind", ["object", "string_subclass"])
+def test_malformed_component_scalars_refuse_without_attacker_callbacks(
+    dimension: str, field: str, suffix: str, kind: str
+) -> None:
+    item = fixture()
+    components = cast(dict[str, object], item["components"])
+    entry = cast(dict[str, object], components[dimension])
+    callbacks: list[str] = []
+    entry[field] = _hostile_scalar(kind, cast(str, entry[field]), callbacks)
+    report = preflight_recovery_evidence(item)
+    assert not report.structurally_reviewable
+    assert f"{dimension}.{suffix}" in report.reasons
+    assert report.authorizes_recovery_or_execution is False
+    assert callbacks == []
+
+
+@pytest.mark.parametrize(
+    "target", ["FEATURE_OFF", "ISOLATED_ORIGINAL", "FROZEN_CONTROL"]
+)
+@pytest.mark.parametrize("hold", ["HELD", "UNKNOWN"])
+def test_all_valid_targets_preserve_unresolved_hold_refusal(
+    target: str, hold: str
+) -> None:
+    item = fixture(target)
+    item["execution_hold_state"] = hold
+    report = preflight_recovery_evidence(item)
+    assert not report.structurally_reviewable
+    assert report.reasons == ("execution_hold_state.not_resolved_for_resumption",)
+    assert report.authorizes_recovery_or_execution is False

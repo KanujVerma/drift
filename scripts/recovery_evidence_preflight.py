@@ -120,16 +120,18 @@ def preflight_recovery_evidence(payload: object) -> RecoveryPreflight:
         if name in required and not _digest(record.get(name), _HEX_SHA256):
             problems.append(f"{name}.invalid")
 
-    if target == "FROZEN_CONTROL" and record.get("frozen_arm") != "A":
-        problems.append("frozen_control.requires_arm_A")
+    if type(target) is str and target == "FROZEN_CONTROL":
+        frozen_arm = record.get("frozen_arm")
+        if type(frozen_arm) is not str or frozen_arm != "A":
+            problems.append("frozen_control.requires_arm_A")
 
     author = record.get("mechanism_author")
     reviewer = record.get("independent_verifier")
-    if _has_text(author) and author == reviewer:
+    if _has_text(author) and _has_text(reviewer) and author == reviewer:
         problems.append("independent_verifier.self_review")
 
     hold = record.get("execution_hold_state")
-    if hold not in ("CLEAR", "HELD", "UNKNOWN"):
+    if type(hold) is not str or hold not in ("CLEAR", "HELD", "UNKNOWN"):
         problems.append("execution_hold_state.invalid")
     elif hold != "CLEAR":
         problems.append("execution_hold_state.not_resolved_for_resumption")
@@ -167,7 +169,7 @@ def preflight_recovery_evidence(payload: object) -> RecoveryPreflight:
 
         if not _digest(entry.get("manifest_sha256"), _HEX_SHA256):
             problems.append(f"{dimension}.manifest_sha256.invalid")
-        elif entry["manifest_sha256"] != manifest_hash:
+        elif type(manifest_hash) is str and entry["manifest_sha256"] != manifest_hash:
             problems.append(f"{dimension}.manifest_mismatch")
 
     return RecoveryPreflight(not problems, tuple(problems))
