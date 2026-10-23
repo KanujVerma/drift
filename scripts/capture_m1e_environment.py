@@ -37,6 +37,8 @@ class _RuntimeObservation:
 
     implementation: str
     version: str
+    release_level: str
+    release_serial: int
     build: str
     executable: str
     operating_system: str
@@ -49,6 +51,8 @@ def _current_runtime_observation() -> _RuntimeObservation:
     return _RuntimeObservation(
         implementation=sys.implementation.name,
         version=f"{version.major}.{version.minor}.{version.micro}",
+        release_level=version.releaselevel,
+        release_serial=version.serial,
         build=sys.version.replace("\n", " ").strip(),
         executable=sys.executable,
         operating_system=platform.system(),
@@ -73,7 +77,12 @@ def _validated_runtime_identity(
     """
     if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", pinned_version) is None:
         raise ValueError("M1E_INVALID_PYTHON_PIN")
-    if observed.implementation != "cpython" or observed.version != pinned_version:
+    if (
+        observed.implementation != "cpython"
+        or observed.version != pinned_version
+        or observed.release_level != "final"
+        or observed.release_serial != 0
+    ):
         raise ValueError(
             "M1E_RUNTIME_PIN_MISMATCH: measured interpreter is not the "
             "exact repository CPython pin"
