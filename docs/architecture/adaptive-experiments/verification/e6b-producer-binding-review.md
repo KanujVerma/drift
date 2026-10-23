@@ -10,7 +10,7 @@ The accepted foundation on main is E1 campaign and full run-account bindings, St
 
 On #508, Matthew has produced a detailed source-backed **proposal** for a future engine-owned prepare/consume lifecycle and original retention in the one existing M0 SQLite audit ledger. It remains active producer design. This code must not assume his proposed class names are imports or assign an unaccepted issuer. The complete review and remaining owner decisions are recorded in this document and on #508, rather than a duplicate fake implementation of account provisioning.
 
-Current additional related gates: Kanuj's [scheduler grant proposal #512 / draft PR #513](https://github.com/KanujVerma/drift/pull/513) at head `80b54a55950bda44166661e5f3312a85f09e4d48` (its original grant issuer is not implemented); the [E6B B1.5 28-case fixture plan](https://github.com/KanujVerma/drift/issues/507#issuecomment-6302535419); still-open independent provenance/rebuild correction #511/#504; the separate platform #508 M0/M2 association and source/rights/mandate contracts. An E1 binding hash is not a proof that M2 created the associated account.
+Additional related gates are Kanuj's [scheduler grant proposal #512 / draft PR #513](https://github.com/KanujVerma/drift/pull/513), the [E6B B1.5 fixture plan](https://github.com/KanujVerma/drift/issues/507#issuecomment-6302535419), and the separate platform #508 M0/M2 association and source/rights/mandate contracts. The independent provenance/rebuild correction [PR #504](https://github.com/KanujVerma/drift/pull/504) has merged, and #503/#511 are closed. This composition consumes that accepted public provenance verifier; its completed acceptance is not a missing producer. An E1 binding hash still does not prove that M2 created the associated account.
 
 Accountable code producer for this child is Krish, authenticated actor `Krish-Verma` through GPT-6 at the user's request to resolve idle gaps; Matthew remains accountable for the original platform and Kanuj for E1 scientific scheduling. No unaffiliated reviewer has accepted these candidate fields. Root [AGENTS.md](../../../../AGENTS.md), [workstreams](../../workstreams.md), [agent workflow](../../agent-workflow.md) and [scientific experiment contract](../contracts/experiment.md) still govern.
 
@@ -18,7 +18,7 @@ Accountable code producer for this child is Krish, authenticated actor `Krish-Ve
 
 This draft PR adds only:
 - `src/drift/loop/e1_trial_association.py` (real E1/K1 source-bound structural joining code)
-- `tests/unit/test_intelligence_e1_trial_association.py` (source-backed positive and adversarial fixtures, **not run**)
+- `tests/unit/test_intelligence_e1_trial_association.py` (source-backed positive and adversarial fixtures)
 - `docs/architecture/adaptive-experiments/verification/e6b-producer-binding-review.md` (this contract, cross-owner response and AntiGravity packet)
 
 All accepted K1/E1/E6A records, schema versions, original hashes, source grade, private retained bytes, ledger, actual validation runner, M2 engine, original `PortfolioStateV2`, external scheduling and account issuer, domain core and all active PR paths remain read-only. This is neither a new registry with side effects nor a competing orchestrator.
@@ -46,6 +46,7 @@ The outcome is `ResearchE1BindingReview`: structural consistency, a **candidate-
 - `hold`: requires a recorded incumbent reference, but actual matching compliant incumbent state is separately verified under Matthew. It never silently sells or claims a safe hold from unverified state.
 - `abstain` / `unavailable`: remain different non-order outcomes with original reasons and no strategy/target trade authority.
 - `failed` / `rejected`: actual started and terminal attempts with original failure evidence and no candidate stay present in the denominator; missing billing remains UNKNOWN, not free.
+- Terminal status and hold eligibility are independent checks. A `failed` or `rejected` attempt carrying any candidate, including `hold`, is refused. A completed `propose`, `abstain` or `unavailable` candidate is not rejected merely because it is not `hold`. A completed hold still retains the missing verified matching-incumbent blocker.
 - K1 `CostReceipt` is raw inference/research spending. It does **not** change the authoritative trading NAV or paid trading fees. A correction is appended under current `ResearchReceiptStore` semantics, never silently overwritten. A cost receipt recorded later than an earlier as-of association is reported as late; a repeated deterministic candidate is not another independent scored trial.
 
 ## 3A. Actual local validation original-byte append/readback implemented
@@ -98,7 +99,7 @@ has yet been wired to record its validator's original decision at issuance
 time, so a later copied `ValidationResult` cannot be described as an
 authentic original production result.
 
-### Added regression oracles (written, intentionally unrun)
+### Local retention regression oracles
 
 - Append a genuine synthetic `REJECTED` or `VALID` K1 decision and literal
   raw output to temporary `SQLiteLedger`, reopen read-only, verify exact
@@ -114,9 +115,9 @@ authentic original production result.
 - Fraudulent retained-validation status/candidate mismatch and forged
   self-consistent issuer ref never grant original E1/scientific admission.
 
-These checks exercise genuine local persistence **only when AntiGravity runs
-the synthetic tests later**. They are not a claim of currently passing
-pytest, full CI or independent review.
+These checks exercise genuine local persistence against temporary synthetic
+ledgers. Record actual results against the tested revision in the issue and
+PR checkpoint; local success does not replace full CI or independent review.
 
 ## 4. Research consumer NARROW of Matthew's #508 opening-book proposal
 
@@ -143,9 +144,9 @@ The smallest legitimate next dependency closure is:
 
 No stage above lets an AI model, trial projector or test harness self-approve a research/system/source permission.
 
-## 6. AntiGravity handoff: tests written, intentionally NOT RUN
+## 6. Verification and AntiGravity handoff
 
-At the exact published PR head, inspect the three new files and source-bound contracts and run these commands, without altering the historical fixtures or existing E1/K1 hashes:
+At the exact published PR head, inspect the three scoped files and source-bound contracts and run these commands, without altering the historical fixtures or existing E1/K1 hashes:
 
 ```bash
 uv run pytest tests/unit/test_intelligence_e1_trial_association.py -q
@@ -159,9 +160,11 @@ git diff --check
 
 Then run the canonical [Drift verification gate](../../agent-workflow.md), confirm exact path ownership, review each R01-R08/J01-J04 from [#507](https://github.com/KanujVerma/drift/issues/507), and verify no E1/K1 earlier bytes, old deterministic replay or promotion permissions change.
 
-The authored, **unexecuted** cases include actual accepted E1 `CampaignSpecV1/ArmSpecV1/RunAccountBindingV1` and provenance builder, accepted K1 original context/attempt/candidate and real `ResearchReceiptStore`, then wrong account, run, checkpoint and entire manifest; loss of original validation receipt; wrong validation/candidate hash; a late candidate deadline; hold, abstain, unavailable and failed no-candidate; unknown billing; forged source clock, changed logical request; stable replay hash without extra sample. AntiGravity should independently add: valid post-cutoff but pre-deadline model completion, model response or parse after deadline, cost correction after as-of, overlapping model/ref identity, duplicate and conflicting retained validator originals, issuer-forged grants, trust-root reassignment, replay after revocation and actual Matthew book readback once their accepted producer endpoints exist. Non-vacuous trusted positive controls require #508 and #512 sources; inventing a fake signature to make these pass would be invalid.
+The terminal-status regressions cover all `propose`/`hold`/`abstain`/`unavailable` candidates under both unsuccessful terminal states, and preserve genuine failed/rejected no-candidate positives. Replay requires two structurally successful reviews with non-null association hashes before comparing them; equal refusals with null hashes are not a replay-success witness. Every outcome retains false original-issuer and admission properties.
 
-**No tests, build, dependency changes, private-source reads, real ledger writes during this authoring session, issuer registration, broker operations, schema migration, GitHub merge or independent acceptance are claimed by this publication.** Any automatically started CI must be assessed at the exact new HEAD and remains distinct from AntiGravity review.
+The source-backed cases include actual accepted E1 `CampaignSpecV1/ArmSpecV1/RunAccountBindingV1` and provenance builder, accepted K1 original context/attempt/candidate and real `ResearchReceiptStore`, then wrong account, run, checkpoint and entire manifest; loss of original validation receipt; wrong validation/candidate hash; a late candidate deadline; hold, abstain, unavailable and failed no-candidate; unknown billing; forged source clock, changed logical request; stable replay hash without extra sample. AntiGravity should independently add: valid post-cutoff but pre-deadline model completion, model response or parse after deadline, cost correction after as-of, overlapping model/ref identity, duplicate and conflicting retained validator originals, issuer-forged grants, trust-root reassignment, replay after revocation and actual Matthew book readback once their accepted producer endpoints exist. Non-vacuous trusted positive controls require #508 and #512 sources; inventing a fake signature to make these pass would be invalid.
+
+The original candidate publication deferred execution. Its later terminal-status repair requires focused RED/GREEN tests and the canonical gate on the exact repaired composition. Record executed commands, interpreter, actual outcomes and remaining failures in the GitHub checkpoint. Local and hosted engineering verification do not supply issuer registration, private-source authority, broker permission, schema migration, merge authorization or independent acceptance.
 
 ## 7. Release disposition and accurate issue status
 
