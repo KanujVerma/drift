@@ -13,24 +13,24 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import cast
 
-_REQUIRED_FILES = frozenset(
-    {"bars.json", "calendar.json", "corporate-actions.json"}
-)
+_REQUIRED_FILES = frozenset({"bars.json", "calendar.json", "corporate-actions.json"})
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
-_UTC = re.compile(
-    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z\Z"
-)
-_ROOT = frozenset(
-    {"profile", "window", "acquisition", "timezone", "objects"}
-)
+_UTC = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z\Z")
+_ROOT = frozenset({"profile", "window", "acquisition", "timezone", "objects"})
 _WINDOW = frozenset({"name", "symbol", "start_date", "end_date"})
 _ACQUISITION = frozenset({"started_utc", "finished_utc", "rights_state"})
-_TZ = frozenset(
-    {"zone_id", "release", "tzif_sha256", "retained_tzif_ref"}
-)
+_TZ = frozenset({"zone_id", "release", "tzif_sha256", "retained_tzif_ref"})
 _OBJECT = frozenset(
-    {"sha256", "origin_ref", "measured_request", "first_received_utc",
-     "host", "route", "params", "pagination_state"}
+    {
+        "sha256",
+        "origin_ref",
+        "measured_request",
+        "first_received_utc",
+        "host",
+        "route",
+        "params",
+        "pagination_state",
+    }
 )
 _TYPES = (
     "capital_gains_distribution",
@@ -53,9 +53,7 @@ _TYPES = (
 _ENDPOINTS: dict[str, tuple[str, str]] = {
     "bars.json": ("data.alpaca.markets", "/v2/stocks/bars"),
     "calendar.json": ("paper-api.alpaca.markets", "/v2/calendar"),
-    "corporate-actions.json": (
-        "data.alpaca.markets", "/v1/corporate-actions"
-    ),
+    "corporate-actions.json": ("data.alpaca.markets", "/v1/corporate-actions"),
 }
 _MAX_OBJECT_BYTES = 2_000_000
 
@@ -92,8 +90,7 @@ def _plain_json(value: object, depth: int, budget: list[int]) -> bool:
         )
     if type(value) is dict:
         return len(value) <= 32 and all(
-            type(k) is str and len(k) <= 100
-            and _plain_json(v, depth + 1, budget)
+            type(k) is str and len(k) <= 100 and _plain_json(v, depth + 1, budget)
             for k, v in value.items()
         )
     return False
@@ -140,6 +137,9 @@ def _day(value: object) -> date | None:
 
 
 def _json_native(data: bytes) -> object:
+    def reject_constant(value: str) -> object:
+        raise ValueError(f"non-JSON numeric constant: {value}")
+
     def reject_duplicate(pairs: list[tuple[str, object]]) -> object:
         result: dict[str, object] = {}
         for key, value in pairs:
@@ -148,15 +148,23 @@ def _json_native(data: bytes) -> object:
             result[key] = value
         return result
 
-    return json.loads(data, object_pairs_hook=reject_duplicate)
+    return json.loads(
+        data.decode("utf-8"),
+        object_pairs_hook=reject_duplicate,
+        parse_constant=reject_constant,
+    )
 
 
 def _params_for(name: str, start: str, end: str) -> dict[str, str]:
     common = {"start": start, "end": end}
     if name == "bars.json":
         return {
-            **common, "symbols": "QQQ", "feed": "sip",
-            "timeframe": "1Day", "adjustment": "raw", "limit": "10000",
+            **common,
+            "symbols": "QQQ",
+            "feed": "sip",
+            "timeframe": "1Day",
+            "adjustment": "raw",
+            "limit": "10000",
         }
     if name == "corporate-actions.json":
         return {**common, "symbols": "QQQ", "types": ",".join(_TYPES)}
@@ -173,27 +181,23 @@ def preflight_qqq_offline_replay(
     """
     reasons: list[str] = []
     if type(payloads) is not dict:
-        return QQQReplayPreflight(
-            False, (), (), ("payloads.not_plain_object",)
-        )
+        return QQQReplayPreflight(False, (), (), ("payloads.not_plain_object",))
     byte_map = cast(dict[str, object], payloads)
+    if any(type(name) is not str for name in byte_map):
+        return QQQReplayPreflight(
+            False, (), (), ("payloads.filename.not_plain_string",)
+        )
     if set(byte_map) != _REQUIRED_FILES:
         reasons.append("payloads.must_have_exact_three_sources")
     if not _plain_json(manifest, 0, [512]):
-        return QQQReplayPreflight(
-            False, (), (), ("manifest.not_plain_json",)
-        )
+        return QQQReplayPreflight(False, (), (), ("manifest.not_plain_json",))
     root = _obj(manifest, _ROOT, "manifest", reasons)
     if root.get("profile") != "synthetic-qqq-replay-review-v1":
         reasons.append("profile.unsupported")
     window = _obj(root.get("window"), _WINDOW, "window", reasons)
-    acquisition = _obj(
-        root.get("acquisition"), _ACQUISITION, "acquisition", reasons
-    )
+    acquisition = _obj(root.get("acquisition"), _ACQUISITION, "acquisition", reasons)
     timezone = _obj(root.get("timezone"), _TZ, "timezone", reasons)
-    objects = _obj(
-        root.get("objects"), _REQUIRED_FILES, "objects", reasons
-    )
+    objects = _obj(root.get("objects"), _REQUIRED_FILES, "objects", reasons)
 
     if not _text(window.get("name")):
         reasons.append("window.name.missing")
@@ -208,12 +212,15 @@ def preflight_qqq_offline_replay(
     acquisition_start = _utc(acquisition.get("started_utc"))
     acquisition_end = _utc(acquisition.get("finished_utc"))
     if (
-        acquisition_start is None or acquisition_end is None
+        acquisition_start is None
+        or acquisition_end is None
         or acquisition_start > acquisition_end
     ):
         reasons.append("acquisition.window.invalid")
     if acquisition.get("rights_state") not in (
-        "UNKNOWN", "RESTRICTED", "CLAIMED_ALLOWED"
+        "UNKNOWN",
+        "RESTRICTED",
+        "CLAIMED_ALLOWED",
     ):
         reasons.append("acquisition.rights_state.invalid")
 
@@ -258,7 +265,8 @@ def preflight_qqq_offline_replay(
         if when is None:
             reasons.append(f"{name}.first_received_utc.invalid")
         elif (
-            acquisition_start is None or acquisition_end is None
+            acquisition_start is None
+            or acquisition_end is None
             or not acquisition_start <= when <= acquisition_end
         ):
             reasons.append(f"{name}.receipt_outside_acquisition")
@@ -273,7 +281,7 @@ def preflight_qqq_offline_replay(
             reasons.append(f"{name}.pagination.not_closed")
         try:
             doc = _json_native(body)
-        except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        except ValueError, UnicodeDecodeError, json.JSONDecodeError:
             reasons.append(f"{name}.native_json.invalid_or_duplicate_key")
             continue
         if name == "calendar.json":
@@ -286,6 +294,4 @@ def preflight_qqq_offline_replay(
 
     if reasons:
         return QQQReplayPreflight(False, (), (), tuple(reasons))
-    return QQQReplayPreflight(
-        True, tuple(matches), tuple(claimed_origin), ()
-    )
+    return QQQReplayPreflight(True, tuple(matches), tuple(claimed_origin), ())

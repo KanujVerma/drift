@@ -1,4 +1,4 @@
-"""Deferred synthetic QQQ in-memory evidence tests for #536; NOT executed."""
+"""Synthetic QQQ in-memory evidence tests for #536."""
 
 from __future__ import annotations
 
@@ -22,19 +22,32 @@ def fixture() -> tuple[dict[str, bytes], dict[str, object]]:
     }
     endpoint = {
         "bars.json": (
-            "data.alpaca.markets", "/v2/stocks/bars",
-            {"start": "2021-08-03", "end": "2021-08-27",
-             "symbols": "QQQ", "feed": "sip", "timeframe": "1Day",
-             "adjustment": "raw", "limit": "10000"},
+            "data.alpaca.markets",
+            "/v2/stocks/bars",
+            {
+                "start": "2021-08-03",
+                "end": "2021-08-27",
+                "symbols": "QQQ",
+                "feed": "sip",
+                "timeframe": "1Day",
+                "adjustment": "raw",
+                "limit": "10000",
+            },
         ),
         "calendar.json": (
-            "paper-api.alpaca.markets", "/v2/calendar",
+            "paper-api.alpaca.markets",
+            "/v2/calendar",
             {"start": "2021-08-03", "end": "2021-08-27"},
         ),
         "corporate-actions.json": (
-            "data.alpaca.markets", "/v1/corporate-actions",
-            {"start": "2021-08-03", "end": "2021-08-27",
-             "symbols": "QQQ", "types": ",".join(_TYPES)},
+            "data.alpaca.markets",
+            "/v1/corporate-actions",
+            {
+                "start": "2021-08-03",
+                "end": "2021-08-27",
+                "symbols": "QQQ",
+                "types": ",".join(_TYPES),
+            },
         ),
     }
     entries: dict[str, object] = {}
@@ -77,9 +90,7 @@ def obj(meta: dict[str, object], name: str) -> dict[str, object]:
     return cast(dict[str, object], cast(dict[str, object], meta["objects"])[name])
 
 
-def _refuse(
-    data: dict[str, bytes], meta: dict[str, object], expected: str
-) -> None:
+def _refuse(data: dict[str, bytes], meta: dict[str, object], expected: str) -> None:
     result = preflight_qqq_offline_replay(data, meta)
     assert not result.structurally_reviewable
     assert result.exact_byte_digest_matches == ()
@@ -95,10 +106,14 @@ def test_coherent_mock_three_source_package_grants_nothing() -> None:
     assert result.structurally_reviewable
     assert result.reasons == ()
     assert result.exact_byte_digest_matches == (
-        "bars.json", "calendar.json", "corporate-actions.json",
+        "bars.json",
+        "calendar.json",
+        "corporate-actions.json",
     )
     assert result.sources_with_claimed_origin == (
-        "bars.json", "calendar.json", "corporate-actions.json",
+        "bars.json",
+        "calendar.json",
+        "corporate-actions.json",
     )
     assert not result.proves_entitlement_or_historical_origin
     assert not result.authorizes_data_access_or_trading
@@ -106,9 +121,7 @@ def test_coherent_mock_three_source_package_grants_nothing() -> None:
 
 def test_unverified_account_rights_never_become_provider_entitlement() -> None:
     payloads, meta = fixture()
-    cast(dict[str, object], meta["acquisition"])["rights_state"] = (
-        "CLAIMED_ALLOWED"
-    )
+    cast(dict[str, object], meta["acquisition"])["rights_state"] = "CLAIMED_ALLOWED"
     result = preflight_qqq_offline_replay(payloads, meta)
     assert result.structurally_reviewable
     assert not result.proves_entitlement_or_historical_origin
@@ -117,6 +130,56 @@ def test_unverified_account_rights_never_become_provider_entitlement() -> None:
 def test_required_exact_three_responses_not_silently_omitted() -> None:
     payloads, meta = fixture()
     del payloads["calendar.json"]
+    _refuse(payloads, meta, "payloads.must_have_exact_three_sources")
+
+
+@pytest.mark.parametrize(
+    "name", ["bars.json", "calendar.json", "corporate-actions.json"]
+)
+@pytest.mark.parametrize("behavior", ["spoof", "raise_equality", "raise_hash"])
+def test_filename_subclasses_refuse_without_invoking_callbacks(
+    name: str, behavior: str
+) -> None:
+    callbacks: list[str] = []
+    armed = False
+
+    class UntrustedFilename(str):
+        def __hash__(self) -> int:
+            if armed:
+                callbacks.append("hash")
+                if behavior == "raise_hash":
+                    raise AssertionError("untrusted filename hash invoked")
+            return hash(name)
+
+        def __eq__(self, other: object) -> bool:
+            if armed:
+                callbacks.append("equality")
+                if behavior == "raise_equality":
+                    raise AssertionError("untrusted filename equality invoked")
+            return other == name
+
+    payloads, meta = fixture()
+    payloads[UntrustedFilename("not-a-native-filename.json")] = payloads.pop(name)
+    armed = True
+    _refuse(payloads, meta, "payloads.filename.not_plain_string")
+    assert callbacks == []
+
+
+@pytest.mark.parametrize(
+    "name", ["bars.json", "calendar.json", "corporate-actions.json"]
+)
+def test_matching_filename_subclass_is_still_not_a_concrete_key(name: str) -> None:
+    class Filename(str):
+        pass
+
+    payloads, meta = fixture()
+    payloads[Filename(name)] = payloads.pop(name)
+    _refuse(payloads, meta, "payloads.filename.not_plain_string")
+
+
+def test_plain_wrong_filename_remains_a_refusal() -> None:
+    payloads, meta = fixture()
+    payloads["not-bars.json"] = payloads.pop("bars.json")
     _refuse(payloads, meta, "payloads.must_have_exact_three_sources")
 
 
@@ -206,6 +269,70 @@ def test_duplicate_native_json_keys_are_not_last_wins() -> None:
     _refuse(payloads, meta, "bars.json.native_json.invalid_or_duplicate_key")
 
 
+@pytest.mark.parametrize(
+    "name", ["bars.json", "calendar.json", "corporate-actions.json"]
+)
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_non_json_constants_refuse_even_with_matching_digest(
+    name: str, constant: str
+) -> None:
+    payloads, meta = fixture()
+    text = f'{{"value":{constant}}}' if name != "calendar.json" else f"[{constant}]"
+    changed = text.encode("utf-8")
+    payloads[name] = changed
+    obj(meta, name)["sha256"] = hashlib.sha256(changed).hexdigest()
+    _refuse(payloads, meta, f"{name}.native_json.invalid_or_duplicate_key")
+
+
+@pytest.mark.parametrize(
+    "name", ["bars.json", "calendar.json", "corporate-actions.json"]
+)
+@pytest.mark.parametrize(
+    "encoding", ["utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-le", "utf-32-be"]
+)
+def test_non_utf8_native_json_refuses_even_with_matching_digest(
+    name: str, encoding: str
+) -> None:
+    payloads, meta = fixture()
+    changed = payloads[name].decode("utf-8").encode(encoding)
+    payloads[name] = changed
+    obj(meta, name)["sha256"] = hashlib.sha256(changed).hexdigest()
+    _refuse(payloads, meta, f"{name}.native_json.invalid_or_duplicate_key")
+
+
+@pytest.mark.parametrize(
+    "name", ["bars.json", "calendar.json", "corporate-actions.json"]
+)
+def test_malformed_utf8_native_json_refuses(name: str) -> None:
+    payloads, meta = fixture()
+    changed = b'["\xff"]' if name == "calendar.json" else b'{"value":"\xff"}'
+    payloads[name] = changed
+    obj(meta, name)["sha256"] = hashlib.sha256(changed).hexdigest()
+    _refuse(payloads, meta, f"{name}.native_json.invalid_or_duplicate_key")
+
+
+@pytest.mark.parametrize(
+    "name", ["bars.json", "calendar.json", "corporate-actions.json"]
+)
+def test_valid_utf8_and_json_scalars_preserve_exact_byte_hashes(name: str) -> None:
+    payloads, meta = fixture()
+    values = '["caf\u00e9",null,true,false,0,-1,1.25,1e2]'
+    changed = (values if name == "calendar.json" else f'{{"values":{values}}}').encode(
+        "utf-8"
+    )
+    payloads[name] = changed
+    obj(meta, name)["sha256"] = hashlib.sha256(changed).hexdigest()
+    result = preflight_qqq_offline_replay(payloads, meta)
+    replay = preflight_qqq_offline_replay(deepcopy(payloads), deepcopy(meta))
+    assert result.structurally_reviewable
+    assert result.reasons == ()
+    assert result.exact_byte_digest_matches == tuple(sorted(payloads))
+    assert result.sources_with_claimed_origin == tuple(sorted(payloads))
+    assert replay == result
+    assert result.proves_entitlement_or_historical_origin is False
+    assert result.authorizes_data_access_or_trading is False
+
+
 def test_native_payload_must_be_json_of_expected_top_level_shape() -> None:
     payloads, meta = fixture()
     changed = b"{}"
@@ -247,6 +374,8 @@ def test_replay_fixture_not_profitability_or_actual_data_claim() -> None:
     replay = preflight_qqq_offline_replay(deepcopy(payloads), deepcopy(meta))
     assert replay.structurally_reviewable
     assert replay.exact_byte_digest_matches == (
-        "bars.json", "calendar.json", "corporate-actions.json",
+        "bars.json",
+        "calendar.json",
+        "corporate-actions.json",
     )
     assert replay.proves_entitlement_or_historical_origin is False
