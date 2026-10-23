@@ -11,9 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import cast
 
-_UTC_PATTERN = re.compile(
-    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z\Z"
-)
+_UTC_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z\Z")
 _COMMON = frozenset(
     {
         "api_documentation",
@@ -43,9 +41,7 @@ _NEWS = frozenset(
         "feed_health_and_query_closure",
     }
 )
-_HISTORICAL = frozenset(
-    {"historical_version_archive", "historical_availability_basis"}
-)
+_HISTORICAL = frozenset({"historical_version_archive", "historical_availability_basis"})
 _PROSPECTIVE = frozenset({"prospective_capture_scope"})
 _PROFILES = {
     "market_historical": _COMMON | _MARKET | _HISTORICAL,
@@ -67,12 +63,8 @@ _ROOT_KEYS = frozenset(
         "sample",
     }
 )
-_DIMENSION_KEYS = frozenset(
-    {"status", "evidence_ref", "scope_ref", "observed_utc"}
-)
-_SAMPLE_KEYS = frozenset(
-    {"decision_cutoff_utc", "selected_version_id", "versions"}
-)
+_DIMENSION_KEYS = frozenset({"status", "evidence_ref", "scope_ref", "observed_utc"})
+_SAMPLE_KEYS = frozenset({"decision_cutoff_utc", "selected_version_id", "versions"})
 _VERSION_KEYS = frozenset(
     {
         "version_id",
@@ -157,6 +149,7 @@ def preflight_source_qualification(payload: object) -> SourcePreflight:
             problems.append(f"{name}.missing")
     if (
         _text(record.get("evidence_owner"))
+        and _text(record.get("independent_reviewer"))
         and record.get("evidence_owner") == record.get("independent_reviewer")
     ):
         problems.append("independent_reviewer.self_review")
@@ -186,6 +179,7 @@ def preflight_source_qualification(payload: object) -> SourcePreflight:
                 problems.append(f"{name}.evidence_ref.missing")
             if (
                 not _text(entry.get("scope_ref"))
+                or not _text(record.get("scope_ref"))
                 or entry.get("scope_ref") != record.get("scope_ref")
             ):
                 problems.append(f"{name}.scope_mismatch")
@@ -237,7 +231,9 @@ def preflight_source_qualification(payload: object) -> SourcePreflight:
             problems.append(f"{prefix}.payload_ref.missing")
 
         supersedes = version.get("supersedes_id")
-        if supersedes != prior_id:
+        if (
+            supersedes is not None and type(supersedes) is not str
+        ) or supersedes != prior_id:
             problems.append(f"{prefix}.supersedes_id.lineage_mismatch")
         published = _utc(version.get("published_utc"))
         received = _utc(version.get("first_received_utc"))
@@ -269,6 +265,8 @@ def preflight_source_qualification(payload: object) -> SourcePreflight:
             problems.append("sample.no_proven_available_version")
         else:
             selected = admitted[-1][1]
-            if chosen != selected:
+            if type(chosen) is not str or chosen != selected:
                 problems.append("sample.selected_version_not_causally_available")
-    return SourcePreflight(not problems, selected if not problems else None, tuple(problems))
+    return SourcePreflight(
+        not problems, selected if not problems else None, tuple(problems)
+    )
