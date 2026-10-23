@@ -1,8 +1,11 @@
-"""Synthetic-only, unrun AntiGravity test vectors for #521."""
+"""Synthetic-only containment evidence test vectors for #521."""
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import cast
+
+import pytest
 
 from scripts.containment_evidence_preflight import (
     preflight_containment_evidence,
@@ -85,17 +88,17 @@ def test_duplicate_case_id_refused() -> None:
 def test_positive_only_is_not_confinement() -> None:
     item = fixture()
     _cases(item)[0]["denial_status"] = "not_run"
-    assert "A01.denial_status.not_passed" in preflight_containment_evidence(
-        item
-    ).reasons
+    assert (
+        "A01.denial_status.not_passed" in preflight_containment_evidence(item).reasons
+    )
 
 
 def test_denial_only_broken_fixture_cannot_count_as_pass() -> None:
     item = fixture()
     _cases(item)[1]["control_status"] = "failed"
-    assert "A02.control_status.not_passed" in preflight_containment_evidence(
-        item
-    ).reasons
+    assert (
+        "A02.control_status.not_passed" in preflight_containment_evidence(item).reasons
+    )
 
 
 def test_worker_self_attestation_refused() -> None:
@@ -150,9 +153,7 @@ def test_mismatched_environment_and_self_review() -> None:
 def test_unhashable_nested_status_is_refused_not_raised() -> None:
     item = fixture()
     _cases(item)[0]["denial_status"] = {"claim": "passed"}
-    assert "A01.denial_status.invalid" in preflight_containment_evidence(
-        item
-    ).reasons
+    assert "A01.denial_status.invalid" in preflight_containment_evidence(item).reasons
 
 
 def test_incomplete_evidence_never_authorizes_launch() -> None:
@@ -161,3 +162,121 @@ def test_incomplete_evidence_never_authorizes_launch() -> None:
     verdict = preflight_containment_evidence(item)
     assert not verdict.structurally_reviewable
     assert not verdict.authorizes_worker_launch
+
+
+def _scalar_slot(
+    packet: dict[str, object], location: str
+) -> tuple[dict[str, object], str]:
+    if "." not in location:
+        return packet, location
+    case_id, field = location.split(".")
+    return next(case for case in _cases(packet) if case["case_id"] == case_id), field
+
+
+def _hostile_scalar(
+    kind: str, behavior: str, text: str, callbacks: list[str]
+) -> object:
+    class Hostile:
+        def __eq__(self, _: object) -> bool:
+            callbacks.append("equality")
+            if behavior == "raise":
+                raise AssertionError("untrusted scalar equality invoked")
+            return True
+
+        def __ne__(self, _: object) -> bool:
+            callbacks.append("inequality")
+            if behavior == "raise":
+                raise AssertionError("untrusted scalar inequality invoked")
+            return False
+
+        def __hash__(self) -> int:
+            callbacks.append("hash")
+            if behavior == "raise":
+                raise AssertionError("untrusted scalar hash invoked")
+            return 0
+
+    class HostileText(Hostile, str):
+        pass
+
+    return HostileText(text) if kind == "string_subclass" else Hostile()
+
+
+@pytest.mark.parametrize(
+    ("location", "text", "reason"),
+    [
+        (
+            "network_profile",
+            "network-enabled",
+            "network_profile.must_be_offline_for_this_preflight",
+        ),
+        ("unconfined_fallback", "retry-on-host", "unconfined_fallback.not_refused"),
+        ("evidence_origin", "worker", "evidence_origin.not_external_enforcer"),
+        ("independent_verifier", "mechanism-author", "independent_verifier.missing"),
+        ("mechanism_author", "independent-reviewer", "mechanism_author.missing"),
+        ("environment_ref", "different-environment", "environment_ref.missing"),
+        ("A07.evidence_origin", "worker", "A07.worker_claim_not_enforcement_proof"),
+        (
+            "A08.control_kind",
+            "real_external_network",
+            "A08.offline_control_kind.invalid",
+        ),
+        ("A01.environment_ref", "different-environment", "A01.environment_ref.missing"),
+        ("A11.control_receipt_ref", "wrong-control", "A11.control_receipt_ref.missing"),
+        ("A01.denial_receipt_ref", "wrong-denial", "A01.denial_receipt_ref.missing"),
+    ],
+)
+@pytest.mark.parametrize("kind", ["object", "string_subclass"])
+@pytest.mark.parametrize("behavior", ["spoof", "raise"])
+def test_malformed_policy_and_comparison_scalars_refuse_without_callbacks(
+    location: str, text: str, reason: str, kind: str, behavior: str
+) -> None:
+    item = fixture()
+    owner, field = _scalar_slot(item, location)
+    callbacks: list[str] = []
+    owner[field] = _hostile_scalar(kind, behavior, text, callbacks)
+    result = preflight_containment_evidence(item)
+    assert not result.structurally_reviewable
+    assert reason in result.reasons
+    assert result.authorizes_worker_launch is False
+    assert callbacks == []
+
+
+@pytest.mark.parametrize(
+    ("location", "wrong_value", "reason"),
+    [
+        (
+            "network_profile",
+            "network-enabled",
+            "network_profile.must_be_offline_for_this_preflight",
+        ),
+        ("unconfined_fallback", "retry-on-host", "unconfined_fallback.not_refused"),
+        ("evidence_origin", "worker", "evidence_origin.not_external_enforcer"),
+        ("A07.evidence_origin", "worker", "A07.worker_claim_not_enforcement_proof"),
+        (
+            "A08.control_kind",
+            "real_external_network",
+            "A08.offline_control_kind.invalid",
+        ),
+    ],
+)
+def test_wrong_plain_policy_values_remain_refused(
+    location: str, wrong_value: str, reason: str
+) -> None:
+    item = fixture()
+    owner, field = _scalar_slot(item, location)
+    owner[field] = wrong_value
+    result = preflight_containment_evidence(item)
+    assert not result.structurally_reviewable
+    assert result.reasons == (reason,)
+    assert result.authorizes_worker_launch is False
+
+
+def test_complete_eleven_case_claim_is_deterministic_and_read_only() -> None:
+    item = fixture()
+    before = deepcopy(item)
+    result = preflight_containment_evidence(item)
+    assert result.structurally_reviewable
+    assert result.reasons == ()
+    assert result == preflight_containment_evidence(deepcopy(item))
+    assert item == before
+    assert result.authorizes_worker_launch is False

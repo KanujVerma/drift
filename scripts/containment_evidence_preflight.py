@@ -81,23 +81,30 @@ def preflight_containment_evidence(payload: object) -> ContainmentPreflight:
     if not _hex_digest(data.get("policy_sha256"), _HEX_SHA256):
         problems.append("policy_sha256.invalid")
 
-    if data.get("network_profile") != "offline":
+    if (
+        type(data.get("network_profile")) is not str
+        or data.get("network_profile") != "offline"
+    ):
         problems.append("network_profile.must_be_offline_for_this_preflight")
-    if data.get("unconfined_fallback") != "refused":
+    if (
+        type(data.get("unconfined_fallback")) is not str
+        or data.get("unconfined_fallback") != "refused"
+    ):
         problems.append("unconfined_fallback.not_refused")
 
     author = data.get("mechanism_author")
     reviewer = data.get("independent_verifier")
-    if _has_text(author) and author == reviewer:
+    if _has_text(author) and _has_text(reviewer) and author == reviewer:
         problems.append("independent_verifier.self_review")
-    if data.get("evidence_origin") != "independent_enforcer":
+    if (
+        type(data.get("evidence_origin")) is not str
+        or data.get("evidence_origin") != "independent_enforcer"
+    ):
         problems.append("evidence_origin.not_external_enforcer")
 
     cases_value = data.get("cases")
     if type(cases_value) is not list:
-        return ContainmentPreflight(
-            False, tuple([*problems, "cases.not_plain_list"])
-        )
+        return ContainmentPreflight(False, tuple([*problems, "cases.not_plain_list"]))
 
     seen: set[str] = set()
     for index, item in enumerate(cases_value):
@@ -132,13 +139,23 @@ def preflight_containment_evidence(payload: object) -> ContainmentPreflight:
 
         if (
             _has_text(case.get("denial_receipt_ref"))
+            and _has_text(case.get("control_receipt_ref"))
             and case.get("denial_receipt_ref") == case.get("control_receipt_ref")
         ):
             problems.append(f"{case_id}.denial_control_receipt_identical")
 
-        if case.get("environment_ref") != data.get("environment_ref"):
+        case_environment = case.get("environment_ref")
+        root_environment = data.get("environment_ref")
+        if (
+            type(case_environment) is str
+            and type(root_environment) is str
+            and case_environment != root_environment
+        ):
             problems.append(f"{case_id}.environment_mismatch")
-        if case.get("evidence_origin") != "independent_enforcer":
+        if (
+            type(case.get("evidence_origin")) is not str
+            or case.get("evidence_origin") != "independent_enforcer"
+        ):
             problems.append(f"{case_id}.worker_claim_not_enforcement_proof")
 
         if case_id in ("A01", "A11") and not _has_text(
@@ -150,7 +167,10 @@ def preflight_containment_evidence(payload: object) -> ContainmentPreflight:
         ):
             problems.append("A07.direct_alternate_path_receipt.missing")
         if case_id == "A08":
-            if case.get("control_kind") != "offline_local_fixture":
+            if (
+                type(case.get("control_kind")) is not str
+                or case.get("control_kind") != "offline_local_fixture"
+            ):
                 problems.append("A08.offline_control_kind.invalid")
             if not _has_text(case.get("egress_policy_denial_receipt_ref")):
                 problems.append("A08.egress_denial_receipt.missing")
