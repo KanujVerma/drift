@@ -1673,7 +1673,6 @@ type _PreparedBookEscrow = tuple[
 ]
 
 
-
 def _private_original_book_escrow() -> tuple[
     Callable[
         [
@@ -3468,10 +3467,7 @@ _PREPARED_EXECUTOR_TYPE: type[SessionEvaluatorEngine] = type(
             for name, descriptor in vars(SessionEvaluatorEngine).items()
             if name not in {"__module__", "__dict__", "__weakref__", "__doc__"}
         },
-        **{
-            name: _prepared_instance_field(name)
-            for name in _PREPARED_INSTANCE_FIELDS
-        },
+        **{name: _prepared_instance_field(name) for name in _PREPARED_INSTANCE_FIELDS},
         "__getattribute__": object.__getattribute__,
         "__setattr__": object.__setattr__,
         "__hash__": object.__hash__,
