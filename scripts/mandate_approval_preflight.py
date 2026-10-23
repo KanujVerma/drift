@@ -19,63 +19,145 @@ _HEX = re.compile(r"[0-9a-f]{64}\Z")
 _AMOUNT = re.compile(r"(?:0|[1-9]\d*)(?:\.\d{1,8})?\Z")
 
 _ROOT = frozenset(
-    {"profile", "as_of_utc", "operation_kind", "mandate", "request",
-     "approval", "state", "mandatory_policy", "smart_policy",
-     "smart_observed", "history"}
+    {
+        "profile",
+        "as_of_utc",
+        "operation_kind",
+        "mandate",
+        "request",
+        "approval",
+        "state",
+        "mandatory_policy",
+        "smart_policy",
+        "smart_observed",
+        "history",
+    }
 )
 _MANDATE = frozenset(
-    {"mandate_id", "manifest_sha256", "account_id", "arm_id",
-     "environment_ref", "approval_mode", "issuer_ref",
-     "issuer_verification_ref", "accepted_policy_ref", "epoch",
-     "issued_utc", "expires_utc", "revoked"}
+    {
+        "mandate_id",
+        "manifest_sha256",
+        "account_id",
+        "arm_id",
+        "environment_ref",
+        "approval_mode",
+        "issuer_ref",
+        "issuer_verification_ref",
+        "accepted_policy_ref",
+        "epoch",
+        "issued_utc",
+        "expires_utc",
+        "revoked",
+    }
 )
 _REQUEST = frozenset(
-    {"logical_operation_id", "client_token", "candidate_revision_ref",
-     "account_id", "arm_id", "environment_ref", "mandate_id",
-     "mandate_epoch", "manifest_sha256", "state_sha256",
-     "accepted_policy_ref", "source_cutoff_ref", "eligibility_ref",
-     "security_ref", "side", "quantity", "order_notional_usd",
-     "nav_usd"}
+    {
+        "logical_operation_id",
+        "client_token",
+        "candidate_revision_ref",
+        "account_id",
+        "arm_id",
+        "environment_ref",
+        "mandate_id",
+        "mandate_epoch",
+        "manifest_sha256",
+        "state_sha256",
+        "accepted_policy_ref",
+        "source_cutoff_ref",
+        "eligibility_ref",
+        "security_ref",
+        "side",
+        "quantity",
+        "order_notional_usd",
+        "nav_usd",
+    }
 )
 _APPROVAL = frozenset(
-    {"grant_id", "decision", "grant_mode", "issuer_role",
-     "issuer_ref", "issuer_verification_ref", "bound_intent_sha256",
-     "bound_state_sha256", "bound_mandate_sha256",
-     "bound_account_id", "bound_arm_id", "bound_environment_ref",
-     "bound_mandate_epoch", "issued_utc", "expires_utc"}
+    {
+        "grant_id",
+        "decision",
+        "grant_mode",
+        "issuer_role",
+        "issuer_ref",
+        "issuer_verification_ref",
+        "bound_intent_sha256",
+        "bound_state_sha256",
+        "bound_mandate_sha256",
+        "bound_account_id",
+        "bound_arm_id",
+        "bound_environment_ref",
+        "bound_mandate_epoch",
+        "issued_utc",
+        "expires_utc",
+    }
 )
 _STATE = frozenset(
-    {"state_sha256", "observed_utc", "quote_event_utc",
-     "quote_received_utc", "portfolio_status", "open_orders_status",
-     "mandate_epoch", "kill", "paused", "uncertainty_hold",
-     "pause_time_utc", "mandatory_gates"}
+    {
+        "state_sha256",
+        "observed_utc",
+        "quote_event_utc",
+        "quote_received_utc",
+        "portfolio_status",
+        "open_orders_status",
+        "mandate_epoch",
+        "kill",
+        "paused",
+        "uncertainty_hold",
+        "pause_time_utc",
+        "mandatory_gates",
+    }
 )
-_MANDATORY = frozenset(
-    {"policy_ref", "max_quote_age_seconds", "max_state_age_seconds"}
-)
+_MANDATORY = frozenset({"policy_ref", "max_quote_age_seconds", "max_state_age_seconds"})
 _SMART = frozenset(
-    {"policy_ref", "max_notional_usd", "max_nav_notional_bps",
-     "max_weight_change_bps", "max_quote_age_seconds",
-     "max_state_age_seconds", "max_spread_bps", "max_orders_window",
-     "window_seconds"}
+    {
+        "policy_ref",
+        "max_notional_usd",
+        "max_nav_notional_bps",
+        "max_weight_change_bps",
+        "max_quote_age_seconds",
+        "max_state_age_seconds",
+        "max_spread_bps",
+        "max_orders_window",
+        "window_seconds",
+    }
 )
 _SMART_OBSERVED = frozenset(
-    {"spread_bps", "gross_change_bps", "orders_in_window",
-     "window_evidence_ref"}
+    {"spread_bps", "gross_change_bps", "orders_in_window", "window_evidence_ref"}
 )
 _HISTORY = frozenset({"attempts", "fill_effects"})
 _ATTEMPT = frozenset(
-    {"grant_id", "logical_operation_id", "client_token",
-     "bound_intent_sha256", "account_id", "arm_id", "dispatch_started"}
+    {
+        "grant_id",
+        "logical_operation_id",
+        "client_token",
+        "bound_intent_sha256",
+        "account_id",
+        "arm_id",
+        "dispatch_started",
+    }
 )
 _FILL = frozenset(
-    {"effect_id", "account_id", "arm_id", "client_token",
-     "incremental_quantity", "occurred_utc", "fee_state"}
+    {
+        "effect_id",
+        "account_id",
+        "arm_id",
+        "client_token",
+        "incremental_quantity",
+        "occurred_utc",
+        "fee_state",
+    }
 )
 _GATES = frozenset(
-    {"issuer_authority", "asset_and_mandate_scope", "portfolio_state",
-     "open_orders", "source_and_market_capability", "risk_and_eligibility",
-     "budget_reservation", "durable_dispatch"}
+    {
+        "issuer_authority",
+        "asset_and_mandate_scope",
+        "portfolio_state",
+        "open_orders",
+        "source_and_market_capability",
+        "risk_and_eligibility",
+        "budget_reservation",
+        "durable_dispatch",
+    }
 )
 _GATE_FIELDS = frozenset({"verdict", "receipt_ref"})
 _MODES = frozenset({"ASK", "SMART", "AUTO"})
@@ -170,9 +252,8 @@ def _decimal(value: object, *, positive: bool = False) -> Decimal | None:
 def _seconds_between(later: datetime, earlier: datetime) -> Decimal:
     delta = later - earlier
     microseconds = (
-        ((delta.days * 86400) + delta.seconds) * 1_000_000
-        + delta.microseconds
-    )
+        (delta.days * 86400) + delta.seconds
+    ) * 1_000_000 + delta.microseconds
     return Decimal(microseconds) / Decimal(1_000_000)
 
 
@@ -196,9 +277,12 @@ def canonical_fixture_intent_sha256(value: object) -> str | None:
     for name in _REQUEST - {"mandate_epoch", "quantity"}:
         if not _text(record.get(name)):
             return None
-    if type(record.get("quantity")) is not int or record["quantity"] <= 0:
+    if type(record.get("quantity")) is not int or cast(int, record["quantity"]) <= 0:
         return None
-    if type(record.get("mandate_epoch")) is not int or record["mandate_epoch"] < 0:
+    if (
+        type(record.get("mandate_epoch")) is not int
+        or cast(int, record["mandate_epoch"]) < 0
+    ):
         return None
     if not _digest(record.get("manifest_sha256")) or not _digest(
         record.get("state_sha256")
@@ -228,47 +312,77 @@ def _check_bindings(
         if not _text(request.get(name)):
             issues.append(f"request.{name}.missing")
     for name in (
-        "issuer_ref", "issuer_verification_ref",
-        "accepted_policy_ref", "mandate_id",
+        "issuer_ref",
+        "issuer_verification_ref",
+        "accepted_policy_ref",
+        "mandate_id",
     ):
         if not _text(mandate.get(name)):
             issues.append(f"mandate.{name}.missing")
     for name in (
-        "grant_id", "issuer_ref", "issuer_verification_ref",
+        "grant_id",
+        "issuer_ref",
+        "issuer_verification_ref",
     ):
         if not _text(approval.get(name)):
             issues.append(f"approval.{name}.missing")
     checks = (
         ("mandate.account_id", mandate.get("account_id"), request.get("account_id")),
         ("mandate.arm_id", mandate.get("arm_id"), request.get("arm_id")),
-        ("mandate.environment_ref", mandate.get("environment_ref"),
-         request.get("environment_ref")),
-        ("request.mandate_id", request.get("mandate_id"),
-         mandate.get("mandate_id")),
-        ("request.manifest_sha256", request.get("manifest_sha256"),
-         mandate.get("manifest_sha256")),
-        ("request.accepted_policy_ref", request.get("accepted_policy_ref"),
-         mandate.get("accepted_policy_ref")),
-        ("mandatory_policy.policy_ref", policy.get("policy_ref"),
-         mandate.get("accepted_policy_ref")),
-        ("request.state_sha256", request.get("state_sha256"),
-         state.get("state_sha256")),
-        ("approval.bound_state_sha256", approval.get("bound_state_sha256"),
-         state.get("state_sha256")),
-        ("approval.bound_mandate_sha256", approval.get("bound_mandate_sha256"),
-         mandate.get("manifest_sha256")),
-        ("approval.bound_account_id", approval.get("bound_account_id"),
-         request.get("account_id")),
-        ("approval.bound_arm_id", approval.get("bound_arm_id"),
-         request.get("arm_id")),
-        ("approval.bound_environment_ref", approval.get("bound_environment_ref"),
-         request.get("environment_ref")),
-        ("request.mandate_epoch", request.get("mandate_epoch"),
-         mandate.get("epoch")),
-        ("state.mandate_epoch", state.get("mandate_epoch"),
-         mandate.get("epoch")),
-        ("approval.bound_mandate_epoch", approval.get("bound_mandate_epoch"),
-         mandate.get("epoch")),
+        (
+            "mandate.environment_ref",
+            mandate.get("environment_ref"),
+            request.get("environment_ref"),
+        ),
+        ("request.mandate_id", request.get("mandate_id"), mandate.get("mandate_id")),
+        (
+            "request.manifest_sha256",
+            request.get("manifest_sha256"),
+            mandate.get("manifest_sha256"),
+        ),
+        (
+            "request.accepted_policy_ref",
+            request.get("accepted_policy_ref"),
+            mandate.get("accepted_policy_ref"),
+        ),
+        (
+            "mandatory_policy.policy_ref",
+            policy.get("policy_ref"),
+            mandate.get("accepted_policy_ref"),
+        ),
+        (
+            "request.state_sha256",
+            request.get("state_sha256"),
+            state.get("state_sha256"),
+        ),
+        (
+            "approval.bound_state_sha256",
+            approval.get("bound_state_sha256"),
+            state.get("state_sha256"),
+        ),
+        (
+            "approval.bound_mandate_sha256",
+            approval.get("bound_mandate_sha256"),
+            mandate.get("manifest_sha256"),
+        ),
+        (
+            "approval.bound_account_id",
+            approval.get("bound_account_id"),
+            request.get("account_id"),
+        ),
+        ("approval.bound_arm_id", approval.get("bound_arm_id"), request.get("arm_id")),
+        (
+            "approval.bound_environment_ref",
+            approval.get("bound_environment_ref"),
+            request.get("environment_ref"),
+        ),
+        ("request.mandate_epoch", request.get("mandate_epoch"), mandate.get("epoch")),
+        ("state.mandate_epoch", state.get("mandate_epoch"), mandate.get("epoch")),
+        (
+            "approval.bound_mandate_epoch",
+            approval.get("bound_mandate_epoch"),
+            mandate.get("epoch"),
+        ),
     )
     for name, actual, expected in checks:
         if actual != expected:
@@ -279,12 +393,18 @@ def _check_bindings(
     ):
         if not _digest(value):
             issues.append(f"{name}.invalid")
-    for name in ("mandate.epoch", "state.mandate_epoch", "request.mandate_epoch",
-                 "approval.bound_mandate_epoch"):
+    for name in (
+        "mandate.epoch",
+        "state.mandate_epoch",
+        "request.mandate_epoch",
+        "approval.bound_mandate_epoch",
+    ):
         group, key = name.split(".")
         from_group = {
-            "mandate": mandate, "state": state,
-            "request": request, "approval": approval,
+            "mandate": mandate,
+            "state": state,
+            "request": request,
+            "approval": approval,
         }[group]
         value = from_group.get(key)
         if type(value) is not int or value < 0:
@@ -313,7 +433,8 @@ def _check_times(
     quote_receipt = _time(state.get("quote_received_utc"))
 
     for name, moment in (
-        ("mandate.issued_utc", issued), ("mandate.expires_utc", expiry),
+        ("mandate.issued_utc", issued),
+        ("mandate.expires_utc", expiry),
         ("approval.issued_utc", grant_issued),
         ("approval.expires_utc", grant_expires),
         ("state.observed_utc", observed),
@@ -361,8 +482,10 @@ def _mandatory_gates(state: dict[str, object], issues: list[str]) -> None:
         issues.append("state.mandatory_gates.not_exact")
     for name in sorted(_GATES):
         gate = _exact(
-            gates.get(name), _GATE_FIELDS,
-            f"state.mandatory_gates.{name}", issues,
+            gates.get(name),
+            _GATE_FIELDS,
+            f"state.mandatory_gates.{name}",
+            issues,
         )
         if gate.get("verdict") != "PASS":
             issues.append(f"state.mandatory_gates.{name}.not_passed")
@@ -380,9 +503,7 @@ def _smart_route(
     issues: list[str],
 ) -> str:
     policy = _exact(smart_policy, _SMART, "smart_policy", issues)
-    observed = _exact(
-        observation, _SMART_OBSERVED, "smart_observed", issues
-    )
+    observed = _exact(observation, _SMART_OBSERVED, "smart_observed", issues)
     if not _text(policy.get("policy_ref")):
         issues.append("smart_policy.policy_ref.missing")
     if not _text(observed.get("window_evidence_ref")):
@@ -399,9 +520,7 @@ def _smart_route(
     nav = _decimal(request.get("nav_usd"), positive=True)
     notional = measurements["max_notional_usd"]
     if nav is not None and notional is not None:
-        measurements["max_nav_notional_bps"] = (
-            notional * Decimal(10000) / nav
-        )
+        measurements["max_nav_notional_bps"] = notional * Decimal(10000) / nav
 
     beyond = False
     for key, value in measurements.items():
@@ -412,8 +531,8 @@ def _smart_route(
             beyond = True
 
     for key in ("max_orders_window", "window_seconds"):
-        value = policy.get(key)
-        if type(value) is not int or value < (1 if key == "window_seconds" else 0):
+        limit = policy.get(key)
+        if type(limit) is not int or limit < (1 if key == "window_seconds" else 0):
             issues.append(f"smart_policy.{key}.invalid")
     count = observed.get("orders_in_window")
     if type(count) is not int or count < 0:
@@ -452,6 +571,17 @@ def _history(
     for index, raw_attempt in enumerate(attempts):
         prefix = f"history.attempts.{index}"
         attempt = _exact(raw_attempt, _ATTEMPT, prefix, issues)
+        for field in (
+            "grant_id",
+            "logical_operation_id",
+            "client_token",
+            "account_id",
+            "arm_id",
+        ):
+            if not _text(attempt.get(field)):
+                issues.append(f"{prefix}.{field}.invalid")
+        if not _digest(attempt.get("bound_intent_sha256")):
+            issues.append(f"{prefix}.bound_intent_sha256.invalid")
         if type(attempt.get("dispatch_started")) is not bool:
             issues.append(f"{prefix}.dispatch_started.invalid")
             continue
@@ -461,15 +591,15 @@ def _history(
             issues.append(f"{prefix}.foreign_account_or_arm")
         if (
             attempt.get("grant_id") == approval.get("grant_id")
-            or attempt.get("logical_operation_id") == request.get("logical_operation_id")
+            or attempt.get("logical_operation_id")
+            == request.get("logical_operation_id")
             or attempt.get("client_token") == request.get("client_token")
         ):
             for field in ("logical_operation_id", "client_token"):
                 if attempt.get(field) != request.get(field):
                     issues.append(f"{prefix}.operation_identity_conflict")
-            if (
-                attempt.get("bound_intent_sha256")
-                != approval.get("bound_intent_sha256")
+            if attempt.get("bound_intent_sha256") != approval.get(
+                "bound_intent_sha256"
             ):
                 issues.append(f"{prefix}.intent_changed")
             used = True
@@ -505,10 +635,9 @@ def _history(
                 issues.append(f"{prefix}.effect_id.conflicting_redelivery")
             continue
         seen_effects[event_id] = effect
-        if (
-            effect.get("account_id") != request.get("account_id")
-            or effect.get("arm_id") != request.get("arm_id")
-        ):
+        if effect.get("account_id") != request.get("account_id") or effect.get(
+            "arm_id"
+        ) != request.get("arm_id"):
             issues.append(f"{prefix}.foreign_account_or_arm")
         if not _text(effect.get("client_token")):
             issues.append(f"{prefix}.client_token.missing")
@@ -560,7 +689,10 @@ def preflight_mandate_approval(payload: object) -> MandateApprovalPreflight:
     approval = _exact(root.get("approval"), _APPROVAL, "approval", problems)
     state = _exact(root.get("state"), _STATE, "state", problems)
     mandatory = _exact(
-        root.get("mandatory_policy"), _MANDATORY, "mandatory_policy", problems,
+        root.get("mandatory_policy"),
+        _MANDATORY,
+        "mandatory_policy",
+        problems,
     )
 
     _check_bindings(request, mandate, approval, state, mandatory, problems)
@@ -593,9 +725,7 @@ def preflight_mandate_approval(payload: object) -> MandateApprovalPreflight:
     if not _text(mandatory.get("policy_ref")):
         problems.append("mandatory_policy.policy_ref.missing")
 
-    state_age, quote_age = _check_times(
-        mandate, approval, state, now, problems
-    )
+    state_age, quote_age = _check_times(mandate, approval, state, now, problems)
     max_state = _decimal(mandatory.get("max_state_age_seconds"))
     max_quote = _decimal(mandatory.get("max_quote_age_seconds"))
     if max_state is None:
@@ -615,8 +745,13 @@ def preflight_mandate_approval(payload: object) -> MandateApprovalPreflight:
     route = "MANUAL_REVIEW_ONLY" if mode == "ASK" else "POLICY_REVIEW_ONLY"
     if mode == "SMART":
         route = _smart_route(
-            root.get("smart_policy"), root.get("smart_observed"),
-            mandatory, request, quote_age, state_age, problems,
+            root.get("smart_policy"),
+            root.get("smart_observed"),
+            mandatory,
+            request,
+            quote_age,
+            state_age,
+            problems,
         )
     elif root.get("smart_policy") is not None or (
         root.get("smart_observed") is not None
@@ -624,15 +759,26 @@ def preflight_mandate_approval(payload: object) -> MandateApprovalPreflight:
         problems.append("smart.undeclared_in_mode")
 
     used, post_pause = _history(
-        root.get("history"), request, approval, state, now, problems,
+        root.get("history"),
+        request,
+        approval,
+        state,
+        now,
+        problems,
     )
 
     if problems:
         return MandateApprovalPreflight(
             False,
             route if problems == ["smart.outside_proposed_bounds"] else "REFUSED",
-            used, post_pause, tuple(problems),
+            used,
+            post_pause,
+            tuple(problems),
         )
     return MandateApprovalPreflight(
-        True, route, used, post_pause, (),
+        True,
+        route,
+        used,
+        post_pause,
+        (),
     )

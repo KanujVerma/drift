@@ -1,6 +1,6 @@
 # Offline mandate and approval consumption preflight (Issue #529)
 
-**Implementation candidate, not executed and not an authorization system.**
+**Focused-verified implementation candidate, not an authorization system.**
 Accountable Matthew producer: [#380](https://github.com/KanujVerma/drift/issues/380), original [MANDATE M2 draft PR #414](https://github.com/KanujVerma/drift/pull/414). The draft `docs/architecture/adaptive-experiments/contracts/mandate.md` is **not** accepted as an operational wire, numeric risk rule or persisted approval schema. Kanuj accepted its conceptual deterministic safeguards only and separately asked for development-only Balanced feasibility studies; neither acceptance authorizes broker/paper/live trading. The paired user-requested coding issue is [#528](https://github.com/KanujVerma/drift/issues/528), covering Matthew's minimal SRC envelope.
 
 ## Scope, owner, protected code and state
@@ -24,7 +24,7 @@ The fixture contains one `as_of_utc` and requested operation, an immutable claim
 
 **Ask/Smart/Auto are not execution permission.** Ask requires a claimed HUMAN grant; Smart/Auto a claimed SYSTEM-derived grant. Mode must equal the declared mandate/grant. For Smart only, the caller supplies every numeric bound and observed value explicitly: USD notional, notional/NAV basis points, gross target weight-change basis points, quote/state age, spread bps, and an evidenced window and order counter. All bounds are deterministic Decimal comparisons. Missing/invalid values refuse; values outside Smart bounds return `ASK_REVIEW_REQUIRED` only when other mandatory conditions hold. The fixture's $500 / 100-bps synthetic boundary is **not an approved Stage 1 threshold**. An automatic system grant outside bounds is not permitted to dispatch while it waits for a *fresh* human review. The accepted issuer/custodian and actual policy numeric thresholds remain pending owner rulings.
 
-**One-shot grant and unresolved attempts.** Retained attempts with matching grant, original logical operation or token are never grounds for another placement; this preflight refuses reuse even if a prior attempt was reserved but no SEND_STARTED receipt exists. Distinct IDs cannot bypass account holds; every existing attempt has account/arm identity checked and intent hash compared. Actual atomic uniqueness, fencing, broker readback, settlement and safe retry protocol belong to #411/#379, not this script. The in-memory list cannot prove absence of concurrent dispatches.
+**One-shot grant and unresolved attempts.** Every retained attempt must contain concrete nonempty grant, logical-operation, client-token, account and arm strings plus a valid lowercase SHA-256 intent digest before reuse classification. Malformed history refuses even when its identifiers do not match the current operation. Account/arm binding still applies to every attempt. Retained attempts with matching grant, original logical operation or token are never grounds for another placement; this preflight compares their intent digest with the current approval and refuses reuse even if a prior attempt was reserved but no SEND_STARTED receipt exists. Valid unrelated history can contain a different intent digest and does not consume the current grant. Distinct IDs cannot bypass account holds. Actual atomic uniqueness, fencing, broker readback, settlement and safe retry protocol belong to #411/#379, not this script. The in-memory list cannot prove absence of concurrent dispatches.
 
 **Pause is not cancellation.** The preflight refuses any new risk while paused or under a kill/uncertainty hold. A record with a separately labelled `PROTECTIVE` action cannot bypass; the helper deliberately refuses all operations other than `NEW_RISK`, requiring a different accepted authority and enforcement implementation. Existing immutable fill-effect receipts are retained as separate claimed facts, including quantity after pause, duplicate same-ID redelivery and conflicts. `reported_post_pause_fill_quantity` is a **self-described diagnostic count**, not an actual account reconciliation, known exposure, filled order or net NAV. Missing fee evidence prevents a claimed complete portfolio in this review model.
 
@@ -36,30 +36,42 @@ This tool performs **no trusted control authentication**; even a green synthetic
 
 The fixture-only canonical request digest is not a commitment to a future persisted wire. Missing status or revocation cannot default to false. The preflight is not wired into any real risk gatekeeper, strategy evaluator, broker, network, exchange clock, source adapter or ledger. Existing #411 critical UNKNOWN-state defects are **not fixed** by this code.
 
-## AntiGravity test instructions (all deferred by user)
+## Verification and remaining integration gate
 
-The author has **not run** the unit tests, Ruff, mypy, build, canonical CI or independent tests. On the precise published PR head, AntiGravity should review all three new files and PR #414/issue #380, then run:
+The user's 2026-10-23 continuation instruction, recorded in [#529](https://github.com/KanujVerma/drift/issues/529#issuecomment-6369511588), supersedes the original authoring-session test deferral. The repair addresses Matthew's [formal review](https://github.com/KanujVerma/drift/pull/531#pullrequestreview-5595532972): retained-attempt identity/digest validation before unrelated-history classification, Ruff formatting and E501, and source-inventory admission coordination. Existing strict-type errors were also repaired with identity casts after exact integer checks and a local loop-variable rename; numerical behavior is unchanged.
+
+Actual local results with locked CPython 3.14.6:
+
+- Tests-only RED on the original source: **63 failed, 64 passed**, including malformed unrelated-history acceptance and missing malformed-field diagnostics while existing controls passed.
+- Final focused suite: **127 passed**. Null, empty, whitespace, integer, boolean, list and dict identities refuse; malformed digests refuse in reserved and dispatched history. Valid unrelated ASK/SMART/AUTO histories remain reviewable, and existing current-operation refusals remain intact.
+- Six additional valid unrelated-history controls sharing the current intent digest passed across all modes and dispatch states. A matching digest alone does not consume an unrelated grant.
+- Repository Ruff lint and format checks passed; strict `mypy src tests` passed across **472 files**; source distribution and wheel build passed. Docs links, forbidden punctuation and Git whitespace/scope checks passed.
+- Direct invocation of the unchanged production AST guard accepts the actual script. Socket, credential-read, subprocess and dynamic-evaluation injection controls are refused.
+- The focused M1e inventory test remains **1 failed** because `scripts/mandate_approval_preflight.py` is absent from its exact inventory. [Producer request #554](https://github.com/KanujVerma/drift/issues/554) tracks admission. The ordinary production AST profile already accepts this script; it needs no false-property exception. This PR does not edit the shared guard or move source to evade it.
+
+The full suite was **not rerun** while that inventory failure remains unresolved. Earlier hosted run [39546665957](https://github.com/KanujVerma/drift/actions/runs/39546665957) failed on the same missing inventory entry at the original head; it does not qualify this repair. New-head hosted verification and independent producer review remain pending. Focused synthetic checks do not accept the original #380/#414 issuer, numerical policy or operational interfaces.
+
+Reproduce the focused and static checks in the pinned environment:
 
 ```bash
-uv run pytest tests/unit/test_mandate_approval_preflight.py -q
+uv run python -m pytest tests/unit/test_mandate_approval_preflight.py -q
 uv run ruff check scripts/mandate_approval_preflight.py tests/unit/test_mandate_approval_preflight.py
 uv run ruff format --check scripts/mandate_approval_preflight.py tests/unit/test_mandate_approval_preflight.py
 uv run mypy src tests
-uv run pytest
 uv build
 git diff --check
 ```
 
-Follow the full pinned [agent workflow](../../agent-workflow.md), inspect branch/main file diffs, confirm no lockfile/policy/legacy hash changes, and keep automatic hosted GitHub CI separate from actual AntiGravity testing.
+After exact-path guard admission, AntiGravity and the canonical pipeline should run the full pinned [agent workflow](../../agent-workflow.md), including `uv run pytest`, inspect branch/main file diffs and confirm no lockfile, policy or legacy hash changes. Keep automatic hosted GitHub CI separate from actual independent review.
 
-### Non-vacuous acceptance and adversarial oracles (test code committed, unrun)
+### Non-vacuous acceptance and adversarial oracles
 
 1. Exact synthetic ASK/SMART/AUTO records can be structurally reviewable but have **zero authority** to send a trade.
 2. Change original request quantity, candidate/account, arm, state digest, token or mandate epoch after approval: calculated full-intent binding no longer matches.
 3. Identical grant at expiry boundary, revoked mandate or incompatible issuer mode: refuse.
 4. ASK human approval does not cure an expired quote, stale portfolio, unknown open order, failing deterministic risk, kill, pause or UNKNOWN execution hold.
 5. Smart synthetic $500 and 100-bps boundary can be checked only against explicit caller-provided fixture values. $500.01, excessive trailing order count or missing bounds cannot become Auto by default; strict bounds and window semantics need later ratification.
-6. A previous durable reserved/started attempt for the same grant/operation/token blocks a second call. A fresh client token while the account is held is not a workaround.
+6. A previous durable reserved/started attempt for the same grant/operation/token blocks a second call. Every retained attempt's identities and intent digest must be valid before unrelated-history classification. Valid unrelated history does not consume the current grant; malformed later history cannot hide an earlier current-operation refusal. A fresh client token while the account is held is not a workaround.
 7. New-risk refusal on pause retains a separate claimed two-share late fill; exact repeated effect receipt counts once; changed same-ID receipt conflicts.
 8. Unknown fee with a claimed complete account is refused, not rounded to zero.
 9. A `PROTECTIVE` SELL label cannot bypass missing independent protective policy. Actual bounded corrective trade belongs to a separately accepted mechanism and complete state.

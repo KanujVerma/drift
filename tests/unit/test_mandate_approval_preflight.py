@@ -1,4 +1,4 @@
-"""Unexecuted synthetic AntiGravity vectors for Matthew #380 / assist #529."""
+"""Synthetic mandate review vectors for Matthew #380 / assist #529."""
 
 from __future__ import annotations
 
@@ -113,7 +113,9 @@ def fixture(mode: str = "SMART") -> dict[str, object]:
             "max_quote_age_seconds": "2",
             "max_state_age_seconds": "5",
         },
-        "smart_policy": None if mode != "SMART" else {
+        "smart_policy": None
+        if mode != "SMART"
+        else {
             "policy_ref": "fictional-smart-policy-revision",
             "max_notional_usd": "500",
             "max_nav_notional_bps": "100",
@@ -124,7 +126,9 @@ def fixture(mode: str = "SMART") -> dict[str, object]:
             "max_orders_window": 2,
             "window_seconds": 60,
         },
-        "smart_observed": None if mode != "SMART" else {
+        "smart_observed": None
+        if mode != "SMART"
+        else {
             "spread_bps": "9",
             "gross_change_bps": "100",
             "orders_in_window": 1,
@@ -162,9 +166,7 @@ def _refuse(data: dict[str, object], reason: str) -> None:
         ("AUTO", "POLICY_REVIEW_ONLY"),
     ],
 )
-def test_declared_grant_never_authenticates_permission(
-    mode: str, route: str
-) -> None:
+def test_declared_grant_never_authenticates_permission(mode: str, route: str) -> None:
     report = preflight_mandate_approval(fixture(mode))
     assert report.review_ready
     assert report.route == route
@@ -186,8 +188,11 @@ def test_full_intent_mutation_invalidates_original_approval() -> None:
     [
         ("account_id", "other-account", "mandate.account_id.binding_mismatch"),
         ("arm_id", "B", "mandate.arm_id.binding_mismatch"),
-        ("environment_ref", "other-environment",
-         "mandate.environment_ref.binding_mismatch"),
+        (
+            "environment_ref",
+            "other-environment",
+            "mandate.environment_ref.binding_mismatch",
+        ),
         ("state_sha256", "c" * 64, "request.state_sha256.binding_mismatch"),
         ("mandate_epoch", 8, "request.mandate_epoch.binding_mismatch"),
     ],
@@ -217,9 +222,7 @@ def test_pause_kill_or_unknown_hold_refuses_new_risk(field: str) -> None:
     data = fixture()
     _inner(data, "state")[field] = True
     if field == "paused":
-        _inner(data, "state")["pause_time_utc"] = (
-            "2026-01-02T10:32:07Z"
-        )
+        _inner(data, "state")["pause_time_utc"] = "2026-01-02T10:32:07Z"
     _refuse(data, f"state.{field}.blocks_new_risk")
 
 
@@ -244,9 +247,7 @@ def test_mandatory_risk_failure_cannot_escalate_to_manual_override() -> None:
 
 def test_quote_and_portfolio_freshness_are_mandatory_in_all_modes() -> None:
     data = fixture("ASK")
-    _inner(data, "state")["quote_event_utc"] = (
-        "2026-01-02T10:32:06Z"
-    )
+    _inner(data, "state")["quote_event_utc"] = "2026-01-02T10:32:06Z"
     _refuse(data, "mandatory.quote_stale")
     data = fixture("AUTO")
     _inner(data, "state")["observed_utc"] = "2026-01-02T10:32:04Z"
@@ -332,6 +333,124 @@ def test_original_operation_already_dispatched_cannot_retry() -> None:
     assert "history.original_operation_already_dispatched" in report.reasons
 
 
+def _unrelated_attempt(dispatch_started: bool) -> dict[str, object]:
+    return {
+        "grant_id": "previous-grant",
+        "logical_operation_id": "previous-operation",
+        "client_token": "previous-token",
+        "bound_intent_sha256": "c" * 64,
+        "account_id": "synthetic-account-A",
+        "arm_id": "A",
+        "dispatch_started": dispatch_started,
+    }
+
+
+@pytest.mark.parametrize("mode", ["ASK", "SMART", "AUTO"])
+@pytest.mark.parametrize("dispatch_started", [False, True])
+def test_valid_unrelated_attempt_does_not_consume_current_grant(
+    mode: str, dispatch_started: bool
+) -> None:
+    data = fixture(mode)
+    _inner(data, "history")["attempts"] = [_unrelated_attempt(dispatch_started)]
+    report = preflight_mandate_approval(data)
+    assert report.review_ready
+    assert report.reasons == ()
+    assert not report.grant_already_consumed
+    assert report.reported_post_pause_fill_quantity == 0
+    assert not report.authorizes_order_or_protective_action
+    assert not report.authenticates_mandate_or_account
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["grant_id", "logical_operation_id", "client_token", "account_id", "arm_id"],
+)
+@pytest.mark.parametrize("malformed", [None, "", " \t", 0, False, [], {}])
+@pytest.mark.parametrize("dispatch_started", [False, True])
+def test_every_retained_attempt_identity_must_be_concrete_nonempty_text(
+    field: str, malformed: object, dispatch_started: bool
+) -> None:
+    data = fixture()
+    attempt = _unrelated_attempt(dispatch_started)
+    attempt[field] = malformed
+    _inner(data, "history")["attempts"] = [attempt]
+    reason = (
+        "history.attempts.0.foreign_account_or_arm"
+        if field in ("account_id", "arm_id")
+        else f"history.attempts.0.{field}.invalid"
+    )
+    _refuse(data, reason)
+
+
+@pytest.mark.parametrize(
+    "malformed", [None, "", "not-a-digest", "a" * 63, "a" * 65, "A" * 64, 0, [], {}]
+)
+@pytest.mark.parametrize("dispatch_started", [False, True])
+def test_every_retained_attempt_requires_a_valid_intent_digest(
+    malformed: object, dispatch_started: bool
+) -> None:
+    data = fixture()
+    attempt = _unrelated_attempt(dispatch_started)
+    attempt["bound_intent_sha256"] = malformed
+    _inner(data, "history")["attempts"] = [attempt]
+    _refuse(data, "history.attempts.0.bound_intent_sha256.invalid")
+
+
+def test_all_retained_attempt_fields_are_validated_before_dispatch_classification() -> (
+    None
+):
+    data = fixture()
+    attempt = _unrelated_attempt(True)
+    for field in (
+        "grant_id",
+        "logical_operation_id",
+        "client_token",
+        "bound_intent_sha256",
+    ):
+        attempt[field] = None
+    attempt["dispatch_started"] = None
+    _inner(data, "history")["attempts"] = [attempt]
+    report = preflight_mandate_approval(data)
+    assert not report.review_ready
+    assert report.route == "REFUSED"
+    for field in (
+        "grant_id",
+        "logical_operation_id",
+        "client_token",
+        "bound_intent_sha256",
+        "dispatch_started",
+    ):
+        assert f"history.attempts.0.{field}.invalid" in report.reasons
+    assert not report.authorizes_order_or_protective_action
+    assert not report.authenticates_mandate_or_account
+
+
+@pytest.mark.parametrize("dispatch_started", [False, True])
+def test_malformed_later_attempt_does_not_hide_current_operation_refusal(
+    dispatch_started: bool,
+) -> None:
+    data = fixture()
+    current = _unrelated_attempt(dispatch_started)
+    current.update(
+        grant_id=_inner(data, "approval")["grant_id"],
+        logical_operation_id=_inner(data, "request")["logical_operation_id"],
+        client_token=_inner(data, "request")["client_token"],
+        bound_intent_sha256=_inner(data, "approval")["bound_intent_sha256"],
+    )
+    malformed = _unrelated_attempt(dispatch_started)
+    malformed["grant_id"] = None
+    _inner(data, "history")["attempts"] = [current, malformed]
+    report = preflight_mandate_approval(data)
+    assert not report.review_ready
+    assert report.route == "REFUSED"
+    assert report.grant_already_consumed
+    prior_state = "dispatched" if dispatch_started else "reserved"
+    assert f"history.original_operation_already_{prior_state}" in report.reasons
+    assert "history.attempts.1.grant_id.invalid" in report.reasons
+    assert not report.authorizes_order_or_protective_action
+    assert not report.authenticates_mandate_or_account
+
+
 def test_fresh_client_token_cannot_bypass_a_live_account_hold() -> None:
     data = fixture()
     _inner(data, "request")["client_token"] = "fresh-attempt"
@@ -355,7 +474,8 @@ def test_post_pause_fill_is_still_recorded_as_claimed_effect() -> None:
         "fee_state": "KNOWN",
     }
     _inner(data, "history")["fill_effects"] = [
-        effect, deepcopy(effect),
+        effect,
+        deepcopy(effect),
     ]
     report = preflight_mandate_approval(data)
     assert not report.review_ready
@@ -382,9 +502,7 @@ def test_conflicting_effect_id_does_not_launder_a_second_fill() -> None:
     changed["incremental_quantity"] = 20
     _inner(data, "history")["fill_effects"] = [original, changed]
     report = preflight_mandate_approval(data)
-    assert "history.fill_effects.1.effect_id.conflicting_redelivery" in (
-        report.reasons
-    )
+    assert "history.fill_effects.1.effect_id.conflicting_redelivery" in (report.reasons)
     assert report.reported_post_pause_fill_quantity is None
 
 
