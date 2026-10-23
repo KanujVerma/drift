@@ -1020,3 +1020,88 @@ def test_replacing_lifecycle_lifetime_anchor_fails_without_original() -> None:
     assert substitute.seen == []
     with pytest.raises(OpeningBookLifecycleError, match="not available"):
         _run(engine)
+
+
+@pytest.mark.parametrize("at", ["retain", "claim", "consume"])
+@pytest.mark.parametrize(
+    "collaborator",
+    ["_corporate_actions", "_rebalance", "_exploratory_dividends"],
+)
+def test_public_class_descriptor_cannot_intercept_prepared_collaborator(
+    monkeypatch: pytest.MonkeyPatch, at: str, collaborator: str
+) -> None:
+    """A later base-class property cannot see the real accounting loop."""
+    expected = canonical_json(_run(_engine()))
+    engine = _engine()
+    accessed = 0
+
+    class InjectsDescriptor(_Recorder):
+        def _visit(self, where: str, book: PortfolioStateV2) -> None:
+            nonlocal accessed
+            if where == at:
+
+                def injected(_owner: object) -> object:
+                    nonlocal accessed
+                    accessed += 1
+                    raise AssertionError("base-class descriptor reached private executor")
+
+                # A property is a data descriptor, which outranks an ordinary
+                # instance field unless the private subclass shadows it.
+                monkeypatch.setattr(
+                    type(engine), collaborator, property(injected), raising=False
+                )
+            super()._visit(where, book)
+
+    observer = InjectsDescriptor()
+    engine.prepare_opening_book(lifecycle=observer)
+    result = _run(engine)
+    assert canonical_json(result) == expected
+    assert accessed == 0
+    assert observer.seen == ["retain", "claim", "consume"]
+
+
+@pytest.mark.parametrize("at", ["retain", "consume"])
+def test_mutated_public_hash_and_phase_cannot_reset_original_cash(
+    monkeypatch: pytest.MonkeyPatch, at: str
+) -> None:
+    """Identity-based tombstones survive changing class __hash__ and phase."""
+    actual_initializer = initial_portfolio_state
+    opened: list[PortfolioStateV2] = []
+
+    def counted(
+        *,
+        session_key: SessionKeyV1,
+        initial_cash: Decimal,
+        admission: EvaluationAdmissionV1,
+    ) -> PortfolioStateV2:
+        book = actual_initializer(
+            session_key=session_key, initial_cash=initial_cash, admission=admission
+        )
+        opened.append(book)
+        return book
+
+    monkeypatch.setattr(evaluator_engine, "initial_portfolio_state", counted)
+    engine = _engine()
+
+    class PoisonHashAndPhase(_Recorder):
+        def _visit(self, where: str, book: PortfolioStateV2) -> None:
+            if where == at:
+                monkeypatch.setattr(type(engine), "__hash__", lambda _owner: 1)
+                monkeypatch.setattr(
+                    type(engine),
+                    "_opening_book_phase",
+                    property(lambda _owner: "new", lambda _owner, _value: None),
+                    raising=False,
+                )
+            super()._visit(where, book)
+
+    observer = PoisonHashAndPhase()
+    engine.prepare_opening_book(lifecycle=observer)
+    assert len(opened) == 1
+    with pytest.raises(OpeningBookLifecycleError, match="not available|phase changed"):
+        _run(engine)
+    with pytest.raises(OpeningBookLifecycleError, match="not available"):
+        _run(engine)
+    with pytest.raises(OpeningBookLifecycleError, match="fresh, unused"):
+        engine.prepare_opening_book(lifecycle=_Recorder())
+    assert len(opened) == 1
