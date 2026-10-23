@@ -72,7 +72,7 @@ from typing import (
     get_type_hints,
 )
 from uuid import UUID
-from weakref import ReferenceType, WeakKeyDictionary, ref
+from weakref import ReferenceType, ref
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from pydantic_core import PydanticSerializationError
@@ -1673,6 +1673,7 @@ type _PreparedBookEscrow = tuple[
 ]
 
 
+
 def _private_original_book_escrow() -> tuple[
     Callable[
         [
@@ -1688,19 +1689,27 @@ def _private_original_book_escrow() -> tuple[
     Callable[[object], SessionEvaluatorEngine | None],
     Callable[[object], _PreparedBookEscrow | None],
 ]:
-    """Escrow the original book, private executor and exact observer binding.
+    """Retain original evidence by object identity, never mutable object hash.
 
-    Callback-visible engine fields are not trusted as authoritative lifecycle
-    references. The book, executor, observer witness, original digest and a
-    weak reference to the exact lifecycle are retained before any invocation.
-    The public engine alone keeps the observer alive, so an abandoned engine
-    and callback closure cannot stay alive through a WeakKeyDictionary value.
-    Replacing the public lifetime anchor may fail closed, but cannot replace
-    the escrowed callback. This assumes an independently trusted Python host,
-    not hostile process/frame introspection.
+    Lifecycle code may mutate its engine's class __hash__ or __eq__. A weak-key
+    dictionary would then lose access to an already retained book. Integer
+    identity keys and weak owner references avoid all user-defined hashing
+    and equality, and weakref cleanup also prevents abandoned engines from
+    being retained by this module. No escrow value references its owner.
     """
-    states: WeakKeyDictionary[object, _PreparedBookEscrow] = WeakKeyDictionary()
+    states: dict[int, tuple[ReferenceType[object], _PreparedBookEscrow]] = {}
     lock = Lock()
+
+    def owner_reference(owner: object) -> ReferenceType[object]:
+        identity = id(owner)
+
+        def remove(dead: ReferenceType[object]) -> None:
+            with lock:
+                saved = states.get(identity)
+                if saved is not None and saved[0] is dead:
+                    del states[identity]
+
+        return ref(owner, remove)
 
     def retain(
         owner: object,
@@ -1710,27 +1719,39 @@ def _private_original_book_escrow() -> tuple[
         lifecycle: OpeningBookLifecycleV1,
         original_digest: str,
     ) -> None:
+        identity = id(owner)
         with lock:
-            if owner in states:
+            saved = states.get(identity)
+            if saved is not None and saved[0]() is owner:
                 raise OpeningBookLifecycleError(
                     "an original opening book is already retained"
                 )
-            states[owner] = (
-                book,
-                executor,
-                observer_book,
-                ref(lifecycle),
-                original_digest,
+            states[identity] = (
+                owner_reference(owner),
+                (
+                    book,
+                    executor,
+                    observer_book,
+                    ref(lifecycle),
+                    original_digest,
+                ),
             )
 
     def inspect(owner: object) -> SessionEvaluatorEngine | None:
         with lock:
-            prepared = states.get(owner)
-            return prepared[1] if prepared is not None else None
+            saved = states.get(id(owner))
+            if saved is not None and saved[0]() is owner:
+                return saved[1][1]
+            return None
 
     def consume(owner: object) -> _PreparedBookEscrow | None:
+        identity = id(owner)
         with lock:
-            return states.pop(owner, None)
+            saved = states.get(identity)
+            if saved is not None and saved[0]() is owner:
+                del states[identity]
+                return saved[1]
+            return None
 
     return retain, inspect, consume
 
@@ -1744,29 +1765,40 @@ def _private_opening_book_reservation() -> tuple[
     Callable[[object], None],
     Callable[[object], bool],
 ]:
-    """Keep a permanent per-engine prepared-attempt bit outside observer reach.
+    """Keep the prepared-attempt tombstone independent of mutable hashing.
 
-    The original-book escrow removes its entry on invocation, so it cannot
-    alone distinguish an unused legacy engine from a consumed prepared engine.
-    A lifecycle callback can mutate the public engine's _opening_book_phase or
-    _legacy_run_started attributes through object.__setattr__. Never let that
-    mutable metadata authorize reinitializing cash. The private weak-key mark
-    persists for the engine lifetime, including failed preparation and runs.
+    The reservation happens before the first callback and survives escrow
+    consumption. A forged public phase and a replaced class __hash__ or
+    __eq__ must never authorize the legacy cash initializer. Identity keys
+    are retired only when the actual engine is collected.
     """
-    attempted: WeakKeyDictionary[object, bool] = WeakKeyDictionary()
+    attempted: dict[int, ReferenceType[object]] = {}
     lock = Lock()
 
+    def owner_reference(owner: object) -> ReferenceType[object]:
+        identity = id(owner)
+
+        def remove(dead: ReferenceType[object]) -> None:
+            with lock:
+                if attempted.get(identity) is dead:
+                    del attempted[identity]
+
+        return ref(owner, remove)
+
     def reserve(owner: object) -> None:
+        identity = id(owner)
         with lock:
-            if owner in attempted:
+            saved = attempted.get(identity)
+            if saved is not None and saved() is owner:
                 raise OpeningBookLifecycleError(
                     "opening-book preparation requires a fresh, unused engine"
                 )
-            attempted[owner] = True
+            attempted[identity] = owner_reference(owner)
 
     def was_prepared(owner: object) -> bool:
         with lock:
-            return owner in attempted
+            saved = attempted.get(id(owner))
+            return saved is not None and saved() is owner
 
     return reserve, was_prepared
 
@@ -3383,20 +3415,66 @@ def _seal[T: ExploratoryEvaluationResultV1 | PromotionEvaluationResultV1](
     return cast(T, model.model_validate(dict(sealed)))
 
 
-# A lifecycle callback may modify methods on the public evaluator class.
-# Snapshot its complete declared method/property table once, before any user
-# callback, for a callback-inaccessible private evaluator subtype. Prepared
-# dispatch (including transitive self._helper calls) resolves against this
-# snapshot rather than methods subsequently replaced on SessionEvaluatorEngine.
-# This addresses ordinary class monkeypatching. Arbitrary module/global state
-# changes or introspecting private subtypes need process isolation, not a
-# Python-local security claim.
+# A lifecycle callback may install a method or a data descriptor on the
+# public SessionEvaluatorEngine class. Snapshot declared methods before any
+# callback, and explicitly shadow every collaborator stored in an evaluator
+# instance. Otherwise a newly installed property on the public base class
+# would outrank the private executor's ordinary instance attribute and expose
+# the original accounting book through an attacker-controlled proxy.
+_PREPARED_INSTANCE_FIELDS = frozenset(
+    {
+        "_bundle",
+        "_admission",
+        "_protocol",
+        "_cost_model",
+        "_evidence",
+        "_mark_grade",
+        "_reconstructed_lane",
+        "_evidence_hash",
+        "_accounting_index",
+        "_book_currency_namespace",
+        "_book_currency_code",
+        "_reconstructed_prices",
+        "_exploratory_dividends",
+        "_corporate_action_coverage",
+        "_corporate_actions",
+        "_rebalance",
+        "_opening_book_lock",
+        "_opening_book_phase",
+        "_legacy_run_started",
+        "_lifecycle_lifetime_anchor",
+    }
+)
+
+
+def _prepared_instance_field(name: str) -> property:
+    """An own data descriptor outranks future injected base-class properties."""
+
+    def read(instance: SessionEvaluatorEngine) -> Any:
+        return vars(instance)[name]
+
+    def write(instance: SessionEvaluatorEngine, value: Any) -> None:
+        vars(instance)[name] = value
+
+    return property(read, write)
+
+
 _PREPARED_EXECUTOR_TYPE: type[SessionEvaluatorEngine] = type(
     "_PreparedSessionEvaluatorEngine",
     (SessionEvaluatorEngine,),
     {
-        name: descriptor
-        for name, descriptor in vars(SessionEvaluatorEngine).items()
-        if name not in {"__module__", "__dict__", "__weakref__", "__doc__"}
+        **{
+            name: descriptor
+            for name, descriptor in vars(SessionEvaluatorEngine).items()
+            if name not in {"__module__", "__dict__", "__weakref__", "__doc__"}
+        },
+        **{
+            name: _prepared_instance_field(name)
+            for name in _PREPARED_INSTANCE_FIELDS
+        },
+        "__getattribute__": object.__getattribute__,
+        "__setattr__": object.__setattr__,
+        "__hash__": object.__hash__,
+        "__eq__": object.__eq__,
     },
 )
