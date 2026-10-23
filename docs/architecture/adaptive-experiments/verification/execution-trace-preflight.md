@@ -1,6 +1,6 @@
 # Intraday execution trace preflight (Issue #525)
 
-**Status: separate candidate implementation, tests deliberately not run, NOT execution authorization.**
+**Status: bounded repair candidate, focused verification passed; integration blocked.**
 Matthew remains accountable for [#379](https://github.com/KanujVerma/drift/issues/379). His E3 [draft PR #412](https://github.com/KanujVerma/drift/pull/412) is a proposed **documentation** contract and remains unmerged and unchanged; its proposed `drift-exec-intraday-v1` identifier is **not accepted as a runtime wire version** by this code.
 
 ## Ownership, exact added paths and protected boundaries
@@ -16,6 +16,24 @@ No modification to existing source adapters, venue/calendar, M2 account ledger, 
 ## Pure code contract
 
 `preflight_execution_trace(payload: object) -> ExecutionTracePreflight` accepts only an in-memory, JSON-shaped, **untrusted** candidate trace and returns stable diagnostic reason strings. It does not read a file, schedule work, connect to a provider, call a broker, modify a ledger, submit/cancel/resend an order, model fill probability or authenticate any claimed receipt.
+
+Before identity, enum or report-redelivery equality, the checker validates the
+complete nested tree using concrete built-in scalar, list and dictionary types.
+Foreign objects and scalar/container subclasses refuse with
+`payload.not_plain_json` before their equality, inequality or hashing callbacks
+can run. Existing field-specific validators still enforce the schema, enum,
+quantity and decimal-string rules for ordinary concrete values. Iterative
+validation rejects cycles, accepts shared plain containers and checks each
+container once; it adds no depth, size, timing or financial threshold. An exact
+report object supplied twice retains the original idempotent outcome.
+Every request, evidence, timeline, quote, state, attempt and report leaf record
+must also contain only scalar values before comparison. A record containing a
+list or dictionary field refuses with `<record>.not_plain_scalars`, and its
+contents are withheld from dependent checks. This validates both operands of
+original token/hash and other identity comparisons, and prevents malformed
+deeply nested fee/effect values from reaching duplicate-report dictionary
+equality. Existing enum and scalar field validators retain their ordinary
+diagnostics for concrete primitive values.
 
 Quote and report records also carry exact original request/listing/venue
 identifiers: a quote's venue must match the declared capability venue and its
@@ -60,12 +78,25 @@ The return is `ExecutionTracePreflight(review_ready, reported_cumulative_qty, cl
 
 The table does not claim full conformance to E3. Specifically absent: trusted venue/calendar/halt evidence, quote depth and queue allocation, permission expiry, source/correction authentication, historical replay, actual book settlement, durable concurrency recovery, authoritative account assignment, experimental policy acceptance, scientific scoring and old V1/V2 compatibility migration. Those need **separate** owner-scoped implementations and independent tests; do not fill them from guessed defaults.
 
-## Deferred AntiGravity verification
+## Verification checkpoint and independent handoff
 
-Tests are **written but intentionally unrun** at user direction. Inspect exact head, provenance, isolated changed files and candidate/producer boundaries before testing:
+The [exclusive continuation claim](https://github.com/KanujVerma/drift/issues/525#issuecomment-6370821216) records the user's current instruction to run required tests, superseding the historical authoring-session deferral. Matthew retains producer ownership and the E3 draft remains unaccepted. This three-file repair addresses the nested concrete-value and formatting findings in [Matthew's formal review](https://github.com/KanujVerma/drift/pull/527#pullrequestreview-5595529018).
+
+Actual local verification uses pinned CPython 3.14.6 and unchanged `uv.lock`:
+
+- Initial RED: 118 failed, 40 passed before the source repair. The regression matrix exercises identity/enum subclasses, foreign scalar objects and malformed duplicate-report values through the public entry point.
+- Additional RED public-entry controls reproduced four `RecursionError` cases with independently constructed 50,000-level values: fee/effect-ref duplicate reports and both request/attempt token/hash operands. The shared leaf-record scalar check now precedes identity and redelivery comparisons, without introducing a depth limit.
+- Final GREEN: 196 focused tests passed, including all four deep-container regressions, both list/dict operands at every paired identity boundary, all seven leaf-record families, metaclass-callback and deeply shared plain-container controls. Spoofing and raising callbacks are never invoked; invalid results suppress cumulative/accounting claims and retain both permanently false permission properties.
+- Genuine mismatch controls retain their original diagnostics. Ordinary LIMIT sessions, MARKET inputs, partial fills, cumulative/idempotent reports, UNKNOWN dispatch and unknown-fee accounting retain their positive/negative distinctions.
+- Whole-repository Ruff lint passed; Ruff format passed on 564 files. Strict mypy passed on 472 source files. The source distribution and wheel built successfully.
+- Git whitespace, exact three-file scope, UTF-8/EOF/no-U+2014, balanced fences and three local Markdown links passed. AST comparison preserved all original fixture/test functions and all source semantics outside the new concrete-tree helper, its early refusal and the shared leaf-record scalar check; the refusal test helper only adds false-permission assertions.
+- One focused integration inventory probe failed at `tests/integration/test_m1e_compatibility.py:976`, reporting only `scripts/execution_trace_preflight.py` missing. No failure was skipped or waived. The repaired source passes the unchanged ordinary production AST scanner; parsed-only socket/environment/process/eval controls still refuse.
+- The shared M1e guard and its existing source pins remain unchanged. [Separate request #559](https://github.com/KanujVerma/drift/issues/559) requires exact-path inventory and actual scan registration; adding only inert union membership would leave fallback script admission incomplete. [#558](https://github.com/KanujVerma/drift/issues/558) separately requests byte-aware actual-file parsing. Neither producer decision is accepted by this repair.
+
+The full pytest suite was not repeated against the known inventory refusal. Fresh canonical exact-head CI, accepted guard integration and independent Matthew/AntiGravity acceptance remain separate. Inspect the exact candidate head, provenance, isolated changed files and producer boundaries before independent verification:
 
 ```bash
-uv run pytest tests/unit/test_execution_trace_preflight.py -q
+uv run python -m pytest tests/unit/test_execution_trace_preflight.py -q
 uv run ruff check scripts/execution_trace_preflight.py tests/unit/test_execution_trace_preflight.py
 uv run ruff format --check scripts/execution_trace_preflight.py tests/unit/test_execution_trace_preflight.py
 uv run mypy src tests
@@ -74,6 +105,6 @@ uv build
 git diff --check
 ```
 
-AntiGravity must also run the canonical workflows/whitespace/build guards in [agent workflow](../../agent-workflow.md), verify clean pinned interpreter and dependencies, check no unrelated paths changed and independently construct at least these negative oracles: decision/submission before receipt or approval, equality without tie proof, late correction, quote received after decision, stale/unknown quote, bar-only fills, unsupported after-hours type, halt, partial/overfill, descending cumulative counts, duplicate reports and economic effect reuse, LIMIT violation, unknown fee, UNKNOWN resend after restart, changed token/hash, bogus terminal receipt and cross-arm account mismatch. Some cases require future producer adapters and cannot be certified solely by this helper.
+After accepted guard integration, AntiGravity must also run the canonical workflows/whitespace/build guards in [agent workflow](../../agent-workflow.md), verify clean pinned interpreter and dependencies, check no unrelated paths changed and independently construct at least these negative oracles: malformed nested identity/enum scalars and redelivery values without callback execution, decision/submission before receipt or approval, equality without tie proof, late correction, quote received after decision, stale/unknown quote, bar-only fills, unsupported after-hours type, halt, partial/overfill, descending cumulative counts, duplicate reports and economic effect reuse, LIMIT violation, unknown fee, UNKNOWN resend after restart, changed token/hash, bogus terminal receipt and cross-arm account mismatch. Some cases require future producer adapters and cannot be certified solely by this helper.
 
-**No manual or independent checks were run in this authoring session.** Hosted GitHub Actions may run automatically after a PR is opened, but their outcome is separate from the future independently accepted AntiGravity packet. No order, fill, book, source, rights, schema, scientific result or production readiness is established. Keep this PR draft until Matthew and relevant consumer/independent reviewers accept the exact candidate and downstream real contract separately.
+The local checks above do not constitute independent producer acceptance. Hosted GitHub Actions remain enabled and their outcome is separate from the independently accepted AntiGravity packet. No order, fill, book, source, rights, schema, scientific result or production readiness is established. Keep this PR draft until Matthew and relevant consumer/independent reviewers accept the exact candidate and downstream real contract separately.

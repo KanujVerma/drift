@@ -1,4 +1,4 @@
-"""Deferred synthetic/adversarial AntiGravity vectors for #525/#379."""
+"""Synthetic/adversarial execution-trace vectors for #525/#379."""
 
 from __future__ import annotations
 
@@ -113,6 +113,356 @@ def _fail(payload: dict[str, object], expected: str) -> None:
     assert report.reported_cumulative_qty is None
     assert not report.claimed_accounting_structurally_possible
     assert expected in report.reasons
+    assert report.authorizes_order_placement is False
+    assert report.proves_fill_or_settlement is False
+
+
+_SCALAR_BOUNDARIES = (
+    ("payload", "profile"),
+    ("request", "run_id"),
+    ("request", "arm_id"),
+    ("request", "account_id"),
+    ("request", "client_token"),
+    ("request", "request_hash"),
+    ("request", "listing_ref"),
+    ("request", "original_account_binding_ref"),
+    ("request", "side"),
+    ("request", "order_type"),
+    ("request", "session"),
+    ("evidence", "halt_at_arrival"),
+    ("evidence", "venue_ref"),
+    ("quote", "kind"),
+    ("quote", "venue_ref"),
+    ("quote", "listing_ref"),
+    ("attempts", "client_token"),
+    ("attempts", "request_hash"),
+    ("reports", "run_id"),
+    ("reports", "arm_id"),
+    ("reports", "account_id"),
+    ("reports", "client_token"),
+    ("reports", "request_hash"),
+    ("reports", "fee_status"),
+    ("state", "dispatch_knowledge"),
+    ("state", "lifecycle"),
+)
+
+
+def _scalar_record(payload: dict[str, object], group: str) -> dict[str, object]:
+    if group == "payload":
+        return payload
+    if group == "attempts":
+        return _attempts(payload)[0]
+    if group == "reports":
+        return _reports(payload)[0]
+    return _inner(payload, group)
+
+
+@pytest.mark.parametrize(("group", "field"), _SCALAR_BOUNDARIES)
+@pytest.mark.parametrize("behavior", ["spoof", "raise", "matching_subclass"])
+def test_nested_scalar_subclasses_refuse_before_callbacks(
+    group: str, field: str, behavior: str
+) -> None:
+    callbacks: list[str] = []
+
+    class UntrustedScalar(str):
+        def __eq__(self, other: object) -> bool:
+            callbacks.append("equality")
+            if behavior == "raise":
+                raise RuntimeError("untrusted equality invoked")
+            return True
+
+        def __ne__(self, other: object) -> bool:
+            callbacks.append("inequality")
+            if behavior == "raise":
+                raise RuntimeError("untrusted inequality invoked")
+            return False
+
+        def __hash__(self) -> int:
+            callbacks.append("hash")
+            raise RuntimeError("untrusted hash invoked")
+
+    payload = trace_fixture()
+    record = _scalar_record(payload, group)
+    original = record[field]
+    assert type(original) is str
+    record[field] = UntrustedScalar(
+        original if behavior == "matching_subclass" else "foreign-value"
+    )
+    _fail(payload, "payload.not_plain_json")
+    assert callbacks == []
+
+
+@pytest.mark.parametrize(("group", "field"), _SCALAR_BOUNDARIES)
+def test_nested_foreign_objects_refuse_without_equality(group: str, field: str) -> None:
+    callbacks: list[str] = []
+
+    class ForeignScalar:
+        def __eq__(self, other: object) -> bool:
+            callbacks.append("equality")
+            raise RuntimeError("foreign equality invoked")
+
+        def __ne__(self, other: object) -> bool:
+            callbacks.append("inequality")
+            raise RuntimeError("foreign inequality invoked")
+
+    payload = trace_fixture()
+    _scalar_record(payload, group)[field] = ForeignScalar()
+    _fail(payload, "payload.not_plain_json")
+    assert callbacks == []
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "report_id",
+        "run_id",
+        "arm_id",
+        "account_id",
+        "client_token",
+        "request_hash",
+        "cumulative_qty",
+        "execution_utc",
+        "received_utc",
+        "price",
+        "fee",
+        "fee_status",
+        "effect_ref",
+    ],
+)
+def test_redelivery_checks_concrete_values_before_dict_equality(field: str) -> None:
+    callbacks: list[str] = []
+
+    class RedeliveryScalar(str):
+        def __eq__(self, other: object) -> bool:
+            callbacks.append("equality")
+            raise RuntimeError("redelivery equality invoked")
+
+        def __ne__(self, other: object) -> bool:
+            callbacks.append("inequality")
+            raise RuntimeError("redelivery inequality invoked")
+
+    payload = trace_fixture()
+    replay = deepcopy(_reports(payload)[0])
+    replay[field] = RedeliveryScalar("foreign-value")
+    _reports(payload).append(replay)
+    _fail(payload, "payload.not_plain_json")
+    assert callbacks == []
+
+
+@pytest.mark.parametrize(
+    ("group", "field", "wrong", "reason"),
+    [
+        (
+            "attempts",
+            "client_token",
+            "foreign-token",
+            "attempts.0.new_or_foreign_token",
+        ),
+        ("attempts", "request_hash", "b" * 64, "attempts.0.changed_intent"),
+        ("reports", "run_id", "foreign-run", "reports.0.run_id.identity_mismatch"),
+        ("reports", "arm_id", "B", "reports.0.arm_id.identity_mismatch"),
+        (
+            "reports",
+            "account_id",
+            "foreign-account",
+            "reports.0.account_id.identity_mismatch",
+        ),
+        (
+            "reports",
+            "client_token",
+            "foreign-token",
+            "reports.0.client_token.identity_mismatch",
+        ),
+        (
+            "reports",
+            "request_hash",
+            "b" * 64,
+            "reports.0.request_hash.identity_mismatch",
+        ),
+        ("request", "side", "OTHER", "request.side.invalid"),
+        ("request", "order_type", "OTHER", "request.order_type.invalid"),
+        ("request", "session", "OTHER", "request.session.invalid"),
+        ("quote", "kind", "OTHER", "quote.kind.invalid"),
+        ("evidence", "halt_at_arrival", "OTHER", "evidence.halt_at_arrival.invalid"),
+        ("reports", "fee_status", "OTHER", "reports.0.fee_status.invalid"),
+        ("state", "dispatch_knowledge", "OTHER", "state.dispatch_knowledge.invalid"),
+        ("state", "lifecycle", "OTHER", "state.lifecycle.invalid"),
+    ],
+)
+def test_plain_identity_and_enum_mismatches_still_refuse(
+    group: str, field: str, wrong: str, reason: str
+) -> None:
+    payload = trace_fixture()
+    _scalar_record(payload, group)[field] = wrong
+    _fail(payload, reason)
+
+
+@pytest.mark.parametrize("session", ["REGULAR", "PRE", "POST"])
+def test_plain_limit_sessions_remain_reviewable(session: str) -> None:
+    payload = trace_fixture()
+    _inner(payload, "request")["session"] = session
+    assert preflight_execution_trace(payload) == preflight_execution_trace(
+        trace_fixture()
+    )
+
+
+def test_plain_market_order_and_shared_identical_redelivery_remain_reviewable() -> None:
+    payload = trace_fixture()
+    _inner(payload, "request")["order_type"] = "MARKET"
+    _inner(payload, "request")["limit_price"] = None
+    _reports(payload).append(_reports(payload)[0])
+    report = preflight_execution_trace(payload)
+    assert report.review_ready
+    assert report.reported_cumulative_qty == 100
+    assert report.claimed_accounting_structurally_possible
+    assert report.authorizes_order_placement is False
+    assert report.proves_fill_or_settlement is False
+
+
+def test_unknown_fee_remains_reviewable_only_without_complete_accounting() -> None:
+    payload = trace_fixture()
+    _reports(payload)[0]["fee_status"] = "unknown"
+    _reports(payload)[0]["fee"] = None
+    _inner(payload, "state")["claimed_accounting_complete"] = False
+    report = preflight_execution_trace(payload)
+    assert report.review_ready
+    assert report.reported_cumulative_qty == 100
+    assert not report.claimed_accounting_structurally_possible
+    assert report.authorizes_order_placement is False
+    assert report.proves_fill_or_settlement is False
+
+
+def test_cyclic_container_refuses_as_non_json() -> None:
+    payload = trace_fixture()
+    _reports(payload).append(payload)
+    _fail(payload, "payload.not_plain_json")
+
+
+def test_scalar_metaclass_equality_is_not_used_for_concrete_type_checks() -> None:
+    callbacks: list[str] = []
+
+    class UntrustedType(type):
+        def __eq__(cls, other: object) -> bool:
+            callbacks.append("type_equality")
+            raise RuntimeError("untrusted type equality invoked")
+
+        def __ne__(cls, other: object) -> bool:
+            callbacks.append("type_inequality")
+            raise RuntimeError("untrusted type inequality invoked")
+
+    class ForeignScalar(metaclass=UntrustedType):
+        pass
+
+    payload = trace_fixture()
+    _attempts(payload)[0]["client_token"] = ForeignScalar()
+    _fail(payload, "payload.not_plain_json")
+    assert callbacks == []
+
+
+def test_shared_deep_plain_containers_keep_the_existing_unknown_field_refusal() -> None:
+    payload = trace_fixture()
+    shared: object = None
+    for _ in range(3000):
+        shared = [shared, shared]
+    payload["unrecognized"] = shared
+    _fail(payload, "payload.fields.not_exact")
+
+
+@pytest.mark.parametrize("field", ["fee", "effect_ref"])
+def test_deep_container_report_leaves_refuse_before_redelivery_equality(
+    field: str,
+) -> None:
+    left: object = None
+    right: object = None
+    for _ in range(50_000):
+        left = [left]
+        right = [right]
+    payload = trace_fixture()
+    first = _reports(payload)[0]
+    first[field] = left
+    replay = dict(first)
+    replay[field] = right
+    _reports(payload).append(replay)
+    _fail(payload, "reports.0.not_plain_scalars")
+
+
+@pytest.mark.parametrize("field", ["client_token", "request_hash"])
+def test_deep_container_attempt_identities_validate_both_operands(field: str) -> None:
+    left: object = None
+    right: object = None
+    for _ in range(50_000):
+        left = [left]
+        right = [right]
+    payload = trace_fixture()
+    _inner(payload, "request")[field] = left
+    _attempts(payload)[0][field] = right
+    result = preflight_execution_trace(payload)
+    assert not result.review_ready
+    assert result.reported_cumulative_qty is None
+    assert not result.claimed_accounting_structurally_possible
+    assert "request.not_plain_scalars" in result.reasons
+    assert "attempts.0.not_plain_scalars" in result.reasons
+    assert result.authorizes_order_placement is False
+    assert result.proves_fill_or_settlement is False
+
+
+@pytest.mark.parametrize("container", ["list", "dict"])
+@pytest.mark.parametrize(
+    ("left_group", "left_field", "right_group", "right_field"),
+    [
+        ("request", "client_token", "attempts", "client_token"),
+        ("request", "request_hash", "attempts", "request_hash"),
+        ("request", "run_id", "reports", "run_id"),
+        ("request", "arm_id", "reports", "arm_id"),
+        ("request", "account_id", "reports", "account_id"),
+        ("request", "client_token", "reports", "client_token"),
+        ("request", "request_hash", "reports", "request_hash"),
+        ("evidence", "venue_ref", "quote", "venue_ref"),
+        ("request", "listing_ref", "quote", "listing_ref"),
+    ],
+)
+def test_paired_identity_records_refuse_containers_on_both_sides(
+    container: str,
+    left_group: str,
+    left_field: str,
+    right_group: str,
+    right_field: str,
+) -> None:
+    payload = trace_fixture()
+    _scalar_record(payload, left_group)[left_field] = [] if container == "list" else {}
+    _scalar_record(payload, right_group)[right_field] = (
+        [] if container == "list" else {}
+    )
+    result = preflight_execution_trace(payload)
+    assert not result.review_ready
+    assert result.reported_cumulative_qty is None
+    assert not result.claimed_accounting_structurally_possible
+    for group in (left_group, right_group):
+        prefix = group + ".0" if group in ("attempts", "reports") else group
+        assert f"{prefix}.not_plain_scalars" in result.reasons
+    assert result.authorizes_order_placement is False
+    assert result.proves_fill_or_settlement is False
+
+
+@pytest.mark.parametrize("container", ["list", "dict"])
+@pytest.mark.parametrize(
+    ("group", "field", "prefix"),
+    [
+        ("request", "order_type", "request"),
+        ("evidence", "halt_at_arrival", "evidence"),
+        ("timeline", "arrival_utc", "timeline"),
+        ("quote", "kind", "quote"),
+        ("attempts", "dispatched", "attempts.0"),
+        ("reports", "fee_status", "reports.0"),
+        ("state", "lifecycle", "state"),
+    ],
+)
+def test_every_nested_leaf_record_requires_scalars_before_comparisons(
+    container: str, group: str, field: str, prefix: str
+) -> None:
+    payload = trace_fixture()
+    _scalar_record(payload, group)[field] = [] if container == "list" else {}
+    _fail(payload, f"{prefix}.not_plain_scalars")
 
 
 def test_coherent_synthetic_trace_still_grants_nothing() -> None:
@@ -175,12 +525,21 @@ def test_cumulative_decrease_refuses() -> None:
 @pytest.mark.parametrize(
     ("changed", "value", "reason"),
     [
-        ("submission_utc", "2026-01-02T10:32:09Z",
-         "causal.approval_utc->submission_utc.reversed"),
-        ("normalized_available_utc", "2026-01-02T10:32:10Z",
-         "causal.normalized_available_utc->input_cutoff_utc.reversed"),
-        ("arrival_utc", "2026-01-02T10:32:10Z",
-         "causal.submission_utc->arrival_utc.reversed"),
+        (
+            "submission_utc",
+            "2026-01-02T10:32:09Z",
+            "causal.approval_utc->submission_utc.reversed",
+        ),
+        (
+            "normalized_available_utc",
+            "2026-01-02T10:32:10Z",
+            "causal.normalized_available_utc->input_cutoff_utc.reversed",
+        ),
+        (
+            "arrival_utc",
+            "2026-01-02T10:32:10Z",
+            "causal.submission_utc->arrival_utc.reversed",
+        ),
     ],
 )
 def test_early_actions_and_late_information_fail(
@@ -193,16 +552,14 @@ def test_early_actions_and_late_information_fail(
 
 def test_coarse_timestamp_requires_external_causal_proof() -> None:
     payload = trace_fixture()
-    _inner(payload, "timeline")["normalized_available_utc"] = (
-        "2026-01-02T10:32:03Z"
-    )
+    _inner(payload, "timeline")["normalized_available_utc"] = "2026-01-02T10:32:03Z"
     _fail(
         payload,
         "causal.source_received_utc->normalized_available_utc.tie_unproven",
     )
-    _inner(payload, "tie_proofs")[
-        "source_received_utc->normalized_available_utc"
-    ] = "untrusted-external-ordering-reference"
+    _inner(payload, "tie_proofs")["source_received_utc->normalized_available_utc"] = (
+        "untrusted-external-ordering-reference"
+    )
     assert preflight_execution_trace(payload).review_ready
 
 

@@ -12,43 +12,101 @@ from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import cast
 
-_UTC = re.compile(
-    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z\Z"
-)
+_UTC = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z\Z")
 _MONEY = re.compile(r"(?:0|[1-9]\d*)(?:\.\d{1,12})?\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _ROOT = frozenset(
-    {"profile", "request", "evidence", "timeline", "tie_proofs", "quote",
-     "attempts", "reports", "state"}
+    {
+        "profile",
+        "request",
+        "evidence",
+        "timeline",
+        "tie_proofs",
+        "quote",
+        "attempts",
+        "reports",
+        "state",
+    }
 )
 _REQUEST = frozenset(
-    {"run_id", "arm_id", "account_id", "client_token", "request_hash",
-     "side", "order_type", "session", "requested_qty", "limit_price",
-     "listing_ref", "original_account_binding_ref"}
+    {
+        "run_id",
+        "arm_id",
+        "account_id",
+        "client_token",
+        "request_hash",
+        "side",
+        "order_type",
+        "session",
+        "requested_qty",
+        "limit_price",
+        "listing_ref",
+        "original_account_binding_ref",
+    }
 )
 _EVIDENCE = frozenset(
-    {"source_version_ref", "input_cutoff_utc", "mandate_ref", "risk_ref",
-     "session_capability_ref", "venue_ref", "policy_revision_ref",
-     "order_capability_ref", "halt_at_arrival"}
+    {
+        "source_version_ref",
+        "input_cutoff_utc",
+        "mandate_ref",
+        "risk_ref",
+        "session_capability_ref",
+        "venue_ref",
+        "policy_revision_ref",
+        "order_capability_ref",
+        "halt_at_arrival",
+    }
 )
 _TIMELINE = frozenset(
-    {"source_received_utc", "normalized_available_utc",
-     "analysis_completed_utc", "decision_utc", "approval_utc",
-     "risk_utc", "submission_utc", "arrival_utc"}
+    {
+        "source_received_utc",
+        "normalized_available_utc",
+        "analysis_completed_utc",
+        "decision_utc",
+        "approval_utc",
+        "risk_utc",
+        "submission_utc",
+        "arrival_utc",
+    }
 )
 _QUOTE = frozenset(
-    {"kind", "quote_event_utc", "quote_received_utc",
-     "max_age_seconds", "quote_receipt_ref", "venue_ref", "listing_ref"}
+    {
+        "kind",
+        "quote_event_utc",
+        "quote_received_utc",
+        "max_age_seconds",
+        "quote_receipt_ref",
+        "venue_ref",
+        "listing_ref",
+    }
 )
 _ATTEMPT = frozenset({"client_token", "request_hash", "dispatched"})
 _REPORT = frozenset(
-    {"report_id", "cumulative_qty", "execution_utc", "received_utc",
-     "price", "fee", "fee_status", "effect_ref",
-     "run_id", "arm_id", "account_id", "client_token", "request_hash"}
+    {
+        "report_id",
+        "cumulative_qty",
+        "execution_utc",
+        "received_utc",
+        "price",
+        "fee",
+        "fee_status",
+        "effect_ref",
+        "run_id",
+        "arm_id",
+        "account_id",
+        "client_token",
+        "request_hash",
+    }
 )
 _STATE = frozenset(
-    {"dispatch_knowledge", "lifecycle", "claimed_accounting_complete",
-     "terminal_receipt_ref", "ledger_receipt_ref", "valuation_receipt_ref"}
+    {
+        "dispatch_knowledge",
+        "lifecycle",
+        "claimed_accounting_complete",
+        "terminal_receipt_ref",
+        "ledger_receipt_ref",
+        "valuation_receipt_ref",
+    }
 )
 _EDGES = (
     ("source_received_utc", "normalized_available_utc"),
@@ -95,6 +153,43 @@ def _map(value: object) -> dict[str, object] | None:
     return cast(dict[str, object], value)
 
 
+def _plain_json(value: object) -> bool:
+    """Check concrete values before equality, without calling user methods.
+
+    Iteration avoids a new nesting limit. Ancestors detect cycles while allowing
+    shared plain containers, including an identical report supplied twice.
+    """
+    pending: list[tuple[object, bool]] = [(value, False)]
+    ancestors: set[int] = set()
+    checked: set[int] = set()
+    while pending:
+        item, leaving = pending.pop()
+        kind = type(item)
+        if item is None or kind is bool or kind is int or kind is float or kind is str:
+            continue
+        if kind is not list and kind is not dict:
+            return False
+        identity = id(item)
+        if leaving:
+            ancestors.remove(identity)
+            checked.add(identity)
+            continue
+        if identity in checked:
+            continue
+        if identity in ancestors:
+            return False
+        ancestors.add(identity)
+        pending.append((item, True))
+        if kind is dict:
+            mapping = cast(dict[object, object], item)
+            if any(type(key) is not str for key in mapping):
+                return False
+            pending.extend((child, False) for child in mapping.values())
+        else:
+            pending.extend((child, False) for child in cast(list[object], item))
+    return True
+
+
 def _text(value: object) -> bool:
     return type(value) is str and bool(value.strip())
 
@@ -134,6 +229,10 @@ def _exact(
         return {}
     if set(data) != expected:
         problems.append(f"{name}.fields.not_exact")
+    # Every field in these leaf records is scalar, including identity operands.
+    if any(type(item) is list or type(item) is dict for item in data.values()):
+        problems.append(f"{name}.not_plain_scalars")
+        return {}
     return data
 
 
@@ -155,10 +254,7 @@ def _ordered(
 
 
 def _delta_microseconds(value: timedelta) -> int:
-    return (
-        (value.days * 86400 + value.seconds) * 1_000_000
-        + value.microseconds
-    )
+    return (value.days * 86400 + value.seconds) * 1_000_000 + value.microseconds
 
 
 def preflight_execution_trace(payload: object) -> ExecutionTracePreflight:
@@ -168,6 +264,8 @@ def preflight_execution_trace(payload: object) -> ExecutionTracePreflight:
         return ExecutionTracePreflight(
             False, None, False, ("payload.not_plain_object",)
         )
+    if not _plain_json(root):
+        return ExecutionTracePreflight(False, None, False, ("payload.not_plain_json",))
     problems: list[str] = []
     if set(root) != _ROOT:
         problems.append("payload.fields.not_exact")
@@ -187,8 +285,12 @@ def preflight_execution_trace(payload: object) -> ExecutionTracePreflight:
         problems.append("tie_proofs.invalid_edge_or_ref")
 
     for field in (
-        "run_id", "arm_id", "account_id", "client_token",
-        "listing_ref", "original_account_binding_ref",
+        "run_id",
+        "arm_id",
+        "account_id",
+        "client_token",
+        "listing_ref",
+        "original_account_binding_ref",
     ):
         if not _text(request.get(field)):
             problems.append(f"request.{field}.missing")
@@ -218,8 +320,12 @@ def preflight_execution_trace(payload: object) -> ExecutionTracePreflight:
             problems.append("request.extended_session_requires_limit")
 
     for field in (
-        "source_version_ref", "mandate_ref", "risk_ref",
-        "session_capability_ref", "venue_ref", "policy_revision_ref",
+        "source_version_ref",
+        "mandate_ref",
+        "risk_ref",
+        "session_capability_ref",
+        "venue_ref",
+        "policy_revision_ref",
         "order_capability_ref",
     ):
         if not _text(evidence.get(field)):
@@ -303,7 +409,10 @@ def preflight_execution_trace(payload: object) -> ExecutionTracePreflight:
             continue
         assert isinstance(report_id, str)
         for name in (
-            "run_id", "arm_id", "account_id", "client_token",
+            "run_id",
+            "arm_id",
+            "account_id",
+            "client_token",
             "request_hash",
         ):
             if report.get(name) != request.get(name):
@@ -342,19 +451,24 @@ def preflight_execution_trace(payload: object) -> ExecutionTracePreflight:
                 problems.append(f"reports.{index}.execution_time_reversed")
             prior_report_execution = execution
         if received is not None:
-            if (
-                prior_report_receipt is not None
-                and received < prior_report_receipt
-            ):
+            if prior_report_receipt is not None and received < prior_report_receipt:
                 problems.append(f"reports.{index}.receipt_time_reversed")
             prior_report_receipt = received
         _ordered(
-            arrival, execution, "arrival_utc", "execution_utc",
-            ties, problems,
+            arrival,
+            execution,
+            "arrival_utc",
+            "execution_utc",
+            ties,
+            problems,
         )
         _ordered(
-            execution, received, "execution_utc", "received_utc",
-            ties, problems,
+            execution,
+            received,
+            "execution_utc",
+            "received_utc",
+            ties,
+            problems,
         )
         price = _amount(report.get("price"), positive=True)
         if price is None:
@@ -392,17 +506,20 @@ def preflight_execution_trace(payload: object) -> ExecutionTracePreflight:
         problems.append("state.dispatch_without_unique_attempt")
     lifecycle = state.get("lifecycle")
     if lifecycle not in (
-        "REFUSED", "OPEN", "PARTIAL", "FILLED", "CANCELLED",
-        "EXPIRED", "UNKNOWN",
+        "REFUSED",
+        "OPEN",
+        "PARTIAL",
+        "FILLED",
+        "CANCELLED",
+        "EXPIRED",
+        "UNKNOWN",
     ):
         problems.append("state.lifecycle.invalid")
     if lifecycle == "REFUSED" and (placed or cumulative):
         problems.append("state.refused_with_dispatch_or_fill")
     if lifecycle == "FILLED" and (type(qty) is not int or cumulative != qty):
         problems.append("state.filled_without_full_cumulative_qty")
-    if lifecycle == "PARTIAL" and (
-        type(qty) is not int or not 0 < cumulative < qty
-    ):
+    if lifecycle == "PARTIAL" and (type(qty) is not int or not 0 < cumulative < qty):
         problems.append("state.partial_inconsistent")
     if dispatch == "UNKNOWN" and lifecycle != "UNKNOWN":
         problems.append("state.unknown_dispatch_cannot_be_terminal")
@@ -417,7 +534,8 @@ def preflight_execution_trace(payload: object) -> ExecutionTracePreflight:
         if dispatch == "UNKNOWN" or unknown_fee:
             problems.append("state.unknown_dispatch_or_fee_cannot_be_complete")
         for field in (
-            "terminal_receipt_ref", "ledger_receipt_ref",
+            "terminal_receipt_ref",
+            "ledger_receipt_ref",
             "valuation_receipt_ref",
         ):
             if not _text(state.get(field)):
