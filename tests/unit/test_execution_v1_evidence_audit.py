@@ -1,11 +1,12 @@
-"""Deferred real V1 broker report evidence test oracles for Matthew #411."""
+"""Synthetic real V1 broker report evidence test oracles for Matthew #411."""
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import replace
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Sequence
+from typing import cast
 from uuid import UUID, uuid7
 
 import pytest
@@ -37,18 +38,24 @@ SESSION = SessionKeyV1(
 
 def intent() -> OrderIntentV1:
     return build_order_intent(
-        intent_id=uuid7(), client_order_id="synthetic-client-token-1",
-        session_key=SESSION, security_id=uuid7(),
-        side=OrderSide.BUY, quantity=5, order_type=OrderType.MARKET,
+        intent_id=uuid7(),
+        client_order_id="synthetic-client-token-1",
+        session_key=SESSION,
+        security_id=uuid7(),
+        side=OrderSide.BUY,
+        quantity=5,
+        order_type=OrderType.MARKET,
         created_at=T0,
     )
 
 
 def report(
     order: OrderIntentV1,
-    *, seconds: int = 1,
+    *,
+    seconds: int = 1,
     status: ExecutionStatus = ExecutionStatus.ACKNOWLEDGED,
-    quantity: int = 0, leaves: int = 5,
+    quantity: int = 0,
+    leaves: int = 5,
     broker_id: str | None = "mock-order",
     reason: str | None = None,
     fee: str = "0",
@@ -83,7 +90,8 @@ def claim(
         source_kind=source_kind,
         source_receipt_ref=source_ref,
         original_available_at=(
-            None if available_seconds is None
+            None
+            if available_seconds is None
             else T0 + timedelta(seconds=available_seconds)
         ),
         fee_receipt_ref=fee_ref,
@@ -98,7 +106,10 @@ def examine(
     as_of: datetime = T0 + timedelta(seconds=30),
 ) -> V1ExecutionAudit:
     return audit_execution_v1_originals(
-        intent=order, reports=reps, claims=evidences, as_of_utc=as_of,
+        intent=order,
+        reports=reps,
+        claims=evidences,
+        as_of_utc=as_of,
     )
 
 
@@ -143,13 +154,21 @@ def test_same_v1_zero_fee_requires_a_separate_original_fee_claim() -> None:
 def test_transport_timeout_current_robinhood_pattern_cannot_be_rejection() -> None:
     order = intent()
     a = report(
-        order, broker_id=None, status=ExecutionStatus.REJECTED,
+        order,
+        broker_id=None,
+        status=ExecutionStatus.REJECTED,
         reason="mcp_submission_timeout: synthetic transport error",
     )
     out = examine(
-        order, (a,),
-        (claim(a, source_kind="UNCONFIRMED_TRANSPORT",
-               source_ref="untrusted-transport-error"),)
+        order,
+        (a,),
+        (
+            claim(
+                a,
+                source_kind="UNCONFIRMED_TRANSPORT",
+                source_ref="untrusted-transport-error",
+            ),
+        ),
     )
     refuse(out, "REPORT_0_UNCONFIRMED_AS_TERMINAL_V1")
     assert out.claimed_last_v1_status == "rejected"
@@ -158,7 +177,9 @@ def test_transport_timeout_current_robinhood_pattern_cannot_be_rejection() -> No
 def test_mcp_transport_error_as_rejected_is_not_broker_confirmation() -> None:
     order = intent()
     a = report(
-        order, broker_id=None, status=ExecutionStatus.REJECTED,
+        order,
+        broker_id=None,
+        status=ExecutionStatus.REJECTED,
         reason="mcp_error: unconfirmed synthetic side effect",
     )
     out = examine(order, (a,), (claim(a),))
@@ -169,38 +190,47 @@ def test_mcp_transport_error_as_rejected_is_not_broker_confirmation() -> None:
 def test_cancellation_failed_cannot_look_like_canceled() -> None:
     order = intent()
     a = report(
-        order, status=ExecutionStatus.CANCELED, broker_id="test-order",
+        order,
+        status=ExecutionStatus.CANCELED,
+        broker_id="test-order",
         reason="cancellation_failed: timeout",
     )
-    out = examine(
-        order, (a,), (claim(a, source_kind="UNCONFIRMED_TRANSPORT"),)
-    )
+    out = examine(order, (a,), (claim(a, source_kind="UNCONFIRMED_TRANSPORT"),))
     refuse(out, "REPORT_0_UNCONFIRMED_AS_TERMINAL_V1")
 
 
 def test_rejected_broker_status_with_no_original_receipt_cannot_prove_it() -> None:
     order = intent()
     a = report(
-        order, status=ExecutionStatus.REJECTED,
-        broker_id=None, reason="insufficient_buying_power",
+        order,
+        status=ExecutionStatus.REJECTED,
+        broker_id=None,
+        reason="insufficient_buying_power",
     )
-    out = examine(
-        order, (a,), (claim(a, source_ref=None),)
-    )
+    out = examine(order, (a,), (claim(a, source_ref=None),))
     refuse(out, "REPORT_0_ORIGINAL_RECEIPT_CLAIM_MISSING")
 
 
 def test_original_local_before_send_refusal_preserves_no_broker_fact() -> None:
     order = intent()
     a = report(
-        order, status=ExecutionStatus.REJECTED, broker_id=None,
+        order,
+        status=ExecutionStatus.REJECTED,
+        broker_id=None,
         reason="unmapped security_id: local policy refusal",
-        quantity=0, leaves=5,
+        quantity=0,
+        leaves=5,
     )
     out = examine(
-        order, (a,),
-        (claim(a, source_kind="LOCAL_BEFORE_SEND",
-               source_ref="unverified-local-policy-receipt"),),
+        order,
+        (a,),
+        (
+            claim(
+                a,
+                source_kind="LOCAL_BEFORE_SEND",
+                source_ref="unverified-local-policy-receipt",
+            ),
+        ),
     )
     assert out.structurally_reviewable
     assert not out.authenticates_original_broker_or_account
@@ -210,11 +240,15 @@ def test_original_local_before_send_refusal_preserves_no_broker_fact() -> None:
 def test_untrusted_claimed_fill_still_cannot_settle_portfolio() -> None:
     order = intent()
     full = report(
-        order, status=ExecutionStatus.FILLED,
-        quantity=5, leaves=0, fee="1.50",
+        order,
+        status=ExecutionStatus.FILLED,
+        quantity=5,
+        leaves=0,
+        fee="1.50",
     )
     out = examine(
-        order, (full,),
+        order,
+        (full,),
         (claim(full, fee_ref="unverified-fee-receipt"),),
     )
     assert out.structurally_reviewable
@@ -226,15 +260,24 @@ def test_untrusted_claimed_fill_still_cannot_settle_portfolio() -> None:
 def test_cumulative_partial_then_complete_is_structurally_consistent() -> None:
     order = intent()
     part = report(
-        order, status=ExecutionStatus.PARTIALLY_FILLED,
-        seconds=1, quantity=2, leaves=3, fee="0.25",
+        order,
+        status=ExecutionStatus.PARTIALLY_FILLED,
+        seconds=1,
+        quantity=2,
+        leaves=3,
+        fee="0.25",
     )
     full = report(
-        order, status=ExecutionStatus.FILLED,
-        seconds=3, quantity=5, leaves=0, fee="0.75",
+        order,
+        status=ExecutionStatus.FILLED,
+        seconds=3,
+        quantity=5,
+        leaves=0,
+        fee="0.75",
     )
     out = examine(
-        order, (part, full),
+        order,
+        (part, full),
         (claim(part), claim(full, available_seconds=4)),
     )
     assert out.structurally_reviewable
@@ -256,8 +299,11 @@ def test_conflicting_same_report_id_must_fail_closed() -> None:
     report_id = uuid7()
     a = report(order, status=ExecutionStatus.ACKNOWLEDGED, report_id=report_id)
     b = report(
-        order, status=ExecutionStatus.REJECTED, report_id=report_id,
-        broker_id=None, reason="test rejection",
+        order,
+        status=ExecutionStatus.REJECTED,
+        report_id=report_id,
+        broker_id=None,
+        reason="test rejection",
     )
     out = examine(order, (a, b), (claim(a),))
     refuse(out, "REPORT_1_CONFLICTING_ID_REDELIVERY")
@@ -276,12 +322,21 @@ def test_out_of_order_or_future_source_receipt_cannot_be_historical_fact() -> No
     a = report(order, seconds=3)
     b = report(order, seconds=1)
     refuse(
-        examine(order, (a, b), (claim(a), claim(b),)),
+        examine(
+            order,
+            (a, b),
+            (
+                claim(a),
+                claim(b),
+            ),
+        ),
         "REPORT_1_NOT_STRICTLY_ORDERED",
     )
     refuse(
         examine(
-            order, (a,), (claim(a, available_seconds=45),),
+            order,
+            (a,),
+            (claim(a, available_seconds=45),),
         ),
         "REPORT_0_ORIGINAL_UNAVAILABLE_AT_CUTOFF",
     )
@@ -290,21 +345,29 @@ def test_out_of_order_or_future_source_receipt_cannot_be_historical_fact() -> No
 def test_regressing_or_overfilled_cumulative_report_is_not_valid() -> None:
     order = intent()
     partial = report(
-        order, status=ExecutionStatus.PARTIALLY_FILLED,
-        quantity=3, leaves=2,
+        order,
+        status=ExecutionStatus.PARTIALLY_FILLED,
+        quantity=3,
+        leaves=2,
     )
     lower = report(
-        order, seconds=3, status=ExecutionStatus.PARTIALLY_FILLED,
-        quantity=2, leaves=3,
+        order,
+        seconds=3,
+        status=ExecutionStatus.PARTIALLY_FILLED,
+        quantity=2,
+        leaves=3,
     )
     refuse(
-        examine(order, (partial, lower),
-                (claim(partial), claim(lower, available_seconds=4))),
+        examine(
+            order, (partial, lower), (claim(partial), claim(lower, available_seconds=4))
+        ),
         "REPORT_1_CUMULATIVE_QUANTITY_REGRESSED",
     )
     over = report(
-        order, status=ExecutionStatus.FILLED,
-        quantity=6, leaves=0,
+        order,
+        status=ExecutionStatus.FILLED,
+        quantity=6,
+        leaves=0,
     )
     refuse(
         examine(order, (over,), (claim(over),)),
@@ -315,7 +378,10 @@ def test_regressing_or_overfilled_cumulative_report_is_not_valid() -> None:
 def test_filled_v1_incomplete_quantity_is_not_final_account_reconciliation() -> None:
     order = intent()
     bad = report(
-        order, status=ExecutionStatus.FILLED, quantity=2, leaves=0,
+        order,
+        status=ExecutionStatus.FILLED,
+        quantity=2,
+        leaves=0,
     )
     refuse(
         examine(order, (bad,), (claim(bad),)),
@@ -333,7 +399,9 @@ def test_non_utc_review_cutoff_refuses() -> None:
     order = intent()
     a = report(order)
     out = examine(
-        order, (a,), (claim(a),),
+        order,
+        (a,),
+        (claim(a),),
         as_of=datetime(2026, 10, 20, 10, 2),
     )
     refuse(out, "AS_OF_UTC_INVALID")
@@ -343,9 +411,12 @@ def test_subclassed_or_constructed_forgeries_do_not_bypass_original_v1() -> None
     order = intent()
     a = report(order)
     forged = type(a).model_construct(
-        **(a.model_dump(mode="python") | {
-            "status": "silently-successful",
-        })
+        **(
+            a.model_dump(mode="python")
+            | {
+                "status": "silently-successful",
+            }
+        )
     )
     refuse(
         examine(order, (forged,), (claim(a),)),
@@ -361,3 +432,25 @@ def test_original_claim_wrong_report_id_is_not_a_valid_join() -> None:
         examine(order, (a,), (c,)),
         "ORIGINAL_REPORT_AND_CLAIM_SET_MISMATCH",
     )
+
+
+@pytest.mark.parametrize(
+    "invalid_available_at",
+    [
+        datetime(2026, 10, 20, 10, 0, 2),
+        datetime(2026, 10, 20, 10, 0, 2, tzinfo=timezone(timedelta(hours=1))),
+        "2026-10-20T10:00:02Z",
+        7,
+    ],
+)
+def test_malformed_original_clock_refuses_before_ordering_comparison(
+    invalid_available_at: object,
+) -> None:
+    order = intent()
+    original = report(order)
+    declaration = replace(
+        claim(original),
+        original_available_at=cast(datetime, invalid_available_at),
+    )
+    outcome = examine(order, (original,), (declaration,))
+    refuse(outcome, "CLAIM_0_ORIGINAL_CLOCK_INVALID")

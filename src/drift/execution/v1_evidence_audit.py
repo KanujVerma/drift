@@ -7,10 +7,10 @@ relabel persisted V1 reports, or grant any account dispatch authority.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from decimal import Decimal
-from typing import Literal, Sequence
+from typing import Literal
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -111,9 +111,14 @@ def audit_execution_v1_originals(
         issues.append("AS_OF_UTC_INVALID")
     try:
         original_intent = _reparse_intent(intent)
-    except (ValueError, TypeError, ValidationError):
+    except ValueError, TypeError, ValidationError:
         return V1ExecutionAudit(
-            False, None, "UNKNOWN", None, False, (),
+            False,
+            None,
+            "UNKNOWN",
+            None,
+            False,
+            (),
             ("ORIGINAL_INTENT_INVALID",),
         )
 
@@ -141,22 +146,19 @@ def audit_execution_v1_originals(
         if declaration.report_id in evidence:
             issues.append("CLAIM_DUPLICATE_REPORT_ID")
             continue
-        if (
-            type(declaration.source_kind) is not str
-            or declaration.source_kind not in (
-                "BROKER_OBSERVED", "LOCAL_BEFORE_SEND",
-                "UNCONFIRMED_TRANSPORT", "UNVERIFIED",
-            )
+        if type(declaration.source_kind) is not str or declaration.source_kind not in (
+            "BROKER_OBSERVED",
+            "LOCAL_BEFORE_SEND",
+            "UNCONFIRMED_TRANSPORT",
+            "UNVERIFIED",
         ):
             issues.append(f"CLAIM_{index}_SOURCE_KIND_INVALID")
-        if (
-            declaration.source_receipt_ref is not None
-            and not _ref(declaration.source_receipt_ref)
+        if declaration.source_receipt_ref is not None and not _ref(
+            declaration.source_receipt_ref
         ):
             issues.append(f"CLAIM_{index}_SOURCE_REF_INVALID")
-        if (
-            declaration.fee_receipt_ref is not None
-            and not _ref(declaration.fee_receipt_ref)
+        if declaration.fee_receipt_ref is not None and not _ref(
+            declaration.fee_receipt_ref
         ):
             issues.append(f"CLAIM_{index}_FEE_REF_INVALID")
         if declaration.original_available_at is not None and not _utc(
@@ -170,7 +172,7 @@ def audit_execution_v1_originals(
     for index, item in enumerate(reports):
         try:
             report = _reparse_report(item)
-        except (ValueError, TypeError, ValidationError):
+        except ValueError, TypeError, ValidationError:
             issues.append(f"REPORT_{index}_ORIGINAL_INVALID")
             continue
         prior = seen.get(report.report_id)
@@ -212,7 +214,8 @@ def audit_execution_v1_originals(
         if largest_cum is not None and report.cum_quantity < largest_cum:
             issues.append(f"REPORT_{index}_CUMULATIVE_QUANTITY_REGRESSED")
         largest_cum = (
-            report.cum_quantity if largest_cum is None
+            report.cum_quantity
+            if largest_cum is None
             else max(largest_cum, report.cum_quantity)
         )
 
@@ -223,9 +226,8 @@ def audit_execution_v1_originals(
             issues.append(f"REPORT_{index}_FILLED_WITH_UNRECONCILED_QUANTITY")
         if report.status is ExecutionStatus.PARTIALLY_FILLED and (
             not 0 < report.cum_quantity < original_intent.quantity
-            or report.leaves_quantity != (
-                original_intent.quantity - report.cum_quantity
-            )
+            or report.leaves_quantity
+            != (original_intent.quantity - report.cum_quantity)
         ):
             issues.append(f"REPORT_{index}_PARTIAL_FILL_QUANTITY_INCONSISTENT")
         if report.status in (ExecutionStatus.NEW, ExecutionStatus.ACKNOWLEDGED):
@@ -238,9 +240,10 @@ def audit_execution_v1_originals(
             unknown_outcome = True
             fee_claimed_complete = False
             continue
-        if claim.original_available_at is None or (
-            _utc(as_of_utc)
-            and claim.original_available_at > as_of_utc
+        if (
+            claim.original_available_at is None
+            or not _utc(claim.original_available_at)
+            or (_utc(as_of_utc) and claim.original_available_at > as_of_utc)
         ):
             issues.append(f"REPORT_{index}_ORIGINAL_UNAVAILABLE_AT_CUTOFF")
             unknown_outcome = True
@@ -248,19 +251,15 @@ def audit_execution_v1_originals(
             unknown_outcome = True
         if claim.source_kind == "UNVERIFIED":
             unknown_outcome = True
-        if (
-            claim.source_kind in ("BROKER_OBSERVED", "LOCAL_BEFORE_SEND")
-            and not _ref(claim.source_receipt_ref)
+        if claim.source_kind in ("BROKER_OBSERVED", "LOCAL_BEFORE_SEND") and not _ref(
+            claim.source_receipt_ref
         ):
             issues.append(f"REPORT_{index}_ORIGINAL_RECEIPT_CLAIM_MISSING")
             unknown_outcome = True
 
-        ambiguous = (
-            report.rejection_reason is not None
-            and any(
-                report.rejection_reason.lower().startswith(prefix)
-                for prefix in _AMBIGUOUS_PREFIXES
-            )
+        ambiguous = report.rejection_reason is not None and any(
+            report.rejection_reason.lower().startswith(prefix)
+            for prefix in _AMBIGUOUS_PREFIXES
         )
         if ambiguous:
             unknown_outcome = True
@@ -290,14 +289,24 @@ def audit_execution_v1_originals(
 
     if issues:
         return V1ExecutionAudit(
-            False, last_reported_status,
-            "UNKNOWN", None, False, (), tuple(issues),
+            False,
+            last_reported_status,
+            "UNKNOWN",
+            None,
+            False,
+            (),
+            tuple(issues),
         )
     return V1ExecutionAudit(
-        True, last_reported_status,
-        ("UNKNOWN" if unknown_outcome else
-         "LOCAL_NO_SEND_CLAIM" if local_before_send else
-         "V1_ORIGIN_CLAIM_ONLY"),
+        True,
+        last_reported_status,
+        (
+            "UNKNOWN"
+            if unknown_outcome
+            else "LOCAL_NO_SEND_CLAIM"
+            if local_before_send
+            else "V1_ORIGIN_CLAIM_ONLY"
+        ),
         largest_cum,
         fee_claimed_complete,
         tuple(report.report_hash for report in first_seq),

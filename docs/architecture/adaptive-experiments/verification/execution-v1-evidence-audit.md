@@ -1,6 +1,6 @@
 # V1 broker-report uncertainty and original-evidence audit (Issue #543)
 
-**Source-backed offline candidate, synthetic tests authored but NOT EXECUTED. This does not repair live S3/S4 execution or authorize any order.**
+**Source-backed offline candidate with focused local verification. Full exact-head CI and independent acceptance remain pending. This does not repair live S3/S4 execution or authorize any order.**
 
 ## Accountable ownership and live contract
 
@@ -15,7 +15,7 @@ Read [AGENTS.md](../../../../AGENTS.md), [current V1 execution](../../../../src/
 ## Exact new, nonoverlapping files
 
 - `src/drift/execution/v1_evidence_audit.py`: read-only actual `OrderIntentV1` and `ExecutionReportV1` audit.
-- `tests/unit/test_execution_v1_evidence_audit.py`: actual public-builder unrun synthetic/adversarial V1 source tests.
+- `tests/unit/test_execution_v1_evidence_audit.py`: actual public-builder synthetic/adversarial V1 source tests.
 - `docs/architecture/adaptive-experiments/verification/execution-v1-evidence-audit.md`: this contract and AntiGravity packet.
 
 No V1 schema or hash preimage, accepted broker adapter/router/journal, source/rights, account-risk ledger, original Matthew #411 S4/P4 draft, original #533, golden replay, .python-version, uv.lock, live connection or private broker credential was changed. There are no orders, cancellations, host connections, data fetches or account reads. The function accepts supplied in-memory objects and returns only a diagnostic.
@@ -39,9 +39,13 @@ The result names `structurally_reviewable`, `claimed_last_v1_status`, `conservat
 
 The three properties `authenticates_original_broker_or_account`, `authorizes_submission_cancellation_or_retry` and `proves_execution_or_settlement_complete` are **always false**. That is deliberate. This script cannot implement #411's account-wide hold or quiescence, guarantee no hidden transport retry, authenticate a source, or create a real V2 observation. Do not use it in execution routing or scientific promotion. Do not relabel old V1 history as an accepted V2 fact.
 
-## AntiGravity verification and explicit unrun test matrix
+The October 23 repair ensures a declared original-availability clock passes the existing exact datetime/UTC check before any ordering comparison. Previously, a naive datetime, string or integer was flagged invalid but still compared with the aware cutoff, raising TypeError instead of returning the promised conservative refusal. These malformed values and a non-UTC aware clock now return explicit invalid-clock reasons and UNKNOWN without positive fill/fee evidence. Existing valid UTC controls and all three false authority properties remain unchanged.
 
-**User's standing instruction is code and comprehensive documentation now, consolidated AntiGravity testing later. Neither the focused test suite nor Ruff, mypy, package build, canonical CI or provider probes were executed manually while authoring this PR.** Hosted GitHub Actions may start automatically on the draft; their eventual results must be inspected separately and cannot constitute independent source/architecture/operational approval.
+## Local verification and pending independent acceptance
+
+The October 23 continuation used unchanged pinned CPython 3.14.6 and `uv.lock`. Before the clock guard, the four new malformed-clock regressions produced **3 failed / 1 passed**; after the correction, all **23** audit tests passed. The combined audit and M1e compatibility run passed **78 tests / 1 warning** in 3.96 seconds. The warning comes from the existing deliberately forged Pydantic status case. Targeted Ruff lint/format, strict `mypy src tests` (473 source files), sdist/wheel build and Git whitespace checks passed. Import cleanup and pinned formatting also repair the earlier lint gate without changing the V1 wire or persisted hashes.
+
+These are local focused checks. Full exact-head hosted CI and independent source/architecture acceptance remain pending; successful checks cannot confer operational approval.
 
 AntiGravity should check the exact published PR HEAD, only these three additive paths and the accepted V1 source, then execute:
 
@@ -55,7 +59,7 @@ uv build
 git diff --check
 ```
 
-The written unrun tests use real `build_order_intent`, `build_execution_report` and `SessionKeyV1` models, with no actual broker:
+The tests use real `build_order_intent`, `build_execution_report` and `SessionKeyV1` models, with no actual broker:
 
 1. Authenticated-looking but untrusted V1 ACK is `V1_ORIGIN_CLAIM_ONLY`, not broker proof.
 2. Default zero V1 fee is not a verified zero; fee string claim remains unverified even when present.
