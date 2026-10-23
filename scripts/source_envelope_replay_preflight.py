@@ -15,29 +15,54 @@ _UTC = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _ROOT = frozenset({"profile", "decision_cutoff_utc", "source", "events", "coverage"})
 _SOURCE = frozenset(
-    {"publisher_ref", "provider_product_ref", "channel_ref",
-     "native_namespace", "query_scope_ref"}
+    {
+        "publisher_ref",
+        "provider_product_ref",
+        "channel_ref",
+        "native_namespace",
+        "query_scope_ref",
+    }
 )
 _EVENT = frozenset(
-    {"receipt_id", "source_event_id", "source_version_id", "version_basis",
-     "identity_evidence_ref", "content_state", "content_sha256",
-     "retained_content_ref", "published_utc", "first_received_utc",
-     "normalized_available_utc", "usable_available_utc",
-     "availability_basis", "historical_policy_ref", "relation",
-     "predecessor_receipt_id", "relation_evidence_ref", "quality_state"}
+    {
+        "receipt_id",
+        "source_event_id",
+        "source_version_id",
+        "version_basis",
+        "identity_evidence_ref",
+        "content_state",
+        "content_sha256",
+        "retained_content_ref",
+        "published_utc",
+        "first_received_utc",
+        "normalized_available_utc",
+        "usable_available_utc",
+        "availability_basis",
+        "historical_policy_ref",
+        "relation",
+        "predecessor_receipt_id",
+        "relation_evidence_ref",
+        "quality_state",
+    }
 )
 _COVERAGE = frozenset(
-    {"query_scope_ref", "interval_start_utc", "interval_end_utc",
-     "available_utc", "state", "matching_event_count",
-     "pagination_complete", "closure_evidence_ref", "failure_evidence_ref"}
+    {
+        "query_scope_ref",
+        "interval_start_utc",
+        "interval_end_utc",
+        "available_utc",
+        "state",
+        "matching_event_count",
+        "pagination_complete",
+        "closure_evidence_ref",
+        "failure_evidence_ref",
+    }
 )
 _VERSION_BASIS = frozenset({"SOURCE_NATIVE", "LOCALLY_OBSERVED", "UNKNOWN"})
 _CONTENT_STATE = frozenset({"COMPLETE", "PARTIAL", "MISSING"})
 _QUALITY = frozenset({"COMPLETE", "UNRESOLVED", "CONFLICT"})
 _RELATIONS = frozenset({"NONE", "UPDATE", "CORRECTION", "UNKNOWN"})
-_AVAILABILITY = frozenset(
-    {"LOCAL_OBSERVED", "HISTORICAL_RECONSTRUCTED", "UNKNOWN"}
-)
+_AVAILABILITY = frozenset({"LOCAL_OBSERVED", "HISTORICAL_RECONSTRUCTED", "UNKNOWN"})
 _COVERAGE_STATES = frozenset(
     {"COVERED_EMPTY", "COVERED_WITH_EVENTS", "PARTIAL", "FAILED", "UNKNOWN"}
 )
@@ -249,7 +274,11 @@ def preflight_source_envelope_replay(payload: object) -> EnvelopeReplayPreflight
         predecessor_id = event.get("predecessor_receipt_id")
         relation_ref = event.get("relation_evidence_ref")
         if relation in ("UPDATE", "CORRECTION"):
-            prior = known_receipts.get(predecessor_id) if type(predecessor_id) is str else None
+            prior = (
+                known_receipts.get(predecessor_id)
+                if type(predecessor_id) is str
+                else None
+            )
             if prior is None:
                 issues.append(f"{prefix}.predecessor_not_retained_earlier")
             else:
@@ -261,7 +290,8 @@ def preflight_source_envelope_replay(payload: object) -> EnvelopeReplayPreflight
                     issues.append(f"{prefix}.revision_changes_identity_basis")
                 prior_received = _utc(prior.get("first_received_utc"))
                 if (
-                    prior_received is not None and received is not None
+                    prior_received is not None
+                    and received is not None
                     and received <= prior_received
                 ):
                     issues.append(f"{prefix}.revision_not_later")
@@ -278,9 +308,7 @@ def preflight_source_envelope_replay(payload: object) -> EnvelopeReplayPreflight
         if (
             _nonblank(event.get("source_event_id"))
             and _nonblank(event.get("source_version_id"))
-            and event.get("version_basis") in (
-                "SOURCE_NATIVE", "LOCALLY_OBSERVED"
-            )
+            and event.get("version_basis") in ("SOURCE_NATIVE", "LOCALLY_OBSERVED")
             and event.get("content_state") == "COMPLETE"
             and _digest(digest)
             and _nonblank(event.get("identity_evidence_ref"))
@@ -345,12 +373,15 @@ def preflight_source_envelope_replay(payload: object) -> EnvelopeReplayPreflight
             coverage.get("closure_evidence_ref")
         ):
             issues.append("coverage.unclosed_cannot_claim_complete")
-        if type(count) is not int or (
-            status == "COVERED_EMPTY" and count != 0
-        ) or (status == "COVERED_WITH_EVENTS" and count <= 0):
+        if (
+            type(count) is not int
+            or (status == "COVERED_EMPTY" and count != 0)
+            or (status == "COVERED_WITH_EVENTS" and count <= 0)
+        ):
             issues.append("coverage.complete_count_inconsistent")
         if (
-            observed_available is not None and end is not None
+            observed_available is not None
+            and end is not None
             and observed_available < end
         ):
             issues.append("coverage.closed_before_interval_end")
@@ -358,29 +389,40 @@ def preflight_source_envelope_replay(payload: object) -> EnvelopeReplayPreflight
             # Only versions known by this cutoff can contradict a scoped-empty
             # claim; do not leak future deliveries backward into prior decisions.
             if any(
-                (version_available := _utc(e.get("usable_available_utc")))
-                is not None and version_available < cutoff
+                (version_available := _utc(e.get("usable_available_utc"))) is not None
+                and version_available < cutoff
                 for e in known_receipts.values()
             ):
                 issues.append("coverage.claims_empty_despite_event_receipts")
         if (
-            cutoff is not None and observed_available is not None
+            cutoff is not None
+            and observed_available is not None
             and observed_available < cutoff
             and not any(reason.startswith("coverage.") for reason in issues)
         ):
-            reported_at_cutoff = cast(str, status)
+            reported_at_cutoff = status
     elif status == "FAILED":
         if not _nonblank(coverage.get("failure_evidence_ref")):
             issues.append("coverage.failed_without_failure_receipt")
-        reported_at_cutoff = "FAILED" if (
-            cutoff is not None and observed_available is not None
-            and observed_available < cutoff
-        ) else "UNKNOWN"
+        reported_at_cutoff = (
+            "FAILED"
+            if (
+                cutoff is not None
+                and observed_available is not None
+                and observed_available < cutoff
+            )
+            else "UNKNOWN"
+        )
     elif status == "PARTIAL":
-        reported_at_cutoff = "PARTIAL" if (
-            cutoff is not None and observed_available is not None
-            and observed_available < cutoff
-        ) else "UNKNOWN"
+        reported_at_cutoff = (
+            "PARTIAL"
+            if (
+                cutoff is not None
+                and observed_available is not None
+                and observed_available < cutoff
+            )
+            else "UNKNOWN"
+        )
 
     # Invalid metadata cannot produce an affirmative eligibility or quiet feed.
     if issues:
@@ -388,6 +430,10 @@ def preflight_source_envelope_replay(payload: object) -> EnvelopeReplayPreflight
             False, (), (), tuple(sorted(conflicting)), "UNKNOWN", tuple(issues)
         )
     return EnvelopeReplayPreflight(
-        True, tuple(eligible), tuple(duplicates), tuple(sorted(conflicting)),
-        reported_at_cutoff, (),
+        True,
+        tuple(eligible),
+        tuple(duplicates),
+        tuple(sorted(conflicting)),
+        reported_at_cutoff,
+        (),
     )

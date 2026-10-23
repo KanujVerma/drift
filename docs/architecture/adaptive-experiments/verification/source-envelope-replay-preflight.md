@@ -1,6 +1,6 @@
 # Minimal SRC envelope replay preflight (Issue #528)
 
-**Status: source-code candidate; tests written but NOT RUN. Not an accepted SRC interface.**
+**Status: source-code candidate with focused local verification; M1e integration and independent acceptance remain blocked. Not an accepted SRC interface.**
 
 This implementation assist supplements Matthew's [#394](https://github.com/KanujVerma/drift/issues/394) / [draft S2 PR #415](https://github.com/KanujVerma/drift/pull/415). The canonical `contracts/source-envelope.md` on Matthew's unmerged draft remains producer-owned and unchanged. [#393](https://github.com/KanujVerma/drift/issues/393) defines TRIAGE behavior; [#381](https://github.com/KanujVerma/drift/issues/381) / [PR #487](https://github.com/KanujVerma/drift/pull/487) is its separate offline consumer, not modified by this branch. The companion new Matthew assist is #529 for #380 MANDATE.
 
@@ -33,12 +33,18 @@ Feed health is separate: even a complete event receipt cannot prove complete fee
 
 No claimed hash, user-submitted `identity_evidence_ref`, producer label, original-version assertion, synthetic body path or completeness receipt authenticates source origin, entitlement, rights, historical data or content truth. No data access, permission, runtime integration, statement of scientific eligibility or promotion results from a reviewable fixture.
 
-## Deferred AntiGravity verification contract
+## Local verification and blocked integration
 
-At the **exact branch head**, inspect these three added files against #394 S2, #393 accepted behavior, #381 consumer and [#524](https://github.com/KanujVerma/drift/issues/524) source-rights evidence checker (distinct scope). Then execute the user-deferred canonical checks:
+The October 23 retained-writer continuation inspected all formal review bodies and inline threads at the original head `5cb6b6f1b1a5fe359bf5f025449f83cb706e5b87`. Matthew's [review](https://github.com/KanujVerma/drift/pull/530#pullrequestreview-5595531172) requests source-inventory integration and style corrections; there are no inline threads. Pinned Ruff reproduced three E501 failures and formatting failures in both Python files. Formatting preserves both ASTs exactly. The continuation also removed one redundant, runtime-identity `typing.cast` after strict mypy rejected it; no temporal, receipt, correction, coverage or authority behavior changed.
+
+Using unchanged CPython 3.14.6 and `uv.lock`, all **25 focused synthetic tests** pass. Targeted Ruff lint/format, strict `mypy src tests` (472 source files), sdist/wheel build, relative document links and Git whitespace checks pass. The runtime AST remains identical after ignoring the removed identity cast, and the test AST is unchanged. These checks are local evidence, not independent producer acceptance.
+
+**Integration remains blocked.** The focused existing M1e inventory test still fails because `scripts/source_envelope_replay_preflight.py` is absent from its exact inventory. Independently applying its unchanged production AST guard to this actual source also refuses the method name `authorizes_ingestion_or_trading`, although the property always returns False. Adding only an inventory entry would therefore be insufficient. The retained guard writer and platform producer must coordinate explicit exact-path capability admission and controls. This PR does not modify or relax that protected guard, rename the source to avoid scanning, or waive either failure. Full new-head canonical CI must follow that separate admission decision; no full-pass claim is made.
+
+At the **exact published branch head**, independently inspect these three files against #394 S2, #393 accepted behavior, #381 consumer and [#524](https://github.com/KanujVerma/drift/issues/524) source-rights evidence checker (distinct scope). After authorized integration, run the complete required gate:
 
 ```bash
-uv run pytest tests/unit/test_source_envelope_replay_preflight.py -q
+uv run python -m pytest tests/unit/test_source_envelope_replay_preflight.py -q
 uv run ruff check scripts/source_envelope_replay_preflight.py tests/unit/test_source_envelope_replay_preflight.py
 uv run ruff format --check scripts/source_envelope_replay_preflight.py tests/unit/test_source_envelope_replay_preflight.py
 uv run mypy src tests
@@ -47,9 +53,9 @@ uv build
 git diff --check
 ```
 
-Also verify the branch diff has only the above three new paths, interpreter and `uv.lock` are unchanged, no U+2014 appears in changed files, all existing source grades/rights and triage behavior remain unchanged, and GitHub Actions exact-head results are not treated as scientific acceptance. **None of these commands was run by the implementation author.** AntiGravity should independently validate source version equality, multi-channel identity boundaries, replay determinism and all cases below, then report the true results including failures.
+Also verify the branch diff has only the above three new paths, interpreter and `uv.lock` are unchanged, no U+2014 appears in changed files, all existing source grades/rights and triage behavior remain unchanged, and GitHub Actions exact-head results are not treated as scientific acceptance. AntiGravity should independently validate source version equality, multi-channel identity boundaries, replay determinism and all cases below, then report the true results including failures. The original source-authoring checkpoint deferred tests; the executed continuation checks above supersede that deferral without supplying independent acceptance.
 
-### Positive, negative, and adversarial oracles (code-written, not executed)
+### Positive, negative, and adversarial oracles
 
 1. Complete synthetic version at a proven earlier cutoff is structurally reviewable, but has zero source authentication/permission.
 2. Publication unknown with a measured receipt retains that distinction; publication earlier than receipt cannot backdate usability.

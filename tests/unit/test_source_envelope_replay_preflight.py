@@ -145,11 +145,10 @@ def test_exact_duplicate_preserves_both_delivery_receipts() -> None:
     _events(data).append(redelivery)
     report = preflight_source_envelope_replay(data)
     assert report.structurally_reviewable
-    assert report.duplicate_receipt_pairs == (
-        ("receipt-1", "receipt-redelivery"),
-    )
+    assert report.duplicate_receipt_pairs == (("receipt-1", "receipt-redelivery"),)
     assert report.eligible_receipt_ids == (
-        "receipt-1", "receipt-redelivery",
+        "receipt-1",
+        "receipt-redelivery",
     )
 
 
@@ -175,7 +174,8 @@ def test_same_edition_with_changed_original_hash_is_conflict() -> None:
     assert not report.structurally_reviewable
     assert report.eligible_receipt_ids == ()
     assert report.conflicted_receipt_ids == (
-        "receipt-1", "receipt-conflict",
+        "receipt-1",
+        "receipt-conflict",
     )
     assert "events.1.same_edition_conflicting_content" in report.reasons
 
@@ -195,7 +195,11 @@ def test_similar_text_no_exact_identity_does_not_make_a_duplicate() -> None:
 @pytest.mark.parametrize(
     ("field", "value", "diagnostic"),
     [
-        ("content_state", "COMPLETE", "events.0.complete_content_without_retained_bytes"),
+        (
+            "content_state",
+            "COMPLETE",
+            "events.0.complete_content_without_retained_bytes",
+        ),
         ("relation", "UPDATE", "events.0.predecessor_not_retained_earlier"),
     ],
 )
@@ -232,7 +236,9 @@ def test_cannot_normalize_before_observation() -> None:
     _assert_refusal(data, "events.0.normalized_before_receipt")
 
 
-def test_retained_historical_archive_does_not_prove_original_local_availability() -> None:
+def test_retained_historical_archive_does_not_prove_original_local_availability() -> (
+    None
+):
     data = fixture()
     _event(data)["availability_basis"] = "HISTORICAL_RECONSTRUCTED"
     _event(data)["historical_policy_ref"] = "unaccepted-history-policy"
