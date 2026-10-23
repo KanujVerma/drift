@@ -1,4 +1,4 @@
-"""Synthetic forward readiness review vectors for #537, deliberately unrun."""
+"""Synthetic forward readiness review vectors for #537."""
 
 from __future__ import annotations
 
@@ -13,9 +13,7 @@ from scripts.forward_readiness_preflight import (
 )
 
 
-def fixture(
-    mode: str = "LOCAL_SHADOW", arm_count: int = 2
-) -> dict[str, object]:
+def fixture(mode: str = "LOCAL_SHADOW", arm_count: int = 2) -> dict[str, object]:
     dimensions, contracts, credential_mode = _MODES[mode]
     packet: dict[str, object] = {
         "profile": "synthetic-forward-readiness-review-v1",
@@ -32,7 +30,8 @@ def fixture(
                 "allocation_issuer_ref": "unverified-issuer",
                 "external_account_ref": (
                     f"unverified-{mode.lower()}-account-{i}"
-                    if mode != "LOCAL_SHADOW" else None
+                    if mode != "LOCAL_SHADOW"
+                    else None
                 ),
             }
             for i in range(arm_count)
@@ -99,9 +98,7 @@ def _refuse(packet: dict[str, object], expected: str) -> None:
     assert not result.proves_real_account_entitlement
 
 
-@pytest.mark.parametrize(
-    "mode", ["LOCAL_SHADOW", "CONNECTED_PAPER", "LIVE"]
-)
+@pytest.mark.parametrize("mode", ["LOCAL_SHADOW", "CONNECTED_PAPER", "LIVE"])
 def test_complete_mock_packet_remains_non_authoritative(mode: str) -> None:
     packet = fixture(mode)
     report = preflight_forward_readiness(packet)
@@ -124,11 +121,90 @@ def test_five_separate_paper_accounts_are_only_five_unverified_claims() -> None:
     assert not result.proves_real_account_entitlement
 
 
+@pytest.mark.parametrize("mode", ["LOCAL_SHADOW", "CONNECTED_PAPER", "LIVE"])
+@pytest.mark.parametrize("different_issuers", [False, True])
+def test_repeated_allocation_receipt_cannot_claim_five_independent_accounts(
+    mode: str, different_issuers: bool
+) -> None:
+    packet = fixture(mode, 5)
+    for index, account in enumerate(_accounts(packet)):
+        account["original_allocation_receipt_ref"] = "one-original-receipt"
+        if different_issuers:
+            account["allocation_issuer_ref"] = f"different-unverified-issuer-{index}"
+    before = deepcopy(packet)
+    _refuse(packet, "accounts.1.duplicate_original_allocation_receipt")
+    result = preflight_forward_readiness(packet)
+    assert result.checked_mode == mode
+    assert result.missing_or_unaccepted_dimensions == ()
+    assert result.unresolved_contracts == ()
+    assert result.reasons == tuple(
+        f"accounts.{index}.duplicate_original_allocation_receipt"
+        for index in range(1, 5)
+    )
+    assert packet == before
+
+
+@pytest.mark.parametrize("mode", ["LOCAL_SHADOW", "CONNECTED_PAPER", "LIVE"])
+@pytest.mark.parametrize(("first", "second"), [(0, 1), (0, 4), (2, 4)])
+def test_single_repeated_receipt_refuses_even_among_other_distinct_accounts(
+    mode: str, first: int, second: int
+) -> None:
+    packet = fixture(mode, 5)
+    accounts = _accounts(packet)
+    accounts[second]["original_allocation_receipt_ref"] = accounts[first][
+        "original_allocation_receipt_ref"
+    ]
+    _refuse(packet, f"accounts.{second}.duplicate_original_allocation_receipt")
+
+
+@pytest.mark.parametrize("mode", ["LOCAL_SHADOW", "CONNECTED_PAPER", "LIVE"])
+def test_distinct_receipts_under_same_issuer_remain_unverified_claims(
+    mode: str,
+) -> None:
+    packet = fixture(mode, 5)
+    accounts = _accounts(packet)
+    assert (
+        len({account["original_allocation_receipt_ref"] for account in accounts}) == 5
+    )
+    assert len({account["allocation_issuer_ref"] for account in accounts}) == 1
+    before = deepcopy(packet)
+    result = preflight_forward_readiness(packet)
+    assert result.structurally_reviewable
+    assert result.checked_mode == mode
+    assert result.claimed_distinct_account_count == 5
+    assert result.reasons == ()
+    assert result.missing_or_unaccepted_dimensions == ()
+    assert result.unresolved_contracts == ()
+    assert result == preflight_forward_readiness(deepcopy(packet))
+    assert packet == before
+    assert not result.authorizes_provider_connection
+    assert not result.authorizes_paper_live_or_deployment
+    assert not result.proves_real_account_entitlement
+
+
+@pytest.mark.parametrize("mode", ["LOCAL_SHADOW", "CONNECTED_PAPER", "LIVE"])
+def test_receipt_subclasses_refuse_without_hash_or_equality_callbacks(
+    mode: str,
+) -> None:
+    class HostileReceipt(str):
+        def __hash__(self) -> int:
+            raise AssertionError("untrusted receipt hash invoked")
+
+        def __eq__(self, _: object) -> bool:
+            raise AssertionError("untrusted receipt equality invoked")
+
+    packet = fixture(mode)
+    _accounts(packet)[1]["original_allocation_receipt_ref"] = HostileReceipt(
+        "mock-original-book-0"
+    )
+    _refuse(packet, "payload.not_plain_json")
+
+
 def test_five_paper_aliases_do_not_prove_five_independent_accounts() -> None:
     packet = fixture("CONNECTED_PAPER", 5)
-    _accounts(packet)[4]["external_account_ref"] = (
-        _accounts(packet)[0]["external_account_ref"]
-    )
+    _accounts(packet)[4]["external_account_ref"] = _accounts(packet)[0][
+        "external_account_ref"
+    ]
     _refuse(packet, "accounts.4.duplicate_external_account")
 
 
@@ -185,9 +261,7 @@ def test_expired_revoked_or_future_grant_is_no_evidence_of_permission() -> None:
     _map(packet, "operation_grant")["revoked"] = True
     _refuse(packet, "operation_grant.revoked_or_unknown")
     packet = fixture("CONNECTED_PAPER")
-    _map(packet, "operation_grant")["not_before_utc"] = (
-        "2026-10-20T18:30:00Z"
-    )
+    _map(packet, "operation_grant")["not_before_utc"] = "2026-10-20T18:30:00Z"
     _refuse(packet, "operation_grant.outside_claimed_window")
 
 
@@ -201,9 +275,7 @@ def test_all_synthetic_contract_labels_still_are_not_authentic_approvals() -> No
 
 def test_specific_missing_contract_is_reported_as_unresolved() -> None:
     packet = fixture()
-    _map(_map(packet, "contracts"), "m_sources_378")[
-        "claim"
-    ] = "DRAFT_ONLY"
+    _map(_map(packet, "contracts"), "m_sources_378")["claim"] = "DRAFT_ONLY"
     report = preflight_forward_readiness(packet)
     assert not report.structurally_reviewable
     assert "m_sources_378" in report.unresolved_contracts
@@ -212,12 +284,8 @@ def test_specific_missing_contract_is_reported_as_unresolved() -> None:
 
 def test_missing_rights_and_cost_evidence_remain_separate_gaps() -> None:
     packet = fixture()
-    _map(_map(packet, "dimensions"), "source_use_and_retention")[
-        "claim"
-    ] = "UNKNOWN"
-    _map(_map(packet, "dimensions"), "cost_attribution")[
-        "claim"
-    ] = "UNKNOWN"
+    _map(_map(packet, "dimensions"), "source_use_and_retention")["claim"] = "UNKNOWN"
+    _map(_map(packet, "dimensions"), "cost_attribution")["claim"] = "UNKNOWN"
     report = preflight_forward_readiness(packet)
     assert not report.structurally_reviewable
     assert "source_use_and_retention" in report.missing_or_unaccepted_dimensions
@@ -236,17 +304,17 @@ def test_feed_outage_or_held_account_blocks_any_claimed_readiness() -> None:
 
 def test_future_retention_or_source_evidence_cannot_backdate_readiness() -> None:
     packet = fixture()
-    _map(_map(packet, "dimensions"), "audit_retention")[
-        "first_available_utc"
-    ] = "2026-10-20T19:00:00Z"
+    _map(_map(packet, "dimensions"), "audit_retention")["first_available_utc"] = (
+        "2026-10-20T19:00:00Z"
+    )
     _refuse(packet, "dimensions.audit_retention.future_evidence")
 
 
 def test_cross_campaign_receipt_cannot_authorize_other_context() -> None:
     packet = fixture("CONNECTED_PAPER")
-    _map(_map(packet, "dimensions"), "mandate_and_risk")[
-        "scope_ref"
-    ] = "another-campaign"
+    _map(_map(packet, "dimensions"), "mandate_and_risk")["scope_ref"] = (
+        "another-campaign"
+    )
     _refuse(packet, "dimensions.mandate_and_risk.scope_mismatch")
     packet = fixture("CONNECTED_PAPER")
     _map(packet, "operation_grant")["scope_ref"] = "another-campaign"

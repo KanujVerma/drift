@@ -1,6 +1,6 @@
 # Offline forward readiness evidence-gap preflight (Issue #537)
 
-**Status: preparatory code with unrun synthetic tests. This is not forward-operations clearance.**
+**Status: focused-verified preparatory code; integration admission remains pending. This is not forward-operations clearance.**
 
 ## Scope and live ownership
 
@@ -13,7 +13,7 @@ Read [AGENTS.md](../../../../AGENTS.md), [D01-D17](../decisions.md), [agent work
 ## Exact three-file branch scope
 
 - `scripts/forward_readiness_preflight.py`: pure in-memory evidence-index classifier; no I/O.
-- `tests/unit/test_forward_readiness_preflight.py`: synthetic positive, missingness, revocation, alias, feed-failure and adversarial acceptance vectors, **not yet executed**.
+- `tests/unit/test_forward_readiness_preflight.py`: synthetic positive, missingness, revocation, alias, repeated-allocation-receipt, feed-failure and adversarial acceptance vectors.
 - `docs/architecture/adaptive-experiments/verification/forward-readiness-preflight.md`: this contract and future AntiGravity handoff.
 
 No existing producer path, real broker/order/credential adapter, risk gatekeeper, M2 account state, actual source history, experiment admission, UNKNOWN journal, containment mechanism, private data, `.python-version`, `uv.lock`, or original #384 design file is edited. The code never opens a file, accesses the host, creates credentials, contacts a provider or launches a trading process.
@@ -36,7 +36,7 @@ Each dimension has a `claim`, evidence reference, campaign scope, claimed first 
 
 Similarly, the conservative proposed contract list includes original #384 dependencies #378, #379, #380 and #377 for all modes, plus explicit UNKNOWN, RESULT/account provisioning and containment gaps for connected modes, and separate live authority for LIVE. `CLAIMED_ACCEPTED` is **not evidence of an actual merged or accepted contract**: Antigravity/owners must compare it to authoritative GitHub release, reviews, contracts and native dependency state. These are a preparatory *review checklist*, not a newly adopted normative dependency graph or alternative owner ruling.
 
-Every candidate account must bind a unique arm and original internal account identity, with a claimed original allocation receipt, issuer and environment. In connected modes, an additional external account reference must be nonblank and unique. If a prospective experiment asks for five arms, five aliases or duplicated paper-account references cannot be declared five independent connected accounts. Conversely, five distinct strings are **still not proof** that the broker issued five accounts. The original provisioner/issuer and their retained evidence are unresolved in [#508](https://github.com/KanujVerma/drift/issues/508), so this code does not create one.
+Every candidate account must bind a unique arm, original internal account identity and original allocation receipt reference, with a claimed issuer and environment. Exact repeated receipt references refuse in all three modes, even if issuer strings differ. Distinct receipt references under the same issuer remain structurally valid unverified claims; the checker does not require distinct issuers or define an issuer namespace or multi-account receipt contract. In connected modes, an additional external account reference must be nonblank and unique. If a prospective experiment asks for five arms, five aliases, repeated allocation receipts or duplicated paper-account references cannot be declared five independent connected accounts. Conversely, five distinct strings are **still not proof** that the broker issued five accounts. The original provisioner/issuer and their retained evidence are unresolved in [#508](https://github.com/KanujVerma/drift/issues/508), so this code does not create one.
 
 External candidate modes additionally require an explicit campaign-scoped, purpose-specific, unexpired, unrevoked and claimed-issuer/verification **operation-grant reference**. This is a synthetic paper document input and cannot issue/consume a real permit or satisfy a provider's terms. In LOCAL_SHADOW, an external operation grant is rejected rather than quietly activating a connected mode. Neither an empty paper account list, successful source query nor a claimed clear account hold can imply no obligations or safe execution. Missing feed coverage, uncertain settlement and an UNKNOWN hold produce explicit review gaps.
 
@@ -56,29 +56,40 @@ The current #384 scope is a future operational design request that cannot yet be
 
 The externally scoped `operation_grant` is *not* an accepted live credential permission or trading order mandate. Full LIVE remains independently gated; neither Conservative/Aggressive naming nor model confidence can bypass mandatory platform protection. There is no promise that five independent paper accounts are available, that Alpaca news/history is complete, or that a shadow backtest proves profits.
 
-## Deferred AntiGravity verification
+## Verification checkpoint and independent handoff
 
-The user expressly requested code and documentation now, with AntiGravity handling testing later. **No unit suite, Ruff, mypy, build, canonical CI inspection, provider probe, credential operation or paper/live test was executed during this authoring session.**
+The user's current necessary-test instruction, recorded in the [2026-10-23 exclusive continuation claim](https://github.com/KanujVerma/drift/issues/537#issuecomment-6369848017), supersedes the original authoring-session test deferral. Matthew's [formal review](https://github.com/KanujVerma/drift/pull/539#pullrequestreview-5605194446) requires repeated-receipt refusal, formatting and separately scoped guard admission. The source repair retains all existing identity checks, mode requirements, result fields and permanently false authority properties.
+
+Actual local checks with locked CPython 3.14.6:
+
+- Tests-only RED on the original source: **15 failed, 29 passed**, reproducing repeated allocation evidence counted as independent accounts in every mode.
+- GREEN after repair: **44 focused tests passed**. They cover a repeated five-account receipt, nonadjacent repeated pairs, different issuer labels, distinct receipts from a shared issuer, hostile receipt subclasses, deterministic replay and read-only input behavior. Refusals suppress the claimed count and keep all authority properties false.
+- **87 additional probes passed**, covering counts from one to the existing 32-arm maximum, same/different issuer labels, duplicate positions and malformed receipt references. This is fixture behavior, not real provisioning evidence.
+- Whole-repository Ruff lint and format checks passed on 564 files; strict `mypy src tests` passed on 472 source files; source distribution and wheel built successfully.
+- Git whitespace/scope checks and four local Markdown-link checks passed. All 25 original fixture/test functions are unchanged by AST comparison; Python pins, lockfile, package metadata and shared guard bytes remain unchanged.
+- The unchanged ordinary production AST scanner accepts the actual final script. Four parsed-only socket, environment-read, subprocess and dynamic-evaluation injections refuse; none of those injected operations was executed. AST comparison confirms that only receipt-reference uniqueness changed source semantics.
+- One focused inventory probe failed at `tests/integration/test_m1e_compatibility.py:976` solely because `scripts/forward_readiness_preflight.py` is absent from `INERT_SOURCE_PATHS`. The shared guard remains unchanged.
+
+This exact script requires separately scoped inventory admission and actual ordinary AST coverage. [#553](https://github.com/KanujVerma/drift/issues/553) and [#554](https://github.com/KanujVerma/drift/issues/554) cover different explicit paths; neither is silently expanded here. Preserve unknown-path negatives, pins and the separate #502 -> #487 / #394 gates. The full pytest suite was not rerun against the known inventory failure. Earlier [hosted run 39554730050](https://github.com/KanujVerma/drift/actions/runs/39554730050) failed at the original head and does not qualify this repair. Fresh canonical CI and independent acceptance remain pending. No provider probe, credential operation or paper/live test was performed.
 
 At the exact GitHub PR head, AntiGravity should read the three new files, #384, and the current producer/consumer documents and run:
 
 ```bash
-uv run pytest tests/unit/test_forward_readiness_preflight.py -q
+uv run python -m pytest tests/unit/test_forward_readiness_preflight.py -q
 uv run ruff check scripts/forward_readiness_preflight.py tests/unit/test_forward_readiness_preflight.py
 uv run ruff format --check scripts/forward_readiness_preflight.py tests/unit/test_forward_readiness_preflight.py
 uv run mypy src tests
-uv run pytest
 uv build
 git diff --check
 ```
 
-Review the complete [agent workflow](../../agent-workflow.md), confirm the branch changes exactly three new paths, no U+2014 or secrets appear, and Python and `uv.lock` are unchanged. GitHub Actions may run automatically but does not constitute independent AntiGravity or platform-owner acceptance.
+Review the complete [agent workflow](../../agent-workflow.md), confirm the branch changes exactly the three reserved paths, no U+2014 or secrets appear, and Python and `uv.lock` are unchanged. Run the full `uv run pytest` gate after accepted exact-path guard integration is composed. Automatic hosted CI remains enabled and does not constitute independent AntiGravity or platform-owner acceptance.
 
-### Synthetic test oracles, written but unrun
+### Synthetic test oracles
 
 1. Structurally coherent LOCAL_SHADOW, CONNECTED_PAPER and LIVE fixture packets are all permanently unauthorized for network, paper and live operations.
 2. Five distinct *claimed* external accounts remain unverified; reusing one external account string for two arms refuses.
-3. Cross-arm reuse of an internal account, missing original allocation evidence, duplicate arm and incorrect arm count refuse.
+3. Cross-arm reuse of an internal account, repeated original allocation receipt, missing allocation evidence, duplicate arm and incorrect arm count refuse. Changing issuer labels does not cure a repeated receipt; distinct receipts do not require distinct issuers.
 4. LOCAL_SHADOW with external credentials or broker-account reference refuses; paper/live need their own declared grant purpose and credentials mode.
 5. Revoked, expired, future or wrong-campaign grant claims refuse without substituting a grace window.
 6. Unaccepted source/EXEC/mandate/methodology contract, missing required authority or unknown source rights and cost dimensions remain explicit separate gaps.
@@ -91,4 +102,4 @@ Further real deployment testing, account proofs, source acquisition or broker va
 
 ## Review and final disposition
 
-Matthew owns final #384 architecture and producer decisions, supported by source, EXEC, mandate, scientific, containment, account and rights custodians. AntiGravity independently verifies this exact code head and reports actual failures/corrections. Do not merge this preparatory draft based solely on green synthetic tests. Keep original #384 blocked and open, with no paper/live permission or attempt to override its dependencies.
+The publishing integrator records the exact candidate head and routes its separate guard admission before canonical verification on the composed source. Matthew owns final #384 architecture and producer decisions, supported by source, EXEC, mandate, scientific, containment, account and rights custodians. AntiGravity independently verifies this exact code head and reports actual failures/corrections. Do not merge this preparatory draft based solely on green synthetic tests. Keep original #384 blocked and open, with no paper/live permission or attempt to override its dependencies.

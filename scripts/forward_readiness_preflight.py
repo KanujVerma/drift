@@ -11,67 +11,126 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import cast
 
-_UTC = re.compile(
-    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z\Z"
+_UTC = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z\Z")
+_ROOT = frozenset(
+    {
+        "profile",
+        "mode",
+        "as_of_utc",
+        "campaign_ref",
+        "requested_arm_count",
+        "accounts",
+        "dimensions",
+        "contracts",
+        "feed_state",
+        "account_hold",
+        "credential_mode",
+        "operation_grant",
+        "reviews",
+    }
 )
-_ROOT = frozenset({
-    "profile", "mode", "as_of_utc", "campaign_ref",
-    "requested_arm_count", "accounts", "dimensions",
-    "contracts", "feed_state", "account_hold",
-    "credential_mode", "operation_grant", "reviews",
-})
-_ACCOUNT = frozenset({
-    "arm_id", "account_id", "environment_ref",
-    "original_allocation_receipt_ref", "allocation_issuer_ref",
-    "external_account_ref",
-})
-_DIMENSION = frozenset({
-    "claim", "evidence_ref", "scope_ref", "first_available_utc",
-    "producer_ref", "independent_review_ref",
-})
-_CONTRACT = frozenset({
-    "claim", "accepted_revision_ref", "review_ref",
-})
-_GRANT = frozenset({
-    "issuer_ref", "issuer_verification_ref", "scope_ref",
-    "principal_ref", "not_before_utc", "expires_utc",
-    "revoked", "purpose",
-})
-_REVIEWS = frozenset({
-    "producer_ref", "source_custodian_ref", "independent_reviewer_ref",
-    "independent_review_receipt_ref",
-})
-_COMMON_DIMS = frozenset({
-    "original_information", "source_use_and_retention",
-    "venue_and_session", "mandate_and_risk",
-    "execution_and_fills", "account_state_and_orders",
-    "account_arm_isolation", "cost_attribution",
-    "audit_retention", "privacy_and_storage",
-    "feed_failure_containment", "rollback_and_fencing",
-})
-_EXTERNAL_DIMS = frozenset({
-    "provider_account_entitlement", "provider_feed_entitlement",
-    "credential_custody", "broker_order_permission",
-    "durable_unknown_reconciliation", "external_budget",
-    "executor_containment", "account_issuer_verification",
-})
-_LIVE_DIMS = frozenset({
-    "live_capital_scope", "live_broker_account",
-    "human_operational_signoff", "loss_and_liquidity_controls",
-})
-_COMMON_CONTRACTS = frozenset({
-    "m_sources_378", "m_timing_379",
-    "m_mandate_380", "scientific_method_377",
-})
-_EXTERNAL_CONTRACTS = frozenset({
-    "m_unknown_411", "m_result_376",
-    "m_provisioning_508", "containment_396",
-})
+_ACCOUNT = frozenset(
+    {
+        "arm_id",
+        "account_id",
+        "environment_ref",
+        "original_allocation_receipt_ref",
+        "allocation_issuer_ref",
+        "external_account_ref",
+    }
+)
+_DIMENSION = frozenset(
+    {
+        "claim",
+        "evidence_ref",
+        "scope_ref",
+        "first_available_utc",
+        "producer_ref",
+        "independent_review_ref",
+    }
+)
+_CONTRACT = frozenset(
+    {
+        "claim",
+        "accepted_revision_ref",
+        "review_ref",
+    }
+)
+_GRANT = frozenset(
+    {
+        "issuer_ref",
+        "issuer_verification_ref",
+        "scope_ref",
+        "principal_ref",
+        "not_before_utc",
+        "expires_utc",
+        "revoked",
+        "purpose",
+    }
+)
+_REVIEWS = frozenset(
+    {
+        "producer_ref",
+        "source_custodian_ref",
+        "independent_reviewer_ref",
+        "independent_review_receipt_ref",
+    }
+)
+_COMMON_DIMS = frozenset(
+    {
+        "original_information",
+        "source_use_and_retention",
+        "venue_and_session",
+        "mandate_and_risk",
+        "execution_and_fills",
+        "account_state_and_orders",
+        "account_arm_isolation",
+        "cost_attribution",
+        "audit_retention",
+        "privacy_and_storage",
+        "feed_failure_containment",
+        "rollback_and_fencing",
+    }
+)
+_EXTERNAL_DIMS = frozenset(
+    {
+        "provider_account_entitlement",
+        "provider_feed_entitlement",
+        "credential_custody",
+        "broker_order_permission",
+        "durable_unknown_reconciliation",
+        "external_budget",
+        "executor_containment",
+        "account_issuer_verification",
+    }
+)
+_LIVE_DIMS = frozenset(
+    {
+        "live_capital_scope",
+        "live_broker_account",
+        "human_operational_signoff",
+        "loss_and_liquidity_controls",
+    }
+)
+_COMMON_CONTRACTS = frozenset(
+    {
+        "m_sources_378",
+        "m_timing_379",
+        "m_mandate_380",
+        "scientific_method_377",
+    }
+)
+_EXTERNAL_CONTRACTS = frozenset(
+    {
+        "m_unknown_411",
+        "m_result_376",
+        "m_provisioning_508",
+        "containment_396",
+    }
+)
 _LIVE_CONTRACTS = frozenset({"forward_authority_384", "live_risk_review"})
 _MODES = {
-    "LOCAL_SHADOW": (
-        _COMMON_DIMS, _COMMON_CONTRACTS, "NO_EXTERNAL_CREDENTIALS"
-    ),
+    "LOCAL_SHADOW": (_COMMON_DIMS, _COMMON_CONTRACTS, "NO_EXTERNAL_CREDENTIALS"),
     "CONNECTED_PAPER": (
         _COMMON_DIMS | _EXTERNAL_DIMS,
         _COMMON_CONTRACTS | _EXTERNAL_CONTRACTS,
@@ -123,8 +182,7 @@ def _plain_json(value: object, depth: int, budget: list[int]) -> bool:
         )
     if type(value) is dict:
         return len(value) <= 100 and all(
-            type(k) is str and len(k) <= 128
-            and _plain_json(v, depth + 1, budget)
+            type(k) is str and len(k) <= 128 and _plain_json(v, depth + 1, budget)
             for k, v in value.items()
         )
     return False
@@ -172,9 +230,7 @@ def preflight_forward_readiness(payload: object) -> ForwardReadinessPreflight:
         expected_credentials = None
         resolved_mode: str | None = None
     else:
-        expected_dimensions, expected_contracts, expected_credentials = (
-            _MODES[mode]
-        )
+        expected_dimensions, expected_contracts, expected_credentials = _MODES[mode]
         resolved_mode = mode
     if root.get("profile") != "synthetic-forward-readiness-review-v1":
         reasons.append("profile.unsupported")
@@ -194,6 +250,7 @@ def preflight_forward_readiness(payload: object) -> ForwardReadinessPreflight:
     seen_arms: set[str] = set()
     seen_account_ids: set[str] = set()
     seen_external_ids: set[str] = set()
+    seen_allocation_receipts: set[str] = set()
     if type(accounts) is not list:
         reasons.append("accounts.not_plain_list")
         accounts = []
@@ -203,8 +260,11 @@ def preflight_forward_readiness(payload: object) -> ForwardReadinessPreflight:
         label = f"accounts.{index}"
         account = _obj(raw, _ACCOUNT, label, reasons)
         for field in (
-            "arm_id", "account_id", "environment_ref",
-            "original_allocation_receipt_ref", "allocation_issuer_ref",
+            "arm_id",
+            "account_id",
+            "environment_ref",
+            "original_allocation_receipt_ref",
+            "allocation_issuer_ref",
         ):
             if not _text(account.get(field)):
                 reasons.append(f"{label}.{field}.missing")
@@ -220,6 +280,12 @@ def preflight_forward_readiness(payload: object) -> ForwardReadinessPreflight:
             if internal in seen_account_ids:
                 reasons.append(f"{label}.duplicate_account_alias")
             seen_account_ids.add(internal)
+        receipt = account.get("original_allocation_receipt_ref")
+        if _text(receipt):
+            assert isinstance(receipt, str)
+            if receipt in seen_allocation_receipts:
+                reasons.append(f"{label}.duplicate_original_allocation_receipt")
+            seen_allocation_receipts.add(receipt)
         external = account.get("external_account_ref")
         if resolved_mode == "LOCAL_SHADOW":
             if external is not None:
@@ -238,13 +304,13 @@ def preflight_forward_readiness(payload: object) -> ForwardReadinessPreflight:
     )
     incomplete_dimensions: list[str] = []
     for name in sorted(expected_dimensions):
-        item = _obj(
-            dimensions.get(name), _DIMENSION, f"dimensions.{name}", reasons
-        )
+        item = _obj(dimensions.get(name), _DIMENSION, f"dimensions.{name}", reasons)
         if item.get("claim") != "CLAIMED_COMPLETE":
             incomplete_dimensions.append(name)
         for field in (
-            "evidence_ref", "scope_ref", "producer_ref",
+            "evidence_ref",
+            "scope_ref",
+            "producer_ref",
             "independent_review_ref",
         ):
             if not _text(item.get(field)):
@@ -256,15 +322,12 @@ def preflight_forward_readiness(payload: object) -> ForwardReadinessPreflight:
             reasons.append(f"dimensions.{name}.first_available_utc.invalid")
         elif as_of is not None and when > as_of:
             reasons.append(f"dimensions.{name}.future_evidence")
-        if (
-            _text(item.get("producer_ref"))
-            and item.get("producer_ref") == item.get("independent_review_ref")
+        if _text(item.get("producer_ref")) and item.get("producer_ref") == item.get(
+            "independent_review_ref"
         ):
             reasons.append(f"dimensions.{name}.self_review")
 
-    contracts = _obj(
-        root.get("contracts"), expected_contracts, "contracts", reasons
-    )
+    contracts = _obj(root.get("contracts"), expected_contracts, "contracts", reasons)
     unresolved: list[str] = []
     for name in sorted(expected_contracts):
         item = _obj(contracts.get(name), _CONTRACT, f"contracts.{name}", reasons)
@@ -282,12 +345,9 @@ def preflight_forward_readiness(payload: object) -> ForwardReadinessPreflight:
     for field in _REVIEWS:
         if not _text(reviews.get(field)):
             reasons.append(f"reviews.{field}.missing")
-    if (
-        _text(reviews.get("producer_ref"))
-        and reviews.get("producer_ref") == reviews.get(
-            "independent_reviewer_ref"
-        )
-    ):
+    if _text(reviews.get("producer_ref")) and reviews.get(
+        "producer_ref"
+    ) == reviews.get("independent_reviewer_ref"):
         reasons.append("reviews.self_review")
 
     raw_grant = root.get("operation_grant")
@@ -297,7 +357,9 @@ def preflight_forward_readiness(payload: object) -> ForwardReadinessPreflight:
     elif resolved_mode in ("CONNECTED_PAPER", "LIVE"):
         grant = _obj(raw_grant, _GRANT, "operation_grant", reasons)
         for field in (
-            "issuer_ref", "issuer_verification_ref", "scope_ref",
+            "issuer_ref",
+            "issuer_verification_ref",
+            "scope_ref",
             "principal_ref",
         ):
             if not _text(grant.get(field)):
