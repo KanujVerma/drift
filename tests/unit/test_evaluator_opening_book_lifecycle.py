@@ -1043,7 +1043,9 @@ def test_public_class_descriptor_cannot_intercept_prepared_collaborator(
                 def injected(_owner: object) -> object:
                     nonlocal accessed
                     accessed += 1
-                    raise AssertionError("base-class descriptor reached private executor")
+                    raise AssertionError(
+                        "base-class descriptor reached private executor"
+                    )
 
                 # A property is a data descriptor, which outranks an ordinary
                 # instance field unless the private subclass shadows it.
