@@ -618,26 +618,36 @@ def screen_feed_coverage(
     *, coverage: FeedCoverage | None, decision_cutoff: datetime
 ) -> FeedScreeningResult:
     """Classify a covered-empty interval without manufacturing an event."""
+    # Compare the same canonical UTC instants used by the record hash. Native
+    # same-zone datetime comparisons use wall time across repeated DST hours.
+    start_utc = _utc(coverage.start_at) if type(coverage) is FeedCoverage else None
+    end_utc = _utc(coverage.end_at) if type(coverage) is FeedCoverage else None
+    observed_utc = (
+        _utc(coverage.observed_at) if type(coverage) is FeedCoverage else None
+    )
+    available_utc = (
+        _utc(coverage.available_at) if type(coverage) is FeedCoverage else None
+    )
+    cutoff_utc = _utc(decision_cutoff)
     good = (
         type(coverage) is FeedCoverage
         and _token(coverage.source_id)
         and _reference(coverage.scope_ref)
-        and _utc(coverage.start_at) is not None
-        and _utc(coverage.end_at) is not None
-        and _utc(coverage.observed_at) is not None
-        and _utc(coverage.available_at) is not None
-        and _utc(decision_cutoff) is not None
+        and start_utc is not None
+        and end_utc is not None
+        and observed_utc is not None
+        and available_utc is not None
+        and cutoff_utc is not None
         and type(coverage.event_count) is int
         and coverage.event_count >= 0
-        and coverage.start_at < coverage.end_at
-        and coverage.observed_at <= coverage.available_at <= decision_cutoff
+        and start_utc < end_utc
+        and observed_utc <= available_utc <= cutoff_utc
         # A claimed COMPLETE half-open interval [start, end) is not evidence
         # of full coverage until its end has actually been observed. An
         # ongoing partial interval may still truthfully be INCOMPLETE.
-        # Convert both aware endpoints to UTC for the closure comparison.
         and (
             coverage.state not in ("covered_empty", "covered_with_events")
-            or coverage.end_at.astimezone(UTC) <= coverage.observed_at.astimezone(UTC)
+            or end_utc <= observed_utc
         )
         and coverage.state
         in ("covered_empty", "covered_with_events", "partial", "failed", "unknown")
@@ -682,16 +692,10 @@ def screen_feed_coverage(
             "reason": reason,
             "source_id": source_id,
             "scope_ref": _ref_dict(scope_ref),
-            "start_at": _utc(coverage.start_at)
-            if type(coverage) is FeedCoverage
-            else None,
-            "end_at": _utc(coverage.end_at) if type(coverage) is FeedCoverage else None,
-            "observed_at": _utc(coverage.observed_at)
-            if type(coverage) is FeedCoverage
-            else None,
-            "available_at": _utc(coverage.available_at)
-            if type(coverage) is FeedCoverage
-            else None,
+            "start_at": start_utc,
+            "end_at": end_utc,
+            "observed_at": observed_utc,
+            "available_at": available_utc,
             "count": coverage.event_count
             if type(coverage) is FeedCoverage and type(coverage.event_count) is int
             else None,
@@ -700,7 +704,7 @@ def screen_feed_coverage(
                 if type(coverage) is FeedCoverage and type(coverage.state) is str
                 else None
             ),
-            "decision_cutoff": _utc(decision_cutoff),
+            "decision_cutoff": cutoff_utc,
         }
     )
     return FeedScreeningResult(
