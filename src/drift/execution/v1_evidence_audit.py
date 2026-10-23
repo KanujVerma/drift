@@ -193,6 +193,8 @@ def audit_execution_v1_originals(
     fee_claimed_complete = bool(first_seq)
     unknown_outcome = not first_seq
     local_before_send = False
+    prior_local_no_send = False
+    prior_broker_rejection = False
     for index, report in enumerate(first_seq):
         if report.intent_id != original_intent.intent_id:
             issues.append(f"REPORT_{index}_FOREIGN_INTENT")
@@ -269,6 +271,16 @@ def audit_execution_v1_originals(
                 ExecutionStatus.EXPIRED,
             ):
                 issues.append(f"REPORT_{index}_UNCONFIRMED_AS_TERMINAL_V1")
+        if report.intent_id == original_intent.intent_id and report.cum_quantity > 0:
+            if prior_local_no_send:
+                issues.append(
+                    f"REPORT_{index}_LOCAL_NO_SEND_CONTRADICTED_BY_LATER_FILL"
+                )
+            if prior_broker_rejection and report.status in (
+                ExecutionStatus.PARTIALLY_FILLED,
+                ExecutionStatus.FILLED,
+            ):
+                issues.append(f"REPORT_{index}_FILL_AFTER_CLAIMED_BROKER_REJECTION")
         if claim.source_kind == "LOCAL_BEFORE_SEND":
             local_before_send = True
             if (
@@ -277,6 +289,17 @@ def audit_execution_v1_originals(
                 or report.broker_order_id is not None
             ):
                 issues.append(f"REPORT_{index}_LOCAL_REFUSAL_CONTRADICTS_FILL")
+            elif report.intent_id == original_intent.intent_id:
+                prior_local_no_send = True
+        # Unconfirmed or ambiguous V1 rejection labels are not definite
+        # broker-rejection claims. Do not invent retry/correction lineage.
+        if (
+            claim.source_kind == "BROKER_OBSERVED"
+            and report.status is ExecutionStatus.REJECTED
+            and not ambiguous
+            and report.intent_id == original_intent.intent_id
+        ):
+            prior_broker_rejection = True
         if (
             claim.source_kind == "BROKER_OBSERVED"
             and report.status is ExecutionStatus.REJECTED

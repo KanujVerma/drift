@@ -257,6 +257,180 @@ def test_untrusted_claimed_fill_still_cannot_settle_portfolio() -> None:
     assert not out.proves_execution_or_settlement_complete
 
 
+@pytest.mark.parametrize("source_kind", ["LOCAL_BEFORE_SEND", "BROKER_OBSERVED"])
+@pytest.mark.parametrize(
+    ("later_status", "quantity", "leaves"),
+    [
+        (ExecutionStatus.PARTIALLY_FILLED, 2, 3),
+        (ExecutionStatus.FILLED, 5, 0),
+    ],
+)
+def test_original_rejection_claim_cannot_be_followed_by_same_intent_fill(
+    source_kind: SourceClaim,
+    later_status: ExecutionStatus,
+    quantity: int,
+    leaves: int,
+) -> None:
+    order = intent()
+    rejected = report(
+        order,
+        status=ExecutionStatus.REJECTED,
+        broker_id=None,
+        reason="synthetic explicit rejection",
+    )
+    later = report(
+        order,
+        seconds=3,
+        status=later_status,
+        quantity=quantity,
+        leaves=leaves,
+        fee="1.50",
+    )
+    assert rejected.intent_id == later.intent_id == order.intent_id
+    outcome = examine(
+        order,
+        (rejected, later),
+        (
+            claim(rejected, source_kind=source_kind, fee_ref="unverified-zero-fee"),
+            claim(later, available_seconds=4, fee_ref="unverified-fill-fee"),
+        ),
+    )
+    reason = (
+        "REPORT_1_LOCAL_NO_SEND_CONTRADICTED_BY_LATER_FILL"
+        if source_kind == "LOCAL_BEFORE_SEND"
+        else "REPORT_1_FILL_AFTER_CLAIMED_BROKER_REJECTION"
+    )
+    refuse(outcome, reason)
+    assert outcome.claimed_last_v1_status == later_status.value
+    assert outcome.distinct_report_hashes == ()
+
+
+@pytest.mark.parametrize("source_kind", ["UNCONFIRMED_TRANSPORT", "UNVERIFIED"])
+@pytest.mark.parametrize(
+    "initial_status", [ExecutionStatus.ACKNOWLEDGED, ExecutionStatus.REJECTED]
+)
+def test_uncertain_original_claim_is_not_a_definite_rejection_latch(
+    source_kind: SourceClaim, initial_status: ExecutionStatus
+) -> None:
+    order = intent()
+    uncertain = report(
+        order,
+        status=initial_status,
+        broker_id=None,
+        reason=(
+            "synthetic uncertain rejection label"
+            if initial_status is ExecutionStatus.REJECTED
+            else None
+        ),
+    )
+    resolved = report(
+        order,
+        seconds=3,
+        status=ExecutionStatus.FILLED,
+        quantity=5,
+        leaves=0,
+    )
+    outcome = examine(
+        order,
+        (uncertain, resolved),
+        (
+            claim(uncertain, source_kind=source_kind),
+            claim(resolved, available_seconds=4),
+        ),
+    )
+    assert outcome.structurally_reviewable
+    assert outcome.flagged_reasons == ()
+    assert outcome.claimed_last_v1_status == "filled"
+    assert outcome.largest_claimed_cumulative_fill == 5
+    assert outcome.conservative_broker_knowledge == "UNKNOWN"
+    assert not outcome.claimed_original_fee_complete
+    assert not outcome.authenticates_original_broker_or_account
+    assert not outcome.authorizes_submission_cancellation_or_retry
+    assert not outcome.proves_execution_or_settlement_complete
+
+
+def test_claimed_broker_rejection_without_later_fill_remains_idempotent() -> None:
+    order = intent()
+    rejected = report(
+        order,
+        status=ExecutionStatus.REJECTED,
+        broker_id=None,
+        reason="synthetic explicit broker rejection",
+    )
+    evidence = claim(rejected)
+    original = examine(order, (rejected,), (evidence,))
+    redelivered = examine(order, (rejected, rejected), (evidence,))
+    assert original == redelivered
+    assert original.structurally_reviewable
+    assert original.flagged_reasons == ()
+    assert original.conservative_broker_knowledge == "V1_ORIGIN_CLAIM_ONLY"
+    assert original.largest_claimed_cumulative_fill == 0
+    assert not original.authenticates_original_broker_or_account
+    assert not original.authorizes_submission_cancellation_or_retry
+    assert not original.proves_execution_or_settlement_complete
+
+
+@pytest.mark.parametrize(
+    "later_status", [ExecutionStatus.CANCELED, ExecutionStatus.REJECTED]
+)
+def test_nonfill_terminal_report_can_carry_prior_cumulative_quantity(
+    later_status: ExecutionStatus,
+) -> None:
+    order = intent()
+    partial = report(
+        order,
+        status=ExecutionStatus.PARTIALLY_FILLED,
+        quantity=2,
+        leaves=3,
+    )
+    rejected = build_execution_report(
+        report_id=uuid7(),
+        intent_id=order.intent_id,
+        broker_order_id="mock-order",
+        status=ExecutionStatus.REJECTED,
+        cum_quantity=2,
+        leaves_quantity=3,
+        avg_fill_price=Decimal("100"),
+        rejection_reason="synthetic remainder rejection",
+        reported_at=T0 + timedelta(seconds=3),
+    )
+    later = build_execution_report(
+        report_id=uuid7(),
+        intent_id=order.intent_id,
+        broker_order_id="mock-order",
+        status=later_status,
+        cum_quantity=2,
+        leaves_quantity=3,
+        avg_fill_price=Decimal("100"),
+        rejection_reason=(
+            "synthetic repeated remainder rejection"
+            if later_status is ExecutionStatus.REJECTED
+            else None
+        ),
+        reported_at=T0 + timedelta(seconds=5),
+    )
+    assert rejected.last_fill_quantity is None
+    assert later.last_fill_quantity is None
+    outcome = examine(
+        order,
+        (partial, rejected, later),
+        (
+            claim(partial),
+            claim(rejected, available_seconds=4),
+            claim(later, available_seconds=6),
+        ),
+    )
+    assert outcome.structurally_reviewable
+    assert outcome.flagged_reasons == ()
+    assert outcome.claimed_last_v1_status == later_status.value
+    assert outcome.largest_claimed_cumulative_fill == 2
+    assert outcome.conservative_broker_knowledge == "V1_ORIGIN_CLAIM_ONLY"
+    assert not outcome.claimed_original_fee_complete
+    assert not outcome.authenticates_original_broker_or_account
+    assert not outcome.authorizes_submission_cancellation_or_retry
+    assert not outcome.proves_execution_or_settlement_complete
+
+
 def test_cumulative_partial_then_complete_is_structurally_consistent() -> None:
     order = intent()
     part = report(
