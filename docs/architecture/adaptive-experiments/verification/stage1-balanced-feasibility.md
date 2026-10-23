@@ -1,6 +1,6 @@
 # Stage 1 Balanced target-weight structural feasibility (Issue #542)
 
-**Status: development-only mathematical candidate. Code and synthetic tests committed but NOT RUN. No operative risk limits are accepted or changed.**
+**Status: development-only mathematical candidate with focused local verification. Full exact-head CI and independent acceptance remain pending. No operative risk limits are accepted or changed.**
 
 ## Why this slice exists
 
@@ -13,7 +13,7 @@ Read [AGENTS.md](../../../../AGENTS.md), [agent workflow](../../agent-workflow.m
 ## Exact new files, no overlap
 
 - `src/drift/risk/stage1_balanced_feasibility.py`: typed, in-memory Decimal/Fraction arithmetic and exhaustive subset enumeration.
-- `tests/unit/test_stage1_balanced_feasibility.py`: intentionally unrun numeric and adversarial regression tests.
+- `tests/unit/test_stage1_balanced_feasibility.py`: numeric and adversarial regression tests.
 - `docs/architecture/adaptive-experiments/verification/stage1-balanced-feasibility.md`: this source/fixture/test and acceptance handoff.
 
 No existing M2 evaluator, risk-policy, gatekeeper, account, B3/B4/B5, Stage 1 E1/E6B, original #380 proposal, existing #529 approval preflight, CI, source provider, broker, private data, interpreter or lockfile was edited. The helper has no file, network or broker operations.
@@ -28,7 +28,9 @@ The caller must explicitly supply a bounded, uniquely named study universe of `E
 
 `DevelopmentTargetCaps(per_etf, equities, bonds, gold, gross)` has **no defaults**. Each cap is caller-supplied as an exact finite Decimal fraction in [0,1]. A float, NaN, infinity, negative number, cap exceeding 100%, forged `Decimal` subclass or wrong policy class refuses. A caller cannot infer a legitimate actual ETF classification from this fixture.
 
-`review_equal_target_subset(members, selected_tickers, policy)` checks only an **equal continuous notional target**: for n distinct selected funds, each fund weight is the exact rational 1/n, each class weight is the number of selected members in that class divided by n, and target gross investment is 1. Each cap check uses the exact inequality `Decimal(class_count) <= proposed_cap * Decimal(n)`; there is **no binary float** and no rounding at a cap boundary. The result returns rational weights, class counts reflected in weights, explicit reason codes for proposed ETF/class/gross violations and `approved_for_order_or_risk_control=False`.
+`review_equal_target_subset(members, selected_tickers, policy)` checks only an **equal continuous notional target**: for n distinct selected funds, each fund weight is the exact rational 1/n, each class weight is the number of selected members in that class divided by n, and target gross investment is 1. Each cap check compares `Fraction(class_count, n) <= Fraction(proposed_cap)`, converting the entire finite Decimal cap exactly without ambient Decimal arithmetic. There is **no binary float** and no rounding at a cap boundary. The result returns rational weights, class counts reflected in weights, explicit reason codes for proposed ETF/class/gross violations and `approved_for_order_or_risk_control=False`.
+
+The October 23 repair closes a demonstrated precision defect in the earlier Decimal multiplication. A supplied cap `0.16666666666666666666666666666` is below 1/6, but multiplying it by six at precision 28 rounded up to one and incorrectly admitted the target. The same defect affected all five cap categories. Exact Fraction comparisons retain the supplied limits, and regression cases exercise below-boundary refusals plus exact-equality positive controls at Decimal precisions 6, 28 and 80.
 
 `enumerate_equal_target_subsets(members, policy, selected_count=None)` uses the current B4/B5 rule `ceil(n/2)` unless an explicit valid count is supplied. It deterministically enumerates all unordered possible ticker combinations and reports how many satisfy the supplied cap scenario, with bounded example rejected sets, violation counts and a separate B3 all-member equal-target analysis. Max universe size 16 is a defensive fixture limit, not an accepted investment mandate. It deliberately does **not** call `B4MomentumStrategy`, `B5LowVolatilityStrategy` or a market-data provider; actual history may yield non-uniform monthly rankings. A target being structurally feasible is not evidence that B4/B5 will ever select that set, or that its orders are possible at the next open.
 
@@ -56,9 +58,11 @@ The project must keep the frozen B3/B4/B5 semantics and apply the **same effecti
 
 `EqualTargetReview.approved_for_order_or_risk_control` and `EqualTargetSweep.approves_mandate_or_execution` are always **False**, and `is_historical_acceptance_rate=False` is also permanent. An integer enumeration is never market performance, an actual trader's probability of gain or a risk-policy signature.
 
-## Deferred AntiGravity acceptance
+## Local verification and pending independent acceptance
 
-Per user instruction, **no tests, Ruff, mypy, build or scientific simulation have been executed** on this branch. AntiGravity should inspect the exact PR HEAD, all three new paths and the Stage 1 research packet. Under the unchanged pinned interpreter/lockfile run:
+The October 23 continuation used the unchanged pinned CPython 3.14.6 and `uv.lock`. The new precision regressions first produced **10 failed / 8 passed** against the original arithmetic; after the repair, all **40** feasibility tests passed. The combined feasibility and M1e compatibility run passed **95 tests**. Targeted Ruff lint and formatting, strict `mypy src tests` (473 source files), package sdist/wheel build and Git whitespace checks passed. An initial mypy run also exposed two existing fixture-typing issues; explicit role typing and moving the intentional float-test suppression to its actual argument resolved them without changing runtime expectations.
+
+These are local focused checks, not full current-head CI or independent scientific acceptance. AntiGravity should inspect the exact published PR HEAD, all three paths, the precision regressions and the Stage 1 research packet. Under the unchanged pinned interpreter/lockfile run:
 
 ```bash
 uv run pytest tests/unit/test_stage1_balanced_feasibility.py -q
@@ -70,6 +74,6 @@ uv build
 git diff --check
 ```
 
-Verify the exact numeric matrix above independently and adversarial cases: inverted or duplicate universe members, unrecognized role/ticker, invalid float/NaN caps, boolean selected count, invalid selected/security, class-only limits independent of per-ETF, 80% gross refusing fully invested B3 and six-member B4/B5, a shuffled ticker input yielding the same answer, and zero ability to stage an order. Compare against accepted B4/B5 `ceil(n/2)` source behavior; real fee/price/dynamic target/timing tests belong to Matthew under a newly approved integrated write-set. GitHub Actions may run on draft publication, but its results are separate from the user-requested consolidated AntiGravity pass. **No observed test success or independent approval is asserted here.**
+Verify the exact numeric matrix above independently and adversarial cases: inverted or duplicate universe members, unrecognized role/ticker, invalid float/NaN caps, boolean selected count, invalid selected/security, class-only limits independent of per-ETF, 80% gross refusing fully invested B3 and six-member B4/B5, Decimal precision invariance, a shuffled ticker input yielding the same answer, and zero ability to stage an order. Compare against accepted B4/B5 `ceil(n/2)` source behavior; real fee/price/dynamic target/timing tests belong to Matthew under a newly approved integrated write-set. GitHub Actions results are separate from the consolidated AntiGravity review. **No independent approval is asserted here.**
 
 Next Matthew action: approve or amend actual policy and risk/EXEC version semantics after empirical development-only comparison and independent scientific review; Kanuj owns final numerical/methodology freeze. Original #380 remains open, proposal #414 remains draft and unchanged. Keep this draft unmerged until independent test/contract review; no orders, real data or capital.

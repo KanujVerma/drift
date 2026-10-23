@@ -8,11 +8,12 @@ risk-override path, source entitlement, or approval for broker orders.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from fractions import Fraction
 from itertools import combinations
-from typing import Literal, Sequence
+from typing import Literal
 
 type AssetRole = Literal["EQUITY", "BOND", "GOLD"]
 
@@ -99,9 +100,7 @@ def _check_members(
     for item in copied:
         if type(item) is not ETFStudyMember:
             raise ValueError("STUDY_MEMBER_EXACT_TYPE_REQUIRED")
-        if type(item.ticker) is not str or not _TICKER.fullmatch(
-            item.ticker
-        ):
+        if type(item.ticker) is not str or not _TICKER.fullmatch(item.ticker):
             raise ValueError("STUDY_TICKER_INVALID")
         if type(item.role) is not str or item.role not in _ROLES:
             raise ValueError("STUDY_ROLE_INVALID")
@@ -121,18 +120,18 @@ def _evaluate_validated(
     count_e = sum(role_by_ticker[s] == "EQUITY" for s in selected)
     count_b = sum(role_by_ticker[s] == "BOND" for s in selected)
     count_g = sum(role_by_ticker[s] == "GOLD" for s in selected)
-    one = Decimal(size)
     rejected: list[str] = []
-    if Decimal(1) > policy.per_etf * one:
+    # Fraction preserves the entire finite Decimal cap independently of context.
+    if Fraction(1, size) > Fraction(policy.per_etf):
         rejected.append("SINGLE_ETF")
-    if Decimal(count_e) > policy.equities * one:
+    if Fraction(count_e, size) > Fraction(policy.equities):
         rejected.append("EQUITY_CLASS")
-    if Decimal(count_b) > policy.bonds * one:
+    if Fraction(count_b, size) > Fraction(policy.bonds):
         rejected.append("BOND_CLASS")
-    if Decimal(count_g) > policy.gold * one:
+    if Fraction(count_g, size) > Fraction(policy.gold):
         rejected.append("GOLD_CLASS")
     # Exactly 100% continuous target investment, before whole-share rounding.
-    if Decimal(size) > policy.gross * one:
+    if Fraction(1) > Fraction(policy.gross):
         rejected.append("GROSS_INVESTMENT")
     return EqualTargetReview(
         selected_tickers=selected,
@@ -187,10 +186,7 @@ def enumerate_equal_target_subsets(
         selected_count = (len(universe) + 1) // 2
     if type(selected_count) is not int or not 1 <= selected_count <= len(universe):
         raise ValueError("SELECTION_COUNT_INVALID")
-    if (
-        type(max_rejection_examples) is not int
-        or not 0 <= max_rejection_examples <= 20
-    ):
+    if type(max_rejection_examples) is not int or not 0 <= max_rejection_examples <= 20:
         raise ValueError("REJECTION_EXAMPLE_LIMIT_INVALID")
 
     full = _evaluate_validated(
@@ -198,10 +194,16 @@ def enumerate_equal_target_subsets(
     )
     total = 0
     feasible = 0
-    violations = {key: 0 for key in (
-        "SINGLE_ETF", "EQUITY_CLASS", "BOND_CLASS",
-        "GOLD_CLASS", "GROSS_INVESTMENT",
-    )}
+    violations = {
+        key: 0
+        for key in (
+            "SINGLE_ETF",
+            "EQUITY_CLASS",
+            "BOND_CLASS",
+            "GOLD_CLASS",
+            "GROSS_INVESTMENT",
+        )
+    }
     examples: list[tuple[str, ...]] = []
     for selected in combinations((m.ticker for m in universe), selected_count):
         review = _evaluate_validated(universe, selected, policy)
