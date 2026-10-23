@@ -115,8 +115,10 @@ def test_capture_path_reads_repo_pin_before_identity(
         stdlib_hash="c" * 64, distribution_hash="d" * 64
     )
     pinned = (
-        Path(capture.__file__).resolve().parents[1] / ".python-version"
-    ).read_text(encoding="utf-8").strip()
+        (Path(capture.__file__).resolve().parents[1] / ".python-version")
+        .read_text(encoding="utf-8")
+        .strip()
+    )
     assert pinned == "3.14.6"
     assert runtime.version == pinned
 
@@ -125,9 +127,7 @@ def test_staging_runtime_does_not_override_measured_host(
     measured: capture._RuntimeObservation, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     stale = replace(measured, version="3.14.5")
-    monkeypatch.setattr(
-        capture, "_current_runtime_observation", lambda: stale
-    )
+    monkeypatch.setattr(capture, "_current_runtime_observation", lambda: stale)
     with pytest.raises(ValueError, match="M1E_RUNTIME_PIN_MISMATCH"):
         capture._measure_pinned_runtime(
             stdlib_hash="a" * 64, distribution_hash="b" * 64

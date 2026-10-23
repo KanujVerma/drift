@@ -78,9 +78,9 @@ def _validated_runtime_identity(
             "M1E_RUNTIME_PIN_MISMATCH: measured interpreter is not the "
             "exact repository CPython pin"
         )
-    if (
-        observed.operating_system != "Darwin"
-        or observed.machine.lower() not in ("arm64", "aarch64")
+    if observed.operating_system != "Darwin" or observed.machine.lower() not in (
+        "arm64",
+        "aarch64",
     ):
         raise ValueError("M1E_UNSUPPORTED_CAPTURE_PLATFORM: macOS arm64 required")
     if not observed.build:
