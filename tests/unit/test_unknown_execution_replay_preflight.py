@@ -1,8 +1,9 @@
-"""Unrun A1 S3/S4 synthetic safety vectors for Matthew #411 / assist #533."""
+"""A1 S3/S4 synthetic safety vectors for Matthew #411 / assist #533."""
 
 from __future__ import annotations
 
 from copy import deepcopy
+from decimal import Decimal
 
 import pytest
 
@@ -42,9 +43,7 @@ def append(
     event: dict[str, object] = {
         "event_id": f"mock-event-{sequence}",
         "sequence": sequence,
-        "previous_event_id": (
-            existing[-1]["event_id"] if existing else None
-        ),
+        "previous_event_id": (existing[-1]["event_id"] if existing else None),
         "kind": kind,
         "account_key": data["account_key"],
         "environment_ref": data["environment_ref"],
@@ -104,7 +103,8 @@ def test_prepared_then_send_without_broker_proof_requires_hold() -> None:
 def test_unknown_transport_does_not_invent_rejection_or_zero_exposure() -> None:
     data = started()
     append(
-        data, "OBSERVED_UNKNOWN",
+        data,
+        "OBSERVED_UNKNOWN",
         reason_code="submission_unconfirmed",
     )
     report = preflight_unknown_execution_replay(data)
@@ -119,9 +119,11 @@ def test_unknown_transport_does_not_invent_rejection_or_zero_exposure() -> None:
 def test_known_partial_with_unknown_fee_remains_unsettled() -> None:
     data = started()
     append(
-        data, "OBSERVED_CONFIRMED",
+        data,
+        "OBSERVED_CONFIRMED",
         broker_status="partially_filled",
-        cumulative_qty=3, cumulative_fee_usd=None,
+        cumulative_qty=3,
+        cumulative_fee_usd=None,
     )
     report = preflight_unknown_execution_replay(data)
     assert report.structurally_reviewable
@@ -134,8 +136,10 @@ def test_known_partial_with_unknown_fee_remains_unsettled() -> None:
 def test_later_unknown_retains_historical_known_quantity_without_finality() -> None:
     data = started()
     append(
-        data, "OBSERVED_CONFIRMED",
-        broker_status="partially_filled", cumulative_qty=3,
+        data,
+        "OBSERVED_CONFIRMED",
+        broker_status="partially_filled",
+        cumulative_qty=3,
         cumulative_fee_usd="0.50",
     )
     append(data, "OBSERVED_UNKNOWN", reason_code="cancellation_unconfirmed")
@@ -144,6 +148,7 @@ def test_later_unknown_retains_historical_known_quantity_without_finality() -> N
     assert report.latest_broker_knowledge == "UNKNOWN"
     assert report.last_confirmed_cumulative_qty == 3
     assert report.last_confirmed_broker_status == "partially_filled"
+    assert report.last_confirmed_cumulative_fee_usd == Decimal("0.50")
     assert report.account_hold_required
 
 
@@ -167,7 +172,9 @@ def test_local_pre_dispatch_refusal_is_not_broker_rejection() -> None:
     data = fixture()
     append(data, "PREPARED")
     append(
-        data, "NOT_SENT", authority_ref="untrusted-verified-refusal",
+        data,
+        "NOT_SENT",
+        authority_ref="untrusted-verified-refusal",
     )
     report = preflight_unknown_execution_replay(data)
     assert report.structurally_reviewable
@@ -195,8 +202,11 @@ def test_late_fill_after_pause_retains_economic_effect() -> None:
     data = started()
     append(data, "PAUSED")
     append(
-        data, "OBSERVED_CONFIRMED", broker_status="partially_filled",
-        cumulative_qty=2, cumulative_fee_usd="0.10",
+        data,
+        "OBSERVED_CONFIRMED",
+        broker_status="partially_filled",
+        cumulative_qty=2,
+        cumulative_fee_usd="0.10",
     )
     append(data, "FILL_EFFECT", effect_id="posted-fill-1", effect_quantity=2)
     report = preflight_unknown_execution_replay(data)
@@ -209,8 +219,11 @@ def test_late_fill_after_pause_retains_economic_effect() -> None:
 def test_redelivered_fill_effect_is_idempotent() -> None:
     data = started()
     append(
-        data, "OBSERVED_CONFIRMED", broker_status="filled",
-        cumulative_qty=5, cumulative_fee_usd="0.25",
+        data,
+        "OBSERVED_CONFIRMED",
+        broker_status="filled",
+        cumulative_qty=5,
+        cumulative_fee_usd="0.25",
     )
     append(data, "FILL_EFFECT", effect_id="effect-1", effect_quantity=5)
     append(data, "FILL_EFFECT", effect_id="effect-1", effect_quantity=5)
@@ -222,8 +235,11 @@ def test_redelivered_fill_effect_is_idempotent() -> None:
 def test_conflicting_reused_effect_identity_is_refused() -> None:
     data = started()
     append(
-        data, "OBSERVED_CONFIRMED", broker_status="filled",
-        cumulative_qty=5, cumulative_fee_usd="0.25",
+        data,
+        "OBSERVED_CONFIRMED",
+        broker_status="filled",
+        cumulative_qty=5,
+        cumulative_fee_usd="0.25",
     )
     append(data, "FILL_EFFECT", effect_id="effect-1", effect_quantity=2)
     append(data, "FILL_EFFECT", effect_id="effect-1", effect_quantity=3)
@@ -261,8 +277,11 @@ def test_unrecognized_broker_status_and_malformed_facts_refuse(
 def test_UNKNOWN_record_cannot_carry_fabricated_rejection_or_zero_fee() -> None:
     data = started()
     append(
-        data, "OBSERVED_UNKNOWN", reason_code="submission_unconfirmed",
-        broker_status="rejected", cumulative_qty=0,
+        data,
+        "OBSERVED_UNKNOWN",
+        reason_code="submission_unconfirmed",
+        broker_status="rejected",
+        cumulative_qty=0,
         cumulative_fee_usd="0",
     )
     _fail(data, "events.2.broker_status.not_allowed_for_OBSERVED_UNKNOWN")
@@ -271,20 +290,142 @@ def test_UNKNOWN_record_cannot_carry_fabricated_rejection_or_zero_fee() -> None:
 def test_later_lower_cumulative_quantity_or_fee_is_not_valid() -> None:
     data = started()
     append(
-        data, "OBSERVED_CONFIRMED", broker_status="partially_filled",
-        cumulative_qty=10, cumulative_fee_usd="1.20",
+        data,
+        "OBSERVED_CONFIRMED",
+        broker_status="partially_filled",
+        cumulative_qty=10,
+        cumulative_fee_usd="1.20",
     )
     append(
-        data, "OBSERVED_CONFIRMED", broker_status="partially_filled",
-        cumulative_qty=9, cumulative_fee_usd="0.50",
+        data,
+        "OBSERVED_CONFIRMED",
+        broker_status="partially_filled",
+        cumulative_qty=9,
+        cumulative_fee_usd="0.50",
     )
     _fail(data, "events.3.cumulative_qty.regressed")
+
+
+@pytest.mark.parametrize(
+    "fees",
+    [
+        ("5", "4"),
+        ("5", None, "4"),
+        ("5", None, "0"),
+        ("5", None, "4.999999999999"),
+        ("5", None, None, "4"),
+        ("5", "6", None, "5.50"),
+        ("5", None, "6", None, "5.50"),
+    ],
+)
+def test_known_cumulative_fee_floor_survives_missing_observations(
+    fees: tuple[str | None, ...],
+) -> None:
+    data = started()
+    for quantity, fee in enumerate(fees, start=1):
+        append(
+            data,
+            "OBSERVED_CONFIRMED",
+            broker_status="partially_filled",
+            cumulative_qty=quantity,
+            cumulative_fee_usd=fee,
+        )
+    # Quantities increase throughout, so only the fee evidence is contradictory.
+    _fail(data, f"events.{len(fees) + 1}.cumulative_fee_usd.regressed")
+
+
+@pytest.mark.parametrize(
+    "fees",
+    [
+        ("5", None, "6"),
+        ("5", None, "5"),
+        ("5", None),
+        ("5", None, None),
+        ("0", None),
+        (None, "0"),
+        (None, "5", None, "6"),
+    ],
+)
+def test_missing_current_fee_is_unavailable_without_erasing_the_known_bound(
+    fees: tuple[str | None, ...],
+) -> None:
+    data = started()
+    for quantity, fee in enumerate(fees, start=1):
+        append(
+            data,
+            "OBSERVED_CONFIRMED",
+            broker_status="partially_filled",
+            cumulative_qty=quantity,
+            cumulative_fee_usd=fee,
+        )
+    result = preflight_unknown_execution_replay(data)
+    assert result.structurally_reviewable
+    assert result.reasons == ()
+    assert result.latest_broker_knowledge == "CONFIRMED"
+    assert result.last_confirmed_cumulative_qty == len(fees)
+    expected = None if fees[-1] is None else Decimal(fees[-1])
+    assert result.last_confirmed_cumulative_fee_usd == expected
+    assert result.account_hold_required
+    assert not result.authorizes_dispatch_or_resumption
+    assert not result.authenticates_journal_broker_or_ledger
+
+
+def test_fee_gap_unknown_and_claimed_resolution_do_not_grant_resumption() -> None:
+    data = started()
+    append(
+        data,
+        "OBSERVED_CONFIRMED",
+        broker_status="partially_filled",
+        cumulative_qty=1,
+        cumulative_fee_usd="5",
+    )
+    append(data, "OBSERVED_UNKNOWN", reason_code="cancellation_unconfirmed")
+    append(
+        data,
+        "OBSERVED_CONFIRMED",
+        broker_status="partially_filled",
+        cumulative_qty=2,
+        cumulative_fee_usd=None,
+    )
+    append(
+        data,
+        "OBSERVED_CONFIRMED",
+        broker_status="filled",
+        cumulative_qty=3,
+        cumulative_fee_usd="6",
+    )
+    append(
+        data,
+        "RESOLVED",
+        authority_ref="untrusted-authority",
+        quiescence_ref="untrusted-fencing-proof",
+        resolution_ref="untrusted-account-reconciliation",
+    )
+    append(
+        data,
+        "RESUMED",
+        authority_ref="untrusted-resume-authority",
+        resume_mandate_ref="untrusted-current-mandate",
+        expires_utc="2026-01-05T11:00:00Z",
+    )
+    result = preflight_unknown_execution_replay(data)
+    assert result.structurally_reviewable
+    assert result.claimed_phase == "RESUMED_CLAIMED"
+    assert result.latest_broker_knowledge == "UNVERIFIED_RESUMPTION"
+    assert result.last_confirmed_broker_status == "filled"
+    assert result.last_confirmed_cumulative_qty == 3
+    assert result.last_confirmed_cumulative_fee_usd == Decimal("6")
+    assert result.account_hold_required
+    assert not result.authorizes_dispatch_or_resumption
+    assert not result.authenticates_journal_broker_or_ledger
 
 
 def test_same_event_id_changed_payload_is_a_conflict_not_redelivery() -> None:
     data = started()
     event = append(
-        data, "OBSERVED_UNKNOWN", reason_code="submission_unconfirmed",
+        data,
+        "OBSERVED_UNKNOWN",
+        reason_code="submission_unconfirmed",
     )
     replay = deepcopy(event)
     events(data).append(replay)
@@ -301,7 +442,9 @@ def test_event_chain_and_temporal_order_are_bound() -> None:
     _fail(data, "events.2.predecessor_mismatch")
     data = started()
     append(
-        data, "OBSERVED_UNKNOWN", reason_code="submission_unconfirmed",
+        data,
+        "OBSERVED_UNKNOWN",
+        reason_code="submission_unconfirmed",
         observed_utc="2026-01-05T10:00:02Z",
     )
     _fail(data, "events.2.observation_order.not_strict")
@@ -318,7 +461,8 @@ def test_account_context_alias_and_journal_swap_do_not_clear_hold() -> None:
     _fail(data, "events.2.journal_ref.binding_mismatch")
     data = started()
     append(
-        data, "OBSERVED_UNKNOWN",
+        data,
+        "OBSERVED_UNKNOWN",
         reason_code="submission_unconfirmed",
         account_key="another-account",
     )
@@ -329,13 +473,15 @@ def test_unverified_resolution_and_resumption_cannot_unhold_account() -> None:
     data = started()
     append(data, "OBSERVED_UNKNOWN", reason_code="submission_unconfirmed")
     append(
-        data, "RESOLVED",
+        data,
+        "RESOLVED",
         authority_ref="untrusted-authority",
         quiescence_ref="untrusted-fencing-proof",
         resolution_ref="untrusted-account-reconciliation",
     )
     append(
-        data, "RESUMED",
+        data,
+        "RESUMED",
         authority_ref="untrusted-resume-authority",
         resume_mandate_ref="untrusted-current-mandate",
         expires_utc="2026-01-05T11:00:00Z",
@@ -361,11 +507,16 @@ def test_expired_claimed_resume_is_refused() -> None:
     data = started()
     append(data, "OBSERVED_UNKNOWN", reason_code="submission_unconfirmed")
     append(
-        data, "RESOLVED", authority_ref="x",
-        quiescence_ref="y", resolution_ref="z",
+        data,
+        "RESOLVED",
+        authority_ref="x",
+        quiescence_ref="y",
+        resolution_ref="z",
     )
     append(
-        data, "RESUMED", authority_ref="x",
+        data,
+        "RESUMED",
+        authority_ref="x",
         resume_mandate_ref="y",
         expires_utc="2026-01-05T10:00:04Z",
     )

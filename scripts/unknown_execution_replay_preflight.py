@@ -15,34 +15,80 @@ from typing import cast
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
 _UTC = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z\Z")
 _MONEY = re.compile(r"(?:0|[1-9]\d*)(?:\.\d{1,12})?\Z")
-_ROOT_FIELDS = frozenset({
-    "profile", "account_key", "environment_ref", "journal_ref",
-    "context_ref", "intent_hash", "client_token", "events",
-})
-_EVENT_FIELDS = frozenset({
-    "event_id", "sequence", "previous_event_id", "kind",
-    "account_key", "environment_ref", "journal_ref",
-    "intent_hash", "client_token", "observed_utc",
-    "evidence_ref", "reason_code", "broker_status",
-    "cumulative_qty", "cumulative_fee_usd", "effect_id",
-    "effect_quantity", "authority_ref", "quiescence_ref",
-    "resolution_ref", "resume_mandate_ref", "expires_utc",
-})
-_KIND = frozenset({
-    "PREPARED", "SEND_STARTED", "OBSERVED_UNKNOWN",
-    "OBSERVED_CONFIRMED", "NOT_SENT", "PAUSED",
-    "CANCEL_REQUESTED", "FILL_EFFECT", "RESOLVED", "RESUMED",
-})
-_BROKER_STATUS = frozenset({
-    "new", "acknowledged", "partially_filled", "filled",
-    "canceled", "rejected", "expired",
-})
-_UNKNOWN_REASONS = frozenset({
-    "submission_unconfirmed", "cancellation_unconfirmed",
-    "response_unrecognized", "evidence_conflict",
-    "recovery_required", "journal_unavailable",
-    "legacy_uncertainty",
-})
+_ROOT_FIELDS = frozenset(
+    {
+        "profile",
+        "account_key",
+        "environment_ref",
+        "journal_ref",
+        "context_ref",
+        "intent_hash",
+        "client_token",
+        "events",
+    }
+)
+_EVENT_FIELDS = frozenset(
+    {
+        "event_id",
+        "sequence",
+        "previous_event_id",
+        "kind",
+        "account_key",
+        "environment_ref",
+        "journal_ref",
+        "intent_hash",
+        "client_token",
+        "observed_utc",
+        "evidence_ref",
+        "reason_code",
+        "broker_status",
+        "cumulative_qty",
+        "cumulative_fee_usd",
+        "effect_id",
+        "effect_quantity",
+        "authority_ref",
+        "quiescence_ref",
+        "resolution_ref",
+        "resume_mandate_ref",
+        "expires_utc",
+    }
+)
+_KIND = frozenset(
+    {
+        "PREPARED",
+        "SEND_STARTED",
+        "OBSERVED_UNKNOWN",
+        "OBSERVED_CONFIRMED",
+        "NOT_SENT",
+        "PAUSED",
+        "CANCEL_REQUESTED",
+        "FILL_EFFECT",
+        "RESOLVED",
+        "RESUMED",
+    }
+)
+_BROKER_STATUS = frozenset(
+    {
+        "new",
+        "acknowledged",
+        "partially_filled",
+        "filled",
+        "canceled",
+        "rejected",
+        "expired",
+    }
+)
+_UNKNOWN_REASONS = frozenset(
+    {
+        "submission_unconfirmed",
+        "cancellation_unconfirmed",
+        "response_unrecognized",
+        "evidence_conflict",
+        "recovery_required",
+        "journal_unavailable",
+        "legacy_uncertainty",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,8 +128,7 @@ def _plain_json(value: object, depth: int, budget: list[int]) -> bool:
         )
     if type(value) is dict:
         return len(value) <= 128 and all(
-            type(k) is str and len(k) <= 128
-            and _plain_json(v, depth + 1, budget)
+            type(k) is str and len(k) <= 128 and _plain_json(v, depth + 1, budget)
             for k, v in value.items()
         )
     return False
@@ -142,19 +187,26 @@ def _result(
 def preflight_unknown_execution_replay(payload: object) -> UnknownReplayPreflight:
     """Classify A1-style mock event order; never perform or permit operations."""
     if not _plain_json(payload, 0, [4096]):
-        return _result("INVALID", "UNAVAILABLE", None, None, None, 0,
-                       ["payload.not_plain_json"])
+        return _result(
+            "INVALID", "UNAVAILABLE", None, None, None, 0, ["payload.not_plain_json"]
+        )
     if type(payload) is not dict:
-        return _result("INVALID", "UNAVAILABLE", None, None, None, 0,
-                       ["payload.not_plain_object"])
+        return _result(
+            "INVALID", "UNAVAILABLE", None, None, None, 0, ["payload.not_plain_object"]
+        )
     root = cast(dict[str, object], payload)
     problems: list[str] = []
     if set(root) != _ROOT_FIELDS:
         problems.append("payload.fields.not_exact")
     if root.get("profile") != "synthetic-unknown-replay-review-v1":
         problems.append("profile.invalid")
-    for field in ("account_key", "environment_ref", "journal_ref", "context_ref",
-                  "client_token"):
+    for field in (
+        "account_key",
+        "environment_ref",
+        "journal_ref",
+        "context_ref",
+        "client_token",
+    ):
         if not _text(root.get(field)):
             problems.append(f"{field}.missing")
     intent_hash = root.get("intent_hash")
@@ -174,6 +226,7 @@ def preflight_unknown_execution_replay(payload: object) -> UnknownReplayPrefligh
     last_status: str | None = None
     last_qty: int | None = None
     last_fee: Decimal | None = None
+    known_fee_floor: Decimal | None = None
     effects_total = 0
     send_started = False
     unknown_seen = False
@@ -202,8 +255,11 @@ def preflight_unknown_execution_replay(payload: object) -> UnknownReplayPrefligh
         if event.get("previous_event_id") != last_id:
             problems.append(f"{tag}.predecessor_mismatch")
         for field in (
-            "account_key", "environment_ref", "journal_ref",
-            "intent_hash", "client_token",
+            "account_key",
+            "environment_ref",
+            "journal_ref",
+            "intent_hash",
+            "client_token",
         ):
             if event.get(field) != root.get(field):
                 problems.append(f"{tag}.{field}.binding_mismatch")
@@ -211,7 +267,8 @@ def preflight_unknown_execution_replay(payload: object) -> UnknownReplayPrefligh
         if observed is None:
             problems.append(f"{tag}.observed_utc.invalid")
         if (
-            observed is not None and last_observed is not None
+            observed is not None
+            and last_observed is not None
             and observed <= last_observed
         ):
             problems.append(f"{tag}.observation_order.not_strict")
@@ -274,7 +331,8 @@ def preflight_unknown_execution_replay(payload: object) -> UnknownReplayPrefligh
             knowledge = "UNKNOWN"
         elif kind == "OBSERVED_UNKNOWN":
             if not send_started or phase in (
-                "NOT_SENT_CLAIMED", "RESUMED_CLAIMED",
+                "NOT_SENT_CLAIMED",
+                "RESUMED_CLAIMED",
             ):
                 problems.append(f"{tag}.unknown_without_possible_send")
             reason = event.get("reason_code")
@@ -285,16 +343,15 @@ def preflight_unknown_execution_replay(payload: object) -> UnknownReplayPrefligh
             unknown_seen = True
         elif kind == "OBSERVED_CONFIRMED":
             if not send_started or phase in (
-                "NOT_SENT_CLAIMED", "RESUMED_CLAIMED",
+                "NOT_SENT_CLAIMED",
+                "RESUMED_CLAIMED",
             ):
                 problems.append(f"{tag}.confirmed_without_possible_send")
             status = event.get("broker_status")
             if type(status) is not str or status not in _BROKER_STATUS:
                 problems.append(f"{tag}.broker_status.unrecognized")
             count = event.get("cumulative_qty")
-            if count is not None and (
-                type(count) is not int or count < 0
-            ):
+            if count is not None and (type(count) is not int or count < 0):
                 problems.append(f"{tag}.cumulative_qty.invalid")
                 count = None
             fee = event.get("cumulative_fee_usd")
@@ -303,8 +360,8 @@ def preflight_unknown_execution_replay(payload: object) -> UnknownReplayPrefligh
                 problems.append(f"{tag}.cumulative_fee_usd.invalid")
             if last_qty is not None and count is not None and count < last_qty:
                 problems.append(f"{tag}.cumulative_qty.regressed")
-            if last_fee is not None and parsed_fee is not None:
-                if parsed_fee < last_fee:
+            if known_fee_floor is not None and parsed_fee is not None:
+                if parsed_fee < known_fee_floor:
                     problems.append(f"{tag}.cumulative_fee_usd.regressed")
             if type(status) is str and status in _BROKER_STATUS:
                 last_status = status
@@ -312,8 +369,11 @@ def preflight_unknown_execution_replay(payload: object) -> UnknownReplayPrefligh
                 last_qty = count
             if parsed_fee is not None:
                 last_fee = parsed_fee
+                if known_fee_floor is None or parsed_fee >= known_fee_floor:
+                    known_fee_floor = parsed_fee
             elif fee is None:
-                # An absent current fee must not be replaced by a historical zero.
+                # The latest fee is unavailable, but prior known evidence still
+                # bounds future cumulative observations. Never invent a zero.
                 last_fee = None
             phase = "CONFIRMED_OBSERVATION"
             knowledge = "CONFIRMED"
@@ -341,8 +401,10 @@ def preflight_unknown_execution_replay(payload: object) -> UnknownReplayPrefligh
             if _text(effect_id) and type(effect_qty) is int and effect_qty > 0:
                 assert isinstance(effect_id, str)
                 signature = (
-                    effect_qty, event.get("intent_hash"),
-                    event.get("account_key"), event.get("client_token"),
+                    effect_qty,
+                    event.get("intent_hash"),
+                    event.get("account_key"),
+                    event.get("client_token"),
                 )
                 original_effect = effect_ids.get(effect_id)
                 if original_effect is not None:
@@ -380,6 +442,11 @@ def preflight_unknown_execution_replay(payload: object) -> UnknownReplayPrefligh
             knowledge = "UNVERIFIED_RESUMPTION"
 
     return _result(
-        phase, knowledge, last_status, last_qty,
-        last_fee, effects_total, problems,
+        phase,
+        knowledge,
+        last_status,
+        last_qty,
+        last_fee,
+        effects_total,
+        problems,
     )
