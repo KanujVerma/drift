@@ -5,9 +5,10 @@ from __future__ import annotations
 import ast
 from collections.abc import Iterator
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import cast
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -23,7 +24,7 @@ from drift.news_triage import (
     screen_event,
     screen_feed_coverage,
 )
-from drift.news_triage.screen import CoverageState, Outcome
+from drift.news_triage.screen import CoverageState, FeedState, Outcome
 
 T = datetime(2026, 1, 30, 21, tzinfo=UTC)
 
@@ -406,6 +407,239 @@ def test_feed_coverage_requires_complete_scoped_and_causal_evidence() -> None:
         screen_feed_coverage(coverage=None, decision_cutoff=T).disposition
         == "UNAVAILABLE"
     )
+
+
+def test_issue492_complete_coverage_requires_closed_interval() -> None:
+    """No COMPLETE feed claims for an interval extending beyond observation."""
+    observed = T - timedelta(seconds=2)
+    covered = FeedCoverage(
+        source_id="source",
+        scope_ref=ref("scope"),
+        start_at=T - timedelta(hours=1),
+        end_at=observed - timedelta(seconds=1),
+        observed_at=observed,
+        available_at=T - timedelta(seconds=1),
+        state="covered_empty",
+        event_count=0,
+    )
+    cases: tuple[tuple[FeedState, int, str], ...] = (
+        ("covered_empty", 0, "EMPTY"),
+        ("covered_with_events", 2, "EVENTS_PRESENT"),
+    )
+    for state, count, complete in cases:
+        fixture = replace(covered, state=state, event_count=count)
+        complete_result = screen_feed_coverage(coverage=fixture, decision_cutoff=T)
+        assert complete_result.disposition == complete
+        assert complete_result == screen_feed_coverage(
+            coverage=fixture, decision_cutoff=T
+        )
+        at_observation = replace(fixture, end_at=observed)
+        assert (
+            screen_feed_coverage(coverage=at_observation, decision_cutoff=T).disposition
+            == complete
+        )
+
+        # An interval ending *after observation* is not complete even when
+        # it ends before the current decision cutoff or the data arrival.
+        for end in (
+            observed + timedelta(microseconds=1),
+            T + timedelta(seconds=1),
+        ):
+            future = replace(fixture, end_at=end)
+            outcome = screen_feed_coverage(coverage=future, decision_cutoff=T)
+            assert outcome.disposition == "UNAVAILABLE"
+            assert outcome.reason == "INVALID_OR_UNAVAILABLE_COVERAGE"
+            assert outcome.record_hash != complete_result.record_hash
+
+    # A genuinely PARTIAL interval stays incomplete, not falsely COMPLETE.
+    ongoing = replace(
+        covered,
+        state="partial",
+        end_at=T + timedelta(seconds=1),
+    )
+    assert (
+        screen_feed_coverage(coverage=ongoing, decision_cutoff=T).disposition
+        == "INCOMPLETE"
+    )
+
+
+def test_issue492_utc_offset_boundary_uses_actual_instant() -> None:
+    """Offset encodings cannot convert a future interval into completed news."""
+    observed = T - timedelta(seconds=2)
+    normal = FeedCoverage(
+        source_id="source",
+        scope_ref=ref("scope"),
+        start_at=observed - timedelta(hours=1),
+        end_at=observed,
+        observed_at=observed,
+        available_at=T - timedelta(seconds=1),
+        state="covered_empty",
+        event_count=0,
+    )
+    utc_result = screen_feed_coverage(coverage=normal, decision_cutoff=T)
+    assert utc_result.disposition == "EMPTY"
+    assert utc_result.record_hash == (
+        "4843b87a88768a2b8e132d5feacdd5e22fd01879a8e38b29bdb67356b9e9b8bb"
+    )
+
+    different_offsets = replace(
+        normal,
+        start_at=normal.start_at.astimezone(timezone(timedelta(hours=9))),
+        end_at=observed.astimezone(timezone(timedelta(hours=5, minutes=30))),
+        observed_at=observed.astimezone(timezone(-timedelta(hours=8))),
+        available_at=normal.available_at.astimezone(timezone(timedelta(hours=2))),
+    )
+    alternate = screen_feed_coverage(
+        coverage=different_offsets,
+        decision_cutoff=T.astimezone(timezone(-timedelta(hours=7))),
+    )
+    assert alternate.disposition == "EMPTY"
+    assert alternate.record_hash == utc_result.record_hash
+
+    late = replace(
+        different_offsets,
+        end_at=(observed + timedelta(microseconds=1)).astimezone(
+            timezone(timedelta(hours=5, minutes=30))
+        ),
+    )
+    refused = screen_feed_coverage(coverage=late, decision_cutoff=T)
+    assert refused.disposition == "UNAVAILABLE"
+    assert refused.record_hash != utc_result.record_hash
+
+
+@pytest.mark.parametrize(
+    ("state", "count"), [("covered_empty", 0), ("covered_with_events", 2)]
+)
+def test_issue492_dst_fold_refuses_future_feed_availability(
+    state: FeedState, count: int
+) -> None:
+    """Repeated local hours must not admit observations beyond the cutoff."""
+    eastern = ZoneInfo("America/New_York")
+    cutoff = datetime(2026, 11, 1, 1, 50, tzinfo=eastern, fold=0)
+    covered = FeedCoverage(
+        source_id="synthetic:source",
+        scope_ref=ref("synthetic:scope"),
+        start_at=datetime(2026, 11, 1, 0, 30, tzinfo=eastern),
+        end_at=datetime(2026, 11, 1, 1, 10, tzinfo=eastern, fold=1),
+        observed_at=datetime(2026, 11, 1, 1, 20, tzinfo=eastern, fold=1),
+        available_at=datetime(2026, 11, 1, 1, 30, tzinfo=eastern, fold=1),
+        state=state,
+        event_count=count,
+    )
+    assert covered.available_at.astimezone(UTC) > cutoff.astimezone(UTC)
+    local_result = screen_feed_coverage(coverage=covered, decision_cutoff=cutoff)
+    utc_result = screen_feed_coverage(
+        coverage=replace(
+            covered,
+            start_at=covered.start_at.astimezone(UTC),
+            end_at=covered.end_at.astimezone(UTC),
+            observed_at=covered.observed_at.astimezone(UTC),
+            available_at=covered.available_at.astimezone(UTC),
+        ),
+        decision_cutoff=cutoff.astimezone(UTC),
+    )
+    assert local_result.disposition == utc_result.disposition == "UNAVAILABLE"
+    assert local_result.reason == "INVALID_OR_UNAVAILABLE_COVERAGE"
+    assert local_result.record_hash == utc_result.record_hash
+
+
+@pytest.mark.parametrize(
+    ("state", "count", "expected"),
+    [("covered_empty", 0, "EMPTY"), ("covered_with_events", 2, "EVENTS_PRESENT")],
+)
+def test_issue492_dst_fold_accepts_actual_boundary_and_utc_equivalence(
+    state: FeedState, count: int, expected: str
+) -> None:
+    """A valid interval can end at an earlier wall time in the repeated hour."""
+    eastern = ZoneInfo("America/New_York")
+    observed = datetime(2026, 11, 1, 1, 10, tzinfo=eastern, fold=1)
+    cutoff = datetime(2026, 11, 1, 1, 20, tzinfo=eastern, fold=1)
+    covered = FeedCoverage(
+        source_id="synthetic:source",
+        scope_ref=ref("synthetic:scope"),
+        start_at=datetime(2026, 11, 1, 1, 40, tzinfo=eastern, fold=0),
+        end_at=observed,
+        observed_at=observed,
+        available_at=cutoff,
+        state=state,
+        event_count=count,
+    )
+    assert covered.start_at.astimezone(UTC) < covered.end_at.astimezone(UTC)
+    local_result = screen_feed_coverage(coverage=covered, decision_cutoff=cutoff)
+    utc_result = screen_feed_coverage(
+        coverage=replace(
+            covered,
+            start_at=covered.start_at.astimezone(UTC),
+            end_at=observed.astimezone(UTC),
+            observed_at=observed.astimezone(UTC),
+            available_at=cutoff.astimezone(UTC),
+        ),
+        decision_cutoff=cutoff.astimezone(UTC),
+    )
+    assert local_result.disposition == utc_result.disposition == expected
+    assert local_result.record_hash == utc_result.record_hash
+
+
+@pytest.mark.parametrize("reversed_edge", ["interval", "observation_availability"])
+@pytest.mark.parametrize(
+    ("state", "count"),
+    [("covered_empty", 0), ("covered_with_events", 2), ("partial", 1)],
+)
+def test_issue492_dst_fold_refuses_reversed_actual_clock_order(
+    reversed_edge: str, state: FeedState, count: int
+) -> None:
+    """Wall-clock order cannot override interval or receipt causality."""
+    eastern = ZoneInfo("America/New_York")
+    covered = FeedCoverage(
+        source_id="synthetic:source",
+        scope_ref=ref("synthetic:scope"),
+        start_at=datetime(2026, 11, 1, 0, 30, tzinfo=eastern),
+        end_at=datetime(2026, 11, 1, 1, 0, tzinfo=eastern, fold=0),
+        observed_at=datetime(2026, 11, 1, 1, 10, tzinfo=eastern, fold=1),
+        available_at=datetime(2026, 11, 1, 1, 20, tzinfo=eastern, fold=1),
+        state=state,
+        event_count=count,
+    )
+    if reversed_edge == "interval":
+        covered = replace(
+            covered,
+            start_at=datetime(2026, 11, 1, 1, 10, tzinfo=eastern, fold=1),
+            end_at=datetime(2026, 11, 1, 1, 40, tzinfo=eastern, fold=0),
+        )
+        assert covered.start_at.astimezone(UTC) > covered.end_at.astimezone(UTC)
+    else:
+        covered = replace(
+            covered,
+            available_at=datetime(2026, 11, 1, 1, 20, tzinfo=eastern, fold=0),
+        )
+        assert covered.observed_at.astimezone(UTC) > covered.available_at.astimezone(
+            UTC
+        )
+    result = screen_feed_coverage(
+        coverage=covered,
+        decision_cutoff=datetime(2026, 11, 1, 2, 0, tzinfo=eastern),
+    )
+    assert result.disposition == "UNAVAILABLE"
+    assert result.reason == "INVALID_OR_UNAVAILABLE_COVERAGE"
+
+
+def test_issue492_dst_fold_partial_future_interval_remains_incomplete() -> None:
+    eastern = ZoneInfo("America/New_York")
+    covered = FeedCoverage(
+        source_id="synthetic:source",
+        scope_ref=ref("synthetic:scope"),
+        start_at=datetime(2026, 11, 1, 0, 30, tzinfo=eastern),
+        end_at=datetime(2026, 11, 1, 2, 0, tzinfo=eastern),
+        observed_at=datetime(2026, 11, 1, 1, 10, tzinfo=eastern, fold=1),
+        available_at=datetime(2026, 11, 1, 1, 20, tzinfo=eastern, fold=1),
+        state="partial",
+        event_count=1,
+    )
+    cutoff = datetime(2026, 11, 1, 1, 30, tzinfo=eastern, fold=1)
+    assert covered.end_at.astimezone(UTC) > cutoff.astimezone(UTC)
+    result = screen_feed_coverage(coverage=covered, decision_cutoff=cutoff)
+    assert result.disposition == "INCOMPLETE"
+    assert result.reason == "PARTIAL_COVERAGE"
 
 
 def test_offline_capabilities_are_lexically_inert() -> None:
