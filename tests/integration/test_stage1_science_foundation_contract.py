@@ -401,3 +401,129 @@ def test_pure_mock_br_oracles_include_unknown_costs_and_losing_ai() -> None:
     assert (losing_gain.state, losing_gain.value) == ("KNOWN", Decimal("-45"))
     losing_adv = calculate_comparative_economic_advantage(losing_gain, r_gain)
     assert (losing_adv.state, losing_adv.value) == ("KNOWN", Decimal("-100"))
+
+
+# ---------------------------------------------------------------------------
+# #518: Two-run E1/E6A structural witnesses, never producer RESULT
+# ---------------------------------------------------------------------------
+
+
+def test_two_runs_preserve_distinct_scientific_coverage() -> None:
+    """Separate accounts and missing snapshots survive complete-manifest checks."""
+    fixture = _fixture()
+    camp, arms, bindings, runs = fixture
+    assert runs == ["RUN-001", "RUN-002"]
+    assert camp.campaign_spec_fingerprint == CAMPAIGN_HASH
+    assert verify_stage1_synthetic_br_configuration(
+        campaign=camp,
+        arms=arms,
+        bindings=bindings,
+        expected_run_ids=runs,
+    )
+    account_ids = {
+        (binding.run_id, binding.arm_id): binding.portfolio_account_id
+        for binding in bindings
+    }
+    assert account_ids == {
+        ("RUN-001", "ARM-B"): "SYNTH-ACC-B-001",
+        ("RUN-001", "ARM-R"): "SYNTH-ACC-R-001",
+        ("RUN-002", "ARM-B"): "SYNTH-ACC-B-002",
+        ("RUN-002", "ARM-R"): "SYNTH-ACC-R-002",
+    }
+    assert len(set(account_ids.values())) == 4
+
+    declarations = _decls(runs, checkpoint_ids=("CKPT-001",))
+    first_b = _snapshot(
+        camp, arms, bindings, runs, "ARM-B", run_id="RUN-001", recorded=True
+    )
+    first_r = _snapshot(camp, arms, bindings, runs, "ARM-R", run_id="RUN-001")
+    second_r = _snapshot(camp, arms, bindings, runs, "ARM-R", run_id="RUN-002")
+    assert first_b.event_envelopes[0].event_hash == ROOT_EVENT_HASH
+    assert all(
+        snapshot.scope.complete_manifest_fingerprint
+        == first_b.scope.complete_manifest_fingerprint
+        for snapshot in (first_r, second_r)
+    )
+
+    missing = _build(*fixture, declarations, snapshots=[second_r, first_b, first_r])
+    assert _verify(missing, fixture)
+    assert missing.counts == Stage1CoverageCountsV1(4, 1, 2, 1, 3, 2, 1)
+    assert [
+        (pair.run_id, pair.checkpoint_id, pair.pair_state) for pair in missing.pairs
+    ] == [
+        ("RUN-001", "CKPT-001", "BOTH_SUBMITTED"),
+        ("RUN-002", "CKPT-001", "TEST_MISSING"),
+    ]
+    assert [
+        (slot.run_id, slot.arm_id, slot.coverage_state) for slot in missing.slots
+    ] == [
+        ("RUN-001", "ARM-B", "EVENTS_RECORDED"),
+        ("RUN-001", "ARM-R", "UNOBSERVED"),
+        ("RUN-002", "ARM-B", "MISSING_SNAPSHOT"),
+        ("RUN-002", "ARM-R", "UNOBSERVED"),
+    ]
+    assert missing.slots[2].provenance_snapshot is None
+
+    second_b = _snapshot(camp, arms, bindings, runs, "ARM-B", run_id="RUN-002")
+    assert (second_b.observation_state, second_b.event_count) == ("UNOBSERVED", 0)
+    complete = _build(
+        *fixture,
+        declarations,
+        snapshots=[second_b, first_r, first_b, second_r],
+    )
+    assert _verify(complete, fixture)
+    assert complete.counts == Stage1CoverageCountsV1(4, 0, 3, 1, 4, 2, 2)
+    assert [(pair.run_id, pair.pair_state) for pair in complete.pairs] == [
+        ("RUN-001", "BOTH_SUBMITTED"),
+        ("RUN-002", "BOTH_SUBMITTED"),
+    ]
+    expected_checkpoint_hash = missing.checkpoint_manifest_fingerprint
+    assert complete.checkpoint_manifest_fingerprint == expected_checkpoint_hash
+    assert complete.audit_fingerprint != missing.audit_fingerprint
+    assert first_b.event_envelopes[0].event_hash == ROOT_EVENT_HASH
+    assert camp.campaign_spec_fingerprint == CAMPAIGN_HASH
+    # A second operational run does not itself prove a new scored sample.
+
+
+def test_cross_run_reused_account_and_omitted_binding_are_refused() -> None:
+    """E1 must validate ALL declared runs before E6A can consume the manifest."""
+    fixture = _fixture()
+    camp, arms, bindings, runs = fixture
+    declarations = _decls(runs, checkpoint_ids=("CKPT-001",))
+    accepted = _build(*fixture, declarations)
+    assert _verify(accepted, fixture)
+    original_fingerprint = accepted.complete_manifest_fingerprint
+
+    wrong_second_b = build_run_account_binding(
+        campaign_id=camp.campaign_id,
+        run_id="RUN-002",
+        arm_id="ARM-B",
+        portfolio_account_id=bindings[0].portfolio_account_id,
+        initial_cash_allocated="10000",
+        bound_at=datetime(2026, 10, 19, 0, 0, 2, tzinfo=UTC),
+    )
+    reused_account_bindings = [*bindings[:2], wrong_second_b, bindings[3]]
+    with pytest.raises(ValueError, match="reused across bindings"):
+        verify_stage1_synthetic_br_configuration(
+            campaign=camp,
+            arms=arms,
+            bindings=reused_account_bindings,
+            expected_run_ids=runs,
+        )
+    with pytest.raises(ValueError):
+        _build(camp, arms, reused_account_bindings, runs, declarations)
+
+    omitted_second_b = [*bindings[:2], bindings[3]]
+    with pytest.raises(ValueError):
+        verify_stage1_synthetic_br_configuration(
+            campaign=camp,
+            arms=arms,
+            bindings=omitted_second_b,
+            expected_run_ids=runs,
+        )
+    with pytest.raises(ValueError):
+        _build(camp, arms, omitted_second_b, runs, declarations)
+
+    assert accepted.complete_manifest_fingerprint == original_fingerprint
+    assert len({b.portfolio_account_id for b in bindings}) == 4
+    assert camp.campaign_spec_fingerprint == CAMPAIGN_HASH
