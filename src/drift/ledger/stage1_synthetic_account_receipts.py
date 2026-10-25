@@ -265,9 +265,7 @@ class LocalSyntheticAccountReceiptStoreV1:
                 fields.bound_at.replace("Z", "+00:00")
             ).astimezone(UTC)
         except (TypeError, ValueError) as error:
-            raise LocalAccountReceiptError(
-                "NONCANONICAL_ACCOUNT_BOUND_AT"
-            ) from error
+            raise LocalAccountReceiptError("NONCANONICAL_ACCOUNT_BOUND_AT") from error
         if bound_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ") != fields.bound_at:
             raise LocalAccountReceiptError("NONCANONICAL_ACCOUNT_BOUND_AT")
         allocation_id = uuid7()
@@ -342,8 +340,7 @@ class LocalSyntheticAccountReceiptStoreV1:
             or allocation_payload.get("fields") != asdict(expected_fields)
             or witness_payload.get("allocation_event_id")
             != str(allocation_ref.event_id)
-            or witness_payload.get("allocation_event_hash")
-            != allocation_ref.event_hash
+            or witness_payload.get("allocation_event_hash") != allocation_ref.event_hash
             or witness.timestamp < alloc.timestamp
         ):
             raise LocalAccountReceiptError(
@@ -353,12 +350,9 @@ class LocalSyntheticAccountReceiptStoreV1:
         if type(text) is not str:
             raise LocalAccountReceiptError("ORIGINAL_BOOK_BYTES_MISSING")
         original = text.encode("utf-8")
-        if (
-            len(original) > MAX_BOOK_BYTES
-            or sha256(original).hexdigest() != allocation_payload.get(
-                "original_book_sha256"
-            )
-        ):
+        if len(original) > MAX_BOOK_BYTES or sha256(
+            original
+        ).hexdigest() != allocation_payload.get("original_book_sha256"):
             raise LocalAccountReceiptError("ORIGINAL_BOOK_BYTES_HASH_MISMATCH")
         book = PortfolioStateV2.model_validate_json(original)
         if canonical_json(book) != original:
@@ -369,11 +363,16 @@ class LocalSyntheticAccountReceiptStoreV1:
             != expected_fields.first_session_fingerprint
             or book.cash_balance != Decimal(expected_fields.initial_cash)
             or book.net_asset_value != book.cash_balance
-            or book.holdings or book.pending_cash_claims or book.mark is not None
-            or book.settled_claim_ids or book.applied_effect_ids
-            or book.holdings_market_value != 0 or book.pending_claims_value != 0
+            or book.holdings
+            or book.pending_cash_claims
+            or book.mark is not None
+            or book.settled_claim_ids
+            or book.applied_effect_ids
+            or book.holdings_market_value != 0
+            or book.pending_claims_value != 0
             or book.cumulative_transaction_costs != 0
-            or book.realized_gross_pnl != 0 or book.realized_net_pnl != 0
+            or book.realized_gross_pnl != 0
+            or book.realized_net_pnl != 0
         ):
             raise LocalAccountReceiptError("ORIGINAL_BOOK_NOT_FRESH_ENGINE_SHAPE")
         if postread_guard is not None:

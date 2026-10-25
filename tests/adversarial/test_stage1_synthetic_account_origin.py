@@ -6,8 +6,8 @@ cannot authenticate an allocation under an independent configured origin.
 
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Any
 from pathlib import Path
+from typing import Any
 from uuid import uuid7
 
 import pytest
@@ -224,9 +224,7 @@ def test_caller_mutation_after_e1_verification_cannot_redirect_account(
         store=store,
     )
     original_account = provenance.scope.run_account_binding
-    object.__setattr__(
-        original_account, "portfolio_account_id", "SYNTH-ACC-R-001"
-    )
+    object.__setattr__(original_account, "portfolio_account_id", "SYNTH-ACC-R-001")
     with pytest.raises(
         LocalAccountReceiptError, match="E1_PROVENANCE_MUTATED_AFTER_VALIDATION"
     ):
@@ -311,7 +309,8 @@ def test_provenance_mutation_at_readback_return_refuses_original(
     ):
         coordinator.verified_original()
     assert [event.event_type for event in store.origin.verified_events()] == [
-        ALLOCATION, WITNESS
+        ALLOCATION,
+        WITNESS,
     ]
 
 

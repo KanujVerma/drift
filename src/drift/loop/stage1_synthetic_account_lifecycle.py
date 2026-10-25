@@ -136,14 +136,13 @@ class Stage1SyntheticAccountLifecycleV1:
             a for a in captured_arms if a.arm_id == captured_provenance.scope.arm_id
         ]
         matching = [
-            b for b in captured_bindings
+            b
+            for b in captured_bindings
             if b.campaign_id == selected.campaign_id
-            and b.run_id == selected.run_id and b.arm_id == selected.arm_id
+            and b.run_id == selected.run_id
+            and b.arm_id == selected.arm_id
         ]
-        if (
-            len(selected_arms) != 1 or len(matching) != 1
-            or matching[0] != selected
-        ):
+        if len(selected_arms) != 1 or len(matching) != 1 or matching[0] != selected:
             raise LocalAccountReceiptError("E1_ACCOUNT_NOT_IN_FULL_MANIFEST")
         self._campaign = captured_campaign
         self._arms = captured_arms
@@ -161,9 +160,9 @@ class Stage1SyntheticAccountLifecycleV1:
         self._phase = "new"
         self._original_book: PortfolioStateV2 | None = None
         self._original_bytes: bytes | None = None
-        self._allocation: tuple[
-            UUID, LocalEventReferenceV1, LocalEventReferenceV1
-        ] | None = None
+        self._allocation: (
+            tuple[UUID, LocalEventReferenceV1, LocalEventReferenceV1] | None
+        ) = None
         self._fields: AccountAllocationFieldsV1 | None = None
         self._claim: LocalEventReferenceV1 | None = None
         self._consumption: LocalEventReferenceV1 | None = None
@@ -203,9 +202,7 @@ class Stage1SyntheticAccountLifecycleV1:
                 "E1_PROVENANCE_MUTATED_AFTER_VALIDATION"
             ) from error
         if self._source_provenance != self._provenance:
-            raise LocalAccountReceiptError(
-                "E1_PROVENANCE_MUTATED_AFTER_VALIDATION"
-            )
+            raise LocalAccountReceiptError("E1_PROVENANCE_MUTATED_AFTER_VALIDATION")
 
     def retain_original_book(
         self,
@@ -324,7 +321,8 @@ class Stage1SyntheticAccountLifecycleV1:
             self._assert_e1_source_unchanged()
             self._require_same_original(opening_book)
             if type(run_identity) not in (
-                EvaluationRunIdentityV1, EvaluationRunIdentityV2
+                EvaluationRunIdentityV1,
+                EvaluationRunIdentityV2,
             ):
                 raise LocalAccountReceiptError("INVALID_ORIGINAL_RUN_IDENTITY")
             readback = self.verified_original()
