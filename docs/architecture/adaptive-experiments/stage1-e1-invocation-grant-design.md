@@ -262,13 +262,28 @@ Neither is an accepted Python class or wire revision.
     supported amounts as exact decimal values in the original
     currency; unknown conversions or remaining balance cannot
     silently establish authority.
-  - Independently join **all** original attributable
+  - Independently retrieve, verify and retain **all** original attributable
     `CostReceipt` records, including `cost_receipt_ids`
     on the attempt and candidate, late receipts, corrections via
     `supersedes_receipt_id` and shared work via
     `shared_work_ref`, under the accepted #507 allocation rule.
+    Preserve this complete immutable receipt lineage independently
+    of the effective monetary total. Before aggregation, resolve
+    accepted supersession chains identifying the same raw expense
+    under the [raw cost receipt contract](contracts/research.md#raw-cost-receipt-no-second-account-ledger).
+    Only the effective receipt for that expense contributes to the
+    total: exclude superseded estimates and superseded unknowns
+    from aggregation while retaining their original records.
+    A USD 8 estimate superseded by a USD 9 actual receipt therefore
+    contributes USD 9, not USD 17, against a USD 10 reservation.
+    Independent expenses remain separate; shared work contributes
+    once under the accepted allocation rule, not once per consumer
+    reference. An unresolved effective unknown or unverifiable
+    correction chain remains `UNAVAILABLE`, never an omitted or
+    zero-valued expense. This does not introduce refund, credit or
+    negative-cost netting; those require separately accepted policy.
     Verify actual attempt/scope, billing identity/category,
-    currency, `amount_basis` and exact decimal amount against
+    currency, effective `amount_basis` and exact decimal amount against
     the original per-attempt authorization and the arm's
     aggregate remaining capacity. A correctly scoped reservation
     cannot make a USD 100 charge valid under a USD 10 ceiling.
@@ -414,7 +429,12 @@ new network service, executor identity or source-file implementation**.
   actual attributable research costs, not just the nominal permission
   fields. Independently link all original raw `CostReceipt`s,
   subsequent superseding corrections and approved shared-work
-  allocations to the same attempt/arm and reservation. Proven
+  allocations to the same attempt/arm and reservation. Retain that
+  full lineage, then resolve accepted supersession before comparing
+  effective amounts with the ceiling. Superseded estimates and
+  unknowns do not add to the monetary total; independent expenses
+  and accepted shared-work allocations still contribute once.
+  An unresolved effective unknown is not zero. Proven
   charge-over-ceiling, off-category spend or exhausted cumulative
   permission is `INVALID` without erasing incurred work. Missing
   receipt completeness, unknown spend, disputed shared attribution
@@ -531,10 +551,16 @@ new network service, executor identity or source-file implementation**.
    refusal can lack the authorization, retaining its reason
    and any unknown cost evidence. Do not replace authorization
    with a billing or M2 cash receipt.
-   Independently reconcile original `CostReceipt` events from
+   Independently verify and retain original `CostReceipt` events from
    every attempt/candidate receipt reference plus later
-   correction and shared-work allocations against the exact
-   reservation and frozen per-attempt/aggregate budget.
+   correction and shared-work allocations. Resolve accepted
+   supersession for each raw expense before aggregating effective
+   amounts against the exact reservation and frozen per-attempt/
+   aggregate budget. Retain superseded estimates/unknowns as
+   lineage without summing them again. Count independent expenses
+   and shared work once under the accepted allocation rule;
+   unresolved effective unknowns or unverified corrections remain
+   `UNAVAILABLE`, never zero or silently excluded missing spend.
    An authenticated actual charge over the ceiling or from an
    unauthorized category is `INVALID`, even when the
    authorization itself was nominally valid. Missing original
@@ -565,7 +591,7 @@ original grant-at-start check. Genuine future input is lookahead,
 not a normal after-cutoff model completion. No generic `dict[str, Any]`
 evidence resolver or second financial ledger is allowed.
 
-## 6. Fifty-four synthetic original-grant test vectors
+## 6. Fifty-five synthetic original-grant test vectors
 
 Each vector is a **design expectation, not an executed test**.
 `READY_STRUCTURAL` has accepted E1 fixture verification only.
@@ -927,6 +953,23 @@ Each vector is a **design expectation, not an executed test**.
   returns `UNAVAILABLE`, never a fabricated within-budget
   or zero-cost claim.
   **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
+- **G19h, compliant accepted correction chain:** an authentic
+  USD 10 reservation was available before the same authorized
+  ARM-B attempt. A retained USD 8 estimate is followed by a
+  USD 9 actual receipt whose `supersedes_receipt_id` identifies
+  that estimate under the accepted producer correction rules
+  for the same expense. Independently retain and verify both
+  receipts, but use only the effective USD 9 actual amount in
+  the monetary total, not USD 17. With complete original costs,
+  accepted attribution, allowed currency/category and verified
+  remaining aggregate capacity, accept this cost-compliance
+  precondition only; no new spending or scientific eligibility
+  follows. An accepted actual receipt superseding an earlier
+  unknown likewise resolves the effective amount while retaining
+  the unknown record. If the effective cost instead remains
+  unknown, or the supersession chain is unverified, expect
+  `UNAVAILABLE`, never assumed zero or a satisfied ceiling.
+  **BLOCKED_ON_508 + BLOCKED_ON_SCHEDULER + BLOCKED_ON_507**.
 
 For each issuer-dependent positive case, the eventual producer test
 must independently prove a forged or missing original issuer **fails**.
@@ -961,10 +1004,10 @@ Also accept the budget policy and per-attempt authorization issuer
 mapping for `ResearchContext.budget_ref`,
 `AttemptRecord.budget_ref` and `budget_authorization_ref`,
 including original effective times, currency/categories,
-remaining-capacity proof and independent reconciliation of all
-attributable `CostReceipt`s and late/shared-work corrections
-against the actual reservation, or the direct no-work preflight
-exception.
+remaining-capacity proof, independent retention of all attributable
+`CostReceipt` lineage, and resolution of accepted supersession before
+aggregating effective expenses and shared-work allocations against
+the actual reservation, or the direct no-work preflight exception.
 Confirm original grant consumption, `logical_request_id`,
 attempt/retained validation origin and no-candidate outcomes.
 His proposed `ResearchE1DecisionAssociationV1` remains
