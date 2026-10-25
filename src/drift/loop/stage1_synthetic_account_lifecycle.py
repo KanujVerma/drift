@@ -136,14 +136,13 @@ class Stage1SyntheticAccountLifecycleV1:
             a for a in captured_arms if a.arm_id == captured_provenance.scope.arm_id
         ]
         matching = [
-            b for b in captured_bindings
+            b
+            for b in captured_bindings
             if b.campaign_id == selected.campaign_id
-            and b.run_id == selected.run_id and b.arm_id == selected.arm_id
+            and b.run_id == selected.run_id
+            and b.arm_id == selected.arm_id
         ]
-        if (
-            len(selected_arms) != 1 or len(matching) != 1
-            or matching[0] != selected
-        ):
+        if len(selected_arms) != 1 or len(matching) != 1 or matching[0] != selected:
             raise LocalAccountReceiptError("E1_ACCOUNT_NOT_IN_FULL_MANIFEST")
         self._campaign = captured_campaign
         self._arms = captured_arms
@@ -161,9 +160,9 @@ class Stage1SyntheticAccountLifecycleV1:
         self._phase = "new"
         self._original_book: PortfolioStateV2 | None = None
         self._original_bytes: bytes | None = None
-        self._allocation: tuple[
-            UUID, LocalEventReferenceV1, LocalEventReferenceV1
-        ] | None = None
+        self._allocation: (
+            tuple[UUID, LocalEventReferenceV1, LocalEventReferenceV1] | None
+        ) = None
         self._fields: AccountAllocationFieldsV1 | None = None
         self._claim: LocalEventReferenceV1 | None = None
         self._consumption: LocalEventReferenceV1 | None = None
@@ -203,9 +202,7 @@ class Stage1SyntheticAccountLifecycleV1:
                 "E1_PROVENANCE_MUTATED_AFTER_VALIDATION"
             ) from error
         if self._source_provenance != self._provenance:
-            raise LocalAccountReceiptError(
-                "E1_PROVENANCE_MUTATED_AFTER_VALIDATION"
-            )
+            raise LocalAccountReceiptError("E1_PROVENANCE_MUTATED_AFTER_VALIDATION")
 
     def retain_original_book(
         self,
@@ -246,19 +243,25 @@ class Stage1SyntheticAccountLifecycleV1:
             allocation_id, receipt_ref = self._store.append_allocation(
                 fields=fields,
                 original_book=original,
+                precommit_guard=self._assert_e1_source_unchanged,
             )
+            self._assert_e1_source_unchanged()
             witness_ref = self._store.witness_original_readback(
                 allocation_id=allocation_id,
                 allocation_ref=receipt_ref,
+                precommit_guard=self._assert_e1_source_unchanged,
             )
+            self._assert_e1_source_unchanged()
             readback = self._store.readback_allocation(
                 allocation_id=allocation_id,
                 allocation_ref=receipt_ref,
                 witness_ref=witness_ref,
                 expected_fields=fields,
+                postread_guard=self._assert_e1_source_unchanged,
             )
             if readback.original_book_bytes != original:
                 raise LocalAccountReceiptError("ORIGINAL_BOOK_READBACK_DIFFERENT")
+            self._assert_e1_source_unchanged()
             # Only after original bytes and the witness are independently
             # read from this host's configured read-only ledger.
             self._original_book = opening_book
@@ -271,15 +274,24 @@ class Stage1SyntheticAccountLifecycleV1:
         self._transition("retaining", "ready")
 
     def verified_original(self) -> OriginalLocalAccountReadbackV1:
+        # Only the detached original E1 values are allowed to label ledger
+        # evidence. A mutable caller-owned alias may change while SQLite
+        # readback runs, so verify on both sides of the readback boundary.
+        self._assert_e1_source_unchanged()
         if self._allocation is None or self._fields is None:
             raise LocalAccountReceiptError("ORIGINAL_ACCOUNT_NOT_RETAINED")
         allocation_id, allocation_ref, witness_ref = self._allocation
-        return self._store.readback_allocation(
+        readback = self._store.readback_allocation(
             allocation_id=allocation_id,
             allocation_ref=allocation_ref,
             witness_ref=witness_ref,
             expected_fields=self._fields,
+            postread_guard=self._assert_e1_source_unchanged,
         )
+        # Also guard the return boundary if an injected adapter changes
+        # caller-owned provenance after the underlying readback completes.
+        self._assert_e1_source_unchanged()
+        return readback
 
     def _require_same_original(self, opening_book: PortfolioStateV2) -> None:
         if opening_book is not self._original_book or self._original_bytes is None:
@@ -306,9 +318,11 @@ class Stage1SyntheticAccountLifecycleV1:
     ) -> None:
         self._transition("ready", "claiming")
         try:
+            self._assert_e1_source_unchanged()
             self._require_same_original(opening_book)
             if type(run_identity) not in (
-                EvaluationRunIdentityV1, EvaluationRunIdentityV2
+                EvaluationRunIdentityV1,
+                EvaluationRunIdentityV2,
             ):
                 raise LocalAccountReceiptError("INVALID_ORIGINAL_RUN_IDENTITY")
             readback = self.verified_original()
@@ -320,7 +334,12 @@ class Stage1SyntheticAccountLifecycleV1:
             claim = self._store.append_invocation_claim(
                 original=readback,
                 identity_hash=run_identity.run_identity_hash,
+                precommit_guard=self._assert_e1_source_unchanged,
             )
+            # If untrusted source data changes inside an injected ledger
+            # adapter after append, preserve the original durable audit
+            # event but fail this transition rather than claiming success.
+            self._assert_e1_source_unchanged()
             self._claim = claim
         except BaseException:
             self._fail()
@@ -335,6 +354,7 @@ class Stage1SyntheticAccountLifecycleV1:
     ) -> None:
         self._transition("claimed", "consuming")
         try:
+            self._assert_e1_source_unchanged()
             self._require_same_original(opening_book)
             if self._claim is None:
                 raise LocalAccountReceiptError("ORIGINAL_INVOCATION_CLAIM_MISSING")
@@ -343,7 +363,9 @@ class Stage1SyntheticAccountLifecycleV1:
                 original=readback,
                 claim_ref=self._claim,
                 identity_hash=run_identity.run_identity_hash,
+                precommit_guard=self._assert_e1_source_unchanged,
             )
+            self._assert_e1_source_unchanged()
             self._consumption = event_ref
         except BaseException:
             self._fail()

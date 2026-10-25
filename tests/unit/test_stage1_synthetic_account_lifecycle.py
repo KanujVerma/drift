@@ -11,7 +11,7 @@ from pathlib import Path
 from uuid import uuid7
 
 import pytest
-from test_evaluator_engine import _engine, _run
+from test_evaluator_engine import _engine, _run, _run_identity
 from test_stage1_campaign_config import (
     make_golden_arm_b,
     make_golden_arm_r,
@@ -117,7 +117,10 @@ def test_original_engine_book_is_retained_then_claimed_once(tmp_path: Path) -> N
     assert canonical_json(artifacts) == baseline
     assert original.local_phase == "consumed"
     assert [e.event_type for e in origin.verified_events()] == [
-        ALLOCATION, WITNESS, CLAIM, CONSUMED
+        ALLOCATION,
+        WITNESS,
+        CLAIM,
+        CONSUMED,
     ]
     with pytest.raises(OpeningBookLifecycleError, match="not available"):
         _run(engine)
@@ -193,9 +196,7 @@ def test_missing_retention_witness_does_not_make_an_account_ready(
     origin = ConfiguredLocalSyntheticOriginV1(
         ledger_path=tmp_path / "rollback.db", issuer_instance_id=uuid7()
     )
-    store = LocalSyntheticAccountReceiptStoreV1(
-        origin=origin, clock=ReversedClock()
-    )
+    store = LocalSyntheticAccountReceiptStoreV1(origin=origin, clock=ReversedClock())
     coordinator = _coordinator(store)
     with pytest.raises(
         LocalAccountReceiptError, match="CLOCK_ROLLBACK_BEFORE_ORIGINAL"
@@ -236,9 +237,7 @@ def test_allocation_at_exact_e1_binding_time_is_not_backdated(
     origin = ConfiguredLocalSyntheticOriginV1(
         ledger_path=tmp_path / "exactbinding.db", issuer_instance_id=uuid7()
     )
-    store = LocalSyntheticAccountReceiptStoreV1(
-        origin=origin, clock=lambda: bound_at
-    )
+    store = LocalSyntheticAccountReceiptStoreV1(origin=origin, clock=lambda: bound_at)
     coord = _coordinator(store)
     _engine().prepare_opening_book(lifecycle=coord)
     receipt = coord.verified_original()
@@ -247,3 +246,78 @@ def test_allocation_at_exact_e1_binding_time_is_not_backdated(
     assert events[0].timestamp == bound_at
     assert receipt.receipt_observed_available_by_at >= bound_at
     assert receipt.fields.bound_at == "2026-10-19T00:00:02.000000Z"
+
+
+def test_changed_provenance_after_allocation_refuses_original_claim(
+    tmp_path: Path,
+) -> None:
+    """Original receipt cannot be associated with later-relabelled E1 scope."""
+    store = _store(tmp_path)
+    coordinator = _coordinator(store)
+    engine = _engine()
+    engine.prepare_opening_book(lifecycle=coordinator)
+    assert coordinator.local_phase == "ready"
+    assert [e.event_type for e in store.origin.verified_events()] == [
+        ALLOCATION,
+        WITNESS,
+    ]
+    # This is the original untrusted input object, not the detached verified
+    # graph or immutable bytes written into the configured SQLite ledger.
+    original_binding = coordinator._source_provenance.scope.run_account_binding
+    object.__setattr__(original_binding, "portfolio_account_id", "SYNTH-ACC-R-001")
+    with pytest.raises(
+        LocalAccountReceiptError, match="E1_PROVENANCE_MUTATED_AFTER_VALIDATION"
+    ):
+        coordinator.verified_original()
+    with pytest.raises(
+        LocalAccountReceiptError, match="E1_PROVENANCE_MUTATED_AFTER_VALIDATION"
+    ):
+        _run(engine)
+    assert coordinator.local_phase == "failed"
+    assert [e.event_type for e in store.origin.verified_events()] == [
+        ALLOCATION,
+        WITNESS,
+    ]
+    with pytest.raises(OpeningBookLifecycleError, match="not available"):
+        _run(engine)
+
+
+def test_changed_e1_source_after_claim_refuses_consumption(
+    tmp_path: Path,
+) -> None:
+    """No consumed witness follows a post-claim forged account identity."""
+    store = _store(tmp_path)
+    coordinator = _coordinator(store)
+    engine = _engine()
+    engine.prepare_opening_book(lifecycle=coordinator)
+    book = coordinator._original_book
+    assert book is not None
+    identity = _run_identity(
+        admission=engine.admission,
+        bundle=engine.bundle,
+        protocol=engine.protocol,
+        cost_model=engine.cost_model,
+        evidence_hash=engine.evaluator_evidence_hash,
+    )
+    coordinator.claim_invocation(opening_book=book, run_identity=identity)
+    assert coordinator.local_phase == "claimed"
+    assert [e.event_type for e in store.origin.verified_events()] == [
+        ALLOCATION,
+        WITNESS,
+        CLAIM,
+    ]
+    object.__setattr__(
+        coordinator._source_provenance.scope.run_account_binding,
+        "portfolio_account_id",
+        "SYNTH-ACC-R-001",
+    )
+    with pytest.raises(
+        LocalAccountReceiptError, match="E1_PROVENANCE_MUTATED_AFTER_VALIDATION"
+    ):
+        coordinator.observe_consumption(opening_book=book, run_identity=identity)
+    assert coordinator.local_phase == "failed"
+    assert [e.event_type for e in store.origin.verified_events()] == [
+        ALLOCATION,
+        WITNESS,
+        CLAIM,
+    ]
