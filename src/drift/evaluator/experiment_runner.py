@@ -25,8 +25,8 @@ compares is rebuilt through canonical JSON first, and only those canonical
 copies are compared and recorded (issue 123).
 """
 
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 from typing import Protocol
@@ -131,6 +131,7 @@ class ExperimentRunnerContext:
     ledger: Ledger | None = None
     audit_event_id: UUID7 | None = None
     original_result_observer: CanonicalM0ResultObserverV1 | None = None
+    completion_clock: Callable[[], datetime] | None = None
 
 
 @dataclass(frozen=True)
@@ -404,6 +405,28 @@ def _bound_parameters_hash(
     return specified
 
 
+def _completed_inputs(
+    inputs: _CallerInputs, clock: Callable[[], datetime] | None
+) -> _CallerInputs:
+    """Sample opt-in completion after execution, never guess a future instant.
+
+    A bad/failed clock leaves the invocation unresolved. No successful audit
+    event is written using a stale placeholder. Existing no-clock callers keep
+    the original supplied-clock contract and bytes unchanged.
+    """
+    if clock is None:
+        return inputs
+    sampled = clock()
+    if type(sampled) is not datetime:
+        raise ValueError("completion clock requires an exact datetime")
+    completed = _canonical(_INSTANT, sampled)
+    if completed.tzinfo is None or completed.utcoffset() is None:
+        raise ValueError("completion clock requires a timezone-aware instant")
+    if completed < inputs.started_at:
+        raise ValueError("completion clock precedes original invocation start")
+    return replace(inputs, completed_at=completed)
+
+
 def _record_audit_event(
     ledger: Ledger | None,
     inputs: _CallerInputs,
@@ -543,6 +566,7 @@ def execute_experiment_run(
     ledger = context.ledger
     strategy = context.strategy
     original_result_observer = context.original_result_observer
+    completion_clock = context.completion_clock
     refuse_promotion_lane(engine.admission, site="the experiment runner")
     inputs = _caller_inputs(specification, context)
     _validate_context(inputs)
@@ -597,6 +621,8 @@ def execute_experiment_run(
         raise
     except Exception as error:
         detail = _error_details(error)
+        inputs = _completed_inputs(inputs, completion_clock)
+        common["completed_at"] = inputs.completed_at
         run = ExperimentRun.model_validate(
             common
             | {
@@ -615,6 +641,8 @@ def execute_experiment_run(
         return run
     recorded = _rebuilt_artifacts(artifacts)
     _refuse_foreign_run(inputs, recorded)
+    inputs = _completed_inputs(inputs, completion_clock)
+    common["completed_at"] = inputs.completed_at
     run = ExperimentRun.model_validate(
         common
         | {
