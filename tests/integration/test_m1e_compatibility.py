@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.util
 import re
 import subprocess
@@ -33,6 +34,53 @@ INTELLIGENCE_SOURCE_PATHS = frozenset(
         "src/drift/intelligence/platform_bridge.py",
     }
 )
+# Preserved #496 exact triage registrations; real scans never exempt a directory.
+TRIAGE_OFFLINE_SOURCE_PATHS = frozenset(
+    {
+        "src/drift/news_triage/__init__.py",
+        "src/drift/news_triage/screen.py",
+    }
+)
+# Issue #552 is exactly one local original-account ledger source.
+E6B_LOCAL_ORIGINAL_LEDGER_SOURCE_PATHS = frozenset(
+    {"src/drift/ledger/stage1_synthetic_account_receipts.py"}
+)
+# Separate #553-#557/#559 requests share one explicit dispatch, not a prefix rule.
+OFFLINE_PREFLIGHT_SCRIPT_PATHS = frozenset(
+    {
+        "scripts/source_envelope_replay_preflight.py",  # #553
+        "scripts/result_economics_preflight.py",  # #553
+        "scripts/unknown_execution_replay_preflight.py",  # #553
+        "scripts/mandate_approval_preflight.py",  # #554
+        "scripts/qqq_offline_replay_preflight.py",  # #554
+        "scripts/forward_readiness_preflight.py",  # #555
+        "scripts/recovery_evidence_preflight.py",  # #556
+        "scripts/containment_evidence_preflight.py",  # #557
+        "scripts/source_qualification_preflight.py",  # #559
+        "scripts/execution_trace_preflight.py",  # #559
+    }
+)
+# Exact static versions proposed in #553 comment 6370604563. Only these three
+# negative-authority property names need an exception. Every semantic AST change
+# needs source review and an accepted new fingerprint; never regenerate to pass.
+# These fingerprints establish neither origin authentication nor runtime isolation.
+OFFLINE_PREFLIGHT_AST_PROFILES: dict[str, tuple[str, str, str]] = {
+    "scripts/source_envelope_replay_preflight.py": (
+        "EnvelopeReplayPreflight",
+        "authorizes_ingestion_or_trading",
+        "e514259164395aab580a3e816da69f1b53ddec82518f3385267ab9cd455a8781",
+    ),
+    "scripts/unknown_execution_replay_preflight.py": (
+        "UnknownReplayPreflight",
+        "authenticates_journal_broker_or_ledger",
+        "2c8662901bc07c1b8ed8a6b12fed0efb5fa2d42bc1f658af53f1a81ee4860ffb",
+    ),
+    "scripts/qqq_offline_replay_preflight.py": (
+        "QQQReplayPreflight",
+        "authorizes_data_access_or_trading",
+        "aec771311606d780c3d8e411d1ba1159d62d3b126a96d02e32a5d538be124a00",
+    ),
+}
 ALLOWED_M1E_PRODUCTION_PATHS = frozenset(
     {
         "src/drift/domain/qualification.py",
@@ -211,6 +259,25 @@ INERT_SOURCE_PATHS = (
     | M5_SCORECARD_SOURCE_PATHS
     | M6_RESEARCH_MEMORY_SOURCE_PATHS
     | INTELLIGENCE_SOURCE_PATHS
+    | TRIAGE_OFFLINE_SOURCE_PATHS
+    | E6B_LOCAL_ORIGINAL_LEDGER_SOURCE_PATHS
+    | OFFLINE_PREFLIGHT_SCRIPT_PATHS
+)
+SCANNED_AS_PRODUCTION_PATHS = (
+    M1E_PRODUCTION_PATHS
+    | M1D_REPLAY_IDENTITY_PATHS
+    | M1D_CLOSED_WORLD_SOURCE_PATHS
+    | M1C_CLOSED_WORLD_SOURCE_PATHS
+    | M2_ADDITIVE_SOURCE_PATHS
+    | M2_ALPACA_BRIDGE_SOURCE_PATHS
+    | M3_BASELINE_SOURCE_PATHS
+    | M4_PREDICTION_TRACKING_SOURCE_PATHS
+    | M5_SCORECARD_SOURCE_PATHS
+    | M6_RESEARCH_MEMORY_SOURCE_PATHS
+    | INTELLIGENCE_SOURCE_PATHS
+    | TRIAGE_OFFLINE_SOURCE_PATHS
+    | E6B_LOCAL_ORIGINAL_LEDGER_SOURCE_PATHS
+    | OFFLINE_PREFLIGHT_SCRIPT_PATHS
 )
 M1E_SCRIPT_PATHS = frozenset(
     path for path in ALLOWED_M1E_PRODUCTION_PATHS if path.startswith("scripts/")
@@ -560,6 +627,21 @@ def _m1e_paths_on_disk() -> set[str]:
     return m1e_candidates - baseline
 
 
+type PythonSource = str | bytes | ast.Module
+
+
+def _source_ast(source: PythonSource, label: str) -> ast.Module:
+    """Use Python's declared-encoding parser; reuse an already parsed module."""
+    if isinstance(source, ast.Module):
+        return source
+    try:
+        return ast.parse(
+            source, filename=label, mode="exec", type_comments=False, optimize=0
+        )
+    except (SyntaxError, UnicodeError, LookupError, ValueError) as exc:
+        raise AssertionError(f"invalid Python source in {label}: {exc}") from exc
+
+
 def _import_aliases(tree: ast.AST) -> dict[str, str]:
     aliases: dict[str, str] = {}
     for node in ast.walk(tree):
@@ -596,7 +678,7 @@ def _assert_definition_allowed(name: str, relative: str, *, script: bool) -> Non
         )
 
 
-def _assert_m1e_production_module_allowed(source: str, label: str) -> None:
+def _assert_m1e_production_module_allowed(source: PythonSource, label: str) -> None:
     """Hold production source to every prohibition its name implies.
 
     Credential reads were deferred to Task 8 for the *script* only.  Production
@@ -606,7 +688,15 @@ def _assert_m1e_production_module_allowed(source: str, label: str) -> None:
     ``os.getenv("ALPACA_API_KEY")`` injected into a production module, the
     Alpaca bridge included, left the whole suite green.
     """
-    tree = ast.parse(source, label)
+    _assert_m1e_production_tree_allowed(_source_ast(source, label), label)
+
+
+def _assert_m1e_production_tree_allowed(
+    tree: ast.Module,
+    label: str,
+    permitted_definition: ast.FunctionDef | None = None,
+) -> None:
+    """Apply every ordinary prohibition, except one fingerprint-bound node name."""
     aliases = _import_aliases(tree)
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -621,7 +711,8 @@ def _assert_m1e_production_module_allowed(source: str, label: str) -> None:
                 not in FORBIDDEN_PRODUCTION_IMPORT_ROOTS
             )
         if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-            _assert_definition_allowed(node.name, label, script=False)
+            if node is not permitted_definition:
+                _assert_definition_allowed(node.name, label, script=False)
         if isinstance(node, ast.Call):
             call_path = _call_path(node.func, aliases)
             assert call_path not in FORBIDDEN_PROCESS_CALLS, (
@@ -638,6 +729,36 @@ def _assert_m1e_production_module_allowed(source: str, label: str) -> None:
             assert access_path != "os.environ", (
                 f"credential read os.environ in production module {label}"
             )
+
+
+def _assert_offline_preflight_script_allowed(relative: str, tree: ast.Module) -> None:
+    """Bound a name exception to one exact path and complete byte-parsed AST."""
+    assert relative in OFFLINE_PREFLIGHT_SCRIPT_PATHS, (
+        f"unregistered offline preflight: {relative}"
+    )
+    permitted_definition = None
+    profile = OFFLINE_PREFLIGHT_AST_PROFILES.get(relative)
+    if profile is not None:
+        class_name, property_name, expected_digest = profile
+        actual_digest = hashlib.sha256(
+            ast.dump(tree, annotate_fields=True, include_attributes=False).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        assert actual_digest == expected_digest, (
+            f"unreviewed offline preflight AST: {relative}"
+        )
+        definitions = [
+            member
+            for owner in tree.body
+            if isinstance(owner, ast.ClassDef) and owner.name == class_name
+            for member in owner.body
+            if isinstance(member, ast.FunctionDef) and member.name == property_name
+        ]
+        assert len(definitions) == 1, f"missing exact property in {relative}"
+        permitted_definition = definitions[0]
+    # Reuse this exact AST. No second text decode or name-only fallback exists.
+    _assert_m1e_production_tree_allowed(tree, relative, permitted_definition)
 
 
 def _string_assignments(tree: ast.AST) -> dict[str, set[str] | None]:
@@ -706,10 +827,10 @@ def _permitted_environment_read(
 
 
 def _bridge_capability_violations(
-    source: str, label: str, allowlist: BridgeCapabilityAllowlist
+    source: PythonSource, label: str, allowlist: BridgeCapabilityAllowlist
 ) -> list[str]:
     """List every capability one bridge source reaches outside its allowlist."""
-    tree = ast.parse(source, label)
+    tree = _source_ast(source, label)
     parents = {
         child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)
     }
@@ -806,14 +927,15 @@ def _bridge_capability_violations(
     return violations
 
 
-def _assert_alpaca_bridge_module_allowed(source: str, label: str) -> None:
+def _assert_alpaca_bridge_module_allowed(source: PythonSource, label: str) -> None:
     """Hold the Alpaca adapter to its allowlist, then to the production guard."""
-    violations = _bridge_capability_violations(source, label, ALPACA_ADAPTER_ALLOWLIST)
+    tree = _source_ast(source, label)
+    violations = _bridge_capability_violations(tree, label, ALPACA_ADAPTER_ALLOWLIST)
     assert not violations, "alpaca bridge allowlist: " + "; ".join(violations)
-    _assert_m1e_production_module_allowed(source, label)
+    _assert_m1e_production_module_allowed(tree, label)
 
 
-def _assert_m2_bridge_script_allowed(relative: str, source: str) -> None:
+def _assert_m2_bridge_script_allowed(relative: str, source: PythonSource) -> None:
     """Allow the Task 8 acquisition CLI its transport and its API key reads.
 
     Everything M1e Task 1 forbade for a different reason stays forbidden here:
@@ -824,7 +946,7 @@ def _assert_m2_bridge_script_allowed(relative: str, source: str) -> None:
     assert relative in M2_ALPACA_BRIDGE_SCRIPT_PATHS, (
         f"unexpected M2 bridge script: {relative}"
     )
-    tree = ast.parse(source, relative)
+    tree = _source_ast(source, relative)
     aliases = _import_aliases(tree)
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -850,13 +972,11 @@ def _assert_m2_bridge_script_allowed(relative: str, source: str) -> None:
             )
     # The transport and the key reads are lifted for this script, and only as
     # far as its allowlist states: two named variables through one spelling.
-    violations = _bridge_capability_violations(
-        source, relative, ALPACA_SCRIPT_ALLOWLIST
-    )
+    violations = _bridge_capability_violations(tree, relative, ALPACA_SCRIPT_ALLOWLIST)
     assert not violations, "alpaca bridge allowlist: " + "; ".join(violations)
 
 
-def _assert_m2_benchmark_script_allowed(relative: str, source: str) -> None:
+def _assert_m2_benchmark_script_allowed(relative: str, source: PythonSource) -> None:
     """Enforce exact static capability bounds on the M2 historical benchmark script.
 
     The benchmark script is strictly offline: no network imports, no process
@@ -866,7 +986,7 @@ def _assert_m2_benchmark_script_allowed(relative: str, source: str) -> None:
     assert relative in M2_BENCHMARK_SCRIPT_PATHS, (
         f"unexpected M2 benchmark script: {relative}"
     )
-    tree = ast.parse(source, relative)
+    tree = _source_ast(source, relative)
     aliases = _import_aliases(tree)
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -903,14 +1023,14 @@ def _assert_m2_benchmark_script_allowed(relative: str, source: str) -> None:
                 "forbidden os.environ subscript in the M2 benchmark script"
             )
     violations = _bridge_capability_violations(
-        source, relative, BENCHMARK_SCRIPT_ALLOWLIST
+        tree, relative, BENCHMARK_SCRIPT_ALLOWLIST
     )
     assert not violations, "benchmark script allowlist: " + "; ".join(violations)
 
 
-def _assert_m1e_script_allowed(relative: str, source: str) -> None:
+def _assert_m1e_script_allowed(relative: str, source: PythonSource) -> None:
     assert relative in M1E_SCRIPT_PATHS, f"unexpected M1e script: {relative}"
-    tree = ast.parse(source, relative)
+    tree = _source_ast(source, relative)
     aliases = _import_aliases(tree)
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -970,46 +1090,41 @@ def test_task1_pin_commit_precedes_live_m1e_source_additions() -> None:
     assert not pinned_paths.intersection(ALLOWED_M1E_PRODUCTION_PATHS)
 
 
+def _assert_m1e_source_file_allowed(relative: str) -> None:
+    """Scan an exact registered file through the actual collection path."""
+    assert relative in INERT_SOURCE_PATHS, f"unregistered source: {relative}"
+    source = _source_ast((REPO_ROOT / relative).read_bytes(), relative)
+    if relative in INTELLIGENCE_SOURCE_PATHS:
+        violations = _bridge_capability_violations(
+            source, relative, INTELLIGENCE_CAPABILITY_ALLOWLIST
+        )
+        assert not violations, "intelligence capability allowlist: " + "; ".join(
+            violations
+        )
+        # The positive capability guard applies to these exact K1-K5
+        # paths. Do not apply M1e's unrelated definition-name ban:
+        # ordinary intelligence domain types may name a portfolio.
+    elif relative in M2_ALPACA_BRIDGE_SOURCE_PATHS:
+        _assert_alpaca_bridge_module_allowed(source, relative)
+    elif relative in OFFLINE_PREFLIGHT_SCRIPT_PATHS:
+        _assert_offline_preflight_script_allowed(relative, source)
+    elif relative in SCANNED_AS_PRODUCTION_PATHS:
+        _assert_m1e_production_module_allowed(source, relative)
+    elif relative in M2_ALPACA_BRIDGE_SCRIPT_PATHS:
+        _assert_m2_bridge_script_allowed(relative, source)
+    elif relative in M2_BENCHMARK_SCRIPT_PATHS:
+        _assert_m2_benchmark_script_allowed(relative, source)
+    else:
+        _assert_m1e_script_allowed(relative, source)
+
+
 def test_m1e_additions_are_allowlisted_inert_and_leave_m1d_pins_unchanged() -> None:
     """Future M1e code is constrained separately from byte-pinned M1d history."""
     present = _m1e_paths_on_disk()
     assert present <= INERT_SOURCE_PATHS
-    scanned_as_production = (
-        M1E_PRODUCTION_PATHS
-        | M1D_REPLAY_IDENTITY_PATHS
-        | M1D_CLOSED_WORLD_SOURCE_PATHS
-        | M1C_CLOSED_WORLD_SOURCE_PATHS
-        | M2_ADDITIVE_SOURCE_PATHS
-        | M2_ALPACA_BRIDGE_SOURCE_PATHS
-        | M3_BASELINE_SOURCE_PATHS
-        | M4_PREDICTION_TRACKING_SOURCE_PATHS
-        | M5_SCORECARD_SOURCE_PATHS
-        | M6_RESEARCH_MEMORY_SOURCE_PATHS
-        | INTELLIGENCE_SOURCE_PATHS
-    )
-    assert present & scanned_as_production
+    assert present & SCANNED_AS_PRODUCTION_PATHS
     for relative in present:
-        source = (REPO_ROOT / relative).read_text(encoding="utf-8")
-        if relative in INTELLIGENCE_SOURCE_PATHS:
-            violations = _bridge_capability_violations(
-                source, relative, INTELLIGENCE_CAPABILITY_ALLOWLIST
-            )
-            assert not violations, "intelligence capability allowlist: " + "; ".join(
-                violations
-            )
-            # The positive capability guard applies to these exact K1-K5
-            # paths. Do not apply M1e's unrelated definition-name ban:
-            # ordinary intelligence domain types may name a portfolio.
-        elif relative in M2_ALPACA_BRIDGE_SOURCE_PATHS:
-            _assert_alpaca_bridge_module_allowed(source, relative)
-        elif relative in scanned_as_production:
-            _assert_m1e_production_module_allowed(source, relative)
-        elif relative in M2_ALPACA_BRIDGE_SCRIPT_PATHS:
-            _assert_m2_bridge_script_allowed(relative, source)
-        elif relative in M2_BENCHMARK_SCRIPT_PATHS:
-            _assert_m2_benchmark_script_allowed(relative, source)
-        else:
-            _assert_m1e_script_allowed(relative, source)
+        _assert_m1e_source_file_allowed(relative)
 
     helper = _load_pinned_helper()
     helper.verify_m1d_protected_inputs(root=REPO_ROOT)
@@ -1099,7 +1214,7 @@ def test_production_ast_guard_refuses_every_credential_read() -> None:
 def test_injecting_a_credential_read_into_the_alpaca_bridge_now_fails() -> None:
     """The bridge is scanned as production source, so the check binds to it."""
     relative = "src/drift/adapters/alpaca_exploratory.py"
-    source = (REPO_ROOT / relative).read_text(encoding="utf-8")
+    source = (REPO_ROOT / relative).read_bytes()
 
     # Unmodified, the real adapter passes.
     _assert_m1e_production_module_allowed(source, relative)
@@ -1110,7 +1225,9 @@ def test_injecting_a_credential_read_into_the_alpaca_bridge_now_fails() -> None:
         '\n\n_LEAKED = os.environ["ALPACA_API_KEY"]\n',
     ):
         with pytest.raises(AssertionError):
-            _assert_m1e_production_module_allowed(source + injection, relative)
+            _assert_m1e_production_module_allowed(
+                source + injection.encode("utf-8"), relative
+            )
 
 
 def test_script_ast_guard_partitions_process_and_defers_acquisition_capabilities() -> (
@@ -1257,13 +1374,13 @@ ADAPTER_BYPASSES: dict[str, tuple[str, str]] = {
 def test_the_real_alpaca_bridge_sources_pass_their_allowlists() -> None:
     """The allowlist is derived from the real sources, so both must pass."""
     for relative in sorted(M2_ALPACA_BRIDGE_SOURCE_PATHS):
-        source = (REPO_ROOT / relative).read_text(encoding="utf-8")
+        source = (REPO_ROOT / relative).read_bytes()
         assert (
             _bridge_capability_violations(source, relative, ALPACA_ADAPTER_ALLOWLIST)
             == []
         )
         _assert_alpaca_bridge_module_allowed(source, relative)
-    script = (REPO_ROOT / ALPACA_SCRIPT_PATH).read_text(encoding="utf-8")
+    script = (REPO_ROOT / ALPACA_SCRIPT_PATH).read_bytes()
     assert (
         _bridge_capability_violations(
             script, ALPACA_SCRIPT_PATH, ALPACA_SCRIPT_ALLOWLIST
@@ -1278,11 +1395,11 @@ def test_every_known_credential_or_network_bypass_is_refused_in_the_adapter(
     bypass: str,
 ) -> None:
     injection, rule = ADAPTER_BYPASSES[bypass]
-    source = (REPO_ROOT / ALPACA_ADAPTER_PATH).read_text(encoding="utf-8")
+    source = (REPO_ROOT / ALPACA_ADAPTER_PATH).read_bytes()
 
     with pytest.raises(AssertionError, match=re.escape(rule)):
         _assert_alpaca_bridge_module_allowed(
-            source + "\n\n" + injection, ALPACA_ADAPTER_PATH
+            source + b"\n\n" + injection.encode("utf-8"), ALPACA_ADAPTER_PATH
         )
 
 
@@ -1340,11 +1457,11 @@ SCRIPT_BYPASSES: dict[str, tuple[str, str]] = {
 @pytest.mark.parametrize("bypass", sorted(SCRIPT_BYPASSES))
 def test_the_script_may_read_only_the_two_alpaca_key_variables(bypass: str) -> None:
     injection, rule = SCRIPT_BYPASSES[bypass]
-    source = (REPO_ROOT / ALPACA_SCRIPT_PATH).read_text(encoding="utf-8")
+    source = (REPO_ROOT / ALPACA_SCRIPT_PATH).read_bytes()
 
     with pytest.raises(AssertionError, match=re.escape(rule)):
         _assert_m2_bridge_script_allowed(
-            ALPACA_SCRIPT_PATH, source + "\n\n" + injection
+            ALPACA_SCRIPT_PATH, source + b"\n\n" + injection.encode("utf-8")
         )
 
 
@@ -1363,7 +1480,7 @@ def _origin_record_minters(root: Path) -> set[str]:
     found: set[str] = set()
     for base in (root / "src", root / "scripts"):
         for path in sorted(base.rglob("*.py")) if base.is_dir() else ():
-            tree = ast.parse(path.read_bytes(), str(path))
+            tree = _source_ast(path.read_bytes(), str(path))
             for node in ast.walk(tree):
                 named = (
                     (isinstance(node, ast.Name) and node.id == ORIGIN_RECORD_MINTER)
@@ -1474,7 +1591,7 @@ BENCHMARK_SCRIPT_BYPASSES: dict[str, tuple[str, str]] = {
 
 def test_the_real_benchmark_script_passes_its_capability_guard() -> None:
     """The real historical benchmark script must pass its capability guard."""
-    script_source = (REPO_ROOT / BENCHMARK_SCRIPT_PATH).read_text(encoding="utf-8")
+    script_source = (REPO_ROOT / BENCHMARK_SCRIPT_PATH).read_bytes()
     assert (
         _bridge_capability_violations(
             script_source, BENCHMARK_SCRIPT_PATH, BENCHMARK_SCRIPT_ALLOWLIST
@@ -1489,8 +1606,255 @@ def test_every_known_capability_bypass_is_refused_in_the_benchmark_script(
     bypass: str,
 ) -> None:
     injection, rule = BENCHMARK_SCRIPT_BYPASSES[bypass]
-    source = (REPO_ROOT / BENCHMARK_SCRIPT_PATH).read_text(encoding="utf-8")
+    source = (REPO_ROOT / BENCHMARK_SCRIPT_PATH).read_bytes()
     with pytest.raises(AssertionError, match=re.escape(rule)):
         _assert_m2_benchmark_script_allowed(
-            BENCHMARK_SCRIPT_PATH, source + "\n\n" + injection
+            BENCHMARK_SCRIPT_PATH, source + b"\n\n" + injection.encode("utf-8")
         )
+
+
+_SOURCE_DECODING_PATHS = (
+    "src/drift/qualification/__init__.py",
+    "src/drift/intelligence/contracts.py",
+    "src/drift/adapters/alpaca_exploratory.py",
+    "scripts/intake_alpaca_exploratory.py",
+    "scripts/benchmark_qqq_historical.py",
+    "scripts/intake_m1e_truth.py",
+)
+
+
+@pytest.mark.parametrize("relative", _SOURCE_DECODING_PATHS)
+@pytest.mark.parametrize(
+    "operation",
+    (
+        "import socket",
+        "import os; os.getenv('SECRET')",
+        "import subprocess; subprocess.run(['true'])",
+        "eval('1 + 1')",
+    ),
+)
+def test_actual_file_scans_refuse_declared_codec_hidden_operations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str, operation: str
+) -> None:
+    """Every dispatch profile inspects Python's decoded program without execution."""
+    source = (
+        b"# coding: unicode_escape\npass\n# hidden\\n"
+        + operation.encode("ascii")
+        + b"\n"
+    )
+    # Demonstrate the defect: UTF-8 text sees only the innocent pass statement.
+    assert len(ast.parse(source.decode("utf-8")).body) == 1
+    assert len(ast.parse(source).body) > 1
+    path = tmp_path / relative
+    path.parent.mkdir(parents=True)
+    path.write_bytes(source)
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+    with pytest.raises(AssertionError):
+        _assert_m1e_source_file_allowed(relative)
+
+
+@pytest.mark.parametrize("relative", _SOURCE_DECODING_PATHS)
+@pytest.mark.parametrize(
+    "source",
+    (
+        b"# coding: no_such_python_codec\npass\n",
+        b"\xef\xbb\xbf# coding: latin-1\npass\n",
+        b"# coding: ascii\n# \xff\npass\n",
+    ),
+)
+def test_actual_file_scans_fail_closed_on_invalid_source_encodings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str, source: bytes
+) -> None:
+    path = tmp_path / relative
+    path.parent.mkdir(parents=True)
+    path.write_bytes(source)
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+    with pytest.raises(AssertionError, match="invalid Python source"):
+        _assert_m1e_source_file_allowed(relative)
+
+
+@pytest.mark.parametrize("relative", _SOURCE_DECODING_PATHS)
+@pytest.mark.parametrize(
+    "source",
+    (
+        b"pass\n",
+        b"# coding: utf-8\n# a comment\npass\n",
+        b"\xef\xbb\xbfpass\r\n",
+        b"# coding: latin-1\n# caf\xe9\npass\n",
+    ),
+)
+def test_actual_file_scans_preserve_valid_source_encoding_decisions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str, source: bytes
+) -> None:
+    path = tmp_path / relative
+    path.parent.mkdir(parents=True)
+    path.write_bytes(source)
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+    _assert_m1e_source_file_allowed(relative)
+
+
+_SUCCESSOR_ORDINARY_PATHS = (
+    TRIAGE_OFFLINE_SOURCE_PATHS
+    | E6B_LOCAL_ORIGINAL_LEDGER_SOURCE_PATHS
+    | (OFFLINE_PREFLIGHT_SCRIPT_PATHS - OFFLINE_PREFLIGHT_AST_PROFILES.keys())
+)
+_CAPABILITY_INJECTIONS = (
+    b"import socket\n",
+    b"import os\nos.getenv('SECRET')\n",
+    b"import os\nos.environ['SECRET']\n",
+    b"import subprocess\nsubprocess.run(['true'])\n",
+    b"import os\nos.system('true')\n",
+    b"eval('1 + 1')\n",
+)
+
+
+def test_successor_inventory_is_exact_and_scanned() -> None:
+    assert TRIAGE_OFFLINE_SOURCE_PATHS == {
+        "src/drift/news_triage/__init__.py",
+        "src/drift/news_triage/screen.py",
+    }
+    assert E6B_LOCAL_ORIGINAL_LEDGER_SOURCE_PATHS == {
+        "src/drift/ledger/stage1_synthetic_account_receipts.py"
+    }
+    assert OFFLINE_PREFLIGHT_SCRIPT_PATHS == {
+        "scripts/source_envelope_replay_preflight.py",
+        "scripts/result_economics_preflight.py",
+        "scripts/unknown_execution_replay_preflight.py",
+        "scripts/mandate_approval_preflight.py",
+        "scripts/qqq_offline_replay_preflight.py",
+        "scripts/forward_readiness_preflight.py",
+        "scripts/recovery_evidence_preflight.py",
+        "scripts/containment_evidence_preflight.py",
+        "scripts/source_qualification_preflight.py",
+        "scripts/execution_trace_preflight.py",
+    }
+    expected = (
+        TRIAGE_OFFLINE_SOURCE_PATHS
+        | E6B_LOCAL_ORIGINAL_LEDGER_SOURCE_PATHS
+        | OFFLINE_PREFLIGHT_SCRIPT_PATHS
+    )
+    assert expected <= INERT_SOURCE_PATHS
+    assert expected <= SCANNED_AS_PRODUCTION_PATHS
+    assert set(OFFLINE_PREFLIGHT_AST_PROFILES) == {
+        "scripts/source_envelope_replay_preflight.py",
+        "scripts/unknown_execution_replay_preflight.py",
+        "scripts/qqq_offline_replay_preflight.py",
+    }
+    for unknown in (
+        "src/drift/news_triage/extra.py",
+        "src/drift/ledger/stage1_synthetic_extra.py",
+        "scripts/new_offline_preflight.py",
+        "./scripts/qqq_offline_replay_preflight.py",
+    ):
+        assert unknown not in INERT_SOURCE_PATHS
+        with pytest.raises(AssertionError, match="unregistered source"):
+            _assert_m1e_source_file_allowed(unknown)
+
+
+@pytest.mark.parametrize("relative", sorted(_SUCCESSOR_ORDINARY_PATHS))
+def test_successor_ordinary_paths_have_nonvacuous_actual_file_scans(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str
+) -> None:
+    """Main need not import unmerged consumers to test their real scan route."""
+    path = tmp_path / relative
+    path.parent.mkdir(parents=True)
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+    original = b"from dataclasses import dataclass\nvalue = False\n"
+    path.write_bytes(original)
+    _assert_m1e_source_file_allowed(relative)
+    for injection in _CAPABILITY_INJECTIONS:
+        path.write_bytes(original + injection)
+        with pytest.raises(AssertionError):
+            _assert_m1e_source_file_allowed(relative)
+        path.write_bytes(
+            b"# coding: unicode_escape\n"
+            + original
+            + b"# hidden\\n"
+            + injection.replace(b"\n", b"\\n")
+            + b"\n"
+        )
+        with pytest.raises(AssertionError):
+            _assert_m1e_source_file_allowed(relative)
+
+
+# These tiny parser fixtures are not the real source-version admission pins.
+# Monkeypatching is confined to each test; actual-file integration always uses
+# the original three reviewed digests above and the actual source on disk.
+_PREFLIGHT_FIXTURE_DIGESTS = {
+    "scripts/source_envelope_replay_preflight.py": (
+        "975a35c7856b73f4f8b6420fcc20ab49ed78bcc6b0b842f9ad3b333f1d7c6669"
+    ),
+    "scripts/unknown_execution_replay_preflight.py": (
+        "ef27d4c8646a8df62f6c2ddb7843a5a7c5c46ba77fc376f4a47b3c9f3a3ecb9a"
+    ),
+    "scripts/qqq_offline_replay_preflight.py": (
+        "0e911d6de85a5102588946bbc894573e0275e27a37820e668f4b57aa65458383"
+    ),
+}
+
+
+@pytest.mark.parametrize("relative", sorted(OFFLINE_PREFLIGHT_AST_PROFILES))
+def test_pinned_preflight_actual_file_dispatch_and_mutation_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str
+) -> None:
+    class_name, property_name, _ = OFFLINE_PREFLIGHT_AST_PROFILES[relative]
+    original = (
+        f"class {class_name}:\n"
+        "    @property\n"
+        f"    def {property_name}(self) -> bool:\n"
+        "        return False\n"
+    ).encode("ascii")
+    path = tmp_path / relative
+    path.parent.mkdir(parents=True)
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+    path.write_bytes(original)
+    # Merely containing the expected false property cannot authorize a version.
+    with pytest.raises(AssertionError, match="unreviewed offline preflight AST"):
+        _assert_m1e_source_file_allowed(relative)
+    monkeypatch.setitem(
+        OFFLINE_PREFLIGHT_AST_PROFILES,
+        relative,
+        (class_name, property_name, _PREFLIGHT_FIXTURE_DIGESTS[relative]),
+    )
+    for benign in (
+        original,
+        b"# leading comment\n" + original,
+        original + b"# trailing comment\n",
+        b"# coding: utf-8\n" + original,
+        original.replace(b"\n", b"\r\n"),
+    ):
+        path.write_bytes(benign)
+        _assert_m1e_source_file_allowed(relative)
+    replacement = f"{class_name}.{property_name} = property(lambda self: True)\n"
+    mutations = (
+        original.replace(b"return False", b"return True"),
+        original.replace(b"return False", b"effects.append('effect'); return False"),
+        b"def property(fn):\n    return lambda self: True\n" + original,
+        original + replacement.encode("ascii"),
+        original
+        + f"alias = {class_name}\nalias.{property_name} = True\n".encode("ascii"),
+        original + f"setattr({class_name}, '{property_name}', True)\n".encode("ascii"),
+        b"# coding: unicode_escape\n" + original + b"# hidden\\nimport socket\n",
+    )
+    for mutation in mutations:
+        path.write_bytes(mutation)
+        with pytest.raises(AssertionError, match="unreviewed offline preflight AST"):
+            _assert_m1e_source_file_allowed(relative)
+    # Each path selects its own fingerprint, even when the property is unchanged.
+    for other in OFFLINE_PREFLIGHT_AST_PROFILES:
+        if other != relative:
+            with pytest.raises(
+                AssertionError, match="unreviewed offline preflight AST"
+            ):
+                _assert_offline_preflight_script_allowed(
+                    other, _source_ast(original, relative)
+                )
+    # Check the ordinary remainder directly: failures cannot depend only on a hash.
+    for injection in _CAPABILITY_INJECTIONS:
+        tree = _source_ast(original + injection, relative)
+        owner = tree.body[0]
+        assert isinstance(owner, ast.ClassDef)
+        definition = owner.body[0]
+        assert isinstance(definition, ast.FunctionDef)
+        with pytest.raises(AssertionError):
+            _assert_m1e_production_tree_allowed(tree, relative, definition)
