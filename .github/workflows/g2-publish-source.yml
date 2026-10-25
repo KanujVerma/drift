@@ -1,0 +1,118 @@
+name: g2 exact source publication (not release)
+
+on:
+  push:
+    branches:
+      - coord/564-publish-reviewed-tree
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: github.repository == 'KanujVerma/drift' && github.ref == 'refs/heads/coord/564-publish-reviewed-tree'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the exact integration parent
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: e22104511f2b2b7b5466dc00785e76eeb2aad523
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reconstruct and verify the owner-scoped source patch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import urllib.request
+          import zlib
+
+          parent = 'e22104511f2b2b7b5466dc00785e76eeb2aad523'
+          expected_tree = '15be550a478b5608ce78a6b8f9cf500b56e64db9'
+          expected_patch = 'f6ee70446f4db16693ba47c56ee119312f91744f25b8fd8ffd1bc48c750e9a1c'
+          parts = (
+              'ee751c207e62355d9c632b4f830b0ddb852f6104',
+              '5d6d76097434d4c2af898de121253f334c22dfff',
+              '9c1c3e089da4dfc6f827498af610f19537468c16',
+              '9cd94e9ca5c04e807f1a837bfeae048c57055f8b',
+              '353e58756df18c46554dab158594334d15973640',
+              '215c3a1f56adeb9db41001de4504d466afc28b76',
+              '34635003d081a6080a1ba8dd851b35ac25722571',
+              'a1565d9873381fa88805aa619c04b275dd3fc84c',
+              '5bac90865e7d63231646f6dd6e87488f869e6ada',
+          )
+          allowed = {
+              'docs/architecture/adaptive-experiments/verification/stage1-research-execution-candidate.md',
+              'src/drift/evaluator/experiment_runner.py',
+              'src/drift/loop/stage1_synthetic_research_execution.py',
+              'tests/adversarial/test_stage1_research_execution_integrity.py',
+              'tests/integration/test_stage1_research_execution_end_to_end.py',
+              'tests/unit/test_stage1_synthetic_research_execution.py',
+          }
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          if git('rev-parse', 'HEAD') != parent or git('status', '--porcelain'):
+              raise SystemExit('Refusing unexpected or dirty parent')
+          pieces = []
+          for sha in parts:
+              request = urllib.request.Request(
+                  'https://api.github.com/repos/KanujVerma/drift/git/blobs/' + sha,
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                           'Accept': 'application/vnd.github+json'},
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  item = json.load(response)
+              if item['sha'] != sha or item['encoding'] != 'base64':
+                  raise SystemExit('Refusing mismatched source blob')
+              data = base64.b64decode(''.join(item['content'].split()), validate=True)
+              actual = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+              if actual != sha:
+                  raise SystemExit('Source blob integrity failure')
+              pieces.append(data)
+          decoder = zlib.decompressobj()
+          patch = decoder.decompress(b''.join(pieces), 1_000_000)
+          if not decoder.eof or decoder.unused_data or decoder.unconsumed_tail:
+              raise SystemExit('Invalid or excessive patch encoding')
+          if len(patch) != 97795 or hashlib.sha256(patch).hexdigest() != expected_patch:
+              raise SystemExit('Patch does not match the locally tested source')
+          patch_file = Path(os.environ['RUNNER_TEMP']) / 'g2-reviewed-source.patch'
+          patch_file.write_bytes(patch)
+          subprocess.run(['git', 'apply', '--check', str(patch_file)], check=True)
+          subprocess.run(['git', 'apply', '--index', str(patch_file)], check=True)
+          changed = set(subprocess.check_output(
+              ['git', 'diff', '--cached', '--name-only', '-z']
+          ).decode().rstrip('\0').split('\0'))
+          if changed != allowed:
+              raise SystemExit('Changed paths exceed the six-path writer claim')
+          subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
+          if git('write-tree') != expected_tree:
+              raise SystemExit('Final tree differs from the locally tested source')
+          print('Verified patch:', expected_patch)
+          print('Verified source tree:', expected_tree)
+          print('Verified paths:', '\n'.join(sorted(changed)))
+          PY
+      - name: Publish only the new integration branch without rewriting history
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          BRANCH='kanuj/564-synthetic-research-execution'
+          PARENT='e22104511f2b2b7b5466dc00785e76eeb2aad523'
+          CURRENT="$(git ls-remote origin "refs/heads/$BRANCH" | cut -f1)"
+          test "$CURRENT" = "$PARENT"
+          test "$(git write-tree)" = '15be550a478b5608ce78a6b8f9cf500b56e64db9'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(stage1): bind offline research to original execution (#564)'
+          AUTH="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$AUTH"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $AUTH" push origin "HEAD:refs/heads/$BRANCH"
+          unset AUTH GH_TOKEN
+          git log -1 --format='Published commit: %H%nTree: %T%nParent: %P'
