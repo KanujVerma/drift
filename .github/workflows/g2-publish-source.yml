@@ -14,13 +14,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - name: Check out the exact integration parent
+      - name: Check out exact reviewed integration parent
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 7ff63f7390be8a07f589b67b023a78a0c633ac80
+          ref: 78d0fd4ef37a7c087ada00b5d012de007a832cba
           fetch-depth: 0
           persist-credentials: false
-      - name: Reconstruct and verify the owner-scoped source patch
+      - name: Verify patch, scope and tree before isolated publication
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -34,32 +34,28 @@ jobs:
           import urllib.request
           import zlib
 
-          parent = '7ff63f7390be8a07f589b67b023a78a0c633ac80'
-          expected_tree = '78caf350407d1a567fad5ed19319b1aa32713b84'
-          expected_patch = '73f37b62f94e57925ea227d5a31af595dde213db086a06b3f0daa668194c1234'
+          parent = '78d0fd4ef37a7c087ada00b5d012de007a832cba'
+          expected_tree = '9d85885d66f5672943f130239a4a131f7425a63b'
+          expected_patch = '9eefcc49f4162f2602fdd79693a15404dc09c408f4e7d2049cac9de25fe01106'
+          target = 'refs/heads/coord/564-transfer-failed-evidence'
           parts = (
-              '22aa3f599e3bbeb70b3e6414206957921ea7a470',
-              'abc22a68009a2abc815cf98b4157ea2419f8aefc',
-              '83998fe37bbede4323e0f536cb5ad3f88efd0f3a',
-              'cf846ff49e56083e2fa629a132ea068fb41a4c73',
-              '8c8fca1e79f4f03a468d35eab578da706f45cf78',
-              '8118c7ee1d11ddbe7470df4f3776d34dd64905c1',
-              '01b3e11b44e632f7175f0524f9757688086e2f78',
-              '624f21f1457cf078fba6e4c5d779c8b80d1271d7',
-              '559658e5b27faacac7c6553e3dab3b1adbfdaefc',
-              'ffe52b235a9d596d7cbbc3e29fb2c188de822b3f',
+              'd7402c8c0177edc1d82cb5222935d349c11c6c60',
+              '50878ca08ecf00620f62b7e2f4f1b0e2ea69e8f0',
+              '2e2d9c66f2b38961ed7388ed10bb618ec1f24c36',
+              '97b7b6fbc086db04239756ab960e55fdbdc8a4aa',
+              '0949c36872fbb9d1274f1d323044a113b760d1b7',
+              '0f30de340db866b531634238b22166d940d73eb5',
+              'ecbbcfd6b5888e41324f1b26dec72b13269e580e',
           )
           allowed = {
               'docs/architecture/adaptive-experiments/verification/stage1-research-execution-candidate.md',
               'src/drift/loop/stage1_synthetic_research_execution.py',
               'tests/adversarial/test_stage1_research_execution_integrity.py',
-              'tests/integration/test_stage1_research_execution_end_to_end.py',
-              'tests/unit/test_stage1_synthetic_research_execution.py',
           }
           def git(*args):
               return subprocess.check_output(['git', *args], text=True).strip()
           if git('rev-parse', 'HEAD') != parent or git('status', '--porcelain'):
-              raise SystemExit('Refusing unexpected or dirty parent')
+              raise SystemExit('Unexpected or dirty source parent')
           pieces = []
           for sha in parts:
               request = urllib.request.Request(
@@ -70,51 +66,39 @@ jobs:
               with urllib.request.urlopen(request, timeout=30) as response:
                   item = json.load(response)
               if item['sha'] != sha or item['encoding'] != 'base64':
-                  raise SystemExit('Refusing mismatched source blob')
+                  raise SystemExit('Mismatched source blob metadata')
               data = base64.b64decode(''.join(item['content'].split()), validate=True)
               actual = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
               if actual != sha:
                   raise SystemExit('Source blob integrity failure')
               pieces.append(data)
           decoder = zlib.decompressobj()
-          patch = decoder.decompress(b''.join(pieces), 1_000_000)
+          patch = decoder.decompress(b''.join(pieces), 1000000)
           if not decoder.eof or decoder.unused_data or decoder.unconsumed_tail:
               raise SystemExit('Invalid or excessive patch encoding')
-          if len(patch) != 35037 or hashlib.sha256(patch).hexdigest() != expected_patch:
-              raise SystemExit('Patch does not match the locally tested source')
+          if len(patch) != 18625 or hashlib.sha256(patch).hexdigest() != expected_patch:
+              raise SystemExit('Patch differs from the locally tested source')
           patch_file = Path(os.environ['RUNNER_TEMP']) / 'g2-reviewed-source.patch'
           patch_file.write_bytes(patch)
           subprocess.run(['git', 'apply', '--check', str(patch_file)], check=True)
           subprocess.run(['git', 'apply', '--index', str(patch_file)], check=True)
           changed = set(subprocess.check_output(
               ['git', 'diff', '--cached', '--name-only', '-z']
-          ).decode().rstrip('\0').split('\0'))
-          if changed != allowed:
-              raise SystemExit('Changed paths differ from the five-path repair claim')
+          ).decode().strip('\0').split('\0'))
+          if changed != allowed or git('write-tree') != expected_tree:
+              raise SystemExit('Unexpected source scope or tree')
           subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
-          if git('write-tree') != expected_tree:
-              raise SystemExit('Final tree differs from the locally tested source')
-          print('Verified patch:', expected_patch)
-          print('Verified source tree:', expected_tree)
-          print('Verified paths:', '\n'.join(sorted(changed)))
+          subprocess.run(['git', 'config', 'user.name', 'github-actions[bot]'], check=True)
+          subprocess.run(['git', 'config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com'], check=True)
+          subprocess.run(['git', 'commit', '-m', 'fix(stage1): verify original failed invocation evidence (#564)'], check=True)
+          if git('rev-parse', 'HEAD^') != parent or git('rev-parse', 'HEAD^{tree}') != expected_tree:
+              raise SystemExit('Publication commit identity mismatch')
+          token = base64.b64encode(('x-access-token:' + os.environ['GH_TOKEN']).encode()).decode()
+          header = 'http.https://github.com/.extraheader=AUTHORIZATION: basic ' + token
+          existing = git('-c', header, 'ls-remote', 'origin', target)
+          if existing:
+              raise SystemExit('Transfer branch already exists; no overwrite permitted')
+          subprocess.run(['git', '-c', header, 'push', 'origin', 'HEAD:' + target], check=True)
+          print('PUBLISHED_COMMIT', git('rev-parse', 'HEAD'))
+          print('PUBLISHED_TREE', git('rev-parse', 'HEAD^{tree}'))
           PY
-      - name: Publish only an isolated transfer ref, not main or the PR branch
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          SOURCE='kanuj/564-synthetic-research-execution'
-          TRANSFER='coord/564-retention-source-transfer'
-          PARENT='7ff63f7390be8a07f589b67b023a78a0c633ac80'
-          CURRENT="$(git ls-remote origin "refs/heads/$SOURCE" | cut -f1)"
-          test "$CURRENT" = "$PARENT"
-          test -z "$(git ls-remote origin "refs/heads/$TRANSFER")"
-          test "$(git write-tree)" = '78caf350407d1a567fad5ed19319b1aa32713b84'
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'fix(stage1): retain complete bounded B4/B5 decision history (#564)'
-          AUTH="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
-          echo "::add-mask::$AUTH"
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $AUTH" push origin "HEAD:refs/heads/$TRANSFER"
-          unset AUTH GH_TOKEN
-          git log -1 --format='Published commit: %H%nTree: %T%nParent: %P'
