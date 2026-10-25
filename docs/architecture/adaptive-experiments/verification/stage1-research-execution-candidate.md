@@ -110,9 +110,14 @@ result cannot validate a forged or unrelated first-decision proof.
 
 Later decisions remain that same installed strategy's frozen internal behavior.
 This is not an adaptive monthly switch implementation and does not rewrite the
-historical B3/B4/B5 algorithms. Positive full-window integration coverage is B3;
-insufficient B4 history is an explicit failure control, not positive B4/B5
-eligibility proof. Qualified B4/B5 reference histories remain a separate gate.
+historical B3/B4/B5 algorithms. B3 has a full 379-session two-arm integration
+fixture. B4 and B5 additionally execute with twelve fictional securities,
+253 completed lookback sessions and the next fill session; both retain their
+complete first-decision history and original results for cold verification.
+Those constant-price fixtures establish the execution/retention path, not real
+market eligibility, optimized selection or the full scored/reset campaign.
+Insufficient B4 history remains a separate failure control. Qualified reference
+histories and adaptive monthly campaign continuity remain separate gates.
 
 ## Actual post-execution M0 completion clock
 
@@ -166,10 +171,40 @@ cost-supersession adjudication, shared-cost attribution or economic-gain report
 is introduced. Cold replay makes no external inference call but is not a claim
 that infrastructure or storage is universally free.
 
-Each local record is capped at 1 MiB. Original RESULT retention keeps its existing
-4 MiB cap. Oversize evidence is never truncated into apparent completeness. A
-failure to retain a large final proof after execution leaves the existing M0
-facts present and the opportunity unresolved.
+## Lossless large-context retention and compatibility
+
+Each local canonical record payload is capped at 1 MiB, including its escaped
+body and envelope. Original RESULT retention keeps its existing 4 MiB cap.
+Neither cap is raised to accommodate full B4/B5 history.
+
+Outcome event schema `1` retains the existing inline `first_context_utf8` and
+its exact field set. Small first-decision contexts continue to use that wire
+format, with no added null artifact field. Historical schema-1 originals are
+not upgraded or rewritten.
+
+A large first context uses additive outcome event schema `2`, with
+`first_context_artifact` profile `drift-synthetic-decision-context/1` and
+encoding `zlib-base64`. The artifact retains its original uncompressed byte
+length, SHA-256 digest and complete compressed data. `first_context_utf8` must
+be null. Only an actual returned M0 outcome with an original context kind and
+intent may carry this representation. Both-context, failed-outcome, missing
+proof and unknown/downgraded schema combinations refuse.
+
+Compression is only transport: the cold reader verifies the complete original
+uncompressed bytes and the original evaluator context/intent hashes. It uses
+strict canonical base64 and bounded streaming decompression with a separate
+32 MiB decoded-context ceiling. Truncation, trailing data, concatenated streams,
+noncanonical base64, dishonest lengths, digest mismatches, duplicate JSON keys,
+nonfinite JSON and noncanonical original bytes refuse. No unbounded flush or
+partial-context success is permitted.
+
+The first-decision guard checks both the decoded ceiling and the encoded
+payload capacity before returning an intent for staging. A proof that exceeds
+either bound fails without staging that first order. This does not promise
+future I/O will succeed: an interrupted final append still leaves existing
+M0 facts present and the opportunity unresolved, without automatic retry.
+The limits are bounded retention-resource choices for this synthetic profile,
+not financial thresholds or permission to discard history.
 
 ## Remaining G2 requirements
 

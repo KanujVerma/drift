@@ -277,3 +277,209 @@ def test_original_research_retained_after_deadline_does_not_dispatch(
         event.event_type == "m2.evaluation.run.recorded"
         for event in harness["origin"].verified_events()
     )
+
+
+def _compressed_context(raw: bytes, **changes: Any) -> Any:
+    import base64
+    import hashlib
+    import zlib
+
+    return pipeline._CompressedDecisionContextV1.model_validate(
+        {
+            "uncompressed_size": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "data": base64.b64encode(zlib.compress(raw)).decode("ascii"),
+        }
+        | changes
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "truncated",
+        "trailing",
+        "concatenated",
+        "short-size",
+        "long-size",
+        "wrong-digest",
+        "bad-zlib",
+        "bad-base64",
+        "base64-whitespace",
+    ],
+)
+def test_compressed_proof_refuses_corrupt_streams_and_claims(mutation: str) -> None:
+    import base64
+    import zlib
+
+    raw = canonical_json({"original": "retained" * 1000})
+    stream = zlib.compress(raw)
+    changes: dict[str, Any] = {}
+    if mutation == "truncated":
+        stream = stream[:-1]
+    elif mutation == "trailing":
+        stream += b"not part of the original"
+    elif mutation == "concatenated":
+        stream += zlib.compress(b"{}")
+    elif mutation == "short-size":
+        changes["uncompressed_size"] = len(raw) - 1
+    elif mutation == "long-size":
+        changes["uncompressed_size"] = len(raw) + 1
+    elif mutation == "wrong-digest":
+        changes["sha256"] = "f" * 64
+    elif mutation == "bad-zlib":
+        stream = b"not a zlib stream"
+    changes["data"] = base64.b64encode(stream).decode("ascii")
+    if mutation == "bad-base64":
+        changes["data"] = "not!base64"
+    elif mutation == "base64-whitespace":
+        changes["data"] += "\n"
+    artifact = _compressed_context(raw, **changes)
+    with pytest.raises(ValueError):
+        pipeline._decode_context(artifact)
+
+
+@pytest.mark.parametrize("size", [True, False, 0, -1, 1.5, "20", 33_554_433])
+def test_compressed_proof_requires_bounded_exact_integer_size(size: Any) -> None:
+    with pytest.raises(ValueError):
+        _compressed_context(b"{}", uncompressed_size=size)
+
+
+@pytest.mark.parametrize(
+    "raw", [b'{"x":1,"x":2}', b'{"x": 1}', b'{"x":NaN}', b"[]", b"\xff"]
+)
+def test_lossless_compression_never_relaxes_original_json_rules(raw: bytes) -> None:
+    artifact = _compressed_context(raw)
+    with pytest.raises(ValueError):
+        pipeline._decode_context(artifact)
+
+
+def test_decompression_stops_at_advertised_size_instead_of_expanding_a_bomb() -> None:
+    artifact = _compressed_context(b"x" * 1_000_000, uncompressed_size=2)
+    with pytest.raises(ValueError, match="STREAM_OR_LENGTH"):
+        pipeline._decode_context(artifact)
+
+
+@pytest.mark.parametrize("bound", ["decoded", "encoded"])
+def test_unretainable_first_context_fails_before_any_order_is_staged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bound: str
+) -> None:
+    from drift.evaluator import engine as engine_module
+
+    harness = make_harness(tmp_path)
+    stages: list[bool] = []
+
+    def unexpected_stage(*args: Any, **kwargs: Any) -> Any:
+        stages.append(True)
+        raise AssertionError("An unretainable first proof must not reach staging")
+
+    monkeypatch.setattr(engine_module, "stage_decision_targets", unexpected_stage)
+    monkeypatch.setattr(
+        engine_module, "stage_exploratory_decision_targets", unexpected_stage
+    )
+    if bound == "decoded":
+        monkeypatch.setattr(pipeline, "MAX_DECISION_CONTEXT_BYTES", 8)
+        expected = "DECISION_CONTEXT_DECODED_BOUND_EXCEEDED"
+    else:
+        monkeypatch.setattr(
+            pipeline, "_PROOF_METADATA_RESERVE", pipeline.MAX_RECORD_BYTES
+        )
+        expected = "FIRST_DECISION_PROOF_TOO_LARGE"
+    result = pipeline.execute_synthetic_research(**harness, request=request())
+    assert result.state == "EXECUTION_FAILED"
+    assert expected in result.reason
+    assert stages == []
+    assert result.original_result is None
+    assert not any(
+        event.event_type == "stage1.synthetic_result.original_retained"
+        for event in harness["origin"].verified_events()
+    )
+
+
+@pytest.mark.parametrize("field", ["sha256", "uncompressed_size", "data"])
+def test_cold_read_refuses_rehashed_but_corrupt_compressed_original_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    harness = make_harness(tmp_path)
+    real_append = pipeline._append
+    monkeypatch.setattr(pipeline, "_INLINE_CONTEXT_BYTES", 1)
+
+    def forged(*args: Any, **kwargs: Any) -> Any:
+        if kwargs["phase"] == pipeline.OUTCOME:
+            body = kwargs["body"]
+            artifact = body.first_context_artifact
+            value = {"sha256": "f" * 64, "uncompressed_size": 1, "data": "AA=="}[field]
+            changed = artifact.model_copy(update={field: value})
+            kwargs["body"] = body.model_copy(update={"first_context_artifact": changed})
+        return real_append(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(pipeline, "_append", forged)
+        with pytest.raises(ValueError):
+            pipeline.execute_synthetic_research(**harness, request=request())
+    assert any(
+        event.event_type == "stage1.synthetic_result.original_retained"
+        for event in harness["origin"].verified_events()
+    )
+    with pytest.raises(ValueError):
+        cold_read(harness, _ref(harness))
+
+
+@pytest.mark.parametrize("schema", ["1", "3"])
+def test_compressed_outcome_cannot_be_downgraded_or_read_as_an_unknown_schema(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, schema: str
+) -> None:
+    harness = make_harness(tmp_path)
+    monkeypatch.setattr(pipeline, "_INLINE_CONTEXT_BYTES", 1)
+    result = pipeline.execute_synthetic_research(**harness, request=request())
+    outcome = next(
+        item
+        for item in harness["origin"].verified_events()
+        if item.event_type == pipeline.OUTCOME
+    )
+    forged = outcome.model_copy(update={"schema_version": schema})
+    cls = pipeline._Outcome if schema == "1" else pipeline._OutcomeV2
+    with pytest.raises(ValueError):
+        pipeline._record(forged, cls, harness["origin"])
+    assert (
+        cold_read(harness, result.opportunity_ref).state == "LOCAL_EXECUTION_COMPLETE"
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation", ["both", "failed", "missing-kind", "missing-intent"]
+)
+def test_compressed_outcome_requires_one_complete_success_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    harness = make_harness(tmp_path)
+    monkeypatch.setattr(pipeline, "_INLINE_CONTEXT_BYTES", 1)
+    pipeline.execute_synthetic_research(**harness, request=request())
+    outcome = next(
+        item
+        for item in harness["origin"].verified_events()
+        if item.event_type == pipeline.OUTCOME
+    )
+    data = json.loads(outcome.payload["body_utf8"])
+    change = {
+        "both": {"first_context_utf8": "{}"},
+        "failed": {"status": "M0_FAILED"},
+        "missing-kind": {"first_context_kind": None},
+        "missing-intent": {"first_intent_utf8": None},
+    }[mutation]
+    with pytest.raises(ValueError):
+        pipeline._OutcomeV2.model_validate(data | change)
+
+
+def test_noncanonical_base64_pad_bits_do_not_alias_original_compressed_bytes() -> None:
+    import base64
+
+    artifact = _compressed_context(b"{}")
+    assert artifact.data.endswith("==")
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    pos = alphabet.index(artifact.data[-3])
+    assert pos % 16 == 0
+    changed = artifact.data[:-3] + alphabet[pos + 1] + "=="
+    assert base64.b64decode(changed) == base64.b64decode(artifact.data)
+    with pytest.raises(ValueError, match="BASE64_NONCANONICAL"):
+        pipeline._decode_context(artifact.model_copy(update={"data": changed}))

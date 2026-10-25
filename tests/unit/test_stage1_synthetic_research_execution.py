@@ -314,3 +314,74 @@ def test_insufficient_b4_history_is_not_a_successful_sell_all(tmp_path: Path) ->
     assert result.state == "EXECUTION_FAILED"
     assert "RESEARCH_INSTALLED_TARGET_MISMATCH" in result.reason
     assert result.original_result is None
+
+
+def test_lossless_context_encoding_preserves_inline_legacy_bytes() -> None:
+    from drift.loop import stage1_synthetic_research_execution as pipeline
+    from drift.serialization.canonical import canonical_json
+
+    original = canonical_json({"context": "unchanged original"})
+    inline, artifact = pipeline._encode_context(original)
+    assert inline == original.decode("utf-8")
+    assert artifact is None
+
+
+def test_large_context_encoding_retains_the_exact_original_json() -> None:
+    import hashlib
+
+    from drift.loop import stage1_synthetic_research_execution as pipeline
+    from drift.serialization.canonical import canonical_json
+
+    decoded = {"history": "retained observation; " * 60_000}
+    original = canonical_json(decoded)
+    inline, artifact = pipeline._encode_context(original)
+    assert inline is None
+    assert artifact is not None
+    assert artifact.uncompressed_size == len(original)
+    assert artifact.sha256 == hashlib.sha256(original).hexdigest()
+    assert len(canonical_json(artifact)) < pipeline.MAX_RECORD_BYTES
+    assert pipeline._decode_context(artifact) == decoded
+
+
+def test_compressed_outcome_has_distinct_schema_and_readback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drift.loop import stage1_synthetic_research_execution as pipeline
+
+    monkeypatch.setattr(pipeline, "_INLINE_CONTEXT_BYTES", 1)
+    harness = make_harness(tmp_path)
+    result = execute_synthetic_research(**harness, request=request())
+    assert result.state == "LOCAL_EXECUTION_COMPLETE"
+    event = next(
+        item
+        for item in harness["origin"].verified_events()
+        if item.event_type == pipeline.OUTCOME
+    )
+    assert event.schema_version == "2"
+    body = json.loads(event.payload["body_utf8"])
+    assert body["first_context_utf8"] is None
+    assert body["first_context_artifact"]["encoding"] == "zlib-base64"
+    again = cold_read(harness, result.opportunity_ref)
+    assert again.original_result is not None and result.original_result is not None
+    assert again.original_result.original_artifacts_bytes == (
+        result.original_result.original_artifacts_bytes
+    )
+
+
+def test_inline_outcome_keeps_schema_one_and_no_new_proof_fields(
+    tmp_path: Path,
+) -> None:
+    from drift.loop import stage1_synthetic_research_execution as pipeline
+
+    harness = make_harness(tmp_path)
+    result = execute_synthetic_research(**harness, request=request())
+    event = next(
+        item
+        for item in harness["origin"].verified_events()
+        if item.event_type == pipeline.OUTCOME
+    )
+    body = json.loads(event.payload["body_utf8"])
+    assert event.schema_version == "1"
+    assert "first_context_artifact" not in body
+    assert body["first_context_utf8"] is not None
+    assert cold_read(harness, result.opportunity_ref).state == result.state

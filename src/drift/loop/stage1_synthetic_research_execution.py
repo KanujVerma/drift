@@ -9,8 +9,11 @@ repair a ledger. G2/scientific/operational authority is deliberately not issued.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
+import zlib
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import asdict, dataclass
@@ -112,6 +115,9 @@ RESEARCH = "stage1.synthetic_research.original_output"
 RESERVATION = "stage1.synthetic_research.m0_reservation"
 OUTCOME = "stage1.synthetic_research.outcome"
 MAX_RECORD_BYTES = 1_048_576
+MAX_DECISION_CONTEXT_BYTES = 33_554_432
+_INLINE_CONTEXT_BYTES = MAX_RECORD_BYTES // 2
+_PROOF_METADATA_RESERVE = 16_384
 _PHASES = (OPPORTUNITY, RESEARCH, RESERVATION, OUTCOME)
 _PAYLOAD_KEYS = frozenset({"profile", "issuer_instance_id", "body_utf8", "body_hash"})
 _FAMILIES = ("B3", "B4", "B5")
@@ -313,6 +319,79 @@ class _Outcome(ImmutableModel):
     first_intent_utf8: str | None = None
 
 
+class _CompressedDecisionContextV1(ImmutableModel):
+    """Lossless bounded transport of original canonical decision-context bytes."""
+
+    profile: Literal["drift-synthetic-decision-context/1"] = (
+        "drift-synthetic-decision-context/1"
+    )
+    encoding: Literal["zlib-base64"] = "zlib-base64"
+    uncompressed_size: int = Field(strict=True, gt=0, le=MAX_DECISION_CONTEXT_BYTES)
+    sha256: str = Field(strict=True, pattern=r"^[0-9a-f]{64}$")
+    data: str = Field(strict=True, min_length=1, max_length=MAX_RECORD_BYTES)
+
+
+class _OutcomeV2(_Outcome):
+    """Only large successful-return proofs use this additive outcome version."""
+
+    first_context_artifact: _CompressedDecisionContextV1
+
+    @model_validator(mode="after")
+    def require_one_context(self) -> _OutcomeV2:
+        if (
+            self.status != "M0_RETURNED"
+            or self.first_context_utf8 is not None
+            or self.first_context_kind is None
+            or self.first_intent_utf8 is None
+        ):
+            raise ValueError("COMPRESSED_CONTEXT_OUTCOME_INVALID")
+        return self
+
+
+def _encode_context(
+    original: bytes,
+) -> tuple[str | None, _CompressedDecisionContextV1 | None]:
+    if not original or len(original) > MAX_DECISION_CONTEXT_BYTES:
+        raise ValueError("DECISION_CONTEXT_DECODED_BOUND_EXCEEDED")
+    if len(original) <= _INLINE_CONTEXT_BYTES:
+        return original.decode("utf-8"), None
+    artifact = _CompressedDecisionContextV1(
+        uncompressed_size=len(original),
+        sha256=hashlib.sha256(original).hexdigest(),
+        data=base64.b64encode(zlib.compress(original, level=9)).decode("ascii"),
+    )
+    return None, artifact
+
+
+def _decode_context(artifact: _CompressedDecisionContextV1) -> dict[str, object]:
+    artifact = _clone(_CompressedDecisionContextV1, artifact)
+    try:
+        compressed = base64.b64decode(artifact.data, validate=True)
+    except (binascii.Error, ValueError) as error:
+        raise ValueError("DECISION_CONTEXT_BASE64_INVALID") from error
+    if base64.b64encode(compressed).decode("ascii") != artifact.data:
+        raise ValueError("DECISION_CONTEXT_BASE64_NONCANONICAL")
+    decoder = zlib.decompressobj()
+    try:
+        original = decoder.decompress(compressed, artifact.uncompressed_size + 1)
+    except zlib.error as error:
+        raise ValueError("DECISION_CONTEXT_ZLIB_INVALID") from error
+    # No unbounded flush. Refuse truncated streams, trailing bytes, additional
+    # streams and dishonest advertised sizes, even if a prefix looks genuine.
+    if (
+        len(original) != artifact.uncompressed_size
+        or not decoder.eof
+        or decoder.unused_data
+        or decoder.unconsumed_tail
+    ):
+        raise ValueError("DECISION_CONTEXT_STREAM_OR_LENGTH_INVALID")
+    if hashlib.sha256(original).hexdigest() != artifact.sha256:
+        raise ValueError("DECISION_CONTEXT_ORIGINAL_HASH_MISMATCH")
+    return _json_object(
+        original.decode("utf-8"), maximum_bytes=MAX_DECISION_CONTEXT_BYTES
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class SyntheticResearchExecutionReadback:
     """Locally verified mechanics only. Never a released scientific trial."""
@@ -340,7 +419,9 @@ class SyntheticResearchExecutionReadback:
         return False
 
 
-def _json_object(text: str) -> dict[str, object]:
+def _json_object(
+    text: str, *, maximum_bytes: int = MAX_RECORD_BYTES
+) -> dict[str, object]:
     def pairs(items: list[tuple[str, object]]) -> dict[str, object]:
         result: dict[str, object] = {}
         for key, value in items:
@@ -352,7 +433,7 @@ def _json_object(text: str) -> dict[str, object]:
     def invalid(value: str) -> object:
         raise ValueError(f"NONFINITE_EXECUTION_JSON:{value}")
 
-    if type(text) is not str or len(text.encode("utf-8")) > MAX_RECORD_BYTES:
+    if type(text) is not str or len(text.encode("utf-8")) > maximum_bytes:
         raise ValueError("EXECUTION_RECORD_TOO_LARGE_OR_NOT_TEXT")
     decoded = json.loads(text, object_pairs_hook=pairs, parse_constant=invalid)
     if type(decoded) is not dict or canonical_json(decoded) != text.encode("utf-8"):
@@ -370,7 +451,8 @@ def _record[T: BaseModel](
         or payload["profile"] != PROFILE
         or payload["issuer_instance_id"] != str(origin.issuer_instance_id)
         or event.entity_type != ENTITY
-        or event.schema_version != "1"
+        or event.schema_version != ("2" if cls is _OutcomeV2 else "1")
+        or (cls is _OutcomeV2 and event.event_type != OUTCOME)
     ):
         raise ValueError("EXECUTION_EVENT_OR_ORIGIN_MISMATCH")
     text = payload["body_utf8"]
@@ -394,6 +476,14 @@ def _append(
     encoded = canonical_json(body.model_dump(mode="python"))
     if len(encoded) > MAX_RECORD_BYTES:
         raise ValueError("EXECUTION_RECORD_TOO_LARGE")
+    payload = {
+        "profile": PROFILE,
+        "issuer_instance_id": str(origin.issuer_instance_id),
+        "body_utf8": encoded.decode("utf-8"),
+        "body_hash": hashlib.sha256(encoded).hexdigest(),
+    }
+    if len(canonical_json(payload)) > MAX_RECORD_BYTES:
+        raise ValueError("EXECUTION_RECORD_TOO_LARGE")
     # Only the writer may create its store. This root already has the prepared
     # account; read-only opening proves that it exists before the writer opens.
     origin.verified_events()
@@ -404,14 +494,9 @@ def _append(
             timestamp=_stamp(timestamp),
             entity_type=ENTITY,
             entity_id=allocation_id,
-            payload={
-                "profile": PROFILE,
-                "issuer_instance_id": str(origin.issuer_instance_id),
-                "body_utf8": encoded.decode("utf-8"),
-                "body_hash": hashlib.sha256(encoded).hexdigest(),
-            },
+            payload=payload,
             deduplication_key=f"stage1:synthetic-research:{allocation_id}:{phase}",
-            schema_version="1",
+            schema_version="2" if type(body) is _OutcomeV2 else "1",
         )
     )
 
@@ -548,6 +633,7 @@ class _FirstDecisionGuard:
         self.first_context_kind: Literal["realized", "reconstructed"] | None = None
         self.first_context_utf8: str | None = None
         self.first_intent_utf8: str | None = None
+        self.first_context_artifact: _CompressedDecisionContextV1 | None = None
 
     @property
     def strategy_reference(self) -> StrategyReference:
@@ -593,8 +679,21 @@ class _FirstDecisionGuard:
             if type(context) is StrategyDecisionContextV1
             else "reconstructed"
         )
-        self.first_context_utf8 = canonical_json(context).decode("utf-8")
+        self.first_context_utf8, self.first_context_artifact = _encode_context(
+            canonical_json(context)
+        )
         self.first_intent_utf8 = canonical_json(intent).decode("utf-8")
+        proof = {
+            "first_context_kind": self.first_context_kind,
+            "first_context_utf8": self.first_context_utf8,
+            "first_context_artifact": self.first_context_artifact,
+            "first_intent_utf8": self.first_intent_utf8,
+        }
+        payload_size = len(
+            canonical_json({"body_utf8": canonical_json(proof).decode("utf-8")})
+        )
+        if payload_size > MAX_RECORD_BYTES - _PROOF_METADATA_RESERVE:
+            raise StrategyIntentRejectedError("FIRST_DECISION_PROOF_TOO_LARGE")
         self._checked = True
         return intent
 
@@ -605,6 +704,35 @@ class _FirstDecisionGuard:
         self, context: ExploratoryStrategyDecisionContextV1
     ) -> StrategyDecisionIntentV1:
         return self._guard(context, self._strategy.decide_exploratory(context))
+
+
+def _completed_outcome(
+    *,
+    research_hash: str,
+    reservation_hash: str,
+    m0_run_id: str,
+    association: LocalEventReferenceV1,
+    reason: str,
+    guarded: _FirstDecisionGuard,
+) -> _Outcome:
+    legacy = _Outcome(
+        research_hash=research_hash,
+        reservation_hash=reservation_hash,
+        status="M0_RETURNED",
+        reason=reason,
+        m0_run_id=m0_run_id,
+        association_event_id=str(association.event_id),
+        association_event_hash=association.event_hash,
+        first_context_kind=guarded.first_context_kind,
+        first_context_utf8=guarded.first_context_utf8,
+        first_intent_utf8=guarded.first_intent_utf8,
+    )
+    if guarded.first_context_artifact is None:
+        return legacy
+    return _OutcomeV2.model_validate(
+        legacy.model_dump(mode="python")
+        | {"first_context_artifact": guarded.first_context_artifact}
+    )
 
 
 def _verify_context(
@@ -900,17 +1028,13 @@ def execute_synthetic_research(
                 allocation_id=original.allocation_id,
                 trial_id=trial,
                 timestamp=finished_at,
-                body=_Outcome(
+                body=_completed_outcome(
                     research_hash=research.event_hash,
                     reservation_hash=reservation.event_hash,
-                    status="M0_RETURNED",
-                    reason=run.status.value,
                     m0_run_id=str(run.run_id),
-                    association_event_id=str(observed.association_ref.event_id),
-                    association_event_hash=observed.association_ref.event_hash,
-                    first_context_kind=guarded.first_context_kind,
-                    first_context_utf8=guarded.first_context_utf8,
-                    first_intent_utf8=guarded.first_intent_utf8,
+                    association=observed.association_ref,
+                    reason=run.status.value,
+                    guarded=guarded,
                 ),
             )
     return read_synthetic_research_execution(
@@ -1094,7 +1218,11 @@ def read_synthetic_research_execution(
             None,
             amount,
         )
-    outcome = _record(phases[OUTCOME], _Outcome, origin)
+    outcome = (
+        _record(phases[OUTCOME], _OutcomeV2, origin)
+        if phases[OUTCOME].schema_version == "2"
+        else _record(phases[OUTCOME], _Outcome, origin)
+    )
     if outcome.research_hash != research_event.event_hash:
         raise ValueError("OUTCOME_RESEARCH_LINK_MISMATCH")
     if outcome.status == "NO_DISPATCH":
@@ -1269,11 +1397,15 @@ def read_synthetic_research_execution(
     # result hash is not evidence that it executed the retained proposal.
     if (
         outcome.first_context_kind is None
-        or outcome.first_context_utf8 is None
+        or (outcome.first_context_utf8 is None and not isinstance(outcome, _OutcomeV2))
         or outcome.first_intent_utf8 is None
     ):
         raise ValueError("ORIGINAL_FIRST_DECISION_PROOF_MISSING")
-    context_data = _json_object(outcome.first_context_utf8)
+    if isinstance(outcome, _OutcomeV2):
+        context_data = _decode_context(outcome.first_context_artifact)
+    else:
+        assert outcome.first_context_utf8 is not None
+        context_data = _json_object(outcome.first_context_utf8)
     intent_data = _json_object(outcome.first_intent_utf8)
     first_intent = StrategyDecisionIntentV1.model_validate_json(
         canonical_json(intent_data)

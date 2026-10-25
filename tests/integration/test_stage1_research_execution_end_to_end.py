@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "unit"))
+import test_evaluator_engine as engine_fixture
 import test_evaluator_experiment_run as m0_fixture
 import test_stage1_original_invocation_end_to_end as full_fixture
 from test_evaluator_engine import FixedTargetStrategy, _engine
@@ -167,3 +168,126 @@ def test_full_379_session_pair_is_research_selected_and_cold_readable(
     assert left.operational_m0_run_id != right.operational_m0_run_id
     assert left.original_artifacts_bytes == right.original_artifacts_bytes
     assert results[0].research_receipt_hashes != results[1].research_receipt_hashes
+
+
+def _full_lookback_bundle() -> Any:
+    """Twelve constant-price fictional assets, 253 history sessions plus a fill.
+
+    Every prior observation is re-expressed at the actual decision cutoff.
+    This is not qualified market history or the full scored Stage 1 campaign.
+    """
+    from datetime import UTC, time
+
+    from drift.domain.securities import ListingV1, ListingVenue, SecurityV1
+    from drift.evaluator.bundles import assemble_evaluation_input_bundle
+
+    fixture = engine_fixture
+    dates = full_fixture._session_dates()[:254]
+    template = fixture._template_view().query.observation
+    views = []
+    for cutoff_day in dates[252:]:
+        cutoff = datetime.combine(cutoff_day, time(21), tzinfo=UTC)
+        for source_day in dates:
+            if source_day > cutoff_day:
+                break
+            for security, listing in zip(
+                full_fixture.SECURITIES, full_fixture.LISTINGS, strict=True
+            ):
+                observation = template.model_copy(
+                    update={
+                        "security_id": security,
+                        "listing_id": listing,
+                        "session_date": source_day,
+                        "decision_time": cutoff,
+                        "knowledge_cutoff": cutoff,
+                        "effective_cutoff": cutoff,
+                    }
+                )
+                views.append(
+                    fixture._restated_view(
+                        role="decision",
+                        observation=observation,
+                        security_id=security,
+                        listing_id=listing,
+                        source_day=source_day,
+                        open_price="100",
+                        close_price="100",
+                    )
+                )
+    return assemble_evaluation_input_bundle(
+        evaluation_interval=fixture._interval(),
+        session_clock=fixture._clock(dates),
+        security_identities=tuple(
+            SecurityV1(schema_version="1", security_id=security)
+            for security in full_fixture.SECURITIES
+        ),
+        listing_identities=tuple(
+            ListingV1(schema_version="1", listing_id=listing, venue=ListingVenue.XNYS)
+            for listing in full_fixture.LISTINGS
+        ),
+        structural_eligibilities=tuple(
+            fixture._eligibility(
+                security, listing, knowledge_cutoff=datetime(2024, 1, 1, tzinfo=UTC)
+            )
+            for security, listing in zip(
+                full_fixture.SECURITIES, full_fixture.LISTINGS, strict=True
+            )
+        ),
+        authentic_decision_views=tuple(views),
+        authentic_accounting_views=tuple(
+            full_fixture._constant_view(security, listing, day, decision=False)
+            for day in dates
+            for security, listing in zip(
+                full_fixture.SECURITIES, full_fixture.LISTINGS, strict=True
+            )
+        ),
+        corporate_action_coverage=fixture.quiet_coverage(
+            full_fixture.SECURITIES, dates[0], dates[-1]
+        ),
+    )
+
+
+@pytest.fixture(scope="module")
+def full_lookback_bundle() -> Any:
+    return _full_lookback_bundle()
+
+
+@pytest.mark.parametrize("family", ["B4", "B5"])
+def test_lookback_strategies_execute_and_cold_verify_complete_decision_history(
+    tmp_path: Path, family: str, full_lookback_bundle: Any
+) -> None:
+    from drift.loop.stage1_synthetic_research_execution import MAX_RECORD_BYTES
+    from drift.serialization.canonical import canonical_json
+
+    harness = make_harness(tmp_path, engine=full_fixture._engine(full_lookback_bundle))
+    selected = RawChoice(
+        disposition="propose",
+        selection=StrategySelection(family_id=family, strategy_version="1"),
+        targets=tuple(
+            TargetWeight(security_id=str(security), weight="0.16")
+            for security in full_fixture.SECURITIES[:6]
+        ),
+        cash_weight="0.04",
+        rationale="Equal synthetic scores select the first six UUIDs, 16 shares each.",
+    )
+    result = execute_synthetic_research(**harness, request=request(selected))
+    assert result.state == "LOCAL_EXECUTION_COMPLETE"
+    assert result.original_result is not None
+    original = result.original_result.original_artifacts
+    assert original.result.metrics.committed_fill_count == 6
+    assert original.final_state.cash_balance == Decimal("400")
+    assert original.final_state.net_asset_value == Decimal("10000")
+    assert {
+        item.security_id: item.quantity for item in original.final_state.holdings
+    } == {security: 16 for security in full_fixture.SECURITIES[:6]}
+    # Large original history must remain recoverable, not truncated to fit.
+    events = harness["origin"].verified_events()
+    for event in events:
+        if event.event_type.startswith("stage1.synthetic_research."):
+            assert len(canonical_json(event.payload)) <= MAX_RECORD_BYTES
+    del harness["engine"], harness["account"]
+    reread = cold_read(harness, result.opportunity_ref)
+    assert reread.original_result is not None
+    assert reread.original_result.original_artifacts_bytes == (
+        result.original_result.original_artifacts_bytes
+    )
