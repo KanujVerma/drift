@@ -5,6 +5,8 @@ authenticate a Matthew account provisioner, retained SQLite event, research
 grant, or original M0 RESULT. Those are separately gated PR B and PR C.
 """
 
+import gc
+import weakref
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -110,14 +112,12 @@ class _Recorder:
 def _refuse_session_start(
     engine: evaluator_engine.SessionEvaluatorEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    original_emit = type(engine)._emit_session_start
-
     def forbidden(*args: Any, **kwargs: Any) -> None:
-        if args[0] is engine:
-            pytest.fail("a session began despite a failed opening-book lifecycle")
-        original_emit(*args, **kwargs)
+        pytest.fail("a session began despite a failed opening-book lifecycle")
 
-    monkeypatch.setattr(type(engine), "_emit_session_start", forbidden)
+    monkeypatch.setattr(
+        evaluator_engine._PREPARED_EXECUTOR_TYPE, "_emit_session_start", forbidden
+    )
 
 
 def test_prepared_engine_consumes_same_original_and_matches_legacy(
@@ -153,16 +153,22 @@ def test_prepared_engine_consumes_same_original_and_matches_legacy(
     assert lifecycle.retained.pending_cash_claims == ()
     assert lifecycle.seen == ["retain"]
     saw_private_original = False
-    emit_original = type(engine)._emit_session_start
+    emit_original = evaluator_engine._PREPARED_EXECUTOR_TYPE._emit_session_start
 
     def inspect_original(*args: Any, **kwargs: Any) -> None:
         nonlocal saw_private_original
-        if args[0] is engine and args[2] == 0:
+        if args[2] == 0:
             saw_private_original = True
+            # Only the privately revalidated runner receives the original.
+            assert args[0] is not engine
             assert args[1].state is originals[0]
         emit_original(*args, **kwargs)
 
-    monkeypatch.setattr(type(engine), "_emit_session_start", inspect_original)
+    monkeypatch.setattr(
+        evaluator_engine._PREPARED_EXECUTOR_TYPE,
+        "_emit_session_start",
+        inspect_original,
+    )
     prepared_artifacts = _run(engine)
     assert originals == [lifecycle.retained]
     assert lifecycle.retained is lifecycle.claimed is lifecycle.consumed
@@ -485,12 +491,12 @@ def test_post_callback_async_observer_tamper_cannot_change_original_run(
     engine.prepare_opening_book(lifecycle=lifecycle)
     assert lifecycle.retained is not None
     assert not hasattr(engine, "_prepared_opening_book")
-    actual_emit = type(engine)._emit_session_start
+    actual_emit = evaluator_engine._PREPARED_EXECUTOR_TYPE._emit_session_start
     changed = False
 
     def after_last_callback(*args: Any, **kwargs: Any) -> None:
         nonlocal changed
-        if args[0] is engine and not changed:
+        if args[0] is not engine and not changed:
             changed = True
             # The test harness signals a retained-witness mutation after
             # observe_consumption and the last guard, immediately before the
@@ -499,7 +505,11 @@ def test_post_callback_async_observer_tamper_cannot_change_original_run(
             object.__setattr__(lifecycle.retained, "net_asset_value", Decimal("1"))
         actual_emit(*args, **kwargs)
 
-    monkeypatch.setattr(type(engine), "_emit_session_start", after_last_callback)
+    monkeypatch.setattr(
+        evaluator_engine._PREPARED_EXECUTOR_TYPE,
+        "_emit_session_start",
+        after_last_callback,
+    )
     artifacts = _run(engine)
     assert changed
     assert canonical_json(artifacts) == baseline
@@ -553,11 +563,11 @@ def test_captured_engine_callback_cannot_reach_original(
     class CapturedEngine(_Recorder):
         def _visit(self, phase: str, book: PortfolioStateV2) -> None:
             assert not hasattr(engine, "_prepared_opening_book")
-            if phase == "retain":
-                # The engine publishes the twin after retain succeeds.
-                assert engine._observer_opening_book is None
-            else:
-                assert engine._observer_opening_book is book
+            # All three callbacks share one detached witness, but the engine
+            # must never publish it through a replaceable instance field.
+            assert not hasattr(engine, "_observer_opening_book")
+            assert not hasattr(engine, "_opening_book_lifecycle")
+            assert not hasattr(engine, "_prepared_opening_digest")
             super()._visit(phase, book)
 
     lifecycle = CapturedEngine()
@@ -577,6 +587,7 @@ def test_callback_installed_instance_hook_cannot_mutate_prepared_book() -> None:
         def _visit(self, phase: str, book: PortfolioStateV2) -> None:
             nonlocal calls
             if phase == "consume":
+
                 def injected(loop: Any, index: int, session: Any) -> None:
                     nonlocal calls
                     calls += 1
@@ -670,3 +681,429 @@ def test_reconstructed_prepared_decision_ignores_instance_injection() -> None:
     assert canonical_json(result) == baseline
     assert called == 0
     assert observer.seen == ["retain", "claim", "consume"]
+
+
+@pytest.mark.parametrize("phase", ["retain", "claim", "consume"])
+def test_captured_engine_cannot_replace_private_accounting_collaborators(
+    phase: str,
+) -> None:
+    """A callback-visible engine mutation cannot reach the original book."""
+    baseline = _run(_engine())
+    expected = canonical_json(baseline)
+    engine = _engine()
+    poisoned_calls = 0
+
+    class PoisonCorporateActions:
+        def apply_pre_open_actions(self, *args: Any, **kwargs: Any) -> Any:
+            nonlocal poisoned_calls
+            poisoned_calls += 1
+            state = args[0]
+            object.__setattr__(state, "cash_balance", Decimal("1"))
+            object.__setattr__(state, "net_asset_value", Decimal("1"))
+            raise AssertionError("observer replaced the actual accounting processor")
+
+    class PoisonRebalance:
+        def rebalance(self, *args: Any, **kwargs: Any) -> Any:
+            nonlocal poisoned_calls
+            poisoned_calls += 1
+            raise AssertionError("observer replaced the actual rebalance processor")
+
+    class CapturedEngineObserver(_Recorder):
+        def _visit(self, at: str, book: PortfolioStateV2) -> None:
+            if at == phase:
+                # These fields are directly accessible on the engine captured
+                # by a lifecycle closure. A shared execution self would invoke
+                # the forged collaborator after the final book-integrity check.
+                object.__setattr__(
+                    engine, "_corporate_actions", PoisonCorporateActions()
+                )
+                object.__setattr__(engine, "_rebalance", PoisonRebalance())
+                assert not any(
+                    isinstance(value, evaluator_engine.SessionEvaluatorEngine)
+                    for value in vars(engine).values()
+                )
+            super()._visit(at, book)
+
+    observer = CapturedEngineObserver()
+    engine.prepare_opening_book(lifecycle=observer)
+    result = _run(engine)
+    assert canonical_json(result) == expected
+    assert result.result.metrics.initial_cash == Decimal("10000")
+    assert result.final_state.cash_balance == baseline.final_state.cash_balance
+    assert poisoned_calls == 0
+    assert observer.seen == ["retain", "claim", "consume"]
+
+
+def test_consume_observer_cannot_replace_private_evidence_and_bundle() -> None:
+    """The actual run must not consult post-claim public engine references."""
+    expected = canonical_json(_run(_engine()))
+    engine = _engine()
+
+    class CorruptPublicEngine(_Recorder):
+        def _visit(self, phase: str, book: PortfolioStateV2) -> None:
+            if phase == "consume":
+                object.__setattr__(engine, "_bundle", object())
+                object.__setattr__(engine, "_evidence", object())
+                object.__setattr__(engine, "_accounting_index", object())
+                object.__setattr__(engine, "_protocol", object())
+            super()._visit(phase, book)
+
+    observer = CorruptPublicEngine()
+    engine.prepare_opening_book(lifecycle=observer)
+    result = _run(engine)
+    assert canonical_json(result) == expected
+    assert observer.seen == ["retain", "claim", "consume"]
+
+
+@pytest.mark.parametrize("spoofed_phase", ["new", "prepared", "failed"])
+def test_consumed_engine_phase_spoof_never_restores_fresh_cash(
+    spoofed_phase: str,
+) -> None:
+    """Even a forged 'new' phase cannot make the prepared engine legacy."""
+    baseline = canonical_json(_run(_engine()))
+    engine = _engine()
+    observer = _Recorder()
+    engine.prepare_opening_book(lifecycle=observer)
+    assert canonical_json(_run(engine)) == baseline
+    assert observer.seen == ["retain", "claim", "consume"]
+
+    object.__setattr__(engine, "_opening_book_phase", spoofed_phase)
+    object.__setattr__(engine, "_legacy_run_started", False)
+    with pytest.raises(OpeningBookLifecycleError, match="not available"):
+        _run(engine)
+    with pytest.raises(OpeningBookLifecycleError, match="fresh, unused"):
+        engine.prepare_opening_book(lifecycle=_Recorder())
+
+
+def test_consumption_phase_spoof_refuses_before_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claimed original cannot step or be replayed after phase tampering."""
+    actual_initializer = initial_portfolio_state
+    initialized: list[PortfolioStateV2] = []
+
+    def tracked_initializer(
+        *,
+        session_key: SessionKeyV1,
+        initial_cash: Decimal,
+        admission: EvaluationAdmissionV1,
+    ) -> PortfolioStateV2:
+        book = actual_initializer(
+            session_key=session_key, initial_cash=initial_cash, admission=admission
+        )
+        initialized.append(book)
+        return book
+
+    monkeypatch.setattr(
+        evaluator_engine, "initial_portfolio_state", tracked_initializer
+    )
+    engine = _engine()
+    _refuse_session_start(engine, monkeypatch)
+
+    class ResetsDuringConsume(_Recorder):
+        def _visit(self, phase: str, book: PortfolioStateV2) -> None:
+            if phase == "consume":
+                object.__setattr__(engine, "_opening_book_phase", "new")
+                object.__setattr__(engine, "_legacy_run_started", False)
+            super()._visit(phase, book)
+
+    observer = ResetsDuringConsume()
+    engine.prepare_opening_book(lifecycle=observer)
+    assert len(initialized) == 1
+    with pytest.raises(OpeningBookLifecycleError, match="phase changed"):
+        _run(engine)
+    assert observer.seen == ["retain", "claim", "consume"]
+    with pytest.raises(OpeningBookLifecycleError, match="not available"):
+        _run(engine)
+    object.__setattr__(engine, "_opening_book_phase", "new")
+    with pytest.raises(OpeningBookLifecycleError, match="not available"):
+        _run(engine)
+    with pytest.raises(OpeningBookLifecycleError, match="fresh, unused"):
+        engine.prepare_opening_book(lifecycle=_Recorder())
+    assert len(initialized) == 1
+
+
+def test_retention_phase_spoof_cannot_reenter_or_reset_original() -> None:
+    """The private reservation exists before any observer executes."""
+    baseline = canonical_json(_run(_engine()))
+    engine = _engine()
+
+    class ResetsDuringRetain(_Recorder):
+        def _visit(self, phase: str, book: PortfolioStateV2) -> None:
+            if phase == "retain":
+                object.__setattr__(engine, "_opening_book_phase", "new")
+                with pytest.raises(OpeningBookLifecycleError, match="fresh, unused"):
+                    engine.prepare_opening_book(lifecycle=_Recorder())
+                with pytest.raises(OpeningBookLifecycleError, match="not available"):
+                    _run(engine)
+            super()._visit(phase, book)
+
+    observer = ResetsDuringRetain()
+    engine.prepare_opening_book(lifecycle=observer)
+    assert canonical_json(_run(engine)) == baseline
+    with pytest.raises(OpeningBookLifecycleError, match="not available"):
+        _run(engine)
+
+
+def test_failed_retention_cannot_be_relabelled_as_unused() -> None:
+    """Failed pre-claim retention permanently forbids new seed capital."""
+    engine = _engine()
+
+    class FailedRetain(_Recorder):
+        def _visit(self, phase: str, book: PortfolioStateV2) -> None:
+            if phase == "retain":
+                object.__setattr__(engine, "_opening_book_phase", "new")
+                raise RuntimeError("synthetic retain unavailable")
+            super()._visit(phase, book)
+
+    with pytest.raises(RuntimeError, match="synthetic retain unavailable"):
+        engine.prepare_opening_book(lifecycle=FailedRetain())
+    object.__setattr__(engine, "_opening_book_phase", "new")
+    object.__setattr__(engine, "_legacy_run_started", False)
+    with pytest.raises(OpeningBookLifecycleError, match="not available"):
+        _run(engine)
+    with pytest.raises(OpeningBookLifecycleError, match="fresh, unused"):
+        engine.prepare_opening_book(lifecycle=_Recorder())
+
+
+@pytest.mark.parametrize("replacement_phase", ["before_run", "claim", "consume"])
+def test_lifecycle_observer_and_witness_cannot_be_swapped(
+    replacement_phase: str,
+) -> None:
+    """A replacement engine attribute cannot redirect original ledger callbacks."""
+    baseline = canonical_json(_run(_engine()))
+    engine = _engine()
+    substitute = _Recorder()
+    replacements: list[PortfolioStateV2] = []
+
+    def corrupt_public_fields(opening_book: PortfolioStateV2) -> None:
+        cloned = PortfolioStateV2.model_validate_json(opening_book.model_dump_json())
+        assert cloned is not opening_book
+        replacements.append(cloned)
+        # These were replaceable engine fields in a vulnerable revision.
+        object.__setattr__(engine, "_observer_opening_book", cloned)
+        object.__setattr__(engine, "_opening_book_lifecycle", substitute)
+        object.__setattr__(engine, "_prepared_opening_digest", "0" * 64)
+        object.__setattr__(engine, "_lifecycle_lifetime_anchor", substitute)
+
+    class OriginalObserver(_Recorder):
+        def _visit(self, phase: str, book: PortfolioStateV2) -> None:
+            if phase == replacement_phase:
+                corrupt_public_fields(book)
+            super()._visit(phase, book)
+
+    original = OriginalObserver()
+    engine.prepare_opening_book(lifecycle=original)
+    retained = original.retained
+    assert retained is not None
+    if replacement_phase == "before_run":
+        corrupt_public_fields(retained)
+    result = _run(engine)
+    assert canonical_json(result) == baseline
+    assert original.seen == ["retain", "claim", "consume"]
+    assert original.retained is original.claimed is original.consumed
+    assert substitute.seen == []
+    assert len(replacements) == 1
+    assert original.retained is not replacements[0]
+    with pytest.raises(OpeningBookLifecycleError, match="not available"):
+        _run(engine)
+
+
+@pytest.mark.parametrize("phase", ["retain", "claim", "consume"])
+@pytest.mark.parametrize(
+    "method_name",
+    [
+        "_emit_session_start",
+        "_step_session",
+        "_pre_open_effects",
+        "_post_close_decision",
+        "_accounting_view",
+        "admitted_universe_at",
+    ],
+)
+def test_lifecycle_cannot_replace_public_class_accounting_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    method_name: str,
+) -> None:
+    """Only the snapshotted private evaluator receives the original book."""
+    expected = canonical_json(_run(_engine()))
+    engine = _engine()
+    calls = 0
+
+    class ReplacesPublicClass(_Recorder):
+        def _visit(self, where: str, book: PortfolioStateV2) -> None:
+            if where == phase:
+
+                def injected(*args: Any, **kwargs: Any) -> Any:
+                    nonlocal calls
+                    calls += 1
+                    raise AssertionError("callback-mutated public engine dispatched")
+
+                monkeypatch.setattr(type(engine), method_name, injected)
+            super()._visit(where, book)
+
+    lifecycle = ReplacesPublicClass()
+    engine.prepare_opening_book(lifecycle=lifecycle)
+    result = _run(engine)
+    assert canonical_json(result) == expected
+    assert calls == 0
+    assert lifecycle.seen == ["retain", "claim", "consume"]
+
+
+def test_reconstructed_class_hook_cannot_intercept_prepared_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The weak reconstructed decision lane uses frozen dispatch as well."""
+    bundle = bundle_of(three_regular_sessions())
+    expected = canonical_json(
+        run_engine(reconstructed_engine(bundle), ReconstructedTargetStrategy({}))
+    )
+    engine = reconstructed_engine(bundle)
+    called = 0
+
+    class Poison(_Recorder):
+        def _visit(self, where: str, book: PortfolioStateV2) -> None:
+            if where == "consume":
+
+                def injected(*args: Any, **kwargs: Any) -> Any:
+                    nonlocal called
+                    called += 1
+                    raise AssertionError("reconstructed class hook reached original")
+
+                monkeypatch.setattr(
+                    type(engine), "_post_close_reconstructed_decision", injected
+                )
+            super()._visit(where, book)
+
+    lifecycle = Poison()
+    engine.prepare_opening_book(lifecycle=lifecycle)
+    actual = run_engine(engine, ReconstructedTargetStrategy({}))
+    assert canonical_json(actual) == expected
+    assert called == 0
+
+
+def test_abandoned_prepared_callback_cycle_is_collectable() -> None:
+    """The weak escrow must not keep an unused engine alive indefinitely."""
+
+    def make_refs() -> tuple[
+        weakref.ReferenceType[evaluator_engine.SessionEvaluatorEngine],
+        weakref.ReferenceType[_Recorder],
+    ]:
+        engine = _engine()
+
+        class CapturesEngine(_Recorder):
+            def _visit(self, where: str, book: PortfolioStateV2) -> None:
+                assert engine.bundle is not None
+                super()._visit(where, book)
+
+        observer = CapturesEngine()
+        engine.prepare_opening_book(lifecycle=observer)
+        assert observer.seen == ["retain"]
+        return weakref.ref(engine), weakref.ref(observer)
+
+    engine_ref, observer_ref = make_refs()
+    gc.collect()
+    assert engine_ref() is None
+    assert observer_ref() is None
+
+
+def test_replacing_lifecycle_lifetime_anchor_fails_without_original() -> None:
+    """An attacker can stop a run but cannot substitute a new callback."""
+    engine = _engine()
+    engine.prepare_opening_book(lifecycle=_Recorder())
+    substitute = _Recorder()
+    object.__setattr__(engine, "_lifecycle_lifetime_anchor", substitute)
+    gc.collect()
+    with pytest.raises(OpeningBookLifecycleError, match="state is incomplete"):
+        _run(engine)
+    assert substitute.seen == []
+    with pytest.raises(OpeningBookLifecycleError, match="not available"):
+        _run(engine)
+
+
+@pytest.mark.parametrize("at", ["retain", "claim", "consume"])
+@pytest.mark.parametrize(
+    "collaborator",
+    ["_corporate_actions", "_rebalance", "_exploratory_dividends"],
+)
+def test_public_class_descriptor_cannot_intercept_prepared_collaborator(
+    monkeypatch: pytest.MonkeyPatch, at: str, collaborator: str
+) -> None:
+    """A later base-class property cannot see the real accounting loop."""
+    expected = canonical_json(_run(_engine()))
+    engine = _engine()
+    accessed = 0
+
+    class InjectsDescriptor(_Recorder):
+        def _visit(self, where: str, book: PortfolioStateV2) -> None:
+            nonlocal accessed
+            if where == at:
+
+                def injected(_owner: object) -> object:
+                    nonlocal accessed
+                    accessed += 1
+                    raise AssertionError(
+                        "base-class descriptor reached private executor"
+                    )
+
+                # A property is a data descriptor, which outranks an ordinary
+                # instance field unless the private subclass shadows it.
+                monkeypatch.setattr(
+                    type(engine), collaborator, property(injected), raising=False
+                )
+            super()._visit(where, book)
+
+    observer = InjectsDescriptor()
+    engine.prepare_opening_book(lifecycle=observer)
+    result = _run(engine)
+    assert canonical_json(result) == expected
+    assert accessed == 0
+    assert observer.seen == ["retain", "claim", "consume"]
+
+
+@pytest.mark.parametrize("at", ["retain", "consume"])
+def test_mutated_public_hash_and_phase_cannot_reset_original_cash(
+    monkeypatch: pytest.MonkeyPatch, at: str
+) -> None:
+    """Identity-based tombstones survive changing class __hash__ and phase."""
+    actual_initializer = initial_portfolio_state
+    opened: list[PortfolioStateV2] = []
+
+    def counted(
+        *,
+        session_key: SessionKeyV1,
+        initial_cash: Decimal,
+        admission: EvaluationAdmissionV1,
+    ) -> PortfolioStateV2:
+        book = actual_initializer(
+            session_key=session_key, initial_cash=initial_cash, admission=admission
+        )
+        opened.append(book)
+        return book
+
+    monkeypatch.setattr(evaluator_engine, "initial_portfolio_state", counted)
+    engine = _engine()
+
+    class PoisonHashAndPhase(_Recorder):
+        def _visit(self, where: str, book: PortfolioStateV2) -> None:
+            if where == at:
+                monkeypatch.setattr(type(engine), "__hash__", lambda _owner: 1)
+                monkeypatch.setattr(
+                    type(engine),
+                    "_opening_book_phase",
+                    property(lambda _owner: "new", lambda _owner, _value: None),
+                    raising=False,
+                )
+            super()._visit(where, book)
+
+    observer = PoisonHashAndPhase()
+    engine.prepare_opening_book(lifecycle=observer)
+    assert len(opened) == 1
+    with pytest.raises(OpeningBookLifecycleError, match="not available|phase changed"):
+        _run(engine)
+    with pytest.raises(OpeningBookLifecycleError, match="not available"):
+        _run(engine)
+    with pytest.raises(OpeningBookLifecycleError, match="fresh, unused"):
+        engine.prepare_opening_book(lifecycle=_Recorder())
+    assert len(opened) == 1
