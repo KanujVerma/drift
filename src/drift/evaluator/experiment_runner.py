@@ -29,6 +29,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+from typing import Protocol
 from uuid import UUID
 
 from pydantic import TypeAdapter
@@ -68,6 +69,7 @@ from drift.serialization.canonical import content_hash
 EXPERIMENT_RUN_EVENT_TYPE = "m2.evaluation.run.recorded"
 EXPERIMENT_RUN_ENTITY_TYPE = "experiment_run"
 EXPERIMENT_RUN_EVENT_SCHEMA_VERSION = "1"
+EXPERIMENT_RUN_BOOK_EVENT_SCHEMA_VERSION = "2"
 
 
 class ForeignRunArtifactsError(DriftError, ValueError):
@@ -78,6 +80,27 @@ class ForeignRunArtifactsError(DriftError, ValueError):
     protocol, cost model, strategy or evaluator evidence would otherwise be
     recorded under this run's M0 row. Nothing is recorded when this is raised.
     """
+
+
+class CanonicalM0ResultObserverV1(Protocol):
+    """Optional post-audit observer of actual canonical M0/M2 results.
+
+    This evaluator-neutral interface does not import E1, permit scoring, or
+    authenticate an external issuer. An observer must independently verify
+    the original M0 audit record and source evidence before retaining an E1
+    association. Callback failure leaves the already-written original M0
+    event unchanged and propagates to the caller.
+    """
+
+    def observe_canonical_result(
+        self,
+        *,
+        run: ExperimentRun,
+        artifacts: EvaluationRunArtifactsV2,
+        m0_audit_event_id: UUID,
+    ) -> None:
+        """Receive detached validated artifacts after original M0 audit."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -100,6 +123,7 @@ class ExperimentRunnerContext:
     trace_artifact_location: str
     ledger: Ledger | None = None
     audit_event_id: UUID7 | None = None
+    original_result_observer: CanonicalM0ResultObserverV1 | None = None
 
 
 @dataclass(frozen=True)
@@ -374,14 +398,29 @@ def _bound_parameters_hash(
 
 
 def _record_audit_event(
-    context: ExperimentRunnerContext, inputs: _CallerInputs, run: ExperimentRun
+    context: ExperimentRunnerContext,
+    inputs: _CallerInputs,
+    run: ExperimentRun,
+    *,
+    original_final_book_hash: str | None = None,
 ) -> None:
-    """Append the run's audit event, from canonical values only (issue 123)."""
+    """Append an original M0 event; V2 opt-in also binds the final book.
+
+    V1 payloads and source hashes stay byte-for-byte unchanged when no
+    original-result observer is installed. The V2 local synthetic extension
+    hashes the *actual rebuilt* M2 final book before any consumer receives
+    that object, preventing a forged post-hoc final-book association.
+    """
     ledger = context.ledger
     if ledger is None:
         return
     if inputs.audit_event_id is None:
         raise ValueError("recording an experiment run requires an audit event id")
+    if (
+        original_final_book_hash is not None
+        and run.status is not ExperimentRunStatus.COMPLETED
+    ):
+        raise ValueError("a non-completed M0 run has no original final book")
     ledger.append(
         AuditEventDraft(
             event_id=inputs.audit_event_id,
@@ -399,8 +438,17 @@ def _record_audit_event(
                 if isinstance(run.metrics, Mapping)
                 else {},
                 "error_details": run.error_details,
+                **(
+                    {"original_final_book_hash": original_final_book_hash}
+                    if original_final_book_hash is not None
+                    else {}
+                ),
             },
-            schema_version=EXPERIMENT_RUN_EVENT_SCHEMA_VERSION,
+            schema_version=(
+                EXPERIMENT_RUN_BOOK_EVENT_SCHEMA_VERSION
+                if original_final_book_hash is not None
+                else EXPERIMENT_RUN_EVENT_SCHEMA_VERSION
+            ),
         )
     )
 
@@ -468,10 +516,23 @@ def execute_experiment_run(
     re-raised exactly as ``PromotionLaneDisabledError`` is, never recorded as
     a FAILED run. A V1 run is unchanged.
     """
+    # A strategy can retain/mutate the context object during decide().
+    # Capture the authorized observer ONCE before any strategy execution,
+    # and use the same object for the admission requirement, event schema,
+    # and callback. Re-reading context afterward allows false V1 downgrades.
+    original_result_observer = context.original_result_observer
     refuse_promotion_lane(context.engine.admission, site="the experiment runner")
     inputs = _caller_inputs(specification, context)
     _validate_context(inputs)
     parameters_hash = _bound_parameters_hash(specification, inputs)
+    # A Stage 1 original RESULT observer requires a recorded original M0
+    # event. Refuse before engine invocation if the audit root is absent.
+    if original_result_observer is not None and (
+        context.ledger is None or inputs.audit_event_id is None
+    ):
+        raise ValueError(
+            "original-result observation requires an M0 audit ledger and event ID"
+        )
     common: dict[str, object] = {
         "run_id": inputs.run_id,
         "experiment_id": inputs.experiment_id,
@@ -517,5 +578,24 @@ def execute_experiment_run(
             "artifact_references": _artifact_references(context, inputs, recorded),
         }
     )
-    _record_audit_event(context, inputs, run)
+    _record_audit_event(
+        context,
+        inputs,
+        run,
+        original_final_book_hash=(
+            content_hash(recorded.final_state)
+            if original_result_observer is not None
+            else None
+        ),
+    )
+    if original_result_observer is not None:
+        # The original M0 row and event already exist, so the observer can
+        # independently re-open them and refuse any forged association.
+        # Never pass it objects subsequently used to seal M0 or M2 output.
+        assert inputs.audit_event_id is not None
+        original_result_observer.observe_canonical_result(
+            run=ExperimentRun.model_validate_json(run.model_dump_json()),
+            artifacts=_rebuilt_artifacts(recorded),
+            m0_audit_event_id=inputs.audit_event_id,
+        )
     return run
