@@ -571,3 +571,35 @@ def test_legacy_consumption_and_m0_cannot_be_upgraded_after_execution(
             run=run, artifacts=_run(_engine()), m0_audit_event_id=m0.event_id
         )
     assert store.origin.verified_events() == before
+
+
+class _AnyReferenceUUID(UUID):
+    def __ne__(self, other: object) -> bool:
+        return False
+
+
+class _AnyReferenceHash(str):
+    def __ne__(self, other: object) -> bool:
+        return False
+
+
+@pytest.mark.parametrize("forged_leaf", ("event_id", "event_hash", "both"))
+def test_cold_reader_refuses_noncanonical_reference_equality(
+    tmp_path: Path, forged_leaf: str
+) -> None:
+    engine, observer, store = _setup(tmp_path)
+    _execute(engine, observer, store)
+    account = observer._account.verified_original()
+    genuine = observer.readback()
+    reference = LocalEventReferenceV1(
+        _AnyReferenceUUID(int=uuid7().int)
+        if forged_leaf in {"event_id", "both"}
+        else genuine.association_ref.event_id,
+        _AnyReferenceHash("0" * 64)
+        if forged_leaf in {"event_hash", "both"}
+        else genuine.association_ref.event_hash,
+    )
+    before = store.origin.verified_events()
+    with pytest.raises(OriginalResultAssociationError):
+        _cold_read(observer, store.origin, account, reference)
+    assert store.origin.verified_events() == before

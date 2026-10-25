@@ -136,6 +136,30 @@ def _invocation_binding(
         ) from error
 
 
+def _captured_reference(reference: LocalEventReferenceV1) -> LocalEventReferenceV1:
+    """Detach canonical locator leaves before comparison or caller copy hooks."""
+    if type(reference) is not LocalEventReferenceV1:
+        raise OriginalResultAssociationError("RESULT_REFERENCE_INVALID")
+    try:
+        identifier = reference.event_id
+        digest = reference.event_hash
+        if type(identifier) is not UUID or type(digest) is not str:
+            raise OriginalResultAssociationError("RESULT_REFERENCE_INVALID")
+        bits = identifier.int
+    except AttributeError as error:
+        raise OriginalResultAssociationError("RESULT_REFERENCE_INVALID") from error
+    if type(bits) is not int or not 0 <= bits < 1 << 128:
+        raise OriginalResultAssociationError("RESULT_REFERENCE_INVALID")
+    captured = UUID(int=bits)
+    if (
+        captured.version != 7
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        raise OriginalResultAssociationError("RESULT_REFERENCE_INVALID")
+    return LocalEventReferenceV1(captured, digest)
+
+
 def _exact_event(
     events: tuple[AuditEvent, ...],
     *,
@@ -392,6 +416,7 @@ class _OriginalResultVerifier:
         self, reference: LocalEventReferenceV1
     ) -> LocalOriginalResultReadbackV1:
         """Independently re-open and verify original local result event bytes."""
+        reference = _captured_reference(reference)
         self._check_e1()
         events = self._origin.verified_events()
         position, receipt = _exact_event(
@@ -528,7 +553,9 @@ class _OriginalResultVerifier:
         if observed < receipt.timestamp:
             raise OriginalResultAssociationError("RESULT_READBACK_CLOCK_ROLLBACK")
         return LocalOriginalResultReadbackV1(
-            association_ref=reference,
+            association_ref=LocalEventReferenceV1(
+                UUID(int=receipt.event_id.int), receipt.event_hash
+            ),
             allocation_ref=self._original_allocation.allocation_ref,
             result_hash=artifacts.result.result_hash,
             trace_hash=artifacts.trace.trace_hash,
@@ -761,8 +788,8 @@ def read_original_result(
     E1 scope and complete original artifact bytes are verified again. This
     read path neither prepares a new account nor permits another callback.
     """
+    reference = _captured_reference(association_ref)
     captured = deepcopy(original_account)
-    reference = deepcopy(association_ref)
     store = LocalSyntheticAccountReceiptStoreV1.open_existing(
         origin=origin, clock=clock
     )

@@ -40,9 +40,8 @@ M0's caller-supplied completion time is not a new availability witness.
 **Trust-boundary recommendation for architecture review:** retain this
 trusted-host boundary for the bounded synthetic candidate. Supporting hostile
 executable code requires a separately scoped process-isolation boundary.
-The recommendation and its
-implementation do not mean that the user answered an optional boundary
-question or that the independent D1/D2 owner gates were accepted.
+This follows D01's bounded strategy direction. It does not establish
+independent acceptance of the D1/D2 issuer and witness contracts.
 
 ## Why invocation identity is necessary
 
@@ -136,7 +135,10 @@ uses `SQLiteLedger.open_existing`. Reopening does not create a missing ledger
 or repair missing append protections before verification. The reader reopens
 the original allocation and witness, verifies all seven events and complete
 artifact bytes, and checks the complete E1 manifest again. Supplied references
-locate evidence; they do not authorize an origin.
+locate evidence; they do not authorize an origin. The association locator must
+contain exact canonical UUIDv7 and lowercase SHA-256 values. The reader rejects
+noncanonical comparison objects and returns a fresh locator from the verified
+original event, rather than echoing a caller-owned reference.
 
 Cold readback does not prepare an account, invoke a strategy, restore spent
 cash, append a new RESULT, or acquire another execution opportunity. A valid
