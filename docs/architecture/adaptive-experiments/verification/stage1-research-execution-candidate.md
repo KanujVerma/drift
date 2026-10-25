@@ -149,6 +149,22 @@ replays the offline K1 producer, compares the complete original output/journal,
 then independently verifies the original platform association and first decision.
 It needs neither the original account lifecycle nor the live writer/engine.
 
+For failed executions, equal invocation dictionaries are not sufficient proof.
+The reader parses the original three-UUID binding, verifies the claim's exact
+producer profile, schema, entity, issuer, account-scoped deduplication key,
+witness reference and identity digest, and requires its event ID to equal the
+original invocation ID. The reservation, claim and failed M0 clocks and event
+positions must be causally ordered in the same verified ledger snapshot.
+
+A failure may legitimately occur before book consumption. The reader does not
+invent or require a consumption receipt in that case. When a receipt exists,
+it must be unique and must match the original claim, allocated book bytes,
+execution identity and invocation, with valid producer metadata and an event
+position and timestamp between claim and failed M0. A semantically contradictory
+receipt is refused even when the enclosing ledger's hash chain is valid.
+These checks establish local failure attribution, not account-wide zero fills,
+general issuer authentication or scientific completion.
+
 Readers do not create missing ledgers or repair their schema/triggers. Current
 installed source identity must match the retained inventory. Reading older
 source versions requires that exact retained code environment rather than

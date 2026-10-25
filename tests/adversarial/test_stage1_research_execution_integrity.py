@@ -18,6 +18,7 @@ from test_stage1_synthetic_research_execution import (
     Tick,
     cold_read,
     make_harness,
+    proposal,
     request,
 )
 
@@ -26,11 +27,18 @@ from drift.experiments.stage1_trial_provenance import (
     build_stage1_trial_provenance_snapshot,
 )
 from drift.intelligence.contracts import ResearchContext, compute_record_hash
+from drift.ledger.interface import AuditEventDraft
+from drift.ledger.sqlite import SQLiteLedger
 from drift.ledger.stage1_synthetic_account_receipts import (
+    CLAIM,
+    CONSUMED,
     ConfiguredLocalSyntheticOriginV1,
     LocalEventReferenceV1,
 )
 from drift.loop import stage1_synthetic_research_execution as pipeline
+from drift.loop.stage1_synthetic_account_lifecycle import (
+    Stage1SyntheticAccountLifecycleV1,
+)
 from drift.serialization.canonical import canonical_json
 
 
@@ -483,3 +491,194 @@ def test_noncanonical_base64_pad_bits_do_not_alias_original_compressed_bytes() -
     assert base64.b64decode(changed) == base64.b64decode(artifact.data)
     with pytest.raises(ValueError, match="BASE64_NONCANONICAL"):
         pipeline._decode_context(artifact.model_copy(update={"data": changed}))
+
+
+_FAILED_EVIDENCE_MUTATIONS = (
+    "claim-schema",
+    "claim-profile",
+    "claim-issuer",
+    "claim-entity",
+    "claim-dedup",
+    "claim-witness",
+    "claim-identity",
+    "claim-before-reservation",
+    "claim-after-failure",
+    "failure-before-claim",
+    "shared-wrong-invocation",
+    "binding-extra-key",
+    "binding-not-uuid7",
+    "consumption-schema",
+    "consumption-profile",
+    "consumption-issuer",
+    "consumption-entity",
+    "consumption-dedup",
+    "consumption-claim-id",
+    "consumption-claim-hash",
+    "consumption-allocation",
+    "consumption-identity",
+    "consumption-book",
+    "consumption-binding",
+    "consumption-before-claim",
+    "consumption-after-failure",
+    "consumption-after-m0",
+    "duplicate-consumption",
+)
+
+
+def _failed_evidence_copy(
+    tmp_path: Path, mutation: str
+) -> tuple[dict[str, Any], LocalEventReferenceV1]:
+    """Use genuine failed M0, then an independently hash-valid negative ledger.
+
+    Checksum failures would mask the missing semantic checks under test. Rebuild
+    the copy through SQLiteLedger.append, preserving the original allocation,
+    opportunity, research and reservation. This is fixture corruption only;
+    the original writer's database and append protections are never modified.
+    """
+    harness = make_harness(tmp_path / "source")
+    result = pipeline.execute_synthetic_research(
+        **harness, request=request(proposal(weight="0.5", cash="0.5"))
+    )
+    assert result.state == "EXECUTION_FAILED"
+    events = list(harness["origin"].verified_events())
+    claim = next(e for e in events if e.event_type == CLAIM)
+    consumed = next(e for e in events if e.event_type == CONSUMED)
+    reservation = next(e for e in events if e.event_type == pipeline.RESERVATION)
+    failed = next(e for e in events if e.event_type == "m2.evaluation.run.recorded")
+    origin = replace(harness["origin"], ledger_path=tmp_path / "negative.sqlite3")
+    ledger = SQLiteLedger(origin.ledger_path)
+    if mutation == "consumption-after-m0":
+        events.remove(consumed)
+        events.insert(events.index(failed) + 1, consumed)
+    replacement_invocation = str(uuid7())
+    claim_hash = claim.event_hash
+    for event in events:
+        payload = json.loads(canonical_json(event.payload))
+        schema, entity, stamp, dedup = (
+            event.schema_version,
+            event.entity_type,
+            event.timestamp,
+            event.deduplication_key,
+        )
+        if event.event_type == CLAIM:
+            if mutation == "claim-schema":
+                schema = "1"
+            if mutation == "claim-profile":
+                payload["profile"] = "unaccepted-profile"
+            if mutation == "claim-issuer":
+                payload["issuer_instance_id"] = str(uuid7())
+            if mutation == "claim-entity":
+                entity = "other_account"
+            if mutation == "claim-dedup":
+                dedup = "unscoped-claim"
+            if mutation == "claim-witness":
+                payload["witness_event_hash"] = "0" * 64
+            if mutation == "claim-identity":
+                payload["identity_hash"] = "not-a-digest"
+            if mutation == "claim-before-reservation":
+                stamp = reservation.timestamp - timedelta(seconds=1)
+            if mutation == "claim-after-failure":
+                stamp = failed.timestamp + timedelta(seconds=1)
+        if mutation == "failure-before-claim" and event == failed:
+            stamp = claim.timestamp - timedelta(seconds=1)
+        if event.event_type in (CLAIM, CONSUMED, "m2.evaluation.run.recorded"):
+            if mutation == "shared-wrong-invocation":
+                payload["invocation_binding"]["invocation_id"] = replacement_invocation
+            if mutation == "binding-extra-key":
+                payload["invocation_binding"]["unexpected"] = "value"
+            if mutation == "binding-not-uuid7":
+                payload["invocation_binding"]["invocation_id"] = "not-a-uuid"
+        if event.event_type == CONSUMED:
+            # Keep lineage consistent after a claim mutation so each negative
+            # cannot pass merely because an unrelated stale claim hash fails.
+            payload["claim_event_hash"] = claim_hash
+            if mutation == "consumption-schema":
+                schema = "1"
+            if mutation == "consumption-profile":
+                payload["profile"] = "unaccepted-profile"
+            if mutation == "consumption-issuer":
+                payload["issuer_instance_id"] = str(uuid7())
+            if mutation == "consumption-entity":
+                entity = "other_account"
+            if mutation == "consumption-dedup":
+                dedup = "unscoped-consumption"
+            fields = {
+                "consumption-claim-id": "claim_event_id",
+                "consumption-claim-hash": "claim_event_hash",
+                "consumption-allocation": "allocation_event_hash",
+                "consumption-identity": "identity_hash",
+                "consumption-book": "original_book_sha256",
+            }
+            if mutation in fields:
+                payload[fields[mutation]] = "0" * 64
+            if mutation == "consumption-binding":
+                payload["invocation_binding"]["m0_run_id"] = str(uuid7())
+            if mutation == "consumption-before-claim":
+                stamp = claim.timestamp - timedelta(seconds=1)
+            if mutation == "consumption-after-failure":
+                stamp = failed.timestamp + timedelta(seconds=1)
+        draft = AuditEventDraft(
+            event_id=event.event_id,
+            event_type=event.event_type,
+            timestamp=stamp,
+            entity_type=entity,
+            entity_id=event.entity_id,
+            payload=payload,
+            schema_version=schema,
+            deduplication_key=dedup,
+        )
+        written = ledger.append(draft)
+        if event.event_type == CLAIM:
+            claim_hash = written.event_hash
+        if event.event_type == CONSUMED and mutation == "duplicate-consumption":
+            ledger.append(
+                draft.model_copy(
+                    update={
+                        "event_id": uuid7(),
+                        "deduplication_key": "duplicate-consumption",
+                    }
+                )
+            )
+    verified = origin.verified_events()
+    assert len(verified) == len(events) + (mutation == "duplicate-consumption")
+    if mutation == "none":
+        assert verified == tuple(events)
+    harness["origin"] = origin
+    return harness, result.opportunity_ref
+
+
+@pytest.mark.parametrize("mutation", _FAILED_EVIDENCE_MUTATIONS)
+def test_failed_run_requires_original_claim_and_consumption_semantics(
+    tmp_path: Path, mutation: str
+) -> None:
+    harness, reference = _failed_evidence_copy(tmp_path, mutation)
+    with pytest.raises(ValueError):
+        cold_read(harness, reference)
+
+
+def test_genuine_failed_run_survives_independent_evidence_copy(tmp_path: Path) -> None:
+    harness, reference = _failed_evidence_copy(tmp_path, "none")
+    result = cold_read(harness, reference)
+    assert result.state == "EXECUTION_FAILED"
+    assert result.original_result is None
+    assert not result.g2_accepted
+
+
+def test_failure_before_consumption_does_not_require_fabricated_consumption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = make_harness(tmp_path)
+
+    def unavailable(*args: Any, **kwargs: Any) -> None:
+        raise OSError("consumption unavailable before original append")
+
+    monkeypatch.setattr(
+        Stage1SyntheticAccountLifecycleV1, "observe_bound_consumption", unavailable
+    )
+    result = pipeline.execute_synthetic_research(**harness, request=request())
+    assert result.state == "EXECUTION_FAILED"
+    assert result.original_result is None
+    events = harness["origin"].verified_events()
+    assert any(e.event_type == CLAIM for e in events)
+    assert not any(e.event_type == CONSUMED for e in events)
+    assert cold_read(harness, result.opportunity_ref).state == "EXECUTION_FAILED"

@@ -62,6 +62,10 @@ from drift.evaluator.experiment_runner import (
     ExperimentRunnerContext,
     execute_experiment_run,
 )
+from drift.evaluator.opening_book_lifecycle import (
+    OpeningBookLifecycleError,
+    parse_original_invocation_binding,
+)
 from drift.experiments.stage1_campaign_config import (
     ArmSpecV1,
     CampaignSpecV1,
@@ -92,11 +96,17 @@ from drift.intelligence.validation import ResolvedDependencies, StrategyRegistra
 from drift.ledger.interface import AuditEventDraft
 from drift.ledger.sqlite import SQLiteLedger
 from drift.ledger.stage1_synthetic_account_receipts import (
+    BOUND_PROFILE,
+    CLAIM,
+    CONSUMED,
     AccountAllocationFieldsV1,
     ConfiguredLocalSyntheticOriginV1,
     LocalEventReferenceV1,
     LocalSyntheticAccountReceiptStoreV1,
     OriginalLocalAccountReadbackV1,
+)
+from drift.ledger.stage1_synthetic_account_receipts import (
+    ENTITY as ACCOUNT_ENTITY,
 )
 from drift.loop.stage1_original_result_association import (
     LocalOriginalResultReadbackV1,
@@ -1300,8 +1310,7 @@ def read_synthetic_research_execution(
         claims = [
             event
             for event in events
-            if event.entity_id == original.allocation_id
-            and event.event_type == "stage1.synthetic_account.invocation_claim"
+            if event.entity_id == original.allocation_id and event.event_type == CLAIM
         ]
         # Failed M0 has no successful financial artifact. Verify its original
         # invocation through the actual bound account claim, never assume fills
@@ -1312,7 +1321,77 @@ def read_synthetic_research_execution(
         data, claimed = event.payload, claim.payload
         if not isinstance(data, Mapping) or not isinstance(claimed, Mapping):
             raise ValueError("FAILED_M0_ORIGINAL_EVIDENCE_MISSING")
-        binding = data.get("invocation_binding")
+        # Matching payload dictionaries do not establish an original claim.
+        # Validate its producer envelope and canonical invocation identity from
+        # this same verified event snapshot, before attributing a failed run.
+        try:
+            binding = parse_original_invocation_binding(data.get("invocation_binding"))
+            claim_binding = parse_original_invocation_binding(
+                claimed.get("invocation_binding")
+            )
+        except OpeningBookLifecycleError as error:
+            raise ValueError("FAILED_M0_ORIGINAL_CLAIM_MISMATCH") from error
+        identity_hash = claimed.get("identity_hash")
+        if (
+            claim.entity_type != ACCOUNT_ENTITY
+            or claim.schema_version != "2"
+            or claimed.get("profile") != BOUND_PROFILE
+            or claimed.get("issuer_instance_id") != str(origin.issuer_instance_id)
+            or claim.deduplication_key != f"stage1:invocation:{original.allocation_id}"
+            or binding != claim_binding
+            or claim.event_id != binding.invocation_id
+            or binding.m0_run_id != UUID(reservation.m0_run_id)
+            or binding.m0_audit_event_id != UUID(reservation.m0_audit_event_id)
+            or claimed.get("witness_event_hash") != original.witness_ref.event_hash
+            or type(identity_hash) is not str
+            or len(identity_hash) != 64
+            or any(c not in "0123456789abcdef" for c in identity_hash)
+            or not reservation_event.timestamp <= claim.timestamp <= event.timestamp
+        ):
+            raise ValueError("FAILED_M0_ORIGINAL_CLAIM_MISMATCH")
+        # Failure may precede book consumption. Do not invent consumption, but
+        # verify every consumption record that does exist, including lineage,
+        # identity, original book bytes and causal order. A valid hash chain
+        # alone does not make a contradictory producer event acceptable.
+        consumptions = [
+            item
+            for item in events
+            if item.entity_id == original.allocation_id and item.event_type == CONSUMED
+        ]
+        if len(consumptions) > 1:
+            raise ValueError("FAILED_M0_DUPLICATE_CONSUMPTION")
+        if consumptions:
+            consumption = consumptions[0]
+            consumed = consumption.payload
+            if not isinstance(consumed, Mapping):
+                raise ValueError("FAILED_M0_CONSUMPTION_MISMATCH")
+            try:
+                consumed_binding = parse_original_invocation_binding(
+                    consumed.get("invocation_binding")
+                )
+            except OpeningBookLifecycleError as error:
+                raise ValueError("FAILED_M0_CONSUMPTION_MISMATCH") from error
+            if (
+                consumption.entity_type != ACCOUNT_ENTITY
+                or consumption.schema_version != "2"
+                or consumed.get("profile") != BOUND_PROFILE
+                or consumed.get("issuer_instance_id") != str(origin.issuer_instance_id)
+                or consumption.deduplication_key
+                != f"stage1:consumed:{original.allocation_id}"
+                or consumed_binding != binding
+                or consumed.get("claim_event_id") != str(claim.event_id)
+                or consumed.get("claim_event_hash") != claim.event_hash
+                or consumed.get("allocation_event_hash")
+                != original.allocation_ref.event_hash
+                or consumed.get("identity_hash") != identity_hash
+                or consumed.get("original_book_sha256")
+                != hashlib.sha256(original.original_book_bytes).hexdigest()
+                or not indexes[claim.event_id]
+                < indexes[consumption.event_id]
+                < indexes[event.event_id]
+                or not claim.timestamp <= consumption.timestamp <= event.timestamp
+            ):
+                raise ValueError("FAILED_M0_CONSUMPTION_MISMATCH")
         if (
             event.event_type != "m2.evaluation.run.recorded"
             or event.entity_id != UUID(reservation.m0_run_id)
@@ -1323,10 +1402,6 @@ def read_synthetic_research_execution(
             or data.get("metrics") != {}
             or "original_final_book_hash" in data
             or data.get("error_details") != outcome.reason
-            or not isinstance(binding, Mapping)
-            or binding != claimed.get("invocation_binding")
-            or binding.get("m0_run_id") != reservation.m0_run_id
-            or binding.get("m0_audit_event_id") != reservation.m0_audit_event_id
             or claimed.get("allocation_event_hash")
             != original.allocation_ref.event_hash
             or not indexes[reservation_event.event_id]
