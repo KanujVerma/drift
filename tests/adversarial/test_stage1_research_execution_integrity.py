@@ -754,3 +754,101 @@ def test_claim_write_failure_preserves_readable_state_without_reexecution(
     with pytest.raises(DuplicateEventError):
         pipeline.execute_synthetic_research(**harness, request=request())
     assert harness["origin"].verified_events() == events
+
+
+@pytest.mark.parametrize("mutation", ["early-outcome", "late-reservation"])
+def test_successful_result_cannot_certify_cross_layer_clock_inversion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    """A valid producer chain still needs a causal coordinator-to-producer join."""
+    harness = make_harness(tmp_path)
+    append = pipeline._append
+
+    def changed_clock(*args: Any, **kwargs: Any) -> Any:
+        phase = kwargs["phase"]
+        if mutation == "late-reservation" and phase == pipeline.RESERVATION:
+            # Actual claim happens one clock tick after the original reservation.
+            # Leave engine/account clocks and all producer evidence untouched.
+            kwargs["timestamp"] += timedelta(seconds=2)
+        if mutation == "early-outcome" and phase == pipeline.OUTCOME:
+            original = next(
+                e
+                for e in harness["origin"].verified_events()
+                if e.event_type == "stage1.synthetic_result.original_retained"
+            )
+            kwargs["timestamp"] = original.timestamp - timedelta(microseconds=1)
+        return append(*args, **kwargs)
+
+    caught: ValueError | None = None
+    with monkeypatch.context() as patch:
+        patch.setattr(pipeline, "_append", changed_clock)
+        try:
+            pipeline.execute_synthetic_research(**harness, request=request())
+        except ValueError as error:
+            caught = error
+    events = harness["origin"].verified_events()
+    assert len(events) == 11, "Genuine producer and outcome records must all exist"
+    reservation = next(e for e in events if e.event_type == pipeline.RESERVATION)
+    claim = next(e for e in events if e.event_type == CLAIM)
+    result = next(
+        e for e in events if e.event_type == "stage1.synthetic_result.original_retained"
+    )
+    outcome = next(e for e in events if e.event_type == pipeline.OUTCOME)
+    if mutation == "late-reservation":
+        assert reservation.timestamp > claim.timestamp
+    else:
+        assert outcome.timestamp < result.timestamp
+    # Test cold refusal even when the live reader already refused. The chain's
+    # hash integrity and real financial artifact cannot certify impossible time.
+    with pytest.raises(ValueError, match="RESEARCH_TO_ORIGINAL_M0_MISMATCH"):
+        cold_read(harness, _ref(harness))
+    assert caught is not None
+    assert "RESEARCH_TO_ORIGINAL_M0_MISMATCH" in str(caught)
+    assert harness["origin"].verified_events() == events
+
+
+@pytest.mark.parametrize(
+    "boundary", ["outcome-equals-result", "reservation-equals-claim"]
+)
+def test_successful_result_allows_equal_cross_layer_clock_boundaries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    """Coarse clocks may coincide; append order must still be strictly causal."""
+    harness = make_harness(tmp_path)
+    append = pipeline._append
+
+    def equal_clock(*args: Any, **kwargs: Any) -> Any:
+        phase = kwargs["phase"]
+        if boundary == "reservation-equals-claim" and phase == pipeline.RESERVATION:
+            kwargs["timestamp"] += timedelta(seconds=1)
+        if boundary == "outcome-equals-result" and phase == pipeline.OUTCOME:
+            original = next(
+                e
+                for e in harness["origin"].verified_events()
+                if e.event_type == "stage1.synthetic_result.original_retained"
+            )
+            kwargs["timestamp"] = original.timestamp
+        return append(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(pipeline, "_append", equal_clock)
+        result = pipeline.execute_synthetic_research(**harness, request=request())
+    assert result.state == "LOCAL_EXECUTION_COMPLETE"
+    assert result.original_result is not None
+    before = harness["origin"].verified_events()
+    phase = {e.event_type: e for e in before}
+    if boundary == "reservation-equals-claim":
+        assert phase[pipeline.RESERVATION].timestamp == phase[CLAIM].timestamp
+    else:
+        assert (
+            phase[pipeline.OUTCOME].timestamp
+            == phase["stage1.synthetic_result.original_retained"].timestamp
+        )
+    repeated = cold_read(harness, result.opportunity_ref)
+    assert repeated.state == result.state and repeated.original_result is not None
+    assert (
+        repeated.original_result.original_artifacts_bytes
+        == result.original_result.original_artifacts_bytes
+    )
+    assert harness["origin"].verified_events() == before
+    assert not repeated.g2_accepted

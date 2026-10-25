@@ -1495,6 +1495,39 @@ def read_synthetic_research_execution(
         for event in events
         if str(event.event_id) == reservation.m0_audit_event_id
     ]
+    claims = [
+        event
+        for event in events
+        if event.event_id == retained.invocation_binding.invocation_id
+    ]
+    result_events = [
+        event for event in events if event.event_id == retained.association_ref.event_id
+    ]
+    # The platform reader verifies its own claim/consumption/M0/RESULT chain.
+    # Join that exact chain to this coordinator's original reservation and
+    # outcome in the captured event snapshot. Append order does not establish
+    # timestamp causality, and a genuine RESULT cannot validate an outcome
+    # recorded before that RESULT was available. Equal clocks are permitted;
+    # the original append positions must still be strictly increasing.
+    if (
+        len(m0) != 1
+        or len(claims) != 1
+        or len(result_events) != 1
+        or claims[0].event_type != CLAIM
+        or claims[0].entity_id != original.allocation_id
+        or result_events[0].event_hash != retained.association_ref.event_hash
+        or not indexes[reservation_event.event_id]
+        < indexes[claims[0].event_id]
+        < indexes[m0[0].event_id]
+        < indexes[result_events[0].event_id]
+        < indexes[phases[OUTCOME].event_id]
+        or not reservation_event.timestamp
+        <= claims[0].timestamp
+        <= m0[0].timestamp
+        <= result_events[0].timestamp
+        <= phases[OUTCOME].timestamp
+    ):
+        raise ValueError("RESEARCH_TO_ORIGINAL_M0_MISMATCH")
     if (
         retained.operational_m0_run_id != UUID(reservation.m0_run_id)
         or identity.strategy_hash != reservation.strategy_hash
@@ -1505,12 +1538,7 @@ def read_synthetic_research_execution(
         or identity.admission_hash != plan.admission_hash
         or identity.evaluator_evidence_hash != plan.evaluator_evidence_hash
         or identity.code_version_hash != plan.source_inventory_hash
-        or len(m0) != 1
         or m0[0].event_type != "m2.evaluation.run.recorded"
-        or indexes[m0[0].event_id] <= indexes[reservation_event.event_id]
-        or indexes[retained.association_ref.event_id] <= indexes[m0[0].event_id]
-        or indexes[retained.association_ref.event_id]
-        >= indexes[phases[OUTCOME].event_id]
     ):
         raise ValueError("RESEARCH_TO_ORIGINAL_M0_MISMATCH")
     # Independently reconstruct the first actual target decision. A correct

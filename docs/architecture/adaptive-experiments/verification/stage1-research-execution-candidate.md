@@ -165,6 +165,16 @@ receipt is refused even when the enclosing ledger's hash chain is valid.
 These checks establish local failure attribution, not account-wide zero fills,
 general issuer authentication or scientific completion.
 
+For successful executions, the coordinator independently joins the verified
+original invocation claim, M0 and RESULT to its own reservation and outcome in
+one captured event snapshot. It requires strictly increasing append positions
+and nondecreasing timestamps from reservation through claim, M0 and RESULT to
+outcome. A valid producer hash chain does not make an outcome recorded before
+its supporting RESULT, or a reservation recorded after consumption began,
+causally valid. Equal clock instants remain permitted when original append order
+is correct. Missing or contradictory originals refuse without rewriting events
+or rerunning execution; valid financial artifact bytes remain unchanged.
+
 Readers do not create missing ledgers or repair their schema/triggers. Current
 installed source identity must match the retained inventory. Reading older
 source versions requires that exact retained code environment rather than
