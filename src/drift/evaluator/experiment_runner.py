@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Protocol
-from uuid import UUID
+from uuid import UUID, uuid7
 
 from pydantic import TypeAdapter
 
@@ -63,6 +63,11 @@ from drift.evaluator.engine import (
     SessionEvaluatorEngine,
     refuse_promotion_lane,
 )
+from drift.evaluator.opening_book_lifecycle import (
+    OriginalInvocationBindingV1,
+    copy_original_invocation_binding,
+    invocation_binding_payload,
+)
 from drift.ledger.interface import AuditEventDraft, Ledger
 from drift.serialization.canonical import content_hash
 
@@ -70,6 +75,7 @@ EXPERIMENT_RUN_EVENT_TYPE = "m2.evaluation.run.recorded"
 EXPERIMENT_RUN_ENTITY_TYPE = "experiment_run"
 EXPERIMENT_RUN_EVENT_SCHEMA_VERSION = "1"
 EXPERIMENT_RUN_BOOK_EVENT_SCHEMA_VERSION = "2"
+EXPERIMENT_RUN_INVOCATION_EVENT_SCHEMA_VERSION = "3"
 
 
 class ForeignRunArtifactsError(DriftError, ValueError):
@@ -107,8 +113,9 @@ class CanonicalM0ResultObserverV1(Protocol):
 class ExperimentRunnerContext:
     """Everything an execution needs that the evaluation itself must not own.
 
-    Every identifier and instant here is operational metadata. None of it
-    reaches the evaluator, so none of it can perturb a result hash.
+    Every identifier and instant here is operational metadata. Original
+    invocation binding reaches the optional opening-book lifecycle, but
+    never deterministic evaluator identity, results, traces or book hashes.
     """
 
     run_id: UUID7
@@ -398,20 +405,21 @@ def _bound_parameters_hash(
 
 
 def _record_audit_event(
-    context: ExperimentRunnerContext,
+    ledger: Ledger | None,
     inputs: _CallerInputs,
     run: ExperimentRun,
     *,
     original_final_book_hash: str | None = None,
+    original_invocation_binding: OriginalInvocationBindingV1 | None = None,
 ) -> None:
-    """Append an original M0 event; V2 opt-in also binds the final book.
+    """Append an original M0 event, binding the optional actual invocation.
 
     V1 payloads and source hashes stay byte-for-byte unchanged when no
-    original-result observer is installed. The V2 local synthetic extension
-    hashes the *actual rebuilt* M2 final book before any consumer receives
-    that object, preventing a forged post-hoc final-book association.
+    original-result observer is installed. V2 is retained as a historical
+    final-book-only extension. New original observers use V3: the fresh M0
+    invocation binding plus the actual rebuilt final book on completion.
+    A failed attempt records its binding but has no completed artifacts.
     """
-    ledger = context.ledger
     if ledger is None:
         return
     if inputs.audit_event_id is None:
@@ -443,9 +451,20 @@ def _record_audit_event(
                     if original_final_book_hash is not None
                     else {}
                 ),
+                **(
+                    {
+                        "invocation_binding": invocation_binding_payload(
+                            original_invocation_binding
+                        )
+                    }
+                    if original_invocation_binding is not None
+                    else {}
+                ),
             },
             schema_version=(
-                EXPERIMENT_RUN_BOOK_EVENT_SCHEMA_VERSION
+                EXPERIMENT_RUN_INVOCATION_EVENT_SCHEMA_VERSION
+                if original_invocation_binding is not None
+                else EXPERIMENT_RUN_BOOK_EVENT_SCHEMA_VERSION
                 if original_final_book_hash is not None
                 else EXPERIMENT_RUN_EVENT_SCHEMA_VERSION
             ),
@@ -517,21 +536,32 @@ def execute_experiment_run(
     a FAILED run. A V1 run is unchanged.
     """
     # A strategy can retain/mutate the context object during decide().
-    # Capture the authorized observer ONCE before any strategy execution,
-    # and use the same object for the admission requirement, event schema,
-    # and callback. Re-reading context afterward allows false V1 downgrades.
+    # Capture the selected collaborators before any strategy execution.
+    # Re-reading context afterward permits changing the ledger, engine or
+    # observer used to admit and record this original invocation.
+    engine = context.engine
+    ledger = context.ledger
+    strategy = context.strategy
     original_result_observer = context.original_result_observer
-    refuse_promotion_lane(context.engine.admission, site="the experiment runner")
+    refuse_promotion_lane(engine.admission, site="the experiment runner")
     inputs = _caller_inputs(specification, context)
     _validate_context(inputs)
     parameters_hash = _bound_parameters_hash(specification, inputs)
     # A Stage 1 original RESULT observer requires a recorded original M0
     # event. Refuse before engine invocation if the audit root is absent.
     if original_result_observer is not None and (
-        context.ledger is None or inputs.audit_event_id is None
+        ledger is None or inputs.audit_event_id is None
     ):
         raise ValueError(
             "original-result observation requires an M0 audit ledger and event ID"
+        )
+    invocation_binding = None
+    if original_result_observer is not None:
+        assert inputs.audit_event_id is not None
+        invocation_binding = OriginalInvocationBindingV1(
+            invocation_id=uuid7(),
+            m0_run_id=inputs.run_id,
+            m0_audit_event_id=inputs.audit_event_id,
         )
     common: dict[str, object] = {
         "run_id": inputs.run_id,
@@ -544,9 +574,19 @@ def execute_experiment_run(
         "parameters_hash": parameters_hash,
     }
     try:
-        artifacts = context.engine.run(
-            strategy=context.strategy, run_identity=inputs.run_identity
-        )
+        if invocation_binding is None:
+            # Preserve the ordinary evaluator call surface and byte contract.
+            artifacts = engine.run(strategy=strategy, run_identity=inputs.run_identity)
+        else:
+            # The engine/lifecycle receives a detached copy. Its callbacks
+            # cannot change the binding later recorded by this M0 attempt.
+            artifacts = engine.run(
+                strategy=strategy,
+                run_identity=inputs.run_identity,
+                original_invocation_binding=copy_original_invocation_binding(
+                    invocation_binding
+                ),
+            )
     except PromotionLaneDisabledError, StrategyParametersBindingError:
         # A refusal from inside the run is still a refusal (issue 120 review,
         # F-B): it is never laundered into a recorded FAILED run. The engine
@@ -566,7 +606,12 @@ def execute_experiment_run(
                 "error_details": detail,
             }
         )
-        _record_audit_event(context, inputs, run)
+        _record_audit_event(
+            ledger,
+            inputs,
+            run,
+            original_invocation_binding=invocation_binding,
+        )
         return run
     recorded = _rebuilt_artifacts(artifacts)
     _refuse_foreign_run(inputs, recorded)
@@ -579,7 +624,7 @@ def execute_experiment_run(
         }
     )
     _record_audit_event(
-        context,
+        ledger,
         inputs,
         run,
         original_final_book_hash=(
@@ -587,6 +632,7 @@ def execute_experiment_run(
             if original_result_observer is not None
             else None
         ),
+        original_invocation_binding=invocation_binding,
     )
     if original_result_observer is not None:
         # The original M0 row and event already exist, so the observer can

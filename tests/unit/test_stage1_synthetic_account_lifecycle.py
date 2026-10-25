@@ -11,7 +11,7 @@ from pathlib import Path
 from uuid import uuid7
 
 import pytest
-from test_evaluator_engine import _engine, _run, _run_identity
+from test_evaluator_engine import _buy_ten, _engine, _run, _run_identity
 from test_stage1_campaign_config import (
     make_golden_arm_b,
     make_golden_arm_r,
@@ -19,7 +19,12 @@ from test_stage1_campaign_config import (
     make_golden_campaign,
 )
 
-from drift.evaluator.opening_book_lifecycle import OpeningBookLifecycleError
+from drift.evaluator.opening_book_lifecycle import (
+    OpeningBookLifecycleError,
+    OriginalInvocationBindingV1,
+    invocation_binding_payload,
+    parse_original_invocation_binding,
+)
 from drift.experiments.stage1_trial_provenance import (
     build_stage1_trial_provenance_snapshot,
 )
@@ -31,6 +36,7 @@ from drift.ledger.stage1_synthetic_account_receipts import (
     ConfiguredLocalSyntheticOriginV1,
     LocalAccountReceiptError,
     LocalSyntheticAccountReceiptStoreV1,
+    read_configured_original,
 )
 from drift.loop.stage1_synthetic_account_lifecycle import (
     Stage1SyntheticAccountLifecycleV1,
@@ -38,6 +44,14 @@ from drift.loop.stage1_synthetic_account_lifecycle import (
 from drift.serialization.canonical import canonical_json
 
 START = datetime(2026, 10, 21, 19, 0, tzinfo=UTC)
+
+
+def _invocation_binding() -> OriginalInvocationBindingV1:
+    return OriginalInvocationBindingV1(
+        invocation_id=uuid7(),
+        m0_run_id=uuid7(),
+        m0_audit_event_id=uuid7(),
+    )
 
 
 class _ObservedClock:
@@ -125,6 +139,160 @@ def test_original_engine_book_is_retained_then_claimed_once(tmp_path: Path) -> N
     with pytest.raises(OpeningBookLifecycleError, match="not available"):
         _run(engine)
     assert len(origin.verified_events()) == 4
+    assert all(event.schema_version == "1" for event in origin.verified_events())
+    assert all(
+        isinstance(event.payload, Mapping) and "invocation_binding" not in event.payload
+        for event in origin.verified_events()
+    )
+
+
+def test_bound_engine_consumption_retains_exact_original_invocation(
+    tmp_path: Path,
+) -> None:
+    """The actual prepared engine emits one bound claim and consumption."""
+    store = _store(tmp_path)
+    coordinator = _coordinator(store)
+    engine = _engine()
+    engine.prepare_opening_book(lifecycle=coordinator)
+    original = coordinator.verified_original()
+    binding = _invocation_binding()
+    identity = _run_identity(
+        admission=engine.admission,
+        bundle=engine.bundle,
+        protocol=engine.protocol,
+        cost_model=engine.cost_model,
+        evidence_hash=engine.evaluator_evidence_hash,
+    )
+    artifacts = engine.run(
+        strategy=_buy_ten(),
+        run_identity=identity,
+        original_invocation_binding=binding,
+    )
+    assert canonical_json(artifacts) == canonical_json(_run(_engine()))
+    assert coordinator.local_phase == "consumed"
+    events = ConfiguredLocalSyntheticOriginV1(
+        ledger_path=store.origin.ledger_path,
+        issuer_instance_id=store.origin.issuer_instance_id,
+    ).verified_events()
+    assert [event.event_type for event in events] == [
+        ALLOCATION,
+        WITNESS,
+        CLAIM,
+        CONSUMED,
+    ]
+    assert [event.schema_version for event in events] == ["1", "1", "2", "2"]
+    claim, consumed = events[-2:]
+    assert claim.event_id == binding.invocation_id
+    expected = invocation_binding_payload(binding)
+    for event in (claim, consumed):
+        assert isinstance(event.payload, Mapping)
+        assert event.payload["profile"] == (
+            "drift-stage1-synthetic-account-local/2-candidate"
+        )
+        assert event.payload["invocation_binding"] == expected
+    assert isinstance(consumed.payload, Mapping)
+    assert consumed.payload["claim_event_id"] == str(binding.invocation_id)
+    assert consumed.payload["claim_event_hash"] == claim.event_hash
+    assert coordinator._claim is not None
+    assert coordinator._consumption is not None
+    for kind, reference in (
+        (CLAIM, coordinator._claim),
+        (CONSUMED, coordinator._consumption),
+    ):
+        retained = read_configured_original(
+            origin=store.origin,
+            reference=reference,
+            event_type=kind,
+            allocation_id=original.allocation_id,
+        )
+        assert retained.schema_version == "2"
+    with pytest.raises(OpeningBookLifecycleError, match="not available"):
+        engine.run(
+            strategy=_buy_ten(),
+            run_identity=identity,
+            original_invocation_binding=_invocation_binding(),
+        )
+    assert len(store.origin.verified_events()) == 4
+
+
+@pytest.mark.parametrize(
+    "identifier", ["invocation_id", "m0_run_id", "m0_audit_event_id"]
+)
+def test_bound_claim_detaches_uuid_leaves_before_later_consumption(
+    tmp_path: Path, identifier: str
+) -> None:
+    store = _store(tmp_path)
+    coordinator = _coordinator(store)
+    engine = _engine()
+    engine.prepare_opening_book(lifecycle=coordinator)
+    book = coordinator._original_book
+    assert book is not None
+    identity = _run_identity(
+        admission=engine.admission,
+        bundle=engine.bundle,
+        protocol=engine.protocol,
+        cost_model=engine.cost_model,
+        evidence_hash=engine.evaluator_evidence_hash,
+    )
+    supplied = _invocation_binding()
+    original_payload = invocation_binding_payload(supplied)
+    coordinator.claim_bound_invocation(
+        opening_book=book, run_identity=identity, binding=supplied
+    )
+    object.__setattr__(getattr(supplied, identifier), "int", uuid7().int)
+    assert invocation_binding_payload(supplied) != original_payload
+    coordinator.observe_bound_consumption(
+        opening_book=book,
+        run_identity=identity,
+        binding=parse_original_invocation_binding(original_payload),
+    )
+    assert coordinator.local_phase == "consumed"
+    for event in store.origin.verified_events()[-2:]:
+        assert isinstance(event.payload, Mapping)
+        assert event.payload["invocation_binding"] == original_payload
+
+
+@pytest.mark.parametrize("transition", ["claim", "consume"])
+def test_store_binding_snapshot_survives_source_uuid_mutation_in_clock(
+    tmp_path: Path, transition: str
+) -> None:
+    """The injectable clock cannot relabel an already-captured invocation."""
+    store = _store(tmp_path)
+    coordinator = _coordinator(store)
+    _engine().prepare_opening_book(lifecycle=coordinator)
+    original = coordinator.verified_original()
+    binding = _invocation_binding()
+    expected = invocation_binding_payload(binding)
+    claim_ref = None
+    if transition == "consume":
+        claim_ref = store.append_invocation_claim(
+            original=original, identity_hash="a" * 64, invocation_binding=binding
+        )
+
+    def mutating_clock() -> datetime:
+        for name in expected:
+            object.__setattr__(getattr(binding, name), "int", uuid7().int)
+        return START + timedelta(seconds=10)
+
+    store._clock = mutating_clock
+    if transition == "claim":
+        reference = store.append_invocation_claim(
+            original=original, identity_hash="a" * 64, invocation_binding=binding
+        )
+    else:
+        assert claim_ref is not None
+        reference = store.append_consumption(
+            original=original,
+            claim_ref=claim_ref,
+            identity_hash="a" * 64,
+            invocation_binding=binding,
+        )
+    event = store.origin.verified_events()[-1]
+    assert event.event_id == reference.event_id
+    assert isinstance(event.payload, Mapping)
+    assert event.payload["invocation_binding"] == expected
+    if transition == "claim":
+        assert str(event.event_id) == expected["invocation_id"]
 
 
 def test_distinct_b_r_original_accounts_in_single_configured_ledger(

@@ -14,17 +14,26 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
+from typing import Self
 from uuid import UUID, uuid7
 
 from drift.domain.common import ImmutableJSONValue
 from drift.domain.evaluator_portfolio import PortfolioStateV2
 from drift.domain.events import AuditEvent
 from drift.errors import DuplicateEventError
+from drift.evaluator.opening_book_lifecycle import (
+    OpeningBookLifecycleError,
+    OriginalInvocationBindingV1,
+    copy_original_invocation_binding,
+    invocation_binding_payload,
+    parse_original_invocation_binding,
+)
 from drift.ledger.interface import AuditEventDraft
 from drift.ledger.sqlite import SQLiteLedger
 from drift.serialization.canonical import canonical_json, content_hash
 
 PROFILE = "drift-stage1-synthetic-account-local/1-candidate"
+BOUND_PROFILE = "drift-stage1-synthetic-account-local/2-candidate"
 ALLOCATION = "stage1.synthetic_account.allocation"
 WITNESS = "stage1.synthetic_account.allocation_observed"
 CLAIM = "stage1.synthetic_account.invocation_claim"
@@ -140,6 +149,15 @@ def _require_ref(ref: LocalEventReferenceV1) -> None:
         raise LocalAccountReceiptError("INVALID_ORIGINAL_EVENT_REFERENCE")
 
 
+def _original_binding(
+    payload: Mapping[str, ImmutableJSONValue],
+) -> OriginalInvocationBindingV1:
+    try:
+        return parse_original_invocation_binding(payload.get("invocation_binding"))
+    except OpeningBookLifecycleError as error:
+        raise LocalAccountReceiptError("INVALID_ORIGINAL_INVOCATION_BINDING") from error
+
+
 def read_configured_original(
     *,
     origin: ConfiguredLocalSyntheticOriginV1,
@@ -161,10 +179,27 @@ def read_configured_original(
         or event.event_type != event_type
         or event.entity_type != ENTITY
         or event.entity_id != allocation_id
-        or event.schema_version != "1"
-        or payload.get("profile") != PROFILE
         or payload.get("issuer_instance_id") != str(origin.issuer_instance_id)
     ):
+        raise LocalAccountReceiptError("ORIGINAL_EVENT_OR_ISSUER_MISMATCH")
+    if event.schema_version == "1" and payload.get("profile") == PROFILE:
+        # Legacy originals are readable, but an added binding does not turn
+        # their historical unbound execution into a schema-2 invocation.
+        if event_type in (CLAIM, CONSUMED) and "invocation_binding" in payload:
+            raise LocalAccountReceiptError("ORIGINAL_EVENT_BINDING_VERSION_MISMATCH")
+    elif (
+        event_type in (CLAIM, CONSUMED)
+        and event.schema_version == "2"
+        and payload.get("profile") == BOUND_PROFILE
+    ):
+        binding = _original_binding(payload)
+        if event_type == CLAIM and event.event_id != binding.invocation_id:
+            raise LocalAccountReceiptError("ORIGINAL_INVOCATION_CLAIM_ID_MISMATCH")
+        if event_type == CONSUMED and payload.get("claim_event_id") != str(
+            binding.invocation_id
+        ):
+            raise LocalAccountReceiptError("ORIGINAL_CONSUMPTION_CLAIM_ID_MISMATCH")
+    else:
         raise LocalAccountReceiptError("ORIGINAL_EVENT_OR_ISSUER_MISMATCH")
     return event
 
@@ -197,6 +232,25 @@ class LocalSyntheticAccountReceiptStoreV1:
         self._clock = clock
         self._writer = SQLiteLedger(origin.ledger_path)
 
+    @classmethod
+    def open_existing(
+        cls,
+        *,
+        origin: ConfiguredLocalSyntheticOriginV1,
+        clock: Callable[[], datetime],
+    ) -> Self:
+        """Reopen retained originals without creating or repairing the ledger.
+
+        The underlying SQLite adapter is read-only. In particular, a cold
+        verifier must observe missing schema protections rather than restore
+        them through the ordinary writer constructor before checking them.
+        """
+        store = cls.__new__(cls)
+        store.origin = origin
+        store._clock = clock
+        store._writer = SQLiteLedger.open_existing(origin.ledger_path)
+        return store
+
     def _append(
         self,
         *,
@@ -206,7 +260,13 @@ class LocalSyntheticAccountReceiptStoreV1:
         payload: Mapping[str, ImmutableJSONValue],
         minimum_time: datetime | None = None,
         precommit_guard: Callable[[], None] | None = None,
+        schema_version: str = "1",
+        event_id: UUID | None = None,
     ) -> LocalEventReferenceV1:
+        if schema_version not in ("1", "2") or (
+            schema_version == "2" and kind not in (CLAIM, CONSUMED)
+        ):
+            raise LocalAccountReceiptError("INVALID_ORIGINAL_EVENT_SCHEMA")
         now = _utc_now(self._clock)
         if minimum_time is not None and now < minimum_time:
             raise LocalAccountReceiptError("CLOCK_ROLLBACK_BEFORE_ORIGINAL")
@@ -217,18 +277,18 @@ class LocalSyntheticAccountReceiptStoreV1:
         if precommit_guard is not None:
             precommit_guard()
         draft = AuditEventDraft(
-            event_id=uuid7(),
+            event_id=uuid7() if event_id is None else event_id,
             event_type=kind,
             timestamp=now,
             entity_type=ENTITY,
             entity_id=allocation_id,
             payload={
-                "profile": PROFILE,
-                "issuer_instance_id": str(self.origin.issuer_instance_id),
                 **payload,
+                "profile": PROFILE if schema_version == "1" else BOUND_PROFILE,
+                "issuer_instance_id": str(self.origin.issuer_instance_id),
             },
             deduplication_key=dedup_key,
-            schema_version="1",
+            schema_version=schema_version,
         )
         try:
             appended = self._writer.append(draft)
@@ -392,19 +452,33 @@ class LocalSyntheticAccountReceiptStoreV1:
         *,
         original: OriginalLocalAccountReadbackV1,
         identity_hash: str,
+        invocation_binding: OriginalInvocationBindingV1 | None = None,
         precommit_guard: Callable[[], None] | None = None,
     ) -> LocalEventReferenceV1:
+        binding = (
+            copy_original_invocation_binding(invocation_binding)
+            if invocation_binding is not None
+            else None
+        )
+        payload: dict[str, ImmutableJSONValue] = {
+            "allocation_event_hash": original.allocation_ref.event_hash,
+            "witness_event_hash": original.witness_ref.event_hash,
+            "identity_hash": identity_hash,
+        }
+        if binding is not None:
+            payload["invocation_binding"] = invocation_binding_payload(binding)
         return self._append(
             kind=CLAIM,
             allocation_id=original.allocation_id,
+            # The account dedup key prevents recredit with a fresh token. The
+            # ledger's independent event-ID uniqueness prevents token reuse
+            # for a different allocation in the configured original ledger.
             dedup_key=f"stage1:invocation:{original.allocation_id}",
+            event_id=None if binding is None else binding.invocation_id,
+            schema_version="1" if binding is None else "2",
             minimum_time=original.receipt_observed_available_by_at,
             precommit_guard=precommit_guard,
-            payload={
-                "allocation_event_hash": original.allocation_ref.event_hash,
-                "witness_event_hash": original.witness_ref.event_hash,
-                "identity_hash": identity_hash,
-            },
+            payload=payload,
         )
 
     def append_consumption(
@@ -413,8 +487,14 @@ class LocalSyntheticAccountReceiptStoreV1:
         original: OriginalLocalAccountReadbackV1,
         claim_ref: LocalEventReferenceV1,
         identity_hash: str,
+        invocation_binding: OriginalInvocationBindingV1 | None = None,
         precommit_guard: Callable[[], None] | None = None,
     ) -> LocalEventReferenceV1:
+        binding = (
+            copy_original_invocation_binding(invocation_binding)
+            if invocation_binding is not None
+            else None
+        )
         claim = read_configured_original(
             origin=self.origin,
             reference=claim_ref,
@@ -430,18 +510,31 @@ class LocalSyntheticAccountReceiptStoreV1:
             or claim_payload.get("identity_hash") != identity_hash
         ):
             raise LocalAccountReceiptError("CONSUMPTION_CLAIM_SCOPE_MISMATCH")
+        if binding is None:
+            if claim.schema_version != "1" or "invocation_binding" in claim_payload:
+                raise LocalAccountReceiptError("CONSUMPTION_CLAIM_BINDING_MISMATCH")
+        elif (
+            claim.schema_version != "2"
+            or claim_payload.get("profile") != BOUND_PROFILE
+            or claim.event_id != binding.invocation_id
+            or _original_binding(claim_payload) != binding
+        ):
+            raise LocalAccountReceiptError("CONSUMPTION_CLAIM_BINDING_MISMATCH")
+        payload: dict[str, ImmutableJSONValue] = {
+            "claim_event_hash": claim_ref.event_hash,
+            "allocation_event_hash": original.allocation_ref.event_hash,
+            "identity_hash": identity_hash,
+            "original_book_sha256": sha256(original.original_book_bytes).hexdigest(),
+        }
+        if binding is not None:
+            payload["invocation_binding"] = invocation_binding_payload(binding)
+            payload["claim_event_id"] = str(binding.invocation_id)
         return self._append(
             kind=CONSUMED,
             allocation_id=original.allocation_id,
             dedup_key=f"stage1:consumed:{original.allocation_id}",
+            schema_version="1" if binding is None else "2",
             minimum_time=claim.timestamp,
             precommit_guard=precommit_guard,
-            payload={
-                "claim_event_hash": claim_ref.event_hash,
-                "allocation_event_hash": original.allocation_ref.event_hash,
-                "identity_hash": identity_hash,
-                "original_book_sha256": sha256(
-                    original.original_book_bytes
-                ).hexdigest(),
-            },
+            payload=payload,
         )

@@ -10,7 +10,9 @@ import weakref
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Any
+from uuid import UUID, uuid4, uuid7
 
 import pytest
 from exploratory_decision_test_support import (
@@ -30,8 +32,15 @@ from drift.domain.evaluator_bundles import (
 from drift.domain.evaluator_lanes import EvaluationAdmissionV1
 from drift.domain.evaluator_portfolio import PortfolioStateV2
 from drift.domain.evaluator_protocol import EvaluationProtocolV1
+from drift.domain.evaluator_results import EvaluationRunArtifactsV2
 from drift.domain.sessions import SessionKeyV1
-from drift.evaluator.opening_book_lifecycle import OpeningBookLifecycleError
+from drift.evaluator.opening_book_lifecycle import (
+    OpeningBookLifecycleError,
+    OriginalInvocationBindingV1,
+    copy_original_invocation_binding,
+    invocation_binding_payload,
+    parse_original_invocation_binding,
+)
 from drift.evaluator.portfolio import initial_portfolio_state
 from drift.serialization.canonical import canonical_json
 
@@ -1107,3 +1116,326 @@ def test_mutated_public_hash_and_phase_cannot_reset_original_cash(
     with pytest.raises(OpeningBookLifecycleError, match="fresh, unused"):
         engine.prepare_opening_book(lifecycle=_Recorder())
     assert len(opened) == 1
+
+
+def _invocation_binding() -> OriginalInvocationBindingV1:
+    return OriginalInvocationBindingV1(
+        invocation_id=uuid7(), m0_run_id=uuid7(), m0_audit_event_id=uuid7()
+    )
+
+
+def _run_bound(
+    engine: evaluator_engine.SessionEvaluatorEngine,
+    binding: OriginalInvocationBindingV1,
+) -> EvaluationRunArtifactsV2:
+    identity = _run_identity(
+        admission=engine.admission,
+        bundle=engine.bundle,
+        protocol=engine.protocol,
+        cost_model=engine.cost_model,
+        evidence_hash=engine.evaluator_evidence_hash,
+    )
+    return engine.run(
+        strategy=_buy_ten(),
+        run_identity=identity,
+        original_invocation_binding=binding,
+    )
+
+
+@dataclass
+class _BoundRecorder(_Recorder):
+    bindings: list[OriginalInvocationBindingV1] = field(default_factory=list)
+    binding_payloads: list[dict[str, str]] = field(default_factory=list)
+
+    def claim_bound_invocation(
+        self,
+        *,
+        opening_book: PortfolioStateV2,
+        run_identity: EvaluationRunIdentityV1 | EvaluationRunIdentityV2,
+        binding: OriginalInvocationBindingV1,
+    ) -> None:
+        self.bindings.append(binding)
+        self.binding_payloads.append(invocation_binding_payload(binding))
+        super().claim_invocation(opening_book=opening_book, run_identity=run_identity)
+
+    def observe_bound_consumption(
+        self,
+        *,
+        opening_book: PortfolioStateV2,
+        run_identity: EvaluationRunIdentityV1 | EvaluationRunIdentityV2,
+        binding: OriginalInvocationBindingV1,
+    ) -> None:
+        self.bindings.append(binding)
+        self.binding_payloads.append(invocation_binding_payload(binding))
+        super().observe_consumption(
+            opening_book=opening_book, run_identity=run_identity
+        )
+
+
+def test_invocation_binding_detaches_input_and_copied_uuid_leaves() -> None:
+    raw = (uuid7(), uuid7(), uuid7())
+    original = OriginalInvocationBindingV1(*raw)
+    expected = invocation_binding_payload(original)
+    copied = copy_original_invocation_binding(original)
+    parsed = parse_original_invocation_binding(MappingProxyType(expected))
+    assert copied == original == parsed
+    assert copied is not original and parsed is not original
+    for key, source in zip(expected, raw, strict=True):
+        assert getattr(original, key) is not source
+        assert getattr(copied, key) is not getattr(original, key)
+        assert getattr(parsed, key) is not getattr(original, key)
+        object.__setattr__(source, "int", uuid7().int)
+    assert invocation_binding_payload(original) == expected
+    object.__setattr__(original.invocation_id, "int", uuid7().int)
+    object.__setattr__(original, "m0_run_id", uuid7())
+    assert invocation_binding_payload(original) != expected
+    assert invocation_binding_payload(copied) == expected
+    assert invocation_binding_payload(parsed) == expected
+
+
+class _UUIDSubclass(UUID):
+    pass
+
+
+@pytest.mark.parametrize(
+    "invalid", [uuid4(), _UUIDSubclass(str(uuid7())), "uuid7", None]
+)
+@pytest.mark.parametrize("name", ["invocation_id", "m0_run_id", "m0_audit_event_id"])
+def test_invocation_binding_refuses_invalid_or_forged_uuid_leaves(
+    name: str, invalid: object
+) -> None:
+    binding = _invocation_binding()
+    object.__setattr__(binding, name, invalid)
+    with pytest.raises(OpeningBookLifecycleError, match="UUIDv7"):
+        copy_original_invocation_binding(binding)
+    with pytest.raises(OpeningBookLifecycleError, match="UUIDv7"):
+        invocation_binding_payload(binding)
+
+
+@pytest.mark.parametrize("invalid_bits", [True, -1, 1 << 128, "not an integer"])
+def test_invocation_binding_refuses_reflectively_corrupted_uuid(
+    invalid_bits: object,
+) -> None:
+    binding = _invocation_binding()
+    object.__setattr__(binding.invocation_id, "int", invalid_bits)
+    with pytest.raises(OpeningBookLifecycleError, match="UUIDv7"):
+        copy_original_invocation_binding(binding)
+
+
+def test_invocation_binding_refuses_wrong_type_and_deleted_field() -> None:
+    forged: Any = invocation_binding_payload(_invocation_binding())
+    with pytest.raises(OpeningBookLifecycleError, match="wrong type"):
+        copy_original_invocation_binding(forged)
+    binding = _invocation_binding()
+    object.__delattr__(binding, "m0_run_id")
+    with pytest.raises(OpeningBookLifecycleError, match="missing identifiers"):
+        copy_original_invocation_binding(binding)
+
+
+class _BindingString(str):
+    pass
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["missing", "extra", "uuid_object", "uuid4", "compact", "uppercase", "subclass"],
+)
+def test_invocation_binding_parser_refuses_noncanonical_payload(mutation: str) -> None:
+    payload: dict[str, object] = dict(invocation_binding_payload(_invocation_binding()))
+    canonical = "019a0123-abcd-7abc-8def-0123456789ab"
+    payload["invocation_id"] = canonical
+    if mutation == "missing":
+        del payload["m0_audit_event_id"]
+    elif mutation == "extra":
+        payload["issuer"] = canonical
+    elif mutation == "uuid_object":
+        payload["invocation_id"] = UUID(canonical)
+    elif mutation == "uuid4":
+        payload["invocation_id"] = str(uuid4())
+    elif mutation == "compact":
+        payload["invocation_id"] = canonical.replace("-", "")
+    elif mutation == "uppercase":
+        payload["invocation_id"] = canonical.upper()
+    else:
+        payload["invocation_id"] = _BindingString(canonical)
+    with pytest.raises(OpeningBookLifecycleError):
+        parse_original_invocation_binding(payload)
+
+
+def test_invocation_binding_parser_refuses_forged_key_or_nonmapping() -> None:
+    payload = invocation_binding_payload(_invocation_binding())
+    forged = {_BindingString(key): value for key, value in payload.items()}
+    with pytest.raises(OpeningBookLifecycleError, match="exact unique string"):
+        parse_original_invocation_binding(forged)
+    with pytest.raises(OpeningBookLifecycleError, match="not a mapping"):
+        parse_original_invocation_binding(tuple(payload.items()))
+
+
+def test_bound_invocations_keep_artifacts_and_detach_callbacks() -> None:
+    baseline = _run(_engine())
+    for _ in range(2):
+        binding = _invocation_binding()
+        engine = _engine()
+        lifecycle = _BoundRecorder()
+        engine.prepare_opening_book(lifecycle=lifecycle)
+        actual = _run_bound(engine, binding)
+        assert canonical_json(actual) == canonical_json(baseline)
+        assert lifecycle.seen == ["retain", "claim", "consume"]
+        assert lifecycle.binding_payloads == [invocation_binding_payload(binding)] * 2
+        claimed, consumed = lifecycle.bindings
+        assert claimed is not consumed and claimed is not binding
+        assert consumed is not binding
+        for name in invocation_binding_payload(binding):
+            assert getattr(claimed, name) is not getattr(consumed, name)
+            assert getattr(claimed, name) is not getattr(binding, name)
+            assert getattr(consumed, name) is not getattr(binding, name)
+        with pytest.raises(OpeningBookLifecycleError, match="not available"):
+            _run_bound(engine, _invocation_binding())
+        with pytest.raises(OpeningBookLifecycleError, match="not available"):
+            _run(engine)
+
+
+def test_bound_invocation_never_falls_back_to_a_fresh_seed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _engine()
+
+    def forbidden(*args: Any, **kwargs: Any) -> PortfolioStateV2:
+        pytest.fail("an unprepared bound invocation constructed a fresh cash book")
+
+    with monkeypatch.context() as context:
+        context.setattr(evaluator_engine, "initial_portfolio_state", forbidden)
+        with pytest.raises(OpeningBookLifecycleError, match="requires a prepared"):
+            _run_bound(engine, _invocation_binding())
+    lifecycle = _BoundRecorder()
+    engine.prepare_opening_book(lifecycle=lifecycle)
+    assert _run_bound(engine, _invocation_binding()).result.classification.value == (
+        "complete"
+    )
+
+
+@pytest.mark.parametrize("has_claim_method", [False, True])
+def test_bound_invocation_requires_both_callbacks_without_legacy_fallback(
+    monkeypatch: pytest.MonkeyPatch, has_claim_method: bool
+) -> None:
+    class ClaimOnly(_Recorder):
+        def claim_bound_invocation(
+            self,
+            *,
+            opening_book: PortfolioStateV2,
+            run_identity: EvaluationRunIdentityV1 | EvaluationRunIdentityV2,
+            binding: OriginalInvocationBindingV1,
+        ) -> None:
+            pytest.fail("claim began before checking bound consumption capability")
+
+    engine = _engine()
+    lifecycle = ClaimOnly() if has_claim_method else _Recorder()
+    engine.prepare_opening_book(lifecycle=lifecycle)
+    _refuse_session_start(engine, monkeypatch)
+    with pytest.raises(OpeningBookLifecycleError, match="requires a bound lifecycle"):
+        _run_bound(engine, _invocation_binding())
+    assert lifecycle.seen == ["retain"]
+    with pytest.raises(OpeningBookLifecycleError, match="not available"):
+        _run(engine)
+    with pytest.raises(OpeningBookLifecycleError, match="fresh, unused"):
+        engine.prepare_opening_book(lifecycle=_BoundRecorder())
+
+
+def test_invalid_binding_refuses_before_claim_and_does_not_burn_original() -> None:
+    engine = _engine()
+    lifecycle = _BoundRecorder()
+    engine.prepare_opening_book(lifecycle=lifecycle)
+    invalid = _invocation_binding()
+    object.__setattr__(invalid, "m0_audit_event_id", uuid4())
+    with pytest.raises(OpeningBookLifecycleError, match="UUIDv7"):
+        _run_bound(engine, invalid)
+    assert lifecycle.seen == ["retain"]
+    assert _run_bound(engine, _invocation_binding()).result.classification.value == (
+        "complete"
+    )
+
+
+def test_bound_callback_cannot_relabel_consumption_or_mutate_captured_input() -> None:
+    supplied = _invocation_binding()
+    expected = invocation_binding_payload(supplied)
+
+    class MutatingBinding(_BoundRecorder):
+        def claim_bound_invocation(
+            self,
+            *,
+            opening_book: PortfolioStateV2,
+            run_identity: EvaluationRunIdentityV1 | EvaluationRunIdentityV2,
+            binding: OriginalInvocationBindingV1,
+        ) -> None:
+            super().claim_bound_invocation(
+                opening_book=opening_book, run_identity=run_identity, binding=binding
+            )
+            object.__setattr__(binding.invocation_id, "int", uuid7().int)
+            object.__setattr__(binding, "m0_run_id", uuid7())
+            object.__setattr__(supplied.m0_audit_event_id, "int", uuid7().int)
+
+    engine = _engine()
+    lifecycle = MutatingBinding()
+    engine.prepare_opening_book(lifecycle=lifecycle)
+    actual = _run_bound(engine, supplied)
+    assert lifecycle.binding_payloads == [expected, expected]
+    assert invocation_binding_payload(lifecycle.bindings[0]) != expected
+    assert invocation_binding_payload(lifecycle.bindings[1]) == expected
+    assert invocation_binding_payload(supplied) != expected
+    assert canonical_json(actual) == canonical_json(_run(_engine()))
+
+
+@pytest.mark.parametrize("phase", ["claim", "consume"])
+def test_bound_callback_failure_is_terminal_before_session(
+    monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    engine = _engine()
+    lifecycle = _BoundRecorder(fail=phase)
+    engine.prepare_opening_book(lifecycle=lifecycle)
+    _refuse_session_start(engine, monkeypatch)
+    with pytest.raises(RuntimeError, match=f"observer {phase} failed"):
+        _run_bound(engine, _invocation_binding())
+    with pytest.raises(OpeningBookLifecycleError, match="not available"):
+        _run_bound(engine, _invocation_binding())
+    with pytest.raises(OpeningBookLifecycleError, match="not available"):
+        _run(engine)
+    with pytest.raises(OpeningBookLifecycleError, match="fresh, unused"):
+        engine.prepare_opening_book(lifecycle=_BoundRecorder())
+
+
+@pytest.mark.parametrize("phase", ["claim", "consume"])
+def test_bound_callbacks_retain_original_book_tamper_checks(
+    monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    engine = _engine()
+    lifecycle = _BoundRecorder(tamper=phase)
+    engine.prepare_opening_book(lifecycle=lifecycle)
+    _refuse_session_start(engine, monkeypatch)
+    with pytest.raises(OpeningBookLifecycleError, match="changed"):
+        _run_bound(engine, _invocation_binding())
+    with pytest.raises(OpeningBookLifecycleError, match="not available"):
+        _run(engine)
+
+
+def test_reentrant_bound_claim_cannot_spend_the_same_original_twice() -> None:
+    engine = _engine()
+
+    class ReentrantBinding(_BoundRecorder):
+        def claim_bound_invocation(
+            self,
+            *,
+            opening_book: PortfolioStateV2,
+            run_identity: EvaluationRunIdentityV1 | EvaluationRunIdentityV2,
+            binding: OriginalInvocationBindingV1,
+        ) -> None:
+            with pytest.raises(OpeningBookLifecycleError, match="not available"):
+                _run_bound(engine, _invocation_binding())
+            super().claim_bound_invocation(
+                opening_book=opening_book, run_identity=run_identity, binding=binding
+            )
+
+    lifecycle = ReentrantBinding()
+    engine.prepare_opening_book(lifecycle=lifecycle)
+    actual = _run_bound(engine, _invocation_binding())
+    assert lifecycle.seen == ["retain", "claim", "consume"]
+    assert canonical_json(actual) == canonical_json(_run(_engine()))

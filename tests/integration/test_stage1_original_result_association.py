@@ -19,8 +19,8 @@ if str(_UNIT) not in sys.path:
 
 from test_evaluator_engine import DAY_1, SEC_A, FixedTargetStrategy, _engine, _run
 from test_evaluator_experiment_run import (
-    _ExplodingStrategy,
     _context,
+    _ExplodingStrategy,
     _specification,
 )
 from test_stage1_campaign_config import (
@@ -94,9 +94,7 @@ def _setup(
             ledger_path=tmp_path / "owner-original.sqlite3",
             issuer_instance_id=uuid7(),
         )
-        actual_store = LocalSyntheticAccountReceiptStoreV1(
-            origin=origin, clock=_Tick()
-        )
+        actual_store = LocalSyntheticAccountReceiptStoreV1(origin=origin, clock=_Tick())
     campaign = make_golden_campaign()
     arms = (make_golden_arm_b(), make_golden_arm_r())
     bindings = tuple(make_golden_bindings())
@@ -183,11 +181,12 @@ def test_actual_m0_result_trace_book_and_e1_account_are_retained(
     assert by_kind[ArtifactKind.LOG] == retained.trace_hash
     original_events = store.origin.verified_events()
     m0_audit = [
-        event for event in original_events
+        event
+        for event in original_events
         if event.event_type == "m2.evaluation.run.recorded"
     ]
     assert len(m0_audit) == 1
-    assert m0_audit[0].schema_version == "2"
+    assert m0_audit[0].schema_version == "3"
     m0_data = m0_audit[0].payload
     assert isinstance(m0_data, Mapping)
     assert m0_data["original_final_book_hash"] == retained.final_book_hash
@@ -235,9 +234,7 @@ def test_independent_b_r_accounts_keep_separate_original_results(
         event for event in origin.verified_events() if event.event_type == RESULT_EVENT
     ]
     original_m0_uses = [
-        event
-        for event in origin.verified_events()
-        if event.event_type == M0_USE_EVENT
+        event for event in origin.verified_events() if event.event_type == M0_USE_EVENT
     ]
     assert len(original_results) == 2
     assert len(original_m0_uses) == 2
@@ -303,7 +300,7 @@ def test_observer_requires_a_real_original_m0_audit_before_stepping(
 def test_strategy_cannot_suppress_original_result_observer_during_decide(
     tmp_path: Path,
 ) -> None:
-    """A mutable caller context cannot downgrade M0 V2 to V1 mid-run."""
+    """Caller context changes cannot redirect the original M0 collaborators."""
     engine, original, store = _setup(tmp_path)
 
     class ObserverErasingStrategy(FixedTargetStrategy):
@@ -313,9 +310,9 @@ def test_strategy_cannot_suppress_original_result_observer_during_decide(
             self, context: StrategyDecisionContextV1
         ) -> StrategyDecisionIntentV1:
             assert self.run_context is not None
-            object.__setattr__(
-                self.run_context, "original_result_observer", None
-            )
+            object.__setattr__(self.run_context, "original_result_observer", None)
+            object.__setattr__(self.run_context, "ledger", None)
+            object.__setattr__(self.run_context, "engine", _engine())
             return super().decide(context)
 
     strategy = ObserverErasingStrategy({})
@@ -333,14 +330,15 @@ def test_strategy_cannot_suppress_original_result_observer_during_decide(
     run = execute_experiment_run(_specification(), ctx)
     assert run.status is ExperimentRunStatus.COMPLETED
     assert ctx.original_result_observer is None
+    assert ctx.ledger is None
+    assert ctx.engine is not engine
     recorded_m0 = [
-        e for e in store.origin.verified_events()
+        e
+        for e in store.origin.verified_events()
         if e.event_type == "m2.evaluation.run.recorded"
     ]
     assert len(recorded_m0) == 1
-    assert recorded_m0[0].schema_version == "2"
+    assert recorded_m0[0].schema_version == "3"
     retained = original.readback()
-    assert retained.result_hash in {
-        r.content_hash for r in run.artifact_references
-    }
+    assert retained.result_hash in {r.content_hash for r in run.artifact_references}
     assert not retained.scientifically_qualified

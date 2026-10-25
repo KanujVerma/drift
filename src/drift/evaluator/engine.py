@@ -210,8 +210,11 @@ from drift.evaluator.corporate_actions import CorporateActionProcessor
 from drift.evaluator.execution import AtomicRebalanceEngine, resolve_execution_listings
 from drift.evaluator.exploratory_dividends import ExploratoryDividendPolicyV1
 from drift.evaluator.opening_book_lifecycle import (
+    BoundOpeningBookLifecycleV1,
     OpeningBookLifecycleError,
     OpeningBookLifecycleV1,
+    OriginalInvocationBindingV1,
+    copy_original_invocation_binding,
 )
 from drift.evaluator.portfolio import (
     PortfolioAccountingKernel,
@@ -2222,6 +2225,7 @@ class SessionEvaluatorEngine:
         *,
         strategy: LaneDispatchStrategy,
         run_identity: EvaluationRunIdentityV1 | EvaluationRunIdentityV2,
+        original_invocation_binding: OriginalInvocationBindingV1 | None = None,
     ) -> EvaluationRunArtifactsV2:
         """Step every session through all five phases, halting fail-closed.
 
@@ -2229,7 +2233,19 @@ class SessionEvaluatorEngine:
         that lane's one decision method before any session is stepped. Under
         an ``EvaluationRunIdentityV2`` the strategy's exposed parameters are
         bound to the identity first (issue 112); a V1 run is unchanged.
+
+        An optional operational binding requires an actual prepared book and
+        bound lifecycle callbacks. It never enters deterministic evaluator
+        identity, accounting, RESULT or trace hashes.
         """
+        # Snapshot before strategy validation or any lifecycle callback. Each
+        # callback receives a further detached value, including UUID leaves.
+        invocation_binding = (
+            copy_original_invocation_binding(original_invocation_binding)
+            if original_invocation_binding is not None
+            else None
+        )
+        bound_lifecycle: BoundOpeningBookLifecycleV1 | None = None
         # Decide which evaluator owns accounting *before* any callbacks.
         # For a prepared run the private runner was revalidated before retain
         # and cannot be redirected by replacing fields/methods on this public
@@ -2242,6 +2258,10 @@ class SessionEvaluatorEngine:
             ):
                 raise OpeningBookLifecycleError(
                     "prepared opening book is not available for another run"
+                )
+            if invocation_binding is not None and phase != "prepared":
+                raise OpeningBookLifecycleError(
+                    "bound original invocation requires a prepared opening book"
                 )
             executor = _PEEK_PREPARED_EXECUTOR(self) if phase == "prepared" else self
         if executor is None:
@@ -2266,7 +2286,7 @@ class SessionEvaluatorEngine:
                 # Double-check after strategy validation and before any fresh
                 # seed book is constructed. A callback cannot turn an engine
                 # that ever attempted preparation into a legacy engine.
-                if _WAS_PREPARED(self):
+                if invocation_binding is not None or _WAS_PREPARED(self):
                     raise OpeningBookLifecycleError(
                         "prepared opening book is not available for another run"
                     )
@@ -2311,6 +2331,13 @@ class SessionEvaluatorEngine:
                     raise OpeningBookLifecycleError(
                         "prepared opening-book state is incomplete"
                     )
+                if invocation_binding is not None:
+                    if not isinstance(lifecycle, BoundOpeningBookLifecycleV1):
+                        self._opening_book_phase = "failed"
+                        raise OpeningBookLifecycleError(
+                            "bound original invocation requires a bound lifecycle"
+                        )
+                    bound_lifecycle = lifecycle
                 # Make the claim single-winner before invoking any callback.
                 # A failed or uncertain claim must not be retried as new cash.
                 self._opening_book_phase = "claimed"
@@ -2340,19 +2367,35 @@ class SessionEvaluatorEngine:
             # Never expose either the evaluator's internal original book or
             # the identity used to seal RESULT. The observer sees one stable
             # detached twin for its original-retention ledger receipts.
-            lifecycle.claim_invocation(
-                opening_book=observer_book,
-                run_identity=_revalidated_run_identity(run_identity),
-            )
+            if invocation_binding is None:
+                lifecycle.claim_invocation(
+                    opening_book=observer_book,
+                    run_identity=_revalidated_run_identity(run_identity),
+                )
+            else:
+                assert bound_lifecycle is not None
+                bound_lifecycle.claim_bound_invocation(
+                    opening_book=observer_book,
+                    run_identity=_revalidated_run_identity(run_identity),
+                    binding=copy_original_invocation_binding(invocation_binding),
+                )
             _verify_untampered_original_book(observer_book, prepared_digest)
             _verify_untampered_original_book(prepared_book, prepared_digest)
             loop = _Loop(state=prepared_book)
             with self._opening_book_lock:
                 self._opening_book_phase = "consumed"
-            lifecycle.observe_consumption(
-                opening_book=observer_book,
-                run_identity=_revalidated_run_identity(run_identity),
-            )
+            if invocation_binding is None:
+                lifecycle.observe_consumption(
+                    opening_book=observer_book,
+                    run_identity=_revalidated_run_identity(run_identity),
+                )
+            else:
+                assert bound_lifecycle is not None
+                bound_lifecycle.observe_bound_consumption(
+                    opening_book=observer_book,
+                    run_identity=_revalidated_run_identity(run_identity),
+                    binding=copy_original_invocation_binding(invocation_binding),
+                )
             _verify_untampered_original_book(observer_book, prepared_digest)
             _verify_untampered_original_book(loop.state, prepared_digest)
             with self._opening_book_lock:

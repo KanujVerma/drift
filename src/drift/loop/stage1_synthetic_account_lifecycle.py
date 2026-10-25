@@ -22,6 +22,10 @@ from drift.domain.evaluator_bundles import (
 from drift.domain.evaluator_lanes import EvaluationAdmissionV1
 from drift.domain.evaluator_portfolio import PortfolioStateV2
 from drift.domain.evaluator_protocol import EvaluationProtocolV1
+from drift.evaluator.opening_book_lifecycle import (
+    OriginalInvocationBindingV1,
+    copy_original_invocation_binding,
+)
 from drift.experiments.stage1_campaign_config import (
     ArmSpecV1,
     CampaignSpecV1,
@@ -166,6 +170,7 @@ class Stage1SyntheticAccountLifecycleV1:
         self._fields: AccountAllocationFieldsV1 | None = None
         self._claim: LocalEventReferenceV1 | None = None
         self._consumption: LocalEventReferenceV1 | None = None
+        self._invocation_binding: OriginalInvocationBindingV1 | None = None
 
     @property
     def local_phase(self) -> str:
@@ -316,8 +321,45 @@ class Stage1SyntheticAccountLifecycleV1:
         opening_book: PortfolioStateV2,
         run_identity: EvaluationRunIdentityV1 | EvaluationRunIdentityV2,
     ) -> None:
+        self._claim_original_invocation(
+            opening_book=opening_book,
+            run_identity=run_identity,
+            binding=None,
+            bound=False,
+        )
+
+    def claim_bound_invocation(
+        self,
+        *,
+        opening_book: PortfolioStateV2,
+        run_identity: EvaluationRunIdentityV1 | EvaluationRunIdentityV2,
+        binding: OriginalInvocationBindingV1,
+    ) -> None:
+        """Claim one actual prepared invocation without changing M2 identity."""
+        self._claim_original_invocation(
+            opening_book=opening_book,
+            run_identity=run_identity,
+            binding=binding,
+            bound=True,
+        )
+
+    def _claim_original_invocation(
+        self,
+        *,
+        opening_book: PortfolioStateV2,
+        run_identity: EvaluationRunIdentityV1 | EvaluationRunIdentityV2,
+        binding: OriginalInvocationBindingV1 | None,
+        bound: bool,
+    ) -> None:
         self._transition("ready", "claiming")
         try:
+            if bound and binding is None:
+                raise LocalAccountReceiptError("ORIGINAL_INVOCATION_BINDING_MISSING")
+            captured_binding = (
+                copy_original_invocation_binding(binding)
+                if binding is not None
+                else None
+            )
             self._assert_e1_source_unchanged()
             self._require_same_original(opening_book)
             if type(run_identity) not in (
@@ -334,6 +376,11 @@ class Stage1SyntheticAccountLifecycleV1:
             claim = self._store.append_invocation_claim(
                 original=readback,
                 identity_hash=run_identity.run_identity_hash,
+                invocation_binding=(
+                    copy_original_invocation_binding(captured_binding)
+                    if captured_binding is not None
+                    else None
+                ),
                 precommit_guard=self._assert_e1_source_unchanged,
             )
             # If untrusted source data changes inside an injected ledger
@@ -341,6 +388,9 @@ class Stage1SyntheticAccountLifecycleV1:
             # event but fail this transition rather than claiming success.
             self._assert_e1_source_unchanged()
             self._claim = claim
+            # Neither the caller nor a store adapter receives this captured
+            # graph. Each boundary gets another detached set of UUID leaves.
+            self._invocation_binding = captured_binding
         except BaseException:
             self._fail()
             raise
@@ -352,10 +402,54 @@ class Stage1SyntheticAccountLifecycleV1:
         opening_book: PortfolioStateV2,
         run_identity: EvaluationRunIdentityV1 | EvaluationRunIdentityV2,
     ) -> None:
+        self._observe_original_consumption(
+            opening_book=opening_book,
+            run_identity=run_identity,
+            binding=None,
+            bound=False,
+        )
+
+    def observe_bound_consumption(
+        self,
+        *,
+        opening_book: PortfolioStateV2,
+        run_identity: EvaluationRunIdentityV1 | EvaluationRunIdentityV2,
+        binding: OriginalInvocationBindingV1,
+    ) -> None:
+        """Consume only under the exact previously retained claim binding."""
+        self._observe_original_consumption(
+            opening_book=opening_book,
+            run_identity=run_identity,
+            binding=binding,
+            bound=True,
+        )
+
+    def _observe_original_consumption(
+        self,
+        *,
+        opening_book: PortfolioStateV2,
+        run_identity: EvaluationRunIdentityV1 | EvaluationRunIdentityV2,
+        binding: OriginalInvocationBindingV1 | None,
+        bound: bool,
+    ) -> None:
         self._transition("claimed", "consuming")
         try:
+            if bound and binding is None:
+                raise LocalAccountReceiptError("ORIGINAL_INVOCATION_BINDING_MISSING")
+            captured_binding = (
+                copy_original_invocation_binding(binding)
+                if binding is not None
+                else None
+            )
+            if captured_binding != self._invocation_binding:
+                raise LocalAccountReceiptError("CONSUMPTION_CLAIM_BINDING_MISMATCH")
             self._assert_e1_source_unchanged()
             self._require_same_original(opening_book)
+            if type(run_identity) not in (
+                EvaluationRunIdentityV1,
+                EvaluationRunIdentityV2,
+            ):
+                raise LocalAccountReceiptError("INVALID_ORIGINAL_RUN_IDENTITY")
             if self._claim is None:
                 raise LocalAccountReceiptError("ORIGINAL_INVOCATION_CLAIM_MISSING")
             readback = self.verified_original()
@@ -363,6 +457,11 @@ class Stage1SyntheticAccountLifecycleV1:
                 original=readback,
                 claim_ref=self._claim,
                 identity_hash=run_identity.run_identity_hash,
+                invocation_binding=(
+                    copy_original_invocation_binding(captured_binding)
+                    if captured_binding is not None
+                    else None
+                ),
                 precommit_guard=self._assert_e1_source_unchanged,
             )
             self._assert_e1_source_unchanged()
