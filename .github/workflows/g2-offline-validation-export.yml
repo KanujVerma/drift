@@ -39,11 +39,12 @@ jobs:
           git bundle verify "$OUT/drift-source.bundle"
           tar -czf "$OUT/managed-python.tar.gz" -C "$UV_PYTHON_INSTALL_DIR" .
           tar -czf "$OUT/site-packages.tar.gz" -C .venv/lib/python3.14/site-packages .
+          cp .venv/bin/ruff "$OUT/ruff"
           git rev-parse HEAD > "$OUT/source-head.txt"
           cp .python-version "$OUT/python-version.txt"
           sha256sum uv.lock > "$OUT/lock-sha256.txt"
           cd "$OUT"
-          sha256sum drift-source.bundle managed-python.tar.gz site-packages.tar.gz source-head.txt python-version.txt lock-sha256.txt > SHA256SUMS
+          sha256sum drift-source.bundle managed-python.tar.gz site-packages.tar.gz ruff source-head.txt python-version.txt lock-sha256.txt > SHA256SUMS
           cat SHA256SUMS
       - name: Retain isolated verification inputs for one day
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
