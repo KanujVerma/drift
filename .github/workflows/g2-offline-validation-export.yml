@@ -16,9 +16,10 @@ jobs:
       UV_LOCKED: "1"
       UV_PYTHON_PREFERENCE: only-managed
     steps:
-      - name: Check out public source without persisted credentials
+      - name: Check out exact public source without persisted credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: 78d0fd4ef37a7c087ada00b5d012de007a832cba
           fetch-depth: 0
           persist-credentials: false
       - name: Install existing pinned uv setup
@@ -35,7 +36,7 @@ jobs:
           set -euo pipefail
           OUT="$RUNNER_TEMP/g2-offline-inputs"
           mkdir -p "$OUT"
-          git bundle create "$OUT/drift-source.bundle" --all
+          git bundle create "$OUT/drift-source.bundle" --all HEAD
           git bundle verify "$OUT/drift-source.bundle"
           tar -czf "$OUT/managed-python.tar.gz" -C "$UV_PYTHON_INSTALL_DIR" .
           tar -czf "$OUT/site-packages.tar.gz" -C .venv/lib/python3.14/site-packages .
