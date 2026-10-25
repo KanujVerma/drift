@@ -1,0 +1,55 @@
+name: g2 isolated verification export (not release)
+
+on:
+  push:
+    branches:
+      - coord/g2-verification-export
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      UV_LOCKED: "1"
+      UV_PYTHON_PREFERENCE: only-managed
+    steps:
+      - name: Check out public source without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install existing pinned uv setup
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          enable-cache: false
+      - name: Provision unchanged interpreter and locked packages
+        run: |
+          uv python install
+          uv sync --locked
+          uv run python -c "import pathlib, platform; assert platform.python_version() == pathlib.Path('.python-version').read_text().strip(); print(platform.python_version())"
+      - name: Export only source objects and test dependencies
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/g2-offline-inputs"
+          mkdir -p "$OUT"
+          git bundle create "$OUT/drift-source.bundle" --all
+          git bundle verify "$OUT/drift-source.bundle"
+          tar -czf "$OUT/managed-python.tar.gz" -C "$UV_PYTHON_INSTALL_DIR" .
+          tar -czf "$OUT/site-packages.tar.gz" -C .venv/lib/python3.14/site-packages .
+          git rev-parse HEAD > "$OUT/source-head.txt"
+          cp .python-version "$OUT/python-version.txt"
+          sha256sum uv.lock > "$OUT/lock-sha256.txt"
+          cd "$OUT"
+          sha256sum drift-source.bundle managed-python.tar.gz site-packages.tar.gz source-head.txt python-version.txt lock-sha256.txt > SHA256SUMS
+          cat SHA256SUMS
+      - name: Retain isolated verification inputs for one day
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: g2-offline-verification-inputs
+          path: ${{ runner.temp }}/g2-offline-inputs/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
