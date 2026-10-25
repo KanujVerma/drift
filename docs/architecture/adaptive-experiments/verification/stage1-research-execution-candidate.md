@@ -237,3 +237,21 @@ implemented or accepted by calling these local opportunity records grants.
 The exact release/test/review status belongs in #564 and its PR checkpoint,
 not in this durable interface description. User merge approval is recorded;
 independent producer acceptance and ordinary branch protections still apply.
+
+### Failed computation identity
+
+Claim/consumption equality alone cannot authenticate a failed computation. The
+reader validates the claimed run hash through `EvaluationRunIdentityV2` against
+the retained opportunity's input, admission, policy, source and evaluator
+evidence hashes and the selected installed strategy/parameters. This coordinator
+uses the canonical factory's unchanged zero environment-closure default. The
+failed M0 experiment UUID must also follow the existing canonical baseline
+strategy-and-bundle derivation. Matching foreign identities and a different
+experiment ID refuse even when the original ledger hash chain verifies.
+
+A failure before the original account claim commits does not append a terminal
+account-attributed failure. Its original M0 failure remains retained, and the
+research reservation remains `UNRESOLVED` and cold-readable. A committed claim
+whose acknowledgement was lost may support `EXECUTION_FAILED` only after all
+original failed-run checks pass. Neither state permits another invocation or
+asserts that no fills occurred. No claim or consumption is synthesized.

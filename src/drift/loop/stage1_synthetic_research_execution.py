@@ -30,7 +30,10 @@ from drift.baselines import (
     B4MomentumStrategy,
     B5LowVolatilityStrategy,
 )
-from drift.baselines.common import extract_current_close_price
+from drift.baselines.common import (
+    deterministic_baseline_uuid7,
+    extract_current_close_price,
+)
 from drift.baselines.runner import (
     build_canonical_run_identity,
     build_canonical_specification,
@@ -1013,20 +1016,33 @@ def execute_synthetic_research(
             finished_at = _stamp(clock())
             if run.completed_at is None or finished_at < run.completed_at:
                 raise ValueError("RESULT_RETENTION_CHRONOLOGY_INVALID")
-            _append(
-                origin,
-                phase=OUTCOME,
-                allocation_id=original.allocation_id,
-                trial_id=trial,
-                timestamp=finished_at,
-                body=_Outcome(
-                    research_hash=research.event_hash,
-                    reservation_hash=reservation.event_hash,
-                    status="M0_FAILED",
-                    reason=run.error_details or "M0_FAILED",
-                    m0_run_id=str(run.run_id),
-                ),
-            )
+            # A claim append can fail before any original account binding
+            # commits. M0 still retains its actual failure, but without that
+            # claim we cannot finalize an account-attributed failure. Preserve
+            # the reservation as unresolved and let cold readback report it.
+            # A committed claim with a lost acknowledgement remains available
+            # and must pass the same strict failed-original readback checks.
+            claims = [
+                event
+                for event in origin.verified_events()
+                if event.entity_id == original.allocation_id
+                and event.event_type == CLAIM
+            ]
+            if claims:
+                _append(
+                    origin,
+                    phase=OUTCOME,
+                    allocation_id=original.allocation_id,
+                    trial_id=trial,
+                    timestamp=finished_at,
+                    body=_Outcome(
+                        research_hash=research.event_hash,
+                        reservation_hash=reservation.event_hash,
+                        status="M0_FAILED",
+                        reason=run.error_details or "M0_FAILED",
+                        m0_run_id=str(run.run_id),
+                    ),
+                )
         else:
             observed = observer.readback()
             finished_at = _stamp(clock())
@@ -1349,6 +1365,35 @@ def read_synthetic_research_execution(
             or not reservation_event.timestamp <= claim.timestamp <= event.timestamp
         ):
             raise ValueError("FAILED_M0_ORIGINAL_CLAIM_MISMATCH")
+        # Agreement between two producer records is not sufficient when both
+        # name the same foreign computation. Revalidate against the actual
+        # retained opportunity using the authoritative V2 identity contract.
+        EvaluationRunIdentityV2.model_validate(
+            {
+                "schema_version": "2",
+                "strategy_hash": reservation.strategy_hash,
+                "strategy_parameters_hash": reservation.parameter_hash,
+                "protocol_hash": plan.protocol_hash,
+                "cost_model_hash": plan.cost_model_hash,
+                "admission_hash": plan.admission_hash,
+                "bundle_hash": plan.input_bundle_hash,
+                "evaluator_evidence_hash": plan.evaluator_evidence_hash,
+                "code_version_hash": plan.source_inventory_hash,
+                # This coordinator uses the canonical factory's unchanged
+                # default, not a caller-provided closure claim.
+                "environment_closure_hash": "0" * 64,
+                "run_identity_hash": identity_hash,
+            }
+        )
+        # build_canonical_specification derives this operational experiment ID
+        # from the installed strategy and original bundle. No live bundle or
+        # engine needs to be reconstructed to check that same public rule.
+        expected_experiment_id = deterministic_baseline_uuid7(
+            f"drift.baseline.experiment.{installed.strategy_reference.strategy_id}:"
+            f"{plan.input_bundle_hash}"
+        )
+        if data.get("experiment_id") != str(expected_experiment_id):
+            raise ValueError("FAILED_M0_EXPERIMENT_ID_MISMATCH")
         # Failure may precede book consumption. Do not invent consumption, but
         # verify every consumption record that does exist, including lineage,
         # identity, original book bytes and causal order. A valid hash chain

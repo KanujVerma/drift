@@ -494,6 +494,9 @@ def test_noncanonical_base64_pad_bits_do_not_alias_original_compressed_bytes() -
 
 
 _FAILED_EVIDENCE_MUTATIONS = (
+    "shared-foreign-identity",
+    "shared-foreign-identity-before-consumption",
+    "foreign-m0-experiment",
     "claim-schema",
     "claim-profile",
     "claim-issuer",
@@ -536,18 +539,32 @@ def _failed_evidence_copy(
     the original writer's database and append protections are never modified.
     """
     harness = make_harness(tmp_path / "source")
-    result = pipeline.execute_synthetic_research(
-        **harness, request=request(proposal(weight="0.5", cash="0.5"))
-    )
+    if mutation == "shared-foreign-identity-before-consumption":
+
+        def unavailable(*args: Any, **kwargs: Any) -> None:
+            raise OSError("original pre-consumption failure")
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(
+                Stage1SyntheticAccountLifecycleV1,
+                "observe_bound_consumption",
+                unavailable,
+            )
+            result = pipeline.execute_synthetic_research(**harness, request=request())
+    else:
+        result = pipeline.execute_synthetic_research(
+            **harness, request=request(proposal(weight="0.5", cash="0.5"))
+        )
     assert result.state == "EXECUTION_FAILED"
     events = list(harness["origin"].verified_events())
     claim = next(e for e in events if e.event_type == CLAIM)
-    consumed = next(e for e in events if e.event_type == CONSUMED)
+    consumed = next((e for e in events if e.event_type == CONSUMED), None)
     reservation = next(e for e in events if e.event_type == pipeline.RESERVATION)
     failed = next(e for e in events if e.event_type == "m2.evaluation.run.recorded")
     origin = replace(harness["origin"], ledger_path=tmp_path / "negative.sqlite3")
     ledger = SQLiteLedger(origin.ledger_path)
     if mutation == "consumption-after-m0":
+        assert consumed is not None
         events.remove(consumed)
         events.insert(events.index(failed) + 1, consumed)
     replacement_invocation = str(uuid7())
@@ -560,6 +577,13 @@ def _failed_evidence_copy(
             event.timestamp,
             event.deduplication_key,
         )
+        if mutation in (
+            "shared-foreign-identity",
+            "shared-foreign-identity-before-consumption",
+        ) and event.event_type in (CLAIM, CONSUMED):
+            payload["identity_hash"] = "f" * 64
+        if mutation == "foreign-m0-experiment" and event == failed:
+            payload["experiment_id"] = str(uuid7())
         if event.event_type == CLAIM:
             if mutation == "claim-schema":
                 schema = "1"
@@ -643,6 +667,16 @@ def _failed_evidence_copy(
     assert len(verified) == len(events) + (mutation == "duplicate-consumption")
     if mutation == "none":
         assert verified == tuple(events)
+    else:
+        assert verified != tuple(events), "Negative fixture must change retained bytes"
+    if mutation == "shared-foreign-identity-before-consumption":
+        assert not any(event.event_type == CONSUMED for event in verified)
+        assert (
+            next(event for event in verified if event.event_type == CLAIM).payload[
+                "identity_hash"
+            ]
+            == "f" * 64
+        )
     harness["origin"] = origin
     return harness, result.opportunity_ref
 
@@ -682,3 +716,41 @@ def test_failure_before_consumption_does_not_require_fabricated_consumption(
     assert any(e.event_type == CLAIM for e in events)
     assert not any(e.event_type == CONSUMED for e in events)
     assert cold_read(harness, result.opportunity_ref).state == "EXECUTION_FAILED"
+
+
+@pytest.mark.parametrize("committed", [False, True])
+def test_claim_write_failure_preserves_readable_state_without_reexecution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, committed: bool
+) -> None:
+    from drift.ledger.stage1_synthetic_account_receipts import (
+        LocalSyntheticAccountReceiptStoreV1,
+    )
+
+    harness = make_harness(tmp_path)
+    original_append = LocalSyntheticAccountReceiptStoreV1.append_invocation_claim
+
+    def failed_append(self: Any, **kwargs: Any) -> Any:
+        if committed:
+            original_append(self, **kwargs)
+        raise OSError("claim acknowledgement unavailable")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            LocalSyntheticAccountReceiptStoreV1,
+            "append_invocation_claim",
+            failed_append,
+        )
+        result = pipeline.execute_synthetic_research(**harness, request=request())
+    expected = "EXECUTION_FAILED" if committed else "UNRESOLVED"
+    assert result.state == expected
+    assert result.original_result is None
+    events = harness["origin"].verified_events()
+    assert sum(e.event_type == CLAIM for e in events) == int(committed)
+    assert not any(e.event_type == CONSUMED for e in events)
+    assert sum(e.event_type == pipeline.OUTCOME for e in events) == int(committed)
+    failed = [e for e in events if e.event_type == "m2.evaluation.run.recorded"]
+    assert len(failed) == 1 and failed[0].payload["status"] == "failed"
+    assert cold_read(harness, result.opportunity_ref).state == expected
+    with pytest.raises(DuplicateEventError):
+        pipeline.execute_synthetic_research(**harness, request=request())
+    assert harness["origin"].verified_events() == events
