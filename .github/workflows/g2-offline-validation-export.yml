@@ -19,7 +19,7 @@ jobs:
       - name: Check out exact public source without persisted credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 78d0fd4ef37a7c087ada00b5d012de007a832cba
+          ref: c8ab0c1cab7e28d21b8df3e3af10652fa9e108cf
           fetch-depth: 0
           persist-credentials: false
       - name: Install existing pinned uv setup
