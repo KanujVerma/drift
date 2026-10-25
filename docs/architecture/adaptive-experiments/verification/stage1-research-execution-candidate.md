@@ -222,6 +222,43 @@ M0 facts present and the opportunity unresolved, without automatic retry.
 The limits are bounded retention-resource choices for this synthetic profile,
 not financial thresholds or permission to discard history.
 
+## Portfolio-preserving conformance and fresh-process recovery
+
+`tests/integration/test_stage1_reuse_conformance.py` applies the test approaches
+recorded in [reuse evaluation](../reuse-evaluation.md) without copying upstream
+source or adding dependencies. The fixtures retain both cross-sectional
+securities and run the actual installed K1/coordinator/account/M0/RESULT path.
+
+For B3, B4 and B5, post-cutoff closing-price poisoning changes the full input
+bundle and final financial outcome but must leave the first eligible context
+and intent byte-identical. Separate past-data controls change the B4/B5 selected
+security, so decision invariance is not asserted over an insensitive fixture.
+The comparison oracle excludes unrelated operational IDs and whole-bundle
+hashes that legitimately include future outcomes.
+
+Full and physically truncated post-fill prefixes must preserve that same first
+decision. An exact-cutoff-only evaluation still refuses the production runner's
+minimum post-warmup-window rule; the test does not disable it to imitate an
+external diagnostic. Extra old observations leave the declared fixed-lookback
+intent unchanged. Insufficient B4/B5 history refuses execution rather than
+returning a successful empty target. A deliberately future-sourced view is
+rejected by the same typed context validator used by the evaluator.
+
+A separate Python process receives only scalar configured-root and original
+record locators, reconstructs the public E1 fixture, and invokes the cold reader.
+Successful retention and commit-with-lost-acknowledgement yield the same original
+result; missing research or outcome retention remains unresolved. Reads leave
+the original SQLite bytes and event sequence unchanged, and a duplicate request
+cannot produce another M0 invocation.
+
+This is synthetic computation and persistence evidence, not qualified historical
+vintage coverage, a cache/training-cutoff test, a real model API test, or a broker
+submission/fill simulator. The scripted K1 choice remains explicit. Additional
+research dispositions are covered by the existing coordinator suites; neither
+this file nor its title certifies every G2 matrix row. Real order/cancel/partial
+fill reconciliation and independently accepted producer authority remain the
+separate platform and research obligations below.
+
 ## Remaining G2 requirements
 
 This candidate does not close [#507](https://github.com/KanujVerma/drift/issues/507),
