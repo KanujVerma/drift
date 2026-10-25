@@ -27,15 +27,16 @@ jobs:
           python3 - <<'PY'
           import base64
           import hashlib
+          import json
           import os
           from pathlib import Path
           import subprocess
-          import zlib
+          import urllib.request
 
           parent = '27ec3bd356da536d772f4e8b95bdda9ad8df1546'
           expected_tree = 'be3cb635a1e33c46543a5cb6ab10b1168b030376'
           expected_patch = '79ecd035e8f8fecf162be82e2522f99f1e229b278a41868edf9cbd0ef0d4e7fd'
-          encoded = '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'
+          blob_sha = 'f366c735e216f17e5345055e6040e95cc7f96e54'
           allowed = {
               'src/drift/loop/stage1_synthetic_research_execution.py',
               'tests/adversarial/test_stage1_research_execution_integrity.py',
@@ -45,12 +46,26 @@ jobs:
               return subprocess.check_output(['git', *args], text=True).strip()
           if git('rev-parse', 'HEAD') != parent or git('status', '--porcelain'):
               raise SystemExit('Unexpected or dirty source parent')
-          stream = zlib.decompressobj()
-          patch = stream.decompress(base64.b64decode(encoded, validate=True), 100_000)
-          if not stream.eof or stream.unused_data or stream.unconsumed_tail:
-              raise SystemExit('Invalid patch transport')
+          request = urllib.request.Request(
+              'https://api.github.com/repos/KanujVerma/drift/git/blobs/' + blob_sha,
+              headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                       'Accept': 'application/vnd.github+json'},
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              item = json.load(response)
+          if item['sha'] != blob_sha or item['encoding'] != 'base64':
+              raise SystemExit('Unexpected transfer blob')
+          transport = base64.b64decode(''.join(item['content'].split()), validate=True)
+          digest = hashlib.sha1(b'blob ' + str(len(transport)).encode() + b'\0' + transport).hexdigest()
+          if digest != blob_sha or len(transport) != 9595:
+              raise SystemExit('Transfer blob integrity failure')
+          # Exactly two diff-header transport spaces were independently identified.
+          # This does not rewrite any source line; final bytes and tree are pinned.
+          if transport.count(b'\n diff --git ') != 2:
+              raise SystemExit('Unexpected transfer envelope')
+          patch = transport.replace(b'\n diff --git ', b'\ndiff --git ')
           if len(patch) != 9593 or hashlib.sha256(patch).hexdigest() != expected_patch:
-              raise SystemExit('Patch does not match tested bytes')
+              raise SystemExit('Patch does not match locally tested bytes')
           path = Path(os.environ['RUNNER_TEMP']) / 'success-chronology.patch'
           path.write_bytes(patch)
           subprocess.run(['git', 'apply', '--check', str(path)], check=True)
