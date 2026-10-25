@@ -17,7 +17,7 @@ jobs:
       - name: Check out exact reviewed integration parent
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 78d0fd4ef37a7c087ada00b5d012de007a832cba
+          ref: 4d0f4f2705e57be2789c0b2ac3fa9997e91a8142
           fetch-depth: 0
           persist-credentials: false
       - name: Verify patch, scope and tree before isolated publication
@@ -34,18 +34,15 @@ jobs:
           import urllib.request
           import zlib
 
-          parent = '78d0fd4ef37a7c087ada00b5d012de007a832cba'
-          expected_tree = '9d85885d66f5672943f130239a4a131f7425a63b'
-          expected_patch = '9eefcc49f4162f2602fdd79693a15404dc09c408f4e7d2049cac9de25fe01106'
-          target = 'refs/heads/coord/564-transfer-failed-evidence'
+          parent = '4d0f4f2705e57be2789c0b2ac3fa9997e91a8142'
+          expected_tree = 'aacf67698dfbb0bae15530772531a554d8fa74bb'
+          expected_patch = '80fd66dc8520a2177c2ed92ef9a7c1c9f10db406e13bd77da71d02c5c63b3118'
+          target = 'refs/heads/coord/564-transfer-codex-corrections'
           parts = (
-              'd7402c8c0177edc1d82cb5222935d349c11c6c60',
-              '50878ca08ecf00620f62b7e2f4f1b0e2ea69e8f0',
-              '2e2d9c66f2b38961ed7388ed10bb618ec1f24c36',
-              '97b7b6fbc086db04239756ab960e55fdbdc8a4aa',
-              '0949c36872fbb9d1274f1d323044a113b760d1b7',
-              '0f30de340db866b531634238b22166d940d73eb5',
-              'ecbbcfd6b5888e41324f1b26dec72b13269e580e',
+              'f64e88f4e49c7ca6813af58c13f40aab9e39a6f1',
+              '6a959370cd148bbaf5e13ebe034e1d6f7202d615',
+              'bc483a00ad6bde83166c4a71e2a5242b2c475a3e',
+              'fd02ce05207387afd47ee32cd38c73af5a2641a9',
           )
           allowed = {
               'docs/architecture/adaptive-experiments/verification/stage1-research-execution-candidate.md',
@@ -76,7 +73,7 @@ jobs:
           patch = decoder.decompress(b''.join(pieces), 1000000)
           if not decoder.eof or decoder.unused_data or decoder.unconsumed_tail:
               raise SystemExit('Invalid or excessive patch encoding')
-          if len(patch) != 18625 or hashlib.sha256(patch).hexdigest() != expected_patch:
+          if len(patch) != 12662 or hashlib.sha256(patch).hexdigest() != expected_patch:
               raise SystemExit('Patch differs from the locally tested source')
           patch_file = Path(os.environ['RUNNER_TEMP']) / 'g2-reviewed-source.patch'
           patch_file.write_bytes(patch)
@@ -90,7 +87,7 @@ jobs:
           subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
           subprocess.run(['git', 'config', 'user.name', 'github-actions[bot]'], check=True)
           subprocess.run(['git', 'config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com'], check=True)
-          subprocess.run(['git', 'commit', '-m', 'fix(stage1): verify original failed invocation evidence (#564)'], check=True)
+          subprocess.run(['git', 'commit', '-m', 'fix(stage1): bind failed computation and preserve unresolved claims (#564)'], check=True)
           if git('rev-parse', 'HEAD^') != parent or git('rev-parse', 'HEAD^{tree}') != expected_tree:
               raise SystemExit('Publication commit identity mismatch')
           token = base64.b64encode(('x-access-token:' + os.environ['GH_TOKEN']).encode()).decode()
