@@ -1,3 +1,4 @@
+# Refreshed for issue #570 source/runtime recovery on 2026-10-27.
 name: g2 isolated verification export (not release)
 
 on:
