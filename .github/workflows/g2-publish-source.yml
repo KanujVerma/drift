@@ -17,7 +17,7 @@ jobs:
       - name: Check out exact source parent without persisted credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: dda8903fa962cb1fc61667b1d240093ac94ade01
+          ref: e39289761828a9ee2d70526bfc7d3110ad2f6d29
           fetch-depth: 0
           persist-credentials: false
       - name: Verify patch and tree before fresh-branch publication
@@ -34,14 +34,16 @@ jobs:
           import subprocess
           import urllib.request
 
-          parent = 'dda8903fa962cb1fc61667b1d240093ac94ade01'
-          expected_tree = 'f46b31abd3aebb1be0ee973603005f7814419df0'
-          expected_commit = 'e39289761828a9ee2d70526bfc7d3110ad2f6d29'
-          expected_patch = 'cb6149833f20307f57f59c4dce8006e5374b8c9ffcfea1b1e6af958e2b70b6f9'
-          target = 'refs/heads/coord/570-source-05'
-          parts = ('65943c3093e7da1ae3ab50c8c0b95f53584215fd',)
+          parent = 'e39289761828a9ee2d70526bfc7d3110ad2f6d29'
+          expected_tree = 'ce51d5ce8014e86d4690441b2bde4c63757ef5ca'
+          expected_commit = 'a25040f4f3a03ca4e92e04d2180fc2a6b4bb9678'
+          expected_patch = '4649bf277e0c651ec913f3e2876fc5be81ab573f9e3d3a4efe8ec33b4c498832'
+          target = 'refs/heads/coord/570-source-06'
+          parts = ('5b3aff06e33452e4de3a40fe8b6ee4561790ac13',)
           allowed = {
+              'src/drift/loop/stage1_controlled_readback.py',
               'src/drift/loop/stage1_original_result_association.py',
+              'tests/adversarial/test_stage1_controlled_integrity.py',
               'tests/adversarial/test_stage1_original_result_forgery.py',
           }
           def git(*args):
@@ -68,7 +70,7 @@ jobs:
           patch = decoder.decompress(b''.join(pieces), max_length=1000000)
           if not decoder.eof or decoder.unused_data:
               raise SystemExit('Invalid or excessive patch encoding')
-          if len(patch) != 3000 or hashlib.sha256(patch).hexdigest() != expected_patch:
+          if len(patch) != 9681 or hashlib.sha256(patch).hexdigest() != expected_patch:
               raise SystemExit('Patch differs from locally tested source')
           patch_file = Path(os.environ['RUNNER_TEMP']) / 'g2-reviewed-source.patch'
           patch_file.write_bytes(patch)
@@ -84,10 +86,10 @@ jobs:
           for role in ('AUTHOR', 'COMMITTER'):
               env['GIT_' + role + '_NAME'] = 'Kanuj Verma'
               env['GIT_' + role + '_EMAIL'] = '108971272+KanujVerma@users.noreply.github.com'
-              env['GIT_' + role + '_DATE'] = '1793121850 +0000'
+              env['GIT_' + role + '_DATE'] = '1793122200 +0000'
           commit = subprocess.check_output(
               ['git', 'commit-tree', expected_tree, '-p', parent],
-              input='fix(stage1): reject foreign-envelope RESULT chunk evidence (#570)\n',
+              input='fix(stage1): require original M0 lifecycle and reject inline orphan chunks (#570)\n',
               text=True, env=env,
           ).strip()
           if commit != expected_commit or git('rev-parse', commit + '^{tree}') != expected_tree:
