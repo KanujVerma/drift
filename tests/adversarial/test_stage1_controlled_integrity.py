@@ -280,3 +280,113 @@ def test_repeated_reopen_preserves_account_and_never_dispatches(
     assert first == second
     assert second.independent_account_count == 1
     assert args["origin"].verified_events() == before
+
+
+def test_cold_replay_refuses_a_different_installed_source_inventory(
+    retained_copy: tuple[dict[str, Any], Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import drift.loop.stage1_controlled_readback as reader
+
+    args, executed = retained_copy
+    assert read(args, executed.allocation_id).status == "VERIFIED_COMPLETE"
+    monkeypatch.setattr(reader, "drift_source_inventory_hash", lambda: "0" * 64)
+    with pytest.raises(ValueError, match="ORIGINAL_INSTALLED_SOURCE"):
+        read(args, executed.allocation_id)
+
+
+@pytest.mark.parametrize("checkpoint_execution", [False, True])
+def test_missing_original_execution_record_is_not_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkpoint_execution: bool
+) -> None:
+    """The real evaluator authorizes and fills; only journal retention is omitted."""
+    from drift.evaluator.session_observer import RebalancePreviewV1
+
+    args = controlled_arguments(tmp_path)
+    index = (
+        args["checkpoints"][0].session_index
+        if checkpoint_execution
+        else args["initial_decision_index"]
+    ) + 1
+    original_append = ControlledJournalWriterV1.append
+    omitted = False
+
+    def omit(
+        self: ControlledJournalWriterV1, record: C.ControlledRecord, **kwargs: Any
+    ) -> Any:
+        nonlocal omitted
+        if isinstance(record, C.ExecutionRecordV1):
+            preview = record.preview.parse(RebalancePreviewV1)
+            if preview.session_index == index:
+                omitted = True
+                # authorize_rebalance does not consume append's return value.
+                # Keep a genuinely valid original ledger, not a filtered reader.
+                return self.origin.verified_events()[-1]
+        return original_append(self, record, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ControlledJournalWriterV1, "append", omit)
+        executed = execute_controlled_campaign(**args)
+    assert omitted and executed.m0_status == "completed"
+    args["origin"].verified_events()
+    report = read(args, executed.allocation_id)
+    assert report.status == "UNRESOLVED"
+    assert "MISSING_ORIGINAL_EXECUTION_RECORD" in report.reasons
+    assert not report.economics.complete
+    if checkpoint_execution:
+        assert report.trials[0].outcome == "UNRESOLVED"
+        assert not report.trials[0].complete_interval
+
+
+def test_equal_clock_decision_before_research_is_not_certified(
+    tmp_path: Path,
+) -> None:
+    """Rebuild a hash-valid original journal with a genuine causal inversion."""
+    args = controlled_arguments(tmp_path / "source")
+    args["clock"] = lambda: BASE + timedelta(hours=1)
+    executed = execute_controlled_campaign(**args)
+    assert read(args, executed.allocation_id).status == "VERIFIED_COMPLETE"
+    original = list(args["origin"].verified_events())
+    decision = next(
+        event
+        for event in original
+        if event.event_type == C.EVENT_PREFIX + "decision"
+        and event.payload["record"]["checkpoint_id"] == "CKPT-001"
+    )
+    observation_id = decision.payload["record"]["observation"]["event_id"]
+    original.remove(decision)
+    position = next(
+        i for i, event in enumerate(original) if str(event.event_id) == observation_id
+    )
+    original.insert(position + 1, decision)
+    target = tmp_path / "causally-reordered.sqlite3"
+    writer = SQLiteLedger(target)
+    hashes: dict[str, str] = {}
+
+    def remap(value: Any) -> Any:
+        if isinstance(value, str):
+            return hashes.get(value, value)
+        if isinstance(value, list):
+            return [remap(item) for item in value]
+        if isinstance(value, dict):
+            return {key: remap(item) for key, item in value.items()}
+        return value
+
+    for event in original:
+        payload = remap(json.loads(canonical_json(event.payload)))
+        appended = writer.append(
+            AuditEventDraft(
+                event_id=event.event_id,
+                event_type=event.event_type,
+                timestamp=event.timestamp,
+                entity_type=event.entity_type,
+                entity_id=event.entity_id,
+                payload=payload,
+                deduplication_key=event.deduplication_key,
+                schema_version=event.schema_version,
+            )
+        )
+        hashes[event.event_hash] = appended.event_hash
+    writer.verify_chain()
+    args["origin"] = replace(args["origin"], ledger_path=target)
+    with pytest.raises(ValueError, match="CONTROLLED_REFERENCE_NOT_CAUSAL"):
+        read(args, executed.allocation_id)

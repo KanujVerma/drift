@@ -43,6 +43,14 @@ original identities:
 | Execution | Detached existing atomic accounting preview at the actual next open; mandatory exact-policy approval/refusal/containment before committing any fill |
 | Terminal | Original M0 identity, result association and classification, never a successful label for a failed or uncertain invocation |
 
+The full Stage 1 profile checks that its first and last synthetic session dates,
+253/126 preparation windows, scoring-session labels, monthly decision rule,
+next-open execution and explicit mandate match the original E1 declaration.
+The selected arm must use its declared scripted or conventional selector mode.
+Development-only profiles remain distinctly labelled and cannot stand in for
+that full-window proof. This verifies declared synthetic clocks, not exchange
+holidays or historical source qualification.
+
 The original account is single-use at the invocation level. Within that one
 invocation, cash, holdings, claims, fills and fees are carried across checkpoints.
 Original account/M0 records, operational IDs, financial run identity and derived
@@ -99,7 +107,10 @@ sealed and substituted feedback is rejected by replay.
 verified immutable original ledger prefix. Every join uses that captured prefix,
 including original account and result helpers. Caller-made writer objects and
 account capabilities are neither required nor recreated. The returned report
-pins the original prefix tip and every accounted controlled-event hash.
+pins the original prefix tip and every accounted controlled-event hash. It also
+requires the original installed Python source inventory: a different installed
+revision cannot certify old decisions merely because its outputs happen to
+match. The original pinned environment and source must be restored for replay.
 
 The declared manifest, not successful result rows, defines the opportunity set.
 Every relevant event is assigned exactly once to an allowed phase or an explicit
@@ -110,7 +121,12 @@ mistaken for corruption. Missing due opportunities remain unresolved even when
 there are no retained rows for them. Future opportunities remain not yet due.
 A legitimate no-research-attempt record differs from research followed by no
 execution. Neither a matching hash nor a successful neighboring opportunity
-can conceal a missing or contradictory original lifecycle.
+can conceal a missing or contradictory original lifecycle. Every original
+execution-authorization trace event requires exactly one retained execution
+record; missing records keep the affected trial and whole campaign unresolved.
+Original research or no-attempt completion must precede its consuming decision
+in append order even when all operational timestamps are equal. Genuine late
+cost supersession remains permitted and cannot retroactively authorize a decision.
 
 Late accepted operating-cost corrections remain immutable new originals. For
 an estimate 8 superseded by actual 9, the later projection charges 9, not 17;

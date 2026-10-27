@@ -1096,6 +1096,7 @@ def execute_controlled_campaign(
         checkpoints=checkpoints,
         clock_policy=clock_policy,
     )
+    C.verify_declared_stage1_plan(plan, campaign, arms)
     allowed = next(
         arm for arm in arms if arm.arm_id == original.fields.arm_id
     ).eligible_strategy_references

@@ -481,7 +481,11 @@ def _carried_arguments(root: Path, bundle: object, arm: str) -> dict[str, object
                 }
                 | {
                     "mandate_reference": "fixture://controlled-explicit-caps-v1",
-                    "model_configuration_reference": "fixture://scripted-fixed-scores-not-real-model-v1",
+                    "model_configuration_reference": (
+                        "fixture://scripted-fixed-scores-not-real-model-v1"
+                        if a.arm_id == "ARM-B"
+                        else "NONE"
+                    ),
                 }
             )
         )
@@ -669,11 +673,15 @@ def test_full_456_session_carried_br_campaign_has_real_monthly_switches(
     from drift.loop import stage1_controlled_contracts as C
     from drift.loop.stage1_controlled_campaign import execute_controlled_campaign
     from drift.loop.stage1_controlled_journal import CapturedControlledJournalV1
-    from drift.loop.stage1_controlled_readback import read_controlled_campaign
+    from drift.loop.stage1_controlled_readback import (
+        compare_controlled_campaigns,
+        read_controlled_campaign,
+    )
 
     bundle = _carried_456_bundle()
     print("controlled: original 456-session input bundle constructed", flush=True)
     reports = []
+    campaign_inputs: list[dict[str, Any]] = []
     for arm in ("ARM-B", "ARM-R"):
         args: dict[str, Any] = _carried_arguments(tmp_path / arm, bundle, arm)
         executed = execute_controlled_campaign(**args)
@@ -744,6 +752,15 @@ def test_full_456_session_carried_br_campaign_has_real_monthly_switches(
         assert report.trials[0].end_nav == report.trials[1].start_nav
         assert report.trials[0].start_nav != Decimal("10000")
         assert report.independent_account_count == 1
+        recovered = _fresh_controlled_read(
+            args, executed.allocation_id, tmp_path / f"cold-{arm}.json"
+        )
+        assert recovered["status"] == "VERIFIED_COMPLETE"
+        assert recovered["result_hash"] == report.original_result.result_hash
+        assert recovered["authorizes_trading"] is False
+        recovered_trials = recovered["trials"]
+        assert isinstance(recovered_trials, list) and len(recovered_trials) == 2
+        campaign_inputs.append(args)
         reports.append(report)
         print("controlled: original replay verified", arm, flush=True)
     assert reports[0].allocation_id != reports[1].allocation_id
@@ -760,6 +777,27 @@ def test_full_456_session_carried_br_campaign_has_real_monthly_switches(
         reports[0].trials[0].net_investment_gain
         == reports[1].trials[0].net_investment_gain
     )
+
+    compared = compare_controlled_campaigns(
+        test_origin=campaign_inputs[0]["origin"],
+        comparator_origin=campaign_inputs[1]["origin"],
+        test_allocation_id=reports[0].allocation_id,
+        comparator_allocation_id=reports[1].allocation_id,
+        campaign=campaign_inputs[0]["campaign"],
+        arms=campaign_inputs[0]["arms"],
+        bindings=campaign_inputs[0]["bindings"],
+        expected_run_ids=campaign_inputs[0]["expected_run_ids"],
+        test_provenance=campaign_inputs[0]["provenance"],
+        comparator_provenance=campaign_inputs[1]["provenance"],
+        clock=campaign_inputs[0]["clock"],
+    )
+    assert compared.test.economics.complete and compared.comparator.economics.complete
+    assert compared.test.economics.initial_net_nav == Decimal("10000")
+    assert compared.independent_paired_run_count == 1
+    assert compared.independent_account_count == 2
+    assert compared.economic_advantage.state == "KNOWN"
+    assert compared.economic_advantage.value == Decimal("0")
+    assert compared.scientific_conclusion == "INSUFFICIENT_INDEPENDENT_QUALIFIED_RUNS"
 
 
 _COLD_CONTROLLED_READER = r"""

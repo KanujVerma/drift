@@ -12,7 +12,7 @@ import base64
 import binascii
 import hashlib
 import zlib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from decimal import Decimal
 from fractions import Fraction
@@ -27,6 +27,7 @@ from drift.evaluator.session_observer import (
     ExecutionAuthorizationV1,
     SessionObservationV1,
 )
+from drift.experiments.stage1_campaign_config import ArmSpecV1, CampaignSpecV1
 from drift.intelligence.contracts import (
     ArtifactReference,
     AttemptRecord,
@@ -346,6 +347,56 @@ class ControlledCampaignPlanV1(FrozenModel):
     def trial_id(self, checkpoint_id: str) -> str:
         f = self.original_account.fields
         return f"{f.campaign_id}:{f.run_id}:{f.arm_id}:{checkpoint_id}"
+
+
+def verify_declared_stage1_plan(
+    plan: ControlledCampaignPlanV1,
+    campaign: CampaignSpecV1,
+    arms: Sequence[ArmSpecV1],
+) -> None:
+    """Couple the full-window profile to its original E1 study declaration.
+
+    Development fixtures do not assert Stage 1 window conformance. Full-window
+    callers cannot substitute a different window, mandate or comparator mode
+    while retaining an otherwise valid E1 scope fingerprint. This is a local
+    synthetic mapping, not qualified calendar or external policy evidence.
+    """
+    if plan.coverage != "STAGE1_253_126_MONTHLY":
+        return
+    selected = [a for a in arms if a.arm_id == plan.original_account.fields.arm_id]
+    if len(selected) != 1:
+        raise ValueError("CONTROLLED_STAGE1_ARM_NOT_DECLARED")
+    arm = selected[0]
+    scoring_count = len(plan.sessions) - plan.initial_decision_index - 1
+    if (
+        campaign.data_window.start_date
+        != plan.sessions[0].session_key.local_date.isoformat()
+        or campaign.data_window.end_date
+        != plan.sessions[-1].session_key.local_date.isoformat()
+        or campaign.warmup_window.sessions_count != 253
+        or campaign.observation_window.sessions_count != 126
+        or campaign.scoring_window.start_session != "SC-001"
+        or campaign.scoring_window.end_session != f"SC-{scoring_count:03d}"
+        or not campaign.scoring_window.fresh_accounts
+        or campaign.decision_schedule.frequency != "MONTHLY"
+        or campaign.decision_schedule.alignment != "LAST_COMPLETED_SESSION"
+        or campaign.decision_schedule.execution_timing != "NEXT_OPEN"
+    ):
+        raise ValueError("CONTROLLED_STAGE1_WINDOW_NOT_DECLARED_E1")
+    if (
+        plan.mandate.policy_id != campaign.portfolio_mandate_reference
+        or plan.mandate.policy_id != arm.mandate_reference
+        or arm.initial_strategy_reference != plan.initial_family
+    ):
+        raise ValueError("CONTROLLED_STAGE1_POLICY_NOT_DECLARED_E1")
+    expected_mode = {
+        "ADAPTIVE_AI": "scripted_fixture",
+        "DETERMINISTIC_COMPARATOR": "conventional_fixture",
+    }.get(arm.selector_type)
+    if expected_mode is None or any(
+        point.fixture.mode != expected_mode for point in plan.checkpoints
+    ):
+        raise ValueError("CONTROLLED_STAGE1_SELECTOR_NOT_DECLARED_E1")
 
 
 class ManifestRecordV1(FrozenModel):

@@ -28,6 +28,7 @@ from drift.domain.evaluator_trace import (
     SessionObservationTraceEventV1,
     StrategyDecisionTraceEventV1,
 )
+from drift.domain.observation_query import drift_source_inventory_hash
 from drift.evaluator.opening_book_lifecycle import parse_original_invocation_binding
 from drift.evaluator.session_observer import RebalancePreviewV1, SessionObservationV1
 from drift.experiments.stage1_campaign_config import (
@@ -307,6 +308,7 @@ class _Verifier:
         self.observations: dict[int, ControlledRowV1] = {}
         self.decisions: dict[int, ControlledRowV1] = {}
         self.executions: dict[int, ControlledRowV1] = {}
+        self.missing_executions: set[int] = set()
         self.containments: dict[int, ControlledRowV1] = {}
         self.opportunity_rows: dict[str, list[ControlledRowV1]] = {
             c.checkpoint_id: [] for c in self.plan.checkpoints
@@ -432,6 +434,24 @@ class _Verifier:
             }
             if required != set(self.observations):
                 self.reasons.add("MISSING_ORIGINAL_OBSERVATIONS")
+
+    def verify_execution_inventory(
+        self, result: LocalOriginalResultReadbackV1 | None
+    ) -> None:
+        if result is None:
+            return
+        originals = [
+            e.session_index
+            for e in result.original_artifacts.trace.events
+            if isinstance(e, ExecutionAuthorizationTraceEventV1)
+        ]
+        if len(originals) != len(set(originals)):
+            raise ValueError("CONTROLLED_DUPLICATE_ORIGINAL_EXECUTION_AUTHORIZATION")
+        if set(self.executions) - set(originals):
+            raise ValueError("CONTROLLED_EXECUTION_AUTHORIZATION_NOT_ORIGINAL")
+        self.missing_executions = set(originals) - set(self.executions)
+        if self.missing_executions:
+            self.reasons.add("MISSING_ORIGINAL_EXECUTION_RECORD")
 
     def verify_execution(
         self,
@@ -995,6 +1015,19 @@ class _Verifier:
                     checkpoint, context, observation, source, active, learning, feedback
                 )
                 opportunities[checkpoint.checkpoint_id] = known
+                if row is not None:
+                    # Research, including a legitimate no-attempt terminal,
+                    # must exist before the decision that consumes it. A cost
+                    # correction may be genuinely later and is not decision
+                    # authorization; its original lineage is checked separately.
+                    for original_row in known.rows:
+                        if (
+                            isinstance(original_row.record, C.CostRecordV1)
+                            and original_row.record.original.supersedes_receipt_id
+                            is not None
+                        ):
+                            continue
+                        self.journal.resolve(original_row.ref, before=row)
                 if not known.complete:
                     self.reasons.add(
                         "INCOMPLETE_ORIGINAL_RESEARCH:" + checkpoint.checkpoint_id
@@ -1069,6 +1102,8 @@ def read_controlled_campaign(
     )
     verifier = _Verifier(captured)
     plan = captured.plan
+    if plan.source_inventory_hash != drift_source_inventory_hash():
+        raise ValueError("CONTROLLED_REPLAY_REQUIRES_ORIGINAL_INSTALLED_SOURCE")
     manifest = captured.manifest.record
     assert isinstance(manifest, C.ManifestRecordV1)
     verify_stage1_trial_provenance_snapshot(
@@ -1078,6 +1113,7 @@ def read_controlled_campaign(
         bindings=bindings,
         expected_run_ids=expected_run_ids,
     )
+    C.verify_declared_stage1_plan(plan, campaign, arms)
     fields = plan.original_account.fields
     scope = provenance.scope
     matching = [
@@ -1201,6 +1237,7 @@ def read_controlled_campaign(
             raise ValueError("CONTROLLED_FAILED_M0_HAS_SUCCESSFUL_RESULT")
         verifier.take(verifier.terminal)
     verifier.verify_observations(result, binding)
+    verifier.verify_execution_inventory(result)
     for row in verifier.executions.values():
         verifier.verify_execution(row, result, binding)
     opportunities = verifier.verify_decisions(result)
@@ -1276,6 +1313,15 @@ def read_controlled_campaign(
                 outcome, reason, family = "COMPLETED", info.reason, info.family
             else:
                 outcome, reason = "REFUSED", decision_row.record.reason
+        if any(
+            checkpoint.session_index < index <= end
+            for index in verifier.missing_executions
+        ):
+            outcome, reason, family = (
+                "UNRESOLVED",
+                "MISSING_ORIGINAL_EXECUTION_RECORD",
+                None,
+            )
         complete_interval = (
             result is not None
             and start_state is not None
