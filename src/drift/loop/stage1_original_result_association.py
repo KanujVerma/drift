@@ -209,6 +209,36 @@ def _original_event(
     return position, original
 
 
+def _account_artifact_chunks(
+    events: tuple[AuditEvent, ...],
+    *,
+    allocation_id: UUID,
+    allocation_hash: str,
+    m0_event_hash: object,
+) -> list[tuple[int, AuditEvent]]:
+    """Inventory every chunk naming this original account, body or envelope.
+
+    Both inline and chunked RESULT readers must use the same complete
+    allocation-touching inventory. A foreign event envelope cannot hide a
+    chunk whose retained body still cites the original allocation or M0.
+    """
+    return [
+        (position, event)
+        for position, event in enumerate(events)
+        if event.event_type == CHUNK_EVENT
+        and (
+            event.entity_id == allocation_id
+            or (
+                isinstance(event.payload, Mapping)
+                and (
+                    event.payload.get("allocation_event_hash") == allocation_hash
+                    or event.payload.get("m0_event_hash") == m0_event_hash
+                )
+            )
+        )
+    ]
+
+
 def _read_original_chunked_artifacts(
     *,
     events: tuple[AuditEvent, ...],
@@ -245,23 +275,12 @@ def _read_original_chunked_artifacts(
         or any(type(item) is not str for item in expected_ids)
     ):
         raise OriginalResultAssociationError("RESULT_CHUNK_MANIFEST_INVALID")
-    # A forged envelope with a foreign entity cannot hide a chunk whose body
-    # still claims this allocation or M0. Unrelated accounts retain isolation.
-    parts = [
-        (pos, event)
-        for pos, event in enumerate(events)
-        if event.event_type == CHUNK_EVENT
-        and (
-            event.entity_id == allocation_id
-            or (
-                isinstance(event.payload, Mapping)
-                and (
-                    event.payload.get("allocation_event_hash") == allocation_hash
-                    or event.payload.get("m0_event_hash") == data.get("m0_event_hash")
-                )
-            )
-        )
-    ]
+    parts = _account_artifact_chunks(
+        events,
+        allocation_id=allocation_id,
+        allocation_hash=allocation_hash,
+        m0_event_hash=data.get("m0_event_hash"),
+    )
     if len(parts) != expected_count:
         raise OriginalResultAssociationError("RESULT_CHUNK_INVENTORY_INCOMPLETE")
     compressed = bytearray()
@@ -602,10 +621,11 @@ class _OriginalResultVerifier:
                 allocation_hash=self._original_allocation.allocation_ref.event_hash,
             )
         else:
-            if any(
-                item.event_type == CHUNK_EVENT
-                and item.entity_id == self._original_allocation.allocation_id
-                for item in events
+            if _account_artifact_chunks(
+                events,
+                allocation_id=self._original_allocation.allocation_id,
+                allocation_hash=self._original_allocation.allocation_ref.event_hash,
+                m0_event_hash=data.get("m0_event_hash"),
             ):
                 raise OriginalResultAssociationError(
                     "RESULT_UNDECLARED_ARTIFACT_CHUNKS"

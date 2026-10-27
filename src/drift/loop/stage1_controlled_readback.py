@@ -1205,6 +1205,24 @@ def read_controlled_campaign(
         ):
             raise ValueError("CONTROLLED_TERMINAL_WITHOUT_ORIGINAL_M0")
         if terminal.m0_status == "completed":
+            # A completed original M0 audit is the completion of the actual
+            # evaluator execution, not merely an identifier which happens to
+            # precede the later RESULT/terminal receipts. Every original
+            # campaign phase which is required to have happened during that
+            # execution must be retained *before* this M0 audit, even when
+            # their operational timestamps compare equal. An explicitly
+            # superseding cost receipt is different: it may be appended after
+            # completion and can only change a later derived as-of report.
+            if any(
+                row.sequence >= m0[0]
+                for row in captured.rows
+                if not isinstance(row.record, C.TerminalRecordV1)
+                and not (
+                    isinstance(row.record, C.CostRecordV1)
+                    and row.record.original.supersedes_receipt_id is not None
+                )
+            ):
+                raise ValueError("CONTROLLED_ORIGINAL_M0_BEFORE_CAMPAIGN_EVIDENCE")
             if terminal.result_association is None:
                 raise ValueError("CONTROLLED_COMPLETION_WITHOUT_RESULT")
             captured.original(terminal.result_association, before=verifier.terminal)

@@ -430,3 +430,41 @@ def test_equal_clock_decision_before_research_is_not_certified(
     args["origin"] = replace(args["origin"], ledger_path=target)
     with pytest.raises(ValueError, match="CONTROLLED_REFERENCE_NOT_CAUSAL"):
         read(args, executed.allocation_id)
+
+
+def test_completed_original_m0_cannot_precede_its_campaign_evidence(
+    tmp_path: Path,
+) -> None:
+    """Moving a genuine M0-completed audit before original fills cannot certify it.
+
+    Rebuild the entire original ledger with remapped hashes and equal clocks.
+    This is not a caller-edited, unauthenticated verification receipt.
+    """
+    from drift.ledger.stage1_synthetic_account_receipts import CONSUMED
+
+    args = controlled_arguments(tmp_path / "source")
+    args["clock"] = lambda: BASE + timedelta(hours=1)
+    executed = execute_controlled_campaign(**args)
+    assert executed.m0_status == "completed"
+    assert read(args, executed.allocation_id).status == "VERIFIED_COMPLETE"
+    captured = capture(args, executed.allocation_id)
+    manifest = captured.manifest.record
+    assert isinstance(manifest, C.ManifestRecordV1)
+    original = list(args["origin"].verified_events())
+    completed = next(
+        row for row in original if row.event_id == manifest.m0_audit_event_id
+    )
+    original.remove(completed)
+    consumed_index = next(
+        index
+        for index, row in enumerate(original)
+        if row.event_type == CONSUMED and row.entity_id == executed.allocation_id
+    )
+    original.insert(consumed_index + 1, completed)
+    destination = tmp_path / "completed-too-soon.sqlite3"
+    _write_reordered_journal(original, destination)
+    args["origin"] = replace(args["origin"], ledger_path=destination)
+    with pytest.raises(
+        ValueError, match="CONTROLLED_ORIGINAL_M0_BEFORE_CAMPAIGN_EVIDENCE"
+    ):
+        read(args, executed.allocation_id)

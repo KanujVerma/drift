@@ -668,6 +668,7 @@ def test_chunk_from_foreign_allocation_envelope_refuses_before_reassembly(
         if event.event_type == storage.RESULT_EVENT
     )
     result = events[result_position]
+    assert isinstance(result.payload, Mapping)
     chunk_position = next(
         index
         for index, event in enumerate(events)
@@ -748,3 +749,42 @@ def test_original_chunk_reader_enforces_uncompressed_resource_budget(
     ):
         observer.readback()
     assert store.origin.verified_events() == before
+
+
+def test_inline_original_result_refuses_foreign_envelope_orphan_chunk(
+    tmp_path: Path,
+) -> None:
+    """An inline RESULT must not ignore a foreign-envelope chunk for its account."""
+    from drift.loop import stage1_original_result_association as storage
+
+    engine, observer, store = _setup(tmp_path)
+    _execute(engine, observer, store)
+    proof = observer.readback()
+    events = store.origin.verified_events()
+    results = [event for event in events if event.event_type == storage.RESULT_EVENT]
+    assert len(results) == 1 and results[0].schema_version == "2"
+    result = results[0]
+    assert isinstance(result.payload, Mapping)
+    SQLiteLedger(store.origin.ledger_path).append(
+        AuditEventDraft(
+            event_id=uuid7(),
+            event_type=storage.CHUNK_EVENT,
+            timestamp=RESULT_OBSERVED,
+            entity_type=storage.RESULT_ENTITY,
+            entity_id=uuid7(),
+            payload={
+                "profile": storage.RESULT_PROFILE,
+                "issuer_instance_id": str(store.origin.issuer_instance_id),
+                "allocation_event_hash": proof.allocation_ref.event_hash,
+                "m0_event_hash": result.payload["m0_event_hash"],
+                "chunk_index": 0,
+            },
+            deduplication_key="synthetic:orphan:inline:" + str(uuid7()),
+            schema_version="1",
+        )
+    )
+    store.origin.verified_events()
+    with pytest.raises(
+        OriginalResultAssociationError, match="RESULT_UNDECLARED_ARTIFACT_CHUNKS"
+    ):
+        observer.readback()
