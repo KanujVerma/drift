@@ -17,7 +17,7 @@ jobs:
       - name: Check out exact source parent without persisted credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: b9ef1ef7cb7b25d8196d70e784c816466a09814a
+          ref: dda8903fa962cb1fc61667b1d240093ac94ade01
           fetch-depth: 0
           persist-credentials: false
       - name: Verify patch and tree before fresh-branch publication
@@ -34,20 +34,15 @@ jobs:
           import subprocess
           import urllib.request
 
-          parent = 'b9ef1ef7cb7b25d8196d70e784c816466a09814a'
-          expected_tree = '1be98e465199db7e0eb872942e5240a3b37a0b9f'
-          expected_commit = 'dda8903fa962cb1fc61667b1d240093ac94ade01'
-          expected_patch = '77a53678c0860b37b837e387a7996233bf9ee8dcffdc220c95b19cd20e0bb7cd'
-          target = 'refs/heads/coord/570-source-04'
-          parts = ('4f024fe69f849b06010f31ab3fb3122ca9a7a6b9',)
+          parent = 'dda8903fa962cb1fc61667b1d240093ac94ade01'
+          expected_tree = 'f46b31abd3aebb1be0ee973603005f7814419df0'
+          expected_commit = 'e39289761828a9ee2d70526bfc7d3110ad2f6d29'
+          expected_patch = 'cb6149833f20307f57f59c4dce8006e5374b8c9ffcfea1b1e6af958e2b70b6f9'
+          target = 'refs/heads/coord/570-source-05'
+          parts = ('65943c3093e7da1ae3ab50c8c0b95f53584215fd',)
           allowed = {
-              'docs/architecture/adaptive-experiments/contracts/stage1-synthetic-g2.md',
-              'src/drift/loop/stage1_controlled_readback.py',
               'src/drift/loop/stage1_original_result_association.py',
-              'tests/adversarial/test_stage1_controlled_integrity.py',
               'tests/adversarial/test_stage1_original_result_forgery.py',
-              'tests/integration/test_stage1_controlled_campaign.py',
-              'tests/integration/test_stage1_original_result_association.py',
           }
           def git(*args):
               return subprocess.check_output(['git', *args], text=True).strip()
@@ -73,7 +68,7 @@ jobs:
           patch = decoder.decompress(b''.join(pieces), max_length=1000000)
           if not decoder.eof or decoder.unused_data:
               raise SystemExit('Invalid or excessive patch encoding')
-          if len(patch) != 36931 or hashlib.sha256(patch).hexdigest() != expected_patch:
+          if len(patch) != 3000 or hashlib.sha256(patch).hexdigest() != expected_patch:
               raise SystemExit('Patch differs from locally tested source')
           patch_file = Path(os.environ['RUNNER_TEMP']) / 'g2-reviewed-source.patch'
           patch_file.write_bytes(patch)
@@ -89,10 +84,10 @@ jobs:
           for role in ('AUTHOR', 'COMMITTER'):
               env['GIT_' + role + '_NAME'] = 'Kanuj Verma'
               env['GIT_' + role + '_EMAIL'] = '108971272+KanujVerma@users.noreply.github.com'
-              env['GIT_' + role + '_DATE'] = '1793121600 +0000'
+              env['GIT_' + role + '_DATE'] = '1793121850 +0000'
           commit = subprocess.check_output(
               ['git', 'commit-tree', expected_tree, '-p', parent],
-              input='fix(stage1): bound complete original RESULT chunks and reject invalid causal replay (#570)\n',
+              input='fix(stage1): reject foreign-envelope RESULT chunk evidence (#570)\n',
               text=True, env=env,
           ).strip()
           if commit != expected_commit or git('rev-parse', commit + '^{tree}') != expected_tree:
