@@ -14,7 +14,7 @@ from drift.domain.common import UUID7, FrozenModel, NonBlankStr, SHA256Hash
 from drift.domain.evaluator_clock import EvaluationSessionV1
 from drift.domain.evaluator_execution import ListingOpenPriceV1, RebalanceOutcomeV2
 from drift.domain.evaluator_portfolio import PortfolioStateV2
-from drift.domain.evaluator_trace import EvaluatorTraceEventV1
+from drift.domain.evaluator_trace import EvaluatorTraceEventV2
 from drift.evaluator.opening_book_lifecycle import OriginalInvocationBindingV1
 from drift.serialization.canonical import content_hash
 
@@ -26,7 +26,7 @@ class SessionObservationV1(FrozenModel):
     session_index: int = Field(ge=0, strict=True)
     session: EvaluationSessionV1
     state: PortfolioStateV2
-    trace_prefix: tuple[EvaluatorTraceEventV1, ...]
+    trace_prefix: tuple[EvaluatorTraceEventV2, ...]
     invocation_binding: OriginalInvocationBindingV1 | None = None
 
     @model_validator(mode="after")

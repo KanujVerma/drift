@@ -121,3 +121,66 @@ def test_conventional_selector_observes_its_actual_validation(tmp_path: Path) ->
     )
     assert result.is_success and len(seen) == 1 and seen[0].is_valid
     assert seen[0].candidate == result.selected_candidate
+
+
+def controlled_arguments(
+    tmp_path: Path, *, arm: str = "ARM-B", engine: Any = None
+) -> dict[str, Any]:
+    from datetime import timedelta
+
+    from test_stage1_synthetic_research_execution import BASE, make_harness
+
+    from drift.loop import stage1_controlled_contracts as C
+
+    harness = make_harness(tmp_path, arm=arm, engine=engine)
+    evaluator = harness["engine"]
+    ids = tuple(
+        sorted(
+            (s.security_id for s in evaluator.bundle.security_identities),
+            key=lambda s: s.bytes,
+        )
+    )
+    policy = C.SyntheticMandateV1(
+        policy_id="synthetic:explicit-unit-mandate",
+        revision="1",
+        securities=tuple(
+            C.SecurityMandateV1(
+                security_id=s, asset_class="synthetic", maximum_fraction=Decimal("1")
+            )
+            for s in ids
+        ),
+        classes=(
+            C.ClassMandateV1(asset_class="synthetic", maximum_fraction=Decimal("1")),
+        ),
+        maximum_gross_fraction=Decimal("1"),
+        maximum_turnover_fraction=Decimal("2"),
+        maximum_price_age_sessions=0,
+        paused=False,
+        execution_knowledge="RESOLVED",
+    )
+    index = evaluator.protocol.warmup_session_count
+    checkpoint = C.ControlledCheckpointV1(
+        checkpoint_id="CKPT-001",
+        session_index=index,
+        decision_cutoff=evaluator.bundle.session_clock.sessions[index].closed_at,
+        not_before=BASE,
+        expires_at=BASE + timedelta(days=1),
+        research_budget_usd=Decimal("10"),
+        fixture=C.ControlledResearchFixtureV1(
+            mode="scripted_fixture",
+            disposition="propose",
+            selected_family="B3",
+            candidate_families=(),
+            scores={},
+            cost_amount=Decimal("0"),
+        ),
+    )
+    return harness | {
+        "mandate": policy,
+        "checkpoints": (checkpoint,),
+        "initial_decision_index": index - 1,
+        "coverage": "DEVELOPMENT",
+        "clock_policy": ArtifactReference(
+            id="synthetic:tick-clock", version="1", sha256="1" * 64
+        ),
+    }

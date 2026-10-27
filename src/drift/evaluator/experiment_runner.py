@@ -49,7 +49,7 @@ from drift.domain.evaluator_results import (
     EvaluationRunArtifactsV2,
     EvaluationSummaryMetricsV1,
 )
-from drift.domain.evaluator_trace import EvaluationTraceLogV1
+from drift.domain.evaluator_trace import EvaluationTraceLog
 from drift.domain.experiments import (
     ExperimentRun,
     ExperimentRunStatus,
@@ -321,7 +321,7 @@ def _artifact_references(
     artifacts: EvaluationRunArtifactsV2,
 ) -> tuple[ArtifactReference, ...]:
     result: EvaluationResultV1 = artifacts.result
-    trace: EvaluationTraceLogV1 = artifacts.trace
+    trace: EvaluationTraceLog = artifacts.trace
     return (
         ArtifactReference(
             artifact_id=inputs.result_artifact_id,

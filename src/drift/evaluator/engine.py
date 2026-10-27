@@ -167,8 +167,8 @@ from drift.domain.evaluator_trace import (
     ClaimSettledTraceEventV1,
     CorporateActionAppliedTraceEventV1,
     EvaluationPhase,
-    EvaluationTraceLogV1,
-    EvaluatorTraceEventV1,
+    EvaluationTraceLog,
+    EvaluatorTraceEventV2,
     ExecutionAuthorizationTraceEventV1,
     ExploratoryAccountingPriceTraceEventV1,
     ExploratoryStrategyDecisionTraceEventV1,
@@ -176,9 +176,10 @@ from drift.domain.evaluator_trace import (
     FillTraceEventV1,
     IndeterminateCauseTraceEventV1,
     SessionMarkTraceEventV1,
+    SessionObservationTraceEventV1,
     SessionStartTraceEventV1,
     StrategyDecisionTraceEventV1,
-    seal_evaluation_trace_log,
+    seal_observed_evaluation_trace_log,
 )
 from drift.domain.normalization import DerivedObservationViewV1
 from drift.domain.observation_query import (
@@ -242,7 +243,7 @@ from drift.markets.observation_validation import (
     m1d_context_hash,
 )
 from drift.markets.session_closed_world import verify_closed_world_session_coverage
-from drift.serialization.canonical import content_hash
+from drift.serialization.canonical import canonical_json, content_hash
 
 ZERO = Decimal("0")
 IDENTITY_NUMERATOR = "1"
@@ -1150,7 +1151,7 @@ class _Loop:
     staged_targets: tuple[SecurityTargetPositionV1, ...] = ()
     #: The session whose close staged the pending decision, if one is pending.
     staged_decision_session: EvaluationSessionV1 | None = None
-    events: list[EvaluatorTraceEventV1] = field(default_factory=list)
+    events: list[EvaluatorTraceEventV2] = field(default_factory=list)
     checkpoints: list[_Checkpoint] = field(default_factory=list)
     gross_traded_notional: Decimal = ZERO
     committed_fill_count: int = 0
@@ -2469,7 +2470,7 @@ class SessionEvaluatorEngine:
                 ) from error
             if halt is not None:
                 break
-        trace = seal_evaluation_trace_log(loop.events)
+        trace = seal_observed_evaluation_trace_log(loop.events)
         if prepared_digest is None:
             metrics = self._metrics(loop)
             result = self._seal_result(
@@ -2548,6 +2549,14 @@ class SessionEvaluatorEngine:
                 self._close_mark(loop, index, session)
             phase = EvaluationPhase.POST_CLOSE_DECISION
             if loop.session_observer is not None:
+                loop.events.append(
+                    SessionObservationTraceEventV1(
+                        sequence=len(loop.events),
+                        session_index=index,
+                        session_key=session.session_key,
+                        book_hash=content_hash(loop.state),
+                    )
+                )
                 observation = SessionObservationV1(
                     session_index=index,
                     session=session,
@@ -2558,7 +2567,9 @@ class SessionEvaluatorEngine:
                     invocation_binding=loop.invocation_binding,
                 )
                 loop.session_observer.observe_session(
-                    _revalidated(SessionObservationV1, observation)
+                    SessionObservationV1.model_validate_json(
+                        canonical_json(observation)
+                    )
                 )
             return decide(loop, index, session)
         except (IndeterminateValuationError, IndeterminateExecutionError) as error:
@@ -2790,7 +2801,7 @@ class SessionEvaluatorEngine:
             )
             expected_preview_hash = preview.financial_hash
             returned = loop.session_observer.authorize_rebalance(
-                _revalidated(RebalancePreviewV1, preview)
+                RebalancePreviewV1.model_validate_json(canonical_json(preview))
             )
             if type(returned) is not ExecutionAuthorizationV1:
                 raise ValueError("EXACT_EXECUTION_AUTHORIZATION_REQUIRED")
@@ -2808,17 +2819,20 @@ class SessionEvaluatorEngine:
                     reason=authorization.reason,
                 )
             )
-            # An accounting rejection below remains a rejection; an observer
-            # cannot turn it into permission, a fill, or a successful hold.
-            if outcome.classification != "rejected":
-                if authorization.verdict == "contain":
-                    return _Halt(
-                        index,
-                        EvaluationClassification.INDETERMINATE,
-                        authorization.reason,
-                    )
-                if authorization.verdict == "reject":
-                    return None
+            # Unsafe current state is independent of incoming solvency. It
+            # cannot be hidden by rejecting an already unfunded proposal.
+            if authorization.verdict == "contain":
+                return _Halt(
+                    index,
+                    EvaluationClassification.INDETERMINATE,
+                    authorization.reason,
+                )
+            # An accounting rejection is never upgraded into a successful hold.
+            if (
+                outcome.classification != "rejected"
+                and authorization.verdict == "reject"
+            ):
+                return None
         if outcome.classification == "rejected":
             rejection = outcome.rejection
             if rejection is None:  # pragma: no cover - model invariant
@@ -3514,7 +3528,7 @@ class SessionEvaluatorEngine:
         run_identity: EvaluationRunIdentityV1 | EvaluationRunIdentityV2,
         halt: _Halt | None,
         metrics: EvaluationSummaryMetricsV1,
-        trace: EvaluationTraceLogV1,
+        trace: EvaluationTraceLog,
     ) -> EvaluationResultV1:
         common: dict[str, object] = {
             "schema_version": "1",
