@@ -270,6 +270,7 @@ def _read_original_chunked_artifacts(
         encoded = fields.get("data_base64")
         if (
             position >= result_position
+            or event.entity_id != allocation_id
             or event.entity_type != RESULT_ENTITY
             or event.schema_version != "1"
             or event.event_id.version != 7

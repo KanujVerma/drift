@@ -645,6 +645,49 @@ def test_original_artifact_chunk_orphan_refuses_even_with_valid_ledger_chain(
     assert not original.scientifically_qualified
 
 
+def test_chunk_from_foreign_allocation_envelope_refuses_before_reassembly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An original chunk's body may not launder a foreign event envelope.
+
+    Exercise the exact captured-event reader boundary independently of ledger
+    verification: a foreign allocation envelope cannot become a trusted
+    original merely because it copies this account's original chunk hashes.
+    """
+    from drift.loop import stage1_original_result_association as storage
+
+    monkeypatch.setattr(storage, "MAX_ARTIFACT_BYTES", 1_024)
+    monkeypatch.setattr(storage, "ARTIFACT_CHUNK_BYTES", 512)
+    engine, observer, store = _setup(tmp_path)
+    _execute(engine, observer, store)
+    original = observer.readback()
+    events = store.origin.verified_events()
+    result_position = next(
+        index
+        for index, event in enumerate(events)
+        if event.event_type == storage.RESULT_EVENT
+    )
+    result = events[result_position]
+    chunk_position = next(
+        index
+        for index, event in enumerate(events)
+        if event.event_type == storage.CHUNK_EVENT
+    )
+    foreign = events[chunk_position].model_copy(update={"entity_id": uuid7()})
+    substituted = (*events[:chunk_position], foreign, *events[chunk_position + 1 :])
+    with pytest.raises(
+        OriginalResultAssociationError, match="RESULT_CHUNK_ORIGINAL_MISMATCH"
+    ):
+        storage._read_original_chunked_artifacts(
+            events=substituted,
+            result_position=result_position,
+            data=result.payload,
+            issuer=store.origin.issuer_instance_id,
+            allocation_id=original.allocation_ref.event_id,
+            allocation_hash=original.allocation_ref.event_hash,
+        )
+
+
 def test_interrupted_artifact_chunk_retention_never_recredits_original_account(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
