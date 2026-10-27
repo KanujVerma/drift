@@ -17,7 +17,7 @@ jobs:
       - name: Check out exact source parent without persisted credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 25904cede9c82ddc2fbf8fbf7a9b944d18c0eeeb
+          ref: 140918fd0f1a8d5fe2b138754454fe8cf1f31320
           fetch-depth: 0
           persist-credentials: false
       - name: Verify patch and tree before fresh-branch publication
@@ -34,36 +34,20 @@ jobs:
           import subprocess
           import urllib.request
 
-          parent = '25904cede9c82ddc2fbf8fbf7a9b944d18c0eeeb'
-          expected_tree = 'fc1e79a0c75c776921b940784f3f7484982ead19'
-          expected_commit = '140918fd0f1a8d5fe2b138754454fe8cf1f31320'
-          expected_patch = '3cf11eac3451eaf73ec2c1f45fe869d3fc5f316d7554ec5d4278ed876972d37d'
-          target = 'refs/heads/coord/570-source-02'
-          parts = (
-              '56ad09107886bc21b9d47d9f9199d784e46d7778',
-              '3381b9e0915ffc438dbb6ee248014afd3057f9e4',
-              '7c003366afdfdf54320b578c713cded2715b0306',
-              '4d3e55ea3ceedb658f00e8498270429c6a9c62e0',
-              '87a3c41823ca6bd77d615edb4dbc13234bbeb865',
-              '30dba12ad7cc0b62f63b7da595705a388f93244d',
-              'de323a8162e45d658da7266e033a06eda6e03683',
-          )
+          parent = '140918fd0f1a8d5fe2b138754454fe8cf1f31320'
+          expected_tree = '89500da2a4ae4fda010ea195d5e7957262a71f2f'
+          expected_commit = 'b9ef1ef7cb7b25d8196d70e784c816466a09814a'
+          expected_patch = '3b4a9285d28c934a808ac2ee7fa1e4cad60730a732eb34d4ec570a197e543a15'
+          target = 'refs/heads/coord/570-source-03'
+          parts = ('4739aaa2090d8389741e7c798536e7ee383904bf',)
           allowed = {
               'docs/architecture/adaptive-experiments/contracts/stage1-synthetic-g2.md',
-              'src/drift/domain/evaluator_results.py',
-              'src/drift/domain/evaluator_trace.py',
-              'src/drift/evaluator/engine.py',
-              'src/drift/evaluator/experiment_runner.py',
-              'src/drift/evaluator/session_observer.py',
-              'src/drift/experiments/stage1_trial_projection.py',
               'src/drift/loop/stage1_controlled_campaign.py',
               'src/drift/loop/stage1_controlled_contracts.py',
-              'src/drift/loop/stage1_controlled_journal.py',
               'src/drift/loop/stage1_controlled_readback.py',
               'tests/adversarial/test_stage1_controlled_integrity.py',
               'tests/integration/test_stage1_controlled_campaign.py',
               'tests/unit/test_stage1_controlled_contracts.py',
-              'tests/unit/test_stage1_trial_projection.py',
           }
           def git(*args):
               return subprocess.check_output(['git', *args], text=True).strip()
@@ -89,7 +73,7 @@ jobs:
           patch = decoder.decompress(b''.join(pieces), max_length=1000000)
           if not decoder.eof or decoder.unused_data:
               raise SystemExit('Invalid or excessive patch encoding')
-          if len(patch) != 256822 or hashlib.sha256(patch).hexdigest() != expected_patch:
+          if len(patch) != 26285 or hashlib.sha256(patch).hexdigest() != expected_patch:
               raise SystemExit('Patch differs from locally tested source')
           patch_file = Path(os.environ['RUNNER_TEMP']) / 'g2-reviewed-source.patch'
           patch_file.write_bytes(patch)
@@ -105,10 +89,10 @@ jobs:
           for role in ('AUTHOR', 'COMMITTER'):
               env['GIT_' + role + '_NAME'] = 'Kanuj Verma'
               env['GIT_' + role + '_EMAIL'] = '108971272+KanujVerma@users.noreply.github.com'
-              env['GIT_' + role + '_DATE'] = '1793117808 +0000'
+              env['GIT_' + role + '_DATE'] = '1793119391 +0000'
           commit = subprocess.check_output(
               ['git', 'commit-tree', expected_tree, '-p', parent],
-              input='feat(stage1): retain controlled carried-account campaigns and cold projections (#570)\n',
+              input='fix(stage1): require original execution inventory and causal research completion (#570)\n',
               text=True, env=env,
           ).strip()
           if commit != expected_commit or git('rev-parse', commit + '^{tree}') != expected_tree:
