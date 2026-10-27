@@ -169,6 +169,7 @@ from drift.domain.evaluator_trace import (
     EvaluationPhase,
     EvaluationTraceLogV1,
     EvaluatorTraceEventV1,
+    ExecutionAuthorizationTraceEventV1,
     ExploratoryAccountingPriceTraceEventV1,
     ExploratoryStrategyDecisionTraceEventV1,
     FillRejectionTraceEventV1,
@@ -224,6 +225,13 @@ from drift.evaluator.reconstruction import (
     ExploratoryReconstructionReplay,
     require_scheduled_calendar_row,
     verify_exploratory_reconstructions,
+)
+from drift.evaluator.session_observer import (
+    ExecutionAuthorizationV1,
+    OpenSecurityPriceV1,
+    RebalancePreviewV1,
+    SessionEvidenceObserverV1,
+    SessionObservationV1,
 )
 from drift.markets.economic_closed_world import (
     CorporateActionCoverageError,
@@ -1137,6 +1145,8 @@ class _Loop:
     """Mutable working set carried across the session loop."""
 
     state: PortfolioStateV2
+    session_observer: SessionEvidenceObserverV1 | None = None
+    invocation_binding: OriginalInvocationBindingV1 | None = None
     staged_targets: tuple[SecurityTargetPositionV1, ...] = ()
     #: The session whose close staged the pending decision, if one is pending.
     staged_decision_session: EvaluationSessionV1 | None = None
@@ -2226,6 +2236,7 @@ class SessionEvaluatorEngine:
         strategy: LaneDispatchStrategy,
         run_identity: EvaluationRunIdentityV1 | EvaluationRunIdentityV2,
         original_invocation_binding: OriginalInvocationBindingV1 | None = None,
+        session_observer: SessionEvidenceObserverV1 | None = None,
     ) -> EvaluationRunArtifactsV2:
         """Step every session through all five phases, halting fail-closed.
 
@@ -2245,6 +2256,10 @@ class SessionEvaluatorEngine:
             if original_invocation_binding is not None
             else None
         )
+        if session_observer is not None and not isinstance(
+            session_observer, SessionEvidenceObserverV1
+        ):
+            raise TypeError("EXACT_SESSION_OBSERVER_PROTOCOL_REQUIRED")
         bound_lifecycle: BoundOpeningBookLifecycleV1 | None = None
         # Decide which evaluator owns accounting *before* any callbacks.
         # For a prepared run the private runner was revalidated before retain
@@ -2405,6 +2420,12 @@ class SessionEvaluatorEngine:
                         "opening-book lifecycle phase changed during consumption"
                     )
 
+        loop.session_observer = session_observer
+        loop.invocation_binding = (
+            copy_original_invocation_binding(invocation_binding)
+            if invocation_binding is not None
+            else None
+        )
         halt: _Halt | None = None
         for index, session in enumerate(sessions):
             try:
@@ -2526,6 +2547,19 @@ class SessionEvaluatorEngine:
             else:
                 self._close_mark(loop, index, session)
             phase = EvaluationPhase.POST_CLOSE_DECISION
+            if loop.session_observer is not None:
+                observation = SessionObservationV1(
+                    session_index=index,
+                    session=session,
+                    state=loop.state,
+                    trace_prefix=tuple(
+                        event for event in loop.events if event.session_index == index
+                    ),
+                    invocation_binding=loop.invocation_binding,
+                )
+                loop.session_observer.observe_session(
+                    _revalidated(SessionObservationV1, observation)
+                )
             return decide(loop, index, session)
         except (IndeterminateValuationError, IndeterminateExecutionError) as error:
             cause = str(error) or type(error).__name__
@@ -2718,6 +2752,73 @@ class SessionEvaluatorEngine:
         # stale intent can never be executed twice.
         loop.staged_targets = ()
         loop.staged_decision_session = None
+        if loop.session_observer is not None:
+            # Mandatory host controls see actual next-open prices, including
+            # unchanged holdings. Legacy no-observer evidence requirements and
+            # financial artifacts remain untouched.
+            complete_prices = dict(prices)
+            for security_id in sorted(set(targets) | set(held), key=_security_order):
+                if security_id in complete_prices:
+                    continue
+                if self._reconstructed_lane is None:
+                    complete_prices[security_id] = self._open_price(
+                        security_id, session
+                    )
+                else:
+                    record = self._reconstructed_price(
+                        security_id, session.session_key, "open"
+                    )
+                    complete_prices[security_id] = ListingOpenPriceV1(
+                        listing_id=record.listing_id,
+                        venue=record.venue,
+                        unadjusted_open_price=record.unadjusted_price,
+                    )
+            preview = RebalancePreviewV1(
+                session_index=index,
+                session=session,
+                decision_session=decision_session,
+                before_state=loop.state,
+                outcome=outcome,
+                open_prices=tuple(
+                    OpenSecurityPriceV1(security_id=security_id, quote=quote)
+                    for security_id, quote in sorted(
+                        complete_prices.items(),
+                        key=lambda item: _security_order(item[0]),
+                    )
+                ),
+                invocation_binding=loop.invocation_binding,
+            )
+            expected_preview_hash = preview.financial_hash
+            returned = loop.session_observer.authorize_rebalance(
+                _revalidated(RebalancePreviewV1, preview)
+            )
+            if type(returned) is not ExecutionAuthorizationV1:
+                raise ValueError("EXACT_EXECUTION_AUTHORIZATION_REQUIRED")
+            authorization = _revalidated(ExecutionAuthorizationV1, returned)
+            if authorization.preview_hash != expected_preview_hash:
+                raise ValueError("EXECUTION_AUTHORIZATION_WRONG_PREVIEW")
+            loop.events.append(
+                ExecutionAuthorizationTraceEventV1(
+                    sequence=len(loop.events),
+                    session_index=index,
+                    session_key=session.session_key,
+                    preview_hash=expected_preview_hash,
+                    policy_hash=authorization.policy_hash,
+                    verdict=authorization.verdict,
+                    reason=authorization.reason,
+                )
+            )
+            # An accounting rejection below remains a rejection; an observer
+            # cannot turn it into permission, a fill, or a successful hold.
+            if outcome.classification != "rejected":
+                if authorization.verdict == "contain":
+                    return _Halt(
+                        index,
+                        EvaluationClassification.INDETERMINATE,
+                        authorization.reason,
+                    )
+                if authorization.verdict == "reject":
+                    return None
         if outcome.classification == "rejected":
             rejection = outcome.rejection
             if rejection is None:  # pragma: no cover - model invariant

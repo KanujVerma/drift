@@ -68,6 +68,7 @@ from drift.evaluator.opening_book_lifecycle import (
     copy_original_invocation_binding,
     invocation_binding_payload,
 )
+from drift.evaluator.session_observer import SessionEvidenceObserverV1
 from drift.ledger.interface import AuditEventDraft, Ledger
 from drift.serialization.canonical import content_hash
 
@@ -132,6 +133,7 @@ class ExperimentRunnerContext:
     audit_event_id: UUID7 | None = None
     original_result_observer: CanonicalM0ResultObserverV1 | None = None
     completion_clock: Callable[[], datetime] | None = None
+    session_observer: SessionEvidenceObserverV1 | None = None
 
 
 @dataclass(frozen=True)
@@ -567,6 +569,7 @@ def execute_experiment_run(
     strategy = context.strategy
     original_result_observer = context.original_result_observer
     completion_clock = context.completion_clock
+    session_observer = context.session_observer
     refuse_promotion_lane(engine.admission, site="the experiment runner")
     inputs = _caller_inputs(specification, context)
     _validate_context(inputs)
@@ -598,7 +601,18 @@ def execute_experiment_run(
         "parameters_hash": parameters_hash,
     }
     try:
-        if invocation_binding is None:
+        if session_observer is not None:
+            artifacts = engine.run(
+                strategy=strategy,
+                run_identity=inputs.run_identity,
+                original_invocation_binding=(
+                    copy_original_invocation_binding(invocation_binding)
+                    if invocation_binding is not None
+                    else None
+                ),
+                session_observer=session_observer,
+            )
+        elif invocation_binding is None:
             # Preserve the ordinary evaluator call surface and byte contract.
             artifacts = engine.run(strategy=strategy, run_identity=inputs.run_identity)
         else:

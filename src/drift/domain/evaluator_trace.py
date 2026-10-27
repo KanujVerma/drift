@@ -392,6 +392,17 @@ class IndeterminateCauseTraceEventV1(_TraceEventBaseV1):
     cause: NonBlankStr
 
 
+class ExecutionAuthorizationTraceEventV1(_TraceEventBaseV1):
+    """Optional installed-host pre-commit verdict, with no operational IDs."""
+
+    kind: Literal["execution_authorization"] = "execution_authorization"
+    phase: Literal[EvaluationPhase.OPEN_EXECUTION] = EvaluationPhase.OPEN_EXECUTION
+    preview_hash: SHA256Hash
+    policy_hash: SHA256Hash
+    verdict: Literal["approve", "reject", "contain"]
+    reason: NonBlankStr
+
+
 type EvaluatorTraceEventV1 = Annotated[
     SessionStartTraceEventV1
     | CorporateActionAppliedTraceEventV1
@@ -402,7 +413,8 @@ type EvaluatorTraceEventV1 = Annotated[
     | StrategyDecisionTraceEventV1
     | ExploratoryStrategyDecisionTraceEventV1
     | ExploratoryAccountingPriceTraceEventV1
-    | IndeterminateCauseTraceEventV1,
+    | IndeterminateCauseTraceEventV1
+    | ExecutionAuthorizationTraceEventV1,
     Field(discriminator="kind"),
 ]
 
