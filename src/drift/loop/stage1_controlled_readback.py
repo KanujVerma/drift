@@ -493,6 +493,13 @@ class _Verifier:
         )
         if expected != record.authorization:
             raise ValueError("CONTROLLED_FALSE_EXECUTION_AUTHORIZATION")
+        # An authorization journal row cannot be recorded after the marked
+        # book that already includes the outcome of that authorization. UTC
+        # timestamps can legitimately be equal, so enforce original append
+        # order rather than comparing the clock values alone.
+        observed = self.observations.get(preview.session_index)
+        if observed is not None:
+            self.journal.resolve(row.ref, before=observed)
         if result is not None:
             trace = result.original_artifacts.trace.events
             originals = [
@@ -1471,6 +1478,9 @@ def read_controlled_campaign(
                         c.checkpoint_id,
                         c.session_index,
                         c.decision_cutoff,
+                        c.not_before,
+                        c.expires_at,
+                        c.revoked_at,
                         c.research_budget_usd,
                     )
                     for c in plan.checkpoints

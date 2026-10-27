@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "unit"))
 from test_stage1_controlled_contracts import controlled_arguments
 from test_stage1_synthetic_research_execution import BASE
 
+from drift.evaluator.session_observer import RebalancePreviewV1
 from drift.ledger.interface import AuditEventDraft
 from drift.ledger.sqlite import SQLiteLedger
 from drift.loop import stage1_controlled_contracts as C
@@ -337,28 +338,8 @@ def test_missing_original_execution_record_is_not_complete(
         assert not report.trials[0].complete_interval
 
 
-def test_equal_clock_decision_before_research_is_not_certified(
-    tmp_path: Path,
-) -> None:
-    """Rebuild a hash-valid original journal with a genuine causal inversion."""
-    args = controlled_arguments(tmp_path / "source")
-    args["clock"] = lambda: BASE + timedelta(hours=1)
-    executed = execute_controlled_campaign(**args)
-    assert read(args, executed.allocation_id).status == "VERIFIED_COMPLETE"
-    original = list(args["origin"].verified_events())
-    decision = next(
-        event
-        for event in original
-        if event.event_type == C.EVENT_PREFIX + "decision"
-        and event.payload["record"]["checkpoint_id"] == "CKPT-001"
-    )
-    observation_id = decision.payload["record"]["observation"]["event_id"]
-    original.remove(decision)
-    position = next(
-        i for i, event in enumerate(original) if str(event.event_id) == observation_id
-    )
-    original.insert(position + 1, decision)
-    target = tmp_path / "causally-reordered.sqlite3"
+def _write_reordered_journal(original: list[Any], target: Path) -> None:
+    """Rebuild a fully valid audit hash chain after moving original events."""
     writer = SQLiteLedger(target)
     hashes: dict[str, str] = {}
 
@@ -387,6 +368,65 @@ def test_equal_clock_decision_before_research_is_not_certified(
         )
         hashes[event.event_hash] = appended.event_hash
     writer.verify_chain()
+
+
+def test_equal_clock_execution_after_marked_book_is_not_certified(
+    tmp_path: Path,
+) -> None:
+    """An append-valid authorization cannot follow its own committed close."""
+    args = controlled_arguments(tmp_path / "source")
+    args["clock"] = lambda: BASE + timedelta(hours=1)
+    executed = execute_controlled_campaign(**args)
+    assert read(args, executed.allocation_id).status == "VERIFIED_COMPLETE"
+    captured = capture(args, executed.allocation_id)
+    execution = next(row for row in captured.rows if row.record.kind == "execution")
+    assert isinstance(execution.record, C.ExecutionRecordV1)
+    preview = execution.record.preview.parse(RebalancePreviewV1)
+    marked = next(
+        row
+        for row in captured.rows
+        if isinstance(row.record, C.ObservationRecordV1)
+        and row.record.observation.session_index == preview.session_index
+    )
+    original = list(args["origin"].verified_events())
+    moved = next(
+        event for event in original if event.event_id == execution.event.event_id
+    )
+    original.remove(moved)
+    target_index = next(
+        i for i, event in enumerate(original) if event.event_id == marked.event.event_id
+    )
+    original.insert(target_index + 1, moved)
+    target = tmp_path / "late-authorization.sqlite3"
+    _write_reordered_journal(original, target)
+    args["origin"] = replace(args["origin"], ledger_path=target)
+    with pytest.raises(ValueError, match="CONTROLLED_REFERENCE_NOT_CAUSAL"):
+        read(args, executed.allocation_id)
+
+
+def test_equal_clock_decision_before_research_is_not_certified(
+    tmp_path: Path,
+) -> None:
+    """Rebuild a hash-valid original journal with a genuine causal inversion."""
+    args = controlled_arguments(tmp_path / "source")
+    args["clock"] = lambda: BASE + timedelta(hours=1)
+    executed = execute_controlled_campaign(**args)
+    assert read(args, executed.allocation_id).status == "VERIFIED_COMPLETE"
+    original = list(args["origin"].verified_events())
+    decision = next(
+        event
+        for event in original
+        if event.event_type == C.EVENT_PREFIX + "decision"
+        and event.payload["record"]["checkpoint_id"] == "CKPT-001"
+    )
+    observation_id = decision.payload["record"]["observation"]["event_id"]
+    original.remove(decision)
+    position = next(
+        i for i, event in enumerate(original) if str(event.event_id) == observation_id
+    )
+    original.insert(position + 1, decision)
+    target = tmp_path / "causally-reordered.sqlite3"
+    _write_reordered_journal(original, target)
     args["origin"] = replace(args["origin"], ledger_path=target)
     with pytest.raises(ValueError, match="CONTROLLED_REFERENCE_NOT_CAUSAL"):
         read(args, executed.allocation_id)

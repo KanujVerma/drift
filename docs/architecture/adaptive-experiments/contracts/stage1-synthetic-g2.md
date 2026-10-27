@@ -145,7 +145,8 @@ comparison. It reuses existing metric math for economic gain and maximum
 drawdown. Filled notional and original trading costs are reported separately.
 `compare_controlled_campaigns` cold-verifies both roots and original allocations,
 requires the declared complementary B/R arms and comparable data/cost/mandate/
-execution/schedule, and records both immutable prefix tips. Two accounts in one
+execution/schedule, including each original grant's not-before, expiry and
+revocation policy, and records both immutable prefix tips. Two accounts in one
 paired run are not multiple independent samples merely because they have many
 monthly checkpoints. No Sharpe, significance, profitability or superiority
 claim is inferred from an insufficient synthetic sample.
@@ -158,6 +159,25 @@ schemas remain frozen. Opt-in observation/authorization events use a distinct
 `EvaluationTraceLogV2` admitted only by the existing V2 artifact container.
 Ordinary V1 artifacts cannot silently accept the new event kinds. No golden
 fingerprint is updated to accommodate this feature.
+
+Original M0 RESULT associations preserve the existing schema-2 single-event
+retention for canonical artifacts of at most 4 MiB. Larger canonical original
+artifacts are retained using an additive schema-3 association in the same
+configured local append-only ledger. Each original artifact is zlib-compressed,
+then divided into at most 256 original chunk events of at most 256 KiB binary
+payload each. The decoded complete canonical original is bounded to 128 MiB;
+total compressed evidence is bounded to 64 MiB. The terminal association binds
+the exact compressed and original lengths, SHA-256 hashes, count, original chunk
+event identifiers and every ledger-event hash. Every chunk also binds its own
+index, count, content digest, actual allocation and original M0 event. The
+independent cold reader must account for every chunk in the one captured ledger
+snapshot and enforce the original M0 -> chunk -> unique M0-use reservation ->
+RESULT chronology before bounded decompression and full canonical validation.
+Unaccounted/orphan chunks, truncated or malformed streams, missing artifacts,
+foreign origin or inconsistent original result/trace/book hashes fail closed.
+If any append is interrupted, the already consumed account cannot be retried,
+refunded or reallocated. A schema-3 record cannot claim the schema-2 inline
+bytes, and no schema-2 retention limit is silently raised.
 
 The engine, portfolio accounting and baseline algorithms remain authoritative.
 There is no second backtester, financial ledger, source qualification system,

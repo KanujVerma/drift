@@ -13,6 +13,9 @@ implementation is replaced or bypassed.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import zlib
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import asdict, dataclass
@@ -65,11 +68,19 @@ from drift.loop.stage1_synthetic_account_lifecycle import (
 from drift.serialization.canonical import canonical_json, content_hash
 
 RESULT_EVENT = "stage1.synthetic_result.original_retained"
+CHUNK_EVENT = "stage1.synthetic_result.original_artifact_chunk"
 M0_USE_EVENT = "stage1.synthetic_result.original_m0_claim"
 RESULT_ENTITY = "stage1_synthetic_result"
 RESULT_PROFILE = "stage1-m0-original-association/2-candidate"
 M0_EVENT = "m2.evaluation.run.recorded"
 MAX_ARTIFACT_BYTES = 4_194_304
+# Keep the original v2 single-event limit, while allowing complete original
+# evidence under a strictly bounded, chunked v3 original association.
+MAX_ORIGINAL_ARTIFACT_BYTES = 134_217_728
+MAX_COMPRESSED_ARTIFACT_BYTES = 67_108_864
+ARTIFACT_CHUNK_BYTES = 262_144
+MAX_ARTIFACT_CHUNKS = 256
+CHUNK_ENCODING = "zlib+base64/1"
 
 
 class OriginalResultAssociationError(ValueError):
@@ -198,6 +209,129 @@ def _original_event(
     return position, original
 
 
+def _read_original_chunked_artifacts(
+    *,
+    events: tuple[AuditEvent, ...],
+    result_position: int,
+    data: Mapping[str, ImmutableJSONValue],
+    issuer: UUID,
+    allocation_id: UUID,
+    allocation_hash: str,
+) -> bytes:
+    """Cold-read every original chunk from the single verified ledger snapshot.
+
+    Chunk references are identities within the trusted configured origin, not
+    alternative caller-supplied paths or URLs. Every chunk, its ordering and
+    byte payload must be accounted for before decompression or RESULT scoring.
+    """
+    expected_count = data.get("artifact_chunk_count")
+    expected_length = data.get("artifact_original_size")
+    expected_packed_length = data.get("artifact_compressed_size")
+    expected_hashes = data.get("artifact_chunk_event_hashes")
+    expected_ids = data.get("artifact_chunk_event_ids")
+    if (
+        data.get("artifact_encoding") != CHUNK_ENCODING
+        or type(expected_count) is not int
+        or not 1 <= expected_count <= MAX_ARTIFACT_CHUNKS
+        or type(expected_length) is not int
+        or not MAX_ARTIFACT_BYTES < expected_length <= MAX_ORIGINAL_ARTIFACT_BYTES
+        or type(expected_packed_length) is not int
+        or not 1 <= expected_packed_length <= MAX_COMPRESSED_ARTIFACT_BYTES
+        or type(expected_hashes) is not tuple
+        or len(expected_hashes) != expected_count
+        or any(type(item) is not str for item in expected_hashes)
+        or type(expected_ids) is not tuple
+        or len(expected_ids) != expected_count
+        or any(type(item) is not str for item in expected_ids)
+    ):
+        raise OriginalResultAssociationError("RESULT_CHUNK_MANIFEST_INVALID")
+    # A forged envelope with a foreign entity cannot hide a chunk whose body
+    # still claims this allocation or M0. Unrelated accounts retain isolation.
+    parts = [
+        (pos, event)
+        for pos, event in enumerate(events)
+        if event.event_type == CHUNK_EVENT
+        and (
+            event.entity_id == allocation_id
+            or (
+                isinstance(event.payload, Mapping)
+                and (
+                    event.payload.get("allocation_event_hash") == allocation_hash
+                    or event.payload.get("m0_event_hash") == data.get("m0_event_hash")
+                )
+            )
+        )
+    ]
+    if len(parts) != expected_count:
+        raise OriginalResultAssociationError("RESULT_CHUNK_INVENTORY_INCOMPLETE")
+    compressed = bytearray()
+    for index, (position, event) in enumerate(parts):
+        fields = _mapping(event.payload, "RESULT_CHUNK_NOT_STRUCTURED")
+        encoded = fields.get("data_base64")
+        if (
+            position >= result_position
+            or event.entity_type != RESULT_ENTITY
+            or event.schema_version != "1"
+            or event.event_id.version != 7
+            or str(event.event_id) != expected_ids[index]
+            or event.event_hash != expected_hashes[index]
+            or event.deduplication_key != f"stage1:result-chunk:{allocation_id}:{index}"
+            or fields.get("profile") != RESULT_PROFILE
+            or fields.get("issuer_instance_id") != str(issuer)
+            or fields.get("allocation_event_hash") != allocation_hash
+            or fields.get("m0_event_hash") != data.get("m0_event_hash")
+            or fields.get("original_artifacts_sha256")
+            != data.get("original_artifacts_sha256")
+            or fields.get("compressed_sha256") != data.get("artifact_compressed_sha256")
+            or type(fields.get("chunk_index")) is not int
+            or fields.get("chunk_index") != index
+            or type(fields.get("chunk_count")) is not int
+            or fields.get("chunk_count") != expected_count
+            or type(encoded) is not str
+            or not encoded
+            or len(encoded) > ((ARTIFACT_CHUNK_BYTES + 2) // 3) * 4
+        ):
+            raise OriginalResultAssociationError("RESULT_CHUNK_ORIGINAL_MISMATCH")
+        try:
+            raw = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error) as error:
+            raise OriginalResultAssociationError(
+                "RESULT_CHUNK_ENCODING_INVALID"
+            ) from error
+        if (
+            not raw
+            or len(raw) > ARTIFACT_CHUNK_BYTES
+            or base64.b64encode(raw).decode("ascii") != encoded
+            or sha256(raw).hexdigest() != fields.get("chunk_sha256")
+        ):
+            raise OriginalResultAssociationError("RESULT_CHUNK_BYTES_INVALID")
+        compressed.extend(raw)
+        if len(compressed) > MAX_COMPRESSED_ARTIFACT_BYTES:
+            raise OriginalResultAssociationError("RESULT_COMPRESSED_ARTIFACT_TOO_LARGE")
+    if len(compressed) != expected_packed_length or sha256(
+        compressed
+    ).hexdigest() != data.get("artifact_compressed_sha256"):
+        raise OriginalResultAssociationError("RESULT_COMPRESSED_ARTIFACT_HASH_INVALID")
+    decoder = zlib.decompressobj()
+    try:
+        original = decoder.decompress(compressed, MAX_ORIGINAL_ARTIFACT_BYTES + 1)
+        if (
+            len(original) != expected_length
+            or decoder.unconsumed_tail
+            or decoder.unused_data
+            or not decoder.eof
+            or sha256(original).hexdigest() != data.get("original_artifacts_sha256")
+        ):
+            raise OriginalResultAssociationError(
+                "RESULT_ORIGINAL_ARTIFACT_REBUILD_INVALID"
+            )
+    except zlib.error as error:
+        raise OriginalResultAssociationError(
+            "RESULT_ARTIFACT_COMPRESSION_INVALID"
+        ) from error
+    return original
+
+
 class _OriginalResultVerifier:
     """Shared verification for live observation and fresh-process readback."""
 
@@ -290,8 +424,15 @@ class _OriginalResultVerifier:
         result_hash: str,
         trace_hash: str,
         final_book_hash: str,
+        captured_events: tuple[AuditEvent, ...] | None = None,
     ) -> tuple[tuple[AuditEvent, ...], AuditEvent, AuditEvent, AuditEvent]:
-        events = self._origin.verified_events()
+        # Cold RESULT and chunks must be checked against one immutable prefix;
+        # a live writer must not splice a later ledger view into this proof.
+        events = (
+            captured_events
+            if captured_events is not None
+            else self._origin.verified_events()
+        )
         proof = self._read_account()
         if (
             proof.fields != self._fields
@@ -432,7 +573,7 @@ class _OriginalResultVerifier:
             receipt.event_id != reference.event_id
             or receipt.event_hash != reference.event_hash
             or receipt.entity_type != RESULT_ENTITY
-            or receipt.schema_version != "2"
+            or receipt.schema_version not in ("2", "3")
             or receipt.deduplication_key
             != f"stage1:result:{self._original_allocation.allocation_id}"
             or data.get("profile") != RESULT_PROFILE
@@ -448,14 +589,36 @@ class _OriginalResultVerifier:
             or data.get("scientifically_qualified") is not False
         ):
             raise OriginalResultAssociationError("RESULT_E1_SCOPE_ORIGIN_MISMATCH")
-        original_text = data.get("original_artifacts_utf8")
-        if type(original_text) is not str:
-            raise OriginalResultAssociationError("RESULT_ORIGINAL_BYTES_MISSING")
-        original = original_text.encode("utf-8")
-        if len(original) > MAX_ARTIFACT_BYTES or sha256(
-            original
-        ).hexdigest() != data.get("original_artifacts_sha256"):
-            raise OriginalResultAssociationError("RESULT_ORIGINAL_BYTES_HASH_INVALID")
+        if receipt.schema_version == "3":
+            if "original_artifacts_utf8" in data:
+                raise OriginalResultAssociationError("RESULT_CHUNK_MANIFEST_INVALID")
+            original = _read_original_chunked_artifacts(
+                events=events,
+                result_position=position,
+                data=data,
+                issuer=self._origin.issuer_instance_id,
+                allocation_id=self._original_allocation.allocation_id,
+                allocation_hash=self._original_allocation.allocation_ref.event_hash,
+            )
+        else:
+            if any(
+                item.event_type == CHUNK_EVENT
+                and item.entity_id == self._original_allocation.allocation_id
+                for item in events
+            ):
+                raise OriginalResultAssociationError(
+                    "RESULT_UNDECLARED_ARTIFACT_CHUNKS"
+                )
+            original_text = data.get("original_artifacts_utf8")
+            if type(original_text) is not str:
+                raise OriginalResultAssociationError("RESULT_ORIGINAL_BYTES_MISSING")
+            original = original_text.encode("utf-8")
+            if len(original) > MAX_ARTIFACT_BYTES or sha256(
+                original
+            ).hexdigest() != data.get("original_artifacts_sha256"):
+                raise OriginalResultAssociationError(
+                    "RESULT_ORIGINAL_BYTES_HASH_INVALID"
+                )
         artifacts = EvaluationRunArtifactsV2.model_validate_json(original)
         self._verify_account_artifacts(artifacts)
         if (
@@ -491,6 +654,7 @@ class _OriginalResultVerifier:
             result_hash=artifacts.result.result_hash,
             trace_hash=artifacts.trace.trace_hash,
             final_book_hash=content_hash(artifacts.final_state),
+            captured_events=events,
         )
         m0_position = next(
             index
@@ -531,6 +695,18 @@ class _OriginalResultVerifier:
             or not m0.timestamp <= m0_use.timestamp <= receipt.timestamp
         ):
             raise OriginalResultAssociationError("M0_EVENT_RESERVATION_SCOPE_MISMATCH")
+        if receipt.schema_version == "3" and any(
+            not (
+                m0_position < index < use_position
+                and m0.timestamp <= event.timestamp <= m0_use.timestamp
+            )
+            for index, event in enumerate(history)
+            if event.event_type == CHUNK_EVENT
+            and event.entity_id == self._original_allocation.allocation_id
+        ):
+            raise OriginalResultAssociationError(
+                "ORIGINAL_CHUNK_NOT_BETWEEN_M0_AND_USE"
+            )
         if (
             data.get("allocation_event_hash")
             != self._original_allocation.allocation_ref.event_hash
@@ -636,7 +812,7 @@ class Stage1OriginalResultAssociationV1(_OriginalResultVerifier):
         if (
             canonical_run.status is not ExperimentRunStatus.COMPLETED
             or not original_bytes
-            or len(original_bytes) > MAX_ARTIFACT_BYTES
+            or len(original_bytes) > MAX_ORIGINAL_ARTIFACT_BYTES
             or canonical_json(rebuilt) != original_bytes
             or canonical_run.completed_at is None
         ):
@@ -675,6 +851,22 @@ class Stage1OriginalResultAssociationV1(_OriginalResultVerifier):
         original = self._original_allocation
         result_hash = result.result_hash
         trace_hash = trace.trace_hash
+        chunked = len(original_bytes) > MAX_ARTIFACT_BYTES
+        packed: bytes | None = None
+        chunk_count = 0
+        if chunked:
+            packed = zlib.compress(original_bytes, level=6)
+            chunk_count = (
+                len(packed) + ARTIFACT_CHUNK_BYTES - 1
+            ) // ARTIFACT_CHUNK_BYTES
+            if (
+                not packed
+                or len(packed) > MAX_COMPRESSED_ARTIFACT_BYTES
+                or not 1 <= chunk_count <= MAX_ARTIFACT_CHUNKS
+            ):
+                raise OriginalResultAssociationError(
+                    "M0_ORIGINAL_CHUNK_BUDGET_EXCEEDED"
+                )
         fields: dict[str, ImmutableJSONValue] = {
             "invocation_binding": invocation_binding_payload(
                 _invocation_binding(_mapping(m0.payload, "M0_AUDIT_PAYLOAD_INVALID"))
@@ -699,9 +891,58 @@ class Stage1OriginalResultAssociationV1(_OriginalResultVerifier):
             "final_book_hash": content_hash(book),
             "evaluator_classification": result.classification.value,
             "original_artifacts_sha256": sha256(original_bytes).hexdigest(),
-            "original_artifacts_utf8": original_bytes.decode("utf-8"),
             "scientifically_qualified": False,
         }
+        if not chunked:
+            fields["original_artifacts_utf8"] = original_bytes.decode("utf-8")
+        else:
+            assert packed is not None
+            # Chunk commits occur after original M0 completion and before
+            # the unique M0-result reservation; a torn append is unresolved.
+            writer = SQLiteLedger(self._origin.ledger_path)
+            chunk_events: list[AuditEvent] = []
+            compressed_hash = sha256(packed).hexdigest()
+            for index in range(chunk_count):
+                start = index * ARTIFACT_CHUNK_BYTES
+                raw_chunk = packed[start : start + ARTIFACT_CHUNK_BYTES]
+                draft_chunk = AuditEventDraft(
+                    event_id=uuid7(),
+                    event_type=CHUNK_EVENT,
+                    timestamp=observed,
+                    entity_type=RESULT_ENTITY,
+                    entity_id=original.allocation_id,
+                    payload={
+                        "profile": RESULT_PROFILE,
+                        "issuer_instance_id": str(self._origin.issuer_instance_id),
+                        "allocation_event_hash": original.allocation_ref.event_hash,
+                        "m0_event_hash": m0.event_hash,
+                        "original_artifacts_sha256": fields[
+                            "original_artifacts_sha256"
+                        ],
+                        "compressed_sha256": compressed_hash,
+                        "chunk_index": index,
+                        "chunk_count": chunk_count,
+                        "chunk_sha256": sha256(raw_chunk).hexdigest(),
+                        "data_base64": base64.b64encode(raw_chunk).decode("ascii"),
+                    },
+                    deduplication_key=f"stage1:result-chunk:{original.allocation_id}:{index}",
+                    schema_version="1",
+                )
+                try:
+                    chunk_events.append(writer.append(draft_chunk))
+                except DuplicateEventError as error:
+                    raise OriginalResultAssociationError(
+                        "ORIGINAL_RESULT_CHUNK_ALREADY_RETAINED"
+                    ) from error
+            fields.update(
+                artifact_encoding=CHUNK_ENCODING,
+                artifact_original_size=len(original_bytes),
+                artifact_compressed_sha256=compressed_hash,
+                artifact_compressed_size=len(packed),
+                artifact_chunk_count=chunk_count,
+                artifact_chunk_event_ids=tuple(str(e.event_id) for e in chunk_events),
+                artifact_chunk_event_hashes=tuple(e.event_hash for e in chunk_events),
+            )
         # Reserve the operational M0 event with its own ledger-unique key
         # BEFORE publishing the account-scoped RESULT. A key scoped only to
         # the allocation cannot stop ARM-B and ARM-R from consuming the same
@@ -748,7 +989,7 @@ class Stage1OriginalResultAssociationV1(_OriginalResultVerifier):
                 **fields,
             },
             deduplication_key=f"stage1:result:{original.allocation_id}",
-            schema_version="2",
+            schema_version="3" if chunked else "2",
         )
         # The configured original ledger is the same trusted-host root that
         # holds original allocation + M0, not one named by a caller receipt.

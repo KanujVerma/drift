@@ -342,3 +342,45 @@ def test_strategy_cannot_suppress_original_result_observer_during_decide(
     retained = original.readback()
     assert retained.result_hash in {r.content_hash for r in run.artifact_references}
     assert not retained.scientifically_qualified
+
+
+def test_bounded_chunked_original_result_can_be_cold_verified_without_v1_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Force the additive v3 path with real evaluator artifacts and tiny chunks."""
+    from drift.loop import stage1_original_result_association as storage
+    from drift.loop.stage1_original_result_association import (
+        CHUNK_EVENT,
+        read_original_result,
+    )
+
+    monkeypatch.setattr(storage, "MAX_ARTIFACT_BYTES", 1_024)
+    monkeypatch.setattr(storage, "ARTIFACT_CHUNK_BYTES", 512)
+    engine, observer, store = _setup(tmp_path)
+    run = _execute(engine, observer, store)
+    assert run.status is ExperimentRunStatus.COMPLETED
+    events = store.origin.verified_events()
+    chunks = [e for e in events if e.event_type == CHUNK_EVENT]
+    receipts = [e for e in events if e.event_type == RESULT_EVENT]
+    assert len(receipts) == 1 and receipts[0].schema_version == "3"
+    assert len(chunks) >= 2
+    assert all(e.schema_version == "1" for e in chunks)
+    assert isinstance(receipts[0].payload, Mapping)
+    assert receipts[0].payload["artifact_chunk_count"] == len(chunks)
+    original = observer.readback()
+    cold = read_original_result(
+        origin=store.origin,
+        original_account=observer._account.verified_original(),
+        association_ref=original.association_ref,
+        provenance=observer._provenance,
+        campaign=make_golden_campaign(),
+        arms=(make_golden_arm_b(), make_golden_arm_r()),
+        bindings=tuple(make_golden_bindings()),
+        expected_run_ids=("RUN-001",),
+        clock=lambda: RESULT_OBSERVED + timedelta(minutes=1),
+    )
+    assert original.original_artifacts_bytes == cold.original_artifacts_bytes
+    assert cold.original_artifacts_bytes == canonical_json(cold.original_artifacts)
+    assert cold.result_hash == original.result_hash
+    assert not cold.original_issuer_authenticated_for_e6b
+    assert not cold.scientifically_qualified

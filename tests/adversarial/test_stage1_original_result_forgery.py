@@ -44,6 +44,7 @@ from drift.domain.evaluator_strategy import (
     StrategyDecisionContextV1,
     StrategyDecisionIntentV1,
 )
+from drift.domain.events import AuditEvent
 from drift.domain.experiments import ExperimentRun, ExperimentRunStatus
 from drift.errors import LedgerIntegrityError
 from drift.evaluator.engine import SessionEvaluatorEngine
@@ -602,4 +603,105 @@ def test_cold_reader_refuses_noncanonical_reference_equality(
     before = store.origin.verified_events()
     with pytest.raises(OriginalResultAssociationError):
         _cold_read(observer, store.origin, account, reference)
+    assert store.origin.verified_events() == before
+
+
+@pytest.mark.parametrize("foreign_envelope", [False, True])
+def test_original_artifact_chunk_orphan_refuses_even_with_valid_ledger_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, foreign_envelope: bool
+) -> None:
+    """A post-RESULT orphan cannot disappear from a complete chunk inventory."""
+    import base64
+
+    from drift.loop import stage1_original_result_association as storage
+
+    monkeypatch.setattr(storage, "MAX_ARTIFACT_BYTES", 1_024)
+    monkeypatch.setattr(storage, "ARTIFACT_CHUNK_BYTES", 512)
+    engine, observer, store = _setup(tmp_path)
+    _execute(engine, observer, store)
+    original = observer.readback()
+    events = store.origin.verified_events()
+    chunk = next(event for event in events if event.event_type == storage.CHUNK_EVENT)
+    assert isinstance(chunk.payload, Mapping)
+    fields = dict(chunk.payload)
+    fields["data_base64"] = base64.b64encode(b"forged").decode("ascii")
+    SQLiteLedger(store.origin.ledger_path).append(
+        AuditEventDraft(
+            event_id=uuid7(),
+            event_type=storage.CHUNK_EVENT,
+            timestamp=RESULT_OBSERVED,
+            entity_type=chunk.entity_type,
+            entity_id=uuid7() if foreign_envelope else chunk.entity_id,
+            payload=fields,
+            deduplication_key="synthetic:orphan:" + str(uuid7()),
+            schema_version="1",
+        )
+    )
+    store.origin.verified_events()
+    with pytest.raises(
+        OriginalResultAssociationError, match="RESULT_CHUNK_INVENTORY_INCOMPLETE"
+    ):
+        observer.readback()
+    assert not original.scientifically_qualified
+
+
+def test_interrupted_artifact_chunk_retention_never_recredits_original_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A partial v3 artifact write remains unresolved and cannot retry M0."""
+    from drift.loop import stage1_original_result_association as storage
+
+    monkeypatch.setattr(storage, "MAX_ARTIFACT_BYTES", 1_024)
+    monkeypatch.setattr(storage, "ARTIFACT_CHUNK_BYTES", 512)
+    engine, observer, store = _setup(tmp_path)
+    actual_append = SQLiteLedger.append
+    chunks = 0
+
+    def fail_second_chunk(ledger: SQLiteLedger, draft: AuditEventDraft) -> AuditEvent:
+        nonlocal chunks
+        if draft.event_type == storage.CHUNK_EVENT:
+            chunks += 1
+            if chunks == 2:
+                raise OSError("injected v3 chunk retention uncertainty")
+        return actual_append(ledger, draft)
+
+    monkeypatch.setattr(SQLiteLedger, "append", fail_second_chunk)
+    with pytest.raises(OSError, match="chunk retention uncertainty"):
+        _execute(engine, observer, store)
+    assert chunks == 2
+    with pytest.raises(
+        OriginalResultAssociationError, match="ORIGINAL_RESULT_NOT_RETAINED"
+    ):
+        observer.readback()
+    events = store.origin.verified_events()
+    assert any(e.event_type == storage.CHUNK_EVENT for e in events)
+    assert all(
+        e.event_type not in {storage.RESULT_EVENT, storage.M0_USE_EVENT} for e in events
+    )
+    assert any(e.event_type == CONSUMED for e in events)
+    second = _execute(engine, observer, store)
+    assert second.status is ExperimentRunStatus.FAILED
+    remaining = store.origin.verified_events()
+    assert sum(event.event_type == ALLOCATION for event in remaining) == 1
+    assert sum(event.event_type == CONSUMED for event in remaining) == 1
+    assert all(event.event_type != storage.RESULT_EVENT for event in remaining)
+
+
+def test_original_chunk_reader_enforces_uncompressed_resource_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verified chunk hashes never authorize an unbounded decoded payload."""
+    from drift.loop import stage1_original_result_association as storage
+
+    monkeypatch.setattr(storage, "MAX_ARTIFACT_BYTES", 1_024)
+    monkeypatch.setattr(storage, "ARTIFACT_CHUNK_BYTES", 512)
+    engine, observer, store = _setup(tmp_path)
+    _execute(engine, observer, store)
+    assert observer.readback().original_artifacts_bytes
+    before = store.origin.verified_events()
+    monkeypatch.setattr(storage, "MAX_ORIGINAL_ARTIFACT_BYTES", 2_048)
+    with pytest.raises(
+        OriginalResultAssociationError, match="RESULT_CHUNK_MANIFEST_INVALID"
+    ):
+        observer.readback()
     assert store.origin.verified_events() == before

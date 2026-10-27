@@ -1209,3 +1209,47 @@ def test_whole_campaign_comparison_includes_initial_period_and_distinct_accounts
                 }
             )
         )
+
+
+@pytest.mark.parametrize("validity_field", ["not_before", "expires_at", "revoked_at"])
+def test_comparison_refuses_different_original_grant_validity(
+    tmp_path: Path, validity_field: str
+) -> None:
+    """B/R accounting cannot turn asymmetric grant permission into equal policy."""
+    from datetime import timedelta
+
+    from test_stage1_controlled_contracts import controlled_arguments
+    from test_stage1_synthetic_research_execution import BASE
+
+    from drift.loop.stage1_controlled_campaign import execute_controlled_campaign
+    from drift.loop.stage1_controlled_readback import compare_controlled_campaigns
+
+    left = controlled_arguments(tmp_path / "B")
+    right = controlled_arguments(tmp_path / "R", arm="ARM-R")
+    checkpoint = right["checkpoints"][0]
+    changes = {
+        "not_before": BASE - timedelta(minutes=1),
+        "expires_at": BASE + timedelta(days=1, minutes=1),
+        "revoked_at": BASE + timedelta(days=1),
+    }
+    right["checkpoints"] = (
+        checkpoint.model_copy(update={validity_field: changes[validity_field]}),
+    )
+    b = execute_controlled_campaign(**left)
+    r = execute_controlled_campaign(**right)
+    with pytest.raises(
+        ValueError, match="CONTROLLED_COMPARISON_NOT_DISTINCT_MATCHED_B_R"
+    ):
+        compare_controlled_campaigns(
+            test_origin=left["origin"],
+            comparator_origin=right["origin"],
+            test_allocation_id=b.allocation_id,
+            comparator_allocation_id=r.allocation_id,
+            campaign=left["campaign"],
+            arms=left["arms"],
+            bindings=left["bindings"],
+            expected_run_ids=left["expected_run_ids"],
+            test_provenance=left["provenance"],
+            comparator_provenance=right["provenance"],
+            clock=lambda: BASE + timedelta(days=2),
+        )
