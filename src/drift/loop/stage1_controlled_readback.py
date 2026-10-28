@@ -1555,7 +1555,9 @@ def read_controlled_campaign(
         status=status,
         reasons=tuple(sorted(verifier.reasons)),
         declared_opportunities=len(plan.checkpoints),
-        accounted_event_hashes=tuple(r.event.event_hash for r in captured.rows),
+        accounted_event_hashes=tuple(
+            event.event_hash for event in captured.physical_events
+        ),
         trials=tuple(trials),
         original_result=result,
         source_coverage=plan.coverage,

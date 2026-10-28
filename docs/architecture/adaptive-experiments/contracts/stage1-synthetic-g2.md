@@ -110,6 +110,51 @@ sealed and substituted feedback is rejected by replay.
 
 ## Replay, journal completeness and costs
 
+### Bounded original journal transport
+
+Small canonical payloads retain the original `zlib-base64` representation and
+small controlled envelopes retain their exact schema-1 serialized shape. A
+larger compressed payload uses `zlib-base64-segments/2`: bounded segments of one
+stream, with one unchanged 32MiB decoded-original limit, exact original size and
+SHA256, canonical base64, complete EOF and no trailing stream data. Segments
+are at most 1MiB each, with at most 64 segments and 64MiB encoded in aggregate.
+The candidate controlled record annotations accept this additional encoding;
+their JSON schemas therefore expand. Byte compatibility for old records is not
+a claim that those candidate JSON schemas are unchanged. Original account and
+RESULT schemas are unaffected.
+
+The complete logical envelope, including metadata, determines whether storage
+is inline or chunked. The stored-envelope limit remains 1MiB. A larger logical
+envelope has a separate 64MiB limit and is retained as at most 256 original
+`drift-local-synthetic-g2-chunk/2` events, each carrying at most 256KiB of original
+bytes, followed by one `drift-local-synthetic-g2-record/2` commit. Each chunk binds
+the configured issuer, allocation, preallocated commit event ID, record kind,
+whole-envelope size and digest, and index/count. The commit names exact ordered
+original chunk event IDs and hashes. Every physical payload is checked against
+the existing 1MiB limit, including its transport metadata.
+
+The clock is observed once per logical append. Its parts and commit share that
+instant, while the actual commit event supplies the semantic record's identity
+and ledger position. Cold readers retain raw events unchanged and inventory
+all recognized transport records across allocations before filtering. They
+reject missing, foreign, duplicate, reordered, malformed, late or orphan parts,
+bound resources before joining/parsing, and reconstruct the exact canonical
+logical envelope before the existing manifest and financial verification.
+The report accounts for physical chunks as well as their semantic commits.
+Independent allocations may interleave their parts in a shared ledger.
+
+A snapshot ending inside a chunk group is incomplete and fails closed, even
+if another allocation is being queried. This is an explicit availability cost
+of whole-prefix verification. Any storage exception latches the writer; a
+lost commit acknowledgment can be cold-read if its complete original group
+exists, but never authorizes a retry, replacement record or fresh account.
+Post-terminal cost corrections use the same bounded transport and retain their
+existing immutable supersession and deduplication rules. The first physical
+event reserves the logical deduplication key before any further chunks are
+written. Later transport keys use the preallocated commit identity in a separate
+namespace. A competing correction that loses this reservation leaves no parts
+behind, whether the winning correction is inline or chunked.
+
 `read_controlled_campaign` in `drift.loop.stage1_controlled_readback` uses one
 verified immutable original ledger prefix. Every join uses that captured prefix,
 including original account and result helpers. Caller-made writer objects and

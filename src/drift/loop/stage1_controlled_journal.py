@@ -7,16 +7,14 @@ the declared trusted local host, not authentication against a hostile host.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from uuid import UUID, uuid7
+from uuid import UUID
 
 from drift.domain.events import AuditEvent
 from drift.intelligence.contracts import CostReceipt
 from drift.intelligence.receipts import ResearchReceiptStore
-from drift.ledger.interface import AuditEventDraft
 from drift.ledger.sqlite import SQLiteLedger
 from drift.ledger.stage1_synthetic_account_receipts import (
     ConfiguredLocalSyntheticOriginV1,
@@ -24,7 +22,6 @@ from drift.ledger.stage1_synthetic_account_receipts import (
 from drift.loop.stage1_controlled_contracts import (
     ENTITY,
     EVENT_PREFIX,
-    MAX_RECORD_BYTES,
     ControlledCampaignPlanV1,
     ControlledEnvelopeV1,
     ControlledRecord,
@@ -34,6 +31,10 @@ from drift.loop.stage1_controlled_contracts import (
     OriginalReferenceV1,
     ResearchOutputRecordV1,
     detached,
+)
+from drift.loop.stage1_controlled_transport import (
+    append_envelope,
+    decode_original_events,
 )
 from drift.serialization.canonical import canonical_json
 
@@ -117,38 +118,8 @@ class CapturedControlledJournalV1:
             event.event_hash: (index, event) for index, event in enumerate(self.events)
         }
         self.tip = reference(self.events[-1]) if self.events else None
-        all_rows: list[ControlledRowV1] = []
-        for index, event in enumerate(self.events):
-            payload = event.payload
-            touches_namespace = (
-                event.event_type.startswith(EVENT_PREFIX)
-                or event.entity_type == ENTITY
-                or (
-                    isinstance(payload, Mapping)
-                    and payload.get("profile") == "drift-local-synthetic-g2/1"
-                )
-            )
-            if not touches_namespace:
-                continue
-            try:
-                encoded = canonical_json(payload)
-                if len(encoded) > MAX_RECORD_BYTES:
-                    raise ValueError("record too large")
-                envelope = ControlledEnvelopeV1.model_validate_json(encoded)
-            except (TypeError, ValueError) as error:
-                raise ValueError(
-                    "CONTROLLED_UNKNOWN_OR_MALFORMED_ORIGINAL_RECORD"
-                ) from error
-            if (
-                event.entity_type != ENTITY
-                or event.entity_id != envelope.allocation_id
-                or event.event_type != EVENT_PREFIX + envelope.record.kind
-                or event.schema_version != "1"
-                or envelope.issuer_instance_id != self.origin.issuer_instance_id
-                or canonical_json(envelope) != encoded
-            ):
-                raise ValueError("CONTROLLED_ENVELOPE_BODY_OR_ISSUER_MISMATCH")
-            all_rows.append(ControlledRowV1(index, event, envelope))
+        decoded = decode_original_events(self.events, self.origin.issuer_instance_id)
+        all_rows = [ControlledRowV1(*row) for row in decoded.rows]
         manifests: dict[UUID, ControlledRowV1] = {}
         for row in all_rows:
             if isinstance(row.record, ManifestRecordV1):
@@ -179,6 +150,12 @@ class CapturedControlledJournalV1:
         )
         self.rows_by_id = {row.event.event_id: row for row in self.rows}
         self.rows_by_hash = {row.event.event_hash: row for row in self.rows}
+        physical_ids = {
+            ident for row in self.rows for ident in decoded.members[row.event.event_id]
+        }
+        self.physical_events = tuple(
+            event for event in self.events if event.event_id in physical_ids
+        )
         if any(row.event.timestamp > self.observed_at for row in self.rows):
             raise ValueError("CONTROLLED_READ_BEFORE_ORIGINAL_AVAILABILITY")
         if any(
@@ -280,21 +257,11 @@ class ControlledJournalWriterV1:
             envelope = ControlledEnvelopeV1.create(
                 issuer=self.origin.issuer_instance_id, plan=self.plan, record=record
             )
-            original = canonical_json(envelope)
-            if len(original) > MAX_RECORD_BYTES:
-                raise ValueError("CONTROLLED_ORIGINAL_RECORD_TOO_LARGE")
-            envelope = ControlledEnvelopeV1.model_validate_json(original)
-            event = self._ledger.append(
-                AuditEventDraft(
-                    event_id=uuid7(),
-                    event_type=EVENT_PREFIX + record.kind,
-                    timestamp=when,
-                    entity_type=ENTITY,
-                    entity_id=self.plan.original_account.allocation_id,
-                    payload=json.loads(original),
-                    deduplication_key=f"stage1:controlled:{self.plan.original_account.allocation_id}:{key}",
-                    schema_version="1",
-                )
+            event = append_envelope(
+                self._ledger,
+                envelope,
+                when=when,
+                key=f"stage1:controlled:{self.plan.original_account.allocation_id}:{key}",
             )
             self._last_time = when
             self._terminal = record.kind == "terminal"
@@ -386,23 +353,14 @@ def append_controlled_cost_correction(
             checkpoint_id=checkpoint_id, grant=grant_row.ref, original=correction
         ),
     )
-    encoded = canonical_json(envelope)
-    if len(encoded) > MAX_RECORD_BYTES:
-        raise ValueError("CONTROLLED_ORIGINAL_RECORD_TOO_LARGE")
     ledger = SQLiteLedger(origin.ledger_path)
-    event = ledger.append(
-        AuditEventDraft(
-            event_id=uuid7(),
-            event_type=EVENT_PREFIX + "cost",
-            timestamp=when,
-            entity_type=ENTITY,
-            entity_id=allocation_id,
-            payload=json.loads(encoded),
-            deduplication_key=(
-                f"stage1:controlled:{allocation_id}:correction:"
-                + correction.supersedes_receipt_id
-            ),
-            schema_version="1",
-        )
+    event = append_envelope(
+        ledger,
+        envelope,
+        when=when,
+        key=(
+            f"stage1:controlled:{allocation_id}:correction:"
+            + correction.supersedes_receipt_id
+        ),
     )
     return reference(event)

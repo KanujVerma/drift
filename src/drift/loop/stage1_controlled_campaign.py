@@ -143,7 +143,7 @@ def context_kind(context: DecisionContext) -> Literal["realized", "reconstructed
     return "realized" if type(context) is StrategyDecisionContextV1 else "reconstructed"
 
 
-def parse_context(kind: str, payload: C.RetainedCanonicalPayloadV1) -> DecisionContext:
+def parse_context(kind: str, payload: C.RetainedCanonicalPayload) -> DecisionContext:
     if kind == "realized":
         return payload.parse(StrategyDecisionContextV1)
     if kind == "reconstructed":
@@ -647,7 +647,7 @@ class _ControlledStrategy:
         )
         self.writer.append(
             C.ExecutionRecordV1(
-                preview=C.RetainedCanonicalPayloadV1.retain(preview),
+                preview=C.retain_canonical_payload(preview),
                 authorization=authorization,
                 decision=self.last_decision_ref,
             ),
@@ -734,7 +734,7 @@ class _ControlledStrategy:
                 checkpoint_id=checkpoint.checkpoint_id,
                 observation=self.observation_ref,
                 context_kind=context_kind(context),
-                decision_context=C.RetainedCanonicalPayloadV1.retain(context),
+                decision_context=C.retain_canonical_payload(context),
                 research_context=research_context,
                 learning=learning,
                 feedback=feedback,
@@ -1008,7 +1008,7 @@ class _ControlledStrategy:
             checkpoint_id=checkpoint.checkpoint_id if checkpoint else None,
             observation=self.observation_ref,
             context_kind=context_kind(context),
-            decision_context=C.RetainedCanonicalPayloadV1.retain(context),
+            decision_context=C.retain_canonical_payload(context),
             previous_family=previous,
             proposed_family=proposed,
             staged_family=staged,
