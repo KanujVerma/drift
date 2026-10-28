@@ -639,16 +639,19 @@ def _carried_arguments(root: Path, bundle: object, arm: str) -> dict[str, object
         paused=False,
         execution_knowledge="RESOLVED",
     )
-    # The actual 456 XNYS sessions shift the July/August month ends relative
-    # to a fabricated Mon-Fri calendar. Keep the original monthly rule.
+    # Scoring starts July 9 at index379. July's month end is before the
+    # required 21-session observation boundary at index399 (August 6).
+    # Both later eligible month ends must remain declared in the full window.
     calendar_dates = tuple(
         s.session_key.local_date for s in bundle.session_clock.sessions
     )
-    july = calendar_dates.index(date(2025, 7, 31))
     august = calendar_dates.index(date(2025, 8, 29))
-    assert 378 < july < august < 456
+    september = calendar_dates.index(date(2025, 9, 30))
+    assert (august, september) == (416, 437)
+    assert calendar_dates[378] == date(2025, 7, 8)
+    assert calendar_dates[399] == date(2025, 8, 6)
     checkpoints = []
-    for number, (index, family) in enumerate(((july, "B4"), (august, "B5")), 1):
+    for number, (index, family) in enumerate(((august, "B4"), (september, "B5")), 1):
         planned = C.ControlledResearchFixtureV1(
             mode="scripted_fixture" if arm == "ARM-B" else "conventional_fixture",
             disposition="propose",
@@ -694,6 +697,7 @@ def _carried_arguments(root: Path, bundle: object, arm: str) -> dict[str, object
 def test_full_456_session_carried_br_campaign_has_real_monthly_switches(
     tmp_path: Path,
 ) -> None:
+    from datetime import date
 
     from drift.ledger.stage1_synthetic_account_receipts import (
         ALLOCATION,
@@ -744,6 +748,18 @@ def test_full_456_session_carried_br_campaign_has_real_monthly_switches(
         assert [
             (d.previous_family, d.staged_family, d.disposition) for d in decisions
         ] == [("B3", "B4", "SELECTED"), ("B4", "B5", "SELECTED")]
+        assert [d.session_index for d in decisions] == [416, 437]
+        checkpoint_execution = [
+            preview
+            for row in journal.rows
+            if isinstance(row.record, C.ExecutionRecordV1)
+            for preview in (row.record.preview.parse(RebalancePreviewV1),)
+            if preview.session_index in (417, 438)
+        ]
+        assert [
+            (preview.session_index, preview.session.session_key.local_date)
+            for preview in checkpoint_execution
+        ] == [(417, date(2025, 9, 2)), (438, date(2025, 10, 1))]
         inputs = [
             r.record
             for r in journal.rows
@@ -1201,6 +1217,100 @@ def test_retained_decision_prefix_awaits_original_next_open_execution(
     complete = read_controlled_campaign(**kwargs, allocation_id=execution.allocation_id)
     assert complete.trials[0].outcome == "RETAINED"
     assert args["origin"].ledger_path.read_bytes() == before
+
+
+def test_next_open_expiry_preserves_original_execution_refusal_reason(
+    tmp_path: Path,
+) -> None:
+    from test_stage1_controlled_contracts import controlled_arguments
+
+    from drift.loop import stage1_controlled_contracts as C
+    from drift.loop.stage1_controlled_campaign import execute_controlled_campaign
+    from drift.loop.stage1_controlled_journal import CapturedControlledJournalV1
+    from drift.loop.stage1_controlled_readback import read_controlled_campaign
+
+    # Derive the boundary from a real execution using the same declared tick
+    # clock, rather than depending on an unexplained number of clock calls.
+    baseline = controlled_arguments(tmp_path / "baseline")
+    first = execute_controlled_campaign(**baseline)
+    assert first.m0_status == "completed"
+    original = CapturedControlledJournalV1(
+        origin=baseline["origin"],
+        allocation_id=first.allocation_id,
+        observed_at=baseline["clock"](),
+    )
+    next_open = next(
+        row
+        for row in original.rows
+        if isinstance(row.record, C.ExecutionRecordV1)
+        and row.record.preview.parse(RebalancePreviewV1).session_index
+        == baseline["checkpoints"][0].session_index + 1
+    )
+
+    args = controlled_arguments(tmp_path / "expires-at-next-open")
+    checkpoint = args["checkpoints"][0].model_copy(
+        update={"expires_at": next_open.event.timestamp}
+    )
+    args["checkpoints"] = (checkpoint,)
+    execution = execute_controlled_campaign(**args)
+    assert execution.m0_status == "completed"
+    journal = CapturedControlledJournalV1(
+        origin=args["origin"],
+        allocation_id=execution.allocation_id,
+        observed_at=args["clock"](),
+    )
+    decision = next(
+        row
+        for row in journal.rows
+        if isinstance(row.record, C.DecisionRecordV1)
+        and row.record.checkpoint_id == checkpoint.checkpoint_id
+    )
+    rejected = next(
+        row
+        for row in journal.rows
+        if isinstance(row.record, C.ExecutionRecordV1)
+        and row.record.preview.parse(RebalancePreviewV1).session_index
+        == checkpoint.session_index + 1
+    )
+    assert isinstance(decision.record, C.DecisionRecordV1)
+    assert decision.record.disposition == "SELECTED"
+    assert decision.event.timestamp < checkpoint.expires_at <= rejected.event.timestamp
+    assert isinstance(rejected.record, C.ExecutionRecordV1)
+    assert rejected.record.authorization.verdict == "reject"
+    assert (
+        rejected.record.authorization.reason
+        == "PROPOSAL_EXPIRED_OR_REVOKED_BEFORE_EXECUTION"
+    )
+    before = args["origin"].ledger_path.read_bytes()
+    report = read_controlled_campaign(
+        **{
+            key: args[key]
+            for key in (
+                "origin",
+                "campaign",
+                "arms",
+                "bindings",
+                "expected_run_ids",
+                "provenance",
+                "clock",
+            )
+        },
+        allocation_id=execution.allocation_id,
+    )
+    assert report.original_result is not None
+    artifacts = report.original_result.original_artifacts
+    assert artifacts.result.metrics.committed_fill_count == 1
+    assert not any(
+        event.kind == "fill" and event.session_index == checkpoint.session_index + 1
+        for event in artifacts.trace.events
+    )
+    trial = report.trials[0]
+    assert trial.outcome == "REFUSED"
+    assert trial.reason == rejected.record.authorization.reason
+    assert trial.selected_family is None
+    assert trial.operating_cost.status == "VERIFIED_ZERO"
+    assert args["origin"].ledger_path.read_bytes() == before
+    assert not report.authorizes_trading and not report.scientifically_qualified
 
 
 def test_actual_next_open_gap_is_checked_against_exact_target_cap(

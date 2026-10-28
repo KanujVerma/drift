@@ -1341,6 +1341,13 @@ def read_controlled_campaign(
                 outcome, reason = "RETAINED", decision_row.record.reason
             elif execution_row is None and decision_row.record.disposition != "REFUSED":
                 outcome, reason = "UNRESOLVED", "ORIGINAL_EXECUTION_UNAVAILABLE"
+            elif (
+                execution_row is not None
+                and isinstance(execution_row.record, C.ExecutionRecordV1)
+                and execution_row.record.authorization.verdict == "reject"
+                and decision_row.record.disposition != "REFUSED"
+            ):
+                outcome, reason = "REFUSED", execution_row.record.authorization.reason
             else:
                 outcome, reason = "REFUSED", decision_row.record.reason
         if any(

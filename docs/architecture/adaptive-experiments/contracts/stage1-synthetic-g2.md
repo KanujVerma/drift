@@ -159,6 +159,9 @@ A prefix ending at a retained or selected decision before its next-open
 execution remains `UNRESOLVED` with `ORIGINAL_EXECUTION_UNAVAILABLE`. Absence of
 that later original is not evidence of a refusal. An original close-time
 mandate refusal remains separately identifiable even before the next open.
+When a selected proposal is rejected at the next open, the derived refusal
+keeps the original execution authorization's reason, such as expiry before
+execution, instead of the earlier successful research-selection reason.
 
 The campaign report separately includes the whole scoring interval, beginning
 before the initial B3 execution, so the initial period is not omitted from the
@@ -229,7 +232,11 @@ open/explicit closed session rows, exact declared source and the selected
 source-policy binding; the original `require_evidenced_clock_density` guard is
 unchanged. Missing/contradictory coverage remains INDETERMINATE or refused.
 The fixture retains the 253-session warmup, 126-session observation, B3 initial
-execution and July/August actual month-end B4/B5 decisions on carried books.
+execution and August/September actual month-end B4/B5 decisions on carried books.
+The initial decision is July 8 at index378 and scoring begins July 9 at379.
+The 21-session boundary is August 6 at399, so July 31 at395 is ineligible.
+The complete eligible monthly sequence is August 29 at416 and September 30
+at437, with actual next-open executions on September 2 and October 1.
 
 This is a **normalized structured Alpaca calendar read**, not retained raw
 provider HTTP response bytes, official historical exchange attestation or a
