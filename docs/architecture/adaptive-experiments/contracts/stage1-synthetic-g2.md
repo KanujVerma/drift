@@ -195,14 +195,29 @@ expiry, revocation, budget and history refusals; timeout and malformed output;
 hold/abstain; pause, position/class/gross/turnover limits; UNKNOWN/PARTIAL
 containment; and distinct-account comparison including the initial B3 period.
 
-The full-size fixture uses twelve fictional assets and 456 scheduled weekday
-sessions, 253-session warmup, 126-session observation, B3 initial execution and
-July/August month-end B4/B5 choices. It uses existing exploratory reconstructed
-source records and retained source queries, not provider-authenticated history
-or a real exchange-holiday calendar. The source fixture is explicitly a
-retrospective synthetic reconstruction. Its source methods and operational
-observations must not be represented as having been historically available in
-2024/2025. The scripted AI and fixed conventional scores are deterministic
+The full-size fixture uses twelve fictional assets and the first 456 genuine
+XNYS scheduled dates from a pinned, offline-normalized 461-session calendar
+read covering 2024-01-02 through 2025-10-31; the 456th date is 2025-10-24.
+The date/open/close tuples were independently matched to `exchange_calendars`
+4.13.1 for all 461 sessions (the captured 64-bit comparison fingerprint is
+`aac013f21d5a422f`), including early closes, holidays and the January 9, 2025
+special closure. The retained SHA-256 fixture is read from
+`tests/fixtures/stage1/xnys_461_normalized_calendar_v1.json`. One original M1d
+replay context holds its complete `ClosedWorldSessionCoverageV1`, the generated
+open/explicit closed session rows, exact declared source and the selected
+source-policy binding; the original `require_evidenced_clock_density` guard is
+unchanged. Missing/contradictory coverage remains INDETERMINATE or refused.
+The fixture retains the 253-session warmup, 126-session observation, B3 initial
+execution and July/August actual month-end B4/B5 decisions on carried books.
+
+This is a **normalized structured Alpaca calendar read**, not retained raw
+provider HTTP response bytes, official historical exchange attestation or a
+point-in-time 2024/2025 source vintage. The schedule data is captured after the
+simulated dates, while asset prices, the open-price boundary calculations and
+operational clocks remain fictional. All findings are retrospective,
+exploratory engineering evidence and cannot be promoted to historical study
+quality, original producer issuer acceptance, statistical scoring or trading
+permission. The scripted AI and fixed conventional scores are deterministic
 engineering fixtures, not an accepted real AI or frozen scientific R formula.
 
 Live test results, exact source hashes, current CI and acceptance belong in the

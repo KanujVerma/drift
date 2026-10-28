@@ -322,22 +322,27 @@ def test_late_cost_correction_changes_only_new_asof_projection(tmp_path: Path) -
 
 
 def _carried_456_bundle() -> object:
-    """Twelve fictional assets, 456 scheduled sessions, genuine source replay.
+    """Twelve fictional assets, 456 exchange dates, full M1d source replay.
 
-    Reuse the existing scheduled-reconstruction lane's compact original records.
-    The fixture has no realized-calendar or qualified-history claim. Every daily
-    decision still receives all preceding observations, including B4's full 253
-    sessions. No baseline, cohort or history requirement is reduced.
+    Calendar dates are pinned from an exploratory normalized Alpaca read
+    independently compared to exchange_calendars; prices and historical
+    availability remain fictional, so no scientific qualification is implied.
+    Neither the 253/126 windows nor original evaluator is reduced.
     """
     from dataclasses import replace
-    from datetime import date, timedelta
+    from datetime import date
 
     import exploratory_decision_test_support as reconstruction
     import test_evaluator_engine as fixture
     import test_stage1_original_invocation_end_to_end as cohort
     from observation_test_support import ObservationHarness
+    from stage1_calendar_evidence_support import (
+        attach_pinned_calendar,
+        pinned_source_calendar,
+    )
     from test_evaluator_reconstruction import make_policy
 
+    from drift.domain.evaluator_lanes import ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD
     from drift.domain.securities import ListingV1, ListingVenue, SecurityV1
     from drift.evaluator.bundles import assemble_evaluation_input_bundle
     from drift.evaluator.clock import build_scheduled_reconstruction_clock
@@ -345,12 +350,14 @@ def _carried_456_bundle() -> object:
         build_exploratory_reconstructed_session_observation,
     )
 
-    days: list[date] = []
-    day = date(2024, 1, 2)
-    while len(days) < 456:
-        if day.weekday() < 5:
-            days.append(day)
-        day += timedelta(days=1)
+    # Original normalized Alpaca read of 461 sessions, independently matched
+    # against exchange_calendars XNYS. No weekday inference, holiday guess or
+    # fabricated provider origin is used. The scoring fixture uses the first
+    # 456 actually scheduled sessions; five subsequent sessions remain in the
+    # witnessed calendar's closed-world hull.
+    published_days, early_closes, _ = pinned_source_calendar()
+    days = list(published_days[:456])
+    assert days[-1] == date(2025, 10, 24)
     observations = []
     sessions = []
     for index, source_day in enumerate(days):
@@ -373,7 +380,17 @@ def _carried_456_bundle() -> object:
             # This exploratory corpus does not claim a coverage certification.
             # The generic helper's January-2026 coverage cannot describe 2024/25.
             harness.use_unproven_observation_coverage(mode="absent")
-            harness.attach_sessions(realized_outcome="missing")
+            harness.attach_sessions(
+                schedule_state=(
+                    "early_close" if source_day in early_closes else "regular"
+                ),
+                realized_outcome="missing",
+            )
+            if index == 0 and ordinal == 0:
+                # One original M1d context brings the entire independently
+                # witnessed regular-session calendar into the replay inputs.
+                # The common coverage is retained once, not copied 5,472 times.
+                attach_pinned_calendar(harness)
             harness.context = replace(
                 harness.context,
                 supporting_artifacts={
@@ -419,13 +436,14 @@ def _carried_456_bundle() -> object:
         corporate_action_coverage=fixture.quiet_coverage(
             cohort.SECURITIES, days[0], days[-1]
         ),
+        dataset_limitations=(ALPACA_LIMITATION_CALENDAR_CLOSED_WORLD,),
     )
 
 
 def _carried_arguments(root: Path, bundle: object, arm: str) -> dict[str, object]:
     import json
     from dataclasses import fields
-    from datetime import UTC, datetime, timedelta
+    from datetime import UTC, date, datetime, timedelta
     from typing import cast
     from uuid import uuid7
 
@@ -504,13 +522,17 @@ def _carried_arguments(root: Path, bundle: object, arm: str) -> dict[str, object
         accepted_contract_revisions={},
         arm_spec_references=tuple(a.arm_spec_fingerprint for a in arms),
         data_window=DataWindowV1(
-            "2024-01-02", "2025-09-30", "fixture://weekday-456-no-market-holidays-v1"
+            "2024-01-02", "2025-10-24", "fixture://xnys-456-normalized-source-backed-v1"
         ),
         scoring_window=ScoringWindowV1("SC-001", "SC-077", True),
         portfolio_mandate_reference="fixture://controlled-explicit-caps-v1",
         model_and_prompt_policy_reference="fixture://scripted-fixed-scores-not-real-model-v1",
         authorization_evidence={
             "synthetic_fixture_only": True,
+            "calendar_source": (
+                "Alpaca normalized connector snapshot, 461 returned days"
+            ),
+            "calendar_source_qualified": False,
             "reviewer_receipts": [],
             "input_bundle_hash": bundle.bundle_hash,
             "session_clock_hash": bundle.session_clock.clock_hash,
@@ -617,8 +639,16 @@ def _carried_arguments(root: Path, bundle: object, arm: str) -> dict[str, object
         paused=False,
         execution_knowledge="RESOLVED",
     )
+    # The actual 456 XNYS sessions shift the July/August month ends relative
+    # to a fabricated Mon-Fri calendar. Keep the original monthly rule.
+    calendar_dates = tuple(
+        s.session_key.local_date for s in bundle.session_clock.sessions
+    )
+    july = calendar_dates.index(date(2025, 7, 31))
+    august = calendar_dates.index(date(2025, 8, 29))
+    assert 378 < july < august < 456
     checkpoints = []
-    for number, (index, family) in enumerate(((412, "B4"), (433, "B5")), 1):
+    for number, (index, family) in enumerate(((july, "B4"), (august, "B5")), 1):
         planned = C.ControlledResearchFixtureV1(
             mode="scripted_fixture" if arm == "ARM-B" else "conventional_fixture",
             disposition="propose",
