@@ -1299,6 +1299,7 @@ def read_controlled_campaign(
         )
         outcome: Literal[
             "COMPLETED",
+            "RETAINED",
             "REFUSED",
             "NO_ATTEMPT",
             "FAILED_RESEARCH",
@@ -1336,6 +1337,10 @@ def read_controlled_campaign(
             )
             if decision_row.record.disposition == "SELECTED" and approved:
                 outcome, reason, family = "COMPLETED", info.reason, info.family
+            elif decision_row.record.disposition == "RETAINED" and approved:
+                outcome, reason = "RETAINED", decision_row.record.reason
+            elif execution_row is None and decision_row.record.disposition != "REFUSED":
+                outcome, reason = "UNRESOLVED", "ORIGINAL_EXECUTION_UNAVAILABLE"
             else:
                 outcome, reason = "REFUSED", decision_row.record.reason
         if any(

@@ -96,6 +96,13 @@ policy. The original evaluator computes the atomic accounting outcome exactly
 once. The observer approves that exact detached preview before it is committed;
 a close-time mandate verdict is insufficient if next-open prices change.
 
+The existing M2 rebalance commits all planned fills or none. The `PARTIAL` and
+`UNKNOWN` mandate fixtures verify containment of declared unresolved execution;
+they do not demonstrate staged orders with genuine partial fills and an
+unresolved remainder. The separate P05 producer acceptance vector remains
+unproved by this atomic simulator. Supporting it requires an explicit execution
+contract and original fill/reconciliation evidence, not fabricated fill rows.
+
 The active strategy changes only after actual approved execution. Refused or
 unexecuted candidates never inherit incumbent returns as their own feedback.
 K4 consumes only completed earlier same-arm observed intervals; future, foreign,
@@ -138,6 +145,20 @@ net account values and are never subtracted again as operating costs.
 rational returns when a decimal would require rounding. Self-rehashed incorrect
 arithmetic, contradictory cost states and unsupported completeness claims refuse.
 A complete account interval does not make an unknown operating cost known.
+
+The derived trial outcome `RETAINED` distinguishes an original retained-incumbent
+decision with approved next-open execution from a mandate `REFUSED` outcome.
+Research `hold`, `abstain` and `unavailable` retain their distinct original
+`RESEARCH_*` reasons, costs and nullable selected family. This does not invent a
+new target, suppress the incumbent strategy's ordinary internal decisions, or
+make missing execution evidence complete. Actual fills remain those in the
+original trace; a no-order hold is not a refused mandate. This additional value
+belongs to the unmerged derived projection contract, not the frozen evaluator
+schemas or retained original journal records.
+A prefix ending at a retained or selected decision before its next-open
+execution remains `UNRESOLVED` with `ORIGINAL_EXECUTION_UNAVAILABLE`. Absence of
+that later original is not evidence of a refusal. An original close-time
+mandate refusal remains separately identifiable even before the next open.
 
 The campaign report separately includes the whole scoring interval, beginning
 before the initial B3 execution, so the initial period is not omitted from the

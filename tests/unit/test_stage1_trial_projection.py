@@ -118,6 +118,28 @@ def test_trading_cost_already_in_nav_is_not_subtracted_again() -> None:
     assert result.net_investment_return.as_fraction() == Fraction(1, 3)
 
 
+def test_retained_incumbent_preserves_real_loss_and_cost_without_new_selection() -> (
+    None
+):
+    result = projection(
+        outcome="RETAINED",
+        selected_family=None,
+        reason="RESEARCH_ABSTAIN",
+        start_nav=Decimal("10000"),
+        end_nav=Decimal("9980"),
+        costs=(receipt(amount="25", basis="actual"),),
+    )
+    assert result.net_investment_gain == Decimal("-20")
+    assert result.economic_gain == Decimal("-45")
+    assert result.selected_family is None
+    assert result.reason == "RESEARCH_ABSTAIN"
+    assert (
+        ControlledTrialProjectionV1.model_validate_json(result.model_dump_json())
+        == result
+    )
+    assert not result.scientifically_qualified and not result.authorizes_trading
+
+
 @pytest.mark.parametrize("precision", [1, 2, 7, 28, 100])
 def test_nonterminating_return_and_cost_sum_are_exact_at_every_decimal_precision(
     precision: int,

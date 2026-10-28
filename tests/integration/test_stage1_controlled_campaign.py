@@ -960,9 +960,9 @@ def test_controlled_cold_read_in_new_process_never_needs_live_writer(
         ("B5", "NO_ATTEMPT", "INPUT_UNAVAILABLE", 1),
         ("timeout", "FAILED_RESEARCH", "RESEARCH_TIMEOUT", 1),
         ("malformed", "FAILED_RESEARCH", "RESEARCH_MALFORMED_OUTPUT", 1),
-        ("hold", "REFUSED", "RESEARCH_HOLD", 1),
-        ("abstain", "REFUSED", "RESEARCH_ABSTAIN", 1),
-        ("unavailable", "REFUSED", "RESEARCH_UNAVAILABLE", 1),
+        ("hold", "RETAINED", "RESEARCH_HOLD", 1),
+        ("abstain", "RETAINED", "RESEARCH_ABSTAIN", 1),
+        ("unavailable", "RETAINED", "RESEARCH_UNAVAILABLE", 1),
         ("paused", "REFUSED", "PAUSED", 0),
         ("security", "REFUSED", "SECURITY_CAP", 0),
         ("class", "REFUSED", "CLASS_CAP", 0),
@@ -1115,9 +1115,92 @@ def test_actual_controlled_failure_paths_keep_original_lifecycle_and_costs(
         assert len(attempts) == 2 and attempts[0].original.status == "started"
     if case == "timeout":
         assert trial.operating_cost.status == "UNAVAILABLE"
+    if case in ("hold", "abstain", "unavailable"):
+        assert trial.selected_family is None
+        assert trial.complete_interval
+        assert trial.operating_cost.status == "VERIFIED_ZERO"
+        decision = next(
+            row.record
+            for row in journal.rows
+            if isinstance(row.record, C.DecisionRecordV1)
+            and row.record.checkpoint_id == checkpoint.checkpoint_id
+        )
+        assert decision.disposition == "RETAINED"
+        assert decision.previous_family == decision.staged_family == "B3"
+        execution_record, preview = next(
+            (row.record, preview)
+            for row in journal.rows
+            if isinstance(row.record, C.ExecutionRecordV1)
+            for preview in (row.record.preview.parse(RebalancePreviewV1),)
+            if preview.session_index == checkpoint.session_index + 1
+        )
+        assert execution_record.authorization.verdict == "approve"
+        assert preview.outcome.committed_fills == ()
     if expected_fills:
         assert report.original_result.original_artifacts.final_state.holdings
     assert not report.authorizes_trading and not report.scientifically_qualified
+
+
+def test_retained_decision_prefix_awaits_original_next_open_execution(
+    tmp_path: Path,
+) -> None:
+    from test_stage1_controlled_contracts import controlled_arguments
+
+    from drift.loop import stage1_controlled_contracts as C
+    from drift.loop.stage1_controlled_campaign import execute_controlled_campaign
+    from drift.loop.stage1_controlled_journal import CapturedControlledJournalV1
+    from drift.loop.stage1_controlled_readback import read_controlled_campaign
+
+    args = controlled_arguments(tmp_path)
+    checkpoint = args["checkpoints"][0]
+    args["checkpoints"] = (
+        checkpoint.model_copy(
+            update={
+                "fixture": checkpoint.fixture.model_copy(
+                    update={"disposition": "hold", "selected_family": None}
+                )
+            }
+        ),
+    )
+    execution = execute_controlled_campaign(**args)
+    assert execution.m0_status == "completed"
+    journal = CapturedControlledJournalV1(
+        origin=args["origin"],
+        allocation_id=execution.allocation_id,
+        observed_at=args["clock"](),
+    )
+    decision = next(
+        row
+        for row in journal.rows
+        if isinstance(row.record, C.DecisionRecordV1)
+        and row.record.checkpoint_id == checkpoint.checkpoint_id
+    )
+    kwargs = {
+        key: args[key]
+        for key in (
+            "origin",
+            "campaign",
+            "arms",
+            "bindings",
+            "expected_run_ids",
+            "provenance",
+            "clock",
+        )
+    }
+    before = args["origin"].ledger_path.read_bytes()
+    pending = read_controlled_campaign(
+        **kwargs,
+        allocation_id=execution.allocation_id,
+        as_of_event_hash=decision.event.event_hash,
+    )
+    assert pending.trials[0].outcome == "UNRESOLVED"
+    assert pending.trials[0].reason == "ORIGINAL_EXECUTION_UNAVAILABLE"
+    assert not pending.trials[0].complete_interval
+    assert pending.trials[0].selected_family is None
+    assert pending.trials[0].operating_cost.status == "VERIFIED_ZERO"
+    complete = read_controlled_campaign(**kwargs, allocation_id=execution.allocation_id)
+    assert complete.trials[0].outcome == "RETAINED"
+    assert args["origin"].ledger_path.read_bytes() == before
 
 
 def test_actual_next_open_gap_is_checked_against_exact_target_cap(
