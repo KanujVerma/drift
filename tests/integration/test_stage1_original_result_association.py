@@ -8,6 +8,7 @@ import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from uuid import uuid7
 
@@ -17,7 +18,14 @@ _UNIT = Path(__file__).resolve().parents[1] / "unit"
 if str(_UNIT) not in sys.path:
     sys.path.insert(0, str(_UNIT))
 
-from test_evaluator_engine import DAY_1, SEC_A, FixedTargetStrategy, _engine, _run
+from test_evaluator_engine import (
+    DAY_1,
+    DAY_2,
+    SEC_A,
+    FixedTargetStrategy,
+    _engine,
+    _run,
+)
 from test_evaluator_experiment_run import (
     _context,
     _ExplodingStrategy,
@@ -265,6 +273,29 @@ def test_evaluator_rejection_is_not_scientific_completion(
     assert retained.classification == EvaluationClassification.REJECTED.value
     assert retained.original_artifacts.result.metrics.committed_fill_count == 0
     assert retained.scientifically_qualified is False
+
+
+def test_halted_original_keeps_last_close_metrics_and_unmarked_final_book(
+    tmp_path: Path,
+) -> None:
+    engine, observer, store = _setup(tmp_path)
+    strategy = FixedTargetStrategy({DAY_1: ((SEC_A, 10),), DAY_2: ((SEC_A, 999999),)})
+    run = _execute(engine, observer, store, strategy=strategy)
+    assert run.status is ExperimentRunStatus.COMPLETED
+    before = store.origin.ledger_path.read_bytes()
+    retained = observer.readback()
+    artifacts = retained.original_artifacts
+    assert artifacts.result.classification == EvaluationClassification.REJECTED
+    assert artifacts.result.halted_session_index == 3
+    assert artifacts.result.metrics.evaluated_session_count == 3
+    assert artifacts.result.metrics.committed_fill_count == 1
+    assert artifacts.result.metrics.ending_net_asset_value == Decimal("10100")
+    assert artifacts.final_state.mark is None
+    assert artifacts.final_state.net_asset_value == Decimal("9000")
+    assert artifacts.final_state.holdings[0].quantity == 10
+    assert retained.original_artifacts_bytes == canonical_json(artifacts)
+    assert store.origin.ledger_path.read_bytes() == before
+    assert not retained.scientifically_qualified
 
 
 def test_failed_m0_attempt_has_no_original_result_association(

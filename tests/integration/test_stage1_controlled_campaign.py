@@ -1313,6 +1313,151 @@ def test_next_open_expiry_preserves_original_execution_refusal_reason(
     assert not report.authorizes_trading and not report.scientifically_qualified
 
 
+@pytest.mark.parametrize("case", ("propose", "hold", "timeout", "expired"))
+def test_next_open_current_book_containment_is_unresolved(
+    tmp_path: Path, case: str
+) -> None:
+    from datetime import timedelta
+
+    import test_evaluator_engine as fixture
+    from test_stage1_controlled_contracts import controlled_arguments
+    from test_stage1_synthetic_research_execution import BASE
+
+    from drift.loop import stage1_controlled_contracts as C
+    from drift.loop.stage1_controlled_campaign import execute_controlled_campaign
+    from drift.loop.stage1_controlled_journal import CapturedControlledJournalV1
+    from drift.loop.stage1_controlled_readback import read_controlled_campaign
+
+    members = (
+        (fixture.SEC_A, fixture.LISTING_A),
+        (fixture.SEC_B, fixture.LISTING_B),
+    )
+    bundle = fixture._bundle(
+        decision_views=tuple(
+            fixture._decision_view(security, day, listing_id=listing)
+            for day in fixture.DAYS[1:]
+            for security, listing in members
+        ),
+        accounting_views=tuple(
+            fixture._accounting_view(
+                security,
+                day,
+                listing_id=listing,
+                open_price="200"
+                if security == fixture.SEC_A and day == fixture.DAY_3
+                else None,
+            )
+            for day in fixture.DAYS
+            for security, listing in members
+        ),
+        eligibilities=tuple(
+            fixture._eligibility(security, listing) for security, listing in members
+        ),
+    )
+    args = controlled_arguments(tmp_path, engine=fixture._engine(bundle=bundle))
+    policy = args["mandate"]
+    args["mandate"] = policy.model_copy(
+        update={
+            "securities": tuple(
+                rule.model_copy(update={"maximum_fraction": Decimal("0.6")})
+                for rule in policy.securities
+            )
+        }
+    )
+    checkpoint = args["checkpoints"][0]
+    if case == "expired":
+        checkpoint = checkpoint.model_copy(
+            update={"expires_at": BASE + timedelta(seconds=1)}
+        )
+    args["checkpoints"] = (
+        checkpoint.model_copy(
+            update={
+                "fixture": checkpoint.fixture.model_copy(
+                    update={
+                        "disposition": "hold" if case == "hold" else "propose",
+                        "selected_family": None if case == "hold" else "B3",
+                        "should_timeout": case == "timeout",
+                    }
+                )
+            }
+        ),
+    )
+    execution = execute_controlled_campaign(**args)
+    assert execution.m0_status == "completed"
+    checkpoint = args["checkpoints"][0]
+    journal = CapturedControlledJournalV1(
+        origin=args["origin"],
+        allocation_id=execution.allocation_id,
+        observed_at=args["clock"](),
+    )
+    decision = next(
+        row.record
+        for row in journal.rows
+        if isinstance(row.record, C.DecisionRecordV1)
+        and row.record.checkpoint_id == checkpoint.checkpoint_id
+    )
+    assert decision.disposition == ("SELECTED" if case == "propose" else "RETAINED")
+    contained = next(
+        row.record
+        for row in journal.rows
+        if isinstance(row.record, C.ExecutionRecordV1)
+        and row.record.preview.parse(RebalancePreviewV1).session_index
+        == checkpoint.session_index + 1
+    )
+    assert contained.authorization.verdict == "contain"
+    assert contained.authorization.reason == "SECURITY_CAP"
+    before = args["origin"].ledger_path.read_bytes()
+    report = read_controlled_campaign(
+        **{
+            key: args[key]
+            for key in (
+                "origin",
+                "campaign",
+                "arms",
+                "bindings",
+                "expected_run_ids",
+                "provenance",
+                "clock",
+            )
+        },
+        allocation_id=execution.allocation_id,
+    )
+    assert report.original_result is not None
+    artifacts = report.original_result.original_artifacts
+    assert artifacts.result.classification == EvaluationClassification.INDETERMINATE
+    assert artifacts.final_state.mark is None
+    assert len(artifacts.final_state.holdings) == 2
+    assert artifacts.final_state.net_asset_value == Decimal("0")
+    assert artifacts.result.metrics.ending_net_asset_value == Decimal("10500")
+    assert artifacts.result.metrics.committed_fill_count == 2
+    assert not any(
+        event.kind == "fill" and event.session_index == checkpoint.session_index + 1
+        for event in artifacts.trace.events
+    )
+    trial = report.trials[0]
+    assert trial.outcome == "UNRESOLVED"
+    assert trial.reason == "SECURITY_CAP"
+    assert trial.selected_family is None and not trial.complete_interval
+    assert trial.net_investment_gain is None and trial.economic_gain is None
+    assert trial.operating_cost.status == (
+        "UNAVAILABLE" if case in ("timeout", "expired") else "VERIFIED_ZERO"
+    )
+    attempts = [
+        row.record.original
+        for row in journal.rows
+        if isinstance(row.record, C.AttemptRecordV1)
+    ]
+    if case == "timeout":
+        assert [attempt.status for attempt in attempts] == ["started", "failed"]
+    elif case == "expired":
+        assert not attempts
+        assert any(isinstance(row.record, C.NoAttemptRecordV1) for row in journal.rows)
+    assert report.status == "UNRESOLVED" and not report.economics.complete
+    assert "ORIGINAL_EXECUTION_CONTAINED:3" in report.reasons
+    assert args["origin"].ledger_path.read_bytes() == before
+    assert not report.authorizes_trading and not report.scientifically_qualified
+
+
 def test_actual_next_open_gap_is_checked_against_exact_target_cap(
     tmp_path: Path,
 ) -> None:

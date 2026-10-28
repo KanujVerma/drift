@@ -162,6 +162,18 @@ mandate refusal remains separately identifiable even before the next open.
 When a selected proposal is rejected at the next open, the derived refusal
 keeps the original execution authorization's reason, such as expiry before
 execution, instead of the earlier successful research-selection reason.
+Verified next-open containment instead leaves the affected trial and campaign
+`UNRESOLVED`, preserving the original containment reason and all earlier fills.
+This also applies after failed research or no attempt; those original records
+and their distinct cost states remain retained.
+It cannot supply complete interval economics. If the evaluator halts before
+the next close, the original final book has no current mark; its numeric NAV
+covers only cash and claims, with holdings unvalued. Summary metrics still
+describe the last completed close, as the evaluator contract requires. The
+original-result association preserves both artifacts and accepts that mismatch
+only for an unmarked non-complete halt on the immediate next session, with
+matching original session-start evidence and no halt-session close mark. The
+original M0 invocation, result, trace and final-book hashes remain mandatory.
 
 The campaign report separately includes the whole scoring interval, beginning
 before the initial B3 execution, so the initial period is not omitted from the

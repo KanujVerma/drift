@@ -532,6 +532,8 @@ class _Verifier:
             )
             if fills != expected_fills:
                 raise ValueError("CONTROLLED_FALSE_COMMITTED_FILLS")
+        if expected.verdict == "contain":
+            self.reasons.add(f"ORIGINAL_EXECUTION_CONTAINED:{preview.session_index}")
         self.take(row)
 
     def opportunity(
@@ -1350,6 +1352,20 @@ def read_controlled_campaign(
                 outcome, reason = "REFUSED", execution_row.record.authorization.reason
             else:
                 outcome, reason = "REFUSED", decision_row.record.reason
+        # Current-book containment also applies when research failed or was
+        # not attempted and the original decision retained the incumbent.
+        # Those research records and costs remain in the original journal.
+        execution_row = verifier.executions.get(checkpoint.session_index + 1)
+        if (
+            execution_row is not None
+            and isinstance(execution_row.record, C.ExecutionRecordV1)
+            and execution_row.record.authorization.verdict == "contain"
+        ):
+            outcome, reason, family = (
+                "UNRESOLVED",
+                execution_row.record.authorization.reason,
+                None,
+            )
         if any(
             checkpoint.session_index < index <= end
             for index in verifier.missing_executions
