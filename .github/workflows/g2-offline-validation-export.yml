@@ -12,7 +12,7 @@ permissions:
 jobs:
   export:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 120
     env:
       UV_LOCKED: "1"
       UV_PYTHON_PREFERENCE: only-managed
@@ -56,3 +56,11 @@ jobs:
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
+      - name: Diagnose exact original 456-session B/R campaign (no waivers)
+        timeout-minutes: 110
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          set -euxo pipefail
+          test "$(git rev-parse HEAD)" = "75e6e80490b884d0c4b6caa2ac6de5814110c69f"
+          uv run pytest -q -s -x tests/integration/test_stage1_controlled_campaign.py::test_full_456_session_carried_br_campaign_has_real_monthly_switches
