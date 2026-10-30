@@ -20,7 +20,7 @@ jobs:
       - name: Check out exact public source without persisted credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 75e6e80490b884d0c4b6caa2ac6de5814110c69f
+          ref: 6ac17fc2106f5bbdd2a8decb65558cc97a2ae6a3
           fetch-depth: 0
           persist-credentials: false
       - name: Install existing pinned uv setup
@@ -76,7 +76,7 @@ jobs:
           root.mkdir(parents=True, exist_ok=True)
           def report(label,start):
               print("G2_PROFILE:",label,"elapsed_sec",round(time.monotonic()-start,2),flush=True)
-          assert subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip()=="75e6e80490b884d0c4b6caa2ac6de5814110c69f"
+          assert subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip()=="6ac17fc2106f5bbdd2a8decb65558cc97a2ae6a3"
           start=time.monotonic()
           bundle=T._carried_456_bundle()
           report("source_456x12",start)
@@ -101,18 +101,25 @@ jobs:
           report("warm_read",start)
           print("G2_PROFILE: parent_status",parent.status,flush=True)
           assert parent.status=="VERIFIED_COMPLETE"
-          real_run=subprocess.run
-          def longer_child(*argv,**opts):
-              if opts.get("timeout")==180 and isinstance(argv[0],list) and "-c" in argv[0]:
-                  opts["timeout"]=1200
-                  print("G2_PROFILE: cold_child_budget_sec 1200 (DIAGNOSTIC ONLY)",flush=True)
-              t=time.monotonic()
-              try: return real_run(*argv,**opts)
-              finally: report("cold_subprocess",t)
           start=time.monotonic()
-          with patch("subprocess.run",side_effect=longer_child):
+          try:
+              print("G2_PROFILE: trying unmodified cold reader with original 180s budget",flush=True)
               cold=T._fresh_controlled_read(args,executed.allocation_id,root/"cold-ARM-B.json")
-          report("cold_verified_recovery",start)
+              report("cold_original_180_pass",start)
+          except subprocess.TimeoutExpired:
+              report("cold_original_180_timeout",start)
+              print("G2_PROFILE: original 180-second child budget failed; retrying SAME verified synthetic ledger with diagnostic-only 1200s budget",flush=True)
+              real_run=subprocess.run
+              def longer_child(*argv,**opts):
+                  if opts.get("timeout")==180 and isinstance(argv[0],list) and "-c" in argv[0]:
+                      opts["timeout"]=1200
+                  t=time.monotonic()
+                  try: return real_run(*argv,**opts)
+                  finally: report("cold_extended_subprocess",t)
+              start=time.monotonic()
+              with patch("subprocess.run",side_effect=longer_child):
+                  cold=T._fresh_controlled_read(args,executed.allocation_id,root/"cold-ARM-B.json")
+              report("cold_extended_verified_recovery",start)
           print("G2_PROFILE: cold_status",cold["status"],flush=True)
           assert cold["status"]=="VERIFIED_COMPLETE"
           assert cold["result_hash"]==parent.original_result.result_hash
@@ -122,14 +129,12 @@ jobs:
           echo "G2_PROFILE_DIAGNOSTIC_EXIT=$result"
           find /tmp/g2-cold-profile -type f -printf 'G2_PROFILE_FILE %p %s bytes\n' | head -20 || true
           exit "$result"
-      - name: Retain synthetic cold-replay ledger for performance debugging (one day)
+      - name: Retain synthetic cold-replay digest for performance debugging (one day)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: g2-synthetic-cold-ledger-75e6e80
-          path: |
-            /tmp/g2-cold-profile/ARM-B/original.sqlite3
-            /tmp/g2-cold-profile/cold-ARM-B.json
+          name: g2-synthetic-cold-profile-6ac17fc
+          path: /tmp/g2-cold-profile/cold-ARM-B.json
           if-no-files-found: warn
           retention-days: 1
           compression-level: 1
