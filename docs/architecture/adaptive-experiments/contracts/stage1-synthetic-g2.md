@@ -96,6 +96,13 @@ policy. The original evaluator computes the atomic accounting outcome exactly
 once. The observer approves that exact detached preview before it is committed;
 a close-time mandate verdict is insufficient if next-open prices change.
 
+The existing M2 rebalance commits all planned fills or none. The `PARTIAL` and
+`UNKNOWN` mandate fixtures verify containment of declared unresolved execution;
+they do not demonstrate staged orders with genuine partial fills and an
+unresolved remainder. The separate P05 producer acceptance vector remains
+unproved by this atomic simulator. Supporting it requires an explicit execution
+contract and original fill/reconciliation evidence, not fabricated fill rows.
+
 The active strategy changes only after actual approved execution. Refused or
 unexecuted candidates never inherit incumbent returns as their own feedback.
 K4 consumes only completed earlier same-arm observed intervals; future, foreign,
@@ -103,9 +110,60 @@ sealed and substituted feedback is rejected by replay.
 
 ## Replay, journal completeness and costs
 
+### Bounded original journal transport
+
+Small canonical payloads retain the original `zlib-base64` representation and
+small controlled envelopes retain their exact schema-1 serialized shape. A
+larger compressed payload uses `zlib-base64-segments/2`: bounded segments of one
+stream, with one unchanged 32MiB decoded-original limit, exact original size and
+SHA256, canonical base64, complete EOF and no trailing stream data. Segments
+are at most 1MiB each, with at most 64 segments and 64MiB encoded in aggregate.
+The candidate controlled record annotations accept this additional encoding;
+their JSON schemas therefore expand. Byte compatibility for old records is not
+a claim that those candidate JSON schemas are unchanged. Original account and
+RESULT schemas are unaffected.
+
+The complete logical envelope, including metadata, determines whether storage
+is inline or chunked. The stored-envelope limit remains 1MiB. A larger logical
+envelope has a separate 64MiB limit and is retained as at most 256 original
+`drift-local-synthetic-g2-chunk/2` events, each carrying at most 256KiB of original
+bytes, followed by one `drift-local-synthetic-g2-record/2` commit. Each chunk binds
+the configured issuer, allocation, preallocated commit event ID, record kind,
+whole-envelope size and digest, and index/count. The commit names exact ordered
+original chunk event IDs and hashes. Every physical payload is checked against
+the existing 1MiB limit, including its transport metadata.
+
+The clock is observed once per logical append. Its parts and commit share that
+instant, while the actual commit event supplies the semantic record's identity
+and ledger position. Cold readers retain raw events unchanged and inventory
+all recognized transport records across allocations before filtering. They
+reject missing, foreign, duplicate, reordered, malformed, late or orphan parts,
+bound resources before joining/parsing, and reconstruct the exact canonical
+logical envelope before the existing manifest and financial verification.
+The report accounts for physical chunks as well as their semantic commits.
+Independent allocations may interleave their parts in a shared ledger.
+
+A snapshot ending inside a chunk group is incomplete and fails closed, even
+if another allocation is being queried. This is an explicit availability cost
+of whole-prefix verification. Any storage exception latches the writer; a
+lost commit acknowledgment can be cold-read if its complete original group
+exists, but never authorizes a retry, replacement record or fresh account.
+Post-terminal cost corrections use the same bounded transport and retain their
+existing immutable supersession and deduplication rules. The first physical
+event reserves the logical deduplication key before any further chunks are
+written. Later transport keys use the preallocated commit identity in a separate
+namespace. A competing correction that loses this reservation leaves no parts
+behind, whether the winning correction is inline or chunked.
+
 `read_controlled_campaign` in `drift.loop.stage1_controlled_readback` uses one
 verified immutable original ledger prefix. Every join uses that captured prefix,
-including original account and result helpers. Caller-made writer objects and
+including original account and result helpers. After the configured root verifies
+the complete chain, the private snapshot retains primitive envelope fields and
+the validated immutable JSON payload graph. Each consumer receives fresh event
+objects and UUIDs; large immutable payloads are shared without repeated JSON
+parsing. This does not skip initial ledger, transport, scope or result validation,
+and subsequent ledger appends cannot change a captured prefix.
+Caller-made writer objects and
 account capabilities are neither required nor recreated. The returned report
 pins the original prefix tip and every accounted controlled-event hash. It also
 requires the original installed Python source inventory: a different installed
@@ -138,6 +196,35 @@ net account values and are never subtracted again as operating costs.
 rational returns when a decimal would require rounding. Self-rehashed incorrect
 arithmetic, contradictory cost states and unsupported completeness claims refuse.
 A complete account interval does not make an unknown operating cost known.
+
+The derived trial outcome `RETAINED` distinguishes an original retained-incumbent
+decision with approved next-open execution from a mandate `REFUSED` outcome.
+Research `hold`, `abstain` and `unavailable` retain their distinct original
+`RESEARCH_*` reasons, costs and nullable selected family. This does not invent a
+new target, suppress the incumbent strategy's ordinary internal decisions, or
+make missing execution evidence complete. Actual fills remain those in the
+original trace; a no-order hold is not a refused mandate. This additional value
+belongs to the unmerged derived projection contract, not the frozen evaluator
+schemas or retained original journal records.
+A prefix ending at a retained or selected decision before its next-open
+execution remains `UNRESOLVED` with `ORIGINAL_EXECUTION_UNAVAILABLE`. Absence of
+that later original is not evidence of a refusal. An original close-time
+mandate refusal remains separately identifiable even before the next open.
+When a selected proposal is rejected at the next open, the derived refusal
+keeps the original execution authorization's reason, such as expiry before
+execution, instead of the earlier successful research-selection reason.
+Verified next-open containment instead leaves the affected trial and campaign
+`UNRESOLVED`, preserving the original containment reason and all earlier fills.
+This also applies after failed research or no attempt; those original records
+and their distinct cost states remain retained.
+It cannot supply complete interval economics. If the evaluator halts before
+the next close, the original final book has no current mark; its numeric NAV
+covers only cash and claims, with holdings unvalued. Summary metrics still
+describe the last completed close, as the evaluator contract requires. The
+original-result association preserves both artifacts and accepts that mismatch
+only for an unmarked non-complete halt on the immediate next session, with
+matching original session-start evidence and no halt-session close mark. The
+original M0 invocation, result, trace and final-book hashes remain mandatory.
 
 The campaign report separately includes the whole scoring interval, beginning
 before the initial B3 execution, so the initial period is not omitted from the
@@ -208,7 +295,11 @@ open/explicit closed session rows, exact declared source and the selected
 source-policy binding; the original `require_evidenced_clock_density` guard is
 unchanged. Missing/contradictory coverage remains INDETERMINATE or refused.
 The fixture retains the 253-session warmup, 126-session observation, B3 initial
-execution and July/August actual month-end B4/B5 decisions on carried books.
+execution and August/September actual month-end B4/B5 decisions on carried books.
+The initial decision is July 8 at index378 and scoring begins July 9 at379.
+The 21-session boundary is August 6 at399, so July 31 at395 is ineligible.
+The complete eligible monthly sequence is August 29 at416 and September 30
+at437, with actual next-open executions on September 2 and October 1.
 
 This is a **normalized structured Alpaca calendar read**, not retained raw
 provider HTTP response bytes, official historical exchange attestation or a

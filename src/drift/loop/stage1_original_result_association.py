@@ -26,7 +26,10 @@ from uuid import UUID, uuid7
 
 from drift.domain.artifacts import ArtifactKind
 from drift.domain.common import ImmutableJSONValue
-from drift.domain.evaluator_results import EvaluationRunArtifactsV2
+from drift.domain.evaluator_results import (
+    EvaluationClassification,
+    EvaluationRunArtifactsV2,
+)
 from drift.domain.events import AuditEvent
 from drift.domain.experiments import ExperimentRun, ExperimentRunStatus
 from drift.errors import DuplicateEventError
@@ -562,13 +565,37 @@ class _OriginalResultVerifier:
         result = artifacts.result
         identity = result.run_identity
         book = artifacts.final_state
+        # Metrics describe completed close marks. Advancing into the next
+        # session clears the old mark, so a genuine pre-close halt can leave
+        # the original final holdings unvalued. Its numeric book NAV then
+        # covers only cash and claims, not a completed valuation. The exact
+        # result, trace and final book still require the original M0 binding.
+        unmarked_halt = (
+            book.mark is None
+            and result.classification is not EvaluationClassification.COMPLETE
+            and result.halted_session_index == result.metrics.evaluated_session_count
+            and any(
+                event.kind == "session_start"
+                and event.session_index == result.halted_session_index
+                and event.session_key == book.session_key
+                for event in artifacts.trace.events
+            )
+            and not any(
+                event.kind == "session_mark"
+                and event.session_index == result.halted_session_index
+                for event in artifacts.trace.events
+            )
+        )
         if (
             identity.admission_hash != self._fields.admission_hash
             or identity.protocol_hash != self._fields.protocol_hash
             or result.metrics.initial_cash != Decimal(self._fields.initial_cash)
             or result.metrics.initial_net_asset_value
             != Decimal(self._fields.initial_cash)
-            or result.metrics.ending_net_asset_value != book.net_asset_value
+            or (
+                result.metrics.ending_net_asset_value != book.net_asset_value
+                and not unmarked_halt
+            )
             or book.admission_hash != self._fields.admission_hash
         ):
             raise OriginalResultAssociationError("RESULT_BOOK_M0_ACCOUNT_MISMATCH")

@@ -143,6 +143,7 @@ class ControlledTrialProjectionV1(FrozenModel):
     end_session_index: int | None = Field(default=None, strict=True, ge=0)
     outcome: Literal[
         "COMPLETED",
+        "RETAINED",
         "REFUSED",
         "NO_ATTEMPT",
         "FAILED_RESEARCH",
@@ -242,6 +243,7 @@ def make_trial_projection(
     end_session_index: int | None,
     outcome: Literal[
         "COMPLETED",
+        "RETAINED",
         "REFUSED",
         "NO_ATTEMPT",
         "FAILED_RESEARCH",

@@ -20,7 +20,15 @@ for _source in ("unit", "integration"):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
-from test_evaluator_engine import FixedTargetStrategy, _buy_ten, _engine, _run
+from test_evaluator_engine import (
+    DAY_1,
+    DAY_2,
+    SEC_A,
+    FixedTargetStrategy,
+    _buy_ten,
+    _engine,
+    _run,
+)
 from test_evaluator_experiment_run import _context, _specification
 from test_stage1_campaign_config import (
     make_golden_arm_b,
@@ -266,6 +274,54 @@ def test_altered_final_book_cannot_borrow_original_result_trace_hashes(
             artifacts=altered,
             m0_audit_event_id=original.m0_event_id,
         )
+    assert all(e.event_type != RESULT_EVENT for e in store.origin.verified_events())
+
+
+@pytest.mark.parametrize("alteration", ("settled_claim", "wrong_session"))
+def test_unmarked_halt_cannot_borrow_an_altered_original_final_book(
+    tmp_path: Path,
+    alteration: str,
+) -> None:
+    engine, observer, store = _setup(tmp_path)
+    original = _SourceResultCapture()
+    context = replace(
+        _context(
+            engine,
+            ledger=SQLiteLedger(store.origin.ledger_path),
+            started_at=M0_START,
+            completed_at=M0_COMPLETE,
+            strategy=FixedTargetStrategy(
+                {DAY_1: ((SEC_A, 10),), DAY_2: ((SEC_A, 999999),)}
+            ),
+        ),
+        original_result_observer=original,
+    )
+    run = execute_experiment_run(_specification(), context)
+    assert run.status is ExperimentRunStatus.COMPLETED
+    assert original.artifacts is not None and original.m0_event_id is not None
+    assert original.artifacts.final_state.mark is None
+    assert original.artifacts.final_state.holdings[0].quantity == 10
+    book_change = (
+        {"settled_claim_ids": ("a" * 64,)}
+        if alteration == "settled_claim"
+        else {"session_key": engine.bundle.session_clock.sessions[2].session_key}
+    )
+    altered = original.artifacts.model_copy(
+        update={
+            "final_state": original.artifacts.final_state.model_copy(update=book_change)
+        }
+    )
+    before = store.origin.ledger_path.read_bytes()
+    with pytest.raises(
+        OriginalResultAssociationError,
+        match="NOT_THE_ORIGINAL_COMPLETED_M0"
+        if alteration == "settled_claim"
+        else "RESULT_BOOK_M0_ACCOUNT_MISMATCH",
+    ):
+        observer.observe_canonical_result(
+            run=run, artifacts=altered, m0_audit_event_id=original.m0_event_id
+        )
+    assert store.origin.ledger_path.read_bytes() == before
     assert all(e.event_type != RESULT_EVENT for e in store.origin.verified_events())
 
 

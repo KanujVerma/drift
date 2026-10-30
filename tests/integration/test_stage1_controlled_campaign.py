@@ -413,11 +413,13 @@ def _carried_456_bundle() -> object:
                 query,
                 harness.context,
             )
-            session = build_scheduled_reconstruction_clock(
-                (query,), harness.context
-            ).sessions[0]
             observations.append(observation)
             if ordinal == 0:
+                # Only this clock enters the bundle. The engine independently
+                # replays and validates every retained source request.
+                session = build_scheduled_reconstruction_clock(
+                    (query,), harness.context
+                ).sessions[0]
                 sessions.append(session)
         if index % 60 == 0:
             print("controlled: reconstructed source session", index, flush=True)
@@ -639,16 +641,19 @@ def _carried_arguments(root: Path, bundle: object, arm: str) -> dict[str, object
         paused=False,
         execution_knowledge="RESOLVED",
     )
-    # The actual 456 XNYS sessions shift the July/August month ends relative
-    # to a fabricated Mon-Fri calendar. Keep the original monthly rule.
+    # Scoring starts July 9 at index379. July's month end is before the
+    # required 21-session observation boundary at index399 (August 6).
+    # Both later eligible month ends must remain declared in the full window.
     calendar_dates = tuple(
         s.session_key.local_date for s in bundle.session_clock.sessions
     )
-    july = calendar_dates.index(date(2025, 7, 31))
     august = calendar_dates.index(date(2025, 8, 29))
-    assert 378 < july < august < 456
+    september = calendar_dates.index(date(2025, 9, 30))
+    assert (august, september) == (416, 437)
+    assert calendar_dates[378] == date(2025, 7, 8)
+    assert calendar_dates[399] == date(2025, 8, 6)
     checkpoints = []
-    for number, (index, family) in enumerate(((july, "B4"), (august, "B5")), 1):
+    for number, (index, family) in enumerate(((august, "B4"), (september, "B5")), 1):
         planned = C.ControlledResearchFixtureV1(
             mode="scripted_fixture" if arm == "ARM-B" else "conventional_fixture",
             disposition="propose",
@@ -694,6 +699,7 @@ def _carried_arguments(root: Path, bundle: object, arm: str) -> dict[str, object
 def test_full_456_session_carried_br_campaign_has_real_monthly_switches(
     tmp_path: Path,
 ) -> None:
+    from datetime import date
 
     from drift.ledger.stage1_synthetic_account_receipts import (
         ALLOCATION,
@@ -744,12 +750,27 @@ def test_full_456_session_carried_br_campaign_has_real_monthly_switches(
         assert [
             (d.previous_family, d.staged_family, d.disposition) for d in decisions
         ] == [("B3", "B4", "SELECTED"), ("B4", "B5", "SELECTED")]
+        assert [d.session_index for d in decisions] == [416, 437]
+        checkpoint_execution = [
+            preview
+            for row in journal.rows
+            if isinstance(row.record, C.ExecutionRecordV1)
+            for preview in (row.record.preview.parse(RebalancePreviewV1),)
+            if preview.session_index in (417, 438)
+        ]
+        assert [
+            (preview.session_index, preview.session.session_key.local_date)
+            for preview in checkpoint_execution
+        ] == [(417, date(2025, 9, 2)), (438, date(2025, 10, 1))]
         inputs = [
             r.record
             for r in journal.rows
             if isinstance(r.record, C.InputWitnessRecordV1)
         ]
         assert len(inputs[1].feedback) == 1 and inputs[1].feedback[0].arm_id == arm
+        # These inspection copies are no longer needed. Release their retained
+        # histories before independently reconstructing the same original root.
+        del journal, original_events, decisions, checkpoint_execution, inputs
         kwargs = {
             key: args[key]
             for key in (
@@ -960,9 +981,9 @@ def test_controlled_cold_read_in_new_process_never_needs_live_writer(
         ("B5", "NO_ATTEMPT", "INPUT_UNAVAILABLE", 1),
         ("timeout", "FAILED_RESEARCH", "RESEARCH_TIMEOUT", 1),
         ("malformed", "FAILED_RESEARCH", "RESEARCH_MALFORMED_OUTPUT", 1),
-        ("hold", "REFUSED", "RESEARCH_HOLD", 1),
-        ("abstain", "REFUSED", "RESEARCH_ABSTAIN", 1),
-        ("unavailable", "REFUSED", "RESEARCH_UNAVAILABLE", 1),
+        ("hold", "RETAINED", "RESEARCH_HOLD", 1),
+        ("abstain", "RETAINED", "RESEARCH_ABSTAIN", 1),
+        ("unavailable", "RETAINED", "RESEARCH_UNAVAILABLE", 1),
         ("paused", "REFUSED", "PAUSED", 0),
         ("security", "REFUSED", "SECURITY_CAP", 0),
         ("class", "REFUSED", "CLASS_CAP", 0),
@@ -1115,8 +1136,330 @@ def test_actual_controlled_failure_paths_keep_original_lifecycle_and_costs(
         assert len(attempts) == 2 and attempts[0].original.status == "started"
     if case == "timeout":
         assert trial.operating_cost.status == "UNAVAILABLE"
+    if case in ("hold", "abstain", "unavailable"):
+        assert trial.selected_family is None
+        assert trial.complete_interval
+        assert trial.operating_cost.status == "VERIFIED_ZERO"
+        decision = next(
+            row.record
+            for row in journal.rows
+            if isinstance(row.record, C.DecisionRecordV1)
+            and row.record.checkpoint_id == checkpoint.checkpoint_id
+        )
+        assert decision.disposition == "RETAINED"
+        assert decision.previous_family == decision.staged_family == "B3"
+        execution_record, preview = next(
+            (row.record, preview)
+            for row in journal.rows
+            if isinstance(row.record, C.ExecutionRecordV1)
+            for preview in (row.record.preview.parse(RebalancePreviewV1),)
+            if preview.session_index == checkpoint.session_index + 1
+        )
+        assert execution_record.authorization.verdict == "approve"
+        assert preview.outcome.committed_fills == ()
     if expected_fills:
         assert report.original_result.original_artifacts.final_state.holdings
+    assert not report.authorizes_trading and not report.scientifically_qualified
+
+
+def test_retained_decision_prefix_awaits_original_next_open_execution(
+    tmp_path: Path,
+) -> None:
+    from test_stage1_controlled_contracts import controlled_arguments
+
+    from drift.loop import stage1_controlled_contracts as C
+    from drift.loop.stage1_controlled_campaign import execute_controlled_campaign
+    from drift.loop.stage1_controlled_journal import CapturedControlledJournalV1
+    from drift.loop.stage1_controlled_readback import read_controlled_campaign
+
+    args = controlled_arguments(tmp_path)
+    checkpoint = args["checkpoints"][0]
+    args["checkpoints"] = (
+        checkpoint.model_copy(
+            update={
+                "fixture": checkpoint.fixture.model_copy(
+                    update={"disposition": "hold", "selected_family": None}
+                )
+            }
+        ),
+    )
+    execution = execute_controlled_campaign(**args)
+    assert execution.m0_status == "completed"
+    journal = CapturedControlledJournalV1(
+        origin=args["origin"],
+        allocation_id=execution.allocation_id,
+        observed_at=args["clock"](),
+    )
+    decision = next(
+        row
+        for row in journal.rows
+        if isinstance(row.record, C.DecisionRecordV1)
+        and row.record.checkpoint_id == checkpoint.checkpoint_id
+    )
+    kwargs = {
+        key: args[key]
+        for key in (
+            "origin",
+            "campaign",
+            "arms",
+            "bindings",
+            "expected_run_ids",
+            "provenance",
+            "clock",
+        )
+    }
+    before = args["origin"].ledger_path.read_bytes()
+    pending = read_controlled_campaign(
+        **kwargs,
+        allocation_id=execution.allocation_id,
+        as_of_event_hash=decision.event.event_hash,
+    )
+    assert pending.trials[0].outcome == "UNRESOLVED"
+    assert pending.trials[0].reason == "ORIGINAL_EXECUTION_UNAVAILABLE"
+    assert not pending.trials[0].complete_interval
+    assert pending.trials[0].selected_family is None
+    assert pending.trials[0].operating_cost.status == "VERIFIED_ZERO"
+    complete = read_controlled_campaign(**kwargs, allocation_id=execution.allocation_id)
+    assert complete.trials[0].outcome == "RETAINED"
+    assert args["origin"].ledger_path.read_bytes() == before
+
+
+def test_next_open_expiry_preserves_original_execution_refusal_reason(
+    tmp_path: Path,
+) -> None:
+    from test_stage1_controlled_contracts import controlled_arguments
+
+    from drift.loop import stage1_controlled_contracts as C
+    from drift.loop.stage1_controlled_campaign import execute_controlled_campaign
+    from drift.loop.stage1_controlled_journal import CapturedControlledJournalV1
+    from drift.loop.stage1_controlled_readback import read_controlled_campaign
+
+    # Derive the boundary from a real execution using the same declared tick
+    # clock, rather than depending on an unexplained number of clock calls.
+    baseline = controlled_arguments(tmp_path / "baseline")
+    first = execute_controlled_campaign(**baseline)
+    assert first.m0_status == "completed"
+    original = CapturedControlledJournalV1(
+        origin=baseline["origin"],
+        allocation_id=first.allocation_id,
+        observed_at=baseline["clock"](),
+    )
+    next_open = next(
+        row
+        for row in original.rows
+        if isinstance(row.record, C.ExecutionRecordV1)
+        and row.record.preview.parse(RebalancePreviewV1).session_index
+        == baseline["checkpoints"][0].session_index + 1
+    )
+
+    args = controlled_arguments(tmp_path / "expires-at-next-open")
+    checkpoint = args["checkpoints"][0].model_copy(
+        update={"expires_at": next_open.event.timestamp}
+    )
+    args["checkpoints"] = (checkpoint,)
+    execution = execute_controlled_campaign(**args)
+    assert execution.m0_status == "completed"
+    journal = CapturedControlledJournalV1(
+        origin=args["origin"],
+        allocation_id=execution.allocation_id,
+        observed_at=args["clock"](),
+    )
+    decision = next(
+        row
+        for row in journal.rows
+        if isinstance(row.record, C.DecisionRecordV1)
+        and row.record.checkpoint_id == checkpoint.checkpoint_id
+    )
+    rejected = next(
+        row
+        for row in journal.rows
+        if isinstance(row.record, C.ExecutionRecordV1)
+        and row.record.preview.parse(RebalancePreviewV1).session_index
+        == checkpoint.session_index + 1
+    )
+    assert isinstance(decision.record, C.DecisionRecordV1)
+    assert decision.record.disposition == "SELECTED"
+    assert decision.event.timestamp < checkpoint.expires_at <= rejected.event.timestamp
+    assert isinstance(rejected.record, C.ExecutionRecordV1)
+    assert rejected.record.authorization.verdict == "reject"
+    assert (
+        rejected.record.authorization.reason
+        == "PROPOSAL_EXPIRED_OR_REVOKED_BEFORE_EXECUTION"
+    )
+    before = args["origin"].ledger_path.read_bytes()
+    report = read_controlled_campaign(
+        **{
+            key: args[key]
+            for key in (
+                "origin",
+                "campaign",
+                "arms",
+                "bindings",
+                "expected_run_ids",
+                "provenance",
+                "clock",
+            )
+        },
+        allocation_id=execution.allocation_id,
+    )
+    assert report.original_result is not None
+    artifacts = report.original_result.original_artifacts
+    assert artifacts.result.metrics.committed_fill_count == 1
+    assert not any(
+        event.kind == "fill" and event.session_index == checkpoint.session_index + 1
+        for event in artifacts.trace.events
+    )
+    trial = report.trials[0]
+    assert trial.outcome == "REFUSED"
+    assert trial.reason == rejected.record.authorization.reason
+    assert trial.selected_family is None
+    assert trial.operating_cost.status == "VERIFIED_ZERO"
+    assert args["origin"].ledger_path.read_bytes() == before
+    assert not report.authorizes_trading and not report.scientifically_qualified
+
+
+@pytest.mark.parametrize("case", ("propose", "hold", "timeout", "expired"))
+def test_next_open_current_book_containment_is_unresolved(
+    tmp_path: Path, case: str
+) -> None:
+    from datetime import timedelta
+
+    import test_evaluator_engine as fixture
+    from test_stage1_controlled_contracts import controlled_arguments
+    from test_stage1_synthetic_research_execution import BASE
+
+    from drift.loop import stage1_controlled_contracts as C
+    from drift.loop.stage1_controlled_campaign import execute_controlled_campaign
+    from drift.loop.stage1_controlled_journal import CapturedControlledJournalV1
+    from drift.loop.stage1_controlled_readback import read_controlled_campaign
+
+    members = (
+        (fixture.SEC_A, fixture.LISTING_A),
+        (fixture.SEC_B, fixture.LISTING_B),
+    )
+    bundle = fixture._bundle(
+        decision_views=tuple(
+            fixture._decision_view(security, day, listing_id=listing)
+            for day in fixture.DAYS[1:]
+            for security, listing in members
+        ),
+        accounting_views=tuple(
+            fixture._accounting_view(
+                security,
+                day,
+                listing_id=listing,
+                open_price="200"
+                if security == fixture.SEC_A and day == fixture.DAY_3
+                else None,
+            )
+            for day in fixture.DAYS
+            for security, listing in members
+        ),
+        eligibilities=tuple(
+            fixture._eligibility(security, listing) for security, listing in members
+        ),
+    )
+    args = controlled_arguments(tmp_path, engine=fixture._engine(bundle=bundle))
+    policy = args["mandate"]
+    args["mandate"] = policy.model_copy(
+        update={
+            "securities": tuple(
+                rule.model_copy(update={"maximum_fraction": Decimal("0.6")})
+                for rule in policy.securities
+            )
+        }
+    )
+    checkpoint = args["checkpoints"][0]
+    if case == "expired":
+        checkpoint = checkpoint.model_copy(
+            update={"expires_at": BASE + timedelta(seconds=1)}
+        )
+    args["checkpoints"] = (
+        checkpoint.model_copy(
+            update={
+                "fixture": checkpoint.fixture.model_copy(
+                    update={
+                        "disposition": "hold" if case == "hold" else "propose",
+                        "selected_family": None if case == "hold" else "B3",
+                        "should_timeout": case == "timeout",
+                    }
+                )
+            }
+        ),
+    )
+    execution = execute_controlled_campaign(**args)
+    assert execution.m0_status == "completed"
+    checkpoint = args["checkpoints"][0]
+    journal = CapturedControlledJournalV1(
+        origin=args["origin"],
+        allocation_id=execution.allocation_id,
+        observed_at=args["clock"](),
+    )
+    decision = next(
+        row.record
+        for row in journal.rows
+        if isinstance(row.record, C.DecisionRecordV1)
+        and row.record.checkpoint_id == checkpoint.checkpoint_id
+    )
+    assert decision.disposition == ("SELECTED" if case == "propose" else "RETAINED")
+    contained = next(
+        row.record
+        for row in journal.rows
+        if isinstance(row.record, C.ExecutionRecordV1)
+        and row.record.preview.parse(RebalancePreviewV1).session_index
+        == checkpoint.session_index + 1
+    )
+    assert contained.authorization.verdict == "contain"
+    assert contained.authorization.reason == "SECURITY_CAP"
+    before = args["origin"].ledger_path.read_bytes()
+    report = read_controlled_campaign(
+        **{
+            key: args[key]
+            for key in (
+                "origin",
+                "campaign",
+                "arms",
+                "bindings",
+                "expected_run_ids",
+                "provenance",
+                "clock",
+            )
+        },
+        allocation_id=execution.allocation_id,
+    )
+    assert report.original_result is not None
+    artifacts = report.original_result.original_artifacts
+    assert artifacts.result.classification == EvaluationClassification.INDETERMINATE
+    assert artifacts.final_state.mark is None
+    assert len(artifacts.final_state.holdings) == 2
+    assert artifacts.final_state.net_asset_value == Decimal("0")
+    assert artifacts.result.metrics.ending_net_asset_value == Decimal("10500")
+    assert artifacts.result.metrics.committed_fill_count == 2
+    assert not any(
+        event.kind == "fill" and event.session_index == checkpoint.session_index + 1
+        for event in artifacts.trace.events
+    )
+    trial = report.trials[0]
+    assert trial.outcome == "UNRESOLVED"
+    assert trial.reason == "SECURITY_CAP"
+    assert trial.selected_family is None and not trial.complete_interval
+    assert trial.net_investment_gain is None and trial.economic_gain is None
+    assert trial.operating_cost.status == (
+        "UNAVAILABLE" if case in ("timeout", "expired") else "VERIFIED_ZERO"
+    )
+    attempts = [
+        row.record.original
+        for row in journal.rows
+        if isinstance(row.record, C.AttemptRecordV1)
+    ]
+    if case == "timeout":
+        assert [attempt.status for attempt in attempts] == ["started", "failed"]
+    elif case == "expired":
+        assert not attempts
+        assert any(isinstance(row.record, C.NoAttemptRecordV1) for row in journal.rows)
+    assert report.status == "UNRESOLVED" and not report.economics.complete
+    assert "ORIGINAL_EXECUTION_CONTAINED:3" in report.reasons
+    assert args["origin"].ledger_path.read_bytes() == before
     assert not report.authorizes_trading and not report.scientifically_qualified
 
 

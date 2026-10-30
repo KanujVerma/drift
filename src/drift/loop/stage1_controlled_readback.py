@@ -532,6 +532,8 @@ class _Verifier:
             )
             if fills != expected_fills:
                 raise ValueError("CONTROLLED_FALSE_COMMITTED_FILLS")
+        if expected.verdict == "contain":
+            self.reasons.add(f"ORIGINAL_EXECUTION_CONTAINED:{preview.session_index}")
         self.take(row)
 
     def opportunity(
@@ -1299,6 +1301,7 @@ def read_controlled_campaign(
         )
         outcome: Literal[
             "COMPLETED",
+            "RETAINED",
             "REFUSED",
             "NO_ATTEMPT",
             "FAILED_RESEARCH",
@@ -1336,8 +1339,33 @@ def read_controlled_campaign(
             )
             if decision_row.record.disposition == "SELECTED" and approved:
                 outcome, reason, family = "COMPLETED", info.reason, info.family
+            elif decision_row.record.disposition == "RETAINED" and approved:
+                outcome, reason = "RETAINED", decision_row.record.reason
+            elif execution_row is None and decision_row.record.disposition != "REFUSED":
+                outcome, reason = "UNRESOLVED", "ORIGINAL_EXECUTION_UNAVAILABLE"
+            elif (
+                execution_row is not None
+                and isinstance(execution_row.record, C.ExecutionRecordV1)
+                and execution_row.record.authorization.verdict == "reject"
+                and decision_row.record.disposition != "REFUSED"
+            ):
+                outcome, reason = "REFUSED", execution_row.record.authorization.reason
             else:
                 outcome, reason = "REFUSED", decision_row.record.reason
+        # Current-book containment also applies when research failed or was
+        # not attempted and the original decision retained the incumbent.
+        # Those research records and costs remain in the original journal.
+        execution_row = verifier.executions.get(checkpoint.session_index + 1)
+        if (
+            execution_row is not None
+            and isinstance(execution_row.record, C.ExecutionRecordV1)
+            and execution_row.record.authorization.verdict == "contain"
+        ):
+            outcome, reason, family = (
+                "UNRESOLVED",
+                execution_row.record.authorization.reason,
+                None,
+            )
         if any(
             checkpoint.session_index < index <= end
             for index in verifier.missing_executions
@@ -1527,7 +1555,9 @@ def read_controlled_campaign(
         status=status,
         reasons=tuple(sorted(verifier.reasons)),
         declared_opportunities=len(plan.checkpoints),
-        accounted_event_hashes=tuple(r.event.event_hash for r in captured.rows),
+        accounted_event_hashes=tuple(
+            event.event_hash for event in captured.physical_events
+        ),
         trials=tuple(trials),
         original_result=result,
         source_coverage=plan.coverage,

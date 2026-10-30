@@ -45,6 +45,7 @@ ENTITY = "stage1_controlled_campaign"
 EVENT_PREFIX = "stage1.controlled."
 MAX_RECORD_BYTES = 1_048_576
 MAX_CONTEXT_BYTES = 33_554_432
+MAX_ENCODED_CONTEXT_BYTES = MAX_CONTEXT_BYTES * 2
 Family = Literal["B3", "B4", "B5"]
 
 
@@ -94,23 +95,9 @@ class RetainedCanonicalPayloadV1(FrozenModel):
         )
 
     def original_bytes(self) -> bytes:
-        try:
-            encoded = base64.b64decode(self.data, validate=True)
-            if base64.b64encode(encoded).decode("ascii") != self.data:
-                raise ValueError("CONTROLLED_PAYLOAD_NONCANONICAL_BASE64")
-            decoder = zlib.decompressobj()
-            original = decoder.decompress(encoded, self.size + 1)
-        except (binascii.Error, zlib.error) as error:
-            raise ValueError("CONTROLLED_PAYLOAD_ENCODING_INVALID") from error
-        if (
-            not decoder.eof
-            or decoder.unused_data
-            or decoder.unconsumed_tail
-            or len(original) != self.size
-            or hashlib.sha256(original).hexdigest() != self.sha256
-        ):
-            raise ValueError("CONTROLLED_PAYLOAD_SIZE_OR_HASH_INVALID")
-        return original
+        if type(self.data) is not str or len(self.data) > MAX_RECORD_BYTES:
+            raise ValueError("CONTROLLED_PAYLOAD_TOO_LARGE")
+        return _restore_payload(self.data, self.size, self.sha256)
 
     def parse[M: BaseModel](self, cls: type[M]) -> M:
         original = self.original_bytes()
@@ -118,6 +105,102 @@ class RetainedCanonicalPayloadV1(FrozenModel):
         if canonical_json(result) != original:
             raise ValueError("CONTROLLED_PAYLOAD_NOT_CANONICAL")
         return result
+
+
+def _restore_payload(data: str, size: int, sha256: str) -> bytes:
+    if type(size) is not int or not 0 < size <= MAX_CONTEXT_BYTES:
+        raise ValueError("CONTROLLED_PAYLOAD_TOO_LARGE")
+    if len(data) > MAX_ENCODED_CONTEXT_BYTES:
+        raise ValueError("CONTROLLED_PAYLOAD_TOO_LARGE")
+    try:
+        encoded = base64.b64decode(data, validate=True)
+        if base64.b64encode(encoded).decode("ascii") != data:
+            raise ValueError("CONTROLLED_PAYLOAD_NONCANONICAL_BASE64")
+        decoder = zlib.decompressobj()
+        original = decoder.decompress(encoded, size + 1)
+    except (binascii.Error, zlib.error) as error:
+        raise ValueError("CONTROLLED_PAYLOAD_ENCODING_INVALID") from error
+    if (
+        not decoder.eof
+        or decoder.unused_data
+        or decoder.unconsumed_tail
+        or len(original) != size
+        or hashlib.sha256(original).hexdigest() != sha256
+    ):
+        raise ValueError("CONTROLLED_PAYLOAD_SIZE_OR_HASH_INVALID")
+    return original
+
+
+class SegmentedCanonicalPayloadV2(FrozenModel):
+    """Bounded segments of one stream with ONE original-byte budget."""
+
+    encoding: Literal["zlib-base64-segments/2"] = "zlib-base64-segments/2"
+    size: int = Field(strict=True, gt=0, le=MAX_CONTEXT_BYTES)
+    sha256: SHA256Hash
+    data_parts: tuple[
+        Annotated[str, Field(strict=True, min_length=1, max_length=MAX_RECORD_BYTES)],
+        ...,
+    ] = Field(min_length=2, max_length=MAX_ENCODED_CONTEXT_BYTES // MAX_RECORD_BYTES)
+
+    @model_validator(mode="after")
+    def require_bounded_segments(self) -> Self:
+        self._encoded_size()
+        return self
+
+    def _encoded_size(self) -> int:
+        if (
+            type(self.data_parts) is not tuple
+            or not 2
+            <= len(self.data_parts)
+            <= MAX_ENCODED_CONTEXT_BYTES // MAX_RECORD_BYTES
+            or any(
+                type(part) is not str or not 0 < len(part) <= MAX_RECORD_BYTES
+                for part in self.data_parts
+            )
+            or any(len(part) != MAX_RECORD_BYTES for part in self.data_parts[:-1])
+        ):
+            raise ValueError("CONTROLLED_PAYLOAD_SEGMENT_BOUNDS")
+        size = sum(len(part) for part in self.data_parts)
+        if size > MAX_ENCODED_CONTEXT_BYTES:
+            raise ValueError("CONTROLLED_PAYLOAD_TOO_LARGE")
+        return size
+
+    def original_bytes(self) -> bytes:
+        self._encoded_size()
+        return _restore_payload("".join(self.data_parts), self.size, self.sha256)
+
+    def parse[M: BaseModel](self, cls: type[M]) -> M:
+        original = self.original_bytes()
+        result = cls.model_validate_json(original)
+        if canonical_json(result) != original:
+            raise ValueError("CONTROLLED_PAYLOAD_NOT_CANONICAL")
+        return result
+
+
+RetainedCanonicalPayload = Annotated[
+    RetainedCanonicalPayloadV1 | SegmentedCanonicalPayloadV2,
+    Field(discriminator="encoding"),
+]
+
+
+def retain_canonical_payload(value: BaseModel) -> RetainedCanonicalPayload:
+    original = canonical_json(value)
+    if len(original) > MAX_CONTEXT_BYTES:
+        raise ValueError("CONTROLLED_PAYLOAD_TOO_LARGE")
+    encoded = base64.b64encode(zlib.compress(original, 9)).decode("ascii")
+    digest = hashlib.sha256(original).hexdigest()
+    if len(encoded) <= MAX_RECORD_BYTES:
+        return RetainedCanonicalPayloadV1(
+            size=len(original), sha256=digest, data=encoded
+        )
+    return SegmentedCanonicalPayloadV2(
+        size=len(original),
+        sha256=digest,
+        data_parts=tuple(
+            encoded[i : i + MAX_RECORD_BYTES]
+            for i in range(0, len(encoded), MAX_RECORD_BYTES)
+        ),
+    )
 
 
 class SecurityMandateV1(FrozenModel):
@@ -418,7 +501,7 @@ class InputWitnessRecordV1(FrozenModel):
     checkpoint_id: NonBlankStr
     observation: OriginalReferenceV1
     context_kind: Literal["realized", "reconstructed"]
-    decision_context: RetainedCanonicalPayloadV1
+    decision_context: RetainedCanonicalPayload
     research_context: ResearchContext
     learning: LearningSnapshot
     feedback: tuple[TrialFeedbackRecord, ...]
@@ -490,7 +573,7 @@ class DecisionRecordV1(FrozenModel):
     checkpoint_id: NonBlankStr | None
     observation: OriginalReferenceV1
     context_kind: Literal["realized", "reconstructed"]
-    decision_context: RetainedCanonicalPayloadV1
+    decision_context: RetainedCanonicalPayload
     previous_family: Family
     proposed_family: Family
     staged_family: Family
@@ -502,7 +585,7 @@ class DecisionRecordV1(FrozenModel):
 
 class ExecutionRecordV1(FrozenModel):
     kind: Literal["execution"] = "execution"
-    preview: RetainedCanonicalPayloadV1
+    preview: RetainedCanonicalPayload
     authorization: ExecutionAuthorizationV1
     decision: OriginalReferenceV1
 
