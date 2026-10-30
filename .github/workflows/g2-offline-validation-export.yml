@@ -65,7 +65,6 @@ jobs:
           uv run python - <<'PY'
           import sys, time, os, json, pathlib, resource, subprocess
           from unittest.mock import patch
-          from test_stage1_synthetic_research_execution import BASE
           from datetime import timedelta
           sys.path.insert(0, str(pathlib.Path.cwd() / "tests" / "unit"))
           sys.path.insert(0, str(pathlib.Path.cwd() / "tests" / "integration"))
@@ -93,7 +92,7 @@ jobs:
           print("G2_PROFILE: ledger_bytes",ledger.stat().st_size,flush=True)
           import sqlite3
           db=sqlite3.connect(str(ledger))
-          print("G2_PROFILE: original_event_inventory",db.execute("SELECT count(*),sum(length(payload)) FROM audit_events").fetchone(),flush=True)
+          print("G2_PROFILE: original_event_inventory",db.execute("SELECT count(*),sum(length(payload_json)) FROM audit_events").fetchone(),flush=True)
           db.close()
           keys=("origin","campaign","arms","bindings","expected_run_ids","provenance","clock")
           kw={key:args[key] for key in keys}
