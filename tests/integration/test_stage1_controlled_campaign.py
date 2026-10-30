@@ -413,11 +413,13 @@ def _carried_456_bundle() -> object:
                 query,
                 harness.context,
             )
-            session = build_scheduled_reconstruction_clock(
-                (query,), harness.context
-            ).sessions[0]
             observations.append(observation)
             if ordinal == 0:
+                # Only this clock enters the bundle. The engine independently
+                # replays and validates every retained source request.
+                session = build_scheduled_reconstruction_clock(
+                    (query,), harness.context
+                ).sessions[0]
                 sessions.append(session)
         if index % 60 == 0:
             print("controlled: reconstructed source session", index, flush=True)
