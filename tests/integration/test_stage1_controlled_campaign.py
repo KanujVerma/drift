@@ -768,6 +768,9 @@ def test_full_456_session_carried_br_campaign_has_real_monthly_switches(
             if isinstance(r.record, C.InputWitnessRecordV1)
         ]
         assert len(inputs[1].feedback) == 1 and inputs[1].feedback[0].arm_id == arm
+        # These inspection copies are no longer needed. Release their retained
+        # histories before independently reconstructing the same original root.
+        del journal, original_events, decisions, checkpoint_execution, inputs
         kwargs = {
             key: args[key]
             for key in (
