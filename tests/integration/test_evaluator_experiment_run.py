@@ -82,6 +82,11 @@ from drift.evaluator.experiment_runner import (  # noqa: E402
     execute_experiment_run,
     summary_metrics_payload,
 )
+from drift.evaluator.opening_book_lifecycle import (  # noqa: E402
+    OriginalInvocationBindingV1,
+    invocation_binding_payload,
+    parse_original_invocation_binding,
+)
 from drift.ledger.sqlite import SQLiteLedger  # noqa: E402
 from drift.serialization.canonical import content_hash  # noqa: E402
 
@@ -1288,3 +1293,74 @@ def test_metrics_report_the_exact_terminal_book() -> None:
     assert Decimal(str(_metric(run, "gross_traded_notional"))) == Decimal("1000.00")
     assert _metric(run, "lane") == "exploratory"
     assert _metric(run, "is_promotion_grade_evidence") is False
+
+
+class _NoCompletedResultObserver:
+    def observe_canonical_result(
+        self,
+        *,
+        run: ExperimentRun,
+        artifacts: EvaluationRunArtifactsV2,
+        m0_audit_event_id: UUID,
+    ) -> None:
+        raise AssertionError("failed attempts cannot notify a completed observer")
+
+
+def test_original_observer_refuses_fresh_engine_and_records_only_failed_attempt(
+    tmp_path: Path,
+) -> None:
+    ledger = SQLiteLedger(tmp_path / "bound-attempt.sqlite3")
+    ctx = replace(
+        _context(_engine(), ledger=ledger),
+        original_result_observer=_NoCompletedResultObserver(),
+    )
+    run = execute_experiment_run(_specification(), ctx)
+    assert run.status is ExperimentRunStatus.FAILED
+    assert run.artifact_references == ()
+    events = ledger.verified_events()
+    assert len(events) == 1
+    event = events[0]
+    assert event.schema_version == "3"
+    assert isinstance(event.payload, Mapping)
+    binding = parse_original_invocation_binding(event.payload["invocation_binding"])
+    assert binding.m0_run_id == run.run_id == ctx.run_id
+    assert binding.m0_audit_event_id == event.event_id == ctx.audit_event_id
+    assert event.payload["artifact_hashes"] == ()
+    assert "original_final_book_hash" not in event.payload
+
+
+def test_engine_binding_mutation_cannot_relabel_m0_failed_attempt(
+    tmp_path: Path,
+) -> None:
+    ledger = SQLiteLedger(tmp_path / "detached-attempt.sqlite3")
+    original = _engine()
+    captured: list[dict[str, str]] = []
+
+    class MutatingEngine:
+        admission = original.admission
+
+        def run(self, **kwargs: object) -> EvaluationRunArtifactsV2:
+            binding = kwargs["original_invocation_binding"]
+            assert isinstance(binding, OriginalInvocationBindingV1)
+            captured.append(invocation_binding_payload(binding))
+            for value in (
+                binding.invocation_id,
+                binding.m0_run_id,
+                binding.m0_audit_event_id,
+            ):
+                object.__setattr__(value, "int", uuid7().int)
+            raise RuntimeError("engine failed after mutating its detached binding")
+
+    ctx = replace(
+        _context(original, ledger=ledger),
+        engine=cast(SessionEvaluatorEngine, MutatingEngine()),
+        original_result_observer=_NoCompletedResultObserver(),
+    )
+    run = execute_experiment_run(_specification(), ctx)
+    assert run.status is ExperimentRunStatus.FAILED
+    event = ledger.verified_events()[0]
+    assert isinstance(event.payload, Mapping)
+    assert event.payload["invocation_binding"] == captured[0]
+    assert event.entity_id == ctx.run_id
+    assert event.event_id == ctx.audit_event_id
+    assert event.payload["artifact_hashes"] == ()

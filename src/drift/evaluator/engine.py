@@ -58,6 +58,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from functools import cache
+from threading import Lock
 from types import NoneType, UnionType
 from typing import (
     Any,
@@ -71,6 +72,7 @@ from typing import (
     get_type_hints,
 )
 from uuid import UUID
+from weakref import ReferenceType, ref
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from pydantic_core import PydanticSerializationError
@@ -165,17 +167,19 @@ from drift.domain.evaluator_trace import (
     ClaimSettledTraceEventV1,
     CorporateActionAppliedTraceEventV1,
     EvaluationPhase,
-    EvaluationTraceLogV1,
-    EvaluatorTraceEventV1,
+    EvaluationTraceLog,
+    EvaluatorTraceEventV2,
+    ExecutionAuthorizationTraceEventV1,
     ExploratoryAccountingPriceTraceEventV1,
     ExploratoryStrategyDecisionTraceEventV1,
     FillRejectionTraceEventV1,
     FillTraceEventV1,
     IndeterminateCauseTraceEventV1,
     SessionMarkTraceEventV1,
+    SessionObservationTraceEventV1,
     SessionStartTraceEventV1,
     StrategyDecisionTraceEventV1,
-    seal_evaluation_trace_log,
+    seal_observed_evaluation_trace_log,
 )
 from drift.domain.normalization import DerivedObservationViewV1
 from drift.domain.observation_query import (
@@ -207,6 +211,13 @@ from drift.evaluator.corporate_action_coverage import CorporateActionCoverageInd
 from drift.evaluator.corporate_actions import CorporateActionProcessor
 from drift.evaluator.execution import AtomicRebalanceEngine, resolve_execution_listings
 from drift.evaluator.exploratory_dividends import ExploratoryDividendPolicyV1
+from drift.evaluator.opening_book_lifecycle import (
+    BoundOpeningBookLifecycleV1,
+    OpeningBookLifecycleError,
+    OpeningBookLifecycleV1,
+    OriginalInvocationBindingV1,
+    copy_original_invocation_binding,
+)
 from drift.evaluator.portfolio import (
     PortfolioAccountingKernel,
     initial_portfolio_state,
@@ -215,6 +226,13 @@ from drift.evaluator.reconstruction import (
     ExploratoryReconstructionReplay,
     require_scheduled_calendar_row,
     verify_exploratory_reconstructions,
+)
+from drift.evaluator.session_observer import (
+    ExecutionAuthorizationV1,
+    OpenSecurityPriceV1,
+    RebalancePreviewV1,
+    SessionEvidenceObserverV1,
+    SessionObservationV1,
 )
 from drift.markets.economic_closed_world import (
     CorporateActionCoverageError,
@@ -225,7 +243,7 @@ from drift.markets.observation_validation import (
     m1d_context_hash,
 )
 from drift.markets.session_closed_world import verify_closed_world_session_coverage
-from drift.serialization.canonical import content_hash
+from drift.serialization.canonical import canonical_json, content_hash
 
 ZERO = Decimal("0")
 IDENTITY_NUMERATOR = "1"
@@ -1128,10 +1146,12 @@ class _Loop:
     """Mutable working set carried across the session loop."""
 
     state: PortfolioStateV2
+    session_observer: SessionEvidenceObserverV1 | None = None
+    invocation_binding: OriginalInvocationBindingV1 | None = None
     staged_targets: tuple[SecurityTargetPositionV1, ...] = ()
     #: The session whose close staged the pending decision, if one is pending.
     staged_decision_session: EvaluationSessionV1 | None = None
-    events: list[EvaluatorTraceEventV1] = field(default_factory=list)
+    events: list[EvaluatorTraceEventV2] = field(default_factory=list)
     checkpoints: list[_Checkpoint] = field(default_factory=list)
     gross_traded_notional: Decimal = ZERO
     committed_fill_count: int = 0
@@ -1578,6 +1598,227 @@ def _bind_reconstruction(
     require_scheduled_calendar_row(observation, session)
 
 
+def _verify_untampered_original_book(
+    book: PortfolioStateV2, expected_digest: str
+) -> None:
+    """Refuse object-level tampering before trusting the original book digest.
+
+    A mutable reference exposed to an observer can bypass Pydantic freezing via
+    object.__setattr__. Hashing alone cannot detect a Decimal subclass that
+    numerically equals 1 but renders "10000" through its forged __str__.
+    Inspect the exact engine-created object's actual stored types before any
+    serializer or accounting operation; never rebuild or replace that object.
+    """
+    invalid = OpeningBookLifecycleError(
+        "prepared original book changed or carries untrusted field types"
+    )
+    if type(book) is not PortfolioStateV2:
+        raise invalid
+    values = vars(book)
+    # Check raw key types before any set, equality, attribute lookup or
+    # serialization. A str subclass with a forged __eq__ can mutate the
+    # exposed dict during a seemingly harmless set membership comparison.
+    if (
+        type(values) is not dict
+        or any(type(key) is not str for key in values)
+        or set(values) != set(PortfolioStateV2.model_fields)
+        or getattr(book, "__pydantic_extra__", None) is not None
+        or getattr(book, "__pydantic_private__", None) is not None
+    ):
+        raise invalid
+    for field_name in ("schema_version", "lane", "admission_hash"):
+        if type(values[field_name]) is not str:
+            raise invalid
+    money_fields = (
+        "cash_balance",
+        "holdings_market_value",
+        "pending_claims_value",
+        "net_asset_value",
+        "realized_gross_pnl",
+        "realized_net_pnl",
+        "cumulative_transaction_costs",
+    )
+    if any(type(values[name]) is not Decimal for name in money_fields):
+        raise invalid
+    tuple_fields = (
+        "holdings",
+        "pending_cash_claims",
+        "settled_claim_ids",
+        "applied_effect_ids",
+    )
+    if any(type(values[name]) is not tuple or values[name] for name in tuple_fields):
+        raise invalid
+    if values["mark"] is not None:
+        raise invalid
+    session = values["session_key"]
+    if type(session) is not SessionKeyV1:
+        raise invalid
+    session_fields = vars(session)
+    if (
+        type(session_fields) is not dict
+        or any(type(key) is not str for key in session_fields)
+        or set(session_fields) != set(SessionKeyV1.model_fields)
+        or any(
+            type(session_fields[name]) is not str
+            for name in ("schema_version", "mic", "session_scope")
+        )
+        or type(session_fields["local_date"]) is not date
+        or getattr(session, "__pydantic_extra__", None) is not None
+        or getattr(session, "__pydantic_private__", None) is not None
+    ):
+        raise invalid
+    try:
+        rebuilt = _revalidated(PortfolioStateV2, book)
+    except (TypeError, ValueError) as error:
+        raise invalid from error
+    if (
+        content_hash(book) != expected_digest
+        or content_hash(rebuilt) != expected_digest
+    ):
+        raise invalid
+
+
+type _PreparedBookEscrow = tuple[
+    PortfolioStateV2,
+    SessionEvaluatorEngine,
+    PortfolioStateV2,
+    ReferenceType[OpeningBookLifecycleV1],
+    str,
+]
+
+
+def _private_original_book_escrow() -> tuple[
+    Callable[
+        [
+            object,
+            PortfolioStateV2,
+            SessionEvaluatorEngine,
+            PortfolioStateV2,
+            OpeningBookLifecycleV1,
+            str,
+        ],
+        None,
+    ],
+    Callable[[object], SessionEvaluatorEngine | None],
+    Callable[[object], _PreparedBookEscrow | None],
+]:
+    """Retain original evidence by object identity, never mutable object hash.
+
+    Lifecycle code may mutate its engine's class __hash__ or __eq__. A weak-key
+    dictionary would then lose access to an already retained book. Integer
+    identity keys and weak owner references avoid all user-defined hashing
+    and equality, and weakref cleanup also prevents abandoned engines from
+    being retained by this module. No escrow value references its owner.
+    """
+    states: dict[int, tuple[ReferenceType[object], _PreparedBookEscrow]] = {}
+    lock = Lock()
+
+    def owner_reference(owner: object) -> ReferenceType[object]:
+        identity = id(owner)
+
+        def remove(dead: ReferenceType[object]) -> None:
+            with lock:
+                saved = states.get(identity)
+                if saved is not None and saved[0] is dead:
+                    del states[identity]
+
+        return ref(owner, remove)
+
+    def retain(
+        owner: object,
+        book: PortfolioStateV2,
+        executor: SessionEvaluatorEngine,
+        observer_book: PortfolioStateV2,
+        lifecycle: OpeningBookLifecycleV1,
+        original_digest: str,
+    ) -> None:
+        identity = id(owner)
+        with lock:
+            saved = states.get(identity)
+            if saved is not None and saved[0]() is owner:
+                raise OpeningBookLifecycleError(
+                    "an original opening book is already retained"
+                )
+            states[identity] = (
+                owner_reference(owner),
+                (
+                    book,
+                    executor,
+                    observer_book,
+                    ref(lifecycle),
+                    original_digest,
+                ),
+            )
+
+    def inspect(owner: object) -> SessionEvaluatorEngine | None:
+        with lock:
+            saved = states.get(id(owner))
+            if saved is not None and saved[0]() is owner:
+                return saved[1][1]
+            return None
+
+    def consume(owner: object) -> _PreparedBookEscrow | None:
+        identity = id(owner)
+        with lock:
+            saved = states.get(identity)
+            if saved is not None and saved[0]() is owner:
+                del states[identity]
+                return saved[1]
+            return None
+
+    return retain, inspect, consume
+
+
+_RETAIN_ORIGINAL_BOOK, _PEEK_PREPARED_EXECUTOR, _CONSUME_ORIGINAL_BOOK = (
+    _private_original_book_escrow()
+)
+
+
+def _private_opening_book_reservation() -> tuple[
+    Callable[[object], None],
+    Callable[[object], bool],
+]:
+    """Keep the prepared-attempt tombstone independent of mutable hashing.
+
+    The reservation happens before the first callback and survives escrow
+    consumption. A forged public phase and a replaced class __hash__ or
+    __eq__ must never authorize the legacy cash initializer. Identity keys
+    are retired only when the actual engine is collected.
+    """
+    attempted: dict[int, ReferenceType[object]] = {}
+    lock = Lock()
+
+    def owner_reference(owner: object) -> ReferenceType[object]:
+        identity = id(owner)
+
+        def remove(dead: ReferenceType[object]) -> None:
+            with lock:
+                if attempted.get(identity) is dead:
+                    del attempted[identity]
+
+        return ref(owner, remove)
+
+    def reserve(owner: object) -> None:
+        identity = id(owner)
+        with lock:
+            saved = attempted.get(identity)
+            if saved is not None and saved() is owner:
+                raise OpeningBookLifecycleError(
+                    "opening-book preparation requires a fresh, unused engine"
+                )
+            attempted[identity] = owner_reference(owner)
+
+    def was_prepared(owner: object) -> bool:
+        with lock:
+            saved = attempted.get(id(owner))
+            return saved is not None and saved() is owner
+
+    return reserve, was_prepared
+
+
+_RESERVE_OPENING_BOOK, _WAS_PREPARED = _private_opening_book_reservation()
+
+
 class SessionEvaluatorEngine:
     """Runs the canonical five-phase evaluation loop over one input bundle."""
 
@@ -1649,6 +1890,7 @@ class SessionEvaluatorEngine:
             book_currency_code=book_currency_code,
         )
         self._accounting_index = self._index_accounting_views(bundle)
+        self._book_currency_namespace = book_currency_namespace
         self._book_currency_code = book_currency_code
         # Issue 54: only the reconstructed lane reads this index, and only
         # after its gate re-derived every reconstruction (issue 55).
@@ -1682,6 +1924,18 @@ class SessionEvaluatorEngine:
         self._rebalance = AtomicRebalanceEngine(
             cost_model=cost_model, session_clock=bundle.session_clock
         )
+        # #508 PR A: optional original-book preparation is an isolated engine
+        # lifecycle. An unprepared engine preserves the existing run behavior.
+        self._opening_book_lock = Lock()
+        self._opening_book_phase: Literal[
+            "new", "preparing", "prepared", "claimed", "consumed", "failed"
+        ] = "new"
+        self._legacy_run_started = False
+        # The only strong lifecycle reference lives on the engine itself.
+        # Escrow stores a weak reference to that exact observer, never a
+        # strong value that can retain a callback closing over the weak key.
+        # This anchor controls lifetime only, never callback authority.
+        self._lifecycle_lifetime_anchor: OpeningBookLifecycleV1 | None = None
 
     # -- accessors ---------------------------------------------------------
 
@@ -1878,6 +2132,103 @@ class SessionEvaluatorEngine:
         # with. A V1 identity binds none, and the strategy is not read for them.
         require_bound_strategy_parameters(run_identity, strategy)
 
+    # -- optional original opening-book lifecycle --------------------------
+
+    def prepare_opening_book(self, *, lifecycle: OpeningBookLifecycleV1) -> None:
+        """Prepare one actual engine-created fresh book before an invocation.
+
+        The observer must retain its original book through a separately
+        accepted producer. Callback success is *not* issuer authentication:
+        PR B must prove original retention and the trusted ledger origin.
+        Once preparation is attempted this engine never falls back to fresh
+        capital, even when the observer fails.
+        """
+        try:
+            ref(lifecycle)
+        except TypeError as error:
+            raise OpeningBookLifecycleError(
+                "opening-book lifecycle must support weak references"
+            ) from error
+        with self._opening_book_lock:
+            if (
+                self._opening_book_phase != "new"
+                or self._legacy_run_started
+                or _WAS_PREPARED(self)
+            ):
+                raise OpeningBookLifecycleError(
+                    "opening-book preparation requires a fresh, unused engine"
+                )
+            # Reserve before the first callback, initializer or other
+            # potentially failing operation. This outlives escrow consumption
+            # and cannot be reset by changing the public engine's phase.
+            _RESERVE_OPENING_BOOK(self)
+            self._opening_book_phase = "preparing"
+
+        try:
+            # This is the same initializer and exact set of arguments that
+            # the legacy run used. No caller can inject arbitrary holdings.
+            # The opening book must not expose the bundle's actual nested
+            # SessionKeyV1 object to a lifecycle callback. Its serialized
+            # contents are identical, but its object identity is independent.
+            opening_book = initial_portfolio_state(
+                session_key=_revalidated(
+                    SessionKeyV1, self._bundle.session_clock.sessions[0].session_key
+                ),
+                initial_cash=self._protocol.initial_cash,
+                admission=self._admission,
+            )
+            original_digest = content_hash(opening_book)
+            _verify_untampered_original_book(opening_book, original_digest)
+            # Independently revalidate every accounting collaborator before
+            # any observer can mutate the public engine. This is the same M2
+            # implementation over the same canonical inputs, NOT a second
+            # account/portfolio or another call to initial_portfolio_state.
+            # Keep the executor in escrow, never in an engine attribute that
+            # lifecycle code capturing self could replace or inspect.
+            execution_engine = _PREPARED_EXECUTOR_TYPE(
+                bundle=self._bundle,
+                admission=self._admission,
+                protocol=self._protocol,
+                cost_model=self._cost_model,
+                evidence=self._evidence,
+                book_currency_namespace=self._book_currency_namespace,
+                book_currency_code=self._book_currency_code,
+            )
+            # The original book stays private to the engine. Python's frozen
+            # models can still be mutated via object.__setattr__, including
+            # asynchronously after any last check. An observer receives one
+            # detached, revalidated twin with identical original book bytes,
+            # reused across all three callbacks. Its identity is not the
+            # actual evaluator state object. The engine consumes its original.
+            observed_book = _revalidated(PortfolioStateV2, opening_book)
+            _verify_untampered_original_book(observed_book, original_digest)
+            lifecycle.retain_original_book(
+                opening_book=observed_book,
+                admission=_revalidated_admission(self._admission),
+                protocol=_revalidated(EvaluationProtocolV1, self._protocol),
+                currency_code=self._book_currency_code,
+            )
+            _verify_untampered_original_book(observed_book, original_digest)
+            _verify_untampered_original_book(opening_book, original_digest)
+        except BaseException:
+            with self._opening_book_lock:
+                self._opening_book_phase = "failed"
+            raise
+
+        with self._opening_book_lock:
+            _RETAIN_ORIGINAL_BOOK(
+                self,
+                opening_book,
+                execution_engine,
+                observed_book,
+                lifecycle,
+                original_digest,
+            )
+            # Keep the exact lifecycle alive without adding an escrow value
+            # reference to its captured owner engine.
+            self._lifecycle_lifetime_anchor = lifecycle
+            self._opening_book_phase = "prepared"
+
     # -- run ----------------------------------------------------------------
 
     def run(
@@ -1885,6 +2236,8 @@ class SessionEvaluatorEngine:
         *,
         strategy: LaneDispatchStrategy,
         run_identity: EvaluationRunIdentityV1 | EvaluationRunIdentityV2,
+        original_invocation_binding: OriginalInvocationBindingV1 | None = None,
+        session_observer: SessionEvidenceObserverV1 | None = None,
     ) -> EvaluationRunArtifactsV2:
         """Step every session through all five phases, halting fail-closed.
 
@@ -1892,28 +2245,212 @@ class SessionEvaluatorEngine:
         that lane's one decision method before any session is stepped. Under
         an ``EvaluationRunIdentityV2`` the strategy's exposed parameters are
         bound to the identity first (issue 112); a V1 run is unchanged.
+
+        An optional operational binding requires an actual prepared book and
+        bound lifecycle callbacks. It never enters deterministic evaluator
+        identity, accounting, RESULT or trace hashes.
         """
-        # Issue 79 ruling, at use: construction already refused a promotion
-        # admission, and nothing past it is stepped under one either.
-        refuse_promotion_lane(self._admission, site="an engine run")
-        run_identity = _revalidated_run_identity(run_identity)
-        self._require_bound_identity(run_identity, strategy)
-        decide = self._lane_decision(strategy)
-        sessions = self._bundle.session_clock.sessions
-        loop = _Loop(
-            state=initial_portfolio_state(
-                session_key=sessions[0].session_key,
-                initial_cash=self._protocol.initial_cash,
-                admission=self._admission,
+        # Snapshot before strategy validation or any lifecycle callback. Each
+        # callback receives a further detached value, including UUID leaves.
+        invocation_binding = (
+            copy_original_invocation_binding(original_invocation_binding)
+            if original_invocation_binding is not None
+            else None
+        )
+        if session_observer is not None and not isinstance(
+            session_observer, SessionEvidenceObserverV1
+        ):
+            raise TypeError("EXACT_SESSION_OBSERVER_PROTOCOL_REQUIRED")
+        bound_lifecycle: BoundOpeningBookLifecycleV1 | None = None
+        # Decide which evaluator owns accounting *before* any callbacks.
+        # For a prepared run the private runner was revalidated before retain
+        # and cannot be redirected by replacing fields/methods on this public
+        # engine during claim/consume. Legacy execution stays on self.
+        with self._opening_book_lock:
+            phase = self._opening_book_phase
+            previously_prepared = _WAS_PREPARED(self)
+            if (previously_prepared and phase != "prepared") or (
+                phase == "prepared" and not previously_prepared
+            ):
+                raise OpeningBookLifecycleError(
+                    "prepared opening book is not available for another run"
+                )
+            if invocation_binding is not None and phase != "prepared":
+                raise OpeningBookLifecycleError(
+                    "bound original invocation requires a prepared opening book"
+                )
+            executor = _PEEK_PREPARED_EXECUTOR(self) if phase == "prepared" else self
+        if executor is None:
+            raise OpeningBookLifecycleError(
+                "prepared opening-book executor is not available"
             )
+        # Issue 79 ruling, at use: construction already refused promotion.
+        refuse_promotion_lane(executor._admission, site="an engine run")
+        run_identity = _revalidated_run_identity(run_identity)
+        if executor is self:
+            # Preserve the entire legacy/direct extension path.
+            self._require_bound_identity(run_identity, strategy)
+            decide = self._lane_decision(strategy)
+        else:
+            type(executor)._require_bound_identity(executor, run_identity, strategy)
+            decide = type(executor)._lane_decision(
+                executor, strategy, trusted_dispatch=True
+            )
+        sessions = executor._bundle.session_clock.sessions
+        with self._opening_book_lock:
+            if self._opening_book_phase == "new":
+                # Double-check after strategy validation and before any fresh
+                # seed book is constructed. A callback cannot turn an engine
+                # that ever attempted preparation into a legacy engine.
+                if invocation_binding is not None or _WAS_PREPARED(self):
+                    raise OpeningBookLifecycleError(
+                        "prepared opening book is not available for another run"
+                    )
+                # Existing direct engine callers may still run/replay freely,
+                # but cannot switch into provisioned mode after the fact.
+                self._legacy_run_started = True
+                prepared_book = None
+                observer_book = None
+                lifecycle = None
+                prepared_digest = None
+            elif self._opening_book_phase == "prepared":
+                # Take the same actual prepared object out of escrow BEFORE
+                # a callback that closes over this engine could run.
+                # The original and its isolated executor have one atomic
+                # claim. Neither can be substituted or re-credited later.
+                prepared_pair = _CONSUME_ORIGINAL_BOOK(self)
+                if prepared_pair is None:
+                    self._opening_book_phase = "failed"
+                    raise OpeningBookLifecycleError(
+                        "prepared opening-book state is incomplete"
+                    )
+                (
+                    prepared_book,
+                    claimed_executor,
+                    observer_book,
+                    lifecycle_reference,
+                    prepared_digest,
+                ) = prepared_pair
+                lifecycle = lifecycle_reference()
+                if claimed_executor is not executor:
+                    self._opening_book_phase = "failed"
+                    raise OpeningBookLifecycleError(
+                        "prepared opening-book executor identity changed"
+                    )
+                if (
+                    prepared_book is None
+                    or observer_book is None
+                    or lifecycle is None
+                    or prepared_digest is None
+                ):
+                    self._opening_book_phase = "failed"
+                    raise OpeningBookLifecycleError(
+                        "prepared opening-book state is incomplete"
+                    )
+                if invocation_binding is not None:
+                    if not isinstance(lifecycle, BoundOpeningBookLifecycleV1):
+                        self._opening_book_phase = "failed"
+                        raise OpeningBookLifecycleError(
+                            "bound original invocation requires a bound lifecycle"
+                        )
+                    bound_lifecycle = lifecycle
+                # Make the claim single-winner before invoking any callback.
+                # A failed or uncertain claim must not be retried as new cash.
+                self._opening_book_phase = "claimed"
+            else:
+                raise OpeningBookLifecycleError(
+                    "prepared opening book is not available for another run"
+                )
+
+        if prepared_book is None:
+            loop = _Loop(
+                state=initial_portfolio_state(
+                    session_key=sessions[0].session_key,
+                    initial_cash=self._protocol.initial_cash,
+                    admission=self._admission,
+                )
+            )
+        else:
+            assert (
+                lifecycle is not None
+                and observer_book is not None
+                and prepared_digest is not None
+            )
+            _verify_untampered_original_book(prepared_book, prepared_digest)
+            _verify_untampered_original_book(observer_book, prepared_digest)
+            # The prepared decision closure already targets the separately
+            # revalidated private executor, not callback-visible self.
+            # Never expose either the evaluator's internal original book or
+            # the identity used to seal RESULT. The observer sees one stable
+            # detached twin for its original-retention ledger receipts.
+            if invocation_binding is None:
+                lifecycle.claim_invocation(
+                    opening_book=observer_book,
+                    run_identity=_revalidated_run_identity(run_identity),
+                )
+            else:
+                assert bound_lifecycle is not None
+                bound_lifecycle.claim_bound_invocation(
+                    opening_book=observer_book,
+                    run_identity=_revalidated_run_identity(run_identity),
+                    binding=copy_original_invocation_binding(invocation_binding),
+                )
+            _verify_untampered_original_book(observer_book, prepared_digest)
+            _verify_untampered_original_book(prepared_book, prepared_digest)
+            loop = _Loop(state=prepared_book)
+            with self._opening_book_lock:
+                self._opening_book_phase = "consumed"
+            if invocation_binding is None:
+                lifecycle.observe_consumption(
+                    opening_book=observer_book,
+                    run_identity=_revalidated_run_identity(run_identity),
+                )
+            else:
+                assert bound_lifecycle is not None
+                bound_lifecycle.observe_bound_consumption(
+                    opening_book=observer_book,
+                    run_identity=_revalidated_run_identity(run_identity),
+                    binding=copy_original_invocation_binding(invocation_binding),
+                )
+            _verify_untampered_original_book(observer_book, prepared_digest)
+            _verify_untampered_original_book(loop.state, prepared_digest)
+            with self._opening_book_lock:
+                if self._opening_book_phase != "consumed":
+                    self._opening_book_phase = "failed"
+                    raise OpeningBookLifecycleError(
+                        "opening-book lifecycle phase changed during consumption"
+                    )
+
+        loop.session_observer = session_observer
+        loop.invocation_binding = (
+            copy_original_invocation_binding(invocation_binding)
+            if invocation_binding is not None
+            else None
         )
         halt: _Halt | None = None
         for index, session in enumerate(sessions):
             try:
                 if index > 0:
-                    loop.state = self._advance(loop.state, session.session_key)
-                self._emit_session_start(loop, index, session)
-                halt = self._step_session(loop, index, session, decide)
+                    if prepared_digest is None:
+                        loop.state = self._advance(loop.state, session.session_key)
+                    else:
+                        loop.state = type(executor)._advance(
+                            executor, loop.state, session.session_key
+                        )
+                if prepared_digest is None:
+                    # Legacy callers retain their existing extension hooks.
+                    self._emit_session_start(loop, index, session)
+                else:
+                    # An observer that captured the engine must not be able
+                    # to inject an instance-level hook that sees the private
+                    # original book after our last integrity check.
+                    type(executor)._emit_session_start(executor, loop, index, session)
+                if prepared_digest is None:
+                    halt = self._step_session(loop, index, session, decide)
+                else:
+                    halt = type(executor)._step_session(
+                        executor, loop, index, session, decide, trusted_dispatch=True
+                    )
             except (
                 PromotionLaneDisabledError,
                 StrategyParametersBindingError,
@@ -1933,13 +2470,24 @@ class SessionEvaluatorEngine:
                 ) from error
             if halt is not None:
                 break
-        trace = seal_evaluation_trace_log(loop.events)
-        result = self._seal_result(
-            run_identity=run_identity,
-            halt=halt,
-            metrics=self._metrics(loop),
-            trace=trace,
-        )
+        trace = seal_observed_evaluation_trace_log(loop.events)
+        if prepared_digest is None:
+            metrics = self._metrics(loop)
+            result = self._seal_result(
+                run_identity=run_identity,
+                halt=halt,
+                metrics=metrics,
+                trace=trace,
+            )
+        else:
+            metrics = type(executor)._metrics(executor, loop)
+            result = type(executor)._seal_result(
+                executor,
+                run_identity=run_identity,
+                halt=halt,
+                metrics=metrics,
+                trace=trace,
+            )
         return EvaluationRunArtifactsV2(
             result=result, trace=trace, final_state=loop.state
         )
@@ -1973,19 +2521,56 @@ class SessionEvaluatorEngine:
         index: int,
         session: EvaluationSessionV1,
         decide: _DecisionPhase,
+        *,
+        trusted_dispatch: bool = False,
     ) -> _Halt | None:
         phase = EvaluationPhase.PRE_OPEN_EFFECTS
         try:
-            self._pre_open_effects(loop, index, session)
+            if trusted_dispatch:
+                type(self)._pre_open_effects(self, loop, index, session)
+            else:
+                self._pre_open_effects(loop, index, session)
             phase = EvaluationPhase.OPEN_EXECUTION
-            rejected = self._open_execution(loop, index, session)
+            if trusted_dispatch:
+                rejected = type(self)._open_execution(self, loop, index, session)
+            else:
+                rejected = self._open_execution(loop, index, session)
             if rejected is not None:
                 return rejected
             phase = EvaluationPhase.INTRASESSION_ECONOMIC_EFFECTS
-            self._intrasession_effects(loop, index, session)
+            if trusted_dispatch:
+                type(self)._intrasession_effects(self, loop, index, session)
+            else:
+                self._intrasession_effects(loop, index, session)
             phase = EvaluationPhase.CLOSE_MARK
-            self._close_mark(loop, index, session)
+            if trusted_dispatch:
+                type(self)._close_mark(self, loop, index, session)
+            else:
+                self._close_mark(loop, index, session)
             phase = EvaluationPhase.POST_CLOSE_DECISION
+            if loop.session_observer is not None:
+                loop.events.append(
+                    SessionObservationTraceEventV1(
+                        sequence=len(loop.events),
+                        session_index=index,
+                        session_key=session.session_key,
+                        book_hash=content_hash(loop.state),
+                    )
+                )
+                observation = SessionObservationV1(
+                    session_index=index,
+                    session=session,
+                    state=loop.state,
+                    trace_prefix=tuple(
+                        event for event in loop.events if event.session_index == index
+                    ),
+                    invocation_binding=loop.invocation_binding,
+                )
+                loop.session_observer.observe_session(
+                    SessionObservationV1.model_validate_json(
+                        canonical_json(observation)
+                    )
+                )
             return decide(loop, index, session)
         except (IndeterminateValuationError, IndeterminateExecutionError) as error:
             cause = str(error) or type(error).__name__
@@ -2178,6 +2763,76 @@ class SessionEvaluatorEngine:
         # stale intent can never be executed twice.
         loop.staged_targets = ()
         loop.staged_decision_session = None
+        if loop.session_observer is not None:
+            # Mandatory host controls see actual next-open prices, including
+            # unchanged holdings. Legacy no-observer evidence requirements and
+            # financial artifacts remain untouched.
+            complete_prices = dict(prices)
+            for security_id in sorted(set(targets) | set(held), key=_security_order):
+                if security_id in complete_prices:
+                    continue
+                if self._reconstructed_lane is None:
+                    complete_prices[security_id] = self._open_price(
+                        security_id, session
+                    )
+                else:
+                    record = self._reconstructed_price(
+                        security_id, session.session_key, "open"
+                    )
+                    complete_prices[security_id] = ListingOpenPriceV1(
+                        listing_id=record.listing_id,
+                        venue=record.venue,
+                        unadjusted_open_price=record.unadjusted_price,
+                    )
+            preview = RebalancePreviewV1(
+                session_index=index,
+                session=session,
+                decision_session=decision_session,
+                before_state=loop.state,
+                outcome=outcome,
+                open_prices=tuple(
+                    OpenSecurityPriceV1(security_id=security_id, quote=quote)
+                    for security_id, quote in sorted(
+                        complete_prices.items(),
+                        key=lambda item: _security_order(item[0]),
+                    )
+                ),
+                invocation_binding=loop.invocation_binding,
+            )
+            expected_preview_hash = preview.financial_hash
+            returned = loop.session_observer.authorize_rebalance(
+                RebalancePreviewV1.model_validate_json(canonical_json(preview))
+            )
+            if type(returned) is not ExecutionAuthorizationV1:
+                raise ValueError("EXACT_EXECUTION_AUTHORIZATION_REQUIRED")
+            authorization = _revalidated(ExecutionAuthorizationV1, returned)
+            if authorization.preview_hash != expected_preview_hash:
+                raise ValueError("EXECUTION_AUTHORIZATION_WRONG_PREVIEW")
+            loop.events.append(
+                ExecutionAuthorizationTraceEventV1(
+                    sequence=len(loop.events),
+                    session_index=index,
+                    session_key=session.session_key,
+                    preview_hash=expected_preview_hash,
+                    policy_hash=authorization.policy_hash,
+                    verdict=authorization.verdict,
+                    reason=authorization.reason,
+                )
+            )
+            # Unsafe current state is independent of incoming solvency. It
+            # cannot be hidden by rejecting an already unfunded proposal.
+            if authorization.verdict == "contain":
+                return _Halt(
+                    index,
+                    EvaluationClassification.INDETERMINATE,
+                    authorization.reason,
+                )
+            # An accounting rejection is never upgraded into a successful hold.
+            if (
+                outcome.classification != "rejected"
+                and authorization.verdict == "reject"
+            ):
+                return None
         if outcome.classification == "rejected":
             rejection = outcome.rejection
             if rejection is None:  # pragma: no cover - model invariant
@@ -2594,7 +3249,9 @@ class SessionEvaluatorEngine:
             for security_id in sorted(grouped, key=_security_order)
         )
 
-    def _lane_decision(self, strategy: LaneDispatchStrategy) -> _DecisionPhase:
+    def _lane_decision(
+        self, strategy: LaneDispatchStrategy, *, trusted_dispatch: bool = False
+    ) -> _DecisionPhase:
         """Bind the strategy to the one decision method this engine's lane allows.
 
         Checked once, before any session is stepped, so a strategy that cannot
@@ -2612,6 +3269,10 @@ class SessionEvaluatorEngine:
             def realized_decision(
                 loop: _Loop, index: int, session: EvaluationSessionV1
             ) -> _Halt | None:
+                if trusted_dispatch:
+                    return type(self)._post_close_decision(
+                        self, loop, index, session, realized
+                    )
                 return self._post_close_decision(loop, index, session, realized)
 
             return realized_decision
@@ -2626,6 +3287,10 @@ class SessionEvaluatorEngine:
         def reconstructed_decision(
             loop: _Loop, index: int, session: EvaluationSessionV1
         ) -> _Halt | None:
+            if trusted_dispatch:
+                return type(self)._post_close_reconstructed_decision(
+                    self, loop, index, session, exploratory, lane
+                )
             return self._post_close_reconstructed_decision(
                 loop, index, session, exploratory, lane
             )
@@ -2863,7 +3528,7 @@ class SessionEvaluatorEngine:
         run_identity: EvaluationRunIdentityV1 | EvaluationRunIdentityV2,
         halt: _Halt | None,
         metrics: EvaluationSummaryMetricsV1,
-        trace: EvaluationTraceLogV1,
+        trace: EvaluationTraceLog,
     ) -> EvaluationResultV1:
         common: dict[str, object] = {
             "schema_version": "1",
@@ -2905,3 +3570,65 @@ def _seal[T: ExploratoryEvaluationResultV1 | PromotionEvaluationResultV1](
         **cast(Any, dict(draft) | {"result_hash": evaluation_result_hash(draft)}),
     )
     return cast(T, model.model_validate(dict(sealed)))
+
+
+# A lifecycle callback may install a method or a data descriptor on the
+# public SessionEvaluatorEngine class. Snapshot declared methods before any
+# callback, and explicitly shadow every collaborator stored in an evaluator
+# instance. Otherwise a newly installed property on the public base class
+# would outrank the private executor's ordinary instance attribute and expose
+# the original accounting book through an attacker-controlled proxy.
+_PREPARED_INSTANCE_FIELDS = frozenset(
+    {
+        "_bundle",
+        "_admission",
+        "_protocol",
+        "_cost_model",
+        "_evidence",
+        "_mark_grade",
+        "_reconstructed_lane",
+        "_evidence_hash",
+        "_accounting_index",
+        "_book_currency_namespace",
+        "_book_currency_code",
+        "_reconstructed_prices",
+        "_exploratory_dividends",
+        "_corporate_action_coverage",
+        "_corporate_actions",
+        "_rebalance",
+        "_opening_book_lock",
+        "_opening_book_phase",
+        "_legacy_run_started",
+        "_lifecycle_lifetime_anchor",
+    }
+)
+
+
+def _prepared_instance_field(name: str) -> property:
+    """An own data descriptor outranks future injected base-class properties."""
+
+    def read(instance: SessionEvaluatorEngine) -> Any:
+        return vars(instance)[name]
+
+    def write(instance: SessionEvaluatorEngine, value: Any) -> None:
+        vars(instance)[name] = value
+
+    return property(read, write)
+
+
+_PREPARED_EXECUTOR_TYPE: type[SessionEvaluatorEngine] = type(
+    "_PreparedSessionEvaluatorEngine",
+    (SessionEvaluatorEngine,),
+    {
+        **{
+            name: descriptor
+            for name, descriptor in vars(SessionEvaluatorEngine).items()
+            if name not in {"__module__", "__dict__", "__weakref__", "__doc__"}
+        },
+        **{name: _prepared_instance_field(name) for name in _PREPARED_INSTANCE_FIELDS},
+        "__getattribute__": object.__getattribute__,
+        "__setattr__": object.__setattr__,
+        "__hash__": object.__hash__,
+        "__eq__": object.__eq__,
+    },
+)

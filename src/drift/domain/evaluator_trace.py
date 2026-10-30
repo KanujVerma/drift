@@ -392,6 +392,27 @@ class IndeterminateCauseTraceEventV1(_TraceEventBaseV1):
     cause: NonBlankStr
 
 
+class SessionObservationTraceEventV1(_TraceEventBaseV1):
+    """Opt-in original marked-book commitment, before an installed observer."""
+
+    kind: Literal["session_observation"] = "session_observation"
+    phase: Literal[EvaluationPhase.POST_CLOSE_DECISION] = (
+        EvaluationPhase.POST_CLOSE_DECISION
+    )
+    book_hash: SHA256Hash
+
+
+class ExecutionAuthorizationTraceEventV1(_TraceEventBaseV1):
+    """Optional installed-host pre-commit verdict, with no operational IDs."""
+
+    kind: Literal["execution_authorization"] = "execution_authorization"
+    phase: Literal[EvaluationPhase.OPEN_EXECUTION] = EvaluationPhase.OPEN_EXECUTION
+    preview_hash: SHA256Hash
+    policy_hash: SHA256Hash
+    verdict: Literal["approve", "reject", "contain"]
+    reason: NonBlankStr
+
+
 type EvaluatorTraceEventV1 = Annotated[
     SessionStartTraceEventV1
     | CorporateActionAppliedTraceEventV1
@@ -472,10 +493,12 @@ class EvaluationTraceLogV1(FrozenModel):
 
 
 def seal_evaluation_trace_log(
-    events: Sequence[EvaluatorTraceEventV1],
+    events: Sequence[EvaluatorTraceEventV2],
 ) -> EvaluationTraceLogV1:
-    """Seal an ordered event sequence into its content-addressed trace log.
+    """Seal an ordered legacy event sequence into its version-1 trace log.
 
+    The broader input type permits callers holding an explicitly versioned
+    trace. Validation still refuses every non-V1 event instead of upgrading it.
     Sequence numbers are the caller's, not this function's. The emitter knows
     where each event belongs, and assigning positions here would make the
     contiguity rule unfalsifiable through the public construction path.
@@ -487,3 +510,79 @@ def seal_evaluation_trace_log(
         **(dict(draft) | {"trace_hash": evaluation_trace_log_hash(draft)})
     )
     return EvaluationTraceLogV1.model_validate(dict(sealed))
+
+
+# Observer-enabled traces are a new wire version. Never extend the frozen V1
+# event union: EvaluationRunArtifactsV1 embeds that exact schema.
+type EvaluatorTraceEventV2 = Annotated[
+    EvaluatorTraceEventV1
+    | ExecutionAuthorizationTraceEventV1
+    | SessionObservationTraceEventV1,
+    Field(discriminator="kind"),
+]
+
+
+class EvaluationTraceLogV2(FrozenModel):
+    """Versioned opt-in observer trace; V1 logs and artifacts stay unchanged."""
+
+    schema_version: Literal["2"] = "2"
+    events: tuple[EvaluatorTraceEventV2, ...]
+    trace_hash: SHA256Hash
+
+    @model_validator(mode="after")
+    def validate_log(self) -> Self:
+        # Preserve the existing contiguous-session sequence rules without
+        # altering the frozen V1 model or its event union. Keep every typed
+        # original in this log and its explicit version-2 hash preimage.
+        opened = -1
+        open_key: SessionKeyV1 | None = None
+        if not self.events:
+            raise ValueError("a trace log requires at least one event")
+        for position, event in enumerate(self.events):
+            if event.sequence != position:
+                raise ValueError("trace event sequence must be contiguous from zero")
+            if event.kind == "session_start":
+                if event.session_index != opened + 1:
+                    raise ValueError("trace session index must advance by one")
+                opened, open_key = event.session_index, event.session_key
+            elif open_key is None or event.session_index != opened:
+                raise ValueError("a trace event must belong to the open session")
+            if event.session_key != open_key:
+                raise ValueError(
+                    "a trace event session key must match its open session"
+                )
+        payload = self.model_dump(mode="python")
+        payload.pop("trace_hash")
+        if self.trace_hash != content_hash(payload):
+            raise ValueError("observed trace hash mismatch")
+        return self
+
+
+type EvaluationTraceLog = Annotated[
+    EvaluationTraceLogV1 | EvaluationTraceLogV2,
+    Field(discriminator="schema_version"),
+]
+
+
+def seal_observed_evaluation_trace_log(
+    events: Sequence[EvaluatorTraceEventV2],
+) -> EvaluationTraceLogV1 | EvaluationTraceLogV2:
+    """Use V2 only when optional observer events actually exist."""
+    values = tuple(events)
+    if not any(
+        isinstance(
+            event, (SessionObservationTraceEventV1, ExecutionAuthorizationTraceEventV1)
+        )
+        for event in values
+    ):
+        return EvaluationTraceLogV1.model_validate(
+            {
+                "schema_version": "1",
+                "events": values,
+                "trace_hash": content_hash({"schema_version": "1", "events": values}),
+            }
+        )
+    payload = {"schema_version": "2", "events": values}
+    return EvaluationTraceLogV2.model_validate(
+        payload | {"trace_hash": content_hash(payload)}
+    )
