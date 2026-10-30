@@ -10,8 +10,10 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import NamedTuple
 from uuid import UUID
 
+from drift.domain.common import ImmutableJSONValue
 from drift.domain.events import AuditEvent
 from drift.intelligence.contracts import CostReceipt
 from drift.intelligence.receipts import ResearchReceiptStore
@@ -52,6 +54,40 @@ def reference(event: AuditEvent) -> OriginalReferenceV1:
     )
 
 
+class _CapturedEvent(NamedTuple):
+    """Private, fully immutable fields from an already verified ledger event."""
+
+    event_id: int
+    event_type: str
+    timestamp: datetime
+    entity_type: str
+    entity_id: int
+    payload: ImmutableJSONValue
+    previous_event_hash: str
+    deduplication_key: str | None
+    schema_version: str
+    event_hash: str
+
+    def detached_event(self) -> AuditEvent:
+        # Only the exact configured root's verified events reach this private
+        # representation. ImmutableJSON has already copied the payload into
+        # mapping proxies, tuples and JSON scalars. Sharing that closed graph
+        # avoids reparsing the entire large journal for every account lookup.
+        # Event shells and UUIDs remain detached for each consumer.
+        return AuditEvent.model_construct(
+            event_id=UUID(int=self.event_id),
+            event_type=self.event_type,
+            timestamp=self.timestamp,
+            entity_type=self.entity_type,
+            entity_id=UUID(int=self.entity_id),
+            payload=self.payload,
+            previous_event_hash=self.previous_event_hash,
+            deduplication_key=self.deduplication_key,
+            schema_version=self.schema_version,
+            event_hash=self.event_hash,
+        )
+
+
 class _CapturedOrigin(ConfiguredLocalSyntheticOriginV1):
     """Private read-only origin adapter, created only by reading the real root."""
 
@@ -72,14 +108,32 @@ class _CapturedOrigin(ConfiguredLocalSyntheticOriginV1):
                 raise ValueError("CONTROLLED_SNAPSHOT_TIP_NOT_ORIGINAL")
             original = original[: positions[0] + 1]
         object.__setattr__(
-            self, "_captured_bytes", tuple(canonical_json(event) for event in original)
+            self,
+            "_captured_events",
+            tuple(
+                _CapturedEvent(
+                    event.event_id.int,
+                    event.event_type,
+                    event.timestamp,
+                    event.entity_type,
+                    event.entity_id.int,
+                    event.payload,
+                    event.previous_event_hash,
+                    event.deduplication_key,
+                    event.schema_version,
+                    event.event_hash,
+                )
+                for event in original
+            ),
         )
 
     def verified_events(self) -> tuple[AuditEvent, ...]:
         # Consumers cannot mutate the stored snapshot through a returned UUID,
         # object.__setattr__, or a previously retained event reference.
-        originals: tuple[bytes, ...] = object.__getattribute__(self, "_captured_bytes")
-        return tuple(AuditEvent.model_validate_json(data) for data in originals)
+        originals: tuple[_CapturedEvent, ...] = object.__getattribute__(
+            self, "_captured_events"
+        )
+        return tuple(event.detached_event() for event in originals)
 
 
 @dataclass(frozen=True, slots=True)

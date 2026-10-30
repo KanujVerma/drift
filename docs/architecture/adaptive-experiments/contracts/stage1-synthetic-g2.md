@@ -157,7 +157,13 @@ behind, whether the winning correction is inline or chunked.
 
 `read_controlled_campaign` in `drift.loop.stage1_controlled_readback` uses one
 verified immutable original ledger prefix. Every join uses that captured prefix,
-including original account and result helpers. Caller-made writer objects and
+including original account and result helpers. After the configured root verifies
+the complete chain, the private snapshot retains primitive envelope fields and
+the validated immutable JSON payload graph. Each consumer receives fresh event
+objects and UUIDs; large immutable payloads are shared without repeated JSON
+parsing. This does not skip initial ledger, transport, scope or result validation,
+and subsequent ledger appends cannot change a captured prefix.
+Caller-made writer objects and
 account capabilities are neither required nor recreated. The returned report
 pins the original prefix tip and every accounted controlled-event hash. It also
 requires the original installed Python source inventory: a different installed

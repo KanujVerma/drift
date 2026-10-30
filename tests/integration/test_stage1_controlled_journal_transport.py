@@ -12,7 +12,8 @@ from collections.abc import Mapping
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from types import MappingProxyType
+from typing import Any, cast
 from uuid import uuid7
 
 import pytest
@@ -22,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "unit"))
 from test_stage1_controlled_contracts import controlled_arguments
 from test_stage1_synthetic_research_execution import BASE
 
+from drift.domain.events import AuditEvent
 from drift.ledger.interface import AuditEventDraft
 from drift.ledger.sqlite import SQLiteLedger
 from drift.ledger.stage1_synthetic_account_receipts import (
@@ -166,6 +168,78 @@ def test_large_logical_record_roundtrips_in_bounded_original_events(
     assert captured.physical_events == tuple(
         item for item in events if item.event_type.startswith(C.EVENT_PREFIX)
     )
+
+
+def test_captured_prefix_does_not_reparse_bulk_payload_for_each_consumer(
+    large_journal: CapturedControlledJournalV1, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = canonical_json(large_journal.events)
+    parsed_bytes = 0
+    parse = AuditEvent.model_validate_json
+
+    def measured_parse(
+        cls: type[AuditEvent], /, data: str | bytes | bytearray, **kwargs: Any
+    ) -> AuditEvent:
+        nonlocal parsed_bytes
+        parsed_bytes += len(data)
+        return parse(data, **kwargs)
+
+    # Count actual parser input, rather than imposing a host-dependent timer.
+    # Each consumer still receives and checks a real complete original prefix.
+    monkeypatch.setattr(AuditEvent, "model_validate_json", classmethod(measured_parse))
+    for _ in range(8):
+        events = large_journal.origin.verified_events()
+        assert canonical_json(events) == expected
+        assert all(
+            event is not original
+            and event.event_id is not original.event_id
+            and event.entity_id is not original.entity_id
+            for event, original in zip(events, large_journal.events, strict=True)
+        )
+    assert parsed_bytes <= len(expected), "immutable bulk payload was repeatedly parsed"
+
+
+def test_captured_payload_graph_is_immutable_and_prefix_stays_fixed(
+    tmp_path: Path, original_journal: CapturedControlledJournalV1
+) -> None:
+    writer = storage_writer(tmp_path, original_journal)
+    captured = CapturedControlledJournalV1(
+        origin=writer.origin,
+        allocation_id=writer.plan.original_account.allocation_id,
+        observed_at=original_journal.observed_at,
+    )
+    expected = canonical_json(captured.events)
+
+    def require_immutable(value: Any) -> None:
+        if isinstance(value, Mapping):
+            assert type(value) is MappingProxyType
+            with pytest.raises(TypeError):
+                cast(Any, value)["changed"] = None
+            for item in value.values():
+                require_immutable(item)
+        elif isinstance(value, tuple):
+            for item in value:
+                require_immutable(item)
+        else:
+            assert type(value) in (type(None), bool, int, float, str)
+
+    for event in captured.origin.verified_events():
+        require_immutable(event.payload)
+    writer.append(
+        C.ContainmentRecordV1(
+            observation=captured.manifest.ref, reason="Later original evidence"
+        ),
+        key="after-capture",
+    )
+    assert canonical_json(captured.origin.verified_events()) == expected
+    assert len(writer.origin.verified_events()) == len(captured.events) + 1
+    historical = CapturedControlledJournalV1(
+        origin=writer.origin,
+        allocation_id=writer.plan.original_account.allocation_id,
+        observed_at=original_journal.observed_at,
+        as_of_event_hash=captured.manifest.event.event_hash,
+    )
+    assert canonical_json(historical.events) == expected
 
 
 def test_small_logical_record_keeps_original_v1_event(
