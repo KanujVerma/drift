@@ -316,3 +316,48 @@ issue/PR checkpoints. A test defined here is not a claim it has passed. Full G2
 release requires completed exact-source verification and applicable independent
 producer/consumer contract acceptance. G1/G3 historical qualification and G6
 operational permission remain separate and are not granted by this document.
+
+## Owner-directed successor integration (#575)
+
+The November 1, 2026 owner delegation authorizes a new coordinated integration
+branch preserving the published #571/#572 ancestry. It does not impersonate
+other reviewers or overwrite their branches. Normal merge still requires actual
+passing canonical verification and exact-source review.
+
+### Bounded repeated-observation work
+
+A private per-call scope reuses only the pure canonical hash computation for an
+identical complete, strictly parsed observation. Every ordinary field/model
+validation still runs, each parse creates its own model objects, altered bodies
+with the same claimed digest go through full verification, and no validity flag
+or caller equality establishes a hit. Keys include exact concrete types, all
+fields, Decimal representation, datetime representation, source-context identity
+and the active hash/serializer implementation identities. The cache stores hash
+strings, never trusted model objects; it is bounded to 8192 entries and 128 MiB
+of conservatively charged key storage. Misses/evictions fall back to the original
+calculation. Each execute/read has a fresh scope, cleared on return or error.
+This is not a global source trust cache, a schema migration or a validation skip.
+
+The full-window cold test has a bounded 1200-second subprocess budget based on
+previous genuinely verified recovery taking 210-300 seconds. Development tests
+retain 180 seconds. Both real fresh-process B/R proofs remain required. The test
+streams SHA-256 and size of the original ledger before/after rather than holding
+another full roughly 795 MB byte string in parent memory. It still detects any
+original-byte change and cannot label a timeout or mismatched result complete.
+
+### Explicit local producer authority
+
+`drift.loop.stage1_local_authority.ConfiguredStage1LocalAuthorityV1` binds the
+host-appointed root/issuer, original E1 campaign/arms/accounts, installed-source
+hash, appointment reference and clock. Receipts supply only allocation/provenance
+references, never choose their verifying ledger or policy. The adapter delegates
+all original account, grant, K1, chronology, cost, result and trace checks to the
+existing reader; missing roots are not created or repaired. The narrow reader
+protocol permits a future provider-backed implementation without changing
+financial accounting or accepting a self-asserted producer string.
+
+`local_contract_verified` describes this explicit installed-host profile only.
+Legacy issuer/G2/scientific/operational flags remain unchanged. This profile does
+not defend against a privileged host replacing its own installed code/config or
+prove external provider authentication, historical source qualification or
+scientific efficacy. Those require their original accepted verifiers and reviews.

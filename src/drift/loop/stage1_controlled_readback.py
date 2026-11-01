@@ -21,6 +21,9 @@ from drift.domain.evaluator_bundles import (
     strategy_parameters_hash,
 )
 from drift.domain.evaluator_portfolio import decimal_context
+from drift.domain.evaluator_reconstruction import (
+    _with_reconstruction_validation_reuse,
+)
 from drift.domain.evaluator_trace import (
     ExecutionAuthorizationTraceEventV1,
     ExploratoryStrategyDecisionTraceEventV1,
@@ -1090,6 +1093,7 @@ class _Verifier:
         return opportunities
 
 
+@_with_reconstruction_validation_reuse
 def read_controlled_campaign(
     *,
     origin: ConfiguredLocalSyntheticOriginV1,

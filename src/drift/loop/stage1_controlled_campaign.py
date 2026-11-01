@@ -45,6 +45,9 @@ from drift.domain.evaluator_portfolio import (
     PortfolioStateV2,
     decimal_context,
 )
+from drift.domain.evaluator_reconstruction import (
+    _with_reconstruction_validation_reuse,
+)
 from drift.domain.evaluator_strategy import (
     SecurityTargetPositionV1,
     StrategyDecisionContextV1,
@@ -1022,6 +1025,7 @@ class _ControlledStrategy:
         return C.detached(StrategyDecisionIntentV1, intent)
 
 
+@_with_reconstruction_validation_reuse
 def execute_controlled_campaign(
     *,
     origin: ConfiguredLocalSyntheticOriginV1,

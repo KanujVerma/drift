@@ -1,0 +1,55 @@
+{
+  "schema_version": "drift-stage1-study/1",
+  "study_id": "DRIFT-STAGE1-PRIMARY-DISCOVERY-V1",
+  "created_at": "2026-11-01T00:00:00Z",
+  "mode": "RETROSPECTIVE_DISCOVERY",
+  "universe": [
+    "VOO",
+    "IJH",
+    "IJR",
+    "QQQ",
+    "VEA",
+    "VWO",
+    "SHY",
+    "IEF",
+    "TLT",
+    "TIP",
+    "LQD",
+    "GLD"
+  ],
+  "warmup_sessions": 253,
+  "observation_sessions": 126,
+  "families": [
+    "B3",
+    "B4",
+    "B5"
+  ],
+  "initial_family": "B3",
+  "initial_capital": "10000",
+  "currency": "USD",
+  "schedule": "MONTH_END_CLOSE_NEXT_ELIGIBLE_OPEN",
+  "abstention": "RETAIN_VALID_INCUMBENT",
+  "development": {
+    "start": "2021-01-01",
+    "end": "2023-12-31"
+  },
+  "validation": {
+    "start": "2024-01-01",
+    "end": "2024-12-31"
+  },
+  "scoring": {
+    "start": "2025-01-01",
+    "end": "2025-12-31"
+  },
+  "prior_holdout_exposure": "UNKNOWN",
+  "installed_source_hash": null,
+  "dataset_manifest_hash": null,
+  "calendar_and_universe_hash": null,
+  "decision_cutoff_policy_hash": null,
+  "seed_and_replication_policy_hash": null,
+  "mandate": null,
+  "comparator": null,
+  "model": null,
+  "costs": null,
+  "statistics": null
+}

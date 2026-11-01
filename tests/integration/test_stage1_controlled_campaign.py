@@ -906,8 +906,10 @@ print(canonical_json({"status": report.status, "reasons": report.reasons,
 def _fresh_controlled_read(
     args: dict[str, Any], allocation: object, path: Path
 ) -> dict[str, object]:
+    import hashlib
     import json
     import subprocess
+    import time
     from dataclasses import asdict
     from datetime import timedelta
 
@@ -937,17 +939,78 @@ def _fresh_controlled_read(
         observed=(BASE + timedelta(days=2)).isoformat(),
     )
     path.write_bytes(canonical_json(data))
-    before = origin.ledger_path.read_bytes()
+
+    def original_ledger_digest() -> tuple[int, str]:
+        with origin.ledger_path.open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        return origin.ledger_path.stat().st_size, digest
+
+    # Do not retain another full 795 MB ledger alongside the parent and child
+    # object graphs. Streaming verifies the exact original bytes before/after.
+    before = original_ledger_digest()
+    started = time.monotonic()
     child = subprocess.run(
         [sys.executable, "-B", "-c", _COLD_CONTROLLED_READER, str(path)],
         cwd=Path(__file__).resolve().parents[2],
         text=True,
         capture_output=True,
-        timeout=180,
+        # The full 456-session cold read verifies its original large ledger and
+        # RESULT in a separate interpreter. Keep the short development-fixture
+        # timeout unchanged; allow a longer bounded budget for the full proof.
+        # Neither branch skips or trusts an unverified original result.
+        timeout=1200 if args["coverage"] == "STAGE1_253_126_MONTHLY" else 180,
         check=True,
     )
-    assert origin.ledger_path.read_bytes() == before
+    assert original_ledger_digest() == before
+    print(
+        "controlled: cold read seconds",
+        round(time.monotonic() - started, 2),
+        "ledger bytes",
+        before[0],
+        flush=True,
+    )
     return dict(json.loads(child.stdout))
+
+
+@pytest.mark.parametrize(
+    ("coverage", "timeout_seconds"),
+    [("DEVELOPMENT", 180), ("STAGE1_253_126_MONTHLY", 1200)],
+)
+def test_cold_read_budget_is_bounded_by_declared_fixture_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    coverage: str,
+    timeout_seconds: int,
+) -> None:
+    """Selecting the larger budget never bypasses the cold subprocess itself."""
+    import subprocess
+    from types import SimpleNamespace
+
+    from test_stage1_controlled_contracts import controlled_arguments
+
+    from drift.loop.stage1_controlled_campaign import execute_controlled_campaign
+
+    args = controlled_arguments(tmp_path / "original")
+    executed = execute_controlled_campaign(**args)
+    assert executed.m0_status == "completed"
+    args["coverage"] = coverage
+    observed: list[int] = []
+
+    def capture(*command: object, **options: object) -> SimpleNamespace:
+        timeout = options["timeout"]
+        assert isinstance(timeout, int)
+        observed.append(timeout)
+        assert options["check"] is True
+        assert options["capture_output"] is True
+        return SimpleNamespace(stdout='{"status":"VERIFIED_COMPLETE"}')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "run", capture)
+        result = _fresh_controlled_read(
+            args, executed.allocation_id, tmp_path / "independent.json"
+        )
+    assert result["status"] == "VERIFIED_COMPLETE"
+    assert observed == [timeout_seconds]
 
 
 def test_controlled_cold_read_in_new_process_never_needs_live_writer(
