@@ -1,4 +1,3 @@
-# Refreshed for issue #570 source/runtime recovery on 2026-10-27.
 name: g2 isolated verification export (not release)
 
 on:
@@ -12,129 +11,32 @@ permissions:
 jobs:
   export:
     runs-on: ubuntu-24.04
-    timeout-minutes: 220
-    env:
-      UV_LOCKED: "1"
-      UV_PYTHON_PREFERENCE: only-managed
+    timeout-minutes: 10
     steps:
-      - name: Check out exact public source without persisted credentials
+      - name: Check out exact published source without persisted credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 6ac17fc2106f5bbdd2a8decb65558cc97a2ae6a3
+          ref: 8af665e5f17dde676e73bf2c259f02f088abf615
           fetch-depth: 0
           persist-credentials: false
-      - name: Install existing pinned uv setup
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
-        with:
-          enable-cache: false
-      - name: Provision unchanged interpreter and locked packages
-        run: |
-          uv python install
-          uv sync --locked
-          uv run python -c "import pathlib, platform; assert platform.python_version() == pathlib.Path('.python-version').read_text().strip(); print(platform.python_version())"
-      - name: Export only source objects and test dependencies
+      - name: Export source ancestry only
         run: |
           set -euo pipefail
-          OUT="$RUNNER_TEMP/g2-offline-inputs"
+          OUT="$RUNNER_TEMP/g2-source-575"
           mkdir -p "$OUT"
           git bundle create "$OUT/drift-source.bundle" --all HEAD
           git bundle verify "$OUT/drift-source.bundle"
-          tar -czf "$OUT/managed-python.tar.gz" -C "$UV_PYTHON_INSTALL_DIR" .
-          tar -czf "$OUT/site-packages.tar.gz" -C .venv/lib/python3.14/site-packages .
-          cp .venv/bin/ruff "$OUT/ruff"
           git rev-parse HEAD > "$OUT/source-head.txt"
           cp .python-version "$OUT/python-version.txt"
           sha256sum uv.lock > "$OUT/lock-sha256.txt"
           cd "$OUT"
-          sha256sum drift-source.bundle managed-python.tar.gz site-packages.tar.gz ruff source-head.txt python-version.txt lock-sha256.txt > SHA256SUMS
+          sha256sum drift-source.bundle source-head.txt python-version.txt lock-sha256.txt > SHA256SUMS
           cat SHA256SUMS
-      - name: Retain isolated verification inputs for one day
+      - name: Retain isolated source inputs for one day
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: g2-offline-verification-inputs
-          path: ${{ runner.temp }}/g2-offline-inputs/
+          name: g2-source-575
+          path: ${{ runner.temp }}/g2-source-575/
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
-      - name: Profile exact original ARM-B and independent cold read (synthetic only)
-        timeout-minutes: 205
-        env:
-          PYTHONUNBUFFERED: "1"
-        run: |
-          set +e
-          uv run python - <<'PY'
-          import sys, time, os, json, pathlib, resource, subprocess
-          from unittest.mock import patch
-          from datetime import timedelta
-          sys.path.insert(0, str(pathlib.Path.cwd() / "tests" / "unit"))
-          sys.path.insert(0, str(pathlib.Path.cwd() / "tests" / "integration"))
-          import test_stage1_controlled_campaign as T
-          from drift.loop.stage1_controlled_campaign import execute_controlled_campaign
-          from drift.loop.stage1_controlled_readback import read_controlled_campaign
-          from drift.ledger.sqlite import SQLiteLedger
-          root = pathlib.Path("/tmp/g2-cold-profile")
-          root.mkdir(parents=True, exist_ok=True)
-          def report(label,start):
-              print("G2_PROFILE:",label,"elapsed_sec",round(time.monotonic()-start,2),flush=True)
-          assert subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip()=="6ac17fc2106f5bbdd2a8decb65558cc97a2ae6a3"
-          start=time.monotonic()
-          bundle=T._carried_456_bundle()
-          report("source_456x12",start)
-          start=time.monotonic()
-          args=T._carried_arguments(root/"ARM-B",bundle,"ARM-B")
-          report("arm_b_arguments",start)
-          start=time.monotonic()
-          executed=execute_controlled_campaign(**args)
-          report("arm_b_execute",start)
-          print("G2_PROFILE: original_m0",executed.m0_status,flush=True)
-          assert executed.m0_status=="completed"
-          ledger=args["origin"].ledger_path
-          print("G2_PROFILE: ledger_bytes",ledger.stat().st_size,flush=True)
-          import sqlite3
-          db=sqlite3.connect(str(ledger))
-          print("G2_PROFILE: original_event_inventory",db.execute("SELECT count(*),sum(length(payload_json)) FROM audit_events").fetchone(),flush=True)
-          db.close()
-          keys=("origin","campaign","arms","bindings","expected_run_ids","provenance","clock")
-          kw={key:args[key] for key in keys}
-          start=time.monotonic()
-          parent=read_controlled_campaign(**kw,allocation_id=executed.allocation_id)
-          report("warm_read",start)
-          print("G2_PROFILE: parent_status",parent.status,flush=True)
-          assert parent.status=="VERIFIED_COMPLETE"
-          start=time.monotonic()
-          try:
-              print("G2_PROFILE: trying unmodified cold reader with original 180s budget",flush=True)
-              cold=T._fresh_controlled_read(args,executed.allocation_id,root/"cold-ARM-B.json")
-              report("cold_original_180_pass",start)
-          except subprocess.TimeoutExpired:
-              report("cold_original_180_timeout",start)
-              print("G2_PROFILE: original 180-second child budget failed; retrying SAME verified synthetic ledger with diagnostic-only 1200s budget",flush=True)
-              real_run=subprocess.run
-              def longer_child(*argv,**opts):
-                  if opts.get("timeout")==180 and isinstance(argv[0],list) and "-c" in argv[0]:
-                      opts["timeout"]=1200
-                  t=time.monotonic()
-                  try: return real_run(*argv,**opts)
-                  finally: report("cold_extended_subprocess",t)
-              start=time.monotonic()
-              with patch("subprocess.run",side_effect=longer_child):
-                  cold=T._fresh_controlled_read(args,executed.allocation_id,root/"cold-ARM-B.json")
-              report("cold_extended_verified_recovery",start)
-          print("G2_PROFILE: cold_status",cold["status"],flush=True)
-          assert cold["status"]=="VERIFIED_COMPLETE"
-          assert cold["result_hash"]==parent.original_result.result_hash
-          print("G2_PROFILE: maxrss_kb",resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,flush=True)
-          PY
-          result=$?
-          echo "G2_PROFILE_DIAGNOSTIC_EXIT=$result"
-          find /tmp/g2-cold-profile -type f -printf 'G2_PROFILE_FILE %p %s bytes\n' | head -20 || true
-          exit "$result"
-      - name: Retain synthetic cold-replay digest for performance debugging (one day)
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: g2-synthetic-cold-profile-6ac17fc
-          path: /tmp/g2-cold-profile/cold-ARM-B.json
-          if-no-files-found: warn
-          retention-days: 1
-          compression-level: 1
