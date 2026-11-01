@@ -1,0 +1,117 @@
+name: g2 exact source publication (not release)
+
+on:
+  push:
+    branches:
+      - coord/575-publish-exact-source
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: github.repository == 'KanujVerma/drift' && github.ref == 'refs/heads/coord/575-publish-exact-source'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact published parent without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 8af665e5f17dde676e73bf2c259f02f088abf615
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify exact ancestry, patch and tree before fresh-branch publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import hashlib
+          import json
+          import lzma
+          import os
+          from pathlib import Path
+          import subprocess
+          import urllib.request
+
+          first = '8af665e5f17dde676e73bf2c259f02f088abf615'
+          second = 'a1c3c660d23818adc6aa560d0e342e36ac70b32e'
+          merged_tree = 'c68294c90fdc0fb1d8bf6cab3fe1fb87eff2ece3'
+          expected_tree = '473d4a4c98572cb03ccf65b93108e9a305eaed3a'
+          expected_commit = 'fcaae6ca6da4f18f2874c1d9ae43e97e324a817d'
+          expected_patch = 'a571a44912eed98515de0393ad64e2fc37e573fce23809bbf1b1118c0003d659'
+          target = 'refs/heads/coord/575-source-01'
+          parts = ('3abc2c1b99f4283853e4811a1dd53123134b251a', 'edfeeee60a593a4a2dcb427772abaf357a4a334a')
+          allowed = {
+              'docs/architecture/adaptive-experiments/contracts/stage1-synthetic-g2.md',
+              'docs/architecture/adaptive-experiments/stage1-g3-freeze.md',
+              'src/drift/domain/evaluator_reconstruction.py',
+              'src/drift/experiments/stage1_study_freeze.py',
+              'src/drift/loop/stage1_controlled_campaign.py',
+              'src/drift/loop/stage1_controlled_readback.py',
+              'src/drift/loop/stage1_local_authority.py',
+              'tests/fixtures/stage1/study-freeze-template-v1.json',
+              'tests/integration/test_stage1_controlled_campaign.py',
+              'tests/integration/test_stage1_reconstruction_validation_reuse.py',
+              'tests/unit/test_stage1_local_authority.py',
+              'tests/unit/test_stage1_study_freeze.py',
+          }
+          env = dict(os.environ)
+          for role in ('AUTHOR', 'COMMITTER'):
+              env['GIT_' + role + '_NAME'] = 'Kanuj Verma'
+              env['GIT_' + role + '_EMAIL'] = '108971272+KanujVerma@users.noreply.github.com'
+              env['GIT_' + role + '_DATE'] = '1793570412 +0000'
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True, env=env).strip()
+          if git('rev-parse', 'HEAD') != first or git('status', '--porcelain'):
+              raise SystemExit('Unexpected or dirty source parent')
+          subprocess.run(['git', 'merge', '--no-commit', '--no-ff', second], env=env, check=True)
+          if git('write-tree') != merged_tree:
+              raise SystemExit('Merged original tree mismatch')
+          pieces = []
+          for sha in parts:
+              request = urllib.request.Request(
+                  'https://api.github.com/repos/KanujVerma/drift/git/blobs/' + sha,
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                           'Accept': 'application/vnd.github+json'},
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  item = json.load(response)
+              if item['sha'] != sha or item['encoding'] != 'base64':
+                  raise SystemExit('Mismatched source blob metadata')
+              data = base64.b64decode(''.join(item['content'].split()), validate=True)
+              actual = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+              if actual != sha:
+                  raise SystemExit('Source blob integrity failure')
+              pieces.append(data)
+          decoder = lzma.LZMADecompressor(format=lzma.FORMAT_XZ, memlimit=134217728)
+          patch = decoder.decompress(b''.join(pieces), max_length=1000000)
+          if not decoder.eof or decoder.unused_data:
+              raise SystemExit('Invalid or excessive patch encoding')
+          if len(patch) != 61352 or hashlib.sha256(patch).hexdigest() != expected_patch:
+              raise SystemExit('Patch differs from locally tested source')
+          patch_file = Path(os.environ['RUNNER_TEMP']) / 'g2-reviewed-source.patch'
+          patch_file.write_bytes(patch)
+          subprocess.run(['git', 'apply', '--check', str(patch_file)], check=True)
+          subprocess.run(['git', 'apply', '--index', str(patch_file)], check=True)
+          changed = set(subprocess.check_output(
+              ['git', 'diff', '--cached', '--name-only', '-z', merged_tree]
+          ).decode().strip('\0').split('\0'))
+          if changed != allowed or git('write-tree') != expected_tree:
+              raise SystemExit('Unexpected source scope or tree')
+          subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
+          commit = subprocess.check_output(
+              ['git', 'commit-tree', expected_tree, '-p', first, '-p', second],
+              input='feat(stage1): consolidate G2 evidence and add explicit G3 freeze gates (#575)\n',
+              text=True, env=env,
+          ).strip()
+          if commit != expected_commit:
+              raise SystemExit('Publication commit identity mismatch')
+          token = base64.b64encode(('x-access-token:' + os.environ['GH_TOKEN']).encode()).decode()
+          header = 'http.https://github.com/.extraheader=AUTHORIZATION: basic ' + token
+          if git('-c', header, 'ls-remote', 'origin', target):
+              raise SystemExit('Transfer branch exists; no overwrite permitted')
+          subprocess.run(['git', '-c', header, 'push', 'origin', commit + ':' + target], check=True)
+          print('PUBLISHED_COMMIT', commit)
+          print('PUBLISHED_TREE', expected_tree)
+          PY
