@@ -211,8 +211,17 @@ def action_verify_freeze(args: argparse.Namespace) -> int:
 
     try:
         frozen = FrozenStage1StudyV1.model_validate_json(json.dumps(freeze_data))
+    except Exception as e:
+        sys.stderr.write(f"Invalid frozen study: {e}\n")
+        return 3
+
+    try:
         trust_roots = host_config.get("trust_roots", {})
         receipt_store = host_config.get("receipt_store", {})
+        if not trust_roots or not receipt_store:
+            sys.stderr.write("Trust roots or receipt store unavailable\n")
+            return 2
+
         verifier = ProductionStudyEvidenceVerifier(
             trust_roots=trust_roots,
             receipt_resolver=lambda rid: receipt_store.get(rid, {}),
@@ -221,8 +230,8 @@ def action_verify_freeze(args: argparse.Namespace) -> int:
         _write_output(args.output, report.model_dump(mode="json"))
         return 0 if report.status != "BLOCKED" else 2
     except Exception as e:
-        sys.stderr.write(f"Verification failed: {e}\n")
-        return 1
+        sys.stderr.write(f"Verification failed or blocked: {e}\n")
+        return 2
 
 
 def action_historical(args: argparse.Namespace) -> int:
@@ -235,8 +244,17 @@ def action_historical(args: argparse.Namespace) -> int:
 
     try:
         frozen = FrozenStage1StudyV1.model_validate_json(json.dumps(freeze_data))
+    except Exception as e:
+        sys.stderr.write(f"Invalid frozen study: {e}\n")
+        return 3
+
+    try:
         trust_roots = host_config.get("trust_roots", {})
         receipt_store = host_config.get("receipt_store", {})
+        if not trust_roots or not receipt_store:
+            sys.stderr.write("Trust roots or receipt store unavailable\n")
+            return 2
+
         verifier = ProductionStudyEvidenceVerifier(
             trust_roots=trust_roots,
             receipt_resolver=lambda rid: receipt_store.get(rid, {}),
@@ -245,13 +263,44 @@ def action_historical(args: argparse.Namespace) -> int:
         if report.status == "BLOCKED":
             sys.stderr.write(f"Historical study blocked: {report.blockers}\n")
             return 2
+    except Exception as e:
+        sys.stderr.write(f"Historical freeze verification failed: {e}\n")
+        return 2
 
-        execution_receipts = host_config.get("execution_receipts", [])
-        if not execution_receipts:
+    try:
+        if (
+            "execution_receipts" not in host_config
+            or host_config["execution_receipts"] is None
+        ):
             sys.stderr.write(
                 "Historical execution dependencies or session receipts unavailable\n"
             )
             return 2
+
+        execution_receipts = host_config["execution_receipts"]
+        if not isinstance(execution_receipts, list):
+            sys.stderr.write("Historical execution receipts must be a list\n")
+            return 3
+
+        if len(execution_receipts) == 0:
+            sys.stderr.write("Historical execution receipts empty\n")
+            return 2
+
+        for i, r in enumerate(execution_receipts):
+            if not isinstance(r, dict):
+                sys.stderr.write(f"Receipt at index {i} is not a valid object\n")
+                return 3
+            if r.get("freeze_hash") != frozen.freeze_hash:
+                sys.stderr.write(
+                    f"Receipt at index {i} freeze_hash mismatch: expected "
+                    f"{frozen.freeze_hash}, got {r.get('freeze_hash')}\n"
+                )
+                return 3
+            if r.get("status") != "COMPLETED":
+                sys.stderr.write(
+                    f"Receipt at index {i} not completed: {r.get('status')}\n"
+                )
+                return 3
 
         observed_count = len(execution_receipts)
         if observed_count < 252:

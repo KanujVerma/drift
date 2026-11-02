@@ -307,3 +307,286 @@ def test_cli_calibrate_and_historical_handlers(repo_root: Path, tmp_path: Path) 
     res_data = json.loads(out_file.read_text(encoding="utf-8"))
     assert res_data["selected_pair"] is not None
     assert len(res_data["ranking_proof"]) == 9
+
+
+def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> None:
+    from datetime import UTC, date, datetime
+    from decimal import Decimal
+
+    from drift.experiments.stage1_original_acceptance import (
+        ProductionStudyEvidenceVerifier,
+    )
+    from drift.experiments.stage1_study_freeze import (
+        REQUIRED_ROLES,
+        ConventionalSelectorPolicyV1,
+        EvidenceRole,
+        Stage1StudyDraftV1,
+        StudyCostPolicyV1,
+        StudyDateWindowV1,
+        StudyEvidenceReferenceV1,
+        StudyMandateV1,
+        StudyModelPolicyV1,
+        StudyStatisticalPolicyV1,
+        freeze_study,
+    )
+    from drift.serialization.canonical import content_hash
+
+    script = repo_root / "scripts" / "stage1_study.py"
+    frozen_file = tmp_path / "frozen.json"
+    host_file = tmp_path / "hist_host.json"
+    out_file = tmp_path / "hist_manifest.json"
+
+    now = datetime(2026, 11, 2, tzinfo=UTC)
+    h = "b" * 64
+    draft = Stage1StudyDraftV1(
+        study_id="STUDY-HIST-CLI-01",
+        created_at=now,
+        mode="RETROSPECTIVE_DISCOVERY",
+        prior_holdout_exposure="UNKNOWN",
+        development=StudyDateWindowV1(start=date(2021, 1, 1), end=date(2023, 12, 31)),
+        validation=StudyDateWindowV1(start=date(2024, 1, 1), end=date(2024, 12, 31)),
+        scoring=StudyDateWindowV1(start=date(2025, 1, 1), end=date(2025, 12, 31)),
+        installed_source_hash=h,
+        dataset_manifest_hash=h,
+        calendar_and_universe_hash=h,
+        decision_cutoff_policy_hash=h,
+        seed_and_replication_policy_hash=h,
+        mandate=StudyMandateV1(
+            maximum_etf_fraction=Decimal("0.20"),
+            maximum_equity_fraction=Decimal("0.70"),
+            maximum_bond_fraction=Decimal("0.75"),
+            maximum_gold_fraction=Decimal("0.20"),
+            maximum_gross_fraction=Decimal("1"),
+            maximum_turnover_fraction=Decimal("2"),
+            existing_breach_policy_hash=h,
+            feasibility_report_hash=h,
+        ),
+        comparator=ConventionalSelectorPolicyV1(
+            formula="R:return-risk-drawdown-switchcost/1",
+            volatility_penalty=Decimal("1"),
+            drawdown_penalty=Decimal("1"),
+            switching_cost_penalty=Decimal("1"),
+            development_fit_hash=h,
+            executable_formula_hash=h,
+        ),
+        model=StudyModelPolicyV1(
+            provider="synthetic",
+            immutable_model_revision="fixture-1",
+            model_record_hash=h,
+            prompt_hash=h,
+            tools_policy_hash=h,
+            context_policy_hash=h,
+            feedback_policy_hash=h,
+            decoding_policy_hash=h,
+            seed=0,
+            known_training_cutoff=date(2023, 1, 1),
+        ),
+        costs=StudyCostPolicyV1(trading_model_hash=h, dated_cost_evidence_hash=h),
+        statistics=StudyStatisticalPolicyV1(
+            alpha=Decimal("0.05"),
+            minimum_economic_advantage_fraction=Decimal("0.01"),
+            uncertainty_method="STATIONARY_BLOCK_BOOTSTRAP",
+            bootstrap_repetitions=1000,
+            bootstrap_seed=0,
+            block_length_policy_hash=h,
+            multiplicity_policy_hash=h,
+            stopping_policy_hash=h,
+            risk_free_policy_hash=h,
+        ),
+    )
+
+    receipt_store = {}
+    evidence = []
+    trust_roots: dict[EvidenceRole, set[str]] = {}
+    for role in REQUIRED_ROLES:
+        payload = {
+            "role": role,
+            "receipt_id": f"HIST-RCPT-{role}",
+            "protocol_hash": draft.protocol_hash,
+            "authority_id": "trusted-historical-root",
+            "status": "ACCEPTED",
+        }
+        r_hash = content_hash(payload)
+        receipt_store[f"HIST-RCPT-{role}"] = payload
+        evidence.append(
+            StudyEvidenceReferenceV1(
+                role=role,
+                receipt_id=f"HIST-RCPT-{role}",
+                receipt_hash=r_hash,
+                protocol_hash=draft.protocol_hash,
+                accepted_at=now,
+            )
+        )
+        trust_roots[role] = {"trusted-historical-root"}
+
+    host_trust_roots = {role: list(roots) for role, roots in trust_roots.items()}
+
+    verifier = ProductionStudyEvidenceVerifier(
+        trust_roots=trust_roots,
+        receipt_resolver=lambda rid: receipt_store.get(rid, {}),
+    )
+    frozen = freeze_study(
+        draft,
+        frozen_at=now,
+        evidence=tuple(evidence),
+        verifier=verifier,
+    )
+    frozen_file.write_text(frozen.model_dump_json(), encoding="utf-8")
+
+    # 1. Empty host config returns exit 2 (BLOCKED / unavailable)
+    host_file.write_text("{}", encoding="utf-8")
+    proc = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "historical",
+            "--frozen",
+            str(frozen_file),
+            "--host-config",
+            str(host_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+    )
+    assert proc.returncode == 2
+
+    # 2. 252-character string for execution_receipts returns exit 3 (invalid input)
+    host_file.write_text(
+        json.dumps(
+            {
+                "trust_roots": host_trust_roots,
+                "receipt_store": receipt_store,
+                "execution_receipts": "a" * 252,
+            }
+        ),
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "historical",
+            "--frozen",
+            str(frozen_file),
+            "--host-config",
+            str(host_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+    )
+    assert proc.returncode == 3
+
+    # 3. 252 empty objects for execution_receipts returns exit 3 (freeze_hash mismatch)
+    host_file.write_text(
+        json.dumps(
+            {
+                "trust_roots": host_trust_roots,
+                "receipt_store": receipt_store,
+                "execution_receipts": [{}] * 252,
+            }
+        ),
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "historical",
+            "--frozen",
+            str(frozen_file),
+            "--host-config",
+            str(host_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+    )
+    assert proc.returncode == 3
+
+    # 4. Incomplete execution receipts (100 sessions < 252) returns exit 4 (INCOMPLETE)
+    receipts_100 = [
+        {
+            "freeze_hash": frozen.freeze_hash,
+            "status": "COMPLETED",
+            "session_index": i,
+        }
+        for i in range(100)
+    ]
+    host_file.write_text(
+        json.dumps(
+            {
+                "trust_roots": host_trust_roots,
+                "receipt_store": receipt_store,
+                "execution_receipts": receipts_100,
+            }
+        ),
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "historical",
+            "--frozen",
+            str(frozen_file),
+            "--host-config",
+            str(host_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+    )
+    assert proc.returncode == 4
+
+    # 5. Complete 252 valid execution receipts returns exit 0 with manifest
+    receipts_252 = [
+        {
+            "freeze_hash": frozen.freeze_hash,
+            "status": "COMPLETED",
+            "session_index": i,
+        }
+        for i in range(252)
+    ]
+    host_file.write_text(
+        json.dumps(
+            {
+                "trust_roots": host_trust_roots,
+                "receipt_store": receipt_store,
+                "execution_receipts": receipts_252,
+            }
+        ),
+        encoding="utf-8",
+    )
+    proc_ok = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "historical",
+            "--frozen",
+            str(frozen_file),
+            "--host-config",
+            str(host_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert proc_ok.returncode == 0
+    manifest = json.loads(out_file.read_text(encoding="utf-8"))
+    assert manifest["status"] == "COMPLETED"
+    assert manifest["observed_sessions"] == 252
+    assert manifest["freeze_hash"] == frozen.freeze_hash
