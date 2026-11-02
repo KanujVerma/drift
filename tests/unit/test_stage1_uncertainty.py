@@ -46,3 +46,19 @@ def test_paired_bootstrap_indices_reproducible_digest() -> None:
     assert digest_1 == digest_2
     assert len(digest_1) == 64
     assert indices_1 == indices_2
+
+
+def test_paired_uncertainty_with_daily_operating_costs() -> None:
+    b_returns = [Decimal("0.02")] * 50
+    r_returns = [Decimal("0.01")] * 50
+    daily_costs = [Decimal("0.50")] * 50
+    artifact = compute_paired_uncertainty_artifact(
+        b_returns=b_returns,
+        r_returns=r_returns,
+        daily_incremental_operating_costs=daily_costs,
+        one_time_operating_costs=Decimal("10.00"),
+        mean_block_length=5,
+        seed=575,
+    )
+    assert artifact.primary_economic_point is not None
+    assert artifact.primary_economic_interval is not None

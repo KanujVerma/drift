@@ -129,8 +129,8 @@ def test_calibration_result_requires_all_9_attempts_for_selection() -> None:
         for i, pair in enumerate(ORDERED_CALIBRATION_PAIRS)
     )
 
-    selected = ORDERED_CALIBRATION_PAIRS[3]
-    selected_receipt = attempts[3].receipt_hash
+    selected = ORDERED_CALIBRATION_PAIRS[8]
+    selected_receipt = attempts[8].receipt_hash
 
     res = create_calibration_result(
         plan_hash=H,
@@ -141,6 +141,16 @@ def test_calibration_result_requires_all_9_attempts_for_selection() -> None:
     )
     assert res.selected_pair == selected
     assert len(res.attempts) == 9
+
+    # Rejection if non-winning pair is selected
+    with pytest.raises(ValueError, match="CALIBRATION_SELECTED_PAIR_NOT_WINNER"):
+        create_calibration_result(
+            plan_hash=H,
+            completed_at=NOW,
+            attempts=attempts,
+            selected_pair=ORDERED_CALIBRATION_PAIRS[3],
+            selected_pair_receipt_hash=attempts[3].receipt_hash,
+        )
 
     # Rejection if incomplete attempts
     with pytest.raises(ValueError, match="CALIBRATION_RESULT_INCOMPLETE_ATTEMPTS"):

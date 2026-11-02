@@ -9,7 +9,6 @@ Permuting receipt order does not change ranking.
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -20,6 +19,7 @@ from drift.experiments.stage1_study_artifacts import (
     CalibrationPairV1,
     CalibrationResultV1,
     DevelopmentCalibrationPlanV1,
+    compute_ranking_proof,
     create_calibration_result,
 )
 from drift.experiments.stage1_study_freeze import StudyEvidenceReferenceV1
@@ -86,13 +86,7 @@ def execute_development_calibration(
 
     ranked = rank_calibration_attempts(attempts)
     winner = ranked[0]
-
-    ranking_proof = tuple(
-        hashlib.sha256(
-            f"{att.pair.lambda_v}:{att.pair.lambda_d}:{att.receipt_hash}".encode()
-        ).hexdigest()
-        for att in ranked
-    )
+    ranking_proof = compute_ranking_proof(ranked)
 
     return create_calibration_result(
         plan_hash=plan.plan_hash,

@@ -31,7 +31,7 @@ Defines the experimental framework across development, validation, and historica
 
 ### 2.2 Calibration Plan & Results (`DevelopmentCalibrationPlanV1`, `CalibrationResultV1`)
 - Parameter grid consists of 9 ordered pairs `(lambda_v, lambda_d)`:
-  - `lambda_v in {0.5, 1.0, 1.5}`
+  - `lambda_v in {0.25, 0.5, 1.0}`
   - `lambda_d in {0.25, 0.5, 1.0}`
 - Deterministic ranking key:
   `(-terminal_net_return, absolute_maximum_drawdown, total_gross_turnover, lambda_v, lambda_d)`
@@ -45,12 +45,12 @@ Defines the experimental framework across development, validation, and historica
 - Exact quantile evaluation using Decimal linear interpolation at position `9999 * p`.
 
 ### 2.4 Outcome Classification (`StudyOutcomeClassificationV1`)
-Strict precedence resolution:
-1. `INVALID`: Missing evidence, tampered artifacts, unverified roots, or protocol violations.
-2. `UNAVAILABLE`: Missing required market data or external resources.
-3. `UNSUCCESSFUL`: Executed cleanly, but failed materiality hurdle or risk limits.
-4. `SUCCESS`: Statistically significant primary economic advantage exceeding hurdle ($100 at 252 sessions, $200 at 504 sessions) with risk limits satisfied.
-5. `PROMISING_BUT_INCONCLUSIVE`: Positive point advantage meeting hurdles, but bootstrap confidence interval crosses zero.
+Strict precedence resolution per G3 Protocol Section 6:
+1. `INVALID`: Known lookahead, unauthorized policy override, manipulated original evidence, unrecorded outcome-driven selection, or violated frozen comparison rule.
+2. `UNAVAILABLE`: Required original account, execution, source, cost or comparable endpoint evidence is missing or contradictory.
+3. `UNSUCCESSFUL`: Complete valid comparable evidence establishes B-minus-R net economic value at or below zero.
+4. `SUCCESS`: Positive economic value meets materiality hurdle ($100 at 252 sessions, $200 at 504 sessions), both primary NAV and economic uncertainty intervals are strictly above zero, risk bounds hold, separate prospective study is complete, and required independent acceptance is verified.
+5. `PROMISING_BUT_INCONCLUSIVE`: Positive valid economic value exists, but one or more materiality, uncertainty, risk-comparability, or prospective-confirmation requirements are unmet.
 
 ---
 

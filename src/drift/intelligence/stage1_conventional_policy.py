@@ -9,7 +9,7 @@ No epsilon bands, no hidden score perturbations, no candidate-ID-dependent prefe
 from __future__ import annotations
 
 from collections.abc import Sequence
-from decimal import ROUND_HALF_EVEN, Context, Decimal
+from decimal import ROUND_HALF_EVEN, Context, Decimal, localcontext
 from typing import Literal
 
 from drift.domain.common import FrozenModel
@@ -40,32 +40,36 @@ def compute_r_utility(
     if len(nav_series) != 127:
         raise ValueError(f"R_UTILITY_REQUIRES_127_MARKS: got {len(nav_series)}")
 
-    # 126 completed returns
-    returns: list[Decimal] = []
-    for i in range(1, 127):
-        prev = nav_series[i - 1]
-        curr = nav_series[i]
-        if prev <= Decimal(0) or curr <= Decimal(0):
-            raise ValueError("R_UTILITY_NON_POSITIVE_NAV")
-        r_i = context.subtract(context.divide(curr, prev), Decimal(1))
-        returns.append(r_i)
+    with localcontext(context):
+        # 126 completed returns
+        returns: list[Decimal] = []
+        for i in range(1, 127):
+            prev = nav_series[i - 1]
+            curr = nav_series[i]
+            if prev <= Decimal(0) or curr <= Decimal(0):
+                raise ValueError("R_UTILITY_NON_POSITIVE_NAV")
+            r_i = context.subtract(context.divide(curr, prev), Decimal(1))
+            returns.append(r_i)
 
-    # G_s = product(1 + r_i) - 1
-    prod = Decimal(1)
-    for r in returns:
-        prod = context.multiply(prod, context.add(Decimal(1), r))
-    g_s = context.subtract(prod, Decimal(1))
+        # G_s = product(1 + r_i) - 1
+        prod = Decimal(1)
+        for r in returns:
+            prod = context.multiply(prod, context.add(Decimal(1), r))
+        g_s = context.subtract(prod, Decimal(1))
 
-    # mean_s = sum(r_i) / 126
-    total_r = sum(returns)
-    mean_s = context.divide(Decimal(total_r), Decimal(126))
+        # mean_s = sum(r_i) / 126
+        total_r = Decimal(0)
+        for r in returns:
+            total_r = context.add(total_r, r)
+        mean_s = context.divide(total_r, Decimal(126))
 
-    # var_s = sum((r_i - mean_s)^2) / 125
-    sum_sq = sum(
-        context.power(context.subtract(r, mean_s), Decimal(2)) for r in returns
-    )
-    var_s = context.divide(Decimal(sum_sq), Decimal(125))
-    sigma_s = context.sqrt(var_s)
+        # var_s = sum((r_i - mean_s)^2) / 125
+        sum_sq = Decimal(0)
+        for r in returns:
+            diff = context.subtract(r, mean_s)
+            sum_sq = context.add(sum_sq, context.multiply(diff, diff))
+        var_s = context.divide(sum_sq, Decimal(125))
+        sigma_s = context.sqrt(var_s)
 
     # peak_i = max(NAV_0, ..., NAV_i)
     # D_s = max(1 - NAV_i / peak_i) over i=0..126

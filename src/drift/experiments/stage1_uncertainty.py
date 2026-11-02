@@ -111,12 +111,19 @@ def compute_paired_uncertainty_artifact(
     r_returns: Sequence[Decimal],
     initial_capital: Decimal = Decimal("10000"),
     incremental_operating_costs: Decimal = Decimal("0"),
+    daily_incremental_operating_costs: Sequence[Decimal] | None = None,
+    one_time_operating_costs: Decimal = Decimal("0"),
     mean_block_length: int | None = None,
     seed: int = 575,
 ) -> PairedUncertaintyArtifactV1:
     n = len(b_returns)
     if n == 0 or len(r_returns) != n:
         raise ValueError("RETURNS_LENGTH_MISMATCH_OR_EMPTY")
+    if (
+        daily_incremental_operating_costs is not None
+        and len(daily_incremental_operating_costs) != n
+    ):
+        raise ValueError("DAILY_COSTS_LENGTH_MISMATCH")
 
     # Point estimates
     # Compound B
@@ -132,7 +139,13 @@ def compute_paired_uncertainty_artifact(
     r_r = r_compound - Decimal("1")
 
     delta_nav_point = r_b - r_r
-    economic_point = (initial_capital * delta_nav_point) - incremental_operating_costs
+    if daily_incremental_operating_costs is not None:
+        total_point_costs = one_time_operating_costs + sum(
+            daily_incremental_operating_costs
+        )
+    else:
+        total_point_costs = incremental_operating_costs
+    economic_point = (initial_capital * delta_nav_point) - total_point_costs
 
     primary_nav_interval: tuple[Decimal, Decimal] | None = None
     primary_econ_interval: tuple[Decimal, Decimal] | None = None
@@ -151,7 +164,13 @@ def compute_paired_uncertainty_artifact(
                 r_rep_prod *= Decimal("1") + r_returns[idx]
             d_nav = (b_rep_prod - Decimal("1")) - (r_rep_prod - Decimal("1"))
             nav_diffs.append(d_nav)
-            e_val = (initial_capital * d_nav) - incremental_operating_costs
+            if daily_incremental_operating_costs is not None:
+                rep_cost = one_time_operating_costs + sum(
+                    daily_incremental_operating_costs[idx] for idx in rep
+                )
+            else:
+                rep_cost = incremental_operating_costs
+            e_val = (initial_capital * d_nav) - rep_cost
             econ_diffs.append(e_val)
 
         nav_diffs.sort()
@@ -183,7 +202,13 @@ def compute_paired_uncertainty_artifact(
                 b_rep_prod *= Decimal("1") + b_returns[idx]
                 r_rep_prod *= Decimal("1") + r_returns[idx]
             d_nav = (b_rep_prod - Decimal("1")) - (r_rep_prod - Decimal("1"))
-            e_val = (initial_capital * d_nav) - incremental_operating_costs
+            if daily_incremental_operating_costs is not None:
+                rep_cost = one_time_operating_costs + sum(
+                    daily_incremental_operating_costs[idx] for idx in rep
+                )
+            else:
+                rep_cost = incremental_operating_costs
+            e_val = (initial_capital * d_nav) - rep_cost
             econ_sens.append(e_val)
         econ_sens.sort()
         sensitivities.append(

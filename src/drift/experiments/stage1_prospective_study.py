@@ -242,6 +242,7 @@ class ProspectiveRegistrationV1(FrozenModel):
     frozen_study: FrozenProspectiveStudyV1
     operational_state: ProspectiveLifecycle = "REGISTERED"
     observed_session_count: int = Field(ge=0, default=0)
+    last_observed_session: date | None = None
     scheduled_sessions: Literal[504] = 504
     has_broker_dispatch_capability: bool = False
     registration_hash: SHA256Hash
@@ -270,6 +271,7 @@ def register_prospective_study(
         "frozen_study": frozen_study,
         "operational_state": "REGISTERED",
         "observed_session_count": 0,
+        "last_observed_session": None,
         "scheduled_sessions": 504,
         "has_broker_dispatch_capability": has_broker_dispatch_capability,
     }
@@ -288,6 +290,31 @@ def advance_prospective_session(
     if registration.has_broker_dispatch_capability:
         raise ValueError("BROKER_DISPATCH_FORBIDDEN")
 
+    if (
+        registration.operational_state == "COMPLETED_PENDING_REVIEW"
+        or registration.observed_session_count >= 504
+    ):
+        raise ValueError("PROSPECTIVE_STUDY_ALREADY_COMPLETED")
+
+    plan = registration.frozen_study.plan
+    if (
+        session_date < plan.first_eligible_session
+        or session_date > plan.planned_last_session
+    ):
+        raise ValueError(
+            f"SESSION_DATE_OUTSIDE_PLANNED_WINDOW: {session_date} not in "
+            f"[{plan.first_eligible_session}, {plan.planned_last_session}]"
+        )
+
+    if (
+        registration.last_observed_session is not None
+        and session_date <= registration.last_observed_session
+    ):
+        raise ValueError(
+            f"SESSION_DATE_NOT_CONSECUTIVE: {session_date} must be strictly after "
+            f"{registration.last_observed_session}"
+        )
+
     new_count = registration.observed_session_count + 1
     new_state: ProspectiveLifecycle = (
         "COMPLETED_PENDING_REVIEW" if new_count >= 504 else "RUNNING"
@@ -300,6 +327,7 @@ def advance_prospective_session(
         "frozen_study": registration.frozen_study,
         "operational_state": new_state,
         "observed_session_count": new_count,
+        "last_observed_session": session_date,
         "scheduled_sessions": 504,
         "has_broker_dispatch_capability": False,
     }

@@ -6,6 +6,8 @@ calibration plan -> calibration result -> fitted protocol -> final freeze.
 
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal, Self
@@ -196,6 +198,36 @@ def create_calibration_attempt_receipt(
     )
 
 
+def calibration_ranking_key(
+    attempt: CalibrationAttemptReceiptV1,
+) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal]:
+    if (
+        attempt.terminal_net_return is None
+        or attempt.absolute_maximum_drawdown is None
+        or attempt.total_gross_turnover is None
+    ):
+        raise ValueError("INCOMPLETE_ATTEMPT_METRICS_CANNOT_BE_RANKED")
+
+    return (
+        -attempt.terminal_net_return,
+        attempt.absolute_maximum_drawdown,
+        attempt.total_gross_turnover,
+        attempt.pair.lambda_v,
+        attempt.pair.lambda_d,
+    )
+
+
+def compute_ranking_proof(
+    ranked_attempts: Sequence[CalibrationAttemptReceiptV1],
+) -> tuple[str, ...]:
+    return tuple(
+        hashlib.sha256(
+            f"{att.pair.lambda_v}:{att.pair.lambda_d}:{att.receipt_hash}".encode()
+        ).hexdigest()
+        for att in ranked_attempts
+    )
+
+
 class CalibrationResultV1(FrozenModel):
     schema_version: Literal["drift-stage1-calibration-result/1"] = (
         "drift-stage1-calibration-result/1"
@@ -219,20 +251,26 @@ class CalibrationResultV1(FrozenModel):
             attempt_pairs = {
                 att.pair for att in self.attempts if att.status == "COMPLETED"
             }
-            if len(attempt_pairs) < len(ORDERED_CALIBRATION_PAIRS):
+            if attempt_pairs != set(ORDERED_CALIBRATION_PAIRS):
                 raise ValueError("CALIBRATION_RESULT_INCOMPLETE_ATTEMPTS")
             if self.selected_pair not in attempt_pairs:
                 raise ValueError("CALIBRATION_SELECTED_PAIR_NOT_COMPLETED")
-            matching = [
-                att
-                for att in self.attempts
-                if att.pair == self.selected_pair and att.status == "COMPLETED"
+
+            completed_attempts = [
+                att for att in self.attempts if att.status == "COMPLETED"
             ]
-            if (
-                not matching
-                or matching[0].receipt_hash != self.selected_pair_receipt_hash
-            ):
+            ranked = sorted(completed_attempts, key=calibration_ranking_key)
+            winner = ranked[0]
+            if self.selected_pair != winner.pair:
+                raise ValueError(
+                    f"CALIBRATION_SELECTED_PAIR_NOT_WINNER: expected "
+                    f"{winner.pair}, got {self.selected_pair}"
+                )
+            if self.selected_pair_receipt_hash != winner.receipt_hash:
                 raise ValueError("CALIBRATION_SELECTED_PAIR_RECEIPT_MISMATCH")
+            expected_proof = compute_ranking_proof(ranked)
+            if self.ranking_proof and self.ranking_proof != expected_proof:
+                raise ValueError("CALIBRATION_RANKING_PROOF_MISMATCH")
         return self
 
 

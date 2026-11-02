@@ -130,3 +130,36 @@ def test_prospective_plan_rejects_reversed_dates() -> None:
             mandate_hash=H,
             cost_policy_hash=H,
         )
+
+
+def test_prospective_step_enforces_monotonicity_and_window() -> None:
+    plan, evidence, verifier = make_prospective_plan()
+    frozen = freeze_prospective_study(
+        plan, frozen_at=NOW, evidence=evidence, verifier=verifier
+    )
+    reg = register_prospective_study(
+        registration_id="REG-WINDOW-TEST",
+        registered_at=NOW,
+        frozen_study=frozen,
+        has_broker_dispatch_capability=False,
+    )
+
+    # Date before first_eligible_session
+    with pytest.raises(ValueError, match="SESSION_DATE_OUTSIDE_PLANNED_WINDOW"):
+        advance_prospective_session(reg, session_date=date(2026, 1, 1))
+
+    # Valid first step
+    s1 = advance_prospective_session(reg, session_date=date(2026, 11, 3))
+    assert s1.last_observed_session == date(2026, 11, 3)
+
+    # Repeating same date
+    with pytest.raises(ValueError, match="SESSION_DATE_NOT_CONSECUTIVE"):
+        advance_prospective_session(s1, session_date=date(2026, 11, 3))
+
+    # Advance to 2026-11-05
+    s2 = advance_prospective_session(s1, session_date=date(2026, 11, 5))
+    assert s2.observed_session_count == 2
+
+    # Earlier date within window
+    with pytest.raises(ValueError, match="SESSION_DATE_NOT_CONSECUTIVE"):
+        advance_prospective_session(s2, session_date=date(2026, 11, 4))
