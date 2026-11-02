@@ -37,6 +37,10 @@ STUDY_START_DATE: date = date(2019, 10, 1)
 STUDY_END_DATE: date = date(2025, 12, 31)
 STUDY_MIN_BARS_COUNT: int = 500
 
+MIN_EQUITY_DIVIDEND_COUNT: int = 15
+MIN_BOND_DIVIDEND_COUNT: int = 40
+MIN_DISTRIBUTION_YEARS: int = 5
+
 EQUITY_ETFS: tuple[str, ...] = ("VOO", "IJH", "IJR", "QQQ", "VEA", "VWO")
 BOND_ETFS: tuple[str, ...] = ("SHY", "IEF", "TLT", "TIP", "LQD")
 
@@ -455,19 +459,35 @@ def create_mock_valid_raw_payloads(
     )
 
     calendar_list = [
-        {"date": d.isoformat(), "open": "09:30", "close": "16:00"}
-        for d in sorted(set(dates))
+        {"date": d.isoformat(), "open": "09:30", "close": "16:00"} for d in dates
     ]
     calendar_payload = json.dumps(calendar_list).encode("utf-8")
 
-    dividends_list = [
-        {
-            "symbol": sym,
-            "ex_date": "2024-03-15",
-            "rate": 1.50,
-        }
-        for sym in (*EQUITY_ETFS, *BOND_ETFS)
-    ]
+    # Equity ETFs: quarterly distributions across 2019-2025 (~25 distributions)
+    equity_div_dates = [date(2019, 12, 20)]
+    for y in range(2020, 2026):
+        for m in (3, 6, 9, 12):
+            equity_div_dates.append(date(y, m, 15))
+
+    # Bond ETFs: monthly distributions across 2019-10 to 2025-12 (75 distributions)
+    bond_div_dates: list[date] = []
+    for y in range(2019, 2026):
+        m_start = 10 if y == 2019 else 1
+        for m in range(m_start, 13):
+            bond_div_dates.append(date(y, m, 1))
+
+    dividends_list: list[dict[str, Any]] = []
+    for sym in EQUITY_ETFS:
+        for d in equity_div_dates:
+            dividends_list.append(
+                {"symbol": sym, "ex_date": d.isoformat(), "rate": 1.50}
+            )
+    for sym in BOND_ETFS:
+        for d in bond_div_dates:
+            dividends_list.append(
+                {"symbol": sym, "ex_date": d.isoformat(), "rate": 0.85}
+            )
+
     ca_payload = json.dumps(
         {
             "corporate_actions": {
@@ -608,6 +628,8 @@ class RawAlpacaPayloadSummary:
     calendar_days_count: int
     dividend_symbols: frozenset[str]
     split_symbols: frozenset[str]
+    dividend_counts: dict[str, int]
+    dividend_years: dict[str, frozenset[int]]
 
 
 def validate_raw_alpaca_payloads(
@@ -625,6 +647,7 @@ def validate_raw_alpaca_payloads(
     if not (isinstance(ca_b, bytes) and len(ca_b) >= 20):
         raise ValueError("raw_payloads.corporate_actions must be non-empty bytes")
 
+    # 1. Validate Bars payload
     try:
         bars_doc = json.loads(bars_b.decode("utf-8"))
     except Exception as e:
@@ -649,14 +672,15 @@ def validate_raw_alpaca_payloads(
     bar_counts: dict[str, int] = {}
     bar_start_dates: dict[str, date] = {}
     bar_end_dates: dict[str, date] = {}
+    bar_dates_by_sym: dict[str, list[date]] = {}
 
     for sym in EXACT_12_ETF_UNIVERSE:
         bars_list = grouped_bars[sym]
         if not isinstance(bars_list, list) or len(bars_list) == 0:
             raise ValueError(f"bars response contains empty or non-list bars for {sym}")
 
-        min_bar_date: date | None = None
-        max_bar_date: date | None = None
+        bar_dates: list[date] = []
+        last_dt: datetime | None = None
 
         for idx, bar in enumerate(bars_list):
             if not isinstance(bar, dict):
@@ -675,17 +699,11 @@ def validate_raw_alpaca_payloads(
                 )
             try:
                 bar_dt = datetime.fromisoformat(t_str.replace("Z", "+00:00"))
-                bar_d = bar_dt.date()
             except Exception as e:
                 raise ValueError(
                     f"bar record at {sym}[{idx}] has non-ISO timestamp 't': "
                     f"{t_str}: {e}"
                 ) from e
-
-            if min_bar_date is None or bar_d < min_bar_date:
-                min_bar_date = bar_d
-            if max_bar_date is None or bar_d > max_bar_date:
-                max_bar_date = bar_d
 
             for price_key in ("o", "h", "l", "c"):
                 val = bar.get(price_key)
@@ -711,28 +729,44 @@ def validate_raw_alpaca_payloads(
                     f"volume v={v_val}"
                 )
 
-        if len(bars_list) < STUDY_MIN_BARS_COUNT:
+            if last_dt is not None and bar_dt <= last_dt:
+                raise ValueError(
+                    f"bars for {sym} timestamps must be unique and strictly "
+                    f"increasing: [{idx}] {bar_dt} <= [{idx - 1}] {last_dt}"
+                )
+            last_dt = bar_dt
+
+            bar_d = bar_dt.date()
+            if bar_dates and bar_d <= bar_dates[-1]:
+                raise ValueError(
+                    f"bars for {sym} trading dates must be unique and strictly "
+                    f"increasing: [{idx}] {bar_d} <= [{idx - 1}] {bar_dates[-1]}"
+                )
+            bar_dates.append(bar_d)
+
+        if len(bar_dates) < STUDY_MIN_BARS_COUNT:
             raise ValueError(
-                f"bars for {sym} count ({len(bars_list)}) less than minimum "
+                f"bars for {sym} count ({len(bar_dates)}) less than minimum "
                 f"required ({STUDY_MIN_BARS_COUNT})"
             )
 
-        assert min_bar_date is not None and max_bar_date is not None
-        if min_bar_date > STUDY_START_DATE:
+        if bar_dates[0] > STUDY_START_DATE:
             raise ValueError(
-                f"bars for {sym} start date {min_bar_date} does not cover "
+                f"bars for {sym} start date {bar_dates[0]} does not cover "
                 f"required study start date {STUDY_START_DATE}"
             )
-        if max_bar_date < STUDY_END_DATE:
+        if bar_dates[-1] < STUDY_END_DATE:
             raise ValueError(
-                f"bars for {sym} end date {max_bar_date} does not cover "
+                f"bars for {sym} end date {bar_dates[-1]} does not cover "
                 f"required study end date {STUDY_END_DATE}"
             )
 
-        bar_counts[sym] = len(bars_list)
-        bar_start_dates[sym] = min_bar_date
-        bar_end_dates[sym] = max_bar_date
+        bar_counts[sym] = len(bar_dates)
+        bar_start_dates[sym] = bar_dates[0]
+        bar_end_dates[sym] = bar_dates[-1]
+        bar_dates_by_sym[sym] = bar_dates
 
+    # 2. Validate Calendar payload
     try:
         cal_doc = json.loads(cal_b.decode("utf-8"))
     except Exception as e:
@@ -743,9 +777,7 @@ def validate_raw_alpaca_payloads(
             "calendar response must be a non-empty JSON list of trading days"
         )
 
-    cal_min_date: date | None = None
-    cal_max_date: date | None = None
-
+    cal_dates: list[date] = []
     for idx, day in enumerate(cal_doc):
         if not isinstance(day, dict):
             raise ValueError(f"calendar entry at [{idx}] must be a dict")
@@ -761,29 +793,49 @@ def validate_raw_alpaca_payloads(
                 f"calendar entry at [{idx}] has non-ISO date {d_val}: {e}"
             ) from e
 
-        if cal_min_date is None or parsed_d < cal_min_date:
-            cal_min_date = parsed_d
-        if cal_max_date is None or parsed_d > cal_max_date:
-            cal_max_date = parsed_d
+        if cal_dates and parsed_d <= cal_dates[-1]:
+            raise ValueError(
+                f"calendar dates must be unique and strictly increasing: "
+                f"[{idx}] {parsed_d} <= [{idx - 1}] {cal_dates[-1]}"
+            )
+        cal_dates.append(parsed_d)
 
-    if len(cal_doc) < STUDY_MIN_BARS_COUNT:
+    if len(cal_dates) < STUDY_MIN_BARS_COUNT:
         raise ValueError(
-            f"calendar days count ({len(cal_doc)}) less than minimum "
+            f"calendar days count ({len(cal_dates)}) less than minimum "
             f"required ({STUDY_MIN_BARS_COUNT})"
         )
 
-    assert cal_min_date is not None and cal_max_date is not None
-    if cal_min_date > STUDY_START_DATE:
+    if cal_dates[0] > STUDY_START_DATE:
         raise ValueError(
-            f"calendar start date {cal_min_date} does not cover "
+            f"calendar start date {cal_dates[0]} does not cover "
             f"required study start date {STUDY_START_DATE}"
         )
-    if cal_max_date < STUDY_END_DATE:
+    if cal_dates[-1] < STUDY_END_DATE:
         raise ValueError(
-            f"calendar end date {cal_max_date} does not cover "
+            f"calendar end date {cal_dates[-1]} does not cover "
             f"required study end date {STUDY_END_DATE}"
         )
 
+    cal_dates_set = frozenset(cal_dates)
+
+    # 3. Reconcile Bars against Calendar trading sessions
+    for sym in EXACT_12_ETF_UNIVERSE:
+        non_cal = [d for d in bar_dates_by_sym[sym] if d not in cal_dates_set]
+        if non_cal:
+            raise ValueError(
+                f"bars for {sym} contain dates not in trading calendar: {non_cal[:5]}"
+            )
+        expected_sessions = [
+            d for d in cal_dates if bar_start_dates[sym] <= d <= bar_end_dates[sym]
+        ]
+        if len(bar_dates_by_sym[sym]) != len(expected_sessions):
+            raise ValueError(
+                f"bars for {sym} trading session count ({len(bar_dates_by_sym[sym])}) "
+                f"does not match calendar session count ({len(expected_sessions)})"
+            )
+
+    # 3. Validate Corporate Actions payload
     try:
         ca_doc = json.loads(ca_b.decode("utf-8"))
     except Exception as e:
@@ -818,6 +870,7 @@ def validate_raw_alpaca_payloads(
     splits = ca_grouped.get("forward_splits")
     dividend_symbols: set[str] = set()
     split_symbols: set[str] = set()
+    dividend_dates_map: dict[str, list[date]] = {}
 
     if isinstance(dividends, list):
         for idx, item in enumerate(dividends):
@@ -849,7 +902,7 @@ def validate_raw_alpaca_payloads(
                     f"corporate actions cash_dividends[{idx}] lacks valid date: {d_val}"
                 )
             try:
-                date.fromisoformat(d_val[:10])
+                parsed_div_d = date.fromisoformat(d_val[:10])
             except Exception as e:
                 raise ValueError(
                     f"corporate actions cash_dividends[{idx}] has non-ISO date "
@@ -871,6 +924,7 @@ def validate_raw_alpaca_payloads(
                     f"finite rate/amount: {rate}"
                 )
             dividend_symbols.add(ca_sym)
+            dividend_dates_map.setdefault(ca_sym, []).append(parsed_div_d)
 
     if isinstance(splits, list):
         for idx, item in enumerate(splits):
@@ -906,19 +960,46 @@ def validate_raw_alpaca_payloads(
                 ) from e
             split_symbols.add(ca_sym)
 
-    # Validate that corporate actions in raw payloads cover required distribution ETFs
-    missing_div_equity = [s for s in EQUITY_ETFS if s not in dividend_symbols]
-    if missing_div_equity:
-        raise ValueError(
-            "corporate actions payload missing dividends for required equity ETFs: "
-            f"{missing_div_equity}"
-        )
-    missing_div_bonds = [s for s in BOND_ETFS if s not in dividend_symbols]
-    if missing_div_bonds:
-        raise ValueError(
-            "corporate actions payload missing dividends for required bond ETFs: "
-            f"{missing_div_bonds}"
-        )
+    dividend_counts = {
+        s: len(dividend_dates_map.get(s, [])) for s in EXACT_12_ETF_UNIVERSE
+    }
+    dividend_years = {
+        s: frozenset(d.year for d in dividend_dates_map.get(s, []))
+        for s in EXACT_12_ETF_UNIVERSE
+    }
+
+    # Validate distribution coverage across the study window
+    for sym in EQUITY_ETFS:
+        if sym not in dividend_symbols:
+            raise ValueError(
+                "corporate actions payload missing dividends for required equity "
+                f"ETF: {sym}"
+            )
+        count = dividend_counts[sym]
+        years_cnt = len(dividend_years[sym])
+        if count < MIN_EQUITY_DIVIDEND_COUNT or years_cnt < MIN_DISTRIBUTION_YEARS:
+            raise ValueError(
+                f"corporate actions payload has sparse dividend history for equity "
+                f"ETF {sym}: {count} dividends across {years_cnt} years "
+                f"(min {MIN_EQUITY_DIVIDEND_COUNT} dividends across "
+                f"{MIN_DISTRIBUTION_YEARS} years required)"
+            )
+
+    for sym in BOND_ETFS:
+        if sym not in dividend_symbols:
+            raise ValueError(
+                "corporate actions payload missing dividends for required bond "
+                f"ETF: {sym}"
+            )
+        count = dividend_counts[sym]
+        years_cnt = len(dividend_years[sym])
+        if count < MIN_BOND_DIVIDEND_COUNT or years_cnt < MIN_DISTRIBUTION_YEARS:
+            raise ValueError(
+                f"corporate actions payload has sparse dividend history for bond "
+                f"ETF {sym}: {count} dividends across {years_cnt} years "
+                f"(min {MIN_BOND_DIVIDEND_COUNT} dividends across "
+                f"{MIN_DISTRIBUTION_YEARS} years required)"
+            )
 
     return RawAlpacaPayloadSummary(
         bars_sha256=sha256(bars_b).hexdigest(),
@@ -927,11 +1008,13 @@ def validate_raw_alpaca_payloads(
         bar_counts=bar_counts,
         bar_start_dates=bar_start_dates,
         bar_end_dates=bar_end_dates,
-        calendar_start_date=cal_min_date,
-        calendar_end_date=cal_max_date,
-        calendar_days_count=len(cal_doc),
+        calendar_start_date=cal_dates[0],
+        calendar_end_date=cal_dates[-1],
+        calendar_days_count=len(cal_dates),
         dividend_symbols=frozenset(dividend_symbols),
         split_symbols=frozenset(split_symbols),
+        dividend_counts=dividend_counts,
+        dividend_years=dividend_years,
     )
 
 
@@ -1347,17 +1430,31 @@ def verify_g1_alpaca_sip_qualification(
             # Reconcile corporate actions assertions with raw payload
             if raw_summary is not None:
                 for t in EQUITY_ETFS:
-                    if t not in raw_summary.dividend_symbols:
+                    count = raw_summary.dividend_counts.get(t, 0)
+                    years_cnt = len(raw_summary.dividend_years.get(t, frozenset()))
+                    if (
+                        t not in raw_summary.dividend_symbols
+                        or count < MIN_EQUITY_DIVIDEND_COUNT
+                        or years_cnt < MIN_DISTRIBUTION_YEARS
+                    ):
                         refusal_reasons.append(
                             "INCOMPLETE_CORPORATE_ACTIONS: raw corporate action "
-                            f"payload has no dividend records for equity ETF {t}."
+                            f"payload has sparse or missing dividends for equity "
+                            f"ETF {t} ({count} dividends across {years_cnt} years)."
                         )
                         has_quarterly_equity = False
                 for t in BOND_ETFS:
-                    if t not in raw_summary.dividend_symbols:
+                    count = raw_summary.dividend_counts.get(t, 0)
+                    years_cnt = len(raw_summary.dividend_years.get(t, frozenset()))
+                    if (
+                        t not in raw_summary.dividend_symbols
+                        or count < MIN_BOND_DIVIDEND_COUNT
+                        or years_cnt < MIN_DISTRIBUTION_YEARS
+                    ):
                         refusal_reasons.append(
                             "INCOMPLETE_CORPORATE_ACTIONS: raw corporate action "
-                            f"payload has no dividend records for bond ETF {t}."
+                            f"payload has sparse or missing dividends for bond "
+                            f"ETF {t} ({count} dividends across {years_cnt} years)."
                         )
                         has_monthly_bonds = False
 

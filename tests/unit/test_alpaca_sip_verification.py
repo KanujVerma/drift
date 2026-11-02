@@ -1021,3 +1021,107 @@ def test_reconciliation_refuses_when_raw_payload_and_coverage_mismatch() -> None
         "claimed bars count" in r and "does not match raw payload bars count" in r
         for r in report.refusal_reasons
     )
+
+
+def test_sol_round7_duplicate_dates_refused() -> None:
+    """Sol Round 7 P1: 1559 copies of first date + 1 copy of last date refused."""
+    import json
+    from types import SimpleNamespace
+
+    _, cov_ev, ca_records, rights = make_mock_evidence()
+
+    # Exact Sol reproduction:
+    # 1559 copies of 2019-10-01 + 1 copy of 2025-12-31 (total 1560 entries, 2 dates)
+    dup_cal = [{"date": "2019-10-01", "open": "09:30", "close": "16:00"}] * 1559 + [
+        {"date": "2025-12-31", "open": "09:30", "close": "16:00"}
+    ]
+
+    dup_bars = {
+        sym: [
+            {
+                "t": "2019-10-01T14:30:00Z",
+                "o": 100.0,
+                "h": 105.0,
+                "l": 95.0,
+                "c": 102.0,
+                "v": 1000.0,
+            }
+        ]
+        * 1559
+        + [
+            {
+                "t": "2025-12-31T14:30:00Z",
+                "o": 100.0,
+                "h": 105.0,
+                "l": 95.0,
+                "c": 102.0,
+                "v": 1000.0,
+            }
+        ]
+        for sym in EXACT_12_ETF_UNIVERSE
+    }
+
+    valid_mock = create_mock_valid_raw_payloads()
+    dup_payloads = SimpleNamespace(
+        bars=json.dumps({"bars": dup_bars, "next_page_token": None}).encode("utf-8"),
+        calendar=json.dumps(dup_cal).encode("utf-8"),
+        corporate_actions=valid_mock.corporate_actions,
+    )
+
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        raw_payloads=dup_payloads,
+        corporate_actions=ca_records,
+        rights_assessment=rights,
+        coverage_evidence=cov_ev,
+    )
+
+    assert report.overall_status == "REFUSED"
+    assert report.source_provenance.provenance_verified is False
+    assert any(
+        "must be unique and strictly increasing" in r for r in report.refusal_reasons
+    )
+
+
+def test_sol_round7_sparse_dividend_history_refused() -> None:
+    """Sol Round 7 P1: 1 dividend on 2024-03-15 across 6-year window refused."""
+    import json
+    from types import SimpleNamespace
+
+    _, cov_ev, ca_records, rights = make_mock_evidence()
+    valid_mock = create_mock_valid_raw_payloads()
+
+    # Exact Sol reproduction: single dividend per symbol on 2024-03-15
+    sparse_divs = [
+        {"symbol": sym, "ex_date": "2024-03-15", "rate": 1.50}
+        for sym in EXACT_12_ETF_UNIVERSE
+    ]
+    sparse_payloads = SimpleNamespace(
+        bars=valid_mock.bars,
+        calendar=valid_mock.calendar,
+        corporate_actions=json.dumps(
+            {
+                "corporate_actions": {
+                    "cash_dividends": sparse_divs,
+                    "forward_splits": [],
+                },
+                "next_page_token": None,
+            }
+        ).encode("utf-8"),
+    )
+
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        raw_payloads=sparse_payloads,
+        corporate_actions=ca_records,
+        rights_assessment=rights,
+        coverage_evidence=cov_ev,
+    )
+
+    assert report.overall_status == "REFUSED"
+    assert any(
+        "sparse dividend history" in r or "sparse or missing dividends" in r
+        for r in report.refusal_reasons
+    )
