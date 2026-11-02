@@ -97,6 +97,7 @@ from drift.adapters.alpaca_exploratory import (  # noqa: E402
     retain_native_bytes,
     retain_origin_observations,
     run_alpaca_exploratory_intake,
+    verify_alpaca_sip_request_bounds,
 )
 from drift.domain.securities import ListingVenue  # noqa: E402
 
@@ -182,8 +183,10 @@ def _api_keys_from_environment() -> tuple[str, str] | None:
     `InvalidApiKeyError`, naming only the variable, when a set value could not
     be sent as a header verbatim.
     """
-    key_id = os.environ.get(KEY_ID_VARIABLE)
-    secret_key = os.environ.get(SECRET_KEY_VARIABLE)
+    key_id = os.environ.get(KEY_ID_VARIABLE) or os.environ.get("ALPACA_API_KEY_ID")
+    secret_key = os.environ.get(SECRET_KEY_VARIABLE) or os.environ.get(
+        "ALPACA_API_SECRET_KEY"
+    )
     if key_id is None or secret_key is None:
         return None
     if not _usable_key(key_id):
@@ -272,6 +275,10 @@ def _acquire_payloads(
     request. The corporate-actions GET names every action type the adapter
     requests (issue 76, B1): the same route and host, with a wider filter.
     """
+    valid_delay, delay_err = verify_alpaca_sip_request_bounds(request)
+    if not valid_delay:
+        raise ValueError(delay_err)
+
     parameters = alpaca_endpoint_parameters(request)
     bars, bars_origin = _fetch_bytes(
         BARS_OBJECT_KEY,

@@ -1955,6 +1955,30 @@ def alpaca_endpoint_parameters(
     }
 
 
+def verify_alpaca_sip_request_bounds(
+    request: AlpacaIntakeRequest,
+    observed_at: datetime | None = None,
+) -> tuple[bool, str | None]:
+    """Verify that a historical Alpaca SIP request ends >= 15 minutes in the past.
+
+    On Alpaca's free Developer/Basic tier, `feed=sip` provides 100% consolidated
+    US market coverage for historical requests ending at least 15 minutes before
+    the query time. Older historical data does NOT require an IEX-only feed.
+    """
+    now = datetime.now(UTC) if observed_at is None else observed_at
+    cutoff = now - timedelta(minutes=15)
+    if request.request_end > cutoff:
+        delta = (request.request_end - cutoff).total_seconds()
+        return (
+            False,
+            f"FREE_SIP_REQUEST_WITHIN_15_MINUTES: request end "
+            f"{request.request_end.isoformat()} is {delta:.1f}s past the "
+            f"15-minute delay cutoff {cutoff.isoformat()}. "
+            "Subscription does not permit querying recent SIP data on the free tier.",
+        )
+    return True, None
+
+
 #: The fields each endpoint is expected to return. A calendar row carries no
 #: OHLCV and a dividend row carries no OHLCV, so declaring OHLCV for all three
 #: would make the closed-world inventory describe an acquisition nobody ran.

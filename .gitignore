@@ -9,3 +9,5 @@ __pycache__/
 .drift/
 dist/
 build/
+.local-artifacts/
+.worktrees/

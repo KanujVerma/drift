@@ -2620,3 +2620,56 @@ def test_cli_prospective_step_interrupted_publication_recovery_and_retry(
     s2_data = json.loads(target_step2_file.read_text(encoding="utf-8"))
     assert s2_data["observed_session_count"] == 2
     assert s2_data["last_observed_session"] == "2026-11-04"
+
+
+def test_cli_verify_market_data(repo_root: Path, tmp_path: Path) -> None:
+    script = repo_root / "scripts" / "stage1_study.py"
+    out_file = tmp_path / "market_data_verification.json"
+
+    proc = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "verify-market-data",
+            "--request-end",
+            "2025-12-31T23:59:59Z",
+            "--with-fixtures",
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, f"verify-market-data failed: {proc.stderr}"
+    assert out_file.exists()
+    data = json.loads(out_file.read_text(encoding="utf-8"))
+    assert data["overall_status"] == "VERIFIED"
+    assert data["sip_access_check"]["feed"] == "sip"
+    assert data["sip_access_check"]["requires_iex_fallback"] is False
+    assert data["universe_coverage"]["all_windows_fully_covered"] is True
+    assert data["robinhood_disqualification"]["excluded_from_g1_critical_path"] is True
+
+    # Calling without fixtures must fail closed (exit code 2, status REFUSED)
+    refused_out = tmp_path / "market_data_refused.json"
+    proc_refused = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "verify-market-data",
+            "--request-end",
+            "2025-12-31T23:59:59Z",
+            "--output",
+            str(refused_out),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert proc_refused.returncode == 2
+    assert refused_out.exists()
+    refused_data = json.loads(refused_out.read_text(encoding="utf-8"))
+    assert refused_data["overall_status"] == "REFUSED"
+    assert len(refused_data["refusal_reasons"]) > 0
