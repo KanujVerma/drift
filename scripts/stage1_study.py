@@ -262,7 +262,7 @@ def action_assess(args: argparse.Namespace) -> int:
 def action_verify_market_data(args: argparse.Namespace) -> int:
     try:
         from drift.qualification.alpaca_sip_verification import (
-            EXACT_12_ETF_UNIVERSE,
+            create_mock_alpaca_sip_evidence_fixtures,
             verify_g1_alpaca_sip_qualification,
         )
 
@@ -278,22 +278,16 @@ def action_verify_market_data(args: argparse.Namespace) -> int:
         )
 
         if getattr(args, "with_fixtures", False):
-            from types import SimpleNamespace
-
-            mock_receipt = SimpleNamespace(receipt_id="MOCK-ACQ-RECEIPT-ALPACA-SIP-V1")
-            intake_res = SimpleNamespace(
-                acquisition=SimpleNamespace(receipt=mock_receipt)
-            )
-            rights_assessment = SimpleNamespace(
-                assessment_id="MOCK-RIGHTS-ASSESSMENT-ALPACA-V1"
+            intake_res, cov_ev, ca_records, rights = (
+                create_mock_alpaca_sip_evidence_fixtures()
             )
             report = verify_g1_alpaca_sip_qualification(
                 request_end=request_end,
                 request_time=now,
                 intake_result=intake_res,
-                corporate_actions=tuple(f"MOCK-CA-{t}" for t in EXACT_12_ETF_UNIVERSE),
-                rights_assessment=rights_assessment,
-                covered_tickers=EXACT_12_ETF_UNIVERSE,
+                corporate_actions=ca_records,
+                rights_assessment=rights,
+                coverage_evidence=cov_ev,
             )
         else:
             report = verify_g1_alpaca_sip_qualification(

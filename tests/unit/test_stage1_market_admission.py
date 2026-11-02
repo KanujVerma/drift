@@ -80,20 +80,18 @@ def test_market_admission_refuses_unverified_corporate_actions() -> None:
 
 
 def test_market_admission_with_verified_alpaca_sip_report() -> None:
-    from types import SimpleNamespace
-
-    mock_receipt = SimpleNamespace(receipt_id="MOCK-ACQ-RECEIPT-ALPACA-SIP-V1")
-    intake_res = SimpleNamespace(acquisition=SimpleNamespace(receipt=mock_receipt))
-    rights_assessment = SimpleNamespace(
-        assessment_id="MOCK-RIGHTS-ASSESSMENT-ALPACA-V1"
+    from drift.qualification.alpaca_sip_verification import (
+        create_mock_alpaca_sip_evidence_fixtures,
     )
+
+    intake_res, cov_ev, ca_records, rights = create_mock_alpaca_sip_evidence_fixtures()
     report = verify_g1_alpaca_sip_qualification(
         request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
         request_time=NOW,
         intake_result=intake_res,
-        corporate_actions=tuple(f"MOCK-CA-{t}" for t in STAGE1_UNIVERSE),
-        rights_assessment=rights_assessment,
-        covered_tickers=STAGE1_UNIVERSE,
+        corporate_actions=ca_records,
+        rights_assessment=rights,
+        coverage_evidence=cov_ev,
     )
     secs = make_securities()
     artifact = create_market_data_admission(

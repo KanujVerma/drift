@@ -20,13 +20,18 @@ from drift.qualification.alpaca_sip_verification import (
     DISQUALIFIED_SOURCE_ROBINHOOD_TOTALVIEW,
     EXACT_12_ETF_UNIVERSE,
     AlpacaSipHistoricalRequestCheckV1,
+    AlpacaSipIntakeEvidenceV1,
     ContractualResearchRetentionRightsV1,
+    ContractualRightsAssessmentEvidenceV1,
     CorporateActionCompletenessV1,
+    CorporateActionEvidenceRecordV1,
     OriginalSourceProvenanceV1,
     RobinhoodTotalViewDisqualificationV1,
+    SecurityHistoricalCoverageEvidenceV1,
     SecurityHistoricalCoverageV1,
     Universe12EtfCoverageV1,
     build_12_etf_coverage,
+    create_mock_alpaca_sip_evidence_fixtures,
     verify_alpaca_sip_request_delay,
     verify_g1_alpaca_sip_qualification,
 )
@@ -34,18 +39,13 @@ from drift.qualification.alpaca_sip_verification import (
 FIXED_NOW = datetime(2026, 11, 2, 14, 0, 0, tzinfo=UTC)
 
 
-def make_mock_evidence() -> tuple[Any, tuple[str, ...], Any, tuple[str, ...]]:
-    from types import SimpleNamespace
-
-    mock_receipt = SimpleNamespace(receipt_id="MOCK-ACQ-RECEIPT-ALPACA-SIP-V1")
-    intake_res = SimpleNamespace(acquisition=SimpleNamespace(receipt=mock_receipt))
-    corporate_actions = tuple(f"MOCK-CA-{t}" for t in EXACT_12_ETF_UNIVERSE)
-    rights_assessment = SimpleNamespace(
-        assessment_id="MOCK-RIGHTS-ASSESSMENT-ALPACA-V1",
-        entitlement_scope="INTERNAL_RESEARCH_NON_DISPLAY",
-    )
-    covered_tickers = EXACT_12_ETF_UNIVERSE
-    return intake_res, corporate_actions, rights_assessment, covered_tickers
+def make_mock_evidence() -> tuple[
+    AlpacaSipIntakeEvidenceV1,
+    tuple[SecurityHistoricalCoverageEvidenceV1, ...],
+    tuple[CorporateActionEvidenceRecordV1, ...],
+    ContractualRightsAssessmentEvidenceV1,
+]:
+    return create_mock_alpaca_sip_evidence_fixtures()
 
 
 def test_free_historical_sip_access_verification_fails_closed_without_evidence() -> (
@@ -65,9 +65,29 @@ def test_free_historical_sip_access_verification_fails_closed_without_evidence()
     assert any("INCOMPLETE_UNIVERSE_COVERAGE" in r for r in report.refusal_reasons)
 
 
+def test_sol_adversarial_reproduction_refuses_arbitrary_objects() -> None:
+    """Sol Review Round 2 blocker regression: arbitrary objects must be refused."""
+    report = verify_g1_alpaca_sip_qualification(
+        intake_result=object(),
+        corporate_actions=[None] * 12,
+        rights_assessment=object(),
+        covered_tickers=EXACT_12_ETF_UNIVERSE,
+    )
+    assert report.overall_status == "REFUSED"
+    assert len(report.refusal_reasons) >= 4
+    assert any("MISSING_PROVIDER_EVIDENCE" in r for r in report.refusal_reasons)
+    assert any("INCOMPLETE_CORPORATE_ACTIONS" in r for r in report.refusal_reasons)
+    assert any("UNRESOLVED_CONTRACTUAL_RIGHTS" in r for r in report.refusal_reasons)
+    assert any("INCOMPLETE_UNIVERSE_COVERAGE" in r for r in report.refusal_reasons)
+    assert report.source_provenance.provenance_verified is False
+    assert report.corporate_actions.completeness_status == "INCOMPLETE"
+    assert report.contractual_rights.is_verified is False
+    assert report.universe_coverage.all_windows_fully_covered is False
+
+
 def test_free_historical_sip_access_verification_passes_with_evidence() -> None:
     """Historical requests ending > 15 minutes in past succeed with evidence."""
-    intake_res, ca_records, rights, tickers = make_mock_evidence()
+    intake_res, cov_ev, ca_records, rights = make_mock_evidence()
     request_end = datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC)
     report = verify_g1_alpaca_sip_qualification(
         request_end=request_end,
@@ -75,7 +95,7 @@ def test_free_historical_sip_access_verification_passes_with_evidence() -> None:
         intake_result=intake_res,
         corporate_actions=ca_records,
         rights_assessment=rights,
-        covered_tickers=tickers,
+        coverage_evidence=cov_ev,
     )
     assert report.overall_status == "VERIFIED"
     assert report.sip_access_check.feed == ALPACA_SIP_FEED
@@ -91,7 +111,7 @@ def test_free_historical_sip_access_verification_passes_with_evidence() -> None:
 
 def test_verification_refuses_when_provider_evidence_missing() -> None:
     """Refuse verification if provider response / intake evidence is missing."""
-    _, ca_records, rights, tickers = make_mock_evidence()
+    _, cov_ev, ca_records, rights = make_mock_evidence()
     report = verify_g1_alpaca_sip_qualification(
         request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
         request_time=FIXED_NOW,
@@ -99,7 +119,7 @@ def test_verification_refuses_when_provider_evidence_missing() -> None:
         raw_payloads=None,
         corporate_actions=ca_records,
         rights_assessment=rights,
-        covered_tickers=tickers,
+        coverage_evidence=cov_ev,
     )
     assert report.overall_status == "REFUSED"
     assert any("MISSING_PROVIDER_EVIDENCE" in r for r in report.refusal_reasons)
@@ -107,7 +127,7 @@ def test_verification_refuses_when_provider_evidence_missing() -> None:
 
 def test_verification_refuses_when_corporate_actions_incomplete() -> None:
     """Refuse verification if corporate-actions coverage is incomplete (< 12)."""
-    intake_res, ca_records, rights, tickers = make_mock_evidence()
+    intake_res, cov_ev, ca_records, rights = make_mock_evidence()
     incomplete_ca = ca_records[:-1]  # Only 11 records
     report = verify_g1_alpaca_sip_qualification(
         request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
@@ -115,7 +135,7 @@ def test_verification_refuses_when_corporate_actions_incomplete() -> None:
         intake_result=intake_res,
         corporate_actions=incomplete_ca,
         rights_assessment=rights,
-        covered_tickers=tickers,
+        coverage_evidence=cov_ev,
     )
     assert report.overall_status == "REFUSED"
     assert any("INCOMPLETE_CORPORATE_ACTIONS" in r for r in report.refusal_reasons)
@@ -123,15 +143,15 @@ def test_verification_refuses_when_corporate_actions_incomplete() -> None:
 
 def test_verification_refuses_when_universe_coverage_incomplete() -> None:
     """Refuse verification if 12-ETF coverage is missing a ticker."""
-    intake_res, ca_records, rights, _ = make_mock_evidence()
-    missing_one = tuple(t for t in EXACT_12_ETF_UNIVERSE if t != "QQQ")
+    intake_res, cov_ev, ca_records, rights = make_mock_evidence()
+    missing_one = cov_ev[:-1]  # Missing last ticker
     report = verify_g1_alpaca_sip_qualification(
         request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
         request_time=FIXED_NOW,
         intake_result=intake_res,
         corporate_actions=ca_records,
         rights_assessment=rights,
-        covered_tickers=missing_one,
+        coverage_evidence=missing_one,
     )
     assert report.overall_status == "REFUSED"
     assert any("INCOMPLETE_UNIVERSE_COVERAGE" in r for r in report.refusal_reasons)
@@ -139,14 +159,14 @@ def test_verification_refuses_when_universe_coverage_incomplete() -> None:
 
 def test_verification_refuses_when_contractual_rights_unresolved() -> None:
     """Refuse verification if contractual rights assessment is absent."""
-    intake_res, ca_records, _, tickers = make_mock_evidence()
+    intake_res, cov_ev, ca_records, _ = make_mock_evidence()
     report = verify_g1_alpaca_sip_qualification(
         request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
         request_time=FIXED_NOW,
         intake_result=intake_res,
         corporate_actions=ca_records,
         rights_assessment=None,
-        covered_tickers=tickers,
+        coverage_evidence=cov_ev,
     )
     assert report.overall_status == "REFUSED"
     assert any("UNRESOLVED_CONTRACTUAL_RIGHTS" in r for r in report.refusal_reasons)
@@ -154,7 +174,7 @@ def test_verification_refuses_when_contractual_rights_unresolved() -> None:
 
 def test_verification_clock_defaults_to_now() -> None:
     """Default clock must be datetime.now(UTC), not a fixed hardcoded date."""
-    intake_res, ca_records, rights, tickers = make_mock_evidence()
+    intake_res, cov_ev, ca_records, rights = make_mock_evidence()
     before = datetime.now(UTC)
     report = verify_g1_alpaca_sip_qualification(
         request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
@@ -162,7 +182,7 @@ def test_verification_clock_defaults_to_now() -> None:
         intake_result=intake_res,
         corporate_actions=ca_records,
         rights_assessment=rights,
-        covered_tickers=tickers,
+        coverage_evidence=cov_ev,
     )
     after = datetime.now(UTC)
     req_time = report.sip_access_check.request_time
@@ -219,7 +239,8 @@ def test_exact_12_etf_coverage_canonical_order_and_venues() -> None:
     assert cov_empty.universe == EXACT_12_ETF_UNIVERSE
     assert cov_empty.all_windows_fully_covered is False
 
-    cov = build_12_etf_coverage(EXACT_12_ETF_UNIVERSE)
+    _, cov_ev, _, _ = make_mock_evidence()
+    cov = build_12_etf_coverage(cov_ev)
     assert cov.universe == EXACT_12_ETF_UNIVERSE
     assert cov.universe == (
         "VOO",
@@ -256,7 +277,8 @@ def test_exact_12_etf_coverage_canonical_order_and_venues() -> None:
 
 def test_universe_coverage_refuses_altered_order() -> None:
     """Canonical 12-ETF universe order is mandatory."""
-    cov = build_12_etf_coverage(EXACT_12_ETF_UNIVERSE)
+    _, cov_ev, _, _ = make_mock_evidence()
+    cov = build_12_etf_coverage(cov_ev)
     reversed_secs = tuple(reversed(cov.securities))
     with pytest.raises(
         ValidationError, match="SECURITIES_TICKERS_MUST_MATCH_EXACT_12_ETFS_ORDER"
@@ -270,7 +292,8 @@ def test_universe_coverage_refuses_altered_order() -> None:
 
 def test_universe_coverage_refuses_dropped_ticker() -> None:
     """Dropping any ticker (e.g. QQQ) is rejected as incomplete."""
-    cov = build_12_etf_coverage(EXACT_12_ETF_UNIVERSE)
+    _, cov_ev, _, _ = make_mock_evidence()
+    cov = build_12_etf_coverage(cov_ev)
     dropped = tuple(s for s in cov.securities if s.ticker != "QQQ")
     with pytest.raises(
         ValidationError, match="SECURITIES_TICKERS_MUST_MATCH_EXACT_12_ETFS_ORDER"
@@ -284,7 +307,8 @@ def test_universe_coverage_refuses_dropped_ticker() -> None:
 
 def test_universe_coverage_refuses_inception_after_warmup() -> None:
     """Security with inception date after warmup start cannot claim coverage."""
-    cov = build_12_etf_coverage(EXACT_12_ETF_UNIVERSE)
+    _, cov_ev, _, _ = make_mock_evidence()
+    cov = build_12_etf_coverage(cov_ev)
     bad_secs = list(cov.securities)
     bad_secs[0] = SecurityHistoricalCoverageV1(
         ticker="VOO",
@@ -451,3 +475,159 @@ def test_adapter_verify_alpaca_sip_request_bounds() -> None:
     assert is_valid is False
     assert err is not None
     assert "FREE_SIP_REQUEST_WITHIN_15_MINUTES" in err
+
+
+def test_refuses_intake_with_unverified_reconciliation_pass() -> None:
+    """Refuse provenance if intake reconciliation did not pass."""
+    _, cov_ev, ca_records, rights = make_mock_evidence()
+    from types import SimpleNamespace
+
+    fake_res = SimpleNamespace(
+        retained=SimpleNamespace(
+            bars=SimpleNamespace(sha256="a" * 64, byte_size=100),
+            calendar=SimpleNamespace(sha256="b" * 64, byte_size=100),
+            corporate_actions=SimpleNamespace(sha256="c" * 64, byte_size=100),
+        ),
+        acquisition=SimpleNamespace(
+            receipt=SimpleNamespace(provider="alpaca"),
+            reconciliation=SimpleNamespace(result="FAILED"),
+        ),
+    )
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        intake_result=fake_res,
+        corporate_actions=ca_records,
+        rights_assessment=rights,
+        coverage_evidence=cov_ev,
+    )
+    assert report.overall_status == "REFUSED"
+    assert any("intake acquisition reconciliation" in r for r in report.refusal_reasons)
+
+
+def test_refuses_raw_payloads_with_invalid_json() -> None:
+    """Refuse provenance if raw payload bytes are not valid JSON objects."""
+    _, cov_ev, ca_records, rights = make_mock_evidence()
+    from types import SimpleNamespace
+
+    bad_payloads = SimpleNamespace(
+        bars=b"not valid json",
+        calendar=b"[]",
+        corporate_actions=b"[]",
+    )
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        raw_payloads=bad_payloads,
+        corporate_actions=ca_records,
+        rights_assessment=rights,
+        coverage_evidence=cov_ev,
+    )
+    assert report.overall_status == "REFUSED"
+    assert any("raw_payloads failed verification" in r for r in report.refusal_reasons)
+
+
+def test_refuses_corporate_actions_when_quarterly_distribution_missing_for_equity() -> (
+    None
+):
+    """Refuse corporate actions if an equity ETF claims no quarterly distributions."""
+    intake_res, cov_ev, ca_records, rights = make_mock_evidence()
+    bad_ca: list[Any] = list(ca_records)
+    bad_ca[0] = {
+        "ticker": "VOO",
+        "has_quarterly_equity_distributions": False,
+        "has_monthly_fixed_income_distributions": False,
+        "all_splits_captured": True,
+        "closed_world_coverage_verified": True,
+        "covered_start_date": date(2019, 10, 1),
+        "covered_end_date": date(2025, 12, 31),
+        "single_count_accounting_enforced": True,
+        "completeness_basis": "ALPACA_EXPLORATORY_CLOSED_WORLD_V1",
+    }
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        intake_result=intake_res,
+        corporate_actions=bad_ca,
+        rights_assessment=rights,
+        coverage_evidence=cov_ev,
+    )
+    assert report.overall_status == "REFUSED"
+    assert any("EQUITY_ETF_MISSING_QUARTERLY" in r for r in report.refusal_reasons)
+
+
+def test_refuses_corporate_actions_when_monthly_distribution_missing_for_bond() -> None:
+    """Refuse corporate actions if a bond ETF claims no monthly distributions."""
+    intake_res, cov_ev, ca_records, rights = make_mock_evidence()
+    bad_ca: list[Any] = list(ca_records)
+    # SHY is index 6
+    bad_ca[6] = {
+        "ticker": "SHY",
+        "has_quarterly_equity_distributions": False,
+        "has_monthly_fixed_income_distributions": False,
+        "all_splits_captured": True,
+        "closed_world_coverage_verified": True,
+        "covered_start_date": date(2019, 10, 1),
+        "covered_end_date": date(2025, 12, 31),
+        "single_count_accounting_enforced": True,
+        "completeness_basis": "ALPACA_EXPLORATORY_CLOSED_WORLD_V1",
+    }
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        intake_result=intake_res,
+        corporate_actions=bad_ca,
+        rights_assessment=rights,
+        coverage_evidence=cov_ev,
+    )
+    assert report.overall_status == "REFUSED"
+    assert any("BOND_ETF_MISSING_MONTHLY" in r for r in report.refusal_reasons)
+
+
+def test_refuses_rights_assessment_when_entitlement_not_active() -> None:
+    """Refuse rights if entitlement is expired or terminated."""
+    intake_res, cov_ev, ca_records, rights = make_mock_evidence()
+    from types import SimpleNamespace
+
+    expired_rights = SimpleNamespace(
+        assessment_id="ASSESSMENT-1",
+        assessor_identity="matthew@drift.local",
+        entitlement_state="expired",
+        notice_evidence_hashes=("e" * 64,),
+    )
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        intake_result=intake_res,
+        corporate_actions=ca_records,
+        rights_assessment=expired_rights,
+        coverage_evidence=cov_ev,
+    )
+    assert report.overall_status == "REFUSED"
+    assert any("entitlement_state is not active" in r for r in report.refusal_reasons)
+
+
+def test_refuses_coverage_when_dates_do_not_span_full_study_window() -> None:
+    """Refuse coverage if historical span ends early (e.g. 2024 instead of 2025)."""
+    intake_res, cov_ev, ca_records, rights = make_mock_evidence()
+    bad_cov: list[Any] = list(cov_ev)
+    bad_cov[0] = {
+        "ticker": "VOO",
+        "warmup_covered": True,
+        "development_covered": True,
+        "validation_covered": True,
+        "evaluation_covered": False,
+        "coverage_start": date(2019, 10, 1),
+        "coverage_end": date(2024, 12, 31),
+        "observed_bars_count": 1200,
+    }
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        intake_result=intake_res,
+        corporate_actions=ca_records,
+        rights_assessment=rights,
+        coverage_evidence=bad_cov,
+    )
+    assert report.overall_status == "REFUSED"
+    assert any("INCOMPLETE_UNIVERSE_COVERAGE" in r for r in report.refusal_reasons)
