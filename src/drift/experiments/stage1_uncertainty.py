@@ -144,7 +144,7 @@ def compute_paired_uncertainty_artifact(
             daily_incremental_operating_costs
         )
     else:
-        total_point_costs = incremental_operating_costs
+        total_point_costs = incremental_operating_costs + one_time_operating_costs
     economic_point = (initial_capital * delta_nav_point) - total_point_costs
 
     primary_nav_interval: tuple[Decimal, Decimal] | None = None
@@ -169,7 +169,7 @@ def compute_paired_uncertainty_artifact(
                     daily_incremental_operating_costs[idx] for idx in rep
                 )
             else:
-                rep_cost = incremental_operating_costs
+                rep_cost = incremental_operating_costs + one_time_operating_costs
             e_val = (initial_capital * d_nav) - rep_cost
             econ_diffs.append(e_val)
 
@@ -207,7 +207,7 @@ def compute_paired_uncertainty_artifact(
                     daily_incremental_operating_costs[idx] for idx in rep
                 )
             else:
-                rep_cost = incremental_operating_costs
+                rep_cost = incremental_operating_costs + one_time_operating_costs
             e_val = (initial_capital * d_nav) - rep_cost
             econ_sens.append(e_val)
         econ_sens.sort()

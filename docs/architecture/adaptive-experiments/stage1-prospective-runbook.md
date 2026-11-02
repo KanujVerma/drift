@@ -1,7 +1,7 @@
 # Stage 1 Prospective Study Runbook (G5)
 
-**Specification Version:** drift-stage1-prospective-runbook/1  
-**Scope:** Operational runbook for registering, executing, and stepping prospective study sessions under G5.  
+**Specification Version:** drift-stage1-prospective-runbook/1
+**Scope:** Operational runbook for registering, executing, and stepping prospective study sessions under G5.
 **Predecessor References:** [Stage 1 Study Execution Contract v1](stage1-study-execution-contract-v1.md), [G3 Protocol v1](stage1-g3-protocol-v1.md).
 
 ---
@@ -10,7 +10,7 @@
 
 The Stage 1 prospective evaluation protocol is strictly analytical. The execution orchestrator must assert and enforce the following invariant:
 
-> **CAPABILITY INVARIANT:**  
+> **CAPABILITY INVARIANT:**
 > `has_broker_dispatch_capability == False`
 
 If any capability granting live broker interaction, automated order submission, capital transfer, or unauthorized runtime mutation is detected, prospective registration and execution must immediately abort with a non-zero exit code (Exit Code 2).

@@ -269,7 +269,7 @@ class CalibrationResultV1(FrozenModel):
             if self.selected_pair_receipt_hash != winner.receipt_hash:
                 raise ValueError("CALIBRATION_SELECTED_PAIR_RECEIPT_MISMATCH")
             expected_proof = compute_ranking_proof(ranked)
-            if self.ranking_proof and self.ranking_proof != expected_proof:
+            if self.ranking_proof != expected_proof:
                 raise ValueError("CALIBRATION_RANKING_PROOF_MISMATCH")
         return self
 
@@ -285,6 +285,19 @@ def create_calibration_result(
     exposure_record: tuple[str, ...] = (),
     original_acceptance_receipts: tuple[StudyEvidenceReferenceV1, ...] = (),
 ) -> CalibrationResultV1:
+    completed = [att for att in attempts if att.status == "COMPLETED"]
+    if (
+        selected_pair is not None
+        or {att.pair for att in completed} == set(ORDERED_CALIBRATION_PAIRS)
+    ) and completed:
+        ranked = sorted(completed, key=calibration_ranking_key)
+        winner = ranked[0]
+        if selected_pair is None:
+            selected_pair = winner.pair
+            selected_pair_receipt_hash = winner.receipt_hash
+        if not ranking_proof:
+            ranking_proof = compute_ranking_proof(ranked)
+
     body = {
         "schema_version": "drift-stage1-calibration-result/1",
         "plan_hash": plan_hash,

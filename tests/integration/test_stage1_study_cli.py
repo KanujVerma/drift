@@ -211,3 +211,99 @@ def test_cli_prospective_register_and_step(repo_root: Path, tmp_path: Path) -> N
     step_data = json.loads(step_file.read_text(encoding="utf-8"))
     assert step_data["observed_session_count"] == 1
     assert step_data["last_observed_session"] == "2026-11-03"
+
+
+def test_cli_calibrate_and_historical_handlers(repo_root: Path, tmp_path: Path) -> None:
+    from datetime import UTC, date, datetime
+    from decimal import Decimal
+
+    from drift.experiments.stage1_study_artifacts import (
+        ORDERED_CALIBRATION_PAIRS,
+        create_calibration_attempt_receipt,
+        create_development_calibration_plan,
+    )
+    from drift.experiments.stage1_study_freeze import StudyDateWindowV1
+
+    script = repo_root / "scripts" / "stage1_study.py"
+    plan_file = tmp_path / "cal_plan.json"
+    host_file = tmp_path / "cal_host.json"
+    out_file = tmp_path / "cal_result.json"
+
+    H = "1" * 64
+    plan = create_development_calibration_plan(
+        plan_id="CAL-CLI-01",
+        created_at=datetime(2026, 11, 2, tzinfo=UTC),
+        method_version="grid-9-conventional/1",
+        owner_reference="kanuj@drift.local",
+        reviewer_reference="matthew@drift.local",
+        development_window=StudyDateWindowV1(
+            start=date(2021, 1, 1), end=date(2023, 12, 31)
+        ),
+        prohibited_windows=(),
+        installed_source_hash=H,
+        dataset_manifest_hash=H,
+        calendar_and_universe_hash=H,
+        execution_policy_hash=H,
+        cost_policy_hash=H,
+        mandate_policy_hash=H,
+        access_log_policy_hash=H,
+    )
+    plan_file.write_text(plan.model_dump_json(), encoding="utf-8")
+
+    # 1. Calibrate with empty host config exits 2
+    host_file.write_text("{}", encoding="utf-8")
+    proc_empty = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "calibrate",
+            "--plan",
+            str(plan_file),
+            "--host-config",
+            str(host_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+    )
+    assert proc_empty.returncode == 2
+
+    # 2. Calibrate with 9 valid attempts succeeds and outputs winner and proof
+    attempts = [
+        create_calibration_attempt_receipt(
+            attempt_id=f"ATT-{i}",
+            pair=pair,
+            status="COMPLETED",
+            terminal_net_return=Decimal("0.10") + Decimal(f"0.0{i}"),
+            absolute_maximum_drawdown=Decimal("0.05"),
+            total_gross_turnover=Decimal("0.30"),
+            operating_cost=Decimal("0.00"),
+        ).model_dump(mode="json")
+        for i, pair in enumerate(ORDERED_CALIBRATION_PAIRS)
+    ]
+    host_file.write_text(json.dumps({"attempts": attempts}), encoding="utf-8")
+
+    proc_ok = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "calibrate",
+            "--plan",
+            str(plan_file),
+            "--host-config",
+            str(host_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert proc_ok.returncode == 0
+    res_data = json.loads(out_file.read_text(encoding="utf-8"))
+    assert res_data["selected_pair"] is not None
+    assert len(res_data["ranking_proof"]) == 9

@@ -1,7 +1,7 @@
 # Stage 1 Study Execution Contract v1
 
-**Specification Version:** drift-stage1-study-execution-contract/1  
-**Scope:** Stage 1 G3/G4 study artifacts, execution plans, calibration, uncertainty quantification, and canonical report serialization.  
+**Specification Version:** drift-stage1-study-execution-contract/1
+**Scope:** Stage 1 G3/G4 study artifacts, execution plans, calibration, uncertainty quantification, and canonical report serialization.
 **Predecessor References:** [Stage 1 Decisions](stage1-decisions.md), [G3 Freeze Contract](stage1-g3-freeze.md), [G3 Protocol v1](stage1-g3-protocol-v1.md).
 
 ---

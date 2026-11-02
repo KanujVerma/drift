@@ -62,3 +62,19 @@ def test_paired_uncertainty_with_daily_operating_costs() -> None:
     )
     assert artifact.primary_economic_point is not None
     assert artifact.primary_economic_interval is not None
+
+
+def test_paired_uncertainty_one_time_costs_without_daily_costs() -> None:
+    returns = [Decimal("0")] * 50
+    artifact = compute_paired_uncertainty_artifact(
+        b_returns=returns,
+        r_returns=returns,
+        one_time_operating_costs=Decimal("10.00"),
+        mean_block_length=5,
+        seed=575,
+    )
+    assert artifact.primary_economic_point == Decimal("-10.00")
+    assert artifact.primary_economic_interval == (
+        Decimal("-10.00"),
+        Decimal("-10.00"),
+    )

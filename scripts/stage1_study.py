@@ -42,8 +42,11 @@ from drift.experiments.stage1_prospective_study import (
     register_prospective_study,
 )
 from drift.experiments.stage1_study_artifacts import (
+    ORDERED_CALIBRATION_PAIRS,
     CalibrationAttemptReceiptV1,
     DevelopmentCalibrationPlanV1,
+    calibration_ranking_key,
+    compute_ranking_proof,
     create_calibration_result,
 )
 from drift.experiments.stage1_study_freeze import (
@@ -136,10 +139,26 @@ def action_calibrate(args: argparse.Namespace) -> int:
             CalibrationAttemptReceiptV1.model_validate_json(json.dumps(a))
             for a in attempts_data
         )
+        completed = [a for a in attempts if a.status == "COMPLETED"]
+        completed_pairs = {a.pair for a in completed}
+        if completed_pairs != set(ORDERED_CALIBRATION_PAIRS):
+            sys.stderr.write(
+                f"Calibration incomplete: expected 9 pairs, "
+                f"got {len(completed_pairs)}\n"
+            )
+            return 2
+
+        ranked = sorted(completed, key=calibration_ranking_key)
+        winner = ranked[0]
+        ranking_proof = compute_ranking_proof(ranked)
+
         res = create_calibration_result(
             plan_hash=plan.plan_hash,
             completed_at=datetime.now(UTC),
             attempts=attempts,
+            selected_pair=winner.pair,
+            selected_pair_receipt_hash=winner.receipt_hash,
+            ranking_proof=ranking_proof,
         )
         _write_output(args.output, res.model_dump(mode="json"))
         return 0
@@ -216,14 +235,41 @@ def action_historical(args: argparse.Namespace) -> int:
 
     try:
         frozen = FrozenStage1StudyV1.model_validate_json(json.dumps(freeze_data))
+        trust_roots = host_config.get("trust_roots", {})
+        receipt_store = host_config.get("receipt_store", {})
+        verifier = ProductionStudyEvidenceVerifier(
+            trust_roots=trust_roots,
+            receipt_resolver=lambda rid: receipt_store.get(rid, {}),
+        )
+        report = verify_frozen_study(frozen, verifier=verifier)
+        if report.status == "BLOCKED":
+            sys.stderr.write(f"Historical study blocked: {report.blockers}\n")
+            return 2
+
+        execution_receipts = host_config.get("execution_receipts", [])
+        if not execution_receipts:
+            sys.stderr.write(
+                "Historical execution dependencies or session receipts unavailable\n"
+            )
+            return 2
+
+        observed_count = len(execution_receipts)
+        if observed_count < 252:
+            sys.stderr.write(
+                f"Historical execution incomplete: got {observed_count} "
+                "sessions, need 252\n"
+            )
+            return 4
+
         manifest = {
             "schema_version": "drift-stage1-historical-manifest/1",
             "study_id": f"HIST-{frozen.protocol.study_id}",
             "freeze_hash": frozen.freeze_hash,
             "scheduled_sessions": 252,
-            "observed_sessions": host_config.get("observed_sessions", 252),
+            "observed_sessions": observed_count,
             "executed_at": datetime.now(UTC).isoformat(),
-            "status": host_config.get("status", "COMPLETED"),
+            "status": "COMPLETED",
+            "execution_receipts": execution_receipts,
         }
         _write_output(args.output, manifest)
         return 0
