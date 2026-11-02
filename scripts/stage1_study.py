@@ -23,6 +23,8 @@ Exits:
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import json
 import os
 import sys
@@ -78,7 +80,7 @@ from drift.experiments.stage1_uncertainty import (
     PairedUncertaintyArtifactV1,
     compute_paired_uncertainty_artifact,
 )
-from drift.serialization.canonical import canonical_json
+from drift.serialization.canonical import canonical_json, content_hash
 
 
 def _write_output(path_str: str, data: dict[str, Any] | str) -> None:
@@ -529,7 +531,7 @@ def action_historical(args: argparse.Namespace) -> int:
             for r in sorted_receipts
         ]
 
-        # Verified paired reference evidence (Round 21)
+        # Verified paired reference evidence (Round 21 & Round 22)
         ref_receipts_raw = host_config.get(
             "reference_execution_receipts"
         ) or host_config.get("reference_receipts")
@@ -538,22 +540,89 @@ def action_historical(args: argparse.Namespace) -> int:
         if paired_ev_dict and isinstance(paired_ev_dict, dict):
             if "reference_receipts" in paired_ev_dict:
                 ref_receipts_raw = paired_ev_dict["reference_receipts"]
+            elif "reference_execution_receipts" in paired_ev_dict:
+                ref_receipts_raw = paired_ev_dict["reference_execution_receipts"]
+
+        # Authorized reference binding:
+        # must be explicit reference binding or frozen study comparison
+        expected_ref_freeze_hash = (
+            host_config.get("reference_freeze_hash")
+            or host_config.get("reference_binding", {}).get("freeze_hash")
+            or (
+                paired_ev_dict.get("reference_freeze_hash")
+                if isinstance(paired_ev_dict, dict)
+                else None
+            )
+            or frozen.freeze_hash
+        )
 
         r_returns: list[Decimal] | None = None
-        if ref_receipts_raw and isinstance(ref_receipts_raw, list):
-            verified_ref_receipts: list[dict[str, Any]] = []
-            for j, rr in enumerate(ref_receipts_raw):
-                if isinstance(rr, dict):
-                    rr_idx = rr.get("session_index", j)
-                    ok_ref, _, payload_ref = exec_verifier.verify_execution_receipt(
-                        rr,
-                        expected_freeze_hash=rr.get("freeze_hash", frozen.freeze_hash),
-                        expected_session_index=rr_idx,
-                    )
-                    if ok_ref and payload_ref is not None:
-                        verified_ref_receipts.append(payload_ref)
+        seen_ref_sessions: set[int] = set()
+        verified_ref_receipts: list[dict[str, Any]] = []
+        candidate_receipt_ids = {
+            r.get("receipt_id") for r in verified_receipts if "receipt_id" in r
+        }
 
-            if len(verified_ref_receipts) == len(sorted_receipts):
+        if ref_receipts_raw and isinstance(ref_receipts_raw, list):
+            for rr in ref_receipts_raw:
+                if not isinstance(rr, dict):
+                    continue
+                rr_idx = rr.get("session_index")
+                if (
+                    rr_idx is None
+                    or not isinstance(rr_idx, int)
+                    or isinstance(rr_idx, bool)
+                    or rr_idx not in required_sessions
+                    or rr_idx in seen_ref_sessions
+                ):
+                    # Malformed, out of scope, or duplicate session index
+                    continue
+
+                ok_ref, _, payload_ref = exec_verifier.verify_execution_receipt(
+                    rr,
+                    expected_freeze_hash=expected_ref_freeze_hash,
+                    expected_session_index=rr_idx,
+                )
+                if not ok_ref or payload_ref is None:
+                    continue
+
+                # Distinct reference-arm identity check:
+                # Reference receipt cannot be candidate arm's receipt
+                ref_rid = payload_ref.get("receipt_id")
+                if ref_rid and ref_rid in candidate_receipt_ids:
+                    continue
+
+                # Reference arm identity verification
+                ref_arm = (
+                    payload_ref.get("arm")
+                    or payload_ref.get("arm_id")
+                    or payload_ref.get("role")
+                    or payload_ref.get("reference_arm")
+                    or (
+                        payload_ref.get("metrics", {}).get("arm")
+                        if isinstance(payload_ref.get("metrics"), dict)
+                        else None
+                    )
+                )
+                expected_ref_arm = host_config.get("reference_arm_id") or (
+                    paired_ev_dict.get("reference_arm_id")
+                    if isinstance(paired_ev_dict, dict)
+                    else None
+                )
+                if expected_ref_arm:
+                    if ref_arm != expected_ref_arm:
+                        continue
+                elif ref_arm is not None:
+                    if str(ref_arm).upper() in ("B", "CANDIDATE"):
+                        continue
+
+                seen_ref_sessions.add(rr_idx)
+                verified_ref_receipts.append(payload_ref)
+
+            # Require exact 1-to-1 session coverage across all 252 required sessions
+            if seen_ref_sessions == required_sessions and len(
+                verified_ref_receipts
+            ) == len(sorted_receipts):
                 sorted_ref = sorted(
                     verified_ref_receipts, key=lambda x: x["session_index"]
                 )
@@ -561,33 +630,125 @@ def action_historical(args: argparse.Namespace) -> int:
                     Decimal(str(r.get("metrics", {}).get("net_return", "0")))
                     for r in sorted_ref
                 ]
-        elif (
-            paired_ev_dict
-            and isinstance(paired_ev_dict, dict)
-            and "reference_returns" in paired_ev_dict
-        ):
-            raw_r_rets = paired_ev_dict["reference_returns"]
-            if isinstance(raw_r_rets, list) and len(raw_r_rets) == len(b_returns):
-                r_returns = [Decimal(str(x)) for x in raw_r_rets]
 
         # Verified independent acceptance
         is_independently_accepted = False
-        acpt_rcpt = host_config.get(
+        acpt_rcpt_raw = host_config.get(
             "independent_acceptance_receipt"
         ) or host_config.get("acceptance_receipt")
-        if acpt_rcpt and isinstance(acpt_rcpt, dict):
-            acpt_auth = acpt_rcpt.get("authority_id")
-            if (
-                acpt_auth in exec_roots
-                and acpt_rcpt.get("status") in ("COMPLETED", "ACCEPTED")
-                and (
-                    acpt_rcpt.get("assessor_independence") is True
-                    or acpt_rcpt.get("independent_assessor") is True
-                    or bool(acpt_rcpt.get("independence_declaration"))
+        if acpt_rcpt_raw:
+            acpt_rcpt: dict[str, Any] | None = None
+            if isinstance(acpt_rcpt_raw, str):
+                resolved_acpt = receipt_store.get(acpt_rcpt_raw)
+                if isinstance(resolved_acpt, dict):
+                    acpt_rcpt = resolved_acpt
+                elif isinstance(resolved_acpt, (bytes, str)):
+                    try:
+                        acpt_rcpt = json.loads(
+                            resolved_acpt
+                            if isinstance(resolved_acpt, str)
+                            else resolved_acpt.decode("utf-8")
+                        )
+                    except Exception:
+                        pass
+            elif isinstance(acpt_rcpt_raw, dict):
+                acpt_rcpt = acpt_rcpt_raw
+
+            if acpt_rcpt and isinstance(acpt_rcpt, dict):
+                acpt_auth = acpt_rcpt.get("authority_id")
+                # 1. Authority must be in trusted execution roots
+                auth_ok = bool(acpt_auth and acpt_auth in exec_roots)
+
+                # 2. Binding to this study/freeze
+                binding_ok = (
+                    acpt_rcpt.get("freeze_hash") == frozen.freeze_hash
+                    or acpt_rcpt.get("protocol_hash") == frozen.protocol.protocol_hash
+                    or acpt_rcpt.get("study_id") == frozen.protocol.study_id
+                    or acpt_rcpt.get("study_id") == f"HIST-{frozen.protocol.study_id}"
                 )
-                and acpt_rcpt.get("is_self_review") is not True
-            ):
-                is_independently_accepted = True
+
+                # 3. Status must be COMPLETED or ACCEPTED
+                status_ok = acpt_rcpt.get("status") in ("COMPLETED", "ACCEPTED")
+
+                # 4. Assessor independence and non-self-review explicitly verified
+                indep_ok = (
+                    acpt_rcpt.get("assessor_independence") is True
+                    and acpt_rcpt.get("is_self_review") is False
+                    and acpt_rcpt.get("conflicted") is not True
+                    and bool(acpt_rcpt.get("independence_declaration"))
+                )
+
+                # 5. Authenticate receipt bytes (receipt_hash / signature / HMAC)
+                rcpt_bytes_ok = False
+                declared_hash = acpt_rcpt.get("receipt_hash") or acpt_rcpt.get(
+                    "evidence_hash"
+                )
+                body = {
+                    k: v
+                    for k, v in acpt_rcpt.items()
+                    if k
+                    not in (
+                        "receipt_hash",
+                        "evidence_hash",
+                        "signature",
+                        "token",
+                        "hmac",
+                    )
+                }
+                computed_hash = content_hash(body)
+                if declared_hash:
+                    body_with_sig = {
+                        k: v
+                        for k, v in acpt_rcpt.items()
+                        if k not in ("receipt_hash", "evidence_hash")
+                    }
+                    if declared_hash in (computed_hash, content_hash(body_with_sig)):
+                        rcpt_bytes_ok = True
+                else:
+                    rcpt_bytes_ok = True
+
+                auth_issuers = host_config.get("authenticated_issuers", {})
+                if auth_issuers and acpt_auth in auth_issuers:
+                    creds = auth_issuers[acpt_auth]
+                    key = creds.get("hmac_key") if isinstance(creds, dict) else creds
+                    sig = (
+                        acpt_rcpt.get("signature")
+                        or acpt_rcpt.get("token")
+                        or acpt_rcpt.get("hmac")
+                    )
+                    if not sig or not key:
+                        rcpt_bytes_ok = False
+                    else:
+                        key_b = key.encode("utf-8") if isinstance(key, str) else key
+                        expected_sig = hmac.new(
+                            key_b, canonical_json(body), hashlib.sha256
+                        ).hexdigest()
+                        if not hmac.compare_digest(str(sig), expected_sig):
+                            rcpt_bytes_ok = False
+
+                if auth_ok and binding_ok and status_ok and indep_ok and rcpt_bytes_ok:
+                    is_independently_accepted = True
+
+        # Operating costs: must be established from host config or paired evidence.
+        # Freeze contract prohibits defaulting unknown operating costs to zero.
+        raw_costs = None
+        if "incremental_operating_costs" in host_config:
+            raw_costs = host_config["incremental_operating_costs"]
+        elif (
+            paired_ev_dict
+            and isinstance(paired_ev_dict, dict)
+            and "incremental_operating_costs" in paired_ev_dict
+        ):
+            raw_costs = paired_ev_dict["incremental_operating_costs"]
+        elif "attributable_costs" in host_config:
+            raw_costs = host_config["attributable_costs"]
+
+        costs: Decimal | None = None
+        if raw_costs is not None:
+            try:
+                costs = Decimal(str(raw_costs))
+            except Exception:
+                costs = None
 
         pea: Decimal | None = None
         b_volatility: Decimal | None = None
@@ -597,7 +758,18 @@ def action_historical(args: argparse.Namespace) -> int:
         p_nav_lower: Decimal | None = None
         p_econ_lower: Decimal | None = None
 
-        if r_returns is not None and len(r_returns) == len(b_returns):
+        unavailable_reasons: list[str] = []
+        if r_returns is None or len(r_returns) != len(b_returns):
+            unavailable_reasons.append("MISSING_PAIRED_REFERENCE_EVIDENCE")
+
+        if costs is None:
+            unavailable_reasons.append("MISSING_ATTRIBUTABLE_OPERATING_COSTS")
+
+        if (
+            r_returns is not None
+            and len(r_returns) == len(b_returns)
+            and costs is not None
+        ):
             b_compound = Decimal("1")
             r_compound = Decimal("1")
             b_nav_marks = [Decimal("10000")]
@@ -609,16 +781,6 @@ def action_historical(args: argparse.Namespace) -> int:
                 r_nav_marks.append(Decimal("10000") * r_compound)
 
             delta_nav = (b_compound - Decimal("1")) - (r_compound - Decimal("1"))
-            costs = Decimal(
-                str(
-                    host_config.get(
-                        "incremental_operating_costs",
-                        paired_ev_dict.get("incremental_operating_costs", "0")
-                        if paired_ev_dict
-                        else "0",
-                    )
-                )
-            )
             pea = (Decimal("10000") * delta_nav) - costs
 
             n_obs = Decimal(len(b_returns))
@@ -672,9 +834,7 @@ def action_historical(args: argparse.Namespace) -> int:
             r_max_drawdown=r_max_drawdown,
             is_prospective_complete=False,
             is_independently_accepted=is_independently_accepted,
-            unavailable_reasons=(
-                ("MISSING_PAIRED_REFERENCE_EVIDENCE",) if pea is None else ()
-            ),
+            unavailable_reasons=tuple(unavailable_reasons),
         )
 
         manifest = {

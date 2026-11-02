@@ -1049,6 +1049,8 @@ def test_cli_calibrate_and_historical_handlers(repo_root: Path, tmp_path: Path) 
 
 
 def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> None:
+    import hashlib
+    import hmac
     from datetime import UTC, date, datetime
     from decimal import Decimal
 
@@ -1069,7 +1071,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
         StudyStatisticalPolicyV1,
         freeze_study,
     )
-    from drift.serialization.canonical import content_hash
+    from drift.serialization.canonical import canonical_json, content_hash
 
     script = repo_root / "scripts" / "stage1_study.py"
     frozen_file = tmp_path / "frozen.json"
@@ -1266,6 +1268,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
         store_in_receipts: bool = True,
         prefix: str = "HIST-EXEC",
         net_return_val: str = "0.0005",
+        arm: str = "B",
     ) -> dict[str, Any]:
         p_obj = {
             "freeze_hash": frozen.freeze_hash,
@@ -1330,6 +1333,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
             "session_index": s_idx,
             "authority_id": authority,
             "status": status,
+            "arm": arm,
             "execution_journal": (
                 {"session_index": s_idx, "executed_ticks": 390}
                 if not omit_journal
@@ -1712,11 +1716,16 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     assert manifest["status"] == "COMPLETED"
     assert manifest["observed_sessions"] == 252
     assert manifest["freeze_hash"] == frozen.freeze_hash
-    # Missing paired reference evidence leaves economic advantage unavailable
+    # Missing paired reference evidence and missing costs leave
+    # economic advantage unavailable
     assert manifest["primary_economic_advantage"] is None
     assert manifest["outcome_classification"]["outcome"] == "UNAVAILABLE"
     assert (
         "MISSING_PAIRED_REFERENCE_EVIDENCE"
+        in manifest["outcome_classification"]["reasons"]
+    )
+    assert (
+        "MISSING_ATTRIBUTABLE_OPERATING_COSTS"
         in manifest["outcome_classification"]["reasons"]
     )
 
@@ -1724,11 +1733,15 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     # Candidate arm B has net_return = 0.0001, reference arm R has net_return = 0.0005
     # -> primary_economic_advantage is negative, outcome is UNSUCCESSFUL
     b_receipts = [
-        make_execution_receipt(i, prefix="HIST-UNDER-B", net_return_val="0.0001")
+        make_execution_receipt(
+            i, prefix="HIST-UNDER-B", net_return_val="0.0001", arm="B"
+        )
         for i in range(252)
     ]
     r_receipts = [
-        make_execution_receipt(i, prefix="HIST-UNDER-R", net_return_val="0.0005")
+        make_execution_receipt(
+            i, prefix="HIST-UNDER-R", net_return_val="0.0005", arm="R"
+        )
         for i in range(252)
     ]
     write_host_config(
@@ -1770,11 +1783,11 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     # -> primary_economic_advantage is positive, measured risk statistics reported
     # -> outcome is PROMISING_BUT_INCONCLUSIVE (prospective not complete)
     b_perf_receipts = [
-        make_execution_receipt(i, prefix="HIST-OUT-B", net_return_val="0.0010")
+        make_execution_receipt(i, prefix="HIST-OUT-B", net_return_val="0.0010", arm="B")
         for i in range(252)
     ]
     r_perf_receipts = [
-        make_execution_receipt(i, prefix="HIST-OUT-R", net_return_val="0.0001")
+        make_execution_receipt(i, prefix="HIST-OUT-R", net_return_val="0.0001", arm="R")
         for i in range(252)
     ]
     write_host_config(
@@ -1812,17 +1825,26 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     )
 
     # 15. Verified independent acceptance receipt passes assessor independence
-    indep_rcpt = {
+    indep_body = {
+        "schema_version": "drift-stage1-acceptance-receipt/1",
         "receipt_id": "INDEP-ACPT-01",
+        "freeze_hash": frozen.freeze_hash,
         "authority_id": "trusted-historical-root",
         "status": "ACCEPTED",
         "assessor_independence": True,
         "is_self_review": False,
+        "independence_declaration": "Independent review verified.",
     }
+    sig = hmac.new(
+        b"hist-secret", canonical_json(indep_body), hashlib.sha256
+    ).hexdigest()
+    indep_signed = indep_body | {"signature": sig}
+    indep_rcpt = indep_signed | {"receipt_hash": content_hash(indep_body)}
     write_host_config(
         {
             "execution_receipts": b_perf_receipts,
             "reference_receipts": r_perf_receipts,
+            "incremental_operating_costs": "10.00",
             "independent_acceptance_receipt": indep_rcpt,
         }
     )
@@ -1849,17 +1871,22 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     assert manifest_acpt["outcome_classification"]["is_independently_accepted"] is True
 
     # 16. Conflicted or unaccepted acceptance receipt fails verification
-    conflicted_rcpt = {
+    conflicted_body = {
+        "schema_version": "drift-stage1-acceptance-receipt/1",
         "receipt_id": "INDEP-ACPT-BAD",
+        "freeze_hash": "f" * 64,
         "authority_id": "trusted-historical-root",
         "status": "ACCEPTED",
         "assessor_independence": False,
         "is_self_review": True,
+        "independence_declaration": "",
     }
+    conflicted_rcpt = conflicted_body | {"receipt_hash": content_hash(conflicted_body)}
     write_host_config(
         {
             "execution_receipts": b_perf_receipts,
             "reference_receipts": r_perf_receipts,
+            "incremental_operating_costs": "10.00",
             "independent_acceptance_receipt": conflicted_rcpt,
         }
     )
@@ -1884,6 +1911,111 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     assert proc_conf.returncode == 0
     manifest_conf = json.loads(out_file.read_text(encoding="utf-8"))
     assert manifest_conf["outcome_classification"]["is_independently_accepted"] is False
+
+    # 17. Missing operating costs when reference receipts are present -> UNAVAILABLE
+    write_host_config(
+        {
+            "execution_receipts": b_perf_receipts,
+            "reference_receipts": r_perf_receipts,
+        }
+    )
+    proc_nocost = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "historical",
+            "--frozen",
+            str(frozen_file),
+            "--host-config",
+            str(host_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert proc_nocost.returncode == 0
+    manifest_nocost = json.loads(out_file.read_text(encoding="utf-8"))
+    assert manifest_nocost["primary_economic_advantage"] is None
+    assert manifest_nocost["outcome_classification"]["outcome"] == "UNAVAILABLE"
+    assert (
+        "MISSING_ATTRIBUTABLE_OPERATING_COSTS"
+        in manifest_nocost["outcome_classification"]["reasons"]
+    )
+
+    # 18. Reference receipts with duplicate session index -> UNAVAILABLE
+    dup_r_receipts = [r_perf_receipts[0]] * 252
+    write_host_config(
+        {
+            "execution_receipts": b_perf_receipts,
+            "reference_receipts": dup_r_receipts,
+            "incremental_operating_costs": "10.00",
+        }
+    )
+    proc_dup = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "historical",
+            "--frozen",
+            str(frozen_file),
+            "--host-config",
+            str(host_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert proc_dup.returncode == 0
+    manifest_dup = json.loads(out_file.read_text(encoding="utf-8"))
+    assert manifest_dup["primary_economic_advantage"] is None
+    assert manifest_dup["outcome_classification"]["outcome"] == "UNAVAILABLE"
+    assert (
+        "MISSING_PAIRED_REFERENCE_EVIDENCE"
+        in manifest_dup["outcome_classification"]["reasons"]
+    )
+
+    # 19. Re-using candidate receipt as reference receipt -> rejected, UNAVAILABLE
+    write_host_config(
+        {
+            "execution_receipts": b_perf_receipts,
+            "reference_receipts": b_perf_receipts,
+            "incremental_operating_costs": "10.00",
+        }
+    )
+    proc_reuse = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "historical",
+            "--frozen",
+            str(frozen_file),
+            "--host-config",
+            str(host_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert proc_reuse.returncode == 0
+    manifest_reuse = json.loads(out_file.read_text(encoding="utf-8"))
+    assert manifest_reuse["primary_economic_advantage"] is None
+    assert manifest_reuse["outcome_classification"]["outcome"] == "UNAVAILABLE"
+    assert (
+        "MISSING_PAIRED_REFERENCE_EVIDENCE"
+        in manifest_reuse["outcome_classification"]["reasons"]
+    )
 
 
 def test_cli_prospective_step_concurrent_writers_serialization(
