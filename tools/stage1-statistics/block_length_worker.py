@@ -106,7 +106,11 @@ def run_block_length_worker(input_data: dict[str, Any]) -> dict[str, Any]:
                 diagnostics.append(f"{name}: {w.category.__name__}: {w.message}")
 
     aggregated_b: int | None = None
-    if finite_stationary_values:
+    all_series_finite = len(series_results) == len(series_map) and all(
+        res.get("status") == "FINITE" and res.get("stationary") is not None
+        for res in series_results.values()
+    )
+    if all_series_finite and finite_stationary_values:
         max_val = max(finite_stationary_values)
         aggregated_b = max(1, math.ceil(max_val))
 
@@ -118,6 +122,7 @@ def run_block_length_worker(input_data: dict[str, Any]) -> dict[str, Any]:
         "input_hash": input_hash,
         "series_results": series_results,
         "aggregated_block_length": aggregated_b,
+        "all_series_finite": all_series_finite,
         "diagnostics": diagnostics,
         "runtime_identity": sys.version,
         "package_identity": f"arch=={arch.__version__}",

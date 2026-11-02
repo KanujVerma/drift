@@ -704,7 +704,7 @@ def action_historical(args: argparse.Namespace) -> int:
         p_nav_lower: Decimal | None = None
         p_econ_lower: Decimal | None = None
         opt_b_length: int | None = None
-        block_diagnostics: list[str] = []
+        block_diagnostics: dict[str, Any] = {}
 
         unavailable_reasons: list[str] = []
         if r_returns is None or len(r_returns) != len(b_returns):
@@ -792,12 +792,40 @@ def action_historical(args: argparse.Namespace) -> int:
                         env=env,
                     )
                     worker_out = json.loads(proc_worker.stdout.decode("utf-8"))
+                    series_results = worker_out.get("series_results", {})
+                    all_finite = len(series_results) == 3 and all(
+                        res.get("status") == "FINITE"
+                        and res.get("stationary") is not None
+                        for res in series_results.values()
+                    )
                     agg_b = worker_out.get("aggregated_block_length")
-                    if agg_b is not None:
+                    if agg_b is not None and all_finite:
                         opt_b_length = int(agg_b)
-                    block_diagnostics = worker_out.get("diagnostics", [])
+                    else:
+                        opt_b_length = None
+                    block_diagnostics = {
+                        "series_results": series_results,
+                        "diagnostics": worker_out.get("diagnostics", []),
+                        "aggregated_block_length": opt_b_length,
+                        "all_series_finite": all_finite,
+                        "worker_source_hash": worker_out.get("worker_source_hash"),
+                        "package_identity": worker_out.get("package_identity"),
+                    }
                 except Exception as e:
-                    block_diagnostics.append(f"BLOCK_LENGTH_WORKER_ERROR:{e}")
+                    opt_b_length = None
+                    block_diagnostics = {
+                        "series_results": {},
+                        "diagnostics": [f"BLOCK_LENGTH_WORKER_ERROR:{e}"],
+                        "aggregated_block_length": None,
+                        "all_series_finite": False,
+                    }
+            else:
+                block_diagnostics = {
+                    "series_results": {},
+                    "diagnostics": ["BLOCK_LENGTH_WORKER_NOT_FOUND"],
+                    "aggregated_block_length": None,
+                    "all_series_finite": False,
+                }
 
             try:
                 uncertainty_art = compute_paired_uncertainty_artifact(
@@ -877,7 +905,7 @@ def action_historical(args: argparse.Namespace) -> int:
                 ):
                     binding_non_contradictory = False
 
-                # Exact result binding: receipt must bind to the exact
+                # Exact result binding: receipt must bind strictly to the exact
                 # reviewed result digest
                 acpt_result_digest = (
                     acpt_rcpt.get("result_digest")
@@ -885,18 +913,8 @@ def action_historical(args: argparse.Namespace) -> int:
                     or acpt_rcpt.get("reviewed_result_digest")
                     or acpt_rcpt.get("evidence_digest")
                 )
-                valid_result_digests = {
-                    exact_result_digest,
-                    content_hash(cand_inventory + ref_inventory),
-                    content_hash(
-                        {
-                            "evidence_inventory": cand_inventory,
-                            "primary_economic_advantage": str(pea),
-                        }
-                    ),
-                }
                 result_binding_ok = bool(
-                    acpt_result_digest and acpt_result_digest in valid_result_digests
+                    acpt_result_digest and acpt_result_digest == exact_result_digest
                 )
 
                 # 3. Status must be COMPLETED or ACCEPTED
@@ -936,15 +954,7 @@ def action_historical(args: argparse.Namespace) -> int:
                         )
                     }
                     computed_hash = content_hash(body)
-                    body_with_sig = {
-                        k: v
-                        for k, v in acpt_rcpt.items()
-                        if k not in ("receipt_hash", "evidence_hash")
-                    }
-                    if declared_hash in (
-                        computed_hash,
-                        content_hash(body_with_sig),
-                    ):
+                    if declared_hash == computed_hash:
                         creds = auth_issuers[acpt_auth]
                         key = (
                             creds.get("hmac_key") if isinstance(creds, dict) else creds

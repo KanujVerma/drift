@@ -1827,7 +1827,15 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     # 15. Verified independent acceptance receipt passes assessor independence
     cand_inv = [r["receipt_id"] for r in b_perf_receipts]
     ref_inv = [r["receipt_id"] for r in r_perf_receipts]
-    res_digest = content_hash(cand_inv + ref_inv)
+    exact_res_payload = {
+        "freeze_hash": frozen.freeze_hash,
+        "protocol_hash": frozen.protocol.protocol_hash,
+        "observed_sessions": 252,
+        "evidence_inventory": cand_inv,
+        "reference_evidence_inventory": ref_inv,
+        "primary_economic_advantage": str(manifest_out["primary_economic_advantage"]),
+    }
+    res_digest = content_hash(exact_res_payload)
     indep_body = {
         "schema_version": "drift-stage1-acceptance-receipt/1",
         "receipt_id": "INDEP-ACPT-01",
@@ -1875,6 +1883,12 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     assert proc_acpt.returncode == 0
     manifest_acpt = json.loads(out_file.read_text(encoding="utf-8"))
     assert manifest_acpt["outcome_classification"]["is_independently_accepted"] is True
+    assert "series_results" in manifest_acpt["block_length_diagnostics"]
+    series_res = manifest_acpt["block_length_diagnostics"]["series_results"]
+    assert "b_returns" in series_res
+    assert "r_returns" in series_res
+    assert "difference_returns" in series_res
+    assert manifest_acpt["block_length_diagnostics"]["all_series_finite"] is True
 
     # 16. Conflicted or unaccepted acceptance receipt fails verification
     conflicted_body = {
@@ -2061,6 +2075,84 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
         capture_output=True,
     )
     assert proc_noarm.returncode == 3
+
+    # 22. Incomplete/bypassable result digest (e.g. inventory-only digest)
+    # fails exact result binding -> is_independently_accepted is False
+    bypass_indep_body = indep_body.copy()
+    bypass_indep_body["result_digest"] = content_hash(cand_inv + ref_inv)
+    bypass_sig = hmac.new(
+        b"hist-secret", canonical_json(bypass_indep_body), hashlib.sha256
+    ).hexdigest()
+    bypass_rcpt = (
+        bypass_indep_body
+        | {"signature": bypass_sig}
+        | {"receipt_hash": content_hash(bypass_indep_body)}
+    )
+    write_host_config(
+        {
+            "execution_receipts": b_perf_receipts,
+            "reference_receipts": r_perf_receipts,
+            "incremental_operating_costs": "10.00",
+            "independent_acceptance_receipt": bypass_rcpt,
+        }
+    )
+    proc_bypass = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "historical",
+            "--frozen",
+            str(frozen_file),
+            "--host-config",
+            str(host_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert proc_bypass.returncode == 0
+    manifest_bypass = json.loads(out_file.read_text(encoding="utf-8"))
+    assert (
+        manifest_bypass["outcome_classification"]["is_independently_accepted"] is False
+    )
+
+    # 23. Receipt hash that matches body_with_sig instead of canonical body
+    # fails receipt bytes check -> is_independently_accepted is False
+    body_with_sig_hash = content_hash(indep_signed)
+    tampered_hash_rcpt = indep_signed | {"receipt_hash": body_with_sig_hash}
+    write_host_config(
+        {
+            "execution_receipts": b_perf_receipts,
+            "reference_receipts": r_perf_receipts,
+            "incremental_operating_costs": "10.00",
+            "independent_acceptance_receipt": tampered_hash_rcpt,
+        }
+    )
+    proc_hash_mismatch = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "historical",
+            "--frozen",
+            str(frozen_file),
+            "--host-config",
+            str(host_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert proc_hash_mismatch.returncode == 0
+    manifest_hm = json.loads(out_file.read_text(encoding="utf-8"))
+    assert manifest_hm["outcome_classification"]["is_independently_accepted"] is False
 
 
 def test_cli_prospective_step_concurrent_writers_serialization(
