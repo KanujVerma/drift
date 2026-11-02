@@ -60,6 +60,7 @@ from drift.experiments.stage1_study_freeze import (
 from drift.experiments.stage1_study_outcomes import StudyOutcomeClassificationV1
 from drift.experiments.stage1_study_report import create_study_report
 from drift.experiments.stage1_uncertainty import PairedUncertaintyArtifactV1
+from drift.serialization.canonical import content_hash
 
 
 def _write_output(path_str: str, data: dict[str, Any] | str) -> None:
@@ -305,12 +306,6 @@ def action_historical(args: argparse.Namespace) -> int:
                     f"{r.get('status')}\n"
                 )
                 return 3
-            if "completion_evidence" in r and not r["completion_evidence"]:
-                sys.stderr.write(
-                    f"Receipt at index {i} unsupported completion claim: "
-                    "false or empty evidence\n"
-                )
-                return 3
             if r.get("halt_reason") or r.get("error"):
                 sys.stderr.write(
                     f"Receipt at index {i} indicates execution halt or error\n"
@@ -339,6 +334,56 @@ def action_historical(args: argparse.Namespace) -> int:
             if session_index in seen_sessions:
                 sys.stderr.write(
                     f"Receipt at index {i} duplicate session_index: {session_index}\n"
+                )
+                return 3
+
+            ev = r.get("completion_evidence")
+            if not isinstance(ev, dict) or not ev:
+                sys.stderr.write(
+                    f"Receipt at index {i} missing valid completion_evidence "
+                    "dictionary\n"
+                )
+                return 3
+
+            if ev.get("freeze_hash") != frozen.freeze_hash:
+                sys.stderr.write(
+                    f"Receipt at index {i} completion_evidence freeze_hash "
+                    f"mismatch: expected {frozen.freeze_hash}, "
+                    f"got {ev.get('freeze_hash')}\n"
+                )
+                return 3
+
+            if ev.get("session_index") != session_index:
+                sys.stderr.write(
+                    f"Receipt at index {i} completion_evidence session_index "
+                    f"mismatch: expected {session_index}, "
+                    f"got {ev.get('session_index')}\n"
+                )
+                return 3
+
+            if ev.get("status") != "COMPLETED":
+                sys.stderr.write(
+                    f"Receipt at index {i} completion_evidence status not "
+                    f"COMPLETED: {ev.get('status')}\n"
+                )
+                return 3
+
+            ev_hash = ev.get("evidence_hash") or ev.get("receipt_hash")
+            if not isinstance(ev_hash, str) or len(ev_hash) != 64:
+                sys.stderr.write(
+                    f"Receipt at index {i} completion_evidence missing "
+                    "valid 64-char hash\n"
+                )
+                return 3
+
+            ev_body = {
+                k: v
+                for k, v in ev.items()
+                if k not in ("evidence_hash", "receipt_hash")
+            }
+            if ev_hash != content_hash(ev_body):
+                sys.stderr.write(
+                    f"Receipt at index {i} completion_evidence hash mismatch\n"
                 )
                 return 3
 

@@ -312,6 +312,7 @@ def test_cli_calibrate_and_historical_handlers(repo_root: Path, tmp_path: Path) 
 def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> None:
     from datetime import UTC, date, datetime
     from decimal import Decimal
+    from typing import Any
 
     from drift.experiments.stage1_original_acceptance import (
         ProductionStudyEvidenceVerifier,
@@ -511,12 +512,22 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     )
     assert proc.returncode == 3
 
-    # 4. Incomplete execution receipts (100 sessions < 252) returns exit 4 (INCOMPLETE)
+    def make_evidence(s_idx: int) -> dict[str, Any]:
+        body = {
+            "freeze_hash": frozen.freeze_hash,
+            "session_index": s_idx,
+            "status": "COMPLETED",
+        }
+        return body | {"evidence_hash": content_hash(body)}
+
+    # 4. Incomplete execution receipts (100 sessions < 252) returns exit 4
+    # (INCOMPLETE)
     receipts_100 = [
         {
             "freeze_hash": frozen.freeze_hash,
             "status": "COMPLETED",
             "session_index": i,
+            "completion_evidence": make_evidence(i),
         }
         for i in range(100)
     ]
@@ -555,6 +566,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
             "freeze_hash": frozen.freeze_hash,
             "status": "COMPLETED",
             "session_index": 0,
+            "completion_evidence": make_evidence(0),
         }
     ] * 252
     host_file.write_text(
@@ -590,6 +602,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
         {
             "freeze_hash": frozen.freeze_hash,
             "status": "COMPLETED",
+            "completion_evidence": make_evidence(0),
         }
         for _ in range(252)
     ]
@@ -621,13 +634,12 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     )
     assert proc.returncode == 3
 
-    # 7. Unsupported completion claims (false completion_evidence) returns exit 3
-    unsupported_claim = [
+    # 7. Absent completion evidence returns exit 3
+    absent_evidence = [
         {
             "freeze_hash": frozen.freeze_hash,
             "status": "COMPLETED",
             "session_index": i,
-            "completion_evidence": (i != 5),  # False at index 5
         }
         for i in range(252)
     ]
@@ -636,7 +648,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
             {
                 "trust_roots": host_trust_roots,
                 "receipt_store": receipt_store,
-                "execution_receipts": unsupported_claim,
+                "execution_receipts": absent_evidence,
             }
         ),
         encoding="utf-8",
@@ -659,12 +671,96 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     )
     assert proc.returncode == 3
 
-    # 8. Out-of-scope session index (e.g. 999 instead of 0..251) returns exit 3
+    # 8. Truthy but non-dict / invalid completion evidence returns exit 3
+    truthy_invalid = [
+        {
+            "freeze_hash": frozen.freeze_hash,
+            "status": "COMPLETED",
+            "session_index": i,
+            "completion_evidence": "claimed" if i == 0 else make_evidence(i),
+        }
+        for i in range(252)
+    ]
+    host_file.write_text(
+        json.dumps(
+            {
+                "trust_roots": host_trust_roots,
+                "receipt_store": receipt_store,
+                "execution_receipts": truthy_invalid,
+            }
+        ),
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "historical",
+            "--frozen",
+            str(frozen_file),
+            "--host-config",
+            str(host_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+    )
+    assert proc.returncode == 3
+
+    # 9. Completion evidence with tampered hash returns exit 3
+    bad_hash_evidence = [
+        {
+            "freeze_hash": frozen.freeze_hash,
+            "status": "COMPLETED",
+            "session_index": i,
+            "completion_evidence": {
+                "freeze_hash": frozen.freeze_hash,
+                "session_index": i,
+                "status": "COMPLETED",
+                "evidence_hash": "f" * 64,
+            }
+            if i == 0
+            else make_evidence(i),
+        }
+        for i in range(252)
+    ]
+    host_file.write_text(
+        json.dumps(
+            {
+                "trust_roots": host_trust_roots,
+                "receipt_store": receipt_store,
+                "execution_receipts": bad_hash_evidence,
+            }
+        ),
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "historical",
+            "--frozen",
+            str(frozen_file),
+            "--host-config",
+            str(host_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+    )
+    assert proc.returncode == 3
+
+    # 10. Out-of-scope session index (e.g. 999 instead of 0..251) returns exit 3
     out_of_scope_receipts = [
         {
             "freeze_hash": frozen.freeze_hash,
             "status": "COMPLETED",
             "session_index": 999 if i == 0 else i,
+            "completion_evidence": make_evidence(999 if i == 0 else i),
         }
         for i in range(252)
     ]
@@ -696,12 +792,13 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     )
     assert proc.returncode == 3
 
-    # 9. Complete 252 valid execution receipts returns exit 0 with manifest
+    # 11. Complete 252 valid execution receipts returns exit 0 with manifest
     receipts_252 = [
         {
             "freeze_hash": frozen.freeze_hash,
             "status": "COMPLETED",
             "session_index": i,
+            "completion_evidence": make_evidence(i),
         }
         for i in range(252)
     ]
