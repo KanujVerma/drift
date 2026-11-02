@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from datetime import date, datetime
-from typing import Any, Literal, Self
+from typing import Any, Literal, Protocol, Self
 
 from pydantic import Field, model_validator
 
@@ -381,6 +381,107 @@ def create_prospective_execution_artifact(
     return h, body
 
 
+class ProspectiveProducerVerifier(Protocol):
+    """Protocol for independently authenticating prospective execution artifacts."""
+
+    def verify_artifact(
+        self,
+        artifact: ProspectiveExecutionArtifactV1 | dict[str, Any],
+        *,
+        expected_role: str,
+        expected_registration_id: str,
+        expected_freeze_hash: str,
+        expected_session_index: int,
+        expected_session_date: date,
+    ) -> bool: ...
+
+
+class ProductionProspectiveProducerVerifier:
+    """Authenticates original prospective execution artifacts and session bindings."""
+
+    def __init__(
+        self,
+        *,
+        trust_roots: set[str],
+        authenticated_producers: Mapping[str, Any] | None = None,
+        artifact_authenticator: Callable[[dict[str, Any]], bool] | None = None,
+        authenticated_artifact_hashes: set[str] | None = None,
+    ) -> None:
+        self._trust_roots = set(trust_roots)
+        self._authenticated_producers = dict(authenticated_producers or {})
+        self._artifact_authenticator = artifact_authenticator
+        self._authenticated_hashes = (
+            set(authenticated_artifact_hashes)
+            if authenticated_artifact_hashes is not None
+            else None
+        )
+
+    def verify_artifact(
+        self,
+        artifact: ProspectiveExecutionArtifactV1 | dict[str, Any],
+        *,
+        expected_role: str,
+        expected_registration_id: str,
+        expected_freeze_hash: str,
+        expected_session_index: int,
+        expected_session_date: date,
+    ) -> bool:
+        if isinstance(artifact, ProspectiveExecutionArtifactV1):
+            art_obj = artifact.model_dump(mode="python")
+        elif isinstance(artifact, dict):
+            art_obj = artifact
+        else:
+            return False
+
+        auth = art_obj.get("authority_id") or art_obj.get("producer_id")
+        if not auth or auth not in self._trust_roots:
+            return False
+
+        role = art_obj.get("artifact_role") or art_obj.get("artifact_type")
+        if role != expected_role:
+            return False
+
+        if art_obj.get("registration_id") != expected_registration_id:
+            return False
+        if art_obj.get("freeze_hash") != expected_freeze_hash:
+            return False
+        if art_obj.get("session_index") != expected_session_index:
+            return False
+
+        raw_date = art_obj.get("session_date")
+        if raw_date is None:
+            return False
+        bound_date = (
+            date.fromisoformat(raw_date) if isinstance(raw_date, str) else raw_date
+        )
+        if bound_date != expected_session_date:
+            return False
+
+        # Independent producer authentication
+        if self._artifact_authenticator is not None:
+            try:
+                if not self._artifact_authenticator(art_obj):
+                    return False
+            except Exception:
+                return False
+
+        if self._authenticated_hashes is not None:
+            h = content_hash(art_obj)
+            if h not in self._authenticated_hashes:
+                return False
+
+        if self._authenticated_producers:
+            prod_info = self._authenticated_producers.get(auth)
+            if not prod_info:
+                return False
+            if isinstance(prod_info, dict) and "tokens" in prod_info:
+                token = art_obj.get("producer_token") or art_obj.get("signature")
+                if not token or token not in prod_info["tokens"]:
+                    return False
+
+        return True
+
+
 def advance_prospective_session(
     registration: ProspectiveRegistrationV1,
     *,
@@ -389,6 +490,7 @@ def advance_prospective_session(
     calendar: set[date] | tuple[date, ...] | list[date] | None = None,
     artifact_store: Mapping[str, Any] | Callable[[str], Any] | None = None,
     trust_roots: set[str] | tuple[str, ...] | list[str] | None = None,
+    producer_verifier: ProspectiveProducerVerifier | Callable[..., bool] | None = None,
 ) -> ProspectiveRegistrationV1:
     """Durably advances prospective observation by one session."""
     import json
@@ -411,6 +513,12 @@ def advance_prospective_session(
         raise ValueError(
             "EXECUTION_EVIDENCE_STORE_REQUIRED: artifact_store must be provided "
             "to verify execution evidence"
+        )
+
+    if producer_verifier is None:
+        raise ValueError(
+            "PRODUCER_VERIFIER_REQUIRED: an independently configured producer verifier "
+            "is required to authenticate execution artifacts"
         )
 
     if isinstance(session_evidence, dict):
@@ -526,6 +634,37 @@ def advance_prospective_session(
                 for bad in ("untrusted", "mock", "fabricat", "self_author")
             ):
                 raise ValueError(f"UNTRUSTED_ARTIFACT_AUTHORITY:{art_name}")
+
+        # Independent producer authentication
+        try:
+            if hasattr(producer_verifier, "verify_artifact"):
+                is_valid = producer_verifier.verify_artifact(
+                    art_obj,
+                    expected_role=art_name,
+                    expected_registration_id=registration.registration_id,
+                    expected_freeze_hash=registration.frozen_study.freeze_hash,
+                    expected_session_index=registration.observed_session_count,
+                    expected_session_date=session_date,
+                )
+            elif callable(producer_verifier):
+                is_valid = producer_verifier(
+                    art_obj,
+                    expected_role=art_name,
+                    expected_registration_id=registration.registration_id,
+                    expected_freeze_hash=registration.frozen_study.freeze_hash,
+                    expected_session_index=registration.observed_session_count,
+                    expected_session_date=session_date,
+                )
+            else:
+                is_valid = False
+        except Exception as e:
+            raise ValueError(f"PRODUCER_VERIFIER_FAILED:{art_name}:{e}") from e
+
+        if not is_valid:
+            raise ValueError(
+                f"PRODUCER_AUTHENTICATION_FAILED: artifact {art_name} failed "
+                f"independent producer verification"
+            )
 
     # Calendar and date validation
     if session_date.weekday() >= 5:

@@ -204,6 +204,7 @@ def test_cli_prospective_register_and_step(repo_root: Path, tmp_path: Path) -> N
         art_hashes[art_name] = ah
 
     host_config["artifact_store"] = art_store
+    host_config["authentic_artifacts"] = list(art_store.keys())
     host_config_file.write_text(json.dumps(host_config), encoding="utf-8")
 
     ev_body = {

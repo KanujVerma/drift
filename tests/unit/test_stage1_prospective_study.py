@@ -10,6 +10,7 @@ from drift.experiments.stage1_original_acceptance import (
     ProductionStudyEvidenceVerifier,
 )
 from drift.experiments.stage1_prospective_study import (
+    ProductionProspectiveProducerVerifier,
     ProspectiveLifecycle,
     ProspectiveRegistrationV1,
     ProspectiveSessionEvidenceV1,
@@ -71,6 +72,16 @@ def make_prospective_evidence(
         evidence_artifacts=artifact_hashes,
     )
     return ev, artifacts
+
+
+def make_producer_verifier(
+    artifact_store: dict[str, Any],
+    trust_roots: set[str] | None = None,
+) -> ProductionProspectiveProducerVerifier:
+    return ProductionProspectiveProducerVerifier(
+        trust_roots=trust_roots or {"drift.stage1.trusted_authority", "trusted-root"},
+        authenticated_artifact_hashes=set(artifact_store.keys()),
+    )
 
 
 def make_prospective_plan() -> tuple[
@@ -150,6 +161,7 @@ def test_n12_prospective_study_readiness_and_freeze() -> None:
         session_date=date(2026, 11, 3),
         session_evidence=ev,
         artifact_store=art_store,
+        producer_verifier=make_producer_verifier(art_store),
     )
     assert stepped.observed_session_count == 1
     assert stepped.operational_state == "RUNNING"
@@ -206,6 +218,7 @@ def test_prospective_step_enforces_sequential_sessions_and_rejects_gaps() -> Non
             session_date=date(2026, 1, 1),
             session_evidence=ev_early,
             artifact_store=store_early,
+            producer_verifier=make_producer_verifier(store_early),
         )
 
     # Valid first step (Nov 3, 2026 is Tuesday)
@@ -215,6 +228,7 @@ def test_prospective_step_enforces_sequential_sessions_and_rejects_gaps() -> Non
         session_date=date(2026, 11, 3),
         session_evidence=ev1,
         artifact_store=store1,
+        producer_verifier=make_producer_verifier(store1),
     )
     assert s1.last_observed_session == date(2026, 11, 3)
 
@@ -226,6 +240,7 @@ def test_prospective_step_enforces_sequential_sessions_and_rejects_gaps() -> Non
             session_date=date(2026, 11, 3),
             session_evidence=ev_same,
             artifact_store=store_same,
+            producer_verifier=make_producer_verifier(store_same),
         )
 
     # Skipping Wednesday 2026-11-04 and jumping to Thursday 2026-11-05 (GAP REJECTION)
@@ -236,6 +251,7 @@ def test_prospective_step_enforces_sequential_sessions_and_rejects_gaps() -> Non
             session_date=date(2026, 11, 5),
             session_evidence=ev_skip,
             artifact_store=store_skip,
+            producer_verifier=make_producer_verifier(store_skip),
         )
 
     # Valid exact next step (Nov 4, 2026 is Wednesday)
@@ -245,6 +261,7 @@ def test_prospective_step_enforces_sequential_sessions_and_rejects_gaps() -> Non
         session_date=date(2026, 11, 4),
         session_evidence=ev2,
         artifact_store=store2,
+        producer_verifier=make_producer_verifier(store2),
     )
     assert s2.observed_session_count == 2
     assert s2.last_observed_session == date(2026, 11, 4)
@@ -260,6 +277,7 @@ def test_prospective_step_enforces_sequential_sessions_and_rejects_gaps() -> Non
             session_evidence=ev_cal_skip,
             artifact_store=store_cal_skip,
             calendar=cal,
+            producer_verifier=make_producer_verifier(store_cal_skip),
         )
 
 
@@ -276,6 +294,7 @@ def test_prospective_step_enforces_store_and_evidence_verification() -> None:
     )
 
     ev, store = make_prospective_evidence(reg, 0, date(2026, 11, 3))
+    pv = make_producer_verifier(store)
 
     # 1. Missing artifact store entirely
     with pytest.raises(ValueError, match="EXECUTION_EVIDENCE_STORE_REQUIRED"):
@@ -284,6 +303,17 @@ def test_prospective_step_enforces_store_and_evidence_verification() -> None:
             session_date=date(2026, 11, 3),
             session_evidence=ev,
             artifact_store=None,
+            producer_verifier=pv,
+        )
+
+    # 1b. Missing producer verifier entirely
+    with pytest.raises(ValueError, match="PRODUCER_VERIFIER_REQUIRED"):
+        advance_prospective_session(
+            reg,
+            session_date=date(2026, 11, 3),
+            session_evidence=ev,
+            artifact_store=store,
+            producer_verifier=None,
         )
 
     # 2. Invented artifact hash not found in store
@@ -304,6 +334,7 @@ def test_prospective_step_enforces_store_and_evidence_verification() -> None:
             session_date=date(2026, 11, 3),
             session_evidence=ev_invented,
             artifact_store=store,
+            producer_verifier=pv,
         )
 
     # 3. Missing required artifact (e.g. fills missing)
@@ -323,6 +354,7 @@ def test_prospective_step_enforces_store_and_evidence_verification() -> None:
             session_date=date(2026, 11, 3),
             session_evidence=ev_missing_req,
             artifact_store=store,
+            producer_verifier=pv,
         )
 
     # 4. Non-hex artifact hash in evidence dict
@@ -346,6 +378,7 @@ def test_prospective_step_enforces_store_and_evidence_verification() -> None:
             session_date=date(2026, 11, 3),
             session_evidence=ev_non_hex_dict,
             artifact_store=store,
+            producer_verifier=pv,
         )
 
     # 5. Content hash mismatch in artifact store
@@ -358,6 +391,7 @@ def test_prospective_step_enforces_store_and_evidence_verification() -> None:
             session_date=date(2026, 11, 3),
             session_evidence=ev,
             artifact_store=corrupted_store,
+            producer_verifier=pv,
         )
 
     # 6. Session index mismatch inside artifact object
@@ -391,6 +425,7 @@ def test_prospective_step_enforces_store_and_evidence_verification() -> None:
             session_date=date(2026, 11, 3),
             session_evidence=ev_mismatched,
             artifact_store=mismatched_store,
+            producer_verifier=make_producer_verifier(mismatched_store),
         )
 
     # 7. Empty artifact {} stored under its hash (Sol's Round 11 finding)
@@ -415,6 +450,7 @@ def test_prospective_step_enforces_store_and_evidence_verification() -> None:
             session_date=date(2026, 11, 3),
             session_evidence=ev_empty,
             artifact_store=empty_store,
+            producer_verifier=make_producer_verifier(empty_store),
         )
 
     # 8. Empty execution payload inside artifact
@@ -447,6 +483,7 @@ def test_prospective_step_enforces_store_and_evidence_verification() -> None:
             session_date=date(2026, 11, 3),
             session_evidence=ev_empty_payload,
             artifact_store=empty_payload_store,
+            producer_verifier=make_producer_verifier(empty_payload_store),
         )
 
     # 9. Wrong artifact role
@@ -479,6 +516,7 @@ def test_prospective_step_enforces_store_and_evidence_verification() -> None:
             session_date=date(2026, 11, 3),
             session_evidence=ev_wrong_role,
             artifact_store=wrong_role_store,
+            producer_verifier=make_producer_verifier(wrong_role_store),
         )
 
     # 10. Untrusted artifact authority
@@ -511,6 +549,75 @@ def test_prospective_step_enforces_store_and_evidence_verification() -> None:
             session_date=date(2026, 11, 3),
             session_evidence=ev_untrusted,
             artifact_store=untrusted_store,
+            producer_verifier=make_producer_verifier(untrusted_store),
+        )
+
+
+def test_adversarial_fabricated_artifact_with_trusted_authority_is_rejected() -> None:
+    """Adversarial test: caller fabricates artifact with matching trusted authority name
+
+    and valid content hash, but producer verification independently rejects it.
+    """
+    plan, evidence, verifier = make_prospective_plan()
+    frozen = freeze_prospective_study(
+        plan, frozen_at=NOW, evidence=evidence, verifier=verifier
+    )
+    reg = register_prospective_study(
+        registration_id="REG-ADVERSARIAL",
+        registered_at=NOW,
+        frozen_study=frozen,
+        has_broker_dispatch_capability=False,
+    )
+
+    # Legitimate authentic artifacts known to independent producer verifier
+    _ev_auth, store_auth = make_prospective_evidence(reg, 0, date(2026, 11, 3))
+    prod_verifier = ProductionProspectiveProducerVerifier(
+        trust_roots={"drift.stage1.trusted_authority"},
+        authenticated_artifact_hashes=set(store_auth.keys()),
+    )
+
+    # Adversary constructs a fabricated artifact:
+    # 1. Sets trusted authority name "drift.stage1.trusted_authority"
+    # 2. Sets matching registration_id, freeze_hash, session_index, session_date
+    # 3. Supplies arbitrary non-empty execution payload
+    # 4. Computes valid content hash and places into artifact_store
+    fab_store: dict[str, Any] = {}
+    fab_hashes: dict[str, str] = {}
+    for art_name in ("portfolio_state", "decision", "fills"):
+        fab_body = {
+            "schema_version": "drift-stage1-prospective-artifact/1",
+            "artifact_role": art_name,
+            "registration_id": reg.registration_id,
+            "freeze_hash": reg.frozen_study.freeze_hash,
+            "session_index": 0,
+            "session_date": "2026-11-03",
+            # Correct trusted authority name
+            "authority_id": "drift.stage1.trusted_authority",
+            "execution_payload": {
+                "fabricated_pnl": 999999,
+                "status": "FABRICATED_EXECUTION",
+            },
+        }
+        h = content_hash(fab_body)
+        fab_store[h] = fab_body
+        fab_hashes[art_name] = h
+
+    ev_fab = create_prospective_session_evidence(
+        registration_id=reg.registration_id,
+        freeze_hash=reg.frozen_study.freeze_hash,
+        session_index=0,
+        session_date=date(2026, 11, 3),
+        evidence_artifacts=fab_hashes,
+    )
+
+    # Must be rejected by producer verification!
+    with pytest.raises(ValueError, match="PRODUCER_AUTHENTICATION_FAILED"):
+        advance_prospective_session(
+            reg,
+            session_date=date(2026, 11, 3),
+            session_evidence=ev_fab,
+            artifact_store=fab_store,
+            producer_verifier=prod_verifier,
         )
 
 
@@ -559,6 +666,7 @@ def test_prospective_step_enforces_lifecycle_states() -> None:
                 session_date=date(2026, 11, 3),
                 session_evidence=ev,
                 artifact_store=store,
+                producer_verifier=make_producer_verifier(store),
             )
 
 
@@ -580,6 +688,7 @@ def test_prospective_step_enforces_trading_calendar_and_evidence() -> None:
             reg,
             session_date=date(2026, 11, 3),
             artifact_store={},
+            producer_verifier=make_producer_verifier({}),
         )
 
     # Weekend rejection (Nov 7, 2026 is Saturday)
@@ -590,6 +699,7 @@ def test_prospective_step_enforces_trading_calendar_and_evidence() -> None:
             session_date=date(2026, 11, 7),
             session_evidence=ev_wknd,
             artifact_store=store_wknd,
+            producer_verifier=make_producer_verifier(store_wknd),
         )
 
     # Calendar membership / sequential gap rejection
@@ -604,6 +714,7 @@ def test_prospective_step_enforces_trading_calendar_and_evidence() -> None:
             session_evidence=ev_not_in_cal,
             calendar=cal,
             artifact_store=store_not_in_cal,
+            producer_verifier=make_producer_verifier(store_not_in_cal),
         )
 
     # Evidence index mismatch
@@ -614,4 +725,5 @@ def test_prospective_step_enforces_trading_calendar_and_evidence() -> None:
             session_date=date(2026, 11, 3),
             session_evidence=ev_wrong_idx,
             artifact_store=store_wrong_idx,
+            producer_verifier=make_producer_verifier(store_wrong_idx),
         )
