@@ -598,6 +598,8 @@ def test_refuses_rights_assessment_when_entitlement_not_active() -> None:
         internal_research_permitted=True,
         algorithmic_non_display_permitted=True,
         private_offline_retention_permitted=True,
+        public_redistribution_permitted=False,
+        git_tree_retention_permitted=False,
     )
     report = verify_g1_alpaca_sip_qualification(
         request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
@@ -676,6 +678,8 @@ def test_sol_round3_denied_rights_assessment_refused() -> None:
         internal_research_permitted=False,
         algorithmic_non_display_permitted=False,
         private_offline_retention_permitted=False,
+        public_redistribution_permitted=False,
+        git_tree_retention_permitted=False,
     )
     report = verify_g1_alpaca_sip_qualification(
         request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
@@ -701,6 +705,8 @@ def test_sol_round3_denied_rights_assessment_refused() -> None:
         internal_research_permitted=True,
         algorithmic_non_display_permitted=True,
         private_offline_retention_permitted=True,
+        public_redistribution_permitted=False,
+        git_tree_retention_permitted=False,
     )
     report2 = verify_g1_alpaca_sip_qualification(
         request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
@@ -742,3 +748,191 @@ def test_valid_duck_typed_rights_assessment_passes() -> None:
     )
     assert report.overall_status == "VERIFIED"
     assert report.contractual_rights.is_verified is True
+
+
+def test_sol_round4_payload_malformed_evidence_refused() -> None:
+    """Sol Round 4 P1: malformed bars, non-ISO calendar, false corporate actions."""
+    import json
+    from types import SimpleNamespace
+
+    _, cov_ev, ca_records, rights = make_mock_evidence()
+
+    # 1. Bars containing [null] or partial symbols
+    bad_bars = SimpleNamespace(
+        bars=json.dumps({"bars": {"VOO": [None]}}).encode("utf-8"),
+        calendar=b"[]",
+        corporate_actions=b"{}",
+    )
+    rep1 = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        raw_payloads=bad_bars,
+        corporate_actions=ca_records,
+        rights_assessment=rights,
+        coverage_evidence=cov_ev,
+    )
+    assert rep1.overall_status == "REFUSED"
+    assert rep1.source_provenance.provenance_verified is False
+
+    # 2. Invalid calendar date
+    bad_cal = SimpleNamespace(
+        bars=json.dumps(
+            {
+                "bars": {
+                    sym: [
+                        {
+                            "t": "2024-01-02T09:30:00Z",
+                            "o": 100.0,
+                            "h": 105.0,
+                            "l": 99.0,
+                            "c": 104.0,
+                            "v": 1000,
+                        }
+                    ]
+                    for sym in EXACT_12_ETF_UNIVERSE
+                }
+            }
+        ).encode("utf-8"),
+        calendar=json.dumps([{"date": "invalid-date"}]).encode("utf-8"),
+        corporate_actions=json.dumps(
+            {"corporate_actions": {"cash_dividends": [{"symbol": "VOO"}]}}
+        ).encode("utf-8"),
+    )
+    rep2 = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        raw_payloads=bad_cal,
+        corporate_actions=ca_records,
+        rights_assessment=rights,
+        coverage_evidence=cov_ev,
+    )
+    assert rep2.overall_status == "REFUSED"
+    assert any("invalid date" in r or "non-ISO date" in r for r in rep2.refusal_reasons)
+
+    # 3. cash_dividends is boolean false instead of list
+    bad_ca = SimpleNamespace(
+        bars=bad_cal.bars,
+        calendar=json.dumps([{"date": "2024-01-02"}]).encode("utf-8"),
+        corporate_actions=json.dumps(
+            {"corporate_actions": {"cash_dividends": False}}
+        ).encode("utf-8"),
+    )
+    rep3 = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        raw_payloads=bad_ca,
+        corporate_actions=ca_records,
+        rights_assessment=rights,
+        coverage_evidence=cov_ev,
+    )
+    assert rep3.overall_status == "REFUSED"
+    assert any("must be a list if present" in r for r in rep3.refusal_reasons)
+
+
+def test_sol_round4_rights_string_false_and_missing_restrictions_refused() -> None:
+    """Sol Round 4 P1: string 'False' not upgraded, restrictions required."""
+    from types import SimpleNamespace
+
+    intake_res, cov_ev, ca_records, _ = make_mock_evidence()
+
+    # 1. String "False" must fail closed and NOT be upgraded to True
+    string_false_rights = SimpleNamespace(
+        assessment_id="ASSESSMENT-STRING-FALSE",
+        assessor_identity="matthew@drift.local",
+        authority="legal-counsel@drift.local",
+        entitlement_state="active",
+        notice_evidence_hashes=("d" * 64,),
+        internal_research_permitted="False",
+        algorithmic_non_display_permitted="False",
+        private_offline_retention_permitted="False",
+        public_redistribution_permitted="False",
+        git_tree_retention_permitted="False",
+    )
+    rep1 = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        intake_result=intake_res,
+        corporate_actions=ca_records,
+        rights_assessment=string_false_rights,
+        coverage_evidence=cov_ev,
+    )
+    assert rep1.overall_status == "REFUSED"
+    assert rep1.contractual_rights.is_verified is False
+    assert any(
+        "internal research permission is explicitly denied" in r
+        for r in rep1.refusal_reasons
+    )
+
+    # 2. Missing redistribution and Git retention restrictions must fail closed
+    missing_restrictions_rights = SimpleNamespace(
+        assessment_id="ASSESSMENT-MISSING-RESTRICTIONS",
+        assessor_identity="matthew@drift.local",
+        authority="legal-counsel@drift.local",
+        entitlement_state="active",
+        notice_evidence_hashes=("d" * 64,),
+        internal_research_permitted=True,
+        algorithmic_non_display_permitted=True,
+        private_offline_retention_permitted=True,
+    )
+    rep2 = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        intake_result=intake_res,
+        corporate_actions=ca_records,
+        rights_assessment=missing_restrictions_rights,
+        coverage_evidence=cov_ev,
+    )
+    assert rep2.overall_status == "REFUSED"
+    assert rep2.contractual_rights.is_verified is False
+    assert any(
+        "missing explicit public_redistribution_permitted" in r
+        for r in rep2.refusal_reasons
+    )
+
+
+def test_valid_raw_payloads_provenance_passes() -> None:
+    """Valid raw payloads meeting complete Alpaca schema contracts pass provenance."""
+    import json
+    from types import SimpleNamespace
+
+    _, cov_ev, ca_records, rights = make_mock_evidence()
+
+    valid_bars = {
+        sym: [
+            {
+                "t": "2024-01-02T09:30:00Z",
+                "o": 100.0,
+                "h": 105.0,
+                "l": 99.0,
+                "c": 104.0,
+                "v": 50000.0,
+            }
+        ]
+        for sym in EXACT_12_ETF_UNIVERSE
+    }
+    valid_payloads = SimpleNamespace(
+        bars=json.dumps({"bars": valid_bars, "next_page_token": None}).encode("utf-8"),
+        calendar=json.dumps([{"date": "2024-01-02", "open": "09:30"}]).encode("utf-8"),
+        corporate_actions=json.dumps(
+            {
+                "corporate_actions": {
+                    "cash_dividends": [{"symbol": "VOO", "rate": 1.5}],
+                    "forward_splits": [],
+                },
+                "next_page_token": None,
+            }
+        ).encode("utf-8"),
+    )
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        raw_payloads=valid_payloads,
+        corporate_actions=ca_records,
+        rights_assessment=rights,
+        coverage_evidence=cov_ev,
+    )
+    assert report.overall_status == "VERIFIED"
+    assert report.source_provenance.provenance_verified is True
+    assert report.source_provenance.bars_sha256 is not None
+    assert report.source_provenance.calendar_sha256 is not None
+    assert report.source_provenance.corporate_actions_sha256 is not None

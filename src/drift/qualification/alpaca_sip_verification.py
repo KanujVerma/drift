@@ -550,17 +550,51 @@ def validate_raw_alpaca_payloads(
         raise ValueError(
             "bars response must carry a non-empty 'bars' mapping for securities"
         )
-    covered_symbols = [
-        sym
-        for sym in EXACT_12_ETF_UNIVERSE
-        if sym in grouped_bars
-        and isinstance(grouped_bars[sym], list)
-        and len(grouped_bars[sym]) > 0
-    ]
-    if not covered_symbols:
+    # Complete canonical 12-ETF universe coverage is mandatory
+    missing_symbols = [sym for sym in EXACT_12_ETF_UNIVERSE if sym not in grouped_bars]
+    if missing_symbols:
         raise ValueError(
-            "bars response contains no bar records for the canonical 12-ETF universe"
+            f"bars response missing required universe symbols: {missing_symbols}"
         )
+
+    for sym in EXACT_12_ETF_UNIVERSE:
+        bars_list = grouped_bars[sym]
+        if not isinstance(bars_list, list) or len(bars_list) == 0:
+            raise ValueError(f"bars response contains empty or non-list bars for {sym}")
+        for idx, bar in enumerate(bars_list):
+            if not isinstance(bar, dict):
+                raise ValueError(
+                    f"bar record at {sym}[{idx}] must be a dict, got {type(bar)}"
+                )
+            for key in ("t", "o", "h", "l", "c", "v"):
+                if key not in bar or bar[key] is None:
+                    raise ValueError(
+                        f"bar record at {sym}[{idx}] missing or null key: {key}"
+                    )
+            if not (isinstance(bar["t"], str) and bar["t"].strip()):
+                raise ValueError(
+                    f"bar record at {sym}[{idx}] has invalid timestamp 't': {bar['t']}"
+                )
+            for price_key in ("o", "h", "l", "c"):
+                val = bar[price_key]
+                if (
+                    not isinstance(val, (int, float))
+                    or isinstance(val, bool)
+                    or val <= 0
+                ):
+                    raise ValueError(
+                        f"bar record at {sym}[{idx}] has non-positive price "
+                        f"{price_key}={val}"
+                    )
+            v_val = bar["v"]
+            if (
+                not isinstance(v_val, (int, float))
+                or isinstance(v_val, bool)
+                or v_val < 0
+            ):
+                raise ValueError(
+                    f"bar record at {sym}[{idx}] has negative volume v={v_val}"
+                )
 
     try:
         cal_doc = json.loads(cal_b.decode("utf-8"))
@@ -571,8 +605,20 @@ def validate_raw_alpaca_payloads(
         raise ValueError(
             "calendar response must be a non-empty JSON list of trading days"
         )
-    if not all(isinstance(day, dict) and "date" in day for day in cal_doc[:5]):
-        raise ValueError("calendar entries must contain trading date keys")
+    for idx, day in enumerate(cal_doc):
+        if not isinstance(day, dict):
+            raise ValueError(f"calendar entry at [{idx}] must be a dict")
+        d_val = day.get("date")
+        if not (isinstance(d_val, str) and len(d_val) == 10):
+            raise ValueError(
+                f"calendar entry at [{idx}] has invalid date string: {d_val}"
+            )
+        try:
+            date.fromisoformat(d_val)
+        except Exception as e:
+            raise ValueError(
+                f"calendar entry at [{idx}] has non-ISO date {d_val}: {e}"
+            ) from e
 
     try:
         ca_doc = json.loads(ca_b.decode("utf-8"))
@@ -590,11 +636,27 @@ def validate_raw_alpaca_payloads(
         raise ValueError(
             "corporate actions response must carry a 'corporate_actions' object"
         )
+    if "cash_dividends" in ca_grouped and not isinstance(
+        ca_grouped["cash_dividends"], list
+    ):
+        raise ValueError(
+            "'cash_dividends' must be a list if present, got "
+            f"{type(ca_grouped['cash_dividends'])}"
+        )
+    if "forward_splits" in ca_grouped and not isinstance(
+        ca_grouped["forward_splits"], list
+    ):
+        raise ValueError(
+            "'forward_splits' must be a list if present, got "
+            f"{type(ca_grouped['forward_splits'])}"
+        )
     dividends = ca_grouped.get("cash_dividends")
     splits = ca_grouped.get("forward_splits")
-    if dividends is None and splits is None:
+    div_count = len(dividends) if isinstance(dividends, list) else 0
+    split_count = len(splits) if isinstance(splits, list) else 0
+    if div_count == 0 and split_count == 0:
         raise ValueError(
-            "corporate actions must contain 'cash_dividends' or 'forward_splits'"
+            "corporate actions response carries no dividend or split records"
         )
 
     return (
@@ -671,31 +733,47 @@ def extract_and_validate_rights_assessment(
             disp_val = getattr(disp, "value", str(disp))
             answer_map[q_val] = disp_val == "allowed"
 
+    def _parse_strict_bool(val: Any, field_name: str) -> bool:
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, str):
+            s = val.strip().lower()
+            if s in ("true", "allowed", "permitted", "1"):
+                return True
+            if s in ("false", "denied", "prohibited", "0"):
+                return False
+        raise ValueError(
+            f"permission '{field_name}' must be an explicit boolean value, got {val!r}"
+        )
+
     def _get_perm(names: tuple[str, ...], answer_key: str | None = None) -> bool | None:
         for name in names:
             if isinstance(rights_assessment, dict) and name in rights_assessment:
                 val = rights_assessment[name]
                 if val is not None:
-                    return bool(val)
+                    return _parse_strict_bool(val, name)
             elif hasattr(rights_assessment, name):
                 val = getattr(rights_assessment, name)
                 if val is not None:
-                    return bool(val)
+                    return _parse_strict_bool(val, name)
         if answer_key and answer_key in answer_map:
             return answer_map[answer_key]
         return None
 
-    # Required: internal research
+    # All 5 permissions must be explicitly declared and validated
+    # 1. Required: internal research (must be explicitly True)
     research = _get_perm(
         ("internal_research_permitted", "research_permitted"),
         "internal_automated_research",
     )
-    if research is False:
-        raise ValueError("internal research permission is explicitly denied")
+    if research is None:
+        raise ValueError(
+            "source assessment missing explicit internal_research_permitted"
+        )
     if research is not True:
-        raise ValueError("internal research permission is missing")
+        raise ValueError("internal research permission is explicitly denied")
 
-    # Required: algorithmic non-display / execution
+    # 2. Required: algorithmic non-display / execution (must be explicitly True)
     execution = _get_perm(
         (
             "algorithmic_non_display_permitted",
@@ -705,14 +783,16 @@ def extract_and_validate_rights_assessment(
         ),
         "non_display_use",
     )
-    if execution is False:
+    if execution is None:
+        raise ValueError(
+            "source assessment missing explicit algorithmic_non_display_permitted"
+        )
+    if execution is not True:
         raise ValueError(
             "algorithmic execution / non-display permission is explicitly denied"
         )
-    if execution is not True:
-        raise ValueError("algorithmic execution / non-display permission is missing")
 
-    # Required: private offline retention
+    # 3. Required: private offline retention (must be explicitly True)
     retention = _get_perm(
         (
             "private_offline_retention_permitted",
@@ -722,26 +802,42 @@ def extract_and_validate_rights_assessment(
         ),
         "local_storage",
     )
-    if retention is False:
-        raise ValueError("private offline retention permission is explicitly denied")
+    if retention is None:
+        raise ValueError(
+            "source assessment missing explicit private_offline_retention_permitted"
+        )
     if retention is not True:
-        raise ValueError("private offline retention permission is missing")
+        raise ValueError("private offline retention permission is explicitly denied")
 
-    # Forbidden: public redistribution
+    # 4. Required restriction: public redistribution (must be False)
     redistribution = _get_perm(
         ("public_redistribution_permitted", "redistribution_permitted"),
         "redistribution",
     )
-    if redistribution is True:
-        raise ValueError("public redistribution is permitted (must be denied)")
+    if redistribution is None:
+        raise ValueError(
+            "source assessment missing explicit "
+            "public_redistribution_permitted restriction"
+        )
+    if redistribution is not False:
+        raise ValueError(
+            "public redistribution is permitted (must be explicitly denied/False)"
+        )
 
-    # Forbidden: git tree retention
+    # 5. Required restriction: git tree retention (must be False)
     git_storage = _get_perm(
         ("git_tree_retention_permitted", "git_storage_permitted"),
         "private_git_storage",
     )
-    if git_storage is True:
-        raise ValueError("git tree retention is permitted (must be denied)")
+    if git_storage is None:
+        raise ValueError(
+            "source assessment missing explicit "
+            "git_tree_retention_permitted restriction"
+        )
+    if git_storage is not False:
+        raise ValueError(
+            "git tree retention is permitted (must be explicitly denied/False)"
+        )
 
     assessment_id = getattr(rights_assessment, "assessment_id", None)
     if assessment_id is None and isinstance(rights_assessment, dict):
