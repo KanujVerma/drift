@@ -829,6 +829,128 @@ def test_cli_prospective_step_adversarial_authentication_enforcement(
     assert proc_calendar_jump.returncode == 3
     assert "SESSION_DATE_NOT_SEQUENTIAL" in proc_calendar_jump.stderr
 
+    # Adversarial Case 9 (Round 18 Finding): Recovery refuses fabricated step
+    # state with correctly recomputed registration_hash
+    fab_body = reg_data.copy()
+    fab_body["observed_session_count"] = 1
+    fab_body["last_observed_session"] = "2026-11-03"
+    fab_body["prior_step_hash"] = reg_data["registration_hash"]
+    fab_body["last_evidence_hash"] = "9" * 64
+    fab_body["evidence_chain"] = ["9" * 64]
+    del fab_body["registration_hash"]
+    fab_h = content_hash(fab_body)
+    fab_step_file = private_root / f"REG-{plan.plan_id}-step-1.json"
+    fab_step_file.write_text(
+        json.dumps(fab_body | {"registration_hash": fab_h}), encoding="utf-8"
+    )
+
+    # 9a. Fabricated step with mismatched replayed state / evidence -> rejected
+    host_config_file.write_text(json.dumps(valid_step_host), encoding="utf-8")
+    proc_fab_no_ev = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "prospective-step",
+            "--registration",
+            str(reg_file),
+            "--host-config",
+            str(host_config_file),
+            "--private-root",
+            str(private_root),
+            "--session-date",
+            "2026-11-04",
+            "--session-evidence",
+            str(ev_file),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert proc_fab_no_ev.returncode == 3
+    assert "RECOVERY_VERIFICATION_FAILED" in proc_fab_no_ev.stderr
+
+    # 9b. Fabricated step with unauthenticated artifacts -> rejected
+    fake_ev_body = {
+        "schema_version": "drift-stage1-prospective-session-evidence/1",
+        "registration_id": f"REG-{plan.plan_id}",
+        "freeze_hash": reg_data["frozen_study"]["freeze_hash"],
+        "session_index": 0,
+        "session_date": "2026-11-03",
+        "status": "COMPLETED",
+        "evidence_artifacts": {
+            "portfolio_state": "e" * 64,
+            "decision": "e" * 64,
+            "fills": "e" * 64,
+        },
+    }
+    fake_ev_file = private_root / f"REG-{plan.plan_id}-evidence-1.json"
+    fake_ev_file.write_text(
+        json.dumps(fake_ev_body | {"evidence_hash": content_hash(fake_ev_body)}),
+        encoding="utf-8",
+    )
+    proc_fake_art = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "prospective-step",
+            "--registration",
+            str(reg_file),
+            "--host-config",
+            str(host_config_file),
+            "--private-root",
+            str(private_root),
+            "--session-date",
+            "2026-11-04",
+            "--session-evidence",
+            str(ev_file),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert proc_fake_art.returncode == 3
+    assert "RECOVERY_VERIFICATION_FAILED" in proc_fake_art.stderr
+
+    # 9c. Fabricated step altering frozen study bindings -> rejected
+    tampered_freeze_body = fab_body.copy()
+    tampered_frozen = reg_data["frozen_study"].copy()
+    tampered_frozen["freeze_hash"] = "0" * 64
+    tampered_freeze_body["frozen_study"] = tampered_frozen
+    tf_h = content_hash(tampered_freeze_body)
+    fab_step_file.write_text(
+        json.dumps(tampered_freeze_body | {"registration_hash": tf_h}),
+        encoding="utf-8",
+    )
+    proc_tf = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "prospective-step",
+            "--registration",
+            str(reg_file),
+            "--host-config",
+            str(host_config_file),
+            "--private-root",
+            str(private_root),
+            "--session-date",
+            "2026-11-04",
+            "--session-evidence",
+            str(ev_file),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert proc_tf.returncode == 3
+    assert "RECOVERY_VERIFICATION_FAILED" in proc_tf.stderr
+
+    # Clean up fabricated artifacts
+    fab_step_file.unlink(missing_ok=True)
+    fake_ev_file.unlink(missing_ok=True)
+
 
 def test_cli_calibrate_and_historical_handlers(repo_root: Path, tmp_path: Path) -> None:
     from datetime import UTC, date, datetime
