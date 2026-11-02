@@ -37,17 +37,24 @@ def make_prospective_evidence(
     session_date: date,
     *,
     custom_artifacts: dict[str, str] | None = None,
+    authority_id: str = "drift.stage1.trusted_authority",
 ) -> tuple[ProspectiveSessionEvidenceV1, dict[str, Any]]:
     artifacts: dict[str, Any] = {}
     artifact_hashes: dict[str, str] = {}
     for art_name in ("portfolio_state", "decision", "fills"):
         art_body = {
-            "artifact_type": art_name,
+            "schema_version": "drift-stage1-prospective-artifact/1",
+            "artifact_role": art_name,
             "registration_id": reg.registration_id,
             "freeze_hash": reg.frozen_study.freeze_hash,
             "session_index": session_index,
             "session_date": session_date.isoformat(),
-            "data": {"status": "OK", "index": session_index},
+            "authority_id": authority_id,
+            "execution_payload": {
+                "status": "OK",
+                "session_index": session_index,
+                "recorded_orders": 2,
+            },
         }
         h = content_hash(art_body)
         artifacts[h] = art_body
@@ -358,11 +365,14 @@ def test_prospective_step_enforces_store_and_evidence_verification() -> None:
     mismatched_hashes = {}
     for art_name in ("portfolio_state", "decision", "fills"):
         art_body = {
-            "artifact_type": art_name,
+            "schema_version": "drift-stage1-prospective-artifact/1",
+            "artifact_role": art_name,
             "registration_id": reg.registration_id,
             "freeze_hash": reg.frozen_study.freeze_hash,
             "session_index": 99,  # Mismatched session index!
             "session_date": "2026-11-03",
+            "authority_id": "drift.stage1.trusted_authority",
+            "execution_payload": {"status": "OK"},
         }
         h = content_hash(art_body)
         mismatched_store[h] = art_body
@@ -381,6 +391,126 @@ def test_prospective_step_enforces_store_and_evidence_verification() -> None:
             session_date=date(2026, 11, 3),
             session_evidence=ev_mismatched,
             artifact_store=mismatched_store,
+        )
+
+    # 7. Empty artifact {} stored under its hash (Sol's Round 11 finding)
+    empty_h = content_hash({})
+    empty_store: dict[str, Any] = {empty_h: {}}
+    ev_empty = create_prospective_session_evidence(
+        registration_id=reg.registration_id,
+        freeze_hash=reg.frozen_study.freeze_hash,
+        session_index=0,
+        session_date=date(2026, 11, 3),
+        evidence_artifacts={
+            "portfolio_state": empty_h,
+            "decision": empty_h,
+            "fills": empty_h,
+        },
+    )
+    with pytest.raises(
+        ValueError, match="EMPTY_OR_INVALID_ARTIFACT|ARTIFACT_ROLE_MISMATCH"
+    ):
+        advance_prospective_session(
+            reg,
+            session_date=date(2026, 11, 3),
+            session_evidence=ev_empty,
+            artifact_store=empty_store,
+        )
+
+    # 8. Empty execution payload inside artifact
+    empty_payload_store = {}
+    empty_payload_hashes = {}
+    for art_name in ("portfolio_state", "decision", "fills"):
+        art_body = {
+            "schema_version": "drift-stage1-prospective-artifact/1",
+            "artifact_role": art_name,
+            "registration_id": reg.registration_id,
+            "freeze_hash": reg.frozen_study.freeze_hash,
+            "session_index": 0,
+            "session_date": "2026-11-03",
+            "authority_id": "drift.stage1.trusted_authority",
+            "execution_payload": {},  # Empty payload!
+        }
+        h = content_hash(art_body)
+        empty_payload_store[h] = art_body
+        empty_payload_hashes[art_name] = h
+    ev_empty_payload = create_prospective_session_evidence(
+        registration_id=reg.registration_id,
+        freeze_hash=reg.frozen_study.freeze_hash,
+        session_index=0,
+        session_date=date(2026, 11, 3),
+        evidence_artifacts=empty_payload_hashes,
+    )
+    with pytest.raises(ValueError, match="EMPTY_EXECUTION_PAYLOAD"):
+        advance_prospective_session(
+            reg,
+            session_date=date(2026, 11, 3),
+            session_evidence=ev_empty_payload,
+            artifact_store=empty_payload_store,
+        )
+
+    # 9. Wrong artifact role
+    wrong_role_store = {}
+    wrong_role_hashes = {}
+    for art_name in ("portfolio_state", "decision", "fills"):
+        art_body = {
+            "schema_version": "drift-stage1-prospective-artifact/1",
+            "artifact_role": "decision",  # Wrong role for portfolio_state and fills!
+            "registration_id": reg.registration_id,
+            "freeze_hash": reg.frozen_study.freeze_hash,
+            "session_index": 0,
+            "session_date": "2026-11-03",
+            "authority_id": "drift.stage1.trusted_authority",
+            "execution_payload": {"status": "OK"},
+        }
+        h = content_hash(art_body)
+        wrong_role_store[h] = art_body
+        wrong_role_hashes[art_name] = h
+    ev_wrong_role = create_prospective_session_evidence(
+        registration_id=reg.registration_id,
+        freeze_hash=reg.frozen_study.freeze_hash,
+        session_index=0,
+        session_date=date(2026, 11, 3),
+        evidence_artifacts=wrong_role_hashes,
+    )
+    with pytest.raises(ValueError, match="ARTIFACT_ROLE_MISMATCH"):
+        advance_prospective_session(
+            reg,
+            session_date=date(2026, 11, 3),
+            session_evidence=ev_wrong_role,
+            artifact_store=wrong_role_store,
+        )
+
+    # 10. Untrusted artifact authority
+    untrusted_store = {}
+    untrusted_hashes = {}
+    for art_name in ("portfolio_state", "decision", "fills"):
+        art_body = {
+            "schema_version": "drift-stage1-prospective-artifact/1",
+            "artifact_role": art_name,
+            "registration_id": reg.registration_id,
+            "freeze_hash": reg.frozen_study.freeze_hash,
+            "session_index": 0,
+            "session_date": "2026-11-03",
+            "authority_id": "untrusted-self-author",
+            "execution_payload": {"status": "OK"},
+        }
+        h = content_hash(art_body)
+        untrusted_store[h] = art_body
+        untrusted_hashes[art_name] = h
+    ev_untrusted = create_prospective_session_evidence(
+        registration_id=reg.registration_id,
+        freeze_hash=reg.frozen_study.freeze_hash,
+        session_index=0,
+        session_date=date(2026, 11, 3),
+        evidence_artifacts=untrusted_hashes,
+    )
+    with pytest.raises(ValueError, match="UNTRUSTED_ARTIFACT_AUTHORITY"):
+        advance_prospective_session(
+            reg,
+            session_date=date(2026, 11, 3),
+            session_evidence=ev_untrusted,
+            artifact_store=untrusted_store,
         )
 
 

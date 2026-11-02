@@ -585,9 +585,19 @@ def action_prospective_step(args: argparse.Namespace) -> int:
             if isinstance(extra_store, dict):
                 artifact_store.update(extra_store)
 
-        trust_roots = set(
-            host_config.get("trust_roots", ["drift.stage1.trusted_authority"])
-        )
+        raw_roots = host_config.get("trust_roots", ["drift.stage1.trusted_authority"])
+        trust_roots: set[str]
+        if isinstance(raw_roots, dict):
+            trust_roots = set()
+            for v in raw_roots.values():
+                if isinstance(v, (list, tuple, set)):
+                    trust_roots.update(v)
+                elif isinstance(v, str):
+                    trust_roots.add(v)
+        elif isinstance(raw_roots, (list, tuple, set)):
+            trust_roots = set(raw_roots)
+        else:
+            trust_roots = {"drift.stage1.trusted_authority"}
 
         advanced = advance_prospective_session(
             reg,

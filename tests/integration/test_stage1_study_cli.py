@@ -190,12 +190,14 @@ def test_cli_prospective_register_and_step(repo_root: Path, tmp_path: Path) -> N
     art_hashes: dict[str, str] = {}
     for art_name in ("portfolio_state", "decision", "fills"):
         art_body = {
-            "artifact_type": art_name,
+            "schema_version": "drift-stage1-prospective-artifact/1",
+            "artifact_role": art_name,
             "registration_id": f"REG-{plan.plan_id}",
             "freeze_hash": reg_data["frozen_study"]["freeze_hash"],
             "session_index": 0,
             "session_date": "2026-11-03",
-            "data": {"status": "OK", "step": 0},
+            "authority_id": "trusted-root",
+            "execution_payload": {"status": "OK", "step": 0},
         }
         ah = content_hash(art_body)
         art_store[ah] = art_body

@@ -338,6 +338,49 @@ REQUIRED_PROSPECTIVE_ARTIFACTS: frozenset[str] = frozenset(
 )
 
 
+class ProspectiveExecutionArtifactV1(FrozenModel):
+    schema_version: Literal["drift-stage1-prospective-artifact/1"] = (
+        "drift-stage1-prospective-artifact/1"
+    )
+    artifact_role: Literal["portfolio_state", "decision", "fills"]
+    registration_id: NonBlankStr
+    freeze_hash: SHA256Hash
+    session_index: int = Field(ge=0, lt=504)
+    session_date: date
+    authority_id: NonBlankStr
+    execution_payload: dict[str, Any]
+
+    @model_validator(mode="after")
+    def validate_payload(self) -> Self:
+        if not self.execution_payload:
+            raise ValueError("EMPTY_EXECUTION_PAYLOAD")
+        return self
+
+
+def create_prospective_execution_artifact(
+    *,
+    artifact_role: Literal["portfolio_state", "decision", "fills"],
+    registration_id: str,
+    freeze_hash: str,
+    session_index: int,
+    session_date: date,
+    authority_id: str = "drift.stage1.trusted_authority",
+    execution_payload: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    body = {
+        "schema_version": "drift-stage1-prospective-artifact/1",
+        "artifact_role": artifact_role,
+        "registration_id": registration_id,
+        "freeze_hash": freeze_hash,
+        "session_index": session_index,
+        "session_date": session_date.isoformat(),
+        "authority_id": authority_id,
+        "execution_payload": execution_payload,
+    }
+    h = content_hash(body)
+    return h, body
+
+
 def advance_prospective_session(
     registration: ProspectiveRegistrationV1,
     *,
@@ -396,7 +439,9 @@ def advance_prospective_session(
             raise ValueError(f"MISSING_REQUIRED_ARTIFACT:{req_art}")
 
     # Resolve and verify each referenced artifact in the trusted store
-    effective_roots = set(trust_roots) if trust_roots else None
+    effective_roots = (
+        set(trust_roots) if trust_roots else {"drift.stage1.trusted_authority"}
+    )
     for art_name, art_hash in ev.evidence_artifacts.items():
         if not isinstance(art_hash, str) or len(art_hash) != 64:
             raise ValueError(f"INVALID_ARTIFACT_HASH:{art_name}")
@@ -430,31 +475,57 @@ def advance_prospective_session(
         if content_hash(art_obj) != art_hash:
             raise ValueError(f"ARTIFACT_CONTENT_HASH_MISMATCH:{art_name}")
 
-        if isinstance(art_obj, dict):
-            if (
-                "registration_id" in art_obj
-                and art_obj["registration_id"] != registration.registration_id
+        if not isinstance(art_obj, dict) or len(art_obj) == 0:
+            raise ValueError(f"EMPTY_OR_INVALID_ARTIFACT:{art_name}")
+
+        # Check appropriate artifact role
+        art_role = art_obj.get("artifact_role") or art_obj.get("artifact_type")
+        if not art_role or art_role != art_name:
+            raise ValueError(
+                f"ARTIFACT_ROLE_MISMATCH: expected {art_name}, got {art_role}"
+            )
+
+        # Mandatory registration and freeze bindings
+        if art_obj.get("registration_id") != registration.registration_id:
+            raise ValueError(f"ARTIFACT_REGISTRATION_MISMATCH:{art_name}")
+        if art_obj.get("freeze_hash") != registration.frozen_study.freeze_hash:
+            raise ValueError(f"ARTIFACT_FREEZE_MISMATCH:{art_name}")
+
+        # Mandatory session index binding
+        if art_obj.get("session_index") != registration.observed_session_count:
+            raise ValueError(f"ARTIFACT_SESSION_INDEX_MISMATCH:{art_name}")
+
+        # Mandatory session date binding
+        raw_bound_date = art_obj.get("session_date")
+        if raw_bound_date is None:
+            raise ValueError(f"ARTIFACT_SESSION_DATE_MISSING:{art_name}")
+        bound_date = (
+            date.fromisoformat(raw_bound_date)
+            if isinstance(raw_bound_date, str)
+            else raw_bound_date
+        )
+        if bound_date != session_date:
+            raise ValueError(f"ARTIFACT_SESSION_DATE_MISMATCH:{art_name}")
+
+        # Mandatory execution payload (reject empty artifacts)
+        payload = art_obj.get("execution_payload") or art_obj.get("data")
+        if not payload or not isinstance(payload, dict) or len(payload) == 0:
+            raise ValueError(f"EMPTY_EXECUTION_PAYLOAD:{art_name}")
+
+        # Authenticated producer verification
+        authority = art_obj.get("authority_id") or art_obj.get("producer_id")
+        if not authority or not isinstance(authority, str) or not authority.strip():
+            raise ValueError(f"ARTIFACT_AUTHORITY_MISSING:{art_name}")
+
+        if effective_roots:
+            if authority not in effective_roots:
+                raise ValueError(f"UNTRUSTED_ARTIFACT_AUTHORITY:{art_name}")
+        else:
+            if any(
+                bad in authority.lower()
+                for bad in ("untrusted", "mock", "fabricat", "self_author")
             ):
-                raise ValueError(f"ARTIFACT_REGISTRATION_MISMATCH:{art_name}")
-            if (
-                "freeze_hash" in art_obj
-                and art_obj["freeze_hash"] != registration.frozen_study.freeze_hash
-            ):
-                raise ValueError(f"ARTIFACT_FREEZE_MISMATCH:{art_name}")
-            if (
-                "session_index" in art_obj
-                and art_obj["session_index"] != registration.observed_session_count
-            ):
-                raise ValueError(f"ARTIFACT_SESSION_INDEX_MISMATCH:{art_name}")
-            if "session_date" in art_obj:
-                bound_date = art_obj["session_date"]
-                if isinstance(bound_date, str):
-                    bound_date = date.fromisoformat(bound_date)
-                if bound_date != session_date:
-                    raise ValueError(f"ARTIFACT_SESSION_DATE_MISMATCH:{art_name}")
-            if "authority_id" in art_obj and effective_roots:
-                if art_obj["authority_id"] not in effective_roots:
-                    raise ValueError(f"UNTRUSTED_ARTIFACT_AUTHORITY:{art_name}")
+                raise ValueError(f"UNTRUSTED_ARTIFACT_AUTHORITY:{art_name}")
 
     # Calendar and date validation
     if session_date.weekday() >= 5:
