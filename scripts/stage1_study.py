@@ -108,21 +108,46 @@ def _registration_lock(private_root: Path, registration_id: str) -> Generator[No
             pass
 
 
+def _recover_uncommitted_publication(private_root: Path, registration_id: str) -> None:
+    """Reconcile uncommitted or orphaned publication remnants (Round 20).
+
+    If an earlier process was terminated after publishing evidence but before
+    publishing step state, the orphaned evidence is rolled back to allow clean
+    retry.
+    """
+    for ev_file in private_root.glob(f"{registration_id}-evidence-*.json"):
+        stem = ev_file.stem
+        if "-evidence-" in stem:
+            idx_str = stem.split("-evidence-")[-1]
+            step_file = private_root / f"{registration_id}-step-{idx_str}.json"
+            if not step_file.exists():
+                ev_file.unlink(missing_ok=True)
+
+    for tmp_f in private_root.glob(f"{registration_id}-*.tmp.*"):
+        tmp_f.unlink(missing_ok=True)
+
+
 def _publish_prospective_step_pair(
     ev_path: Path,
     ev_data: dict[str, Any] | str,
     step_path: Path,
     step_data: dict[str, Any] | str,
 ) -> None:
-    """Atomically commit evidence and step state pair with duplicate rejection."""
+    """Atomically commit evidence and step state pair with recoverable protocol."""
     ev_path.parent.mkdir(parents=True, exist_ok=True)
     step_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if ev_path.exists() or step_path.exists():
+    if ev_path.exists() and step_path.exists():
         raise FileExistsError(
-            f"Step target file {step_path.name} or evidence {ev_path.name} "
-            f"already exists"
+            f"Step target file {step_path.name} and evidence {ev_path.name} "
+            f"already exist"
         )
+
+    # Clean any uncommitted single-file remnant before publishing
+    if ev_path.exists():
+        ev_path.unlink(missing_ok=True)
+    if step_path.exists():
+        step_path.unlink(missing_ok=True)
 
     ev_text = (
         ev_data
@@ -143,6 +168,10 @@ def _publish_prospective_step_pair(
 
     try:
         os.replace(tmp_ev, ev_path)
+
+        if os.environ.get("_DRIFT_TEST_CRASH_AFTER_FIRST_RENAME") == "1":
+            os._exit(42)
+
         os.replace(tmp_step, step_path)
     except Exception:
         tmp_ev.unlink(missing_ok=True)
@@ -808,6 +837,8 @@ def action_prospective_step(args: argparse.Namespace) -> int:
         private_root.mkdir(parents=True, exist_ok=True)
 
         with _registration_lock(private_root, reg.registration_id):
+            _recover_uncommitted_publication(private_root, reg.registration_id)
+
             step_files = sorted(
                 private_root.glob(f"{reg.registration_id}-step-*.json"),
                 key=lambda p: (
@@ -1013,10 +1044,10 @@ def action_prospective_step(args: argparse.Namespace) -> int:
             step_ev_fname = f"{reg.registration_id}-evidence-{target_idx}.json"
             step_ev_path = private_root / step_ev_fname
 
-            if out_path.exists() or step_ev_path.exists():
+            if out_path.exists() and step_ev_path.exists():
                 sys.stderr.write(
-                    f"CONFLICT_ERROR: step file {step_fname} or evidence file "
-                    f"already exists\n"
+                    f"CONFLICT_ERROR: step file {step_fname} and evidence file "
+                    f"already exist\n"
                 )
                 return 3
 
