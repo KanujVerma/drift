@@ -3,6 +3,7 @@
 import json
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -185,6 +186,24 @@ def test_cli_prospective_register_and_step(repo_root: Path, tmp_path: Path) -> N
     assert reg_data["observed_session_count"] == 0
 
     # 2. Step
+    art_store: dict[str, Any] = {}
+    art_hashes: dict[str, str] = {}
+    for art_name in ("portfolio_state", "decision", "fills"):
+        art_body = {
+            "artifact_type": art_name,
+            "registration_id": f"REG-{plan.plan_id}",
+            "freeze_hash": reg_data["frozen_study"]["freeze_hash"],
+            "session_index": 0,
+            "session_date": "2026-11-03",
+            "data": {"status": "OK", "step": 0},
+        }
+        ah = content_hash(art_body)
+        art_store[ah] = art_body
+        art_hashes[art_name] = ah
+
+    host_config["artifact_store"] = art_store
+    host_config_file.write_text(json.dumps(host_config), encoding="utf-8")
+
     ev_body = {
         "schema_version": "drift-stage1-prospective-session-evidence/1",
         "registration_id": f"REG-{plan.plan_id}",
@@ -192,7 +211,7 @@ def test_cli_prospective_register_and_step(repo_root: Path, tmp_path: Path) -> N
         "session_index": 0,
         "session_date": "2026-11-03",
         "status": "COMPLETED",
-        "evidence_artifacts": {"observation": "1" * 64},
+        "evidence_artifacts": art_hashes,
     }
     ev_file = private_root / "step-0-evidence.json"
     ev_file.write_text(
@@ -328,7 +347,6 @@ def test_cli_calibrate_and_historical_handlers(repo_root: Path, tmp_path: Path) 
 def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> None:
     from datetime import UTC, date, datetime
     from decimal import Decimal
-    from typing import Any
 
     from drift.experiments.stage1_original_acceptance import (
         ProductionStudyEvidenceVerifier,

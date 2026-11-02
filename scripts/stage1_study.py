@@ -576,11 +576,26 @@ def action_prospective_step(args: argparse.Namespace) -> int:
             sys.stderr.write("Prospective step requires verified session_evidence\n")
             return 3
 
+        # Artifact store resolution
+        artifact_store = dict(
+            host_config.get("artifact_store", host_config.get("receipt_store", {}))
+        )
+        if hasattr(args, "artifact_store") and args.artifact_store:
+            extra_store = _read_json(args.artifact_store)
+            if isinstance(extra_store, dict):
+                artifact_store.update(extra_store)
+
+        trust_roots = set(
+            host_config.get("trust_roots", ["drift.stage1.trusted_authority"])
+        )
+
         advanced = advance_prospective_session(
             reg,
             session_date=step_date,
             session_evidence=ev_data,
             calendar=calendar_dates,
+            artifact_store=artifact_store,
+            trust_roots=trust_roots,
         )
         step_fname = (
             f"{advanced.registration_id}-step-{advanced.observed_session_count}.json"
@@ -642,6 +657,7 @@ def build_parser() -> argparse.ArgumentParser:
     pstep.add_argument("--private-root", required=True)
     pstep.add_argument("--session-date", required=False, default=None)
     pstep.add_argument("--session-evidence", required=False, default=None)
+    pstep.add_argument("--artifact-store", required=False, default=None)
 
     return parser
 

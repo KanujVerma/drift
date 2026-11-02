@@ -9,6 +9,7 @@ Implements broker-free prospective system:
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from datetime import date, datetime
 from typing import Any, Literal, Self
 
@@ -332,14 +333,23 @@ def create_prospective_session_evidence(
     )
 
 
+REQUIRED_PROSPECTIVE_ARTIFACTS: frozenset[str] = frozenset(
+    {"portfolio_state", "decision", "fills"}
+)
+
+
 def advance_prospective_session(
     registration: ProspectiveRegistrationV1,
     *,
     session_date: date,
     session_evidence: ProspectiveSessionEvidenceV1 | dict[str, Any] | None = None,
-    calendar: set[date] | tuple[date, ...] | None = None,
+    calendar: set[date] | tuple[date, ...] | list[date] | None = None,
+    artifact_store: Mapping[str, Any] | Callable[[str], Any] | None = None,
+    trust_roots: set[str] | tuple[str, ...] | list[str] | None = None,
 ) -> ProspectiveRegistrationV1:
     """Durably advances prospective observation by one session."""
+    import json
+
     if registration.has_broker_dispatch_capability:
         raise ValueError("BROKER_DISPATCH_FORBIDDEN")
 
@@ -354,9 +364,13 @@ def advance_prospective_session(
     if session_evidence is None:
         raise ValueError("SESSION_EVIDENCE_REQUIRED")
 
-    if isinstance(session_evidence, dict):
-        import json
+    if artifact_store is None:
+        raise ValueError(
+            "EXECUTION_EVIDENCE_STORE_REQUIRED: artifact_store must be provided "
+            "to verify execution evidence"
+        )
 
+    if isinstance(session_evidence, dict):
         ev = ProspectiveSessionEvidenceV1.model_validate_json(
             json.dumps(session_evidence)
         )
@@ -376,12 +390,75 @@ def advance_prospective_session(
     if ev.status not in ("OBSERVED", "COMPLETED"):
         raise ValueError("SESSION_EVIDENCE_STATUS_NOT_OBSERVED")
 
+    # Verify required prospective execution artifacts
+    for req_art in REQUIRED_PROSPECTIVE_ARTIFACTS:
+        if req_art not in ev.evidence_artifacts:
+            raise ValueError(f"MISSING_REQUIRED_ARTIFACT:{req_art}")
+
+    # Resolve and verify each referenced artifact in the trusted store
+    effective_roots = set(trust_roots) if trust_roots else None
+    for art_name, art_hash in ev.evidence_artifacts.items():
+        if not isinstance(art_hash, str) or len(art_hash) != 64:
+            raise ValueError(f"INVALID_ARTIFACT_HASH:{art_name}")
+        try:
+            int(art_hash, 16)
+        except ValueError as err:
+            raise ValueError(f"NON_HEX_ARTIFACT_HASH:{art_name}") from err
+
+        if callable(artifact_store):
+            raw_art = artifact_store(art_hash)
+        elif isinstance(artifact_store, Mapping):
+            raw_art = artifact_store.get(art_hash)
+        else:
+            raise ValueError("INVALID_ARTIFACT_STORE_TYPE")
+
+        if raw_art is None:
+            raise ValueError(f"ARTIFACT_NOT_FOUND_IN_STORE:{art_name}")
+
+        if isinstance(raw_art, (bytes, str)):
+            try:
+                art_obj = json.loads(
+                    raw_art if isinstance(raw_art, str) else raw_art.decode("utf-8")
+                )
+            except Exception as e:
+                raise ValueError(f"MALFORMED_ARTIFACT_JSON:{art_name}:{e}") from e
+        elif isinstance(raw_art, dict):
+            art_obj = raw_art
+        else:
+            raise ValueError(f"INVALID_ARTIFACT_TYPE:{art_name}")
+
+        if content_hash(art_obj) != art_hash:
+            raise ValueError(f"ARTIFACT_CONTENT_HASH_MISMATCH:{art_name}")
+
+        if isinstance(art_obj, dict):
+            if (
+                "registration_id" in art_obj
+                and art_obj["registration_id"] != registration.registration_id
+            ):
+                raise ValueError(f"ARTIFACT_REGISTRATION_MISMATCH:{art_name}")
+            if (
+                "freeze_hash" in art_obj
+                and art_obj["freeze_hash"] != registration.frozen_study.freeze_hash
+            ):
+                raise ValueError(f"ARTIFACT_FREEZE_MISMATCH:{art_name}")
+            if (
+                "session_index" in art_obj
+                and art_obj["session_index"] != registration.observed_session_count
+            ):
+                raise ValueError(f"ARTIFACT_SESSION_INDEX_MISMATCH:{art_name}")
+            if "session_date" in art_obj:
+                bound_date = art_obj["session_date"]
+                if isinstance(bound_date, str):
+                    bound_date = date.fromisoformat(bound_date)
+                if bound_date != session_date:
+                    raise ValueError(f"ARTIFACT_SESSION_DATE_MISMATCH:{art_name}")
+            if "authority_id" in art_obj and effective_roots:
+                if art_obj["authority_id"] not in effective_roots:
+                    raise ValueError(f"UNTRUSTED_ARTIFACT_AUTHORITY:{art_name}")
+
     # Calendar and date validation
     if session_date.weekday() >= 5:
         raise ValueError(f"SESSION_DATE_NOT_A_TRADING_DAY: {session_date} is weekend")
-
-    if calendar is not None and session_date not in calendar:
-        raise ValueError(f"SESSION_DATE_NOT_IN_CALENDAR: {session_date}")
 
     plan = registration.frozen_study.plan
     if (
@@ -393,14 +470,52 @@ def advance_prospective_session(
             f"[{plan.first_eligible_session}, {plan.planned_last_session}]"
         )
 
-    if (
-        registration.last_observed_session is not None
-        and session_date <= registration.last_observed_session
-    ):
-        raise ValueError(
-            f"SESSION_DATE_NOT_CONSECUTIVE: {session_date} must be strictly after "
-            f"{registration.last_observed_session}"
+    # Enforce exact sequential scheduled sessions and reject any gaps
+    if calendar is not None:
+        eligible_calendar = sorted(
+            [
+                d
+                for d in calendar
+                if plan.first_eligible_session <= d <= plan.planned_last_session
+                and d.weekday() < 5
+            ]
         )
+        if not eligible_calendar:
+            raise ValueError("CALENDAR_HAS_NO_ELIGIBLE_SESSIONS_IN_WINDOW")
+
+        expected_idx = registration.observed_session_count
+        if expected_idx >= len(eligible_calendar):
+            raise ValueError("ALL_SCHEDULED_CALENDAR_SESSIONS_ALREADY_OBSERVED")
+
+        expected_date = eligible_calendar[expected_idx]
+        if session_date != expected_date:
+            raise ValueError(
+                f"SESSION_DATE_NOT_SEQUENTIAL: expected exact next scheduled session "
+                f"{expected_date} (session {expected_idx}), got {session_date}"
+            )
+    else:
+        from datetime import timedelta
+
+        def _next_trading_day(cur: date) -> date:
+            nxt = cur + timedelta(days=1)
+            while nxt.weekday() >= 5:
+                nxt += timedelta(days=1)
+            return nxt
+
+        if registration.observed_session_count == 0:
+            expected_date = plan.first_eligible_session
+            while expected_date.weekday() >= 5:
+                expected_date += timedelta(days=1)
+        else:
+            assert registration.last_observed_session is not None
+            expected_date = _next_trading_day(registration.last_observed_session)
+
+        if session_date != expected_date:
+            raise ValueError(
+                f"SESSION_DATE_NOT_SEQUENTIAL: expected exact next scheduled session "
+                f"{expected_date} (session {registration.observed_session_count}), "
+                f"got {session_date}"
+            )
 
     new_count = registration.observed_session_count + 1
     new_state: ProspectiveLifecycle = (
