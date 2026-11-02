@@ -24,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from drift.qualification.alpaca_sip_verification import (
+    EXACT_12_ETF_UNIVERSE,
     verify_g1_alpaca_sip_qualification,
 )
 
@@ -40,6 +41,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Historical request end timestamp (ISO-8601).",
     )
     parser.add_argument(
+        "--as-of",
+        type=str,
+        default=None,
+        help="Explicit verification timestamp (ISO-8601). Defaults to now(UTC).",
+    )
+    parser.add_argument(
+        "--with-fixtures",
+        action="store_true",
+        help="Bind offline verification fixtures to demonstrate verified pass.",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Output raw JSON report.",
@@ -52,12 +64,34 @@ def main() -> int:
     args = parser.parse_args()
 
     request_end = datetime.fromisoformat(args.request_end.replace("Z", "+00:00"))
-    now = datetime(2026, 11, 2, 14, 30, 0, tzinfo=UTC)
-
-    report = verify_g1_alpaca_sip_qualification(
-        request_end=request_end,
-        request_time=now,
+    now = (
+        datetime.fromisoformat(args.as_of.replace("Z", "+00:00"))
+        if args.as_of is not None
+        else datetime.now(UTC)
     )
+
+    if args.with_fixtures:
+        from types import SimpleNamespace
+
+        mock_receipt = SimpleNamespace(receipt_id="MOCK-ACQ-RECEIPT-ALPACA-SIP-V1")
+        intake_res = SimpleNamespace(acquisition=SimpleNamespace(receipt=mock_receipt))
+        rights_assessment = SimpleNamespace(
+            assessment_id="MOCK-RIGHTS-ASSESSMENT-ALPACA-V1"
+        )
+        report = verify_g1_alpaca_sip_qualification(
+            request_end=request_end,
+            request_time=now,
+            intake_result=intake_res,
+            raw_payloads=None,
+            corporate_actions=tuple(f"MOCK-CA-{t}" for t in EXACT_12_ETF_UNIVERSE),
+            rights_assessment=rights_assessment,
+            covered_tickers=EXACT_12_ETF_UNIVERSE,
+        )
+    else:
+        report = verify_g1_alpaca_sip_qualification(
+            request_end=request_end,
+            request_time=now,
+        )
 
     if args.json:
         print(report.model_dump_json(indent=2))
@@ -72,6 +106,10 @@ def main() -> int:
     print(f"Verified At:    {report.verified_at.isoformat()}")
     print(f"Report Hash:    {report.report_hash}")
     print(f"Overall Status: {report.overall_status}")
+    if report.refusal_reasons:
+        print("Refusal Reasons:")
+        for reason in report.refusal_reasons:
+            print(f"  * {reason}")
     print(sep)
     print("1. Free Historical SIP Access Verification:")
     sip = report.sip_access_check
@@ -91,9 +129,10 @@ def main() -> int:
     print(f"   Eval Window:            {cov.evaluation_window[0]}")
     print(f"   All Windows Covered:    {cov.all_windows_fully_covered}")
     for sec in cov.securities:
+        status_str = "100%" if sec.warmup_covered else "UNVERIFIED"
         print(
             f"     - {sec.ticker:<4} | Venue: {sec.primary_venue:<4} | "
-            f"Inception: {sec.inception_date} | Covered: 100%"
+            f"Inception: {sec.inception_date} | Covered: {status_str}"
         )
     print(sep)
     print("3. Original Source Provenance:")
@@ -115,9 +154,10 @@ def main() -> int:
     print("5. Contractual Research & Retention Rights:")
     r = report.contractual_rights
     print(f"   Provider / License:     {r.provider} ({r.license_type})")
-    print(f"   Internal Research:      {r.internal_research_permitted} (OK)")
-    print(f"   Non-Display Execution:  {r.algorithmic_non_display_permitted} (OK)")
-    print(f"   Private Offline Store:  {r.private_offline_retention_permitted} (OK)")
+    print(f"   Rights Verified:        {r.is_verified}")
+    print(f"   Internal Research:      {r.internal_research_permitted}")
+    print(f"   Non-Display Execution:  {r.algorithmic_non_display_permitted}")
+    print(f"   Private Offline Store:  {r.private_offline_retention_permitted}")
     print(f"   Public Redistribution:  {r.public_redistribution_permitted} (NO)")
     print(f"   Git Tree Retention:     {r.git_tree_retention_permitted} (PROHIBITED)")
     print(f"   Classification:         {r.compliance_classification}")

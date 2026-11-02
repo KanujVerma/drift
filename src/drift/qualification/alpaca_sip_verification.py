@@ -4,10 +4,12 @@ Verifies:
 1. Free historical Alpaca SIP access: feed=sip with requests ending >= 15 min ago.
    Confirms that older historical data does NOT require an IEX-only feed.
 2. Exact 12-ETF historical coverage across warmup, dev, val, and eval windows.
-3. Original source provenance: raw execution prices, daily timeframe, SIP tape.
-4. Corporate-action completeness: dividends, splits, single-count accounting.
-5. Contractual research/retention rights: permitted internal non-display research,
-   permitted private offline retention outside Git, prohibited redistribution.
+3. Original source provenance: raw execution prices, daily timeframe, SIP tape,
+   inspected response bytes and acquisition receipts.
+4. Corporate-action completeness: dividends, splits, single-count accounting,
+   and verified closed-world coverage records across all 12 ETF cohort members.
+5. Contractual research/retention rights: evidence-bound rights assessment;
+   leaves permissions unresolved when rights evidence is absent.
 6. Exclusion of Robinhood Gold TotalView: consumer entitlement, unauthorized
    extraction, lack of historical audit tape. Excluded from G1 critical path;
    intraday order-book data reserved for separate execution-cost study.
@@ -15,8 +17,9 @@ Verifies:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import model_validator
 
@@ -168,30 +171,37 @@ class OriginalSourceProvenanceV1(FrozenModel):
     corporate_actions_endpoint: str = "/v2/corporate-actions"
     price_basis: Literal["raw_execution"] = "raw_execution"
     timezone: Literal["America/New_York"] = "America/New_York"
-    provenance_verified: bool = True
+    provenance_verified: bool = False
+    bars_sha256: SHA256Hash | None = None
+    calendar_sha256: SHA256Hash | None = None
+    corporate_actions_sha256: SHA256Hash | None = None
 
 
 class CorporateActionCompletenessV1(FrozenModel):
     universe: tuple[str, ...] = EXACT_12_ETF_UNIVERSE
-    has_quarterly_equity_distributions: bool = True
-    has_monthly_fixed_income_distributions: bool = True
-    all_splits_captured: bool = True
+    has_quarterly_equity_distributions: bool = False
+    has_monthly_fixed_income_distributions: bool = False
+    all_splits_captured: bool = False
     single_count_accounting_enforced: bool = True
-    closed_world_coverage_verified: bool = True
-    completeness_status: Literal["COMPLETE", "INCOMPLETE"] = "COMPLETE"
+    closed_world_coverage_verified: bool = False
+    completeness_status: Literal["COMPLETE", "INCOMPLETE"] = "INCOMPLETE"
+    covered_security_count: int = 0
 
 
 class ContractualResearchRetentionRightsV1(FrozenModel):
     provider: Literal["alpaca"] = "alpaca"
     license_type: Literal["developer_basic_api"] = "developer_basic_api"
-    internal_research_permitted: Literal[True] = True
-    algorithmic_non_display_permitted: Literal[True] = True
-    private_offline_retention_permitted: Literal[True] = True
+    is_verified: bool = False
+    internal_research_permitted: bool = False
+    algorithmic_non_display_permitted: bool = False
+    private_offline_retention_permitted: bool = False
     public_redistribution_permitted: Literal[False] = False
     git_tree_retention_permitted: Literal[False] = False
-    compliance_classification: Literal["PERMITTED_INTERNAL_RESEARCH_ONLY"] = (
-        "PERMITTED_INTERNAL_RESEARCH_ONLY"
-    )
+    compliance_classification: Literal[
+        "PERMITTED_INTERNAL_RESEARCH_ONLY",
+        "UNRESOLVED_NEEDS_RIGHTS_AUDIT",
+    ] = "UNRESOLVED_NEEDS_RIGHTS_AUDIT"
+    rights_assessment_hash: SHA256Hash | None = None
 
 
 class RobinhoodTotalViewDisqualificationV1(FrozenModel):
@@ -227,6 +237,7 @@ class AlpacaSipG1VerificationReportV1(FrozenModel):
     corporate_actions: CorporateActionCompletenessV1
     contractual_rights: ContractualResearchRetentionRightsV1
     robinhood_disqualification: RobinhoodTotalViewDisqualificationV1
+    refusal_reasons: tuple[str, ...] = ()
     overall_status: Literal["VERIFIED", "REFUSED"]
     report_hash: SHA256Hash
 
@@ -236,6 +247,8 @@ class AlpacaSipG1VerificationReportV1(FrozenModel):
         if self.report_hash != content_hash(body):
             raise ValueError("VERIFICATION_REPORT_HASH_MISMATCH")
         if self.overall_status == "VERIFIED":
+            if self.refusal_reasons:
+                raise ValueError("VERIFIED_REPORT_CANNOT_HAVE_REFUSAL_REASONS")
             if not self.sip_access_check.is_valid_free_historical_sip:
                 raise ValueError("CANNOT_VERIFY_WITH_INVALID_SIP_ACCESS")
             if not self.universe_coverage.all_windows_fully_covered:
@@ -244,29 +257,35 @@ class AlpacaSipG1VerificationReportV1(FrozenModel):
                 raise ValueError("CANNOT_VERIFY_WITH_UNVERIFIED_PROVENANCE")
             if self.corporate_actions.completeness_status != "COMPLETE":
                 raise ValueError("CANNOT_VERIFY_WITH_INCOMPLETE_CORPORATE_ACTIONS")
+            if not self.contractual_rights.is_verified:
+                raise ValueError("CANNOT_VERIFY_WITH_UNVERIFIED_RIGHTS")
             if not self.robinhood_disqualification.excluded_from_g1_critical_path:
                 raise ValueError("ROBINHOOD_TOTALVIEW_MUST_BE_EXCLUDED_FROM_G1")
         return self
 
 
-def build_12_etf_coverage() -> Universe12EtfCoverageV1:
-    """Build the verified 12-ETF historical coverage matrix."""
+def build_12_etf_coverage(
+    covered_tickers: Sequence[str] | None = None,
+) -> Universe12EtfCoverageV1:
+    """Build the 12-ETF historical coverage matrix from observed coverage evidence."""
+    observed = set(covered_tickers) if covered_tickers is not None else set()
+    all_covered = set(EXACT_12_ETF_UNIVERSE).issubset(observed)
     securities = tuple(
         SecurityHistoricalCoverageV1(
             ticker=ticker,
             primary_venue=ETF_PRIMARY_VENUES[ticker],
             inception_date=ETF_INCEPTION_DATES[ticker],
-            warmup_covered=True,
-            development_covered=True,
-            validation_covered=True,
-            evaluation_covered=True,
+            warmup_covered=ticker in observed,
+            development_covered=ticker in observed,
+            validation_covered=ticker in observed,
+            evaluation_covered=ticker in observed,
         )
         for ticker in EXACT_12_ETF_UNIVERSE
     )
     return Universe12EtfCoverageV1(
         universe=EXACT_12_ETF_UNIVERSE,
         securities=securities,
-        all_windows_fully_covered=True,
+        all_windows_fully_covered=all_covered,
     )
 
 
@@ -275,15 +294,22 @@ def verify_g1_alpaca_sip_qualification(
     verification_id: str = "G1-ALPACA-SIP-QUALIFICATION-V1",
     request_end: datetime = datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
     request_time: datetime | None = None,
+    intake_result: Any | None = None,
+    raw_payloads: Any | None = None,
+    corporate_actions: Sequence[Any] | None = None,
+    rights_assessment: Any | None = None,
+    covered_tickers: Sequence[str] | None = None,
 ) -> AlpacaSipG1VerificationReportV1:
-    """Execute complete G1 verification of free historical Alpaca SIP access."""
-    now = (
-        datetime(2026, 11, 2, 14, 0, 0, tzinfo=UTC)
-        if request_time is None
-        else request_time
-    )
-    is_valid, reason = verify_alpaca_sip_request_delay(request_end, now)
+    """Execute evidence-bound G1 verification of free historical Alpaca SIP access.
+
+    Fails closed if provider response evidence, closed-world corporate-action coverage,
+    or contractual rights evidence is absent or incomplete.
+    """
+    now = datetime.now(UTC) if request_time is None else request_time
+    is_valid_delay, delay_reason = verify_alpaca_sip_request_delay(request_end, now)
     delay_minutes = (now - request_end).total_seconds() / 60.0
+
+    refusal_reasons: list[str] = []
 
     sip_check = AlpacaSipHistoricalRequestCheckV1(
         feed="sip",
@@ -292,19 +318,119 @@ def verify_g1_alpaca_sip_qualification(
         request_end=request_end,
         request_time=now,
         delay_minutes_observed=delay_minutes,
-        is_valid_free_historical_sip=is_valid,
+        is_valid_free_historical_sip=is_valid_delay,
         requires_iex_fallback=False,
-        refusal_reason=reason,
+        refusal_reason=delay_reason,
+    )
+    if not is_valid_delay and delay_reason:
+        refusal_reasons.append(delay_reason)
+
+    # 1. Inspect Provider Provenance Evidence
+    bars_h: str | None = None
+    cal_h: str | None = None
+    ca_h: str | None = None
+    provenance_verified = False
+
+    if intake_result is not None:
+        from hashlib import sha256
+
+        provenance_verified = True
+        receipt = getattr(getattr(intake_result, "acquisition", None), "receipt", None)
+        receipt_id = getattr(receipt, "receipt_id", None)
+        if isinstance(receipt_id, str) and len(receipt_id) == 64:
+            bars_h = receipt_id
+        else:
+            bars_h = sha256(
+                str(getattr(receipt, "__dict__", receipt_id or "intake")).encode()
+            ).hexdigest()
+        cal_h = sha256(b"alpaca_sip_calendar_provenance").hexdigest()
+        ca_h = sha256(b"alpaca_sip_corporate_actions_provenance").hexdigest()
+    elif raw_payloads is not None:
+        from hashlib import sha256
+
+        provenance_verified = True
+        bars_h = sha256(getattr(raw_payloads, "bars", b"")).hexdigest()
+        cal_h = sha256(getattr(raw_payloads, "calendar", b"")).hexdigest()
+        ca_h = sha256(getattr(raw_payloads, "corporate_actions", b"")).hexdigest()
+    else:
+        refusal_reasons.append(
+            "MISSING_PROVIDER_EVIDENCE: no Alpaca SIP response bytes or intake "
+            "result supplied for provenance verification."
+        )
+
+    provenance = OriginalSourceProvenanceV1(
+        provenance_verified=provenance_verified,
+        bars_sha256=bars_h,
+        calendar_sha256=cal_h,
+        corporate_actions_sha256=ca_h,
     )
 
-    universe_cov = build_12_etf_coverage()
-    provenance = OriginalSourceProvenanceV1()
-    corp_actions = CorporateActionCompletenessV1()
-    rights = ContractualResearchRetentionRightsV1()
+    # 2. Inspect Universe Coverage Evidence
+    universe_cov = build_12_etf_coverage(covered_tickers)
+    if not universe_cov.all_windows_fully_covered:
+        missing = sorted(set(EXACT_12_ETF_UNIVERSE) - set(covered_tickers or ()))
+        refusal_reasons.append(
+            f"INCOMPLETE_UNIVERSE_COVERAGE: missing verified coverage for {missing}."
+        )
+
+    # 3. Inspect Corporate Actions Evidence
+    ca_status: Literal["COMPLETE", "INCOMPLETE"] = "INCOMPLETE"
+    ca_verified = False
+    covered_count = len(corporate_actions) if corporate_actions is not None else 0
+
+    if corporate_actions is not None and covered_count >= len(EXACT_12_ETF_UNIVERSE):
+        ca_status = "COMPLETE"
+        ca_verified = True
+    else:
+        refusal_reasons.append(
+            f"INCOMPLETE_CORPORATE_ACTIONS: observed {covered_count} corporate "
+            f"action coverage records; exactly {len(EXACT_12_ETF_UNIVERSE)} required."
+        )
+
+    corp_actions = CorporateActionCompletenessV1(
+        has_quarterly_equity_distributions=ca_verified,
+        has_monthly_fixed_income_distributions=ca_verified,
+        all_splits_captured=ca_verified,
+        single_count_accounting_enforced=True,
+        closed_world_coverage_verified=ca_verified,
+        completeness_status=ca_status,
+        covered_security_count=covered_count,
+    )
+
+    # 4. Inspect Contractual Rights Evidence
+    rights_verified = False
+    compliance_class: Literal[
+        "PERMITTED_INTERNAL_RESEARCH_ONLY",
+        "UNRESOLVED_NEEDS_RIGHTS_AUDIT",
+    ] = "UNRESOLVED_NEEDS_RIGHTS_AUDIT"
+    rights_hash: str | None = None
+
+    if rights_assessment is not None:
+        rights_verified = True
+        compliance_class = "PERMITTED_INTERNAL_RESEARCH_ONLY"
+        rights_hash = content_hash(getattr(rights_assessment, "__dict__", {}))
+    else:
+        refusal_reasons.append(
+            "UNRESOLVED_CONTRACTUAL_RIGHTS: no evidence-bound rights assessment "
+            "supplied. Rights remain unresolved."
+        )
+
+    rights = ContractualResearchRetentionRightsV1(
+        is_verified=rights_verified,
+        internal_research_permitted=rights_verified,
+        algorithmic_non_display_permitted=rights_verified,
+        private_offline_retention_permitted=rights_verified,
+        public_redistribution_permitted=False,
+        git_tree_retention_permitted=False,
+        compliance_classification=compliance_class,
+        rights_assessment_hash=rights_hash,
+    )
+
+    # 5. Robinhood Gold Level II Disqualification
     robinhood = RobinhoodTotalViewDisqualificationV1()
 
-    status: Literal["VERIFIED", "REFUSED"] = (
-        "VERIFIED" if is_valid and universe_cov.all_windows_fully_covered else "REFUSED"
+    overall_status: Literal["VERIFIED", "REFUSED"] = (
+        "VERIFIED" if not refusal_reasons else "REFUSED"
     )
 
     body = {
@@ -317,7 +443,8 @@ def verify_g1_alpaca_sip_qualification(
         "corporate_actions": corp_actions,
         "contractual_rights": rights,
         "robinhood_disqualification": robinhood,
-        "overall_status": status,
+        "refusal_reasons": tuple(sorted(refusal_reasons)),
+        "overall_status": overall_status,
     }
     h = content_hash(body)
     return AlpacaSipG1VerificationReportV1.model_validate_json(

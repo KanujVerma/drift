@@ -1,6 +1,7 @@
 """Unit tests for Drift Stage 1 (G1) free historical Alpaca SIP verification."""
 
 from datetime import UTC, date, datetime, timedelta
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -33,12 +34,48 @@ from drift.qualification.alpaca_sip_verification import (
 FIXED_NOW = datetime(2026, 11, 2, 14, 0, 0, tzinfo=UTC)
 
 
-def test_free_historical_sip_access_verification_passes() -> None:
-    """Historical requests ending > 15 minutes in past succeed without IEX."""
+def make_mock_evidence() -> tuple[Any, tuple[str, ...], Any, tuple[str, ...]]:
+    from types import SimpleNamespace
+
+    mock_receipt = SimpleNamespace(receipt_id="MOCK-ACQ-RECEIPT-ALPACA-SIP-V1")
+    intake_res = SimpleNamespace(acquisition=SimpleNamespace(receipt=mock_receipt))
+    corporate_actions = tuple(f"MOCK-CA-{t}" for t in EXACT_12_ETF_UNIVERSE)
+    rights_assessment = SimpleNamespace(
+        assessment_id="MOCK-RIGHTS-ASSESSMENT-ALPACA-V1",
+        entitlement_scope="INTERNAL_RESEARCH_NON_DISPLAY",
+    )
+    covered_tickers = EXACT_12_ETF_UNIVERSE
+    return intake_res, corporate_actions, rights_assessment, covered_tickers
+
+
+def test_free_historical_sip_access_verification_fails_closed_without_evidence() -> (
+    None
+):
+    """Calling verification without evidence fails closed and returns REFUSED."""
     request_end = datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC)
     report = verify_g1_alpaca_sip_qualification(
         request_end=request_end,
         request_time=FIXED_NOW,
+    )
+    assert report.overall_status == "REFUSED"
+    assert len(report.refusal_reasons) == 4
+    assert any("MISSING_PROVIDER_EVIDENCE" in r for r in report.refusal_reasons)
+    assert any("UNRESOLVED_CONTRACTUAL_RIGHTS" in r for r in report.refusal_reasons)
+    assert any("INCOMPLETE_CORPORATE_ACTIONS" in r for r in report.refusal_reasons)
+    assert any("INCOMPLETE_UNIVERSE_COVERAGE" in r for r in report.refusal_reasons)
+
+
+def test_free_historical_sip_access_verification_passes_with_evidence() -> None:
+    """Historical requests ending > 15 minutes in past succeed with evidence."""
+    intake_res, ca_records, rights, tickers = make_mock_evidence()
+    request_end = datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC)
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=request_end,
+        request_time=FIXED_NOW,
+        intake_result=intake_res,
+        corporate_actions=ca_records,
+        rights_assessment=rights,
+        covered_tickers=tickers,
     )
     assert report.overall_status == "VERIFIED"
     assert report.sip_access_check.feed == ALPACA_SIP_FEED
@@ -49,6 +86,87 @@ def test_free_historical_sip_access_verification_passes() -> None:
     assert report.sip_access_check.requires_iex_fallback is False
     assert report.sip_access_check.delay_minutes_observed > 15.0
     assert len(report.report_hash) == 64
+    assert report.refusal_reasons == ()
+
+
+def test_verification_refuses_when_provider_evidence_missing() -> None:
+    """Refuse verification if provider response / intake evidence is missing."""
+    _, ca_records, rights, tickers = make_mock_evidence()
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        intake_result=None,
+        raw_payloads=None,
+        corporate_actions=ca_records,
+        rights_assessment=rights,
+        covered_tickers=tickers,
+    )
+    assert report.overall_status == "REFUSED"
+    assert any("MISSING_PROVIDER_EVIDENCE" in r for r in report.refusal_reasons)
+
+
+def test_verification_refuses_when_corporate_actions_incomplete() -> None:
+    """Refuse verification if corporate-actions coverage is incomplete (< 12)."""
+    intake_res, ca_records, rights, tickers = make_mock_evidence()
+    incomplete_ca = ca_records[:-1]  # Only 11 records
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        intake_result=intake_res,
+        corporate_actions=incomplete_ca,
+        rights_assessment=rights,
+        covered_tickers=tickers,
+    )
+    assert report.overall_status == "REFUSED"
+    assert any("INCOMPLETE_CORPORATE_ACTIONS" in r for r in report.refusal_reasons)
+
+
+def test_verification_refuses_when_universe_coverage_incomplete() -> None:
+    """Refuse verification if 12-ETF coverage is missing a ticker."""
+    intake_res, ca_records, rights, _ = make_mock_evidence()
+    missing_one = tuple(t for t in EXACT_12_ETF_UNIVERSE if t != "QQQ")
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        intake_result=intake_res,
+        corporate_actions=ca_records,
+        rights_assessment=rights,
+        covered_tickers=missing_one,
+    )
+    assert report.overall_status == "REFUSED"
+    assert any("INCOMPLETE_UNIVERSE_COVERAGE" in r for r in report.refusal_reasons)
+
+
+def test_verification_refuses_when_contractual_rights_unresolved() -> None:
+    """Refuse verification if contractual rights assessment is absent."""
+    intake_res, ca_records, _, tickers = make_mock_evidence()
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        intake_result=intake_res,
+        corporate_actions=ca_records,
+        rights_assessment=None,
+        covered_tickers=tickers,
+    )
+    assert report.overall_status == "REFUSED"
+    assert any("UNRESOLVED_CONTRACTUAL_RIGHTS" in r for r in report.refusal_reasons)
+
+
+def test_verification_clock_defaults_to_now() -> None:
+    """Default clock must be datetime.now(UTC), not a fixed hardcoded date."""
+    intake_res, ca_records, rights, tickers = make_mock_evidence()
+    before = datetime.now(UTC)
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=None,
+        intake_result=intake_res,
+        corporate_actions=ca_records,
+        rights_assessment=rights,
+        covered_tickers=tickers,
+    )
+    after = datetime.now(UTC)
+    req_time = report.sip_access_check.request_time
+    assert before <= req_time <= after
 
 
 def test_free_sip_request_within_15_minutes_refused() -> None:
@@ -97,7 +215,11 @@ def test_iex_fallback_not_permitted_for_older_historical_data() -> None:
 
 def test_exact_12_etf_coverage_canonical_order_and_venues() -> None:
     """Verify exact 12 ETFs in canonical order with primary listing venues."""
-    cov = build_12_etf_coverage()
+    cov_empty = build_12_etf_coverage()
+    assert cov_empty.universe == EXACT_12_ETF_UNIVERSE
+    assert cov_empty.all_windows_fully_covered is False
+
+    cov = build_12_etf_coverage(EXACT_12_ETF_UNIVERSE)
     assert cov.universe == EXACT_12_ETF_UNIVERSE
     assert cov.universe == (
         "VOO",
@@ -134,7 +256,7 @@ def test_exact_12_etf_coverage_canonical_order_and_venues() -> None:
 
 def test_universe_coverage_refuses_altered_order() -> None:
     """Canonical 12-ETF universe order is mandatory."""
-    cov = build_12_etf_coverage()
+    cov = build_12_etf_coverage(EXACT_12_ETF_UNIVERSE)
     reversed_secs = tuple(reversed(cov.securities))
     with pytest.raises(
         ValidationError, match="SECURITIES_TICKERS_MUST_MATCH_EXACT_12_ETFS_ORDER"
@@ -148,7 +270,7 @@ def test_universe_coverage_refuses_altered_order() -> None:
 
 def test_universe_coverage_refuses_dropped_ticker() -> None:
     """Dropping any ticker (e.g. QQQ) is rejected as incomplete."""
-    cov = build_12_etf_coverage()
+    cov = build_12_etf_coverage(EXACT_12_ETF_UNIVERSE)
     dropped = tuple(s for s in cov.securities if s.ticker != "QQQ")
     with pytest.raises(
         ValidationError, match="SECURITIES_TICKERS_MUST_MATCH_EXACT_12_ETFS_ORDER"
@@ -162,7 +284,7 @@ def test_universe_coverage_refuses_dropped_ticker() -> None:
 
 def test_universe_coverage_refuses_inception_after_warmup() -> None:
     """Security with inception date after warmup start cannot claim coverage."""
-    cov = build_12_etf_coverage()
+    cov = build_12_etf_coverage(EXACT_12_ETF_UNIVERSE)
     bad_secs = list(cov.securities)
     bad_secs[0] = SecurityHistoricalCoverageV1(
         ticker="VOO",
@@ -183,34 +305,69 @@ def test_universe_coverage_refuses_inception_after_warmup() -> None:
 
 def test_original_source_provenance_verified() -> None:
     """Verify endpoint contracts and raw execution price basis."""
-    prov = OriginalSourceProvenanceV1()
-    assert prov.source_provider == "alpaca"
-    assert prov.feed_identity == "sip"
-    assert prov.price_basis == "raw_execution"
-    assert prov.timezone == "America/New_York"
-    assert prov.provenance_verified is True
+    prov_default = OriginalSourceProvenanceV1()
+    assert prov_default.source_provider == "alpaca"
+    assert prov_default.feed_identity == "sip"
+    assert prov_default.price_basis == "raw_execution"
+    assert prov_default.timezone == "America/New_York"
+    assert prov_default.provenance_verified is False
+
+    prov_verified = OriginalSourceProvenanceV1(
+        provenance_verified=True,
+        bars_sha256="a" * 64,
+        calendar_sha256="b" * 64,
+        corporate_actions_sha256="c" * 64,
+    )
+    assert prov_verified.provenance_verified is True
 
 
 def test_corporate_actions_completeness_verified() -> None:
     """Verify corporate actions completeness and single-count accounting."""
-    ca = CorporateActionCompletenessV1()
-    assert ca.has_quarterly_equity_distributions is True
-    assert ca.has_monthly_fixed_income_distributions is True
-    assert ca.all_splits_captured is True
-    assert ca.single_count_accounting_enforced is True
-    assert ca.closed_world_coverage_verified is True
-    assert ca.completeness_status == "COMPLETE"
+    ca_default = CorporateActionCompletenessV1()
+    assert ca_default.completeness_status == "INCOMPLETE"
+    assert ca_default.closed_world_coverage_verified is False
+
+    ca_verified = CorporateActionCompletenessV1(
+        has_quarterly_equity_distributions=True,
+        has_monthly_fixed_income_distributions=True,
+        all_splits_captured=True,
+        single_count_accounting_enforced=True,
+        closed_world_coverage_verified=True,
+        completeness_status="COMPLETE",
+        covered_security_count=12,
+    )
+    assert ca_verified.has_quarterly_equity_distributions is True
+    assert ca_verified.has_monthly_fixed_income_distributions is True
+    assert ca_verified.all_splits_captured is True
+    assert ca_verified.single_count_accounting_enforced is True
+    assert ca_verified.closed_world_coverage_verified is True
+    assert ca_verified.completeness_status == "COMPLETE"
 
 
 def test_contractual_research_and_retention_rights() -> None:
     """Verify contractual rights: internal research ok, redistribution barred."""
-    rights = ContractualResearchRetentionRightsV1()
-    assert rights.internal_research_permitted is True
-    assert rights.algorithmic_non_display_permitted is True
-    assert rights.private_offline_retention_permitted is True
-    assert rights.public_redistribution_permitted is False
-    assert rights.git_tree_retention_permitted is False
-    assert rights.compliance_classification == "PERMITTED_INTERNAL_RESEARCH_ONLY"
+    rights_default = ContractualResearchRetentionRightsV1()
+    assert rights_default.is_verified is False
+    assert rights_default.compliance_classification == "UNRESOLVED_NEEDS_RIGHTS_AUDIT"
+
+    rights_verified = ContractualResearchRetentionRightsV1(
+        is_verified=True,
+        internal_research_permitted=True,
+        algorithmic_non_display_permitted=True,
+        private_offline_retention_permitted=True,
+        public_redistribution_permitted=False,
+        git_tree_retention_permitted=False,
+        compliance_classification="PERMITTED_INTERNAL_RESEARCH_ONLY",
+        rights_assessment_hash="d" * 64,
+    )
+    assert rights_verified.internal_research_permitted is True
+    assert rights_verified.algorithmic_non_display_permitted is True
+    assert rights_verified.private_offline_retention_permitted is True
+    assert rights_verified.public_redistribution_permitted is False
+    assert rights_verified.git_tree_retention_permitted is False
+    assert (
+        rights_verified.compliance_classification == "PERMITTED_INTERNAL_RESEARCH_ONLY"
+    )
 
 
 def test_robinhood_gold_totalview_disqualification() -> None:

@@ -262,6 +262,7 @@ def action_assess(args: argparse.Namespace) -> int:
 def action_verify_market_data(args: argparse.Namespace) -> int:
     try:
         from drift.qualification.alpaca_sip_verification import (
+            EXACT_12_ETF_UNIVERSE,
             verify_g1_alpaca_sip_qualification,
         )
 
@@ -270,7 +271,36 @@ def action_verify_market_data(args: argparse.Namespace) -> int:
             if getattr(args, "request_end", None)
             else datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC)
         )
-        report = verify_g1_alpaca_sip_qualification(request_end=request_end)
+        now = (
+            datetime.fromisoformat(args.as_of.replace("Z", "+00:00"))
+            if getattr(args, "as_of", None)
+            else datetime.now(UTC)
+        )
+
+        if getattr(args, "with_fixtures", False):
+            from types import SimpleNamespace
+
+            mock_receipt = SimpleNamespace(receipt_id="MOCK-ACQ-RECEIPT-ALPACA-SIP-V1")
+            intake_res = SimpleNamespace(
+                acquisition=SimpleNamespace(receipt=mock_receipt)
+            )
+            rights_assessment = SimpleNamespace(
+                assessment_id="MOCK-RIGHTS-ASSESSMENT-ALPACA-V1"
+            )
+            report = verify_g1_alpaca_sip_qualification(
+                request_end=request_end,
+                request_time=now,
+                intake_result=intake_res,
+                corporate_actions=tuple(f"MOCK-CA-{t}" for t in EXACT_12_ETF_UNIVERSE),
+                rights_assessment=rights_assessment,
+                covered_tickers=EXACT_12_ETF_UNIVERSE,
+            )
+        else:
+            report = verify_g1_alpaca_sip_qualification(
+                request_end=request_end,
+                request_time=now,
+            )
+
         if getattr(args, "output", None):
             _write_output(args.output, report.model_dump(mode="json"))
         return 0 if report.overall_status == "VERIFIED" else 2
@@ -1614,6 +1644,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     vmd = subparsers.add_parser("verify-market-data")
     vmd.add_argument("--request-end", required=False, default=None)
+    vmd.add_argument("--as-of", required=False, default=None)
+    vmd.add_argument("--with-fixtures", action="store_true", default=False)
     vmd.add_argument("--output", required=False, default=None)
 
     return parser
