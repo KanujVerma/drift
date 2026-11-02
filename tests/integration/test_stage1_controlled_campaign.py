@@ -1,6 +1,7 @@
 """Controlled synthetic campaign integration and real execution-boundary tests."""
 
 import sys
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
@@ -696,6 +697,15 @@ def _carried_arguments(root: Path, bundle: object, arm: str) -> dict[str, object
     )
 
 
+def _completed_comparison_observation(inputs: list[dict[str, Any]]) -> datetime:
+    """Observe independent original ledgers without borrowing economic cutoffs."""
+    # Each original arm has its own operational observation clock. A paired
+    # analysis is available only after both completed roots are observable.
+    # Capture one common instant; do not change either arm's economic cutoffs.
+    observations: list[datetime] = [args["clock"]() for args in inputs]
+    return max(observations)
+
+
 def test_full_456_session_carried_br_campaign_has_real_monthly_switches(
     tmp_path: Path,
 ) -> None:
@@ -811,7 +821,9 @@ def test_full_456_session_carried_br_campaign_has_real_monthly_switches(
         assert recovered["authorizes_trading"] is False
         recovered_trials = recovered["trials"]
         assert isinstance(recovered_trials, list) and len(recovered_trials) == 2
-        campaign_inputs.append(args)
+        # Comparison only needs original readers and frozen campaign inputs,
+        # not the already exercised execution engine and its in-memory history.
+        campaign_inputs.append(kwargs)
         reports.append(report)
         print("controlled: original replay verified", arm, flush=True)
     assert reports[0].allocation_id != reports[1].allocation_id
@@ -829,18 +841,23 @@ def test_full_456_session_carried_br_campaign_has_real_monthly_switches(
         == reports[1].trials[0].net_investment_gain
     )
 
+    comparison_observed_at = _completed_comparison_observation(campaign_inputs)
+    allocation_ids = tuple(report.allocation_id for report in reports)
+    # All assertions over the independent reads above are complete. The paired
+    # reader must reconstruct its own originals, not retain duplicate reports.
+    del reports, report, args, bundle
     compared = compare_controlled_campaigns(
         test_origin=campaign_inputs[0]["origin"],
         comparator_origin=campaign_inputs[1]["origin"],
-        test_allocation_id=reports[0].allocation_id,
-        comparator_allocation_id=reports[1].allocation_id,
+        test_allocation_id=allocation_ids[0],
+        comparator_allocation_id=allocation_ids[1],
         campaign=campaign_inputs[0]["campaign"],
         arms=campaign_inputs[0]["arms"],
         bindings=campaign_inputs[0]["bindings"],
         expected_run_ids=campaign_inputs[0]["expected_run_ids"],
         test_provenance=campaign_inputs[0]["provenance"],
         comparator_provenance=campaign_inputs[1]["provenance"],
-        clock=campaign_inputs[0]["clock"],
+        clock=lambda: comparison_observed_at,
     )
     assert compared.test.economics.complete and compared.comparator.economics.complete
     assert compared.test.economics.initial_net_nav == Decimal("10000")
@@ -1689,3 +1706,90 @@ def test_comparison_refuses_different_original_grant_validity(
             comparator_provenance=right["provenance"],
             clock=lambda: BASE + timedelta(days=2),
         )
+
+
+@pytest.mark.parametrize("later_arm", ["ARM-B", "ARM-R"])
+def test_completed_pair_observation_covers_both_original_clocks(
+    tmp_path: Path, later_arm: str
+) -> None:
+    """A pair is observed after both runs, not at one arm's last clock tick."""
+    from datetime import timedelta
+
+    from test_stage1_controlled_contracts import controlled_arguments
+
+    from drift.loop.stage1_controlled_campaign import execute_controlled_campaign
+    from drift.loop.stage1_controlled_readback import compare_controlled_campaigns
+
+    left = controlled_arguments(tmp_path / "B")
+    right = controlled_arguments(tmp_path / "R", arm="ARM-R")
+    checkpoint = right["checkpoints"][0]
+    right["checkpoints"] = (
+        checkpoint.model_copy(
+            update={
+                "fixture": checkpoint.fixture.model_copy(
+                    update={
+                        "mode": "conventional_fixture",
+                        "selected_family": None,
+                        "candidate_families": ("B3",),
+                        "scores": {"B3": Decimal(1)},
+                    }
+                )
+            }
+        ),
+    )
+    earlier, later = (right, left) if later_arm == "ARM-B" else (left, right)
+    # These are the original trusted fixture observation clocks, not a replay
+    # annotation or altered economic cutoff. Model availability is unchanged.
+    later["clock"].at += timedelta(minutes=5)
+    b = execute_controlled_campaign(**left)
+    r = execute_controlled_campaign(**right)
+    assert b.m0_status == r.m0_status == "completed"
+    kwargs: dict[str, Any] = dict(
+        test_origin=left["origin"],
+        comparator_origin=right["origin"],
+        test_allocation_id=b.allocation_id,
+        comparator_allocation_id=r.allocation_id,
+        campaign=left["campaign"],
+        arms=left["arms"],
+        bindings=left["bindings"],
+        expected_run_ids=left["expected_run_ids"],
+        test_provenance=left["provenance"],
+        comparator_provenance=right["provenance"],
+    )
+    originals = tuple(
+        tuple(event.event_hash for event in args["origin"].verified_events())
+        for args in (left, right)
+    )
+    # The production guard must still refuse unavailable original evidence.
+    too_early = earlier["clock"]()
+    with pytest.raises(
+        ValueError, match="CONTROLLED_READ_BEFORE_ORIGINAL_AVAILABILITY"
+    ):
+        compare_controlled_campaigns(**kwargs, clock=lambda: too_early)
+
+    observed = _completed_comparison_observation([left, right])
+    assert all(
+        event.timestamp <= observed
+        for args in (left, right)
+        for event in args["origin"].verified_events()
+    )
+    reads = 0
+
+    def analysis_clock() -> datetime:
+        nonlocal reads
+        reads += 1
+        return observed
+
+    compared = compare_controlled_campaigns(**kwargs, clock=analysis_clock)
+    assert reads == 1
+    assert compared.test.status == compared.comparator.status == "VERIFIED_COMPLETE"
+    assert compared.test.economics.complete and compared.comparator.economics.complete
+    assert compared.economic_advantage.value == Decimal(0)
+    assert compared.independent_account_count == 2
+    assert (
+        tuple(
+            tuple(event.event_hash for event in args["origin"].verified_events())
+            for args in (left, right)
+        )
+        == originals
+    )

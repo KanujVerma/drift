@@ -235,7 +235,13 @@ requires the declared complementary B/R arms and comparable data/cost/mandate/
 execution/schedule, including each original grant's not-before, expiry and
 revocation policy, and records both immutable prefix tips. Two accounts in one
 paired run are not multiple independent samples merely because they have many
-monthly checkpoints. No Sharpe, significance, profitability or superiority
+monthly checkpoints. The paired read captures one analysis observation instant
+that must cover both original ledgers. Independent fixture clocks can advance
+by different numbers of operational observations; the full-size test therefore
+samples both completed host clocks and uses their later instant. It never changes
+economic cutoffs, original receipt timestamps or the reader's refusal of evidence
+that is not yet observable. Short original-ledger regressions exercise either arm
+finishing later, an intentionally too-early read, and unchanged original hashes. No Sharpe, significance, profitability or superiority
 claim is inferred from an insufficient synthetic sample.
 
 ## Compatibility and versioning
