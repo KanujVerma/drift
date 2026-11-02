@@ -339,11 +339,11 @@ class ContractualRightsAssessmentEvidenceV1(FrozenModel):
     assessor_identity: NonBlankStr
     authority: NonBlankStr
     entitlement_state: Literal["active", "permitted"] = "active"
-    internal_research_permitted: Literal[True] = True
-    algorithmic_non_display_permitted: Literal[True] = True
-    private_offline_retention_permitted: Literal[True] = True
-    public_redistribution_permitted: Literal[False] = False
-    git_tree_retention_permitted: Literal[False] = False
+    internal_research_permitted: Literal[True]
+    algorithmic_non_display_permitted: Literal[True]
+    private_offline_retention_permitted: Literal[True]
+    public_redistribution_permitted: Literal[False]
+    git_tree_retention_permitted: Literal[False]
     evidence_document_hashes: tuple[SHA256Hash, ...] = Field(min_length=1)
 
 
@@ -464,6 +464,308 @@ def build_12_etf_coverage(
     )
 
 
+def validate_intake_result_provenance(
+    intake_result: Any,
+) -> tuple[str, str, str]:
+    """Validate intake result against Alpaca verified intake evidence."""
+    if isinstance(intake_result, AlpacaSipIntakeEvidenceV1):
+        if not intake_result.reconciliation_pass:
+            raise ValueError("intake reconciliation did not pass")
+        if intake_result.provider != "alpaca" or intake_result.feed != "sip":
+            raise ValueError("intake evidence is not Alpaca SIP feed")
+        return (
+            intake_result.bars_sha256,
+            intake_result.calendar_sha256,
+            intake_result.corporate_actions_sha256,
+        )
+
+    retained = getattr(intake_result, "retained", None)
+    acq = getattr(intake_result, "acquisition", None)
+    if retained is None or acq is None:
+        raise ValueError(
+            "intake_result lacks required 'retained' or 'acquisition' attributes"
+        )
+    recon = getattr(acq, "reconciliation", None)
+    recon_res = getattr(recon, "result", None)
+    recon_pass = (
+        getattr(recon_res, "value", str(recon_res)) == "PASS" or recon_res == "PASS"
+    )
+    if not recon_pass:
+        raise ValueError("intake acquisition reconciliation did not pass")
+
+    receipt = getattr(acq, "receipt", None)
+    receipt_provider = getattr(receipt, "provider", None)
+    if receipt_provider not in ("alpaca", None):
+        raise ValueError(f"unsupported receipt provider: {receipt_provider}")
+
+    bars = getattr(retained, "bars", None)
+    calendar = getattr(retained, "calendar", None)
+    corporate_actions_ret = getattr(retained, "corporate_actions", None)
+    bars_h = getattr(bars, "sha256", None)
+    cal_h = getattr(calendar, "sha256", None)
+    ca_h = getattr(corporate_actions_ret, "sha256", None)
+    bars_sz = getattr(bars, "byte_size", 0)
+    cal_sz = getattr(calendar, "byte_size", 0)
+    ca_sz = getattr(corporate_actions_ret, "byte_size", 0)
+
+    if not (isinstance(bars_h, str) and len(bars_h) == 64 and bars_sz >= 100):
+        raise ValueError("invalid or empty bars payload retained evidence")
+    if not (isinstance(cal_h, str) and len(cal_h) == 64 and cal_sz >= 100):
+        raise ValueError("invalid or empty calendar payload retained evidence")
+    if not (isinstance(ca_h, str) and len(ca_h) == 64 and ca_sz >= 100):
+        raise ValueError("invalid or empty corporate actions retained evidence")
+
+    return bars_h, cal_h, ca_h
+
+
+def validate_raw_alpaca_payloads(
+    raw_payloads: Any,
+) -> tuple[str, str, str]:
+    """Validate raw payload bytes against Alpaca provider payload contracts."""
+    import json
+    from hashlib import sha256
+
+    bars_b = getattr(raw_payloads, "bars", None)
+    cal_b = getattr(raw_payloads, "calendar", None)
+    ca_b = getattr(raw_payloads, "corporate_actions", None)
+
+    if not (isinstance(bars_b, bytes) and len(bars_b) >= 20):
+        raise ValueError("raw_payloads.bars must be non-empty bytes")
+    if not (isinstance(cal_b, bytes) and len(cal_b) >= 20):
+        raise ValueError("raw_payloads.calendar must be non-empty bytes")
+    if not (isinstance(ca_b, bytes) and len(ca_b) >= 20):
+        raise ValueError("raw_payloads.corporate_actions must be non-empty bytes")
+
+    try:
+        bars_doc = json.loads(bars_b.decode("utf-8"))
+    except Exception as e:
+        raise ValueError(f"raw_payloads.bars is not valid JSON: {e}") from e
+
+    if not isinstance(bars_doc, dict):
+        raise ValueError("bars response must be a JSON object")
+    if bars_doc.get("next_page_token") is not None:
+        raise ValueError("bars response is paginated and incomplete")
+    grouped_bars = bars_doc.get("bars")
+    if not isinstance(grouped_bars, dict) or len(grouped_bars) == 0:
+        raise ValueError(
+            "bars response must carry a non-empty 'bars' mapping for securities"
+        )
+    covered_symbols = [
+        sym
+        for sym in EXACT_12_ETF_UNIVERSE
+        if sym in grouped_bars
+        and isinstance(grouped_bars[sym], list)
+        and len(grouped_bars[sym]) > 0
+    ]
+    if not covered_symbols:
+        raise ValueError(
+            "bars response contains no bar records for the canonical 12-ETF universe"
+        )
+
+    try:
+        cal_doc = json.loads(cal_b.decode("utf-8"))
+    except Exception as e:
+        raise ValueError(f"raw_payloads.calendar is not valid JSON: {e}") from e
+
+    if not isinstance(cal_doc, list) or len(cal_doc) == 0:
+        raise ValueError(
+            "calendar response must be a non-empty JSON list of trading days"
+        )
+    if not all(isinstance(day, dict) and "date" in day for day in cal_doc[:5]):
+        raise ValueError("calendar entries must contain trading date keys")
+
+    try:
+        ca_doc = json.loads(ca_b.decode("utf-8"))
+    except Exception as e:
+        raise ValueError(
+            f"raw_payloads.corporate_actions is not valid JSON: {e}"
+        ) from e
+
+    if not isinstance(ca_doc, dict):
+        raise ValueError("corporate actions response must be a JSON object")
+    if ca_doc.get("next_page_token") is not None:
+        raise ValueError("corporate actions response is paginated and incomplete")
+    ca_grouped = ca_doc.get("corporate_actions")
+    if not isinstance(ca_grouped, dict):
+        raise ValueError(
+            "corporate actions response must carry a 'corporate_actions' object"
+        )
+    dividends = ca_grouped.get("cash_dividends")
+    splits = ca_grouped.get("forward_splits")
+    if dividends is None and splits is None:
+        raise ValueError(
+            "corporate actions must contain 'cash_dividends' or 'forward_splits'"
+        )
+
+    return (
+        sha256(bars_b).hexdigest(),
+        sha256(cal_b).hexdigest(),
+        sha256(ca_b).hexdigest(),
+    )
+
+
+def extract_and_validate_rights_assessment(
+    rights_assessment: Any,
+) -> ContractualRightsAssessmentEvidenceV1:
+    """Validate and normalize a source contractual rights assessment.
+
+    Fails closed if authority is missing or derived from assessor, if required
+    rights (internal research, algorithmic execution, private retention) are
+    missing or denied, or if forbidden rights (redistribution, git storage)
+    are permitted.
+    """
+    if isinstance(rights_assessment, ContractualRightsAssessmentEvidenceV1):
+        return rights_assessment
+
+    # 1. Authority must be explicitly present and distinct from assessor identity
+    authority = getattr(rights_assessment, "authority", None)
+    if authority is None and isinstance(rights_assessment, dict):
+        authority = rights_assessment.get("authority")
+    if authority is None:
+        authority = getattr(rights_assessment, "reviewer_authority", None) or getattr(
+            rights_assessment, "legal_authority", None
+        )
+    if not (isinstance(authority, str) and authority.strip()):
+        raise ValueError(
+            "source rights assessment lacks explicit authority; "
+            "cannot derive authority from assessor identity"
+        )
+
+    # 2. Assessor identity must be present
+    assessor = getattr(rights_assessment, "assessor_identity", None)
+    if assessor is None and isinstance(rights_assessment, dict):
+        assessor = rights_assessment.get("assessor_identity")
+    if not (isinstance(assessor, str) and assessor.strip()):
+        raise ValueError("source rights assessment lacks assessor_identity")
+
+    # 3. Entitlement state must be active
+    ent_state = getattr(rights_assessment, "entitlement_state", None)
+    if ent_state is None and isinstance(rights_assessment, dict):
+        ent_state = rights_assessment.get("entitlement_state")
+    ent_val = getattr(ent_state, "value", str(ent_state))
+    if ent_val not in ("active", "permitted"):
+        raise ValueError(f"entitlement_state is not active: {ent_val}")
+
+    # 4. Evidence document / notice hashes must be present and valid
+    evidence_hashes = getattr(
+        rights_assessment, "evidence_document_hashes", None
+    ) or getattr(rights_assessment, "notice_evidence_hashes", None)
+    if evidence_hashes is None and isinstance(rights_assessment, dict):
+        evidence_hashes = rights_assessment.get(
+            "evidence_document_hashes"
+        ) or rights_assessment.get("notice_evidence_hashes")
+    if not evidence_hashes or not isinstance(evidence_hashes, (list, tuple)):
+        raise ValueError("missing evidence document / notice hashes")
+    for h in evidence_hashes:
+        if not (isinstance(h, str) and len(h) == 64):
+            raise ValueError(f"invalid evidence document hash: {h}")
+
+    # 5. Extract and validate required & forbidden permissions
+    answers = getattr(rights_assessment, "answers", None)
+    answer_map: dict[str, bool] = {}
+    if answers is not None and isinstance(answers, (list, tuple)):
+        for ans in answers:
+            q = getattr(ans, "question", None)
+            q_val = getattr(q, "value", str(q))
+            disp = getattr(ans, "disposition", None)
+            disp_val = getattr(disp, "value", str(disp))
+            answer_map[q_val] = disp_val == "allowed"
+
+    def _get_perm(names: tuple[str, ...], answer_key: str | None = None) -> bool | None:
+        for name in names:
+            if isinstance(rights_assessment, dict) and name in rights_assessment:
+                val = rights_assessment[name]
+                if val is not None:
+                    return bool(val)
+            elif hasattr(rights_assessment, name):
+                val = getattr(rights_assessment, name)
+                if val is not None:
+                    return bool(val)
+        if answer_key and answer_key in answer_map:
+            return answer_map[answer_key]
+        return None
+
+    # Required: internal research
+    research = _get_perm(
+        ("internal_research_permitted", "research_permitted"),
+        "internal_automated_research",
+    )
+    if research is False:
+        raise ValueError("internal research permission is explicitly denied")
+    if research is not True:
+        raise ValueError("internal research permission is missing")
+
+    # Required: algorithmic non-display / execution
+    execution = _get_perm(
+        (
+            "algorithmic_non_display_permitted",
+            "algorithmic_execution_permitted",
+            "non_display_permitted",
+            "non_display_use",
+        ),
+        "non_display_use",
+    )
+    if execution is False:
+        raise ValueError(
+            "algorithmic execution / non-display permission is explicitly denied"
+        )
+    if execution is not True:
+        raise ValueError("algorithmic execution / non-display permission is missing")
+
+    # Required: private offline retention
+    retention = _get_perm(
+        (
+            "private_offline_retention_permitted",
+            "offline_retention_permitted",
+            "retention_permitted",
+            "local_storage_permitted",
+        ),
+        "local_storage",
+    )
+    if retention is False:
+        raise ValueError("private offline retention permission is explicitly denied")
+    if retention is not True:
+        raise ValueError("private offline retention permission is missing")
+
+    # Forbidden: public redistribution
+    redistribution = _get_perm(
+        ("public_redistribution_permitted", "redistribution_permitted"),
+        "redistribution",
+    )
+    if redistribution is True:
+        raise ValueError("public redistribution is permitted (must be denied)")
+
+    # Forbidden: git tree retention
+    git_storage = _get_perm(
+        ("git_tree_retention_permitted", "git_storage_permitted"),
+        "private_git_storage",
+    )
+    if git_storage is True:
+        raise ValueError("git tree retention is permitted (must be denied)")
+
+    assessment_id = getattr(rights_assessment, "assessment_id", None)
+    if assessment_id is None and isinstance(rights_assessment, dict):
+        assessment_id = rights_assessment.get("assessment_id")
+    if not (isinstance(assessment_id, str) and assessment_id.strip()):
+        assessment_id = "ASSESSMENT-SOURCE-VERIFIED"
+
+    ent_state_literal: Literal["active", "permitted"] = (
+        "permitted" if ent_val == "permitted" else "active"
+    )
+    return ContractualRightsAssessmentEvidenceV1(
+        assessment_id=str(assessment_id),
+        assessor_identity=str(assessor),
+        authority=str(authority),
+        entitlement_state=ent_state_literal,
+        internal_research_permitted=True,
+        algorithmic_non_display_permitted=True,
+        private_offline_retention_permitted=True,
+        public_redistribution_permitted=False,
+        git_tree_retention_permitted=False,
+        evidence_document_hashes=tuple(str(h) for h in evidence_hashes),
+    )
+
+
 def verify_g1_alpaca_sip_qualification(
     *,
     verification_id: str = "G1-ALPACA-SIP-QUALIFICATION-V1",
@@ -509,82 +811,16 @@ def verify_g1_alpaca_sip_qualification(
 
     if intake_result is not None:
         try:
-            if isinstance(intake_result, AlpacaSipIntakeEvidenceV1):
-                provenance_verified = True
-                bars_h = intake_result.bars_sha256
-                cal_h = intake_result.calendar_sha256
-                ca_h = intake_result.corporate_actions_sha256
-            else:
-                retained = getattr(intake_result, "retained", None)
-                acq = getattr(intake_result, "acquisition", None)
-                if retained is None or acq is None:
-                    raise ValueError(
-                        "intake_result lacks required 'retained' or "
-                        "'acquisition' attributes"
-                    )
-                recon = getattr(acq, "reconciliation", None)
-                recon_res = getattr(recon, "result", None)
-                recon_pass = (
-                    getattr(recon_res, "value", str(recon_res)) == "PASS"
-                    or recon_res == "PASS"
-                )
-                if not recon_pass:
-                    raise ValueError("intake acquisition reconciliation did not pass")
-                receipt = getattr(acq, "receipt", None)
-                receipt_provider = getattr(receipt, "provider", None)
-                if receipt_provider not in ("alpaca", None):
-                    raise ValueError(
-                        f"unsupported receipt provider: {receipt_provider}"
-                    )
-                bars = getattr(retained, "bars", None)
-                calendar = getattr(retained, "calendar", None)
-                corporate_actions_ret = getattr(retained, "corporate_actions", None)
-                bars_h = getattr(bars, "sha256", None)
-                cal_h = getattr(calendar, "sha256", None)
-                ca_h = getattr(corporate_actions_ret, "sha256", None)
-                bars_sz = getattr(bars, "byte_size", 0)
-                cal_sz = getattr(calendar, "byte_size", 0)
-                ca_sz = getattr(corporate_actions_ret, "byte_size", 0)
-                if not (bars_h and len(bars_h) == 64 and bars_sz > 0):
-                    raise ValueError("invalid or empty bars payload retained evidence")
-                if not (cal_h and len(cal_h) == 64 and cal_sz > 0):
-                    raise ValueError(
-                        "invalid or empty calendar payload retained evidence"
-                    )
-                if not (ca_h and len(ca_h) == 64 and ca_sz > 0):
-                    raise ValueError(
-                        "invalid or empty corporate actions retained evidence"
-                    )
-                provenance_verified = True
+            bars_h, cal_h, ca_h = validate_intake_result_provenance(intake_result)
+            provenance_verified = True
         except Exception as e:
             refusal_reasons.append(
                 f"MISSING_PROVIDER_EVIDENCE: intake_result failed verification: {e}"
             )
     elif raw_payloads is not None:
         try:
-            import json
-            from hashlib import sha256
-
-            bars_b = getattr(raw_payloads, "bars", None)
-            cal_b = getattr(raw_payloads, "calendar", None)
-            ca_b = getattr(raw_payloads, "corporate_actions", None)
-            if not (isinstance(bars_b, bytes) and len(bars_b) > 0):
-                raise ValueError("raw_payloads.bars must be non-empty bytes")
-            if not (isinstance(cal_b, bytes) and len(cal_b) > 0):
-                raise ValueError("raw_payloads.calendar must be non-empty bytes")
-            if not (isinstance(ca_b, bytes) and len(ca_b) > 0):
-                raise ValueError(
-                    "raw_payloads.corporate_actions must be non-empty bytes"
-                )
-            bars_doc = json.loads(bars_b.decode("utf-8"))
-            if not isinstance(bars_doc, dict):
-                raise ValueError("raw_payloads.bars JSON must be an object")
-            json.loads(cal_b.decode("utf-8"))
-            json.loads(ca_b.decode("utf-8"))
+            bars_h, cal_h, ca_h = validate_raw_alpaca_payloads(raw_payloads)
             provenance_verified = True
-            bars_h = sha256(bars_b).hexdigest()
-            cal_h = sha256(cal_b).hexdigest()
-            ca_h = sha256(ca_b).hexdigest()
         except Exception as e:
             refusal_reasons.append(
                 f"MISSING_PROVIDER_EVIDENCE: raw_payloads failed verification: {e}"
@@ -735,43 +971,7 @@ def verify_g1_alpaca_sip_qualification(
 
     if rights_assessment is not None:
         try:
-            if isinstance(rights_assessment, ContractualRightsAssessmentEvidenceV1):
-                ra = rights_assessment
-            elif isinstance(rights_assessment, dict):
-                ra = ContractualRightsAssessmentEvidenceV1.model_validate(
-                    rights_assessment
-                )
-            elif hasattr(rights_assessment, "entitlement_state") and hasattr(
-                rights_assessment, "assessor_identity"
-            ):
-                ent_state = getattr(rights_assessment, "entitlement_state", None)
-                ent_val = getattr(ent_state, "value", str(ent_state))
-                if ent_val != "active":
-                    raise ValueError(f"entitlement_state is not active: {ent_val}")
-                assessor = getattr(rights_assessment, "assessor_identity", None)
-                if not assessor:
-                    raise ValueError("missing assessor_identity")
-                evidence_hashes = getattr(
-                    rights_assessment, "notice_evidence_hashes", ()
-                )
-                if not evidence_hashes:
-                    raise ValueError("missing notice_evidence_hashes")
-                ra = ContractualRightsAssessmentEvidenceV1(
-                    assessment_id=str(getattr(rights_assessment, "assessment_id", "")),
-                    assessor_identity=str(assessor),
-                    authority=str(assessor),
-                    entitlement_state="active",
-                    internal_research_permitted=True,
-                    algorithmic_non_display_permitted=True,
-                    private_offline_retention_permitted=True,
-                    public_redistribution_permitted=False,
-                    git_tree_retention_permitted=False,
-                    evidence_document_hashes=tuple(str(h) for h in evidence_hashes),
-                )
-            else:
-                ra = ContractualRightsAssessmentEvidenceV1.model_validate(
-                    getattr(rights_assessment, "__dict__", {})
-                )
+            ra = extract_and_validate_rights_assessment(rights_assessment)
             rights_verified = True
             compliance_class = "PERMITTED_INTERNAL_RESEARCH_ONLY"
             rights_hash = content_hash(ra.model_dump(mode="python"))

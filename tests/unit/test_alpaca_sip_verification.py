@@ -592,8 +592,12 @@ def test_refuses_rights_assessment_when_entitlement_not_active() -> None:
     expired_rights = SimpleNamespace(
         assessment_id="ASSESSMENT-1",
         assessor_identity="matthew@drift.local",
+        authority="legal@drift.local",
         entitlement_state="expired",
         notice_evidence_hashes=("e" * 64,),
+        internal_research_permitted=True,
+        algorithmic_non_display_permitted=True,
+        private_offline_retention_permitted=True,
     )
     report = verify_g1_alpaca_sip_qualification(
         request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
@@ -631,3 +635,110 @@ def test_refuses_coverage_when_dates_do_not_span_full_study_window() -> None:
     )
     assert report.overall_status == "REFUSED"
     assert any("INCOMPLETE_UNIVERSE_COVERAGE" in r for r in report.refusal_reasons)
+
+
+def test_sol_round3_empty_json_payloads_refused() -> None:
+    """Sol Round 3 blocker regression: empty JSON payloads must be refused."""
+    _, cov_ev, ca_records, rights = make_mock_evidence()
+    from types import SimpleNamespace
+
+    # Exact Sol reproduction: bars=b'{}', calendar=b'null', corporate_actions=b'null'
+    empty_payloads = SimpleNamespace(
+        bars=b"{}",
+        calendar=b"null",
+        corporate_actions=b"null",
+    )
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        raw_payloads=empty_payloads,
+        corporate_actions=ca_records,
+        rights_assessment=rights,
+        coverage_evidence=cov_ev,
+    )
+    assert report.overall_status == "REFUSED"
+    assert report.source_provenance.provenance_verified is False
+    assert any("raw_payloads failed verification" in r for r in report.refusal_reasons)
+
+
+def test_sol_round3_denied_rights_assessment_refused() -> None:
+    """Sol Round 3 blocker regression: denied or missing rights must be refused."""
+    intake_res, cov_ev, ca_records, _ = make_mock_evidence()
+    from types import SimpleNamespace
+
+    # 1. Denying research, algorithmic execution, or offline retention must fail
+    denied_rights = SimpleNamespace(
+        assessment_id="ASSESSMENT-DENIED",
+        assessor_identity="matthew@drift.local",
+        authority="legal-counsel@drift.local",
+        entitlement_state="active",
+        notice_evidence_hashes=("d" * 64,),
+        internal_research_permitted=False,
+        algorithmic_non_display_permitted=False,
+        private_offline_retention_permitted=False,
+    )
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        intake_result=intake_res,
+        corporate_actions=ca_records,
+        rights_assessment=denied_rights,
+        coverage_evidence=cov_ev,
+    )
+    assert report.overall_status == "REFUSED"
+    assert report.contractual_rights.is_verified is False
+    assert any(
+        "internal research permission is explicitly denied" in r
+        for r in report.refusal_reasons
+    )
+
+    # 2. Missing explicit authority (cannot derive from assessor) must fail
+    no_authority_rights = SimpleNamespace(
+        assessment_id="ASSESSMENT-NO-AUTH",
+        assessor_identity="matthew@drift.local",
+        entitlement_state="active",
+        notice_evidence_hashes=("d" * 64,),
+        internal_research_permitted=True,
+        algorithmic_non_display_permitted=True,
+        private_offline_retention_permitted=True,
+    )
+    report2 = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        intake_result=intake_res,
+        corporate_actions=ca_records,
+        rights_assessment=no_authority_rights,
+        coverage_evidence=cov_ev,
+    )
+    assert report2.overall_status == "REFUSED"
+    assert report2.contractual_rights.is_verified is False
+    assert any("lacks explicit authority" in r for r in report2.refusal_reasons)
+
+
+def test_valid_duck_typed_rights_assessment_passes() -> None:
+    """A valid duck-typed rights assessment with explicit authority passes."""
+    intake_res, cov_ev, ca_records, _ = make_mock_evidence()
+    from types import SimpleNamespace
+
+    valid_duck_rights = SimpleNamespace(
+        assessment_id="ASSESSMENT-VALID-DUCK",
+        assessor_identity="matthew@drift.local",
+        authority="legal-counsel@drift.local",
+        entitlement_state="active",
+        notice_evidence_hashes=("d" * 64,),
+        internal_research_permitted=True,
+        algorithmic_non_display_permitted=True,
+        private_offline_retention_permitted=True,
+        public_redistribution_permitted=False,
+        git_tree_retention_permitted=False,
+    )
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        intake_result=intake_res,
+        corporate_actions=ca_records,
+        rights_assessment=valid_duck_rights,
+        coverage_evidence=cov_ev,
+    )
+    assert report.overall_status == "VERIFIED"
+    assert report.contractual_rights.is_verified is True
