@@ -548,7 +548,155 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     )
     assert proc.returncode == 4
 
-    # 5. Complete 252 valid execution receipts returns exit 0 with manifest
+    # 5. Repeated receipts (252 copies of session_index 0) returns exit 3
+    # (duplicate session)
+    repeated_receipts = [
+        {
+            "freeze_hash": frozen.freeze_hash,
+            "status": "COMPLETED",
+            "session_index": 0,
+        }
+    ] * 252
+    host_file.write_text(
+        json.dumps(
+            {
+                "trust_roots": host_trust_roots,
+                "receipt_store": receipt_store,
+                "execution_receipts": repeated_receipts,
+            }
+        ),
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "historical",
+            "--frozen",
+            str(frozen_file),
+            "--host-config",
+            str(host_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+    )
+    assert proc.returncode == 3
+
+    # 6. Absent session identity (missing session_index) returns exit 3
+    no_session_id = [
+        {
+            "freeze_hash": frozen.freeze_hash,
+            "status": "COMPLETED",
+        }
+        for _ in range(252)
+    ]
+    host_file.write_text(
+        json.dumps(
+            {
+                "trust_roots": host_trust_roots,
+                "receipt_store": receipt_store,
+                "execution_receipts": no_session_id,
+            }
+        ),
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "historical",
+            "--frozen",
+            str(frozen_file),
+            "--host-config",
+            str(host_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+    )
+    assert proc.returncode == 3
+
+    # 7. Unsupported completion claims (false completion_evidence) returns exit 3
+    unsupported_claim = [
+        {
+            "freeze_hash": frozen.freeze_hash,
+            "status": "COMPLETED",
+            "session_index": i,
+            "completion_evidence": (i != 5),  # False at index 5
+        }
+        for i in range(252)
+    ]
+    host_file.write_text(
+        json.dumps(
+            {
+                "trust_roots": host_trust_roots,
+                "receipt_store": receipt_store,
+                "execution_receipts": unsupported_claim,
+            }
+        ),
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "historical",
+            "--frozen",
+            str(frozen_file),
+            "--host-config",
+            str(host_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+    )
+    assert proc.returncode == 3
+
+    # 8. Out-of-scope session index (e.g. 999 instead of 0..251) returns exit 3
+    out_of_scope_receipts = [
+        {
+            "freeze_hash": frozen.freeze_hash,
+            "status": "COMPLETED",
+            "session_index": 999 if i == 0 else i,
+        }
+        for i in range(252)
+    ]
+    host_file.write_text(
+        json.dumps(
+            {
+                "trust_roots": host_trust_roots,
+                "receipt_store": receipt_store,
+                "execution_receipts": out_of_scope_receipts,
+            }
+        ),
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "historical",
+            "--frozen",
+            str(frozen_file),
+            "--host-config",
+            str(host_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+    )
+    assert proc.returncode == 3
+
+    # 9. Complete 252 valid execution receipts returns exit 0 with manifest
     receipts_252 = [
         {
             "freeze_hash": frozen.freeze_hash,

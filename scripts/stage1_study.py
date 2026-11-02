@@ -286,6 +286,9 @@ def action_historical(args: argparse.Namespace) -> int:
             sys.stderr.write("Historical execution receipts empty\n")
             return 2
 
+        required_sessions = set(range(252))
+        seen_sessions: set[int] = set()
+
         for i, r in enumerate(execution_receipts):
             if not isinstance(r, dict):
                 sys.stderr.write(f"Receipt at index {i} is not a valid object\n")
@@ -298,17 +301,58 @@ def action_historical(args: argparse.Namespace) -> int:
                 return 3
             if r.get("status") != "COMPLETED":
                 sys.stderr.write(
-                    f"Receipt at index {i} not completed: {r.get('status')}\n"
+                    f"Receipt at index {i} unsupported completion status: "
+                    f"{r.get('status')}\n"
+                )
+                return 3
+            if "completion_evidence" in r and not r["completion_evidence"]:
+                sys.stderr.write(
+                    f"Receipt at index {i} unsupported completion claim: "
+                    "false or empty evidence\n"
+                )
+                return 3
+            if r.get("halt_reason") or r.get("error"):
+                sys.stderr.write(
+                    f"Receipt at index {i} indicates execution halt or error\n"
                 )
                 return 3
 
-        observed_count = len(execution_receipts)
-        if observed_count < 252:
+            session_index = r.get("session_index")
+            if (
+                session_index is None
+                or not isinstance(session_index, int)
+                or isinstance(session_index, bool)
+            ):
+                sys.stderr.write(
+                    f"Receipt at index {i} missing valid session identity "
+                    "(session_index)\n"
+                )
+                return 3
+
+            if session_index not in required_sessions:
+                sys.stderr.write(
+                    f"Receipt at index {i} has out-of-scope session_index: "
+                    f"{session_index} (expected 0..251)\n"
+                )
+                return 3
+
+            if session_index in seen_sessions:
+                sys.stderr.write(
+                    f"Receipt at index {i} duplicate session_index: {session_index}\n"
+                )
+                return 3
+
+            seen_sessions.add(session_index)
+
+        missing_sessions = required_sessions - seen_sessions
+        if missing_sessions:
             sys.stderr.write(
-                f"Historical execution incomplete: got {observed_count} "
-                "sessions, need 252\n"
+                f"Historical execution incomplete: missing {len(missing_sessions)} "
+                f"required sessions (observed {len(seen_sessions)}/252)\n"
             )
             return 4
+
+        observed_count = len(seen_sessions)
 
         manifest = {
             "schema_version": "drift-stage1-historical-manifest/1",
@@ -318,7 +362,9 @@ def action_historical(args: argparse.Namespace) -> int:
             "observed_sessions": observed_count,
             "executed_at": datetime.now(UTC).isoformat(),
             "status": "COMPLETED",
-            "execution_receipts": execution_receipts,
+            "execution_receipts": sorted(
+                execution_receipts, key=lambda x: x["session_index"]
+            ),
         }
         _write_output(args.output, manifest)
         return 0
