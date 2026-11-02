@@ -472,6 +472,39 @@ def test_cli_prospective_step_adversarial_authentication_enforcement(
     assert proc_unauth.returncode == 3
     assert "PRODUCER_AUTHENTICATION_FAILED" in proc_unauth.stderr
 
+    # Adversarial Case 4: Config supplies truthy producer allowlisting without
+    # authentication credentials (e.g. {"trusted-root": True}).
+    # Must fail closed with exit code 3 (INVALID_PRODUCER_CREDENTIALS).
+    host_config_truthy_prod = {
+        "trust_roots": trust_roots,
+        "artifact_store": art_store,
+        "authenticated_producers": {"trusted-root": True},
+    }
+    host_config_file.write_text(json.dumps(host_config_truthy_prod), encoding="utf-8")
+    proc_truthy_prod = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "prospective-step",
+            "--registration",
+            str(reg_file),
+            "--host-config",
+            str(host_config_file),
+            "--private-root",
+            str(private_root),
+            "--session-date",
+            "2026-11-03",
+            "--session-evidence",
+            str(ev_file),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert proc_truthy_prod.returncode == 3
+    assert "INVALID_PRODUCER_CREDENTIALS" in proc_truthy_prod.stderr
+
 
 def test_cli_calibrate_and_historical_handlers(repo_root: Path, tmp_path: Path) -> None:
     from datetime import UTC, date, datetime

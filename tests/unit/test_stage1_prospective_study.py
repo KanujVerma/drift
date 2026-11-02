@@ -753,3 +753,71 @@ def test_producer_verifier_rejects_empty_authentication_mechanisms() -> None:
         ProductionProspectiveProducerVerifier(
             trust_roots={"trusted"}, authenticated_producers={}
         )
+
+
+def test_producer_verifier_rejects_identity_only_producers() -> None:
+    """Verifies that ProductionProspectiveProducerVerifier rejects identity-only
+    allowlisting (e.g. {"trusted": True}) and requires actual credentials.
+    """
+    # Sol's Round 14 reproduction: truthy producer entry without credentials
+    with pytest.raises(ValueError, match="INVALID_PRODUCER_CREDENTIALS"):
+        ProductionProspectiveProducerVerifier(
+            trust_roots={"trusted"},
+            authenticated_producers={"trusted": True},
+        )
+
+    # Empty dict entry
+    with pytest.raises(ValueError, match="INVALID_PRODUCER_CREDENTIALS"):
+        ProductionProspectiveProducerVerifier(
+            trust_roots={"trusted"},
+            authenticated_producers={"trusted": {}},
+        )
+
+    # Empty tokens list
+    with pytest.raises(ValueError, match="INVALID_PRODUCER_CREDENTIALS"):
+        ProductionProspectiveProducerVerifier(
+            trust_roots={"trusted"},
+            authenticated_producers={"trusted": {"tokens": []}},
+        )
+
+    # Valid token credentials: verify artifact authentication behavior
+    pv = ProductionProspectiveProducerVerifier(
+        trust_roots={"trusted"},
+        authenticated_producers={"trusted": {"tokens": ["valid-secret-token"]}},
+    )
+    art = {
+        "authority_id": "trusted",
+        "artifact_role": "portfolio_state",
+        "registration_id": "REG-TEST",
+        "freeze_hash": "a" * 64,
+        "session_index": 0,
+        "session_date": "2026-11-03",
+        "execution_payload": {"state": "clean"},
+    }
+    # Uncredentialed artifact is rejected
+    assert not pv.verify_artifact(
+        art,
+        expected_role="portfolio_state",
+        expected_registration_id="REG-TEST",
+        expected_freeze_hash="a" * 64,
+        expected_session_index=0,
+        expected_session_date=date(2026, 11, 3),
+    )
+    # Incorrect token is rejected
+    assert not pv.verify_artifact(
+        art | {"producer_token": "wrong-token"},
+        expected_role="portfolio_state",
+        expected_registration_id="REG-TEST",
+        expected_freeze_hash="a" * 64,
+        expected_session_index=0,
+        expected_session_date=date(2026, 11, 3),
+    )
+    # Valid token is accepted
+    assert pv.verify_artifact(
+        art | {"producer_token": "valid-secret-token"},
+        expected_role="portfolio_state",
+        expected_registration_id="REG-TEST",
+        expected_freeze_hash="a" * 64,
+        expected_session_index=0,
+        expected_session_date=date(2026, 11, 3),
+    )

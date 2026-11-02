@@ -411,9 +411,62 @@ class ProductionProspectiveProducerVerifier:
             raise ValueError("TRUST_ROOTS_REQUIRED: trust_roots must not be empty")
 
         self._trust_roots = set(trust_roots)
-        self._authenticated_producers = (
-            dict(authenticated_producers) if authenticated_producers else None
-        )
+        self._authenticated_producers: dict[str, Any] | None
+        if authenticated_producers:
+            valid_producers: dict[str, Any] = {}
+            for prod_id, creds in authenticated_producers.items():
+                if not isinstance(prod_id, str) or not prod_id.strip():
+                    raise ValueError(
+                        f"INVALID_PRODUCER_CREDENTIALS: producer '{prod_id}' "
+                        "must be a non-empty string"
+                    )
+                if callable(creds):
+                    valid_producers[prod_id] = creds
+                elif isinstance(creds, dict):
+                    has_tokens = (
+                        "tokens" in creds
+                        and isinstance(creds["tokens"], (set, list, tuple))
+                        and len(creds["tokens"]) > 0
+                        and all(
+                            isinstance(t, str) and t.strip() for t in creds["tokens"]
+                        )
+                    )
+                    has_signatures = (
+                        "signatures" in creds
+                        and isinstance(creds["signatures"], (set, list, tuple))
+                        and len(creds["signatures"]) > 0
+                        and all(
+                            isinstance(s, str) and s.strip()
+                            for s in creds["signatures"]
+                        )
+                    )
+                    has_authenticator = "authenticator" in creds and callable(
+                        creds["authenticator"]
+                    )
+                    has_verifier = "verifier" in creds and callable(creds["verifier"])
+                    if not (
+                        has_tokens
+                        or has_signatures
+                        or has_authenticator
+                        or has_verifier
+                    ):
+                        raise ValueError(
+                            f"INVALID_PRODUCER_CREDENTIALS: producer '{prod_id}' "
+                            "provides only identity allowlisting without artifact "
+                            "authentication credentials (requires non-empty "
+                            "tokens/signatures or callable authenticator/verifier)"
+                        )
+                    valid_producers[prod_id] = creds
+                else:
+                    raise ValueError(
+                        f"INVALID_PRODUCER_CREDENTIALS: producer '{prod_id}' "
+                        "provides only identity allowlisting without artifact "
+                        "authentication credentials (requires non-empty "
+                        "tokens/signatures or callable authenticator/verifier)"
+                    )
+            self._authenticated_producers = valid_producers
+        else:
+            self._authenticated_producers = None
         self._artifact_authenticator = artifact_authenticator
         self._authenticated_hashes = (
             set(authenticated_artifact_hashes)
@@ -503,10 +556,28 @@ class ProductionProspectiveProducerVerifier:
             prod_info = self._authenticated_producers.get(auth)
             if not prod_info:
                 return False
-            if isinstance(prod_info, dict) and "tokens" in prod_info:
-                token = art_obj.get("producer_token") or art_obj.get("signature")
-                if not token or token not in prod_info["tokens"]:
+            producer_authenticated = False
+            if callable(prod_info):
+                try:
+                    if prod_info(art_obj):
+                        producer_authenticated = True
+                except Exception:
                     return False
+            elif isinstance(prod_info, dict):
+                tokens = prod_info.get("tokens") or prod_info.get("signatures")
+                if tokens is not None:
+                    tok = art_obj.get("producer_token") or art_obj.get("signature")
+                    if tok and tok in tokens:
+                        producer_authenticated = True
+                auth_fn = prod_info.get("authenticator") or prod_info.get("verifier")
+                if auth_fn is not None and callable(auth_fn):
+                    try:
+                        if auth_fn(art_obj):
+                            producer_authenticated = True
+                    except Exception:
+                        return False
+            if not producer_authenticated:
+                return False
             authenticated = True
 
         return authenticated
