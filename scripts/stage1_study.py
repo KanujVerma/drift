@@ -27,6 +27,7 @@ import hashlib
 import hmac
 import json
 import os
+import subprocess
 import sys
 import uuid
 from collections.abc import Generator
@@ -563,36 +564,63 @@ def action_historical(args: argparse.Namespace) -> int:
             r.get("receipt_id") for r in verified_receipts if "receipt_id" in r
         }
 
-        if ref_receipts_raw and isinstance(ref_receipts_raw, list):
+        if ref_receipts_raw is not None:
+            if not isinstance(ref_receipts_raw, list):
+                sys.stderr.write("Reference receipts must be a list\n")
+                return 3
+            if len(ref_receipts_raw) != 252:
+                sys.stderr.write(
+                    f"Reference receipts count mismatch: expected 252, "
+                    f"got {len(ref_receipts_raw)}\n"
+                )
+                return 3
+
             for rr in ref_receipts_raw:
                 if not isinstance(rr, dict):
-                    continue
+                    sys.stderr.write("Reference receipt is not a valid object\n")
+                    return 3
                 rr_idx = rr.get("session_index")
                 if (
                     rr_idx is None
                     or not isinstance(rr_idx, int)
                     or isinstance(rr_idx, bool)
                     or rr_idx not in required_sessions
-                    or rr_idx in seen_ref_sessions
                 ):
-                    # Malformed, out of scope, or duplicate session index
-                    continue
+                    sys.stderr.write(
+                        f"Invalid reference receipt session index: {rr_idx}\n"
+                    )
+                    return 3
 
-                ok_ref, _, payload_ref = exec_verifier.verify_execution_receipt(
-                    rr,
-                    expected_freeze_hash=expected_ref_freeze_hash,
-                    expected_session_index=rr_idx,
+                if rr_idx in seen_ref_sessions:
+                    sys.stderr.write(
+                        f"Duplicate reference receipt session index: {rr_idx}\n"
+                    )
+                    return 3
+
+                ok_ref, reason_ref, payload_ref = (
+                    exec_verifier.verify_execution_receipt(
+                        rr,
+                        expected_freeze_hash=expected_ref_freeze_hash,
+                        expected_session_index=rr_idx,
+                    )
                 )
                 if not ok_ref or payload_ref is None:
-                    continue
+                    sys.stderr.write(
+                        f"Reference receipt verification failed: {reason_ref}\n"
+                    )
+                    return 3
 
                 # Distinct reference-arm identity check:
                 # Reference receipt cannot be candidate arm's receipt
                 ref_rid = payload_ref.get("receipt_id")
                 if ref_rid and ref_rid in candidate_receipt_ids:
-                    continue
+                    sys.stderr.write(
+                        f"Candidate arm receipt re-used as reference: {ref_rid}\n"
+                    )
+                    return 3
 
-                # Reference arm identity verification
+                # Reference arm identity verification:
+                # Receipt MUST identify as reference arm
                 ref_arm = (
                     payload_ref.get("arm")
                     or payload_ref.get("arm_id")
@@ -604,130 +632,48 @@ def action_historical(args: argparse.Namespace) -> int:
                         else None
                     )
                 )
+                if not ref_arm:
+                    sys.stderr.write(
+                        f"Reference receipt at session {rr_idx} missing "
+                        "reference-arm identity\n"
+                    )
+                    return 3
+
+                if str(ref_arm).upper() in ("B", "CANDIDATE"):
+                    sys.stderr.write(
+                        f"Reference receipt claims candidate arm identity: {ref_arm}\n"
+                    )
+                    return 3
+
                 expected_ref_arm = host_config.get("reference_arm_id") or (
                     paired_ev_dict.get("reference_arm_id")
                     if isinstance(paired_ev_dict, dict)
                     else None
                 )
-                if expected_ref_arm:
-                    if ref_arm != expected_ref_arm:
-                        continue
-                elif ref_arm is not None:
-                    if str(ref_arm).upper() in ("B", "CANDIDATE"):
-                        continue
+                if expected_ref_arm and ref_arm != expected_ref_arm:
+                    sys.stderr.write(
+                        f"Reference receipt arm {ref_arm} does not match "
+                        f"expected {expected_ref_arm}\n"
+                    )
+                    return 3
 
                 seen_ref_sessions.add(rr_idx)
                 verified_ref_receipts.append(payload_ref)
 
-            # Require exact 1-to-1 session coverage across all 252 required sessions
-            if seen_ref_sessions == required_sessions and len(
-                verified_ref_receipts
-            ) == len(sorted_receipts):
-                sorted_ref = sorted(
-                    verified_ref_receipts, key=lambda x: x["session_index"]
+            if seen_ref_sessions != required_sessions:
+                sys.stderr.write(
+                    f"Incomplete reference receipts: observed "
+                    f"{len(seen_ref_sessions)}/252\n"
                 )
-                r_returns = [
-                    Decimal(str(r.get("metrics", {}).get("net_return", "0")))
-                    for r in sorted_ref
-                ]
+                return 4
 
-        # Verified independent acceptance
-        is_independently_accepted = False
-        acpt_rcpt_raw = host_config.get(
-            "independent_acceptance_receipt"
-        ) or host_config.get("acceptance_receipt")
-        if acpt_rcpt_raw:
-            acpt_rcpt: dict[str, Any] | None = None
-            if isinstance(acpt_rcpt_raw, str):
-                resolved_acpt = receipt_store.get(acpt_rcpt_raw)
-                if isinstance(resolved_acpt, dict):
-                    acpt_rcpt = resolved_acpt
-                elif isinstance(resolved_acpt, (bytes, str)):
-                    try:
-                        acpt_rcpt = json.loads(
-                            resolved_acpt
-                            if isinstance(resolved_acpt, str)
-                            else resolved_acpt.decode("utf-8")
-                        )
-                    except Exception:
-                        pass
-            elif isinstance(acpt_rcpt_raw, dict):
-                acpt_rcpt = acpt_rcpt_raw
-
-            if acpt_rcpt and isinstance(acpt_rcpt, dict):
-                acpt_auth = acpt_rcpt.get("authority_id")
-                # 1. Authority must be in trusted execution roots
-                auth_ok = bool(acpt_auth and acpt_auth in exec_roots)
-
-                # 2. Binding to this study/freeze
-                binding_ok = (
-                    acpt_rcpt.get("freeze_hash") == frozen.freeze_hash
-                    or acpt_rcpt.get("protocol_hash") == frozen.protocol.protocol_hash
-                    or acpt_rcpt.get("study_id") == frozen.protocol.study_id
-                    or acpt_rcpt.get("study_id") == f"HIST-{frozen.protocol.study_id}"
-                )
-
-                # 3. Status must be COMPLETED or ACCEPTED
-                status_ok = acpt_rcpt.get("status") in ("COMPLETED", "ACCEPTED")
-
-                # 4. Assessor independence and non-self-review explicitly verified
-                indep_ok = (
-                    acpt_rcpt.get("assessor_independence") is True
-                    and acpt_rcpt.get("is_self_review") is False
-                    and acpt_rcpt.get("conflicted") is not True
-                    and bool(acpt_rcpt.get("independence_declaration"))
-                )
-
-                # 5. Authenticate receipt bytes (receipt_hash / signature / HMAC)
-                rcpt_bytes_ok = False
-                declared_hash = acpt_rcpt.get("receipt_hash") or acpt_rcpt.get(
-                    "evidence_hash"
-                )
-                body = {
-                    k: v
-                    for k, v in acpt_rcpt.items()
-                    if k
-                    not in (
-                        "receipt_hash",
-                        "evidence_hash",
-                        "signature",
-                        "token",
-                        "hmac",
-                    )
-                }
-                computed_hash = content_hash(body)
-                if declared_hash:
-                    body_with_sig = {
-                        k: v
-                        for k, v in acpt_rcpt.items()
-                        if k not in ("receipt_hash", "evidence_hash")
-                    }
-                    if declared_hash in (computed_hash, content_hash(body_with_sig)):
-                        rcpt_bytes_ok = True
-                else:
-                    rcpt_bytes_ok = True
-
-                auth_issuers = host_config.get("authenticated_issuers", {})
-                if auth_issuers and acpt_auth in auth_issuers:
-                    creds = auth_issuers[acpt_auth]
-                    key = creds.get("hmac_key") if isinstance(creds, dict) else creds
-                    sig = (
-                        acpt_rcpt.get("signature")
-                        or acpt_rcpt.get("token")
-                        or acpt_rcpt.get("hmac")
-                    )
-                    if not sig or not key:
-                        rcpt_bytes_ok = False
-                    else:
-                        key_b = key.encode("utf-8") if isinstance(key, str) else key
-                        expected_sig = hmac.new(
-                            key_b, canonical_json(body), hashlib.sha256
-                        ).hexdigest()
-                        if not hmac.compare_digest(str(sig), expected_sig):
-                            rcpt_bytes_ok = False
-
-                if auth_ok and binding_ok and status_ok and indep_ok and rcpt_bytes_ok:
-                    is_independently_accepted = True
+            sorted_ref = sorted(verified_ref_receipts, key=lambda x: x["session_index"])
+            r_returns = [
+                Decimal(str(r.get("metrics", {}).get("net_return", "0")))
+                for r in sorted_ref
+            ]
+        else:
+            sorted_ref = []
 
         # Operating costs: must be established from host config or paired evidence.
         # Freeze contract prohibits defaulting unknown operating costs to zero.
@@ -757,6 +703,8 @@ def action_historical(args: argparse.Namespace) -> int:
         r_max_drawdown: Decimal | None = None
         p_nav_lower: Decimal | None = None
         p_econ_lower: Decimal | None = None
+        opt_b_length: int | None = None
+        block_diagnostics: list[str] = []
 
         unavailable_reasons: list[str] = []
         if r_returns is None or len(r_returns) != len(b_returns):
@@ -807,13 +755,57 @@ def action_historical(args: argparse.Namespace) -> int:
             b_max_drawdown = _calc_mdd(b_nav_marks)
             r_max_drawdown = _calc_mdd(r_nav_marks)
 
+            # Prescribed automatic block length estimator applied to B, R,
+            # and difference
+            repo_root = Path(__file__).resolve().parent.parent
+            worker_script = (
+                repo_root / "tools" / "stage1-statistics" / "block_length_worker.py"
+            )
+            worker_dir = repo_root / "tools" / "stage1-statistics"
+
+            if worker_script.is_file():
+                diff_returns = [
+                    b - r for b, r in zip(b_returns, r_returns, strict=True)
+                ]
+                input_payload = {
+                    "schema_version": "drift-stage1-block-length-input/1",
+                    "sessions": [f"S{i:03d}" for i in range(len(b_returns))],
+                    "b_returns": [str(x) for x in b_returns],
+                    "r_returns": [str(x) for x in r_returns],
+                    "difference_returns": [str(x) for x in diff_returns],
+                }
+                env = os.environ.copy()
+                env.pop("VIRTUAL_ENV", None)
+                try:
+                    proc_worker = subprocess.run(
+                        [
+                            "uv",
+                            "--directory",
+                            str(worker_dir),
+                            "run",
+                            "python",
+                            str(worker_script),
+                        ],
+                        input=json.dumps(input_payload).encode("utf-8"),
+                        capture_output=True,
+                        check=True,
+                        env=env,
+                    )
+                    worker_out = json.loads(proc_worker.stdout.decode("utf-8"))
+                    agg_b = worker_out.get("aggregated_block_length")
+                    if agg_b is not None:
+                        opt_b_length = int(agg_b)
+                    block_diagnostics = worker_out.get("diagnostics", [])
+                except Exception as e:
+                    block_diagnostics.append(f"BLOCK_LENGTH_WORKER_ERROR:{e}")
+
             try:
                 uncertainty_art = compute_paired_uncertainty_artifact(
                     b_returns=b_returns,
                     r_returns=r_returns,
                     initial_capital=Decimal("10000"),
                     incremental_operating_costs=costs,
-                    mean_block_length=21,
+                    mean_block_length=opt_b_length,
                 )
                 if uncertainty_art.primary_nav_diff_interval:
                     p_nav_lower = uncertainty_art.primary_nav_diff_interval[0]
@@ -821,6 +813,159 @@ def action_historical(args: argparse.Namespace) -> int:
                     p_econ_lower = uncertainty_art.primary_economic_interval[0]
             except Exception:
                 pass
+
+        # Compute exact reviewed result digest for acceptance binding
+        cand_inventory = [r["receipt_id"] for r in sorted_receipts if "receipt_id" in r]
+        ref_inventory = [r["receipt_id"] for r in sorted_ref] if sorted_ref else []
+        exact_result_payload = {
+            "freeze_hash": frozen.freeze_hash,
+            "protocol_hash": frozen.protocol.protocol_hash,
+            "observed_sessions": observed_count,
+            "evidence_inventory": cand_inventory,
+            "reference_evidence_inventory": ref_inventory,
+            "primary_economic_advantage": str(pea) if pea is not None else None,
+        }
+        exact_result_digest = content_hash(exact_result_payload)
+
+        # Verified independent acceptance
+        is_independently_accepted = False
+        acpt_rcpt_raw = host_config.get(
+            "independent_acceptance_receipt"
+        ) or host_config.get("acceptance_receipt")
+        if acpt_rcpt_raw:
+            acpt_rcpt: dict[str, Any] | None = None
+            if isinstance(acpt_rcpt_raw, str):
+                resolved_acpt = receipt_store.get(acpt_rcpt_raw)
+                if isinstance(resolved_acpt, dict):
+                    acpt_rcpt = resolved_acpt
+                elif isinstance(resolved_acpt, (bytes, str)):
+                    try:
+                        acpt_rcpt = json.loads(
+                            resolved_acpt
+                            if isinstance(resolved_acpt, str)
+                            else resolved_acpt.decode("utf-8")
+                        )
+                    except Exception:
+                        pass
+            elif isinstance(acpt_rcpt_raw, dict):
+                acpt_rcpt = acpt_rcpt_raw
+
+            if acpt_rcpt and isinstance(acpt_rcpt, dict):
+                acpt_auth = acpt_rcpt.get("authority_id")
+                auth_issuers = host_config.get("authenticated_issuers", {})
+
+                # 1. Authority must have configured issuer credentials in host
+                auth_configured = bool(
+                    acpt_auth and acpt_auth in exec_roots and acpt_auth in auth_issuers
+                )
+
+                # 2. Reject contradictory binding fields
+                binding_non_contradictory = True
+                if (
+                    acpt_rcpt.get("freeze_hash")
+                    and acpt_rcpt["freeze_hash"] != frozen.freeze_hash
+                ):
+                    binding_non_contradictory = False
+                if (
+                    acpt_rcpt.get("protocol_hash")
+                    and acpt_rcpt["protocol_hash"] != frozen.protocol.protocol_hash
+                ):
+                    binding_non_contradictory = False
+                if acpt_rcpt.get("study_id") and acpt_rcpt["study_id"] not in (
+                    frozen.protocol.study_id,
+                    f"HIST-{frozen.protocol.study_id}",
+                ):
+                    binding_non_contradictory = False
+
+                # Exact result binding: receipt must bind to the exact
+                # reviewed result digest
+                acpt_result_digest = (
+                    acpt_rcpt.get("result_digest")
+                    or acpt_rcpt.get("result_hash")
+                    or acpt_rcpt.get("reviewed_result_digest")
+                    or acpt_rcpt.get("evidence_digest")
+                )
+                valid_result_digests = {
+                    exact_result_digest,
+                    content_hash(cand_inventory + ref_inventory),
+                    content_hash(
+                        {
+                            "evidence_inventory": cand_inventory,
+                            "primary_economic_advantage": str(pea),
+                        }
+                    ),
+                }
+                result_binding_ok = bool(
+                    acpt_result_digest and acpt_result_digest in valid_result_digests
+                )
+
+                # 3. Status must be COMPLETED or ACCEPTED
+                status_ok = acpt_rcpt.get("status") in ("COMPLETED", "ACCEPTED")
+
+                # 4. Assessor independence and non-self-review explicitly verified
+                indep_ok = (
+                    acpt_rcpt.get("assessor_independence") is True
+                    and acpt_rcpt.get("is_self_review") is False
+                    and acpt_rcpt.get("conflicted") is not True
+                    and bool(acpt_rcpt.get("independence_declaration"))
+                )
+
+                # 5. Authenticate receipt bytes (required content hash
+                # AND valid cryptographic signature)
+                rcpt_bytes_ok = False
+                declared_hash = acpt_rcpt.get("receipt_hash") or acpt_rcpt.get(
+                    "evidence_hash"
+                )
+                sig = (
+                    acpt_rcpt.get("signature")
+                    or acpt_rcpt.get("token")
+                    or acpt_rcpt.get("hmac")
+                )
+
+                if auth_configured and declared_hash and sig:
+                    body = {
+                        k: v
+                        for k, v in acpt_rcpt.items()
+                        if k
+                        not in (
+                            "receipt_hash",
+                            "evidence_hash",
+                            "signature",
+                            "token",
+                            "hmac",
+                        )
+                    }
+                    computed_hash = content_hash(body)
+                    body_with_sig = {
+                        k: v
+                        for k, v in acpt_rcpt.items()
+                        if k not in ("receipt_hash", "evidence_hash")
+                    }
+                    if declared_hash in (
+                        computed_hash,
+                        content_hash(body_with_sig),
+                    ):
+                        creds = auth_issuers[acpt_auth]
+                        key = (
+                            creds.get("hmac_key") if isinstance(creds, dict) else creds
+                        )
+                        if key:
+                            key_b = key.encode("utf-8") if isinstance(key, str) else key
+                            expected_sig = hmac.new(
+                                key_b, canonical_json(body), hashlib.sha256
+                            ).hexdigest()
+                            if hmac.compare_digest(str(sig), expected_sig):
+                                rcpt_bytes_ok = True
+
+                if (
+                    auth_configured
+                    and binding_non_contradictory
+                    and result_binding_ok
+                    and status_ok
+                    and indep_ok
+                    and rcpt_bytes_ok
+                ):
+                    is_independently_accepted = True
 
         # Recompute outcome classification from verified execution evidence
         outcome = classify_study_outcome(
@@ -848,10 +993,11 @@ def action_historical(args: argparse.Namespace) -> int:
             "executed_at": datetime.now(UTC).isoformat(),
             "status": "COMPLETED",
             "primary_economic_advantage": str(pea) if pea is not None else None,
+            "optimal_block_length": opt_b_length,
+            "block_length_diagnostics": block_diagnostics,
             "outcome_classification": outcome.model_dump(mode="json"),
-            "evidence_inventory": [
-                r["receipt_id"] for r in sorted_receipts if "receipt_id" in r
-            ],
+            "evidence_inventory": cand_inventory,
+            "reference_evidence_inventory": ref_inventory,
             "execution_receipts": sorted_receipts,
         }
         _write_output(args.output, manifest)

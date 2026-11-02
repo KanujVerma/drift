@@ -1825,11 +1825,17 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     )
 
     # 15. Verified independent acceptance receipt passes assessor independence
+    cand_inv = [r["receipt_id"] for r in b_perf_receipts]
+    ref_inv = [r["receipt_id"] for r in r_perf_receipts]
+    res_digest = content_hash(cand_inv + ref_inv)
     indep_body = {
         "schema_version": "drift-stage1-acceptance-receipt/1",
         "receipt_id": "INDEP-ACPT-01",
         "freeze_hash": frozen.freeze_hash,
+        "protocol_hash": frozen.protocol.protocol_hash,
+        "study_id": f"HIST-{frozen.protocol.study_id}",
         "authority_id": "trusted-historical-root",
+        "result_digest": res_digest,
         "status": "ACCEPTED",
         "assessor_independence": True,
         "is_self_review": False,
@@ -1946,7 +1952,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
         in manifest_nocost["outcome_classification"]["reasons"]
     )
 
-    # 18. Reference receipts with duplicate session index -> UNAVAILABLE
+    # 18. Reference receipts with duplicate session index -> returns exit 3
     dup_r_receipts = [r_perf_receipts[0]] * 252
     write_host_config(
         {
@@ -1970,19 +1976,37 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
             str(out_file),
         ],
         capture_output=True,
-        text=True,
-        check=True,
     )
-    assert proc_dup.returncode == 0
-    manifest_dup = json.loads(out_file.read_text(encoding="utf-8"))
-    assert manifest_dup["primary_economic_advantage"] is None
-    assert manifest_dup["outcome_classification"]["outcome"] == "UNAVAILABLE"
-    assert (
-        "MISSING_PAIRED_REFERENCE_EVIDENCE"
-        in manifest_dup["outcome_classification"]["reasons"]
-    )
+    assert proc_dup.returncode == 3
 
-    # 19. Re-using candidate receipt as reference receipt -> rejected, UNAVAILABLE
+    # 19. Reference receipts with extra duplicate (253 receipts) -> returns exit 3
+    r_253 = r_perf_receipts + [r_perf_receipts[0]]
+    write_host_config(
+        {
+            "execution_receipts": b_perf_receipts,
+            "reference_receipts": r_253,
+            "incremental_operating_costs": "10.00",
+        }
+    )
+    proc_253 = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "historical",
+            "--frozen",
+            str(frozen_file),
+            "--host-config",
+            str(host_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+    )
+    assert proc_253.returncode == 3
+
+    # 20. Re-using candidate receipt as reference receipt -> returns exit 3
     write_host_config(
         {
             "execution_receipts": b_perf_receipts,
@@ -2005,17 +2029,38 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
             str(out_file),
         ],
         capture_output=True,
-        text=True,
-        check=True,
     )
-    assert proc_reuse.returncode == 0
-    manifest_reuse = json.loads(out_file.read_text(encoding="utf-8"))
-    assert manifest_reuse["primary_economic_advantage"] is None
-    assert manifest_reuse["outcome_classification"]["outcome"] == "UNAVAILABLE"
-    assert (
-        "MISSING_PAIRED_REFERENCE_EVIDENCE"
-        in manifest_reuse["outcome_classification"]["reasons"]
+    assert proc_reuse.returncode == 3
+
+    # 21. Reference receipt with absent reference-arm identity -> returns exit 3
+    r_no_arm = [
+        make_execution_receipt(i, prefix="HIST-NOARM", net_return_val="0.0001", arm="")
+        for i in range(252)
+    ]
+    write_host_config(
+        {
+            "execution_receipts": b_perf_receipts,
+            "reference_receipts": r_no_arm,
+            "incremental_operating_costs": "10.00",
+        }
     )
+    proc_noarm = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "historical",
+            "--frozen",
+            str(frozen_file),
+            "--host-config",
+            str(host_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+    )
+    assert proc_noarm.returncode == 3
 
 
 def test_cli_prospective_step_concurrent_writers_serialization(
