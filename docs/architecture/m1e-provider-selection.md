@@ -268,18 +268,27 @@ authorized.
 
 ---
 
-## Canonical Next Action
+## Historical screening record and current routing
 
-Under ADR 0012, paid promotion-grade M1e qualification is deferred until
-economically justified by exploratory research.
+The provider observations and terms summaries above are dated screening evidence,
+not a current entitlement, complete qualification or permission to acquire data.
+This documentation correction does not revalidate vendor terms, account rights,
+coverage, retention or historical information versions. Recheck those matters
+against actual source evidence before a newly authorized acquisition or study.
 
-The immediate next project action is:
-1. Conduct the external architecture and design pass for the **M2 Evaluator**,
-   defining the provider-neutral evaluator core and its two distinct evaluation
-   lanes (`EXPLORATORY` and `PROMOTION`).
-2. Formulate the executable M2 implementation plan.
-3. Implement the evaluator core and exploratory Alpaca development adapter
-   strictly within the exploratory lane.
+The M2 evaluator and exploratory development adapter have already been delivered;
+do not restart their design or implementation from the earlier next-action list.
+Current source qualification is routed through
+[issue #378](https://github.com/KanujVerma/drift/issues/378), the
+[Stage 1 roadmap](adaptive-experiments/stage1-roadmap.md) and the consuming
+study's explicit G1/G3 requirements. Matthew owns source qualification; Krish
+reviews research consumption; Kanuj owns scientific consumption for migrated
+issues, with independent acceptance as required.
+
+Under ADR 0012, paid promotion-grade M1e qualification remains separately gated.
+An exploratory source, retained snapshot or passing replay cannot be relabeled
+promotion-grade. Any new paid acquisition, model call or connected operation
+requires its actual scoped authorization and evidence.
 
 ## External Reference Links
 

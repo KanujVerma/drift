@@ -1,5 +1,26 @@
 # Drift Stage 1: Consolidated Antigravity Validation Handoff
 
+## Historical handoff: scope and current routing
+
+This file preserves the original K0-K5 consolidation review, defects, corrective
+commits and QA instructions. The consolidated implementation was delivered
+through [PR #457](https://github.com/KanujVerma/drift/pull/457); later G2
+integration was delivered through
+[PR #579](https://github.com/KanujVerma/drift/pull/579).
+
+All status statements, proposed merge sequences, source heads and test counts
+below refer to their recorded historical revisions. A historical rejection
+remains a rejection of that revision. A historical passing test is not proof
+for a later revision. Do not rerun the old merge sequence, reopen incorporated
+slices or treat a former source reservation as a new active writer claim.
+
+For current work, read [AGENTS.md](../../AGENTS.md),
+[workstreams](../architecture/workstreams.md), the assigned issue, its latest
+comments and the exact current PR checks/reviews. Outstanding producer/consumer,
+source, scientific and operational acceptance are not supplied by this archival
+handoff or by closure of an incorporated delivery PR. Keep the original evidence
+below intact.
+
 ## AntiGravity audit DEF-01 to DEF-04 remediation (issue #482)
 
 The independent AntiGravity report for commit
