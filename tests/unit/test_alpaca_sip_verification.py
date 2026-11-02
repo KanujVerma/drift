@@ -936,3 +936,56 @@ def test_valid_raw_payloads_provenance_passes() -> None:
     assert report.source_provenance.bars_sha256 is not None
     assert report.source_provenance.calendar_sha256 is not None
     assert report.source_provenance.corporate_actions_sha256 is not None
+
+
+def test_sol_round5_malformed_raw_evidence_refused() -> None:
+    """Sol Round 5 P1: NaN/Inf prices, non-ISO timestamp, null dividend record."""
+    import json
+    from types import SimpleNamespace
+
+    _, cov_ev, ca_records, rights = make_mock_evidence()
+
+    # Exact Sol reproduction:
+    # all 12 symbols with t="not-a-time", o=NaN, h=Infinity, v=NaN,
+    # cash_dividends=[None]
+    bad_bars = {
+        sym: [
+            {
+                "t": "not-a-time",
+                "o": float("nan"),
+                "h": float("inf"),
+                "l": 99.0,
+                "c": 104.0,
+                "v": float("nan"),
+            }
+        ]
+        for sym in EXACT_12_ETF_UNIVERSE
+    }
+    malformed_payloads = SimpleNamespace(
+        bars=json.dumps({"bars": bad_bars, "next_page_token": None}).encode("utf-8"),
+        calendar=json.dumps([{"date": "2024-01-02", "open": "09:30"}]).encode("utf-8"),
+        corporate_actions=json.dumps(
+            {
+                "corporate_actions": {
+                    "cash_dividends": [None],
+                    "forward_splits": [],
+                },
+                "next_page_token": None,
+            }
+        ).encode("utf-8"),
+    )
+
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        raw_payloads=malformed_payloads,
+        corporate_actions=ca_records,
+        rights_assessment=rights,
+        coverage_evidence=cov_ev,
+    )
+
+    assert report.overall_status == "REFUSED"
+    assert report.source_provenance.provenance_verified is False
+    assert any("raw_payloads failed verification" in r for r in report.refusal_reasons)
+    # Refusal reason mentions non-ISO timestamp
+    assert any("non-ISO timestamp" in r for r in report.refusal_reasons)

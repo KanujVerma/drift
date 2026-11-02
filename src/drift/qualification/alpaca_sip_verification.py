@@ -523,6 +523,8 @@ def validate_raw_alpaca_payloads(
 ) -> tuple[str, str, str]:
     """Validate raw payload bytes against Alpaca provider payload contracts."""
     import json
+    import math
+    from datetime import date, datetime
     from hashlib import sha256
 
     bars_b = getattr(raw_payloads, "bars", None)
@@ -571,29 +573,41 @@ def validate_raw_alpaca_payloads(
                     raise ValueError(
                         f"bar record at {sym}[{idx}] missing or null key: {key}"
                     )
-            if not (isinstance(bar["t"], str) and bar["t"].strip()):
+            t_str = bar.get("t")
+            if not (isinstance(t_str, str) and t_str.strip()):
                 raise ValueError(
-                    f"bar record at {sym}[{idx}] has invalid timestamp 't': {bar['t']}"
+                    f"bar record at {sym}[{idx}] has invalid timestamp 't': {t_str}"
                 )
+            try:
+                datetime.fromisoformat(t_str.replace("Z", "+00:00"))
+            except Exception as e:
+                raise ValueError(
+                    f"bar record at {sym}[{idx}] has non-ISO timestamp 't': "
+                    f"{t_str}: {e}"
+                ) from e
+
             for price_key in ("o", "h", "l", "c"):
-                val = bar[price_key]
+                val = bar.get(price_key)
                 if (
                     not isinstance(val, (int, float))
                     or isinstance(val, bool)
+                    or not math.isfinite(val)
                     or val <= 0
                 ):
                     raise ValueError(
-                        f"bar record at {sym}[{idx}] has non-positive price "
-                        f"{price_key}={val}"
+                        f"bar record at {sym}[{idx}] has non-positive or "
+                        f"non-finite price {price_key}={val}"
                     )
-            v_val = bar["v"]
+            v_val = bar.get("v")
             if (
                 not isinstance(v_val, (int, float))
                 or isinstance(v_val, bool)
+                or not math.isfinite(v_val)
                 or v_val < 0
             ):
                 raise ValueError(
-                    f"bar record at {sym}[{idx}] has negative volume v={v_val}"
+                    f"bar record at {sym}[{idx}] has negative or non-finite "
+                    f"volume v={v_val}"
                 )
 
     try:
@@ -652,11 +666,41 @@ def validate_raw_alpaca_payloads(
         )
     dividends = ca_grouped.get("cash_dividends")
     splits = ca_grouped.get("forward_splits")
-    div_count = len(dividends) if isinstance(dividends, list) else 0
-    split_count = len(splits) if isinstance(splits, list) else 0
-    if div_count == 0 and split_count == 0:
+    valid_divs = 0
+    if isinstance(dividends, list):
+        for idx, item in enumerate(dividends):
+            if not isinstance(item, dict):
+                raise ValueError(
+                    f"corporate actions cash_dividends[{idx}] must be a dict, "
+                    f"got {type(item)}"
+                )
+            ca_sym = item.get("symbol")
+            if not (isinstance(ca_sym, str) and ca_sym.strip()):
+                raise ValueError(
+                    f"corporate actions cash_dividends[{idx}] lacks valid symbol: "
+                    f"{ca_sym}"
+                )
+            valid_divs += 1
+
+    valid_splits = 0
+    if isinstance(splits, list):
+        for idx, item in enumerate(splits):
+            if not isinstance(item, dict):
+                raise ValueError(
+                    f"corporate actions forward_splits[{idx}] must be a dict, "
+                    f"got {type(item)}"
+                )
+            ca_sym = item.get("symbol")
+            if not (isinstance(ca_sym, str) and ca_sym.strip()):
+                raise ValueError(
+                    f"corporate actions forward_splits[{idx}] lacks valid symbol: "
+                    f"{ca_sym}"
+                )
+            valid_splits += 1
+
+    if valid_divs == 0 and valid_splits == 0:
         raise ValueError(
-            "corporate actions response carries no dividend or split records"
+            "corporate actions response carries no valid dividend or split records"
         )
 
     return (
