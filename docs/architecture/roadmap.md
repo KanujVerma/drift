@@ -8,17 +8,19 @@ equal units of engineering effort; earlier milestones establish scientific and
 data integrity, while later milestones introduce modeling, evaluation, and live
 execution.
 
-Permanent implementation owners for M2 through M18+ are defined in
-[workstreams.md](workstreams.md). GitHub Issues and PRs own live task state.
-This roadmap does not track current issue numbers, percent complete, or
-session status.
+Current feature ownership and milestone stewardship are defined in
+[workstreams.md](workstreams.md), with issue-specific claims and accepted
+handoffs in GitHub. Historical delivery attribution below is not a current
+writer assignment, a file reservation or a mandatory review obligation.
 
-[ADR 0014](../adr/0014-transfer-active-drift-implementation-ownership-to-krish.md)
-assigns all remaining active roadmap implementation, M2 through M18+, to
-Krish. [ADR 0013](../adr/0013-parallelize-owned-milestones-without-advancing-authorization.md)
-remains the historical record of the superseded 8/8 split. Its separation of
-build order from authorization order still applies. Code availability is not
-operational authorization.
+[ADR 0013](../adr/0013-parallelize-owned-milestones-without-advancing-authorization.md)
+and [ADR 0014](../adr/0014-transfer-active-drift-implementation-ownership-to-krish.md)
+remain historical ownership records. The current three-workstream routing and
+[ADR 0017](../adr/0017-transfer-scientific-experiment-ownership-to-kanuj.md)
+apply only with their required issue-specific migration and writer-handoff
+receipts. Preserve those records rather than reactivating superseded assignments.
+Build order, code availability, independent acceptance and operational
+authorization remain separate.
 
 ---
 
@@ -26,7 +28,7 @@ operational authorization.
 
 Progress across Drift milestones is tracked below. Note that code availability does not constitute operational authority: completion of milestone implementation (including M11 promotion controls or M16-M18 live execution components) does not authorize live trading, broker order routing, or the promotion of exploratory evaluation results without promotion-grade M1e evidence.
 
-| Milestone | Title | Owner | Status | Primary Output / Invariant |
+| Milestone | Title | Historical delivery attribution | Code status | Primary Output / Invariant |
 |---|---|---|---|---|
 | **M0** | Auditable Evidence Kernel | - | **COMPLETE** | Monotonic append-only SQLite ledger with SHA-256 hash chaining. |
 | **M1a** | Temporal Provenance | - | **COMPLETE** | Exact-byte manifests, channel availability, and tri-state cutoffs. |
@@ -47,10 +49,10 @@ Progress across Drift milestones is tracked below. Note that code availability d
 | **M12** | Shadow Broker | Krish | **COMPLETE** | Realistic simulated broker tracking intended orders, fills, and exposures. |
 | **M13** | Deterministic Hard Risk | Krish | **COMPLETE** | Hard-coded executor limits, persistent kill switches, drawdown stops. |
 | **M14** | Broker-Neutral Execution | Krish | **COMPLETE** | Abstract execution interfaces decoupling strategies from venues. |
-| **M15** | Real-World Paper / Shadow Validation | Krish | **COMPLETE** | Live market feed validation without capital risk. |
-| **M16** | Official Robinhood Agentic MCP Adapter | Krish | **COMPLETE** | Integration with Robinhood via official Agentic Trading protocol. |
-| **M17** | Tiny-Money Canary | Krish | **COMPLETE** | Minimal real-capital validation (e.g., single-share order routing). |
-| **M18+** | Bounded Autonomy & Improvement | Krish | **COMPLETE** | Controlled live allocation with ongoing empirical evidence governance. M18+ is an open-ended operating phase. |
+| **M15** | Paper / Shadow Validation Components | Krish | **COMPLETE** | Shadow-processing infrastructure; prospective evidence remains separately gated. |
+| **M16** | Robinhood Agentic MCP Adapter | Krish | **OFFLINE ADAPTER IMPLEMENTED** | Broker-neutral translation and mock transport; authenticated service conformance is a separate deliverable. |
+| **M17** | Tiny-Money Canary Components | Krish | **COMPLETE** | Canary controls and reconciliation; no capital deployment is established by code completion. |
+| **M18+** | Bounded Autonomy & Improvement Components | Krish | **COMPLETE** | Bounded-autonomy controls; operational advancement requires independent evidence and authorization. |
 
 ---
 
@@ -247,12 +249,21 @@ Progress across Drift milestones is tracked below. Note that code availability d
   daily loss limits, persistent kill switches) running outside the AI agent's control. Closed with Issue #21 and PR #289.
 - **M14 Broker-Neutral Execution** (Krish; Complete): Abstract execution protocols and order intent
   journals decoupling strategy logic from broker APIs (ADR 0002). Closed with Issue #22 and PR #301.
-- **M15 Real-World Paper / Shadow Validation** (Krish; Complete): Live market feed processing, execution
-  drift calculation, and order intent generation running in shadow mode. Closed with Issue #23 and PR #313.
+- **M15 Paper / Shadow Validation Components** (historical delivery: Krish): Market-feed
+  processing, execution-drift calculation and shadow-validation components were delivered
+  with Issue #23 and PR #313. This code milestone is not a claim that the current
+  Stage 1 prospective study has run or met its evidence requirements.
 
-### M16 through M18+: Live Execution and Controlled Autonomy (Complete)
-- **M16 Official Robinhood Agentic MCP Adapter** (Krish; Complete): Implemented the live brokerage
-  connection using Robinhood's official Agentic Trading protocol (ADR 0011). Closed with Issue #24 and PR #323.
+### M16 through M18+: Execution and Autonomy Components
+
+These milestones describe component delivery, not a completed live connection,
+a deployed capital allocation or authorization for ongoing operation.
+
+- **M16 Robinhood Agentic MCP Adapter** (historical delivery: Krish): The broker adapter,
+  account synchronization interface and deterministic mock transport were delivered
+  with Issue #24 and PR #323 under ADR 0011. Actual authenticated transport,
+  current official-tool conformance, account entitlement and mode-specific release
+  must be verified separately before claiming a working connected broker.
 - **M17 Tiny-Money Canary** (Krish; Complete): Micro-capital execution layer with strict capital limits,
   allocation gatekeepers, and fill/settlement reconciliation. Closed with Issue #25 and PR #335.
 - **M18+ Bounded Autonomy** (Krish; Complete baseline runtime): Dynamic allocation expansion governors,
