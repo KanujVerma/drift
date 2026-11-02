@@ -1710,3 +1710,217 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     assert manifest["status"] == "COMPLETED"
     assert manifest["observed_sessions"] == 252
     assert manifest["freeze_hash"] == frozen.freeze_hash
+
+
+def test_cli_prospective_step_concurrent_writers_serialization(
+    repo_root: Path, tmp_path: Path
+) -> None:
+    """Test concurrent prospective steps serialization per registration (Round 19).
+
+    Two concurrent invocations targeting the same step cannot interleave, overwrite
+    evidence, or leave mismatched files. Exactly one succeeds; the duplicate is
+    rejected with exit code 3. Subsequent recovery and sequential stepping succeed.
+    """
+    import concurrent.futures
+    from datetime import UTC, date, datetime
+
+    from drift.experiments.stage1_original_acceptance import (
+        create_original_study_evidence_receipt,
+    )
+    from drift.experiments.stage1_prospective_study import (
+        create_prospective_study_plan,
+    )
+    from drift.experiments.stage1_study_freeze import REQUIRED_ROLES
+    from drift.serialization.canonical import content_hash
+
+    script = repo_root / "scripts" / "stage1_study.py"
+    private_root = tmp_path / "private_root"
+    private_root.mkdir(parents=True, exist_ok=True)
+    plan_file = tmp_path / "plan.json"
+    reg_host_file = tmp_path / "reg_host.json"
+    host_config_file = tmp_path / "host_config.json"
+
+    now = datetime(2026, 11, 2, tzinfo=UTC)
+    h = "8" * 64
+    plan = create_prospective_study_plan(
+        plan_id="PROSP-CONC-01",
+        created_at=now,
+        calendar_identity="XNYS-2026-2027",
+        first_eligible_session=date(2026, 11, 3),
+        planned_last_session=date(2028, 11, 3),
+        operating_environment_hash=h,
+        model_binding_hash=h,
+        market_admission_hash=h,
+        mandate_hash=h,
+        cost_policy_hash=h,
+    )
+    plan_file.write_text(plan.model_dump_json(), encoding="utf-8")
+
+    receipts_store: dict[str, Any] = {}
+    evidence = []
+    trust_roots: dict[str, list[str]] = {}
+    for role in REQUIRED_ROLES:
+        rcpt_body, r_hash = create_original_study_evidence_receipt(
+            role=role,
+            receipt_id=f"CONC-RCPT-{role}",
+            protocol_hash=plan.plan_hash,
+            authority_id="trusted-root",
+            accepted_at=now,
+            status="ACCEPTED",
+            hmac_key="conc-secret",
+        )
+        receipts_store[f"CONC-RCPT-{role}"] = rcpt_body
+        evidence.append(
+            {
+                "role": role,
+                "receipt_id": f"CONC-RCPT-{role}",
+                "receipt_hash": r_hash,
+                "protocol_hash": plan.plan_hash,
+                "accepted_at": now.isoformat(),
+            }
+        )
+        trust_roots[role] = ["trusted-root"]
+
+    reg_host = {
+        "trust_roots": trust_roots,
+        "receipt_store": receipts_store,
+        "evidence": evidence,
+        "authenticated_issuers": {"trusted-root": {"hmac_key": "conc-secret"}},
+        "has_broker": False,
+    }
+    reg_host_file.write_text(json.dumps(reg_host), encoding="utf-8")
+
+    # 1. Register prospective study
+    reg_proc = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "prospective-register",
+            "--plan",
+            str(plan_file),
+            "--host-config",
+            str(reg_host_file),
+            "--private-root",
+            str(private_root),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert reg_proc.returncode == 0
+    reg_file = private_root / f"REG-{plan.plan_id}.json"
+    reg_data = json.loads(reg_file.read_text(encoding="utf-8"))
+
+    art_store: dict[str, Any] = {}
+
+    def make_evidence(s_idx: int, s_date: str) -> Path:
+        hashes = {}
+        for role, payload in (
+            (
+                "portfolio_state",
+                {"nav": "100000.00", "cash": "100000.00", "positions": {}},
+            ),
+            ("decision", {"strategy_id": "s1", "allocations": {}}),
+            ("fills", {"orders": [], "fills": []}),
+        ):
+            full_art = {
+                "schema_version": "drift-stage1-prospective-artifact/1",
+                "artifact_role": role,
+                "registration_id": f"REG-{plan.plan_id}",
+                "freeze_hash": reg_data["frozen_study"]["freeze_hash"],
+                "session_index": s_idx,
+                "session_date": s_date,
+                "authority_id": "trusted-root",
+                "execution_payload": payload,
+            }
+            h = content_hash(full_art)
+            art_store[h] = full_art
+            hashes[role] = h
+
+        ev_body = {
+            "schema_version": "drift-stage1-prospective-session-evidence/1",
+            "registration_id": f"REG-{plan.plan_id}",
+            "freeze_hash": reg_data["frozen_study"]["freeze_hash"],
+            "session_index": s_idx,
+            "session_date": s_date,
+            "status": "COMPLETED",
+            "evidence_artifacts": hashes,
+        }
+        ev_f = private_root / f"conc-step-{s_idx}-evidence.json"
+        ev_f.write_text(
+            json.dumps(ev_body | {"evidence_hash": content_hash(ev_body)}),
+            encoding="utf-8",
+        )
+        return ev_f
+
+    ev_file_1 = make_evidence(0, "2026-11-03")
+    ev_file_2 = make_evidence(1, "2026-11-04")
+
+    host_cfg = {
+        "trust_roots": trust_roots,
+        "receipt_store": receipts_store,
+        "authenticated_issuers": {"trusted-root": {"hmac_key": "conc-secret"}},
+        "artifact_store": art_store,
+        "authentic_artifacts": list(art_store.keys()),
+        "has_broker": False,
+    }
+    host_config_file.write_text(json.dumps(host_cfg), encoding="utf-8")
+
+    def run_worker(s_date: str, ev_p: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                "uv",
+                "run",
+                "python",
+                str(script),
+                "prospective-step",
+                "--registration",
+                str(reg_file),
+                "--host-config",
+                str(host_config_file),
+                "--private-root",
+                str(private_root),
+                "--session-date",
+                s_date,
+                "--session-evidence",
+                str(ev_p),
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        f1 = executor.submit(run_worker, "2026-11-03", ev_file_1)
+        f2 = executor.submit(run_worker, "2026-11-03", ev_file_1)
+        res1 = f1.result()
+        res2 = f2.result()
+
+    results = [res1, res2]
+    returncodes = sorted(r.returncode for r in results)
+    assert returncodes == [0, 3], (
+        f"Expected [0, 3], got {returncodes}.\n"
+        f"Output 1: {res1.stderr}\nOutput 2: {res2.stderr}"
+    )
+
+    step_files = list(private_root.glob(f"REG-{plan.plan_id}-step-*.json"))
+    ev_files = list(private_root.glob(f"REG-{plan.plan_id}-evidence-*.json"))
+    assert len(step_files) == 1
+    assert len(ev_files) == 1
+
+    s1_data = json.loads(step_files[0].read_text(encoding="utf-8"))
+    assert s1_data["observed_session_count"] == 1
+    assert s1_data["last_observed_session"] == "2026-11-03"
+
+    res_step2 = run_worker("2026-11-04", ev_file_2)
+    assert res_step2.returncode == 0, f"Step 2 failed: {res_step2.stderr}"
+
+    step_files_2 = sorted(private_root.glob(f"REG-{plan.plan_id}-step-*.json"))
+    ev_files_2 = sorted(private_root.glob(f"REG-{plan.plan_id}-evidence-*.json"))
+    assert len(step_files_2) == 2
+    assert len(ev_files_2) == 2
+
+    s2_data = json.loads(step_files_2[1].read_text(encoding="utf-8"))
+    assert s2_data["observed_session_count"] == 2
+    assert s2_data["last_observed_session"] == "2026-11-04"

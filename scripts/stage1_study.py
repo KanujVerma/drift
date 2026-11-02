@@ -24,11 +24,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import uuid
+from collections.abc import Generator
+from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore[assignment]
 
 from drift.experiments.stage1_original_acceptance import (
     ProductionExecutionEvidenceVerifier,
@@ -66,19 +75,81 @@ from drift.experiments.stage1_study_outcomes import (
 )
 from drift.experiments.stage1_study_report import create_study_report
 from drift.experiments.stage1_uncertainty import PairedUncertaintyArtifactV1
-from drift.serialization.canonical import canonical_json, content_hash
+from drift.serialization.canonical import canonical_json
 
 
 def _write_output(path_str: str, data: dict[str, Any] | str) -> None:
-    import os
-    import uuid
-
     p = Path(path_str).resolve()
     p.parent.mkdir(parents=True, exist_ok=True)
     text = data if isinstance(data, str) else json.dumps(data, indent=2, default=str)
     tmp_p = p.parent / f"{p.name}.tmp.{uuid.uuid4().hex}"
     tmp_p.write_text(text, encoding="utf-8")
     os.replace(tmp_p, p)
+
+
+@contextmanager
+def _registration_lock(private_root: Path, registration_id: str) -> Generator[None]:
+    """Serialize recovery and step publication per registration (Round 19)."""
+    lock_path = private_root / f".{registration_id}.lock"
+    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if fcntl is not None:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        if fcntl is not None:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        try:
+            os.close(lock_fd)
+        except OSError:
+            pass
+
+
+def _publish_prospective_step_pair(
+    ev_path: Path,
+    ev_data: dict[str, Any] | str,
+    step_path: Path,
+    step_data: dict[str, Any] | str,
+) -> None:
+    """Atomically commit evidence and step state pair with duplicate rejection."""
+    ev_path.parent.mkdir(parents=True, exist_ok=True)
+    step_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if ev_path.exists() or step_path.exists():
+        raise FileExistsError(
+            f"Step target file {step_path.name} or evidence {ev_path.name} "
+            f"already exists"
+        )
+
+    ev_text = (
+        ev_data
+        if isinstance(ev_data, str)
+        else json.dumps(ev_data, indent=2, default=str)
+    )
+    step_text = (
+        step_data
+        if isinstance(step_data, str)
+        else json.dumps(step_data, indent=2, default=str)
+    )
+
+    tmp_ev = ev_path.parent / f"{ev_path.name}.tmp.{uuid.uuid4().hex}"
+    tmp_step = step_path.parent / f"{step_path.name}.tmp.{uuid.uuid4().hex}"
+
+    tmp_ev.write_text(ev_text, encoding="utf-8")
+    tmp_step.write_text(step_text, encoding="utf-8")
+
+    try:
+        os.replace(tmp_ev, ev_path)
+        os.replace(tmp_step, step_path)
+    except Exception:
+        tmp_ev.unlink(missing_ok=True)
+        tmp_step.unlink(missing_ok=True)
+        ev_path.unlink(missing_ok=True)
+        step_path.unlink(missing_ok=True)
+        raise
 
 
 def _read_json(path_str: str) -> dict[str, Any]:
@@ -732,240 +803,253 @@ def action_prospective_step(args: argparse.Namespace) -> int:
                 }
 
         # 4. Recovery: scan private_root for verified latest step file
-        # (Finding 6 & Round 18)
+        # (Finding 6, Round 18 & Round 19)
         private_root = Path(args.private_root).resolve()
         private_root.mkdir(parents=True, exist_ok=True)
 
-        step_files = sorted(
-            private_root.glob(f"{reg.registration_id}-step-*.json"),
-            key=lambda p: (
-                int(p.stem.split("-step-")[-1])
-                if p.stem.split("-step-")[-1].isdigit()
-                else -1
-            ),
-        )
-        cur_reg = reg
-        for sf in step_files:
-            try:
-                sf_data = _read_json(str(sf))
-                step_reg = ProspectiveRegistrationV1.model_validate_json(
-                    json.dumps(sf_data)
-                )
-            except Exception as e:
-                sys.stderr.write(
-                    f"RECOVERY_VERIFICATION_FAILED: step file {sf.name} "
-                    f"is malformed: {e}\n"
-                )
-                return 3
-
-            if step_reg.registration_id != reg.registration_id:
-                continue
-
-            # Enforce immutable registration and study bindings
-            if step_reg.frozen_study.freeze_hash != reg.frozen_study.freeze_hash:
-                sys.stderr.write(
-                    f"RECOVERY_VERIFICATION_FAILED: step file {sf.name} "
-                    f"altered frozen study freeze_hash\n"
-                )
-                return 3
-            if canonical_json(step_reg.frozen_study) != canonical_json(
-                reg.frozen_study
-            ):
-                sys.stderr.write(
-                    f"RECOVERY_VERIFICATION_FAILED: step file {sf.name} "
-                    f"altered frozen study evidence or plan\n"
-                )
-                return 3
-            if step_reg.registered_at != reg.registered_at:
-                sys.stderr.write(
-                    f"RECOVERY_VERIFICATION_FAILED: step file {sf.name} "
-                    f"altered registered_at\n"
-                )
-                return 3
-            if (
-                step_reg.has_broker_dispatch_capability
-                != reg.has_broker_dispatch_capability
-            ):
-                sys.stderr.write(
-                    f"RECOVERY_VERIFICATION_FAILED: step file {sf.name} "
-                    f"altered broker capability\n"
-                )
-                return 3
-            if step_reg.prior_step_hash != cur_reg.registration_hash:
-                sys.stderr.write(
-                    f"RECOVERY_VERIFICATION_FAILED: step file {sf.name} "
-                    f"broken prior_step_hash chain: {step_reg.prior_step_hash} "
-                    f"!= {cur_reg.registration_hash}\n"
-                )
-                return 3
-            if step_reg.observed_session_count != cur_reg.observed_session_count + 1:
-                sys.stderr.write(
-                    f"RECOVERY_VERIFICATION_FAILED: step file {sf.name} "
-                    f"non-sequential session count: "
-                    f"{step_reg.observed_session_count} != "
-                    f"{cur_reg.observed_session_count + 1}\n"
-                )
-                return 3
-
-            # Resolve step's session evidence
-            step_idx = cur_reg.observed_session_count
-            step_ev = None
-            for pattern in (
-                f"{reg.registration_id}-evidence-{step_idx + 1}.json",
-                f"step-{step_idx}-evidence.json",
-                f"evidence-{step_idx}.json",
-                f"evidence-step-{step_idx}.json",
-            ):
-                cand = private_root / pattern
-                if cand.exists():
-                    try:
-                        step_ev = _read_json(str(cand))
-                        break
-                    except Exception:
-                        pass
-            if step_ev is None:
-                ev_store = host_config.get("session_evidence_store") or host_config.get(
-                    "session_evidence_history"
-                )
-                if isinstance(ev_store, dict):
-                    step_ev = (
-                        ev_store.get(step_reg.last_evidence_hash)
-                        or ev_store.get(f"{reg.registration_id}:{step_idx}")
-                        or ev_store.get(str(step_idx))
-                        or ev_store.get(step_idx)
+        with _registration_lock(private_root, reg.registration_id):
+            step_files = sorted(
+                private_root.glob(f"{reg.registration_id}-step-*.json"),
+                key=lambda p: (
+                    int(p.stem.split("-step-")[-1])
+                    if p.stem.split("-step-")[-1].isdigit()
+                    else -1
+                ),
+            )
+            cur_reg = reg
+            for sf in step_files:
+                try:
+                    sf_data = _read_json(str(sf))
+                    step_reg = ProspectiveRegistrationV1.model_validate_json(
+                        json.dumps(sf_data)
                     )
-
-            if step_ev is None:
-                sys.stderr.write(
-                    f"RECOVERY_VERIFICATION_FAILED: step file {sf.name} "
-                    f"has no verifiable session evidence\n"
-                )
-                return 3
-
-            # Determine expected session date
-            if cur_reg.frozen_study.plan.scheduled_dates and step_idx < len(
-                cur_reg.frozen_study.plan.scheduled_dates
-            ):
-                exp_date = cur_reg.frozen_study.plan.scheduled_dates[step_idx]
-            elif step_reg.last_observed_session:
-                exp_date = step_reg.last_observed_session
-            else:
-                sys.stderr.write(
-                    f"RECOVERY_VERIFICATION_FAILED: cannot determine session "
-                    f"date for {sf.name}\n"
-                )
-                return 3
-
-            # Replay advancement through advance_prospective_session to re-verify
-            # authenticated evidence, producer authentication, and typed artifacts
-            try:
-                replayed_reg = advance_prospective_session(
-                    cur_reg,
-                    session_date=exp_date,
-                    session_evidence=step_ev,
-                    calendar=calendar_dates,
-                    artifact_store=artifact_store,
-                    trust_roots=trust_roots,
-                    producer_verifier=prod_verifier,
-                )
-            except Exception as e:
-                sys.stderr.write(
-                    f"RECOVERY_VERIFICATION_FAILED: step file {sf.name} "
-                    f"failed evidence verification: {e}\n"
-                )
-                return 3
-
-            if replayed_reg.registration_hash != step_reg.registration_hash:
-                sys.stderr.write(
-                    f"RECOVERY_VERIFICATION_FAILED: step file {sf.name} "
-                    f"replayed state hash mismatch: "
-                    f"{replayed_reg.registration_hash} "
-                    f"!= {step_reg.registration_hash}\n"
-                )
-                return 3
-
-            cur_reg = replayed_reg
-        reg = cur_reg
-
-        # Target step date resolution
-        if hasattr(args, "session_date") and args.session_date:
-            step_date = date.fromisoformat(args.session_date)
-        elif reg.frozen_study.plan.scheduled_dates:
-            if reg.observed_session_count >= len(reg.frozen_study.plan.scheduled_dates):
-                sys.stderr.write("All scheduled sessions already observed\n")
-                return 3
-            step_date = reg.frozen_study.plan.scheduled_dates[
-                reg.observed_session_count
-            ]
-        elif calendar_dates is not None:
-            last = reg.last_observed_session or (
-                reg.frozen_study.plan.first_eligible_session - timedelta(days=1)
-            )
-            eligible = sorted([d for d in calendar_dates if d > last])
-            if not eligible:
-                sys.stderr.write("No eligible trading sessions remaining in calendar\n")
-                return 3
-            step_date = eligible[0]
-        else:
-            sys.stderr.write(
-                "Prospective step requires explicit --session-date, "
-                "frozen scheduled_dates, or host_config trading_calendar\n"
-            )
-            return 3
-
-        # Session evidence resolution for target step
-        ev_data = None
-        if hasattr(args, "session_evidence") and args.session_evidence:
-            ev_data = _read_json(args.session_evidence)
-        elif "session_evidence" in host_config:
-            ev_data = host_config["session_evidence"]
-
-        if not ev_data:
-            sys.stderr.write("Prospective step requires verified session_evidence\n")
-            return 3
-
-        # 5. Conflict detection: check if target step file already exists (Finding 6)
-        target_idx = reg.observed_session_count + 1
-        step_fname = f"{reg.registration_id}-step-{target_idx}.json"
-        out_path = private_root / step_fname
-
-        ev_hash = (
-            ev_data.get("evidence_hash")
-            if isinstance(ev_data, dict)
-            else getattr(ev_data, "evidence_hash", None)
-        ) or content_hash(ev_data)
-
-        if out_path.exists():
-            try:
-                existing_data = _read_json(str(out_path))
-                existing_ev = existing_data.get("last_evidence_hash")
-                if existing_ev and existing_ev != ev_hash:
+                except Exception as e:
                     sys.stderr.write(
-                        f"CONFLICT_ERROR: step file {step_fname} already exists with "
-                        f"contradictory evidence {existing_ev} != {ev_hash}\n"
+                        f"RECOVERY_VERIFICATION_FAILED: step file {sf.name} "
+                        f"is malformed: {e}\n"
                     )
                     return 3
-            except Exception:
-                pass
 
-        advanced = advance_prospective_session(
-            reg,
-            session_date=step_date,
-            session_evidence=ev_data,
-            calendar=calendar_dates,
-            artifact_store=artifact_store,
-            trust_roots=trust_roots,
-            producer_verifier=prod_verifier,
-        )
-        step_ev_path = (
-            private_root / f"{reg.registration_id}-evidence-{target_idx}.json"
-        )
-        _write_output(
-            str(step_ev_path),
-            ev_data if isinstance(ev_data, dict) else ev_data.model_dump(mode="json"),
-        )
-        _write_output(str(out_path), advanced.model_dump(mode="json"))
-        return 0
+                if step_reg.registration_id != reg.registration_id:
+                    continue
+
+                # Enforce immutable registration and study bindings
+                if step_reg.frozen_study.freeze_hash != reg.frozen_study.freeze_hash:
+                    sys.stderr.write(
+                        f"RECOVERY_VERIFICATION_FAILED: step file {sf.name} "
+                        f"altered frozen study freeze_hash\n"
+                    )
+                    return 3
+                if canonical_json(step_reg.frozen_study) != canonical_json(
+                    reg.frozen_study
+                ):
+                    sys.stderr.write(
+                        f"RECOVERY_VERIFICATION_FAILED: step file {sf.name} "
+                        f"altered frozen study evidence or plan\n"
+                    )
+                    return 3
+                if step_reg.registered_at != reg.registered_at:
+                    sys.stderr.write(
+                        f"RECOVERY_VERIFICATION_FAILED: step file {sf.name} "
+                        f"altered registered_at\n"
+                    )
+                    return 3
+                if (
+                    step_reg.has_broker_dispatch_capability
+                    != reg.has_broker_dispatch_capability
+                ):
+                    sys.stderr.write(
+                        f"RECOVERY_VERIFICATION_FAILED: step file {sf.name} "
+                        f"altered broker capability\n"
+                    )
+                    return 3
+                if step_reg.prior_step_hash != cur_reg.registration_hash:
+                    sys.stderr.write(
+                        f"RECOVERY_VERIFICATION_FAILED: step file {sf.name} "
+                        f"broken prior_step_hash chain: {step_reg.prior_step_hash} "
+                        f"!= {cur_reg.registration_hash}\n"
+                    )
+                    return 3
+                if (
+                    step_reg.observed_session_count
+                    != cur_reg.observed_session_count + 1
+                ):
+                    sys.stderr.write(
+                        f"RECOVERY_VERIFICATION_FAILED: step file {sf.name} "
+                        f"non-sequential session count: "
+                        f"{step_reg.observed_session_count} != "
+                        f"{cur_reg.observed_session_count + 1}\n"
+                    )
+                    return 3
+
+                # Resolve step's session evidence
+                step_idx = cur_reg.observed_session_count
+                step_ev = None
+                for pattern in (
+                    f"{reg.registration_id}-evidence-{step_idx + 1}.json",
+                    f"step-{step_idx}-evidence.json",
+                    f"evidence-{step_idx}.json",
+                    f"evidence-step-{step_idx}.json",
+                ):
+                    cand = private_root / pattern
+                    if cand.exists():
+                        try:
+                            step_ev = _read_json(str(cand))
+                            break
+                        except Exception:
+                            pass
+                if step_ev is None:
+                    ev_store = host_config.get(
+                        "session_evidence_store"
+                    ) or host_config.get("session_evidence_history")
+                    if isinstance(ev_store, dict):
+                        step_ev = (
+                            ev_store.get(step_reg.last_evidence_hash)
+                            or ev_store.get(f"{reg.registration_id}:{step_idx}")
+                            or ev_store.get(str(step_idx))
+                            or ev_store.get(step_idx)
+                        )
+
+                if step_ev is None:
+                    sys.stderr.write(
+                        f"RECOVERY_VERIFICATION_FAILED: step file {sf.name} "
+                        f"has no verifiable session evidence\n"
+                    )
+                    return 3
+
+                # Determine expected session date
+                if cur_reg.frozen_study.plan.scheduled_dates and step_idx < len(
+                    cur_reg.frozen_study.plan.scheduled_dates
+                ):
+                    exp_date = cur_reg.frozen_study.plan.scheduled_dates[step_idx]
+                elif step_reg.last_observed_session:
+                    exp_date = step_reg.last_observed_session
+                else:
+                    sys.stderr.write(
+                        f"RECOVERY_VERIFICATION_FAILED: cannot determine session "
+                        f"date for {sf.name}\n"
+                    )
+                    return 3
+
+                # Replay advancement through advance_prospective_session to re-verify
+                # authenticated evidence, producer authentication, and typed artifacts
+                try:
+                    replayed_reg = advance_prospective_session(
+                        cur_reg,
+                        session_date=exp_date,
+                        session_evidence=step_ev,
+                        calendar=calendar_dates,
+                        artifact_store=artifact_store,
+                        trust_roots=trust_roots,
+                        producer_verifier=prod_verifier,
+                    )
+                except Exception as e:
+                    sys.stderr.write(
+                        f"RECOVERY_VERIFICATION_FAILED: step file {sf.name} "
+                        f"failed evidence verification: {e}\n"
+                    )
+                    return 3
+
+                if replayed_reg.registration_hash != step_reg.registration_hash:
+                    sys.stderr.write(
+                        f"RECOVERY_VERIFICATION_FAILED: step file {sf.name} "
+                        f"replayed state hash mismatch: "
+                        f"{replayed_reg.registration_hash} "
+                        f"!= {step_reg.registration_hash}\n"
+                    )
+                    return 3
+
+                cur_reg = replayed_reg
+            reg = cur_reg
+
+            # Target step date resolution
+            if hasattr(args, "session_date") and args.session_date:
+                step_date = date.fromisoformat(args.session_date)
+            elif reg.frozen_study.plan.scheduled_dates:
+                if reg.observed_session_count >= len(
+                    reg.frozen_study.plan.scheduled_dates
+                ):
+                    sys.stderr.write("All scheduled sessions already observed\n")
+                    return 3
+                step_date = reg.frozen_study.plan.scheduled_dates[
+                    reg.observed_session_count
+                ]
+            elif calendar_dates is not None:
+                last = reg.last_observed_session or (
+                    reg.frozen_study.plan.first_eligible_session - timedelta(days=1)
+                )
+                eligible = sorted([d for d in calendar_dates if d > last])
+                if not eligible:
+                    sys.stderr.write(
+                        "No eligible trading sessions remaining in calendar\n"
+                    )
+                    return 3
+                step_date = eligible[0]
+            else:
+                sys.stderr.write(
+                    "Prospective step requires explicit --session-date, "
+                    "frozen scheduled_dates, or host_config trading_calendar\n"
+                )
+                return 3
+
+            # Session evidence resolution for target step
+            ev_data = None
+            if hasattr(args, "session_evidence") and args.session_evidence:
+                ev_data = _read_json(args.session_evidence)
+            elif "session_evidence" in host_config:
+                ev_data = host_config["session_evidence"]
+
+            if not ev_data:
+                sys.stderr.write(
+                    "Prospective step requires verified session_evidence\n"
+                )
+                return 3
+
+            # 5. Conflict detection: check if target step file or evidence file
+            # already exists (Finding 6 & Round 19)
+            target_idx = reg.observed_session_count + 1
+            step_fname = f"{reg.registration_id}-step-{target_idx}.json"
+            out_path = private_root / step_fname
+            step_ev_fname = f"{reg.registration_id}-evidence-{target_idx}.json"
+            step_ev_path = private_root / step_ev_fname
+
+            if out_path.exists() or step_ev_path.exists():
+                sys.stderr.write(
+                    f"CONFLICT_ERROR: step file {step_fname} or evidence file "
+                    f"already exists\n"
+                )
+                return 3
+
+            if (
+                reg.last_observed_session is not None
+                and step_date <= reg.last_observed_session
+            ):
+                sys.stderr.write(
+                    f"SESSION_DATE_NOT_SEQUENTIAL: session date {step_date} <= "
+                    f"last observed session {reg.last_observed_session}\n"
+                )
+                return 3
+
+            advanced = advance_prospective_session(
+                reg,
+                session_date=step_date,
+                session_evidence=ev_data,
+                calendar=calendar_dates,
+                artifact_store=artifact_store,
+                trust_roots=trust_roots,
+                producer_verifier=prod_verifier,
+            )
+            _publish_prospective_step_pair(
+                ev_path=step_ev_path,
+                ev_data=(
+                    ev_data
+                    if isinstance(ev_data, dict)
+                    else ev_data.model_dump(mode="json")
+                ),
+                step_path=out_path,
+                step_data=advanced.model_dump(mode="json"),
+            )
+            return 0
     except Exception as e:
         sys.stderr.write(f"Prospective step failed: {e}\n")
         return 3
