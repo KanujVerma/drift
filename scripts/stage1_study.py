@@ -387,6 +387,38 @@ def action_historical(args: argparse.Namespace) -> int:
                 )
                 return 3
 
+            artifacts = ev.get("artifacts") or ev.get("execution_artifacts")
+            metrics = ev.get("metrics") or ev.get("results")
+            if not artifacts and not metrics:
+                sys.stderr.write(
+                    f"Receipt at index {i} completion_evidence missing "
+                    "supporting execution results or artifacts\n"
+                )
+                return 3
+
+            if artifacts is not None:
+                if not isinstance(artifacts, dict) or not artifacts:
+                    sys.stderr.write(
+                        f"Receipt at index {i} completion_evidence artifacts "
+                        "must be a non-empty dictionary\n"
+                    )
+                    return 3
+                for art_name, art_hash in artifacts.items():
+                    if not isinstance(art_hash, str) or len(art_hash) != 64:
+                        sys.stderr.write(
+                            f"Receipt at index {i} completion_evidence "
+                            f"artifact {art_name} must be a valid 64-char hash\n"
+                        )
+                        return 3
+
+            if metrics is not None:
+                if not isinstance(metrics, dict) or not metrics:
+                    sys.stderr.write(
+                        f"Receipt at index {i} completion_evidence metrics "
+                        "must be a non-empty dictionary\n"
+                    )
+                    return 3
+
             seen_sessions.add(session_index)
 
         missing_sessions = required_sessions - seen_sessions

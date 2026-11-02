@@ -517,6 +517,15 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
             "freeze_hash": frozen.freeze_hash,
             "session_index": s_idx,
             "status": "COMPLETED",
+            "artifacts": {
+                "portfolio_state_hash": content_hash(f"PORTFOLIO-{s_idx}"),
+                "decision_hash": content_hash(f"DECISION-{s_idx}"),
+                "fills_hash": content_hash(f"FILLS-{s_idx}"),
+            },
+            "metrics": {
+                "net_return": "0.0005",
+                "gross_turnover": "0.015",
+            },
         }
         return body | {"evidence_hash": content_hash(body)}
 
@@ -754,7 +763,51 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     )
     assert proc.returncode == 3
 
-    # 10. Out-of-scope session index (e.g. 999 instead of 0..251) returns exit 3
+    # 10. Correctly hashed assertion with no supporting results returns exit 3
+    assertion_without_results = [
+        {
+            "freeze_hash": frozen.freeze_hash,
+            "status": "COMPLETED",
+            "session_index": i,
+            "completion_evidence": (lambda b: b | {"evidence_hash": content_hash(b)})(
+                {
+                    "freeze_hash": frozen.freeze_hash,
+                    "session_index": i,
+                    "status": "COMPLETED",
+                }
+            ),
+        }
+        for i in range(252)
+    ]
+    host_file.write_text(
+        json.dumps(
+            {
+                "trust_roots": host_trust_roots,
+                "receipt_store": receipt_store,
+                "execution_receipts": assertion_without_results,
+            }
+        ),
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "historical",
+            "--frozen",
+            str(frozen_file),
+            "--host-config",
+            str(host_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+    )
+    assert proc.returncode == 3
+
+    # 11. Out-of-scope session index (e.g. 999 instead of 0..251) returns exit 3
     out_of_scope_receipts = [
         {
             "freeze_hash": frozen.freeze_hash,
@@ -792,7 +845,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     )
     assert proc.returncode == 3
 
-    # 11. Complete 252 valid execution receipts returns exit 0 with manifest
+    # 12. Complete 252 valid execution receipts returns exit 0 with manifest
     receipts_252 = [
         {
             "freeze_hash": frozen.freeze_hash,
