@@ -21,6 +21,10 @@ from drift.intelligence.contracts import (
     StoredArtifactRef,
     TrustedInvocationBinding,
 )
+from drift.intelligence.proposal_producer import (
+    ValidationObservationCallback,
+    observe_original_validation,
+)
 from drift.intelligence.receipts import (
     ResearchReceiptStore,
     create_cost_receipt,
@@ -75,6 +79,7 @@ def select_conventional_candidate(
     logical_request_id: str | None = None,
     checked_at: datetime | None = None,
     valid_until: datetime | None = None,
+    validation_observer: ValidationObservationCallback | None = None,
 ) -> ConventionalSelectorResult:
     """Select optimal candidate from preregistered finite pool under DP-R6.
 
@@ -236,6 +241,7 @@ def select_conventional_candidate(
             resolved_dependencies=resolved_inputs,
             trusted_invocation=inv_binding,
         )
+        observe_original_validation(validation_observer, raw_dict, inv_binding, verdict)
         if not verdict.is_valid or verdict.candidate is None:
             score_error = "INVALID_CANDIDATE_POOL_MEMBER"
             break

@@ -1,0 +1,330 @@
+{
+  "schema_version": "drift-stage1-protocol-candidate/1",
+  "design_status": "LOCKED_SPECIFICATION_PENDING_ORIGINAL_ADMISSION",
+  "protocol_document": "docs/architecture/adaptive-experiments/stage1-g3-protocol-v1.md",
+  "locked_specification": {
+    "mandate": {
+      "maximum_etf_fraction": "0.20",
+      "maximum_equity_fraction": "0.70",
+      "maximum_bond_fraction": "0.75",
+      "maximum_gold_fraction": "0.20",
+      "maximum_gross_fraction": "1.00",
+      "maximum_turnover_fraction": "2.00",
+      "turnover_basis": "GROSS_BUYS_PLUS_SELLS_OVER_PRETRADE_NAV",
+      "no_shorting": true,
+      "no_leverage": true,
+      "whole_shares": true,
+      "incoming_policy": "REJECT",
+      "minimum_class_allocations": null,
+      "existing_breach": "ORIGINAL_NEXT_OPEN_MINIMAL_SELL_ONLY_CORRECTION_KEEP_CASH",
+      "limits_are_empirically_validated": false,
+      "feasibility_report_hash": null
+    },
+    "comparator": {
+      "formula": "R:return-risk-drawdown-switchcost/1",
+      "history_intervals": 126,
+      "nav_boundaries": 127,
+      "return": "COMPOUNDED_REFERENCE_NET_RETURN",
+      "volatility": "SAMPLE_DAILY_STD_DDOF1_TIMES_SQRT126",
+      "drawdown": "ABS_MAX_DRAWDOWN_INCLUDING_START_NAV",
+      "switching_cost": "CAUSAL_ESTIMATED_COST_OVER_ACTIVE_DECISION_CLOSE_NAV",
+      "switching_cost_penalty": "1",
+      "decimal_precision": 34,
+      "decimal_rounding": "ROUND_HALF_EVEN",
+      "utility_ties": [
+        "VALID_INCUMBENT",
+        "B3",
+        "B4",
+        "B5"
+      ],
+      "coefficient_grid": [
+        [
+          "0.25",
+          "0.25"
+        ],
+        [
+          "0.25",
+          "0.5"
+        ],
+        [
+          "0.25",
+          "1.0"
+        ],
+        [
+          "0.5",
+          "0.25"
+        ],
+        [
+          "0.5",
+          "0.5"
+        ],
+        [
+          "0.5",
+          "1.0"
+        ],
+        [
+          "1.0",
+          "0.25"
+        ],
+        [
+          "1.0",
+          "0.5"
+        ],
+        [
+          "1.0",
+          "1.0"
+        ]
+      ],
+      "fit_window": {
+        "start": "2021-01-01",
+        "end": "2023-12-31"
+      },
+      "yearly_capital_resets": false,
+      "fit_ranking": [
+        "TERMINAL_NET_RETURN_DESC",
+        "ABS_MAX_DRAWDOWN_ASC",
+        "TOTAL_GROSS_TURNOVER_ASC",
+        "NUMERIC_COEFFICIENT_PAIR_ASC"
+      ],
+      "all_nine_original_runs_required": true,
+      "fitted_coefficients": null,
+      "development_fit_hash": null,
+      "executable_formula_hash": null
+    },
+    "model": {
+      "fixed_weights": true,
+      "immutable_provider_revision": null,
+      "context": "COMMON_REFERENCE_PLUS_CAUSAL_OWN_ARM_MEMORY",
+      "reflection": "VERSIONED_HYPOTHESIS_ORIGINAL_FACTS_IMMUTABLE",
+      "other_actual_arm_private_feedback_visible": false,
+      "comparative_leaderboard_visible_during_run": false,
+      "transport_retry_limit": 1,
+      "retry_payload": "IDENTICAL_ORIGINAL_REQUEST_WITHIN_ORIGINAL_DEADLINE_AND_BUDGET",
+      "semantic_retries_until_desired_response": false,
+      "provider_prompt_tools_decoding_replay_artifacts": null
+    },
+    "costs": {
+      "trading_accounting": "ORIGINAL_KERNEL_BOOKED_ONCE_IN_NAV",
+      "operating_accounting": "ATTRIBUTED_ONCE_OUTSIDE_NAV",
+      "unknown_cost_is_zero": false,
+      "all_attempts_calibration_retries_invalid_abandoned_variants_retained": true,
+      "report_views": [
+        "NET_NAV",
+        "RECURRING_DEPLOYMENT_ECONOMICS",
+        "FULL_ATTRIBUTABLE_EXPERIMENT_ECONOMICS"
+      ],
+      "qualified_fee_slippage_and_shared_cost_artifacts": null
+    },
+    "materiality": {
+      "fraction_initial_capital_per_252_scheduled_sessions": "0.01",
+      "usd_at_10000_for_252_sessions": "100",
+      "usd_at_10000_for_504_sessions": "200",
+      "is_switch_prediction_hurdle": false,
+      "maximum_B_over_R_volatility_ratio": "1.10",
+      "maximum_B_absolute_drawdown_excess": "0.02",
+      "risk_bounds_are_empirically_validated": false
+    },
+    "outcome_precedence": [
+      "INVALID",
+      "UNAVAILABLE",
+      "UNSUCCESSFUL",
+      "SUCCESS",
+      "PROMISING_BUT_INCONCLUSIVE"
+    ],
+    "primary_historical_success_requires_separate_prospective_confirmation": true,
+    "policies": {
+      "decision_cutoff": {
+        "version": "stage1-causal-common-reference/1",
+        "clock": "QUALIFIED_ORIGINAL_VENUE_REGULAR_SESSIONS",
+        "selection": "MONTH_END_CLOSE",
+        "execution": "NEXT_ELIGIBLE_OPEN",
+        "initial_family": "B3",
+        "first_switch": "AFTER_FIRST_FULL_SCORED_CALENDAR_MONTH",
+        "completed_reference_intervals": 126,
+        "required_original_nav_marks": 127,
+        "reference_accounts": "THREE_DISTINCT_ORIGINAL_FIXED_B3_B4_B5",
+        "filter_before_context": true,
+        "future_terminal_classification_visible": false,
+        "common_reference_context": "IDENTICAL_DETACHED_VALUES_FOR_B_AND_R",
+        "private_memory": "CAUSAL_MATURED_OWN_ARM_ONLY"
+      },
+      "seed_and_replication": {
+        "version": "stage1-seed-replication/1",
+        "primary_investment_paths": 1,
+        "model_seed": "REQUIRED_IN_ACTUAL_MODEL_BINDING",
+        "bootstrap_seed": 575,
+        "captured_response_replay": "REPRODUCIBILITY_ONLY",
+        "replays_increase_independent_sample_count": false,
+        "all_attempts_retries_failures_costs_retained": true
+      },
+      "block_length": {
+        "version": "stage1-paired-stationary-bootstrap/1",
+        "method": "POLITIS_ROMANO_1994_STATIONARY_BOOTSTRAP",
+        "automatic_mean_block": "POLITIS_WHITE_2004_WITH_PATTON_POLITIS_WHITE_2009_CORRECTION",
+        "reference_implementation": "arch8.0.0:arch.bootstrap.optimal_block_length:stationary",
+        "series": [
+          "B_NET_RETURNS",
+          "R_NET_RETURNS",
+          "B_MINUS_R_NET_RETURNS"
+        ],
+        "aggregation": "MAXIMUM_FINITE_STATIONARY_OUTPUT_THEN_CEIL_MINIMUM_ONE",
+        "undefined_series": "RETAIN_DIAGNOSTIC_NO_INVENTED_ESTIMATE",
+        "paired_indices": true,
+        "compound_arms_separately": true,
+        "variable_operating_cost_indices": "SAME_PAIRED_INDICES",
+        "one_time_cost_allocation": "FIXED_ONCE_PER_REPLICATE",
+        "rng": "CPYTHON_3.14.6_RANDOM_RANDOM_MT19937",
+        "rng_seed": 575,
+        "replicate_count": 10000,
+        "index_algorithm": [
+          "Initialize one private random.Random(575) once for the whole run.",
+          "For each replicate start at rng.randrange(n).",
+          "For each subsequent element restart at rng.randrange(n) iff rng.random() < 1/b, else advance circularly by one.",
+          "Retain n indices per replicate and the exact generated stream digest."
+        ],
+        "interval": "TWO_SIDED_PERCENTILE_95",
+        "quantile": "LINEAR_INTERPOLATION_ZERO_BASED_POSITION_(9999*p)",
+        "quantile_probabilities": [
+          "0.025",
+          "0.975"
+        ],
+        "fixed_mean_block_sensitivities": [
+          21,
+          42,
+          63
+        ],
+        "sensitivity_may_replace_primary": false,
+        "raw_bootstrap_sign_frequency_is_p_value": false,
+        "executable_implementation_evidence": null
+      },
+      "multiplicity": {
+        "version": "stage1-primary-and-secondary/1",
+        "primary_contrast": "B_MINUS_R",
+        "primary_endpoint": "PAIRED_NET_TERMINAL_RETURN_B_MINUS_R",
+        "economic_endpoint": "INITIAL_CAPITAL_TIMES_NET_DIFFERENCE_LESS_INCREMENTAL_OPERATING_COST",
+        "primary_contrasts": 1,
+        "secondary_confirmatory_family": "HOLM_ADJUST_ALL_PREREGISTERED_TESTS",
+        "exploration_requires_fresh_validation": true,
+        "attempt_inventory_may_drop_failures": false
+      },
+      "stopping": {
+        "version": "stage1-fixed-horizon/1",
+        "historical_mode": "RETROSPECTIVE_DISCOVERY",
+        "prospective_scheduled_sessions": 504,
+        "prospective_start_and_end": null,
+        "efficacy_looks": 1,
+        "outcome_dependent_extension": false,
+        "missing_sessions_replaced_by_extension": false,
+        "safety_stop": "ALLOWED_WITH_ORIGINAL_REASON_AND_CARRY_FORWARD_BOOK",
+        "early_safety_stop_is_efficacy_success": false,
+        "horizon_is_power_guarantee": false
+      },
+      "risk_free": {
+        "version": "stage1-qualified-risk-free-input/1",
+        "required_input": "ORIGINAL_QUALIFIED_TIME_ALIGNED_CASH_YIELD_SERIES",
+        "input_series": null,
+        "implicit_zero_rate": false,
+        "missing_rate_dependent_metric": "UNAVAILABLE",
+        "primary_r_objective": "TOTAL_NET_RETURN_NO_IMPUTED_EXCESS_RETURN"
+      }
+    }
+  },
+  "embedded_policy_hashes": {
+    "decision_cutoff": "5919826f6cc97167efa38f405069ddea63428fae2f28ec0309172e6468588945",
+    "seed_and_replication": "e7e69a020b6e496acba0e0cce79c168f86a53b5446151657710aeb91eff825c8",
+    "block_length": "02738858b1609609efd4c197841ea22607512ac3f467dad8c09624a03a7a9eb8",
+    "multiplicity": "d5cf103d615b716ff09add95a0c2a842a73409bd1a91bac13567fe63780a5b17",
+    "stopping": "b7dc70498e0e92138134637cd97870e9159cc609a33540a1c222587a111df81d",
+    "risk_free": "61a8753923ce573b73111ae19d43c01f8bc660cff6f25afc4553cd5a2aadb8c1"
+  },
+  "draft": {
+    "schema_version": "drift-stage1-study/1",
+    "study_id": "DRIFT-STAGE1-PROTOCOL-CANDIDATE-V1",
+    "created_at": "2026-11-02T03:06:02Z",
+    "mode": "RETROSPECTIVE_DISCOVERY",
+    "universe": [
+      "VOO",
+      "IJH",
+      "IJR",
+      "QQQ",
+      "VEA",
+      "VWO",
+      "SHY",
+      "IEF",
+      "TLT",
+      "TIP",
+      "LQD",
+      "GLD"
+    ],
+    "warmup_sessions": 253,
+    "observation_sessions": 126,
+    "families": [
+      "B3",
+      "B4",
+      "B5"
+    ],
+    "initial_family": "B3",
+    "initial_capital": "10000",
+    "currency": "USD",
+    "schedule": "MONTH_END_CLOSE_NEXT_ELIGIBLE_OPEN",
+    "abstention": "RETAIN_VALID_INCUMBENT",
+    "development": {
+      "start": "2021-01-01",
+      "end": "2023-12-31"
+    },
+    "validation": {
+      "start": "2024-01-01",
+      "end": "2024-12-31"
+    },
+    "scoring": {
+      "start": "2025-01-01",
+      "end": "2025-12-31"
+    },
+    "prior_holdout_exposure": "UNKNOWN",
+    "installed_source_hash": "c261975782d4276d2fe323dd58948d9047a6e9a0a9967c28a810f44addf1084f",
+    "dataset_manifest_hash": null,
+    "calendar_and_universe_hash": null,
+    "decision_cutoff_policy_hash": "5919826f6cc97167efa38f405069ddea63428fae2f28ec0309172e6468588945",
+    "seed_and_replication_policy_hash": "e7e69a020b6e496acba0e0cce79c168f86a53b5446151657710aeb91eff825c8",
+    "mandate": null,
+    "comparator": null,
+    "model": null,
+    "costs": null,
+    "statistics": {
+      "primary_endpoint": "PAIRED_NET_TERMINAL_RETURN_B_MINUS_R",
+      "alpha": "0.05",
+      "minimum_economic_advantage_fraction": "0.01",
+      "uncertainty_method": "STATIONARY_BLOCK_BOOTSTRAP",
+      "bootstrap_repetitions": 10000,
+      "bootstrap_seed": 575,
+      "block_length_policy_hash": "02738858b1609609efd4c197841ea22607512ac3f467dad8c09624a03a7a9eb8",
+      "multiplicity_policy_hash": "d5cf103d615b716ff09add95a0c2a842a73409bd1a91bac13567fe63780a5b17",
+      "stopping_policy_hash": "b7dc70498e0e92138134637cd97870e9159cc609a33540a1c222587a111df81d",
+      "risk_free_policy_hash": "61a8753923ce573b73111ae19d43c01f8bc660cff6f25afc4553cd5a2aadb8c1"
+    }
+  },
+  "readiness": {
+    "protocol_hash": "7ef2ab7d89659bcfd9ed1241bcef8aa2c2fd753591a83a3827c65ad590581e18",
+    "status": "BLOCKED",
+    "blockers": [
+      "MISSING_CONFIGURATION:calendar_and_universe_hash",
+      "MISSING_CONFIGURATION:comparator",
+      "MISSING_CONFIGURATION:costs",
+      "MISSING_CONFIGURATION:dataset_manifest_hash",
+      "MISSING_CONFIGURATION:mandate",
+      "MISSING_CONFIGURATION:model",
+      "MISSING_OR_DUPLICATE_ORIGINAL_EVIDENCE:comparator_review",
+      "MISSING_OR_DUPLICATE_ORIGINAL_EVIDENCE:cost_review",
+      "MISSING_OR_DUPLICATE_ORIGINAL_EVIDENCE:dataset_qualification",
+      "MISSING_OR_DUPLICATE_ORIGINAL_EVIDENCE:g2_integration",
+      "MISSING_OR_DUPLICATE_ORIGINAL_EVIDENCE:holdout_audit",
+      "MISSING_OR_DUPLICATE_ORIGINAL_EVIDENCE:mandate_review",
+      "MISSING_OR_DUPLICATE_ORIGINAL_EVIDENCE:model_replay",
+      "MISSING_OR_DUPLICATE_ORIGINAL_EVIDENCE:scientific_protocol_review"
+    ],
+    "verified_roles": []
+  },
+  "evidence": [],
+  "authorizes_trading": false,
+  "establishes_efficacy": false
+}

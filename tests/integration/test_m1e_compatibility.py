@@ -45,6 +45,16 @@ TRIAGE_OFFLINE_SOURCE_PATHS = frozenset(
 E6B_LOCAL_ORIGINAL_LEDGER_SOURCE_PATHS = frozenset(
     {"src/drift/ledger/stage1_synthetic_account_receipts.py"}
 )
+# Issue #578 opt-in synthetic execution and same-engine reference modules.
+# Exact registrations add actual-file scans; no directory receives an exemption.
+G2_EXECUTION_EXTENSION_SOURCE_PATHS = frozenset(
+    {
+        "src/drift/domain/synthetic_execution.py",
+        "src/drift/evaluator/synthetic_execution.py",
+        "src/drift/loop/stage1_protective_correction.py",
+        "src/drift/loop/stage1_reference_accounts.py",
+    }
+)
 # Separate #553-#557/#559 requests share one explicit dispatch, not a prefix rule.
 OFFLINE_PREFLIGHT_SCRIPT_PATHS = frozenset(
     {
@@ -261,6 +271,7 @@ INERT_SOURCE_PATHS = (
     | INTELLIGENCE_SOURCE_PATHS
     | TRIAGE_OFFLINE_SOURCE_PATHS
     | E6B_LOCAL_ORIGINAL_LEDGER_SOURCE_PATHS
+    | G2_EXECUTION_EXTENSION_SOURCE_PATHS
     | OFFLINE_PREFLIGHT_SCRIPT_PATHS
 )
 SCANNED_AS_PRODUCTION_PATHS = (
@@ -277,6 +288,7 @@ SCANNED_AS_PRODUCTION_PATHS = (
     | INTELLIGENCE_SOURCE_PATHS
     | TRIAGE_OFFLINE_SOURCE_PATHS
     | E6B_LOCAL_ORIGINAL_LEDGER_SOURCE_PATHS
+    | G2_EXECUTION_EXTENSION_SOURCE_PATHS
     | OFFLINE_PREFLIGHT_SCRIPT_PATHS
 )
 M1E_SCRIPT_PATHS = frozenset(
@@ -1142,6 +1154,12 @@ def test_m1e_additions_are_allowlisted_inert_and_leave_m1d_pins_unchanged() -> N
     ).stdout
 
 
+@pytest.mark.parametrize("relative", sorted(G2_EXECUTION_EXTENSION_SOURCE_PATHS))
+def test_g2_execution_extensions_have_actual_inert_source_scans(relative: str) -> None:
+    """Registered evaluator/loop paths also pass the unchanged actual-file guard."""
+    _assert_m1e_source_file_allowed(relative)
+
+
 def test_intelligence_source_inventory_is_exact_and_nonempty() -> None:
     """A future arbitrary intelligence module receives no automatic exemption."""
     assert len(INTELLIGENCE_SOURCE_PATHS) == 11
@@ -1696,6 +1714,7 @@ def test_actual_file_scans_preserve_valid_source_encoding_decisions(
 _SUCCESSOR_ORDINARY_PATHS = (
     TRIAGE_OFFLINE_SOURCE_PATHS
     | E6B_LOCAL_ORIGINAL_LEDGER_SOURCE_PATHS
+    | G2_EXECUTION_EXTENSION_SOURCE_PATHS
     | (OFFLINE_PREFLIGHT_SCRIPT_PATHS - OFFLINE_PREFLIGHT_AST_PROFILES.keys())
 )
 _CAPABILITY_INJECTIONS = (

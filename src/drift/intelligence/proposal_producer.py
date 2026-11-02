@@ -5,7 +5,7 @@ an order or a portfolio mandate authorization. Any later real transport needs
 its own separately approved adapter and authenticated billing provenance.
 """
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
@@ -32,7 +32,31 @@ from drift.intelligence.validation import (
     ValidationResult,
     validate_candidate,
 )
-from drift.serialization.canonical import content_hash
+from drift.serialization.canonical import canonical_json, content_hash
+
+type ValidationObservationCallback = Callable[
+    [str, TrustedInvocationBinding, ValidationResult], None
+]
+
+
+def observe_original_validation(
+    observer: ValidationObservationCallback | None,
+    raw_choice: Mapping[str, Any],
+    binding: TrustedInvocationBinding,
+    result: ValidationResult,
+) -> None:
+    """Observe detached original validation immediately, never reconstructed later.
+
+    A retention exception propagates before terminal completion. The installed
+    caller must preserve its already-recorded start/cost and refuse retry.
+    Omitting the observer preserves the existing offline producer behavior.
+    """
+    if observer is not None:
+        observer(
+            canonical_json(raw_choice).decode("utf-8"),
+            TrustedInvocationBinding.model_validate(binding.model_dump(mode="python")),
+            ValidationResult.model_validate(result.model_dump(mode="python")),
+        )
 
 
 class ProducerResult(ImmutableModel):
@@ -185,6 +209,7 @@ def produce_proposal(
     candidate_id: str | None = None,
     checked_at: datetime | None = None,
     valid_until: datetime | None = None,
+    validation_observer: ValidationObservationCallback | None = None,
 ) -> ProducerResult:
     """Record a full scripted attempt, validate or fail closed, without I/O."""
     logical_clock = checked_at or context.review_started_at
@@ -299,6 +324,9 @@ def produce_proposal(
                 context=context,
                 resolved_dependencies=resolved_inputs,
                 trusted_invocation=binding,
+            )
+            observe_original_validation(
+                validation_observer, raw_choice, binding, result
             )
         status = result.status
         reason = result.reason
