@@ -274,8 +274,9 @@ That closure is not study execution or scientific acceptance. Post-merge push
 CI on `79c79cd` was pending:
 https://github.com/KanujVerma/drift/actions/runs/41515319055.
 
-The DP-R6 near-tie regression remains on open #469. #403 and #450 stay open
-with it. No other new defect issue was opened.
+The DP-R6 near-tie regression remains on open #469. #450 stays open with it.
+#403 is closed as the feature tracker so #469 is the single engineering
+location for that test. No other new defect issue was opened.
 
 ## Pull-request disposition
 
@@ -297,7 +298,7 @@ commit of this file, because the comment has to cite this committed path.
 | --- | --- | --- |
 | #401 | COMPLETED_TRACKER | K1 engineering is on main via #457 and #465. Review remains on #373 and #375. |
 | #402 | COMPLETED_TRACKER | K2 engineering is on main via #457 and incorporated #467. |
-| #403 | ACTIVE_CRITICAL_PATH | Stays open only as the parent of the #469 test gap. Implementation otherwise matches the matrix. |
+| #403 | COMPLETED_TRACKER | K3 engineering is on main. The remaining inside-band test stays on #469, and #450 stays open. |
 | #404 | COMPLETED_TRACKER | K4 engineering is on main via #457 and incorporated #474. |
 | #405 | COMPLETED_TRACKER | K5 engineering is on main via #457 and incorporated #476. |
 | #453 | COMPLETED_TRACKER | The eleven-path byte scanner and negative controls pass on main, including #561. |
@@ -457,13 +458,71 @@ No remote branch is deleted in this pass.
 ## Counts
 
 Before this pass, at the refreshed inventory: 36 open pull requests and 73
-open issues. After the five superseded pull requests and the completed K-series
-trackers close, and after #584 closes with the documentation pull request, the
-expected open counts are 31 pull requests and 63 issues. #450, #403, and #469
-are the K-series records intentionally left open. The execution addendum
-records the read-back counts.
+open issues. After the five superseded pull requests and the completed
+trackers closed, a live read-back showed 31 open pull requests and 63 open
+issues, including #584. After #584 closes with the documentation pull request,
+the expected open-issue count is 62. #450 and #469 stay open. #403 is closed.
 
 ## Execution addendum
 
-Placeholder. The publication commit replaces this section with closure comment
-URLs, read-backs, the documentation commit, and CI evidence.
+Matrix commit: `266cd3cbd1026a5c2614390450bbed427dd9e05b`.
+Published matrix:
+https://github.com/KanujVerma/drift/blob/266cd3cbd1026a5c2614390450bbed427dd9e05b/docs/architecture/adaptive-experiments/verification/k1-k5-reconciliation-2026-11-02.md
+
+Pull requests closed without merge, then read back `CLOSED` with `mergedAt`
+null:
+
+| PR | Comment | Closed at |
+| --- | --- | --- |
+| #447 | https://github.com/KanujVerma/drift/pull/447#issuecomment-6587503299 | 2026-11-02T20:19:09Z |
+| #449 | https://github.com/KanujVerma/drift/pull/449#issuecomment-6587504152 | 2026-11-02T20:19:11Z |
+| #451 | https://github.com/KanujVerma/drift/pull/451#issuecomment-6587505094 | 2026-11-02T20:19:14Z |
+| #452 | https://github.com/KanujVerma/drift/pull/452#issuecomment-6587505931 | 2026-11-02T20:19:16Z |
+| #454 | https://github.com/KanujVerma/drift/pull/454#issuecomment-6587506728 | 2026-11-02T20:19:19Z |
+
+#450 remains `OPEN` and unmerged. Retention comment:
+https://github.com/KanujVerma/drift/pull/450#issuecomment-6587507746
+
+Issues closed `COMPLETED` and read back with `state:done` replacing the prior
+state label:
+
+| Issue | Comment |
+| --- | --- |
+| #401 | https://github.com/KanujVerma/drift/issues/401#issuecomment-6587516058 |
+| #402 | https://github.com/KanujVerma/drift/issues/402#issuecomment-6587517572 |
+| #403 | https://github.com/KanujVerma/drift/issues/403#issuecomment-6587539813 |
+| #404 | https://github.com/KanujVerma/drift/issues/404#issuecomment-6587519116 |
+| #405 | https://github.com/KanujVerma/drift/issues/405#issuecomment-6587520909 |
+| #453 | https://github.com/KanujVerma/drift/issues/453#issuecomment-6587522659 |
+| #464 | https://github.com/KanujVerma/drift/issues/464#issuecomment-6587524069 |
+| #466 | https://github.com/KanujVerma/drift/issues/466#issuecomment-6587525551 |
+| #473 | https://github.com/KanujVerma/drift/issues/473#issuecomment-6587527062 |
+| #475 | https://github.com/KanujVerma/drift/issues/475#issuecomment-6587528987 |
+
+Reciprocal notes: #373
+https://github.com/KanujVerma/drift/issues/373#issuecomment-6587538497,
+#375
+https://github.com/KanujVerma/drift/issues/375#issuecomment-6587538893,
+#469
+https://github.com/KanujVerma/drift/issues/469#issuecomment-6587539345,
+#580
+https://github.com/KanujVerma/drift/issues/580#issuecomment-6587541328.
+
+All six legacy branch tips were still present after the closures, at the same
+SHAs recorded in the baseline table. No remote branch was deleted.
+
+Live read-back after those mutations: 31 open pull requests and 63 open
+issues. #581 remains `MERGED`. Its title now says the change is software, and
+the body states the nine-pair grid.
+
+CI at this addendum, both still non-terminal:
+
+- Run 41498827736 on `16a47d7cf8daadd917e786630220405f08eb2a6c` was
+  `in_progress` with an empty conclusion. `updatedAt` was still
+  `2026-11-02T18:15:32Z`. No success receipt was added to #582.
+- Run 41515319055 on `79c79cdcc31322154f12d654edef3261fbc9e69f` was `pending`
+  with an empty conclusion. `updatedAt` was `2026-11-02T20:01:19Z`.
+  https://github.com/KanujVerma/drift/actions/runs/41515319055
+
+The documentation pull request's own exact-head check is the CI evidence for
+this file. It is not yet available in this commit.
