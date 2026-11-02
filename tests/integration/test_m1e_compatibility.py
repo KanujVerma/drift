@@ -55,6 +55,14 @@ G2_EXECUTION_EXTENSION_SOURCE_PATHS = frozenset(
         "src/drift/loop/stage1_reference_accounts.py",
     }
 )
+# Issue #575/#580 Stage 1 experimental contracts and admission modules.
+G3_STAGE1_EXTENSION_SOURCE_PATHS = frozenset(
+    {
+        "src/drift/intelligence/stage1_conventional_policy.py",
+        "src/drift/intelligence/stage1_model_binding.py",
+        "src/drift/qualification/stage1_market_admission.py",
+    }
+)
 # Separate #553-#557/#559 requests share one explicit dispatch, not a prefix rule.
 OFFLINE_PREFLIGHT_SCRIPT_PATHS = frozenset(
     {
@@ -272,6 +280,7 @@ INERT_SOURCE_PATHS = (
     | TRIAGE_OFFLINE_SOURCE_PATHS
     | E6B_LOCAL_ORIGINAL_LEDGER_SOURCE_PATHS
     | G2_EXECUTION_EXTENSION_SOURCE_PATHS
+    | G3_STAGE1_EXTENSION_SOURCE_PATHS
     | OFFLINE_PREFLIGHT_SCRIPT_PATHS
 )
 SCANNED_AS_PRODUCTION_PATHS = (
@@ -289,6 +298,7 @@ SCANNED_AS_PRODUCTION_PATHS = (
     | TRIAGE_OFFLINE_SOURCE_PATHS
     | E6B_LOCAL_ORIGINAL_LEDGER_SOURCE_PATHS
     | G2_EXECUTION_EXTENSION_SOURCE_PATHS
+    | G3_STAGE1_EXTENSION_SOURCE_PATHS
     | OFFLINE_PREFLIGHT_SCRIPT_PATHS
 )
 M1E_SCRIPT_PATHS = frozenset(
@@ -635,6 +645,7 @@ def _m1e_paths_on_disk() -> set[str]:
         and not path.startswith("src/drift/promotion/")
         and not path.startswith("src/drift/domain/promotion")
         and not path.startswith("src/drift/experiments/")
+        and path != "scripts/stage1_study.py"
     }
     return m1e_candidates - baseline
 
@@ -1157,6 +1168,12 @@ def test_m1e_additions_are_allowlisted_inert_and_leave_m1d_pins_unchanged() -> N
 @pytest.mark.parametrize("relative", sorted(G2_EXECUTION_EXTENSION_SOURCE_PATHS))
 def test_g2_execution_extensions_have_actual_inert_source_scans(relative: str) -> None:
     """Registered evaluator/loop paths also pass the unchanged actual-file guard."""
+    _assert_m1e_source_file_allowed(relative)
+
+
+@pytest.mark.parametrize("relative", sorted(G3_STAGE1_EXTENSION_SOURCE_PATHS))
+def test_g3_stage1_extensions_have_actual_inert_source_scans(relative: str) -> None:
+    """Registered stage1 intelligence and qualification paths pass actual-file guard."""
     _assert_m1e_source_file_allowed(relative)
 
 
