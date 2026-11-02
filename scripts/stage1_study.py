@@ -80,6 +80,26 @@ def _read_json(path_str: str) -> dict[str, Any]:
     return data
 
 
+def _is_sha256(val: Any) -> bool:
+    if not isinstance(val, str) or len(val) != 64:
+        return False
+    try:
+        int(val, 16)
+        return True
+    except ValueError:
+        return False
+
+
+CONTRACT_EXECUTION_METRICS = {
+    "net_return",
+    "gross_turnover",
+    "terminal_nav",
+    "per_share_fees",
+    "holding_costs",
+    "total_pnl",
+}
+
+
 def action_inventory(args: argparse.Namespace) -> int:
     repo_root = Path(args.repo_root).resolve()
     installed = {
@@ -369,10 +389,10 @@ def action_historical(args: argparse.Namespace) -> int:
                 return 3
 
             ev_hash = ev.get("evidence_hash") or ev.get("receipt_hash")
-            if not isinstance(ev_hash, str) or len(ev_hash) != 64:
+            if not _is_sha256(ev_hash):
                 sys.stderr.write(
                     f"Receipt at index {i} completion_evidence missing "
-                    "valid 64-char hash\n"
+                    "valid 64-char hex SHA-256 hash\n"
                 )
                 return 3
 
@@ -396,21 +416,6 @@ def action_historical(args: argparse.Namespace) -> int:
                 )
                 return 3
 
-            if artifacts is not None:
-                if not isinstance(artifacts, dict) or not artifacts:
-                    sys.stderr.write(
-                        f"Receipt at index {i} completion_evidence artifacts "
-                        "must be a non-empty dictionary\n"
-                    )
-                    return 3
-                for art_name, art_hash in artifacts.items():
-                    if not isinstance(art_hash, str) or len(art_hash) != 64:
-                        sys.stderr.write(
-                            f"Receipt at index {i} completion_evidence "
-                            f"artifact {art_name} must be a valid 64-char hash\n"
-                        )
-                        return 3
-
             if metrics is not None:
                 if not isinstance(metrics, dict) or not metrics:
                     sys.stderr.write(
@@ -418,6 +423,88 @@ def action_historical(args: argparse.Namespace) -> int:
                         "must be a non-empty dictionary\n"
                     )
                     return 3
+                unknown_metrics = set(metrics.keys()) - CONTRACT_EXECUTION_METRICS
+                if unknown_metrics:
+                    sys.stderr.write(
+                        f"Receipt at index {i} completion_evidence contains "
+                        f"arbitrary/unsupported metrics: {sorted(unknown_metrics)}\n"
+                    )
+                    return 3
+                for m_k, m_v in metrics.items():
+                    if isinstance(m_v, bool):
+                        sys.stderr.write(
+                            f"Receipt at index {i} completion_evidence metric {m_k} "
+                            "cannot be boolean\n"
+                        )
+                        return 3
+                    try:
+                        d = Decimal(str(m_v))
+                        if not d.is_finite():
+                            raise ValueError()
+                    except Exception:
+                        sys.stderr.write(
+                            f"Receipt at index {i} completion_evidence metric {m_k} "
+                            "must be finite numeric\n"
+                        )
+                        return 3
+
+            if artifacts is not None:
+                if not isinstance(artifacts, dict) or not artifacts:
+                    sys.stderr.write(
+                        f"Receipt at index {i} completion_evidence artifacts "
+                        "must be a non-empty dictionary\n"
+                    )
+                    return 3
+
+                artifact_store = host_config.get(
+                    "artifact_store", host_config.get("receipt_store", {})
+                )
+                if not isinstance(artifact_store, dict):
+                    sys.stderr.write("Host artifact_store must be a dictionary\n")
+                    return 2
+
+                for art_name, art_hash in artifacts.items():
+                    if not _is_sha256(art_hash):
+                        sys.stderr.write(
+                            f"Receipt at index {i} completion_evidence artifact "
+                            f"{art_name} must be a valid 64-char hex SHA-256 hash\n"
+                        )
+                        return 3
+
+                    if art_hash not in artifact_store:
+                        sys.stderr.write(
+                            f"Receipt at index {i} artifact {art_name} reference "
+                            f"{art_hash} not found in artifact store\n"
+                        )
+                        return 3
+
+                    art_obj = artifact_store[art_hash]
+                    if content_hash(art_obj) != art_hash:
+                        sys.stderr.write(
+                            f"Receipt at index {i} artifact {art_name} content "
+                            "hash mismatch\n"
+                        )
+                        return 3
+
+                    if isinstance(art_obj, dict):
+                        if (
+                            "freeze_hash" in art_obj
+                            and art_obj["freeze_hash"] != frozen.freeze_hash
+                        ):
+                            sys.stderr.write(
+                                f"Receipt at index {i} artifact {art_name} bound "
+                                "freeze_hash mismatch\n"
+                            )
+                            return 3
+                        if (
+                            "session_index" in art_obj
+                            and art_obj["session_index"] != session_index
+                        ):
+                            sys.stderr.write(
+                                f"Receipt at index {i} artifact {art_name} bound "
+                                "session_index mismatch\n"
+                            )
+                            return 3
 
             seen_sessions.add(session_index)
 

@@ -512,15 +512,44 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     )
     assert proc.returncode == 3
 
+    artifact_store: dict[str, Any] = {}
+
     def make_evidence(s_idx: int) -> dict[str, Any]:
+        p_obj = {
+            "freeze_hash": frozen.freeze_hash,
+            "session_index": s_idx,
+            "artifact_type": "PORTFOLIO_STATE",
+            "cash": "1000000.00",
+        }
+        p_hash = content_hash(p_obj)
+        artifact_store[p_hash] = p_obj
+
+        d_obj = {
+            "freeze_hash": frozen.freeze_hash,
+            "session_index": s_idx,
+            "artifact_type": "DECISION",
+            "weights": {"AAPL": "0.10"},
+        }
+        d_hash = content_hash(d_obj)
+        artifact_store[d_hash] = d_obj
+
+        f_obj = {
+            "freeze_hash": frozen.freeze_hash,
+            "session_index": s_idx,
+            "artifact_type": "FILLS",
+            "trades": [],
+        }
+        f_hash = content_hash(f_obj)
+        artifact_store[f_hash] = f_obj
+
         body = {
             "freeze_hash": frozen.freeze_hash,
             "session_index": s_idx,
             "status": "COMPLETED",
             "artifacts": {
-                "portfolio_state_hash": content_hash(f"PORTFOLIO-{s_idx}"),
-                "decision_hash": content_hash(f"DECISION-{s_idx}"),
-                "fills_hash": content_hash(f"FILLS-{s_idx}"),
+                "portfolio_state": p_hash,
+                "decision": d_hash,
+                "fills": f_hash,
             },
             "metrics": {
                 "net_return": "0.0005",
@@ -545,6 +574,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
             {
                 "trust_roots": host_trust_roots,
                 "receipt_store": receipt_store,
+                "artifact_store": artifact_store,
                 "execution_receipts": receipts_100,
             }
         ),
@@ -583,6 +613,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
             {
                 "trust_roots": host_trust_roots,
                 "receipt_store": receipt_store,
+                "artifact_store": artifact_store,
                 "execution_receipts": repeated_receipts,
             }
         ),
@@ -620,6 +651,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
             {
                 "trust_roots": host_trust_roots,
                 "receipt_store": receipt_store,
+                "artifact_store": artifact_store,
                 "execution_receipts": no_session_id,
             }
         ),
@@ -657,6 +689,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
             {
                 "trust_roots": host_trust_roots,
                 "receipt_store": receipt_store,
+                "artifact_store": artifact_store,
                 "execution_receipts": absent_evidence,
             }
         ),
@@ -695,6 +728,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
             {
                 "trust_roots": host_trust_roots,
                 "receipt_store": receipt_store,
+                "artifact_store": artifact_store,
                 "execution_receipts": truthy_invalid,
             }
         ),
@@ -724,14 +758,16 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
             "freeze_hash": frozen.freeze_hash,
             "status": "COMPLETED",
             "session_index": i,
-            "completion_evidence": {
-                "freeze_hash": frozen.freeze_hash,
-                "session_index": i,
-                "status": "COMPLETED",
-                "evidence_hash": "f" * 64,
-            }
-            if i == 0
-            else make_evidence(i),
+            "completion_evidence": (
+                {
+                    "freeze_hash": frozen.freeze_hash,
+                    "session_index": i,
+                    "status": "COMPLETED",
+                    "evidence_hash": "f" * 64,
+                }
+                if i == 0
+                else make_evidence(i)
+            ),
         }
         for i in range(252)
     ]
@@ -740,6 +776,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
             {
                 "trust_roots": host_trust_roots,
                 "receipt_store": receipt_store,
+                "artifact_store": artifact_store,
                 "execution_receipts": bad_hash_evidence,
             }
         ),
@@ -784,7 +821,218 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
             {
                 "trust_roots": host_trust_roots,
                 "receipt_store": receipt_store,
+                "artifact_store": artifact_store,
                 "execution_receipts": assertion_without_results,
+            }
+        ),
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "historical",
+            "--frozen",
+            str(frozen_file),
+            "--host-config",
+            str(host_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+    )
+    assert proc.returncode == 3
+
+    # 10a. Arbitrary unsupported metrics returns exit 3
+    arbitrary_metrics_receipts = [
+        {
+            "freeze_hash": frozen.freeze_hash,
+            "status": "COMPLETED",
+            "session_index": i,
+            "completion_evidence": (
+                (lambda b: b | {"evidence_hash": content_hash(b)})(
+                    {
+                        "freeze_hash": frozen.freeze_hash,
+                        "session_index": i,
+                        "status": "COMPLETED",
+                        "metrics": {"claimed": True},
+                    }
+                )
+                if i == 0
+                else make_evidence(i)
+            ),
+        }
+        for i in range(252)
+    ]
+    host_file.write_text(
+        json.dumps(
+            {
+                "trust_roots": host_trust_roots,
+                "receipt_store": receipt_store,
+                "artifact_store": artifact_store,
+                "execution_receipts": arbitrary_metrics_receipts,
+            }
+        ),
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "historical",
+            "--frozen",
+            str(frozen_file),
+            "--host-config",
+            str(host_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+    )
+    assert proc.returncode == 3
+
+    # 10b. Nonexistent artifact reference returns exit 3
+    nonexistent_artifact_receipts = [
+        {
+            "freeze_hash": frozen.freeze_hash,
+            "status": "COMPLETED",
+            "session_index": i,
+            "completion_evidence": (
+                (lambda b: b | {"evidence_hash": content_hash(b)})(
+                    {
+                        "freeze_hash": frozen.freeze_hash,
+                        "session_index": i,
+                        "status": "COMPLETED",
+                        "artifacts": {"portfolio_state": "f" * 64},
+                        "metrics": {"net_return": "0.01"},
+                    }
+                )
+                if i == 0
+                else make_evidence(i)
+            ),
+        }
+        for i in range(252)
+    ]
+    host_file.write_text(
+        json.dumps(
+            {
+                "trust_roots": host_trust_roots,
+                "receipt_store": receipt_store,
+                "artifact_store": artifact_store,
+                "execution_receipts": nonexistent_artifact_receipts,
+            }
+        ),
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "historical",
+            "--frozen",
+            str(frozen_file),
+            "--host-config",
+            str(host_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+    )
+    assert proc.returncode == 3
+
+    # 10c. Non-hex artifact hash returns exit 3
+    nonhex_hash_receipts = [
+        {
+            "freeze_hash": frozen.freeze_hash,
+            "status": "COMPLETED",
+            "session_index": i,
+            "completion_evidence": (
+                (lambda b: b | {"evidence_hash": content_hash(b)})(
+                    {
+                        "freeze_hash": frozen.freeze_hash,
+                        "session_index": i,
+                        "status": "COMPLETED",
+                        "artifacts": {"portfolio_state": "z" * 64},
+                        "metrics": {"net_return": "0.01"},
+                    }
+                )
+                if i == 0
+                else make_evidence(i)
+            ),
+        }
+        for i in range(252)
+    ]
+    host_file.write_text(
+        json.dumps(
+            {
+                "trust_roots": host_trust_roots,
+                "receipt_store": receipt_store,
+                "artifact_store": artifact_store,
+                "execution_receipts": nonhex_hash_receipts,
+            }
+        ),
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "historical",
+            "--frozen",
+            str(frozen_file),
+            "--host-config",
+            str(host_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+    )
+    assert proc.returncode == 3
+
+    # 10d. Bound session mismatch in artifact object returns exit 3
+    mismatched_art_obj = {
+        "freeze_hash": frozen.freeze_hash,
+        "session_index": 999,
+        "artifact_type": "PORTFOLIO_STATE",
+    }
+    mismatched_art_hash = content_hash(mismatched_art_obj)
+    artifact_store[mismatched_art_hash] = mismatched_art_obj
+    mismatched_artifact_receipts = [
+        {
+            "freeze_hash": frozen.freeze_hash,
+            "status": "COMPLETED",
+            "session_index": i,
+            "completion_evidence": (
+                (lambda b: b | {"evidence_hash": content_hash(b)})(
+                    {
+                        "freeze_hash": frozen.freeze_hash,
+                        "session_index": i,
+                        "status": "COMPLETED",
+                        "artifacts": {"portfolio_state": mismatched_art_hash},
+                        "metrics": {"net_return": "0.01"},
+                    }
+                )
+                if i == 0
+                else make_evidence(i)
+            ),
+        }
+        for i in range(252)
+    ]
+    host_file.write_text(
+        json.dumps(
+            {
+                "trust_roots": host_trust_roots,
+                "receipt_store": receipt_store,
+                "artifact_store": artifact_store,
+                "execution_receipts": mismatched_artifact_receipts,
             }
         ),
         encoding="utf-8",
@@ -822,6 +1070,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
             {
                 "trust_roots": host_trust_roots,
                 "receipt_store": receipt_store,
+                "artifact_store": artifact_store,
                 "execution_receipts": out_of_scope_receipts,
             }
         ),
@@ -860,6 +1109,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
             {
                 "trust_roots": host_trust_roots,
                 "receipt_store": receipt_store,
+                "artifact_store": artifact_store,
                 "execution_receipts": receipts_252,
             }
         ),
