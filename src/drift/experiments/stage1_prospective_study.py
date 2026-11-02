@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime
 from typing import Any, Literal, Protocol, Self
 
@@ -70,12 +70,19 @@ class ProspectiveStudyPlanV1(FrozenModel):
     mandate_hash: SHA256Hash
     cost_policy_hash: SHA256Hash
     evidence_receipts: tuple[StudyEvidenceReferenceV1, ...] = ()
+    scheduled_dates: tuple[date, ...] = Field(default=())
+    calendar_evidence_hash: SHA256Hash | None = None
     plan_hash: SHA256Hash
 
     @model_validator(mode="after")
     def validate_plan(self) -> Self:
         if self.first_eligible_session > self.planned_last_session:
             raise ValueError("PROSPECTIVE_DATES_REVERSED")
+        if (
+            self.scheduled_dates
+            and len(self.scheduled_dates) != self.scheduled_sessions
+        ):
+            raise ValueError("SCHEDULED_DATES_COUNT_MISMATCH")
         body = self.model_dump(mode="python", exclude={"plan_hash"})
         if self.plan_hash != content_hash(body):
             raise ValueError("PROSPECTIVE_PLAN_HASH_MISMATCH")
@@ -96,7 +103,22 @@ def create_prospective_study_plan(
     cost_policy_hash: str,
     evidence_receipts: tuple[StudyEvidenceReferenceV1, ...] = (),
     registered_at: datetime | None = None,
+    scheduled_dates: Sequence[date] | None = None,
+    calendar_evidence_hash: str | None = None,
 ) -> ProspectiveStudyPlanV1:
+    if scheduled_dates is not None:
+        s_dates = tuple(scheduled_dates)
+    else:
+        from datetime import timedelta
+
+        cur = first_eligible_session
+        gen_dates: list[date] = []
+        while len(gen_dates) < 504:
+            if cur.weekday() < 5:
+                gen_dates.append(cur)
+            cur += timedelta(days=1)
+        s_dates = tuple(gen_dates)
+
     body = {
         "schema_version": "drift-stage1-prospective-plan/1",
         "plan_id": plan_id,
@@ -119,6 +141,8 @@ def create_prospective_study_plan(
         "mandate_hash": mandate_hash,
         "cost_policy_hash": cost_policy_hash,
         "evidence_receipts": evidence_receipts,
+        "scheduled_dates": s_dates,
+        "calendar_evidence_hash": calendar_evidence_hash,
     }
     h = content_hash(body)
     return ProspectiveStudyPlanV1.model_validate_json(
@@ -248,6 +272,9 @@ class ProspectiveRegistrationV1(FrozenModel):
     last_observed_session: date | None = None
     scheduled_sessions: Literal[504] = 504
     has_broker_dispatch_capability: bool = False
+    evidence_chain: tuple[SHA256Hash, ...] = ()
+    prior_step_hash: SHA256Hash | None = None
+    last_evidence_hash: SHA256Hash | None = None
     registration_hash: SHA256Hash
 
     @model_validator(mode="after")
@@ -277,6 +304,9 @@ def register_prospective_study(
         "last_observed_session": None,
         "scheduled_sessions": 504,
         "has_broker_dispatch_capability": has_broker_dispatch_capability,
+        "evidence_chain": (),
+        "prior_step_hash": None,
+        "last_evidence_hash": None,
     }
     h = content_hash(body)
     return ProspectiveRegistrationV1.model_validate_json(
@@ -727,6 +757,11 @@ def advance_prospective_session(
         raise ValueError("SESSION_EVIDENCE_DATE_MISMATCH")
     if ev.status not in ("OBSERVED", "COMPLETED"):
         raise ValueError("SESSION_EVIDENCE_STATUS_NOT_OBSERVED")
+    if ev.evidence_hash in registration.evidence_chain:
+        raise ValueError(
+            "DUPLICATE_SESSION_EVIDENCE: evidence already recorded "
+            "in registration evidence chain"
+        )
 
     # Verify required prospective execution artifacts
     for req_art in REQUIRED_PROSPECTIVE_ARTIFACTS:
@@ -867,8 +902,22 @@ def advance_prospective_session(
             f"[{plan.first_eligible_session}, {plan.planned_last_session}]"
         )
 
-    # Enforce exact sequential scheduled sessions and reject any gaps
-    if calendar is not None:
+    # Enforce exact sequential scheduled sessions and reject any gaps or mutable skips
+    expected_idx = registration.observed_session_count
+    if plan.scheduled_dates:
+        if expected_idx >= len(plan.scheduled_dates):
+            raise ValueError("ALL_SCHEDULED_CALENDAR_SESSIONS_ALREADY_OBSERVED")
+        expected_date = plan.scheduled_dates[expected_idx]
+        if session_date != expected_date:
+            raise ValueError(
+                f"SESSION_DATE_NOT_SEQUENTIAL: expected exact frozen scheduled session "
+                f"{expected_date} (session {expected_idx}), got {session_date}"
+            )
+        if calendar is not None and session_date not in calendar:
+            raise ValueError(
+                f"SESSION_DATE_NOT_IN_CALENDAR: {session_date} not in supplied calendar"
+            )
+    elif calendar is not None:
         eligible_calendar = sorted(
             [
                 d
@@ -880,7 +929,6 @@ def advance_prospective_session(
         if not eligible_calendar:
             raise ValueError("CALENDAR_HAS_NO_ELIGIBLE_SESSIONS_IN_WINDOW")
 
-        expected_idx = registration.observed_session_count
         if expected_idx >= len(eligible_calendar):
             raise ValueError("ALL_SCHEDULED_CALENDAR_SESSIONS_ALREADY_OBSERVED")
 
@@ -918,6 +966,7 @@ def advance_prospective_session(
     new_state: ProspectiveLifecycle = (
         "COMPLETED_PENDING_REVIEW" if new_count >= 504 else "RUNNING"
     )
+    new_chain = registration.evidence_chain + (ev.evidence_hash,)
 
     body = {
         "schema_version": "drift-stage1-prospective-registration/1",
@@ -929,6 +978,9 @@ def advance_prospective_session(
         "last_observed_session": session_date,
         "scheduled_sessions": 504,
         "has_broker_dispatch_capability": False,
+        "evidence_chain": new_chain,
+        "prior_step_hash": registration.registration_hash,
+        "last_evidence_hash": ev.evidence_hash,
     }
     h = content_hash(body)
     return ProspectiveRegistrationV1.model_validate_json(

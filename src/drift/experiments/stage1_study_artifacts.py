@@ -152,6 +152,8 @@ class CalibrationAttemptReceiptV1(FrozenModel):
     attempt_id: NonBlankStr
     pair: CalibrationPairV1
     status: Literal["COMPLETED", "FAILED"]
+    plan_hash: SHA256Hash | None = None
+    development_execution_hash: SHA256Hash | None = None
     terminal_net_return: Decimal | None = None
     absolute_maximum_drawdown: Decimal | None = None
     total_gross_turnover: Decimal | None = None
@@ -178,6 +180,8 @@ def create_calibration_attempt_receipt(
     attempt_id: str,
     pair: CalibrationPairV1,
     status: Literal["COMPLETED", "FAILED"],
+    plan_hash: str | None = None,
+    development_execution_hash: str | None = None,
     terminal_net_return: Decimal | None = None,
     absolute_maximum_drawdown: Decimal | None = None,
     total_gross_turnover: Decimal | None = None,
@@ -187,6 +191,8 @@ def create_calibration_attempt_receipt(
         "attempt_id": attempt_id,
         "pair": pair,
         "status": status,
+        "plan_hash": plan_hash,
+        "development_execution_hash": development_execution_hash,
         "terminal_net_return": terminal_net_return,
         "absolute_maximum_drawdown": absolute_maximum_drawdown,
         "total_gross_turnover": total_gross_turnover,
@@ -248,17 +254,30 @@ class CalibrationResultV1(FrozenModel):
         if self.result_hash != content_hash(body):
             raise ValueError("CALIBRATION_RESULT_HASH_MISMATCH")
         if self.selected_pair is not None:
-            attempt_pairs = {
-                att.pair for att in self.attempts if att.status == "COMPLETED"
-            }
-            if attempt_pairs != set(ORDERED_CALIBRATION_PAIRS):
-                raise ValueError("CALIBRATION_RESULT_INCOMPLETE_ATTEMPTS")
-            if self.selected_pair not in attempt_pairs:
-                raise ValueError("CALIBRATION_SELECTED_PAIR_NOT_COMPLETED")
-
             completed_attempts = [
                 att for att in self.attempts if att.status == "COMPLETED"
             ]
+            completed_pairs = [att.pair for att in completed_attempts]
+            if len(completed_pairs) != len(set(completed_pairs)):
+                raise ValueError(
+                    "CALIBRATION_RESULT_DUPLICATE_ATTEMPTS: repeated grid runs for "
+                    "the same coefficient pair are prohibited"
+                )
+            if set(completed_pairs) != set(ORDERED_CALIBRATION_PAIRS):
+                raise ValueError("CALIBRATION_RESULT_INCOMPLETE_ATTEMPTS")
+            if len(completed_attempts) != len(ORDERED_CALIBRATION_PAIRS):
+                raise ValueError("CALIBRATION_RESULT_ATTEMPT_COUNT_MISMATCH")
+
+            for att in completed_attempts:
+                if att.plan_hash is not None and att.plan_hash != self.plan_hash:
+                    raise ValueError(
+                        f"CALIBRATION_ATTEMPT_PLAN_MISMATCH: attempt {att.attempt_id} "
+                        f"plan {att.plan_hash} does not match result {self.plan_hash}"
+                    )
+
+            if self.selected_pair not in set(completed_pairs):
+                raise ValueError("CALIBRATION_SELECTED_PAIR_NOT_COMPLETED")
+
             ranked = sorted(completed_attempts, key=calibration_ranking_key)
             winner = ranked[0]
             if self.selected_pair != winner.pair:

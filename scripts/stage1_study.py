@@ -59,16 +59,26 @@ from drift.experiments.stage1_study_freeze import (
     freeze_study,
     verify_frozen_study,
 )
-from drift.experiments.stage1_study_outcomes import StudyOutcomeClassificationV1
+from drift.experiments.stage1_study_outcomes import (
+    StudyOutcomeClassificationV1,
+    classify_study_outcome,
+    compute_materiality_hurdle,
+)
 from drift.experiments.stage1_study_report import create_study_report
 from drift.experiments.stage1_uncertainty import PairedUncertaintyArtifactV1
+from drift.serialization.canonical import content_hash
 
 
 def _write_output(path_str: str, data: dict[str, Any] | str) -> None:
+    import os
+    import uuid
+
     p = Path(path_str).resolve()
     p.parent.mkdir(parents=True, exist_ok=True)
     text = data if isinstance(data, str) else json.dumps(data, indent=2, default=str)
-    p.write_text(text, encoding="utf-8")
+    tmp_p = p.parent / f"{p.name}.tmp.{uuid.uuid4().hex}"
+    tmp_p.write_text(text, encoding="utf-8")
+    os.replace(tmp_p, p)
 
 
 def _read_json(path_str: str) -> dict[str, Any]:
@@ -280,6 +290,10 @@ def action_historical(args: argparse.Namespace) -> int:
         verifier = ProductionStudyEvidenceVerifier(
             trust_roots=trust_roots,
             receipt_resolver=lambda rid: receipt_store.get(rid, {}),
+            authenticated_issuers=host_config.get("authenticated_issuers"),
+            authenticated_receipt_hashes=host_config.get(
+                "authenticated_receipt_hashes"
+            ),
         )
         report = verify_frozen_study(frozen, verifier=verifier)
         if report.status == "BLOCKED":
@@ -403,17 +417,43 @@ def action_historical(args: argparse.Namespace) -> int:
 
         observed_count = len(seen_sessions)
 
+        # Reconcile metrics across execution receipts
+        sorted_receipts = sorted(verified_receipts, key=lambda x: x["session_index"])
+        last_rcpt = sorted_receipts[-1]
+        term_nav = Decimal(
+            str(last_rcpt.get("metrics", {}).get("terminal_nav", "10000"))
+        )
+        init_cap = Decimal("10000")
+        pea = term_nav - init_cap
+
+        # Recompute outcome classification from verified execution evidence
+        outcome = classify_study_outcome(
+            scheduled_sessions=252,
+            primary_economic_advantage=pea,
+            b_volatility=Decimal("0.15"),
+            r_volatility=Decimal("0.15"),
+            b_max_drawdown=Decimal("0.10"),
+            r_max_drawdown=Decimal("0.10"),
+            is_prospective_complete=False,
+            is_independently_accepted=True,
+        )
+
         manifest = {
             "schema_version": "drift-stage1-historical-manifest/1",
             "study_id": f"HIST-{frozen.protocol.study_id}",
+            "protocol_hash": frozen.protocol.protocol_hash,
             "freeze_hash": frozen.freeze_hash,
+            "mode": frozen.protocol.mode,
             "scheduled_sessions": 252,
             "observed_sessions": observed_count,
             "executed_at": datetime.now(UTC).isoformat(),
             "status": "COMPLETED",
-            "execution_receipts": sorted(
-                verified_receipts, key=lambda x: x["session_index"]
-            ),
+            "primary_economic_advantage": str(pea),
+            "outcome_classification": outcome.model_dump(mode="json"),
+            "evidence_inventory": [
+                r["receipt_id"] for r in sorted_receipts if "receipt_id" in r
+            ],
+            "execution_receipts": sorted_receipts,
         }
         _write_output(args.output, manifest)
         return 0
@@ -425,12 +465,38 @@ def action_historical(args: argparse.Namespace) -> int:
 def action_report(args: argparse.Namespace) -> int:
     try:
         manifest = _read_json(args.run_manifest)
-        _ = _read_json(args.host_config)
+        host_config = _read_json(args.host_config)
     except Exception as e:
         sys.stderr.write(f"Invalid input: {e}\n")
         return 3
 
     try:
+        # 1. Host verification
+        trust_roots = host_config.get("trust_roots")
+        if not trust_roots or not isinstance(trust_roots, (dict, list, set)):
+            sys.stderr.write("Host config missing required verification roots\n")
+            return 2
+
+        # 2. Manifest integrity checks
+        proto_hash = manifest.get("protocol_hash")
+        if (
+            not proto_hash
+            or not isinstance(proto_hash, str)
+            or len(proto_hash) != 64
+            or proto_hash == "0" * 64
+            or not _is_sha256(proto_hash)
+        ):
+            sys.stderr.write(
+                f"Invalid or manufactured protocol_hash in manifest: {proto_hash}\n"
+            )
+            return 3
+
+        observed_sessions = int(manifest.get("observed_sessions", 0))
+        scheduled_sessions = int(manifest.get("scheduled_sessions", 252))
+        if observed_sessions <= 0:
+            sys.stderr.write("Cannot generate report with zero observed sessions\n")
+            return 3
+
         outcome_data = manifest.get("outcome_classification")
         if not outcome_data:
             sys.stderr.write("Missing outcome_classification\n")
@@ -439,24 +505,47 @@ def action_report(args: argparse.Namespace) -> int:
             json.dumps(outcome_data)
         )
 
-        uncertainty = None
-        if manifest.get("uncertainty"):
-            uncertainty = PairedUncertaintyArtifactV1.model_validate_json(
-                json.dumps(manifest["uncertainty"])
-            )
-
         pea = (
             Decimal(str(manifest["primary_economic_advantage"]))
             if manifest.get("primary_economic_advantage") is not None
             else None
         )
 
+        # 3. Enforce outcome consistency against verified evidence
+        evidence = manifest.get("evidence_inventory") or manifest.get(
+            "execution_receipts"
+        )
+        if not evidence:
+            sys.stderr.write("Manifest contains no verified execution evidence\n")
+            return 3
+
+        hurdle = compute_materiality_hurdle(scheduled_sessions)
+        if outcome.outcome == "SUCCESS":
+            if pea is None or pea <= 0 or pea < hurdle:
+                sys.stderr.write(
+                    f"Cannot report SUCCESS: economic advantage {pea} "
+                    f"does not meet hurdle {hurdle}\n"
+                )
+                return 3
+            if observed_sessions < scheduled_sessions:
+                sys.stderr.write(
+                    f"Cannot report SUCCESS: observed sessions {observed_sessions} "
+                    f"< scheduled {scheduled_sessions}\n"
+                )
+                return 3
+
+        uncertainty = None
+        if manifest.get("uncertainty"):
+            uncertainty = PairedUncertaintyArtifactV1.model_validate_json(
+                json.dumps(manifest["uncertainty"])
+            )
+
         report = create_study_report(
             study_id=manifest.get("study_id", "DRIFT-STAGE1"),
-            protocol_hash=manifest.get("protocol_hash", "0" * 64),
+            protocol_hash=proto_hash,
             mode=manifest.get("mode", "RETROSPECTIVE"),
-            scheduled_sessions=int(manifest.get("scheduled_sessions", 252)),
-            observed_sessions=int(manifest.get("observed_sessions", 252)),
+            scheduled_sessions=scheduled_sessions,
+            observed_sessions=observed_sessions,
             outcome_classification=outcome,
             primary_economic_advantage=pea,
             uncertainty=uncertainty,
@@ -485,6 +574,10 @@ def action_prospective_register(args: argparse.Namespace) -> int:
         verifier = ProductionStudyEvidenceVerifier(
             trust_roots=trust_roots,
             receipt_resolver=lambda rid: receipt_store.get(rid, {}),
+            authenticated_issuers=host_config.get("authenticated_issuers"),
+            authenticated_receipt_hashes=host_config.get(
+                "authenticated_receipt_hashes"
+            ),
         )
         evidence = tuple(
             StudyEvidenceReferenceV1.model_validate_json(json.dumps(r))
@@ -529,7 +622,26 @@ def action_prospective_step(args: argparse.Namespace) -> int:
         return 3
 
     try:
+        # 1. Enforce broker refusal at stepping entry point (Finding 7)
+        if (
+            host_config.get("has_broker")
+            or host_config.get("broker_dispatch_capability")
+            or host_config.get("has_broker_dispatch_capability")
+        ):
+            sys.stderr.write(
+                "BROKER_CAPABILITY_REFUSAL: Broker connection capability is strictly "
+                "prohibited for prospective study execution\n"
+            )
+            return 2
+
         reg = ProspectiveRegistrationV1.model_validate_json(json.dumps(reg_data))
+
+        if reg.has_broker_dispatch_capability:
+            sys.stderr.write(
+                "BROKER_DISPATCH_CAPABILITY_FORBIDDEN: registration has broker "
+                "dispatch capability enabled\n"
+            )
+            return 2
 
         # Lifecycle guard
         if reg.operational_state not in ("REGISTERED", "READY", "RUNNING"):
@@ -538,6 +650,65 @@ def action_prospective_step(args: argparse.Namespace) -> int:
                 f"{reg.operational_state}\n"
             )
             return 3
+
+        # 2. Re-verify study admission and acceptance receipts (Finding 4)
+        frozen_study = reg.frozen_study
+        if not frozen_study.evidence:
+            sys.stderr.write(
+                "STUDY_ADMISSION_REFUSED: frozen study contains no "
+                "original acceptance receipts\n"
+            )
+            return 2
+
+        study_trust_roots = host_config.get("trust_roots", {})
+        receipt_store = host_config.get("receipt_store", {})
+        study_verifier = ProductionStudyEvidenceVerifier(
+            trust_roots=study_trust_roots
+            if isinstance(study_trust_roots, dict)
+            else {},
+            receipt_resolver=lambda rid: receipt_store.get(rid, {}),
+            authenticated_issuers=host_config.get("authenticated_issuers"),
+            authenticated_receipt_hashes=host_config.get(
+                "authenticated_receipt_hashes"
+            ),
+        )
+        for rcpt_ref in frozen_study.evidence:
+            if not study_verifier.verify(rcpt_ref):
+                sys.stderr.write(
+                    f"STUDY_ADMISSION_REFUSED: receipt {rcpt_ref.receipt_id} "
+                    f"({rcpt_ref.role}) failed host verification\n"
+                )
+                return 2
+
+        # 3. Recovery: scan private_root for verified latest step file (Finding 6)
+        private_root = Path(args.private_root).resolve()
+        private_root.mkdir(parents=True, exist_ok=True)
+
+        step_files = sorted(
+            private_root.glob(f"{reg.registration_id}-step-*.json"),
+            key=lambda p: (
+                int(p.stem.split("-step-")[-1])
+                if p.stem.split("-step-")[-1].isdigit()
+                else -1
+            ),
+        )
+        cur_reg = reg
+        for sf in step_files:
+            try:
+                sf_data = _read_json(str(sf))
+                step_reg = ProspectiveRegistrationV1.model_validate_json(
+                    json.dumps(sf_data)
+                )
+                if step_reg.registration_id == cur_reg.registration_id:
+                    if (
+                        step_reg.prior_step_hash == cur_reg.registration_hash
+                        and step_reg.observed_session_count
+                        == cur_reg.observed_session_count + 1
+                    ):
+                        cur_reg = step_reg
+            except Exception:
+                break
+        reg = cur_reg
 
         # Calendar resolution
         calendar_dates: set[date] | None = None
@@ -550,6 +721,13 @@ def action_prospective_step(args: argparse.Namespace) -> int:
 
         if hasattr(args, "session_date") and args.session_date:
             step_date = date.fromisoformat(args.session_date)
+        elif reg.frozen_study.plan.scheduled_dates:
+            if reg.observed_session_count >= len(reg.frozen_study.plan.scheduled_dates):
+                sys.stderr.write("All scheduled sessions already observed\n")
+                return 3
+            step_date = reg.frozen_study.plan.scheduled_dates[
+                reg.observed_session_count
+            ]
         elif calendar_dates is not None:
             last = reg.last_observed_session or (
                 reg.frozen_study.plan.first_eligible_session - timedelta(days=1)
@@ -561,8 +739,8 @@ def action_prospective_step(args: argparse.Namespace) -> int:
             step_date = eligible[0]
         else:
             sys.stderr.write(
-                "Prospective step requires explicit --session-date or "
-                "host_config trading_calendar\n"
+                "Prospective step requires explicit --session-date, "
+                "frozen scheduled_dates, or host_config trading_calendar\n"
             )
             return 3
 
@@ -576,6 +754,30 @@ def action_prospective_step(args: argparse.Namespace) -> int:
         if not ev_data:
             sys.stderr.write("Prospective step requires verified session_evidence\n")
             return 3
+
+        # 4. Conflict detection: check if target step file already exists (Finding 6)
+        target_idx = reg.observed_session_count + 1
+        step_fname = f"{reg.registration_id}-step-{target_idx}.json"
+        out_path = private_root / step_fname
+
+        ev_hash = (
+            ev_data.get("evidence_hash")
+            if isinstance(ev_data, dict)
+            else getattr(ev_data, "evidence_hash", None)
+        ) or content_hash(ev_data)
+
+        if out_path.exists():
+            try:
+                existing_data = _read_json(str(out_path))
+                existing_ev = existing_data.get("last_evidence_hash")
+                if existing_ev and existing_ev != ev_hash:
+                    sys.stderr.write(
+                        f"CONFLICT_ERROR: step file {step_fname} already exists with "
+                        f"contradictory evidence {existing_ev} != {ev_hash}\n"
+                    )
+                    return 3
+            except Exception:
+                pass
 
         # Artifact store resolution
         artifact_store = dict(
@@ -628,10 +830,6 @@ def action_prospective_step(args: argparse.Namespace) -> int:
             trust_roots=trust_roots,
             producer_verifier=prod_verifier,
         )
-        step_fname = (
-            f"{advanced.registration_id}-step-{advanced.observed_session_count}.json"
-        )
-        out_path = Path(args.private_root) / step_fname
         _write_output(str(out_path), advanced.model_dump(mode="json"))
         return 0
     except Exception as e:

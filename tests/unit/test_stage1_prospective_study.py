@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from drift.experiments.stage1_original_acceptance import (
     ProductionStudyEvidenceVerifier,
+    create_original_study_evidence_receipt,
 )
 from drift.experiments.stage1_prospective_study import (
     ProductionProspectiveProducerVerifier,
@@ -106,15 +107,17 @@ def make_prospective_plan() -> tuple[
     receipts_store = {}
     evidence = []
     trust_roots = {}
+    key = "study-secret-key"
     for role in REQUIRED_ROLES:
-        payload = {
-            "role": role,
-            "receipt_id": f"RCPT-{role}",
-            "protocol_hash": plan.plan_hash,
-            "authority_id": "trusted-root",
-            "status": "ACCEPTED",
-        }
-        r_hash = content_hash(payload)
+        payload, r_hash = create_original_study_evidence_receipt(
+            role=role,
+            receipt_id=f"RCPT-{role}",
+            protocol_hash=plan.plan_hash,
+            authority_id="trusted-root",
+            accepted_at=NOW,
+            assessor_independence=True,
+            hmac_key=key,
+        )
         receipts_store[f"RCPT-{role}"] = payload
         evidence.append(
             StudyEvidenceReferenceV1(
@@ -125,7 +128,7 @@ def make_prospective_plan() -> tuple[
                 accepted_at=NOW,
             )
         )
-        trust_roots[role] = {"trusted-root"}
+        trust_roots[role] = {"trusted-root": {"hmac_key": key}}
 
     verifier = ProductionStudyEvidenceVerifier(
         trust_roots=trust_roots,
@@ -655,6 +658,9 @@ def test_prospective_step_enforces_lifecycle_states() -> None:
             "last_observed_session": None,
             "scheduled_sessions": 504,
             "has_broker_dispatch_capability": False,
+            "evidence_chain": (),
+            "prior_step_hash": None,
+            "last_evidence_hash": None,
         }
         h = content_hash(body)
         invalid_reg = base_reg.model_validate_json(
@@ -708,7 +714,7 @@ def test_prospective_step_enforces_trading_calendar_and_evidence() -> None:
     ev_not_in_cal, store_not_in_cal = make_prospective_evidence(
         reg, 0, date(2026, 11, 3)
     )
-    with pytest.raises(ValueError, match="SESSION_DATE_NOT_SEQUENTIAL"):
+    with pytest.raises(ValueError, match="SESSION_DATE_NOT_IN_CALENDAR"):
         advance_prospective_session(
             reg,
             session_date=date(2026, 11, 3),
@@ -899,3 +905,95 @@ def test_producer_verifier_rejects_reused_credentials_on_altered_contents() -> N
         expected_session_index=1,
         expected_session_date=date(2026, 11, 3),
     )
+
+
+def test_prospective_calendar_is_immutable_and_rejects_arbitrary_jumps() -> None:
+    """Finding 5 regression: Calendar schedule is frozen in the plan and cannot
+
+    be mutated by caller to jump from Nov 3 to Christmas Day.
+    """
+    plan, evidence, verifier = make_prospective_plan()
+    frozen = freeze_prospective_study(
+        plan, frozen_at=NOW, evidence=evidence, verifier=verifier
+    )
+    reg = register_prospective_study(
+        registration_id="REG-CAL-IMMUTABLE",
+        registered_at=NOW,
+        frozen_study=frozen,
+        has_broker_dispatch_capability=False,
+    )
+
+    # Step 0: 2026-11-03 (Tuesday)
+    ev0, store0 = make_prospective_evidence(reg, 0, date(2026, 11, 3))
+    s0 = advance_prospective_session(
+        reg,
+        session_date=date(2026, 11, 3),
+        session_evidence=ev0,
+        artifact_store=store0,
+        producer_verifier=make_producer_verifier(store0),
+    )
+
+    # Attempt to jump directly to Christmas Day (2026-12-25) with a mutable calendar
+    christmas = date(2026, 12, 25)
+    ev_xmas, store_xmas = make_prospective_evidence(s0, 1, christmas)
+    with pytest.raises(ValueError, match="SESSION_DATE_NOT_SEQUENTIAL"):
+        advance_prospective_session(
+            s0,
+            session_date=christmas,
+            session_evidence=ev_xmas,
+            calendar={date(2026, 11, 3), christmas},  # Mutated calendar
+            artifact_store=store_xmas,
+            producer_verifier=make_producer_verifier(store_xmas),
+        )
+
+
+def test_prospective_recovery_preserves_evidence_chain_and_rejects_duplicates() -> None:
+    """Finding 6 regression: Sequential steps persist evidence_chain, prior_step_hash,
+
+    last_evidence_hash, and reject duplicate session evidence.
+    """
+    plan, evidence, verifier = make_prospective_plan()
+    frozen = freeze_prospective_study(
+        plan, frozen_at=NOW, evidence=evidence, verifier=verifier
+    )
+    reg = register_prospective_study(
+        registration_id="REG-CHAIN-TEST",
+        registered_at=NOW,
+        frozen_study=frozen,
+        has_broker_dispatch_capability=False,
+    )
+    assert reg.evidence_chain == ()
+    assert reg.prior_step_hash is None
+    assert reg.last_evidence_hash is None
+
+    # Step 0
+    ev0, store0 = make_prospective_evidence(reg, 0, date(2026, 11, 3))
+    s0 = advance_prospective_session(
+        reg,
+        session_date=date(2026, 11, 3),
+        session_evidence=ev0,
+        artifact_store=store0,
+        producer_verifier=make_producer_verifier(store0),
+    )
+    assert len(s0.evidence_chain) == 1
+    assert s0.evidence_chain[0] == ev0.evidence_hash
+    assert s0.prior_step_hash == reg.registration_hash
+    assert s0.last_evidence_hash == ev0.evidence_hash
+
+    # Submitting evidence whose hash is already in evidence_chain must fail
+    next_date = plan.scheduled_dates[1]
+    ev_dup, store_dup = make_prospective_evidence(s0, 1, next_date)
+    dup_body = s0.model_dump(mode="python", exclude={"registration_hash"})
+    dup_body["evidence_chain"] = (ev_dup.evidence_hash,)
+    h_dup = content_hash(dup_body)
+    s0_dup = s0.model_validate_json(
+        canonical_json(dup_body | {"registration_hash": h_dup})
+    )
+    with pytest.raises(ValueError, match="DUPLICATE_SESSION_EVIDENCE"):
+        advance_prospective_session(
+            s0_dup,
+            session_date=next_date,
+            session_evidence=ev_dup,
+            artifact_store=store_dup,
+            producer_verifier=make_producer_verifier(store_dup),
+        )

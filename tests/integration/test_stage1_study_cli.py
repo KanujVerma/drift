@@ -44,7 +44,12 @@ def test_cli_report(repo_root: Path, tmp_path: Path) -> None:
     host_config_file = tmp_path / "host.json"
     out_file = tmp_path / "report.json"
 
-    host_config_file.write_text("{}", encoding="utf-8")
+    valid_host_config = {
+        "trust_roots": {
+            "scientific_protocol_review": ["trusted-root"],
+        }
+    }
+    host_config_file.write_text(json.dumps(valid_host_config), encoding="utf-8")
     classification_payload = {
         "schema_version": "drift-stage1-outcome/1",
         "outcome": "UNSUCCESSFUL",
@@ -69,6 +74,7 @@ def test_cli_report(repo_root: Path, tmp_path: Path) -> None:
         "observed_sessions": 252,
         "primary_economic_advantage": "100.0",
         "outcome_classification": classification_payload,
+        "evidence_inventory": ["HIST-RCPT-001"],
     }
 
     manifest_file.write_text(json.dumps(manifest_payload), encoding="utf-8")
@@ -95,10 +101,129 @@ def test_cli_report(repo_root: Path, tmp_path: Path) -> None:
     assert report_data["schema_version"] == "drift-stage1-study-report/1"
     assert report_data["study_id"] == "STUDY-CLI-TEST"
 
+    # Adversarial checks for Finding 3
+    # 1. Missing host verification trust roots -> exits 2
+    empty_host = tmp_path / "empty_host.json"
+    empty_host.write_text("{}", encoding="utf-8")
+    proc_no_host = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "report",
+            "--run-manifest",
+            str(manifest_file),
+            "--host-config",
+            str(empty_host),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+    )
+    assert proc_no_host.returncode == 2
+
+    # 2. Zero observed sessions -> exits 3
+    zero_manifest = tmp_path / "zero_manifest.json"
+    zero_manifest.write_text(
+        json.dumps(manifest_payload | {"observed_sessions": 0}), encoding="utf-8"
+    )
+    proc_zero = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "report",
+            "--run-manifest",
+            str(zero_manifest),
+            "--host-config",
+            str(host_config_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+    )
+    assert proc_zero.returncode == 3
+
+    # 3. All-zero protocol hash -> exits 3
+    all_zero_proto = tmp_path / "all_zero_proto.json"
+    all_zero_proto.write_text(
+        json.dumps(manifest_payload | {"protocol_hash": "0" * 64}), encoding="utf-8"
+    )
+    proc_all_zero = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "report",
+            "--run-manifest",
+            str(all_zero_proto),
+            "--host-config",
+            str(host_config_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+    )
+    assert proc_all_zero.returncode == 3
+
+    # 4. Manufactured SUCCESS with negative economic advantage and zero evidence
+    # -> exits 3
+    manuf_class = {
+        "schema_version": "drift-stage1-outcome/1",
+        "outcome": "SUCCESS",
+        "primary_economic_advantage": "-999.0",
+        "materiality_hurdle": "100",
+        "is_invalid": False,
+        "is_available": True,
+        "is_risk_comparable": True,
+        "is_prospective_complete": True,
+        "is_independently_accepted": True,
+        "reasons": [],
+    }
+    manuf_class["classification_hash"] = content_hash(manuf_class)
+    manuf_manifest = tmp_path / "manuf_manifest.json"
+    manuf_manifest.write_text(
+        json.dumps(
+            {
+                "study_id": "MANUFACTURED",
+                "protocol_hash": "0" * 64,
+                "scheduled_sessions": 252,
+                "observed_sessions": 0,
+                "primary_economic_advantage": "-999.0",
+                "outcome_classification": manuf_class,
+                "evidence_inventory": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    proc_manuf = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "report",
+            "--run-manifest",
+            str(manuf_manifest),
+            "--host-config",
+            str(host_config_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+    )
+    assert proc_manuf.returncode == 3
+
 
 def test_cli_prospective_register_and_step(repo_root: Path, tmp_path: Path) -> None:
     from datetime import UTC, date, datetime
 
+    from drift.experiments.stage1_original_acceptance import (
+        create_original_study_evidence_receipt,
+    )
     from drift.experiments.stage1_prospective_study import (
         create_prospective_study_plan,
     )
@@ -131,14 +256,15 @@ def test_cli_prospective_register_and_step(repo_root: Path, tmp_path: Path) -> N
     evidence = []
     trust_roots = {}
     for role in REQUIRED_ROLES:
-        payload = {
-            "role": role,
-            "receipt_id": f"RCPT-{role}",
-            "protocol_hash": plan.plan_hash,
-            "authority_id": "trusted-root",
-            "status": "ACCEPTED",
-        }
-        r_hash = content_hash(payload)
+        payload, r_hash = create_original_study_evidence_receipt(
+            role=role,
+            receipt_id=f"RCPT-{role}",
+            protocol_hash=plan.plan_hash,
+            authority_id="trusted-root",
+            accepted_at=now,
+            status="ACCEPTED",
+            hmac_key="cli-test-secret",
+        )
         receipts_store[f"RCPT-{role}"] = payload
         evidence.append(
             {
@@ -155,6 +281,7 @@ def test_cli_prospective_register_and_step(repo_root: Path, tmp_path: Path) -> N
         "trust_roots": trust_roots,
         "receipt_store": receipts_store,
         "evidence": evidence,
+        "authenticated_issuers": {"trusted-root": {"hmac_key": "cli-test-secret"}},
         "has_broker": False,
     }
     host_config_file.write_text(json.dumps(host_config), encoding="utf-8")
@@ -188,6 +315,21 @@ def test_cli_prospective_register_and_step(repo_root: Path, tmp_path: Path) -> N
     # 2. Step
     art_store: dict[str, Any] = {}
     art_hashes: dict[str, str] = {}
+    typed_payloads = {
+        "portfolio_state": {
+            "nav": "100000.00",
+            "cash": "100000.00",
+            "positions": {},
+        },
+        "decision": {
+            "strategy_id": "drift-allocator",
+            "allocations": {"SPY": "0.5"},
+        },
+        "fills": {
+            "orders": [],
+            "fills": [],
+        },
+    }
     for art_name in ("portfolio_state", "decision", "fills"):
         art_body = {
             "schema_version": "drift-stage1-prospective-artifact/1",
@@ -197,7 +339,7 @@ def test_cli_prospective_register_and_step(repo_root: Path, tmp_path: Path) -> N
             "session_index": 0,
             "session_date": "2026-11-03",
             "authority_id": "trusted-root",
-            "execution_payload": {"status": "OK", "step": 0},
+            "execution_payload": typed_payloads[art_name],
         }
         ah = content_hash(art_body)
         art_store[ah] = art_body
@@ -256,6 +398,9 @@ def test_cli_prospective_step_adversarial_authentication_enforcement(
 ) -> None:
     from datetime import UTC, date, datetime
 
+    from drift.experiments.stage1_original_acceptance import (
+        create_original_study_evidence_receipt,
+    )
     from drift.experiments.stage1_prospective_study import (
         create_prospective_study_plan,
     )
@@ -288,14 +433,15 @@ def test_cli_prospective_step_adversarial_authentication_enforcement(
     evidence = []
     trust_roots = {}
     for role in REQUIRED_ROLES:
-        payload = {
-            "role": role,
-            "receipt_id": f"RCPT-ADV-{role}",
-            "protocol_hash": plan.plan_hash,
-            "authority_id": "trusted-root",
-            "status": "ACCEPTED",
-        }
-        r_hash = content_hash(payload)
+        payload, r_hash = create_original_study_evidence_receipt(
+            role=role,
+            receipt_id=f"RCPT-ADV-{role}",
+            protocol_hash=plan.plan_hash,
+            authority_id="trusted-root",
+            accepted_at=now,
+            status="ACCEPTED",
+            hmac_key="adv-secret",
+        )
         receipts_store[f"RCPT-ADV-{role}"] = payload
         evidence.append(
             {
@@ -312,6 +458,7 @@ def test_cli_prospective_step_adversarial_authentication_enforcement(
         "trust_roots": trust_roots,
         "receipt_store": receipts_store,
         "evidence": evidence,
+        "authenticated_issuers": {"trusted-root": {"hmac_key": "adv-secret"}},
         "has_broker": False,
     }
     host_config_file.write_text(json.dumps(host_config), encoding="utf-8")
@@ -339,9 +486,24 @@ def test_cli_prospective_step_adversarial_authentication_enforcement(
     reg_file = private_root / f"REG-{plan.plan_id}.json"
     reg_data = json.loads(reg_file.read_text(encoding="utf-8"))
 
-    # Prepare store artifacts
+    # Prepare store artifacts with typed execution payloads
     art_store: dict[str, Any] = {}
     art_hashes: dict[str, str] = {}
+    typed_payloads = {
+        "portfolio_state": {
+            "nav": "100000.00",
+            "cash": "100000.00",
+            "positions": {},
+        },
+        "decision": {
+            "strategy_id": "drift-adv",
+            "allocations": {},
+        },
+        "fills": {
+            "orders": [],
+            "fills": [],
+        },
+    }
     for art_name in ("portfolio_state", "decision", "fills"):
         art_body = {
             "schema_version": "drift-stage1-prospective-artifact/1",
@@ -351,7 +513,7 @@ def test_cli_prospective_step_adversarial_authentication_enforcement(
             "session_index": 0,
             "session_date": "2026-11-03",
             "authority_id": "trusted-root",
-            "execution_payload": {"status": "OK", "step": 0},
+            "execution_payload": typed_payloads[art_name],
         }
         ah = content_hash(art_body)
         art_store[ah] = art_body
@@ -371,13 +533,20 @@ def test_cli_prospective_step_adversarial_authentication_enforcement(
         json.dumps(ev_body | {"evidence_hash": content_hash(ev_body)}), encoding="utf-8"
     )
 
+    # Base valid host config for stepping (with study admission auth roots)
+    base_step_host = {
+        "trust_roots": trust_roots,
+        "receipt_store": receipts_store,
+        "authenticated_issuers": {"trusted-root": {"hmac_key": "adv-secret"}},
+        "has_broker": False,
+    }
+
     # Adversarial Case 1: CLI treats store membership as authentication when
     # authentication config is absent.
     # The adversary supplies artifact_store, but omits authentic_artifacts /
     # authenticated_producers.
     # Must fail closed with exit code 3.
-    host_config_no_auth = {
-        "trust_roots": trust_roots,
+    host_config_no_auth = base_step_host | {
         "artifact_store": art_store,
     }
     host_config_file.write_text(json.dumps(host_config_no_auth), encoding="utf-8")
@@ -407,8 +576,7 @@ def test_cli_prospective_step_adversarial_authentication_enforcement(
 
     # Adversarial Case 2: Config provides empty authentication mechanisms.
     # Must fail closed with exit code 3 (PRODUCER_AUTHENTICATION_MECHANISM_REQUIRED).
-    host_config_empty_auth = {
-        "trust_roots": trust_roots,
+    host_config_empty_auth = base_step_host | {
         "artifact_store": art_store,
         "authentic_artifacts": [],
     }
@@ -440,8 +608,7 @@ def test_cli_prospective_step_adversarial_authentication_enforcement(
     # Adversarial Case 3: Artifact exists in store with matching authority and hash,
     # but is omitted from configured authentic_artifacts.
     # Must fail closed with exit code 3 (PRODUCER_AUTHENTICATION_FAILED).
-    host_config_unauth = {
-        "trust_roots": trust_roots,
+    host_config_unauth = base_step_host | {
         "artifact_store": art_store,
         "authentic_artifacts": [
             art_hashes["portfolio_state"]
@@ -475,8 +642,7 @@ def test_cli_prospective_step_adversarial_authentication_enforcement(
     # Adversarial Case 4: Config supplies truthy producer allowlisting without
     # authentication credentials (e.g. {"trusted-root": True}).
     # Must fail closed with exit code 3 (INVALID_PRODUCER_CREDENTIALS).
-    host_config_truthy_prod = {
-        "trust_roots": trust_roots,
+    host_config_truthy_prod = base_step_host | {
         "artifact_store": art_store,
         "authenticated_producers": {"trusted-root": True},
     }
@@ -508,8 +674,7 @@ def test_cli_prospective_step_adversarial_authentication_enforcement(
     # Adversarial Case 5: Config supplies static bearer tokens without
     # canonical content verification (e.g. {"tokens": ["foo"]}).
     # Must fail closed with exit code 3 (INVALID_PRODUCER_CREDENTIALS).
-    host_config_static_tokens = {
-        "trust_roots": trust_roots,
+    host_config_static_tokens = base_step_host | {
         "artifact_store": art_store,
         "authenticated_producers": {"trusted-root": {"tokens": ["bearer-token"]}},
     }
@@ -537,6 +702,132 @@ def test_cli_prospective_step_adversarial_authentication_enforcement(
     )
     assert proc_static_tokens.returncode == 3
     assert "INVALID_PRODUCER_CREDENTIALS" in proc_static_tokens.stderr
+
+    # Adversarial Case 6 (Finding 7): Broker capability refusal on stepping
+    host_config_broker = base_step_host | {
+        "artifact_store": art_store,
+        "authentic_artifacts": list(art_store.keys()),
+        "has_broker": True,
+    }
+    host_config_file.write_text(json.dumps(host_config_broker), encoding="utf-8")
+    proc_broker = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "prospective-step",
+            "--registration",
+            str(reg_file),
+            "--host-config",
+            str(host_config_file),
+            "--private-root",
+            str(private_root),
+            "--session-date",
+            "2026-11-03",
+            "--session-evidence",
+            str(ev_file),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert proc_broker.returncode == 2
+    assert "BROKER_CAPABILITY_REFUSAL" in proc_broker.stderr
+
+    # Adversarial Case 7 (Finding 4): Unauthenticated study admission receipts
+    # If host lacks the receipt or credentials, stepping is refused with exit code 2
+    host_config_no_admission = {
+        "trust_roots": trust_roots,
+        "receipt_store": {},  # Missing receipts
+        "artifact_store": art_store,
+        "authentic_artifacts": list(art_store.keys()),
+        "has_broker": False,
+    }
+    host_config_file.write_text(json.dumps(host_config_no_admission), encoding="utf-8")
+    proc_no_adm = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "prospective-step",
+            "--registration",
+            str(reg_file),
+            "--host-config",
+            str(host_config_file),
+            "--private-root",
+            str(private_root),
+            "--session-date",
+            "2026-11-03",
+            "--session-evidence",
+            str(ev_file),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert proc_no_adm.returncode == 2
+    assert "STUDY_ADMISSION_REFUSED" in proc_no_adm.stderr
+
+    # Adversarial Case 8 (Finding 5): Calendar advancement skipping to Christmas Day
+    jump_art_store: dict[str, Any] = {}
+    jump_art_hashes: dict[str, str] = {}
+    for art_name in ("portfolio_state", "decision", "fills"):
+        art_body = {
+            "schema_version": "drift-stage1-prospective-artifact/1",
+            "artifact_role": art_name,
+            "registration_id": f"REG-{plan.plan_id}",
+            "freeze_hash": reg_data["frozen_study"]["freeze_hash"],
+            "session_index": 0,
+            "session_date": "2026-12-25",
+            "authority_id": "trusted-root",
+            "execution_payload": typed_payloads[art_name],
+        }
+        ah = content_hash(art_body)
+        jump_art_store[ah] = art_body
+        jump_art_hashes[art_name] = ah
+
+    jump_ev_body = {
+        "schema_version": "drift-stage1-prospective-session-evidence/1",
+        "registration_id": f"REG-{plan.plan_id}",
+        "freeze_hash": reg_data["frozen_study"]["freeze_hash"],
+        "session_index": 0,
+        "session_date": "2026-12-25",
+        "status": "COMPLETED",
+        "evidence_artifacts": jump_art_hashes,
+    }
+    jump_ev_file = private_root / "step-jump-evidence.json"
+    jump_ev_file.write_text(
+        json.dumps(jump_ev_body | {"evidence_hash": content_hash(jump_ev_body)}),
+        encoding="utf-8",
+    )
+    valid_step_host = base_step_host | {
+        "artifact_store": jump_art_store,
+        "authentic_artifacts": list(jump_art_store.keys()),
+    }
+    host_config_file.write_text(json.dumps(valid_step_host), encoding="utf-8")
+    proc_calendar_jump = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "prospective-step",
+            "--registration",
+            str(reg_file),
+            "--host-config",
+            str(host_config_file),
+            "--private-root",
+            str(private_root),
+            "--session-date",
+            "2026-12-25",  # Christmas Day instead of scheduled 2026-11-03
+            "--session-evidence",
+            str(jump_ev_file),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert proc_calendar_jump.returncode == 3
+    assert "SESSION_DATE_NOT_SEQUENTIAL" in proc_calendar_jump.stderr
 
 
 def test_cli_calibrate_and_historical_handlers(repo_root: Path, tmp_path: Path) -> None:
@@ -641,6 +932,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
 
     from drift.experiments.stage1_original_acceptance import (
         ProductionStudyEvidenceVerifier,
+        create_original_study_evidence_receipt,
     )
     from drift.experiments.stage1_study_freeze import (
         REQUIRED_ROLES,
@@ -725,14 +1017,15 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     evidence = []
     trust_roots: dict[EvidenceRole, set[str]] = {}
     for role in REQUIRED_ROLES:
-        payload = {
-            "role": role,
-            "receipt_id": f"HIST-RCPT-{role}",
-            "protocol_hash": draft.protocol_hash,
-            "authority_id": "trusted-historical-root",
-            "status": "ACCEPTED",
-        }
-        r_hash = content_hash(payload)
+        payload, r_hash = create_original_study_evidence_receipt(
+            role=role,
+            receipt_id=f"HIST-RCPT-{role}",
+            protocol_hash=draft.protocol_hash,
+            authority_id="trusted-historical-root",
+            accepted_at=now,
+            status="ACCEPTED",
+            hmac_key="hist-secret",
+        )
         receipt_store[f"HIST-RCPT-{role}"] = payload
         evidence.append(
             StudyEvidenceReferenceV1(
@@ -750,6 +1043,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     verifier = ProductionStudyEvidenceVerifier(
         trust_roots=trust_roots,
         receipt_resolver=lambda rid: receipt_store.get(rid, {}),
+        authenticated_issuers={"trusted-historical-root": {"hmac_key": "hist-secret"}},
     )
     frozen = freeze_study(
         draft,
@@ -779,17 +1073,22 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     )
     assert proc.returncode == 2
 
+    artifact_store: dict[str, Any] = {}
+
+    def write_host_config(extra: dict[str, Any]) -> None:
+        cfg = {
+            "trust_roots": host_trust_roots,
+            "receipt_store": receipt_store,
+            "artifact_store": artifact_store,
+            "authenticated_issuers": {
+                "trusted-historical-root": {"hmac_key": "hist-secret"}
+            },
+        }
+        cfg.update(extra)
+        host_file.write_text(json.dumps(cfg), encoding="utf-8")
+
     # 2. 252-character string for execution_receipts returns exit 3 (invalid input)
-    host_file.write_text(
-        json.dumps(
-            {
-                "trust_roots": host_trust_roots,
-                "receipt_store": receipt_store,
-                "execution_receipts": "a" * 252,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_host_config({"execution_receipts": "a" * 252})
     proc = subprocess.run(
         [
             "uv",
@@ -809,16 +1108,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     assert proc.returncode == 3
 
     # 3. 252 empty objects for execution_receipts returns exit 3 (freeze_hash mismatch)
-    host_file.write_text(
-        json.dumps(
-            {
-                "trust_roots": host_trust_roots,
-                "receipt_store": receipt_store,
-                "execution_receipts": [{}] * 252,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_host_config({"execution_receipts": [{}] * 252})
     proc = subprocess.run(
         [
             "uv",
@@ -836,8 +1126,6 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
         capture_output=True,
     )
     assert proc.returncode == 3
-
-    artifact_store: dict[str, Any] = {}
 
     def make_execution_receipt(
         s_idx: int,
@@ -858,8 +1146,11 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
         p_obj = {
             "freeze_hash": frozen.freeze_hash,
             "session_index": 999 if mismatched_session else s_idx,
-            "artifact_type": "PORTFOLIO_STATE",
+            "artifact_role": "portfolio_state",
+            "authority_id": authority,
+            "nav": "1000000.00",
             "cash": "1000000.00",
+            "positions": {},
         }
         p_hash = content_hash(p_obj)
         artifact_store[p_hash] = p_obj
@@ -867,7 +1158,9 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
         d_obj = {
             "freeze_hash": frozen.freeze_hash,
             "session_index": s_idx,
-            "artifact_type": "DECISION",
+            "artifact_role": "decision",
+            "authority_id": authority,
+            "strategy_id": "historical-allocator",
             "weights": {"AAPL": "0.10"},
         }
         d_hash = content_hash(d_obj)
@@ -876,7 +1169,8 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
         f_obj = {
             "freeze_hash": frozen.freeze_hash,
             "session_index": s_idx,
-            "artifact_type": "FILLS",
+            "artifact_role": "fills",
+            "authority_id": authority,
             "trades": [],
         }
         f_hash = content_hash(f_obj)
@@ -900,6 +1194,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
         metrics: dict[str, Any] = {
             "net_return": "0.0005" if not boolean_metric else True,
             "gross_turnover": "0.015",
+            "terminal_nav": "1000000.00",
         }
         if arbitrary_metrics:
             metrics["claimed"] = True
@@ -932,17 +1227,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
         }
 
     # 3a. Empty execution receipts list returns exit 2 (BLOCKED / unavailable)
-    host_file.write_text(
-        json.dumps(
-            {
-                "trust_roots": host_trust_roots,
-                "receipt_store": receipt_store,
-                "artifact_store": artifact_store,
-                "execution_receipts": [],
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_host_config({"execution_receipts": []})
     proc = subprocess.run(
         [
             "uv",
@@ -963,17 +1248,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
 
     # 4. Incomplete execution receipts (100 sessions < 252) returns exit 4 (INCOMPLETE)
     receipts_100 = [make_execution_receipt(i) for i in range(100)]
-    host_file.write_text(
-        json.dumps(
-            {
-                "trust_roots": host_trust_roots,
-                "receipt_store": receipt_store,
-                "artifact_store": artifact_store,
-                "execution_receipts": receipts_100,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_host_config({"execution_receipts": receipts_100})
     proc = subprocess.run(
         [
             "uv",
@@ -995,17 +1270,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     # 5. Repeated receipts (252 copies of session_index 0) returns exit 3
     # (duplicate session)
     repeated_receipts = [make_execution_receipt(0)] * 252
-    host_file.write_text(
-        json.dumps(
-            {
-                "trust_roots": host_trust_roots,
-                "receipt_store": receipt_store,
-                "artifact_store": artifact_store,
-                "execution_receipts": repeated_receipts,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_host_config({"execution_receipts": repeated_receipts})
     proc = subprocess.run(
         [
             "uv",
@@ -1028,17 +1293,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     no_session_id = [
         {"receipt_id": f"HIST-EXEC-{i}", "receipt_hash": "a" * 64} for i in range(252)
     ]
-    host_file.write_text(
-        json.dumps(
-            {
-                "trust_roots": host_trust_roots,
-                "receipt_store": receipt_store,
-                "artifact_store": artifact_store,
-                "execution_receipts": no_session_id,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_host_config({"execution_receipts": no_session_id})
     proc = subprocess.run(
         [
             "uv",
@@ -1064,16 +1319,11 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     self_authored_receipts = [
         make_execution_receipt(i, store_in_receipts=(i != 0)) for i in range(252)
     ]
-    host_file.write_text(
-        json.dumps(
-            {
-                "trust_roots": host_trust_roots,
-                "receipt_store": receipt_store_missing_0,
-                "artifact_store": artifact_store,
-                "execution_receipts": self_authored_receipts,
-            }
-        ),
-        encoding="utf-8",
+    write_host_config(
+        {
+            "receipt_store": receipt_store_missing_0,
+            "execution_receipts": self_authored_receipts,
+        }
     )
     proc = subprocess.run(
         [
@@ -1100,17 +1350,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
         )
         for i in range(252)
     ]
-    host_file.write_text(
-        json.dumps(
-            {
-                "trust_roots": host_trust_roots,
-                "receipt_store": receipt_store,
-                "artifact_store": artifact_store,
-                "execution_receipts": untrusted_auth_receipts,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_host_config({"execution_receipts": untrusted_auth_receipts})
     proc = subprocess.run(
         [
             "uv",
@@ -1133,17 +1373,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     no_journal_receipts = [
         make_execution_receipt(i, omit_journal=(i == 0)) for i in range(252)
     ]
-    host_file.write_text(
-        json.dumps(
-            {
-                "trust_roots": host_trust_roots,
-                "receipt_store": receipt_store,
-                "artifact_store": artifact_store,
-                "execution_receipts": no_journal_receipts,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_host_config({"execution_receipts": no_journal_receipts})
     proc = subprocess.run(
         [
             "uv",
@@ -1166,17 +1396,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     missing_artifact_receipts = [
         make_execution_receipt(i, omit_portfolio_state=(i == 0)) for i in range(252)
     ]
-    host_file.write_text(
-        json.dumps(
-            {
-                "trust_roots": host_trust_roots,
-                "receipt_store": receipt_store,
-                "artifact_store": artifact_store,
-                "execution_receipts": missing_artifact_receipts,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_host_config({"execution_receipts": missing_artifact_receipts})
     proc = subprocess.run(
         [
             "uv",
@@ -1199,17 +1419,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     nonhex_receipts = [
         make_execution_receipt(i, nonhex_hash=(i == 0)) for i in range(252)
     ]
-    host_file.write_text(
-        json.dumps(
-            {
-                "trust_roots": host_trust_roots,
-                "receipt_store": receipt_store,
-                "artifact_store": artifact_store,
-                "execution_receipts": nonhex_receipts,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_host_config({"execution_receipts": nonhex_receipts})
     proc = subprocess.run(
         [
             "uv",
@@ -1232,17 +1442,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     nonexistent_receipts = [
         make_execution_receipt(i, nonexistent_artifact=(i == 0)) for i in range(252)
     ]
-    host_file.write_text(
-        json.dumps(
-            {
-                "trust_roots": host_trust_roots,
-                "receipt_store": receipt_store,
-                "artifact_store": artifact_store,
-                "execution_receipts": nonexistent_receipts,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_host_config({"execution_receipts": nonexistent_receipts})
     proc = subprocess.run(
         [
             "uv",
@@ -1265,17 +1465,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     mismatched_session_receipts = [
         make_execution_receipt(i, mismatched_session=(i == 0)) for i in range(252)
     ]
-    host_file.write_text(
-        json.dumps(
-            {
-                "trust_roots": host_trust_roots,
-                "receipt_store": receipt_store,
-                "artifact_store": artifact_store,
-                "execution_receipts": mismatched_session_receipts,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_host_config({"execution_receipts": mismatched_session_receipts})
     proc = subprocess.run(
         [
             "uv",
@@ -1298,17 +1488,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     arbitrary_metrics_receipts = [
         make_execution_receipt(i, arbitrary_metrics=(i == 0)) for i in range(252)
     ]
-    host_file.write_text(
-        json.dumps(
-            {
-                "trust_roots": host_trust_roots,
-                "receipt_store": receipt_store,
-                "artifact_store": artifact_store,
-                "execution_receipts": arbitrary_metrics_receipts,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_host_config({"execution_receipts": arbitrary_metrics_receipts})
     proc = subprocess.run(
         [
             "uv",
@@ -1331,17 +1511,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     tampered_receipts = [
         make_execution_receipt(i, tamper_hash=(i == 0)) for i in range(252)
     ]
-    host_file.write_text(
-        json.dumps(
-            {
-                "trust_roots": host_trust_roots,
-                "receipt_store": receipt_store,
-                "artifact_store": artifact_store,
-                "execution_receipts": tampered_receipts,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_host_config({"execution_receipts": tampered_receipts})
     proc = subprocess.run(
         [
             "uv",
@@ -1373,17 +1543,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
         )
         for i in range(252)
     ]
-    host_file.write_text(
-        json.dumps(
-            {
-                "trust_roots": host_trust_roots,
-                "receipt_store": receipt_store,
-                "artifact_store": artifact_store,
-                "execution_receipts": out_of_scope_receipts,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_host_config({"execution_receipts": out_of_scope_receipts})
     proc = subprocess.run(
         [
             "uv",
@@ -1404,17 +1564,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
 
     # 12. Complete 252 valid execution receipts returns exit 0 with manifest
     receipts_252 = [make_execution_receipt(i) for i in range(252)]
-    host_file.write_text(
-        json.dumps(
-            {
-                "trust_roots": host_trust_roots,
-                "receipt_store": receipt_store,
-                "artifact_store": artifact_store,
-                "execution_receipts": receipts_252,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_host_config({"execution_receipts": receipts_252})
     proc_ok = subprocess.run(
         [
             "uv",
