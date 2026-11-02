@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from drift.experiments.stage1_original_acceptance import (
+    ProductionExecutionEvidenceVerifier,
     ProductionStudyEvidenceVerifier,
 )
 from drift.experiments.stage1_prospective_study import (
@@ -60,7 +61,6 @@ from drift.experiments.stage1_study_freeze import (
 from drift.experiments.stage1_study_outcomes import StudyOutcomeClassificationV1
 from drift.experiments.stage1_study_report import create_study_report
 from drift.experiments.stage1_uncertainty import PairedUncertaintyArtifactV1
-from drift.serialization.canonical import content_hash
 
 
 def _write_output(path_str: str, data: dict[str, Any] | str) -> None:
@@ -289,6 +289,36 @@ def action_historical(args: argparse.Namespace) -> int:
         return 2
 
     try:
+        trust_roots_raw = host_config.get("trust_roots", {})
+        receipt_store = host_config.get("receipt_store", {})
+        artifact_store = host_config.get(
+            "artifact_store", host_config.get("receipt_store", {})
+        )
+
+        if not trust_roots_raw or not receipt_store:
+            sys.stderr.write("Trust roots or receipt store unavailable\n")
+            return 2
+
+        if not isinstance(artifact_store, dict) or not isinstance(receipt_store, dict):
+            sys.stderr.write(
+                "Host artifact_store or receipt_store must be a dictionary\n"
+            )
+            return 2
+
+        exec_roots: set[str] = set()
+        if isinstance(trust_roots_raw, dict):
+            for role_authorities in trust_roots_raw.values():
+                if isinstance(role_authorities, (list, tuple, set)):
+                    exec_roots.update(role_authorities)
+                elif isinstance(role_authorities, str):
+                    exec_roots.add(role_authorities)
+        elif isinstance(trust_roots_raw, (list, tuple, set)):
+            exec_roots.update(trust_roots_raw)
+
+        if not exec_roots:
+            sys.stderr.write("No execution trust roots available\n")
+            return 2
+
         if (
             "execution_receipts" not in host_config
             or host_config["execution_receipts"] is None
@@ -307,29 +337,19 @@ def action_historical(args: argparse.Namespace) -> int:
             sys.stderr.write("Historical execution receipts empty\n")
             return 2
 
+        exec_verifier = ProductionExecutionEvidenceVerifier(
+            trust_roots=exec_roots,
+            receipt_resolver=lambda rid: receipt_store.get(rid, {}),
+            artifact_resolver=lambda aid: artifact_store.get(aid, {}),
+        )
+
         required_sessions = set(range(252))
         seen_sessions: set[int] = set()
+        verified_receipts: list[dict[str, Any]] = []
 
         for i, r in enumerate(execution_receipts):
             if not isinstance(r, dict):
                 sys.stderr.write(f"Receipt at index {i} is not a valid object\n")
-                return 3
-            if r.get("freeze_hash") != frozen.freeze_hash:
-                sys.stderr.write(
-                    f"Receipt at index {i} freeze_hash mismatch: expected "
-                    f"{frozen.freeze_hash}, got {r.get('freeze_hash')}\n"
-                )
-                return 3
-            if r.get("status") != "COMPLETED":
-                sys.stderr.write(
-                    f"Receipt at index {i} unsupported completion status: "
-                    f"{r.get('status')}\n"
-                )
-                return 3
-            if r.get("halt_reason") or r.get("error"):
-                sys.stderr.write(
-                    f"Receipt at index {i} indicates execution halt or error\n"
-                )
                 return 3
 
             session_index = r.get("session_index")
@@ -357,156 +377,20 @@ def action_historical(args: argparse.Namespace) -> int:
                 )
                 return 3
 
-            ev = r.get("completion_evidence")
-            if not isinstance(ev, dict) or not ev:
+            ok, reason, payload = exec_verifier.verify_execution_receipt(
+                r,
+                expected_freeze_hash=frozen.freeze_hash,
+                expected_session_index=session_index,
+            )
+            if not ok or payload is None:
                 sys.stderr.write(
-                    f"Receipt at index {i} missing valid completion_evidence "
-                    "dictionary\n"
+                    f"Receipt at index {i} (session {session_index}) failed "
+                    f"trusted execution verification: {reason}\n"
                 )
                 return 3
-
-            if ev.get("freeze_hash") != frozen.freeze_hash:
-                sys.stderr.write(
-                    f"Receipt at index {i} completion_evidence freeze_hash "
-                    f"mismatch: expected {frozen.freeze_hash}, "
-                    f"got {ev.get('freeze_hash')}\n"
-                )
-                return 3
-
-            if ev.get("session_index") != session_index:
-                sys.stderr.write(
-                    f"Receipt at index {i} completion_evidence session_index "
-                    f"mismatch: expected {session_index}, "
-                    f"got {ev.get('session_index')}\n"
-                )
-                return 3
-
-            if ev.get("status") != "COMPLETED":
-                sys.stderr.write(
-                    f"Receipt at index {i} completion_evidence status not "
-                    f"COMPLETED: {ev.get('status')}\n"
-                )
-                return 3
-
-            ev_hash = ev.get("evidence_hash") or ev.get("receipt_hash")
-            if not _is_sha256(ev_hash):
-                sys.stderr.write(
-                    f"Receipt at index {i} completion_evidence missing "
-                    "valid 64-char hex SHA-256 hash\n"
-                )
-                return 3
-
-            ev_body = {
-                k: v
-                for k, v in ev.items()
-                if k not in ("evidence_hash", "receipt_hash")
-            }
-            if ev_hash != content_hash(ev_body):
-                sys.stderr.write(
-                    f"Receipt at index {i} completion_evidence hash mismatch\n"
-                )
-                return 3
-
-            artifacts = ev.get("artifacts") or ev.get("execution_artifacts")
-            metrics = ev.get("metrics") or ev.get("results")
-            if not artifacts and not metrics:
-                sys.stderr.write(
-                    f"Receipt at index {i} completion_evidence missing "
-                    "supporting execution results or artifacts\n"
-                )
-                return 3
-
-            if metrics is not None:
-                if not isinstance(metrics, dict) or not metrics:
-                    sys.stderr.write(
-                        f"Receipt at index {i} completion_evidence metrics "
-                        "must be a non-empty dictionary\n"
-                    )
-                    return 3
-                unknown_metrics = set(metrics.keys()) - CONTRACT_EXECUTION_METRICS
-                if unknown_metrics:
-                    sys.stderr.write(
-                        f"Receipt at index {i} completion_evidence contains "
-                        f"arbitrary/unsupported metrics: {sorted(unknown_metrics)}\n"
-                    )
-                    return 3
-                for m_k, m_v in metrics.items():
-                    if isinstance(m_v, bool):
-                        sys.stderr.write(
-                            f"Receipt at index {i} completion_evidence metric {m_k} "
-                            "cannot be boolean\n"
-                        )
-                        return 3
-                    try:
-                        d = Decimal(str(m_v))
-                        if not d.is_finite():
-                            raise ValueError()
-                    except Exception:
-                        sys.stderr.write(
-                            f"Receipt at index {i} completion_evidence metric {m_k} "
-                            "must be finite numeric\n"
-                        )
-                        return 3
-
-            if artifacts is not None:
-                if not isinstance(artifacts, dict) or not artifacts:
-                    sys.stderr.write(
-                        f"Receipt at index {i} completion_evidence artifacts "
-                        "must be a non-empty dictionary\n"
-                    )
-                    return 3
-
-                artifact_store = host_config.get(
-                    "artifact_store", host_config.get("receipt_store", {})
-                )
-                if not isinstance(artifact_store, dict):
-                    sys.stderr.write("Host artifact_store must be a dictionary\n")
-                    return 2
-
-                for art_name, art_hash in artifacts.items():
-                    if not _is_sha256(art_hash):
-                        sys.stderr.write(
-                            f"Receipt at index {i} completion_evidence artifact "
-                            f"{art_name} must be a valid 64-char hex SHA-256 hash\n"
-                        )
-                        return 3
-
-                    if art_hash not in artifact_store:
-                        sys.stderr.write(
-                            f"Receipt at index {i} artifact {art_name} reference "
-                            f"{art_hash} not found in artifact store\n"
-                        )
-                        return 3
-
-                    art_obj = artifact_store[art_hash]
-                    if content_hash(art_obj) != art_hash:
-                        sys.stderr.write(
-                            f"Receipt at index {i} artifact {art_name} content "
-                            "hash mismatch\n"
-                        )
-                        return 3
-
-                    if isinstance(art_obj, dict):
-                        if (
-                            "freeze_hash" in art_obj
-                            and art_obj["freeze_hash"] != frozen.freeze_hash
-                        ):
-                            sys.stderr.write(
-                                f"Receipt at index {i} artifact {art_name} bound "
-                                "freeze_hash mismatch\n"
-                            )
-                            return 3
-                        if (
-                            "session_index" in art_obj
-                            and art_obj["session_index"] != session_index
-                        ):
-                            sys.stderr.write(
-                                f"Receipt at index {i} artifact {art_name} bound "
-                                "session_index mismatch\n"
-                            )
-                            return 3
 
             seen_sessions.add(session_index)
+            verified_receipts.append(payload)
 
         missing_sessions = required_sessions - seen_sessions
         if missing_sessions:
@@ -527,7 +411,7 @@ def action_historical(args: argparse.Namespace) -> int:
             "executed_at": datetime.now(UTC).isoformat(),
             "status": "COMPLETED",
             "execution_receipts": sorted(
-                execution_receipts, key=lambda x: x["session_index"]
+                verified_receipts, key=lambda x: x["session_index"]
             ),
         }
         _write_output(args.output, manifest)
@@ -638,21 +522,66 @@ def action_prospective_register(args: argparse.Namespace) -> int:
 def action_prospective_step(args: argparse.Namespace) -> int:
     try:
         reg_data = _read_json(args.registration)
-        _ = _read_json(args.host_config)
+        host_config = _read_json(args.host_config)
     except Exception as e:
         sys.stderr.write(f"Invalid input: {e}\n")
         return 3
 
     try:
         reg = ProspectiveRegistrationV1.model_validate_json(json.dumps(reg_data))
+
+        # Lifecycle guard
+        if reg.operational_state not in ("REGISTERED", "READY", "RUNNING"):
+            sys.stderr.write(
+                "Cannot advance prospective study from lifecycle state: "
+                f"{reg.operational_state}\n"
+            )
+            return 3
+
+        # Calendar resolution
+        calendar_dates: set[date] | None = None
+        if "trading_calendar" in host_config:
+            raw_cal = host_config["trading_calendar"]
+            if isinstance(raw_cal, list):
+                calendar_dates = {
+                    date.fromisoformat(d) if isinstance(d, str) else d for d in raw_cal
+                }
+
         if hasattr(args, "session_date") and args.session_date:
             step_date = date.fromisoformat(args.session_date)
-        elif reg.last_observed_session is not None:
-            step_date = reg.last_observed_session + timedelta(days=1)
+        elif calendar_dates is not None:
+            last = reg.last_observed_session or (
+                reg.frozen_study.plan.first_eligible_session - timedelta(days=1)
+            )
+            eligible = sorted([d for d in calendar_dates if d > last])
+            if not eligible:
+                sys.stderr.write("No eligible trading sessions remaining in calendar\n")
+                return 3
+            step_date = eligible[0]
         else:
-            step_date = reg.frozen_study.plan.first_eligible_session
+            sys.stderr.write(
+                "Prospective step requires explicit --session-date or "
+                "host_config trading_calendar\n"
+            )
+            return 3
 
-        advanced = advance_prospective_session(reg, session_date=step_date)
+        # Session evidence resolution
+        ev_data = None
+        if hasattr(args, "session_evidence") and args.session_evidence:
+            ev_data = _read_json(args.session_evidence)
+        elif "session_evidence" in host_config:
+            ev_data = host_config["session_evidence"]
+
+        if not ev_data:
+            sys.stderr.write("Prospective step requires verified session_evidence\n")
+            return 3
+
+        advanced = advance_prospective_session(
+            reg,
+            session_date=step_date,
+            session_evidence=ev_data,
+            calendar=calendar_dates,
+        )
         step_fname = (
             f"{advanced.registration_id}-step-{advanced.observed_session_count}.json"
         )
@@ -661,7 +590,7 @@ def action_prospective_step(args: argparse.Namespace) -> int:
         return 0
     except Exception as e:
         sys.stderr.write(f"Prospective step failed: {e}\n")
-        return 1
+        return 3
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -712,6 +641,7 @@ def build_parser() -> argparse.ArgumentParser:
     pstep.add_argument("--host-config", required=True)
     pstep.add_argument("--private-root", required=True)
     pstep.add_argument("--session-date", required=False, default=None)
+    pstep.add_argument("--session-evidence", required=False, default=None)
 
     return parser
 

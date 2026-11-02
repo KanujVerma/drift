@@ -10,7 +10,7 @@ Implements broker-free prospective system:
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import Field, model_validator
 
@@ -281,20 +281,107 @@ def register_prospective_study(
     )
 
 
+VALID_PROSPECTIVE_ADVANCE_STATES: frozenset[str] = frozenset(
+    {"REGISTERED", "READY", "RUNNING"}
+)
+
+
+class ProspectiveSessionEvidenceV1(FrozenModel):
+    schema_version: Literal["drift-stage1-prospective-session-evidence/1"] = (
+        "drift-stage1-prospective-session-evidence/1"
+    )
+    registration_id: NonBlankStr
+    freeze_hash: SHA256Hash
+    session_index: int = Field(ge=0, lt=504)
+    session_date: date
+    status: Literal["OBSERVED", "COMPLETED"] = "COMPLETED"
+    evidence_artifacts: dict[str, SHA256Hash]
+    evidence_hash: SHA256Hash
+
+    @model_validator(mode="after")
+    def validate_evidence(self) -> Self:
+        if not self.evidence_artifacts:
+            raise ValueError("SESSION_EVIDENCE_ARTIFACTS_CANNOT_BE_EMPTY")
+        body = self.model_dump(mode="python", exclude={"evidence_hash"})
+        if self.evidence_hash != content_hash(body):
+            raise ValueError("SESSION_EVIDENCE_HASH_MISMATCH")
+        return self
+
+
+def create_prospective_session_evidence(
+    *,
+    registration_id: str,
+    freeze_hash: str,
+    session_index: int,
+    session_date: date,
+    evidence_artifacts: dict[str, str],
+    status: Literal["OBSERVED", "COMPLETED"] = "COMPLETED",
+) -> ProspectiveSessionEvidenceV1:
+    body = {
+        "schema_version": "drift-stage1-prospective-session-evidence/1",
+        "registration_id": registration_id,
+        "freeze_hash": freeze_hash,
+        "session_index": session_index,
+        "session_date": session_date,
+        "status": status,
+        "evidence_artifacts": evidence_artifacts,
+    }
+    h = content_hash(body)
+    return ProspectiveSessionEvidenceV1.model_validate_json(
+        canonical_json(body | {"evidence_hash": h})
+    )
+
+
 def advance_prospective_session(
     registration: ProspectiveRegistrationV1,
     *,
     session_date: date,
+    session_evidence: ProspectiveSessionEvidenceV1 | dict[str, Any] | None = None,
+    calendar: set[date] | tuple[date, ...] | None = None,
 ) -> ProspectiveRegistrationV1:
     """Durably advances prospective observation by one session."""
     if registration.has_broker_dispatch_capability:
         raise ValueError("BROKER_DISPATCH_FORBIDDEN")
 
-    if (
-        registration.operational_state == "COMPLETED_PENDING_REVIEW"
-        or registration.observed_session_count >= 504
-    ):
+    if registration.operational_state not in VALID_PROSPECTIVE_ADVANCE_STATES:
+        raise ValueError(
+            f"CANNOT_ADVANCE_FROM_LIFECYCLE_STATE:{registration.operational_state}"
+        )
+
+    if registration.observed_session_count >= 504:
         raise ValueError("PROSPECTIVE_STUDY_ALREADY_COMPLETED")
+
+    if session_evidence is None:
+        raise ValueError("SESSION_EVIDENCE_REQUIRED")
+
+    if isinstance(session_evidence, dict):
+        import json
+
+        ev = ProspectiveSessionEvidenceV1.model_validate_json(
+            json.dumps(session_evidence)
+        )
+    elif isinstance(session_evidence, ProspectiveSessionEvidenceV1):
+        ev = session_evidence
+    else:
+        raise ValueError("INVALID_SESSION_EVIDENCE_TYPE")
+
+    if ev.registration_id != registration.registration_id:
+        raise ValueError("SESSION_EVIDENCE_REGISTRATION_MISMATCH")
+    if ev.freeze_hash != registration.frozen_study.freeze_hash:
+        raise ValueError("SESSION_EVIDENCE_FREEZE_MISMATCH")
+    if ev.session_index != registration.observed_session_count:
+        raise ValueError("SESSION_EVIDENCE_INDEX_MISMATCH")
+    if ev.session_date != session_date:
+        raise ValueError("SESSION_EVIDENCE_DATE_MISMATCH")
+    if ev.status not in ("OBSERVED", "COMPLETED"):
+        raise ValueError("SESSION_EVIDENCE_STATUS_NOT_OBSERVED")
+
+    # Calendar and date validation
+    if session_date.weekday() >= 5:
+        raise ValueError(f"SESSION_DATE_NOT_A_TRADING_DAY: {session_date} is weekend")
+
+    if calendar is not None and session_date not in calendar:
+        raise ValueError(f"SESSION_DATE_NOT_IN_CALENDAR: {session_date}")
 
     plan = registration.frozen_study.plan
     if (

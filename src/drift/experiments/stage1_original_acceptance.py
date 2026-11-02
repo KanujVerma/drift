@@ -89,3 +89,200 @@ class ProductionStudyEvidenceVerifier(OriginalStudyEvidenceVerifier):
         except Exception:
             # Outage or verification failure must fail closed (never True)
             return False
+
+
+CONTRACT_EXECUTION_METRICS: frozenset[str] = frozenset(
+    {
+        "net_return",
+        "gross_turnover",
+        "terminal_nav",
+        "per_share_fees",
+        "holding_costs",
+        "total_pnl",
+    }
+)
+
+REQUIRED_EXECUTION_ARTIFACTS: frozenset[str] = frozenset(
+    {
+        "portfolio_state",
+        "decision",
+        "fills",
+    }
+)
+
+
+class Stage1ExecutionReceiptV1(FrozenModel):
+    schema_version: str = "drift-stage1-execution-receipt/1"
+    receipt_id: NonBlankStr
+    freeze_hash: SHA256Hash
+    session_index: int
+    authority_id: NonBlankStr
+    status: str = "COMPLETED"
+    execution_journal: dict[str, Any]
+    artifacts: dict[str, SHA256Hash]
+    metrics: dict[str, Any]
+    receipt_hash: SHA256Hash
+
+
+class ProductionExecutionEvidenceVerifier:
+    """Verifies original historical execution receipts against host trust roots."""
+
+    def __init__(
+        self,
+        *,
+        trust_roots: set[str],
+        receipt_resolver: Callable[[str], bytes | str | dict[str, Any]],
+        artifact_resolver: Callable[[str], bytes | str | dict[str, Any]],
+    ) -> None:
+        self._trust_roots = set(trust_roots)
+        self._receipt_resolver = receipt_resolver
+        self._artifact_resolver = artifact_resolver
+
+    def verify_execution_receipt(
+        self,
+        receipt_ref: str | dict[str, Any],
+        *,
+        expected_freeze_hash: str,
+        expected_session_index: int,
+    ) -> tuple[bool, str, dict[str, Any] | None]:
+        """Resolves and verifies original execution receipt from trusted store."""
+        from decimal import Decimal
+
+        if not self._trust_roots:
+            return False, "TRUST_ROOTS_UNAVAILABLE", None
+
+        receipt_id: str | None = None
+        if isinstance(receipt_ref, str):
+            receipt_id = receipt_ref
+        elif isinstance(receipt_ref, dict):
+            receipt_id = receipt_ref.get("receipt_id") or receipt_ref.get(
+                "execution_receipt_id"
+            )
+            if not receipt_id:
+                h = receipt_ref.get("receipt_hash") or receipt_ref.get("evidence_hash")
+                if h:
+                    receipt_id = h
+
+        if not receipt_id:
+            return False, "RECEIPT_ID_MISSING", None
+
+        try:
+            raw = self._receipt_resolver(receipt_id)
+        except Exception as e:
+            return False, f"RECEIPT_RESOLVER_FAILED:{e}", None
+
+        if not raw:
+            return False, f"RECEIPT_NOT_FOUND_IN_STORE:{receipt_id}", None
+
+        if isinstance(raw, (bytes, str)):
+            try:
+                payload = (
+                    json.loads(raw)
+                    if isinstance(raw, str)
+                    else json.loads(raw.decode("utf-8"))
+                )
+            except Exception:
+                return False, "MALFORMED_RECEIPT_JSON", None
+        elif isinstance(raw, dict):
+            payload = raw
+        else:
+            return False, "INVALID_RECEIPT_TYPE", None
+
+        r_hash = payload.get("receipt_hash") or payload.get("evidence_hash")
+        body = {
+            k: v
+            for k, v in payload.items()
+            if k not in ("receipt_hash", "evidence_hash")
+        }
+        if not r_hash or content_hash(body) != r_hash:
+            return False, "RECEIPT_HASH_MISMATCH", None
+
+        authority = payload.get("authority_id")
+        if not authority or authority not in self._trust_roots:
+            return False, f"UNTRUSTED_AUTHORITY:{authority}", None
+
+        if payload.get("status") not in ("COMPLETED", "ACCEPTED"):
+            return False, f"UNACCEPTED_STATUS:{payload.get('status')}", None
+
+        if payload.get("freeze_hash") != expected_freeze_hash:
+            return (
+                False,
+                f"FREEZE_HASH_MISMATCH: expected {expected_freeze_hash}, "
+                f"got {payload.get('freeze_hash')}",
+                None,
+            )
+        if payload.get("session_index") != expected_session_index:
+            return (
+                False,
+                f"SESSION_INDEX_MISMATCH: expected {expected_session_index}, "
+                f"got {payload.get('session_index')}",
+                None,
+            )
+
+        journal = payload.get("execution_journal")
+        if not journal or not isinstance(journal, dict):
+            return False, "MISSING_OR_EMPTY_EXECUTION_JOURNAL", None
+
+        artifacts = payload.get("artifacts")
+        if not artifacts or not isinstance(artifacts, dict):
+            return False, "MISSING_OR_EMPTY_ARTIFACTS", None
+
+        for req_art in REQUIRED_EXECUTION_ARTIFACTS:
+            if req_art not in artifacts:
+                return False, f"MISSING_REQUIRED_ARTIFACT:{req_art}", None
+
+        for art_name, art_hash in artifacts.items():
+            if not isinstance(art_hash, str) or len(art_hash) != 64:
+                return False, f"INVALID_ARTIFACT_HASH:{art_name}", None
+            try:
+                int(art_hash, 16)
+            except ValueError:
+                return False, f"NON_HEX_ARTIFACT_HASH:{art_name}", None
+
+            try:
+                raw_art = self._artifact_resolver(art_hash)
+            except Exception as e:
+                return False, f"ARTIFACT_RESOLVER_FAILED:{art_name}:{e}", None
+            if not raw_art:
+                return False, f"ARTIFACT_NOT_FOUND_IN_STORE:{art_name}:{art_hash}", None
+
+            art_obj = (
+                json.loads(raw_art)
+                if isinstance(raw_art, str)
+                else (
+                    json.loads(raw_art.decode("utf-8"))
+                    if isinstance(raw_art, bytes)
+                    else raw_art
+                )
+            )
+            if content_hash(art_obj) != art_hash:
+                return False, f"ARTIFACT_CONTENT_HASH_MISMATCH:{art_name}", None
+            if isinstance(art_obj, dict):
+                if (
+                    "freeze_hash" in art_obj
+                    and art_obj["freeze_hash"] != expected_freeze_hash
+                ):
+                    return False, f"ARTIFACT_BOUND_FREEZE_MISMATCH:{art_name}", None
+                if (
+                    "session_index" in art_obj
+                    and art_obj["session_index"] != expected_session_index
+                ):
+                    return False, f"ARTIFACT_BOUND_SESSION_MISMATCH:{art_name}", None
+
+        metrics = payload.get("metrics")
+        if not metrics or not isinstance(metrics, dict):
+            return False, "MISSING_OR_EMPTY_METRICS", None
+        unknown_metrics = set(metrics.keys()) - CONTRACT_EXECUTION_METRICS
+        if unknown_metrics:
+            return False, f"UNSUPPORTED_METRICS:{sorted(unknown_metrics)}", None
+        for m_k, m_v in metrics.items():
+            if isinstance(m_v, bool):
+                return False, f"METRIC_CANNOT_BE_BOOLEAN:{m_k}", None
+            try:
+                d = Decimal(str(m_v))
+                if not d.is_finite():
+                    raise ValueError()
+            except Exception:
+                return False, f"METRIC_NOT_FINITE_NUMERIC:{m_k}", None
+
+        return True, "OK", payload
