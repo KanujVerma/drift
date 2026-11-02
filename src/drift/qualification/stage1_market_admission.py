@@ -3,7 +3,8 @@
 Enforces source-purpose qualification for the exact 12-instrument universe:
 VOO, IJH, IJR, QQQ, VEA, VWO, SHY, IEF, TLT, TIP, LQD, GLD.
 Rejects weekday-only calendar substitutes, ticker-only proofs,
-and unverified corporate actions.
+unverified corporate actions, and disqualified consumer display sources
+(such as Robinhood Gold Nasdaq TotalView Level II).
 """
 
 from __future__ import annotations
@@ -15,7 +16,48 @@ from pydantic import model_validator
 
 from drift.domain.common import FrozenModel, NonBlankStr, SHA256Hash, UTCDateTime
 from drift.experiments.stage1_study_freeze import STAGE1_UNIVERSE
+from drift.qualification.alpaca_sip_verification import (
+    ALPACA_DELAY_MINIMUM_MINUTES,
+    ALPACA_SIP_FEED,
+    DISQUALIFIED_SOURCE_ROBINHOOD_TOTALVIEW,
+    EXACT_12_ETF_UNIVERSE,
+    AlpacaSipG1VerificationReportV1,
+    AlpacaSipHistoricalRequestCheckV1,
+    ContractualResearchRetentionRightsV1,
+    CorporateActionCompletenessV1,
+    OriginalSourceProvenanceV1,
+    RobinhoodTotalViewDisqualificationV1,
+    SecurityHistoricalCoverageV1,
+    Universe12EtfCoverageV1,
+    build_12_etf_coverage,
+    verify_alpaca_sip_request_delay,
+    verify_g1_alpaca_sip_qualification,
+)
 from drift.serialization.canonical import canonical_json, content_hash
+
+__all__ = [
+    "ALPACA_DELAY_MINIMUM_MINUTES",
+    "ALPACA_SIP_FEED",
+    "DISQUALIFIED_SOURCE_ROBINHOOD_TOTALVIEW",
+    "EXACT_12_ETF_UNIVERSE",
+    "STAGE1_UNIVERSE",
+    "AdmissionPurpose",
+    "AdmissionStatus",
+    "AlpacaSipG1VerificationReportV1",
+    "AlpacaSipHistoricalRequestCheckV1",
+    "ContractualResearchRetentionRightsV1",
+    "CorporateActionCompletenessV1",
+    "OriginalSourceProvenanceV1",
+    "RobinhoodTotalViewDisqualificationV1",
+    "SecurityHistoricalCoverageV1",
+    "Stage1MarketDataAdmissionArtifactV1",
+    "Stage1SecurityAdmissionV1",
+    "Universe12EtfCoverageV1",
+    "build_12_etf_coverage",
+    "create_market_data_admission",
+    "verify_alpaca_sip_request_delay",
+    "verify_g1_alpaca_sip_qualification",
+]
 
 AdmissionPurpose = Literal[
     "DEVELOPMENT",
@@ -47,6 +89,8 @@ class Stage1MarketDataAdmissionArtifactV1(FrozenModel):
     admitted_calendar_hash: SHA256Hash
     securities: tuple[Stage1SecurityAdmissionV1, ...]
     rights_scope: Literal["RESEARCH_REPLAY_NON_DISPLAY"] = "RESEARCH_REPLAY_NON_DISPLAY"
+    candidate_source: str | None = None
+    alpaca_sip_verification_report_hash: SHA256Hash | None = None
     limitations: tuple[str, ...] = ()
     status: AdmissionStatus
     refusal_reasons: tuple[str, ...] = ()
@@ -59,6 +103,8 @@ class Stage1MarketDataAdmissionArtifactV1(FrozenModel):
         if self.admission_hash != content_hash(body):
             raise ValueError("MARKET_ADMISSION_HASH_MISMATCH")
         if self.status == "ADMITTED":
+            if self.candidate_source == DISQUALIFIED_SOURCE_ROBINHOOD_TOTALVIEW:
+                raise ValueError("DISQUALIFIED_SOURCE_ROBINHOOD_TOTALVIEW_NOT_ADMITTED")
             admitted_tickers = {s.ticker for s in self.securities}
             if set(self.universe) != admitted_tickers:
                 raise ValueError("MARKET_ADMISSION_UNIVERSE_INCOMPLETE")
@@ -78,11 +124,31 @@ def create_market_data_admission(
     admitted_calendar_hash: str,
     securities: tuple[Stage1SecurityAdmissionV1, ...],
     reviewer_authority: str,
+    candidate_source: str | None = None,
+    alpaca_sip_report: AlpacaSipG1VerificationReportV1 | None = None,
     limitations: tuple[str, ...] = (),
     refusal_reasons: tuple[str, ...] = (),
 ) -> Stage1MarketDataAdmissionArtifactV1:
     admitted_tickers = {s.ticker for s in securities}
     reasons = list(refusal_reasons)
+
+    if candidate_source == DISQUALIFIED_SOURCE_ROBINHOOD_TOTALVIEW:
+        reasons.append(
+            f"DISQUALIFIED_SOURCE:{candidate_source}: Robinhood Gold Nasdaq "
+            "TotalView Level II is a consumer display entitlement. Programmatic "
+            "extraction into Drift is unauthorized. Excluded from G1 critical "
+            "path. Intraday order-book data deferred to separate execution study."
+        )
+
+    if alpaca_sip_report is not None:
+        if alpaca_sip_report.overall_status != "VERIFIED":
+            reasons.append(
+                f"ALPACA_SIP_REPORT_REFUSED:{alpaca_sip_report.verification_id}"
+            )
+        if not alpaca_sip_report.sip_access_check.is_valid_free_historical_sip:
+            reasons.append(
+                f"ALPACA_SIP_REQUEST_DELAY_INVALID:{alpaca_sip_report.sip_access_check.refusal_reason}"
+            )
 
     if set(STAGE1_UNIVERSE) != admitted_tickers:
         missing = sorted(set(STAGE1_UNIVERSE) - admitted_tickers)
@@ -105,6 +171,10 @@ def create_market_data_admission(
         "admitted_calendar_hash": admitted_calendar_hash,
         "securities": securities,
         "rights_scope": "RESEARCH_REPLAY_NON_DISPLAY",
+        "candidate_source": candidate_source,
+        "alpaca_sip_verification_report_hash": (
+            alpaca_sip_report.report_hash if alpaca_sip_report is not None else None
+        ),
         "limitations": limitations,
         "status": status,
         "refusal_reasons": tuple(sorted(reasons)),
