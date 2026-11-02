@@ -16,7 +16,7 @@ jobs:
       - name: Check out exact published source without persisted credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 8af665e5f17dde676e73bf2c259f02f088abf615
+          ref: fcaae6ca6da4f18f2874c1d9ae43e97e324a817d
           fetch-depth: 0
           persist-credentials: false
       - name: Export source ancestry only
