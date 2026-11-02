@@ -32,6 +32,7 @@ from drift.qualification.alpaca_sip_verification import (
     Universe12EtfCoverageV1,
     build_12_etf_coverage,
     create_mock_alpaca_sip_evidence_fixtures,
+    create_mock_valid_raw_payloads,
     verify_alpaca_sip_request_delay,
     verify_g1_alpaca_sip_qualification,
 )
@@ -775,28 +776,11 @@ def test_sol_round4_payload_malformed_evidence_refused() -> None:
     assert rep1.source_provenance.provenance_verified is False
 
     # 2. Invalid calendar date
+    valid_mock = create_mock_valid_raw_payloads()
     bad_cal = SimpleNamespace(
-        bars=json.dumps(
-            {
-                "bars": {
-                    sym: [
-                        {
-                            "t": "2024-01-02T09:30:00Z",
-                            "o": 100.0,
-                            "h": 105.0,
-                            "l": 99.0,
-                            "c": 104.0,
-                            "v": 1000,
-                        }
-                    ]
-                    for sym in EXACT_12_ETF_UNIVERSE
-                }
-            }
-        ).encode("utf-8"),
+        bars=valid_mock.bars,
         calendar=json.dumps([{"date": "invalid-date"}]).encode("utf-8"),
-        corporate_actions=json.dumps(
-            {"corporate_actions": {"cash_dividends": [{"symbol": "VOO"}]}}
-        ).encode("utf-8"),
+        corporate_actions=valid_mock.corporate_actions,
     )
     rep2 = verify_g1_alpaca_sip_qualification(
         request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
@@ -811,8 +795,8 @@ def test_sol_round4_payload_malformed_evidence_refused() -> None:
 
     # 3. cash_dividends is boolean false instead of list
     bad_ca = SimpleNamespace(
-        bars=bad_cal.bars,
-        calendar=json.dumps([{"date": "2024-01-02"}]).encode("utf-8"),
+        bars=valid_mock.bars,
+        calendar=valid_mock.calendar,
         corporate_actions=json.dumps(
             {"corporate_actions": {"cash_dividends": False}}
         ).encode("utf-8"),
@@ -892,37 +876,9 @@ def test_sol_round4_rights_string_false_and_missing_restrictions_refused() -> No
 
 def test_valid_raw_payloads_provenance_passes() -> None:
     """Valid raw payloads meeting complete Alpaca schema contracts pass provenance."""
-    import json
-    from types import SimpleNamespace
-
     _, cov_ev, ca_records, rights = make_mock_evidence()
 
-    valid_bars = {
-        sym: [
-            {
-                "t": "2024-01-02T09:30:00Z",
-                "o": 100.0,
-                "h": 105.0,
-                "l": 99.0,
-                "c": 104.0,
-                "v": 50000.0,
-            }
-        ]
-        for sym in EXACT_12_ETF_UNIVERSE
-    }
-    valid_payloads = SimpleNamespace(
-        bars=json.dumps({"bars": valid_bars, "next_page_token": None}).encode("utf-8"),
-        calendar=json.dumps([{"date": "2024-01-02", "open": "09:30"}]).encode("utf-8"),
-        corporate_actions=json.dumps(
-            {
-                "corporate_actions": {
-                    "cash_dividends": [{"symbol": "VOO", "rate": 1.5}],
-                    "forward_splits": [],
-                },
-                "next_page_token": None,
-            }
-        ).encode("utf-8"),
-    )
+    valid_payloads = create_mock_valid_raw_payloads(bars_count=1560)
     report = verify_g1_alpaca_sip_qualification(
         request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
         request_time=FIXED_NOW,
@@ -989,3 +945,79 @@ def test_sol_round5_malformed_raw_evidence_refused() -> None:
     assert any("raw_payloads failed verification" in r for r in report.refusal_reasons)
     # Refusal reason mentions non-ISO timestamp
     assert any("non-ISO timestamp" in r for r in report.refusal_reasons)
+
+
+def test_sol_round6_contradictory_raw_evidence_refused() -> None:
+    """Sol Round 6 P1: 1900-01-01 bars, 1-day calendar, BOGUS dividend refused."""
+    import json
+    from types import SimpleNamespace
+
+    _, cov_ev, ca_records, rights = make_mock_evidence()
+
+    # Exact Sol reproduction:
+    # - One bar per ETF dated 1900-01-01
+    # - A calendar containing only 1900-01-01
+    # - A dividend record containing only {"symbol":"BOGUS"}
+    # - The existing mock coverage, corporate-action, and rights assertions
+    bogus_bars = {
+        sym: [
+            {
+                "t": "1900-01-01T14:30:00Z",
+                "o": 100.0,
+                "h": 105.0,
+                "l": 95.0,
+                "c": 102.0,
+                "v": 1000.0,
+            }
+        ]
+        for sym in EXACT_12_ETF_UNIVERSE
+    }
+    bogus_payloads = SimpleNamespace(
+        bars=json.dumps({"bars": bogus_bars, "next_page_token": None}).encode("utf-8"),
+        calendar=json.dumps([{"date": "1900-01-01", "open": "09:30"}]).encode("utf-8"),
+        corporate_actions=json.dumps(
+            {
+                "corporate_actions": {
+                    "cash_dividends": [{"symbol": "BOGUS"}],
+                    "forward_splits": [],
+                },
+                "next_page_token": None,
+            }
+        ).encode("utf-8"),
+    )
+
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        raw_payloads=bogus_payloads,
+        corporate_actions=ca_records,
+        rights_assessment=rights,
+        coverage_evidence=cov_ev,
+    )
+
+    assert report.overall_status == "REFUSED"
+    assert report.source_provenance.provenance_verified is False
+    assert len(report.refusal_reasons) > 0
+    assert any("raw_payloads failed verification" in r for r in report.refusal_reasons)
+
+
+def test_reconciliation_refuses_when_raw_payload_and_coverage_mismatch() -> None:
+    """Refuse qualification when raw payload bar count mismatches claimed coverage."""
+    _, cov_ev, ca_records, rights = make_mock_evidence()
+
+    # Create raw payloads with 600 bars (valid schema & bounds), while claimed is 1560
+    mismatched_payloads = create_mock_valid_raw_payloads(bars_count=600)
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        raw_payloads=mismatched_payloads,
+        corporate_actions=ca_records,
+        rights_assessment=rights,
+        coverage_evidence=cov_ev,
+    )
+
+    assert report.overall_status == "REFUSED"
+    assert any(
+        "claimed bars count" in r and "does not match raw payload bars count" in r
+        for r in report.refusal_reasons
+    )
