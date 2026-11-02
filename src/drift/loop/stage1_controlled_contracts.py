@@ -22,10 +22,16 @@ from pydantic import BaseModel, Field, TypeAdapter, model_validator
 
 from drift.domain.common import UUID7, FrozenModel, NonBlankStr, SHA256Hash, UTCDateTime
 from drift.domain.evaluator_clock import EvaluationSessionV1
+from drift.domain.evaluator_costs import EvaluationCostModelV1
 from drift.domain.evaluator_strategy import StrategyDecisionIntentV1
+from drift.domain.synthetic_execution import (
+    ProtectiveCorrectionPolicyV1,
+    SyntheticExecutionPolicyV1,
+)
 from drift.evaluator.session_observer import (
     ExecutionAuthorizationV1,
     SessionObservationV1,
+    SyntheticExecutionObservationV1,
 )
 from drift.experiments.stage1_campaign_config import ArmSpecV1, CampaignSpecV1
 from drift.intelligence.contracts import (
@@ -496,6 +502,54 @@ class ObservationRecordV1(FrozenModel):
     observation: SessionObservationV1
 
 
+class ExecutionExtensionRecordV1(FrozenModel):
+    """Original opt-in policy retained before the original account invocation.
+
+    The V1 manifest and its financial identity remain unchanged when absent.
+    The complete original bundle permits independent repricing; a payload hash
+    alone cannot establish the provenance of quotes or listing identities.
+    """
+
+    kind: Literal["execution_extension"] = "execution_extension"
+    execution_policy: SyntheticExecutionPolicyV1
+    protective_policy: ProtectiveCorrectionPolicyV1 | None
+    input_bundle: RetainedCanonicalPayload
+    cost_model: EvaluationCostModelV1
+
+
+class ActualExecutionRecordV1(FrozenModel):
+    kind: Literal["actual_execution"] = "actual_execution"
+    authorization: OriginalReferenceV1
+    observation: SyntheticExecutionObservationV1
+
+
+class ReferenceAccountsRecordV1(FrozenModel):
+    kind: Literal["reference_accounts"] = "reference_accounts"
+    configuration: RetainedCanonicalPayload
+    receipt: RetainedCanonicalPayload
+
+
+class ReferenceViewRecordV1(FrozenModel):
+    kind: Literal["reference_view"] = "reference_view"
+    checkpoint_id: NonBlankStr
+    accounts: OriginalReferenceV1
+    view: RetainedCanonicalPayload
+    original_available_at: UTCDateTime
+
+
+class ProtectiveDetectionRecordV1(FrozenModel):
+    kind: Literal["protective_detection"] = "protective_detection"
+    observation: OriginalReferenceV1
+    reason: NonBlankStr
+
+
+class ProtectivePlanRecordV1(FrozenModel):
+    kind: Literal["protective_plan"] = "protective_plan"
+    session_index: int = Field(strict=True, ge=0)
+    context: RetainedCanonicalPayload
+    plan: RetainedCanonicalPayload
+
+
 class InputWitnessRecordV1(FrozenModel):
     kind: Literal["input_witness"] = "input_witness"
     checkpoint_id: NonBlankStr
@@ -608,6 +662,12 @@ class TerminalRecordV1(FrozenModel):
 ControlledRecord = Annotated[
     ManifestRecordV1
     | ObservationRecordV1
+    | ExecutionExtensionRecordV1
+    | ActualExecutionRecordV1
+    | ReferenceAccountsRecordV1
+    | ReferenceViewRecordV1
+    | ProtectiveDetectionRecordV1
+    | ProtectivePlanRecordV1
     | InputWitnessRecordV1
     | GrantRecordV1
     | RevocationRecordV1

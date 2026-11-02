@@ -17,23 +17,46 @@ from typing import Literal, cast
 from uuid import UUID
 
 from drift.domain.evaluator_bundles import (
+    EvaluationInputBundleV1,
     EvaluationRunIdentityV2,
     strategy_parameters_hash,
 )
-from drift.domain.evaluator_portfolio import decimal_context
+from drift.domain.evaluator_execution import (
+    ExecutionFillV1,
+    IndeterminateExecutionError,
+    ListingOpenPriceV1,
+)
+from drift.domain.evaluator_exploratory_accounting import reconstructed_accounting_price
+from drift.domain.evaluator_portfolio import decimal_context, fits_portfolio_context
 from drift.domain.evaluator_reconstruction import (
+    ExploratoryReconstructedSessionObservationV1,
     _with_reconstruction_validation_reuse,
 )
 from drift.domain.evaluator_trace import (
+    CorporateActionAppliedTraceEventV1,
     ExecutionAuthorizationTraceEventV1,
     ExploratoryStrategyDecisionTraceEventV1,
     FillTraceEventV1,
     SessionObservationTraceEventV1,
     StrategyDecisionTraceEventV1,
 )
+from drift.domain.normalization import DerivedObservationViewV1
 from drift.domain.observation_query import drift_source_inventory_hash
+from drift.domain.sessions import SessionKeyV1
+from drift.evaluator.engine import accounting_view_currency, source_basis_price
 from drift.evaluator.opening_book_lifecycle import parse_original_invocation_binding
-from drift.evaluator.session_observer import RebalancePreviewV1, SessionObservationV1
+from drift.evaluator.session_observer import (
+    ExecutionAuthorizationV1,
+    OpenSecurityPriceV1,
+    ProtectiveExecutionContextV1,
+    RebalancePreviewV1,
+    SessionObservationV1,
+    SyntheticExecutionObservationV1,
+)
+from drift.evaluator.synthetic_execution import (
+    execute_synthetic_selection,
+    select_synthetic_execution,
+)
 from drift.experiments.stage1_campaign_config import (
     ArmSpecV1,
     CampaignSpecV1,
@@ -89,6 +112,7 @@ from drift.loop.stage1_controlled_campaign import (
     DecisionContext,
     ResearchOutput,
     authorize_preview,
+    authorize_protective_preview,
     choice_for_family,
     context_kind,
     controlled_strategy_reference,
@@ -99,6 +123,7 @@ from drift.loop.stage1_controlled_campaign import (
     installed_intent,
     make_research_context,
     parse_context,
+    protective_plan_from_context,
     research_dependencies,
 )
 from drift.loop.stage1_controlled_journal import (
@@ -107,8 +132,16 @@ from drift.loop.stage1_controlled_journal import (
     observed_time,
 )
 from drift.loop.stage1_original_result_association import (
+    RESULT_EVENT,
     LocalOriginalResultReadbackV1,
     read_original_result,
+)
+from drift.loop.stage1_protective_correction import ProtectiveCorrectionPlanV1
+from drift.loop.stage1_reference_accounts import (
+    CommonReferenceViewV1,
+    ReferenceAccountsReceiptV1,
+    ReferenceCampaignConfigurationV1,
+    read_reference_accounts,
 )
 from drift.serialization.canonical import canonical_json, content_hash
 
@@ -161,6 +194,7 @@ class ControlledCampaignReadbackV1:
     source_coverage: str
     economics: ControlledCampaignEconomicsV1
     independent_account_count: Literal[1] = 1
+    execution_facts: tuple[SyntheticExecutionObservationV1, ...] = ()
 
     @property
     def g2_accepted(self) -> bool:
@@ -195,16 +229,23 @@ def _choices(
     checkpoint: C.ControlledCheckpointV1,
     context: DecisionContext,
     incumbent: C.Family,
+    *,
+    calendar_bound: bool = False,
 ) -> tuple[RawChoice | None, tuple[RawChoice, ...]]:
     fixture = checkpoint.fixture
     if fixture.mode == "conventional_fixture":
         return None, tuple(
-            choice_for_family(f, context, plan.sessions)
+            choice_for_family(f, context, plan.sessions, calendar_bound=calendar_bound)
             for f in fixture.candidate_families
         )
     if fixture.disposition == "propose":
         assert fixture.selected_family is not None
-        return choice_for_family(fixture.selected_family, context, plan.sessions), ()
+        return choice_for_family(
+            fixture.selected_family,
+            context,
+            plan.sessions,
+            calendar_bound=calendar_bound,
+        ), ()
     return RawChoice(
         disposition=fixture.disposition,
         selection=StrategySelection(family_id=incumbent, strategy_version="1")
@@ -224,8 +265,12 @@ def _replay(
     incumbent: C.Family,
     grant: C.GrantRecordV1,
     at: datetime,
+    *,
+    calendar_bound: bool = False,
 ) -> tuple[ResearchOutput, _ReplayStore]:
-    scripted, pool = _choices(plan, checkpoint, context, incumbent)
+    scripted, pool = _choices(
+        plan, checkpoint, context, incumbent, calendar_bound=calendar_bound
+    )
     recorder = _ReplayStore()
     resolved = research_dependencies(research, incumbent, plan.securities)
     policy = ArtifactReference(
@@ -311,6 +356,26 @@ class _Verifier:
         self.observations: dict[int, ControlledRowV1] = {}
         self.decisions: dict[int, ControlledRowV1] = {}
         self.executions: dict[int, ControlledRowV1] = {}
+        self.actual_executions: dict[int, ControlledRowV1] = {}
+        self.protective_detections: dict[int, ControlledRowV1] = {}
+        self.protective_plans: dict[int, ControlledRowV1] = {}
+        self.protective_ready: dict[
+            int, tuple[ProtectiveExecutionContextV1, ProtectiveCorrectionPlanV1]
+        ] = {}
+        self.incomplete_execution_indices: set[int] = set()
+        self.execution_facts: dict[int, SyntheticExecutionObservationV1] = {}
+        self.extension_row: ControlledRowV1 | None = None
+        self.extension: C.ExecutionExtensionRecordV1 | None = None
+        self.references_row: ControlledRowV1 | None = None
+        self.references: C.ReferenceAccountsRecordV1 | None = None
+        self.bundle: EvaluationInputBundleV1 | None = None
+        self.authentic_open_sources: dict[
+            tuple[UUID, SessionKeyV1], list[DerivedObservationViewV1]
+        ] = {}
+        self.reconstructed_open_sources: dict[
+            tuple[UUID, SessionKeyV1],
+            list[ExploratoryReconstructedSessionObservationV1],
+        ] = {}
         self.missing_executions: set[int] = set()
         self.containments: dict[int, ControlledRowV1] = {}
         self.opportunity_rows: dict[str, list[ControlledRowV1]] = {
@@ -329,6 +394,31 @@ class _Verifier:
             elif isinstance(record, C.ExecutionRecordV1):
                 preview = record.preview.parse(RebalancePreviewV1)
                 self._index(self.executions, preview.session_index, row)
+            elif isinstance(record, C.ExecutionExtensionRecordV1):
+                if self.extension_row is not None:
+                    raise ValueError("CONTROLLED_DUPLICATE_EXECUTION_EXTENSION")
+                self.extension_row, self.extension = row, record
+            elif isinstance(record, C.ReferenceAccountsRecordV1):
+                if self.references_row is not None:
+                    raise ValueError("CONTROLLED_DUPLICATE_REFERENCE_ACCOUNTS")
+                self.references_row, self.references = row, record
+            elif isinstance(record, C.ActualExecutionRecordV1):
+                self._index(
+                    self.actual_executions, record.observation.session_index, row
+                )
+            elif isinstance(record, C.ProtectiveDetectionRecordV1):
+                source = captured.resolve(record.observation, before=row)
+                if not isinstance(source.record, C.ObservationRecordV1):
+                    raise ValueError(
+                        "CONTROLLED_PROTECTIVE_DETECTION_WRONG_OBSERVATION"
+                    )
+                self._index(
+                    self.protective_detections,
+                    source.record.observation.session_index,
+                    row,
+                )
+            elif isinstance(record, C.ProtectivePlanRecordV1):
+                self._index(self.protective_plans, record.session_index, row)
             elif isinstance(record, C.ContainmentRecordV1):
                 source = captured.resolve(record.observation, before=row)
                 if not isinstance(source.record, C.ObservationRecordV1):
@@ -353,6 +443,300 @@ class _Verifier:
                 ):
                     raise ValueError("CONTROLLED_UNDECLARED_POST_TERMINAL_PHASE")
         self.take(captured.manifest)
+
+    def verify_extensions(self, claim_sequence: int | None) -> None:
+        if self.extension is None:
+            if (
+                self.actual_executions
+                or self.protective_detections
+                or self.protective_plans
+                or self.references is not None
+            ):
+                raise ValueError("CONTROLLED_EXECUTION_EXTENSION_NOT_DECLARED")
+            return
+        assert self.extension_row is not None
+        self.journal.resolve(self.journal.manifest.ref, before=self.extension_row)
+        if claim_sequence is not None and self.extension_row.sequence >= claim_sequence:
+            raise ValueError("CONTROLLED_EXECUTION_EXTENSION_AFTER_ORIGINAL_CLAIM")
+        extension = self.extension
+        bundle = extension.input_bundle.parse(EvaluationInputBundleV1)
+        if (
+            bundle.bundle_hash != self.plan.input_bundle_hash
+            or bundle.session_clock.sessions != self.plan.sessions
+            or extension.cost_model.cost_model_hash != self.plan.cost_model_hash
+            or any(
+                item.session_index >= len(self.plan.sessions)
+                for item in extension.execution_policy.sessions
+            )
+        ):
+            raise ValueError("CONTROLLED_EXECUTION_EXTENSION_WRONG_ORIGINAL_INPUTS")
+        self.bundle = bundle
+        if bundle.exploratory_reconstructed_observations:
+            for observation in bundle.exploratory_reconstructed_observations:
+                self.reconstructed_open_sources.setdefault(
+                    (observation.security_id, observation.session_key), []
+                ).append(observation)
+        else:
+            for view in bundle.authentic_accounting_views:
+                self.authentic_open_sources.setdefault(
+                    (view.security_id, view.source_session), []
+                ).append(view)
+        self.take(self.extension_row)
+        if self.references is not None:
+            assert self.references_row is not None
+            self.journal.resolve(self.extension_row.ref, before=self.references_row)
+            if (
+                claim_sequence is not None
+                and self.references_row.sequence >= claim_sequence
+            ):
+                raise ValueError("CONTROLLED_REFERENCE_ACCOUNTS_AFTER_ORIGINAL_CLAIM")
+            configuration = self.references.configuration.parse(
+                ReferenceCampaignConfigurationV1
+            )
+            receipt = self.references.receipt.parse(ReferenceAccountsReceiptV1)
+            env = configuration.environment
+            if (
+                env.input_bundle_hash != self.plan.input_bundle_hash
+                or env.admission_hash != self.plan.admission_hash
+                or env.cost_model_hash != self.plan.cost_model_hash
+                or env.evaluator_evidence_hash != self.plan.evaluator_evidence_hash
+                or env.source_inventory_hash != self.plan.source_inventory_hash
+                or env.sessions != self.plan.sessions
+                or env.securities != self.plan.securities
+                or receipt.configuration_hash != content_hash(configuration)
+            ):
+                raise ValueError("CONTROLLED_REFERENCE_ENVIRONMENT_MISMATCH")
+            self.take(self.references_row)
+
+    def verify_open_quotes(
+        self, quotes: tuple[OpenSecurityPriceV1, ...], index: int
+    ) -> None:
+        if self.bundle is None:
+            raise ValueError("CONTROLLED_EXECUTION_WITHOUT_ORIGINAL_BUNDLE")
+        for item in quotes:
+            key = item.security_id, self.plan.sessions[index].session_key
+            if self.bundle.exploratory_reconstructed_observations:
+                reconstructed = self.reconstructed_open_sources.get(key, ())
+                if len(reconstructed) != 1:
+                    raise ValueError("CONTROLLED_EXECUTION_SOURCE_PRICE_NOT_UNIQUE")
+                price = reconstructed_accounting_price(reconstructed[0], "open")
+                value, currency = price.unadjusted_price, price.currency
+                quote = ListingOpenPriceV1(
+                    listing_id=price.listing_id,
+                    venue=price.venue,
+                    unadjusted_open_price=value,
+                )
+            else:
+                authentic = self.authentic_open_sources.get(key, ())
+                if len(authentic) != 1:
+                    raise ValueError("CONTROLLED_EXECUTION_SOURCE_PRICE_NOT_UNIQUE")
+                view = authentic[0]
+                value, currency = (
+                    source_basis_price(view, "open"),
+                    accounting_view_currency(view),
+                )
+                quote = ListingOpenPriceV1(
+                    listing_id=view.listing_id,
+                    venue=view.query.observation.venue,
+                    unadjusted_open_price=value,
+                )
+            if currency != self.plan.mandate.currency or not fits_portfolio_context(
+                value
+            ):
+                raise ValueError(
+                    "CONTROLLED_EXECUTION_SOURCE_PRICE_CURRENCY_OR_PRECISION"
+                )
+            if quote != item.quote:
+                raise ValueError("CONTROLLED_EXECUTION_QUOTE_NOT_ORIGINAL_CURRENT_OPEN")
+
+    def verify_result_identity(
+        self,
+        result: LocalOriginalResultReadbackV1,
+        manifest: C.ManifestRecordV1,
+        binding: object,
+    ) -> None:
+        identity = result.original_artifacts.result.run_identity
+        if not isinstance(identity, EvaluationRunIdentityV2):
+            raise ValueError("CONTROLLED_RESULT_NOT_V2_IDENTITY")
+        if (
+            result.operational_m0_run_id != manifest.m0_run_id
+            or result.invocation_binding != binding
+            or identity.strategy_hash
+            != controlled_strategy_reference(
+                extended=self.extension is not None
+            ).code_hash
+            or identity.strategy_parameters_hash
+            != strategy_parameters_hash(
+                financial_parameters(self.plan, self.extension, self.references)
+            )
+            or identity.bundle_hash != self.plan.input_bundle_hash
+            or identity.code_version_hash != self.plan.source_inventory_hash
+            or identity.cost_model_hash != self.plan.cost_model_hash
+            or identity.protocol_hash != self.plan.protocol_hash
+            or identity.admission_hash != self.plan.admission_hash
+            or identity.evaluator_evidence_hash != self.plan.evaluator_evidence_hash
+        ):
+            raise ValueError("CONTROLLED_RESULT_NOT_DECLARED_INSTALLED_CAMPAIGN")
+
+    def complete_execution(self, index: int, *, strategy: bool = False) -> bool:
+        row = self.executions.get(index)
+        if row is None or not isinstance(row.record, C.ExecutionRecordV1):
+            return False
+        preview = row.record.preview.parse(RebalancePreviewV1)
+        if (
+            row.record.authorization.verdict != "approve"
+            or preview.outcome.classification != "executed"
+        ):
+            return False
+        if self.extension is None:
+            return True
+        actual = self.actual_executions.get(index)
+        if actual is None or not isinstance(actual.record, C.ActualExecutionRecordV1):
+            return False
+        observation = actual.record.observation
+        return (
+            observation.receipt.complete
+            and index not in self.incomplete_execution_indices
+            and (not strategy or observation.purpose == "strategy")
+        )
+
+    def verify_protective_plans(
+        self, result: LocalOriginalResultReadbackV1 | None, binding: object
+    ) -> None:
+        if self.extension is None:
+            return
+        policy = self.extension.protective_policy
+        if self.protective_plans and (policy is None or not policy.enabled):
+            raise ValueError("CONTROLLED_UNDECLARED_PROTECTIVE_PLAN")
+        for index, row in self.protective_plans.items():
+            assert isinstance(row.record, C.ProtectivePlanRecordV1)
+            assert self.bundle is not None and policy is not None
+            context = row.record.context.parse(ProtectiveExecutionContextV1)
+            correction = row.record.plan.parse(ProtectiveCorrectionPlanV1)
+            if (
+                index == 0
+                or context.session_index != index
+                or context.session != self.plan.sessions[index]
+                or context.invocation_binding != binding
+                or context.before_state.admission_hash != self.plan.admission_hash
+                or context.session_clock != self.bundle.session_clock
+                or context.cost_model != self.extension.cost_model
+                or context.decision_session != self.plan.sessions[index - 1]
+            ):
+                raise ValueError("CONTROLLED_PROTECTIVE_CONTEXT_SCOPE")
+            previous = self.observations.get(index - 1)
+            if previous is None or not isinstance(
+                previous.record, C.ObservationRecordV1
+            ):
+                raise ValueError("CONTROLLED_PROTECTIVE_PLAN_WITHOUT_PRIOR_OBSERVATION")
+            if not previous.record.observation.state.holdings:
+                raise ValueError("CONTROLLED_PROTECTIVE_PLAN_WITHOUT_EXISTING_HOLDINGS")
+            self.journal.resolve(previous.ref, before=row)
+            self.verify_open_quotes(context.open_prices, index)
+            originals = {
+                listing.listing_id: listing
+                for listing in self.bundle.listing_identities
+            }
+            quotes = {item.security_id: item.quote for item in context.open_prices}
+            if any(
+                originals.get(item.listing.listing_id) != item.listing
+                or quotes[item.security_id].listing_id != item.listing.listing_id
+                or quotes[item.security_id].venue != item.listing.venue
+                for item in context.execution_listings
+            ):
+                raise ValueError("CONTROLLED_PROTECTIVE_LISTING_NOT_ORIGINAL")
+            expected = protective_plan_from_context(self.plan, policy, context)
+            if correction != expected:
+                raise ValueError("CONTROLLED_FALSE_PROTECTIVE_CORRECTION_PLAN")
+            execution = self.executions.get(index)
+            if execution is not None:
+                assert isinstance(execution.record, C.ExecutionRecordV1)
+                preview = execution.record.preview.parse(RebalancePreviewV1)
+                self.journal.resolve(row.ref, before=execution)
+                if preview.before_state != context.before_state:
+                    raise ValueError("CONTROLLED_PROTECTIVE_CONTEXT_NOT_ORIGINAL_BOOK")
+            elif result is not None:
+                original = result.original_artifacts
+                if original.result.halted_session_index == index:
+                    if original.final_state != context.before_state:
+                        raise ValueError("CONTROLLED_PROTECTIVE_HALTED_BOOK_MISMATCH")
+                else:
+                    self.reasons.add(f"MISSING_PROTECTIVE_EXECUTION:{index}")
+                    self.incomplete_execution_indices.add(index)
+            if result is not None:
+                trace = result.original_artifacts.trace.events
+                decisions = [
+                    event
+                    for event in trace
+                    if isinstance(
+                        event,
+                        (
+                            StrategyDecisionTraceEventV1,
+                            ExploratoryStrategyDecisionTraceEventV1,
+                        ),
+                    )
+                    and event.session_index == index - 1
+                ]
+                if len(decisions) != 1:
+                    raise ValueError(
+                        "CONTROLLED_PROTECTIVE_CONTEXT_WITHOUT_ORIGINAL_DECISION"
+                    )
+                targets = decisions[0].staged_targets
+                for event in trace:
+                    if (
+                        isinstance(event, CorporateActionAppliedTraceEventV1)
+                        and event.session_index == index
+                    ):
+                        targets = event.staged_targets_after
+                if context.staged_targets != targets:
+                    raise ValueError(
+                        "CONTROLLED_PROTECTIVE_CONTEXT_FALSE_STAGED_TARGETS"
+                    )
+            if expected.status == "READY":
+                self.protective_ready[index] = context, correction
+                if execution is None:
+                    self.reasons.add(f"MISSING_PROTECTIVE_EXECUTION:{index}")
+                    self.incomplete_execution_indices.add(index)
+            elif expected.status == "UNRESOLVED":
+                if execution is not None or any(i >= index for i in self.observations):
+                    raise ValueError("CONTROLLED_UNRESOLVED_CORRECTION_CONTINUED")
+                self.reasons.add(f"ORIGINAL_PROTECTIVE_CORRECTION_UNRESOLVED:{index}")
+                self.incomplete_execution_indices.add(index)
+            self.take(row)
+        if policy is not None and policy.enabled:
+            reached = set(self.executions) | set(self.observations)
+            if result is not None:
+                reached.update(
+                    event.session_index
+                    for event in result.original_artifacts.trace.events
+                )
+            for index in reached:
+                previous = self.observations.get(index - 1)
+                if (
+                    previous is not None
+                    and isinstance(previous.record, C.ObservationRecordV1)
+                    and previous.record.observation.state.holdings
+                    and index not in self.protective_plans
+                ):
+                    self.reasons.add(f"MISSING_ORIGINAL_PROTECTIVE_PLAN:{index}")
+                    self.incomplete_execution_indices.add(index)
+
+    def verify_correction_completion(self) -> None:
+        for index in self.protective_detections:
+            following = self.protective_plans.get(index + 1)
+            if following is None:
+                self.reasons.add(f"CURRENT_BOOK_CORRECTION_UNRESOLVED:{index}")
+                self.incomplete_execution_indices.add(
+                    min(index + 1, len(self.plan.sessions) - 1)
+                )
+                continue
+            assert isinstance(following.record, C.ProtectivePlanRecordV1)
+            correction = following.record.plan.parse(ProtectiveCorrectionPlanV1)
+            if correction.status == "UNRESOLVED" or (
+                correction.status == "READY" and not self.complete_execution(index + 1)
+            ):
+                self.reasons.add(f"CURRENT_BOOK_CORRECTION_UNRESOLVED:{index}")
+                self.incomplete_execution_indices.add(index + 1)
 
     def _index(
         self, collection: dict[int, ControlledRowV1], index: int, row: ControlledRowV1
@@ -415,9 +799,22 @@ class _Verifier:
                 raise ValueError("CONTROLLED_PREPARATION_NOT_FRESH_UNTRADED_BOOK")
             reason = current_book_reason(self.plan.mandate, observation.state)
             containment = self.containments.get(index)
+            detection = self.protective_detections.get(index)
             if reason is None:
-                if containment is not None:
+                if containment is not None or detection is not None:
                     raise ValueError("CONTROLLED_FALSE_CURRENT_BOOK_CONTAINMENT")
+            elif detection is not None:
+                policy = self.extension.protective_policy if self.extension else None
+                assert isinstance(detection.record, C.ProtectiveDetectionRecordV1)
+                if (
+                    policy is None
+                    or not policy.enabled
+                    or reason not in ("SECURITY_CAP", "CLASS_CAP", "GROSS_CAP")
+                    or detection.record.reason != reason
+                    or containment is not None
+                ):
+                    raise ValueError("CONTROLLED_FALSE_PROTECTIVE_DETECTION")
+                self.take(detection)
             elif containment is None:
                 self.reasons.add("MISSING_CURRENT_BOOK_CONTAINMENT")
             else:
@@ -456,6 +853,130 @@ class _Verifier:
         if self.missing_executions:
             self.reasons.add("MISSING_ORIGINAL_EXECUTION_RECORD")
 
+    def verify_actual_execution(
+        self,
+        row: ControlledRowV1,
+        preview: RebalancePreviewV1,
+        authorization: ExecutionAuthorizationV1,
+        result: LocalOriginalResultReadbackV1 | None,
+    ) -> tuple[ExecutionFillV1, ...] | None:
+        """Recompute quantities and expose only facts matched to original M0."""
+        assert self.extension is not None and self.bundle is not None
+        index = preview.session_index
+        actual_row = self.actual_executions.get(index)
+        if (
+            authorization.verdict != "approve"
+            or preview.outcome.classification != "executed"
+        ):
+            if actual_row is not None:
+                raise ValueError("CONTROLLED_ACTUAL_EXECUTION_WITHOUT_APPROVAL")
+            return ()
+        self.verify_open_quotes(preview.open_prices, index)
+        prices = {item.security_id: item.quote for item in preview.open_prices}
+        listings = {}
+        for security_id, quote in prices.items():
+            originals = [
+                listing
+                for listing in self.bundle.listing_identities
+                if listing.listing_id == quote.listing_id
+                and listing.venue == quote.venue
+            ]
+            if len(originals) != 1:
+                raise ValueError("CONTROLLED_EXECUTION_LISTING_NOT_ORIGINAL")
+            listings[security_id] = originals[0]
+        invocation_id = (
+            preview.invocation_binding.invocation_id
+            if preview.invocation_binding
+            else None
+        )
+        selection = select_synthetic_execution(
+            policy=self.extension.execution_policy,
+            session_index=index,
+            preview_hash=preview.financial_hash,
+            plan=preview.outcome.plan,
+            invocation_id=invocation_id,
+        )
+        try:
+            receipt = execute_synthetic_selection(
+                state=preview.before_state,
+                requested_plan=preview.outcome.plan,
+                selection=selection,
+                preview_hash=preview.financial_hash,
+                open_prices=prices,
+                execution_listings=listings,
+                cost_model=self.extension.cost_model,
+                session_clock=self.bundle.session_clock,
+                invocation_id=invocation_id,
+            )
+        except IndeterminateExecutionError:
+            if actual_row is not None:
+                raise ValueError("CONTROLLED_UNBOOKABLE_ACTUAL_EXECUTION") from None
+            self.reasons.add(f"ORIGINAL_SYNTHETIC_EXECUTION_UNBOOKABLE:{index}")
+            self.incomplete_execution_indices.add(index)
+            return ()
+        protective = self.protective_ready.get(index)
+        expected = SyntheticExecutionObservationV1(
+            session_index=index,
+            session=preview.session,
+            decision_session=preview.decision_session,
+            preview_hash=preview.financial_hash,
+            purpose="protective" if protective is not None else "strategy",
+            protective_policy_hash=protective[1].policy_hash
+            if protective is not None
+            else None,
+            receipt=receipt,
+            invocation_binding=preview.invocation_binding,
+        )
+        if actual_row is None:
+            self.reasons.add(f"MISSING_ORIGINAL_ACTUAL_EXECUTION:{index}")
+            self.incomplete_execution_indices.add(index)
+        else:
+            assert isinstance(actual_row.record, C.ActualExecutionRecordV1)
+            if (
+                self.journal.resolve(actual_row.record.authorization, before=actual_row)
+                != row
+            ):
+                raise ValueError("CONTROLLED_ACTUAL_EXECUTION_WRONG_AUTHORIZATION")
+            if actual_row.record.observation != expected:
+                raise ValueError("CONTROLLED_FALSE_ORIGINAL_ACTUAL_EXECUTION")
+            marked = self.observations.get(index)
+            if marked is not None:
+                self.journal.resolve(actual_row.ref, before=marked)
+            self.take(actual_row)
+        if not receipt.complete:
+            self.reasons.add(f"ORIGINAL_SYNTHETIC_EXECUTION_INCOMPLETE:{index}")
+            self.incomplete_execution_indices.add(index)
+            if any(i >= index for i in self.observations) or any(
+                i >= index for i in self.decisions
+            ):
+                raise ValueError("CONTROLLED_PARTIAL_EXECUTION_CONTINUED")
+        if result is not None:
+            original = result.original_artifacts
+            if not receipt.complete and (
+                result.classification != "indeterminate"
+                or original.result.halted_session_index != index
+            ):
+                raise ValueError("CONTROLLED_PARTIAL_EXECUTION_FALSE_COMPLETION")
+            if original.result.halted_session_index == index:
+                retention_failed = (
+                    original.result.halt_reason
+                    == "SYNTHETIC_EXECUTION_RECEIPT_RETENTION_FAILED"
+                )
+                if (
+                    not receipt.complete or retention_failed
+                ) and original.final_state != receipt.state:
+                    raise ValueError("CONTROLLED_ACTUAL_FINAL_BOOK_MISMATCH")
+                if retention_failed:
+                    self.reasons.add(f"ORIGINAL_EXECUTION_RETENTION_UNCERTAIN:{index}")
+                    self.incomplete_execution_indices.add(index)
+            # This is a derived verification of original facts. When a durable
+            # receipt is missing, its absence remains a separate blocking reason;
+            # no replacement source row is appended or presented as retained.
+            self.execution_facts[index] = expected
+        else:
+            self.reasons.add(f"ACTUAL_EXECUTION_AWAITS_ORIGINAL_RESULT:{index}")
+        return receipt.committed_fills
+
     def verify_execution(
         self,
         row: ControlledRowV1,
@@ -485,15 +1006,29 @@ class _Verifier:
             None,
         )
         selected = checkpoint is not None and decision.disposition == "SELECTED"
-        expected = authorize_preview(
-            self.plan.mandate,
-            preview,
-            execution_at=row.event.timestamp,
-            proposal_deadline=checkpoint.expires_at
-            if checkpoint and selected
-            else None,
-            revoked_at=checkpoint.revoked_at if checkpoint and selected else None,
-        )
+        protective = self.protective_ready.get(preview.session_index)
+        if protective is not None:
+            assert (
+                self.extension is not None
+                and self.extension.protective_policy is not None
+            )
+            context, correction = protective
+            expected = authorize_protective_preview(
+                policy=self.extension.protective_policy,
+                context=context,
+                correction=correction,
+                preview=preview,
+            )
+        else:
+            expected = authorize_preview(
+                self.plan.mandate,
+                preview,
+                execution_at=row.event.timestamp,
+                proposal_deadline=checkpoint.expires_at
+                if checkpoint and selected
+                else None,
+                revoked_at=checkpoint.revoked_at if checkpoint and selected else None,
+            )
         if expected != record.authorization:
             raise ValueError("CONTROLLED_FALSE_EXECUTION_AUTHORIZATION")
         # An authorization journal row cannot be recorded after the marked
@@ -503,6 +1038,11 @@ class _Verifier:
         observed = self.observations.get(preview.session_index)
         if observed is not None:
             self.journal.resolve(row.ref, before=observed)
+        actual_fills = (
+            self.verify_actual_execution(row, preview, expected, result)
+            if self.extension is not None
+            else None
+        )
         if result is not None:
             trace = result.original_artifacts.trace.events
             originals = [
@@ -528,16 +1068,65 @@ class _Verifier:
                 and e.session_index == preview.session_index
             )
             expected_fills = (
-                preview.outcome.committed_fills
-                if expected.verdict == "approve"
-                and preview.outcome.classification == "executed"
-                else ()
+                actual_fills
+                if actual_fills is not None
+                else (
+                    preview.outcome.committed_fills
+                    if expected.verdict == "approve"
+                    and preview.outcome.classification == "executed"
+                    else ()
+                )
             )
             if fills != expected_fills:
                 raise ValueError("CONTROLLED_FALSE_COMMITTED_FILLS")
         if expected.verdict == "contain":
             self.reasons.add(f"ORIGINAL_EXECUTION_CONTAINED:{preview.session_index}")
         self.take(row)
+
+    def reference_view(
+        self,
+        checkpoint: C.ControlledCheckpointV1,
+        rows: Sequence[ControlledRowV1],
+        witness_row: ControlledRowV1 | None,
+    ) -> CommonReferenceViewV1 | None:
+        row = self._one(rows, "reference_view")
+        if self.references is None:
+            if row is not None:
+                raise ValueError("CONTROLLED_REFERENCE_VIEW_WITHOUT_DECLARED_ACCOUNTS")
+            return None
+        if row is None:
+            if witness_row is not None:
+                raise ValueError("CONTROLLED_ORIGINAL_COMMON_REFERENCE_VIEW_MISSING")
+            return None
+        assert isinstance(row.record, C.ReferenceViewRecordV1)
+        record = row.record
+        if (
+            self.references_row is None
+            or self.journal.resolve(record.accounts, before=row) != self.references_row
+            or record.original_available_at != row.event.timestamp
+        ):
+            raise ValueError("CONTROLLED_REFERENCE_VIEW_WRONG_ORIGINAL_SCOPE")
+        if witness_row is not None:
+            self.journal.resolve(row.ref, before=witness_row)
+            assert isinstance(witness_row.record, C.InputWitnessRecordV1)
+            if record.original_available_at != witness_row.record.original_available_at:
+                raise ValueError(
+                    "CONTROLLED_REFERENCE_VIEW_WRONG_ORIGINAL_AVAILABILITY"
+                )
+        view = record.view.parse(CommonReferenceViewV1)
+        expected = read_reference_accounts(
+            origin=self.journal.origin,
+            configuration=self.references.configuration.parse(
+                ReferenceCampaignConfigurationV1
+            ),
+            receipt=self.references.receipt.parse(ReferenceAccountsReceiptV1),
+            decision_cutoff=checkpoint.decision_cutoff,
+            clock=lambda: record.original_available_at,
+        )
+        if view != expected:
+            raise ValueError("CONTROLLED_REFERENCE_VIEW_NOT_ORIGINAL_CAUSAL_PREFIX")
+        self.take(row)
+        return view
 
     def opportunity(
         self,
@@ -555,11 +1144,19 @@ class _Verifier:
         no_attempt = self._one(rows, "no_attempt")
         output_row = self._one(rows, "research_output")
         revocation = self._one(rows, "revocation")
+        common_references = self.reference_view(checkpoint, rows, witness_row)
         if witness_row is None:
-            if rows:
+            if any(row.record.kind != "reference_view" for row in rows):
                 raise ValueError("CONTROLLED_PHASE_WITHOUT_ORIGINAL_INPUT_WITNESS")
             return _Opportunity(
-                None, None, "ORIGINAL_INPUT_MISSING", False, False, False, (), ()
+                None,
+                None,
+                "ORIGINAL_INPUT_MISSING",
+                False,
+                False,
+                False,
+                (),
+                tuple(rows),
             ), previous_learning
         witness = witness_row.record
         assert isinstance(witness, C.InputWitnessRecordV1)
@@ -592,12 +1189,13 @@ class _Verifier:
             learning,
             witness.original_available_at,
             incumbent,
+            common_references,
         )
         if witness.research_context != research:
             raise ValueError("CONTROLLED_RESEARCH_CONTEXT_NOT_ORIGINAL_INPUTS")
         self.take(witness_row)
         if grant_row is None:
-            if len(rows) != 1:
+            if len(rows) != 1 + (common_references is not None):
                 raise ValueError("CONTROLLED_PHASE_WITHOUT_ORIGINAL_GRANT")
             return _Opportunity(
                 None,
@@ -684,7 +1282,13 @@ class _Verifier:
                 expected_skip = "BUDGET_UNAVAILABLE"
             else:
                 try:
-                    _choices(self.plan, checkpoint, context, incumbent)
+                    _choices(
+                        self.plan,
+                        checkpoint,
+                        context,
+                        incumbent,
+                        calendar_bound=self.extension is not None,
+                    )
                 except ValueError:
                     expected_skip = "INPUT_UNAVAILABLE"
             assert isinstance(no_attempt.record, C.NoAttemptRecordV1)
@@ -722,7 +1326,14 @@ class _Verifier:
         ):
             raise ValueError("CONTROLLED_START_NOT_AUTHORIZED_BY_ORIGINAL_GRANT")
         output, replay = _replay(
-            self.plan, checkpoint, context, research, incumbent, grant, start
+            self.plan,
+            checkpoint,
+            context,
+            research,
+            incumbent,
+            grant,
+            start,
+            calendar_bound=self.extension is not None,
         )
         original_phases: list[tuple[str, bytes]] = []
         all_costs: list[CostReceipt] = []
@@ -892,6 +1503,10 @@ class _Verifier:
                 if (
                     execution.record.authorization.verdict == "approve"
                     and preview.outcome.classification == "executed"
+                    and (
+                        self.extension is None
+                        or self.complete_execution(index, strategy=True)
+                    )
                 ):
                     active = earlier.record.staged_family
                     checkpoint = by_index.get(earlier.record.session_index)
@@ -932,6 +1547,26 @@ class _Verifier:
                 if witness_row is None or not isinstance(
                     witness_row.record, C.InputWitnessRecordV1
                 ):
+                    rows = self.opportunity_rows[checkpoint.checkpoint_id]
+                    if rows and all(
+                        row.record.kind == "reference_view" for row in rows
+                    ):
+                        self.reference_view(checkpoint, rows, None)
+                        self.reasons.add(
+                            "OPPORTUNITY_WITHOUT_ORIGINAL_INPUT:"
+                            + checkpoint.checkpoint_id
+                        )
+                        opportunities[checkpoint.checkpoint_id] = _Opportunity(
+                            None,
+                            None,
+                            "ORIGINAL_INPUT_MISSING",
+                            False,
+                            False,
+                            False,
+                            (),
+                            tuple(rows),
+                        )
+                        continue
                     raise ValueError("CONTROLLED_ORPHAN_OPPORTUNITY_PHASES")
                 source = self.journal.resolve(
                     witness_row.record.observation, before=witness_row
@@ -1059,7 +1694,10 @@ class _Verifier:
             else:
                 try:
                     expected_intent = installed_intent(
-                        proposed, context, self.plan.sessions
+                        proposed,
+                        context,
+                        self.plan.sessions,
+                        calendar_bound=self.extension is not None,
                     )
                     refusal = decision_mandate_reason(
                         self.plan.mandate, context, observation.state, expected_intent
@@ -1190,8 +1828,16 @@ def read_controlled_campaign(
             raise ValueError("CONTROLLED_MANIFEST_M0_INVOCATION_MISMATCH")
         if any(row.sequence <= index for row in verifier.observations.values()):
             raise ValueError("CONTROLLED_OBSERVATION_BEFORE_ACCOUNT_CLAIM")
-    elif verifier.observations or verifier.decisions or verifier.executions:
+    elif (
+        verifier.observations
+        or verifier.decisions
+        or verifier.executions
+        or verifier.actual_executions
+        or verifier.protective_plans
+        or verifier.protective_detections
+    ):
         raise ValueError("CONTROLLED_EXECUTION_WITHOUT_ORIGINAL_ACCOUNT_CLAIM")
+    verifier.verify_extensions(claims[0][0] if claims else None)
     result = None
     if verifier.terminal is not None:
         terminal = verifier.terminal.record
@@ -1243,34 +1889,62 @@ def read_controlled_campaign(
                 expected_run_ids=expected_run_ids,
                 clock=lambda: observed,
             )
-            identity = result.original_artifacts.result.run_identity
-            if not isinstance(identity, EvaluationRunIdentityV2):
-                raise ValueError("CONTROLLED_RESULT_NOT_V2_IDENTITY")
-            if (
-                result.classification != terminal.classification
-                or result.operational_m0_run_id != manifest.m0_run_id
-                or result.invocation_binding != binding
-                or identity.strategy_hash != controlled_strategy_reference().code_hash
-                or identity.strategy_parameters_hash
-                != strategy_parameters_hash(financial_parameters(plan))
-                or identity.bundle_hash != plan.input_bundle_hash
-                or identity.code_version_hash != plan.source_inventory_hash
-                or identity.cost_model_hash != plan.cost_model_hash
-                or identity.protocol_hash != plan.protocol_hash
-                or identity.admission_hash != plan.admission_hash
-                or identity.evaluator_evidence_hash != plan.evaluator_evidence_hash
-            ):
+            if result.classification != terminal.classification:
                 raise ValueError("CONTROLLED_RESULT_NOT_DECLARED_INSTALLED_CAMPAIGN")
+            verifier.verify_result_identity(result, manifest, binding)
         elif (
             terminal.result_association is not None
             or terminal.classification is not None
         ):
             raise ValueError("CONTROLLED_FAILED_M0_HAS_SUCCESSFUL_RESULT")
         verifier.take(verifier.terminal)
+    elif verifier.extension is not None:
+        # An after-commit recorder failure may prevent the terminal append even
+        # though the independent M0 observer retained the original real result.
+        # Reopen that original association; never rerun the account or invent a
+        # terminal. Missing completion retention remains a blocking reason.
+        associations = [
+            event
+            for event in captured.events
+            if event.event_type == RESULT_EVENT and event.entity_id == allocation_id
+        ]
+        if len(associations) > 1:
+            raise ValueError("CONTROLLED_DUPLICATE_ORIGINAL_RESULT_ASSOCIATION")
+        if associations:
+            association = associations[0]
+            result = read_original_result(
+                origin=captured.origin,
+                original_account=original,
+                association_ref=LocalEventReferenceV1(
+                    association.event_id, association.event_hash
+                ),
+                provenance=provenance,
+                campaign=campaign,
+                arms=arms,
+                bindings=bindings,
+                expected_run_ids=expected_run_ids,
+                clock=lambda: observed,
+            )
+            verifier.verify_result_identity(result, manifest, binding)
+            m0 = captured.by_id.get(manifest.m0_audit_event_id)
+            if m0 is None or any(
+                row.sequence >= m0[0]
+                for row in captured.rows
+                if not (
+                    isinstance(row.record, C.CostRecordV1)
+                    and row.record.original.supersedes_receipt_id is not None
+                )
+            ):
+                raise ValueError("CONTROLLED_ORIGINAL_M0_BEFORE_CAMPAIGN_EVIDENCE")
+            verifier.reasons.add("MISSING_ORIGINAL_TERMINAL_RECORD")
     verifier.verify_observations(result, binding)
     verifier.verify_execution_inventory(result)
+    verifier.verify_protective_plans(result, binding)
+    if set(verifier.actual_executions) - set(verifier.executions):
+        raise ValueError("CONTROLLED_ACTUAL_EXECUTION_WITHOUT_ORIGINAL_AUTHORIZATION")
     for row in verifier.executions.values():
         verifier.verify_execution(row, result, binding)
+    verifier.verify_correction_completion()
     opportunities = verifier.verify_decisions(result)
     if set(captured.rows_by_id) != verifier.accounted:
         raise ValueError("CONTROLLED_UNACCOUNTED_ORIGINAL_JOURNAL_ENTRY")
@@ -1340,6 +2014,12 @@ def read_controlled_campaign(
                 execution_row is not None
                 and isinstance(execution_row.record, C.ExecutionRecordV1)
                 and execution_row.record.authorization.verdict == "approve"
+                and (
+                    verifier.extension is None
+                    or verifier.complete_execution(
+                        checkpoint.session_index + 1, strategy=True
+                    )
+                )
             )
             if decision_row.record.disposition == "SELECTED" and approved:
                 outcome, reason, family = "COMPLETED", info.reason, info.family
@@ -1356,6 +2036,16 @@ def read_controlled_campaign(
                 outcome, reason = "REFUSED", execution_row.record.authorization.reason
             else:
                 outcome, reason = "REFUSED", decision_row.record.reason
+            if (
+                decision_row.record.disposition == "SELECTED"
+                and checkpoint.session_index + 1 in verifier.protective_ready
+                and verifier.complete_execution(checkpoint.session_index + 1)
+            ):
+                outcome, reason, family = (
+                    "REFUSED",
+                    "PROTECTIVE_CORRECTION_PREEMPTED_SWITCH",
+                    None,
+                )
         # Current-book containment also applies when research failed or was
         # not attempted and the original decision retained the incumbent.
         # Those research records and costs remain in the original journal.
@@ -1377,6 +2067,15 @@ def read_controlled_campaign(
             outcome, reason, family = (
                 "UNRESOLVED",
                 "MISSING_ORIGINAL_EXECUTION_RECORD",
+                None,
+            )
+        if any(
+            checkpoint.session_index < index <= end
+            for index in verifier.incomplete_execution_indices
+        ):
+            outcome, reason, family = (
+                "UNRESOLVED",
+                "ORIGINAL_EXECUTION_COMPLETION_UNRESOLVED",
                 None,
             )
         complete_interval = (
@@ -1523,6 +2222,27 @@ def read_controlled_campaign(
                 "initial": plan.initial_decision_index,
                 "coverage": plan.coverage,
                 "clock_policy": plan.clock_policy,
+                **(
+                    {
+                        "execution_extension": {
+                            "execution_policy": verifier.extension.execution_policy,
+                            "protective_policy": verifier.extension.protective_policy,
+                        }
+                    }
+                    if verifier.extension is not None
+                    else {}
+                ),
+                **(
+                    {
+                        "common_reference_environment": (
+                            verifier.references.configuration.parse(
+                                ReferenceCampaignConfigurationV1
+                            ).environment
+                        )
+                    }
+                    if verifier.references is not None
+                    else {}
+                ),
                 "opportunities": tuple(
                     (
                         c.checkpoint_id,
@@ -1566,6 +2286,10 @@ def read_controlled_campaign(
         original_result=result,
         source_coverage=plan.coverage,
         economics=economics,
+        execution_facts=tuple(
+            verifier.execution_facts[index]
+            for index in sorted(verifier.execution_facts)
+        ),
     )
 
 

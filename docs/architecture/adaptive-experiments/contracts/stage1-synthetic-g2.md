@@ -91,19 +91,38 @@ contain independently of model confidence and approval mode.
 
 A rejected incoming proposal preserves actual incumbent quantities. It cannot
 suppress an independent current-book breach or turn unknown state into a safe
-hold. This slice does not invent automatic liquidation or a new remediation
-policy. The original evaluator computes the atomic accounting outcome exactly
-once. The observer approves that exact detached preview before it is committed;
-a close-time mandate verdict is insufficient if next-open prices change.
+hold. Without an explicitly declared execution extension, this slice retains its
+original containment behavior and supplies no automatic correction policy.
+The observer approves the original evaluator's exact detached atomic preview
+before it is committed; a close-time mandate verdict is insufficient if
+next-open prices change.
 
-The existing M2 rebalance commits all planned fills or none. The `PARTIAL` and
-`UNKNOWN` mandate fixtures verify containment of declared unresolved execution;
-they do not demonstrate staged orders with genuine partial fills and an
-unresolved remainder. The separate P05 producer acceptance vector remains
-unproved by this atomic simulator. Supporting it requires an explicit execution
-contract and original fill/reconciliation evidence, not fabricated fill rows.
+The existing M2 rebalance commits all planned fills or none. The original
+`PARTIAL` and `UNKNOWN` mandate fixtures verify containment of declared unresolved
+execution; those fixtures alone do not demonstrate actual partial fills. The
+opt-in [execution extensions](stage1-execution-extensions.md), added under #578,
+retain a complete requested plan and a separately repriced actual subset. The
+same original kernel commits verified quantities and emits their real fill
+trace rows. Partial, unknown or known-unfilled remainder keeps the invocation
+indeterminate, preserves committed costs and blocks full strategy activation.
+An extension record fixes these policies before the original invocation. With
+no extension, the existing atomic path is unchanged.
 
-The active strategy changes only after actual approved execution. Refused or
+The separate opt-in protective policy addresses an already observed individual,
+class or gross breach at the next eligible simulated open, including sessions
+without monthly research. It produces bounded, deterministic whole-share
+sell-only targets from the actual account and current evidence, with exact
+post-cost mandate checks and the original turnover limit. The evaluator
+recomputes and authorizes the preview before any actual correction. Missing
+evidence, unresolved execution, exhaustion or an infeasible correction remains
+contained. Its explicit pause permission is confined to the protective path.
+
+P05 completion requires original post-commit receipt/trace reconciliation and
+cold recovery evidence on the integrated revision. A contract definition, a
+policy flag or isolated unit tests cannot substitute for that completed proof.
+
+The active strategy changes only after complete actual approved execution. A
+protective correction does not activate a different family. Refused or
 unexecuted candidates never inherit incumbent returns as their own feedback.
 K4 consumes only completed earlier same-arm observed intervals; future, foreign,
 sealed and substituted feedback is rejected by replay.
@@ -277,6 +296,14 @@ There is no second backtester, financial ledger, source qualification system,
 provider credential or live connector. Original environment pins, locked
 packages, schema fingerprints and historical fixture hashes remain unchanged.
 
+The #578 extension adds distinct original `execution_extension`,
+`actual_execution`, `protective_detection` and `protective_plan` record kinds.
+These extend the controlled-record union; they do not silently change the old
+manifest or atomic outcome into partial-success evidence. Explicit extension
+policies enter the opted-in financial identity. The exact new domain/evaluator
+and planner/reference modules are registered for the existing inert-source
+guards; no prefix exemption or protected predicate is added or weakened.
+
 ## Verification matrix and declared limitations
 
 The executable tests cover original producer callback chronology; pre-commit
@@ -322,6 +349,23 @@ issue/PR checkpoints. A test defined here is not a claim it has passed. Full G2
 release requires completed exact-source verification and applicable independent
 producer/consumer contract acceptance. G1/G3 historical qualification and G6
 operational permission remain separate and are not granted by this document.
+
+The #578 extension adds original independently allocated B3/B4/B5 reference books
+through the same evaluator and M0 runner. Cutoff-bound common views expose only
+completed eligible reference marks and intervals, with 126 completed intervals
+required for availability. They do not transfer reference capital into B/R,
+replace original account arithmetic, or supply fitted scientific R coefficients.
+The detailed execution, recovery and reference contract is in
+[stage1-execution-extensions.md](stage1-execution-extensions.md). Its integration
+test obligations remain distinct from the original fixture matrix above.
+
+The [G3 protocol specification](../stage1-g3-protocol-v1.md) and
+[historical admission checks](../stage1-g3-freeze.md) distinguish a fixed study
+procedure from an evidence-admitted historical run. Qualified retained data,
+actual model/replay configuration, development-only R fitting, mandate
+feasibility, costs and required original review receipts are not supplied by
+successful synthetic G2 execution. No historical readiness or scored result is
+inferred from an extension's presence in the source tree.
 
 ## Owner-directed successor integration (#575)
 

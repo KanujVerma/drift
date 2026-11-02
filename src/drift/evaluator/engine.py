@@ -197,6 +197,7 @@ from drift.domain.securities import (
 )
 from drift.domain.sessions import SessionKeyV1
 from drift.domain.strategies import StrategyReference
+from drift.domain.synthetic_execution import SyntheticExecutionSelectionV1
 from drift.domain.universes import StructuralEligibilityClassification
 from drift.errors import CanonicalSerializationError, DriftError
 from drift.evaluator.bundles import (
@@ -229,11 +230,18 @@ from drift.evaluator.reconstruction import (
 )
 from drift.evaluator.session_observer import (
     ExecutionAuthorizationV1,
+    ExecutionSecurityListingV1,
     OpenSecurityPriceV1,
+    ProtectiveExecutionContextV1,
+    ProtectiveExecutionObserverV1,
+    ProtectiveTargetProposalV1,
     RebalancePreviewV1,
     SessionEvidenceObserverV1,
     SessionObservationV1,
+    SyntheticExecutionObservationV1,
+    SyntheticExecutionObserverV1,
 )
+from drift.evaluator.synthetic_execution import execute_synthetic_selection
 from drift.markets.economic_closed_world import (
     CorporateActionCoverageError,
     verify_corporate_action_coverage,
@@ -2686,9 +2694,116 @@ class SessionEvaluatorEngine:
 
     # -- phase 2: open execution ----------------------------------------------
 
+    def _protective_proposal(
+        self,
+        loop: _Loop,
+        index: int,
+        session: EvaluationSessionV1,
+        observer: ProtectiveExecutionObserverV1,
+    ) -> ProtectiveTargetProposalV1 | None:
+        required = {holding.security_id for holding in loop.state.holdings}
+        required.update(target.security_id for target in loop.staged_targets)
+        listings = resolve_execution_listings(
+            security_ids=tuple(sorted(required, key=_security_order)),
+            execution_session=session,
+            role_records=self._evidence.listing_role_records,
+            listings=self._bundle.listing_identities,
+            termination_records=self._evidence.listing_termination_records,
+            lifecycle_records=self._evidence.listing_lifecycle_records,
+            exploratory_listing_roles=self._evidence.exploratory_listing_roles,
+        )
+        prices: list[OpenSecurityPriceV1] = []
+        for security_id in sorted(required, key=_security_order):
+            if self._reconstructed_lane is None:
+                quote = self._open_price(security_id, session)
+            else:
+                record = self._reconstructed_price(
+                    security_id, session.session_key, "open"
+                )
+                quote = ListingOpenPriceV1(
+                    listing_id=record.listing_id,
+                    venue=record.venue,
+                    unadjusted_open_price=record.unadjusted_price,
+                )
+            prices.append(OpenSecurityPriceV1(security_id=security_id, quote=quote))
+        context = ProtectiveExecutionContextV1(
+            session_index=index,
+            session=session,
+            decision_session=loop.staged_decision_session,
+            before_state=loop.state,
+            staged_targets=loop.staged_targets,
+            open_prices=tuple(prices),
+            execution_listings=tuple(
+                ExecutionSecurityListingV1(
+                    security_id=security_id, listing=listings[security_id]
+                )
+                for security_id in sorted(required, key=_security_order)
+            ),
+            cost_model=self._cost_model,
+            session_clock=self._bundle.session_clock,
+            invocation_binding=loop.invocation_binding,
+        )
+        context_hash = context.financial_hash
+        returned = observer.propose_protective_targets(
+            ProtectiveExecutionContextV1.model_validate_json(canonical_json(context))
+        )
+        if returned is None:
+            return None
+        if type(returned) is not ProtectiveTargetProposalV1:
+            raise ValueError("EXACT_PROTECTIVE_TARGET_PROPOSAL_REQUIRED")
+        proposal = _revalidated(ProtectiveTargetProposalV1, returned)
+        if proposal.context_hash != context_hash:
+            raise ValueError("PROTECTIVE_TARGETS_WRONG_ORIGINAL_CONTEXT")
+        held = {
+            holding.security_id: holding.quantity for holding in loop.state.holdings
+        }
+        proposed = {
+            target.security_id: target.target_quantity for target in proposal.targets
+        }
+        if (
+            set(proposed) != set(held)
+            or any(
+                quantity > held[security_id]
+                for security_id, quantity in proposed.items()
+            )
+            or not any(
+                quantity < held[security_id]
+                for security_id, quantity in proposed.items()
+            )
+        ):
+            raise ValueError("PROTECTIVE_TARGETS_MUST_ONLY_REDUCE_EXISTING_HOLDINGS")
+        if index == 0:
+            raise IndeterminateExecutionError(
+                "PROTECTIVE_EXECUTION_REQUIRES_PRIOR_CLOSE"
+            )
+        return proposal
+
     def _open_execution(
         self, loop: _Loop, index: int, session: EvaluationSessionV1
     ) -> _Halt | None:
+        purpose: Literal["strategy", "protective"] = "strategy"
+        protective_policy_hash: str | None = None
+        observer = loop.session_observer
+        if isinstance(observer, ProtectiveExecutionObserverV1):
+            required = observer.requires_protective_execution(
+                index, EvaluationSessionV1.model_validate_json(canonical_json(session))
+            )
+            if type(required) is not bool:
+                raise ValueError("EXACT_PROTECTIVE_EXECUTION_REQUIREMENT_REQUIRED")
+            if required:
+                proposal = type(self)._protective_proposal(
+                    self, loop, index, session, observer
+                )
+                if proposal is not None:
+                    # A protective sale is the sole batch at this open. It
+                    # supersedes an incoming strategy transition, never mixes
+                    # that transition's buys into the protective correction.
+                    loop.staged_targets = proposal.targets
+                    loop.staged_decision_session = self._bundle.session_clock.sessions[
+                        index - 1
+                    ]
+                    purpose = "protective"
+                    protective_policy_hash = proposal.policy_hash
         decision_session = loop.staged_decision_session
         if decision_session is None:
             return None
@@ -2763,6 +2878,7 @@ class SessionEvaluatorEngine:
         # stale intent can never be executed twice.
         loop.staged_targets = ()
         loop.staged_decision_session = None
+        preview: RebalancePreviewV1 | None = None
         if loop.session_observer is not None:
             # Mandatory host controls see actual next-open prices, including
             # unchanged holdings. Legacy no-observer evidence requirements and
@@ -2853,8 +2969,35 @@ class SessionEvaluatorEngine:
                 f"{rejection.cash_shortfall}"
             )
             return _Halt(index, EvaluationClassification.REJECTED, reason)
+        receipt = None
+        if isinstance(observer, SyntheticExecutionObserverV1):
+            assert preview is not None
+            selected = observer.select_execution(
+                RebalancePreviewV1.model_validate_json(canonical_json(preview))
+            )
+            if type(selected) is not SyntheticExecutionSelectionV1:
+                raise ValueError("EXACT_SYNTHETIC_EXECUTION_SELECTION_REQUIRED")
+            selection = _revalidated(SyntheticExecutionSelectionV1, selected)
+            receipt = execute_synthetic_selection(
+                state=loop.state,
+                requested_plan=outcome.plan,
+                selection=selection,
+                preview_hash=preview.financial_hash,
+                open_prices=prices,
+                execution_listings=listings,
+                cost_model=self._cost_model,
+                session_clock=self._bundle.session_clock,
+                invocation_id=(
+                    loop.invocation_binding.invocation_id
+                    if loop.invocation_binding is not None
+                    else None
+                ),
+            )
+        fills = (
+            receipt.committed_fills if receipt is not None else outcome.committed_fills
+        )
         with decimal_context():
-            for position, fill in enumerate(outcome.committed_fills):
+            for position, fill in enumerate(fills):
                 loop.events.append(
                     FillTraceEventV1(
                         sequence=len(loop.events),
@@ -2866,7 +3009,38 @@ class SessionEvaluatorEngine:
                 )
                 loop.gross_traded_notional += fill.gross_notional
                 loop.committed_fill_count += 1
-        loop.state = outcome.state
+        loop.state = receipt.state if receipt is not None else outcome.state
+        if receipt is not None:
+            assert isinstance(observer, SyntheticExecutionObserverV1)
+            assert preview is not None
+            observed = SyntheticExecutionObservationV1(
+                session_index=index,
+                session=session,
+                decision_session=decision_session,
+                preview_hash=preview.financial_hash,
+                purpose=purpose,
+                protective_policy_hash=protective_policy_hash,
+                receipt=receipt,
+                invocation_binding=loop.invocation_binding,
+            )
+            try:
+                observer.observe_execution(
+                    SyntheticExecutionObservationV1.model_validate_json(
+                        canonical_json(observed)
+                    )
+                )
+            except Exception as error:
+                # The real book and original fill trace have already advanced.
+                # A storage failure cannot erase those fills or authorize retry.
+                raise IndeterminateExecutionError(
+                    "SYNTHETIC_EXECUTION_RECEIPT_RETENTION_FAILED"
+                ) from error
+            if not receipt.complete:
+                raise IndeterminateExecutionError(
+                    "SYNTHETIC_EXECUTION_UNRESOLVED"
+                    if receipt.unresolved_order_count
+                    else "SYNTHETIC_EXECUTION_KNOWN_UNFILLED"
+                )
         return None
 
     def _open_price(

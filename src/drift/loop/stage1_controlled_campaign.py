@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from fractions import Fraction
+from itertools import pairwise
 from typing import Literal, cast
 from uuid import UUID, uuid7
 
@@ -37,6 +38,7 @@ from drift.baselines.runner import (
 from drift.domain.common import ImmutableJSONValue
 from drift.domain.evaluator_bundles import strategy_parameters_hash
 from drift.domain.evaluator_clock import EvaluationSessionV1
+from drift.domain.evaluator_execution import IndeterminateExecutionError
 from drift.domain.evaluator_exploratory_strategy import (
     ExploratoryStrategyDecisionContextV1,
 )
@@ -55,6 +57,11 @@ from drift.domain.evaluator_strategy import (
 )
 from drift.domain.observation_query import drift_source_inventory_hash
 from drift.domain.strategies import StrategyReference
+from drift.domain.synthetic_execution import (
+    ProtectiveCorrectionPolicyV1,
+    SyntheticExecutionPolicyV1,
+    SyntheticExecutionSelectionV1,
+)
 from drift.evaluator.engine import SessionEvaluatorEngine
 from drift.evaluator.experiment_runner import (
     ExperimentRunnerContext,
@@ -62,9 +69,13 @@ from drift.evaluator.experiment_runner import (
 )
 from drift.evaluator.session_observer import (
     ExecutionAuthorizationV1,
+    ProtectiveExecutionContextV1,
+    ProtectiveTargetProposalV1,
     RebalancePreviewV1,
     SessionObservationV1,
+    SyntheticExecutionObservationV1,
 )
+from drift.evaluator.synthetic_execution import select_synthetic_execution
 from drift.experiments.stage1_campaign_config import (
     ArmSpecV1,
     CampaignSpecV1,
@@ -115,6 +126,16 @@ from drift.loop.stage1_controlled_journal import (
 from drift.loop.stage1_original_result_association import (
     Stage1OriginalResultAssociationV1,
 )
+from drift.loop.stage1_protective_correction import (
+    ProtectiveCorrectionPlanV1,
+    plan_protective_correction,
+)
+from drift.loop.stage1_reference_accounts import (
+    CommonReferenceViewV1,
+    ReferenceAccountsReceiptV1,
+    ReferenceCampaignConfigurationV1,
+    read_reference_accounts,
+)
 from drift.loop.stage1_synthetic_account_lifecycle import (
     Stage1SyntheticAccountLifecycleV1,
 )
@@ -154,14 +175,39 @@ def parse_context(kind: str, payload: C.RetainedCanonicalPayload) -> DecisionCon
     raise ValueError("CONTROLLED_UNKNOWN_CONTEXT_KIND")
 
 
-def financial_parameters(plan: C.ControlledCampaignPlanV1) -> ImmutableJSONValue:
+def financial_parameters(
+    plan: C.ControlledCampaignPlanV1,
+    extension: C.ExecutionExtensionRecordV1 | None = None,
+    references: C.ReferenceAccountsRecordV1 | None = None,
+) -> ImmutableJSONValue:
     """Installed study identity, excluding original operational IDs and clocks."""
+    reference_environment = (
+        references.configuration.parse(ReferenceCampaignConfigurationV1).environment
+        if references is not None
+        else None
+    )
     return cast(
         ImmutableJSONValue,
         json.loads(
             canonical_json(
                 {
                     "profile": C.PROFILE,
+                    **(
+                        {"common_reference_environment": reference_environment}
+                        if references is not None
+                        else {}
+                    ),
+                    **(
+                        {
+                            "execution_extension": {
+                                "version": "1",
+                                "execution_policy": extension.execution_policy,
+                                "protective_policy": extension.protective_policy,
+                            }
+                        }
+                        if extension is not None
+                        else {}
+                    ),
                     "initial_family": "B3",
                     "initial_decision_index": plan.initial_decision_index,
                     "coverage": plan.coverage,
@@ -183,12 +229,16 @@ def financial_parameters(plan: C.ControlledCampaignPlanV1) -> ImmutableJSONValue
     )
 
 
-def controlled_strategy_reference() -> StrategyReference:
+def controlled_strategy_reference(*, extended: bool = False) -> StrategyReference:
     return make_baseline_reference(
         "stage1_controlled_installed_menu",
-        version="1",
+        version="2" if extended else "1",
         custom_hash=content_hash(
-            {"profile": C.PROFILE, "families": ("B3", "B4", "B5")}
+            {
+                "profile": C.PROFILE,
+                "families": ("B3", "B4", "B5"),
+                **({"execution_extension": "1"} if extended else {}),
+            }
         ),
     )
 
@@ -209,6 +259,8 @@ def installed_intent(
     family: C.Family,
     context: DecisionContext,
     sessions: tuple[EvaluationSessionV1, ...] = (),
+    *,
+    calendar_bound: bool = False,
 ) -> StrategyDecisionIntentV1:
     """Require nonvacuous original history before calling an unchanged baseline."""
     securities = get_admitted_securities(context)
@@ -236,6 +288,17 @@ def installed_intent(
         if any(C.finite_fraction(item.close_price) <= 0 for item in selected):
             raise ValueError("CONTROLLED_FAMILY_PRICE_INVALID")
     strategy = installed(family)
+    if calendar_bound and family == "B3":
+        if not sessions:
+            raise ValueError("CONTROLLED_CALENDAR_BOUND_FAMILY_REQUIRES_CLOCK")
+        strategy = B3MonthlyEqualWeightRebalanceStrategy(
+            rebalance_dates=tuple(
+                left.session_key.local_date
+                for left, right in pairwise(sessions)
+                if left.session_key.local_date.month
+                != right.session_key.local_date.month
+            )
+        )
     with decimal_context():
         intent = (
             strategy.decide(context)
@@ -390,13 +453,15 @@ def choice_for_family(
     family: C.Family,
     context: DecisionContext,
     sessions: tuple[EvaluationSessionV1, ...],
+    *,
+    calendar_bound: bool = False,
 ) -> RawChoice:
     """Finite display weights of actual installed quantities; never new targets.
 
     Floor only the *display* at 18 decimal places, with exact residual cash.
     Actual whole-share intent is retained, replayed and executed unchanged.
     """
-    intent = installed_intent(family, context, sessions)
+    intent = installed_intent(family, context, sessions, calendar_bound=calendar_bound)
     prices = close_prices(context)
     nav = C.finite_fraction(context.portfolio_nav)
     if nav <= 0:
@@ -457,6 +522,7 @@ def make_research_context(
     learning: LearningSnapshot,
     available_at: datetime,
     incumbent: C.Family,
+    common_references: CommonReferenceViewV1 | None = None,
 ) -> ResearchContext:
     payload = plan.context_template.model_dump(mode="python")
     payload.update(
@@ -535,6 +601,26 @@ def make_research_context(
             "feed_state_ref": None,
         }
     )
+    if common_references is not None:
+        if common_references.decision_cutoff != checkpoint.decision_cutoff:
+            raise ValueError("CONTROLLED_REFERENCE_CUTOFF_MISMATCH")
+        payload["inputs"] += (
+            {
+                "input_ref": {
+                    "id": "synthetic:common-original-reference-accounts",
+                    "version": common_references.profile,
+                    "sha256": content_hash(common_references),
+                },
+                "role": "causal_completed_b3_b4_b5_reference_accounts",
+                "transformation_ref": None,
+                "available_at": checkpoint.decision_cutoff,
+                "availability_basis_ref": {
+                    "id": "synthetic:original-reference-close-cutoff",
+                    "version": common_references.profile,
+                    "sha256": content_hash(common_references),
+                },
+            },
+        )
     payload["record_hash"] = compute_record_hash(payload)
     return C.detached(ResearchContext, ResearchContext.model_validate(payload))
 
@@ -576,9 +662,11 @@ class ControlledCampaignExecutionV1:
     m0_run_id: UUID
     m0_audit_event_id: UUID
     m0_status: str
+    retention_error: str | None = None
 
 
 class _ControlledStrategy:
+    calendar_bound = False
     """One installed host controls one prepared account, never a fresh retry."""
 
     def __init__(
@@ -683,6 +771,11 @@ class _ControlledStrategy:
     ) -> StrategyDecisionIntentV1:
         return self._decide(context)
 
+    def common_reference_view(
+        self, checkpoint: C.ControlledCheckpointV1, available_at: datetime
+    ) -> CommonReferenceViewV1 | None:
+        return None
+
     def _research(
         self, checkpoint: C.ControlledCheckpointV1, context: DecisionContext
     ) -> tuple[C.Family | None, ResearchCandidate | None, str]:
@@ -730,7 +823,14 @@ class _ControlledStrategy:
         self.previous_trial = None
         at = observed_time(self.writer.clock)
         research_context = make_research_context(
-            self.plan, checkpoint, context, observation, learning, at, self.active
+            self.plan,
+            checkpoint,
+            context,
+            observation,
+            learning,
+            at,
+            self.active,
+            self.common_reference_view(checkpoint, at),
         )
         witness = self.writer.append(
             C.InputWitnessRecordV1(
@@ -794,13 +894,21 @@ class _ControlledStrategy:
             fixture = checkpoint.fixture
             if fixture.mode == "conventional_fixture":
                 pool = tuple(
-                    choice_for_family(family, context, self.plan.sessions)
+                    choice_for_family(
+                        family,
+                        context,
+                        self.plan.sessions,
+                        calendar_bound=self.calendar_bound,
+                    )
                     for family in fixture.candidate_families
                 )
             elif fixture.disposition == "propose":
                 assert fixture.selected_family is not None
                 scripted = choice_for_family(
-                    fixture.selected_family, context, self.plan.sessions
+                    fixture.selected_family,
+                    context,
+                    self.plan.sessions,
+                    calendar_bound=self.calendar_bound,
                 )
             else:
                 scripted = RawChoice(
@@ -940,7 +1048,9 @@ class _ControlledStrategy:
                 "RESEARCH_" + selected_candidate.disposition.upper(),
             )
         family = cast(C.Family, selected_candidate.strategy.family_id)
-        expected = choice_for_family(family, context, self.plan.sessions)
+        expected = choice_for_family(
+            family, context, self.plan.sessions, calendar_bound=self.calendar_bound
+        )
         if (
             selected_candidate.targets != expected.targets
             or selected_candidate.cash_weight != expected.cash_weight
@@ -986,7 +1096,12 @@ class _ControlledStrategy:
             reason = "DECLARED_PREPARATION_CASH_NO_RESEARCH"
         else:
             try:
-                intent = installed_intent(proposed, context, self.plan.sessions)
+                intent = installed_intent(
+                    proposed,
+                    context,
+                    self.plan.sessions,
+                    calendar_bound=self.calendar_bound,
+                )
                 refusal = decision_mandate_reason(
                     self.plan.mandate, context, observation.state, intent
                 )
@@ -1025,6 +1140,277 @@ class _ControlledStrategy:
         return C.detached(StrategyDecisionIntentV1, intent)
 
 
+def protective_plan_from_context(
+    plan: C.ControlledCampaignPlanV1,
+    policy: ProtectiveCorrectionPolicyV1,
+    context: ProtectiveExecutionContextV1,
+) -> ProtectiveCorrectionPlanV1:
+    """Use the same pure original-book preview during execution and cold read."""
+    return plan_protective_correction(
+        policy=policy,
+        mandate=plan.mandate,
+        state=context.before_state,
+        execution_session=context.session,
+        open_prices={item.security_id: item.quote for item in context.open_prices},
+        execution_listings={
+            item.security_id: item.listing for item in context.execution_listings
+        },
+        cost_model=context.cost_model,
+        session_clock=context.session_clock,
+    )
+
+
+def authorize_protective_preview(
+    *,
+    policy: ProtectiveCorrectionPolicyV1,
+    context: ProtectiveExecutionContextV1,
+    correction: ProtectiveCorrectionPlanV1,
+    preview: RebalancePreviewV1,
+) -> ExecutionAuthorizationV1:
+    """Only the exact fully compliant sell-only original preview may proceed."""
+    required_prices = {item.security_id for item in preview.before_state.holdings}
+    required_prices.update(item.security_id for item in correction.targets)
+    if (
+        not policy.enabled
+        or correction.status != "READY"
+        or correction.policy_hash != policy.policy_hash
+        or correction.state_hash != content_hash(preview.before_state)
+        or correction.outcome != preview.outcome
+        or context.before_state != preview.before_state
+        or context.session != preview.session
+        or context.session_index != preview.session_index
+        or context.decision_session != preview.decision_session
+        or context.invocation_binding != preview.invocation_binding
+        or tuple(
+            item for item in context.open_prices if item.security_id in required_prices
+        )
+        != preview.open_prices
+    ):
+        raise ValueError("CONTROLLED_PROTECTIVE_PREVIEW_MISMATCH")
+    return ExecutionAuthorizationV1(
+        preview_hash=preview.financial_hash,
+        policy_hash=policy.policy_hash,
+        verdict="approve",
+        reason="VERIFIED_TARGETED_PROTECTIVE_CORRECTION",
+    )
+
+
+class _ExtendedControlledStrategy(_ControlledStrategy):
+    """Opt-in execution contracts; legacy observers acquire no new hooks."""
+
+    calendar_bound = True
+
+    def __init__(
+        self,
+        plan: C.ControlledCampaignPlanV1,
+        writer: ControlledJournalWriterV1,
+        extension: C.ExecutionExtensionRecordV1,
+        references: C.ReferenceAccountsRecordV1 | None = None,
+        reference_accounts_ref: C.OriginalReferenceV1 | None = None,
+    ) -> None:
+        super().__init__(plan, writer)
+        self.extension = C.detached(C.ExecutionExtensionRecordV1, extension)
+        self.references = references
+        self.reference_accounts_ref = reference_accounts_ref
+        self.execution_ref: C.OriginalReferenceV1 | None = None
+        self.protective: (
+            tuple[ProtectiveExecutionContextV1, ProtectiveCorrectionPlanV1] | None
+        ) = None
+
+    @property
+    def strategy_reference(self) -> StrategyReference:
+        return controlled_strategy_reference(extended=True)
+
+    @property
+    def strategy_parameters(self) -> ImmutableJSONValue:
+        return financial_parameters(self.plan, self.extension, self.references)
+
+    def common_reference_view(
+        self, checkpoint: C.ControlledCheckpointV1, available_at: datetime
+    ) -> CommonReferenceViewV1 | None:
+        if self.references is None:
+            return None
+        assert self.reference_accounts_ref is not None
+        view = read_reference_accounts(
+            origin=self.writer.origin,
+            configuration=self.references.configuration.parse(
+                ReferenceCampaignConfigurationV1
+            ),
+            receipt=self.references.receipt.parse(ReferenceAccountsReceiptV1),
+            decision_cutoff=checkpoint.decision_cutoff,
+            clock=lambda: available_at,
+        )
+        self.writer.append(
+            C.ReferenceViewRecordV1(
+                checkpoint_id=checkpoint.checkpoint_id,
+                accounts=self.reference_accounts_ref,
+                view=C.retain_canonical_payload(view),
+                original_available_at=available_at,
+            ),
+            key="reference-view:" + checkpoint.checkpoint_id,
+            at=available_at,
+        )
+        return view
+
+    def observe_session(self, observation: SessionObservationV1) -> None:
+        reason = current_book_reason(self.plan.mandate, observation.state)
+        policy = self.extension.protective_policy
+        if (
+            reason not in ("SECURITY_CAP", "CLASS_CAP", "GROSS_CAP")
+            or policy is None
+            or not policy.enabled
+        ):
+            super().observe_session(observation)
+            return
+        observation = C.detached(SessionObservationV1, observation)
+        index = observation.session_index
+        if observation.session != self.plan.sessions[index]:
+            raise ValueError("CONTROLLED_WRONG_OBSERVED_SESSION")
+        self.observation = observation
+        self.observation_ref = reference(
+            self.writer.append(
+                C.ObservationRecordV1(observation=observation),
+                key=f"observation:{index}",
+            )
+        )
+        self.writer.append(
+            C.ProtectiveDetectionRecordV1(
+                observation=self.observation_ref, reason=reason
+            ),
+            key=f"protective-detection:{index}",
+        )
+
+    def requires_protective_execution(
+        self, session_index: int, session: EvaluationSessionV1
+    ) -> bool:
+        if self.plan.sessions[session_index] != session:
+            raise ValueError("CONTROLLED_WRONG_PROTECTIVE_SESSION")
+        self.protective = None
+        policy = self.extension.protective_policy
+        return bool(
+            policy is not None
+            and policy.enabled
+            and self.observation is not None
+            and self.observation.state.holdings
+        )
+
+    def propose_protective_targets(
+        self, context: ProtectiveExecutionContextV1
+    ) -> ProtectiveTargetProposalV1 | None:
+        context = C.detached(ProtectiveExecutionContextV1, context)
+        policy = self.extension.protective_policy
+        if policy is None or not policy.enabled:
+            raise ValueError("CONTROLLED_UNDECLARED_PROTECTIVE_REQUEST")
+        correction = protective_plan_from_context(self.plan, policy, context)
+        self.writer.append(
+            C.ProtectivePlanRecordV1(
+                session_index=context.session_index,
+                context=C.retain_canonical_payload(context),
+                plan=C.retain_canonical_payload(correction),
+            ),
+            key=f"protective-plan:{context.session_index}",
+        )
+        if correction.status == "NOT_REQUIRED":
+            return None
+        if correction.status != "READY":
+            raise IndeterminateExecutionError(correction.reason)
+        self.protective = context, correction
+        return ProtectiveTargetProposalV1(
+            context_hash=context.financial_hash,
+            policy_hash=policy.policy_hash,
+            targets=correction.targets,
+            reason=correction.reason,
+        )
+
+    def authorize_rebalance(
+        self, preview: RebalancePreviewV1
+    ) -> ExecutionAuthorizationV1:
+        if self.last_decision is None or self.last_decision_ref is None:
+            raise ValueError("CONTROLLED_EXECUTION_WITHOUT_ORIGINAL_DECISION")
+        if (
+            preview.decision_session
+            != self.plan.sessions[self.last_decision.session_index]
+        ):
+            raise ValueError("CONTROLLED_EXECUTION_WRONG_DECISION_SESSION")
+        execution_at = observed_time(self.writer.clock)
+        if self.protective is not None:
+            policy = self.extension.protective_policy
+            assert policy is not None
+            context, correction = self.protective
+            authorization = authorize_protective_preview(
+                policy=policy, context=context, correction=correction, preview=preview
+            )
+        else:
+            checkpoint = self.checkpoints.get(self.last_decision.session_index)
+            selected = (
+                checkpoint is not None and self.last_decision.disposition == "SELECTED"
+            )
+            authorization = authorize_preview(
+                self.plan.mandate,
+                preview,
+                execution_at=execution_at,
+                proposal_deadline=checkpoint.expires_at
+                if checkpoint and selected
+                else None,
+                revoked_at=checkpoint.revoked_at if checkpoint and selected else None,
+            )
+        self.execution_ref = reference(
+            self.writer.append(
+                C.ExecutionRecordV1(
+                    preview=C.retain_canonical_payload(preview),
+                    authorization=authorization,
+                    decision=self.last_decision_ref,
+                ),
+                key=f"execution:{preview.session_index}",
+                at=execution_at,
+            )
+        )
+        return authorization
+
+    def select_execution(
+        self, preview: RebalancePreviewV1
+    ) -> SyntheticExecutionSelectionV1:
+        return select_synthetic_execution(
+            policy=self.extension.execution_policy,
+            session_index=preview.session_index,
+            preview_hash=preview.financial_hash,
+            plan=preview.outcome.plan,
+            invocation_id=(
+                preview.invocation_binding.invocation_id
+                if preview.invocation_binding is not None
+                else None
+            ),
+        )
+
+    def observe_execution(self, observation: SyntheticExecutionObservationV1) -> None:
+        observation = C.detached(SyntheticExecutionObservationV1, observation)
+        if self.execution_ref is None:
+            raise ValueError("CONTROLLED_ACTUAL_WITHOUT_AUTHORIZATION")
+        self.writer.append(
+            C.ActualExecutionRecordV1(
+                authorization=self.execution_ref, observation=observation
+            ),
+            key=f"actual-execution:{observation.session_index}",
+        )
+        # Authorization and a preview never activate the incoming family.
+        if observation.purpose != "strategy" or not observation.receipt.complete:
+            return
+        assert self.last_decision is not None
+        self.active = self.last_decision.staged_family
+        checkpoint = self.checkpoints.get(self.last_decision.session_index)
+        if (
+            checkpoint is not None
+            and self.last_decision.disposition == "SELECTED"
+            and self.pending_candidate is not None
+        ):
+            assert self.observation is not None
+            self.previous_trial = (
+                checkpoint,
+                self.pending_candidate,
+                self.observation.state.net_asset_value,
+            )
+
+
 @_with_reconstruction_validation_reuse
 def execute_controlled_campaign(
     *,
@@ -1043,8 +1429,22 @@ def execute_controlled_campaign(
     initial_decision_index: int,
     coverage: Literal["DEVELOPMENT", "STAGE1_253_126_MONTHLY"],
     clock_policy: ArtifactReference,
+    execution_policy: SyntheticExecutionPolicyV1 | None = None,
+    protective_policy: ProtectiveCorrectionPolicyV1 | None = None,
+    reference_configuration: ReferenceCampaignConfigurationV1 | None = None,
+    reference_receipt: ReferenceAccountsReceiptV1 | None = None,
 ) -> ControlledCampaignExecutionV1:
     """Consume one prepared account exactly once; repeated checkpoints carry it."""
+    if execution_policy is not None:
+        execution_policy = C.detached(SyntheticExecutionPolicyV1, execution_policy)
+    if protective_policy is not None:
+        protective_policy = C.detached(ProtectiveCorrectionPolicyV1, protective_policy)
+    if reference_configuration is not None:
+        reference_configuration = C.detached(
+            ReferenceCampaignConfigurationV1, reference_configuration
+        )
+    if reference_receipt is not None:
+        reference_receipt = C.detached(ReferenceAccountsReceiptV1, reference_receipt)
     if campaign.campaign_type != "SYNTHETIC_TEST":
         raise ValueError("CONTROLLED_SYNTHETIC_CAMPAIGN_ONLY")
     verify_stage1_trial_provenance_snapshot(
@@ -1111,6 +1511,47 @@ def execute_controlled_campaign(
         raise ValueError("CONTROLLED_FAMILIES_NOT_ALLOWED_BY_MANIFEST")
     if initial_decision_index < engine.protocol.warmup_session_count - 1:
         raise ValueError("CONTROLLED_INITIAL_BEFORE_ENGINE_WARMUP")
+    extension = None
+    if (
+        execution_policy is not None
+        or protective_policy is not None
+        or reference_configuration is not None
+    ):
+        if execution_policy is None:
+            raise ValueError("CONTROLLED_EXTENSION_REQUIRES_EXPLICIT_EXECUTION_POLICY")
+        if any(
+            item.session_index >= len(plan.sessions)
+            for item in execution_policy.sessions
+        ):
+            raise ValueError("CONTROLLED_EXECUTION_POLICY_UNDECLARED_SESSION")
+        extension = C.ExecutionExtensionRecordV1(
+            execution_policy=execution_policy,
+            protective_policy=protective_policy,
+            input_bundle=C.retain_canonical_payload(engine.bundle),
+            cost_model=engine.cost_model,
+        )
+    if (reference_configuration is None) != (reference_receipt is None):
+        raise ValueError("CONTROLLED_REFERENCE_CONFIGURATION_AND_RECEIPT_REQUIRED")
+    references = None
+    if reference_configuration is not None:
+        assert reference_receipt is not None
+        env = reference_configuration.environment
+        if (
+            env.input_bundle_hash != plan.input_bundle_hash
+            or env.admission_hash != plan.admission_hash
+            or env.cost_model_hash != plan.cost_model_hash
+            or env.evaluator_evidence_hash != plan.evaluator_evidence_hash
+            or env.source_inventory_hash != plan.source_inventory_hash
+            or env.sessions != plan.sessions
+            or env.securities != plan.securities
+            or reference_receipt.configuration_hash
+            != content_hash(reference_configuration)
+        ):
+            raise ValueError("CONTROLLED_REFERENCE_ENVIRONMENT_MISMATCH")
+        references = C.ReferenceAccountsRecordV1(
+            configuration=C.retain_canonical_payload(reference_configuration),
+            receipt=C.retain_canonical_payload(reference_receipt),
+        )
     writer = ControlledJournalWriterV1(origin=origin, plan=plan, clock=clock)
     run_id, audit_id = uuid7(), uuid7()
     witness_at = observed_time(clock)
@@ -1127,7 +1568,20 @@ def execute_controlled_campaign(
         key="manifest",
         at=witness_at,
     )
-    strategy = _ControlledStrategy(plan, writer)
+    if extension is not None:
+        writer.append(extension, key="execution-extension")
+    reference_accounts_ref = (
+        reference(writer.append(references, key="reference-accounts"))
+        if references is not None
+        else None
+    )
+    strategy: _ControlledStrategy = (
+        _ExtendedControlledStrategy(
+            plan, writer, extension, references, reference_accounts_ref
+        )
+        if extension is not None
+        else _ControlledStrategy(plan, writer)
+    )
     identity = build_canonical_run_identity(
         strategy_hash=strategy.strategy_reference.code_hash,
         strategy_parameters_hash=strategy_parameters_hash(strategy.strategy_parameters),
@@ -1171,26 +1625,34 @@ def execute_controlled_campaign(
         ),
     )
     terminal = None
+    retention_error = None
     if run.status.value != "failed":
         result = observer.readback()
-        terminal = reference(
-            writer.append(
-                C.TerminalRecordV1(
-                    m0_run_id=run_id,
-                    m0_audit_event_id=audit_id,
-                    m0_status="completed",
-                    result_association=C.OriginalReferenceV1(
-                        event_id=result.association_ref.event_id,
-                        event_hash=result.association_ref.event_hash,
+        try:
+            terminal = reference(
+                writer.append(
+                    C.TerminalRecordV1(
+                        m0_run_id=run_id,
+                        m0_audit_event_id=audit_id,
+                        m0_status="completed",
+                        result_association=C.OriginalReferenceV1(
+                            event_id=result.association_ref.event_id,
+                            event_hash=result.association_ref.event_hash,
+                        ),
+                        classification=cast(
+                            Literal["complete", "rejected", "indeterminate"],
+                            result.classification,
+                        ),
                     ),
-                    classification=cast(
-                        Literal["complete", "rejected", "indeterminate"],
-                        result.classification,
-                    ),
-                ),
-                key="terminal",
+                    key="terminal",
+                )
             )
-        )
+        except Exception as error:
+            if extension is None:
+                raise
+            # Original M0/RESULT may exist even when this journal lost its
+            # acknowledgment. Never retry; cold readback resolves the prefix.
+            retention_error = type(error).__name__ + ":" + str(error)
     # A failed/uncertain invocation is intentionally not relabelled complete.
     # Its original M0 failure remains readable, and no account can be retried.
     return ControlledCampaignExecutionV1(
@@ -1200,4 +1662,5 @@ def execute_controlled_campaign(
         run_id,
         audit_id,
         run.status.value,
+        retention_error,
     )
