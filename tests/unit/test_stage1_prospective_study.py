@@ -78,9 +78,10 @@ def make_producer_verifier(
     artifact_store: dict[str, Any],
     trust_roots: set[str] | None = None,
 ) -> ProductionProspectiveProducerVerifier:
+    auth_hashes = set(artifact_store.keys()) or {"placeholder_auth_hash"}
     return ProductionProspectiveProducerVerifier(
         trust_roots=trust_roots or {"drift.stage1.trusted_authority", "trusted-root"},
-        authenticated_artifact_hashes=set(artifact_store.keys()),
+        authenticated_artifact_hashes=auth_hashes,
     )
 
 
@@ -726,4 +727,29 @@ def test_prospective_step_enforces_trading_calendar_and_evidence() -> None:
             session_evidence=ev_wrong_idx,
             artifact_store=store_wrong_idx,
             producer_verifier=make_producer_verifier(store_wrong_idx),
+        )
+
+
+def test_producer_verifier_rejects_empty_authentication_mechanisms() -> None:
+    """Verifies that ProductionProspectiveProducerVerifier requires an active
+    mechanism.
+    """
+    # Empty trust roots
+    with pytest.raises(ValueError, match="TRUST_ROOTS_REQUIRED"):
+        ProductionProspectiveProducerVerifier(trust_roots=set())
+
+    # Empty authentication mechanisms (Sol's Round 13 reproduction)
+    with pytest.raises(ValueError, match="PRODUCER_AUTHENTICATION_MECHANISM_REQUIRED"):
+        ProductionProspectiveProducerVerifier(trust_roots={"trusted"})
+
+    # Empty authenticated artifact hashes set
+    with pytest.raises(ValueError, match="PRODUCER_AUTHENTICATION_MECHANISM_REQUIRED"):
+        ProductionProspectiveProducerVerifier(
+            trust_roots={"trusted"}, authenticated_artifact_hashes=set()
+        )
+
+    # Empty authenticated producers mapping
+    with pytest.raises(ValueError, match="PRODUCER_AUTHENTICATION_MECHANISM_REQUIRED"):
+        ProductionProspectiveProducerVerifier(
+            trust_roots={"trusted"}, authenticated_producers={}
         )

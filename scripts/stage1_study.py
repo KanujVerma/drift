@@ -605,15 +605,12 @@ def action_prospective_step(args: argparse.Namespace) -> int:
             auth_hashes = host_config.get("authentic_artifacts")
             auth_prods = host_config.get("authenticated_producers")
             if auth_hashes is None and auth_prods is None:
-                if "artifact_store" in host_config and host_config["artifact_store"]:
-                    auth_hashes = list(host_config["artifact_store"].keys())
-                else:
-                    sys.stderr.write(
-                        "Prospective step requires host_config to configure "
-                        "authentic_artifacts or authenticated_producers for "
-                        "producer verification\n"
-                    )
-                    return 3
+                sys.stderr.write(
+                    "Prospective step requires host_config to configure separate "
+                    "authentication evidence (authentic_artifacts or "
+                    "authenticated_producers)\n"
+                )
+                return 3
             prod_verifier = ProductionProspectiveProducerVerifier(
                 trust_roots=trust_roots,
                 authenticated_artifact_hashes=(

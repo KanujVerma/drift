@@ -407,14 +407,38 @@ class ProductionProspectiveProducerVerifier:
         artifact_authenticator: Callable[[dict[str, Any]], bool] | None = None,
         authenticated_artifact_hashes: set[str] | None = None,
     ) -> None:
+        if not trust_roots:
+            raise ValueError("TRUST_ROOTS_REQUIRED: trust_roots must not be empty")
+
         self._trust_roots = set(trust_roots)
-        self._authenticated_producers = dict(authenticated_producers or {})
+        self._authenticated_producers = (
+            dict(authenticated_producers) if authenticated_producers else None
+        )
         self._artifact_authenticator = artifact_authenticator
         self._authenticated_hashes = (
             set(authenticated_artifact_hashes)
             if authenticated_artifact_hashes is not None
             else None
         )
+
+        has_mechanism = (
+            self._artifact_authenticator is not None
+            or (
+                self._authenticated_hashes is not None
+                and len(self._authenticated_hashes) > 0
+            )
+            or (
+                self._authenticated_producers is not None
+                and len(self._authenticated_producers) > 0
+            )
+        )
+        if not has_mechanism:
+            raise ValueError(
+                "PRODUCER_AUTHENTICATION_MECHANISM_REQUIRED: verifier must be "
+                "configured with at least one effective authentication mechanism "
+                "(artifact_authenticator, authenticated_artifact_hashes, or "
+                "authenticated_producers)"
+            )
 
     def verify_artifact(
         self,
@@ -457,11 +481,15 @@ class ProductionProspectiveProducerVerifier:
         if bound_date != expected_session_date:
             return False
 
-        # Independent producer authentication
+        # Independent producer authentication: must explicitly authenticate
+        # through at least one active configured mechanism
+        authenticated = False
+
         if self._artifact_authenticator is not None:
             try:
                 if not self._artifact_authenticator(art_obj):
                     return False
+                authenticated = True
             except Exception:
                 return False
 
@@ -469,8 +497,9 @@ class ProductionProspectiveProducerVerifier:
             h = content_hash(art_obj)
             if h not in self._authenticated_hashes:
                 return False
+            authenticated = True
 
-        if self._authenticated_producers:
+        if self._authenticated_producers is not None:
             prod_info = self._authenticated_producers.get(auth)
             if not prod_info:
                 return False
@@ -478,8 +507,9 @@ class ProductionProspectiveProducerVerifier:
                 token = art_obj.get("producer_token") or art_obj.get("signature")
                 if not token or token not in prod_info["tokens"]:
                     return False
+            authenticated = True
 
-        return True
+        return authenticated
 
 
 def advance_prospective_session(

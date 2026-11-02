@@ -251,6 +251,228 @@ def test_cli_prospective_register_and_step(repo_root: Path, tmp_path: Path) -> N
     assert step_data["last_observed_session"] == "2026-11-03"
 
 
+def test_cli_prospective_step_adversarial_authentication_enforcement(
+    repo_root: Path, tmp_path: Path
+) -> None:
+    from datetime import UTC, date, datetime
+
+    from drift.experiments.stage1_prospective_study import (
+        create_prospective_study_plan,
+    )
+    from drift.experiments.stage1_study_freeze import REQUIRED_ROLES
+    from drift.serialization.canonical import content_hash
+
+    script = repo_root / "scripts" / "stage1_study.py"
+    plan_file = tmp_path / "plan.json"
+    host_config_file = tmp_path / "host.json"
+    private_root = tmp_path / "private"
+    private_root.mkdir(parents=True, exist_ok=True)
+
+    now = datetime.now(UTC)
+    h = "8" * 64
+    plan = create_prospective_study_plan(
+        plan_id="PROSP-CLI-ADV-01",
+        created_at=now,
+        calendar_identity="XNYS-2026-2027",
+        first_eligible_session=date(2026, 11, 3),
+        planned_last_session=date(2028, 11, 3),
+        operating_environment_hash=h,
+        model_binding_hash=h,
+        market_admission_hash=h,
+        mandate_hash=h,
+        cost_policy_hash=h,
+    )
+    plan_file.write_text(plan.model_dump_json(), encoding="utf-8")
+
+    receipts_store = {}
+    evidence = []
+    trust_roots = {}
+    for role in REQUIRED_ROLES:
+        payload = {
+            "role": role,
+            "receipt_id": f"RCPT-ADV-{role}",
+            "protocol_hash": plan.plan_hash,
+            "authority_id": "trusted-root",
+            "status": "ACCEPTED",
+        }
+        r_hash = content_hash(payload)
+        receipts_store[f"RCPT-ADV-{role}"] = payload
+        evidence.append(
+            {
+                "role": role,
+                "receipt_id": f"RCPT-ADV-{role}",
+                "receipt_hash": r_hash,
+                "protocol_hash": plan.plan_hash,
+                "accepted_at": now.isoformat(),
+            }
+        )
+        trust_roots[role] = ["trusted-root"]
+
+    host_config = {
+        "trust_roots": trust_roots,
+        "receipt_store": receipts_store,
+        "evidence": evidence,
+        "has_broker": False,
+    }
+    host_config_file.write_text(json.dumps(host_config), encoding="utf-8")
+
+    # 1. Register prospective study
+    reg_proc = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "prospective-register",
+            "--plan",
+            str(plan_file),
+            "--host-config",
+            str(host_config_file),
+            "--private-root",
+            str(private_root),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert reg_proc.returncode == 0
+    reg_file = private_root / f"REG-{plan.plan_id}.json"
+    reg_data = json.loads(reg_file.read_text(encoding="utf-8"))
+
+    # Prepare store artifacts
+    art_store: dict[str, Any] = {}
+    art_hashes: dict[str, str] = {}
+    for art_name in ("portfolio_state", "decision", "fills"):
+        art_body = {
+            "schema_version": "drift-stage1-prospective-artifact/1",
+            "artifact_role": art_name,
+            "registration_id": f"REG-{plan.plan_id}",
+            "freeze_hash": reg_data["frozen_study"]["freeze_hash"],
+            "session_index": 0,
+            "session_date": "2026-11-03",
+            "authority_id": "trusted-root",
+            "execution_payload": {"status": "OK", "step": 0},
+        }
+        ah = content_hash(art_body)
+        art_store[ah] = art_body
+        art_hashes[art_name] = ah
+
+    ev_body = {
+        "schema_version": "drift-stage1-prospective-session-evidence/1",
+        "registration_id": f"REG-{plan.plan_id}",
+        "freeze_hash": reg_data["frozen_study"]["freeze_hash"],
+        "session_index": 0,
+        "session_date": "2026-11-03",
+        "status": "COMPLETED",
+        "evidence_artifacts": art_hashes,
+    }
+    ev_file = private_root / "step-0-evidence.json"
+    ev_file.write_text(
+        json.dumps(ev_body | {"evidence_hash": content_hash(ev_body)}), encoding="utf-8"
+    )
+
+    # Adversarial Case 1: CLI treats store membership as authentication when
+    # authentication config is absent.
+    # The adversary supplies artifact_store, but omits authentic_artifacts /
+    # authenticated_producers.
+    # Must fail closed with exit code 3.
+    host_config_no_auth = {
+        "trust_roots": trust_roots,
+        "artifact_store": art_store,
+    }
+    host_config_file.write_text(json.dumps(host_config_no_auth), encoding="utf-8")
+    proc_no_auth = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "prospective-step",
+            "--registration",
+            str(reg_file),
+            "--host-config",
+            str(host_config_file),
+            "--private-root",
+            str(private_root),
+            "--session-date",
+            "2026-11-03",
+            "--session-evidence",
+            str(ev_file),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert proc_no_auth.returncode == 3
+    assert "authentication evidence" in proc_no_auth.stderr
+
+    # Adversarial Case 2: Config provides empty authentication mechanisms.
+    # Must fail closed with exit code 3 (PRODUCER_AUTHENTICATION_MECHANISM_REQUIRED).
+    host_config_empty_auth = {
+        "trust_roots": trust_roots,
+        "artifact_store": art_store,
+        "authentic_artifacts": [],
+    }
+    host_config_file.write_text(json.dumps(host_config_empty_auth), encoding="utf-8")
+    proc_empty_auth = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "prospective-step",
+            "--registration",
+            str(reg_file),
+            "--host-config",
+            str(host_config_file),
+            "--private-root",
+            str(private_root),
+            "--session-date",
+            "2026-11-03",
+            "--session-evidence",
+            str(ev_file),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert proc_empty_auth.returncode == 3
+    assert "PRODUCER_AUTHENTICATION_MECHANISM_REQUIRED" in proc_empty_auth.stderr
+
+    # Adversarial Case 3: Artifact exists in store with matching authority and hash,
+    # but is omitted from configured authentic_artifacts.
+    # Must fail closed with exit code 3 (PRODUCER_AUTHENTICATION_FAILED).
+    host_config_unauth = {
+        "trust_roots": trust_roots,
+        "artifact_store": art_store,
+        "authentic_artifacts": [
+            art_hashes["portfolio_state"]
+        ],  # decision & fills omitted
+    }
+    host_config_file.write_text(json.dumps(host_config_unauth), encoding="utf-8")
+    proc_unauth = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "prospective-step",
+            "--registration",
+            str(reg_file),
+            "--host-config",
+            str(host_config_file),
+            "--private-root",
+            str(private_root),
+            "--session-date",
+            "2026-11-03",
+            "--session-evidence",
+            str(ev_file),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert proc_unauth.returncode == 3
+    assert "PRODUCER_AUTHENTICATION_FAILED" in proc_unauth.stderr
+
+
 def test_cli_calibrate_and_historical_handlers(repo_root: Path, tmp_path: Path) -> None:
     from datetime import UTC, date, datetime
     from decimal import Decimal
