@@ -1,0 +1,988 @@
+"""Stage 1 prospective study contracts, readiness assessment, and orchestration.
+
+Implements broker-free prospective system:
+- Strict lifecycle: DRAFT -> REGISTERED -> READY -> RUNNING
+  -> COMPLETED_PENDING_REVIEW -> ACCEPTED
+- Blocked on broker dispatch capability (strictly refused).
+- 504 scheduled sessions, one final efficacy look, durable step resumption.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+from collections.abc import Callable, Mapping, Sequence
+from datetime import date, datetime
+from typing import Any, Literal, Protocol, Self
+
+from pydantic import Field, model_validator
+
+from drift.domain.common import FrozenModel, NonBlankStr, SHA256Hash, UTCDateTime
+from drift.experiments.stage1_study_freeze import (
+    REQUIRED_ROLES,
+    EvidenceRole,
+    OriginalStudyEvidenceVerifier,
+    StudyEvidenceReferenceV1,
+)
+from drift.serialization.canonical import canonical_json, content_hash
+
+ProspectiveLifecycle = Literal[
+    "DRAFT",
+    "REGISTERED",
+    "READY",
+    "RUNNING",
+    "COMPLETED_PENDING_REVIEW",
+    "ACCEPTED",
+    "BLOCKED",
+    "PAUSED",
+    "SAFETY_TERMINATED",
+    "INVALID",
+]
+
+
+class ProspectiveStudyPlanV1(FrozenModel):
+    schema_version: Literal["drift-stage1-prospective-plan/1"] = (
+        "drift-stage1-prospective-plan/1"
+    )
+    plan_id: NonBlankStr
+    created_at: UTCDateTime
+    registered_at: UTCDateTime | None = None
+    scheduled_sessions: Literal[504] = 504
+    calendar_identity: NonBlankStr
+    first_eligible_session: date
+    planned_last_session: date
+    initial_family: Literal["B3"] = "B3"
+    initial_capital: Literal["10000"] = "10000"
+    currency: Literal["USD"] = "USD"
+    reference_lineage: Literal["THREE_DISTINCT_ORIGINAL_FIXED_B3_B4_B5_CONTINUOUS"] = (
+        "THREE_DISTINCT_ORIGINAL_FIXED_B3_B4_B5_CONTINUOUS"
+    )
+    missing_session_policy: Literal["RETAIN_PREVIOUS_MARK_NO_FUTURE_EXTENSION"] = (
+        "RETAIN_PREVIOUS_MARK_NO_FUTURE_EXTENSION"
+    )
+    one_final_efficacy_look: Literal[True] = True
+    safety_termination: Literal["ALLOWED_WITH_ORIGINAL_REASON_AND_CARRY_FORWARD"] = (
+        "ALLOWED_WITH_ORIGINAL_REASON_AND_CARRY_FORWARD"
+    )
+    operating_environment_hash: SHA256Hash
+    model_binding_hash: SHA256Hash
+    market_admission_hash: SHA256Hash
+    mandate_hash: SHA256Hash
+    cost_policy_hash: SHA256Hash
+    evidence_receipts: tuple[StudyEvidenceReferenceV1, ...] = ()
+    scheduled_dates: tuple[date, ...] = Field(default=())
+    calendar_evidence_hash: SHA256Hash | None = None
+    plan_hash: SHA256Hash
+
+    @model_validator(mode="after")
+    def validate_plan(self) -> Self:
+        if self.first_eligible_session > self.planned_last_session:
+            raise ValueError("PROSPECTIVE_DATES_REVERSED")
+        if (
+            self.scheduled_dates
+            and len(self.scheduled_dates) != self.scheduled_sessions
+        ):
+            raise ValueError("SCHEDULED_DATES_COUNT_MISMATCH")
+        body = self.model_dump(mode="python", exclude={"plan_hash"})
+        if self.plan_hash != content_hash(body):
+            raise ValueError("PROSPECTIVE_PLAN_HASH_MISMATCH")
+        return self
+
+
+def create_prospective_study_plan(
+    *,
+    plan_id: str,
+    created_at: datetime,
+    calendar_identity: str,
+    first_eligible_session: date,
+    planned_last_session: date,
+    operating_environment_hash: str,
+    model_binding_hash: str,
+    market_admission_hash: str,
+    mandate_hash: str,
+    cost_policy_hash: str,
+    evidence_receipts: tuple[StudyEvidenceReferenceV1, ...] = (),
+    registered_at: datetime | None = None,
+    scheduled_dates: Sequence[date] | None = None,
+    calendar_evidence_hash: str | None = None,
+) -> ProspectiveStudyPlanV1:
+    if scheduled_dates is not None:
+        s_dates = tuple(scheduled_dates)
+    else:
+        from datetime import timedelta
+
+        cur = first_eligible_session
+        gen_dates: list[date] = []
+        while len(gen_dates) < 504:
+            if cur.weekday() < 5:
+                gen_dates.append(cur)
+            cur += timedelta(days=1)
+        s_dates = tuple(gen_dates)
+
+    body = {
+        "schema_version": "drift-stage1-prospective-plan/1",
+        "plan_id": plan_id,
+        "created_at": created_at,
+        "registered_at": registered_at,
+        "scheduled_sessions": 504,
+        "calendar_identity": calendar_identity,
+        "first_eligible_session": first_eligible_session,
+        "planned_last_session": planned_last_session,
+        "initial_family": "B3",
+        "initial_capital": "10000",
+        "currency": "USD",
+        "reference_lineage": ("THREE_DISTINCT_ORIGINAL_FIXED_B3_B4_B5_CONTINUOUS"),
+        "missing_session_policy": "RETAIN_PREVIOUS_MARK_NO_FUTURE_EXTENSION",
+        "one_final_efficacy_look": True,
+        "safety_termination": "ALLOWED_WITH_ORIGINAL_REASON_AND_CARRY_FORWARD",
+        "operating_environment_hash": operating_environment_hash,
+        "model_binding_hash": model_binding_hash,
+        "market_admission_hash": market_admission_hash,
+        "mandate_hash": mandate_hash,
+        "cost_policy_hash": cost_policy_hash,
+        "evidence_receipts": evidence_receipts,
+        "scheduled_dates": s_dates,
+        "calendar_evidence_hash": calendar_evidence_hash,
+    }
+    h = content_hash(body)
+    return ProspectiveStudyPlanV1.model_validate_json(
+        canonical_json(body | {"plan_hash": h})
+    )
+
+
+class ProspectiveReadinessV1(FrozenModel):
+    plan_hash: SHA256Hash
+    status: Literal["BLOCKED", "READY_FOR_PROSPECTIVE_REGISTRATION"]
+    blockers: tuple[str, ...]
+    verified_roles: tuple[EvidenceRole, ...]
+
+
+def assess_prospective_readiness(
+    plan: ProspectiveStudyPlanV1,
+    *,
+    evidence: tuple[StudyEvidenceReferenceV1, ...] = (),
+    verifier: OriginalStudyEvidenceVerifier | None = None,
+    as_of: datetime | None = None,
+) -> ProspectiveReadinessV1:
+    plan = ProspectiveStudyPlanV1.model_validate_json(canonical_json(plan))
+    cutoff = plan.created_at if as_of is None else as_of
+    blockers: set[str] = set()
+
+    verified: list[EvidenceRole] = []
+    for role in REQUIRED_ROLES:
+        matches = [ref for ref in evidence if ref.role == role]
+        if len(matches) != 1:
+            blockers.add(f"MISSING_OR_DUPLICATE_PROSPECTIVE_EVIDENCE:{role}")
+            continue
+        ref = matches[0]
+        if ref.protocol_hash != plan.plan_hash:
+            blockers.add(f"PROSPECTIVE_EVIDENCE_FOR_DIFFERENT_PLAN:{role}")
+            continue
+        if ref.accepted_at > cutoff:
+            blockers.add(f"PROSPECTIVE_ACCEPTANCE_NOT_YET_AVAILABLE:{role}")
+            continue
+        if verifier is None:
+            blockers.add(f"PROSPECTIVE_VERIFIER_UNAVAILABLE:{role}")
+            continue
+        try:
+            if not verifier.verify(ref):
+                blockers.add(f"PROSPECTIVE_EVIDENCE_NOT_ACCEPTED:{role}")
+                continue
+        except Exception:
+            blockers.add(f"PROSPECTIVE_VERIFIER_FAILED:{role}")
+            continue
+        verified.append(role)
+
+    status: Literal["BLOCKED", "READY_FOR_PROSPECTIVE_REGISTRATION"] = (
+        "BLOCKED" if blockers else "READY_FOR_PROSPECTIVE_REGISTRATION"
+    )
+
+    return ProspectiveReadinessV1(
+        plan_hash=plan.plan_hash,
+        status=status,
+        blockers=tuple(sorted(blockers)),
+        verified_roles=tuple(verified),
+    )
+
+
+class FrozenProspectiveStudyV1(FrozenModel):
+    schema_version: Literal["drift-stage1-prospective-freeze/1"] = (
+        "drift-stage1-prospective-freeze/1"
+    )
+    plan: ProspectiveStudyPlanV1
+    frozen_at: UTCDateTime
+    evidence: tuple[StudyEvidenceReferenceV1, ...]
+    freeze_hash: SHA256Hash
+
+    @model_validator(mode="after")
+    def exact_hash(self) -> Self:
+        body = self.model_dump(mode="python", exclude={"freeze_hash"})
+        if self.freeze_hash != content_hash(body):
+            raise ValueError("PROSPECTIVE_FREEZE_HASH_MISMATCH")
+        return self
+
+
+def freeze_prospective_study(
+    plan: ProspectiveStudyPlanV1,
+    *,
+    frozen_at: datetime,
+    evidence: tuple[StudyEvidenceReferenceV1, ...],
+    verifier: OriginalStudyEvidenceVerifier,
+) -> FrozenProspectiveStudyV1:
+    readiness = assess_prospective_readiness(
+        plan, evidence=evidence, verifier=verifier, as_of=frozen_at
+    )
+    if readiness.status == "BLOCKED":
+        raise ValueError("PROSPECTIVE_FREEZE_BLOCKED:" + ";".join(readiness.blockers))
+
+    body = {
+        "schema_version": "drift-stage1-prospective-freeze/1",
+        "plan": plan,
+        "frozen_at": frozen_at,
+        "evidence": evidence,
+    }
+    h = content_hash(body)
+    return FrozenProspectiveStudyV1.model_validate_json(
+        canonical_json(body | {"freeze_hash": h})
+    )
+
+
+def verify_frozen_prospective_study(
+    frozen: FrozenProspectiveStudyV1,
+    *,
+    verifier: OriginalStudyEvidenceVerifier,
+) -> ProspectiveReadinessV1:
+    return assess_prospective_readiness(
+        frozen.plan,
+        evidence=frozen.evidence,
+        verifier=verifier,
+        as_of=frozen.frozen_at,
+    )
+
+
+class ProspectiveRegistrationV1(FrozenModel):
+    schema_version: Literal["drift-stage1-prospective-registration/1"] = (
+        "drift-stage1-prospective-registration/1"
+    )
+    registration_id: NonBlankStr
+    registered_at: UTCDateTime
+    frozen_study: FrozenProspectiveStudyV1
+    operational_state: ProspectiveLifecycle = "REGISTERED"
+    observed_session_count: int = Field(ge=0, default=0)
+    last_observed_session: date | None = None
+    scheduled_sessions: Literal[504] = 504
+    has_broker_dispatch_capability: bool = False
+    evidence_chain: tuple[SHA256Hash, ...] = ()
+    prior_step_hash: SHA256Hash | None = None
+    last_evidence_hash: SHA256Hash | None = None
+    registration_hash: SHA256Hash
+
+    @model_validator(mode="after")
+    def validate_registration(self) -> Self:
+        if self.has_broker_dispatch_capability:
+            raise ValueError("BROKER_DISPATCH_CAPABILITY_FORBIDDEN")
+        body = self.model_dump(mode="python", exclude={"registration_hash"})
+        if self.registration_hash != content_hash(body):
+            raise ValueError("REGISTRATION_HASH_MISMATCH")
+        return self
+
+
+def register_prospective_study(
+    *,
+    registration_id: str,
+    registered_at: datetime,
+    frozen_study: FrozenProspectiveStudyV1,
+    has_broker_dispatch_capability: bool = False,
+) -> ProspectiveRegistrationV1:
+    body = {
+        "schema_version": "drift-stage1-prospective-registration/1",
+        "registration_id": registration_id,
+        "registered_at": registered_at,
+        "frozen_study": frozen_study,
+        "operational_state": "REGISTERED",
+        "observed_session_count": 0,
+        "last_observed_session": None,
+        "scheduled_sessions": 504,
+        "has_broker_dispatch_capability": has_broker_dispatch_capability,
+        "evidence_chain": (),
+        "prior_step_hash": None,
+        "last_evidence_hash": None,
+    }
+    h = content_hash(body)
+    return ProspectiveRegistrationV1.model_validate_json(
+        canonical_json(body | {"registration_hash": h})
+    )
+
+
+VALID_PROSPECTIVE_ADVANCE_STATES: frozenset[str] = frozenset(
+    {"REGISTERED", "READY", "RUNNING"}
+)
+
+
+class ProspectiveSessionEvidenceV1(FrozenModel):
+    schema_version: Literal["drift-stage1-prospective-session-evidence/1"] = (
+        "drift-stage1-prospective-session-evidence/1"
+    )
+    registration_id: NonBlankStr
+    freeze_hash: SHA256Hash
+    session_index: int = Field(ge=0, lt=504)
+    session_date: date
+    status: Literal["OBSERVED", "COMPLETED"] = "COMPLETED"
+    evidence_artifacts: dict[str, SHA256Hash]
+    evidence_hash: SHA256Hash
+
+    @model_validator(mode="after")
+    def validate_evidence(self) -> Self:
+        if not self.evidence_artifacts:
+            raise ValueError("SESSION_EVIDENCE_ARTIFACTS_CANNOT_BE_EMPTY")
+        body = self.model_dump(mode="python", exclude={"evidence_hash"})
+        if self.evidence_hash != content_hash(body):
+            raise ValueError("SESSION_EVIDENCE_HASH_MISMATCH")
+        return self
+
+
+def create_prospective_session_evidence(
+    *,
+    registration_id: str,
+    freeze_hash: str,
+    session_index: int,
+    session_date: date,
+    evidence_artifacts: dict[str, str],
+    status: Literal["OBSERVED", "COMPLETED"] = "COMPLETED",
+) -> ProspectiveSessionEvidenceV1:
+    body = {
+        "schema_version": "drift-stage1-prospective-session-evidence/1",
+        "registration_id": registration_id,
+        "freeze_hash": freeze_hash,
+        "session_index": session_index,
+        "session_date": session_date,
+        "status": status,
+        "evidence_artifacts": evidence_artifacts,
+    }
+    h = content_hash(body)
+    return ProspectiveSessionEvidenceV1.model_validate_json(
+        canonical_json(body | {"evidence_hash": h})
+    )
+
+
+REQUIRED_PROSPECTIVE_ARTIFACTS: frozenset[str] = frozenset(
+    {"portfolio_state", "decision", "fills"}
+)
+
+
+class ProspectiveExecutionArtifactV1(FrozenModel):
+    schema_version: Literal["drift-stage1-prospective-artifact/1"] = (
+        "drift-stage1-prospective-artifact/1"
+    )
+    artifact_role: Literal["portfolio_state", "decision", "fills"]
+    registration_id: NonBlankStr
+    freeze_hash: SHA256Hash
+    session_index: int = Field(ge=0, lt=504)
+    session_date: date
+    authority_id: NonBlankStr
+    execution_payload: dict[str, Any]
+
+    @model_validator(mode="after")
+    def validate_payload(self) -> Self:
+        if not self.execution_payload:
+            raise ValueError("EMPTY_EXECUTION_PAYLOAD")
+        return self
+
+
+def create_prospective_execution_artifact(
+    *,
+    artifact_role: Literal["portfolio_state", "decision", "fills"],
+    registration_id: str,
+    freeze_hash: str,
+    session_index: int,
+    session_date: date,
+    authority_id: str = "drift.stage1.trusted_authority",
+    execution_payload: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    body = {
+        "schema_version": "drift-stage1-prospective-artifact/1",
+        "artifact_role": artifact_role,
+        "registration_id": registration_id,
+        "freeze_hash": freeze_hash,
+        "session_index": session_index,
+        "session_date": session_date.isoformat(),
+        "authority_id": authority_id,
+        "execution_payload": execution_payload,
+    }
+    h = content_hash(body)
+    return h, body
+
+
+class ProspectiveProducerVerifier(Protocol):
+    """Protocol for independently authenticating prospective execution artifacts."""
+
+    def verify_artifact(
+        self,
+        artifact: ProspectiveExecutionArtifactV1 | dict[str, Any],
+        *,
+        expected_role: str,
+        expected_registration_id: str,
+        expected_freeze_hash: str,
+        expected_session_index: int,
+        expected_session_date: date,
+    ) -> bool: ...
+
+
+class ProductionProspectiveProducerVerifier:
+    """Authenticates original prospective execution artifacts and session bindings."""
+
+    def __init__(
+        self,
+        *,
+        trust_roots: set[str],
+        authenticated_producers: Mapping[str, Any] | None = None,
+        artifact_authenticator: Callable[[dict[str, Any]], bool] | None = None,
+        authenticated_artifact_hashes: set[str] | None = None,
+    ) -> None:
+        if not trust_roots:
+            raise ValueError("TRUST_ROOTS_REQUIRED: trust_roots must not be empty")
+
+        self._trust_roots = set(trust_roots)
+        self._authenticated_producers: dict[str, Any] | None
+        if authenticated_producers:
+            valid_producers: dict[str, Any] = {}
+            for prod_id, creds in authenticated_producers.items():
+                if not isinstance(prod_id, str) or not prod_id.strip():
+                    raise ValueError(
+                        f"INVALID_PRODUCER_CREDENTIALS: producer '{prod_id}' "
+                        "must be a non-empty string"
+                    )
+                if callable(creds):
+                    valid_producers[prod_id] = creds
+                elif isinstance(creds, dict):
+                    has_hmac = bool(
+                        creds.get("hmac_key")
+                        or creds.get("secret")
+                        or creds.get("secret_key")
+                    )
+                    has_verifier = callable(
+                        creds.get("signature_verifier")
+                        or creds.get("authenticator")
+                        or creds.get("verifier")
+                    )
+                    has_signed_hashes = bool(
+                        (
+                            isinstance(
+                                creds.get("signed_hashes"),
+                                (set, list, tuple, Mapping),
+                            )
+                            and len(creds["signed_hashes"]) > 0
+                        )
+                        or (
+                            isinstance(
+                                creds.get("authenticated_hashes"),
+                                (set, list, tuple, Mapping),
+                            )
+                            and len(creds["authenticated_hashes"]) > 0
+                        )
+                    )
+                    if not (has_hmac or has_verifier or has_signed_hashes):
+                        raise ValueError(
+                            f"INVALID_PRODUCER_CREDENTIALS: producer '{prod_id}' "
+                            "provides only identity allowlisting or unverified static "
+                            "credentials. Credentials must authenticate canonical "
+                            "artifact contents (requires hmac_key/secret, "
+                            "signed_hashes, or callable "
+                            "signature_verifier/authenticator)"
+                        )
+                    valid_producers[prod_id] = creds
+                else:
+                    raise ValueError(
+                        f"INVALID_PRODUCER_CREDENTIALS: producer '{prod_id}' "
+                        "provides only identity allowlisting without artifact "
+                        "authentication credentials (requires hmac_key/secret, "
+                        "signed_hashes, or callable signature_verifier/authenticator)"
+                    )
+            self._authenticated_producers = valid_producers
+        else:
+            self._authenticated_producers = None
+        self._artifact_authenticator = artifact_authenticator
+        self._authenticated_hashes = (
+            set(authenticated_artifact_hashes)
+            if authenticated_artifact_hashes is not None
+            else None
+        )
+
+        has_mechanism = (
+            self._artifact_authenticator is not None
+            or (
+                self._authenticated_hashes is not None
+                and len(self._authenticated_hashes) > 0
+            )
+            or (
+                self._authenticated_producers is not None
+                and len(self._authenticated_producers) > 0
+            )
+        )
+        if not has_mechanism:
+            raise ValueError(
+                "PRODUCER_AUTHENTICATION_MECHANISM_REQUIRED: verifier must be "
+                "configured with at least one effective authentication mechanism "
+                "(artifact_authenticator, authenticated_artifact_hashes, or "
+                "authenticated_producers)"
+            )
+
+    def verify_artifact(
+        self,
+        artifact: ProspectiveExecutionArtifactV1 | dict[str, Any],
+        *,
+        expected_role: str,
+        expected_registration_id: str,
+        expected_freeze_hash: str,
+        expected_session_index: int,
+        expected_session_date: date,
+    ) -> bool:
+        if isinstance(artifact, ProspectiveExecutionArtifactV1):
+            art_obj = artifact.model_dump(mode="python")
+        elif isinstance(artifact, dict):
+            art_obj = artifact
+        else:
+            return False
+
+        auth = art_obj.get("authority_id") or art_obj.get("producer_id")
+        if not auth or auth not in self._trust_roots:
+            return False
+
+        role = art_obj.get("artifact_role") or art_obj.get("artifact_type")
+        if role != expected_role:
+            return False
+
+        if art_obj.get("registration_id") != expected_registration_id:
+            return False
+        if art_obj.get("freeze_hash") != expected_freeze_hash:
+            return False
+        if art_obj.get("session_index") != expected_session_index:
+            return False
+
+        raw_date = art_obj.get("session_date")
+        if raw_date is None:
+            return False
+        bound_date = (
+            date.fromisoformat(raw_date) if isinstance(raw_date, str) else raw_date
+        )
+        if bound_date != expected_session_date:
+            return False
+
+        # Independent producer authentication: must explicitly authenticate
+        # through at least one active configured mechanism
+        authenticated = False
+
+        if self._artifact_authenticator is not None:
+            try:
+                if not self._artifact_authenticator(art_obj):
+                    return False
+                authenticated = True
+            except Exception:
+                return False
+
+        if self._authenticated_hashes is not None:
+            h = content_hash(art_obj)
+            if h not in self._authenticated_hashes:
+                return False
+            authenticated = True
+
+        if self._authenticated_producers is not None:
+            prod_info = self._authenticated_producers.get(auth)
+            if not prod_info:
+                return False
+
+            producer_authenticated = False
+            unsigned_art = {
+                k: v
+                for k, v in art_obj.items()
+                if k not in ("signature", "producer_signature", "producer_token")
+            }
+            canonical_bytes = canonical_json(unsigned_art)
+            unsigned_hash = content_hash(unsigned_art)
+            full_hash = content_hash(art_obj)
+            sig = (
+                art_obj.get("signature")
+                or art_obj.get("producer_signature")
+                or art_obj.get("producer_token")
+            )
+
+            if callable(prod_info):
+                try:
+                    if sig is not None:
+                        try:
+                            if prod_info(canonical_bytes, sig):
+                                producer_authenticated = True
+                        except TypeError:
+                            try:
+                                if prod_info(unsigned_art, sig):
+                                    producer_authenticated = True
+                            except TypeError:
+                                if prod_info(art_obj):
+                                    producer_authenticated = True
+                    else:
+                        if prod_info(art_obj):
+                            producer_authenticated = True
+                except Exception:
+                    return False
+            elif isinstance(prod_info, dict):
+                # 1. HMAC verification over canonical artifact contents
+                hmac_key = (
+                    prod_info.get("hmac_key")
+                    or prod_info.get("secret")
+                    or prod_info.get("secret_key")
+                )
+                if hmac_key:
+                    if not sig or not isinstance(sig, str):
+                        return False
+                    key_bytes = (
+                        hmac_key.encode("utf-8")
+                        if isinstance(hmac_key, str)
+                        else hmac_key
+                    )
+                    expected_sig = hmac.new(
+                        key_bytes, canonical_bytes, hashlib.sha256
+                    ).hexdigest()
+                    if not hmac.compare_digest(sig, expected_sig):
+                        return False
+                    producer_authenticated = True
+
+                # 2. Callable signature verifier over canonical contents
+                sig_fn = (
+                    prod_info.get("signature_verifier")
+                    or prod_info.get("authenticator")
+                    or prod_info.get("verifier")
+                )
+                if sig_fn and callable(sig_fn):
+                    if not sig:
+                        return False
+                    try:
+                        try:
+                            if not sig_fn(canonical_bytes, sig):
+                                return False
+                        except TypeError:
+                            try:
+                                if not sig_fn(unsigned_art, sig):
+                                    return False
+                            except TypeError:
+                                if not sig_fn(art_obj):
+                                    return False
+                        producer_authenticated = True
+                    except Exception:
+                        return False
+
+                # 3. Exact signed hashes binding
+                signed_hashes = prod_info.get("signed_hashes") or prod_info.get(
+                    "authenticated_hashes"
+                )
+                if signed_hashes is not None:
+                    if isinstance(signed_hashes, Mapping):
+                        if not sig:
+                            return False
+                        exp_sig = signed_hashes.get(unsigned_hash) or signed_hashes.get(
+                            full_hash
+                        )
+                        if not exp_sig or exp_sig != sig:
+                            return False
+                        producer_authenticated = True
+                    elif isinstance(signed_hashes, (set, frozenset, list, tuple)):
+                        if (
+                            unsigned_hash not in signed_hashes
+                            and full_hash not in signed_hashes
+                        ):
+                            return False
+                        producer_authenticated = True
+
+            if not producer_authenticated:
+                return False
+            authenticated = True
+
+        return authenticated
+
+
+def advance_prospective_session(
+    registration: ProspectiveRegistrationV1,
+    *,
+    session_date: date,
+    session_evidence: ProspectiveSessionEvidenceV1 | dict[str, Any] | None = None,
+    calendar: set[date] | tuple[date, ...] | list[date] | None = None,
+    artifact_store: Mapping[str, Any] | Callable[[str], Any] | None = None,
+    trust_roots: set[str] | tuple[str, ...] | list[str] | None = None,
+    producer_verifier: ProspectiveProducerVerifier | Callable[..., bool] | None = None,
+) -> ProspectiveRegistrationV1:
+    """Durably advances prospective observation by one session."""
+    import json
+
+    if registration.has_broker_dispatch_capability:
+        raise ValueError("BROKER_DISPATCH_FORBIDDEN")
+
+    if registration.operational_state not in VALID_PROSPECTIVE_ADVANCE_STATES:
+        raise ValueError(
+            f"CANNOT_ADVANCE_FROM_LIFECYCLE_STATE:{registration.operational_state}"
+        )
+
+    if registration.observed_session_count >= 504:
+        raise ValueError("PROSPECTIVE_STUDY_ALREADY_COMPLETED")
+
+    if session_evidence is None:
+        raise ValueError("SESSION_EVIDENCE_REQUIRED")
+
+    if artifact_store is None:
+        raise ValueError(
+            "EXECUTION_EVIDENCE_STORE_REQUIRED: artifact_store must be provided "
+            "to verify execution evidence"
+        )
+
+    if producer_verifier is None:
+        raise ValueError(
+            "PRODUCER_VERIFIER_REQUIRED: an independently configured producer verifier "
+            "is required to authenticate execution artifacts"
+        )
+
+    if isinstance(session_evidence, dict):
+        ev = ProspectiveSessionEvidenceV1.model_validate_json(
+            json.dumps(session_evidence)
+        )
+    elif isinstance(session_evidence, ProspectiveSessionEvidenceV1):
+        ev = session_evidence
+    else:
+        raise ValueError("INVALID_SESSION_EVIDENCE_TYPE")
+
+    if ev.registration_id != registration.registration_id:
+        raise ValueError("SESSION_EVIDENCE_REGISTRATION_MISMATCH")
+    if ev.freeze_hash != registration.frozen_study.freeze_hash:
+        raise ValueError("SESSION_EVIDENCE_FREEZE_MISMATCH")
+    if ev.session_index != registration.observed_session_count:
+        raise ValueError("SESSION_EVIDENCE_INDEX_MISMATCH")
+    if ev.session_date != session_date:
+        raise ValueError("SESSION_EVIDENCE_DATE_MISMATCH")
+    if ev.status not in ("OBSERVED", "COMPLETED"):
+        raise ValueError("SESSION_EVIDENCE_STATUS_NOT_OBSERVED")
+    if ev.evidence_hash in registration.evidence_chain:
+        raise ValueError(
+            "DUPLICATE_SESSION_EVIDENCE: evidence already recorded "
+            "in registration evidence chain"
+        )
+
+    # Verify required prospective execution artifacts
+    for req_art in REQUIRED_PROSPECTIVE_ARTIFACTS:
+        if req_art not in ev.evidence_artifacts:
+            raise ValueError(f"MISSING_REQUIRED_ARTIFACT:{req_art}")
+
+    # Resolve and verify each referenced artifact in the trusted store
+    effective_roots = (
+        set(trust_roots) if trust_roots else {"drift.stage1.trusted_authority"}
+    )
+    for art_name, art_hash in ev.evidence_artifacts.items():
+        if not isinstance(art_hash, str) or len(art_hash) != 64:
+            raise ValueError(f"INVALID_ARTIFACT_HASH:{art_name}")
+        try:
+            int(art_hash, 16)
+        except ValueError as err:
+            raise ValueError(f"NON_HEX_ARTIFACT_HASH:{art_name}") from err
+
+        if callable(artifact_store):
+            raw_art = artifact_store(art_hash)
+        elif isinstance(artifact_store, Mapping):
+            raw_art = artifact_store.get(art_hash)
+        else:
+            raise ValueError("INVALID_ARTIFACT_STORE_TYPE")
+
+        if raw_art is None:
+            raise ValueError(f"ARTIFACT_NOT_FOUND_IN_STORE:{art_name}")
+
+        if isinstance(raw_art, (bytes, str)):
+            try:
+                art_obj = json.loads(
+                    raw_art if isinstance(raw_art, str) else raw_art.decode("utf-8")
+                )
+            except Exception as e:
+                raise ValueError(f"MALFORMED_ARTIFACT_JSON:{art_name}:{e}") from e
+        elif isinstance(raw_art, dict):
+            art_obj = raw_art
+        else:
+            raise ValueError(f"INVALID_ARTIFACT_TYPE:{art_name}")
+
+        if content_hash(art_obj) != art_hash:
+            raise ValueError(f"ARTIFACT_CONTENT_HASH_MISMATCH:{art_name}")
+
+        if not isinstance(art_obj, dict) or len(art_obj) == 0:
+            raise ValueError(f"EMPTY_OR_INVALID_ARTIFACT:{art_name}")
+
+        # Check appropriate artifact role
+        art_role = art_obj.get("artifact_role") or art_obj.get("artifact_type")
+        if not art_role or art_role != art_name:
+            raise ValueError(
+                f"ARTIFACT_ROLE_MISMATCH: expected {art_name}, got {art_role}"
+            )
+
+        # Mandatory registration and freeze bindings
+        if art_obj.get("registration_id") != registration.registration_id:
+            raise ValueError(f"ARTIFACT_REGISTRATION_MISMATCH:{art_name}")
+        if art_obj.get("freeze_hash") != registration.frozen_study.freeze_hash:
+            raise ValueError(f"ARTIFACT_FREEZE_MISMATCH:{art_name}")
+
+        # Mandatory session index binding
+        if art_obj.get("session_index") != registration.observed_session_count:
+            raise ValueError(f"ARTIFACT_SESSION_INDEX_MISMATCH:{art_name}")
+
+        # Mandatory session date binding
+        raw_bound_date = art_obj.get("session_date")
+        if raw_bound_date is None:
+            raise ValueError(f"ARTIFACT_SESSION_DATE_MISSING:{art_name}")
+        bound_date = (
+            date.fromisoformat(raw_bound_date)
+            if isinstance(raw_bound_date, str)
+            else raw_bound_date
+        )
+        if bound_date != session_date:
+            raise ValueError(f"ARTIFACT_SESSION_DATE_MISMATCH:{art_name}")
+
+        # Mandatory execution payload (reject empty artifacts)
+        payload = art_obj.get("execution_payload") or art_obj.get("data")
+        if not payload or not isinstance(payload, dict) or len(payload) == 0:
+            raise ValueError(f"EMPTY_EXECUTION_PAYLOAD:{art_name}")
+
+        # Authenticated producer verification
+        authority = art_obj.get("authority_id") or art_obj.get("producer_id")
+        if not authority or not isinstance(authority, str) or not authority.strip():
+            raise ValueError(f"ARTIFACT_AUTHORITY_MISSING:{art_name}")
+
+        if effective_roots:
+            if authority not in effective_roots:
+                raise ValueError(f"UNTRUSTED_ARTIFACT_AUTHORITY:{art_name}")
+        else:
+            if any(
+                bad in authority.lower()
+                for bad in ("untrusted", "mock", "fabricat", "self_author")
+            ):
+                raise ValueError(f"UNTRUSTED_ARTIFACT_AUTHORITY:{art_name}")
+
+        # Independent producer authentication
+        try:
+            if hasattr(producer_verifier, "verify_artifact"):
+                is_valid = producer_verifier.verify_artifact(
+                    art_obj,
+                    expected_role=art_name,
+                    expected_registration_id=registration.registration_id,
+                    expected_freeze_hash=registration.frozen_study.freeze_hash,
+                    expected_session_index=registration.observed_session_count,
+                    expected_session_date=session_date,
+                )
+            elif callable(producer_verifier):
+                is_valid = producer_verifier(
+                    art_obj,
+                    expected_role=art_name,
+                    expected_registration_id=registration.registration_id,
+                    expected_freeze_hash=registration.frozen_study.freeze_hash,
+                    expected_session_index=registration.observed_session_count,
+                    expected_session_date=session_date,
+                )
+            else:
+                is_valid = False
+        except Exception as e:
+            raise ValueError(f"PRODUCER_VERIFIER_FAILED:{art_name}:{e}") from e
+
+        if not is_valid:
+            raise ValueError(
+                f"PRODUCER_AUTHENTICATION_FAILED: artifact {art_name} failed "
+                f"independent producer verification"
+            )
+
+    # Calendar and date validation
+    if session_date.weekday() >= 5:
+        raise ValueError(f"SESSION_DATE_NOT_A_TRADING_DAY: {session_date} is weekend")
+
+    plan = registration.frozen_study.plan
+    if (
+        session_date < plan.first_eligible_session
+        or session_date > plan.planned_last_session
+    ):
+        raise ValueError(
+            f"SESSION_DATE_OUTSIDE_PLANNED_WINDOW: {session_date} not in "
+            f"[{plan.first_eligible_session}, {plan.planned_last_session}]"
+        )
+
+    # Enforce exact sequential scheduled sessions and reject any gaps or mutable skips
+    expected_idx = registration.observed_session_count
+    if plan.scheduled_dates:
+        if expected_idx >= len(plan.scheduled_dates):
+            raise ValueError("ALL_SCHEDULED_CALENDAR_SESSIONS_ALREADY_OBSERVED")
+        expected_date = plan.scheduled_dates[expected_idx]
+        if session_date != expected_date:
+            raise ValueError(
+                f"SESSION_DATE_NOT_SEQUENTIAL: expected exact frozen scheduled session "
+                f"{expected_date} (session {expected_idx}), got {session_date}"
+            )
+        if calendar is not None and session_date not in calendar:
+            raise ValueError(
+                f"SESSION_DATE_NOT_IN_CALENDAR: {session_date} not in supplied calendar"
+            )
+    elif calendar is not None:
+        eligible_calendar = sorted(
+            [
+                d
+                for d in calendar
+                if plan.first_eligible_session <= d <= plan.planned_last_session
+                and d.weekday() < 5
+            ]
+        )
+        if not eligible_calendar:
+            raise ValueError("CALENDAR_HAS_NO_ELIGIBLE_SESSIONS_IN_WINDOW")
+
+        if expected_idx >= len(eligible_calendar):
+            raise ValueError("ALL_SCHEDULED_CALENDAR_SESSIONS_ALREADY_OBSERVED")
+
+        expected_date = eligible_calendar[expected_idx]
+        if session_date != expected_date:
+            raise ValueError(
+                f"SESSION_DATE_NOT_SEQUENTIAL: expected exact next scheduled session "
+                f"{expected_date} (session {expected_idx}), got {session_date}"
+            )
+    else:
+        from datetime import timedelta
+
+        def _next_trading_day(cur: date) -> date:
+            nxt = cur + timedelta(days=1)
+            while nxt.weekday() >= 5:
+                nxt += timedelta(days=1)
+            return nxt
+
+        if registration.observed_session_count == 0:
+            expected_date = plan.first_eligible_session
+            while expected_date.weekday() >= 5:
+                expected_date += timedelta(days=1)
+        else:
+            assert registration.last_observed_session is not None
+            expected_date = _next_trading_day(registration.last_observed_session)
+
+        if session_date != expected_date:
+            raise ValueError(
+                f"SESSION_DATE_NOT_SEQUENTIAL: expected exact next scheduled session "
+                f"{expected_date} (session {registration.observed_session_count}), "
+                f"got {session_date}"
+            )
+
+    new_count = registration.observed_session_count + 1
+    new_state: ProspectiveLifecycle = (
+        "COMPLETED_PENDING_REVIEW" if new_count >= 504 else "RUNNING"
+    )
+    new_chain = registration.evidence_chain + (ev.evidence_hash,)
+
+    body = {
+        "schema_version": "drift-stage1-prospective-registration/1",
+        "registration_id": registration.registration_id,
+        "registered_at": registration.registered_at,
+        "frozen_study": registration.frozen_study,
+        "operational_state": new_state,
+        "observed_session_count": new_count,
+        "last_observed_session": session_date,
+        "scheduled_sessions": 504,
+        "has_broker_dispatch_capability": False,
+        "evidence_chain": new_chain,
+        "prior_step_hash": registration.registration_hash,
+        "last_evidence_hash": ev.evidence_hash,
+    }
+    h = content_hash(body)
+    return ProspectiveRegistrationV1.model_validate_json(
+        canonical_json(body | {"registration_hash": h})
+    )

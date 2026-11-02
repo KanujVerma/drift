@@ -1,0 +1,8 @@
+[project]
+name = "stage1-statistics-worker"
+version = "0.1.0"
+description = "Pinned reference worker for Politis-White automatic block length"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+    "arch==8.0.0",
+]
