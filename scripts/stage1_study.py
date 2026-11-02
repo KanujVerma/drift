@@ -74,7 +74,10 @@ from drift.experiments.stage1_study_outcomes import (
     compute_materiality_hurdle,
 )
 from drift.experiments.stage1_study_report import create_study_report
-from drift.experiments.stage1_uncertainty import PairedUncertaintyArtifactV1
+from drift.experiments.stage1_uncertainty import (
+    PairedUncertaintyArtifactV1,
+    compute_paired_uncertainty_artifact,
+)
 from drift.serialization.canonical import canonical_json
 
 
@@ -519,23 +522,159 @@ def action_historical(args: argparse.Namespace) -> int:
 
         # Reconcile metrics across execution receipts
         sorted_receipts = sorted(verified_receipts, key=lambda x: x["session_index"])
-        last_rcpt = sorted_receipts[-1]
-        term_nav = Decimal(
-            str(last_rcpt.get("metrics", {}).get("terminal_nav", "10000"))
-        )
-        init_cap = Decimal("10000")
-        pea = term_nav - init_cap
+
+        # Candidate arm B returns
+        b_returns = [
+            Decimal(str(r.get("metrics", {}).get("net_return", "0")))
+            for r in sorted_receipts
+        ]
+
+        # Verified paired reference evidence (Round 21)
+        ref_receipts_raw = host_config.get(
+            "reference_execution_receipts"
+        ) or host_config.get("reference_receipts")
+
+        paired_ev_dict = host_config.get("paired_evidence")
+        if paired_ev_dict and isinstance(paired_ev_dict, dict):
+            if "reference_receipts" in paired_ev_dict:
+                ref_receipts_raw = paired_ev_dict["reference_receipts"]
+
+        r_returns: list[Decimal] | None = None
+        if ref_receipts_raw and isinstance(ref_receipts_raw, list):
+            verified_ref_receipts: list[dict[str, Any]] = []
+            for j, rr in enumerate(ref_receipts_raw):
+                if isinstance(rr, dict):
+                    rr_idx = rr.get("session_index", j)
+                    ok_ref, _, payload_ref = exec_verifier.verify_execution_receipt(
+                        rr,
+                        expected_freeze_hash=rr.get("freeze_hash", frozen.freeze_hash),
+                        expected_session_index=rr_idx,
+                    )
+                    if ok_ref and payload_ref is not None:
+                        verified_ref_receipts.append(payload_ref)
+
+            if len(verified_ref_receipts) == len(sorted_receipts):
+                sorted_ref = sorted(
+                    verified_ref_receipts, key=lambda x: x["session_index"]
+                )
+                r_returns = [
+                    Decimal(str(r.get("metrics", {}).get("net_return", "0")))
+                    for r in sorted_ref
+                ]
+        elif (
+            paired_ev_dict
+            and isinstance(paired_ev_dict, dict)
+            and "reference_returns" in paired_ev_dict
+        ):
+            raw_r_rets = paired_ev_dict["reference_returns"]
+            if isinstance(raw_r_rets, list) and len(raw_r_rets) == len(b_returns):
+                r_returns = [Decimal(str(x)) for x in raw_r_rets]
+
+        # Verified independent acceptance
+        is_independently_accepted = False
+        acpt_rcpt = host_config.get(
+            "independent_acceptance_receipt"
+        ) or host_config.get("acceptance_receipt")
+        if acpt_rcpt and isinstance(acpt_rcpt, dict):
+            acpt_auth = acpt_rcpt.get("authority_id")
+            if (
+                acpt_auth in exec_roots
+                and acpt_rcpt.get("status") in ("COMPLETED", "ACCEPTED")
+                and (
+                    acpt_rcpt.get("assessor_independence") is True
+                    or acpt_rcpt.get("independent_assessor") is True
+                    or bool(acpt_rcpt.get("independence_declaration"))
+                )
+                and acpt_rcpt.get("is_self_review") is not True
+            ):
+                is_independently_accepted = True
+
+        pea: Decimal | None = None
+        b_volatility: Decimal | None = None
+        r_volatility: Decimal | None = None
+        b_max_drawdown: Decimal | None = None
+        r_max_drawdown: Decimal | None = None
+        p_nav_lower: Decimal | None = None
+        p_econ_lower: Decimal | None = None
+
+        if r_returns is not None and len(r_returns) == len(b_returns):
+            b_compound = Decimal("1")
+            r_compound = Decimal("1")
+            b_nav_marks = [Decimal("10000")]
+            r_nav_marks = [Decimal("10000")]
+            for b_ret, r_ret in zip(b_returns, r_returns, strict=True):
+                b_compound *= Decimal("1") + b_ret
+                r_compound *= Decimal("1") + r_ret
+                b_nav_marks.append(Decimal("10000") * b_compound)
+                r_nav_marks.append(Decimal("10000") * r_compound)
+
+            delta_nav = (b_compound - Decimal("1")) - (r_compound - Decimal("1"))
+            costs = Decimal(
+                str(
+                    host_config.get(
+                        "incremental_operating_costs",
+                        paired_ev_dict.get("incremental_operating_costs", "0")
+                        if paired_ev_dict
+                        else "0",
+                    )
+                )
+            )
+            pea = (Decimal("10000") * delta_nav) - costs
+
+            n_obs = Decimal(len(b_returns))
+            b_mean = sum(b_returns) / n_obs
+            b_var = sum((x - b_mean) ** 2 for x in b_returns) / (n_obs - Decimal("1"))
+            b_volatility = b_var.sqrt() * Decimal("252").sqrt()
+
+            r_mean = sum(r_returns) / n_obs
+            r_var = sum((x - r_mean) ** 2 for x in r_returns) / (n_obs - Decimal("1"))
+            r_volatility = r_var.sqrt() * Decimal("252").sqrt()
+
+            def _calc_mdd(marks: list[Decimal]) -> Decimal:
+                peak = marks[0]
+                mdd = Decimal("0")
+                for m in marks:
+                    if m > peak:
+                        peak = m
+                    if peak > Decimal("0"):
+                        dd = (peak - m) / peak
+                        if dd > mdd:
+                            mdd = dd
+                return mdd
+
+            b_max_drawdown = _calc_mdd(b_nav_marks)
+            r_max_drawdown = _calc_mdd(r_nav_marks)
+
+            try:
+                uncertainty_art = compute_paired_uncertainty_artifact(
+                    b_returns=b_returns,
+                    r_returns=r_returns,
+                    initial_capital=Decimal("10000"),
+                    incremental_operating_costs=costs,
+                    mean_block_length=21,
+                )
+                if uncertainty_art.primary_nav_diff_interval:
+                    p_nav_lower = uncertainty_art.primary_nav_diff_interval[0]
+                if uncertainty_art.primary_economic_interval:
+                    p_econ_lower = uncertainty_art.primary_economic_interval[0]
+            except Exception:
+                pass
 
         # Recompute outcome classification from verified execution evidence
         outcome = classify_study_outcome(
             scheduled_sessions=252,
             primary_economic_advantage=pea,
-            b_volatility=Decimal("0.15"),
-            r_volatility=Decimal("0.15"),
-            b_max_drawdown=Decimal("0.10"),
-            r_max_drawdown=Decimal("0.10"),
+            primary_nav_diff_lower=p_nav_lower,
+            primary_econ_lower=p_econ_lower,
+            b_volatility=b_volatility,
+            r_volatility=r_volatility,
+            b_max_drawdown=b_max_drawdown,
+            r_max_drawdown=r_max_drawdown,
             is_prospective_complete=False,
-            is_independently_accepted=True,
+            is_independently_accepted=is_independently_accepted,
+            unavailable_reasons=(
+                ("MISSING_PAIRED_REFERENCE_EVIDENCE",) if pea is None else ()
+            ),
         )
 
         manifest = {
@@ -548,7 +687,7 @@ def action_historical(args: argparse.Namespace) -> int:
             "observed_sessions": observed_count,
             "executed_at": datetime.now(UTC).isoformat(),
             "status": "COMPLETED",
-            "primary_economic_advantage": str(pea),
+            "primary_economic_advantage": str(pea) if pea is not None else None,
             "outcome_classification": outcome.model_dump(mode="json"),
             "evidence_inventory": [
                 r["receipt_id"] for r in sorted_receipts if "receipt_id" in r

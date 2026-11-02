@@ -1264,6 +1264,8 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
         boolean_metric: bool = False,
         tamper_hash: bool = False,
         store_in_receipts: bool = True,
+        prefix: str = "HIST-EXEC",
+        net_return_val: str = "0.0005",
     ) -> dict[str, Any]:
         p_obj = {
             "freeze_hash": frozen.freeze_hash,
@@ -1298,7 +1300,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
         f_hash = content_hash(f_obj)
         artifact_store[f_hash] = f_obj
 
-        r_id = f"HIST-EXEC-{s_idx}"
+        r_id = f"{prefix}-{s_idx}"
         arts: dict[str, Any] = {
             "portfolio_state": (
                 "z" * 64
@@ -1314,7 +1316,7 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
             arts = {}
 
         metrics: dict[str, Any] = {
-            "net_return": "0.0005" if not boolean_metric else True,
+            "net_return": net_return_val if not boolean_metric else True,
             "gross_turnover": "0.015",
             "terminal_nav": "1000000.00",
         }
@@ -1710,6 +1712,178 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     assert manifest["status"] == "COMPLETED"
     assert manifest["observed_sessions"] == 252
     assert manifest["freeze_hash"] == frozen.freeze_hash
+    # Missing paired reference evidence leaves economic advantage unavailable
+    assert manifest["primary_economic_advantage"] is None
+    assert manifest["outcome_classification"]["outcome"] == "UNAVAILABLE"
+    assert (
+        "MISSING_PAIRED_REFERENCE_EVIDENCE"
+        in manifest["outcome_classification"]["reasons"]
+    )
+
+    # 13. Paired reference evidence where arm B underperforms arm R
+    # Candidate arm B has net_return = 0.0001, reference arm R has net_return = 0.0005
+    # -> primary_economic_advantage is negative, outcome is UNSUCCESSFUL
+    b_receipts = [
+        make_execution_receipt(i, prefix="HIST-UNDER-B", net_return_val="0.0001")
+        for i in range(252)
+    ]
+    r_receipts = [
+        make_execution_receipt(i, prefix="HIST-UNDER-R", net_return_val="0.0005")
+        for i in range(252)
+    ]
+    write_host_config(
+        {
+            "execution_receipts": b_receipts,
+            "reference_receipts": r_receipts,
+            "incremental_operating_costs": "0",
+        }
+    )
+    proc_under = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "historical",
+            "--frozen",
+            str(frozen_file),
+            "--host-config",
+            str(host_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert proc_under.returncode == 0
+    manifest_under = json.loads(out_file.read_text(encoding="utf-8"))
+    assert Decimal(manifest_under["primary_economic_advantage"]) < Decimal("0")
+    assert manifest_under["outcome_classification"]["outcome"] == "UNSUCCESSFUL"
+    assert (
+        "ECONOMIC_ADVANTAGE_NON_POSITIVE"
+        in manifest_under["outcome_classification"]["reasons"]
+    )
+
+    # 14. Paired reference evidence where arm B outperforms arm R
+    # Candidate arm B has net_return = 0.0010, reference arm R has net_return = 0.0001
+    # -> primary_economic_advantage is positive, measured risk statistics reported
+    # -> outcome is PROMISING_BUT_INCONCLUSIVE (prospective not complete)
+    b_perf_receipts = [
+        make_execution_receipt(i, prefix="HIST-OUT-B", net_return_val="0.0010")
+        for i in range(252)
+    ]
+    r_perf_receipts = [
+        make_execution_receipt(i, prefix="HIST-OUT-R", net_return_val="0.0001")
+        for i in range(252)
+    ]
+    write_host_config(
+        {
+            "execution_receipts": b_perf_receipts,
+            "reference_receipts": r_perf_receipts,
+            "incremental_operating_costs": "10.00",
+        }
+    )
+    proc_outperf = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "historical",
+            "--frozen",
+            str(frozen_file),
+            "--host-config",
+            str(host_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert proc_outperf.returncode == 0
+    manifest_out = json.loads(out_file.read_text(encoding="utf-8"))
+    assert Decimal(manifest_out["primary_economic_advantage"]) > Decimal("0")
+    assert manifest_out["outcome_classification"]["is_risk_comparable"] is True
+    assert (
+        manifest_out["outcome_classification"]["outcome"]
+        == "PROMISING_BUT_INCONCLUSIVE"
+    )
+
+    # 15. Verified independent acceptance receipt passes assessor independence
+    indep_rcpt = {
+        "receipt_id": "INDEP-ACPT-01",
+        "authority_id": "trusted-historical-root",
+        "status": "ACCEPTED",
+        "assessor_independence": True,
+        "is_self_review": False,
+    }
+    write_host_config(
+        {
+            "execution_receipts": b_perf_receipts,
+            "reference_receipts": r_perf_receipts,
+            "independent_acceptance_receipt": indep_rcpt,
+        }
+    )
+    proc_acpt = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "historical",
+            "--frozen",
+            str(frozen_file),
+            "--host-config",
+            str(host_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert proc_acpt.returncode == 0
+    manifest_acpt = json.loads(out_file.read_text(encoding="utf-8"))
+    assert manifest_acpt["outcome_classification"]["is_independently_accepted"] is True
+
+    # 16. Conflicted or unaccepted acceptance receipt fails verification
+    conflicted_rcpt = {
+        "receipt_id": "INDEP-ACPT-BAD",
+        "authority_id": "trusted-historical-root",
+        "status": "ACCEPTED",
+        "assessor_independence": False,
+        "is_self_review": True,
+    }
+    write_host_config(
+        {
+            "execution_receipts": b_perf_receipts,
+            "reference_receipts": r_perf_receipts,
+            "independent_acceptance_receipt": conflicted_rcpt,
+        }
+    )
+    proc_conf = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "historical",
+            "--frozen",
+            str(frozen_file),
+            "--host-config",
+            str(host_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert proc_conf.returncode == 0
+    manifest_conf = json.loads(out_file.read_text(encoding="utf-8"))
+    assert manifest_conf["outcome_classification"]["is_independently_accepted"] is False
 
 
 def test_cli_prospective_step_concurrent_writers_serialization(
