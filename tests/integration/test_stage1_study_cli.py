@@ -505,6 +505,39 @@ def test_cli_prospective_step_adversarial_authentication_enforcement(
     assert proc_truthy_prod.returncode == 3
     assert "INVALID_PRODUCER_CREDENTIALS" in proc_truthy_prod.stderr
 
+    # Adversarial Case 5: Config supplies static bearer tokens without
+    # canonical content verification (e.g. {"tokens": ["foo"]}).
+    # Must fail closed with exit code 3 (INVALID_PRODUCER_CREDENTIALS).
+    host_config_static_tokens = {
+        "trust_roots": trust_roots,
+        "artifact_store": art_store,
+        "authenticated_producers": {"trusted-root": {"tokens": ["bearer-token"]}},
+    }
+    host_config_file.write_text(json.dumps(host_config_static_tokens), encoding="utf-8")
+    proc_static_tokens = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            str(script),
+            "prospective-step",
+            "--registration",
+            str(reg_file),
+            "--host-config",
+            str(host_config_file),
+            "--private-root",
+            str(private_root),
+            "--session-date",
+            "2026-11-03",
+            "--session-evidence",
+            str(ev_file),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert proc_static_tokens.returncode == 3
+    assert "INVALID_PRODUCER_CREDENTIALS" in proc_static_tokens.stderr
+
 
 def test_cli_calibrate_and_historical_handlers(repo_root: Path, tmp_path: Path) -> None:
     from datetime import UTC, date, datetime

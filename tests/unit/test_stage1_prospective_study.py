@@ -26,7 +26,7 @@ from drift.experiments.stage1_study_freeze import (
     REQUIRED_ROLES,
     StudyEvidenceReferenceV1,
 )
-from drift.serialization.canonical import content_hash
+from drift.serialization.canonical import canonical_json, content_hash
 
 H = "8" * 64
 NOW = datetime(2026, 11, 2, 6, 30, 0, tzinfo=UTC)
@@ -755,9 +755,9 @@ def test_producer_verifier_rejects_empty_authentication_mechanisms() -> None:
         )
 
 
-def test_producer_verifier_rejects_identity_only_producers() -> None:
+def test_producer_verifier_rejects_identity_only_and_static_producers() -> None:
     """Verifies that ProductionProspectiveProducerVerifier rejects identity-only
-    allowlisting (e.g. {"trusted": True}) and requires actual credentials.
+    allowlisting (e.g. {"trusted": True}) and unverified static credentials.
     """
     # Sol's Round 14 reproduction: truthy producer entry without credentials
     with pytest.raises(ValueError, match="INVALID_PRODUCER_CREDENTIALS"):
@@ -773,51 +773,129 @@ def test_producer_verifier_rejects_identity_only_producers() -> None:
             authenticated_producers={"trusted": {}},
         )
 
-    # Empty tokens list
+    # Unverified static tokens list (Sol's Round 15 finding)
     with pytest.raises(ValueError, match="INVALID_PRODUCER_CREDENTIALS"):
         ProductionProspectiveProducerVerifier(
             trust_roots={"trusted"},
-            authenticated_producers={"trusted": {"tokens": []}},
+            authenticated_producers={"trusted": {"tokens": ["some-bearer-token"]}},
         )
 
-    # Valid token credentials: verify artifact authentication behavior
-    pv = ProductionProspectiveProducerVerifier(
-        trust_roots={"trusted"},
-        authenticated_producers={"trusted": {"tokens": ["valid-secret-token"]}},
+
+def test_producer_verifier_rejects_reused_credentials_on_altered_contents() -> None:
+    """Sol's Round 15 regression: A signature verified over canonical artifact contents
+    or independently authenticated exact artifact hashes rejects payload changes
+    (e.g. cash 100 -> 999999) and session-binding changes with reused credentials.
+    """
+    import hashlib
+    import hmac
+
+    secret = "producer-secret-key-stage1"
+    pv_hmac = ProductionProspectiveProducerVerifier(
+        trust_roots={"trusted-producer"},
+        authenticated_producers={"trusted-producer": {"hmac_key": secret}},
     )
-    art = {
-        "authority_id": "trusted",
+
+    unsigned_art = {
+        "schema_version": "drift-stage1-prospective-artifact/1",
         "artifact_role": "portfolio_state",
         "registration_id": "REG-TEST",
         "freeze_hash": "a" * 64,
         "session_index": 0,
         "session_date": "2026-11-03",
-        "execution_payload": {"state": "clean"},
+        "authority_id": "trusted-producer",
+        "execution_payload": {"cash": 100},
     }
-    # Uncredentialed artifact is rejected
-    assert not pv.verify_artifact(
-        art,
+    raw_bytes = canonical_json(unsigned_art)
+    sig = hmac.new(secret.encode("utf-8"), raw_bytes, hashlib.sha256).hexdigest()
+    original_art = unsigned_art | {"signature": sig}
+
+    # 1. Original valid artifact with signature over canonical contents passes
+    assert pv_hmac.verify_artifact(
+        original_art,
         expected_role="portfolio_state",
         expected_registration_id="REG-TEST",
         expected_freeze_hash="a" * 64,
         expected_session_index=0,
         expected_session_date=date(2026, 11, 3),
     )
-    # Incorrect token is rejected
-    assert not pv.verify_artifact(
-        art | {"producer_token": "wrong-token"},
+
+    # 2. Sol's Round 15 reproduction: cash altered from 100 to 999999 with
+    # reused signature
+    altered_cash_art = dict(original_art)
+    altered_cash_art["execution_payload"] = {"cash": 999999}
+    assert not pv_hmac.verify_artifact(
+        altered_cash_art,
         expected_role="portfolio_state",
         expected_registration_id="REG-TEST",
         expected_freeze_hash="a" * 64,
         expected_session_index=0,
         expected_session_date=date(2026, 11, 3),
     )
-    # Valid token is accepted
-    assert pv.verify_artifact(
-        art | {"producer_token": "valid-secret-token"},
+
+    # 3. Session-binding changes with reused signature are rejected:
+    # a. Changed session_index (0 -> 1)
+    altered_session_art = dict(original_art)
+    altered_session_art["session_index"] = 1
+    assert not pv_hmac.verify_artifact(
+        altered_session_art,
+        expected_role="portfolio_state",
+        expected_registration_id="REG-TEST",
+        expected_freeze_hash="a" * 64,
+        expected_session_index=1,
+        expected_session_date=date(2026, 11, 3),
+    )
+
+    # b. Changed registration_id
+    altered_reg_art = dict(original_art)
+    altered_reg_art["registration_id"] = "REG-FORGED"
+    assert not pv_hmac.verify_artifact(
+        altered_reg_art,
+        expected_role="portfolio_state",
+        expected_registration_id="REG-FORGED",
+        expected_freeze_hash="a" * 64,
+        expected_session_index=0,
+        expected_session_date=date(2026, 11, 3),
+    )
+
+    # c. Changed freeze_hash
+    altered_freeze_art = dict(original_art)
+    altered_freeze_art["freeze_hash"] = "b" * 64
+    assert not pv_hmac.verify_artifact(
+        altered_freeze_art,
+        expected_role="portfolio_state",
+        expected_registration_id="REG-TEST",
+        expected_freeze_hash="b" * 64,
+        expected_session_index=0,
+        expected_session_date=date(2026, 11, 3),
+    )
+
+    # 4. Exact artifact hash authentication also rejects payload & binding alterations
+    orig_hash = content_hash(original_art)
+    pv_hashes = ProductionProspectiveProducerVerifier(
+        trust_roots={"trusted-producer"},
+        authenticated_artifact_hashes={orig_hash},
+    )
+    assert pv_hashes.verify_artifact(
+        original_art,
         expected_role="portfolio_state",
         expected_registration_id="REG-TEST",
         expected_freeze_hash="a" * 64,
         expected_session_index=0,
+        expected_session_date=date(2026, 11, 3),
+    )
+    assert not pv_hashes.verify_artifact(
+        altered_cash_art,
+        expected_role="portfolio_state",
+        expected_registration_id="REG-TEST",
+        expected_freeze_hash="a" * 64,
+        expected_session_index=0,
+        expected_session_date=date(2026, 11, 3),
+    )
+    assert not pv_hashes.verify_artifact(
+        altered_session_art,
+        expected_role="portfolio_state",
+        expected_registration_id="REG-TEST",
+        expected_freeze_hash="a" * 64,
+        expected_session_index=1,
         expected_session_date=date(2026, 11, 3),
     )

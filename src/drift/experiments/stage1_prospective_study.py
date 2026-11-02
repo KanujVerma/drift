@@ -9,6 +9,8 @@ Implements broker-free prospective system:
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 from collections.abc import Callable, Mapping
 from datetime import date, datetime
 from typing import Any, Literal, Protocol, Self
@@ -423,46 +425,48 @@ class ProductionProspectiveProducerVerifier:
                 if callable(creds):
                     valid_producers[prod_id] = creds
                 elif isinstance(creds, dict):
-                    has_tokens = (
-                        "tokens" in creds
-                        and isinstance(creds["tokens"], (set, list, tuple))
-                        and len(creds["tokens"]) > 0
-                        and all(
-                            isinstance(t, str) and t.strip() for t in creds["tokens"]
+                    has_hmac = bool(
+                        creds.get("hmac_key")
+                        or creds.get("secret")
+                        or creds.get("secret_key")
+                    )
+                    has_verifier = callable(
+                        creds.get("signature_verifier")
+                        or creds.get("authenticator")
+                        or creds.get("verifier")
+                    )
+                    has_signed_hashes = bool(
+                        (
+                            isinstance(
+                                creds.get("signed_hashes"),
+                                (set, list, tuple, Mapping),
+                            )
+                            and len(creds["signed_hashes"]) > 0
+                        )
+                        or (
+                            isinstance(
+                                creds.get("authenticated_hashes"),
+                                (set, list, tuple, Mapping),
+                            )
+                            and len(creds["authenticated_hashes"]) > 0
                         )
                     )
-                    has_signatures = (
-                        "signatures" in creds
-                        and isinstance(creds["signatures"], (set, list, tuple))
-                        and len(creds["signatures"]) > 0
-                        and all(
-                            isinstance(s, str) and s.strip()
-                            for s in creds["signatures"]
-                        )
-                    )
-                    has_authenticator = "authenticator" in creds and callable(
-                        creds["authenticator"]
-                    )
-                    has_verifier = "verifier" in creds and callable(creds["verifier"])
-                    if not (
-                        has_tokens
-                        or has_signatures
-                        or has_authenticator
-                        or has_verifier
-                    ):
+                    if not (has_hmac or has_verifier or has_signed_hashes):
                         raise ValueError(
                             f"INVALID_PRODUCER_CREDENTIALS: producer '{prod_id}' "
-                            "provides only identity allowlisting without artifact "
-                            "authentication credentials (requires non-empty "
-                            "tokens/signatures or callable authenticator/verifier)"
+                            "provides only identity allowlisting or unverified static "
+                            "credentials. Credentials must authenticate canonical "
+                            "artifact contents (requires hmac_key/secret, "
+                            "signed_hashes, or callable "
+                            "signature_verifier/authenticator)"
                         )
                     valid_producers[prod_id] = creds
                 else:
                     raise ValueError(
                         f"INVALID_PRODUCER_CREDENTIALS: producer '{prod_id}' "
                         "provides only identity allowlisting without artifact "
-                        "authentication credentials (requires non-empty "
-                        "tokens/signatures or callable authenticator/verifier)"
+                        "authentication credentials (requires hmac_key/secret, "
+                        "signed_hashes, or callable signature_verifier/authenticator)"
                     )
             self._authenticated_producers = valid_producers
         else:
@@ -556,26 +560,108 @@ class ProductionProspectiveProducerVerifier:
             prod_info = self._authenticated_producers.get(auth)
             if not prod_info:
                 return False
+
             producer_authenticated = False
+            unsigned_art = {
+                k: v
+                for k, v in art_obj.items()
+                if k not in ("signature", "producer_signature", "producer_token")
+            }
+            canonical_bytes = canonical_json(unsigned_art)
+            unsigned_hash = content_hash(unsigned_art)
+            full_hash = content_hash(art_obj)
+            sig = (
+                art_obj.get("signature")
+                or art_obj.get("producer_signature")
+                or art_obj.get("producer_token")
+            )
+
             if callable(prod_info):
                 try:
-                    if prod_info(art_obj):
-                        producer_authenticated = True
+                    if sig is not None:
+                        try:
+                            if prod_info(canonical_bytes, sig):
+                                producer_authenticated = True
+                        except TypeError:
+                            try:
+                                if prod_info(unsigned_art, sig):
+                                    producer_authenticated = True
+                            except TypeError:
+                                if prod_info(art_obj):
+                                    producer_authenticated = True
+                    else:
+                        if prod_info(art_obj):
+                            producer_authenticated = True
                 except Exception:
                     return False
             elif isinstance(prod_info, dict):
-                tokens = prod_info.get("tokens") or prod_info.get("signatures")
-                if tokens is not None:
-                    tok = art_obj.get("producer_token") or art_obj.get("signature")
-                    if tok and tok in tokens:
-                        producer_authenticated = True
-                auth_fn = prod_info.get("authenticator") or prod_info.get("verifier")
-                if auth_fn is not None and callable(auth_fn):
+                # 1. HMAC verification over canonical artifact contents
+                hmac_key = (
+                    prod_info.get("hmac_key")
+                    or prod_info.get("secret")
+                    or prod_info.get("secret_key")
+                )
+                if hmac_key:
+                    if not sig or not isinstance(sig, str):
+                        return False
+                    key_bytes = (
+                        hmac_key.encode("utf-8")
+                        if isinstance(hmac_key, str)
+                        else hmac_key
+                    )
+                    expected_sig = hmac.new(
+                        key_bytes, canonical_bytes, hashlib.sha256
+                    ).hexdigest()
+                    if not hmac.compare_digest(sig, expected_sig):
+                        return False
+                    producer_authenticated = True
+
+                # 2. Callable signature verifier over canonical contents
+                sig_fn = (
+                    prod_info.get("signature_verifier")
+                    or prod_info.get("authenticator")
+                    or prod_info.get("verifier")
+                )
+                if sig_fn and callable(sig_fn):
+                    if not sig:
+                        return False
                     try:
-                        if auth_fn(art_obj):
-                            producer_authenticated = True
+                        try:
+                            if not sig_fn(canonical_bytes, sig):
+                                return False
+                        except TypeError:
+                            try:
+                                if not sig_fn(unsigned_art, sig):
+                                    return False
+                            except TypeError:
+                                if not sig_fn(art_obj):
+                                    return False
+                        producer_authenticated = True
                     except Exception:
                         return False
+
+                # 3. Exact signed hashes binding
+                signed_hashes = prod_info.get("signed_hashes") or prod_info.get(
+                    "authenticated_hashes"
+                )
+                if signed_hashes is not None:
+                    if isinstance(signed_hashes, Mapping):
+                        if not sig:
+                            return False
+                        exp_sig = signed_hashes.get(unsigned_hash) or signed_hashes.get(
+                            full_hash
+                        )
+                        if not exp_sig or exp_sig != sig:
+                            return False
+                        producer_authenticated = True
+                    elif isinstance(signed_hashes, (set, frozenset, list, tuple)):
+                        if (
+                            unsigned_hash not in signed_hashes
+                            and full_hash not in signed_hashes
+                        ):
+                            return False
+                        producer_authenticated = True
+
             if not producer_authenticated:
                 return False
             authenticated = True
