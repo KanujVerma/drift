@@ -870,7 +870,9 @@ def validate_raw_alpaca_payloads(
     splits = ca_grouped.get("forward_splits")
     dividend_symbols: set[str] = set()
     split_symbols: set[str] = set()
-    dividend_dates_map: dict[str, list[date]] = {}
+    seen_dividend_events: set[tuple[str, date]] = set()
+    seen_split_events: set[tuple[str, date]] = set()
+    dividend_dates_map: dict[str, set[date]] = {}
 
     if isinstance(dividends, list):
         for idx, item in enumerate(dividends):
@@ -909,6 +911,14 @@ def validate_raw_alpaca_payloads(
                     f"{d_val}: {e}"
                 ) from e
 
+            event_key = (ca_sym, parsed_div_d)
+            if event_key in seen_dividend_events:
+                raise ValueError(
+                    f"corporate actions cash_dividends[{idx}] has duplicate "
+                    f"dividend event for {ca_sym} on {parsed_div_d}"
+                )
+            seen_dividend_events.add(event_key)
+
             rate = item.get("rate")
             if rate is None:
                 rate = item.get("amount") if "amount" in item else item.get("cash")
@@ -924,7 +934,8 @@ def validate_raw_alpaca_payloads(
                     f"finite rate/amount: {rate}"
                 )
             dividend_symbols.add(ca_sym)
-            dividend_dates_map.setdefault(ca_sym, []).append(parsed_div_d)
+            if STUDY_START_DATE <= parsed_div_d <= STUDY_END_DATE:
+                dividend_dates_map.setdefault(ca_sym, set()).add(parsed_div_d)
 
     if isinstance(splits, list):
         for idx, item in enumerate(splits):
@@ -952,19 +963,26 @@ def validate_raw_alpaca_payloads(
                     f"corporate actions forward_splits[{idx}] lacks valid date: {d_val}"
                 )
             try:
-                date.fromisoformat(d_val[:10])
+                parsed_split_d = date.fromisoformat(d_val[:10])
             except Exception as e:
                 raise ValueError(
                     f"corporate actions forward_splits[{idx}] has non-ISO date "
                     f"{d_val}: {e}"
                 ) from e
+            event_key = (ca_sym, parsed_split_d)
+            if event_key in seen_split_events:
+                raise ValueError(
+                    f"corporate actions forward_splits[{idx}] has duplicate "
+                    f"split event for {ca_sym} on {parsed_split_d}"
+                )
+            seen_split_events.add(event_key)
             split_symbols.add(ca_sym)
 
     dividend_counts = {
-        s: len(dividend_dates_map.get(s, [])) for s in EXACT_12_ETF_UNIVERSE
+        s: len(dividend_dates_map.get(s, set())) for s in EXACT_12_ETF_UNIVERSE
     }
     dividend_years = {
-        s: frozenset(d.year for d in dividend_dates_map.get(s, []))
+        s: frozenset(d.year for d in dividend_dates_map.get(s, set()))
         for s in EXACT_12_ETF_UNIVERSE
     }
 
@@ -979,10 +997,11 @@ def validate_raw_alpaca_payloads(
         years_cnt = len(dividend_years[sym])
         if count < MIN_EQUITY_DIVIDEND_COUNT or years_cnt < MIN_DISTRIBUTION_YEARS:
             raise ValueError(
-                f"corporate actions payload has sparse dividend history for equity "
-                f"ETF {sym}: {count} dividends across {years_cnt} years "
-                f"(min {MIN_EQUITY_DIVIDEND_COUNT} dividends across "
-                f"{MIN_DISTRIBUTION_YEARS} years required)"
+                f"corporate actions payload has sparse dividend history in study "
+                f"window for equity ETF {sym}: {count} dividends across "
+                f"{years_cnt} years (min {MIN_EQUITY_DIVIDEND_COUNT} dividends "
+                f"across {MIN_DISTRIBUTION_YEARS} years required in window "
+                f"[{STUDY_START_DATE}, {STUDY_END_DATE}])"
             )
 
     for sym in BOND_ETFS:
@@ -995,10 +1014,11 @@ def validate_raw_alpaca_payloads(
         years_cnt = len(dividend_years[sym])
         if count < MIN_BOND_DIVIDEND_COUNT or years_cnt < MIN_DISTRIBUTION_YEARS:
             raise ValueError(
-                f"corporate actions payload has sparse dividend history for bond "
-                f"ETF {sym}: {count} dividends across {years_cnt} years "
-                f"(min {MIN_BOND_DIVIDEND_COUNT} dividends across "
-                f"{MIN_DISTRIBUTION_YEARS} years required)"
+                f"corporate actions payload has sparse dividend history in study "
+                f"window for bond ETF {sym}: {count} dividends across "
+                f"{years_cnt} years (min {MIN_BOND_DIVIDEND_COUNT} dividends "
+                f"across {MIN_DISTRIBUTION_YEARS} years required in window "
+                f"[{STUDY_START_DATE}, {STUDY_END_DATE}])"
             )
 
     return RawAlpacaPayloadSummary(

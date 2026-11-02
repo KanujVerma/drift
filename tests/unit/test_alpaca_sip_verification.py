@@ -1125,3 +1125,52 @@ def test_sol_round7_sparse_dividend_history_refused() -> None:
         "sparse dividend history" in r or "sparse or missing dividends" in r
         for r in report.refusal_reasons
     )
+
+
+def test_sol_round8_duplicated_out_of_window_dividends_refused() -> None:
+    """Sol Round 8 P1: duplicate dividends outside study window refused."""
+    import json
+    from types import SimpleNamespace
+
+    _, cov_ev, ca_records, rights = make_mock_evidence()
+    valid_mock = create_mock_valid_raw_payloads()
+
+    # Exact Sol reproduction: 8 copies of March 15 for each year 2010 through 2014
+    out_of_window_divs = []
+    for yr in range(2010, 2015):
+        for _ in range(8):
+            for sym in EXACT_12_ETF_UNIVERSE:
+                out_of_window_divs.append(
+                    {"symbol": sym, "ex_date": f"{yr}-03-15", "rate": 1.0}
+                )
+
+    bogus_payloads = SimpleNamespace(
+        bars=valid_mock.bars,
+        calendar=valid_mock.calendar,
+        corporate_actions=json.dumps(
+            {
+                "corporate_actions": {
+                    "cash_dividends": out_of_window_divs,
+                    "forward_splits": [],
+                },
+                "next_page_token": None,
+            }
+        ).encode("utf-8"),
+    )
+
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        raw_payloads=bogus_payloads,
+        corporate_actions=ca_records,
+        rights_assessment=rights,
+        coverage_evidence=cov_ev,
+    )
+
+    assert report.overall_status == "REFUSED"
+    assert any(
+        "duplicate dividend event" in r
+        or "sparse dividend history in study window" in r
+        or "sparse or missing dividends" in r
+        for r in report.refusal_reasons
+    )
