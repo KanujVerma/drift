@@ -1376,8 +1376,7 @@ def verify_authentic_intake_provenance(
         return True, f"receipt cryptographic verification failed: {e}"
 
     descriptor_to_content: dict[str, str] = {
-        obj.descriptor_hash: obj.content_hash
-        for obj in receipt.byte_graph.objects
+        obj.descriptor_hash: obj.content_hash for obj in receipt.byte_graph.objects
     }
     graph_content_hashes: set[str] = {
         obj.content_hash for obj in receipt.byte_graph.objects
@@ -1484,8 +1483,7 @@ def verify_authentic_intake_provenance(
                 "observed object",
             )
         obs_content_hashes = {
-            descriptor_to_content.get(d)
-            for d in role_obs.byte_object_descriptor_hashes
+            descriptor_to_content.get(d) for d in role_obs.byte_object_descriptor_hashes
         }
         if h not in obs_content_hashes:
             return (

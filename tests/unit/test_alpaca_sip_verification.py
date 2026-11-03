@@ -1419,11 +1419,12 @@ def test_genuine_receipt_domain_instances_pass_provenance_verification(
     Genuine domain objects execute the repaired tuple-iteration path without crashing,
     and verify_authentic_intake_provenance returns (False, None).
     """
+    from test_alpaca_exploratory_adapter import run_pinned_intake
+
     from drift.qualification.alpaca_sip_verification import (
         is_synthetic_or_mock_evidence,
         verify_authentic_intake_provenance,
     )
-    from test_alpaca_exploratory_adapter import run_pinned_intake
 
     intake = run_pinned_intake(tmp_path)
     is_mock, reason = verify_authentic_intake_provenance(intake)
@@ -1445,11 +1446,12 @@ def test_unrelated_payload_substitution_fails_closed(tmp_path: Path) -> None:
     from dataclasses import replace
     from hashlib import sha256
 
+    from test_alpaca_exploratory_adapter import run_pinned_intake
+
     from drift.datasets.resolver import VerifiedArtifactBytes
     from drift.qualification.alpaca_sip_verification import (
         verify_authentic_intake_provenance,
     )
-    from test_alpaca_exploratory_adapter import run_pinned_intake
 
     intake = run_pinned_intake(tmp_path)
     unrelated_bytes = b"unrelated_payload_content" * 10
@@ -1478,10 +1480,11 @@ def test_origin_metadata_tampering_fails_closed(tmp_path: Path) -> None:
     """Tampering with origin metadata (HTTP status or host) fails closed."""
     from dataclasses import replace
 
+    from test_alpaca_exploratory_adapter import run_pinned_intake
+
     from drift.qualification.alpaca_sip_verification import (
         verify_authentic_intake_provenance,
     )
-    from test_alpaca_exploratory_adapter import run_pinned_intake
 
     intake = run_pinned_intake(tmp_path)
     receipt = intake.acquisition.receipt
@@ -1523,9 +1526,7 @@ def test_origin_metadata_tampering_fails_closed(tmp_path: Path) -> None:
     tampered_acq_host = replace(intake.acquisition, receipt=tampered_receipt_host)
     tampered_intake_host = replace(intake, acquisition=tampered_acq_host)
 
-    is_mock_host, reason_host = verify_authentic_intake_provenance(
-        tampered_intake_host
-    )
+    is_mock_host, reason_host = verify_authentic_intake_provenance(tampered_intake_host)
     assert is_mock_host is True
     assert reason_host is not None
     assert "is not in expected endpoints" in reason_host
