@@ -630,11 +630,12 @@ def action_historical_run(args: argparse.Namespace) -> int:
         )
 
         session_count = getattr(args, "session_count", None)
+        expected_sessions = host_config.get("expected_sessions") or host_config.get(
+            "calendar_sessions"
+        )
         if session_count is None:
-            if "expected_sessions" in host_config and isinstance(
-                host_config["expected_sessions"], (list, tuple)
-            ):
-                session_count = len(host_config["expected_sessions"])
+            if expected_sessions and isinstance(expected_sessions, (list, tuple, set)):
+                session_count = len(expected_sessions)
             elif "scheduled_sessions" in host_config and isinstance(
                 host_config["scheduled_sessions"], int
             ):
@@ -786,10 +787,11 @@ def action_historical(args: argparse.Namespace) -> int:
             artifact_resolver=lambda aid: artifact_store.get(aid, {}),
         )
 
-        if "expected_sessions" in host_config and isinstance(
-            host_config["expected_sessions"], (list, tuple, set)
-        ):
-            required_sessions = set(host_config["expected_sessions"])
+        expected_sessions = host_config.get("expected_sessions") or host_config.get(
+            "calendar_sessions"
+        )
+        if expected_sessions and isinstance(expected_sessions, (list, tuple, set)):
+            required_sessions = set(expected_sessions)
         elif "scheduled_sessions" in host_config and isinstance(
             host_config["scheduled_sessions"], int
         ):
@@ -829,7 +831,7 @@ def action_historical(args: argparse.Namespace) -> int:
             if session_index not in required_sessions:
                 sys.stderr.write(
                     f"Receipt at index {i} has out-of-scope session_index: "
-                    f"{session_index} (expected 0..251)\n"
+                    f"{session_index} (expected session in required sessions)\n"
                 )
                 return 3
 
@@ -1457,6 +1459,100 @@ def action_report(args: argparse.Namespace) -> int:
         return 1
 
 
+def action_reconstruct(args: argparse.Namespace) -> int:
+    try:
+        from drift.experiments.stage1_historical_reconstruction import (
+            reconstruct_and_verify_historical_experiment,
+        )
+
+        freeze_data = _read_json(args.frozen)
+        host_config = _read_json(args.host_config)
+    except Exception as e:
+        sys.stderr.write(f"Invalid input: {e}\n")
+        return 3
+
+    try:
+        frozen = FrozenStage1StudyV1.model_validate_json(json.dumps(freeze_data))
+        receipt_store = host_config.get("receipt_store", {})
+        b_receipt_refs = host_config.get("execution_receipts", [])
+        r_receipt_refs = host_config.get(
+            "reference_execution_receipts", host_config.get("reference_receipts", [])
+        )
+
+        def _resolve(r: Any) -> dict[str, Any]:
+            if isinstance(r, dict) and "metrics" in r:
+                return dict(r)
+            if isinstance(r, dict) and "receipt_id" in r:
+                res = receipt_store.get(r["receipt_id"], r)
+                return dict(res) if isinstance(res, dict) else {}
+            if isinstance(r, str):
+                res = receipt_store.get(r, {})
+                return dict(res) if isinstance(res, dict) else {}
+            return {}
+
+        b_receipts = [_resolve(r) for r in b_receipt_refs]
+        r_receipts = [_resolve(r) for r in r_receipt_refs]
+
+        costs = Decimal(
+            str(
+                host_config.get(
+                    "incremental_operating_costs",
+                    host_config.get("attributable_costs", "10.00"),
+                )
+            )
+        )
+
+        manifest = (
+            _read_json(args.run_manifest) if getattr(args, "run_manifest", None) else {}
+        )
+        reported_b_nav = (
+            Decimal(str(manifest["b_terminal_nav"]))
+            if "b_terminal_nav" in manifest
+            else None
+        )
+        reported_r_nav = (
+            Decimal(str(manifest["r_terminal_nav"]))
+            if "r_terminal_nav" in manifest
+            else None
+        )
+        reported_pea = (
+            Decimal(str(manifest["primary_economic_advantage"]))
+            if manifest.get("primary_economic_advantage") is not None
+            else None
+        )
+        reported_outcome = (
+            manifest.get("outcome_classification", {}).get("outcome")
+            if "outcome_classification" in manifest
+            else None
+        )
+
+        expected_sessions = host_config.get("expected_sessions") or host_config.get(
+            "calendar_sessions"
+        )
+
+        recon_report = reconstruct_and_verify_historical_experiment(
+            frozen=frozen,
+            b_receipts=b_receipts,
+            r_receipts=r_receipts,
+            incremental_operating_costs=costs,
+            expected_sessions=expected_sessions,
+            reported_b_terminal_nav=reported_b_nav,
+            reported_r_terminal_nav=reported_r_nav,
+            reported_primary_economic_advantage=reported_pea,
+            reported_outcome=reported_outcome,
+        )
+
+        _write_output(args.output, recon_report.model_dump(mode="json"))
+        if recon_report.status == "VERIFIED":
+            return 0
+        else:
+            sys.stderr.write(f"Reconstruction failed: {recon_report.discrepancies}\n")
+            return 2
+    except Exception as e:
+        sys.stderr.write(f"Reconstruction error: {e}\n")
+        return 1
+
+
 def action_prospective_register(args: argparse.Namespace) -> int:
     try:
         plan_data = _read_json(args.plan)
@@ -1950,6 +2046,12 @@ def build_parser() -> argparse.ArgumentParser:
     rep.add_argument("--host-config", required=True)
     rep.add_argument("--output", required=True)
 
+    recon = subparsers.add_parser("reconstruct")
+    recon.add_argument("--frozen", required=True)
+    recon.add_argument("--host-config", required=True)
+    recon.add_argument("--output", required=True)
+    recon.add_argument("--run-manifest", required=False, default=None)
+
     preg = subparsers.add_parser("prospective-register")
     preg.add_argument("--plan", required=True)
     preg.add_argument("--host-config", required=True)
@@ -1988,6 +2090,7 @@ def main() -> None:
         "historical": action_historical,
         "historical-run": action_historical_run,
         "report": action_report,
+        "reconstruct": action_reconstruct,
         "prospective-register": action_prospective_register,
         "prospective-step": action_prospective_step,
     }
