@@ -1295,16 +1295,68 @@ def is_synthetic_or_mock_evidence(
     coverage_evidence: Sequence[Any] | None = None,
     raw_payloads: Any | None = None,
 ) -> tuple[bool, str | None]:
-    """Detect whether any supplied evidence has synthetic or mock origin."""
+    """Positively authenticate genuine evidence and detect synthetic/mock origin.
+
+    Fails closed: evidence is synthetic unless it proves authenticated provenance
+    from live Alpaca provider TLS origin observations (data.alpaca.markets)
+    with HTTP 200, valid non-self-signed legal authority, and verified closed-world
+    reconstruction.
+    """
     if intake_result is not None:
         if getattr(intake_result, "is_synthetic", False):
             return True, "intake_result is explicitly marked synthetic"
+        if isinstance(intake_result, AlpacaSipIntakeEvidenceV1):
+            return (
+                True,
+                "intake_result is offline AlpacaSipIntakeEvidenceV1 fixture "
+                "lacking live TLS origin observations",
+            )
         rid = getattr(intake_result, "receipt_id", "")
         if isinstance(rid, str) and (rid.startswith("MOCK-") or "MOCK" in rid):
             return True, f"intake_result has mock receipt_id: {rid}"
         b_h = getattr(intake_result, "bars_sha256", "")
         if b_h in ("a" * 64, "b" * 64, "c" * 64, "d" * 64, "0" * 64):
             return True, f"intake_result has placeholder hash: {b_h}"
+
+        # Positive provenance check for authentic AlpacaExploratoryIntakeResult
+        acq = getattr(intake_result, "acquisition", None)
+        receipt = getattr(acq, "receipt", None) if acq is not None else None
+        observed_objects = (
+            getattr(receipt, "observed_objects", None) if receipt is not None else None
+        )
+        if not observed_objects:
+            return (
+                True,
+                "intake_result lacks authenticated acquisition receipt "
+                "observed_objects",
+            )
+        for obj_key, obs in observed_objects.items():
+            status = getattr(obs, "http_status", None)
+            host = getattr(obs, "tls_endpoint_identity", None) or getattr(
+                obs, "request_host", None
+            )
+            if status != 200:
+                return (
+                    True,
+                    f"intake_result observed_object {obj_key} has non-200 "
+                    f"HTTP status: {status}",
+                )
+            if host != "data.alpaca.markets":
+                return (
+                    True,
+                    f"intake_result observed_object {obj_key} host {host!r} is not "
+                    "authenticated data.alpaca.markets",
+                )
+
+    if raw_payloads is not None:
+        if getattr(raw_payloads, "is_synthetic", False):
+            return True, "raw_payloads is explicitly marked synthetic"
+        origin = getattr(raw_payloads, "origin_observations", None)
+        if not origin:
+            return (
+                True,
+                "raw_payloads lacks authenticated live TLS origin observations",
+            )
 
     if corporate_actions is not None:
         for ca in corporate_actions:
@@ -1323,15 +1375,18 @@ def is_synthetic_or_mock_evidence(
         assessor = getattr(rights_assessment, "assessor_identity", "")
         if assessor == "matthew@drift.local":
             return True, "rights_assessment uses unauthenticated mock identity"
+        authority = getattr(rights_assessment, "authority", "")
+        if assessor and authority and assessor == authority:
+            return (
+                True,
+                "rights_assessment is self-authorized (assessor == authority); "
+                "must carry independent legal authority",
+            )
 
     if coverage_evidence is not None:
         for cov in coverage_evidence:
             if getattr(cov, "is_synthetic", False):
                 return True, "coverage_evidence contains synthetic record"
-
-    if raw_payloads is not None:
-        if getattr(raw_payloads, "is_synthetic", False):
-            return True, "raw_payloads is explicitly marked synthetic"
 
     return False, None
 

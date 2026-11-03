@@ -1297,3 +1297,62 @@ def test_unauthorized_credentials_fail_closed() -> None:
     )
     assert report.overall_status == "REFUSED"
     assert any("ACCOUNT_ACCESS_UNAVAILABLE" in r for r in report.refusal_reasons)
+
+
+def test_caller_label_tampering_on_mock_evidence_cannot_bypass_production_mode() -> (
+    None
+):
+    """Tampering with caller-controlled labels on mock evidence fails closed.
+
+    Even if caller clears is_synthetic, renames receipt/rights IDs, changes
+    assessor identity, and replaces placeholder hashes, production verification
+    (allow_synthetic=False) refuses with MOCK_EVIDENCE_PROHIBITED_IN_PRODUCTION
+    because authentic live TLS origin observations from data.alpaca.markets are absent.
+    """
+    intake_res, cov_ev, ca_records, rights = make_mock_evidence()
+
+    # Sol P1 reproduction attempt:
+    # 1. Clear is_synthetic and rename receipt/hashes on intake evidence
+    tampered_intake = AlpacaSipIntakeEvidenceV1(
+        provider="alpaca",
+        feed="sip",
+        bars_sha256="1234567890abcdef" * 4,
+        calendar_sha256="fedcba0987654321" * 4,
+        corporate_actions_sha256="abcdef1234567890" * 4,
+        bars_byte_size=1024,
+        calendar_byte_size=512,
+        corporate_actions_byte_size=512,
+        receipt_id="AUTHENTIC-LOOKING-RECEIPT-9999",
+        reconciliation_pass=True,
+        is_synthetic=False,
+    )
+    # 2. Tampered rights assessment
+    tampered_rights = ContractualRightsAssessmentEvidenceV1(
+        assessment_id="AUTHENTIC-RIGHTS-ASSESSMENT-001",
+        assessor_identity="auditor@drift.internal",
+        authority="legal-counsel@drift.internal",
+        entitlement_state="active",
+        internal_research_permitted=True,
+        algorithmic_non_display_permitted=True,
+        private_offline_retention_permitted=True,
+        public_redistribution_permitted=False,
+        git_tree_retention_permitted=False,
+        evidence_document_hashes=("e" * 64,),
+        is_synthetic=False,
+    )
+
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        intake_result=tampered_intake,
+        corporate_actions=ca_records,
+        rights_assessment=tampered_rights,
+        coverage_evidence=cov_ev,
+        allow_synthetic=False,
+    )
+
+    assert report.overall_status == "REFUSED"
+    assert report.contains_synthetic_fixtures is True
+    assert any(
+        "MOCK_EVIDENCE_PROHIBITED_IN_PRODUCTION" in r for r in report.refusal_reasons
+    )

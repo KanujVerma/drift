@@ -81,6 +81,7 @@ def test_adversarial_robinhood_totalview_cannot_masquerade_as_admitted() -> None
         "alpaca_sip_verification_report_hash": None,
         "limitations": (),
         "contains_synthetic_fixtures": False,
+        "diagnostic_authorization": None,
         "status": "ADMITTED",
         "refusal_reasons": (),
         "reviewer_authority": "matthew@drift.local",

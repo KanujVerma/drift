@@ -262,7 +262,8 @@ def _fetch_bytes(
             ) from exc
         if exc.code == 403:
             raise AlpacaAccountAccessError(
-                f"ACCOUNT_ACCESS_FORBIDDEN: Alpaca API returned HTTP 403: {exc.reason}"
+                "ACCOUNT_ACCESS_UNAVAILABLE: Alpaca API returned "
+                f"HTTP 403: {exc.reason}"
             ) from exc
         raise
     if not isinstance(body, bytes):  # pragma: no cover - defensive
@@ -333,6 +334,8 @@ def _failure_label(error: BaseException) -> str:
     Never the message: `http.client` builds exception messages out of header
     values and raw status lines, either of which can carry a key.
     """
+    if isinstance(error, AlpacaAccountAccessError):
+        return str(error)
     label = type(error).__name__
     if isinstance(error, urllib.error.HTTPError):
         label = f"{label} (HTTP {int(error.code)})"
