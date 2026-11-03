@@ -63,6 +63,12 @@ G3_STAGE1_EXTENSION_SOURCE_PATHS = frozenset(
         "src/drift/qualification/stage1_market_admission.py",
     }
 )
+# Issue #587 Stage 1 G1 free historical Alpaca SIP qualification verifier.
+G1_ALPACA_SIP_SOURCE_PATHS = frozenset(
+    {
+        "src/drift/qualification/alpaca_sip_verification.py",
+    }
+)
 # Separate #553-#557/#559 requests share one explicit dispatch, not a prefix rule.
 OFFLINE_PREFLIGHT_SCRIPT_PATHS = frozenset(
     {
@@ -281,6 +287,7 @@ INERT_SOURCE_PATHS = (
     | E6B_LOCAL_ORIGINAL_LEDGER_SOURCE_PATHS
     | G2_EXECUTION_EXTENSION_SOURCE_PATHS
     | G3_STAGE1_EXTENSION_SOURCE_PATHS
+    | G1_ALPACA_SIP_SOURCE_PATHS
     | OFFLINE_PREFLIGHT_SCRIPT_PATHS
 )
 SCANNED_AS_PRODUCTION_PATHS = (
@@ -299,6 +306,7 @@ SCANNED_AS_PRODUCTION_PATHS = (
     | E6B_LOCAL_ORIGINAL_LEDGER_SOURCE_PATHS
     | G2_EXECUTION_EXTENSION_SOURCE_PATHS
     | G3_STAGE1_EXTENSION_SOURCE_PATHS
+    | G1_ALPACA_SIP_SOURCE_PATHS
     | OFFLINE_PREFLIGHT_SCRIPT_PATHS
 )
 M1E_SCRIPT_PATHS = frozenset(
@@ -646,6 +654,7 @@ def _m1e_paths_on_disk() -> set[str]:
         and not path.startswith("src/drift/domain/promotion")
         and not path.startswith("src/drift/experiments/")
         and path != "scripts/stage1_study.py"
+        and path != "scripts/verify_alpaca_sip_qualification.py"
     }
     return m1e_candidates - baseline
 
@@ -1174,6 +1183,12 @@ def test_g2_execution_extensions_have_actual_inert_source_scans(relative: str) -
 @pytest.mark.parametrize("relative", sorted(G3_STAGE1_EXTENSION_SOURCE_PATHS))
 def test_g3_stage1_extensions_have_actual_inert_source_scans(relative: str) -> None:
     """Registered stage1 intelligence and qualification paths pass actual-file guard."""
+    _assert_m1e_source_file_allowed(relative)
+
+
+@pytest.mark.parametrize("relative", sorted(G1_ALPACA_SIP_SOURCE_PATHS))
+def test_g1_alpaca_sip_extensions_have_actual_inert_source_scans(relative: str) -> None:
+    """Registered G1 Alpaca SIP qualification path passes actual-file guard."""
     _assert_m1e_source_file_allowed(relative)
 
 
