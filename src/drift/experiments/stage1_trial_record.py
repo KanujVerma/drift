@@ -31,6 +31,7 @@ from drift.experiments.stage1_trial_projection import (
     OperatingCostProjectionV1,
     project_operating_costs,
 )
+from drift.experiments.stage1_trial_provenance import _complete_manifest_fingerprint
 from drift.intelligence.contracts import (
     AttemptRecord,
     CostReceipt,
@@ -594,6 +595,15 @@ def verify_stage1_derived_trial_record(
 
     if record.campaign_spec_fingerprint != campaign.campaign_spec_fingerprint:
         raise Stage1TrialAdmissionError("CAMPAIGN_FINGERPRINT_MISMATCH")
+
+    expected_manifest_fingerprint = _complete_manifest_fingerprint(
+        campaign=campaign,
+        arms=arms,
+        bindings=bindings,
+        expected_run_ids=expected_run_ids,
+    )
+    if record.complete_manifest_fingerprint != expected_manifest_fingerprint:
+        raise Stage1TrialAdmissionError("MANIFEST_FINGERPRINT_MISMATCH")
 
     # Match exact binding in full manifest
     matching_bindings = [

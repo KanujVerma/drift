@@ -39,6 +39,7 @@ from test_stage1_campaign_config import (
 
 from drift.evaluator.opening_book_lifecycle import OriginalInvocationBindingV1
 from drift.experiments.stage1_trial_projection import ExactRatioV1
+from drift.experiments.stage1_trial_provenance import _complete_manifest_fingerprint
 from drift.experiments.stage1_trial_record import (
     Stage1DerivedTrialRecordV1,
     Stage1ResultTrialBindingV1,
@@ -137,7 +138,12 @@ def test_positive_stage1_derived_trial_record_b_and_r() -> None:
     arms = (make_golden_arm_b(), make_golden_arm_r())
     bindings = tuple(make_golden_bindings())
     b_binding = bindings[0]
-    manifest_hash = "c" * 64
+    manifest_hash = _complete_manifest_fingerprint(
+        campaign=campaign,
+        arms=arms,
+        bindings=bindings,
+        expected_run_ids=("RUN-001",),
+    )
     cal_hash = "d" * 64
     src_hash = "e" * 64
 
@@ -313,11 +319,17 @@ def test_reject_crossed_br_accounts() -> None:
     bindings = tuple(make_golden_bindings())
     b_binding = bindings[0]
     r_binding = bindings[1]
+    manifest_hash = _complete_manifest_fingerprint(
+        campaign=campaign,
+        arms=arms,
+        bindings=bindings,
+        expected_run_ids=(r_binding.run_id,),
+    )
 
     trial = build_stage1_derived_trial_record(
         campaign_id=campaign.campaign_id,
         campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
-        complete_manifest_fingerprint="c" * 64,
+        complete_manifest_fingerprint=manifest_hash,
         run_id=r_binding.run_id,
         arm_id="ARM-R",
         portfolio_account_id=b_binding.portfolio_account_id,
@@ -499,11 +511,17 @@ def test_reject_incorrect_source_vintage() -> None:
     arms = (make_golden_arm_b(), make_golden_arm_r())
     bindings = tuple(make_golden_bindings())
     b_binding = bindings[0]
+    manifest_hash = _complete_manifest_fingerprint(
+        campaign=campaign,
+        arms=arms,
+        bindings=bindings,
+        expected_run_ids=("RUN-001",),
+    )
 
     trial = build_stage1_derived_trial_record(
         campaign_id=campaign.campaign_id,
         campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
-        complete_manifest_fingerprint="c" * 64,
+        complete_manifest_fingerprint=manifest_hash,
         run_id=b_binding.run_id,
         arm_id="ARM-B",
         portfolio_account_id=b_binding.portfolio_account_id,
@@ -524,6 +542,43 @@ def test_reject_incorrect_source_vintage() -> None:
             bindings=bindings,
             expected_run_ids=("RUN-001",),
             source_inventory_hash="WRONG_SOURCE_VINTAGE" + "0" * 44,
+            calendar_hash="d" * 64,
+        )
+
+
+def test_reject_manifest_fingerprint_mismatch() -> None:
+    """B2 control: wrong complete manifest fingerprint fails admission."""
+    campaign = make_golden_campaign()
+    arms = (make_golden_arm_b(), make_golden_arm_r())
+    bindings = tuple(make_golden_bindings())
+    b_binding = bindings[0]
+
+    trial = build_stage1_derived_trial_record(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint="0" * 64,  # wrong fingerprint
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        opening_book_identity="BOOK-001",
+        opening_book_hash="f" * 64,
+        source_inventory_hash="e" * 64,
+        calendar_hash="d" * 64,
+        start_session_index=0,
+        outcome_classification="NO_ATTEMPT",
+        completeness_classification="INVALID",
+    )
+    with pytest.raises(
+        Stage1TrialAdmissionError, match="MANIFEST_FINGERPRINT_MISMATCH"
+    ):
+        verify_stage1_derived_trial_record(
+            trial,
+            campaign=campaign,
+            arms=arms,
+            bindings=bindings,
+            expected_run_ids=("RUN-001",),
+            source_inventory_hash="e" * 64,
             calendar_hash="d" * 64,
         )
 
