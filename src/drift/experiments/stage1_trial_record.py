@@ -348,6 +348,10 @@ class Stage1DerivedTrialRecordV1(FrozenModel):
                 raise Stage1TrialAdmissionError(
                     "COMPLETE_TRIAL_REQUIRES_RESULT_BINDING"
                 )
+            if self.research_binding is None:
+                raise Stage1TrialAdmissionError(
+                    "COMPLETE_TRIAL_REQUIRES_RESEARCH_BINDING"
+                )
             if self.start_nav is None or self.end_nav is None:
                 raise Stage1TrialAdmissionError("COMPLETE_TRIAL_REQUIRES_NAVS")
             if self.trading_costs is None:

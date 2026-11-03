@@ -432,6 +432,21 @@ def test_reject_partial_fill_falsely_treated_as_complete() -> None:
             event_hash="4" * 64,
         ),
     )
+    ctx_b = _make_context("ARM-B", b_binding.portfolio_account_id)
+    cand_b = _make_candidate("ARM-B", b_binding.portfolio_account_id)
+    res_bind_ok = build_stage1_research_trial_binding(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint=manifest_hash,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        research_context=ctx_b,
+        disposition="propose",
+        candidate=cand_b,
+        issuer_authority_id="AUTH-001",
+    )
     # Rejection: claiming COMPLETE on indeterminate execution is rejected
     with pytest.raises(
         (Stage1TrialAdmissionError, ValueError),
@@ -447,6 +462,7 @@ def test_reject_partial_fill_falsely_treated_as_complete() -> None:
             checkpoint_id="CKPT-001",
             opening_book_identity="BOOK-001",
             opening_book_hash="f" * 64,
+            research_binding=res_bind_ok,
             result_binding=result_bind_indeterminate,
             source_inventory_hash="e" * 64,
             calendar_hash="d" * 64,
@@ -495,6 +511,7 @@ def test_reject_partial_fill_falsely_treated_as_complete() -> None:
         checkpoint_id="CKPT-001",
         opening_book_identity="BOOK-001",
         opening_book_hash="f" * 64,
+        research_binding=res_bind_ok,
         result_binding=result_bind_reconciled,
         source_inventory_hash="e" * 64,
         calendar_hash="d" * 64,
@@ -556,6 +573,21 @@ def test_reject_unknown_cost_converted_to_zero() -> None:
             event_hash="4" * 64,
         ),
     )
+    ctx_b = _make_context("ARM-B", b_binding.portfolio_account_id)
+    cand_b = _make_candidate("ARM-B", b_binding.portfolio_account_id)
+    res_bind = build_stage1_research_trial_binding(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint="c" * 64,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        research_context=ctx_b,
+        disposition="propose",
+        candidate=cand_b,
+        issuer_authority_id="AUTH-001",
+    )
     trial = build_stage1_derived_trial_record(
         campaign_id=campaign.campaign_id,
         campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
@@ -566,6 +598,7 @@ def test_reject_unknown_cost_converted_to_zero() -> None:
         checkpoint_id="CKPT-001",
         opening_book_identity="BOOK-001",
         opening_book_hash="f" * 64,
+        research_binding=res_bind,
         result_binding=result_bind,
         source_inventory_hash="e" * 64,
         calendar_hash="d" * 64,
@@ -907,4 +940,70 @@ def test_reject_non_trading_candidate_arm_account_mismatch() -> None:
             candidate=cand_r,
             reasoned_absence_code="NO_SIGNAL",
             issuer_authority_id="AUTH-001",
+        )
+
+
+def test_reject_completed_trial_without_research_binding() -> None:
+    """Codex finding: completed trial requires research binding."""
+    campaign = make_golden_campaign()
+    bindings = tuple(make_golden_bindings())
+    b_binding = bindings[0]
+    manifest_hash = "c" * 64
+
+    m0_inv = OriginalInvocationBindingV1(
+        invocation_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b1"),
+        m0_run_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b2"),
+        m0_audit_event_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b3"),
+    )
+    res_bind = build_stage1_result_trial_binding(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint=manifest_hash,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        opening_book_identity="BOOK-001",
+        opening_book_hash="f" * 64,
+        m0_invocation=m0_inv,
+        result_hash="1" * 64,
+        trace_hash="2" * 64,
+        final_book_hash="3" * 64,
+        final_nav=Decimal("10050"),
+        cash_balance=Decimal("50"),
+        cumulative_transaction_costs=Decimal("2"),
+        order_count=1,
+        fill_count=1,
+        classification="complete",
+        ledger_ref=OriginalReferenceV1(
+            event_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b4"),
+            event_hash="4" * 64,
+        ),
+    )
+
+    with pytest.raises(
+        (Stage1TrialAdmissionError, ValueError),
+        match="COMPLETE_TRIAL_REQUIRES_RESEARCH_BINDING",
+    ):
+        build_stage1_derived_trial_record(
+            campaign_id=campaign.campaign_id,
+            campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+            complete_manifest_fingerprint=manifest_hash,
+            run_id=b_binding.run_id,
+            arm_id="ARM-B",
+            portfolio_account_id=b_binding.portfolio_account_id,
+            checkpoint_id="CKPT-001",
+            opening_book_identity="BOOK-001",
+            opening_book_hash="f" * 64,
+            research_binding=None,  # Omitted research binding
+            result_binding=res_bind,
+            source_inventory_hash="e" * 64,
+            calendar_hash="d" * 64,
+            start_session_index=0,
+            end_session_index=21,
+            outcome_classification="COMPLETED",
+            completeness_classification="COMPLETE",
+            start_nav=Decimal("10000"),
+            end_nav=Decimal("10050"),
+            trading_costs=Decimal("2"),
         )
