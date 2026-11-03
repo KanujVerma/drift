@@ -1356,3 +1356,96 @@ def test_caller_label_tampering_on_mock_evidence_cannot_bypass_production_mode()
     assert any(
         "MOCK_EVIDENCE_PROHIBITED_IN_PRODUCTION" in r for r in report.refusal_reasons
     )
+
+
+def test_fabricated_mapping_provenance_bypass_is_rejected_in_production() -> None:
+    """Fabricated mappings claiming http_status=200 and data.alpaca.markets fail closed.
+
+    A fabricated mapping containing only http_status=200 and
+    request_host='data.alpaca.markets' must not bypass provenance verification;
+    it must be classified as synthetic/mock and rejected in production
+    (allow_synthetic=False).
+    """
+    from types import SimpleNamespace
+
+    from drift.qualification.alpaca_sip_verification import (
+        is_synthetic_or_mock_evidence,
+    )
+
+    # 1. Plain fabricated mapping as intake_result
+    fake_dict = {"http_status": 200, "request_host": "data.alpaca.markets"}
+    is_mock, reason = is_synthetic_or_mock_evidence(intake_result=fake_dict)
+    assert is_mock is True
+    assert reason is not None
+
+    # 2. Fabricated mapping inside observed_objects
+    class FabricatedMapping(dict):
+        http_status = 200
+        request_host = "data.alpaca.markets"
+
+    fake_receipt = SimpleNamespace(
+        observed_objects={
+            "bars": FabricatedMapping(
+                http_status=200, request_host="data.alpaca.markets"
+            )
+        }
+    )
+    fake_intake = SimpleNamespace(acquisition=SimpleNamespace(receipt=fake_receipt))
+    is_mock, reason = is_synthetic_or_mock_evidence(intake_result=fake_intake)
+    assert is_mock is True
+    assert reason is not None
+
+    # 3. Verification report in production mode fails closed
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        intake_result=fake_intake,
+        allow_synthetic=False,
+    )
+    assert report.overall_status == "REFUSED"
+    assert report.contains_synthetic_fixtures is True
+    assert any(
+        "MOCK_EVIDENCE_PROHIBITED_IN_PRODUCTION" in r for r in report.refusal_reasons
+    )
+
+
+def test_genuine_receipt_observed_objects_tuple_does_not_crash() -> None:
+    """Genuine receipt contract observed_objects tuple does not raise AttributeError.
+
+    In AcquisitionReceiptV1, observed_objects is a tuple[ObservedObjectV1, ...].
+    Verification must iterate the sequence without calling .items().
+    """
+    from types import SimpleNamespace
+
+    from drift.domain.acquisition import OriginStatus
+    from drift.qualification.alpaca_sip_verification import (
+        verify_authentic_intake_provenance,
+    )
+
+    # ObservedObject duck-type or contract object in a tuple
+    obs = SimpleNamespace(
+        provider_object_identity="GET https://data.alpaca.markets/v2/stocks/bars",
+        origin_evidence=SimpleNamespace(
+            origin_status=OriginStatus.VERIFIED,
+            tls_endpoint_identity="data.alpaca.markets",
+            safe_response_metadata={
+                "http_status": "200",
+                "request_host": "data.alpaca.markets",
+            },
+        ),
+    )
+    # observed_objects as a tuple (matching AcquisitionReceiptV1 contract)
+    fake_receipt = SimpleNamespace(observed_objects=(obs,))
+    fake_intake = SimpleNamespace(
+        retained=SimpleNamespace(artifacts={}),
+        acquisition=SimpleNamespace(
+            receipt=fake_receipt, reconciliation=SimpleNamespace(result="PASS")
+        ),
+    )
+
+    # Calling verify_authentic_intake_provenance must not crash with
+    # AttributeError: 'tuple' object has no attribute 'items'
+    is_mock, reason = verify_authentic_intake_provenance(fake_intake)
+    assert is_mock is True
+    assert "tuple" not in str(reason)
+    assert "has no attribute 'items'" not in str(reason)

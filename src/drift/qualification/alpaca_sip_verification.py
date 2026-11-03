@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from hashlib import sha256
@@ -27,7 +27,14 @@ from typing import Annotated, Any, Literal, Self
 
 from pydantic import Field, model_validator
 
+from drift.domain.acquisition import (
+    AcquisitionReceiptV1,
+    ObservedObjectV1,
+    OriginEvidenceV1,
+    OriginStatus,
+)
 from drift.domain.common import FrozenModel, NonBlankStr, SHA256Hash, UTCDateTime
+from drift.qualification.acquisition import verify_acquisition_receipt
 from drift.serialization.canonical import canonical_json, content_hash
 
 ALPACA_SIP_FEED = "sip"
@@ -635,12 +642,31 @@ def validate_intake_result_provenance(
     bars = getattr(retained, "bars", None)
     calendar = getattr(retained, "calendar", None)
     corporate_actions_ret = getattr(retained, "corporate_actions", None)
-    bars_h = getattr(bars, "sha256", None)
-    cal_h = getattr(calendar, "sha256", None)
-    ca_h = getattr(corporate_actions_ret, "sha256", None)
-    bars_sz = getattr(bars, "byte_size", 0)
-    cal_sz = getattr(calendar, "byte_size", 0)
-    ca_sz = getattr(corporate_actions_ret, "byte_size", 0)
+    artifacts = getattr(retained, "artifacts", {}) or {}
+
+    bars_h = getattr(retained, "bars_hash", None) or getattr(bars, "sha256", None)
+    cal_h = getattr(retained, "calendar_hash", None) or getattr(
+        calendar, "sha256", None
+    )
+    ca_h = getattr(retained, "corporate_actions_hash", None) or getattr(
+        corporate_actions_ret, "sha256", None
+    )
+
+    bars_sz = (
+        getattr(artifacts.get(bars_h), "byte_size", 0)
+        if bars_h in artifacts
+        else getattr(bars, "byte_size", 0)
+    )
+    cal_sz = (
+        getattr(artifacts.get(cal_h), "byte_size", 0)
+        if cal_h in artifacts
+        else getattr(calendar, "byte_size", 0)
+    )
+    ca_sz = (
+        getattr(artifacts.get(ca_h), "byte_size", 0)
+        if ca_h in artifacts
+        else getattr(corporate_actions_ret, "byte_size", 0)
+    )
 
     if not (isinstance(bars_h, str) and len(bars_h) == 64 and bars_sz >= 100):
         raise ValueError("invalid or empty bars payload retained evidence")
@@ -1288,6 +1314,140 @@ def extract_and_validate_rights_assessment(
     )
 
 
+def verify_authentic_intake_provenance(
+    intake_result: Any,
+) -> tuple[bool, str | None]:
+    """Positively authenticate genuine intake evidence against domain contracts.
+
+    Returns:
+        (is_mock, failure_reason)
+        (False, None) ONLY if evidence positively verifies as authentic live
+        acquisition.
+        (True, reason) if evidence is synthetic, mock, or fails verification.
+    """
+    if getattr(intake_result, "is_synthetic", False):
+        return True, "intake_result is explicitly marked synthetic"
+    if isinstance(intake_result, AlpacaSipIntakeEvidenceV1):
+        return (
+            True,
+            "intake_result is offline AlpacaSipIntakeEvidenceV1 fixture "
+            "lacking live TLS origin observations",
+        )
+    rid = getattr(intake_result, "receipt_id", "")
+    if isinstance(rid, str) and (rid.startswith("MOCK-") or "MOCK" in rid):
+        return True, f"intake_result has mock receipt_id: {rid}"
+    b_h = getattr(intake_result, "bars_sha256", "")
+    if b_h in ("a" * 64, "b" * 64, "c" * 64, "d" * 64, "0" * 64):
+        return True, f"intake_result has placeholder hash: {b_h}"
+
+    retained = getattr(intake_result, "retained", None)
+    acq = getattr(intake_result, "acquisition", None)
+    if retained is None or acq is None:
+        return (
+            True,
+            "intake_result lacks required 'retained' or 'acquisition' attributes",
+        )
+
+    receipt = getattr(acq, "receipt", None)
+    if not isinstance(receipt, AcquisitionReceiptV1):
+        return (
+            True,
+            "acquisition receipt is not an authentic AcquisitionReceiptV1 contract "
+            f"instance (got {type(receipt).__name__})",
+        )
+
+    recon = getattr(acq, "reconciliation", None)
+    recon_res = getattr(recon, "result", None)
+    recon_pass = (
+        getattr(recon_res, "value", str(recon_res)) in ("PASS", "complete")
+        or recon_res == "PASS"
+    )
+    if not recon_pass:
+        return True, "intake acquisition reconciliation did not pass"
+
+    artifacts = getattr(retained, "artifacts", None)
+    if not isinstance(artifacts, Mapping) or not artifacts:
+        return True, "retained artifacts missing or not a valid mapping"
+
+    try:
+        verify_acquisition_receipt(receipt, artifacts)
+    except Exception as e:
+        return True, f"receipt cryptographic verification failed: {e}"
+
+    observed_objects = receipt.observed_objects
+    if not isinstance(observed_objects, (tuple, list)) or not observed_objects:
+        return (
+            True,
+            "acquisition receipt observed_objects must be a non-empty sequence",
+        )
+
+    for obs in observed_objects:
+        if not isinstance(obs, ObservedObjectV1):
+            return (
+                True,
+                f"observed object {obs!r} is not an ObservedObjectV1 instance",
+            )
+        origin_ev = obs.origin_evidence
+        if not isinstance(origin_ev, OriginEvidenceV1):
+            return (
+                True,
+                f"observed object {obs.provider_object_identity} origin_evidence "
+                "is not OriginEvidenceV1",
+            )
+        if origin_ev.origin_status is not OriginStatus.VERIFIED:
+            return (
+                True,
+                f"observed object {obs.provider_object_identity} origin_status is not "
+                f"VERIFIED (got {origin_ev.origin_status})",
+            )
+        if origin_ev.tls_endpoint_identity != "data.alpaca.markets":
+            return (
+                True,
+                f"observed object {obs.provider_object_identity} endpoint "
+                f"{origin_ev.tls_endpoint_identity!r} is not "
+                "authenticated data.alpaca.markets",
+            )
+        metadata = origin_ev.safe_response_metadata
+        if not isinstance(metadata, Mapping):
+            return (
+                True,
+                f"observed object {obs.provider_object_identity} lacks "
+                "safe_response_metadata mapping",
+            )
+        status = metadata.get("http_status")
+        host = metadata.get("request_host")
+        if str(status) != "200":
+            return (
+                True,
+                f"observed object {obs.provider_object_identity} has non-200 "
+                f"HTTP status: {status}",
+            )
+        if str(host) != "data.alpaca.markets":
+            return (
+                True,
+                f"observed object {obs.provider_object_identity} request_host "
+                f"{host!r} is not authenticated data.alpaca.markets",
+            )
+
+    # Verify payload hashes against retained artifacts and check placeholder hashes
+    bars_h = getattr(retained, "bars_hash", None)
+    cal_h = getattr(retained, "calendar_hash", None)
+    ca_h = getattr(retained, "corporate_actions_hash", None)
+    for label, h in (
+        ("bars", bars_h),
+        ("calendar", cal_h),
+        ("corporate_actions", ca_h),
+    ):
+        if not isinstance(h, str) or len(h) != 64:
+            return True, f"{label} hash is invalid or missing"
+        if h in ("a" * 64, "b" * 64, "c" * 64, "d" * 64, "0" * 64):
+            return True, f"{label} hash is placeholder: {h}"
+        if h not in artifacts:
+            return True, f"{label} hash {h} not found in retained artifacts"
+
+    return False, None
+
+
 def is_synthetic_or_mock_evidence(
     intake_result: Any | None = None,
     corporate_actions: Sequence[Any] | None = None,
@@ -1303,79 +1463,54 @@ def is_synthetic_or_mock_evidence(
     reconstruction.
     """
     if intake_result is not None:
-        if getattr(intake_result, "is_synthetic", False):
-            return True, "intake_result is explicitly marked synthetic"
-        if isinstance(intake_result, AlpacaSipIntakeEvidenceV1):
-            return (
-                True,
-                "intake_result is offline AlpacaSipIntakeEvidenceV1 fixture "
-                "lacking live TLS origin observations",
-            )
-        rid = getattr(intake_result, "receipt_id", "")
-        if isinstance(rid, str) and (rid.startswith("MOCK-") or "MOCK" in rid):
-            return True, f"intake_result has mock receipt_id: {rid}"
-        b_h = getattr(intake_result, "bars_sha256", "")
-        if b_h in ("a" * 64, "b" * 64, "c" * 64, "d" * 64, "0" * 64):
-            return True, f"intake_result has placeholder hash: {b_h}"
-
-        # Positive provenance check for authentic AlpacaExploratoryIntakeResult
-        acq = getattr(intake_result, "acquisition", None)
-        receipt = getattr(acq, "receipt", None) if acq is not None else None
-        observed_objects = (
-            getattr(receipt, "observed_objects", None) if receipt is not None else None
-        )
-        if not observed_objects:
-            return (
-                True,
-                "intake_result lacks authenticated acquisition receipt "
-                "observed_objects",
-            )
-        for obj_key, obs in observed_objects.items():
-            status = getattr(obs, "http_status", None)
-            host = getattr(obs, "tls_endpoint_identity", None) or getattr(
-                obs, "request_host", None
-            )
-            if status != 200:
-                return (
-                    True,
-                    f"intake_result observed_object {obj_key} has non-200 "
-                    f"HTTP status: {status}",
-                )
-            if host != "data.alpaca.markets":
-                return (
-                    True,
-                    f"intake_result observed_object {obj_key} host {host!r} is not "
-                    "authenticated data.alpaca.markets",
-                )
+        is_mock, reason = verify_authentic_intake_provenance(intake_result)
+        if is_mock:
+            return True, reason
 
     if raw_payloads is not None:
-        if getattr(raw_payloads, "is_synthetic", False):
-            return True, "raw_payloads is explicitly marked synthetic"
-        origin = getattr(raw_payloads, "origin_observations", None)
-        if not origin:
-            return (
-                True,
-                "raw_payloads lacks authenticated live TLS origin observations",
-            )
+        return (
+            True,
+            "raw_payloads is unauthenticated offline payload evidence lacking "
+            "acquisition receipt and TLS origin verification",
+        )
 
     if corporate_actions is not None:
         for ca in corporate_actions:
-            if getattr(ca, "is_synthetic", False):
+            if getattr(ca, "is_synthetic", False) or (
+                isinstance(ca, Mapping) and ca.get("is_synthetic", False)
+            ):
                 return True, "corporate_actions contains synthetic record"
-            basis = getattr(ca, "completeness_basis", "")
+            basis = getattr(ca, "completeness_basis", "") or (
+                ca.get("completeness_basis", "") if isinstance(ca, Mapping) else ""
+            )
             if "MOCK" in str(basis):
                 return True, f"corporate action has mock completeness basis: {basis}"
 
     if rights_assessment is not None:
-        if getattr(rights_assessment, "is_synthetic", False):
+        if getattr(rights_assessment, "is_synthetic", False) or (
+            isinstance(rights_assessment, Mapping)
+            and rights_assessment.get("is_synthetic", False)
+        ):
             return True, "rights_assessment is explicitly marked synthetic"
-        aid = getattr(rights_assessment, "assessment_id", "")
+        aid = getattr(rights_assessment, "assessment_id", "") or (
+            rights_assessment.get("assessment_id", "")
+            if isinstance(rights_assessment, Mapping)
+            else ""
+        )
         if isinstance(aid, str) and (aid.startswith("MOCK-") or "MOCK" in aid):
             return True, f"rights_assessment has mock assessment_id: {aid}"
-        assessor = getattr(rights_assessment, "assessor_identity", "")
+        assessor = getattr(rights_assessment, "assessor_identity", "") or (
+            rights_assessment.get("assessor_identity", "")
+            if isinstance(rights_assessment, Mapping)
+            else ""
+        )
         if assessor == "matthew@drift.local":
             return True, "rights_assessment uses unauthenticated mock identity"
-        authority = getattr(rights_assessment, "authority", "")
+        authority = getattr(rights_assessment, "authority", "") or (
+            rights_assessment.get("authority", "")
+            if isinstance(rights_assessment, Mapping)
+            else ""
+        )
         if assessor and authority and assessor == authority:
             return (
                 True,
@@ -1385,7 +1520,9 @@ def is_synthetic_or_mock_evidence(
 
     if coverage_evidence is not None:
         for cov in coverage_evidence:
-            if getattr(cov, "is_synthetic", False):
+            if getattr(cov, "is_synthetic", False) or (
+                isinstance(cov, Mapping) and cov.get("is_synthetic", False)
+            ):
                 return True, "coverage_evidence contains synthetic record"
 
     return False, None
