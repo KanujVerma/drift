@@ -1,6 +1,7 @@
 """Unit tests for Drift Stage 1 (G1) free historical Alpaca SIP verification."""
 
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -1409,43 +1410,122 @@ def test_fabricated_mapping_provenance_bypass_is_rejected_in_production() -> Non
     )
 
 
-def test_genuine_receipt_observed_objects_tuple_does_not_crash() -> None:
-    """Genuine receipt contract observed_objects tuple does not raise AttributeError.
+def test_genuine_receipt_domain_instances_pass_provenance_verification(
+    tmp_path: Path,
+) -> None:
+    """Genuine receipt domain instances and retained bytes pass provenance check.
 
     In AcquisitionReceiptV1, observed_objects is a tuple[ObservedObjectV1, ...].
-    Verification must iterate the sequence without calling .items().
+    Genuine domain objects execute the repaired tuple-iteration path without crashing,
+    and verify_authentic_intake_provenance returns (False, None).
     """
-    from types import SimpleNamespace
+    from drift.qualification.alpaca_sip_verification import (
+        is_synthetic_or_mock_evidence,
+        verify_authentic_intake_provenance,
+    )
+    from test_alpaca_exploratory_adapter import run_pinned_intake
 
-    from drift.domain.acquisition import OriginStatus
+    intake = run_pinned_intake(tmp_path)
+    is_mock, reason = verify_authentic_intake_provenance(intake)
+    assert is_mock is False
+    assert reason is None
+
+    is_synth, synth_reason = is_synthetic_or_mock_evidence(intake_result=intake)
+    assert is_synth is False
+    assert synth_reason is None
+
+
+def test_unrelated_payload_substitution_fails_closed(tmp_path: Path) -> None:
+    """Attaching unrelated payloads alongside a valid receipt fails closed.
+
+    If an arbitrary payload hash is placed into retained.bars_hash and present
+    in retained.artifacts, but not bound to the receipt's verified byte graph,
+    provenance verification strictly refuses.
+    """
+    from dataclasses import replace
+    from hashlib import sha256
+
+    from drift.datasets.resolver import VerifiedArtifactBytes
     from drift.qualification.alpaca_sip_verification import (
         verify_authentic_intake_provenance,
     )
+    from test_alpaca_exploratory_adapter import run_pinned_intake
 
-    # ObservedObject duck-type or contract object in a tuple
-    obs = SimpleNamespace(
-        provider_object_identity="GET https://data.alpaca.markets/v2/stocks/bars",
-        origin_evidence=SimpleNamespace(
-            origin_status=OriginStatus.VERIFIED,
-            tls_endpoint_identity="data.alpaca.markets",
-            safe_response_metadata={
-                "http_status": "200",
-                "request_host": "data.alpaca.markets",
-            },
-        ),
-    )
-    # observed_objects as a tuple (matching AcquisitionReceiptV1 contract)
-    fake_receipt = SimpleNamespace(observed_objects=(obs,))
-    fake_intake = SimpleNamespace(
-        retained=SimpleNamespace(artifacts={}),
-        acquisition=SimpleNamespace(
-            receipt=fake_receipt, reconciliation=SimpleNamespace(result="PASS")
-        ),
-    )
+    intake = run_pinned_intake(tmp_path)
+    unrelated_bytes = b"unrelated_payload_content" * 10
+    unrelated_hash = sha256(unrelated_bytes).hexdigest()
 
-    # Calling verify_authentic_intake_provenance must not crash with
-    # AttributeError: 'tuple' object has no attribute 'items'
-    is_mock, reason = verify_authentic_intake_provenance(fake_intake)
+    fake_artifacts = dict(intake.retained.artifacts)
+    fake_artifacts[unrelated_hash] = VerifiedArtifactBytes(
+        data=unrelated_bytes,
+        byte_size=len(unrelated_bytes),
+        content_hash=unrelated_hash,
+    )
+    fake_retained = replace(
+        intake.retained,
+        bars_hash=unrelated_hash,
+        artifacts=fake_artifacts,
+    )
+    tampered_intake = replace(intake, retained=fake_retained)
+
+    is_mock, reason = verify_authentic_intake_provenance(tampered_intake)
     assert is_mock is True
-    assert "tuple" not in str(reason)
-    assert "has no attribute 'items'" not in str(reason)
+    assert reason is not None
+    assert "not bound to the verified acquisition receipt byte graph" in reason
+
+
+def test_origin_metadata_tampering_fails_closed(tmp_path: Path) -> None:
+    """Tampering with origin metadata (HTTP status or host) fails closed."""
+    from dataclasses import replace
+
+    from drift.qualification.alpaca_sip_verification import (
+        verify_authentic_intake_provenance,
+    )
+    from test_alpaca_exploratory_adapter import run_pinned_intake
+
+    intake = run_pinned_intake(tmp_path)
+    receipt = intake.acquisition.receipt
+
+    # 1. Non-200 HTTP status
+    obs0 = receipt.observed_objects[0]
+    tampered_evidence = obs0.origin_evidence.model_copy(
+        update={
+            "safe_response_metadata": {
+                "http_status": "500",
+                "request_host": "data.alpaca.markets",
+            }
+        }
+    )
+    tampered_obs = obs0.model_copy(update={"origin_evidence": tampered_evidence})
+    tampered_observed = (tampered_obs, *receipt.observed_objects[1:])
+    tampered_receipt = receipt.model_copy(
+        update={"observed_objects": tampered_observed}
+    )
+    tampered_acq = replace(intake.acquisition, receipt=tampered_receipt)
+    tampered_intake = replace(intake, acquisition=tampered_acq)
+
+    is_mock, reason = verify_authentic_intake_provenance(tampered_intake)
+    assert is_mock is True
+    assert reason is not None
+    assert "has non-200 HTTP status: 500" in reason
+
+    # 2. Untrusted TLS endpoint identity
+    tampered_evidence_host = obs0.origin_evidence.model_copy(
+        update={"tls_endpoint_identity": "attacker.controlled.endpoint"}
+    )
+    tampered_obs_host = obs0.model_copy(
+        update={"origin_evidence": tampered_evidence_host}
+    )
+    tampered_observed_host = (tampered_obs_host, *receipt.observed_objects[1:])
+    tampered_receipt_host = receipt.model_copy(
+        update={"observed_objects": tampered_observed_host}
+    )
+    tampered_acq_host = replace(intake.acquisition, receipt=tampered_receipt_host)
+    tampered_intake_host = replace(intake, acquisition=tampered_acq_host)
+
+    is_mock_host, reason_host = verify_authentic_intake_provenance(
+        tampered_intake_host
+    )
+    assert is_mock_host is True
+    assert reason_host is not None
+    assert "is not in expected endpoints" in reason_host

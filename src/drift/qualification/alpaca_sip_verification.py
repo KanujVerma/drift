@@ -629,7 +629,8 @@ def validate_intake_result_provenance(
     recon = getattr(acq, "reconciliation", None)
     recon_res = getattr(recon, "result", None)
     recon_pass = (
-        getattr(recon_res, "value", str(recon_res)) == "PASS" or recon_res == "PASS"
+        getattr(recon_res, "value", str(recon_res)).upper() == "PASS"
+        or recon_res == "PASS"
     )
     if not recon_pass:
         raise ValueError("intake acquisition reconciliation did not pass")
@@ -1359,7 +1360,7 @@ def verify_authentic_intake_provenance(
     recon = getattr(acq, "reconciliation", None)
     recon_res = getattr(recon, "result", None)
     recon_pass = (
-        getattr(recon_res, "value", str(recon_res)) in ("PASS", "complete")
+        getattr(recon_res, "value", str(recon_res)).upper() == "PASS"
         or recon_res == "PASS"
     )
     if not recon_pass:
@@ -1374,6 +1375,14 @@ def verify_authentic_intake_provenance(
     except Exception as e:
         return True, f"receipt cryptographic verification failed: {e}"
 
+    descriptor_to_content: dict[str, str] = {
+        obj.descriptor_hash: obj.content_hash
+        for obj in receipt.byte_graph.objects
+    }
+    graph_content_hashes: set[str] = {
+        obj.content_hash for obj in receipt.byte_graph.objects
+    }
+
     observed_objects = receipt.observed_objects
     if not isinstance(observed_objects, (tuple, list)) or not observed_objects:
         return (
@@ -1381,6 +1390,7 @@ def verify_authentic_intake_provenance(
             "acquisition receipt observed_objects must be a non-empty sequence",
         )
 
+    observed_by_role: dict[str, ObservedObjectV1] = {}
     for obs in observed_objects:
         if not isinstance(obs, ObservedObjectV1):
             return (
@@ -1400,13 +1410,6 @@ def verify_authentic_intake_provenance(
                 f"observed object {obs.provider_object_identity} origin_status is not "
                 f"VERIFIED (got {origin_ev.origin_status})",
             )
-        if origin_ev.tls_endpoint_identity != "data.alpaca.markets":
-            return (
-                True,
-                f"observed object {obs.provider_object_identity} endpoint "
-                f"{origin_ev.tls_endpoint_identity!r} is not "
-                "authenticated data.alpaca.markets",
-            )
         metadata = origin_ev.safe_response_metadata
         if not isinstance(metadata, Mapping):
             return (
@@ -1414,36 +1417,82 @@ def verify_authentic_intake_provenance(
                 f"observed object {obs.provider_object_identity} lacks "
                 "safe_response_metadata mapping",
             )
-        status = metadata.get("http_status")
-        host = metadata.get("request_host")
-        if str(status) != "200":
+        status = str(metadata.get("http_status", ""))
+        host = str(metadata.get("request_host", ""))
+        tls_endpoint = origin_ev.tls_endpoint_identity
+
+        if status != "200":
             return (
                 True,
                 f"observed object {obs.provider_object_identity} has non-200 "
                 f"HTTP status: {status}",
             )
-        if str(host) != "data.alpaca.markets":
+
+        key = str(obs.matched_expected_key or "")
+        expected_hosts: tuple[str, ...]
+        if "calendar" in key:
+            expected_hosts = ("paper-api.alpaca.markets", "data.alpaca.markets")
+        else:
+            expected_hosts = ("data.alpaca.markets",)
+
+        if tls_endpoint not in expected_hosts:
+            return (
+                True,
+                f"observed object {obs.provider_object_identity} endpoint "
+                f"{tls_endpoint!r} is not in expected endpoints {expected_hosts}",
+            )
+        if host not in expected_hosts:
             return (
                 True,
                 f"observed object {obs.provider_object_identity} request_host "
-                f"{host!r} is not authenticated data.alpaca.markets",
+                f"{host!r} is not in expected hosts {expected_hosts}",
             )
 
-    # Verify payload hashes against retained artifacts and check placeholder hashes
+        if "bars" in key:
+            observed_by_role["bars"] = obs
+        elif "calendar" in key:
+            observed_by_role["calendar"] = obs
+        elif "action" in key:
+            observed_by_role["corporate_actions"] = obs
+
+    # Verify payload hashes against graph and bound origin observations
     bars_h = getattr(retained, "bars_hash", None)
     cal_h = getattr(retained, "calendar_hash", None)
     ca_h = getattr(retained, "corporate_actions_hash", None)
-    for label, h in (
+    for role, h in (
         ("bars", bars_h),
         ("calendar", cal_h),
         ("corporate_actions", ca_h),
     ):
         if not isinstance(h, str) or len(h) != 64:
-            return True, f"{label} hash is invalid or missing"
+            return True, f"{role} payload hash is invalid or missing: {h!r}"
         if h in ("a" * 64, "b" * 64, "c" * 64, "d" * 64, "0" * 64):
-            return True, f"{label} hash is placeholder: {h}"
+            return True, f"{role} payload has placeholder hash: {h}"
         if h not in artifacts:
-            return True, f"{label} hash {h} not found in retained artifacts"
+            return True, f"{role} payload hash {h} not found in retained artifacts"
+        if h not in graph_content_hashes:
+            return (
+                True,
+                f"{role} payload hash {h} is not bound to the verified acquisition "
+                "receipt byte graph",
+            )
+        role_obs = observed_by_role.get(role)
+        if role_obs is None:
+            return (
+                True,
+                f"{role} payload hash {h} has no corresponding verified "
+                "observed object",
+            )
+        obs_content_hashes = {
+            descriptor_to_content.get(d)
+            for d in role_obs.byte_object_descriptor_hashes
+        }
+        if h not in obs_content_hashes:
+            return (
+                True,
+                f"{role} payload hash {h} is not bound to descriptor hashes in "
+                f"observed object {role_obs.provider_object_identity}",
+            )
 
     return False, None
 
