@@ -29,6 +29,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import uuid
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -42,6 +43,10 @@ try:
 except ImportError:
     fcntl = None  # type: ignore[assignment]
 
+from drift.experiments.stage1_historical_execution import (
+    HistoricalRunConfigV1,
+    execute_historical_study,
+)
 from drift.experiments.stage1_original_acceptance import (
     ProductionExecutionEvidenceVerifier,
     ProductionStudyEvidenceVerifier,
@@ -418,6 +423,115 @@ def action_verify_freeze(args: argparse.Namespace) -> int:
         return 2
 
 
+def action_historical_run(args: argparse.Namespace) -> int:
+    try:
+        freeze_data = _read_json(args.frozen)
+        host_config = _read_json(args.host_config)
+    except Exception as e:
+        sys.stderr.write(f"Invalid input: {e}\n")
+        return 3
+
+    try:
+        frozen = FrozenStage1StudyV1.model_validate_json(json.dumps(freeze_data))
+    except Exception as e:
+        sys.stderr.write(f"Invalid frozen study: {e}\n")
+        return 3
+
+    try:
+        trust_roots_raw = host_config.get("trust_roots", {})
+        receipt_store = host_config.setdefault("receipt_store", {})
+        artifact_store = host_config.setdefault("artifact_store", {})
+
+        authority_id = getattr(args, "authority", None)
+        if not authority_id:
+            if isinstance(trust_roots_raw, dict):
+                for role_authorities in trust_roots_raw.values():
+                    if (
+                        isinstance(role_authorities, (list, tuple, set))
+                        and role_authorities
+                    ):
+                        authority_id = next(iter(role_authorities))
+                        break
+                    elif isinstance(role_authorities, str) and role_authorities:
+                        authority_id = role_authorities
+                        break
+            elif isinstance(trust_roots_raw, (list, tuple, set)) and trust_roots_raw:
+                authority_id = next(iter(trust_roots_raw))
+
+        if not authority_id:
+            authority_id = "trusted-historical-root"
+
+        ledger_dir = (
+            Path(args.ledger_dir).resolve()
+            if getattr(args, "ledger_dir", None)
+            else Path(tempfile.mkdtemp(prefix="drift-historical-ledger-"))
+        )
+
+        session_count = getattr(args, "session_count", None)
+        if session_count is None:
+            if "expected_sessions" in host_config and isinstance(
+                host_config["expected_sessions"], (list, tuple)
+            ):
+                session_count = len(host_config["expected_sessions"])
+            elif "scheduled_sessions" in host_config and isinstance(
+                host_config["scheduled_sessions"], int
+            ):
+                session_count = host_config["scheduled_sessions"]
+            elif (
+                hasattr(frozen.protocol, "observation_sessions")
+                and frozen.protocol.observation_sessions is not None
+            ):
+                session_count = frozen.protocol.observation_sessions
+            else:
+                session_count = 252
+
+        operating_costs = Decimal(
+            str(
+                host_config.get(
+                    "incremental_operating_costs",
+                    host_config.get("attributable_costs", "10.00"),
+                )
+            )
+        )
+
+        config = HistoricalRunConfigV1(
+            frozen=frozen,
+            origin_dir=ledger_dir,
+            authority_id=authority_id,
+            initial_capital=Decimal(
+                str(getattr(frozen.protocol, "initial_capital", "10000"))
+            ),
+            incremental_operating_costs=operating_costs,
+            session_count=session_count,
+        )
+
+        result = execute_historical_study(
+            config,
+            receipt_store=receipt_store,
+            artifact_store=artifact_store,
+        )
+
+        # Populate host_config with execution receipts and reference receipts
+        host_config["execution_receipts"] = list(result.candidate_receipt_refs)
+        host_config["reference_execution_receipts"] = list(
+            result.reference_receipt_refs
+        )
+        host_config["incremental_operating_costs"] = str(operating_costs)
+
+        # Write output manifest
+        out_payload = result.model_dump(mode="json")
+        out_payload["updated_host_config"] = host_config
+        _write_output(args.output, out_payload)
+
+        if getattr(args, "update_host_config", False):
+            _write_output(args.host_config, host_config)
+
+        return 0
+    except Exception as e:
+        sys.stderr.write(f"Historical run failed: {e}\n")
+        return 1
+
+
 def action_historical(args: argparse.Namespace) -> int:
     try:
         freeze_data = _read_json(args.frozen)
@@ -510,7 +624,26 @@ def action_historical(args: argparse.Namespace) -> int:
             artifact_resolver=lambda aid: artifact_store.get(aid, {}),
         )
 
-        required_sessions = set(range(252))
+        if "expected_sessions" in host_config and isinstance(
+            host_config["expected_sessions"], (list, tuple, set)
+        ):
+            required_sessions = set(host_config["expected_sessions"])
+        elif "scheduled_sessions" in host_config and isinstance(
+            host_config["scheduled_sessions"], int
+        ):
+            required_sessions = set(range(host_config["scheduled_sessions"]))
+        elif (
+            hasattr(frozen.protocol, "observation_sessions")
+            and frozen.protocol.observation_sessions is not None
+            and "execution_receipts" in host_config
+            and isinstance(host_config["execution_receipts"], list)
+            and len(host_config["execution_receipts"])
+            == frozen.protocol.observation_sessions
+        ):
+            required_sessions = set(range(frozen.protocol.observation_sessions))
+        else:
+            required_sessions = set(range(252))
+
         seen_sessions: set[int] = set()
         verified_receipts: list[dict[str, Any]] = []
 
@@ -563,7 +696,8 @@ def action_historical(args: argparse.Namespace) -> int:
         if missing_sessions:
             sys.stderr.write(
                 f"Historical execution incomplete: missing {len(missing_sessions)} "
-                f"required sessions (observed {len(seen_sessions)}/252)\n"
+                f"required sessions "
+                f"(observed {len(seen_sessions)}/{len(required_sessions)})\n"
             )
             return 4
 
@@ -614,9 +748,10 @@ def action_historical(args: argparse.Namespace) -> int:
             if not isinstance(ref_receipts_raw, list):
                 sys.stderr.write("Reference receipts must be a list\n")
                 return 3
-            if len(ref_receipts_raw) != 252:
+            if len(ref_receipts_raw) != len(required_sessions):
                 sys.stderr.write(
-                    f"Reference receipts count mismatch: expected 252, "
+                    f"Reference receipts count mismatch: "
+                    f"expected {len(required_sessions)}, "
                     f"got {len(ref_receipts_raw)}\n"
                 )
                 return 3
@@ -709,7 +844,7 @@ def action_historical(args: argparse.Namespace) -> int:
             if seen_ref_sessions != required_sessions:
                 sys.stderr.write(
                     f"Incomplete reference receipts: observed "
-                    f"{len(seen_ref_sessions)}/252\n"
+                    f"{len(seen_ref_sessions)}/{len(required_sessions)}\n"
                 )
                 return 4
 
@@ -1025,7 +1160,7 @@ def action_historical(args: argparse.Namespace) -> int:
 
         # Recompute outcome classification from verified execution evidence
         outcome = classify_study_outcome(
-            scheduled_sessions=252,
+            scheduled_sessions=len(required_sessions),
             primary_economic_advantage=pea,
             primary_nav_diff_lower=p_nav_lower,
             primary_econ_lower=p_econ_lower,
@@ -1044,7 +1179,7 @@ def action_historical(args: argparse.Namespace) -> int:
             "protocol_hash": frozen.protocol.protocol_hash,
             "freeze_hash": frozen.freeze_hash,
             "mode": frozen.protocol.mode,
-            "scheduled_sessions": 252,
+            "scheduled_sessions": len(required_sessions),
             "observed_sessions": observed_count,
             "executed_at": datetime.now(UTC).isoformat(),
             "status": "COMPLETED",
@@ -1620,6 +1755,15 @@ def build_parser() -> argparse.ArgumentParser:
     hist.add_argument("--host-config", required=True)
     hist.add_argument("--output", required=True)
 
+    hrun = subparsers.add_parser("historical-run")
+    hrun.add_argument("--frozen", required=True)
+    hrun.add_argument("--host-config", required=True)
+    hrun.add_argument("--output", required=True)
+    hrun.add_argument("--ledger-dir", required=False, default=None)
+    hrun.add_argument("--session-count", type=int, required=False, default=None)
+    hrun.add_argument("--authority", required=False, default=None)
+    hrun.add_argument("--update-host-config", action="store_true", default=False)
+
     rep = subparsers.add_parser("report")
     rep.add_argument("--run-manifest", required=True)
     rep.add_argument("--host-config", required=True)
@@ -1659,6 +1803,7 @@ def main() -> None:
         "freeze": action_freeze,
         "verify-freeze": action_verify_freeze,
         "historical": action_historical,
+        "historical-run": action_historical_run,
         "report": action_report,
         "prospective-register": action_prospective_register,
         "prospective-step": action_prospective_step,

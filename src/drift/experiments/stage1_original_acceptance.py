@@ -588,6 +588,7 @@ def create_historical_execution_receipt(
     execution_journal: dict[str, Any],
     artifacts: dict[str, str],
     metrics: dict[str, Any],
+    **extra: Any,
 ) -> tuple[dict[str, Any], str]:
     rcpt: dict[str, Any] = {
         "schema_version": "drift-stage1-execution-receipt/1",
@@ -599,6 +600,7 @@ def create_historical_execution_receipt(
         "execution_journal": execution_journal,
         "artifacts": artifacts,
         "metrics": metrics,
+        **extra,
     }
     h = content_hash(rcpt)
     return {**rcpt, "receipt_hash": h}, h
