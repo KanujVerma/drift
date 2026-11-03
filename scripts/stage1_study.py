@@ -421,6 +421,81 @@ def action_development_run(args: argparse.Namespace) -> int:
         return 1
 
 
+def action_validation_run(args: argparse.Namespace) -> int:
+    try:
+        model_binding_data = _read_json(args.model_binding)
+        cal_data = _read_json(args.calibration_result)
+        host_config = _read_json(args.host_config)
+    except Exception as e:
+        sys.stderr.write(f"Invalid input: {e}\n")
+        return 3
+
+    try:
+        from drift.experiments.stage1_model_validation import (
+            ImmutableModelBindingV1,
+            ValidationRunConfigV1,
+            execute_2024_validation,
+        )
+        from drift.experiments.stage1_study_artifacts import (
+            CalibrationResultV1,
+        )
+
+        binding = ImmutableModelBindingV1.model_validate_json(
+            json.dumps(model_binding_data)
+        )
+        cal_res = CalibrationResultV1.model_validate_json(json.dumps(cal_data))
+        if cal_res.selected_pair is None:
+            sys.stderr.write("Calibration result missing selected comparator pair\n")
+            return 2
+
+        ledger_dir = (
+            Path(args.ledger_dir)
+            if getattr(args, "ledger_dir", None)
+            else (
+                Path(host_config["ledger_dir"]) if "ledger_dir" in host_config else None
+            )
+        )
+        session_count = (
+            args.session_count
+            if getattr(args, "session_count", None) is not None
+            else host_config.get("session_count")
+        )
+        authority_id = getattr(args, "authority", None) or host_config.get(
+            "authority", "trusted-validation-authority"
+        )
+
+        artifact_store = host_config.setdefault("artifact_store", {})
+        receipt_store = host_config.setdefault("receipt_store", {})
+
+        config = ValidationRunConfigV1(
+            model_binding=binding,
+            comparator_pair=cal_res.selected_pair,
+            session_count=session_count,
+            ledger_dir=ledger_dir,
+            authority_id=authority_id,
+        )
+
+        val_result = execute_2024_validation(
+            config,
+            artifact_store=artifact_store,
+            receipt_store=receipt_store,
+        )
+
+        _write_output(args.output, val_result.model_dump(mode="json"))
+
+        if getattr(args, "update_host_config", False):
+            host_config["validation_result"] = val_result.model_dump(mode="json")
+            host_config["b_receipts"] = list(val_result.b_receipt_refs)
+            host_config["r_receipts"] = list(val_result.r_receipt_refs)
+            host_config["model_replay_refs"] = list(val_result.model_replay_refs)
+            _write_output(args.host_config, host_config)
+
+        return 0
+    except Exception as e:
+        sys.stderr.write(f"Validation run failed: {e}\n")
+        return 1
+
+
 def action_freeze(args: argparse.Namespace) -> int:
     try:
         draft_data = _read_json(args.draft)
@@ -1814,6 +1889,16 @@ def build_parser() -> argparse.ArgumentParser:
     dev_run.add_argument("--authority", required=False, default=None)
     dev_run.add_argument("--update-host-config", action="store_true", default=False)
 
+    val_run = subparsers.add_parser("validation-run")
+    val_run.add_argument("--model-binding", required=True)
+    val_run.add_argument("--calibration-result", required=True)
+    val_run.add_argument("--host-config", required=True)
+    val_run.add_argument("--output", required=True)
+    val_run.add_argument("--ledger-dir", required=False, default=None)
+    val_run.add_argument("--session-count", type=int, required=False, default=None)
+    val_run.add_argument("--authority", required=False, default=None)
+    val_run.add_argument("--update-host-config", action="store_true", default=False)
+
     frz = subparsers.add_parser("freeze")
     frz.add_argument("--draft", required=True)
     frz.add_argument("--host-config", required=True)
@@ -1875,6 +1960,7 @@ def main() -> None:
         "verify-market-data": action_verify_market_data,
         "calibrate": action_calibrate,
         "development-run": action_development_run,
+        "validation-run": action_validation_run,
         "freeze": action_freeze,
         "verify-freeze": action_verify_freeze,
         "historical": action_historical,
