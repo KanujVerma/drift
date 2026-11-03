@@ -583,6 +583,14 @@ def verify_stage1_derived_trial_record(
     calendar_hash: str,
 ) -> bool:
     """Independently verify genuine producer/account admission of a derived trial."""
+    # Revalidate complete record and nested bindings via fresh validation
+    try:
+        validated = Stage1DerivedTrialRecordV1.model_validate_json(
+            record.model_dump_json()
+        )
+    except Exception as exc:
+        raise Stage1TrialAdmissionError(f"RECORD_INTEGRITY_VIOLATION: {exc}") from exc
+
     verify_stage1_synthetic_br_configuration(
         campaign=campaign,
         arms=arms,
@@ -590,10 +598,10 @@ def verify_stage1_derived_trial_record(
         expected_run_ids=expected_run_ids,
     )
 
-    if record.campaign_id != campaign.campaign_id:
+    if validated.campaign_id != campaign.campaign_id:
         raise Stage1TrialAdmissionError("WRONG_CAMPAIGN")
 
-    if record.campaign_spec_fingerprint != campaign.campaign_spec_fingerprint:
+    if validated.campaign_spec_fingerprint != campaign.campaign_spec_fingerprint:
         raise Stage1TrialAdmissionError("CAMPAIGN_FINGERPRINT_MISMATCH")
 
     expected_manifest_fingerprint = _complete_manifest_fingerprint(
@@ -602,40 +610,74 @@ def verify_stage1_derived_trial_record(
         bindings=bindings,
         expected_run_ids=expected_run_ids,
     )
-    if record.complete_manifest_fingerprint != expected_manifest_fingerprint:
+    if validated.complete_manifest_fingerprint != expected_manifest_fingerprint:
         raise Stage1TrialAdmissionError("MANIFEST_FINGERPRINT_MISMATCH")
+
+    # Revalidate nested bindings against expected complete manifest fingerprint
+    if validated.research_binding is not None:
+        try:
+            Stage1ResearchTrialBindingV1.model_validate_json(
+                validated.research_binding.model_dump_json()
+            )
+        except Exception as exc:
+            raise Stage1TrialAdmissionError(
+                f"RESEARCH_BINDING_INTEGRITY_VIOLATION: {exc}"
+            ) from exc
+        if (
+            validated.research_binding.complete_manifest_fingerprint
+            != expected_manifest_fingerprint
+        ):
+            raise Stage1TrialAdmissionError("RESEARCH_MANIFEST_FINGERPRINT_MISMATCH")
+
+    if validated.result_binding is not None:
+        try:
+            Stage1ResultTrialBindingV1.model_validate_json(
+                validated.result_binding.model_dump_json()
+            )
+        except Exception as exc:
+            raise Stage1TrialAdmissionError(
+                f"RESULT_BINDING_INTEGRITY_VIOLATION: {exc}"
+            ) from exc
+        if (
+            validated.result_binding.complete_manifest_fingerprint
+            != expected_manifest_fingerprint
+        ):
+            raise Stage1TrialAdmissionError("RESULT_MANIFEST_FINGERPRINT_MISMATCH")
 
     # Match exact binding in full manifest
     matching_bindings = [
         b
         for b in bindings
-        if b.campaign_id == record.campaign_id
-        and b.run_id == record.run_id
-        and b.arm_id == record.arm_id
+        if b.campaign_id == validated.campaign_id
+        and b.run_id == validated.run_id
+        and b.arm_id == validated.arm_id
     ]
     if len(matching_bindings) != 1:
         raise Stage1TrialAdmissionError("BINDING_NOT_FOUND_IN_MANIFEST")
 
     matching = matching_bindings[0]
-    if matching.portfolio_account_id != record.portfolio_account_id:
+    if matching.portfolio_account_id != validated.portfolio_account_id:
         raise Stage1TrialAdmissionError("CROSSED_ACCOUNT_OR_WRONG_BINDING")
 
     # Source & calendar vintage verification
-    if record.source_inventory_hash != source_inventory_hash:
+    if validated.source_inventory_hash != source_inventory_hash:
         raise Stage1TrialAdmissionError("INCORRECT_SOURCE_VINTAGE")
-    if record.calendar_hash != calendar_hash:
+    if validated.calendar_hash != calendar_hash:
         raise Stage1TrialAdmissionError("INCORRECT_CALENDAR_HASH")
 
     # Complete interval verification:
-    if record.completeness_classification == "COMPLETE":
-        if record.result_binding is None:
+    if validated.completeness_classification == "COMPLETE":
+        if validated.result_binding is None:
             raise Stage1TrialAdmissionError("COMPLETE_WITHOUT_RESULT_BINDING")
-        if record.result_binding.classification != "complete":
+        if validated.result_binding.classification != "complete":
             raise Stage1TrialAdmissionError("UNACCEPTED_RESULT_CLASSIFICATION")
-        if record.result_binding.order_count > record.result_binding.fill_count:
+        if validated.result_binding.order_count > validated.result_binding.fill_count:
             raise Stage1TrialAdmissionError("PARTIAL_FILL_FALSELY_TREATED_AS_SUCCESS")
-        if record.operating_cost_projection.status == "UNAVAILABLE":
-            if record.economic_gain is not None or record.economic_return is not None:
+        if validated.operating_cost_projection.status == "UNAVAILABLE":
+            if (
+                validated.economic_gain is not None
+                or validated.economic_return is not None
+            ):
                 raise Stage1TrialAdmissionError("UNKNOWN_COST_CONVERTED_TO_ZERO")
 
     return True

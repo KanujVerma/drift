@@ -626,3 +626,46 @@ sys.exit(0)
 """
     res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert res.returncode == 0, f"Fresh process failed: {res.stderr}"
+
+
+def test_reject_unvalidated_in_memory_mutation_on_verification() -> None:
+    """B2 control: in-memory unvalidated mutation fails admission verification."""
+    campaign = make_golden_campaign()
+    arms = (make_golden_arm_b(), make_golden_arm_r())
+    bindings = tuple(make_golden_bindings())
+    b_binding = bindings[0]
+    manifest_hash = _complete_manifest_fingerprint(
+        campaign=campaign,
+        arms=arms,
+        bindings=bindings,
+        expected_run_ids=("RUN-001",),
+    )
+
+    trial = build_stage1_derived_trial_record(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint=manifest_hash,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        opening_book_identity="BOOK-001",
+        opening_book_hash="f" * 64,
+        source_inventory_hash="e" * 64,
+        calendar_hash="d" * 64,
+        start_session_index=0,
+        outcome_classification="NO_ATTEMPT",
+        completeness_classification="INVALID",
+    )
+    # Simulate unvalidated in-memory tampering via direct attribute bypass
+    object.__setattr__(trial, "start_session_index", 999)
+    with pytest.raises(Stage1TrialAdmissionError, match="RECORD_INTEGRITY_VIOLATION"):
+        verify_stage1_derived_trial_record(
+            trial,
+            campaign=campaign,
+            arms=arms,
+            bindings=bindings,
+            expected_run_ids=("RUN-001",),
+            source_inventory_hash="e" * 64,
+            calendar_hash="d" * 64,
+        )
