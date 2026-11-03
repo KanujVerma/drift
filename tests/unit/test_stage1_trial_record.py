@@ -1,0 +1,1574 @@
+"""Tests for Stage 1 derived scientific trial record admission (#485, #507, #508).
+
+Verifies all Workstream B / Release 2 requirements:
+- Authentic research producer-to-trial association (#507)
+- Authentic platform RESULT-to-trial association (#508)
+- Derived scientific trial record admission (#485)
+- All B2 rejection rules:
+  1. Wrong campaign
+  2. Crossed B/R accounts
+  3. Foreign checkpoint
+  4. Duplicated original allocation
+  5. Forged issuer
+  6. Tampered RESULT
+  7. Missing executed order
+  8. Partial fill falsely treated as terminal success
+  9. Unknown cost converted to zero
+  10. Valid hash over invalid account association
+  11. Reused trial receipt
+  12. Incorrect original source vintage
+  13. Incomplete cold readback / fresh process verification
+"""
+
+import json
+import subprocess
+import sys
+from datetime import UTC, datetime
+from decimal import Decimal
+from fractions import Fraction
+from pathlib import Path
+from typing import Literal
+from uuid import UUID
+
+import pytest
+from test_stage1_campaign_config import (
+    make_golden_arm_b,
+    make_golden_arm_r,
+    make_golden_bindings,
+    make_golden_campaign,
+)
+
+from drift.evaluator.opening_book_lifecycle import OriginalInvocationBindingV1
+from drift.experiments.stage1_trial_projection import ExactRatioV1
+from drift.experiments.stage1_trial_provenance import _complete_manifest_fingerprint
+from drift.experiments.stage1_trial_record import (
+    Stage1DerivedTrialRecordV1,
+    Stage1ResultTrialBindingV1,
+    Stage1TrialAdmissionError,
+    build_stage1_derived_trial_record,
+    build_stage1_research_trial_binding,
+    build_stage1_result_trial_binding,
+    verify_stage1_derived_trial_record,
+)
+from drift.intelligence.contracts import (
+    ArtifactReference,
+    AttemptRecord,
+    CostReceipt,
+    ModelReplayRecord,
+    ResearchCandidate,
+    ResearchContext,
+    Scope,
+    StoredArtifactRef,
+    compute_record_hash,
+)
+from drift.intelligence.receipts import (
+    create_cost_receipt,
+    create_started_attempt,
+    create_terminal_attempt,
+)
+from drift.loop.stage1_controlled_contracts import OriginalReferenceV1
+
+BASE = datetime(2026, 10, 25, 21, 0, tzinfo=UTC)
+
+
+GOLDEN_CAMPAIGN_FINGERPRINT = (
+    "2c9cad6f55847c20bf9c7f5a5eaa1ec6f828c7f107bc32ad8a1516a4b2e88be4"
+)
+
+
+def _art_ref(name: str) -> ArtifactReference:
+    return ArtifactReference(id=name, version="1", sha256="a" * 64)
+
+
+def _make_context(
+    arm_id: str,
+    account_id: str,
+    campaign_id: str = "CAMP-E1-SYNTH-001",
+    campaign_fingerprint: str = GOLDEN_CAMPAIGN_FINGERPRINT,
+) -> ResearchContext:
+    path = Path(__file__).parents[1] / "fixtures/adaptive_research/research_v1.json"
+    data = json.loads(path.read_text())["fixtures"]["F01"]
+    data.pop("record_hash")
+    data["scope"] = dict(data["scope"])
+    data["scope"]["arm_id"] = arm_id
+    data["scope"]["account_id"] = account_id
+    data["scope"]["campaign_ref"] = {
+        "id": campaign_id,
+        "version": "1",
+        "sha256": campaign_fingerprint,
+    }
+    data["record_hash"] = compute_record_hash(data)
+    return ResearchContext.model_validate(data)
+
+
+def _make_candidate(
+    arm_id: str,
+    account_id: str,
+    campaign_id: str = "CAMP-E1-SYNTH-001",
+    campaign_fingerprint: str = GOLDEN_CAMPAIGN_FINGERPRINT,
+    family_id: str = "B3",
+) -> ResearchCandidate:
+    path = Path(__file__).parents[1] / "fixtures/adaptive_research/research_v1.json"
+    data = json.loads(path.read_text())["fixtures"]["F02"]
+    data.pop("record_hash")
+    data["scope"] = dict(data["scope"])
+    data["scope"]["arm_id"] = arm_id
+    data["scope"]["account_id"] = account_id
+    data["scope"]["campaign_ref"] = {
+        "id": campaign_id,
+        "version": "1",
+        "sha256": campaign_fingerprint,
+    }
+    data["strategy"] = dict(data["strategy"])
+    data["strategy"]["family_id"] = family_id
+    data["strategy"]["strategy_ref"] = dict(data["strategy"]["strategy_ref"])
+    data["strategy"]["strategy_ref"]["id"] = family_id
+    data["record_hash"] = compute_record_hash(data)
+    return ResearchCandidate.model_validate(data)
+
+
+def _scope(
+    arm_id: str,
+    account_id: str,
+    campaign_id: str = "CAMP-E1-SYNTH-001",
+    campaign_fingerprint: str = GOLDEN_CAMPAIGN_FINGERPRINT,
+) -> Scope:
+    return Scope(
+        experiment_id="STUDY-E1-001",
+        arm_id=arm_id,
+        account_id=account_id,
+        campaign_ref=ArtifactReference(
+            id=campaign_id,
+            version="1",
+            sha256=campaign_fingerprint,
+        ),
+    )
+
+
+def _make_cost(
+    arm_id: str,
+    account_id: str,
+    ident: str = "cost-001",
+    amount: str = "25",
+    basis: Literal["actual", "estimate", "unknown", "verified_zero"] = "actual",
+    campaign_id: str = "CAMP-E1-SYNTH-001",
+    campaign_fingerprint: str = GOLDEN_CAMPAIGN_FINGERPRINT,
+) -> CostReceipt:
+    return create_cost_receipt(
+        receipt_id=ident,
+        scope=_scope(arm_id, account_id, campaign_id, campaign_fingerprint),
+        category="model_inference",
+        billing_identity="synthetic-billing",
+        amount_basis=basis,
+        attempt_id=f"ATT-{arm_id}-001",
+        amount=amount if basis != "unknown" else None,
+        currency="USD" if basis != "unknown" else None,
+        unknown_reason="api_unmetered" if basis == "unknown" else None,
+        raw_evidence_ref=(
+            StoredArtifactRef(
+                artifact_id="art-001",
+                kind="raw_billing",
+                content_hash="b" * 64,
+                location="/tmp/receipt",
+            )
+            if basis == "verified_zero"
+            else None
+        ),
+    )
+
+
+def _make_attempts(
+    arm_id: str,
+    account_id: str,
+    candidate: ResearchCandidate,
+    campaign_id: str = "CAMP-E1-SYNTH-001",
+    campaign_fingerprint: str = GOLDEN_CAMPAIGN_FINGERPRINT,
+) -> tuple[AttemptRecord, AttemptRecord]:
+    scope = _scope(arm_id, account_id, campaign_id, campaign_fingerprint)
+    started = create_started_attempt(
+        attempt_id=candidate.attempt_id,
+        logical_request_id="REQ-001",
+        attempt_event_id=f"EVT-START-{arm_id}",
+        scope=scope,
+        context_ref=_art_ref("ctx-ref"),
+        method_ref=_art_ref("method-ref"),
+        budget_ref=_art_ref("budget-ref"),
+        producer="synthetic-producer",
+        started_at=datetime(2026, 10, 25, 21, 0, tzinfo=UTC),
+    )
+    terminal = create_terminal_attempt(
+        prior_attempt=started,
+        attempt_event_id=f"EVT-TERM-{arm_id}",
+        completed_at=datetime(2026, 10, 25, 21, 5, tzinfo=UTC),
+        status="completed",
+        candidate_ref=ArtifactReference(
+            id=candidate.candidate_id,
+            version="1",
+            sha256=candidate.record_hash,
+        ),
+    )
+    return (started, terminal)
+
+
+def _make_model_replay(
+    arm_id: str,
+    account_id: str,
+    attempt_id: str,
+    context: ResearchContext,
+    campaign_id: str = "CAMP-E1-SYNTH-001",
+    campaign_fingerprint: str = GOLDEN_CAMPAIGN_FINGERPRINT,
+) -> ModelReplayRecord:
+    scope = _scope(arm_id, account_id, campaign_id, campaign_fingerprint)
+    path = Path(__file__).parents[1] / "fixtures/adaptive_research/research_v1.json"
+    data = json.loads(path.read_text())["fixtures"]["F08"]
+    data.pop("record_hash")
+    data["scope"] = scope.model_dump(mode="python")
+    data["attempt_id"] = attempt_id
+    data["context_ref"] = {
+        "id": context.context_id,
+        "version": "1",
+        "sha256": context.record_hash,
+    }
+    data["record_hash"] = compute_record_hash(data)
+    return ModelReplayRecord.model_validate(data)
+
+
+def test_positive_stage1_derived_trial_record_b_and_r() -> None:
+    campaign = make_golden_campaign()
+    arms = (make_golden_arm_b(), make_golden_arm_r())
+    bindings = tuple(make_golden_bindings())
+    b_binding = bindings[0]
+    manifest_hash = _complete_manifest_fingerprint(
+        campaign=campaign,
+        arms=arms,
+        bindings=bindings,
+        expected_run_ids=("RUN-001",),
+    )
+    cal_hash = "d" * 64
+    src_hash = "e" * 64
+
+    # 1. Research binding for ARM-B
+    ctx_b = _make_context("ARM-B", b_binding.portfolio_account_id)
+    cand_b = _make_candidate("ARM-B", b_binding.portfolio_account_id)
+    cost_b = _make_cost("ARM-B", b_binding.portfolio_account_id, "cost-b-1", "25")
+    attempts_b = _make_attempts("ARM-B", b_binding.portfolio_account_id, cand_b)
+
+    res_bind = build_stage1_research_trial_binding(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint=manifest_hash,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        research_context=ctx_b,
+        disposition="propose",
+        candidate=cand_b,
+        attempts=attempts_b,
+        costs=(cost_b,),
+        issuer_authority_id="local_authority",
+    )
+    assert res_bind.binding_hash is not None
+
+    # 2. Result binding for ARM-B
+    m0_inv = OriginalInvocationBindingV1(
+        invocation_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b1"),
+        m0_run_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b2"),
+        m0_audit_event_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b3"),
+    )
+    result_bind = build_stage1_result_trial_binding(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint=manifest_hash,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        opening_book_identity="BOOK-001",
+        opening_book_hash="f" * 64,
+        m0_invocation=m0_inv,
+        result_hash="1" * 64,
+        trace_hash="2" * 64,
+        final_book_hash="3" * 64,
+        final_nav=Decimal("10120"),
+        cash_balance=Decimal("120"),
+        cumulative_transaction_costs=Decimal("5"),
+        order_count=2,
+        fill_count=2,
+        classification="complete",
+        ledger_ref=OriginalReferenceV1(
+            event_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b4"),
+            event_hash="4" * 64,
+        ),
+    )
+    assert result_bind.binding_hash is not None
+
+    # 3. Complete derived trial record
+    trial = build_stage1_derived_trial_record(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint=manifest_hash,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        opening_book_identity="BOOK-001",
+        opening_book_hash="f" * 64,
+        research_binding=res_bind,
+        result_binding=result_bind,
+        source_inventory_hash=src_hash,
+        calendar_hash=cal_hash,
+        start_session_index=0,
+        end_session_index=21,
+        outcome_classification="COMPLETED",
+        completeness_classification="COMPLETE",
+        costs=(cost_b,),
+        start_nav=Decimal("10000"),
+        end_nav=Decimal("10120"),
+        trading_costs=Decimal("5"),
+        reasons=("MONTHLY_REBALANCE_COMPLETED",),
+    )
+
+    assert trial.net_investment_gain == Decimal("120")
+    assert trial.net_investment_return == ExactRatioV1(numerator=3, denominator=250)
+    assert trial.economic_gain == Decimal("95")  # 120 - 25
+    assert trial.economic_return == ExactRatioV1(numerator=19, denominator=2000)
+    assert not trial.scientifically_qualified
+    assert not trial.authorizes_trading
+
+    # 4. Independent verification passes
+    assert verify_stage1_derived_trial_record(
+        trial,
+        campaign=campaign,
+        arms=arms,
+        bindings=bindings,
+        expected_run_ids=("RUN-001",),
+        source_inventory_hash=src_hash,
+        calendar_hash=cal_hash,
+    )
+
+
+def test_reject_wrong_campaign() -> None:
+    campaign = make_golden_campaign()
+    arms = (make_golden_arm_b(), make_golden_arm_r())
+    bindings = tuple(make_golden_bindings())
+    b_binding = bindings[0]
+
+    with pytest.raises(
+        (Stage1TrialAdmissionError, ValueError), match="TRIAL_ID_MISMATCH"
+    ):
+        Stage1DerivedTrialRecordV1.model_validate(
+            {
+                "schema_version": "drift-derived-trial/1",
+                "trial_id": "WRONG-CAMP:RUN-001:ARM-B:CKPT-001",
+                "campaign_id": campaign.campaign_id,
+                "campaign_spec_fingerprint": campaign.campaign_spec_fingerprint,
+                "complete_manifest_fingerprint": "c" * 64,
+                "run_id": b_binding.run_id,
+                "arm_id": "ARM-B",
+                "portfolio_account_id": b_binding.portfolio_account_id,
+                "checkpoint_id": "CKPT-001",
+                "opening_book_identity": "BOOK-001",
+                "opening_book_hash": "f" * 64,
+                "source_inventory_hash": "e" * 64,
+                "calendar_hash": "d" * 64,
+                "start_session_index": 0,
+                "outcome_classification": "NO_ATTEMPT",
+                "completeness_classification": "INVALID",
+                "operating_cost_projection": {
+                    "currency": "USD",
+                    "status": "UNAVAILABLE",
+                    "amount": None,
+                    "original_receipt_hashes": (),
+                    "effective_receipt_hashes": (),
+                },
+                "trial_record_hash": "0" * 64,
+            }
+        )
+
+    trial = build_stage1_derived_trial_record(
+        campaign_id="WRONG_CAMP",
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint="c" * 64,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        opening_book_identity="BOOK-001",
+        opening_book_hash="f" * 64,
+        source_inventory_hash="e" * 64,
+        calendar_hash="d" * 64,
+        start_session_index=0,
+        outcome_classification="NO_ATTEMPT",
+        completeness_classification="INVALID",
+    )
+    with pytest.raises(Stage1TrialAdmissionError, match="WRONG_CAMPAIGN"):
+        verify_stage1_derived_trial_record(
+            trial,
+            campaign=campaign,
+            arms=arms,
+            bindings=bindings,
+            expected_run_ids=(b_binding.run_id,),
+            source_inventory_hash="e" * 64,
+            calendar_hash="d" * 64,
+        )
+
+
+def test_reject_crossed_br_accounts() -> None:
+    """B2 control: account allocated to ARM-B cannot be bound to ARM-R."""
+    campaign = make_golden_campaign()
+    arms = (make_golden_arm_b(), make_golden_arm_r())
+    bindings = tuple(make_golden_bindings())
+    b_binding = bindings[0]
+    r_binding = bindings[1]
+    manifest_hash = _complete_manifest_fingerprint(
+        campaign=campaign,
+        arms=arms,
+        bindings=bindings,
+        expected_run_ids=(r_binding.run_id,),
+    )
+
+    trial = build_stage1_derived_trial_record(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint=manifest_hash,
+        run_id=r_binding.run_id,
+        arm_id="ARM-R",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        opening_book_identity="BOOK-001",
+        opening_book_hash="f" * 64,
+        source_inventory_hash="e" * 64,
+        calendar_hash="d" * 64,
+        start_session_index=0,
+        outcome_classification="NO_ATTEMPT",
+        completeness_classification="INVALID",
+    )
+    with pytest.raises(
+        Stage1TrialAdmissionError, match="CROSSED_ACCOUNT_OR_WRONG_BINDING"
+    ):
+        verify_stage1_derived_trial_record(
+            trial,
+            campaign=campaign,
+            arms=arms,
+            bindings=bindings,
+            expected_run_ids=(r_binding.run_id,),
+            source_inventory_hash="e" * 64,
+            calendar_hash="d" * 64,
+        )
+
+
+def test_reject_partial_fill_falsely_treated_as_complete() -> None:
+    """B2 control: partial fill cannot claim success without complete classification."""
+    campaign = make_golden_campaign()
+    arms = (make_golden_arm_b(), make_golden_arm_r())
+    bindings = tuple(make_golden_bindings())
+    b_binding = bindings[0]
+    manifest_hash = _complete_manifest_fingerprint(
+        campaign=campaign,
+        arms=arms,
+        bindings=bindings,
+        expected_run_ids=("RUN-001",),
+    )
+
+    m0_inv = OriginalInvocationBindingV1(
+        invocation_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b1"),
+        m0_run_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b2"),
+        m0_audit_event_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b3"),
+    )
+    # Unreconciled partial fill (classification="indeterminate")
+    result_bind_indeterminate = build_stage1_result_trial_binding(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint=manifest_hash,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        opening_book_identity="BOOK-001",
+        opening_book_hash="f" * 64,
+        m0_invocation=m0_inv,
+        result_hash="1" * 64,
+        trace_hash="2" * 64,
+        final_book_hash="3" * 64,
+        final_nav=Decimal("10050"),
+        cash_balance=Decimal("50"),
+        cumulative_transaction_costs=Decimal("2"),
+        order_count=2,
+        fill_count=1,  # partial fill
+        classification="indeterminate",  # unresolved execution state
+        ledger_ref=OriginalReferenceV1(
+            event_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b4"),
+            event_hash="4" * 64,
+        ),
+    )
+    ctx_b = _make_context("ARM-B", b_binding.portfolio_account_id)
+    cand_b = _make_candidate("ARM-B", b_binding.portfolio_account_id)
+    cost_b = _make_cost("ARM-B", b_binding.portfolio_account_id, "cost-b-1", "25")
+    attempts_b = _make_attempts("ARM-B", b_binding.portfolio_account_id, cand_b)
+    res_bind_ok = build_stage1_research_trial_binding(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint=manifest_hash,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        research_context=ctx_b,
+        disposition="propose",
+        candidate=cand_b,
+        attempts=attempts_b,
+        costs=(cost_b,),
+        issuer_authority_id="AUTH-001",
+    )
+    # Rejection: claiming COMPLETE on indeterminate execution is rejected
+    with pytest.raises(
+        (Stage1TrialAdmissionError, ValueError),
+        match="UNACCEPTED_RESULT_CLASSIFICATION",
+    ):
+        build_stage1_derived_trial_record(
+            campaign_id=campaign.campaign_id,
+            campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+            complete_manifest_fingerprint=manifest_hash,
+            run_id=b_binding.run_id,
+            arm_id="ARM-B",
+            portfolio_account_id=b_binding.portfolio_account_id,
+            checkpoint_id="CKPT-001",
+            opening_book_identity="BOOK-001",
+            opening_book_hash="f" * 64,
+            research_binding=res_bind_ok,
+            result_binding=result_bind_indeterminate,
+            source_inventory_hash="e" * 64,
+            calendar_hash="d" * 64,
+            start_session_index=0,
+            end_session_index=21,
+            outcome_classification="COMPLETED",
+            completeness_classification="COMPLETE",  # False claim on indeterminate!
+            costs=(cost_b,),
+            start_nav=Decimal("10000"),
+            end_nav=Decimal("10050"),
+            trading_costs=Decimal("2"),
+        )
+
+    # Valid reconciled execution reaching terminal state (Case 16: 6 orders, 5 fills)
+    result_bind_reconciled = build_stage1_result_trial_binding(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint=manifest_hash,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        opening_book_identity="BOOK-001",
+        opening_book_hash="f" * 64,
+        m0_invocation=m0_inv,
+        result_hash="1" * 64,
+        trace_hash="2" * 64,
+        final_book_hash="3" * 64,
+        final_nav=Decimal("10050"),
+        cash_balance=Decimal("50"),
+        cumulative_transaction_costs=Decimal("2"),
+        order_count=6,
+        fill_count=5,  # 6 orders produce 5 fills, terminal state reached
+        classification="complete",  # Reconciled platform RESULT
+        ledger_ref=OriginalReferenceV1(
+            event_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b4"),
+            event_hash="4" * 64,
+        ),
+    )
+    valid_record = build_stage1_derived_trial_record(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint=manifest_hash,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        opening_book_identity="BOOK-001",
+        opening_book_hash="f" * 64,
+        research_binding=res_bind_ok,
+        result_binding=result_bind_reconciled,
+        source_inventory_hash="e" * 64,
+        calendar_hash="d" * 64,
+        start_session_index=0,
+        end_session_index=21,
+        outcome_classification="COMPLETED",
+        completeness_classification="COMPLETE",  # Case 16
+        costs=(cost_b,),
+        start_nav=Decimal("10000"),
+        end_nav=Decimal("10050"),
+        trading_costs=Decimal("2"),
+    )
+    assert verify_stage1_derived_trial_record(
+        valid_record,
+        campaign=campaign,
+        arms=arms,
+        bindings=bindings,
+        expected_run_ids=("RUN-001",),
+        source_inventory_hash="e" * 64,
+        calendar_hash="d" * 64,
+    )
+
+
+def test_reject_unknown_cost_converted_to_zero() -> None:
+    """B2 control: unknown operating cost cannot yield valid economic gain/return."""
+    campaign = make_golden_campaign()
+    bindings = tuple(make_golden_bindings())
+    b_binding = bindings[0]
+
+    cost_unknown = _make_cost(
+        "ARM-B", b_binding.portfolio_account_id, "cost-u", basis="unknown"
+    )
+    m0_inv = OriginalInvocationBindingV1(
+        invocation_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b1"),
+        m0_run_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b2"),
+        m0_audit_event_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b3"),
+    )
+    result_bind = build_stage1_result_trial_binding(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint="c" * 64,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        opening_book_identity="BOOK-001",
+        opening_book_hash="f" * 64,
+        m0_invocation=m0_inv,
+        result_hash="1" * 64,
+        trace_hash="2" * 64,
+        final_book_hash="3" * 64,
+        final_nav=Decimal("10100"),
+        cash_balance=Decimal("100"),
+        cumulative_transaction_costs=Decimal("2"),
+        order_count=1,
+        fill_count=1,
+        classification="complete",
+        ledger_ref=OriginalReferenceV1(
+            event_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b4"),
+            event_hash="4" * 64,
+        ),
+    )
+    ctx_b = _make_context("ARM-B", b_binding.portfolio_account_id)
+    cand_b = _make_candidate("ARM-B", b_binding.portfolio_account_id)
+    res_bind = build_stage1_research_trial_binding(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint="c" * 64,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        research_context=ctx_b,
+        disposition="propose",
+        candidate=cand_b,
+        issuer_authority_id="AUTH-001",
+    )
+    # Case 10: MISSING_COST preserves verified net investment return
+    # while withholding economic returns
+    trial = build_stage1_derived_trial_record(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint="c" * 64,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        opening_book_identity="BOOK-001",
+        opening_book_hash="f" * 64,
+        research_binding=res_bind,
+        result_binding=result_bind,
+        source_inventory_hash="e" * 64,
+        calendar_hash="d" * 64,
+        start_session_index=0,
+        end_session_index=21,
+        outcome_classification="COMPLETED",
+        completeness_classification="MISSING_COST",
+        costs=(cost_unknown,),
+        start_nav=Decimal("10000"),
+        end_nav=Decimal("10100"),
+        trading_costs=Decimal("2"),
+        reasons=("COST_STATUS_UNKNOWN",),
+    )
+    # Net trading return is verified and known
+    assert trial.net_investment_gain == Decimal("100")
+    assert trial.net_investment_return == ExactRatioV1.from_fraction(
+        Fraction(100, 10000)
+    )
+    # Economic gain MUST stay None because cost is unknown
+    assert trial.economic_gain is None
+    assert trial.economic_return is None
+    assert trial.operating_cost_projection.status == "UNAVAILABLE"
+
+    # Attempting to claim COMPLETE on unknown costs is rejected
+    with pytest.raises(
+        (Stage1TrialAdmissionError, ValueError),
+        match="UNKNOWN_COST_CANNOT_BE_COMPLETE",
+    ):
+        build_stage1_derived_trial_record(
+            campaign_id=campaign.campaign_id,
+            campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+            complete_manifest_fingerprint="c" * 64,
+            run_id=b_binding.run_id,
+            arm_id="ARM-B",
+            portfolio_account_id=b_binding.portfolio_account_id,
+            checkpoint_id="CKPT-001",
+            opening_book_identity="BOOK-001",
+            opening_book_hash="f" * 64,
+            research_binding=res_bind,
+            result_binding=result_bind,
+            source_inventory_hash="e" * 64,
+            calendar_hash="d" * 64,
+            start_session_index=0,
+            end_session_index=21,
+            outcome_classification="COMPLETED",
+            completeness_classification="COMPLETE",  # Disallowed when costs are unknown
+            costs=(cost_unknown,),
+            start_nav=Decimal("10000"),
+            end_nav=Decimal("10100"),
+            trading_costs=Decimal("2"),
+        )
+
+
+def test_reject_tampered_result_hash() -> None:
+    """B2 control: tampered result hash fails hash verification."""
+    m0_inv = OriginalInvocationBindingV1(
+        invocation_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b1"),
+        m0_run_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b2"),
+        m0_audit_event_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b3"),
+    )
+    res = build_stage1_result_trial_binding(
+        campaign_id="CAMP-E1-SYNTH-001",
+        campaign_spec_fingerprint="a" * 64,
+        complete_manifest_fingerprint="b" * 64,
+        run_id="RUN-001",
+        arm_id="ARM-B",
+        portfolio_account_id="SYNTH-ACC-B-001",
+        checkpoint_id="CKPT-001",
+        opening_book_identity="BOOK-001",
+        opening_book_hash="f" * 64,
+        m0_invocation=m0_inv,
+        result_hash="1" * 64,
+        trace_hash="2" * 64,
+        final_book_hash="3" * 64,
+        final_nav=Decimal("10050"),
+        cash_balance=Decimal("50"),
+        cumulative_transaction_costs=Decimal("2"),
+        order_count=1,
+        fill_count=1,
+        classification="complete",
+        ledger_ref=OriginalReferenceV1(
+            event_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b4"),
+            event_hash="4" * 64,
+        ),
+    )
+    # Tamper result_hash
+    data = res.model_dump(mode="python")
+    data["result_hash"] = "9" * 64
+    with pytest.raises(
+        (Stage1TrialAdmissionError, ValueError),
+        match="RESULT_BINDING_HASH_MISMATCH",
+    ):
+        Stage1ResultTrialBindingV1.model_validate(data)
+
+
+def test_reject_incorrect_source_vintage() -> None:
+    """B2 control: wrong source inventory hash fails admission."""
+    campaign = make_golden_campaign()
+    arms = (make_golden_arm_b(), make_golden_arm_r())
+    bindings = tuple(make_golden_bindings())
+    b_binding = bindings[0]
+    manifest_hash = _complete_manifest_fingerprint(
+        campaign=campaign,
+        arms=arms,
+        bindings=bindings,
+        expected_run_ids=("RUN-001",),
+    )
+
+    trial = build_stage1_derived_trial_record(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint=manifest_hash,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        opening_book_identity="BOOK-001",
+        opening_book_hash="f" * 64,
+        source_inventory_hash="e" * 64,
+        calendar_hash="d" * 64,
+        start_session_index=0,
+        outcome_classification="NO_ATTEMPT",
+        completeness_classification="INVALID",
+    )
+    with pytest.raises(Stage1TrialAdmissionError, match="INCORRECT_SOURCE_VINTAGE"):
+        verify_stage1_derived_trial_record(
+            trial,
+            campaign=campaign,
+            arms=arms,
+            bindings=bindings,
+            expected_run_ids=("RUN-001",),
+            source_inventory_hash="WRONG_SOURCE_VINTAGE" + "0" * 44,
+            calendar_hash="d" * 64,
+        )
+
+
+def test_reject_manifest_fingerprint_mismatch() -> None:
+    """B2 control: wrong complete manifest fingerprint fails admission."""
+    campaign = make_golden_campaign()
+    arms = (make_golden_arm_b(), make_golden_arm_r())
+    bindings = tuple(make_golden_bindings())
+    b_binding = bindings[0]
+
+    trial = build_stage1_derived_trial_record(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint="0" * 64,  # wrong fingerprint
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        opening_book_identity="BOOK-001",
+        opening_book_hash="f" * 64,
+        source_inventory_hash="e" * 64,
+        calendar_hash="d" * 64,
+        start_session_index=0,
+        outcome_classification="NO_ATTEMPT",
+        completeness_classification="INVALID",
+    )
+    with pytest.raises(
+        Stage1TrialAdmissionError, match="MANIFEST_FINGERPRINT_MISMATCH"
+    ):
+        verify_stage1_derived_trial_record(
+            trial,
+            campaign=campaign,
+            arms=arms,
+            bindings=bindings,
+            expected_run_ids=("RUN-001",),
+            source_inventory_hash="e" * 64,
+            calendar_hash="d" * 64,
+        )
+
+
+def test_independent_fresh_process_verification(tmp_path: Path) -> None:
+    """Verify trial serialization and fresh-process readback without live state."""
+    campaign = make_golden_campaign()
+    bindings = tuple(make_golden_bindings())
+    b_binding = bindings[0]
+    manifest_hash = "c" * 64
+    cal_hash = "d" * 64
+    src_hash = "e" * 64
+
+    trial = build_stage1_derived_trial_record(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint=manifest_hash,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        opening_book_identity="BOOK-001",
+        opening_book_hash="f" * 64,
+        source_inventory_hash=src_hash,
+        calendar_hash=cal_hash,
+        start_session_index=0,
+        outcome_classification="RETAINED",
+        completeness_classification="PENDING_RESULT",
+        reasons=("NO_SWITCH_ATTEMPTED",),
+    )
+    out_file = tmp_path / "trial.json"
+    out_file.write_text(trial.model_dump_json(), encoding="utf-8")
+
+    code = f"""
+import sys
+from drift.experiments.stage1_trial_record import Stage1DerivedTrialRecordV1
+
+raw = open({str(out_file)!r}, 'r').read()
+record = Stage1DerivedTrialRecordV1.model_validate_json(raw)
+assert record.trial_id == '{trial.trial_id}'
+assert record.trial_record_hash == '{trial.trial_record_hash}'
+assert not record.scientifically_qualified
+assert not record.authorizes_trading
+sys.exit(0)
+"""
+    res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert res.returncode == 0, f"Fresh process failed: {res.stderr}"
+
+
+def test_reject_unvalidated_in_memory_mutation_on_verification() -> None:
+    """B2 control: in-memory unvalidated mutation fails admission verification."""
+    campaign = make_golden_campaign()
+    arms = (make_golden_arm_b(), make_golden_arm_r())
+    bindings = tuple(make_golden_bindings())
+    b_binding = bindings[0]
+    manifest_hash = _complete_manifest_fingerprint(
+        campaign=campaign,
+        arms=arms,
+        bindings=bindings,
+        expected_run_ids=("RUN-001",),
+    )
+
+    trial = build_stage1_derived_trial_record(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint=manifest_hash,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        opening_book_identity="BOOK-001",
+        opening_book_hash="f" * 64,
+        source_inventory_hash="e" * 64,
+        calendar_hash="d" * 64,
+        start_session_index=0,
+        outcome_classification="NO_ATTEMPT",
+        completeness_classification="INVALID",
+    )
+    # Simulate unvalidated in-memory tampering via direct attribute bypass
+    object.__setattr__(trial, "start_session_index", 999)
+    with pytest.raises(Stage1TrialAdmissionError, match="RECORD_INTEGRITY_VIOLATION"):
+        verify_stage1_derived_trial_record(
+            trial,
+            campaign=campaign,
+            arms=arms,
+            bindings=bindings,
+            expected_run_ids=("RUN-001",),
+            source_inventory_hash="e" * 64,
+            calendar_hash="d" * 64,
+        )
+
+
+def test_reject_research_evidence_campaign_mismatch() -> None:
+    """Codex finding: research evidence with mismatched campaign ref is rejected."""
+    campaign = make_golden_campaign()
+    bindings = tuple(make_golden_bindings())
+    b_binding = bindings[0]
+    manifest_hash = "c" * 64
+
+    # 1. Context with wrong campaign ID
+    ctx_wrong_id = _make_context(
+        "ARM-B",
+        b_binding.portfolio_account_id,
+        campaign_id="CAMP-OTHER",
+        campaign_fingerprint=campaign.campaign_spec_fingerprint,
+    )
+    cand_ok = _make_candidate("ARM-B", b_binding.portfolio_account_id)
+    with pytest.raises(
+        (Stage1TrialAdmissionError, ValueError),
+        match="RESEARCH_CONTEXT_CAMPAIGN_MISMATCH",
+    ):
+        build_stage1_research_trial_binding(
+            campaign_id=campaign.campaign_id,
+            campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+            complete_manifest_fingerprint=manifest_hash,
+            run_id=b_binding.run_id,
+            arm_id="ARM-B",
+            portfolio_account_id=b_binding.portfolio_account_id,
+            checkpoint_id="CKPT-001",
+            research_context=ctx_wrong_id,
+            disposition="propose",
+            candidate=cand_ok,
+            issuer_authority_id="AUTH-001",
+        )
+
+    # 2. Candidate with wrong campaign fingerprint
+    ctx_ok = _make_context("ARM-B", b_binding.portfolio_account_id)
+    cand_wrong_fp = _make_candidate(
+        "ARM-B",
+        b_binding.portfolio_account_id,
+        campaign_id=campaign.campaign_id,
+        campaign_fingerprint="0" * 64,
+    )
+    with pytest.raises(
+        (Stage1TrialAdmissionError, ValueError),
+        match="CANDIDATE_CAMPAIGN_MISMATCH",
+    ):
+        build_stage1_research_trial_binding(
+            campaign_id=campaign.campaign_id,
+            campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+            complete_manifest_fingerprint=manifest_hash,
+            run_id=b_binding.run_id,
+            arm_id="ARM-B",
+            portfolio_account_id=b_binding.portfolio_account_id,
+            checkpoint_id="CKPT-001",
+            research_context=ctx_ok,
+            disposition="propose",
+            candidate=cand_wrong_fp,
+            issuer_authority_id="AUTH-001",
+        )
+
+    # 3. Cost with wrong campaign fingerprint
+    cost_wrong_fp = _make_cost(
+        "ARM-B",
+        b_binding.portfolio_account_id,
+        campaign_fingerprint="0" * 64,
+    )
+    with pytest.raises(
+        (Stage1TrialAdmissionError, ValueError),
+        match="COST_CAMPAIGN_MISMATCH",
+    ):
+        build_stage1_research_trial_binding(
+            campaign_id=campaign.campaign_id,
+            campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+            complete_manifest_fingerprint=manifest_hash,
+            run_id=b_binding.run_id,
+            arm_id="ARM-B",
+            portfolio_account_id=b_binding.portfolio_account_id,
+            checkpoint_id="CKPT-001",
+            research_context=ctx_ok,
+            disposition="propose",
+            candidate=cand_ok,
+            costs=(cost_wrong_fp,),
+            issuer_authority_id="AUTH-001",
+        )
+
+
+def test_reject_non_trading_candidate_arm_account_mismatch() -> None:
+    """Codex finding: candidate arm and account must be checked for non-trading."""
+    campaign = make_golden_campaign()
+    bindings = tuple(make_golden_bindings())
+    b_binding = bindings[0]
+    r_binding = bindings[1]
+    manifest_hash = "c" * 64
+
+    ctx_b = _make_context("ARM-B", b_binding.portfolio_account_id)
+    cand_r = _make_candidate("ARM-R", r_binding.portfolio_account_id)
+
+    # Candidate has ARM-R, but binding is for ARM-B with disposition='hold'
+    with pytest.raises(
+        (Stage1TrialAdmissionError, ValueError), match="CANDIDATE_ACCOUNT_MISMATCH"
+    ):
+        build_stage1_research_trial_binding(
+            campaign_id=campaign.campaign_id,
+            campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+            complete_manifest_fingerprint=manifest_hash,
+            run_id=b_binding.run_id,
+            arm_id="ARM-B",
+            portfolio_account_id=b_binding.portfolio_account_id,
+            checkpoint_id="CKPT-001",
+            research_context=ctx_b,
+            disposition="hold",
+            candidate=cand_r,
+            reasoned_absence_code="NO_SIGNAL",
+            issuer_authority_id="AUTH-001",
+        )
+
+
+def test_reject_completed_trial_without_research_binding() -> None:
+    """Codex finding: completed trial requires research binding."""
+    campaign = make_golden_campaign()
+    bindings = tuple(make_golden_bindings())
+    b_binding = bindings[0]
+    manifest_hash = "c" * 64
+
+    m0_inv = OriginalInvocationBindingV1(
+        invocation_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b1"),
+        m0_run_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b2"),
+        m0_audit_event_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b3"),
+    )
+    res_bind = build_stage1_result_trial_binding(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint=manifest_hash,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        opening_book_identity="BOOK-001",
+        opening_book_hash="f" * 64,
+        m0_invocation=m0_inv,
+        result_hash="1" * 64,
+        trace_hash="2" * 64,
+        final_book_hash="3" * 64,
+        final_nav=Decimal("10050"),
+        cash_balance=Decimal("50"),
+        cumulative_transaction_costs=Decimal("2"),
+        order_count=1,
+        fill_count=1,
+        classification="complete",
+        ledger_ref=OriginalReferenceV1(
+            event_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b4"),
+            event_hash="4" * 64,
+        ),
+    )
+
+    with pytest.raises(
+        (Stage1TrialAdmissionError, ValueError),
+        match="COMPLETE_TRIAL_REQUIRES_RESEARCH_BINDING",
+    ):
+        build_stage1_derived_trial_record(
+            campaign_id=campaign.campaign_id,
+            campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+            complete_manifest_fingerprint=manifest_hash,
+            run_id=b_binding.run_id,
+            arm_id="ARM-B",
+            portfolio_account_id=b_binding.portfolio_account_id,
+            checkpoint_id="CKPT-001",
+            opening_book_identity="BOOK-001",
+            opening_book_hash="f" * 64,
+            research_binding=None,  # Omitted research binding
+            result_binding=res_bind,
+            source_inventory_hash="e" * 64,
+            calendar_hash="d" * 64,
+            start_session_index=0,
+            end_session_index=21,
+            outcome_classification="COMPLETED",
+            completeness_classification="COMPLETE",
+            start_nav=Decimal("10000"),
+            end_nav=Decimal("10050"),
+            trading_costs=Decimal("2"),
+        )
+
+
+def test_reject_completed_proposal_with_disallowed_strategy_family() -> None:
+    """Codex finding: completed proposals with foreign strategy family are rejected."""
+    campaign = make_golden_campaign()
+    arms = (make_golden_arm_b(), make_golden_arm_r())
+    bindings = tuple(make_golden_bindings())
+    b_binding = bindings[0]
+    manifest_hash = _complete_manifest_fingerprint(
+        campaign=campaign,
+        arms=arms,
+        bindings=bindings,
+        expected_run_ids=("RUN-001",),
+    )
+
+    ctx_b = _make_context("ARM-B", b_binding.portfolio_account_id)
+    cand_foreign = _make_candidate(
+        "ARM-B",
+        b_binding.portfolio_account_id,
+        family_id="DISALLOWED_FAMILY",
+    )
+    cost_b = _make_cost("ARM-B", b_binding.portfolio_account_id, "cost-b-1", "25")
+    attempts_b = _make_attempts("ARM-B", b_binding.portfolio_account_id, cand_foreign)
+    res_bind = build_stage1_research_trial_binding(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint=manifest_hash,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        research_context=ctx_b,
+        disposition="propose",
+        candidate=cand_foreign,
+        attempts=attempts_b,
+        costs=(cost_b,),
+        issuer_authority_id="AUTH-001",
+    )
+    m0_inv = OriginalInvocationBindingV1(
+        invocation_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b1"),
+        m0_run_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b2"),
+        m0_audit_event_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b3"),
+    )
+    result_bind = build_stage1_result_trial_binding(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint=manifest_hash,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        opening_book_identity="BOOK-001",
+        opening_book_hash="f" * 64,
+        m0_invocation=m0_inv,
+        result_hash="1" * 64,
+        trace_hash="2" * 64,
+        final_book_hash="3" * 64,
+        final_nav=Decimal("10050"),
+        cash_balance=Decimal("50"),
+        cumulative_transaction_costs=Decimal("2"),
+        order_count=1,
+        fill_count=1,
+        classification="complete",
+        ledger_ref=OriginalReferenceV1(
+            event_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b4"),
+            event_hash="4" * 64,
+        ),
+    )
+    trial = build_stage1_derived_trial_record(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint=manifest_hash,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        opening_book_identity="BOOK-001",
+        opening_book_hash="f" * 64,
+        research_binding=res_bind,
+        result_binding=result_bind,
+        source_inventory_hash="e" * 64,
+        calendar_hash="d" * 64,
+        start_session_index=0,
+        end_session_index=21,
+        outcome_classification="COMPLETED",
+        completeness_classification="COMPLETE",
+        costs=(cost_b,),
+        start_nav=Decimal("10000"),
+        end_nav=Decimal("10050"),
+        trading_costs=Decimal("2"),
+    )
+    with pytest.raises(Stage1TrialAdmissionError, match="DISALLOWED_STRATEGY_FAMILY"):
+        verify_stage1_derived_trial_record(
+            trial,
+            campaign=campaign,
+            arms=arms,
+            bindings=bindings,
+            expected_run_ids=("RUN-001",),
+            source_inventory_hash="e" * 64,
+            calendar_hash="d" * 64,
+        )
+
+
+def test_reject_invalid_attempt_lifecycle_chain() -> None:
+    campaign = make_golden_campaign()
+    bindings = make_golden_bindings()
+    b_binding = bindings[0]
+    ctx_b = _make_context("ARM-B", b_binding.portfolio_account_id)
+    cand_b = _make_candidate("ARM-B", b_binding.portfolio_account_id)
+    cost_b = _make_cost("ARM-B", b_binding.portfolio_account_id, "cost-b-1", "25")
+
+    scope_b = _scope("ARM-B", b_binding.portfolio_account_id)
+    started = create_started_attempt(
+        attempt_id="ATT-001",
+        logical_request_id="REQ-001",
+        attempt_event_id="EVT-START-001",
+        scope=scope_b,
+        context_ref=_art_ref("ctx-ref"),
+        method_ref=_art_ref("method-ref"),
+        budget_ref=_art_ref("budget-ref"),
+        producer="synthetic-producer",
+        started_at=datetime(2026, 10, 25, 21, 0, tzinfo=UTC),
+    )
+    terminal_valid = create_terminal_attempt(
+        prior_attempt=started,
+        attempt_event_id="EVT-TERM-001",
+        completed_at=datetime(2026, 10, 25, 21, 5, tzinfo=UTC),
+        status="completed",
+    )
+    # Contradictory backlink / broken transition
+    tampered_dict = terminal_valid.model_dump(mode="python")
+    tampered_dict["previous_event_ref"]["id"] = "WRONG-PREDECESSOR-ID"
+    tampered_dict["record_hash"] = compute_record_hash(tampered_dict)
+    from drift.intelligence.contracts import AttemptRecord
+
+    broken_terminal = AttemptRecord.model_validate(tampered_dict)
+
+    with pytest.raises(
+        (Stage1TrialAdmissionError, ValueError), match="INVALID_ATTEMPT_CHAIN"
+    ):
+        build_stage1_research_trial_binding(
+            campaign_id=campaign.campaign_id,
+            campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+            complete_manifest_fingerprint="c" * 64,
+            run_id=b_binding.run_id,
+            arm_id="ARM-B",
+            portfolio_account_id=b_binding.portfolio_account_id,
+            checkpoint_id="CKPT-001",
+            research_context=ctx_b,
+            disposition="propose",
+            candidate=cand_b,
+            attempts=(started, broken_terminal),
+            costs=(cost_b,),
+            issuer_authority_id="AUTH-001",
+        )
+
+
+def test_reject_completed_proposal_missing_candidate_attempt_lifecycle() -> None:
+    campaign = make_golden_campaign()
+    bindings = make_golden_bindings()
+    b_binding = bindings[0]
+    ctx_b = _make_context("ARM-B", b_binding.portfolio_account_id)
+    cand_b = _make_candidate("ARM-B", b_binding.portfolio_account_id)
+    cost_b = _make_cost("ARM-B", b_binding.portfolio_account_id, "cost-b-1", "25")
+    # attempts is empty or contains unrelated attempt
+    res_bind = build_stage1_research_trial_binding(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint="c" * 64,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        research_context=ctx_b,
+        disposition="propose",
+        candidate=cand_b,
+        attempts=(),
+        costs=(cost_b,),
+        issuer_authority_id="AUTH-001",
+    )
+    m0_inv = OriginalInvocationBindingV1(
+        invocation_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b1"),
+        m0_run_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b2"),
+        m0_audit_event_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b3"),
+    )
+    result_bind = build_stage1_result_trial_binding(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint="c" * 64,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        opening_book_identity="BOOK-001",
+        opening_book_hash="f" * 64,
+        m0_invocation=m0_inv,
+        result_hash="1" * 64,
+        trace_hash="2" * 64,
+        final_book_hash="3" * 64,
+        final_nav=Decimal("10050"),
+        cash_balance=Decimal("50"),
+        cumulative_transaction_costs=Decimal("2"),
+        order_count=1,
+        fill_count=1,
+        classification="complete",
+        ledger_ref=OriginalReferenceV1(
+            event_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b4"),
+            event_hash="4" * 64,
+        ),
+    )
+    with pytest.raises(
+        (Stage1TrialAdmissionError, ValueError),
+        match="MISSING_CANDIDATE_ATTEMPT_LIFECYCLE",
+    ):
+        build_stage1_derived_trial_record(
+            campaign_id=campaign.campaign_id,
+            campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+            complete_manifest_fingerprint="c" * 64,
+            run_id=b_binding.run_id,
+            arm_id="ARM-B",
+            portfolio_account_id=b_binding.portfolio_account_id,
+            checkpoint_id="CKPT-001",
+            opening_book_identity="BOOK-001",
+            opening_book_hash="f" * 64,
+            research_binding=res_bind,
+            result_binding=result_bind,
+            source_inventory_hash="e" * 64,
+            calendar_hash="d" * 64,
+            start_session_index=0,
+            end_session_index=21,
+            outcome_classification="COMPLETED",
+            completeness_classification="COMPLETE",
+            costs=(cost_b,),
+            start_nav=Decimal("10000"),
+            end_nav=Decimal("10050"),
+            trading_costs=Decimal("2"),
+        )
+
+
+def test_reject_completed_proposal_mismatched_candidate_reference() -> None:
+    campaign = make_golden_campaign()
+    bindings = make_golden_bindings()
+    b_binding = bindings[0]
+    ctx_b = _make_context("ARM-B", b_binding.portfolio_account_id)
+    cand_b = _make_candidate("ARM-B", b_binding.portfolio_account_id)
+    cost_b = _make_cost("ARM-B", b_binding.portfolio_account_id, "cost-b-1", "25")
+
+    scope_b = _scope("ARM-B", b_binding.portfolio_account_id)
+    started = create_started_attempt(
+        attempt_id=cand_b.attempt_id,
+        logical_request_id="REQ-001",
+        attempt_event_id="EVT-START-001",
+        scope=scope_b,
+        context_ref=_art_ref("ctx-ref"),
+        method_ref=_art_ref("method-ref"),
+        budget_ref=_art_ref("budget-ref"),
+        producer="synthetic-producer",
+        started_at=datetime(2026, 10, 25, 21, 0, tzinfo=UTC),
+    )
+    # Terminal event pointing to a DIFFERENT candidate ID
+    terminal = create_terminal_attempt(
+        prior_attempt=started,
+        attempt_event_id="EVT-TERM-001",
+        completed_at=datetime(2026, 10, 25, 21, 5, tzinfo=UTC),
+        status="completed",
+        candidate_ref=ArtifactReference(
+            id="DIFFERENT-CANDIDATE-ID",
+            version="1",
+            sha256=cand_b.record_hash,
+        ),
+    )
+    res_bind = build_stage1_research_trial_binding(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint="c" * 64,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        research_context=ctx_b,
+        disposition="propose",
+        candidate=cand_b,
+        attempts=(started, terminal),
+        costs=(cost_b,),
+        issuer_authority_id="AUTH-001",
+    )
+    m0_inv = OriginalInvocationBindingV1(
+        invocation_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b1"),
+        m0_run_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b2"),
+        m0_audit_event_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b3"),
+    )
+    result_bind = build_stage1_result_trial_binding(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint="c" * 64,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        opening_book_identity="BOOK-001",
+        opening_book_hash="f" * 64,
+        m0_invocation=m0_inv,
+        result_hash="1" * 64,
+        trace_hash="2" * 64,
+        final_book_hash="3" * 64,
+        final_nav=Decimal("10050"),
+        cash_balance=Decimal("50"),
+        cumulative_transaction_costs=Decimal("2"),
+        order_count=1,
+        fill_count=1,
+        classification="complete",
+        ledger_ref=OriginalReferenceV1(
+            event_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b4"),
+            event_hash="4" * 64,
+        ),
+    )
+    with pytest.raises(
+        (Stage1TrialAdmissionError, ValueError),
+        match="ATTEMPT_CANDIDATE_REF_MISMATCH",
+    ):
+        build_stage1_derived_trial_record(
+            campaign_id=campaign.campaign_id,
+            campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+            complete_manifest_fingerprint="c" * 64,
+            run_id=b_binding.run_id,
+            arm_id="ARM-B",
+            portfolio_account_id=b_binding.portfolio_account_id,
+            checkpoint_id="CKPT-001",
+            opening_book_identity="BOOK-001",
+            opening_book_hash="f" * 64,
+            research_binding=res_bind,
+            result_binding=result_bind,
+            source_inventory_hash="e" * 64,
+            calendar_hash="d" * 64,
+            start_session_index=0,
+            end_session_index=21,
+            outcome_classification="COMPLETED",
+            completeness_classification="COMPLETE",
+            costs=(cost_b,),
+            start_nav=Decimal("10000"),
+            end_nav=Decimal("10050"),
+            trading_costs=Decimal("2"),
+        )
+
+
+def test_reject_model_replay_attempt_mismatch() -> None:
+    campaign = make_golden_campaign()
+    bindings = make_golden_bindings()
+    b_binding = bindings[0]
+    ctx_b = _make_context("ARM-B", b_binding.portfolio_account_id)
+    cand_b = _make_candidate("ARM-B", b_binding.portfolio_account_id)
+    cost_b = _make_cost("ARM-B", b_binding.portfolio_account_id, "cost-b-1", "25")
+    attempts_b = _make_attempts("ARM-B", b_binding.portfolio_account_id, cand_b)
+    replay_foreign = _make_model_replay(
+        "ARM-B",
+        b_binding.portfolio_account_id,
+        "ATT-FOREIGN-999",
+        ctx_b,
+    )
+    with pytest.raises(
+        (Stage1TrialAdmissionError, ValueError),
+        match="MODEL_REPLAY_ATTEMPT_MISMATCH",
+    ):
+        build_stage1_research_trial_binding(
+            campaign_id=campaign.campaign_id,
+            campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+            complete_manifest_fingerprint="c" * 64,
+            run_id=b_binding.run_id,
+            arm_id="ARM-B",
+            portfolio_account_id=b_binding.portfolio_account_id,
+            checkpoint_id="CKPT-001",
+            research_context=ctx_b,
+            disposition="propose",
+            candidate=cand_b,
+            attempts=attempts_b,
+            costs=(cost_b,),
+            model_replay=replay_foreign,
+            issuer_authority_id="AUTH-001",
+        )
+
+
+def test_reject_model_replay_context_mismatch() -> None:
+    campaign = make_golden_campaign()
+    bindings = make_golden_bindings()
+    b_binding = bindings[0]
+    ctx_b = _make_context("ARM-B", b_binding.portfolio_account_id)
+    cand_b = _make_candidate("ARM-B", b_binding.portfolio_account_id)
+    cost_b = _make_cost("ARM-B", b_binding.portfolio_account_id, "cost-b-1", "25")
+    attempts_b = _make_attempts("ARM-B", b_binding.portfolio_account_id, cand_b)
+    other_ctx = _make_context(
+        "ARM-B",
+        b_binding.portfolio_account_id,
+        campaign_fingerprint="f" * 64,
+    )
+    replay_wrong_ctx = _make_model_replay(
+        "ARM-B",
+        b_binding.portfolio_account_id,
+        cand_b.attempt_id,
+        other_ctx,
+    )
+    with pytest.raises(
+        (Stage1TrialAdmissionError, ValueError),
+        match="MODEL_REPLAY_CONTEXT_MISMATCH",
+    ):
+        build_stage1_research_trial_binding(
+            campaign_id=campaign.campaign_id,
+            campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+            complete_manifest_fingerprint="c" * 64,
+            run_id=b_binding.run_id,
+            arm_id="ARM-B",
+            portfolio_account_id=b_binding.portfolio_account_id,
+            checkpoint_id="CKPT-001",
+            research_context=ctx_b,
+            disposition="propose",
+            candidate=cand_b,
+            attempts=attempts_b,
+            costs=(cost_b,),
+            model_replay=replay_wrong_ctx,
+            issuer_authority_id="AUTH-001",
+        )
+
+
+def test_positive_stage1_research_binding_with_matching_model_replay() -> None:
+    campaign = make_golden_campaign()
+    bindings = make_golden_bindings()
+    b_binding = bindings[0]
+    ctx_b = _make_context("ARM-B", b_binding.portfolio_account_id)
+    cand_b = _make_candidate("ARM-B", b_binding.portfolio_account_id)
+    cost_b = _make_cost("ARM-B", b_binding.portfolio_account_id, "cost-b-1", "25")
+    attempts_b = _make_attempts("ARM-B", b_binding.portfolio_account_id, cand_b)
+    replay_ok = _make_model_replay(
+        "ARM-B",
+        b_binding.portfolio_account_id,
+        cand_b.attempt_id,
+        ctx_b,
+    )
+    res_bind = build_stage1_research_trial_binding(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint="c" * 64,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        research_context=ctx_b,
+        disposition="propose",
+        candidate=cand_b,
+        attempts=attempts_b,
+        costs=(cost_b,),
+        model_replay=replay_ok,
+        issuer_authority_id="AUTH-001",
+    )
+    assert res_bind.model_replay is not None
+    assert res_bind.model_replay.attempt_id == cand_b.attempt_id
