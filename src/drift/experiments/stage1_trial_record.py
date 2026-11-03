@@ -95,11 +95,7 @@ class Stage1ResearchTrialBindingV1(FrozenModel):
         if scope.account_id != self.portfolio_account_id:
             raise Stage1TrialAdmissionError("RESEARCH_CONTEXT_ACCOUNT_MISMATCH")
 
-        if self.disposition == "propose":
-            if self.candidate is None:
-                raise Stage1TrialAdmissionError(
-                    "PROPOSE_DISPOSITION_REQUIRES_CANDIDATE"
-                )
+        if self.candidate is not None:
             if (
                 self.candidate.scope.campaign_ref.id != self.campaign_id
                 or self.candidate.scope.campaign_ref.sha256
@@ -110,18 +106,20 @@ class Stage1ResearchTrialBindingV1(FrozenModel):
                 raise Stage1TrialAdmissionError("CANDIDATE_ACCOUNT_MISMATCH")
             if self.candidate.scope.arm_id != self.arm_id:
                 raise Stage1TrialAdmissionError("CANDIDATE_ARM_MISMATCH")
+
+        if self.disposition == "propose":
+            if self.candidate is None:
+                raise Stage1TrialAdmissionError(
+                    "PROPOSE_DISPOSITION_REQUIRES_CANDIDATE"
+                )
             if self.candidate.disposition != "propose":
                 raise Stage1TrialAdmissionError("CANDIDATE_DISPOSITION_MISMATCH")
         else:
-            if self.candidate is not None:
-                if (
-                    self.candidate.scope.campaign_ref.id != self.campaign_id
-                    or self.candidate.scope.campaign_ref.sha256
-                    != self.campaign_spec_fingerprint
-                ):
-                    raise Stage1TrialAdmissionError("CANDIDATE_CAMPAIGN_MISMATCH")
-                if self.candidate.disposition != self.disposition:
-                    raise Stage1TrialAdmissionError("NON_TRADING_DISPOSITION_MISMATCH")
+            if (
+                self.candidate is not None
+                and self.candidate.disposition != self.disposition
+            ):
+                raise Stage1TrialAdmissionError("NON_TRADING_DISPOSITION_MISMATCH")
             if not self.reasoned_absence_code:
                 raise Stage1TrialAdmissionError("REASONED_ABSENCE_CODE_REQUIRED")
 

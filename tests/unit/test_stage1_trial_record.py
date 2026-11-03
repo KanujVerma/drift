@@ -877,3 +877,34 @@ def test_reject_research_evidence_campaign_mismatch() -> None:
             costs=(cost_wrong_fp,),
             issuer_authority_id="AUTH-001",
         )
+
+
+def test_reject_non_trading_candidate_arm_account_mismatch() -> None:
+    """Codex finding: candidate arm and account must be checked for non-trading."""
+    campaign = make_golden_campaign()
+    bindings = tuple(make_golden_bindings())
+    b_binding = bindings[0]
+    r_binding = bindings[1]
+    manifest_hash = "c" * 64
+
+    ctx_b = _make_context("ARM-B", b_binding.portfolio_account_id)
+    cand_r = _make_candidate("ARM-R", r_binding.portfolio_account_id)
+
+    # Candidate has ARM-R, but binding is for ARM-B with disposition='hold'
+    with pytest.raises(
+        (Stage1TrialAdmissionError, ValueError), match="CANDIDATE_ACCOUNT_MISMATCH"
+    ):
+        build_stage1_research_trial_binding(
+            campaign_id=campaign.campaign_id,
+            campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+            complete_manifest_fingerprint=manifest_hash,
+            run_id=b_binding.run_id,
+            arm_id="ARM-B",
+            portfolio_account_id=b_binding.portfolio_account_id,
+            checkpoint_id="CKPT-001",
+            research_context=ctx_b,
+            disposition="hold",
+            candidate=cand_r,
+            reasoned_absence_code="NO_SIGNAL",
+            issuer_authority_id="AUTH-001",
+        )
