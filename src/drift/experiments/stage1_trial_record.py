@@ -39,6 +39,7 @@ from drift.intelligence.contracts import (
     ResearchCandidate,
     ResearchContext,
 )
+from drift.intelligence.receipts import ResearchReceiptStore
 from drift.loop.stage1_controlled_contracts import (
     OriginalReferenceV1,
     exact_decimal,
@@ -123,6 +124,7 @@ class Stage1ResearchTrialBindingV1(FrozenModel):
             if not self.reasoned_absence_code:
                 raise Stage1TrialAdmissionError("REASONED_ABSENCE_CODE_REQUIRED")
 
+        attempt_store = ResearchReceiptStore()
         for attempt in self.attempts:
             if (
                 attempt.scope.campaign_ref.id != self.campaign_id
@@ -133,6 +135,11 @@ class Stage1ResearchTrialBindingV1(FrozenModel):
                 raise Stage1TrialAdmissionError("ATTEMPT_ACCOUNT_MISMATCH")
             if attempt.scope.arm_id != self.arm_id:
                 raise Stage1TrialAdmissionError("ATTEMPT_ARM_MISMATCH")
+            try:
+                attempt_store.record_attempt(attempt)
+            except Exception as exc:
+                msg = f"INVALID_ATTEMPT_CHAIN: {exc}"
+                raise Stage1TrialAdmissionError(msg) from exc
 
         for cost in self.costs:
             if (
@@ -144,6 +151,11 @@ class Stage1ResearchTrialBindingV1(FrozenModel):
                 raise Stage1TrialAdmissionError("COST_ACCOUNT_MISMATCH")
             if cost.scope.arm_id != self.arm_id:
                 raise Stage1TrialAdmissionError("COST_ARM_MISMATCH")
+            try:
+                attempt_store.record_cost_receipt(cost)
+            except Exception as exc:
+                msg = f"INVALID_COST_RECEIPT: {exc}"
+                raise Stage1TrialAdmissionError(msg) from exc
 
         if self.model_replay is not None:
             if (

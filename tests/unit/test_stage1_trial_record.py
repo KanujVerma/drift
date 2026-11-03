@@ -59,7 +59,11 @@ from drift.intelligence.contracts import (
     StoredArtifactRef,
     compute_record_hash,
 )
-from drift.intelligence.receipts import create_cost_receipt
+from drift.intelligence.receipts import (
+    create_cost_receipt,
+    create_started_attempt,
+    create_terminal_attempt,
+)
 from drift.loop.stage1_controlled_contracts import OriginalReferenceV1
 
 BASE = datetime(2026, 10, 25, 21, 0, tzinfo=UTC)
@@ -1150,4 +1154,58 @@ def test_reject_completed_proposal_with_disallowed_strategy_family() -> None:
             expected_run_ids=("RUN-001",),
             source_inventory_hash="e" * 64,
             calendar_hash="d" * 64,
+        )
+
+
+def test_reject_invalid_attempt_lifecycle_chain() -> None:
+    campaign = make_golden_campaign()
+    bindings = make_golden_bindings()
+    b_binding = bindings[0]
+    ctx_b = _make_context("ARM-B", b_binding.portfolio_account_id)
+    cand_b = _make_candidate("ARM-B", b_binding.portfolio_account_id)
+    cost_b = _make_cost("ARM-B", b_binding.portfolio_account_id, "cost-b-1", "25")
+
+    scope_b = _scope("ARM-B", b_binding.portfolio_account_id)
+    started = create_started_attempt(
+        attempt_id="ATT-001",
+        logical_request_id="REQ-001",
+        attempt_event_id="EVT-START-001",
+        scope=scope_b,
+        context_ref=_art_ref("ctx-ref"),
+        method_ref=_art_ref("method-ref"),
+        budget_ref=_art_ref("budget-ref"),
+        producer="synthetic-producer",
+        started_at=datetime(2026, 10, 25, 21, 0, tzinfo=UTC),
+    )
+    terminal_valid = create_terminal_attempt(
+        prior_attempt=started,
+        attempt_event_id="EVT-TERM-001",
+        completed_at=datetime(2026, 10, 25, 21, 5, tzinfo=UTC),
+        status="completed",
+    )
+    # Contradictory backlink / broken transition
+    tampered_dict = terminal_valid.model_dump(mode="python")
+    tampered_dict["previous_event_ref"]["id"] = "WRONG-PREDECESSOR-ID"
+    tampered_dict["record_hash"] = compute_record_hash(tampered_dict)
+    from drift.intelligence.contracts import AttemptRecord
+
+    broken_terminal = AttemptRecord.model_validate(tampered_dict)
+
+    with pytest.raises(
+        (Stage1TrialAdmissionError, ValueError), match="INVALID_ATTEMPT_CHAIN"
+    ):
+        build_stage1_research_trial_binding(
+            campaign_id=campaign.campaign_id,
+            campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+            complete_manifest_fingerprint="c" * 64,
+            run_id=b_binding.run_id,
+            arm_id="ARM-B",
+            portfolio_account_id=b_binding.portfolio_account_id,
+            checkpoint_id="CKPT-001",
+            research_context=ctx_b,
+            disposition="propose",
+            candidate=cand_b,
+            attempts=(started, broken_terminal),
+            costs=(cost_b,),
+            issuer_authority_id="AUTH-001",
         )
