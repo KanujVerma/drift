@@ -1380,7 +1380,7 @@ def test_fabricated_mapping_provenance_bypass_is_rejected_in_production() -> Non
     assert reason is not None
 
     # 2. Fabricated mapping inside observed_objects
-    class FabricatedMapping(dict):
+    class FabricatedMapping(dict[str, Any]):
         http_status = 200
         request_host = "data.alpaca.markets"
 
