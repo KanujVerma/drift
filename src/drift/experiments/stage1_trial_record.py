@@ -402,6 +402,32 @@ class Stage1DerivedTrialRecordV1(FrozenModel):
                     )
                 if self.operating_cost_projection.amount is None:
                     raise Stage1TrialAdmissionError("UNKNOWN_COST_CANNOT_BE_COMPLETE")
+                if self.research_binding.disposition == "propose":
+                    cand = self.research_binding.candidate
+                    if cand is None:
+                        raise Stage1TrialAdmissionError("PROPOSED_CANDIDATE_MISSING")
+                    cand_attempts = [
+                        a
+                        for a in self.research_binding.attempts
+                        if a.attempt_id == cand.attempt_id
+                    ]
+                    if not cand_attempts:
+                        raise Stage1TrialAdmissionError(
+                            "MISSING_CANDIDATE_ATTEMPT_LIFECYCLE"
+                        )
+                    terminal = cand_attempts[-1]
+                    if terminal.status != "completed":
+                        raise Stage1TrialAdmissionError(
+                            "CANDIDATE_ATTEMPT_NOT_COMPLETED"
+                        )
+                    if (
+                        terminal.candidate_ref is None
+                        or terminal.candidate_ref.id != cand.candidate_id
+                        or terminal.candidate_ref.sha256 != cand.record_hash
+                    ):
+                        raise Stage1TrialAdmissionError(
+                            "ATTEMPT_CANDIDATE_REF_MISMATCH"
+                        )
                 economic = gain - finite_fraction(self.operating_cost_projection.amount)
                 if self.economic_gain != exact_decimal(economic):
                     raise Stage1TrialAdmissionError("ECONOMIC_GAIN_MISMATCH")
@@ -740,6 +766,24 @@ def verify_stage1_derived_trial_record(
                 cand = validated.research_binding.candidate
                 if cand is None or cand.strategy is None:
                     raise Stage1TrialAdmissionError("PROPOSED_STRATEGY_MISSING")
+                cand_attempts = [
+                    a
+                    for a in validated.research_binding.attempts
+                    if a.attempt_id == cand.attempt_id
+                ]
+                if not cand_attempts:
+                    raise Stage1TrialAdmissionError(
+                        "MISSING_CANDIDATE_ATTEMPT_LIFECYCLE"
+                    )
+                terminal = cand_attempts[-1]
+                if terminal.status != "completed":
+                    raise Stage1TrialAdmissionError("CANDIDATE_ATTEMPT_NOT_COMPLETED")
+                if (
+                    terminal.candidate_ref is None
+                    or terminal.candidate_ref.id != cand.candidate_id
+                    or terminal.candidate_ref.sha256 != cand.record_hash
+                ):
+                    raise Stage1TrialAdmissionError("ATTEMPT_CANDIDATE_REF_MISMATCH")
                 if cand.strategy.family_id not in campaign.allowed_strategy_families:
                     raise Stage1TrialAdmissionError("DISALLOWED_STRATEGY_FAMILY")
                 arm_spec = next((a for a in arms if a.arm_id == validated.arm_id), None)
