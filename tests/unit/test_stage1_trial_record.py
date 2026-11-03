@@ -54,6 +54,7 @@ from drift.intelligence.contracts import (
     ArtifactReference,
     AttemptRecord,
     CostReceipt,
+    ModelReplayRecord,
     ResearchCandidate,
     ResearchContext,
     Scope,
@@ -207,6 +208,29 @@ def _make_attempts(
         ),
     )
     return (started, terminal)
+
+
+def _make_model_replay(
+    arm_id: str,
+    account_id: str,
+    attempt_id: str,
+    context: ResearchContext,
+    campaign_id: str = "CAMP-E1-SYNTH-001",
+    campaign_fingerprint: str = GOLDEN_CAMPAIGN_FINGERPRINT,
+) -> ModelReplayRecord:
+    scope = _scope(arm_id, account_id, campaign_id, campaign_fingerprint)
+    path = Path(__file__).parents[1] / "fixtures/adaptive_research/research_v1.json"
+    data = json.loads(path.read_text())["fixtures"]["F08"]
+    data.pop("record_hash")
+    data["scope"] = scope.model_dump(mode="python")
+    data["attempt_id"] = attempt_id
+    data["context_ref"] = {
+        "id": context.context_id,
+        "version": "1",
+        "sha256": context.record_hash,
+    }
+    data["record_hash"] = compute_record_hash(data)
+    return ModelReplayRecord.model_validate(data)
 
 
 def test_positive_stage1_derived_trial_record_b_and_r() -> None:
@@ -1437,3 +1461,114 @@ def test_reject_completed_proposal_mismatched_candidate_reference() -> None:
             end_nav=Decimal("10050"),
             trading_costs=Decimal("2"),
         )
+
+
+def test_reject_model_replay_attempt_mismatch() -> None:
+    campaign = make_golden_campaign()
+    bindings = make_golden_bindings()
+    b_binding = bindings[0]
+    ctx_b = _make_context("ARM-B", b_binding.portfolio_account_id)
+    cand_b = _make_candidate("ARM-B", b_binding.portfolio_account_id)
+    cost_b = _make_cost("ARM-B", b_binding.portfolio_account_id, "cost-b-1", "25")
+    attempts_b = _make_attempts("ARM-B", b_binding.portfolio_account_id, cand_b)
+    replay_foreign = _make_model_replay(
+        "ARM-B",
+        b_binding.portfolio_account_id,
+        "ATT-FOREIGN-999",
+        ctx_b,
+    )
+    with pytest.raises(
+        (Stage1TrialAdmissionError, ValueError),
+        match="MODEL_REPLAY_ATTEMPT_MISMATCH",
+    ):
+        build_stage1_research_trial_binding(
+            campaign_id=campaign.campaign_id,
+            campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+            complete_manifest_fingerprint="c" * 64,
+            run_id=b_binding.run_id,
+            arm_id="ARM-B",
+            portfolio_account_id=b_binding.portfolio_account_id,
+            checkpoint_id="CKPT-001",
+            research_context=ctx_b,
+            disposition="propose",
+            candidate=cand_b,
+            attempts=attempts_b,
+            costs=(cost_b,),
+            model_replay=replay_foreign,
+            issuer_authority_id="AUTH-001",
+        )
+
+
+def test_reject_model_replay_context_mismatch() -> None:
+    campaign = make_golden_campaign()
+    bindings = make_golden_bindings()
+    b_binding = bindings[0]
+    ctx_b = _make_context("ARM-B", b_binding.portfolio_account_id)
+    cand_b = _make_candidate("ARM-B", b_binding.portfolio_account_id)
+    cost_b = _make_cost("ARM-B", b_binding.portfolio_account_id, "cost-b-1", "25")
+    attempts_b = _make_attempts("ARM-B", b_binding.portfolio_account_id, cand_b)
+    other_ctx = _make_context(
+        "ARM-B",
+        b_binding.portfolio_account_id,
+        campaign_fingerprint="f" * 64,
+    )
+    replay_wrong_ctx = _make_model_replay(
+        "ARM-B",
+        b_binding.portfolio_account_id,
+        cand_b.attempt_id,
+        other_ctx,
+    )
+    with pytest.raises(
+        (Stage1TrialAdmissionError, ValueError),
+        match="MODEL_REPLAY_CONTEXT_MISMATCH",
+    ):
+        build_stage1_research_trial_binding(
+            campaign_id=campaign.campaign_id,
+            campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+            complete_manifest_fingerprint="c" * 64,
+            run_id=b_binding.run_id,
+            arm_id="ARM-B",
+            portfolio_account_id=b_binding.portfolio_account_id,
+            checkpoint_id="CKPT-001",
+            research_context=ctx_b,
+            disposition="propose",
+            candidate=cand_b,
+            attempts=attempts_b,
+            costs=(cost_b,),
+            model_replay=replay_wrong_ctx,
+            issuer_authority_id="AUTH-001",
+        )
+
+
+def test_positive_stage1_research_binding_with_matching_model_replay() -> None:
+    campaign = make_golden_campaign()
+    bindings = make_golden_bindings()
+    b_binding = bindings[0]
+    ctx_b = _make_context("ARM-B", b_binding.portfolio_account_id)
+    cand_b = _make_candidate("ARM-B", b_binding.portfolio_account_id)
+    cost_b = _make_cost("ARM-B", b_binding.portfolio_account_id, "cost-b-1", "25")
+    attempts_b = _make_attempts("ARM-B", b_binding.portfolio_account_id, cand_b)
+    replay_ok = _make_model_replay(
+        "ARM-B",
+        b_binding.portfolio_account_id,
+        cand_b.attempt_id,
+        ctx_b,
+    )
+    res_bind = build_stage1_research_trial_binding(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint="c" * 64,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        research_context=ctx_b,
+        disposition="propose",
+        candidate=cand_b,
+        attempts=attempts_b,
+        costs=(cost_b,),
+        model_replay=replay_ok,
+        issuer_authority_id="AUTH-001",
+    )
+    assert res_bind.model_replay is not None
+    assert res_bind.model_replay.attempt_id == cand_b.attempt_id

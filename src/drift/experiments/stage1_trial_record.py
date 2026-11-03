@@ -168,6 +168,61 @@ class Stage1ResearchTrialBindingV1(FrozenModel):
                 raise Stage1TrialAdmissionError("MODEL_REPLAY_ACCOUNT_MISMATCH")
             if self.model_replay.scope.arm_id != self.arm_id:
                 raise Stage1TrialAdmissionError("MODEL_REPLAY_ARM_MISMATCH")
+            if (
+                self.model_replay.context_ref.id != self.research_context.context_id
+                or self.model_replay.context_ref.sha256
+                != self.research_context.record_hash
+            ):
+                raise Stage1TrialAdmissionError("MODEL_REPLAY_CONTEXT_MISMATCH")
+            if (
+                self.candidate is not None
+                and self.model_replay.attempt_id != self.candidate.attempt_id
+            ):
+                raise Stage1TrialAdmissionError("MODEL_REPLAY_ATTEMPT_MISMATCH")
+            if self.attempts and self.model_replay.attempt_id not in {
+                a.attempt_id for a in self.attempts
+            }:
+                raise Stage1TrialAdmissionError("MODEL_REPLAY_ATTEMPT_NOT_FOUND")
+
+            if (
+                self.candidate is not None
+                and self.candidate.model_replay_ref is not None
+            ):
+                if (
+                    self.candidate.model_replay_ref.id != self.model_replay.replay_id
+                    or self.candidate.model_replay_ref.sha256
+                    != self.model_replay.record_hash
+                ):
+                    raise Stage1TrialAdmissionError(
+                        "CANDIDATE_MODEL_REPLAY_REF_MISMATCH"
+                    )
+
+            for attempt in self.attempts:
+                if (
+                    attempt.attempt_id == self.model_replay.attempt_id
+                    and attempt.model_replay_ref is not None
+                ):
+                    if (
+                        attempt.model_replay_ref.id != self.model_replay.replay_id
+                        or attempt.model_replay_ref.sha256
+                        != self.model_replay.record_hash
+                    ):
+                        raise Stage1TrialAdmissionError(
+                            "ATTEMPT_MODEL_REPLAY_REF_MISMATCH"
+                        )
+        else:
+            if (
+                self.candidate is not None
+                and self.candidate.model_replay_ref is not None
+            ):
+                raise Stage1TrialAdmissionError(
+                    "MISSING_MODEL_REPLAY_FOR_CANDIDATE_REF"
+                )
+            for attempt in self.attempts:
+                if attempt.model_replay_ref is not None:
+                    raise Stage1TrialAdmissionError(
+                        "MISSING_MODEL_REPLAY_FOR_ATTEMPT_REF"
+                    )
 
         data = self.model_dump(mode="python", exclude={"binding_hash"})
         computed = content_hash(data)
