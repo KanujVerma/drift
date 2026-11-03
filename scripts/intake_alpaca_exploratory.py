@@ -125,6 +125,10 @@ class UnauthorizedHostError(ValueError):
     """Raised before any request is built for a host this tool may not contact."""
 
 
+class AlpacaAccountAccessError(OSError):
+    """Raised when Alpaca API returns an authentication or entitlement error."""
+
+
 class InvalidApiKeyError(ValueError):
     """Raised for a key that is set but cannot be sent safely.
 
@@ -183,10 +187,8 @@ def _api_keys_from_environment() -> tuple[str, str] | None:
     `InvalidApiKeyError`, naming only the variable, when a set value could not
     be sent as a header verbatim.
     """
-    key_id = os.environ.get(KEY_ID_VARIABLE) or os.environ.get("ALPACA_API_KEY_ID")
-    secret_key = os.environ.get(SECRET_KEY_VARIABLE) or os.environ.get(
-        "ALPACA_API_SECRET_KEY"
-    )
+    key_id = os.environ.get(KEY_ID_VARIABLE)
+    secret_key = os.environ.get(SECRET_KEY_VARIABLE)
     if key_id is None or secret_key is None:
         return None
     if not _usable_key(key_id):
@@ -242,13 +244,26 @@ def _fetch_bytes(
     appeal.add_header("APCA-API-KEY-ID", keys[0])
     appeal.add_header("APCA-API-SECRET-KEY", keys[1])
     appeal.add_header("Accept", "application/json")
-    with _build_opener().open(appeal, timeout=_TIMEOUT_SECONDS) as response:
-        answered = response.geturl()
-        _assert_same_tls_origin(url, answered)
-        status = int(response.status)
-        content_type = response.headers.get("Content-Type")
-        body = response.read()
-        observed_at = datetime.now(UTC)
+    try:
+        with _build_opener().open(appeal, timeout=_TIMEOUT_SECONDS) as response:
+            answered = response.geturl()
+            _assert_same_tls_origin(url, answered)
+            status = int(response.status)
+            content_type = response.headers.get("Content-Type")
+            body = response.read()
+            observed_at = datetime.now(UTC)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            raise AlpacaAccountAccessError(
+                "ACCOUNT_ACCESS_UNAVAILABLE: Alpaca API credentials returned "
+                "HTTP 401 Unauthorized"
+            ) from exc
+        if exc.code == 403:
+            raise AlpacaAccountAccessError(
+                "ACCOUNT_ACCESS_UNAVAILABLE: Alpaca API returned "
+                f"HTTP 403: {exc.reason}"
+            ) from exc
+        raise
     if not isinstance(body, bytes):  # pragma: no cover - defensive
         raise TypeError("Alpaca response body must be exact bytes")
     return body, AlpacaOriginObservation(
@@ -317,6 +332,8 @@ def _failure_label(error: BaseException) -> str:
     Never the message: `http.client` builds exception messages out of header
     values and raw status lines, either of which can carry a key.
     """
+    if isinstance(error, AlpacaAccountAccessError):
+        return str(error)
     label = type(error).__name__
     if isinstance(error, urllib.error.HTTPError):
         label = f"{label} (HTTP {int(error.code)})"

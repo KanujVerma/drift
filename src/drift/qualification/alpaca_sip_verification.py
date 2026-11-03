@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from hashlib import sha256
@@ -27,13 +27,26 @@ from typing import Annotated, Any, Literal, Self
 
 from pydantic import Field, model_validator
 
+from drift.domain.acquisition import (
+    AcquisitionReceiptV1,
+    ObservedObjectV1,
+    OriginEvidenceV1,
+    OriginStatus,
+)
 from drift.domain.common import FrozenModel, NonBlankStr, SHA256Hash, UTCDateTime
+from drift.qualification.acquisition import verify_acquisition_receipt
 from drift.serialization.canonical import canonical_json, content_hash
 
 ALPACA_SIP_FEED = "sip"
 ALPACA_DELAY_MINIMUM_MINUTES = 15
 
-STUDY_START_DATE: date = date(2019, 10, 1)
+REQUIRED_STAGE1_WARMUP_SESSIONS: int = 253
+REQUIRED_STAGE1_OBSERVATION_SESSIONS: int = 126
+REQUIRED_STAGE1_PREPARATION_SESSIONS: int = 379  # 253 warmup + 126 observation
+
+# Earliest date required to satisfy 379 preparation sessions before 2021-01-01
+STUDY_START_DATE: date = date(2019, 6, 28)
+LEGACY_UNVERIFIED_WARMUP_START_DATE: date = date(2019, 10, 1)
 STUDY_END_DATE: date = date(2025, 12, 31)
 STUDY_MIN_BARS_COUNT: int = 500
 
@@ -154,7 +167,7 @@ class SecurityHistoricalCoverageV1(FrozenModel):
 
 class Universe12EtfCoverageV1(FrozenModel):
     universe: tuple[str, ...] = EXACT_12_ETF_UNIVERSE
-    warmup_window: tuple[date, date] = (date(2019, 10, 1), date(2020, 12, 31))
+    warmup_window: tuple[date, date] = (date(2019, 6, 28), date(2020, 12, 31))
     development_window: tuple[date, date] = (date(2021, 1, 1), date(2023, 12, 31))
     validation_window: tuple[date, date] = (date(2024, 1, 1), date(2024, 12, 31))
     evaluation_window: tuple[date, date] = (date(2025, 1, 1), date(2025, 12, 31))
@@ -252,6 +265,7 @@ class AlpacaSipG1VerificationReportV1(FrozenModel):
     corporate_actions: CorporateActionCompletenessV1
     contractual_rights: ContractualResearchRetentionRightsV1
     robinhood_disqualification: RobinhoodTotalViewDisqualificationV1
+    contains_synthetic_fixtures: bool = False
     refusal_reasons: tuple[str, ...] = ()
     overall_status: Literal["VERIFIED", "REFUSED"]
     report_hash: SHA256Hash
@@ -292,6 +306,7 @@ class AlpacaSipIntakeEvidenceV1(FrozenModel):
     corporate_actions_byte_size: Annotated[int, Field(gt=0)]
     receipt_id: NonBlankStr
     reconciliation_pass: Literal[True] = True
+    is_synthetic: bool = False
 
 
 class SecurityHistoricalCoverageEvidenceV1(FrozenModel):
@@ -302,9 +317,10 @@ class SecurityHistoricalCoverageEvidenceV1(FrozenModel):
     development_covered: bool = True
     validation_covered: bool = True
     evaluation_covered: bool = True
-    coverage_start: date = Field(le=date(2019, 10, 1))
+    coverage_start: date = Field(le=date(2019, 6, 28))
     coverage_end: date = Field(ge=date(2025, 12, 31))
     observed_bars_count: Annotated[int, Field(gt=0)]
+    is_synthetic: bool = False
 
     @model_validator(mode="after")
     def validate_ticker(self) -> Self:
@@ -321,10 +337,11 @@ class CorporateActionEvidenceRecordV1(FrozenModel):
     has_monthly_fixed_income_distributions: bool = False
     all_splits_captured: bool = False
     closed_world_coverage_verified: bool = True
-    covered_start_date: date = Field(le=date(2019, 10, 1))
+    covered_start_date: date = Field(le=date(2019, 6, 28))
     covered_end_date: date = Field(ge=date(2025, 12, 31))
     single_count_accounting_enforced: Literal[True] = True
     completeness_basis: str = Field(min_length=3)
+    is_synthetic: bool = False
 
     @model_validator(mode="after")
     def validate_action_coverage(self) -> Self:
@@ -360,6 +377,7 @@ class ContractualRightsAssessmentEvidenceV1(FrozenModel):
     public_redistribution_permitted: Literal[False]
     git_tree_retention_permitted: Literal[False]
     evidence_document_hashes: tuple[SHA256Hash, ...] = Field(min_length=1)
+    is_synthetic: bool = False
 
 
 def create_mock_alpaca_sip_evidence_fixtures() -> tuple[
@@ -380,6 +398,7 @@ def create_mock_alpaca_sip_evidence_fixtures() -> tuple[
         corporate_actions_byte_size=512,
         receipt_id="MOCK-ACQ-RECEIPT-ALPACA-SIP-V1",
         reconciliation_pass=True,
+        is_synthetic=True,
     )
     coverage = tuple(
         SecurityHistoricalCoverageEvidenceV1(
@@ -388,9 +407,10 @@ def create_mock_alpaca_sip_evidence_fixtures() -> tuple[
             development_covered=True,
             validation_covered=True,
             evaluation_covered=True,
-            coverage_start=date(2019, 10, 1),
+            coverage_start=date(2019, 6, 28),
             coverage_end=date(2025, 12, 31),
-            observed_bars_count=1560,
+            observed_bars_count=1640,
+            is_synthetic=True,
         )
         for t in EXACT_12_ETF_UNIVERSE
     )
@@ -403,10 +423,11 @@ def create_mock_alpaca_sip_evidence_fixtures() -> tuple[
             in ("SHY", "IEF", "TLT", "TIP", "LQD"),
             all_splits_captured=True,
             closed_world_coverage_verified=True,
-            covered_start_date=date(2019, 10, 1),
+            covered_start_date=date(2019, 6, 28),
             covered_end_date=date(2025, 12, 31),
             single_count_accounting_enforced=True,
             completeness_basis="ALPACA_EXPLORATORY_CLOSED_WORLD_V1",
+            is_synthetic=True,
         )
         for t in EXACT_12_ETF_UNIVERSE
     )
@@ -421,24 +442,48 @@ def create_mock_alpaca_sip_evidence_fixtures() -> tuple[
         public_redistribution_permitted=False,
         git_tree_retention_permitted=False,
         evidence_document_hashes=("d" * 64,),
+        is_synthetic=True,
     )
     return intake, coverage, corporate_actions, rights
 
 
 def create_mock_valid_raw_payloads(
-    bars_count: int = 1560,
+    bars_count: int = 1640,
 ) -> Any:
     """Generate mock raw Alpaca JSON payloads meeting complete provider schemas."""
     from types import SimpleNamespace
 
-    start_d = STUDY_START_DATE
-    end_d = STUDY_END_DATE
-    total_days = (end_d - start_d).days
-
-    dates = [
-        start_d + timedelta(days=int(i * total_days / (bars_count - 1)))
-        for i in range(bars_count)
+    # 1. Synthesize at least REQUIRED_STAGE1_PREPARATION_SESSIONS (379)
+    # sessions before 2021-01-01
+    prep_start = STUDY_START_DATE
+    prep_end = date(2020, 12, 31)
+    prep_days = (prep_end - prep_start).days
+    prep_dates = [
+        prep_start + timedelta(days=int(i * prep_days / 380)) for i in range(381)
     ]
+    seen_d: set[date] = set()
+    prep_unique: list[date] = []
+    for d in prep_dates:
+        if d not in seen_d:
+            seen_d.add(d)
+            prep_unique.append(d)
+
+    # 2. Synthesize remaining dates across 2021-01-01 to 2025-12-31
+    post_start = date(2021, 1, 1)
+    post_end = STUDY_END_DATE
+    post_days = (post_end - post_start).days
+    post_target = max(500, bars_count - len(prep_unique))
+    post_dates = [
+        post_start + timedelta(days=int(i * post_days / (post_target - 1)))
+        for i in range(post_target)
+    ]
+    post_unique: list[date] = []
+    for d in post_dates:
+        if d not in seen_d:
+            seen_d.add(d)
+            post_unique.append(d)
+
+    dates = prep_unique + post_unique
 
     bars_map = {
         sym: [
@@ -502,6 +547,7 @@ def create_mock_valid_raw_payloads(
         bars=bars_payload,
         calendar=calendar_payload,
         corporate_actions=ca_payload,
+        is_synthetic=True,
     )
 
 
@@ -583,7 +629,8 @@ def validate_intake_result_provenance(
     recon = getattr(acq, "reconciliation", None)
     recon_res = getattr(recon, "result", None)
     recon_pass = (
-        getattr(recon_res, "value", str(recon_res)) == "PASS" or recon_res == "PASS"
+        getattr(recon_res, "value", str(recon_res)).upper() == "PASS"
+        or recon_res == "PASS"
     )
     if not recon_pass:
         raise ValueError("intake acquisition reconciliation did not pass")
@@ -596,12 +643,31 @@ def validate_intake_result_provenance(
     bars = getattr(retained, "bars", None)
     calendar = getattr(retained, "calendar", None)
     corporate_actions_ret = getattr(retained, "corporate_actions", None)
-    bars_h = getattr(bars, "sha256", None)
-    cal_h = getattr(calendar, "sha256", None)
-    ca_h = getattr(corporate_actions_ret, "sha256", None)
-    bars_sz = getattr(bars, "byte_size", 0)
-    cal_sz = getattr(calendar, "byte_size", 0)
-    ca_sz = getattr(corporate_actions_ret, "byte_size", 0)
+    artifacts = getattr(retained, "artifacts", {}) or {}
+
+    bars_h = getattr(retained, "bars_hash", None) or getattr(bars, "sha256", None)
+    cal_h = getattr(retained, "calendar_hash", None) or getattr(
+        calendar, "sha256", None
+    )
+    ca_h = getattr(retained, "corporate_actions_hash", None) or getattr(
+        corporate_actions_ret, "sha256", None
+    )
+
+    bars_sz = (
+        getattr(artifacts.get(bars_h), "byte_size", 0)
+        if bars_h in artifacts
+        else getattr(bars, "byte_size", 0)
+    )
+    cal_sz = (
+        getattr(artifacts.get(cal_h), "byte_size", 0)
+        if cal_h in artifacts
+        else getattr(calendar, "byte_size", 0)
+    )
+    ca_sz = (
+        getattr(artifacts.get(ca_h), "byte_size", 0)
+        if ca_h in artifacts
+        else getattr(corporate_actions_ret, "byte_size", 0)
+    )
 
     if not (isinstance(bars_h, str) and len(bars_h) == 64 and bars_sz >= 100):
         raise ValueError("invalid or empty bars payload retained evidence")
@@ -656,7 +722,10 @@ def validate_raw_alpaca_payloads(
     if not isinstance(bars_doc, dict):
         raise ValueError("bars response must be a JSON object")
     if bars_doc.get("next_page_token") is not None:
-        raise ValueError("bars response is paginated and incomplete")
+        raise ValueError(
+            "PAGINATION_INCOMPLETE: bars response is paginated and contains "
+            "unconsumed next_page_token"
+        )
     grouped_bars = bars_doc.get("bars")
     if not isinstance(grouped_bars, dict) or len(grouped_bars) == 0:
         raise ValueError(
@@ -817,6 +886,15 @@ def validate_raw_alpaca_payloads(
             f"required study end date {STUDY_END_DATE}"
         )
 
+    prep_sessions = [d for d in cal_dates if d < date(2021, 1, 1)]
+    if len(prep_sessions) < REQUIRED_STAGE1_PREPARATION_SESSIONS:
+        raise ValueError(
+            f"INSUFFICIENT_PREPARATION_SESSIONS: calendar contains "
+            f"{len(prep_sessions)} trading sessions before 2021-01-01; at least "
+            f"{REQUIRED_STAGE1_PREPARATION_SESSIONS} sessions (253 warmup + "
+            "126 observation intervals) required for Stage 1 preparation."
+        )
+
     cal_dates_set = frozenset(cal_dates)
 
     # 3. Reconcile Bars against Calendar trading sessions
@@ -846,7 +924,10 @@ def validate_raw_alpaca_payloads(
     if not isinstance(ca_doc, dict):
         raise ValueError("corporate actions response must be a JSON object")
     if ca_doc.get("next_page_token") is not None:
-        raise ValueError("corporate actions response is paginated and incomplete")
+        raise ValueError(
+            "PAGINATION_INCOMPLETE: corporate actions response is paginated "
+            "and contains unconsumed next_page_token"
+        )
     ca_grouped = ca_doc.get("corporate_actions")
     if not isinstance(ca_grouped, dict):
         raise ValueError(
@@ -1234,6 +1315,266 @@ def extract_and_validate_rights_assessment(
     )
 
 
+def verify_authentic_intake_provenance(
+    intake_result: Any,
+) -> tuple[bool, str | None]:
+    """Positively authenticate genuine intake evidence against domain contracts.
+
+    Returns:
+        (is_mock, failure_reason)
+        (False, None) ONLY if evidence positively verifies as authentic live
+        acquisition.
+        (True, reason) if evidence is synthetic, mock, or fails verification.
+    """
+    if getattr(intake_result, "is_synthetic", False):
+        return True, "intake_result is explicitly marked synthetic"
+    if isinstance(intake_result, AlpacaSipIntakeEvidenceV1):
+        return (
+            True,
+            "intake_result is offline AlpacaSipIntakeEvidenceV1 fixture "
+            "lacking live TLS origin observations",
+        )
+    rid = getattr(intake_result, "receipt_id", "")
+    if isinstance(rid, str) and (rid.startswith("MOCK-") or "MOCK" in rid):
+        return True, f"intake_result has mock receipt_id: {rid}"
+    b_h = getattr(intake_result, "bars_sha256", "")
+    if b_h in ("a" * 64, "b" * 64, "c" * 64, "d" * 64, "0" * 64):
+        return True, f"intake_result has placeholder hash: {b_h}"
+
+    retained = getattr(intake_result, "retained", None)
+    acq = getattr(intake_result, "acquisition", None)
+    if retained is None or acq is None:
+        return (
+            True,
+            "intake_result lacks required 'retained' or 'acquisition' attributes",
+        )
+
+    receipt = getattr(acq, "receipt", None)
+    if not isinstance(receipt, AcquisitionReceiptV1):
+        return (
+            True,
+            "acquisition receipt is not an authentic AcquisitionReceiptV1 contract "
+            f"instance (got {type(receipt).__name__})",
+        )
+
+    recon = getattr(acq, "reconciliation", None)
+    recon_res = getattr(recon, "result", None)
+    recon_pass = (
+        getattr(recon_res, "value", str(recon_res)).upper() == "PASS"
+        or recon_res == "PASS"
+    )
+    if not recon_pass:
+        return True, "intake acquisition reconciliation did not pass"
+
+    artifacts = getattr(retained, "artifacts", None)
+    if not isinstance(artifacts, Mapping) or not artifacts:
+        return True, "retained artifacts missing or not a valid mapping"
+
+    try:
+        verify_acquisition_receipt(receipt, artifacts)
+    except Exception as e:
+        return True, f"receipt cryptographic verification failed: {e}"
+
+    descriptor_to_content: dict[str, str] = {
+        obj.descriptor_hash: obj.content_hash for obj in receipt.byte_graph.objects
+    }
+    graph_content_hashes: set[str] = {
+        obj.content_hash for obj in receipt.byte_graph.objects
+    }
+
+    observed_objects = receipt.observed_objects
+    if not isinstance(observed_objects, (tuple, list)) or not observed_objects:
+        return (
+            True,
+            "acquisition receipt observed_objects must be a non-empty sequence",
+        )
+
+    observed_by_role: dict[str, ObservedObjectV1] = {}
+    for obs in observed_objects:
+        if not isinstance(obs, ObservedObjectV1):
+            return (
+                True,
+                f"observed object {obs!r} is not an ObservedObjectV1 instance",
+            )
+        origin_ev = obs.origin_evidence
+        if not isinstance(origin_ev, OriginEvidenceV1):
+            return (
+                True,
+                f"observed object {obs.provider_object_identity} origin_evidence "
+                "is not OriginEvidenceV1",
+            )
+        if origin_ev.origin_status is not OriginStatus.VERIFIED:
+            return (
+                True,
+                f"observed object {obs.provider_object_identity} origin_status is not "
+                f"VERIFIED (got {origin_ev.origin_status})",
+            )
+        metadata = origin_ev.safe_response_metadata
+        if not isinstance(metadata, Mapping):
+            return (
+                True,
+                f"observed object {obs.provider_object_identity} lacks "
+                "safe_response_metadata mapping",
+            )
+        status = str(metadata.get("http_status", ""))
+        host = str(metadata.get("request_host", ""))
+        tls_endpoint = origin_ev.tls_endpoint_identity
+
+        if status != "200":
+            return (
+                True,
+                f"observed object {obs.provider_object_identity} has non-200 "
+                f"HTTP status: {status}",
+            )
+
+        key = str(obs.matched_expected_key or "")
+        expected_hosts: tuple[str, ...]
+        if "calendar" in key:
+            expected_hosts = ("paper-api.alpaca.markets", "data.alpaca.markets")
+        else:
+            expected_hosts = ("data.alpaca.markets",)
+
+        if tls_endpoint not in expected_hosts:
+            return (
+                True,
+                f"observed object {obs.provider_object_identity} endpoint "
+                f"{tls_endpoint!r} is not in expected endpoints {expected_hosts}",
+            )
+        if host not in expected_hosts:
+            return (
+                True,
+                f"observed object {obs.provider_object_identity} request_host "
+                f"{host!r} is not in expected hosts {expected_hosts}",
+            )
+
+        if "bars" in key:
+            observed_by_role["bars"] = obs
+        elif "calendar" in key:
+            observed_by_role["calendar"] = obs
+        elif "action" in key:
+            observed_by_role["corporate_actions"] = obs
+
+    # Verify payload hashes against graph and bound origin observations
+    bars_h = getattr(retained, "bars_hash", None)
+    cal_h = getattr(retained, "calendar_hash", None)
+    ca_h = getattr(retained, "corporate_actions_hash", None)
+    for role, h in (
+        ("bars", bars_h),
+        ("calendar", cal_h),
+        ("corporate_actions", ca_h),
+    ):
+        if not isinstance(h, str) or len(h) != 64:
+            return True, f"{role} payload hash is invalid or missing: {h!r}"
+        if h in ("a" * 64, "b" * 64, "c" * 64, "d" * 64, "0" * 64):
+            return True, f"{role} payload has placeholder hash: {h}"
+        if h not in artifacts:
+            return True, f"{role} payload hash {h} not found in retained artifacts"
+        if h not in graph_content_hashes:
+            return (
+                True,
+                f"{role} payload hash {h} is not bound to the verified acquisition "
+                "receipt byte graph",
+            )
+        role_obs = observed_by_role.get(role)
+        if role_obs is None:
+            return (
+                True,
+                f"{role} payload hash {h} has no corresponding verified "
+                "observed object",
+            )
+        obs_content_hashes = {
+            descriptor_to_content.get(d) for d in role_obs.byte_object_descriptor_hashes
+        }
+        if h not in obs_content_hashes:
+            return (
+                True,
+                f"{role} payload hash {h} is not bound to descriptor hashes in "
+                f"observed object {role_obs.provider_object_identity}",
+            )
+
+    return False, None
+
+
+def is_synthetic_or_mock_evidence(
+    intake_result: Any | None = None,
+    corporate_actions: Sequence[Any] | None = None,
+    rights_assessment: Any | None = None,
+    coverage_evidence: Sequence[Any] | None = None,
+    raw_payloads: Any | None = None,
+) -> tuple[bool, str | None]:
+    """Positively authenticate genuine evidence and detect synthetic/mock origin.
+
+    Fails closed: evidence is synthetic unless it proves authenticated provenance
+    from live Alpaca provider TLS origin observations (data.alpaca.markets)
+    with HTTP 200, valid non-self-signed legal authority, and verified closed-world
+    reconstruction.
+    """
+    if intake_result is not None:
+        is_mock, reason = verify_authentic_intake_provenance(intake_result)
+        if is_mock:
+            return True, reason
+
+    if raw_payloads is not None:
+        return (
+            True,
+            "raw_payloads is unauthenticated offline payload evidence lacking "
+            "acquisition receipt and TLS origin verification",
+        )
+
+    if corporate_actions is not None:
+        for ca in corporate_actions:
+            if getattr(ca, "is_synthetic", False) or (
+                isinstance(ca, Mapping) and ca.get("is_synthetic", False)
+            ):
+                return True, "corporate_actions contains synthetic record"
+            basis = getattr(ca, "completeness_basis", "") or (
+                ca.get("completeness_basis", "") if isinstance(ca, Mapping) else ""
+            )
+            if "MOCK" in str(basis):
+                return True, f"corporate action has mock completeness basis: {basis}"
+
+    if rights_assessment is not None:
+        if getattr(rights_assessment, "is_synthetic", False) or (
+            isinstance(rights_assessment, Mapping)
+            and rights_assessment.get("is_synthetic", False)
+        ):
+            return True, "rights_assessment is explicitly marked synthetic"
+        aid = getattr(rights_assessment, "assessment_id", "") or (
+            rights_assessment.get("assessment_id", "")
+            if isinstance(rights_assessment, Mapping)
+            else ""
+        )
+        if isinstance(aid, str) and (aid.startswith("MOCK-") or "MOCK" in aid):
+            return True, f"rights_assessment has mock assessment_id: {aid}"
+        assessor = getattr(rights_assessment, "assessor_identity", "") or (
+            rights_assessment.get("assessor_identity", "")
+            if isinstance(rights_assessment, Mapping)
+            else ""
+        )
+        if assessor == "matthew@drift.local":
+            return True, "rights_assessment uses unauthenticated mock identity"
+        authority = getattr(rights_assessment, "authority", "") or (
+            rights_assessment.get("authority", "")
+            if isinstance(rights_assessment, Mapping)
+            else ""
+        )
+        if assessor and authority and assessor == authority:
+            return (
+                True,
+                "rights_assessment is self-authorized (assessor == authority); "
+                "must carry independent legal authority",
+            )
+
+    if coverage_evidence is not None:
+        for cov in coverage_evidence:
+            if getattr(cov, "is_synthetic", False) or (
+                isinstance(cov, Mapping) and cov.get("is_synthetic", False)
+            ):
+                return True, "coverage_evidence contains synthetic record"
+
+    return False, None
+
+
 def verify_g1_alpaca_sip_qualification(
     *,
     verification_id: str = "G1-ALPACA-SIP-QUALIFICATION-V1",
@@ -1245,6 +1586,8 @@ def verify_g1_alpaca_sip_qualification(
     rights_assessment: Any | None = None,
     coverage_evidence: Sequence[Any] | None = None,
     covered_tickers: Sequence[str] | None = None,
+    allow_synthetic: bool = False,
+    account_access_status: str | None = None,
 ) -> AlpacaSipG1VerificationReportV1:
     """Execute evidence-bound G1 verification of free historical Alpaca SIP access.
 
@@ -1256,6 +1599,22 @@ def verify_g1_alpaca_sip_qualification(
     delay_minutes = (now - request_end).total_seconds() / 60.0
 
     refusal_reasons: list[str] = []
+
+    if account_access_status == "UNAUTHORIZED":
+        refusal_reasons.append(
+            "ACCOUNT_ACCESS_UNAVAILABLE: Alpaca API credentials returned "
+            "HTTP 401 Unauthorized."
+        )
+
+    is_mock, mock_reason = is_synthetic_or_mock_evidence(
+        intake_result=intake_result,
+        corporate_actions=corporate_actions,
+        rights_assessment=rights_assessment,
+        coverage_evidence=coverage_evidence,
+        raw_payloads=raw_payloads,
+    )
+    if is_mock and not allow_synthetic:
+        refusal_reasons.append(f"MOCK_EVIDENCE_PROHIBITED_IN_PRODUCTION: {mock_reason}")
 
     sip_check = AlpacaSipHistoricalRequestCheckV1(
         feed="sip",
@@ -1562,6 +1921,7 @@ def verify_g1_alpaca_sip_qualification(
         "corporate_actions": corp_actions,
         "contractual_rights": rights,
         "robinhood_disqualification": robinhood,
+        "contains_synthetic_fixtures": is_mock,
         "refusal_reasons": tuple(sorted(refusal_reasons)),
         "overall_status": overall_status,
     }

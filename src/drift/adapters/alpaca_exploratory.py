@@ -1967,12 +1967,21 @@ def verify_alpaca_sip_request_bounds(
     """
     now = datetime.now(UTC) if observed_at is None else observed_at
     cutoff = now - timedelta(minutes=15)
-    if request.request_end > cutoff:
-        delta = (request.request_end - cutoff).total_seconds()
+    query_end = datetime(
+        request.end_date.year,
+        request.end_date.month,
+        request.end_date.day,
+        23,
+        59,
+        59,
+        tzinfo=UTC,
+    )
+    if query_end > cutoff:
+        delta = (query_end - cutoff).total_seconds()
         return (
             False,
-            f"FREE_SIP_REQUEST_WITHIN_15_MINUTES: request end "
-            f"{request.request_end.isoformat()} is {delta:.1f}s past the "
+            f"FREE_SIP_REQUEST_WITHIN_15_MINUTES: request end date "
+            f"{request.end_date.isoformat()} is {delta:.1f}s past the "
             f"15-minute delay cutoff {cutoff.isoformat()}. "
             "Subscription does not permit querying recent SIP data on the free tier.",
         )

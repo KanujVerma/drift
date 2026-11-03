@@ -1,6 +1,7 @@
 """Unit tests for Drift Stage 1 (G1) free historical Alpaca SIP verification."""
 
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -97,8 +98,10 @@ def test_free_historical_sip_access_verification_passes_with_evidence() -> None:
         corporate_actions=ca_records,
         rights_assessment=rights,
         coverage_evidence=cov_ev,
+        allow_synthetic=True,
     )
     assert report.overall_status == "VERIFIED"
+    assert report.contains_synthetic_fixtures is True
     assert report.sip_access_check.feed == ALPACA_SIP_FEED
     assert report.sip_access_check.feed == "sip"
     assert report.sip_access_check.adjustment == "raw"
@@ -540,7 +543,7 @@ def test_refuses_corporate_actions_when_quarterly_distribution_missing_for_equit
         "has_monthly_fixed_income_distributions": False,
         "all_splits_captured": True,
         "closed_world_coverage_verified": True,
-        "covered_start_date": date(2019, 10, 1),
+        "covered_start_date": date(2019, 6, 28),
         "covered_end_date": date(2025, 12, 31),
         "single_count_accounting_enforced": True,
         "completeness_basis": "ALPACA_EXPLORATORY_CLOSED_WORLD_V1",
@@ -552,6 +555,7 @@ def test_refuses_corporate_actions_when_quarterly_distribution_missing_for_equit
         corporate_actions=bad_ca,
         rights_assessment=rights,
         coverage_evidence=cov_ev,
+        allow_synthetic=True,
     )
     assert report.overall_status == "REFUSED"
     assert any("EQUITY_ETF_MISSING_QUARTERLY" in r for r in report.refusal_reasons)
@@ -568,7 +572,7 @@ def test_refuses_corporate_actions_when_monthly_distribution_missing_for_bond() 
         "has_monthly_fixed_income_distributions": False,
         "all_splits_captured": True,
         "closed_world_coverage_verified": True,
-        "covered_start_date": date(2019, 10, 1),
+        "covered_start_date": date(2019, 6, 28),
         "covered_end_date": date(2025, 12, 31),
         "single_count_accounting_enforced": True,
         "completeness_basis": "ALPACA_EXPLORATORY_CLOSED_WORLD_V1",
@@ -580,6 +584,7 @@ def test_refuses_corporate_actions_when_monthly_distribution_missing_for_bond() 
         corporate_actions=bad_ca,
         rights_assessment=rights,
         coverage_evidence=cov_ev,
+        allow_synthetic=True,
     )
     assert report.overall_status == "REFUSED"
     assert any("BOND_ETF_MISSING_MONTHLY" in r for r in report.refusal_reasons)
@@ -746,8 +751,10 @@ def test_valid_duck_typed_rights_assessment_passes() -> None:
         corporate_actions=ca_records,
         rights_assessment=valid_duck_rights,
         coverage_evidence=cov_ev,
+        allow_synthetic=True,
     )
     assert report.overall_status == "VERIFIED"
+    assert report.contains_synthetic_fixtures is True
     assert report.contractual_rights.is_verified is True
 
 
@@ -878,7 +885,7 @@ def test_valid_raw_payloads_provenance_passes() -> None:
     """Valid raw payloads meeting complete Alpaca schema contracts pass provenance."""
     _, cov_ev, ca_records, rights = make_mock_evidence()
 
-    valid_payloads = create_mock_valid_raw_payloads(bars_count=1560)
+    valid_payloads = create_mock_valid_raw_payloads(bars_count=1640)
     report = verify_g1_alpaca_sip_qualification(
         request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
         request_time=FIXED_NOW,
@@ -886,8 +893,10 @@ def test_valid_raw_payloads_provenance_passes() -> None:
         corporate_actions=ca_records,
         rights_assessment=rights,
         coverage_evidence=cov_ev,
+        allow_synthetic=True,
     )
     assert report.overall_status == "VERIFIED"
+    assert report.contains_synthetic_fixtures is True
     assert report.source_provenance.provenance_verified is True
     assert report.source_provenance.bars_sha256 is not None
     assert report.source_provenance.calendar_sha256 is not None
@@ -1174,3 +1183,350 @@ def test_sol_round8_duplicated_out_of_window_dividends_refused() -> None:
         or "sparse or missing dividends" in r
         for r in report.refusal_reasons
     )
+
+
+def test_mock_evidence_categorically_refused_in_production_mode() -> None:
+    """Mock/synthetic fixtures must be categorically refused in production mode."""
+    intake_res, cov_ev, ca_records, rights = make_mock_evidence()
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        intake_result=intake_res,
+        corporate_actions=ca_records,
+        rights_assessment=rights,
+        coverage_evidence=cov_ev,
+        allow_synthetic=False,
+    )
+    assert report.overall_status == "REFUSED"
+    assert any(
+        "MOCK_EVIDENCE_PROHIBITED_IN_PRODUCTION" in r for r in report.refusal_reasons
+    )
+
+
+def test_insufficient_warmup_sessions_refused() -> None:
+    """Refuse payloads if trading calendar has < 379 sessions prior to 2021-01-01."""
+    import json
+    from types import SimpleNamespace
+
+    _, cov_ev, ca_records, rights = make_mock_evidence()
+    valid_mock = create_mock_valid_raw_payloads()
+
+    # Keep calendar covering start and end dates, but with insufficient
+    # prep sessions (< 379)
+    cal_data = json.loads(valid_mock.calendar.decode("utf-8"))
+    prep_cal = [c for c in cal_data if c["date"] < "2021-01-01"]
+    post_cal = [c for c in cal_data if c["date"] >= "2021-01-01"]
+    # Thin prep sessions so count is ~190 instead of >= 379, while preserving start date
+    thinned_prep = [prep_cal[0]] + prep_cal[1::2]
+    insufficient_cal = thinned_prep + post_cal
+    insufficient_dates = {c["date"] for c in insufficient_cal}
+
+    bars_data = json.loads(valid_mock.bars.decode("utf-8"))
+    filtered_bars = {
+        sym: [b for b in b_list if b["t"][:10] in insufficient_dates]
+        for sym, b_list in bars_data["bars"].items()
+    }
+
+    short_payloads = SimpleNamespace(
+        bars=json.dumps({"bars": filtered_bars, "next_page_token": None}).encode(
+            "utf-8"
+        ),
+        calendar=json.dumps(insufficient_cal).encode("utf-8"),
+        corporate_actions=valid_mock.corporate_actions,
+        is_synthetic=True,
+    )
+
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        raw_payloads=short_payloads,
+        corporate_actions=ca_records,
+        rights_assessment=rights,
+        coverage_evidence=cov_ev,
+        allow_synthetic=True,
+    )
+    assert report.overall_status == "REFUSED"
+    assert any("INSUFFICIENT_PREPARATION_SESSIONS" in r for r in report.refusal_reasons)
+
+
+def test_unconsumed_pagination_token_refused() -> None:
+    """Refuse raw payloads when response contains unconsumed next_page_token."""
+    import json
+    from types import SimpleNamespace
+
+    _, cov_ev, ca_records, rights = make_mock_evidence()
+    valid_mock = create_mock_valid_raw_payloads()
+
+    bars_data = json.loads(valid_mock.bars.decode("utf-8"))
+    bars_data["next_page_token"] = "unconsumed_next_token_123"
+
+    paginated_payloads = SimpleNamespace(
+        bars=json.dumps(bars_data).encode("utf-8"),
+        calendar=valid_mock.calendar,
+        corporate_actions=valid_mock.corporate_actions,
+        is_synthetic=True,
+    )
+
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        raw_payloads=paginated_payloads,
+        corporate_actions=ca_records,
+        rights_assessment=rights,
+        coverage_evidence=cov_ev,
+        allow_synthetic=True,
+    )
+    assert report.overall_status == "REFUSED"
+    assert any("PAGINATION_INCOMPLETE" in r for r in report.refusal_reasons)
+
+
+def test_unauthorized_credentials_fail_closed() -> None:
+    """Refuse verification with ACCOUNT_ACCESS_UNAVAILABLE when credentials fail.
+
+    Returns HTTP 401 Unauthorized from Alpaca API.
+    """
+    intake_res, cov_ev, ca_records, rights = make_mock_evidence()
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        intake_result=intake_res,
+        corporate_actions=ca_records,
+        rights_assessment=rights,
+        coverage_evidence=cov_ev,
+        account_access_status="UNAUTHORIZED",
+        allow_synthetic=True,
+    )
+    assert report.overall_status == "REFUSED"
+    assert any("ACCOUNT_ACCESS_UNAVAILABLE" in r for r in report.refusal_reasons)
+
+
+def test_caller_label_tampering_on_mock_evidence_cannot_bypass_production_mode() -> (
+    None
+):
+    """Tampering with caller-controlled labels on mock evidence fails closed.
+
+    Even if caller clears is_synthetic, renames receipt/rights IDs, changes
+    assessor identity, and replaces placeholder hashes, production verification
+    (allow_synthetic=False) refuses with MOCK_EVIDENCE_PROHIBITED_IN_PRODUCTION
+    because authentic live TLS origin observations from data.alpaca.markets are absent.
+    """
+    intake_res, cov_ev, ca_records, rights = make_mock_evidence()
+
+    # Sol P1 reproduction attempt:
+    # 1. Clear is_synthetic and rename receipt/hashes on intake evidence
+    tampered_intake = AlpacaSipIntakeEvidenceV1(
+        provider="alpaca",
+        feed="sip",
+        bars_sha256="1234567890abcdef" * 4,
+        calendar_sha256="fedcba0987654321" * 4,
+        corporate_actions_sha256="abcdef1234567890" * 4,
+        bars_byte_size=1024,
+        calendar_byte_size=512,
+        corporate_actions_byte_size=512,
+        receipt_id="AUTHENTIC-LOOKING-RECEIPT-9999",
+        reconciliation_pass=True,
+        is_synthetic=False,
+    )
+    # 2. Tampered rights assessment
+    tampered_rights = ContractualRightsAssessmentEvidenceV1(
+        assessment_id="AUTHENTIC-RIGHTS-ASSESSMENT-001",
+        assessor_identity="auditor@drift.internal",
+        authority="legal-counsel@drift.internal",
+        entitlement_state="active",
+        internal_research_permitted=True,
+        algorithmic_non_display_permitted=True,
+        private_offline_retention_permitted=True,
+        public_redistribution_permitted=False,
+        git_tree_retention_permitted=False,
+        evidence_document_hashes=("e" * 64,),
+        is_synthetic=False,
+    )
+
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        intake_result=tampered_intake,
+        corporate_actions=ca_records,
+        rights_assessment=tampered_rights,
+        coverage_evidence=cov_ev,
+        allow_synthetic=False,
+    )
+
+    assert report.overall_status == "REFUSED"
+    assert report.contains_synthetic_fixtures is True
+    assert any(
+        "MOCK_EVIDENCE_PROHIBITED_IN_PRODUCTION" in r for r in report.refusal_reasons
+    )
+
+
+def test_fabricated_mapping_provenance_bypass_is_rejected_in_production() -> None:
+    """Fabricated mappings claiming http_status=200 and data.alpaca.markets fail closed.
+
+    A fabricated mapping containing only http_status=200 and
+    request_host='data.alpaca.markets' must not bypass provenance verification;
+    it must be classified as synthetic/mock and rejected in production
+    (allow_synthetic=False).
+    """
+    from types import SimpleNamespace
+
+    from drift.qualification.alpaca_sip_verification import (
+        is_synthetic_or_mock_evidence,
+    )
+
+    # 1. Plain fabricated mapping as intake_result
+    fake_dict = {"http_status": 200, "request_host": "data.alpaca.markets"}
+    is_mock, reason = is_synthetic_or_mock_evidence(intake_result=fake_dict)
+    assert is_mock is True
+    assert reason is not None
+
+    # 2. Fabricated mapping inside observed_objects
+    class FabricatedMapping(dict[str, Any]):
+        http_status = 200
+        request_host = "data.alpaca.markets"
+
+    fake_receipt = SimpleNamespace(
+        observed_objects={
+            "bars": FabricatedMapping(
+                http_status=200, request_host="data.alpaca.markets"
+            )
+        }
+    )
+    fake_intake = SimpleNamespace(acquisition=SimpleNamespace(receipt=fake_receipt))
+    is_mock, reason = is_synthetic_or_mock_evidence(intake_result=fake_intake)
+    assert is_mock is True
+    assert reason is not None
+
+    # 3. Verification report in production mode fails closed
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        intake_result=fake_intake,
+        allow_synthetic=False,
+    )
+    assert report.overall_status == "REFUSED"
+    assert report.contains_synthetic_fixtures is True
+    assert any(
+        "MOCK_EVIDENCE_PROHIBITED_IN_PRODUCTION" in r for r in report.refusal_reasons
+    )
+
+
+def test_genuine_receipt_domain_instances_pass_provenance_verification(
+    tmp_path: Path,
+) -> None:
+    """Genuine receipt domain instances and retained bytes pass provenance check.
+
+    In AcquisitionReceiptV1, observed_objects is a tuple[ObservedObjectV1, ...].
+    Genuine domain objects execute the repaired tuple-iteration path without crashing,
+    and verify_authentic_intake_provenance returns (False, None).
+    """
+    from test_alpaca_exploratory_adapter import run_pinned_intake
+
+    from drift.qualification.alpaca_sip_verification import (
+        is_synthetic_or_mock_evidence,
+        verify_authentic_intake_provenance,
+    )
+
+    intake = run_pinned_intake(tmp_path)
+    is_mock, reason = verify_authentic_intake_provenance(intake)
+    assert is_mock is False
+    assert reason is None
+
+    is_synth, synth_reason = is_synthetic_or_mock_evidence(intake_result=intake)
+    assert is_synth is False
+    assert synth_reason is None
+
+
+def test_unrelated_payload_substitution_fails_closed(tmp_path: Path) -> None:
+    """Attaching unrelated payloads alongside a valid receipt fails closed.
+
+    If an arbitrary payload hash is placed into retained.bars_hash and present
+    in retained.artifacts, but not bound to the receipt's verified byte graph,
+    provenance verification strictly refuses.
+    """
+    from dataclasses import replace
+    from hashlib import sha256
+
+    from test_alpaca_exploratory_adapter import run_pinned_intake
+
+    from drift.datasets.resolver import VerifiedArtifactBytes
+    from drift.qualification.alpaca_sip_verification import (
+        verify_authentic_intake_provenance,
+    )
+
+    intake = run_pinned_intake(tmp_path)
+    unrelated_bytes = b"unrelated_payload_content" * 10
+    unrelated_hash = sha256(unrelated_bytes).hexdigest()
+
+    fake_artifacts = dict(intake.retained.artifacts)
+    fake_artifacts[unrelated_hash] = VerifiedArtifactBytes(
+        data=unrelated_bytes,
+        byte_size=len(unrelated_bytes),
+        content_hash=unrelated_hash,
+    )
+    fake_retained = replace(
+        intake.retained,
+        bars_hash=unrelated_hash,
+        artifacts=fake_artifacts,
+    )
+    tampered_intake = replace(intake, retained=fake_retained)
+
+    is_mock, reason = verify_authentic_intake_provenance(tampered_intake)
+    assert is_mock is True
+    assert reason is not None
+    assert "not bound to the verified acquisition receipt byte graph" in reason
+
+
+def test_origin_metadata_tampering_fails_closed(tmp_path: Path) -> None:
+    """Tampering with origin metadata (HTTP status or host) fails closed."""
+    from dataclasses import replace
+
+    from test_alpaca_exploratory_adapter import run_pinned_intake
+
+    from drift.qualification.alpaca_sip_verification import (
+        verify_authentic_intake_provenance,
+    )
+
+    intake = run_pinned_intake(tmp_path)
+    receipt = intake.acquisition.receipt
+
+    # 1. Non-200 HTTP status
+    obs0 = receipt.observed_objects[0]
+    tampered_evidence = obs0.origin_evidence.model_copy(
+        update={
+            "safe_response_metadata": {
+                "http_status": "500",
+                "request_host": "data.alpaca.markets",
+            }
+        }
+    )
+    tampered_obs = obs0.model_copy(update={"origin_evidence": tampered_evidence})
+    tampered_observed = (tampered_obs, *receipt.observed_objects[1:])
+    tampered_receipt = receipt.model_copy(
+        update={"observed_objects": tampered_observed}
+    )
+    tampered_acq = replace(intake.acquisition, receipt=tampered_receipt)
+    tampered_intake = replace(intake, acquisition=tampered_acq)
+
+    is_mock, reason = verify_authentic_intake_provenance(tampered_intake)
+    assert is_mock is True
+    assert reason is not None
+    assert "has non-200 HTTP status: 500" in reason
+
+    # 2. Untrusted TLS endpoint identity
+    tampered_evidence_host = obs0.origin_evidence.model_copy(
+        update={"tls_endpoint_identity": "attacker.controlled.endpoint"}
+    )
+    tampered_obs_host = obs0.model_copy(
+        update={"origin_evidence": tampered_evidence_host}
+    )
+    tampered_observed_host = (tampered_obs_host, *receipt.observed_objects[1:])
+    tampered_receipt_host = receipt.model_copy(
+        update={"observed_objects": tampered_observed_host}
+    )
+    tampered_acq_host = replace(intake.acquisition, receipt=tampered_receipt_host)
+    tampered_intake_host = replace(intake, acquisition=tampered_acq_host)
+
+    is_mock_host, reason_host = verify_authentic_intake_provenance(tampered_intake_host)
+    assert is_mock_host is True
+    assert reason_host is not None
+    assert "is not in expected endpoints" in reason_host

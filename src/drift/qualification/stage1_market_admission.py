@@ -55,6 +55,7 @@ __all__ = [
     "Universe12EtfCoverageV1",
     "build_12_etf_coverage",
     "create_market_data_admission",
+    "validate_market_data_admission_for_production",
     "verify_alpaca_sip_request_delay",
     "verify_g1_alpaca_sip_qualification",
 ]
@@ -92,6 +93,8 @@ class Stage1MarketDataAdmissionArtifactV1(FrozenModel):
     candidate_source: str | None = None
     alpaca_sip_verification_report_hash: SHA256Hash | None = None
     limitations: tuple[str, ...] = ()
+    contains_synthetic_fixtures: bool = False
+    diagnostic_authorization: str | None = None
     status: AdmissionStatus
     refusal_reasons: tuple[str, ...] = ()
     reviewer_authority: NonBlankStr
@@ -102,7 +105,22 @@ class Stage1MarketDataAdmissionArtifactV1(FrozenModel):
         body = self.model_dump(mode="python", exclude={"admission_hash"})
         if self.admission_hash != content_hash(body):
             raise ValueError("MARKET_ADMISSION_HASH_MISMATCH")
+        if self.contains_synthetic_fixtures:
+            if self.status == "ADMITTED" and not self.diagnostic_authorization:
+                raise ValueError(
+                    "SYNTHETIC_MOCK_EVIDENCE_CANNOT_BE_ADMITTED_IN_PRODUCTION: "
+                    "admission artifacts containing synthetic fixtures cannot have "
+                    "ADMITTED status without explicit diagnostic_authorization."
+                )
         if self.status == "ADMITTED":
+            if any("SYNTHETIC_MOCK_EVIDENCE" in r for r in self.refusal_reasons) or any(
+                "MOCK" in r for r in self.refusal_reasons
+            ):
+                raise ValueError(
+                    "SYNTHETIC_MOCK_EVIDENCE_CANNOT_BE_ADMITTED_IN_PRODUCTION"
+                )
+            if self.refusal_reasons:
+                raise ValueError("ADMITTED_MARKET_DATA_CANNOT_HAVE_REFUSAL_REASONS")
             if self.candidate_source == DISQUALIFIED_SOURCE_ROBINHOOD_TOTALVIEW:
                 raise ValueError("DISQUALIFIED_SOURCE_ROBINHOOD_TOTALVIEW_NOT_ADMITTED")
             admitted_tickers = {s.ticker for s in self.securities}
@@ -128,9 +146,12 @@ def create_market_data_admission(
     alpaca_sip_report: AlpacaSipG1VerificationReportV1 | None = None,
     limitations: tuple[str, ...] = (),
     refusal_reasons: tuple[str, ...] = (),
+    allow_synthetic: bool = False,
+    diagnostic_authorization: str | None = None,
 ) -> Stage1MarketDataAdmissionArtifactV1:
     admitted_tickers = {s.ticker for s in securities}
     reasons = list(refusal_reasons)
+    is_synthetic = False
 
     if candidate_source == DISQUALIFIED_SOURCE_ROBINHOOD_TOTALVIEW:
         reasons.append(
@@ -141,6 +162,15 @@ def create_market_data_admission(
         )
 
     if alpaca_sip_report is not None:
+        is_synthetic = bool(
+            getattr(alpaca_sip_report, "contains_synthetic_fixtures", False)
+        )
+        if is_synthetic and not (allow_synthetic and diagnostic_authorization):
+            reasons.append(
+                "SYNTHETIC_MOCK_EVIDENCE_INADMISSIBLE: Alpaca SIP verification "
+                "report contains synthetic mock fixtures and cannot be admitted "
+                "for production Stage 1 market data without diagnostic_authorization."
+            )
         if alpaca_sip_report.overall_status != "VERIFIED":
             reasons.append(
                 f"ALPACA_SIP_REPORT_REFUSED:{alpaca_sip_report.verification_id}"
@@ -176,6 +206,10 @@ def create_market_data_admission(
             alpaca_sip_report.report_hash if alpaca_sip_report is not None else None
         ),
         "limitations": limitations,
+        "contains_synthetic_fixtures": is_synthetic,
+        "diagnostic_authorization": (
+            diagnostic_authorization if is_synthetic else None
+        ),
         "status": status,
         "refusal_reasons": tuple(sorted(reasons)),
         "reviewer_authority": reviewer_authority,
@@ -184,3 +218,24 @@ def create_market_data_admission(
     return Stage1MarketDataAdmissionArtifactV1.model_validate_json(
         canonical_json(body | {"admission_hash": h})
     )
+
+
+def validate_market_data_admission_for_production(
+    artifact: Stage1MarketDataAdmissionArtifactV1,
+) -> None:
+    """Validate that an admission artifact is admissible for production execution.
+
+    Fails closed if the artifact carries non-ADMITTED status or contains synthetic
+    mock fixtures.
+    """
+    if artifact.status != "ADMITTED":
+        raise ValueError(
+            f"ADMISSION_REFUSED: artifact {artifact.admission_id} has status "
+            f"{artifact.status}."
+        )
+    if artifact.contains_synthetic_fixtures:
+        raise ValueError(
+            f"SYNTHETIC_MOCK_EVIDENCE_INADMISSIBLE_IN_PRODUCTION: artifact "
+            f"{artifact.admission_id} contains synthetic mock fixtures and cannot "
+            "be consumed in production."
+        )

@@ -1477,6 +1477,34 @@ def test_a_provider_error_status_fails_with_its_measured_status_and_no_key(
     _assert_no_key_escaped(captured, private)
 
 
+@pytest.mark.parametrize(
+    ("status", "reason"), [(401, "Unauthorized"), (403, "Forbidden")]
+)
+def test_authentication_error_status_fails_with_account_access_unavailable(
+    status: int,
+    reason: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli = _load_cli()
+    routes = pinned_routes(
+        bars=Canned(status=status, reason=reason, body=b'{"message":"auth failure"}')
+    )
+    install_recording_transport(monkeypatch, cli, routes)
+
+    _set_probe_keys(monkeypatch, cli)
+    private = tmp_path / "private"
+    declaration = _write_declaration(tmp_path, around=datetime.now(UTC))
+    code = cli.main(_online_arguments(private, declaration))
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "Alpaca acquisition failed: ACCOUNT_ACCESS_UNAVAILABLE:" in captured.out
+    assert not private.exists()
+    _assert_no_key_escaped(captured, private)
+
+
 def test_a_clean_200_is_measured_from_the_response_itself(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

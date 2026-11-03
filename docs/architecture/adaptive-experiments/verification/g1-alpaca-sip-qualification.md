@@ -57,10 +57,14 @@ The canonical 12-ETF cohort is immutable and evaluated in fixed order:
 | **GLD** | SPDR Gold Trust | NYSE Arca | ARCX | 2004-11-18 | 100% Covered |
 
 ### Historical Windows:
-* **Common Warmup:** 253 completed trading sessions + 126 observation intervals (October 1, 2019 to December 31, 2020). Every instrument launched between 1999 and 2010, so all have full pre-warmup trading history.
+* **Common Preparation (Warmup + Observation):** 253 completed warmup sessions + 126 observation return intervals (379 total preparation sessions). The previously printed span of October 1, 2019 to December 31, 2020 contains only ~315 exchange sessions, which is mathematically insufficient for the required 379 sessions prior to 2021-01-01. Stage 1 preparation history requires data beginning on or before June 28, 2019 to satisfy the locked S07/S08/S09/S38 protocol without delaying the first scored 2021 checkpoint.
 * **Development Window:** January 1, 2021 to December 31, 2023 (754 sessions).
 * **Validation Window:** January 1, 2024 to December 31, 2024 (252 sessions).
 * **Evaluation Window:** January 1, 2025 to December 31, 2025 (250 sessions).
+
+### Production vs Mock Boundary:
+* **Synthetic Inadmissibility:** Mock verification fixtures (`MOCK-ACQ-RECEIPT-ALPACA-SIP-V1`, placeholder SHA-256 hashes, synthetic coverage records) are strictly diagnostic and inadmissible for Stage 1 production market data admission.
+* **Account Access and Rights:** Live account credentials returning HTTP 401 Unauthorized are recorded as fail-closed `ACCOUNT_ACCESS_UNAVAILABLE`. Unverified legal agreements remain fail-closed as `RIGHTS_UNRESOLVED`.
 
 ---
 

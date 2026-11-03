@@ -288,11 +288,13 @@ def action_verify_market_data(args: argparse.Namespace) -> int:
                 corporate_actions=ca_records,
                 rights_assessment=rights,
                 coverage_evidence=cov_ev,
+                allow_synthetic=True,
             )
         else:
             report = verify_g1_alpaca_sip_qualification(
                 request_end=request_end,
                 request_time=now,
+                allow_synthetic=False,
             )
 
         if getattr(args, "output", None):
