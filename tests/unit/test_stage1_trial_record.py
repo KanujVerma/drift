@@ -357,41 +357,132 @@ def test_reject_crossed_br_accounts() -> None:
 
 
 def test_reject_partial_fill_falsely_treated_as_complete() -> None:
-    """B2 control: 2 staged orders with 1 fill cannot claim complete status."""
+    """B2 control: partial fill cannot claim success without complete classification."""
+    campaign = make_golden_campaign()
+    arms = (make_golden_arm_b(), make_golden_arm_r())
+    bindings = tuple(make_golden_bindings())
+    b_binding = bindings[0]
+    manifest_hash = _complete_manifest_fingerprint(
+        campaign=campaign,
+        arms=arms,
+        bindings=bindings,
+        expected_run_ids=("RUN-001",),
+    )
+
     m0_inv = OriginalInvocationBindingV1(
         invocation_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b1"),
         m0_run_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b2"),
         m0_audit_event_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b3"),
     )
+    # Unreconciled partial fill (classification="indeterminate")
+    result_bind_indeterminate = build_stage1_result_trial_binding(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint=manifest_hash,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        opening_book_identity="BOOK-001",
+        opening_book_hash="f" * 64,
+        m0_invocation=m0_inv,
+        result_hash="1" * 64,
+        trace_hash="2" * 64,
+        final_book_hash="3" * 64,
+        final_nav=Decimal("10050"),
+        cash_balance=Decimal("50"),
+        cumulative_transaction_costs=Decimal("2"),
+        order_count=2,
+        fill_count=1,  # partial fill
+        classification="indeterminate",  # unresolved execution state
+        ledger_ref=OriginalReferenceV1(
+            event_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b4"),
+            event_hash="4" * 64,
+        ),
+    )
+    # Rejection: claiming COMPLETE on indeterminate execution is rejected
     with pytest.raises(
         (Stage1TrialAdmissionError, ValueError),
-        match="PARTIAL_FILL_CANNOT_BE_COMPLETE_CLASSIFICATION",
+        match="UNACCEPTED_RESULT_CLASSIFICATION",
     ):
-        build_stage1_result_trial_binding(
-            campaign_id="CAMP-E1-SYNTH-001",
-            campaign_spec_fingerprint="a" * 64,
-            complete_manifest_fingerprint="b" * 64,
-            run_id="RUN-001",
+        build_stage1_derived_trial_record(
+            campaign_id=campaign.campaign_id,
+            campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+            complete_manifest_fingerprint=manifest_hash,
+            run_id=b_binding.run_id,
             arm_id="ARM-B",
-            portfolio_account_id="SYNTH-ACC-B-001",
+            portfolio_account_id=b_binding.portfolio_account_id,
             checkpoint_id="CKPT-001",
             opening_book_identity="BOOK-001",
             opening_book_hash="f" * 64,
-            m0_invocation=m0_inv,
-            result_hash="1" * 64,
-            trace_hash="2" * 64,
-            final_book_hash="3" * 64,
-            final_nav=Decimal("10050"),
-            cash_balance=Decimal("50"),
-            cumulative_transaction_costs=Decimal("2"),
-            order_count=2,
-            fill_count=1,  # partial fill!
-            classification="complete",  # false claim of complete!
-            ledger_ref=OriginalReferenceV1(
-                event_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b4"),
-                event_hash="4" * 64,
-            ),
+            result_binding=result_bind_indeterminate,
+            source_inventory_hash="e" * 64,
+            calendar_hash="d" * 64,
+            start_session_index=0,
+            end_session_index=21,
+            outcome_classification="COMPLETED",
+            completeness_classification="COMPLETE",  # False claim on indeterminate!
+            start_nav=Decimal("10000"),
+            end_nav=Decimal("10050"),
+            trading_costs=Decimal("2"),
         )
+
+    # Valid reconciled execution reaching terminal state (Case 16: 6 orders, 5 fills)
+    result_bind_reconciled = build_stage1_result_trial_binding(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint=manifest_hash,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        opening_book_identity="BOOK-001",
+        opening_book_hash="f" * 64,
+        m0_invocation=m0_inv,
+        result_hash="1" * 64,
+        trace_hash="2" * 64,
+        final_book_hash="3" * 64,
+        final_nav=Decimal("10050"),
+        cash_balance=Decimal("50"),
+        cumulative_transaction_costs=Decimal("2"),
+        order_count=6,
+        fill_count=5,  # 6 orders produce 5 fills, terminal state reached
+        classification="complete",  # Reconciled platform RESULT
+        ledger_ref=OriginalReferenceV1(
+            event_id=UUID("0192e2b3-7640-7f22-9653-0c58e72782b4"),
+            event_hash="4" * 64,
+        ),
+    )
+    valid_record = build_stage1_derived_trial_record(
+        campaign_id=campaign.campaign_id,
+        campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+        complete_manifest_fingerprint=manifest_hash,
+        run_id=b_binding.run_id,
+        arm_id="ARM-B",
+        portfolio_account_id=b_binding.portfolio_account_id,
+        checkpoint_id="CKPT-001",
+        opening_book_identity="BOOK-001",
+        opening_book_hash="f" * 64,
+        result_binding=result_bind_reconciled,
+        source_inventory_hash="e" * 64,
+        calendar_hash="d" * 64,
+        start_session_index=0,
+        end_session_index=21,
+        outcome_classification="COMPLETED",
+        completeness_classification="COMPLETE",  # Case 16
+        start_nav=Decimal("10000"),
+        end_nav=Decimal("10050"),
+        trading_costs=Decimal("2"),
+    )
+    assert verify_stage1_derived_trial_record(
+        valid_record,
+        campaign=campaign,
+        arms=arms,
+        bindings=bindings,
+        expected_run_ids=("RUN-001",),
+        source_inventory_hash="e" * 64,
+        calendar_hash="d" * 64,
+    )
 
 
 def test_reject_unknown_cost_converted_to_zero() -> None:

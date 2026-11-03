@@ -185,11 +185,10 @@ class Stage1ResultTrialBindingV1(FrozenModel):
         if self.trial_id != expected_trial_id:
             raise Stage1TrialAdmissionError("TRIAL_ID_MISMATCH")
 
-        if self.classification == "complete" and self.order_count > self.fill_count:
-            # Partial fill cannot masquerade as complete switch
-            raise Stage1TrialAdmissionError(
-                "PARTIAL_FILL_CANNOT_BE_COMPLETE_CLASSIFICATION"
-            )
+        if self.order_count < self.fill_count:
+            raise Stage1TrialAdmissionError("FILL_COUNT_EXCEEDS_ORDER_COUNT")
+        if self.order_count < 0 or self.fill_count < 0:
+            raise Stage1TrialAdmissionError("NEGATIVE_ORDER_OR_FILL_COUNT")
 
         data = self.model_dump(mode="python", exclude={"binding_hash"})
         computed = content_hash(data)
@@ -329,6 +328,8 @@ class Stage1DerivedTrialRecordV1(FrozenModel):
                 raise Stage1TrialAdmissionError(
                     "COMPLETE_TRIAL_REQUIRES_POSITIVE_INTERVAL"
                 )
+            if self.result_binding.classification != "complete":
+                raise Stage1TrialAdmissionError("UNACCEPTED_RESULT_CLASSIFICATION")
             if self.outcome_classification in ("UNRESOLVED", "NOT_YET_DUE"):
                 raise Stage1TrialAdmissionError("UNRESOLVED_CANNOT_BE_COMPLETE")
 
@@ -671,8 +672,6 @@ def verify_stage1_derived_trial_record(
             raise Stage1TrialAdmissionError("COMPLETE_WITHOUT_RESULT_BINDING")
         if validated.result_binding.classification != "complete":
             raise Stage1TrialAdmissionError("UNACCEPTED_RESULT_CLASSIFICATION")
-        if validated.result_binding.order_count > validated.result_binding.fill_count:
-            raise Stage1TrialAdmissionError("PARTIAL_FILL_FALSELY_TREATED_AS_SUCCESS")
         if validated.operating_cost_projection.status == "UNAVAILABLE":
             if (
                 validated.economic_gain is not None
