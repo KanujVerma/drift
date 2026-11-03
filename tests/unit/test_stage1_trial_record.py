@@ -25,6 +25,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime
 from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
 from typing import Literal
 from uuid import UUID
@@ -439,6 +440,7 @@ def test_reject_partial_fill_falsely_treated_as_complete() -> None:
     )
     ctx_b = _make_context("ARM-B", b_binding.portfolio_account_id)
     cand_b = _make_candidate("ARM-B", b_binding.portfolio_account_id)
+    cost_b = _make_cost("ARM-B", b_binding.portfolio_account_id, "cost-b-1", "25")
     res_bind_ok = build_stage1_research_trial_binding(
         campaign_id=campaign.campaign_id,
         campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
@@ -450,6 +452,7 @@ def test_reject_partial_fill_falsely_treated_as_complete() -> None:
         research_context=ctx_b,
         disposition="propose",
         candidate=cand_b,
+        costs=(cost_b,),
         issuer_authority_id="AUTH-001",
     )
     # Rejection: claiming COMPLETE on indeterminate execution is rejected
@@ -475,6 +478,7 @@ def test_reject_partial_fill_falsely_treated_as_complete() -> None:
             end_session_index=21,
             outcome_classification="COMPLETED",
             completeness_classification="COMPLETE",  # False claim on indeterminate!
+            costs=(cost_b,),
             start_nav=Decimal("10000"),
             end_nav=Decimal("10050"),
             trading_costs=Decimal("2"),
@@ -524,6 +528,7 @@ def test_reject_partial_fill_falsely_treated_as_complete() -> None:
         end_session_index=21,
         outcome_classification="COMPLETED",
         completeness_classification="COMPLETE",  # Case 16
+        costs=(cost_b,),
         start_nav=Decimal("10000"),
         end_nav=Decimal("10050"),
         trading_costs=Decimal("2"),
@@ -593,6 +598,8 @@ def test_reject_unknown_cost_converted_to_zero() -> None:
         candidate=cand_b,
         issuer_authority_id="AUTH-001",
     )
+    # Case 10: MISSING_COST preserves verified net investment return
+    # while withholding economic returns
     trial = build_stage1_derived_trial_record(
         campaign_id=campaign.campaign_id,
         campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
@@ -610,18 +617,51 @@ def test_reject_unknown_cost_converted_to_zero() -> None:
         start_session_index=0,
         end_session_index=21,
         outcome_classification="COMPLETED",
-        completeness_classification="COMPLETE",
+        completeness_classification="MISSING_COST",
         costs=(cost_unknown,),
         start_nav=Decimal("10000"),
         end_nav=Decimal("10100"),
         trading_costs=Decimal("2"),
+        reasons=("COST_STATUS_UNKNOWN",),
     )
-    # Net trading return is known
+    # Net trading return is verified and known
     assert trial.net_investment_gain == Decimal("100")
+    assert trial.net_investment_return == ExactRatioV1.from_fraction(
+        Fraction(100, 10000)
+    )
     # Economic gain MUST stay None because cost is unknown
     assert trial.economic_gain is None
     assert trial.economic_return is None
     assert trial.operating_cost_projection.status == "UNAVAILABLE"
+
+    # Attempting to claim COMPLETE on unknown costs is rejected
+    with pytest.raises(
+        (Stage1TrialAdmissionError, ValueError),
+        match="UNKNOWN_COST_CANNOT_BE_COMPLETE",
+    ):
+        build_stage1_derived_trial_record(
+            campaign_id=campaign.campaign_id,
+            campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+            complete_manifest_fingerprint="c" * 64,
+            run_id=b_binding.run_id,
+            arm_id="ARM-B",
+            portfolio_account_id=b_binding.portfolio_account_id,
+            checkpoint_id="CKPT-001",
+            opening_book_identity="BOOK-001",
+            opening_book_hash="f" * 64,
+            research_binding=res_bind,
+            result_binding=result_bind,
+            source_inventory_hash="e" * 64,
+            calendar_hash="d" * 64,
+            start_session_index=0,
+            end_session_index=21,
+            outcome_classification="COMPLETED",
+            completeness_classification="COMPLETE",  # Disallowed when costs are unknown
+            costs=(cost_unknown,),
+            start_nav=Decimal("10000"),
+            end_nav=Decimal("10100"),
+            trading_costs=Decimal("2"),
+        )
 
 
 def test_reject_tampered_result_hash() -> None:
@@ -1033,6 +1073,7 @@ def test_reject_completed_proposal_with_disallowed_strategy_family() -> None:
         b_binding.portfolio_account_id,
         family_id="DISALLOWED_FAMILY",
     )
+    cost_b = _make_cost("ARM-B", b_binding.portfolio_account_id, "cost-b-1", "25")
     res_bind = build_stage1_research_trial_binding(
         campaign_id=campaign.campaign_id,
         campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
@@ -1044,6 +1085,7 @@ def test_reject_completed_proposal_with_disallowed_strategy_family() -> None:
         research_context=ctx_b,
         disposition="propose",
         candidate=cand_foreign,
+        costs=(cost_b,),
         issuer_authority_id="AUTH-001",
     )
     m0_inv = OriginalInvocationBindingV1(
@@ -1094,6 +1136,7 @@ def test_reject_completed_proposal_with_disallowed_strategy_family() -> None:
         end_session_index=21,
         outcome_classification="COMPLETED",
         completeness_classification="COMPLETE",
+        costs=(cost_b,),
         start_nav=Decimal("10000"),
         end_nav=Decimal("10050"),
         trading_costs=Decimal("2"),

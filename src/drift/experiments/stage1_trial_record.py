@@ -343,14 +343,10 @@ class Stage1DerivedTrialRecordV1(FrozenModel):
                 raise Stage1TrialAdmissionError("RESULT_BOOK_HASH_MISMATCH")
 
         # Arithmetic and completeness enforcement
-        if self.completeness_classification == "COMPLETE":
+        if self.completeness_classification in ("COMPLETE", "MISSING_COST"):
             if self.result_binding is None:
                 raise Stage1TrialAdmissionError(
                     "COMPLETE_TRIAL_REQUIRES_RESULT_BINDING"
-                )
-            if self.research_binding is None:
-                raise Stage1TrialAdmissionError(
-                    "COMPLETE_TRIAL_REQUIRES_RESEARCH_BINDING"
                 )
             if self.start_nav is None or self.end_nav is None:
                 raise Stage1TrialAdmissionError("COMPLETE_TRIAL_REQUIRES_NAVS")
@@ -378,13 +374,22 @@ class Stage1DerivedTrialRecordV1(FrozenModel):
             if self.net_investment_return != ExactRatioV1.from_fraction(gain / start):
                 raise Stage1TrialAdmissionError("NET_INVESTMENT_RETURN_MISMATCH")
 
-            if self.operating_cost_projection.amount is None:
-                # Unknown cost MUST NOT be silently treated as zero
+            if self.completeness_classification == "MISSING_COST":
                 if self.economic_gain is not None or self.economic_return is not None:
                     raise Stage1TrialAdmissionError(
-                        "UNKNOWN_COST_CANNOT_YIELD_ECONOMIC_GAIN"
+                        "MISSING_COST_CANNOT_CLAIM_ECONOMIC_GAIN"
+                    )
+                if self.operating_cost_projection.amount is not None:
+                    raise Stage1TrialAdmissionError(
+                        "KNOWN_COSTS_CANNOT_BE_MISSING_COST"
                     )
             else:
+                if self.research_binding is None:
+                    raise Stage1TrialAdmissionError(
+                        "COMPLETE_TRIAL_REQUIRES_RESEARCH_BINDING"
+                    )
+                if self.operating_cost_projection.amount is None:
+                    raise Stage1TrialAdmissionError("UNKNOWN_COST_CANNOT_BE_COMPLETE")
                 economic = gain - finite_fraction(self.operating_cost_projection.amount)
                 if self.economic_gain != exact_decimal(economic):
                     raise Stage1TrialAdmissionError("ECONOMIC_GAIN_MISMATCH")
@@ -557,7 +562,7 @@ def build_stage1_derived_trial_record(
     econ_return: ExactRatioV1 | None = None
 
     if (
-        completeness_classification == "COMPLETE"
+        completeness_classification in ("COMPLETE", "MISSING_COST")
         and start_nav is not None
         and end_nav is not None
     ):
@@ -565,7 +570,10 @@ def build_stage1_derived_trial_record(
         gain = finite_fraction(end_nav) - start
         net_gain = exact_decimal(gain)
         net_return = ExactRatioV1.from_fraction(gain / start)
-        if operating_costs.amount is not None:
+        if (
+            completeness_classification == "COMPLETE"
+            and operating_costs.amount is not None
+        ):
             economic = gain - finite_fraction(operating_costs.amount)
             econ_gain = exact_decimal(economic)
             econ_return = ExactRatioV1.from_fraction(economic / start)
@@ -701,34 +709,37 @@ def verify_stage1_derived_trial_record(
     if validated.calendar_hash != calendar_hash:
         raise Stage1TrialAdmissionError("INCORRECT_CALENDAR_HASH")
 
-    # Complete interval verification:
-    if validated.completeness_classification == "COMPLETE":
+    # Reconciled interval verification:
+    if validated.completeness_classification in ("COMPLETE", "MISSING_COST"):
         if validated.result_binding is None:
             raise Stage1TrialAdmissionError("COMPLETE_WITHOUT_RESULT_BINDING")
         if validated.result_binding.classification != "complete":
             raise Stage1TrialAdmissionError("UNACCEPTED_RESULT_CLASSIFICATION")
-        if validated.research_binding is None:
-            raise Stage1TrialAdmissionError("COMPLETE_WITHOUT_RESEARCH_BINDING")
-        if validated.research_binding.disposition == "propose":
-            cand = validated.research_binding.candidate
-            if cand is None or cand.strategy is None:
-                raise Stage1TrialAdmissionError("PROPOSED_STRATEGY_MISSING")
-            if cand.strategy.family_id not in campaign.allowed_strategy_families:
-                raise Stage1TrialAdmissionError("DISALLOWED_STRATEGY_FAMILY")
-            arm_spec = next((a for a in arms if a.arm_id == validated.arm_id), None)
-            if arm_spec is None:
-                raise Stage1TrialAdmissionError("ARM_NOT_FOUND_IN_MANIFEST")
-            if (
-                cand.strategy.family_id not in arm_spec.eligible_strategy_references
-                and cand.strategy.strategy_ref.id
-                not in arm_spec.eligible_strategy_references
-            ):
-                raise Stage1TrialAdmissionError("DISALLOWED_ARM_STRATEGY")
-        if validated.operating_cost_projection.status == "UNAVAILABLE":
+        if validated.completeness_classification == "MISSING_COST":
             if (
                 validated.economic_gain is not None
                 or validated.economic_return is not None
             ):
+                raise Stage1TrialAdmissionError("UNKNOWN_COST_CONVERTED_TO_ZERO")
+        elif validated.completeness_classification == "COMPLETE":
+            if validated.research_binding is None:
+                raise Stage1TrialAdmissionError("COMPLETE_WITHOUT_RESEARCH_BINDING")
+            if validated.research_binding.disposition == "propose":
+                cand = validated.research_binding.candidate
+                if cand is None or cand.strategy is None:
+                    raise Stage1TrialAdmissionError("PROPOSED_STRATEGY_MISSING")
+                if cand.strategy.family_id not in campaign.allowed_strategy_families:
+                    raise Stage1TrialAdmissionError("DISALLOWED_STRATEGY_FAMILY")
+                arm_spec = next((a for a in arms if a.arm_id == validated.arm_id), None)
+                if arm_spec is None:
+                    raise Stage1TrialAdmissionError("ARM_NOT_FOUND_IN_MANIFEST")
+                if (
+                    cand.strategy.family_id not in arm_spec.eligible_strategy_references
+                    and cand.strategy.strategy_ref.id
+                    not in arm_spec.eligible_strategy_references
+                ):
+                    raise Stage1TrialAdmissionError("DISALLOWED_ARM_STRATEGY")
+            if validated.operating_cost_projection.status == "UNAVAILABLE":
                 raise Stage1TrialAdmissionError("UNKNOWN_COST_CONVERTED_TO_ZERO")
 
     return True
