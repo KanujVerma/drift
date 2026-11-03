@@ -85,6 +85,11 @@ class Stage1ResearchTrialBindingV1(FrozenModel):
 
         # Causal and scope checks
         scope = self.research_context.scope
+        if (
+            scope.campaign_ref.id != self.campaign_id
+            or scope.campaign_ref.sha256 != self.campaign_spec_fingerprint
+        ):
+            raise Stage1TrialAdmissionError("RESEARCH_CONTEXT_CAMPAIGN_MISMATCH")
         if scope.arm_id != self.arm_id:
             raise Stage1TrialAdmissionError("RESEARCH_CONTEXT_ARM_MISMATCH")
         if scope.account_id != self.portfolio_account_id:
@@ -95,6 +100,12 @@ class Stage1ResearchTrialBindingV1(FrozenModel):
                 raise Stage1TrialAdmissionError(
                     "PROPOSE_DISPOSITION_REQUIRES_CANDIDATE"
                 )
+            if (
+                self.candidate.scope.campaign_ref.id != self.campaign_id
+                or self.candidate.scope.campaign_ref.sha256
+                != self.campaign_spec_fingerprint
+            ):
+                raise Stage1TrialAdmissionError("CANDIDATE_CAMPAIGN_MISMATCH")
             if self.candidate.scope.account_id != self.portfolio_account_id:
                 raise Stage1TrialAdmissionError("CANDIDATE_ACCOUNT_MISMATCH")
             if self.candidate.scope.arm_id != self.arm_id:
@@ -103,24 +114,46 @@ class Stage1ResearchTrialBindingV1(FrozenModel):
                 raise Stage1TrialAdmissionError("CANDIDATE_DISPOSITION_MISMATCH")
         else:
             if self.candidate is not None:
+                if (
+                    self.candidate.scope.campaign_ref.id != self.campaign_id
+                    or self.candidate.scope.campaign_ref.sha256
+                    != self.campaign_spec_fingerprint
+                ):
+                    raise Stage1TrialAdmissionError("CANDIDATE_CAMPAIGN_MISMATCH")
                 if self.candidate.disposition != self.disposition:
                     raise Stage1TrialAdmissionError("NON_TRADING_DISPOSITION_MISMATCH")
             if not self.reasoned_absence_code:
                 raise Stage1TrialAdmissionError("REASONED_ABSENCE_CODE_REQUIRED")
 
         for attempt in self.attempts:
+            if (
+                attempt.scope.campaign_ref.id != self.campaign_id
+                or attempt.scope.campaign_ref.sha256 != self.campaign_spec_fingerprint
+            ):
+                raise Stage1TrialAdmissionError("ATTEMPT_CAMPAIGN_MISMATCH")
             if attempt.scope.account_id != self.portfolio_account_id:
                 raise Stage1TrialAdmissionError("ATTEMPT_ACCOUNT_MISMATCH")
             if attempt.scope.arm_id != self.arm_id:
                 raise Stage1TrialAdmissionError("ATTEMPT_ARM_MISMATCH")
 
         for cost in self.costs:
+            if (
+                cost.scope.campaign_ref.id != self.campaign_id
+                or cost.scope.campaign_ref.sha256 != self.campaign_spec_fingerprint
+            ):
+                raise Stage1TrialAdmissionError("COST_CAMPAIGN_MISMATCH")
             if cost.scope.account_id != self.portfolio_account_id:
                 raise Stage1TrialAdmissionError("COST_ACCOUNT_MISMATCH")
             if cost.scope.arm_id != self.arm_id:
                 raise Stage1TrialAdmissionError("COST_ARM_MISMATCH")
 
         if self.model_replay is not None:
+            if (
+                self.model_replay.scope.campaign_ref.id != self.campaign_id
+                or self.model_replay.scope.campaign_ref.sha256
+                != self.campaign_spec_fingerprint
+            ):
+                raise Stage1TrialAdmissionError("MODEL_REPLAY_CAMPAIGN_MISMATCH")
             if self.model_replay.scope.account_id != self.portfolio_account_id:
                 raise Stage1TrialAdmissionError("MODEL_REPLAY_ACCOUNT_MISMATCH")
             if self.model_replay.scope.arm_id != self.arm_id:

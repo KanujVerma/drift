@@ -64,41 +64,71 @@ from drift.loop.stage1_controlled_contracts import OriginalReferenceV1
 BASE = datetime(2026, 10, 25, 21, 0, tzinfo=UTC)
 
 
+GOLDEN_CAMPAIGN_FINGERPRINT = (
+    "2c9cad6f55847c20bf9c7f5a5eaa1ec6f828c7f107bc32ad8a1516a4b2e88be4"
+)
+
+
 def _art_ref(name: str) -> ArtifactReference:
     return ArtifactReference(id=name, version="1", sha256="a" * 64)
 
 
-def _make_context(arm_id: str, account_id: str) -> ResearchContext:
+def _make_context(
+    arm_id: str,
+    account_id: str,
+    campaign_id: str = "CAMP-E1-SYNTH-001",
+    campaign_fingerprint: str = GOLDEN_CAMPAIGN_FINGERPRINT,
+) -> ResearchContext:
     path = Path(__file__).parents[1] / "fixtures/adaptive_research/research_v1.json"
     data = json.loads(path.read_text())["fixtures"]["F01"]
     data.pop("record_hash")
     data["scope"] = dict(data["scope"])
     data["scope"]["arm_id"] = arm_id
     data["scope"]["account_id"] = account_id
+    data["scope"]["campaign_ref"] = {
+        "id": campaign_id,
+        "version": "1",
+        "sha256": campaign_fingerprint,
+    }
     data["record_hash"] = compute_record_hash(data)
     return ResearchContext.model_validate(data)
 
 
-def _make_candidate(arm_id: str, account_id: str) -> ResearchCandidate:
+def _make_candidate(
+    arm_id: str,
+    account_id: str,
+    campaign_id: str = "CAMP-E1-SYNTH-001",
+    campaign_fingerprint: str = GOLDEN_CAMPAIGN_FINGERPRINT,
+) -> ResearchCandidate:
     path = Path(__file__).parents[1] / "fixtures/adaptive_research/research_v1.json"
     data = json.loads(path.read_text())["fixtures"]["F02"]
     data.pop("record_hash")
     data["scope"] = dict(data["scope"])
     data["scope"]["arm_id"] = arm_id
     data["scope"]["account_id"] = account_id
+    data["scope"]["campaign_ref"] = {
+        "id": campaign_id,
+        "version": "1",
+        "sha256": campaign_fingerprint,
+    }
     data["record_hash"] = compute_record_hash(data)
     return ResearchCandidate.model_validate(data)
 
 
-def _scope(arm_id: str, account_id: str) -> Scope:
+def _scope(
+    arm_id: str,
+    account_id: str,
+    campaign_id: str = "CAMP-E1-SYNTH-001",
+    campaign_fingerprint: str = GOLDEN_CAMPAIGN_FINGERPRINT,
+) -> Scope:
     return Scope(
         experiment_id="STUDY-E1-001",
         arm_id=arm_id,
         account_id=account_id,
         campaign_ref=ArtifactReference(
-            id="CAMP-E1-SYNTH-001",
+            id=campaign_id,
             version="1",
-            sha256="71fe095c4eddac2053be8a4a02b02a83fe11cf4a39195e7972245a45aa372a4e",
+            sha256=campaign_fingerprint,
         ),
     )
 
@@ -109,10 +139,12 @@ def _make_cost(
     ident: str = "cost-001",
     amount: str = "25",
     basis: Literal["actual", "estimate", "unknown", "verified_zero"] = "actual",
+    campaign_id: str = "CAMP-E1-SYNTH-001",
+    campaign_fingerprint: str = GOLDEN_CAMPAIGN_FINGERPRINT,
 ) -> CostReceipt:
     return create_cost_receipt(
         receipt_id=ident,
-        scope=_scope(arm_id, account_id),
+        scope=_scope(arm_id, account_id, campaign_id, campaign_fingerprint),
         category="model_inference",
         billing_identity="synthetic-billing",
         amount_basis=basis,
@@ -759,4 +791,89 @@ def test_reject_unvalidated_in_memory_mutation_on_verification() -> None:
             expected_run_ids=("RUN-001",),
             source_inventory_hash="e" * 64,
             calendar_hash="d" * 64,
+        )
+
+
+def test_reject_research_evidence_campaign_mismatch() -> None:
+    """Codex finding: research evidence with mismatched campaign ref is rejected."""
+    campaign = make_golden_campaign()
+    bindings = tuple(make_golden_bindings())
+    b_binding = bindings[0]
+    manifest_hash = "c" * 64
+
+    # 1. Context with wrong campaign ID
+    ctx_wrong_id = _make_context(
+        "ARM-B",
+        b_binding.portfolio_account_id,
+        campaign_id="CAMP-OTHER",
+        campaign_fingerprint=campaign.campaign_spec_fingerprint,
+    )
+    cand_ok = _make_candidate("ARM-B", b_binding.portfolio_account_id)
+    with pytest.raises(
+        (Stage1TrialAdmissionError, ValueError),
+        match="RESEARCH_CONTEXT_CAMPAIGN_MISMATCH",
+    ):
+        build_stage1_research_trial_binding(
+            campaign_id=campaign.campaign_id,
+            campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+            complete_manifest_fingerprint=manifest_hash,
+            run_id=b_binding.run_id,
+            arm_id="ARM-B",
+            portfolio_account_id=b_binding.portfolio_account_id,
+            checkpoint_id="CKPT-001",
+            research_context=ctx_wrong_id,
+            disposition="propose",
+            candidate=cand_ok,
+            issuer_authority_id="AUTH-001",
+        )
+
+    # 2. Candidate with wrong campaign fingerprint
+    ctx_ok = _make_context("ARM-B", b_binding.portfolio_account_id)
+    cand_wrong_fp = _make_candidate(
+        "ARM-B",
+        b_binding.portfolio_account_id,
+        campaign_id=campaign.campaign_id,
+        campaign_fingerprint="0" * 64,
+    )
+    with pytest.raises(
+        (Stage1TrialAdmissionError, ValueError),
+        match="CANDIDATE_CAMPAIGN_MISMATCH",
+    ):
+        build_stage1_research_trial_binding(
+            campaign_id=campaign.campaign_id,
+            campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+            complete_manifest_fingerprint=manifest_hash,
+            run_id=b_binding.run_id,
+            arm_id="ARM-B",
+            portfolio_account_id=b_binding.portfolio_account_id,
+            checkpoint_id="CKPT-001",
+            research_context=ctx_ok,
+            disposition="propose",
+            candidate=cand_wrong_fp,
+            issuer_authority_id="AUTH-001",
+        )
+
+    # 3. Cost with wrong campaign fingerprint
+    cost_wrong_fp = _make_cost(
+        "ARM-B",
+        b_binding.portfolio_account_id,
+        campaign_fingerprint="0" * 64,
+    )
+    with pytest.raises(
+        (Stage1TrialAdmissionError, ValueError),
+        match="COST_CAMPAIGN_MISMATCH",
+    ):
+        build_stage1_research_trial_binding(
+            campaign_id=campaign.campaign_id,
+            campaign_spec_fingerprint=campaign.campaign_spec_fingerprint,
+            complete_manifest_fingerprint=manifest_hash,
+            run_id=b_binding.run_id,
+            arm_id="ARM-B",
+            portfolio_account_id=b_binding.portfolio_account_id,
+            checkpoint_id="CKPT-001",
+            research_context=ctx_ok,
+            disposition="propose",
+            candidate=cand_ok,
+            costs=(cost_wrong_fp,),
+            issuer_authority_id="AUTH-001",
         )
