@@ -707,6 +707,23 @@ def verify_stage1_derived_trial_record(
             raise Stage1TrialAdmissionError("COMPLETE_WITHOUT_RESULT_BINDING")
         if validated.result_binding.classification != "complete":
             raise Stage1TrialAdmissionError("UNACCEPTED_RESULT_CLASSIFICATION")
+        if validated.research_binding is None:
+            raise Stage1TrialAdmissionError("COMPLETE_WITHOUT_RESEARCH_BINDING")
+        if validated.research_binding.disposition == "propose":
+            cand = validated.research_binding.candidate
+            if cand is None or cand.strategy is None:
+                raise Stage1TrialAdmissionError("PROPOSED_STRATEGY_MISSING")
+            if cand.strategy.family_id not in campaign.allowed_strategy_families:
+                raise Stage1TrialAdmissionError("DISALLOWED_STRATEGY_FAMILY")
+            arm_spec = next((a for a in arms if a.arm_id == validated.arm_id), None)
+            if arm_spec is None:
+                raise Stage1TrialAdmissionError("ARM_NOT_FOUND_IN_MANIFEST")
+            if (
+                cand.strategy.family_id not in arm_spec.eligible_strategy_references
+                and cand.strategy.strategy_ref.id
+                not in arm_spec.eligible_strategy_references
+            ):
+                raise Stage1TrialAdmissionError("DISALLOWED_ARM_STRATEGY")
         if validated.operating_cost_projection.status == "UNAVAILABLE":
             if (
                 validated.economic_gain is not None
