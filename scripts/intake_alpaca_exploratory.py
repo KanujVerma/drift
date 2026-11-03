@@ -125,6 +125,10 @@ class UnauthorizedHostError(ValueError):
     """Raised before any request is built for a host this tool may not contact."""
 
 
+class AlpacaAccountAccessError(OSError):
+    """Raised when Alpaca API returns an authentication or entitlement error."""
+
+
 class InvalidApiKeyError(ValueError):
     """Raised for a key that is set but cannot be sent safely.
 
@@ -242,13 +246,25 @@ def _fetch_bytes(
     appeal.add_header("APCA-API-KEY-ID", keys[0])
     appeal.add_header("APCA-API-SECRET-KEY", keys[1])
     appeal.add_header("Accept", "application/json")
-    with _build_opener().open(appeal, timeout=_TIMEOUT_SECONDS) as response:
-        answered = response.geturl()
-        _assert_same_tls_origin(url, answered)
-        status = int(response.status)
-        content_type = response.headers.get("Content-Type")
-        body = response.read()
-        observed_at = datetime.now(UTC)
+    try:
+        with _build_opener().open(appeal, timeout=_TIMEOUT_SECONDS) as response:
+            answered = response.geturl()
+            _assert_same_tls_origin(url, answered)
+            status = int(response.status)
+            content_type = response.headers.get("Content-Type")
+            body = response.read()
+            observed_at = datetime.now(UTC)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            raise AlpacaAccountAccessError(
+                "ACCOUNT_ACCESS_UNAVAILABLE: Alpaca API credentials returned "
+                "HTTP 401 Unauthorized"
+            ) from exc
+        if exc.code == 403:
+            raise AlpacaAccountAccessError(
+                f"ACCOUNT_ACCESS_FORBIDDEN: Alpaca API returned HTTP 403: {exc.reason}"
+            ) from exc
+        raise
     if not isinstance(body, bytes):  # pragma: no cover - defensive
         raise TypeError("Alpaca response body must be exact bytes")
     return body, AlpacaOriginObservation(

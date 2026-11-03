@@ -82,11 +82,13 @@ def main() -> int:
             corporate_actions=ca_records,
             rights_assessment=rights,
             coverage_evidence=cov_ev,
+            allow_synthetic=True,
         )
     else:
         report = verify_g1_alpaca_sip_qualification(
             request_end=request_end,
             request_time=now,
+            allow_synthetic=False,
         )
 
     if args.json:
@@ -102,6 +104,8 @@ def main() -> int:
     print(f"Verified At:    {report.verified_at.isoformat()}")
     print(f"Report Hash:    {report.report_hash}")
     print(f"Overall Status: {report.overall_status}")
+    if report.contains_synthetic_fixtures:
+        print("Demonstration:  SYNTHETIC_TEST_FIXTURE (Inadmissible in Production)")
     if report.refusal_reasons:
         print("Refusal Reasons:")
         for reason in report.refusal_reasons:

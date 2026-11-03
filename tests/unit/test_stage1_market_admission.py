@@ -92,6 +92,7 @@ def test_market_admission_with_verified_alpaca_sip_report() -> None:
         corporate_actions=ca_records,
         rights_assessment=rights,
         coverage_evidence=cov_ev,
+        allow_synthetic=True,
     )
     secs = make_securities()
     artifact = create_market_data_admission(
@@ -103,10 +104,45 @@ def test_market_admission_with_verified_alpaca_sip_report() -> None:
         reviewer_authority="matthew@drift.local",
         candidate_source="alpaca-sip",
         alpaca_sip_report=report,
+        allow_synthetic=True,
     )
     assert artifact.status == "ADMITTED"
     assert artifact.alpaca_sip_verification_report_hash == report.report_hash
     assert artifact.candidate_source == "alpaca-sip"
+    assert artifact.contains_synthetic_fixtures is True
+
+
+def test_market_admission_refuses_synthetic_report_by_default() -> None:
+    from drift.qualification.alpaca_sip_verification import (
+        create_mock_alpaca_sip_evidence_fixtures,
+    )
+
+    intake_res, cov_ev, ca_records, rights = create_mock_alpaca_sip_evidence_fixtures()
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=NOW,
+        intake_result=intake_res,
+        corporate_actions=ca_records,
+        rights_assessment=rights,
+        coverage_evidence=cov_ev,
+        allow_synthetic=True,
+    )
+    secs = make_securities()
+    artifact = create_market_data_admission(
+        admission_id="MARKET-ADM-ALPACA-SIP-SYNTH-REFUSED",
+        admitted_at=NOW,
+        purpose="CONFIRMATORY_SCORING",
+        admitted_calendar_hash=H,
+        securities=secs,
+        reviewer_authority="matthew@drift.local",
+        candidate_source="alpaca-sip",
+        alpaca_sip_report=report,
+        allow_synthetic=False,
+    )
+    assert artifact.status == "REFUSED"
+    assert any(
+        "SYNTHETIC_MOCK_EVIDENCE_INADMISSIBLE" in r for r in artifact.refusal_reasons
+    )
 
 
 def test_market_admission_refuses_unverified_alpaca_sip_report() -> None:

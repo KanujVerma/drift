@@ -92,6 +92,7 @@ class Stage1MarketDataAdmissionArtifactV1(FrozenModel):
     candidate_source: str | None = None
     alpaca_sip_verification_report_hash: SHA256Hash | None = None
     limitations: tuple[str, ...] = ()
+    contains_synthetic_fixtures: bool = False
     status: AdmissionStatus
     refusal_reasons: tuple[str, ...] = ()
     reviewer_authority: NonBlankStr
@@ -103,6 +104,14 @@ class Stage1MarketDataAdmissionArtifactV1(FrozenModel):
         if self.admission_hash != content_hash(body):
             raise ValueError("MARKET_ADMISSION_HASH_MISMATCH")
         if self.status == "ADMITTED":
+            if any("SYNTHETIC_MOCK_EVIDENCE" in r for r in self.refusal_reasons) or any(
+                "MOCK" in r for r in self.refusal_reasons
+            ):
+                raise ValueError(
+                    "SYNTHETIC_MOCK_EVIDENCE_CANNOT_BE_ADMITTED_IN_PRODUCTION"
+                )
+            if self.refusal_reasons:
+                raise ValueError("ADMITTED_MARKET_DATA_CANNOT_HAVE_REFUSAL_REASONS")
             if self.candidate_source == DISQUALIFIED_SOURCE_ROBINHOOD_TOTALVIEW:
                 raise ValueError("DISQUALIFIED_SOURCE_ROBINHOOD_TOTALVIEW_NOT_ADMITTED")
             admitted_tickers = {s.ticker for s in self.securities}
@@ -128,9 +137,11 @@ def create_market_data_admission(
     alpaca_sip_report: AlpacaSipG1VerificationReportV1 | None = None,
     limitations: tuple[str, ...] = (),
     refusal_reasons: tuple[str, ...] = (),
+    allow_synthetic: bool = False,
 ) -> Stage1MarketDataAdmissionArtifactV1:
     admitted_tickers = {s.ticker for s in securities}
     reasons = list(refusal_reasons)
+    is_synthetic = False
 
     if candidate_source == DISQUALIFIED_SOURCE_ROBINHOOD_TOTALVIEW:
         reasons.append(
@@ -141,6 +152,15 @@ def create_market_data_admission(
         )
 
     if alpaca_sip_report is not None:
+        is_synthetic = bool(
+            getattr(alpaca_sip_report, "contains_synthetic_fixtures", False)
+        )
+        if is_synthetic and not allow_synthetic:
+            reasons.append(
+                "SYNTHETIC_MOCK_EVIDENCE_INADMISSIBLE: Alpaca SIP verification "
+                "report contains synthetic mock fixtures and cannot be admitted "
+                "for production Stage 1 market data."
+            )
         if alpaca_sip_report.overall_status != "VERIFIED":
             reasons.append(
                 f"ALPACA_SIP_REPORT_REFUSED:{alpaca_sip_report.verification_id}"
@@ -176,6 +196,7 @@ def create_market_data_admission(
             alpaca_sip_report.report_hash if alpaca_sip_report is not None else None
         ),
         "limitations": limitations,
+        "contains_synthetic_fixtures": is_synthetic,
         "status": status,
         "refusal_reasons": tuple(sorted(reasons)),
         "reviewer_authority": reviewer_authority,

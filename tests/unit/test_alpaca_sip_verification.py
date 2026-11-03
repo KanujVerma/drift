@@ -97,8 +97,10 @@ def test_free_historical_sip_access_verification_passes_with_evidence() -> None:
         corporate_actions=ca_records,
         rights_assessment=rights,
         coverage_evidence=cov_ev,
+        allow_synthetic=True,
     )
     assert report.overall_status == "VERIFIED"
+    assert report.contains_synthetic_fixtures is True
     assert report.sip_access_check.feed == ALPACA_SIP_FEED
     assert report.sip_access_check.feed == "sip"
     assert report.sip_access_check.adjustment == "raw"
@@ -540,7 +542,7 @@ def test_refuses_corporate_actions_when_quarterly_distribution_missing_for_equit
         "has_monthly_fixed_income_distributions": False,
         "all_splits_captured": True,
         "closed_world_coverage_verified": True,
-        "covered_start_date": date(2019, 10, 1),
+        "covered_start_date": date(2019, 6, 28),
         "covered_end_date": date(2025, 12, 31),
         "single_count_accounting_enforced": True,
         "completeness_basis": "ALPACA_EXPLORATORY_CLOSED_WORLD_V1",
@@ -552,6 +554,7 @@ def test_refuses_corporate_actions_when_quarterly_distribution_missing_for_equit
         corporate_actions=bad_ca,
         rights_assessment=rights,
         coverage_evidence=cov_ev,
+        allow_synthetic=True,
     )
     assert report.overall_status == "REFUSED"
     assert any("EQUITY_ETF_MISSING_QUARTERLY" in r for r in report.refusal_reasons)
@@ -568,7 +571,7 @@ def test_refuses_corporate_actions_when_monthly_distribution_missing_for_bond() 
         "has_monthly_fixed_income_distributions": False,
         "all_splits_captured": True,
         "closed_world_coverage_verified": True,
-        "covered_start_date": date(2019, 10, 1),
+        "covered_start_date": date(2019, 6, 28),
         "covered_end_date": date(2025, 12, 31),
         "single_count_accounting_enforced": True,
         "completeness_basis": "ALPACA_EXPLORATORY_CLOSED_WORLD_V1",
@@ -580,6 +583,7 @@ def test_refuses_corporate_actions_when_monthly_distribution_missing_for_bond() 
         corporate_actions=bad_ca,
         rights_assessment=rights,
         coverage_evidence=cov_ev,
+        allow_synthetic=True,
     )
     assert report.overall_status == "REFUSED"
     assert any("BOND_ETF_MISSING_MONTHLY" in r for r in report.refusal_reasons)
@@ -746,8 +750,10 @@ def test_valid_duck_typed_rights_assessment_passes() -> None:
         corporate_actions=ca_records,
         rights_assessment=valid_duck_rights,
         coverage_evidence=cov_ev,
+        allow_synthetic=True,
     )
     assert report.overall_status == "VERIFIED"
+    assert report.contains_synthetic_fixtures is True
     assert report.contractual_rights.is_verified is True
 
 
@@ -878,7 +884,7 @@ def test_valid_raw_payloads_provenance_passes() -> None:
     """Valid raw payloads meeting complete Alpaca schema contracts pass provenance."""
     _, cov_ev, ca_records, rights = make_mock_evidence()
 
-    valid_payloads = create_mock_valid_raw_payloads(bars_count=1560)
+    valid_payloads = create_mock_valid_raw_payloads(bars_count=1640)
     report = verify_g1_alpaca_sip_qualification(
         request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
         request_time=FIXED_NOW,
@@ -886,8 +892,10 @@ def test_valid_raw_payloads_provenance_passes() -> None:
         corporate_actions=ca_records,
         rights_assessment=rights,
         coverage_evidence=cov_ev,
+        allow_synthetic=True,
     )
     assert report.overall_status == "VERIFIED"
+    assert report.contains_synthetic_fixtures is True
     assert report.source_provenance.provenance_verified is True
     assert report.source_provenance.bars_sha256 is not None
     assert report.source_provenance.calendar_sha256 is not None
@@ -1174,3 +1182,118 @@ def test_sol_round8_duplicated_out_of_window_dividends_refused() -> None:
         or "sparse or missing dividends" in r
         for r in report.refusal_reasons
     )
+
+
+def test_mock_evidence_categorically_refused_in_production_mode() -> None:
+    """Mock/synthetic fixtures must be categorically refused in production mode."""
+    intake_res, cov_ev, ca_records, rights = make_mock_evidence()
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        intake_result=intake_res,
+        corporate_actions=ca_records,
+        rights_assessment=rights,
+        coverage_evidence=cov_ev,
+        allow_synthetic=False,
+    )
+    assert report.overall_status == "REFUSED"
+    assert any(
+        "MOCK_EVIDENCE_PROHIBITED_IN_PRODUCTION" in r for r in report.refusal_reasons
+    )
+
+
+def test_insufficient_warmup_sessions_refused() -> None:
+    """Refuse payloads if trading calendar has < 379 sessions prior to 2021-01-01."""
+    import json
+    from types import SimpleNamespace
+
+    _, cov_ev, ca_records, rights = make_mock_evidence()
+    valid_mock = create_mock_valid_raw_payloads()
+
+    # Keep calendar covering start and end dates, but with insufficient
+    # prep sessions (< 379)
+    cal_data = json.loads(valid_mock.calendar.decode("utf-8"))
+    prep_cal = [c for c in cal_data if c["date"] < "2021-01-01"]
+    post_cal = [c for c in cal_data if c["date"] >= "2021-01-01"]
+    # Thin prep sessions so count is ~190 instead of >= 379, while preserving start date
+    thinned_prep = [prep_cal[0]] + prep_cal[1::2]
+    insufficient_cal = thinned_prep + post_cal
+    insufficient_dates = {c["date"] for c in insufficient_cal}
+
+    bars_data = json.loads(valid_mock.bars.decode("utf-8"))
+    filtered_bars = {
+        sym: [b for b in b_list if b["t"][:10] in insufficient_dates]
+        for sym, b_list in bars_data["bars"].items()
+    }
+
+    short_payloads = SimpleNamespace(
+        bars=json.dumps({"bars": filtered_bars, "next_page_token": None}).encode(
+            "utf-8"
+        ),
+        calendar=json.dumps(insufficient_cal).encode("utf-8"),
+        corporate_actions=valid_mock.corporate_actions,
+        is_synthetic=True,
+    )
+
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        raw_payloads=short_payloads,
+        corporate_actions=ca_records,
+        rights_assessment=rights,
+        coverage_evidence=cov_ev,
+        allow_synthetic=True,
+    )
+    assert report.overall_status == "REFUSED"
+    assert any("INSUFFICIENT_PREPARATION_SESSIONS" in r for r in report.refusal_reasons)
+
+
+def test_unconsumed_pagination_token_refused() -> None:
+    """Refuse raw payloads when response contains unconsumed next_page_token."""
+    import json
+    from types import SimpleNamespace
+
+    _, cov_ev, ca_records, rights = make_mock_evidence()
+    valid_mock = create_mock_valid_raw_payloads()
+
+    bars_data = json.loads(valid_mock.bars.decode("utf-8"))
+    bars_data["next_page_token"] = "unconsumed_next_token_123"
+
+    paginated_payloads = SimpleNamespace(
+        bars=json.dumps(bars_data).encode("utf-8"),
+        calendar=valid_mock.calendar,
+        corporate_actions=valid_mock.corporate_actions,
+        is_synthetic=True,
+    )
+
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        raw_payloads=paginated_payloads,
+        corporate_actions=ca_records,
+        rights_assessment=rights,
+        coverage_evidence=cov_ev,
+        allow_synthetic=True,
+    )
+    assert report.overall_status == "REFUSED"
+    assert any("PAGINATION_INCOMPLETE" in r for r in report.refusal_reasons)
+
+
+def test_unauthorized_credentials_fail_closed() -> None:
+    """Refuse verification with ACCOUNT_ACCESS_UNAVAILABLE when credentials fail.
+
+    Returns HTTP 401 Unauthorized from Alpaca API.
+    """
+    intake_res, cov_ev, ca_records, rights = make_mock_evidence()
+    report = verify_g1_alpaca_sip_qualification(
+        request_end=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
+        request_time=FIXED_NOW,
+        intake_result=intake_res,
+        corporate_actions=ca_records,
+        rights_assessment=rights,
+        coverage_evidence=cov_ev,
+        account_access_status="UNAUTHORIZED",
+        allow_synthetic=True,
+    )
+    assert report.overall_status == "REFUSED"
+    assert any("ACCOUNT_ACCESS_UNAVAILABLE" in r for r in report.refusal_reasons)
