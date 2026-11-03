@@ -248,6 +248,10 @@ def action_assess(args: argparse.Namespace) -> int:
         verifier = ProductionStudyEvidenceVerifier(
             trust_roots=trust_roots,
             receipt_resolver=lambda rid: receipt_store.get(rid, {}),
+            authenticated_issuers=host_config.get("authenticated_issuers"),
+            authenticated_receipt_hashes=host_config.get(
+                "authenticated_receipt_hashes"
+            ),
         )
         evidence = tuple(
             StudyEvidenceReferenceV1.model_validate_json(json.dumps(r))
@@ -511,6 +515,10 @@ def action_freeze(args: argparse.Namespace) -> int:
         verifier = ProductionStudyEvidenceVerifier(
             trust_roots=trust_roots,
             receipt_resolver=lambda rid: receipt_store.get(rid, {}),
+            authenticated_issuers=host_config.get("authenticated_issuers"),
+            authenticated_receipt_hashes=host_config.get(
+                "authenticated_receipt_hashes"
+            ),
         )
         evidence = tuple(
             StudyEvidenceReferenceV1.model_validate_json(json.dumps(r))
@@ -523,6 +531,16 @@ def action_freeze(args: argparse.Namespace) -> int:
             evidence=evidence,
             verifier=verifier,
         )
+
+        # Step 8 & 9: Cold read in independent deserialization and verify
+        cold_read = FrozenStage1StudyV1.model_validate_json(
+            json.dumps(frozen.model_dump(mode="json"))
+        )
+        cold_report = verify_frozen_study(cold_read, verifier=verifier)
+        if cold_report.status == "BLOCKED":
+            sys.stderr.write(f"Freeze cold-read failed: {cold_report.blockers}\n")
+            return 2
+
         _write_output(args.output, frozen.model_dump(mode="json"))
         return 0
     except Exception as e:
@@ -554,6 +572,10 @@ def action_verify_freeze(args: argparse.Namespace) -> int:
         verifier = ProductionStudyEvidenceVerifier(
             trust_roots=trust_roots,
             receipt_resolver=lambda rid: receipt_store.get(rid, {}),
+            authenticated_issuers=host_config.get("authenticated_issuers"),
+            authenticated_receipt_hashes=host_config.get(
+                "authenticated_receipt_hashes"
+            ),
         )
         report = verify_frozen_study(frozen, verifier=verifier)
         _write_output(args.output, report.model_dump(mode="json"))
