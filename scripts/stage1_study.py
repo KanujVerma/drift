@@ -356,6 +356,71 @@ def action_calibrate(args: argparse.Namespace) -> int:
         return 1
 
 
+def action_development_run(args: argparse.Namespace) -> int:
+    try:
+        plan_data = _read_json(args.plan)
+        host_config = _read_json(args.host_config)
+    except Exception as e:
+        sys.stderr.write(f"Invalid input: {e}\n")
+        return 3
+
+    try:
+        from drift.experiments.stage1_development_runner import (
+            DevelopmentRunConfigV1,
+            execute_development_run,
+        )
+
+        plan = DevelopmentCalibrationPlanV1.model_validate_json(json.dumps(plan_data))
+        ledger_dir = (
+            Path(args.ledger_dir)
+            if getattr(args, "ledger_dir", None)
+            else (
+                Path(host_config["ledger_dir"]) if "ledger_dir" in host_config else None
+            )
+        )
+        session_count = (
+            args.session_count
+            if getattr(args, "session_count", None) is not None
+            else host_config.get("session_count")
+        )
+        authority_id = getattr(args, "authority", None) or host_config.get(
+            "authority", "trusted-development-authority"
+        )
+
+        artifact_store = host_config.setdefault("artifact_store", {})
+        receipt_store = host_config.setdefault("receipt_store", {})
+
+        config = DevelopmentRunConfigV1(
+            plan=plan,
+            authority_id=authority_id,
+            session_count=session_count,
+            ledger_dir=ledger_dir,
+        )
+
+        dev_run_result, cal_result = execute_development_run(
+            config,
+            artifact_store=artifact_store,
+            receipt_store=receipt_store,
+        )
+
+        _write_output(args.output, dev_run_result.model_dump(mode="json"))
+
+        if getattr(args, "update_host_config", False):
+            host_config["attempts"] = [
+                a.model_dump(mode="json") for a in dev_run_result.attempts
+            ]
+            host_config["calibration_result"] = cal_result.model_dump(mode="json")
+            host_config["development_run_result"] = dev_run_result.model_dump(
+                mode="json"
+            )
+            _write_output(args.host_config, host_config)
+
+        return 0
+    except Exception as e:
+        sys.stderr.write(f"Development run failed: {e}\n")
+        return 1
+
+
 def action_freeze(args: argparse.Namespace) -> int:
     try:
         draft_data = _read_json(args.draft)
@@ -1740,6 +1805,15 @@ def build_parser() -> argparse.ArgumentParser:
     cal.add_argument("--host-config", required=True)
     cal.add_argument("--output", required=True)
 
+    dev_run = subparsers.add_parser("development-run")
+    dev_run.add_argument("--plan", required=True)
+    dev_run.add_argument("--host-config", required=True)
+    dev_run.add_argument("--output", required=True)
+    dev_run.add_argument("--ledger-dir", required=False, default=None)
+    dev_run.add_argument("--session-count", type=int, required=False, default=None)
+    dev_run.add_argument("--authority", required=False, default=None)
+    dev_run.add_argument("--update-host-config", action="store_true", default=False)
+
     frz = subparsers.add_parser("freeze")
     frz.add_argument("--draft", required=True)
     frz.add_argument("--host-config", required=True)
@@ -1800,6 +1874,7 @@ def main() -> None:
         "assess": action_assess,
         "verify-market-data": action_verify_market_data,
         "calibrate": action_calibrate,
+        "development-run": action_development_run,
         "freeze": action_freeze,
         "verify-freeze": action_verify_freeze,
         "historical": action_historical,
