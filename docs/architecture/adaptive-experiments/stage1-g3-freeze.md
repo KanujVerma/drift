@@ -50,6 +50,19 @@ and invalidates prior acceptances. Re-freeze under a new revision before scoring
 A successful readiness check is configuration admission, not evidence of profit.
 The actual evaluator's dataset/source gates continue to apply independently.
 
+The `assemble_stage1_study_draft` convenience helper defaults to
+`RETROSPECTIVE_DISCOVERY` and `UNKNOWN` exposure. Its inclusive date bounds are
+2021-01-01 through 2023-12-31 for development, calendar-year 2024 for validation,
+and calendar-year 2025 for retrospective evaluation, as specified in
+[the locked protocol](stage1-g3-protocol-v1.md). Those bounds do not generate
+exchange sessions or establish data coverage. Explicit mode, exposure and date
+arguments remain supported; they do not authenticate an audit or admit a study.
+All eight original-evidence roles are still required. A caller explicitly
+requesting confirmatory mode while omitting exposure retains `UNKNOWN` and is
+blocked. Existing explicit manifests are not rewritten. Newly assembled drafts
+using corrected defaults have new fingerprints and cannot reuse acceptances
+bound to the previous defaults.
+
 ## Required final inputs, not fabricated approvals
 
 | Input | Required deliverable | Accountable producer |
