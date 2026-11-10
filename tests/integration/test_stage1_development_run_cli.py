@@ -20,6 +20,57 @@ H = "7" * 64
 NOW = datetime(2026, 11, 2, 6, 0, 0, tzinfo=UTC)
 
 
+def test_unqualified_development_cli_leaves_no_outputs(tmp_path: Path) -> None:
+    plan = create_development_calibration_plan(
+        plan_id="CAL-PLAN-CLI-CONTAINMENT",
+        created_at=NOW,
+        method_version="grid-9-conventional/1",
+        owner_reference="kanuj@drift.local",
+        reviewer_reference="matthew@drift.local",
+        development_window=StudyDateWindowV1(
+            start=date(2021, 1, 1), end=date(2023, 12, 31)
+        ),
+        prohibited_windows=(),
+        installed_source_hash=H,
+        dataset_manifest_hash=H,
+        calendar_and_universe_hash=H,
+        execution_policy_hash=H,
+        cost_policy_hash=H,
+        mandate_policy_hash=H,
+        access_log_policy_hash=H,
+    )
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(json.dumps(plan.model_dump(mode="json")), encoding="utf-8")
+    host = tmp_path / "host.json"
+    host.write_text("{}", encoding="utf-8")
+    output = tmp_path / "result.json"
+    ledger_dir = tmp_path / "ledgers"
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "scripts/stage1_study.py",
+            "development-run",
+            "--plan",
+            str(plan_file),
+            "--host-config",
+            str(host),
+            "--output",
+            str(output),
+            "--ledger-dir",
+            str(ledger_dir),
+            "--session-count",
+            "130",
+            "--update-host-config",
+        ],
+        capture_output=True,
+    )
+    assert proc.returncode != 0
+    assert b"DEVELOPMENT_CALIBRATION_UNQUALIFIED" in proc.stderr
+    assert not output.exists()
+    assert not ledger_dir.exists()
+    assert host.read_text(encoding="utf-8") == "{}"
+
+
 def test_development_run_cli_and_calibrate_pipeline(tmp_path: Path) -> None:
     plan = create_development_calibration_plan(
         plan_id="CAL-PLAN-CLI-TEST",

@@ -56,6 +56,24 @@ def _create_valid_dev_plan() -> tuple[
     return plan, dev_win, prohib
 
 
+def test_unqualified_synthetic_run_refuses_without_creating_artifacts(
+    tmp_path: Path,
+) -> None:
+    """An unqualified generated series must not become historical calibration."""
+    plan, _, _ = _create_valid_dev_plan()
+    ledger_dir = tmp_path / "ledgers"
+    artifacts: dict[str, Any] = {}
+    receipts: dict[str, Any] = {}
+    config = DevelopmentRunConfigV1(plan=plan, session_count=130, ledger_dir=ledger_dir)
+    with pytest.raises(ValueError, match="DEVELOPMENT_CALIBRATION_UNQUALIFIED"):
+        execute_development_run(
+            config, artifact_store=artifacts, receipt_store=receipts
+        )
+    assert not ledger_dir.exists()
+    assert artifacts == {}
+    assert receipts == {}
+
+
 def test_development_run_executes_all_nine_pairs_with_independent_accounts(
     tmp_path: Path,
 ) -> None:

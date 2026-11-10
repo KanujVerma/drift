@@ -315,6 +315,11 @@ def execute_development_run(
     - Cold readback validates receipt store and ledger state.
     - Deterministic ranking selects winning pair.
     """
+    # The current runner generates synthetic returns yet emits an ordinary
+    # calibration artifact. Refuse before any ledger or result is created until
+    # an authenticated historical producer and a distinct fixture contract exist.
+    raise ValueError("DEVELOPMENT_CALIBRATION_UNQUALIFIED: synthetic inputs only")
+
     plan = config.plan
     if plan.scope != "DEVELOPMENT_ONLY":
         raise ValueError(
