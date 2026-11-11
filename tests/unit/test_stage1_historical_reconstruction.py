@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from drift.experiments import stage1_historical_reconstruction as reconstruction
 from drift.experiments.stage1_g3_freeze_pipeline import assemble_stage1_study_draft
 from drift.experiments.stage1_historical_reconstruction import (
     reconstruct_and_verify_historical_experiment,
@@ -22,6 +23,7 @@ from drift.experiments.stage1_study_freeze import (
     StudyModelPolicyV1,
     StudyStatisticalPolicyV1,
 )
+from drift.experiments.stage1_uncertainty import compute_paired_uncertainty_artifact
 from drift.serialization.canonical import content_hash
 
 H = "a" * 64
@@ -127,7 +129,47 @@ def _generate_synthetic_receipts(
     return receipts
 
 
-def test_positive_historical_reconstruction() -> None:
+def test_empty_untrusted_evidence_cannot_verify_historical_reconstruction() -> None:
+    report = reconstruct_and_verify_historical_experiment(
+        frozen=_create_frozen_fixture(),
+        b_receipts=[],
+        r_receipts=[],
+        incremental_operating_costs=Decimal("0"),
+    )
+
+    assert report.status == "RECONSTRUCTION_FAILED"
+    assert report.total_sessions_verified == 0
+    assert report.reconstructed_outcome == "UNAVAILABLE"
+    assert not report.uncertainty_verified
+    assert "ORIGINAL_EVIDENCE_UNAUTHENTICATED" in report.discrepancies
+
+
+def test_missing_primary_block_does_not_select_sensitivity_as_primary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[int | None] = []
+    original = compute_paired_uncertainty_artifact
+
+    def capture_block(**kwargs: Any) -> Any:
+        seen.append(kwargs["mean_block_length"])
+        return original(**kwargs)
+
+    monkeypatch.setattr(
+        reconstruction, "compute_paired_uncertainty_artifact", capture_block
+    )
+    report = reconstruct_and_verify_historical_experiment(
+        frozen=_create_frozen_fixture(),
+        b_receipts=_generate_synthetic_receipts("B", n_sessions=3),
+        r_receipts=_generate_synthetic_receipts("R", n_sessions=3),
+        incremental_operating_costs=Decimal("0"),
+    )
+
+    assert seen == [None]
+    assert report.status == "RECONSTRUCTION_FAILED"
+    assert report.uncertainty_verified is False
+
+
+def test_synthetic_arithmetic_remains_diagnostic_and_unavailable() -> None:
     frozen = _create_frozen_fixture()
     b_receipts = _generate_synthetic_receipts(
         "B", n_sessions=25, base_ret=Decimal("0.0008")
@@ -156,11 +198,63 @@ def test_positive_historical_reconstruction() -> None:
         reported_primary_economic_advantage=expected_pea,
     )
 
-    assert report.status == "VERIFIED"
-    assert report.total_sessions_verified == 25
-    assert report.uncertainty_verified is True
-    assert report.discrepancies == ()
+    assert report.status == "RECONSTRUCTION_FAILED"
+    assert report.total_sessions_verified == 0
+    assert report.reconstructed_outcome == "UNAVAILABLE"
+    assert report.uncertainty_verified is False
+    assert report.b_terminal_nav_reconstructed == b_term_nav
+    assert report.r_terminal_nav_reconstructed == r_term_nav
+    assert report.primary_economic_advantage_reconstructed == expected_pea
+    assert report.discrepancies == ("ORIGINAL_EVIDENCE_UNAUTHENTICATED",)
     assert report.reconstruction_hash is not None
+
+
+def test_untrusted_fixture_matches_independent_arithmetic_but_is_not_verified() -> None:
+    b = [
+        {
+            "session_index": 0,
+            "metrics": {
+                "net_return": "0.10",
+                "per_share_fees": "2",
+                "terminal_nav": "10998",
+            },
+        },
+        {
+            "session_index": 1,
+            "metrics": {
+                "net_return": "0",
+                "per_share_fees": "0",
+                "terminal_nav": "10998",
+            },
+        },
+    ]
+    r = [
+        {
+            "session_index": i,
+            "metrics": {
+                "net_return": "0",
+                "per_share_fees": "0",
+                "terminal_nav": "10000",
+            },
+        }
+        for i in range(2)
+    ]
+    report = reconstruct_and_verify_historical_experiment(
+        frozen=_create_frozen_fixture(),
+        b_receipts=b,
+        r_receipts=r,
+        incremental_operating_costs=Decimal("3"),
+        expected_sessions=[0, 1],
+    )
+
+    # Hand calculation: (10000 * 1.10 - 2) - 10000 - 3 = 995.
+    assert report.b_terminal_nav_reconstructed == Decimal("10998")
+    assert report.r_terminal_nav_reconstructed == Decimal("10000")
+    assert report.primary_economic_advantage_reconstructed == Decimal("995")
+    assert report.status == "RECONSTRUCTION_FAILED"
+    assert report.reconstructed_outcome == "UNAVAILABLE"
+    assert report.total_sessions_verified == 0
+    assert not report.uncertainty_verified
 
 
 def test_negative_control_nav_tamper_detected() -> None:
