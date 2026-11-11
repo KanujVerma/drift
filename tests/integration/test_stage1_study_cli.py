@@ -38,143 +38,46 @@ def test_cli_inventory(repo_root: Path, tmp_path: Path) -> None:
     assert data["repo_root"] == str(repo_root)
 
 
-def test_cli_report(repo_root: Path, tmp_path: Path) -> None:
-    script = repo_root / "scripts" / "stage1_study.py"
+def test_cli_report_rejects_invalid_input(repo_root: Path, tmp_path: Path) -> None:
     manifest_file = tmp_path / "manifest.json"
-    host_config_file = tmp_path / "host.json"
+    host_file = tmp_path / "host.json"
     out_file = tmp_path / "report.json"
+    manifest_file.write_text("not JSON", encoding="utf-8")
+    host_file.write_text("{}", encoding="utf-8")
+    out_file.write_bytes(b"existing report")
+    command = [
+        "uv",
+        "run",
+        "python",
+        str(repo_root / "scripts" / "stage1_study.py"),
+        "report",
+        "--run-manifest",
+        str(manifest_file),
+        "--host-config",
+        str(host_file),
+        "--output",
+        str(out_file),
+    ]
+    proc = subprocess.run(command, capture_output=True, text=True)
+    assert proc.returncode == 3
+    assert out_file.read_bytes() == b"existing report"
 
-    valid_host_config = {
-        "trust_roots": {
-            "scientific_protocol_review": ["trusted-root"],
-        }
-    }
-    host_config_file.write_text(json.dumps(valid_host_config), encoding="utf-8")
-    classification_payload = {
-        "schema_version": "drift-stage1-outcome/1",
-        "outcome": "UNSUCCESSFUL",
-        "primary_economic_advantage": "0",
-        "materiality_hurdle": "100",
-        "is_invalid": False,
-        "is_available": True,
-        "is_risk_comparable": True,
-        "is_prospective_complete": False,
-        "is_independently_accepted": False,
-        "reasons": ["ECONOMIC_ADVANTAGE_NON_POSITIVE"],
-    }
+    manifest_file.write_text("{}", encoding="utf-8")
+    host_file.write_text("not JSON", encoding="utf-8")
+    proc = subprocess.run(command, capture_output=True, text=True)
+    assert proc.returncode == 3
+    assert out_file.read_bytes() == b"existing report"
+
+
+def test_cli_report_refuses_caller_claimed_success(
+    repo_root: Path, tmp_path: Path
+) -> None:
     from drift.serialization.canonical import content_hash
 
-    classification_payload["classification_hash"] = content_hash(classification_payload)
-
-    manifest_payload = {
-        "study_id": "STUDY-CLI-TEST",
-        "protocol_hash": "a" * 64,
-        "mode": "RETROSPECTIVE",
-        "scheduled_sessions": 252,
-        "observed_sessions": 252,
-        "primary_economic_advantage": "100.0",
-        "outcome_classification": classification_payload,
-        "evidence_inventory": ["HIST-RCPT-001"],
-    }
-
-    manifest_file.write_text(json.dumps(manifest_payload), encoding="utf-8")
-
-    proc = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "report",
-            "--run-manifest",
-            str(manifest_file),
-            "--host-config",
-            str(host_config_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-        check=True,
-    )
-    assert proc.returncode == 0
-    report_data = json.loads(out_file.read_text(encoding="utf-8"))
-    assert report_data["schema_version"] == "drift-stage1-study-report/1"
-    assert report_data["study_id"] == "STUDY-CLI-TEST"
-
-    # Adversarial checks for Finding 3
-    # 1. Missing host verification trust roots -> exits 2
-    empty_host = tmp_path / "empty_host.json"
-    empty_host.write_text("{}", encoding="utf-8")
-    proc_no_host = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "report",
-            "--run-manifest",
-            str(manifest_file),
-            "--host-config",
-            str(empty_host),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-    )
-    assert proc_no_host.returncode == 2
-
-    # 2. Zero observed sessions -> exits 3
-    zero_manifest = tmp_path / "zero_manifest.json"
-    zero_manifest.write_text(
-        json.dumps(manifest_payload | {"observed_sessions": 0}), encoding="utf-8"
-    )
-    proc_zero = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "report",
-            "--run-manifest",
-            str(zero_manifest),
-            "--host-config",
-            str(host_config_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-    )
-    assert proc_zero.returncode == 3
-
-    # 3. All-zero protocol hash -> exits 3
-    all_zero_proto = tmp_path / "all_zero_proto.json"
-    all_zero_proto.write_text(
-        json.dumps(manifest_payload | {"protocol_hash": "0" * 64}), encoding="utf-8"
-    )
-    proc_all_zero = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "report",
-            "--run-manifest",
-            str(all_zero_proto),
-            "--host-config",
-            str(host_config_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-    )
-    assert proc_all_zero.returncode == 3
-
-    # 4. Manufactured SUCCESS with negative economic advantage and zero evidence
-    # -> exits 3
-    manuf_class = {
+    classification = {
         "schema_version": "drift-stage1-outcome/1",
         "outcome": "SUCCESS",
-        "primary_economic_advantage": "-999.0",
+        "primary_economic_advantage": "200",
         "materiality_hurdle": "100",
         "is_invalid": False,
         "is_available": True,
@@ -183,39 +86,51 @@ def test_cli_report(repo_root: Path, tmp_path: Path) -> None:
         "is_independently_accepted": True,
         "reasons": [],
     }
-    manuf_class["classification_hash"] = content_hash(manuf_class)
-    manuf_manifest = tmp_path / "manuf_manifest.json"
-    manuf_manifest.write_text(
-        json.dumps(
-            {
-                "study_id": "MANUFACTURED",
-                "protocol_hash": "0" * 64,
-                "scheduled_sessions": 252,
-                "observed_sessions": 0,
-                "primary_economic_advantage": "-999.0",
-                "outcome_classification": manuf_class,
-                "evidence_inventory": [],
-            }
-        ),
-        encoding="utf-8",
-    )
-    proc_manuf = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "report",
-            "--run-manifest",
-            str(manuf_manifest),
-            "--host-config",
-            str(host_config_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-    )
-    assert proc_manuf.returncode == 3
+    classification["classification_hash"] = content_hash(classification)
+    manifest = {
+        "study_id": "SYNTHETIC-PROBE",
+        "protocol_hash": "a" * 64,
+        "mode": "RETROSPECTIVE",
+        "scheduled_sessions": 252,
+        "observed_sessions": 252,
+        "primary_economic_advantage": "200",
+        "outcome_classification": classification,
+        "evidence_inventory": ["FORGED"],
+    }
+    manifest_file = tmp_path / "manifest.json"
+    host_file = tmp_path / "host.json"
+    out_file = tmp_path / "report.json"
+    manifest_file.write_text(json.dumps(manifest), encoding="utf-8")
+    host_file.write_text(json.dumps({"trust_roots": ["caller-selected"]}))
+    original_host = host_file.read_bytes()
+    original_manifest = manifest_file.read_bytes()
+    command = [
+        "uv",
+        "run",
+        "python",
+        str(repo_root / "scripts" / "stage1_study.py"),
+        "report",
+        "--run-manifest",
+        str(manifest_file),
+        "--host-config",
+        str(host_file),
+        "--output",
+        str(out_file),
+    ]
+    for prior in (None, b"preserve existing report"):
+        if prior is None:
+            out_file.unlink(missing_ok=True)
+        else:
+            out_file.write_bytes(prior)
+        proc = subprocess.run(command, capture_output=True, text=True)
+        assert proc.returncode == 2
+        assert "REPORT_EVIDENCE_UNAVAILABLE" in proc.stderr
+        assert host_file.read_bytes() == original_host
+        assert manifest_file.read_bytes() == original_manifest
+        if prior is None:
+            assert not out_file.exists()
+        else:
+            assert out_file.read_bytes() == prior
 
 
 def test_cli_prospective_register_and_step(repo_root: Path, tmp_path: Path) -> None:
@@ -1048,7 +963,9 @@ def test_cli_calibrate_and_historical_handlers(repo_root: Path, tmp_path: Path) 
     assert len(res_data["ranking_proof"]) == 9
 
 
-def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> None:
+def test_cli_historical_refuses_caller_signed_evidence(
+    repo_root: Path, tmp_path: Path
+) -> None:
     import hashlib
     import hmac
     from datetime import UTC, date, datetime
@@ -1177,26 +1094,6 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
     )
     frozen_file.write_text(frozen.model_dump_json(), encoding="utf-8")
 
-    # 1. Empty host config returns exit 2 (BLOCKED / unavailable)
-    host_file.write_text("{}", encoding="utf-8")
-    proc = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "historical",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-    )
-    assert proc.returncode == 2
-
     artifact_store: dict[str, Any] = {}
 
     def write_host_config(extra: dict[str, Any]) -> None:
@@ -1210,46 +1107,6 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
         }
         cfg.update(extra)
         host_file.write_text(json.dumps(cfg), encoding="utf-8")
-
-    # 2. 252-character string for execution_receipts returns exit 3 (invalid input)
-    write_host_config({"execution_receipts": "a" * 252})
-    proc = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "historical",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-    )
-    assert proc.returncode == 3
-
-    # 3. 252 empty objects for execution_receipts returns exit 3 (freeze_hash mismatch)
-    write_host_config({"execution_receipts": [{}] * 252})
-    proc = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "historical",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-    )
-    assert proc.returncode == 3
 
     def make_execution_receipt(
         s_idx: int,
@@ -1354,805 +1211,92 @@ def test_cli_historical_regression_suite(repo_root: Path, tmp_path: Path) -> Non
             "receipt_hash": r_payload["receipt_hash"],
         }
 
-    # 3a. Empty execution receipts list returns exit 2 (BLOCKED / unavailable)
-    write_host_config({"execution_receipts": []})
-    proc = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "historical",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-    )
-    assert proc.returncode == 2
-
-    # 4. Incomplete execution receipts (100 sessions < 252) returns exit 4 (INCOMPLETE)
-    receipts_100 = [make_execution_receipt(i) for i in range(100)]
-    write_host_config({"execution_receipts": receipts_100})
-    proc = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "historical",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-    )
-    assert proc.returncode == 4
-
-    # 5. Repeated receipts (252 copies of session_index 0) returns exit 3
-    # (duplicate session)
-    repeated_receipts = [make_execution_receipt(0)] * 252
-    write_host_config({"execution_receipts": repeated_receipts})
-    proc = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "historical",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-    )
-    assert proc.returncode == 3
-
-    # 6. Absent session identity (missing session_index) returns exit 3
-    no_session_id = [
-        {"receipt_id": f"HIST-EXEC-{i}", "receipt_hash": "a" * 64} for i in range(252)
-    ]
-    write_host_config({"execution_receipts": no_session_id})
-    proc = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "historical",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-    )
-    assert proc.returncode == 3
-
-    # 7. Self-authored receipt (not in receipt_store) returns exit 3
-    receipt_store_missing_0 = {
-        k: v for k, v in receipt_store.items() if k != "HIST-EXEC-0"
-    }
-    self_authored_receipts = [
-        make_execution_receipt(i, store_in_receipts=(i != 0)) for i in range(252)
-    ]
-    write_host_config(
-        {
-            "receipt_store": receipt_store_missing_0,
-            "execution_receipts": self_authored_receipts,
-        }
-    )
-    proc = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "historical",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-    )
-    assert proc.returncode == 3
-
-    # 8. Untrusted authority returns exit 3
-    untrusted_auth_receipts = [
-        make_execution_receipt(
-            i, authority="attacker" if i == 0 else "trusted-historical-root"
-        )
-        for i in range(252)
-    ]
-    write_host_config({"execution_receipts": untrusted_auth_receipts})
-    proc = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "historical",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-    )
-    assert proc.returncode == 3
-
-    # 9. Missing execution journal returns exit 3
-    no_journal_receipts = [
-        make_execution_receipt(i, omit_journal=(i == 0)) for i in range(252)
-    ]
-    write_host_config({"execution_receipts": no_journal_receipts})
-    proc = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "historical",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-    )
-    assert proc.returncode == 3
-
-    # 10a. Missing required artifact (portfolio_state) returns exit 3
-    missing_artifact_receipts = [
-        make_execution_receipt(i, omit_portfolio_state=(i == 0)) for i in range(252)
-    ]
-    write_host_config({"execution_receipts": missing_artifact_receipts})
-    proc = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "historical",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-    )
-    assert proc.returncode == 3
-
-    # 10b. Non-hex artifact hash returns exit 3
-    nonhex_receipts = [
-        make_execution_receipt(i, nonhex_hash=(i == 0)) for i in range(252)
-    ]
-    write_host_config({"execution_receipts": nonhex_receipts})
-    proc = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "historical",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-    )
-    assert proc.returncode == 3
-
-    # 10c. Nonexistent artifact reference returns exit 3
-    nonexistent_receipts = [
-        make_execution_receipt(i, nonexistent_artifact=(i == 0)) for i in range(252)
-    ]
-    write_host_config({"execution_receipts": nonexistent_receipts})
-    proc = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "historical",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-    )
-    assert proc.returncode == 3
-
-    # 10d. Bound session mismatch in artifact object returns exit 3
-    mismatched_session_receipts = [
-        make_execution_receipt(i, mismatched_session=(i == 0)) for i in range(252)
-    ]
-    write_host_config({"execution_receipts": mismatched_session_receipts})
-    proc = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "historical",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-    )
-    assert proc.returncode == 3
-
-    # 10e. Arbitrary unsupported metrics returns exit 3
-    arbitrary_metrics_receipts = [
-        make_execution_receipt(i, arbitrary_metrics=(i == 0)) for i in range(252)
-    ]
-    write_host_config({"execution_receipts": arbitrary_metrics_receipts})
-    proc = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "historical",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-    )
-    assert proc.returncode == 3
-
-    # 10f. Tampered receipt hash returns exit 3
-    tampered_receipts = [
-        make_execution_receipt(i, tamper_hash=(i == 0)) for i in range(252)
-    ]
-    write_host_config({"execution_receipts": tampered_receipts})
-    proc = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "historical",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-    )
-    assert proc.returncode == 3
-
-    # 11. Out-of-scope session index (e.g. 999 instead of 0..251) returns exit 3
-    out_of_scope_receipts = [
-        (
-            {
-                "receipt_id": "HIST-EXEC-999",
-                "session_index": 999,
-                "receipt_hash": "a" * 64,
-            }
-            if i == 0
-            else make_execution_receipt(i)
-        )
-        for i in range(252)
-    ]
-    write_host_config({"execution_receipts": out_of_scope_receipts})
-    proc = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "historical",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-    )
-    assert proc.returncode == 3
-
-    # 12. Complete 252 valid execution receipts returns exit 0 with manifest
-    receipts_252 = [make_execution_receipt(i) for i in range(252)]
-    write_host_config({"execution_receipts": receipts_252})
-    proc_ok = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "historical",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert proc_ok.returncode == 0
-    manifest = json.loads(out_file.read_text(encoding="utf-8"))
-    assert manifest["status"] == "COMPLETED"
-    assert manifest["observed_sessions"] == 252
-    assert manifest["freeze_hash"] == frozen.freeze_hash
-    # Missing paired reference evidence and missing costs leave
-    # economic advantage unavailable
-    assert manifest["primary_economic_advantage"] is None
-    assert manifest["outcome_classification"]["outcome"] == "UNAVAILABLE"
-    assert (
-        "MISSING_PAIRED_REFERENCE_EVIDENCE"
-        in manifest["outcome_classification"]["reasons"]
-    )
-    assert (
-        "MISSING_ATTRIBUTABLE_OPERATING_COSTS"
-        in manifest["outcome_classification"]["reasons"]
-    )
-
-    # 13. Paired reference evidence where arm B underperforms arm R
-    # Candidate arm B has net_return = 0.0001, reference arm R has net_return = 0.0005
-    # -> primary_economic_advantage is negative, outcome is UNSUCCESSFUL
+    # Every authority, key, receipt and return in this fixture is synthetic.
     b_receipts = [
-        make_execution_receipt(
-            i, prefix="HIST-UNDER-B", net_return_val="0.0001", arm="B"
-        )
-        for i in range(252)
-    ]
-    r_receipts = [
-        make_execution_receipt(
-            i, prefix="HIST-UNDER-R", net_return_val="0.0005", arm="R"
-        )
-        for i in range(252)
-    ]
-    write_host_config(
-        {
-            "execution_receipts": b_receipts,
-            "reference_receipts": r_receipts,
-            "incremental_operating_costs": "0",
-        }
-    )
-    proc_under = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "historical",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert proc_under.returncode == 0
-    manifest_under = json.loads(out_file.read_text(encoding="utf-8"))
-    assert Decimal(manifest_under["primary_economic_advantage"]) < Decimal("0")
-    assert manifest_under["outcome_classification"]["outcome"] == "UNSUCCESSFUL"
-    assert (
-        "ECONOMIC_ADVANTAGE_NON_POSITIVE"
-        in manifest_under["outcome_classification"]["reasons"]
-    )
-
-    # 14. Paired reference evidence where arm B outperforms arm R
-    # Candidate arm B has net_return = 0.0010, reference arm R has net_return = 0.0001
-    # -> primary_economic_advantage is positive, measured risk statistics reported
-    # -> outcome is PROMISING_BUT_INCONCLUSIVE (prospective not complete)
-    b_perf_receipts = [
         make_execution_receipt(i, prefix="HIST-OUT-B", net_return_val="0.0010", arm="B")
         for i in range(252)
     ]
-    r_perf_receipts = [
+    r_receipts = [
         make_execution_receipt(i, prefix="HIST-OUT-R", net_return_val="0.0001", arm="R")
         for i in range(252)
     ]
-    write_host_config(
+    b_compound = r_compound = Decimal("1")
+    for _ in range(252):
+        b_compound *= Decimal("1.0010")
+        r_compound *= Decimal("1.0001")
+    pea = Decimal("10000") * ((b_compound - 1) - (r_compound - 1)) - Decimal("10.00")
+    result_digest = content_hash(
         {
-            "execution_receipts": b_perf_receipts,
-            "reference_receipts": r_perf_receipts,
-            "incremental_operating_costs": "10.00",
+            "freeze_hash": frozen.freeze_hash,
+            "protocol_hash": frozen.protocol.protocol_hash,
+            "observed_sessions": 252,
+            "evidence_inventory": [r["receipt_id"] for r in b_receipts],
+            "reference_evidence_inventory": [r["receipt_id"] for r in r_receipts],
+            "primary_economic_advantage": str(pea),
         }
     )
-    proc_outperf = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "historical",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert proc_outperf.returncode == 0
-    manifest_out = json.loads(out_file.read_text(encoding="utf-8"))
-    assert Decimal(manifest_out["primary_economic_advantage"]) > Decimal("0")
-    assert manifest_out["outcome_classification"]["is_risk_comparable"] is True
-    assert (
-        manifest_out["outcome_classification"]["outcome"]
-        == "PROMISING_BUT_INCONCLUSIVE"
-    )
-
-    # 15. Verified independent acceptance receipt passes assessor independence
-    cand_inv = [r["receipt_id"] for r in b_perf_receipts]
-    ref_inv = [r["receipt_id"] for r in r_perf_receipts]
-    exact_res_payload = {
-        "freeze_hash": frozen.freeze_hash,
-        "protocol_hash": frozen.protocol.protocol_hash,
-        "observed_sessions": 252,
-        "evidence_inventory": cand_inv,
-        "reference_evidence_inventory": ref_inv,
-        "primary_economic_advantage": str(manifest_out["primary_economic_advantage"]),
-    }
-    res_digest = content_hash(exact_res_payload)
-    indep_body = {
+    body = {
         "schema_version": "drift-stage1-acceptance-receipt/1",
         "receipt_id": "INDEP-ACPT-01",
         "freeze_hash": frozen.freeze_hash,
         "protocol_hash": frozen.protocol.protocol_hash,
         "study_id": f"HIST-{frozen.protocol.study_id}",
         "authority_id": "trusted-historical-root",
-        "result_digest": res_digest,
+        "result_digest": result_digest,
         "status": "ACCEPTED",
         "assessor_independence": True,
         "is_self_review": False,
-        "independence_declaration": "Independent review verified.",
+        "independence_declaration": "Synthetic self-appointed reviewer.",
     }
-    sig = hmac.new(
-        b"hist-secret", canonical_json(indep_body), hashlib.sha256
+    signature = hmac.new(
+        b"hist-secret", canonical_json(body), hashlib.sha256
     ).hexdigest()
-    indep_signed = indep_body | {"signature": sig}
-    indep_rcpt = indep_signed | {"receipt_hash": content_hash(indep_body)}
     write_host_config(
         {
-            "execution_receipts": b_perf_receipts,
-            "reference_receipts": r_perf_receipts,
+            "execution_receipts": b_receipts,
+            "reference_receipts": r_receipts,
             "incremental_operating_costs": "10.00",
-            "independent_acceptance_receipt": indep_rcpt,
+            "independent_acceptance_receipt": body
+            | {"signature": signature, "receipt_hash": content_hash(body)},
         }
     )
-    proc_acpt = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "historical",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert proc_acpt.returncode == 0
-    manifest_acpt = json.loads(out_file.read_text(encoding="utf-8"))
-    assert manifest_acpt["outcome_classification"]["is_independently_accepted"] is True
-    assert "series_results" in manifest_acpt["block_length_diagnostics"]
-    series_res = manifest_acpt["block_length_diagnostics"]["series_results"]
-    assert "b_returns" in series_res
-    assert "r_returns" in series_res
-    assert "difference_returns" in series_res
-    assert manifest_acpt["block_length_diagnostics"]["all_series_finite"] is True
-
-    # 16. Conflicted or unaccepted acceptance receipt fails verification
-    conflicted_body = {
-        "schema_version": "drift-stage1-acceptance-receipt/1",
-        "receipt_id": "INDEP-ACPT-BAD",
-        "freeze_hash": "f" * 64,
-        "authority_id": "trusted-historical-root",
-        "status": "ACCEPTED",
-        "assessor_independence": False,
-        "is_self_review": True,
-        "independence_declaration": "",
-    }
-    conflicted_rcpt = conflicted_body | {"receipt_hash": content_hash(conflicted_body)}
-    write_host_config(
-        {
-            "execution_receipts": b_perf_receipts,
-            "reference_receipts": r_perf_receipts,
-            "incremental_operating_costs": "10.00",
-            "independent_acceptance_receipt": conflicted_rcpt,
-        }
-    )
-    proc_conf = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "historical",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert proc_conf.returncode == 0
-    manifest_conf = json.loads(out_file.read_text(encoding="utf-8"))
-    assert manifest_conf["outcome_classification"]["is_independently_accepted"] is False
-
-    # 17. Missing operating costs when reference receipts are present -> UNAVAILABLE
-    write_host_config(
-        {
-            "execution_receipts": b_perf_receipts,
-            "reference_receipts": r_perf_receipts,
-        }
-    )
-    proc_nocost = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "historical",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert proc_nocost.returncode == 0
-    manifest_nocost = json.loads(out_file.read_text(encoding="utf-8"))
-    assert manifest_nocost["primary_economic_advantage"] is None
-    assert manifest_nocost["outcome_classification"]["outcome"] == "UNAVAILABLE"
-    assert (
-        "MISSING_ATTRIBUTABLE_OPERATING_COSTS"
-        in manifest_nocost["outcome_classification"]["reasons"]
-    )
-
-    # 18. Reference receipts with duplicate session index -> returns exit 3
-    dup_r_receipts = [r_perf_receipts[0]] * 252
-    write_host_config(
-        {
-            "execution_receipts": b_perf_receipts,
-            "reference_receipts": dup_r_receipts,
-            "incremental_operating_costs": "10.00",
-        }
-    )
-    proc_dup = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "historical",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-    )
-    assert proc_dup.returncode == 3
-
-    # 19. Reference receipts with extra duplicate (253 receipts) -> returns exit 3
-    r_253 = r_perf_receipts + [r_perf_receipts[0]]
-    write_host_config(
-        {
-            "execution_receipts": b_perf_receipts,
-            "reference_receipts": r_253,
-            "incremental_operating_costs": "10.00",
-        }
-    )
-    proc_253 = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "historical",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-    )
-    assert proc_253.returncode == 3
-
-    # 20. Re-using candidate receipt as reference receipt -> returns exit 3
-    write_host_config(
-        {
-            "execution_receipts": b_perf_receipts,
-            "reference_receipts": b_perf_receipts,
-            "incremental_operating_costs": "10.00",
-        }
-    )
-    proc_reuse = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "historical",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-    )
-    assert proc_reuse.returncode == 3
-
-    # 21. Reference receipt with absent reference-arm identity -> returns exit 3
-    r_no_arm = [
-        make_execution_receipt(i, prefix="HIST-NOARM", net_return_val="0.0001", arm="")
-        for i in range(252)
+    original_host = host_file.read_bytes()
+    command = [
+        "uv",
+        "run",
+        "python",
+        str(script),
+        "historical",
+        "--frozen",
+        str(frozen_file),
+        "--host-config",
+        str(host_file),
+        "--output",
+        str(out_file),
     ]
-    write_host_config(
-        {
-            "execution_receipts": b_perf_receipts,
-            "reference_receipts": r_no_arm,
-            "incremental_operating_costs": "10.00",
-        }
-    )
-    proc_noarm = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "historical",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-    )
-    assert proc_noarm.returncode == 3
+    for prior in (None, b"existing result must not be replaced"):
+        if prior is None:
+            out_file.unlink(missing_ok=True)
+        else:
+            out_file.write_bytes(prior)
+        proc = subprocess.run(command, capture_output=True, text=True, check=False)
+        assert proc.returncode == 2
+        assert "HISTORICAL_EVIDENCE_UNAVAILABLE" in proc.stderr
+        assert host_file.read_bytes() == original_host
+        if prior is None:
+            assert not out_file.exists()
+        else:
+            assert out_file.read_bytes() == prior
 
-    # 22. Incomplete/bypassable result digest (e.g. inventory-only digest)
-    # fails exact result binding -> is_independently_accepted is False
-    bypass_indep_body = indep_body.copy()
-    bypass_indep_body["result_digest"] = content_hash(cand_inv + ref_inv)
-    bypass_sig = hmac.new(
-        b"hist-secret", canonical_json(bypass_indep_body), hashlib.sha256
-    ).hexdigest()
-    bypass_rcpt = (
-        bypass_indep_body
-        | {"signature": bypass_sig}
-        | {"receipt_hash": content_hash(bypass_indep_body)}
-    )
-    write_host_config(
-        {
-            "execution_receipts": b_perf_receipts,
-            "reference_receipts": r_perf_receipts,
-            "incremental_operating_costs": "10.00",
-            "independent_acceptance_receipt": bypass_rcpt,
-        }
-    )
-    proc_bypass = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "historical",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert proc_bypass.returncode == 0
-    manifest_bypass = json.loads(out_file.read_text(encoding="utf-8"))
-    assert (
-        manifest_bypass["outcome_classification"]["is_independently_accepted"] is False
-    )
-
-    # 23. Receipt hash that matches body_with_sig instead of canonical body
-    # fails receipt bytes check -> is_independently_accepted is False
-    body_with_sig_hash = content_hash(indep_signed)
-    tampered_hash_rcpt = indep_signed | {"receipt_hash": body_with_sig_hash}
-    write_host_config(
-        {
-            "execution_receipts": b_perf_receipts,
-            "reference_receipts": r_perf_receipts,
-            "incremental_operating_costs": "10.00",
-            "independent_acceptance_receipt": tampered_hash_rcpt,
-        }
-    )
-    proc_hash_mismatch = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            str(script),
-            "historical",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_file),
-            "--output",
-            str(out_file),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert proc_hash_mismatch.returncode == 0
-    manifest_hm = json.loads(out_file.read_text(encoding="utf-8"))
-    assert manifest_hm["outcome_classification"]["is_independently_accepted"] is False
+    # Parseable but invalid or tampered freezes are rejected before refusal.
+    tampered = frozen.model_dump(mode="json")
+    tampered["freeze_hash"] = "0" * 64
+    for invalid in ("not JSON", "{}", json.dumps(tampered)):
+        frozen_file.write_text(invalid, encoding="utf-8")
+        proc = subprocess.run(command, capture_output=True, text=True, check=False)
+        assert proc.returncode == 3
+        assert out_file.read_bytes() == b"existing result must not be replaced"
+        assert host_file.read_bytes() == original_host
 
 
 def test_cli_prospective_step_concurrent_writers_serialization(
