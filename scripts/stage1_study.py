@@ -1493,14 +1493,12 @@ def action_reconstruct(args: argparse.Namespace) -> int:
         b_receipts = [_resolve(r) for r in b_receipt_refs]
         r_receipts = [_resolve(r) for r in r_receipt_refs]
 
-        costs = Decimal(
-            str(
-                host_config.get(
-                    "incremental_operating_costs",
-                    host_config.get("attributable_costs", "10.00"),
-                )
-            )
-        )
+        if "incremental_operating_costs" in host_config:
+            costs = Decimal(str(host_config["incremental_operating_costs"]))
+        elif "attributable_costs" in host_config:
+            costs = Decimal(str(host_config["attributable_costs"]))
+        else:
+            raise ValueError("MISSING_INCREMENTAL_OPERATING_COSTS")
 
         manifest = (
             _read_json(args.run_manifest) if getattr(args, "run_manifest", None) else {}
