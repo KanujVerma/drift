@@ -29,7 +29,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import uuid
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -43,10 +42,6 @@ try:
 except ImportError:
     fcntl = None  # type: ignore[assignment]
 
-from drift.experiments.stage1_historical_execution import (
-    HistoricalRunConfigV1,
-    execute_historical_study,
-)
 from drift.experiments.stage1_original_acceptance import (
     ProductionExecutionEvidenceVerifier,
     ProductionStudyEvidenceVerifier,
@@ -588,111 +583,19 @@ def action_verify_freeze(args: argparse.Namespace) -> int:
 def action_historical_run(args: argparse.Namespace) -> int:
     try:
         freeze_data = _read_json(args.frozen)
-        host_config = _read_json(args.host_config)
+        _read_json(args.host_config)
     except Exception as e:
         sys.stderr.write(f"Invalid input: {e}\n")
         return 3
 
     try:
-        frozen = FrozenStage1StudyV1.model_validate_json(json.dumps(freeze_data))
+        FrozenStage1StudyV1.model_validate_json(json.dumps(freeze_data))
     except Exception as e:
         sys.stderr.write(f"Invalid frozen study: {e}\n")
         return 3
 
-    try:
-        trust_roots_raw = host_config.get("trust_roots", {})
-        receipt_store = host_config.setdefault("receipt_store", {})
-        artifact_store = host_config.setdefault("artifact_store", {})
-
-        authority_id = getattr(args, "authority", None)
-        if not authority_id:
-            if isinstance(trust_roots_raw, dict):
-                for role_authorities in trust_roots_raw.values():
-                    if (
-                        isinstance(role_authorities, (list, tuple, set))
-                        and role_authorities
-                    ):
-                        authority_id = next(iter(role_authorities))
-                        break
-                    elif isinstance(role_authorities, str) and role_authorities:
-                        authority_id = role_authorities
-                        break
-            elif isinstance(trust_roots_raw, (list, tuple, set)) and trust_roots_raw:
-                authority_id = next(iter(trust_roots_raw))
-
-        if not authority_id:
-            authority_id = "trusted-historical-root"
-
-        ledger_dir = (
-            Path(args.ledger_dir).resolve()
-            if getattr(args, "ledger_dir", None)
-            else Path(tempfile.mkdtemp(prefix="drift-historical-ledger-"))
-        )
-
-        session_count = getattr(args, "session_count", None)
-        expected_sessions = host_config.get("expected_sessions") or host_config.get(
-            "calendar_sessions"
-        )
-        if session_count is None:
-            if expected_sessions and isinstance(expected_sessions, (list, tuple, set)):
-                session_count = len(expected_sessions)
-            elif "scheduled_sessions" in host_config and isinstance(
-                host_config["scheduled_sessions"], int
-            ):
-                session_count = host_config["scheduled_sessions"]
-            elif (
-                hasattr(frozen.protocol, "observation_sessions")
-                and frozen.protocol.observation_sessions is not None
-            ):
-                session_count = frozen.protocol.observation_sessions
-            else:
-                session_count = 252
-
-        operating_costs = Decimal(
-            str(
-                host_config.get(
-                    "incremental_operating_costs",
-                    host_config.get("attributable_costs", "10.00"),
-                )
-            )
-        )
-
-        config = HistoricalRunConfigV1(
-            frozen=frozen,
-            origin_dir=ledger_dir,
-            authority_id=authority_id,
-            initial_capital=Decimal(
-                str(getattr(frozen.protocol, "initial_capital", "10000"))
-            ),
-            incremental_operating_costs=operating_costs,
-            session_count=session_count,
-        )
-
-        result = execute_historical_study(
-            config,
-            receipt_store=receipt_store,
-            artifact_store=artifact_store,
-        )
-
-        # Populate host_config with execution receipts and reference receipts
-        host_config["execution_receipts"] = list(result.candidate_receipt_refs)
-        host_config["reference_execution_receipts"] = list(
-            result.reference_receipt_refs
-        )
-        host_config["incremental_operating_costs"] = str(operating_costs)
-
-        # Write output manifest
-        out_payload = result.model_dump(mode="json")
-        out_payload["updated_host_config"] = host_config
-        _write_output(args.output, out_payload)
-
-        if getattr(args, "update_host_config", False):
-            _write_output(args.host_config, host_config)
-
-        return 0
-    except Exception as e:
-        sys.stderr.write(f"Historical run failed: {e}\n")
-        return 1
+    sys.stderr.write("HISTORICAL_ORIGINAL_EXECUTION_UNAVAILABLE\n")
+    return 2
 
 
 def action_historical(args: argparse.Namespace) -> int:

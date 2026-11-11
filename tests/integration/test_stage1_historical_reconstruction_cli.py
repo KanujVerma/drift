@@ -139,36 +139,36 @@ def _setup_frozen_study(tmp_path: Path) -> tuple[FrozenStage1StudyV1, Path, Path
     return frozen, frozen_file, host_config_file
 
 
+def _install_synthetic_receipts(
+    host_config_file: Path, *, tamper: bool = False
+) -> None:
+    """Create diagnostic mappings in tests, never producer-authenticated receipts."""
+    host = json.loads(host_config_file.read_text(encoding="utf-8"))
+    b = [
+        {
+            "session_index": i,
+            "metrics": {
+                "net_return": "0",
+                "terminal_nav": "99999" if tamper and i == 1 else "10000",
+            },
+        }
+        for i in range(3)
+    ]
+    r = [
+        {"session_index": i, "metrics": {"net_return": "0", "terminal_nav": "10000"}}
+        for i in range(3)
+    ]
+    host["execution_receipts"] = b
+    host["reference_execution_receipts"] = r
+    host["expected_sessions"] = [0, 1, 2]
+    host_config_file.write_text(json.dumps(host), encoding="utf-8")
+
+
 def test_synthetic_historical_run_cannot_verify_reconstruction(tmp_path: Path) -> None:
-    frozen, frozen_file, host_config_file = _setup_frozen_study(tmp_path)
-    run_out = tmp_path / "hist_run_result.json"
-
-    # Step 1: Run historical-run CLI (25 sessions)
-    proc_hrun = subprocess.run(
-        [
-            sys.executable,
-            "scripts/stage1_study.py",
-            "historical-run",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_config_file),
-            "--output",
-            str(run_out),
-            "--session-count",
-            "25",
-            "--update-host-config",
-        ],
-        capture_output=True,
-    )
-    assert proc_hrun.returncode == 0, (
-        f"historical-run failed: {proc_hrun.stderr.decode('utf-8')}"
-    )
-    assert run_out.exists()
-
-    # Step 2: The generated fixture must remain unqualified diagnostics.
-    recon_out = tmp_path / "reconstruction_report.json"
-    proc_recon = subprocess.run(
+    _, frozen_file, host_config_file = _setup_frozen_study(tmp_path)
+    _install_synthetic_receipts(host_config_file)
+    output = tmp_path / "reconstruction_report.json"
+    proc = subprocess.run(
         [
             sys.executable,
             "scripts/stage1_study.py",
@@ -177,22 +177,18 @@ def test_synthetic_historical_run_cannot_verify_reconstruction(tmp_path: Path) -
             str(frozen_file),
             "--host-config",
             str(host_config_file),
-            "--run-manifest",
-            str(run_out),
             "--output",
-            str(recon_out),
+            str(output),
         ],
         capture_output=True,
     )
-    assert proc_recon.returncode == 2
-    assert recon_out.exists()
-
-    report_data = json.loads(recon_out.read_text(encoding="utf-8"))
-    assert report_data["status"] == "RECONSTRUCTION_FAILED"
-    assert report_data["total_sessions_verified"] == 0
-    assert report_data["reconstructed_outcome"] == "UNAVAILABLE"
-    assert report_data["uncertainty_verified"] is False
-    assert "ORIGINAL_EVIDENCE_UNAUTHENTICATED" in report_data["discrepancies"]
+    assert proc.returncode == 2
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["status"] == "RECONSTRUCTION_FAILED"
+    assert report["total_sessions_verified"] == 0
+    assert report["reconstructed_outcome"] == "UNAVAILABLE"
+    assert report["uncertainty_verified"] is False
+    assert "ORIGINAL_EVIDENCE_UNAUTHENTICATED" in report["discrepancies"]
 
 
 def test_reconstruct_cli_refuses_missing_operating_costs(tmp_path: Path) -> None:
@@ -223,42 +219,10 @@ def test_reconstruct_cli_refuses_missing_operating_costs(tmp_path: Path) -> None
 
 
 def test_reconstruct_cli_negative_control_detects_tampering(tmp_path: Path) -> None:
-    frozen, frozen_file, host_config_file = _setup_frozen_study(tmp_path)
-    run_out = tmp_path / "hist_run_result.json"
-
-    # Step 1: Run historical-run CLI
-    subprocess.run(
-        [
-            sys.executable,
-            "scripts/stage1_study.py",
-            "historical-run",
-            "--frozen",
-            str(frozen_file),
-            "--host-config",
-            str(host_config_file),
-            "--output",
-            str(run_out),
-            "--session-count",
-            "25",
-            "--update-host-config",
-        ],
-        check=True,
-    )
-
-    # Tamper with host_config receipts: alter session 5 terminal NAV
-    host_data = json.loads(host_config_file.read_text(encoding="utf-8"))
-    for ref in host_data["execution_receipts"]:
-        if ref.get("session_index") == 5:
-            # Look up receipt in store and tamper
-            rid = ref["receipt_id"]
-            rcpt = host_data["receipt_store"][rid]
-            rcpt["metrics"]["terminal_nav"] = "99999.0000"
-            host_data["receipt_store"][rid] = rcpt
-            break
-    host_config_file.write_text(json.dumps(host_data), encoding="utf-8")
-
-    recon_out = tmp_path / "reconstruction_tampered.json"
-    proc_recon = subprocess.run(
+    _, frozen_file, host_config_file = _setup_frozen_study(tmp_path)
+    _install_synthetic_receipts(host_config_file, tamper=True)
+    output = tmp_path / "reconstruction_tampered.json"
+    proc = subprocess.run(
         [
             sys.executable,
             "scripts/stage1_study.py",
@@ -267,17 +231,15 @@ def test_reconstruct_cli_negative_control_detects_tampering(tmp_path: Path) -> N
             str(frozen_file),
             "--host-config",
             str(host_config_file),
-            "--run-manifest",
-            str(run_out),
             "--output",
-            str(recon_out),
+            str(output),
         ],
         capture_output=True,
     )
-    assert proc_recon.returncode == 2
-    assert b"Reconstruction failed" in proc_recon.stderr
-    assert recon_out.exists()
-
-    report_data = json.loads(recon_out.read_text(encoding="utf-8"))
-    assert report_data["status"] == "RECONSTRUCTION_FAILED"
-    assert len(report_data["discrepancies"]) > 0
+    assert proc.returncode == 2
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["status"] == "RECONSTRUCTION_FAILED"
+    assert any(
+        "B_NAV_COMPUTATION_DISCREPANCY at session 1" in item
+        for item in report["discrepancies"]
+    )
