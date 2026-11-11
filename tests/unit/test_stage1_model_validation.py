@@ -3,7 +3,7 @@
 Workstream F, Issue 575.
 """
 
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -21,13 +21,14 @@ from drift.experiments.stage1_model_validation import (
 )
 from drift.experiments.stage1_study_artifacts import CalibrationPairV1
 from drift.experiments.stage1_study_freeze import StudyDateWindowV1
+from drift.serialization.canonical import content_hash
 
 
 def _create_valid_binding() -> ImmutableModelBindingV1:
     return create_immutable_model_binding(
-        binding_id="BINDING-CLAUDE-35-20241022",
-        provider="anthropic",
-        deployment_version="claude-3-5-sonnet-20241022",
+        binding_id="synthetic-binding",
+        provider="synthetic-test-provider",
+        deployment_version="synthetic-fixture-v1",
         prompt_text="You are an asset allocator. Select B3, B4, or B5.",
         seed=42,
         token_ceiling=4096,
@@ -37,62 +38,51 @@ def _create_valid_binding() -> ImmutableModelBindingV1:
     )
 
 
+@pytest.mark.parametrize("supply_returns", [False, True])
+def test_validation_refuses_unverified_execution_without_side_effects(
+    tmp_path: Path, supply_returns: bool
+) -> None:
+    ledger_dir = tmp_path / "uncreated-ledgers"
+    config = ValidationRunConfigV1(
+        model_binding=_create_valid_binding(),
+        comparator_pair=CalibrationPairV1(
+            lambda_v=Decimal("0.25"), lambda_d=Decimal("0.50")
+        ),
+        session_count=42,
+        ledger_dir=ledger_dir,
+    )
+    artifacts: dict[str, Any] = {"existing": "unchanged"}
+    receipts: dict[str, Any] = {"existing": "unchanged"}
+    supplied = [Decimal("0.01")] * 42 if supply_returns else None
+
+    with pytest.raises(ValueError, match="VALIDATION_ORIGINAL_EVIDENCE_UNAVAILABLE"):
+        execute_2024_validation(
+            config,
+            artifact_store=artifacts,
+            receipt_store=receipts,
+            daily_b_returns=supplied,
+            daily_r_returns=supplied,
+        )
+    assert not ledger_dir.exists()
+    assert artifacts == {"existing": "unchanged"}
+    assert receipts == {"existing": "unchanged"}
+
+
 def test_immutable_model_binding_and_study_policy_conformance() -> None:
     binding = _create_valid_binding()
-    assert binding.provider == "anthropic"
-    assert binding.deployment_version == "claude-3-5-sonnet-20241022"
+    assert binding.provider == "synthetic-test-provider"
+    assert binding.deployment_version == "synthetic-fixture-v1"
     assert binding.seed == 42
     assert binding.token_ceiling == 4096
     assert binding.known_training_cutoff == date(2023, 12, 31)
 
     policy = create_study_model_policy(binding)
-    assert policy.provider == "anthropic"
-    assert policy.immutable_model_revision == "claude-3-5-sonnet-20241022"
+    assert policy.provider == "synthetic-test-provider"
+    assert policy.immutable_model_revision == "synthetic-fixture-v1"
     assert policy.seed == 42
     assert policy.known_training_cutoff == date(2023, 12, 31)
     assert len(policy.model_record_hash) == 64
     assert len(policy.prompt_hash) == 64
-
-
-def test_2024_validation_positive_control(tmp_path: Path) -> None:
-    binding = _create_valid_binding()
-    comparator = CalibrationPairV1(lambda_v=Decimal("0.25"), lambda_d=Decimal("0.50"))
-
-    ledger_dir = tmp_path / "val_ledgers"
-    config = ValidationRunConfigV1(
-        model_binding=binding,
-        comparator_pair=comparator,
-        session_count=42,  # 2 rebalance boundaries
-        ledger_dir=ledger_dir,
-    )
-
-    artifact_store: dict[str, Any] = {}
-    receipt_store: dict[str, Any] = {}
-
-    result = execute_2024_validation(
-        config,
-        artifact_store=artifact_store,
-        receipt_store=receipt_store,
-    )
-
-    assert result.status == "COMPLETED"
-    assert result.evaluated_sessions_count == 42
-    assert result.b_terminal_nav > Decimal("9000")
-    assert result.r_terminal_nav > Decimal("9000")
-    assert len(result.b_receipt_refs) == 42
-    assert len(result.r_receipt_refs) == 42
-    assert len(result.model_replay_refs) > 0
-
-    # Verify exposure inventory record
-    assert len(result.exposure_record) == 3
-    assert any("2024_VALIDATION" in exp for exp in result.exposure_record)
-    assert any("FITTED_DEV_ONLY" in exp for exp in result.exposure_record)
-
-    # Verify ledgers created
-    assert Path(result.ledger_paths["ARM-B"]).exists()
-    assert Path(result.ledger_paths["ARM-R"]).exists()
-    assert Path(result.ledger_paths["ARM-B"]).stat().st_size > 0
-    assert Path(result.ledger_paths["ARM-R"]).stat().st_size > 0
 
 
 def test_validation_negative_control_fake_transport_rejected() -> None:
@@ -141,18 +131,35 @@ def test_validation_negative_control_invalid_window() -> None:
         execute_2024_validation(config)
 
 
-def test_validation_result_tamper_fails(tmp_path: Path) -> None:
-    binding = _create_valid_binding()
-    comparator = CalibrationPairV1(lambda_v=Decimal("0.25"), lambda_d=Decimal("0.50"))
-    config = ValidationRunConfigV1(
-        model_binding=binding,
-        comparator_pair=comparator,
-        session_count=5,
-        ledger_dir=tmp_path / "ledgers",
+def test_synthetic_validation_result_tamper_fails() -> None:
+    # Test-only failed record: it is not emitted by the validation runner.
+    body = {
+        "schema_version": "drift-stage1-validation-run/1",
+        "run_id": "synthetic-test-only",
+        "status": "FAILED",
+        "completed_at": datetime(2024, 1, 1, tzinfo=UTC),
+        "model_binding_hash": "a" * 64,
+        "comparator_pair": CalibrationPairV1(
+            lambda_v=Decimal("0.25"), lambda_d=Decimal("0.50")
+        ),
+        "validation_window": StudyDateWindowV1(
+            start=date(2024, 1, 1), end=date(2024, 12, 31)
+        ),
+        "evaluated_sessions_count": 0,
+        "b_terminal_nav": Decimal("10000"),
+        "r_terminal_nav": Decimal("10000"),
+        "b_net_return": Decimal("0"),
+        "r_net_return": Decimal("0"),
+        "b_receipt_refs": (),
+        "r_receipt_refs": (),
+        "model_replay_refs": (),
+        "exposure_record": (),
+        "ledger_paths": {},
+    }
+    result = ValidationRunResultV1.model_validate(
+        body | {"validation_hash": content_hash(body)}
     )
-    res = execute_2024_validation(config)
-
-    dump = res.model_dump(mode="python")
+    dump = result.model_dump(mode="python")
     dump["validation_hash"] = "0" * 64
     with pytest.raises(ValidationError, match="VALIDATION_HASH_MISMATCH"):
         ValidationRunResultV1.model_validate(dump)
