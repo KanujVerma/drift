@@ -215,7 +215,7 @@ def calibration_ranking_key(
         raise ValueError("INCOMPLETE_ATTEMPT_METRICS_CANNOT_BE_RANKED")
 
     return (
-        -attempt.terminal_net_return,
+        attempt.terminal_net_return.copy_negate(),
         attempt.absolute_maximum_drawdown,
         attempt.total_gross_turnover,
         attempt.pair.lambda_v,
