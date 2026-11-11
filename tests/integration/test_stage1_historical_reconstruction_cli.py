@@ -139,7 +139,7 @@ def _setup_frozen_study(tmp_path: Path) -> tuple[FrozenStage1StudyV1, Path, Path
     return frozen, frozen_file, host_config_file
 
 
-def test_historical_run_and_reconstruct_pipeline(tmp_path: Path) -> None:
+def test_synthetic_historical_run_cannot_verify_reconstruction(tmp_path: Path) -> None:
     frozen, frozen_file, host_config_file = _setup_frozen_study(tmp_path)
     run_out = tmp_path / "hist_run_result.json"
 
@@ -166,7 +166,7 @@ def test_historical_run_and_reconstruct_pipeline(tmp_path: Path) -> None:
     )
     assert run_out.exists()
 
-    # Step 2: Run reconstruct CLI on the verified historical run
+    # Step 2: The generated fixture must remain unqualified diagnostics.
     recon_out = tmp_path / "reconstruction_report.json"
     proc_recon = subprocess.run(
         [
@@ -184,16 +184,42 @@ def test_historical_run_and_reconstruct_pipeline(tmp_path: Path) -> None:
         ],
         capture_output=True,
     )
-    assert proc_recon.returncode == 0, (
-        f"reconstruct failed: {proc_recon.stderr.decode('utf-8')}"
-    )
+    assert proc_recon.returncode == 2
     assert recon_out.exists()
 
     report_data = json.loads(recon_out.read_text(encoding="utf-8"))
-    assert report_data["status"] == "VERIFIED"
-    assert report_data["total_sessions_verified"] == 25
-    assert report_data["uncertainty_verified"] is True
-    assert report_data["discrepancies"] == []
+    assert report_data["status"] == "RECONSTRUCTION_FAILED"
+    assert report_data["total_sessions_verified"] == 0
+    assert report_data["reconstructed_outcome"] == "UNAVAILABLE"
+    assert report_data["uncertainty_verified"] is False
+    assert "ORIGINAL_EVIDENCE_UNAUTHENTICATED" in report_data["discrepancies"]
+
+
+def test_reconstruct_cli_refuses_missing_operating_costs(tmp_path: Path) -> None:
+    _, frozen_file, host_config_file = _setup_frozen_study(tmp_path)
+    host_data = json.loads(host_config_file.read_text(encoding="utf-8"))
+    del host_data["incremental_operating_costs"]
+    host_config_file.write_text(json.dumps(host_data), encoding="utf-8")
+    output = tmp_path / "reconstruction.json"
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "scripts/stage1_study.py",
+            "reconstruct",
+            "--frozen",
+            str(frozen_file),
+            "--host-config",
+            str(host_config_file),
+            "--output",
+            str(output),
+        ],
+        capture_output=True,
+    )
+
+    assert proc.returncode != 0
+    assert b"MISSING_INCREMENTAL_OPERATING_COSTS" in proc.stderr
+    assert not output.exists()
 
 
 def test_reconstruct_cli_negative_control_detects_tampering(tmp_path: Path) -> None:
