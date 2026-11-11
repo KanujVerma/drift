@@ -68,10 +68,10 @@ def assemble_stage1_study_draft(
     created_at: datetime,
     mode: Literal[
         "RETROSPECTIVE_DISCOVERY", "CONFIRMATORY_HISTORICAL"
-    ] = "CONFIRMATORY_HISTORICAL",
+    ] = "RETROSPECTIVE_DISCOVERY",
     prior_holdout_exposure: Literal[
         "UNKNOWN", "EXPOSED", "AUDITED_UNEXPOSED"
-    ] = "AUDITED_UNEXPOSED",
+    ] = "UNKNOWN",
     installed_source_hash: str,
     dataset_manifest_hash: str,
     calendar_and_universe_hash: str,
@@ -82,14 +82,20 @@ def assemble_stage1_study_draft(
     model: StudyModelPolicyV1,
     costs: StudyCostPolicyV1,
     statistics: StudyStatisticalPolicyV1,
-    development_start: date = date(2023, 7, 3),
-    development_end: date = date(2023, 12, 29),
-    validation_start: date = date(2024, 1, 2),
+    development_start: date = date(2021, 1, 1),
+    development_end: date = date(2023, 12, 31),
+    validation_start: date = date(2024, 1, 1),
     validation_end: date = date(2024, 12, 31),
-    scoring_start: date = date(2025, 1, 2),
+    scoring_start: date = date(2025, 1, 1),
     scoring_end: date = date(2025, 12, 31),
 ) -> Stage1StudyDraftV1:
-    """Assembles and validates a complete Stage1StudyDraftV1 from verified inputs."""
+    """Assemble a draft without inferring holdout purity or acceptance.
+
+    Default windows are inclusive calendar bounds from the locked protocol;
+    actual sessions must still come from the admitted exchange calendar.
+    Explicit overrides remain part of the protocol fingerprint and require
+    their own original acceptance evidence.
+    """
     if created_at.tzinfo is None:
         created_at = created_at.replace(tzinfo=UTC)
 
