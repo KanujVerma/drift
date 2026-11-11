@@ -53,7 +53,7 @@ class Stage1TrialAdmissionError(ValueError):
 
 
 class Stage1ResearchTrialBindingV1(FrozenModel):
-    """Authenticated research producer-to-trial association (#507)."""
+    """Research-to-trial association with structural consistency checks."""
 
     schema_version: Literal["drift-research-trial-binding/1"] = (
         "drift-research-trial-binding/1"
@@ -107,6 +107,13 @@ class Stage1ResearchTrialBindingV1(FrozenModel):
                 raise Stage1TrialAdmissionError("CANDIDATE_ACCOUNT_MISMATCH")
             if self.candidate.scope.arm_id != self.arm_id:
                 raise Stage1TrialAdmissionError("CANDIDATE_ARM_MISMATCH")
+            if (
+                self.candidate.context_ref.id != self.research_context.context_id
+                or self.candidate.context_ref.version != self.research_context.profile
+                or self.candidate.context_ref.sha256
+                != self.research_context.record_hash
+            ):
+                raise Stage1TrialAdmissionError("CANDIDATE_CONTEXT_MISMATCH")
 
         if self.disposition == "propose":
             if self.candidate is None:
@@ -247,7 +254,7 @@ class InvocationBindingPayloadV1(FrozenModel):
 
 
 class Stage1ResultTrialBindingV1(FrozenModel):
-    """Authenticated platform RESULT-to-trial and account association (#508)."""
+    """Platform RESULT-to-trial association with structural consistency checks."""
 
     schema_version: Literal["drift-result-trial-binding/1"] = (
         "drift-result-trial-binding/1"
@@ -719,7 +726,7 @@ def verify_stage1_derived_trial_record(
     source_inventory_hash: str,
     calendar_hash: str,
 ) -> bool:
-    """Independently verify genuine producer/account admission of a derived trial."""
+    """Check trial structure against a synthetic configuration, not origin."""
     # Revalidate complete record and nested bindings via fresh validation
     try:
         validated = Stage1DerivedTrialRecordV1.model_validate_json(
