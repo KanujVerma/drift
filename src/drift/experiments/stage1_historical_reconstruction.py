@@ -1,19 +1,9 @@
-"""Stage 1 G4 historical experiment independent reconstruction and verification.
+"""Non-verifying diagnostics for Stage 1 historical reconstruction.
 
-Workstream H, Issue 575.
-Implements H4 independent financial verification:
-- Reconstructs actual original account NAV, cash, fees, and session completeness
-  from retained evidence.
-- Verifies candidate arm B and comparator arm R starting from USD 10,000 in B3.
-- Independent compounding: NAV_t = NAV_{t-1} * (1 + ret_t) - fee_t.
-- Independent primary economic advantage (PEA) reconciliation:
-  PEA = (NAV_B_term - 10000) - (NAV_R_term - 10000) - incremental_operating_costs.
-- Independent drawdown, volatility, and paired stationary bootstrap verification
-  (seed 575, 10,000 reps).
-- Enforces scientific classification precedence (INVALID, UNAVAILABLE,
-  UNSUCCESSFUL, SUCCESS, PROMISING_BUT_INCONCLUSIVE).
-- Detects any discrepancy between reported manifests and reconstructed financial
-  reality.
+The current inputs are caller-provided mappings, not authenticated original
+account or acceptance evidence. Arithmetic and discrepancy checks are retained
+for diagnostics only. Every report is failed and scientifically unavailable until
+the original producer and independent-acceptance interfaces are connected.
 """
 
 from __future__ import annotations
@@ -84,8 +74,8 @@ def reconstruct_and_verify_historical_experiment(
     reported_outcome: str | None = None,
     mean_block_length: int | None = None,
 ) -> HistoricalReconstructionReportV1:
-    """Independently reconstructs account accounting, NAV, and uncertainty."""
-    discrepancies: list[str] = []
+    """Produce non-verifying diagnostics until original authority is available."""
+    discrepancies: list[str] = ["ORIGINAL_EVIDENCE_UNAUTHENTICATED"]
 
     if len(b_receipts) != len(r_receipts):
         discrepancies.append(
@@ -252,14 +242,13 @@ def reconstruct_and_verify_historical_experiment(
                 r_returns=r_returns,
                 initial_capital=initial_capital,
                 incremental_operating_costs=incremental_operating_costs,
-                mean_block_length=mean_block_length or 21,
+                mean_block_length=mean_block_length,
                 seed=575,
             )
             if unc.primary_nav_diff_interval:
                 p_nav_lower = unc.primary_nav_diff_interval[0]
             if unc.primary_economic_interval:
                 p_econ_lower = unc.primary_economic_interval[0]
-            uncertainty_verified = True
         except Exception as e:
             discrepancies.append(f"UNCERTAINTY_COMPUTATION_FAILED: {e}")
 
@@ -273,8 +262,10 @@ def reconstruct_and_verify_historical_experiment(
         r_volatility=r_vol,
         b_max_drawdown=b_mdd,
         r_max_drawdown=r_mdd,
+        is_available=False,
+        unavailable_reasons=("ORIGINAL_EVIDENCE_UNAUTHENTICATED",),
         is_prospective_complete=False,
-        is_independently_accepted=True,
+        is_independently_accepted=False,
     )
 
     reconstructed_outcome = outcome_result.outcome
@@ -294,7 +285,7 @@ def reconstruct_and_verify_historical_experiment(
         "protocol_hash": frozen.protocol.protocol_hash,
         "freeze_hash": frozen.freeze_hash,
         "status": status,
-        "total_sessions_verified": n_sessions,
+        "total_sessions_verified": 0,
         "b_terminal_nav": b_nav.quantize(Decimal("0.0001")),
         "r_terminal_nav": r_nav.quantize(Decimal("0.0001")),
         "b_terminal_nav_reconstructed": b_nav.quantize(Decimal("0.0001")),
