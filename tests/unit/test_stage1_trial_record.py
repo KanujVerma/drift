@@ -43,6 +43,7 @@ from drift.experiments.stage1_trial_projection import ExactRatioV1
 from drift.experiments.stage1_trial_provenance import _complete_manifest_fingerprint
 from drift.experiments.stage1_trial_record import (
     Stage1DerivedTrialRecordV1,
+    Stage1ResearchTrialBindingV1,
     Stage1ResultTrialBindingV1,
     Stage1TrialAdmissionError,
     build_stage1_derived_trial_record,
@@ -67,6 +68,7 @@ from drift.intelligence.receipts import (
     create_terminal_attempt,
 )
 from drift.loop.stage1_controlled_contracts import OriginalReferenceV1
+from drift.serialization.canonical import canonical_json, content_hash
 
 BASE = datetime(2026, 10, 25, 21, 0, tzinfo=UTC)
 
@@ -118,6 +120,12 @@ def _make_candidate(
         "id": campaign_id,
         "version": "1",
         "sha256": campaign_fingerprint,
+    }
+    context = _make_context(arm_id, account_id, campaign_id, campaign_fingerprint)
+    data["context_ref"] = {
+        "id": context.context_id,
+        "version": context.profile,
+        "sha256": context.record_hash,
     }
     data["strategy"] = dict(data["strategy"])
     data["strategy"]["family_id"] = family_id
@@ -233,6 +241,109 @@ def _make_model_replay(
     return ModelReplayRecord.model_validate(data)
 
 
+@pytest.mark.parametrize(
+    ("field", "wrong_value"),
+    [
+        ("id", "different-context"),
+        ("version", "different-profile"),
+        ("sha256", "b" * 64),
+    ],
+)
+def test_research_binding_rejects_candidate_from_another_context(
+    field: str, wrong_value: str
+) -> None:
+    context = _make_context("ARM-B", "ACCOUNT-B")
+    data = _make_candidate("ARM-B", "ACCOUNT-B").model_dump(mode="python")
+    ref = {
+        "id": context.context_id,
+        "version": context.profile,
+        "sha256": context.record_hash,
+    }
+    ref[field] = wrong_value
+    data["context_ref"] = ref
+    data.pop("record_hash")
+    data["record_hash"] = compute_record_hash(data)
+    candidate = ResearchCandidate.model_validate(data)
+
+    with pytest.raises(ValueError, match="CANDIDATE_CONTEXT_MISMATCH"):
+        build_stage1_research_trial_binding(
+            campaign_id="CAMP-E1-SYNTH-001",
+            campaign_spec_fingerprint=GOLDEN_CAMPAIGN_FINGERPRINT,
+            complete_manifest_fingerprint="c" * 64,
+            run_id="RUN-001",
+            arm_id="ARM-B",
+            portfolio_account_id="ACCOUNT-B",
+            checkpoint_id="CKPT-001",
+            research_context=context,
+            disposition="propose",
+            candidate=candidate,
+            issuer_authority_id="synthetic-only",
+        )
+
+
+@pytest.mark.parametrize("disposition", ["hold", "abstain", "unavailable"])
+def test_non_trading_candidate_cannot_reference_a_different_context(
+    disposition: Literal["hold", "abstain", "unavailable"],
+) -> None:
+    context = _make_context("ARM-B", "ACCOUNT-B")
+    data = _make_candidate("ARM-B", "ACCOUNT-B").model_dump(mode="python")
+    data["context_ref"] = {
+        "id": context.context_id,
+        "version": context.profile,
+        "sha256": "b" * 64,
+    }
+    data["disposition"] = disposition
+    data["strategy"] = None
+    data["targets"] = ()
+    data["cash_weight"] = None
+    data["record_hash"] = compute_record_hash(data)
+    candidate = ResearchCandidate.model_validate(data)
+
+    with pytest.raises(ValueError, match="CANDIDATE_CONTEXT_MISMATCH"):
+        build_stage1_research_trial_binding(
+            campaign_id="CAMP-E1-SYNTH-001",
+            campaign_spec_fingerprint=GOLDEN_CAMPAIGN_FINGERPRINT,
+            complete_manifest_fingerprint="c" * 64,
+            run_id="RUN-001",
+            arm_id="ARM-B",
+            portfolio_account_id="ACCOUNT-B",
+            checkpoint_id="CKPT-001",
+            research_context=context,
+            disposition=disposition,
+            candidate=candidate,
+            reasoned_absence_code="synthetic-only",
+            issuer_authority_id="synthetic-only",
+        )
+
+
+def test_cold_binding_rejects_rehashed_candidate_with_wrong_context() -> None:
+    context = _make_context("ARM-B", "ACCOUNT-B")
+    candidate = _make_candidate("ARM-B", "ACCOUNT-B")
+    binding = build_stage1_research_trial_binding(
+        campaign_id="CAMP-E1-SYNTH-001",
+        campaign_spec_fingerprint=GOLDEN_CAMPAIGN_FINGERPRINT,
+        complete_manifest_fingerprint="c" * 64,
+        run_id="RUN-001",
+        arm_id="ARM-B",
+        portfolio_account_id="ACCOUNT-B",
+        checkpoint_id="CKPT-001",
+        research_context=context,
+        disposition="propose",
+        candidate=candidate,
+        issuer_authority_id="synthetic-only",
+    )
+    data = binding.model_dump(mode="python")
+    candidate_data = data["candidate"]
+    candidate_data["context_ref"]["sha256"] = "b" * 64
+    candidate_data["record_hash"] = compute_record_hash(candidate_data)
+    data["binding_hash"] = content_hash(
+        {key: value for key, value in data.items() if key != "binding_hash"}
+    )
+
+    with pytest.raises(ValueError, match="CANDIDATE_CONTEXT_MISMATCH"):
+        Stage1ResearchTrialBindingV1.model_validate_json(canonical_json(data))
+
+
 def test_positive_stage1_derived_trial_record_b_and_r() -> None:
     campaign = make_golden_campaign()
     arms = (make_golden_arm_b(), make_golden_arm_r())
@@ -346,6 +457,57 @@ def test_positive_stage1_derived_trial_record_b_and_r() -> None:
         source_inventory_hash=src_hash,
         calendar_hash=cal_hash,
     )
+
+    # Rehash every changed synthetic record to test the cold structural verifier,
+    # not just its detection of stale hashes.
+    bad_data = cand_b.model_dump(mode="python")
+    bad_data["context_ref"]["sha256"] = "b" * 64
+    bad_data["record_hash"] = compute_record_hash(bad_data)
+    bad_candidate = ResearchCandidate.model_validate(bad_data)
+    bad_binding = Stage1ResearchTrialBindingV1.model_construct(
+        **(
+            dict(res_bind)
+            | {
+                "candidate": bad_candidate,
+                "attempts": _make_attempts(
+                    "ARM-B", b_binding.portfolio_account_id, bad_candidate
+                ),
+            }
+        )
+    )
+    bad_binding = Stage1ResearchTrialBindingV1.model_construct(
+        **(
+            dict(bad_binding)
+            | {
+                "binding_hash": content_hash(
+                    bad_binding.model_dump(mode="python", exclude={"binding_hash"})
+                )
+            }
+        )
+    )
+    bad_trial = Stage1DerivedTrialRecordV1.model_construct(
+        **(dict(trial) | {"research_binding": bad_binding})
+    )
+    bad_trial = Stage1DerivedTrialRecordV1.model_construct(
+        **(
+            dict(bad_trial)
+            | {
+                "trial_record_hash": content_hash(
+                    bad_trial.model_dump(mode="python", exclude={"trial_record_hash"})
+                )
+            }
+        )
+    )
+    with pytest.raises(Stage1TrialAdmissionError, match="CANDIDATE_CONTEXT_MISMATCH"):
+        verify_stage1_derived_trial_record(
+            bad_trial,
+            campaign=campaign,
+            arms=arms,
+            bindings=bindings,
+            expected_run_ids=("RUN-001",),
+            source_inventory_hash=src_hash,
+            calendar_hash=cal_hash,
+        )
 
 
 def test_reject_wrong_campaign() -> None:
