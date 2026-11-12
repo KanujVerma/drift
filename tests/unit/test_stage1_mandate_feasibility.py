@@ -3,6 +3,7 @@
 Workstream C, Issue 575.
 """
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -18,8 +19,35 @@ from drift.experiments.stage1_mandate_feasibility import (
 from drift.experiments.stage1_study_freeze import STAGE1_UNIVERSE
 from drift.loop.stage1_controlled_contracts import portfolio_mandate_reason
 from drift.qualification.alpaca_sip_verification import EQUITY_ETFS
+from drift.serialization.canonical import content_hash
 
 H = "a" * 64
+
+
+@pytest.mark.parametrize(
+    "case", ["empty", "truncated", "late_invalid", "complete", "missing", "invalid"]
+)
+def test_feasibility_refuses_unverified_inputs(case: str) -> None:
+    mandate = create_stage1_study_mandate(feasibility_report_hash=H)
+    prices = {ticker: [Decimal("100")] * 253 for ticker in STAGE1_UNIVERSE}
+    if case == "empty":
+        prices = {ticker: [] for ticker in STAGE1_UNIVERSE}
+    elif case == "truncated":
+        prices["IJH"] = prices["IJH"][:1]
+    elif case == "late_invalid":
+        prices["IJH"][10] = Decimal("-1")
+    elif case == "missing":
+        del prices["GLD"]
+    elif case == "invalid":
+        prices["VOO"][0] = Decimal("-1")
+
+    with pytest.raises(ValueError, match="MANDATE_FEASIBILITY_UNAVAILABLE"):
+        evaluate_mandate_feasibility(
+            mandate=mandate,
+            dataset_reference=H,
+            sessions_count=253,
+            security_prices=prices,
+        )
 
 
 def test_create_stage1_study_mandate_locked_rules() -> None:
@@ -96,60 +124,28 @@ def test_study_mandate_to_synthetic_mandate_conformance() -> None:
     assert class_breach in ("CLASS_CAP", "SECURITY_CAP")
 
 
-def test_evaluate_mandate_feasibility_positive_and_negative_controls() -> None:
-    mandate = create_stage1_study_mandate(feasibility_report_hash=H)
-    good_prices = {
-        ticker: [Decimal("100.00") for _ in range(30)] for ticker in STAGE1_UNIVERSE
+def test_synthetic_feasibility_report_tamper_fails() -> None:
+    # Construct a test-only record to retain the schema hash check. It is not
+    # producer evidence and is not emitted by the production evaluator.
+    body = {
+        "schema_version": "drift-stage1-mandate-feasibility/1",
+        "report_id": "synthetic-test-only",
+        "created_at": datetime(2024, 1, 1, tzinfo=UTC),
+        "mandate": create_stage1_study_mandate(feasibility_report_hash=H),
+        "dataset_reference": H,
+        "evaluated_sessions_count": 0,
+        "evaluated_families": ("B3", "B4", "B5"),
+        "target_evaluations_count": 0,
+        "rejected_targets_count": 1,
+        "unavailable_prices_count": 0,
+        "protective_corrections_count": 0,
+        "partial_fills_count": 0,
+        "violations": (),
+        "feasibility_status": "INFEASIBLE",
     }
-
-    report = evaluate_mandate_feasibility(
-        mandate=mandate,
-        dataset_reference=H,
-        sessions_count=30,
-        security_prices=good_prices,
+    report = StudyMandateFeasibilityReportV1.model_validate(
+        body | {"report_hash": content_hash(body)}
     )
-    assert report.feasibility_status == "FEASIBLE"
-    assert report.rejected_targets_count == 0
-    assert report.unavailable_prices_count == 0
-    assert len(report.violations) == 0
-
-    # Negative control: missing ETF prices triggers UNAVAILABLE_PRICE
-    missing_prices = {k: v for k, v in good_prices.items() if k != "GLD"}
-    bad_report = evaluate_mandate_feasibility(
-        mandate=mandate,
-        dataset_reference=H,
-        sessions_count=30,
-        security_prices=missing_prices,
-    )
-    assert bad_report.feasibility_status == "INFEASIBLE"
-    assert bad_report.unavailable_prices_count == 1
-    assert any(v.violation_type == "UNAVAILABLE_PRICE" for v in bad_report.violations)
-
-    # Negative control: nonpositive price triggers INVALID_PRICE
-    invalid_prices = dict(good_prices)
-    invalid_prices["VOO"] = [Decimal("-5.00")] * 30
-    invalid_report = evaluate_mandate_feasibility(
-        mandate=mandate,
-        dataset_reference=H,
-        sessions_count=30,
-        security_prices=invalid_prices,
-    )
-    assert invalid_report.feasibility_status == "INFEASIBLE"
-    assert any(v.violation_type == "INVALID_PRICE" for v in invalid_report.violations)
-
-
-def test_feasibility_report_tamper_fails() -> None:
-    mandate = create_stage1_study_mandate(feasibility_report_hash=H)
-    good_prices = {
-        ticker: [Decimal("100.00") for _ in range(10)] for ticker in STAGE1_UNIVERSE
-    }
-    report = evaluate_mandate_feasibility(
-        mandate=mandate,
-        dataset_reference=H,
-        sessions_count=10,
-        security_prices=good_prices,
-    )
-    # Contradictory report (tampered hash)
     raw = report.model_dump(mode="python")
     raw["report_hash"] = "f" * 64
     with pytest.raises(ValidationError, match="FEASIBILITY_REPORT_HASH_MISMATCH"):
