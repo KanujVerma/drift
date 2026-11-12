@@ -22,6 +22,34 @@ def compute_worker_source_hash() -> str:
         return hashlib.sha256(f.read()).hexdigest()
 
 
+def _exact_difference_matches(b: Decimal, r: Decimal, difference: Decimal) -> bool:
+    """Compare finite decimals without context rounding or exponent expansion."""
+    coefficients: dict[int, int] = {}
+    for value, multiplier in ((b, 1), (r, -1), (difference, -1)):
+        if value.is_zero():
+            continue
+        sign, digits, exponent = value.as_tuple()
+        assert isinstance(exponent, int)  # The caller has rejected nonfinite values.
+        coefficient = int(Decimal((sign, digits, 0))) * multiplier
+        coefficients[exponent] = coefficients.get(exponent, 0) + coefficient
+
+    accumulator = 0
+    previous_exponent: int | None = None
+    for exponent, coefficient in sorted(coefficients.items()):
+        if accumulator and previous_exponent is not None:
+            gap = exponent - previous_exponent
+            # 10**gap exceeds any integer with at most 3*gap binary bits.
+            # Refuse a nonzero remainder without constructing an enormous power.
+            if 3 * gap >= abs(accumulator).bit_length():
+                return False
+            accumulator, remainder = divmod(accumulator, 10**gap)
+            if remainder:
+                return False
+        accumulator += coefficient
+        previous_exponent = exponent
+    return accumulator == 0
+
+
 def run_block_length_worker(input_data: dict[str, Any]) -> dict[str, Any]:
     schema = input_data.get("schema_version")
     if schema != "drift-stage1-block-length-input/1":
@@ -44,10 +72,12 @@ def run_block_length_worker(input_data: dict[str, Any]) -> dict[str, Any]:
         b_dec = Decimal(b_strs[i])
         r_dec = Decimal(r_strs[i])
         diff_dec = Decimal(diff_strs[i])
-        if diff_dec != (b_dec - r_dec):
+        if not all(value.is_finite() for value in (b_dec, r_dec, diff_dec)):
+            raise ValueError("NON_FINITE_FLOAT_ENCOUNTERED")
+        if not _exact_difference_matches(b_dec, r_dec, diff_dec):
             raise ValueError(
                 f"DIFFERENCE_RETURN_MISMATCH_AT_INDEX_{i}: "
-                f"expected {b_dec - r_dec}, got {diff_dec}"
+                f"B={b_dec}, R={r_dec}, difference={diff_dec}"
             )
 
     # Convert once to binary64 numpy array, refusing nonfinite
