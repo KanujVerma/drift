@@ -25,7 +25,21 @@ from drift.domain.evaluator_costs import (
     evaluation_cost_model_hash,
 )
 from drift.experiments.stage1_trial_projection import ExactRatioV1
+from drift.loop.stage1_controlled_contracts import exact_decimal
 from drift.serialization.canonical import canonical_json, content_hash
+
+_MAX_EXACT_INPUT_DIGITS = 1024
+
+
+def _bounded_fraction(value: Decimal) -> Fraction:
+    """Bound rational expansion before converting a finite Decimal."""
+    if value.is_zero():
+        return Fraction(0)
+    parts = value.as_tuple()
+    assert isinstance(parts.exponent, int)  # The caller has rejected nonfinite values.
+    if len(parts.digits) + abs(parts.exponent) > _MAX_EXACT_INPUT_DIGITS:
+        raise ValueError("ECONOMIC_PRECISION_BUDGET_EXCEEDED")
+    return Fraction(value)
 
 
 class Stage1EconomicCostPolicyV1(FrozenModel):
@@ -148,26 +162,30 @@ def reconcile_economic_advantage(
     if incremental_operating_costs < Decimal("0"):
         raise ValueError("NEGATIVE_OPERATING_COSTS")
 
-    b_gain = b_terminal_nav - initial_capital
-    r_gain = r_terminal_nav - initial_capital
-    delta_nav = b_terminal_nav - r_terminal_nav
-    pea = delta_nav - incremental_operating_costs
+    initial = _bounded_fraction(initial_capital)
+    b_terminal = _bounded_fraction(b_terminal_nav)
+    r_terminal = _bounded_fraction(r_terminal_nav)
+    operating_cost = _bounded_fraction(incremental_operating_costs)
+    b_gain = b_terminal - initial
+    r_gain = r_terminal - initial
+    delta_nav = b_terminal - r_terminal
+    pea = delta_nav - operating_cost
 
-    b_net_ret = ExactRatioV1.from_fraction(Fraction(b_gain / initial_capital))
-    r_net_ret = ExactRatioV1.from_fraction(Fraction(r_gain / initial_capital))
-    pea_frac = ExactRatioV1.from_fraction(Fraction(pea / initial_capital))
+    b_net_ret = ExactRatioV1.from_fraction(b_gain / initial)
+    r_net_ret = ExactRatioV1.from_fraction(r_gain / initial)
+    pea_frac = ExactRatioV1.from_fraction(pea / initial)
 
     return EconomicComparisonBreakdownV1(
         initial_capital=initial_capital,
         b_terminal_nav=b_terminal_nav,
         r_terminal_nav=r_terminal_nav,
-        b_investment_gain=b_gain,
-        r_investment_gain=r_gain,
-        delta_nav=delta_nav,
+        b_investment_gain=exact_decimal(b_gain),
+        r_investment_gain=exact_decimal(r_gain),
+        delta_nav=exact_decimal(delta_nav),
         b_trading_costs=b_trading_costs,
         r_trading_costs=r_trading_costs,
         incremental_operating_costs=incremental_operating_costs,
-        primary_economic_advantage=pea,
+        primary_economic_advantage=exact_decimal(pea),
         b_net_return=b_net_ret,
         r_net_return=r_net_ret,
         pea_fraction=pea_frac,
