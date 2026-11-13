@@ -23,11 +23,11 @@ H = "6" * 64
 NOW = datetime(2026, 11, 2, 6, 0, 0, tzinfo=UTC)
 
 
-def test_validation_run_cli_positive_pipeline(tmp_path: Path) -> None:
+def test_validation_run_cli_refuses_unverified_execution(tmp_path: Path) -> None:
     binding = create_immutable_model_binding(
         binding_id="BINDING-CLI-TEST",
-        provider="anthropic",
-        deployment_version="claude-3-5-sonnet-20241022",
+        provider="synthetic-test-provider",
+        deployment_version="synthetic-fixture-v1",
         prompt_text="Allocate.",
         seed=42,
     )
@@ -61,6 +61,7 @@ def test_validation_run_cli_positive_pipeline(tmp_path: Path) -> None:
     host_config_file.write_text(json.dumps({}), encoding="utf-8")
 
     out_file = tmp_path / "val_run_result.json"
+    ledger_dir = tmp_path / "uncreated-ledgers"
 
     proc = subprocess.run(
         [
@@ -75,27 +76,19 @@ def test_validation_run_cli_positive_pipeline(tmp_path: Path) -> None:
             str(host_config_file),
             "--output",
             str(out_file),
+            "--ledger-dir",
+            str(ledger_dir),
             "--session-count",
             "25",
             "--update-host-config",
         ],
         capture_output=True,
     )
-    assert proc.returncode == 0, f"validation-run failed: {proc.stderr.decode('utf-8')}"
-    assert out_file.exists()
-
-    manifest = json.loads(out_file.read_text(encoding="utf-8"))
-    assert manifest["status"] == "COMPLETED"
-    assert manifest["evaluated_sessions_count"] == 25
-    assert len(manifest["b_receipt_refs"]) == 25
-    assert len(manifest["r_receipt_refs"]) == 25
-    assert len(manifest["exposure_record"]) == 3
-
-    # Verify host config was updated
-    updated_host = json.loads(host_config_file.read_text(encoding="utf-8"))
-    assert "validation_result" in updated_host
-    assert len(updated_host["b_receipts"]) == 25
-    assert len(updated_host["r_receipts"]) == 25
+    assert proc.returncode == 1
+    assert b"VALIDATION_ORIGINAL_EVIDENCE_UNAVAILABLE" in proc.stderr
+    assert not out_file.exists()
+    assert not ledger_dir.exists()
+    assert json.loads(host_config_file.read_text(encoding="utf-8")) == {}
 
 
 def test_validation_run_cli_negative_control_missing_comparator(
