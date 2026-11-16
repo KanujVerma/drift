@@ -43,7 +43,8 @@ restart or a concurrency/fencing proof.
 | --- | --- |
 | B01: accepted submission, lost acknowledgement and restart | Partially exercised: journal/router reconstruction with preserved mock transport |
 | B06: repeated lookup misses | No resend demonstrated, but durable UNKNOWN semantics not implemented/proven |
-| B02-B05 and B07-B12 | Not exercised here |
+| B04: out-of-order status | Older NEW/cumulative zero replaces FILLED in current status; conformance failure |
+| B02-B03, B05 and B07-B12 | Not exercised here |
 | Fresh intent while prior outcome is unresolved | Reproduced account-hold conformance failure |
 | Independent LEAN comparison | Not run; optional comparison, not a replacement financial book |
 
@@ -168,6 +169,80 @@ with TemporaryDirectory(prefix="drift568_") as tmp:
     journal.close()
     print(
         "Account-hold negative reproduced: fresh intent after unresolved submit dispatched again; 2 mock submissions, cash 398, 6 shares. This is a conformance failure, not an accepted UNKNOWN/hold implementation. No real transport was used."
+    )
+```
+
+## B04: delayed status cannot be treated as current truth
+
+A separate injected-status probe found that a one-second-older `NEW`
+report with cumulative quantity zero becomes the router's current result
+after `FILLED` with cumulative quantity five. The journal retains arrival
+order, and subsequent same-intent replay returns the older `NEW`.
+The confirmed original fill is still retrievable; actual mock cash remains
+USD 499 and holdings five shares. This proves a **status projection
+regression**, not erased original accounting. Two duplicate positive lookups
+before the delayed report retained only one report and no repeat fill/fee.
+
+[The executed B04 evidence](https://github.com/KanujVerma/drift/issues/568#issuecomment-6909299425)
+belongs to the same legacy source baseline. Append this block to the same
+temporary Python file after the B01/B06 block. It reuses the fixture order
+constructor, not a real transport or source receipt.
+
+```python
+from datetime import timedelta
+from decimal import Decimal
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from drift.domain.execution import ExecutionStatus, build_execution_report
+from drift.execution.adapter import MockBrokerAdapter
+from drift.execution.journal import PersistentOrderIntentJournal
+from drift.execution.router import BrokerNeutralExecutionRouter
+
+# Append after the B01/B06 block, reusing its order constructor and uuid7.
+
+
+class DelayedOldStatus(MockBrokerAdapter):
+    delayed = None
+
+    def get_intent_status(self, intent_id):
+        return (
+            self.delayed
+            if self.delayed is not None
+            else super().get_intent_status(intent_id)
+        )
+
+
+with TemporaryDirectory(prefix="drift568_b04_") as tmp:
+    adapter = DelayedOldStatus(initial_cash=Decimal("1000"), default_fee=Decimal("1"))
+    journal = PersistentOrderIntentJournal(Path(tmp) / "reports.sqlite")
+    router = BrokerNeutralExecutionRouter(adapter=adapter, journal=journal)
+    intent = order(uuid7(), 5, "fixture-out-of-order")
+    fill = router.route_intent(intent)
+    assert fill.status is ExecutionStatus.FILLED and fill.cum_quantity == 5
+    # Positive duplicate lookup: one report, no repeated financial effect.
+    assert router.get_intent_status(intent.intent_id) == fill
+    assert router.get_intent_status(intent.intent_id) == fill
+    assert len(journal.list_execution_reports_for_intent(intent.intent_id)) == 1
+    adapter.delayed = build_execution_report(
+        report_id=uuid7(),
+        intent_id=intent.intent_id,
+        broker_order_id=fill.broker_order_id,
+        status=ExecutionStatus.NEW,
+        cum_quantity=0,
+        leaves_quantity=5,
+        reported_at=fill.reported_at - timedelta(seconds=1),
+    )
+    observed = router.get_intent_status(intent.intent_id)
+    assert observed.status is ExecutionStatus.NEW and observed.cum_quantity == 0
+    assert journal.get_latest_execution_report(intent.intent_id) == observed
+    assert router.route_intent(intent) == observed
+    assert journal.get_execution_report(fill.report_id) == fill
+    assert adapter.cash == Decimal("499") and adapter.get_positions()[0].quantity == 5
+    assert len(journal.list_execution_reports_for_intent(intent.intent_id)) == 2
+    journal.close()
+    print(
+        "B04 conformance failure reproduced: delayed older NEW/cum=0 becomes latest status and replay result after confirmed FILLED/cum=5. Original fill remains retained; cash 499 and five shares unchanged. Positive duplicate lookups retained one report."
     )
 ```
 
