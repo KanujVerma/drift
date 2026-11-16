@@ -1,8 +1,6 @@
-"""Integration tests for Stage 1 development-run and calibrate CLI pipeline.
+"""CLI containment and explicit fixture ranking; no historical execution."""
 
-Workstream E, Issue 575.
-"""
-
+import hashlib
 import json
 import subprocess
 import sys
@@ -10,7 +8,10 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from drift.experiments.stage1_study_artifacts import (
+    CalibrationResultV1,
     create_calibration_attempt_receipt,
     create_development_calibration_plan,
 )
@@ -20,7 +21,11 @@ H = "7" * 64
 NOW = datetime(2026, 11, 2, 6, 0, 0, tzinfo=UTC)
 
 
-def test_unqualified_development_cli_leaves_no_outputs(tmp_path: Path) -> None:
+@pytest.mark.parametrize("existing_outputs", [False, True])
+def test_unqualified_development_cli_leaves_no_outputs(
+    tmp_path: Path,
+    existing_outputs: bool,
+) -> None:
     plan = create_development_calibration_plan(
         plan_id="CAL-PLAN-CLI-CONTAINMENT",
         created_at=NOW,
@@ -42,9 +47,16 @@ def test_unqualified_development_cli_leaves_no_outputs(tmp_path: Path) -> None:
     plan_file = tmp_path / "plan.json"
     plan_file.write_text(json.dumps(plan.model_dump(mode="json")), encoding="utf-8")
     host = tmp_path / "host.json"
-    host.write_text("{}", encoding="utf-8")
+    host_bytes = b'{"artifact_store":{"sentinel":[1]},"receipt_store":{"sentinel":[2]}}'
+    host.write_bytes(host_bytes)
     output = tmp_path / "result.json"
     ledger_dir = tmp_path / "ledgers"
+    output_bytes = b"existing output sentinel"
+    ledger_bytes = b"existing ledger sentinel"
+    if existing_outputs:
+        output.write_bytes(output_bytes)
+        ledger_dir.mkdir()
+        (ledger_dir / "calib_r_0.25_0.25.db").write_bytes(ledger_bytes)
     proc = subprocess.run(
         [
             sys.executable,
@@ -64,14 +76,20 @@ def test_unqualified_development_cli_leaves_no_outputs(tmp_path: Path) -> None:
         ],
         capture_output=True,
     )
-    assert proc.returncode != 0
+    assert proc.returncode == 1
     assert b"DEVELOPMENT_CALIBRATION_UNQUALIFIED" in proc.stderr
-    assert not output.exists()
-    assert not ledger_dir.exists()
-    assert host.read_text(encoding="utf-8") == "{}"
+    assert host.read_bytes() == host_bytes
+    if existing_outputs:
+        assert output.read_bytes() == output_bytes
+        ledger = ledger_dir / "calib_r_0.25_0.25.db"
+        assert ledger.read_bytes() == ledger_bytes
+        assert tuple(ledger_dir.iterdir()) == (ledger,)
+    else:
+        assert not output.exists()
+        assert not ledger_dir.exists()
 
 
-def test_development_run_cli_and_calibrate_pipeline(tmp_path: Path) -> None:
+def test_calibrate_cli_ranks_explicit_nine_pair_fixtures(tmp_path: Path) -> None:
     plan = create_development_calibration_plan(
         plan_id="CAL-PLAN-CLI-TEST",
         created_at=NOW,
@@ -97,72 +115,62 @@ def test_development_run_cli_and_calibrate_pipeline(tmp_path: Path) -> None:
     plan_file = tmp_path / "plan.json"
     plan_file.write_text(json.dumps(plan.model_dump(mode="json")), encoding="utf-8")
 
+    # These supplied metrics only exercise ranking. No account execution,
+    # original-data authentication, or scientific acceptance is represented.
+    attempts = [
+        create_calibration_attempt_receipt(
+            attempt_id=f"FIXTURE-{index}",
+            pair=pair,
+            status="COMPLETED",
+            plan_hash=plan.plan_hash,
+            terminal_net_return=Decimal("0.12") if index == 4 else Decimal("0.08"),
+            absolute_maximum_drawdown=Decimal("0.05"),
+            total_gross_turnover=Decimal("0.50"),
+            operating_cost=Decimal("0.00"),
+        )
+        for index, pair in enumerate(plan.coefficient_pairs)
+    ]
+    expected = [attempts[4], *[a for i, a in enumerate(attempts) if i != 4]]
     host_config_file = tmp_path / "host_config.json"
-    host_config_file.write_text(json.dumps({}), encoding="utf-8")
-
-    dev_run_out = tmp_path / "dev_run_result.json"
-
-    # 1. Run development-run CLI
-    proc_dev = subprocess.run(
-        [
-            sys.executable,
-            "scripts/stage1_study.py",
-            "development-run",
-            "--plan",
-            str(plan_file),
-            "--host-config",
-            str(host_config_file),
-            "--output",
-            str(dev_run_out),
-            "--session-count",
-            "130",
-            "--update-host-config",
-        ],
-        capture_output=True,
-    )
-    assert proc_dev.returncode == 0, (
-        f"development-run failed: {proc_dev.stderr.decode('utf-8')}"
-    )
-    assert dev_run_out.exists()
-
-    run_manifest = json.loads(dev_run_out.read_text(encoding="utf-8"))
-    assert run_manifest["status"] == "COMPLETED"
-    assert len(run_manifest["attempts"]) == 9
-    assert run_manifest["selected_pair"] is not None
-
-    # Host config should be updated with attempts and calibration_result
-    updated_host = json.loads(host_config_file.read_text(encoding="utf-8"))
-    assert "attempts" in updated_host
-    assert len(updated_host["attempts"]) == 9
-
-    # 2. Feed into calibrate CLI to independently confirm deterministic ranking
-    cal_out = tmp_path / "cal_result.json"
-    proc_cal = subprocess.run(
-        [
-            sys.executable,
-            "scripts/stage1_study.py",
-            "calibrate",
-            "--plan",
-            str(plan_file),
-            "--host-config",
-            str(host_config_file),
-            "--output",
-            str(cal_out),
-        ],
-        capture_output=True,
-    )
-    assert proc_cal.returncode == 0, (
-        f"calibrate failed: {proc_cal.stderr.decode('utf-8')}"
-    )
-    assert cal_out.exists()
-
-    cal_manifest = json.loads(cal_out.read_text(encoding="utf-8"))
-    assert cal_manifest["selected_pair"] == run_manifest["selected_pair"]
-    assert (
-        cal_manifest["selected_pair_receipt_hash"]
-        == run_manifest["selected_pair_receipt_hash"]
-    )
-    assert cal_manifest["ranking_proof"] == run_manifest["ranking_proof"]
+    proof: tuple[str, ...] | None = None
+    for order in (attempts, list(reversed(attempts))):
+        host_config_file.write_text(
+            json.dumps({"attempts": [a.model_dump(mode="json") for a in order]}),
+            encoding="utf-8",
+        )
+        host_before = host_config_file.read_bytes()
+        cal_out = tmp_path / "fixture_ranking.json"
+        proc_cal = subprocess.run(
+            [
+                sys.executable,
+                "scripts/stage1_study.py",
+                "calibrate",
+                "--plan",
+                str(plan_file),
+                "--host-config",
+                str(host_config_file),
+                "--output",
+                str(cal_out),
+            ],
+            capture_output=True,
+        )
+        assert proc_cal.returncode == 0, proc_cal.stderr.decode("utf-8")
+        result = CalibrationResultV1.model_validate_json(cal_out.read_text("utf-8"))
+        assert result.selected_pair == plan.coefficient_pairs[4]
+        assert result.selected_pair_receipt_hash == attempts[4].receipt_hash
+        assert len(result.attempts) == 9
+        assert len(result.ranking_proof) == 9
+        assert result.original_acceptance_receipts == ()
+        assert host_config_file.read_bytes() == host_before
+        if proof is not None:
+            assert result.ranking_proof == proof
+        proof = result.ranking_proof
+        assert result.ranking_proof == tuple(
+            hashlib.sha256(
+                f"{a.pair.lambda_v}:{a.pair.lambda_d}:{a.receipt_hash}".encode()
+            ).hexdigest()
+            for a in expected
+        )
 
 
 def test_calibrate_cli_negative_control_incomplete_grid(tmp_path: Path) -> None:
@@ -223,3 +231,4 @@ def test_calibrate_cli_negative_control_incomplete_grid(tmp_path: Path) -> None:
     )
     assert proc_cal.returncode == 2
     assert b"Calibration incomplete" in proc_cal.stderr
+    assert not cal_out.exists()
