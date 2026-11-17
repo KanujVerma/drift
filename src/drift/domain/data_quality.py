@@ -18,6 +18,10 @@ Limitations, stated plainly:
   calibrates them, and no default is offered.
 * Hashes cover the exact decimal spelling of each number, so ``5.0`` and
   ``5`` give different policy hashes.
+* The hashes are plain content hashes, not signatures. They show that a
+  policy or report is internally consistent and unchanged since it was
+  sealed. They do not show who sealed it: anyone can seal a different,
+  equally consistent report over inputs of their choosing.
 """
 
 from collections.abc import Iterable
@@ -63,6 +67,12 @@ type DataQualityCheckStatus = Literal["pass", "warn", "fail", "not_evaluated"]
 type DataQualitySubjectKind = Literal["public_daily_series", "daily_price_observations"]
 type DataQualityJumpMode = Literal["absolute", "relative"]
 
+DATA_QUALITY_CODE_RELATIVE_JUMP_FROM_ZERO = "relative_jump_from_zero_undefined"
+"""A relative change away from zero has no defined size."""
+
+DATA_QUALITY_ALWAYS_ERROR_CODES = frozenset({DATA_QUALITY_CODE_RELATIVE_JUMP_FROM_ZERO})
+"""Finding codes that are an error under every policy, hard check or not."""
+
 
 class DataQualityInputError(DriftError, ValueError):
     """Raised when an input to a quality assessment cannot be examined at all.
@@ -76,9 +86,12 @@ class _RevalidatedModel(FrozenModel):
     """Frozen model whose instances are validated again wherever they are used.
 
     Pydantic accepts an existing model instance as a field value without
-    looking inside it. With this setting an instance assembled without
-    validation is checked again when it is nested in another model or passed
-    to ``model_validate``, so it cannot ride in unchecked.
+    looking inside it. With this setting an instance is checked again when it
+    is nested in another model or passed to ``model_validate``.
+
+    That is the whole of the protection. Reading attributes straight off an
+    instance assembled with ``model_construct``, or altered through its
+    ``__dict__``, is not checked by this setting.
     """
 
     model_config = ConfigDict(revalidate_instances="always")
@@ -149,6 +162,9 @@ class DataQualityFindingV1(_RevalidatedModel):
     ``count`` is how many units the finding covers. ``observed`` and ``limit``
     are the exact text of the measured quantity and of the limit it was held
     to, or ``None`` where no such number exists.
+
+    A finding whose code is in ``DATA_QUALITY_ALWAYS_ERROR_CODES`` can only be
+    an error, whatever the policy says about its check.
     """
 
     check: DataQualityCheck
@@ -171,6 +187,14 @@ class DataQualityFindingV1(_RevalidatedModel):
             raise ValueError(
                 "data_quality_finding_dates_inverted: first_date is after last_date"
             )
+        if (
+            self.code in DATA_QUALITY_ALWAYS_ERROR_CODES
+            and self.severity is not FindingSeverity.ERROR
+        ):
+            raise ValueError(
+                "data_quality_finding_always_error_downgraded: a finding with "
+                f"code {self.code} is an error under every policy"
+            )
         return self
 
 
@@ -179,7 +203,12 @@ class DataQualityCheckResultV1(_RevalidatedModel):
 
     ``examined_count`` is how many units the check looked at and
     ``finding_count`` how many findings it produced. ``not_evaluated`` means
-    the check could not run for want of an optional input.
+    the check could not run: an optional input was not given, or the series
+    held no value for a check that reads values.
+
+    A ``pass`` with ``examined_count`` 0 is possible and means the check ran
+    over nothing it could object to, for example the jump check on a series
+    with a single value. Read the count together with the status.
     """
 
     check: DataQualityCheck
@@ -209,20 +238,28 @@ class DataQualityReportV1(_RevalidatedModel):
 
     The report embeds the policy it was produced under, so the rules that tie
     severities and the result to the hard checks are enforced by the model
-    itself: a finding of a hard check is an error, the result is ``fail``
-    exactly when there is an error finding or a hard check was not evaluated,
-    and no re-hashed edit can state otherwise.
+    itself: a finding of a hard check is an error, an always-error code is an
+    error, and the result is ``fail`` exactly when there is an error finding
+    or a hard check was not evaluated. A report that breaks one of these rules
+    does not validate, whether or not its hash was recomputed.
+
+    What that does and does not protect. The rules and the hash make a report
+    internally consistent and show an edit made without re-sealing. They are
+    not a signature: whoever holds the inputs can seal a different report that
+    is just as consistent, for example one that leaves a finding out and
+    adjusts the counts, or one produced under a softer policy. A consumer must
+    therefore compare ``subject_hash``, ``source_sha256`` and ``policy_hash``
+    with the data and the policy it actually holds, and should produce the
+    report itself when it cannot trust where one came from. Hash consistency
+    is not origin authentication.
 
     What a report does not say: that ``subject_hash`` or ``source_sha256``
     name anything real, or that the cutoff used for the availability check was
-    any particular instant (the cutoff is not recorded). A consumer must
-    compare ``subject_hash``, ``source_sha256`` and ``policy_hash`` with the
-    data and policy it actually holds. Hash consistency is not origin
-    authentication.
+    any particular instant (the cutoff is not recorded).
 
     The nested policy, check results and findings are revalidated whenever a
-    report is validated, so one assembled without validation cannot ride in
-    unchecked.
+    report is validated. Reading attributes off a report that was never
+    validated is not protected; ``require_passing`` validates before it reads.
     """
 
     schema_version: Literal["1"] = "1"

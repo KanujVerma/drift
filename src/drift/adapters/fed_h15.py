@@ -7,26 +7,33 @@ bytes, states their SHA-256, and passes them in. It is a data preparation
 utility that executes outside the evaluator core, and the evaluator core never
 imports it.
 
-The layout it accepts, and nothing else:
+The layout ``parse_h15_csv`` accepts, and nothing else:
 
 * six header rows whose first cells are exactly ``Series Description``,
   ``Unit:``, ``Multiplier:``, ``Currency:``, ``Unique Identifier: `` (with its
-  trailing space) and ``Time Period``, one further cell per series;
-* then data rows of an ISO date followed by one cell per series, where a cell
-  is a plain decimal such as ``3.22``, the marker ``ND`` (no data that day),
-  or empty (the series was not published for that date).
+  trailing space) and ``Time Period``, one further cell per series, every
+  cell wrapped in double quotes with nothing between a quote and its comma;
+* then data rows of an ISO date followed by one cell per series, with no
+  double quote anywhere on the line, where a cell is a plain decimal such as
+  ``3.22``, the marker ``ND`` (no data that day), or empty (the series was not
+  published for that date).
 
-Anything unexpected is refused: a digest or size mismatch (checked before any
+Anything else is refused: a digest or size mismatch (checked before any
 decoding), a NUL byte, bytes that are not UTF-8, mixed line endings, a blank
-or multi-line record, a wrong label, unit or multiplier, a ragged row, a
-duplicate identifier, a date that is not a calendar date, and any cell that is
-not one of the three forms above (``NaN``, ``1e-2``, another marker, digits
-outside ASCII, stray spaces). Decimals are built from the cell text only.
+line, a header cell that is unquoted or spans lines, a quoted data cell, a
+wrong label, a unit other than ``Percent:_Per_Year``, a multiplier other than
+``1``, a currency other than ``NA``, a ragged row, a duplicate identifier, a
+date that is not a calendar date, and any cell that is not one of the three
+forms above (``NaN``, ``1e-2``, another marker, digits outside ASCII, stray
+spaces). Decimals are built from the cell text only.
 
 Limitations, stated plainly:
 
 * The bytes are unauthenticated. The digest check proves the bytes match the
   digest the caller stated, not that either came from the Federal Reserve.
+* Only ``parse_h15_csv`` ties a document to bytes. ``H15NativeDocument`` is a
+  plain dataclass, so a document assembled by hand carries whatever digest
+  and size its author wrote, and a series built from it carries them too.
 * Values are one current download with no vintages, so revisions are not
   replayable, and each ``available_at`` is modeled by the caller's
   publication-lag rule rather than observed.
@@ -58,7 +65,7 @@ from drift.domain.public_series import (
     PublicDailyRateSeriesV1,
     PublicDailyRateState,
     PublicSeriesRightsRecordV1,
-    modeled_available_at,
+    modeled_available_at_each,
     seal_public_daily_rate_series,
 )
 from drift.errors import DriftError
@@ -67,6 +74,7 @@ from drift.markets.data_quality import DatedValue
 FED_H15_SOURCE_ID = "federal-reserve-h15-csv"
 H15_UNIT_PERCENT_PER_YEAR = "Percent:_Per_Year"
 H15_MULTIPLIER_ONE = "1"
+H15_CURRENCY_NOT_APPLICABLE = "NA"
 H15_MISSING_MARKER = "ND"
 H15_NOT_PUBLISHED_QUALITY_MARKER = "not_published"
 """The marker ``quality_points`` gives a date whose cell was empty."""
@@ -116,8 +124,11 @@ class H15NativeRow:
 class H15NativeDocument:
     """A parsed H.15 file: which bytes, which columns, which rows.
 
-    ``source_sha256`` and ``source_byte_size`` describe the bytes that were
-    parsed. They do not say where those bytes came from.
+    When ``parse_h15_csv`` returns a document, ``source_sha256`` and
+    ``source_byte_size`` describe the bytes it parsed. They do not say where
+    those bytes came from. This is a plain dataclass: a document assembled by
+    hand states whatever digest and size its author chose, and nothing here
+    can check them against bytes that are no longer present.
     """
 
     source_sha256: str
@@ -138,36 +149,34 @@ def parse_h15_csv(
     ascending.
     """
     text = _verified_text(data, expected_sha256=expected_sha256, max_bytes=max_bytes)
-    records = _records(_physical_lines(text))
+    lines = _physical_lines(text)
     labels = len(H15_HEADER_LABELS)
-    if len(records) < labels:
+    if len(lines) < labels:
         raise H15ParseError(
             f"h15_header_incomplete: expected {labels} header rows, found "
-            f"{len(records)} rows"
+            f"{len(lines)} lines"
         )
-    for line, (label, record) in enumerate(
-        zip(H15_HEADER_LABELS, records, strict=False), start=1
-    ):
-        if record[0] != label:
-            raise H15ParseError(
-                f"h15_header_label_mismatch: line {line} must start with "
-                f"{label!r}, found {_shown(record[0])}"
-            )
-    width = len(records[0])
-    for line, record in enumerate(records[:labels], start=1):
+    header = [
+        _header_record(number, line, label)
+        for number, (line, label) in enumerate(
+            zip(lines, H15_HEADER_LABELS, strict=False), start=1
+        )
+    ]
+    width = len(header[0])
+    for number, record in enumerate(header, start=1):
         if len(record) != width:
             raise H15ParseError(
-                f"h15_ragged_header: line {line} has {len(record)} cells, "
+                f"h15_ragged_header: line {number} has {len(record)} cells, "
                 f"expected {width}"
             )
     if width < 2:
         raise H15ParseError("h15_no_series_columns: the header names no series")
-    columns = _columns(records[:labels], width)
-    if len(records) == labels:
+    columns = _columns(header, width)
+    if len(lines) == labels:
         raise H15ParseError("h15_no_data_rows: the file has no data rows")
     rows = tuple(
-        _row(line, record, columns)
-        for line, record in enumerate(records[labels:], start=labels + 1)
+        _row(number, line, columns)
+        for number, line in enumerate(lines[labels:], start=labels + 1)
     )
     return H15NativeDocument(
         source_sha256=expected_sha256,
@@ -187,12 +196,24 @@ def build_public_daily_rate_series(
     """Build one exploratory series from one column of a parsed document.
 
     A rights record for exactly this series is required, and both it and the
-    lag policy are revalidated before use. Every cell is classified again
-    here, so a hand-built document gains nothing over parsed bytes. Empty
-    cells before the first published date and after the last are dropped (the
-    series starts at its first published date); empty cells between published
-    dates are kept as ``"not_published"`` points. ``ND`` is always kept, as a
-    ``"missing"`` point.
+    lag policy are revalidated before use. This function is the only place
+    that requirement is enforced: the series type itself stores a hash and
+    cannot tell whether a record stands behind it.
+
+    Empty cells before the first published date are dropped, so the series
+    starts at its first published date. Every later row is kept: an empty
+    cell becomes a ``"not_published"`` point, including at the end of the
+    file, and ``ND`` becomes a ``"missing"`` point. Keeping the trailing rows
+    is what stops an as-of lookup from carrying an old value forward, and it
+    means the answer at a fixed cutoff does not change when later rows are
+    appended to the file.
+
+    What is and is not checked about ``document``. The unit, multiplier and
+    currency of the column, the order of the dates and the form of every cell
+    are checked again here, so a document assembled by hand cannot introduce a
+    cell form the parser refuses. Its ``source_sha256`` and
+    ``source_byte_size`` are copied as given: they bind the series to bytes
+    only when the document came from ``parse_h15_csv``.
 
     Each ``available_at`` is modeled from ``lag_policy``. The result carries
     every required limitation and can only be exploratory.
@@ -230,6 +251,10 @@ def build_public_daily_rate_series(
             "h15_multiplier_unexpected: series multiplier is "
             f"{_shown(column.multiplier)}"
         )
+    if column.currency != H15_CURRENCY_NOT_APPLICABLE:
+        raise H15ParseError(
+            f"h15_currency_unexpected: series currency is {_shown(column.currency)}"
+        )
     for earlier, later in pairwise(checked_document.rows):
         if later.observed_on <= earlier.observed_on:
             raise H15ParseError(
@@ -240,12 +265,15 @@ def build_public_daily_rate_series(
         (row, _cell_state(row.cells[indexes[0]], row.line_number, series_identifier))
         for row in checked_document.rows
     ]
-    published = [
-        position
-        for position, (_, state) in enumerate(cells)
-        if state != "not_published"
-    ]
-    if not published:
+    first_published = next(
+        (
+            position
+            for position, (_, state) in enumerate(cells)
+            if state != "not_published"
+        ),
+        None,
+    )
+    if first_published is None:
         raise H15ParseError(
             f"h15_series_never_published: series {_shown(series_identifier)} "
             "has no published date"
@@ -253,7 +281,11 @@ def build_public_daily_rate_series(
     description = column.description.strip()
     if not description:
         raise H15ParseError("h15_description_blank: the series has no description")
+    kept = cells[first_published:]
     try:
+        stamps = modeled_available_at_each(
+            (row.observed_on for row, _ in kept), checked_lag
+        )
         points = tuple(
             PublicDailyRatePointV1(
                 observed_on=row.observed_on,
@@ -262,9 +294,9 @@ def build_public_daily_rate_series(
                 value_percent=(
                     Decimal(row.cells[indexes[0]]) if state == "value" else None
                 ),
-                available_at=modeled_available_at(row.observed_on, checked_lag),
+                available_at=stamp,
             )
-            for row, state in cells[published[0] : published[-1] + 1]
+            for (row, state), stamp in zip(kept, stamps, strict=True)
         )
         return seal_public_daily_rate_series(
             source_id=FED_H15_SOURCE_ID,
@@ -357,26 +389,37 @@ def _physical_lines(text: str) -> list[str]:
     return lines
 
 
-def _records(lines: list[str]) -> list[list[str]]:
-    """Read one strict CSV record per physical line."""
-    reader = csv.reader(lines, strict=True)
-    records: list[list[str]] = []
+def _header_record(number: int, line: str, label: str) -> list[str]:
+    """Read one header line: strict CSV, the exact label, every cell quoted.
+
+    The line is parsed on its own, so a quoted cell cannot run on into the
+    next line: an unterminated quote is an error here.
+    """
+    if line == "":
+        raise H15ParseError(f"h15_blank_line: line {number} is blank")
     try:
-        for record in reader:
-            line = len(records) + 1
-            if reader.line_num != line:
-                raise H15ParseError(
-                    f"h15_multiline_record: the record at line {line} spans "
-                    "more than one line"
-                )
-            if not record:
-                raise H15ParseError(f"h15_blank_line: line {line} is blank")
-            records.append(record)
+        parsed = list(csv.reader([line], strict=True))
     except csv.Error as error:
+        raise H15ParseError(f"h15_csv_malformed: line {number}: {error}") from error
+    if len(parsed) != 1 or not parsed[0]:
+        raise H15ParseError(f"h15_csv_malformed: line {number} is not one record")
+    record = parsed[0]
+    if record[0] != label:
         raise H15ParseError(
-            f"h15_csv_malformed: line {reader.line_num}: {error}"
-        ) from error
-    return records
+            f"h15_header_label_mismatch: line {number} must start with "
+            f"{label!r}, found {_shown(record[0])}"
+        )
+    if _quoted_line(record) != line:
+        raise H15ParseError(
+            f"h15_header_quoting_unexpected: line {number} must wrap every cell "
+            "in double quotes and nothing else"
+        )
+    return record
+
+
+def _quoted_line(record: list[str]) -> str:
+    """The one spelling of a header line this parser accepts."""
+    return ",".join('"' + cell.replace('"', '""') + '"' for cell in record)
 
 
 def _columns(header: list[list[str]], width: int) -> tuple[H15NativeColumn, ...]:
@@ -395,6 +438,11 @@ def _columns(header: list[list[str]], width: int) -> tuple[H15NativeColumn, ...]
             raise H15ParseError(
                 f"h15_multiplier_unexpected: column {index} has multiplier "
                 f"{_shown(multiplier)}, expected {H15_MULTIPLIER_ONE!r}"
+            )
+        if currency != H15_CURRENCY_NOT_APPLICABLE:
+            raise H15ParseError(
+                f"h15_currency_unexpected: column {index} has currency "
+                f"{_shown(currency)}, expected {H15_CURRENCY_NOT_APPLICABLE!r}"
             )
         if not identifier or any(character.isspace() for character in identifier):
             raise H15ParseError(
@@ -425,19 +473,26 @@ def _columns(header: list[list[str]], width: int) -> tuple[H15NativeColumn, ...]
     return tuple(columns)
 
 
-def _row(
-    line: int, record: list[str], columns: tuple[H15NativeColumn, ...]
-) -> H15NativeRow:
+def _row(number: int, line: str, columns: tuple[H15NativeColumn, ...]) -> H15NativeRow:
+    """Read one data line. Data cells are never quoted, so a comma always splits."""
+    if line == "":
+        raise H15ParseError(f"h15_blank_line: line {number} is blank")
+    if '"' in line:
+        raise H15ParseError(
+            f"h15_data_quote_refused: line {number} contains a double quote; "
+            "data cells are never quoted"
+        )
+    record = line.split(",")
     if len(record) != len(columns) + 1:
         raise H15ParseError(
-            f"h15_ragged_row: line {line} has {len(record)} cells, expected "
+            f"h15_ragged_row: line {number} has {len(record)} cells, expected "
             f"{len(columns) + 1}"
         )
     cells = tuple(record[1:])
     for cell, column in zip(cells, columns, strict=True):
-        _cell_state(cell, line, column.series_identifier)
+        _cell_state(cell, number, column.series_identifier)
     return H15NativeRow(
-        line_number=line, observed_on=_observed_on(record[0], line), cells=cells
+        line_number=number, observed_on=_observed_on(record[0], number), cells=cells
     )
 
 

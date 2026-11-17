@@ -24,6 +24,7 @@ from drift.domain.public_series import (
     PublicDailyRateSeriesV1,
     PublicSeriesRightsRecordV1,
     modeled_available_at,
+    modeled_available_at_each,
     public_daily_rate_series_hash,
     public_series_rights_record_hash,
     publication_lag_policy_hash,
@@ -205,6 +206,45 @@ def test_modeled_availability_refuses_a_date_it_cannot_represent() -> None:
         modeled_available_at(_at(FRI, 12, 0), _lag())
 
 
+def test_modeled_availability_refuses_a_policy_assembled_without_validation() -> None:
+    """A constructed zero-day lag would publish inside the observation day."""
+    same_day = PublicationLagPolicyV1.model_construct(
+        **(dict(_lag()) | {"release_lag_weekdays": 0})
+    )
+    rehashed = PublicationLagPolicyV1.model_construct(
+        **(dict(same_day) | {"policy_hash": publication_lag_policy_hash(same_day)})
+    )
+    relabeled = PublicationLagPolicyV1.model_construct(
+        **(dict(_lag()) | {"release_utc_minute_of_day": 0})
+    )
+
+    for forged in (same_day, rehashed):
+        with pytest.raises(ValidationError, match="release_lag_weekdays"):
+            modeled_available_at(FRI, forged)
+    with pytest.raises(ValidationError, match="publication_lag_policy_hash_mismatch"):
+        modeled_available_at(FRI, relabeled)
+    with pytest.raises(ValidationError):
+        modeled_available_at(FRI, None)  # type: ignore[arg-type]
+    assert modeled_available_at(FRI, _lag()) == _at(MON, 21, 15)
+
+
+def test_availability_for_many_dates_matches_the_single_form() -> None:
+    policy = _lag(non_release_dates=(HOLIDAY_MON,))
+    days = tuple(date(2024, 1, 1) + timedelta(days=offset) for offset in range(30))
+    same_day = PublicationLagPolicyV1.model_construct(
+        **(dict(policy) | {"release_lag_weekdays": 0})
+    )
+
+    stamps = modeled_available_at_each(days, policy)
+
+    assert stamps == tuple(modeled_available_at(day, policy) for day in days)
+    assert modeled_available_at_each((), policy) == ()
+    with pytest.raises(ValidationError, match="release_lag_weekdays"):
+        modeled_available_at_each(days, same_day)
+    with pytest.raises(ValidationError, match="release_lag_weekdays"):
+        modeled_available_at_each((), same_day)
+
+
 # --- value_as_of ----------------------------------------------------------
 
 
@@ -255,6 +295,95 @@ def test_value_as_of_compares_instants_and_refuses_a_naive_cutoff() -> None:
     assert series.value_as_of(local_release - timedelta(seconds=1)) is None
     with pytest.raises(ValueError, match="public_series_cutoff_naive"):
         series.value_as_of(datetime(2024, 1, 5, 21, 15))
+
+
+def _look_ahead_point() -> PublicDailyRatePointV1:
+    """A well-formed point observed on Monday but stamped a week earlier."""
+    return PublicDailyRatePointV1(
+        observed_on=MON,
+        state="value",
+        native_text="9.99",
+        value_percent=Decimal("9.99"),
+        available_at=_at(date(2024, 1, 1), 21, 15),
+    )
+
+
+def test_value_as_of_refuses_a_series_assembled_without_validation() -> None:
+    """The look-ahead attack: a future value stamped as already public."""
+    series = _series(_three_points())
+    cutoff = _at(date(2024, 1, 2), 0, 0)
+    forged = PublicDailyRateSeriesV1.model_construct(
+        **(dict(series) | {"points": (*series.points[:2], _look_ahead_point())})
+    )
+
+    assert series.value_as_of(cutoff) is None
+    with pytest.raises(ValidationError, match="public_series_available_at_mismatch"):
+        forged.value_as_of(cutoff)
+
+
+def test_value_as_of_refuses_a_series_mutated_after_validation() -> None:
+    series = _series(_three_points())
+    cutoff = _at(date(2024, 1, 2), 0, 0)
+    assert series.value_as_of(cutoff) is None
+
+    series.__dict__["points"] = (*series.points[:2], _look_ahead_point())
+
+    with pytest.raises(ValidationError, match="public_series_available_at_mismatch"):
+        series.value_as_of(cutoff)
+
+
+def test_value_as_of_refuses_a_point_mutated_in_place() -> None:
+    series = _series(_three_points())
+    cutoff = _at(date(2024, 1, 2), 0, 0)
+
+    series.points[2].__dict__["available_at"] = _at(date(2024, 1, 1), 21, 15)
+
+    with pytest.raises(ValidationError, match="public_series_available_at_mismatch"):
+        series.value_as_of(cutoff)
+
+
+def test_values_as_of_answers_many_cutoffs_exactly_like_value_as_of() -> None:
+    series = _series(_three_points())
+    start = _at(THU, 0, 0)
+    cutoffs = tuple(start + timedelta(hours=offset) for offset in range(0, 200, 5))
+
+    answers = series.values_as_of(cutoffs)
+
+    assert answers == tuple(series.value_as_of(cutoff) for cutoff in cutoffs)
+    assert {None, *series.points} == set(answers)
+    assert series.values_as_of(()) == ()
+    shuffled = tuple(reversed(cutoffs))
+    assert series.values_as_of(shuffled) == tuple(reversed(answers))
+    with pytest.raises(ValueError, match="public_series_cutoff_naive"):
+        series.values_as_of((cutoffs[0], datetime(2024, 1, 5, 21, 15)))
+
+
+def test_two_dates_released_together_answer_with_the_later_observation() -> None:
+    """A non-release day makes Friday and Monday share one release instant."""
+    policy = _lag(non_release_dates=(HOLIDAY_MON,))
+    friday = _point(FRI_BEFORE_HOLIDAY, "5.30", policy)
+    monday = _point(HOLIDAY_MON, "5.40", policy)
+    series = _series((friday, monday), lag_policy=policy)
+    shared = _at(TUE_AFTER_HOLIDAY, 21, 15)
+
+    assert friday.available_at == monday.available_at == shared
+    assert series.value_as_of(shared - timedelta(seconds=1)) is None
+    assert series.value_as_of(shared) == monday
+    assert series.values_as_of((shared, shared)) == (monday, monday)
+
+
+def test_values_as_of_refuses_a_series_assembled_without_validation() -> None:
+    series = _series(_three_points())
+    cutoff = _at(date(2024, 1, 2), 0, 0)
+    forged = PublicDailyRateSeriesV1.model_construct(
+        **(dict(series) | {"points": (*series.points[:2], _look_ahead_point())})
+    )
+
+    assert series.values_as_of((cutoff,)) == (None,)
+    with pytest.raises(ValidationError, match="public_series_available_at_mismatch"):
+        forged.values_as_of((cutoff,))
+    with pytest.raises(ValidationError, match="public_series_available_at_mismatch"):
+        forged.values_as_of(())
 
 
 # --- the series model -----------------------------------------------------

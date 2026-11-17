@@ -376,6 +376,78 @@ def test_a_relative_jump_from_zero_is_always_an_error() -> None:
     assert _assess(zero_to_zero, policy=soft).result is ValidationResult.PASS
 
 
+def test_a_relative_jump_from_zero_cannot_be_downgraded_to_a_warning() -> None:
+    """The one finding that is an error under any policy stays one when re-sealed."""
+    soft = _policy(
+        hard_checks=(DataQualityCheck.DUPLICATE_KEY,),
+        max_abs_jump="0.10",
+        jump_mode="relative",
+    )
+    failing = _assess((_value(MON, "0.00"), _value(TUE, "0.05")), policy=soft)
+    (finding,) = failing.findings
+    assert finding.code == "relative_jump_from_zero_undefined"
+    downgraded = DataQualityFindingV1.model_construct(
+        **(dict(finding) | {"severity": FindingSeverity.WARNING})
+    )
+    checks = tuple(
+        item.model_copy(update={"status": "warn"})
+        if item.check is DataQualityCheck.EXTREME_JUMP
+        else item
+        for item in failing.checks
+    )
+
+    with pytest.raises(ValidationError, match="data_quality_finding_always_error"):
+        finding.model_copy(update={"severity": FindingSeverity.WARNING})
+    with pytest.raises(ValidationError, match="data_quality_finding_always_error"):
+        _resealed(
+            failing,
+            findings=(downgraded,),
+            checks=checks,
+            result=ValidationResult.PASS,
+        )
+    # The control: the same edit to an ordinary soft finding is a valid report.
+    ordinary = _assess((_value(MON, "5.00"), _value(TUE, "5.60")), policy=soft)
+    (soft_finding,) = ordinary.findings
+    assert soft_finding.code == "relative_jump_exceeds_limit"
+    assert soft_finding.severity is FindingSeverity.WARNING
+    assert ordinary.result is ValidationResult.PASS
+
+
+def test_a_series_with_no_present_value_is_not_passed_vacuously() -> None:
+    """Bounds, jump and stale checks have nothing to examine in an all-marker series."""
+    points = (_marker(MON), _marker(TUE))
+    value_checks = (
+        DataQualityCheck.EXTREME_JUMP,
+        DataQualityCheck.OUT_OF_BOUNDS,
+        DataQualityCheck.STALE_RUN,
+    )
+
+    soft = _assess(points, policy=_policy(hard_checks=(), max_missing_run=5))
+
+    for check in value_checks:
+        result = _check(soft, check)
+        assert (result.status, result.examined_count, result.finding_count) == (
+            "not_evaluated",
+            0,
+            0,
+        )
+    assert _check(soft, DataQualityCheck.MISSING_MARKER).status == "pass"
+    assert soft.result is ValidationResult.PASS
+    for check in value_checks:
+        hard = _assess(points, policy=_policy(hard_checks=(check,), max_missing_run=5))
+        assert hard.result is ValidationResult.FAIL
+        assert hard.findings == ()
+        with pytest.raises(DataQualityError, match=f"{check.value}=not_evaluated"):
+            require_passing(hard)
+    # The control: one present value is enough for the three checks to run.
+    control = _assess(
+        (_marker(MON), _value(TUE, "5.00")),
+        policy=_policy(hard_checks=value_checks, max_missing_run=5),
+    )
+    assert {_check(control, check).status for check in value_checks} == {"pass"}
+    assert control.result is ValidationResult.PASS
+
+
 def test_values_outside_the_bounds_are_reported() -> None:
     points = (_value(MON, "-1.01"), _value(TUE, "-1"), _value(WED, "25.5"))
     policy = _policy(

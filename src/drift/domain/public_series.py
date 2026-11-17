@@ -24,6 +24,8 @@ record can state anything else, and nothing here feeds the evaluator.
 """
 
 import re
+from bisect import bisect_right
+from collections.abc import Iterable
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from itertools import pairwise
@@ -81,9 +83,13 @@ class _RevalidatedModel(FrozenModel):
     """Frozen model whose instances are validated again wherever they are used.
 
     Pydantic accepts an existing model instance as a field value without
-    looking inside it. With this setting an instance assembled without
-    validation is checked again when it is nested in another model or passed
-    to ``model_validate``, so it cannot ride in unchecked.
+    looking inside it. With this setting an instance is checked again when it
+    is nested in another model or passed to ``model_validate``.
+
+    That is the whole of the protection. Reading attributes straight off an
+    instance assembled with ``model_construct``, or altered through its
+    ``__dict__``, is not checked by this setting; a function that answers from
+    such an instance has to validate it again itself.
     """
 
     model_config = ConfigDict(revalidate_instances="always")
@@ -239,7 +245,9 @@ class PublicDailyRateSeriesV1(_RevalidatedModel):
     ``PUBLIC_SERIES_REQUIRED_LIMITATIONS``. The lane can only be exploratory.
 
     Nested points and the nested policy are revalidated whenever a series is
-    validated, so one assembled without validation cannot ride in unchecked.
+    validated, and ``value_as_of`` validates the whole series again before it
+    answers. Reading ``points`` directly off an instance that was never
+    validated is not protected.
     """
 
     schema_version: Literal["1"] = "1"
@@ -293,25 +301,51 @@ class PublicDailyRateSeriesV1(_RevalidatedModel):
     def value_as_of(self, cutoff: datetime) -> PublicDailyRatePointV1 | None:
         """Return the latest point whose modeled availability is not after ``cutoff``.
 
-        The point is returned exactly as recorded. When the latest available
-        date is ``"missing"`` or ``"not_published"`` that point is the answer,
-        with no value: an earlier value is never carried forward. ``None``
-        means no point was available yet.
+        The point is returned as recorded. When the latest available date is
+        ``"missing"`` or ``"not_published"`` that point is the answer, with no
+        value: an earlier value is not carried forward past a date the series
+        has a point for. When two dates share one release instant the later
+        observation is the answer. ``None`` means no point was available yet.
 
-        "Available" here means available under the modeled lag rule, which is
-        not an observed release time.
+        Two limits. A date the series has no point for at all is invisible
+        here, so the latest earlier point is returned across it; a calendar
+        check is what reports such a gap. And "available" means available
+        under the modeled lag rule, which is not an observed release time.
+
+        The whole series is validated again on every call, so an instance
+        assembled with ``model_construct`` or altered through ``__dict__`` is
+        refused with a validation error instead of answered from. That is one
+        pass over all points per call; use ``values_as_of`` for many cutoffs.
         """
-        if not isinstance(cutoff, datetime) or cutoff.utcoffset() is None:
-            raise ValueError(
-                "public_series_cutoff_naive: the cutoff must be a "
-                "timezone-aware datetime"
-            )
-        # Availability never decreases with the date, so the first available
-        # point from the end is the latest one.
-        for point in reversed(self.points):
-            if point.available_at <= cutoff:
-                return point
-        return None
+        (answer,) = self.values_as_of((cutoff,))
+        return answer
+
+    def values_as_of(
+        self, cutoffs: Iterable[datetime]
+    ) -> tuple[PublicDailyRatePointV1 | None, ...]:
+        """Answer ``value_as_of`` for many cutoffs with one validation.
+
+        The series is validated once, before any cutoff is answered, and every
+        answer is read from the validated copy. The answers are in the order
+        the cutoffs were given and each is exactly what ``value_as_of`` returns
+        for that cutoff.
+        """
+        instants = tuple(cutoffs)
+        for instant in instants:
+            if not isinstance(instant, datetime) or instant.utcoffset() is None:
+                raise ValueError(
+                    "public_series_cutoff_naive: the cutoff must be a "
+                    "timezone-aware datetime"
+                )
+        checked = type(self).model_validate(self)
+        # Availability never decreases with the date, so the points are also
+        # in availability order and the latest available one can be bisected.
+        stamps = [point.available_at for point in checked.points]
+        answers: list[PublicDailyRatePointV1 | None] = []
+        for instant in instants:
+            position = bisect_right(stamps, instant)
+            answers.append(checked.points[position - 1] if position else None)
+        return tuple(answers)
 
 
 def modeled_available_at(observed_on: date, policy: PublicationLagPolicyV1) -> datetime:
@@ -322,9 +356,27 @@ def modeled_available_at(observed_on: date, policy: PublicationLagPolicyV1) -> d
     the last of them at the policy's release minute. The lag is at least one
     release day, so the result is never inside the observation day.
 
+    The policy is validated again first, so one assembled with
+    ``model_construct`` (a zero-day lag, for example) is refused with a
+    validation error. Use ``modeled_available_at_each`` for many dates.
+
     This is a model. It is not when the publisher released anything.
     """
-    return _release_instant(observed_on, policy, frozenset(policy.non_release_dates))
+    (instant,) = modeled_available_at_each((observed_on,), policy)
+    return instant
+
+
+def modeled_available_at_each(
+    observed_on_dates: Iterable[date], policy: PublicationLagPolicyV1
+) -> tuple[datetime, ...]:
+    """Return ``modeled_available_at`` for many dates with one validation.
+
+    The policy is validated once, before any date is looked at, and every
+    instant is computed from the validated copy.
+    """
+    checked = PublicationLagPolicyV1.model_validate(policy)
+    blocked = frozenset(checked.non_release_dates)
+    return tuple(_release_instant(day, checked, blocked) for day in observed_on_dates)
 
 
 def public_series_rights_record_hash(record: PublicSeriesRightsRecordV1) -> SHA256Hash:

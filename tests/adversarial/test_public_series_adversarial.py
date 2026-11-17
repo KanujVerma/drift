@@ -11,6 +11,7 @@ import ast
 import importlib.util
 import subprocess
 import sys
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from hashlib import sha256
@@ -36,12 +37,14 @@ from drift.domain.data_quality import (
 )
 from drift.domain.dataset_validation import ValidationResult
 from drift.domain.public_series import (
+    PUBLIC_SERIES_LIMITATION_UNAUTHENTICATED_BYTES,
     PUBLIC_SERIES_REQUIRED_LIMITATIONS,
     PUBLIC_SERIES_RIGHTS_LIMITATION_RECORDED_ASSERTION,
     PublicationLagPolicyV1,
     PublicDailyRateSeriesV1,
     PublicSeriesRightsRecordV1,
     public_daily_rate_series_hash,
+    seal_public_daily_rate_series,
     seal_public_series_rights_record,
     seal_publication_lag_policy,
 )
@@ -427,8 +430,76 @@ def test_a_forged_series_is_revalidated_before_quality_points() -> None:
 # --- the parser boundary --------------------------------------------------
 
 
-def test_a_hand_built_document_cannot_smuggle_a_cell_past_the_parser() -> None:
-    """The builder re-reads every cell: a forged native row gains nothing."""
+def test_a_hand_built_document_states_its_own_digest_unchecked() -> None:
+    """Known limit, pinned: only ``parse_h15_csv`` ties the digest to bytes."""
+    parsed = _document()
+    invented = "9" * 64
+    hand_built = H15NativeDocument(
+        source_sha256=invented,
+        source_byte_size=1,
+        columns=parsed.columns,
+        rows=parsed.rows,
+    )
+
+    series = build_public_daily_rate_series(
+        hand_built, series_identifier=SERIES_A, lag_policy=_lag(), rights=_rights()
+    )
+
+    assert (series.source_sha256, series.source_byte_size) == (invented, 1)
+    assert series.source_sha256 != parsed.source_sha256
+    assert series.points == _series().points
+    unauthenticated = PUBLIC_SERIES_LIMITATION_UNAUTHENTICATED_BYTES
+    assert unauthenticated in series.acknowledged_limitations
+
+
+def test_only_the_adapter_path_requires_a_rights_record_object() -> None:
+    """Known limit, pinned: the domain seal accepts any well-formed hash."""
+    series = _series()
+    invented = "9" * 64
+
+    unbacked = seal_public_daily_rate_series(
+        source_id=series.source_id,
+        series_identifier=series.series_identifier,
+        description=series.description,
+        unit=series.unit,
+        source_sha256=series.source_sha256,
+        source_byte_size=series.source_byte_size,
+        points=series.points,
+        lag_policy=series.lag_policy,
+        rights_record_hash=invented,
+        acknowledged_limitations=series.acknowledged_limitations,
+    )
+
+    assert unbacked.rights_record_hash == invented
+    assert unbacked.rights_record_hash != _rights().record_hash
+    assert unbacked.lane == "exploratory"
+
+
+def test_a_hand_built_column_with_another_unit_multiplier_or_currency_is_refused() -> (
+    None
+):
+    parsed = _document()
+    (column,) = parsed.columns
+    for field, value, code in (
+        ("unit", "Index", "h15_unit_unexpected"),
+        ("multiplier", "100", "h15_multiplier_unexpected"),
+        ("currency", "USD", "h15_currency_unexpected"),
+    ):
+        forged = H15NativeDocument(
+            source_sha256=parsed.source_sha256,
+            source_byte_size=parsed.source_byte_size,
+            columns=(replace(column, **{field: value}),),
+            rows=parsed.rows,
+        )
+
+        with pytest.raises(H15ParseError, match=code):
+            build_public_daily_rate_series(
+                forged, series_identifier=SERIES_A, lag_policy=_lag(), rights=_rights()
+            )
+
+
+def test_a_hand_built_document_cannot_smuggle_a_cell_form_the_parser_refuses() -> None:
+    """The builder classifies every cell again. It does not check the digest."""
     parsed = _document()
     for smuggled in ("1e-2", "NaN", "5.25 ", "N/A"):
         forged = H15NativeDocument(

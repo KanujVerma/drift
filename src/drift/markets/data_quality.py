@@ -11,6 +11,9 @@ How the checks read the points:
 * A point that carries a missing marker is a row for its date. It counts for
   the calendar checks and is skipped, without ending a run, by the stale-run
   and jump checks, which compare consecutive present values.
+* The stale-run, jump and bounds checks read values. When no point carries a
+  value they are reported as ``not_evaluated``, never as a pass, so a series
+  of markers alone fails any policy that makes one of them hard.
 * Arithmetic is exact ``Decimal`` arithmetic with no division. A relative jump
   is tested as ``|change| > limit * |prior|``; a relative jump away from zero
   has no defined size and is always an error. Arithmetic that cannot be exact
@@ -28,6 +31,12 @@ Limitations, stated plainly:
   from a publication-lag rule it is modeled, not observed, and this module
   cannot tell the difference.
 * The cutoff bounds only this call. It is not recorded in the report.
+* A check that ran over nothing it could object to reports ``pass`` with an
+  ``examined_count`` of 0, for example the jump check on a single value. Read
+  the count with the status.
+* The duplicate and order checks look at the points as supplied. A caller that
+  hands over points from a structure which already enforces unique ascending
+  dates will never see them fire.
 * A passing report is exploratory evidence about supplied values. It is not a
   source qualification and it grants nothing.
 """
@@ -49,6 +58,7 @@ from itertools import pairwise
 from pydantic import ValidationError
 
 from drift.domain.data_quality import (
+    DATA_QUALITY_CODE_RELATIVE_JUMP_FROM_ZERO,
     DataQualityCheck,
     DataQualityCheckResultV1,
     DataQualityCheckStatus,
@@ -130,7 +140,8 @@ def assess_daily_values(
     ``cutoff`` is the latest instant a point may have become available; with
     ``None`` that part of the availability check is not applied. The
     availability check as a whole is ``not_evaluated`` when no point states an
-    ``available_at``.
+    ``available_at``, and the stale-run, jump and bounds checks are
+    ``not_evaluated`` when no point carries a value.
 
     A finding of a check in ``policy.hard_checks`` is an error and any other
     finding is a warning, except a relative jump away from zero, which is
@@ -396,6 +407,8 @@ def _stale_outcome(
 ) -> _Outcome:
     """Runs of numerically equal consecutive present values over the limit."""
     check = DataQualityCheck.STALE_RUN
+    if not present:
+        return _Outcome(check, None, ())
     drafts: list[_Draft] = []
     run: list[_Present] = []
     for item in (*present, None):
@@ -420,6 +433,8 @@ def _jump_outcome(
 ) -> _Outcome:
     """Changes between consecutive present values larger than the limit."""
     check = DataQualityCheck.EXTREME_JUMP
+    if not present:
+        return _Outcome(check, None, ())
     exact = Context(
         prec=EXACT_ARITHMETIC_DIGITS,
         traps=[InvalidOperation, DivisionByZero, Overflow, Inexact],
@@ -448,7 +463,7 @@ def _jump_outcome(
             drafts.append(
                 _Draft(
                     check,
-                    "relative_jump_from_zero_undefined",
+                    DATA_QUALITY_CODE_RELATIVE_JUMP_FROM_ZERO,
                     first,
                     last,
                     1,
@@ -462,13 +477,15 @@ def _jump_outcome(
             drafts.append(
                 _Draft(check, code, first, last, 1, str(change), str(allowed))
             )
-    return _Outcome(check, max(len(present) - 1, 0), tuple(drafts))
+    return _Outcome(check, len(present) - 1, tuple(drafts))
 
 
 def _bounds_outcome(
     present: tuple[_Present, ...], policy: DataQualityPolicyV1
 ) -> _Outcome:
     check = DataQualityCheck.OUT_OF_BOUNDS
+    if not present:
+        return _Outcome(check, None, ())
     drafts: list[_Draft] = []
     for item in present:
         day, value = item.observed_on, item.value

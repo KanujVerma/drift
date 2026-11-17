@@ -6,7 +6,7 @@ series identifiers, descriptions and values are not Federal Reserve data, no
 real H.15 file is stored in Git, and nothing here downloads anything.
 """
 
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from hashlib import sha256
 
@@ -379,6 +379,68 @@ def test_a_wrong_unit_or_multiplier_is_refused() -> None:
         _parse(_with_header_row(2, b'"Multiplier:","1.0","1"'))
 
 
+def test_a_currency_other_than_na_is_refused_for_every_column() -> None:
+    for replacement in (
+        b'"Currency:","NA","USD"',
+        b'"Currency:","USD","NA"',
+        b'"Currency:","na","NA"',
+        b'"Currency:","","NA"',
+    ):
+        with pytest.raises(H15ParseError, match="h15_currency_unexpected"):
+            _parse(_with_header_row(3, replacement))
+    assert {column.currency for column in _parse(_document_bytes()).columns} == {"NA"}
+
+
+@pytest.mark.parametrize(
+    ("index", "replacement"),
+    (
+        (0, b"Series Description,Synthetic rate A,Synthetic rate B"),
+        (0, b'"Series Description",Synthetic rate A,"Synthetic rate B"'),
+        (1, b'"Unit:",Percent:_Per_Year,"Percent:_Per_Year"'),
+        (2, b'"Multiplier:", "1","1"'),
+        (2, b'"Multiplier:","1",1'),
+        (3, b'"Currency:",\'NA\',"NA"'),
+        (4, b'"Unique Identifier: ",H15/H15/SYNTH_A.B,H15/H15/SYNTH_B.B'),
+        (5, b"Time Period,SYNTH_A.B,SYNTH_B.B"),
+    ),
+)
+def test_a_header_row_not_in_the_exact_quoted_form_is_refused(
+    index: int, replacement: bytes
+) -> None:
+    with pytest.raises(H15ParseError, match="h15_header_quoting_unexpected") as caught:
+        _parse(_with_header_row(index, replacement))
+
+    assert f"line {index + 1}" in str(caught.value)
+
+
+def test_a_fully_unquoted_header_is_refused() -> None:
+    unquoted = tuple(row.replace(b'"', b"") for row in SYNTHETIC_HEADER_ROWS)
+
+    with pytest.raises(H15ParseError, match="h15_header_quoting_unexpected"):
+        _parse(_document_bytes(header=unquoted))
+
+
+@pytest.mark.parametrize(
+    "row",
+    (
+        b'2024-01-03,"5.25",5.31',
+        b'2024-01-03,5.25,"ND"',
+        b'2024-01-03,"",5.31',
+        b'"2024-01-03",5.25,5.31',
+        b'2024-01-03,5.25,5.31"',
+        b'2024-01-03,5.""25,5.31',
+    ),
+)
+def test_a_double_quote_on_a_data_line_is_refused(row: bytes) -> None:
+    rows = list(SYNTHETIC_DATA_ROWS)
+    rows[1] = row
+
+    with pytest.raises(H15ParseError, match="h15_data_quote_refused") as caught:
+        _parse(_document_bytes(rows=tuple(rows)))
+
+    assert "line 8" in str(caught.value)
+
+
 def test_a_duplicate_or_inconsistent_identifier_is_refused() -> None:
     duplicate_ids = _document_bytes(
         header=(
@@ -453,12 +515,16 @@ def test_a_blank_line_or_a_multi_line_cell_is_refused() -> None:
 
     with pytest.raises(H15ParseError, match="h15_blank_line"):
         _parse(_document_bytes(rows=tuple(blank)))
-    with pytest.raises(H15ParseError, match="h15_multiline_record"):
+    # A header cell split over two lines leaves an unterminated quote on line 1.
+    with pytest.raises(H15ParseError, match="h15_csv_malformed") as caught:
         _parse(multi_line)
-    with pytest.raises(H15ParseError, match="h15_csv_malformed"):
+    assert "line 1" in str(caught.value)
+    with pytest.raises(H15ParseError, match="h15_data_quote_refused"):
         _parse(unterminated)
     with pytest.raises(H15ParseError, match="h15_blank_line"):
         _parse(_document_bytes() + b"\n")
+    with pytest.raises(H15ParseError, match="h15_blank_line"):
+        _parse(_with_header_row(2, b""))
 
 
 # --- line endings ---------------------------------------------------------
@@ -508,16 +574,73 @@ def test_nd_is_missing_and_an_empty_cell_is_not_published() -> None:
         (8, "value", "5.28"),
         (9, "value", "5.29"),
     ]
-    # Series B: ND is a missing observation, the trailing empty cell is dropped.
+    # Series B: ND is a missing observation, the trailing empty cell is kept.
     assert [(p.observed_on.day, p.state, p.native_text) for p in series_b.points] == [
         (2, "value", "5.30"),
         (3, "value", "5.31"),
         (4, "missing", "ND"),
         (5, "value", "5.33"),
         (8, "value", "5.34"),
+        (9, "not_published", ""),
     ]
     assert series_b.points[2].value_percent is None
     assert series_a.points[2].value_percent is None
+
+
+def test_a_fixed_cutoff_answer_does_not_change_when_later_rows_are_appended() -> None:
+    """Trailing unpublished dates are kept, so an old value is not carried forward."""
+    rows = (
+        b"2024-01-04,3.10,5.30",
+        b"2024-01-05,,5.31",
+        b"2024-01-08,,5.32",
+    )
+    appended = (*rows, b"2024-01-10,3.40,5.33")
+    cutoff = datetime(2024, 1, 9, 23, 0, tzinfo=UTC)
+
+    before = _series(_document_bytes(rows=rows), SERIES_A)
+    after = _series(_document_bytes(rows=appended), SERIES_A)
+
+    assert [(p.observed_on.day, p.state) for p in before.points] == [
+        (4, "value"),
+        (5, "not_published"),
+        (8, "not_published"),
+    ]
+    seen = before.value_as_of(cutoff)
+    assert seen is not None
+    assert (seen.observed_on, seen.state, seen.value_percent) == (
+        date(2024, 1, 8),
+        "not_published",
+        None,
+    )
+    assert after.value_as_of(cutoff) == seen
+    assert after.points[: len(before.points)] == before.points
+    # Every instant before the appended row is released answers the same.
+    first_new_release = after.points[-1].available_at
+    instant = datetime(2024, 1, 4, 0, 0, tzinfo=UTC)
+    compared = 0
+    while instant < first_new_release:
+        assert after.value_as_of(instant) == before.value_as_of(instant)
+        instant += timedelta(hours=3)
+        compared += 1
+    assert compared > 50
+    assert after.value_as_of(first_new_release) == after.points[-1]
+
+
+def test_empty_cells_before_the_first_published_date_are_still_dropped() -> None:
+    rows = (
+        b"2024-01-02,,5.30",
+        b"2024-01-03,,5.31",
+        b"2024-01-04,3.10,5.32",
+        b"2024-01-05,,5.33",
+    )
+
+    series = _series(_document_bytes(rows=rows), SERIES_A)
+
+    assert [(p.observed_on.day, p.state) for p in series.points] == [
+        (4, "value"),
+        (5, "not_published"),
+    ]
+    assert series.value_as_of(datetime(2024, 1, 4, 23, 0, tzinfo=UTC)) is None
 
 
 def test_a_value_keeps_its_native_text_and_exact_decimal() -> None:
