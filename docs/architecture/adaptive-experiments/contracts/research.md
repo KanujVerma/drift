@@ -2,14 +2,25 @@
 
 ## Start here: authority before action
 
-This is the canonical Krish producer specification for CONTEXT/CANDIDATE,
-attempts, model replay and raw cost receipts, produced under
-[#375](https://github.com/KanujVerma/drift/issues/375). **It is a draft contract
-proposal until independent acceptance and merge. It implements no runtime.**
-The proposed wire profile below is `drift-research/1-draft`; that name is not an
-existing Python type or an accepted persisted schema. Replace the draft profile
-only through the recorded acceptance decision, then pin the accepted commit in
-each runtime child issue. A merged document alone is not permission to run a study.
+This producer design record for CONTEXT/CANDIDATE, attempts, model replay and
+raw cost receipts was published under
+[#375](https://github.com/KanujVerma/drift/issues/375). Its document bytes and the
+later bounded intelligence implementation are present on main. Publication and
+code delivery do not supply missing producer/consumer or scientific acceptance.
+Read #375 and the consuming issue for the exact accepted scope and revision.
+
+The implementation uses the `drift-research/1-draft` profile. Do not rename that
+profile, rewrite persisted hashes or upgrade its authority through this document.
+A new accepted wire revision requires its own migration and compatibility work.
+Original research authority and trial binding remain separately governed by
+[#507](https://github.com/KanujVerma/drift/issues/507).
+
+The remaining sections preserve the historical design baseline, examples and
+rationale. Statements about future slices, pending merges, old writer assignments
+or historical API absence are not a live work queue. Resolve current ownership
+through [workstreams](../../workstreams.md), required issue-specific migration
+receipts and authenticated handoffs. Do not reimplement incorporated slices or
+infer external source, model, study or trading permission from their existence.
 
 A fresh Antigravity agent using its available Flash model should do the following:
 
