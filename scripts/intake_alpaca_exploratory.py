@@ -97,6 +97,7 @@ from drift.adapters.alpaca_exploratory import (  # noqa: E402
     retain_native_bytes,
     retain_origin_observations,
     run_alpaca_exploratory_intake,
+    verify_alpaca_sip_request_bounds,
 )
 from drift.domain.securities import ListingVenue  # noqa: E402
 
@@ -122,6 +123,10 @@ class RedirectRefusedError(OSError):
 
 class UnauthorizedHostError(ValueError):
     """Raised before any request is built for a host this tool may not contact."""
+
+
+class AlpacaAccountAccessError(OSError):
+    """Raised when Alpaca API returns an authentication or entitlement error."""
 
 
 class InvalidApiKeyError(ValueError):
@@ -239,13 +244,26 @@ def _fetch_bytes(
     appeal.add_header("APCA-API-KEY-ID", keys[0])
     appeal.add_header("APCA-API-SECRET-KEY", keys[1])
     appeal.add_header("Accept", "application/json")
-    with _build_opener().open(appeal, timeout=_TIMEOUT_SECONDS) as response:
-        answered = response.geturl()
-        _assert_same_tls_origin(url, answered)
-        status = int(response.status)
-        content_type = response.headers.get("Content-Type")
-        body = response.read()
-        observed_at = datetime.now(UTC)
+    try:
+        with _build_opener().open(appeal, timeout=_TIMEOUT_SECONDS) as response:
+            answered = response.geturl()
+            _assert_same_tls_origin(url, answered)
+            status = int(response.status)
+            content_type = response.headers.get("Content-Type")
+            body = response.read()
+            observed_at = datetime.now(UTC)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            raise AlpacaAccountAccessError(
+                "ACCOUNT_ACCESS_UNAVAILABLE: Alpaca API credentials returned "
+                "HTTP 401 Unauthorized"
+            ) from exc
+        if exc.code == 403:
+            raise AlpacaAccountAccessError(
+                "ACCOUNT_ACCESS_UNAVAILABLE: Alpaca API returned "
+                f"HTTP 403: {exc.reason}"
+            ) from exc
+        raise
     if not isinstance(body, bytes):  # pragma: no cover - defensive
         raise TypeError("Alpaca response body must be exact bytes")
     return body, AlpacaOriginObservation(
@@ -272,6 +290,10 @@ def _acquire_payloads(
     request. The corporate-actions GET names every action type the adapter
     requests (issue 76, B1): the same route and host, with a wider filter.
     """
+    valid_delay, delay_err = verify_alpaca_sip_request_bounds(request)
+    if not valid_delay:
+        raise ValueError(delay_err)
+
     parameters = alpaca_endpoint_parameters(request)
     bars, bars_origin = _fetch_bytes(
         BARS_OBJECT_KEY,
@@ -310,6 +332,8 @@ def _failure_label(error: BaseException) -> str:
     Never the message: `http.client` builds exception messages out of header
     values and raw status lines, either of which can carry a key.
     """
+    if isinstance(error, AlpacaAccountAccessError):
+        return str(error)
     label = type(error).__name__
     if isinstance(error, urllib.error.HTTPError):
         label = f"{label} (HTTP {int(error.code)})"

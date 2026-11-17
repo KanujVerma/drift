@@ -1025,6 +1025,31 @@ def verify_run_account_binding(*, binding: RunAccountBindingV1) -> bool:
     return True
 
 
+def _snapshot_experiment_collections(
+    *,
+    arms: Sequence[ArmSpecV1],
+    bindings: Sequence[RunAccountBindingV1],
+    expected_run_ids: Sequence[str],
+) -> tuple[
+    tuple[ArmSpecV1, ...],
+    tuple[RunAccountBindingV1, ...],
+    tuple[str, ...],
+]:
+    """Freeze caller collection views before any completeness or profile checks."""
+    if not isinstance(arms, Sequence) or isinstance(arms, (str, bytes)):
+        raise ValueError("arms must be a sequence of ArmSpecV1 instances")
+    if not isinstance(expected_run_ids, Sequence) or isinstance(
+        expected_run_ids, (str, bytes)
+    ):
+        raise ValueError("expected_run_ids must be a sequence of strings")
+    if not isinstance(bindings, Sequence) or isinstance(bindings, (str, bytes)):
+        raise ValueError("bindings must be a sequence of RunAccountBindingV1 instances")
+
+    # Check length/emptiness only on the captured immutable values. In particular,
+    # a Sequence subclass may override __bool__ or change its iterator on reread.
+    return tuple(arms), tuple(bindings), tuple(expected_run_ids)
+
+
 def verify_experiment_configuration(
     *,
     campaign: CampaignSpecV1,
@@ -1033,9 +1058,12 @@ def verify_experiment_configuration(
     expected_run_ids: Sequence[str],
 ) -> bool:
     verify_campaign_spec(campaign=campaign)
+    arms, bindings, expected_run_ids = _snapshot_experiment_collections(
+        arms=arms,
+        bindings=bindings,
+        expected_run_ids=expected_run_ids,
+    )
 
-    if not isinstance(arms, Sequence) or isinstance(arms, (str, bytes)):
-        raise ValueError("arms must be a sequence of ArmSpecV1 instances")
     if not arms:
         raise ValueError("arms collection cannot be empty")
 
@@ -1091,10 +1119,6 @@ def verify_experiment_configuration(
     if set(campaign.control_arm_references) & primary_pair:
         raise ValueError("control_arm_references overlaps with primary comparison pair")
 
-    if not isinstance(expected_run_ids, Sequence) or isinstance(
-        expected_run_ids, (str, bytes)
-    ):
-        raise ValueError("expected_run_ids must be a sequence of strings")
     if not expected_run_ids:
         raise ValueError("expected_run_ids cannot be empty")
     for r_id in expected_run_ids:
@@ -1102,9 +1126,6 @@ def verify_experiment_configuration(
     if len(expected_run_ids) != len(set(expected_run_ids)):
         raise ValueError("duplicate run IDs in expected_run_ids")
     expected_runs_set = set(expected_run_ids)
-
-    if not isinstance(bindings, Sequence) or isinstance(bindings, (str, bytes)):
-        raise ValueError("bindings must be a sequence of RunAccountBindingV1 instances")
 
     seen_binding_ids: set[str] = set()
     seen_cra: set[tuple[str, str, str]] = set()
@@ -1186,6 +1207,11 @@ def verify_stage1_synthetic_br_configuration(
     bindings: Sequence[RunAccountBindingV1],
     expected_run_ids: Sequence[str],
 ) -> bool:
+    arms, bindings, expected_run_ids = _snapshot_experiment_collections(
+        arms=arms,
+        bindings=bindings,
+        expected_run_ids=expected_run_ids,
+    )
     verify_experiment_configuration(
         campaign=campaign,
         arms=arms,

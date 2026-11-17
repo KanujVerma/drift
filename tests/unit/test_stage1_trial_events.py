@@ -1,6 +1,6 @@
 """Tests for Stage 1 auditable trial-event chain."""
 
-from dataclasses import replace
+from dataclasses import fields, replace
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
@@ -1003,3 +1003,102 @@ def test_reject_append_non_event_first_element_in_existing_chain() -> None:
         )
     assert len(non_event_chain) == 1
     assert non_event_chain[0] == "not-an-event"
+
+
+# ---------------------------------------------------------------------------
+# Issue #488: Canonical duplicate identity, not user-overridable __eq__
+# ---------------------------------------------------------------------------
+
+
+class _MisleadingEqualEvent(Stage1TrialEvent):
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+    __hash__ = Stage1TrialEvent.__hash__
+
+
+class _EqualityMustNotRunEvent(Stage1TrialEvent):
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("untrusted subclass equality was invoked")
+
+    __hash__ = Stage1TrialEvent.__hash__
+
+
+def _replay_root(payload_reference: str) -> Stage1TrialEvent:
+    return build_stage1_trial_event(
+        trial_id="CAMP-001:RUN-001:ARM-B:CKPT-001",
+        event_index=0,
+        previous_event_reference="ROOT",
+        event_kind="OPPORTUNITY_CREATED",
+        recorded_at=datetime(2026, 10, 18, 20, 20, 30, tzinfo=UTC),
+        producer_evidence_references=("a" * 64, "f" * 64),
+        payload_reference=payload_reference,
+        payload_hash="01f8a73080e754508a23c88172de3fe6cd77b76819e7768861b68ef90290b630",
+    )
+
+
+def _as_subclass(
+    event: Stage1TrialEvent, kind: type[Stage1TrialEvent]
+) -> Stage1TrialEvent:
+    return kind(
+        **{field.name: getattr(event, field.name) for field in fields(Stage1TrialEvent)}
+    )
+
+
+@pytest.mark.parametrize("position", ["incoming", "stored"])
+def test_direct_append_rejects_valid_conflicting_subclass_replay(position: str) -> None:
+    original = _replay_root("fixture://original")
+    conflict = _replay_root("fixture://conflicting")
+    assert original.event_id == conflict.event_id
+    assert original.event_hash != conflict.event_hash
+    retained = (
+        _as_subclass(original, _MisleadingEqualEvent)
+        if position == "stored"
+        else original
+    )
+    incoming = (
+        _as_subclass(conflict, _MisleadingEqualEvent)
+        if position == "incoming"
+        else conflict
+    )
+    assert verify_stage1_trial_chain(trial_id=original.trial_id, events=(retained,))
+    assert verify_stage1_trial_chain(trial_id=original.trial_id, events=(incoming,))
+    prior = (retained,)
+    with pytest.raises(ValueError, match="conflicting event"):
+        append_stage1_trial_event(events=prior, event=incoming)
+    assert prior == (retained,)
+    assert prior[0] is retained
+    assert retained.event_hash == original.event_hash
+    assert incoming.event_hash == conflict.event_hash
+
+
+@pytest.mark.parametrize("position", ["incoming", "stored"])
+def test_direct_append_canonical_identical_subclass_replay(position: str) -> None:
+    root = _replay_root("fixture://unchanged")
+    wrapped = _as_subclass(root, _EqualityMustNotRunEvent)
+    retained = wrapped if position == "stored" else root
+    incoming = root if position == "stored" else wrapped
+    chain = (retained,)
+    assert append_stage1_trial_event(events=chain, event=incoming) is chain
+
+
+def test_direct_append_normal_conflict_and_identical_replay() -> None:
+    original = _replay_root("fixture://original")
+    same = _replay_root("fixture://original")
+    different = _replay_root("fixture://different")
+    chain = (original,)
+    assert same is not original
+    assert append_stage1_trial_event(events=chain, event=same) is chain
+    with pytest.raises(ValueError, match="conflicting event"):
+        append_stage1_trial_event(events=chain, event=different)
+    assert chain == (original,)
+
+
+def test_direct_append_rejects_malformed_retained_chain_before_replay() -> None:
+    original = _replay_root("fixture://original")
+    tampered = replace(original, event_hash="0" * 64)
+    with pytest.raises(ValueError, match="event_hash mismatch"):
+        append_stage1_trial_event(events=(tampered,), event=original)
