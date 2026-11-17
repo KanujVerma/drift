@@ -20,9 +20,11 @@ from drift.domain.risk import RiskVerdictStatus
 from drift.errors import DriftError
 from drift.execution.adapter import BrokerAdapterProtocol
 from drift.execution.journal import (
+    DuplicateIntentRecordError,
     PersistentOrderIntentJournal,
 )
 from drift.risk.gatekeeper import HardRiskGatekeeper
+from drift.serialization.canonical import canonical_json
 
 __all__ = [
     "BrokerNeutralExecutionRouter",
@@ -109,8 +111,7 @@ class BrokerNeutralExecutionRouter:
                 return latest
             adapter_rep = self._adapter.get_intent_status(existing.intent_id)
             if adapter_rep is not None:
-                self._journal.record_execution_report(adapter_rep)
-                return adapter_rep
+                return self._retain_report(adapter_rep, intent_id=existing.intent_id)
 
         # Check idempotency by intent_id
         existing_id = self._journal.get_intent(intent.intent_id)
@@ -127,8 +128,7 @@ class BrokerNeutralExecutionRouter:
                 return latest
             adapter_rep = self._adapter.get_intent_status(existing_id.intent_id)
             if adapter_rep is not None:
-                self._journal.record_execution_report(adapter_rep)
-                return adapter_rep
+                return self._retain_report(adapter_rep, intent_id=existing_id.intent_id)
 
         # New intent: record to journal
         self._journal.record_intent(intent)
@@ -159,13 +159,11 @@ class BrokerNeutralExecutionRouter:
                     rejection_reason=rejection_reason,
                     reported_at=datetime.now(UTC),
                 )
-                self._journal.record_execution_report(rejected_report)
-                return rejected_report
+                return self._retain_report(rejected_report, intent_id=intent.intent_id)
 
         # Dispatch to broker adapter
         report = self._adapter.submit_intent(intent)
-        self._journal.record_execution_report(report)
-        return report
+        return self._retain_report(report, intent_id=intent.intent_id)
 
     def cancel_intent(self, intent_id: UUID) -> ExecutionReportV1:
         """Request cancellation of an order intent and persist resulting report."""
@@ -174,22 +172,46 @@ class BrokerNeutralExecutionRouter:
             raise UnknownIntentError(f"intent_id {intent_id} not found in journal")
 
         report = self._adapter.cancel_intent(intent_id)
-        self._journal.record_execution_report(report)
-        return report
+        return self._retain_report(report, intent_id=intent_id)
 
     def get_intent_status(self, intent_id: UUID) -> ExecutionReportV1 | None:
         """Query latest execution report for an intent from adapter and journal."""
         adapter_rep = self._adapter.get_intent_status(intent_id)
         if adapter_rep is not None:
-            latest_journal = self._journal.get_latest_execution_report(intent_id)
-            if (
-                latest_journal is None
-                or latest_journal.report_id != adapter_rep.report_id
-            ):
-                self._journal.record_execution_report(adapter_rep)
-            return adapter_rep
+            return self._retain_report(adapter_rep, intent_id=intent_id)
 
         return self._journal.get_latest_execution_report(intent_id)
+
+    def _retain_report(
+        self, report: ExecutionReportV1, *, intent_id: UUID
+    ) -> ExecutionReportV1:
+        """Retain a new report or read back an exactly identical prior delivery.
+
+        The journal stays strict and append-only. Only a duplicate whose stored
+        payload matches is recoverable; other persistence errors still propagate.
+        This is report identity handling, not status ordering or settlement.
+        """
+        if report.intent_id != intent_id:
+            raise RouterExecutionError("execution report intent does not match request")
+
+        retained = self._journal.get_execution_report(report.report_id)
+        if retained is None:
+            try:
+                self._journal.record_execution_report(report)
+            except DuplicateIntentRecordError:
+                # Another connection or reentrant notification may have committed
+                # this report after our read. Do not swallow unrelated collisions.
+                retained = self._journal.get_execution_report(report.report_id)
+                if retained is None:
+                    raise
+            else:
+                return report
+
+        if canonical_json(retained.model_dump(mode="python")) != canonical_json(
+            report.model_dump(mode="python")
+        ):
+            raise RouterExecutionError("conflicting execution report identity")
+        return retained
 
     def get_position_discrepancies(
         self,
