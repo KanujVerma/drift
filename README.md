@@ -84,14 +84,32 @@ Drift evaluates progress across five distinct dimensions:
 | **M7** AI Research Agent | COMPLETE | COMPLETE | PENDING REVIEW | EXPLORATORY | LOCAL ONLY |
 | **M8** Recursive R&D Loop | COMPLETE | COMPLETE | PENDING REVIEW | EXPLORATORY | LOCAL ONLY |
 | **M10** Champion / Challenger | COMPLETE | COMPLETE | PENDING REVIEW | EXPLORATORY | LOCAL ONLY |
-| **M11** Promotion / Overfitting Gates | QUEUED | QUEUED | QUEUED | UNQUALIFIED | UNAUTHORIZED |
+| **M11** Promotion / Overfitting Gates | COMPLETE | PRESENT; VERIFY EXACT HEAD | ACCEPTANCE NOT RECONCILED HERE | UNQUALIFIED | UNAUTHORIZED |
 | **M12** Simulated Shadow Broker | COMPLETE | COMPLETE | ACCEPTED | N/A (SIMULATION) | UNAUTHORIZED |
 | **M13** Deterministic Hard Risk | COMPLETE | COMPLETE | ACCEPTED | N/A (RISK GATE) | UNAUTHORIZED |
 | **M14** Broker-Neutral Router | COMPLETE | COMPLETE | ACCEPTED | N/A (EXECUTION) | UNAUTHORIZED |
 | **M15** Paper / Shadow Validation | COMPLETE | COMPLETE | ACCEPTED | N/A (SHADOW) | UNAUTHORIZED |
-| **M16** Robinhood Agentic MCP Adapter | COMPLETE | COMPLETE | ACCEPTED | N/A (ADAPTER) | **UNAUTHORIZED** |
+| **M16** Robinhood Agentic MCP Adapter | OFFLINE ADAPTER IMPLEMENTED | MOCK / OFFLINE COVERAGE | SEE M16 ACCEPTANCE RECORD | N/A (ADAPTER) | **UNAUTHORIZED** |
 | **M17** Tiny-Money Canary | COMPLETE | COMPLETE | ACCEPTED | N/A (CANARY) | **UNAUTHORIZED** |
 | **M18+** Bounded Autonomy | COMPLETE | COMPLETE | ACCEPTED | N/A (AUTONOMY) | **UNAUTHORIZED** |
+
+M11 implementation was delivered in [PR #264](https://github.com/KanujVerma/drift/pull/264);
+the earlier QUEUED entry did not describe the code inventory. Test availability
+and a green engineering check do not establish independent scientific acceptance,
+a qualified dataset, strategy promotion or permission to trade.
+
+M16 includes a broker adapter interface, order/account translation and a
+deterministic mock transport. Its offline tests do not establish an authenticated,
+current-schema Robinhood connection or live-account readiness. M15, M17 and M18+
+likewise distinguish implemented components from actual prospective or capital
+operations. Read [execution safety](docs/architecture/execution-safety-audit.md)
+and the applicable release issues before asserting operational readiness.
+
+Current work routes through [workstreams](docs/architecture/workstreams.md) and
+the [adaptive experiment entrypoint](docs/architecture/adaptive-experiments/README.md).
+GitHub issues and PRs own live claims and remaining acceptance. Synthetic G2
+integration, an admitted G3 study freeze, historical G4 results and prospective
+G5 evidence are separate deliverables; none is inferred from this status table.
 
 ### PR #350 Research Integrity and Parallel Portfolios Components
 
