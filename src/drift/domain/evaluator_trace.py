@@ -13,14 +13,17 @@ that was reordered, truncated, or stitched together from two runs.
 """
 
 from collections.abc import Sequence
+from datetime import date
 from decimal import Decimal
 from enum import StrEnum
+from fractions import Fraction
 from typing import Annotated, Literal, Self
 from uuid import UUID
 
 from pydantic import Field, field_validator, model_validator
 
 from drift.domain.common import FrozenModel, NonBlankStr, SHA256Hash, UTCDateTime
+from drift.domain.evaluator_cash_yield import CashYieldDayCount, cash_interest
 from drift.domain.evaluator_execution import ExecutionFillV1, FillRejectionV1
 from drift.domain.evaluator_exploratory_accounting import (
     ExploratoryReconstructedAccountingPriceV1,
@@ -413,6 +416,76 @@ class ExecutionAuthorizationTraceEventV1(_TraceEventBaseV1):
     reason: NonBlankStr
 
 
+class CashInterestAccruedTraceEventV1(_TraceEventBaseV1):
+    """Opt-in modeled interest credited on idle cash before a session's effects.
+
+    Emitted only when a caller supplied a cash-yield policy and the credit is
+    strictly positive. Modeled interest is EXPLORATORY, so the event states
+    that it is never promotion-grade evidence, and a promotion result cannot
+    bind a trace that holds one.
+
+    The event restates every input of the accrual, so the credit can be
+    recomputed from the event alone. Its validator does exactly that, with
+    the one accrual function the engine credited the book with. The policy is
+    named by its terms hash, which leaves the rate series out: the one rate
+    this accrual read is bound by ``rate_record_hash``, and no event depends
+    on a rate dated after it.
+    """
+
+    kind: Literal["cash_interest_accrued"] = "cash_interest_accrued"
+    phase: Literal[EvaluationPhase.PRE_OPEN_EFFECTS] = EvaluationPhase.PRE_OPEN_EFFECTS
+    is_promotion_grade_evidence: Literal[False] = False
+    policy_terms_hash: SHA256Hash
+    rate_record_hash: SHA256Hash
+    accrual_start_date: date
+    accrual_days: int = Field(gt=0)
+    annualized_rate: CanonicalMoney
+    day_count: CashYieldDayCount
+    interest_quantum: CanonicalMoney
+    accrual_base_cash: CanonicalMoney
+    interest: CanonicalMoney
+    cash_balance_after: CanonicalMoney
+
+    @model_validator(mode="after")
+    def reconcile_accrual(self) -> Self:
+        if self.session_index == 0:
+            raise ValueError(
+                "the first session has no earlier close to accrue interest from"
+            )
+        if self.interest <= ZERO:
+            raise ValueError(
+                f"credited interest must be strictly positive, got {self.interest}"
+            )
+        session_date = self.session_key.local_date
+        accrued_to = date.toordinal(self.accrual_start_date) + self.accrual_days
+        if accrued_to != date.toordinal(session_date):
+            raise ValueError(
+                f"an accrual of {self.accrual_days} calendar days from "
+                f"{date.isoformat(self.accrual_start_date)} does not end on the "
+                f"session date {date.isoformat(session_date)}"
+            )
+        expected = cash_interest(
+            cash=self.accrual_base_cash,
+            annualized_rate=self.annualized_rate,
+            accrual_days=self.accrual_days,
+            day_count=self.day_count,
+            quantum=self.interest_quantum,
+        )
+        if self.interest != expected:
+            raise ValueError(
+                f"credited interest must equal {expected}, got {self.interest}"
+            )
+        with decimal_context():
+            credited = self.accrual_base_cash + self.interest
+        exact = Fraction(self.accrual_base_cash) + Fraction(self.interest)
+        if Fraction(credited) != exact or self.cash_balance_after != credited:
+            raise ValueError(
+                f"cash balance after the credit must equal {credited}, got "
+                f"{self.cash_balance_after}"
+            )
+        return self
+
+
 type EvaluatorTraceEventV1 = Annotated[
     SessionStartTraceEventV1
     | CorporateActionAppliedTraceEventV1
@@ -513,11 +586,13 @@ def seal_evaluation_trace_log(
 
 
 # Observer-enabled traces are a new wire version. Never extend the frozen V1
-# event union: EvaluationRunArtifactsV1 embeds that exact schema.
+# event union: EvaluationRunArtifactsV1 embeds that exact schema. Every other
+# opt-in event, modeled cash interest included, joins this union instead.
 type EvaluatorTraceEventV2 = Annotated[
     EvaluatorTraceEventV1
     | ExecutionAuthorizationTraceEventV1
-    | SessionObservationTraceEventV1,
+    | SessionObservationTraceEventV1
+    | CashInterestAccruedTraceEventV1,
     Field(discriminator="kind"),
 ]
 
@@ -567,11 +642,16 @@ type EvaluationTraceLog = Annotated[
 def seal_observed_evaluation_trace_log(
     events: Sequence[EvaluatorTraceEventV2],
 ) -> EvaluationTraceLogV1 | EvaluationTraceLogV2:
-    """Use V2 only when optional observer events actually exist."""
+    """Use V2 only when optional observer or opt-in events actually exist."""
     values = tuple(events)
     if not any(
         isinstance(
-            event, (SessionObservationTraceEventV1, ExecutionAuthorizationTraceEventV1)
+            event,
+            (
+                SessionObservationTraceEventV1,
+                ExecutionAuthorizationTraceEventV1,
+                CashInterestAccruedTraceEventV1,
+            ),
         )
         for event in values
     ):

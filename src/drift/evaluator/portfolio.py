@@ -3,6 +3,7 @@
 from collections.abc import Collection, Iterator, Mapping
 from contextlib import contextmanager
 from decimal import Decimal
+from fractions import Fraction
 
 from drift.domain.common import UUID7, SHA256Hash
 from drift.domain.evaluator_clock import SessionClockV1
@@ -397,6 +398,38 @@ class PortfolioAccountingKernel:
                 self._cash += claim.total_cash_expected
                 del self._claims[claim.claim_id]
                 self._settled.add(claim.claim_id)
+            self._rebuild()
+
+    def credit_cash_interest(self, amount: Decimal) -> None:
+        """Credit modeled interest on idle cash to the cash balance.
+
+        Interest is cash income, not a trading result. Realized PnL, costs,
+        holdings, claims and any mark are left exactly as they were, as
+        settlement leaves them. The amount must be an exact, finite, strictly
+        positive ``Decimal`` the book can hold without rounding. Modeled
+        interest is EXPLORATORY, so a book in any other lane refuses it.
+        """
+        if self._lane != "exploratory":
+            raise LaneAdmissibilityError(
+                f"{self._lane} lane refuses modeled cash interest"
+            )
+        if type(amount) is not Decimal:
+            raise TypeError(
+                f"cash interest must be an exact Decimal, got {type(amount).__name__}"
+            )
+        if not amount.is_finite():
+            raise ValueError("cash interest must be finite")
+        if amount <= ZERO:
+            raise ValueError(f"cash interest must be strictly positive, got {amount}")
+        with self._transaction(), decimal_context():
+            credited = self._cash + amount
+            if Fraction(credited) != Fraction(self._cash) + Fraction(amount):
+                raise ValueError(
+                    f"cash interest {amount} on a balance of {self._cash} cannot "
+                    "be held exactly in the pinned portfolio context; it is "
+                    "refused, not rounded"
+                )
+            self._cash = credited
             self._rebuild()
 
     def advance_session(self, session_key: SessionKeyV1) -> None:

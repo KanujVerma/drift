@@ -1034,7 +1034,7 @@ def test_replacing_lifecycle_lifetime_anchor_fails_without_original() -> None:
 @pytest.mark.parametrize("at", ["retain", "claim", "consume"])
 @pytest.mark.parametrize(
     "collaborator",
-    ["_corporate_actions", "_rebalance", "_exploratory_dividends"],
+    ["_corporate_actions", "_rebalance", "_exploratory_dividends", "_cash_yield"],
 )
 def test_public_class_descriptor_cannot_intercept_prepared_collaborator(
     monkeypatch: pytest.MonkeyPatch, at: str, collaborator: str
