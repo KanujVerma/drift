@@ -69,6 +69,16 @@ G1_ALPACA_SIP_SOURCE_PATHS = frozenset(
         "src/drift/qualification/alpaca_sip_verification.py",
     }
 )
+# Offline data-quality report and public daily rate series (exploratory lane).
+# Exact registrations add actual-file scans; no directory receives an exemption.
+DATA_QUALITY_PUBLIC_SERIES_SOURCE_PATHS = frozenset(
+    {
+        "src/drift/adapters/fed_h15.py",
+        "src/drift/domain/data_quality.py",
+        "src/drift/domain/public_series.py",
+        "src/drift/markets/data_quality.py",
+    }
+)
 # Separate #553-#557/#559 requests share one explicit dispatch, not a prefix rule.
 OFFLINE_PREFLIGHT_SCRIPT_PATHS = frozenset(
     {
@@ -288,6 +298,7 @@ INERT_SOURCE_PATHS = (
     | G2_EXECUTION_EXTENSION_SOURCE_PATHS
     | G3_STAGE1_EXTENSION_SOURCE_PATHS
     | G1_ALPACA_SIP_SOURCE_PATHS
+    | DATA_QUALITY_PUBLIC_SERIES_SOURCE_PATHS
     | OFFLINE_PREFLIGHT_SCRIPT_PATHS
 )
 SCANNED_AS_PRODUCTION_PATHS = (
@@ -307,6 +318,7 @@ SCANNED_AS_PRODUCTION_PATHS = (
     | G2_EXECUTION_EXTENSION_SOURCE_PATHS
     | G3_STAGE1_EXTENSION_SOURCE_PATHS
     | G1_ALPACA_SIP_SOURCE_PATHS
+    | DATA_QUALITY_PUBLIC_SERIES_SOURCE_PATHS
     | OFFLINE_PREFLIGHT_SCRIPT_PATHS
 )
 M1E_SCRIPT_PATHS = frozenset(
@@ -1189,6 +1201,14 @@ def test_g3_stage1_extensions_have_actual_inert_source_scans(relative: str) -> N
 @pytest.mark.parametrize("relative", sorted(G1_ALPACA_SIP_SOURCE_PATHS))
 def test_g1_alpaca_sip_extensions_have_actual_inert_source_scans(relative: str) -> None:
     """Registered G1 Alpaca SIP qualification path passes actual-file guard."""
+    _assert_m1e_source_file_allowed(relative)
+
+
+@pytest.mark.parametrize("relative", sorted(DATA_QUALITY_PUBLIC_SERIES_SOURCE_PATHS))
+def test_data_quality_public_series_have_actual_inert_source_scans(
+    relative: str,
+) -> None:
+    """Registered data-quality and public-series paths pass actual-file guard."""
     _assert_m1e_source_file_allowed(relative)
 
 
