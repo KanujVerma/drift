@@ -22,13 +22,19 @@ from drift.domain.risk import (
 )
 from drift.domain.sessions import SessionKeyV1
 from drift.domain.shadow_broker import SimulatedOrderV1
+from drift.errors import DriftError
 from drift.risk.journal import PersistentRiskJournal
 
 BPS_DENOMINATOR = Decimal("10000")
 
 __all__ = [
+    "CachedRiskApprovalBlockedError",
     "HardRiskGatekeeper",
 ]
+
+
+class CachedRiskApprovalBlockedError(DriftError):
+    """An active emergency stop prevents reuse of a historical risk approval."""
 
 
 class HardRiskGatekeeper:
@@ -70,6 +76,8 @@ class HardRiskGatekeeper:
 
         Accepts either SimulatedOrderV1 or OrderIntentV1.
         Returns RiskVerdictV1 and logs verdict into PersistentRiskJournal.
+        Raises CachedRiskApprovalBlockedError if an active kill switch blocks
+        reuse of an already journaled approval; the historical verdict is kept.
         """
         order_id: UUID = (
             order.order_id if isinstance(order, SimulatedOrderV1) else order.intent_id
@@ -82,6 +90,13 @@ class HardRiskGatekeeper:
 
         existing_verdict = self._journal.get_verdict_for_order(order_id)
         if existing_verdict is not None:
+            if (
+                existing_verdict.status == RiskVerdictStatus.ALLOWED
+                and self._journal.is_kill_switch_tripped()
+            ):
+                raise CachedRiskApprovalBlockedError(
+                    "cached risk approval is blocked by the active kill switch"
+                )
             return existing_verdict
 
         # 1. Persistent Kill Switch Latch Check
