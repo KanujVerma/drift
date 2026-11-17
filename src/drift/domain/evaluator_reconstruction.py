@@ -13,10 +13,23 @@ of a realized session, not proof of historical publication availability, not
 proof of the absence of halts, and never promotion-grade evidence.
 """
 
+from collections import OrderedDict
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from datetime import date, datetime
 from decimal import Decimal
+from enum import Enum
+from functools import wraps
 from typing import Literal, Self
+from uuid import UUID
 
-from pydantic import ValidationInfo, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from drift.domain.common import (
     UUID7,
@@ -45,6 +58,107 @@ REQUIRED_RECONSTRUCTION_FIELDS: tuple[str, ...] = (
 """Canonical required exploratory fields for scheduled source-basis reconstruction."""
 
 _COHORT_SORT_KEY = str
+
+
+class _ObservationValidationReuse:
+    """One call's bounded exact-preimage hash computations, never validation."""
+
+    def __init__(self) -> None:
+        self.max_entries = 8192
+        self.max_bytes = 128 * 1024 * 1024
+        self.retained_bytes = 0
+        self.entries: OrderedDict[tuple[object, ...], tuple[str, int]] = OrderedDict()
+
+    def retain(self, key: tuple[object, ...], result: str, cost: int) -> None:
+        if cost > self.max_bytes or self.max_entries <= 0:
+            return
+        while self.entries and (
+            len(self.entries) >= self.max_entries
+            or self.retained_bytes + cost > self.max_bytes
+        ):
+            _, (_, old_cost) = self.entries.popitem(last=False)
+            self.retained_bytes -= old_cost
+        self.entries[key] = (result, cost)
+        self.retained_bytes += cost
+
+
+def _exact_reconstruction_value(value: object) -> tuple[object, int] | None:
+    """Lossless typed key; no caller equality or claimed digest is trusted."""
+    cls = type(value)
+    if cls is str:
+        return (str, value), 128 + 4 * len(value)  # type: ignore[arg-type]
+    if cls in (type(None), bool, int):
+        return (cls, value), 192
+    if cls is Decimal:
+        assert isinstance(value, Decimal)
+        if not value.is_finite():
+            return None
+        triple = value.as_tuple()
+        return (Decimal, triple), 256 + 16 * len(triple.digits)
+    if cls is UUID:
+        assert isinstance(value, UUID)
+        return (UUID, value.int), 192
+    if cls is datetime:
+        assert isinstance(value, datetime)
+        # Domain timestamps are already strictly validated/normalized to UTC.
+        return (datetime, value.isoformat(), value.fold), 256
+    if cls is date:
+        assert isinstance(value, date)
+        return (date, value.isoformat()), 192
+    if cls is ListingVenue:
+        assert isinstance(value, Enum)
+        return (ListingVenue, value.value), 192
+    if cls is tuple:
+        assert isinstance(value, tuple)
+        parts = [_exact_reconstruction_value(item) for item in value]
+        if any(part is None for part in parts):
+            return None
+        checked = [part for part in parts if part is not None]
+        return tuple(part[0] for part in checked), 128 + sum(p[1] for p in checked)
+    if cls in (
+        SessionKeyV1,
+        ExploratoryReconstructedFieldV1,
+        ExploratoryReconstructedSessionObservationV1,
+    ):
+        assert isinstance(value, BaseModel)
+        parts = [
+            _exact_reconstruction_value(getattr(value, name))
+            for name in type(value).model_fields
+        ]
+        if any(part is None for part in parts):
+            return None
+        checked = [part for part in parts if part is not None]
+        return (cls, tuple(p[0] for p in checked)), 192 + sum(p[1] for p in checked)
+    return None
+
+
+_OBSERVATION_VALIDATION_REUSE: ContextVar[_ObservationValidationReuse | None] = (
+    ContextVar("drift_private_observation_validation_reuse", default=None)
+)
+
+
+@contextmanager
+def _reconstruction_validation_scope() -> Iterator[_ObservationValidationReuse]:
+    """Never share successes across independent roots, arms, reads or failures."""
+    cache = _ObservationValidationReuse()
+    token = _OBSERVATION_VALIDATION_REUSE.set(cache)
+    try:
+        yield cache
+    finally:
+        _OBSERVATION_VALIDATION_REUSE.reset(token)
+        cache.entries.clear()
+        cache.retained_bytes = 0
+
+
+def _with_reconstruction_validation_reuse[**P, T](
+    function: Callable[P, T],
+) -> Callable[P, T]:
+    @wraps(function)
+    def scoped(*args: P.args, **kwargs: P.kwargs) -> T:
+        with _reconstruction_validation_scope():
+            return function(*args, **kwargs)
+
+    return scoped
 
 
 def cohort_authorization_hash(cohort: ExploratoryCohortAuthorizationV1) -> SHA256Hash:
@@ -254,13 +368,43 @@ class ExploratoryReconstructedSessionObservationV1(FrozenModel):
         return tuple(sorted(values))
 
     @model_validator(mode="after")
-    def validate_reconstruction(self) -> Self:
-        expected = exploratory_reconstruction_hash(self)
+    def validate_reconstruction(self, info: ValidationInfo) -> Self:
+        # Ordinary strict field and model validation has already executed.
+        # Reuse only the pure canonical hash computation for an identical full
+        # typed body. Return this newly parsed object, never a cached model.
+        cache = _OBSERVATION_VALIDATION_REUSE.get()
+        key: tuple[object, ...] | None = None
+        cost = 0
+        if (
+            cache is not None
+            and info.mode == "json"
+            and info.context is None
+            and type(self) is ExploratoryReconstructedSessionObservationV1
+        ):
+            exact = _exact_reconstruction_value(self)
+            if exact is not None:
+                key = (
+                    type(self),
+                    type(self).__pydantic_serializer__,
+                    exploratory_reconstruction_hash,
+                    content_hash,
+                    exact[0],
+                )
+                cost = exact[1]
+        cached = cache.entries.get(key) if cache is not None and key else None
+        if cached is None:
+            expected = exploratory_reconstruction_hash(self)
+        else:
+            expected = cached[0]
+            assert cache is not None and key is not None
+            cache.entries.move_to_end(key)
         if self.reconstruction_hash != expected:
             raise ValueError(
                 f"reconstruction hash mismatch: expected {expected}, "
                 f"got {self.reconstruction_hash}"
             )
+        if cached is None and cache is not None and key is not None:
+            cache.retain(key, expected, cost)
         return self
 
 
