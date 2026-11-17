@@ -8,6 +8,7 @@ source-basis open prices, with versioned costs and adverse slippage.
 """
 
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal
@@ -33,7 +34,9 @@ from drift.domain.evaluator_execution import (
 from drift.domain.evaluator_portfolio import (
     IndeterminateBasisError,
     PortfolioStateV2,
+    canonical_money,
     decimal_context,
+    fits_portfolio_context,
 )
 from drift.domain.evaluator_reconstruction import ExploratoryCohortListingRoleV1
 from drift.domain.evaluator_strategy import SecurityTargetPositionV1
@@ -48,6 +51,90 @@ from drift.domain.securities import (
 from drift.evaluator.portfolio import PortfolioAccountingKernel
 
 ONE = Decimal("1")
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionCloseOrderCost:
+    """Numeric projection only, not a qualified quote, fill or account result."""
+
+    delta: int
+    reference_notional: Decimal
+    fees: Decimal
+    adverse_shortfall: Decimal
+    estimated_cost: Decimal
+    cash_delta: Decimal
+
+
+def _order_fees(
+    quantity: int, price: Decimal, cost_model: EvaluationCostModelV1
+) -> Decimal:
+    """Shared unslipped-price fee expression; callers own the pinned context."""
+    return (
+        quantity * cost_model.commission_per_share
+        + cost_model.fixed_fee_per_order
+        + quantity
+        * price
+        * cost_model.notional_fee_basis_points
+        / BASIS_POINT_DENOMINATOR
+    )
+
+
+def estimate_decision_close_order_cost(
+    *, delta: int, decision_close: Decimal, cost_model: EvaluationCostModelV1
+) -> DecisionCloseOrderCost:
+    """Calculate read-only order costs from explicitly supplied numeric inputs.
+
+    Positive delta buys and negative delta sells. Input provenance, account/NAV,
+    target completeness, mandate and funding admission belong to the producer;
+    this primitive cannot authenticate any of them or dispatch an order.
+    """
+    if type(delta) is not int or not fits_portfolio_context(Decimal(abs(delta))):
+        raise ValueError("delta must be a representable integer whole-share change")
+    if (
+        type(decision_close) is not Decimal
+        or not decision_close.is_finite()
+        or decision_close <= ZERO
+        or not fits_portfolio_context(decision_close)
+    ):
+        raise ValueError(
+            "decision-close price must be a positive representable Decimal"
+        )
+    if type(cost_model) is not EvaluationCostModelV1:
+        raise ValueError("cost model must be an explicit EvaluationCostModelV1")
+
+    try:
+        with decimal_context():
+            # A frozen model can still be forged with model_construct; validate
+            # its original fields/hash instead of accepting an asserted policy.
+            checked_model = EvaluationCostModelV1.model_validate(
+                cost_model.model_dump(mode="python")
+            )
+            if delta == 0:
+                return DecisionCloseOrderCost(0, ZERO, ZERO, ZERO, ZERO, ZERO)
+            quantity = abs(delta)
+            notional = quantity * decision_close
+            fees = _order_fees(quantity, decision_close, checked_model)
+            shortfall = (
+                notional
+                * checked_model.adverse_slippage_basis_points
+                / BASIS_POINT_DENOMINATOR
+            )
+            cost = fees + shortfall
+            cash_delta = (
+                -(notional + shortfall + fees)
+                if delta > 0
+                else notional - shortfall - fees
+            )
+            return DecisionCloseOrderCost(
+                delta=delta,
+                reference_notional=canonical_money(notional),
+                fees=canonical_money(fees),
+                adverse_shortfall=canonical_money(shortfall),
+                estimated_cost=canonical_money(cost),
+                cash_delta=canonical_money(cash_delta),
+            )
+    except ArithmeticError as error:
+        raise ValueError("order-cost arithmetic cannot be represented") from error
 
 
 def _security_order(security_id: UUID) -> bytes:
@@ -535,14 +622,7 @@ class AtomicRebalanceEngine:
         # The notional fee is charged on traded value at the unadjusted open,
         # not on the slipped fill price. Slippage is an execution shortfall,
         # not a fee base.
-        transaction_costs = (
-            quantity * self._cost_model.commission_per_share
-            + self._cost_model.fixed_fee_per_order
-            + quantity
-            * open_price
-            * self._cost_model.notional_fee_basis_points
-            / BASIS_POINT_DENOMINATOR
-        )
+        transaction_costs = _order_fees(quantity, open_price, self._cost_model)
         cash_delta = (
             gross_notional - transaction_costs
             if side == "sell"
