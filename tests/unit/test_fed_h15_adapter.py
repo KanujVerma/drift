@@ -14,6 +14,7 @@ import pytest
 
 from drift.adapters.fed_h15 import (
     FED_H15_SOURCE_ID,
+    H15_IDENTIFIER_LABEL_SPELLINGS,
     H15_NOT_PUBLISHED_QUALITY_MARKER,
     H15NativeDocument,
     H15ParseError,
@@ -346,11 +347,16 @@ def test_a_plain_decimal_cell_is_kept_as_its_native_text(text: str) -> None:
     ("index", "replacement"),
     (
         (0, b'"Series Descriptions","a","b"'),
+        (0, b'"Series Description ","a","b"'),
         (1, b'"Unit","Percent:_Per_Year","Percent:_Per_Year"'),
+        (1, b'"Unit: ","Percent:_Per_Year","Percent:_Per_Year"'),
         (2, b'"multiplier:","1","1"'),
+        (2, b'"Multiplier: ","1","1"'),
         (3, b'"Currency","NA","NA"'),
-        (4, b'"Unique Identifier:","H15/H15/SYNTH_A.B","H15/H15/SYNTH_B.B"'),
+        (3, b'"Currency: ","NA","NA"'),
+        (4, b'"Unique Identifiers: ","H15/H15/SYNTH_A.B","H15/H15/SYNTH_B.B"'),
         (5, b'"Time Period ","SYNTH_A.B","SYNTH_B.B"'),
+        (5, b'"Time Period:","SYNTH_A.B","SYNTH_B.B"'),
     ),
 )
 def test_a_wrong_header_label_is_refused(index: int, replacement: bytes) -> None:
@@ -358,6 +364,87 @@ def test_a_wrong_header_label_is_refused(index: int, replacement: bytes) -> None
         _parse(_with_header_row(index, replacement))
 
     assert f"line {index + 1}" in str(caught.value)
+
+
+#: The rest of the synthetic row-5 line, after its label cell.
+SYNTHETIC_IDENTIFIER_CELLS = b',"H15/H15/SYNTH_A.B","H15/H15/SYNTH_B.B"'
+
+
+def _with_identifier_label(label: str) -> bytes:
+    """The synthetic document with the quoted row-5 label replaced."""
+    quoted = b'"' + label.encode("ascii") + b'"'
+    return _with_header_row(4, quoted + SYNTHETIC_IDENTIFIER_CELLS)
+
+
+@pytest.mark.parametrize("label", ("Unique Identifier: ", "Unique Identifier:"))
+def test_both_observed_spellings_of_the_identifier_label_are_accepted(
+    label: str,
+) -> None:
+    """With and without the trailing space: the two spellings seen in real files."""
+    data = _with_identifier_label(label)
+    reference = _parse(_document_bytes())
+
+    document = _parse(data)
+    series = _series(data, SERIES_A)
+
+    assert document.identifier_label == label
+    assert document.columns == reference.columns
+    assert document.rows == reference.rows
+    assert series.points == _series(_document_bytes(), SERIES_A).points
+    assert H15_IDENTIFIER_LABEL_SPELLINGS == (
+        "Unique Identifier: ",
+        "Unique Identifier:",
+    )
+
+
+def test_the_two_identifier_label_spellings_are_different_bytes() -> None:
+    spaced = _with_identifier_label("Unique Identifier: ")
+    bare = _with_identifier_label("Unique Identifier:")
+
+    assert spaced == _document_bytes()
+    assert len(spaced) == len(bare) + 1
+    assert _parse(spaced).source_sha256 != _parse(bare).source_sha256
+    assert _parse(spaced).identifier_label != _parse(bare).identifier_label
+
+
+@pytest.mark.parametrize(
+    "label",
+    (
+        "Unique Identifier:  ",
+        "Unique Identifier:   ",
+        " Unique Identifier:",
+        " Unique Identifier: ",
+        "unique identifier:",
+        "unique identifier: ",
+        "UNIQUE IDENTIFIER:",
+        "Unique identifier:",
+        "Unique Identifier",
+        "Unique Identifier ",
+        "Unique  Identifier:",
+        "UniqueIdentifier:",
+        "Unique Identifier::",
+        "Unique Identifier: :",
+        "Unique Identifier;",
+        "Unique Identifiers:",
+        "",
+    ),
+)
+def test_any_third_spelling_of_the_identifier_label_is_refused(label: str) -> None:
+    with pytest.raises(H15ParseError, match="h15_header_label_mismatch") as caught:
+        _parse(_with_identifier_label(label))
+
+    message = str(caught.value)
+    assert "line 5" in message
+    assert "'Unique Identifier: '" in message
+    assert "'Unique Identifier:'" in message
+
+
+def test_a_whitespace_variant_of_the_identifier_label_is_refused() -> None:
+    for trailing in (b"\t", b"\xc2\xa0", b"\xe3\x80\x80"):
+        row = b'"Unique Identifier:' + trailing + b'"' + SYNTHETIC_IDENTIFIER_CELLS
+
+        with pytest.raises(H15ParseError, match="h15_header_label_mismatch"):
+            _parse(_with_header_row(4, row))
 
 
 def test_swapped_header_rows_are_refused() -> None:
@@ -401,6 +488,9 @@ def test_a_currency_other_than_na_is_refused_for_every_column() -> None:
         (2, b'"Multiplier:","1",1'),
         (3, b'"Currency:",\'NA\',"NA"'),
         (4, b'"Unique Identifier: ",H15/H15/SYNTH_A.B,H15/H15/SYNTH_B.B'),
+        (4, b'"Unique Identifier:",H15/H15/SYNTH_A.B,H15/H15/SYNTH_B.B'),
+        (4, b'Unique Identifier:,"H15/H15/SYNTH_A.B","H15/H15/SYNTH_B.B"'),
+        (4, b'Unique Identifier: ,"H15/H15/SYNTH_A.B","H15/H15/SYNTH_B.B"'),
         (5, b"Time Period,SYNTH_A.B,SYNTH_B.B"),
     ),
 )

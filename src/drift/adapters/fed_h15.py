@@ -10,9 +10,14 @@ imports it.
 The layout ``parse_h15_csv`` accepts, and nothing else:
 
 * six header rows whose first cells are exactly ``Series Description``,
-  ``Unit:``, ``Multiplier:``, ``Currency:``, ``Unique Identifier: `` (with its
-  trailing space) and ``Time Period``, one further cell per series, every
-  cell wrapped in double quotes with nothing between a quote and its comma;
+  ``Unit:``, ``Multiplier:``, ``Currency:``, the identifier label and
+  ``Time Period``, one further cell per series, every cell wrapped in double
+  quotes with nothing between a quote and its comma. The identifier label is
+  one of exactly two spellings, ``Unique Identifier: `` (with a trailing
+  space) or ``Unique Identifier:`` (without). Both have been seen in files
+  obtained from the download program; whether the second is the publisher's
+  own spelling or the work of a tool that normalized whitespace when the file
+  was saved is not known. No third spelling is accepted;
 * then data rows of an ISO date followed by one cell per series, with no
   double quote anywhere on the line, where a cell is a plain decimal such as
   ``3.22``, the marker ``ND`` (no data that day), or empty (the series was not
@@ -79,15 +84,21 @@ H15_MISSING_MARKER = "ND"
 H15_NOT_PUBLISHED_QUALITY_MARKER = "not_published"
 """The marker ``quality_points`` gives a date whose cell was empty."""
 
-H15_HEADER_LABELS = (
-    "Series Description",
-    "Unit:",
-    "Multiplier:",
-    "Currency:",
-    "Unique Identifier: ",
-    "Time Period",
+H15_IDENTIFIER_LABEL_SPELLINGS = ("Unique Identifier: ", "Unique Identifier:")
+"""The two spellings of the fifth header label seen in real files: with and
+without a trailing space. A closed set; nothing else is accepted."""
+
+H15_HEADER_LABEL_SPELLINGS: tuple[tuple[str, ...], ...] = (
+    ("Series Description",),
+    ("Unit:",),
+    ("Multiplier:",),
+    ("Currency:",),
+    H15_IDENTIFIER_LABEL_SPELLINGS,
+    ("Time Period",),
 )
-"""The exact first cell of each of the six header rows, in order."""
+"""The accepted spellings of the first cell of each header row, in order."""
+
+_IDENTIFIER_ROW = H15_HEADER_LABEL_SPELLINGS.index(H15_IDENTIFIER_LABEL_SPELLINGS)
 
 _DATE_TEXT = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 _VALUE_TEXT = re.compile(r"-?[0-9]+(?:\.[0-9]+)?")
@@ -129,10 +140,14 @@ class H15NativeDocument:
     those bytes came from. This is a plain dataclass: a document assembled by
     hand states whatever digest and size its author chose, and nothing here
     can check them against bytes that are no longer present.
+
+    ``identifier_label`` records which of the two accepted spellings of the
+    fifth header label the file used.
     """
 
     source_sha256: str
     source_byte_size: int
+    identifier_label: str
     columns: tuple[H15NativeColumn, ...]
     rows: tuple[H15NativeRow, ...]
 
@@ -150,16 +165,16 @@ def parse_h15_csv(
     """
     text = _verified_text(data, expected_sha256=expected_sha256, max_bytes=max_bytes)
     lines = _physical_lines(text)
-    labels = len(H15_HEADER_LABELS)
+    labels = len(H15_HEADER_LABEL_SPELLINGS)
     if len(lines) < labels:
         raise H15ParseError(
             f"h15_header_incomplete: expected {labels} header rows, found "
             f"{len(lines)} lines"
         )
     header = [
-        _header_record(number, line, label)
-        for number, (line, label) in enumerate(
-            zip(lines, H15_HEADER_LABELS, strict=False), start=1
+        _header_record(number, line, spellings)
+        for number, (line, spellings) in enumerate(
+            zip(lines, H15_HEADER_LABEL_SPELLINGS, strict=False), start=1
         )
     ]
     width = len(header[0])
@@ -181,6 +196,7 @@ def parse_h15_csv(
     return H15NativeDocument(
         source_sha256=expected_sha256,
         source_byte_size=len(data),
+        identifier_label=header[_IDENTIFIER_ROW][0],
         columns=columns,
         rows=rows,
     )
@@ -208,10 +224,11 @@ def build_public_daily_rate_series(
     means the answer at a fixed cutoff does not change when later rows are
     appended to the file.
 
-    What is and is not checked about ``document``. The unit, multiplier and
-    currency of the column, the order of the dates and the form of every cell
-    are checked again here, so a document assembled by hand cannot introduce a
-    cell form the parser refuses. Its ``source_sha256`` and
+    What is and is not checked about ``document``. The identifier-label
+    spelling, the unit, multiplier and currency of the column, the order of
+    the dates and the form of every cell are checked again here, so a document
+    assembled by hand cannot introduce a cell form the parser refuses. Its
+    ``source_sha256`` and
     ``source_byte_size`` are copied as given: they bind the series to bytes
     only when the document came from ``parse_h15_csv``.
 
@@ -389,8 +406,8 @@ def _physical_lines(text: str) -> list[str]:
     return lines
 
 
-def _header_record(number: int, line: str, label: str) -> list[str]:
-    """Read one header line: strict CSV, the exact label, every cell quoted.
+def _header_record(number: int, line: str, spellings: tuple[str, ...]) -> list[str]:
+    """Read one header line: strict CSV, an accepted label, every cell quoted.
 
     The line is parsed on its own, so a quoted cell cannot run on into the
     next line: an unterminated quote is an error here.
@@ -404,10 +421,11 @@ def _header_record(number: int, line: str, label: str) -> list[str]:
     if len(parsed) != 1 or not parsed[0]:
         raise H15ParseError(f"h15_csv_malformed: line {number} is not one record")
     record = parsed[0]
-    if record[0] != label:
+    if record[0] not in spellings:
+        accepted = " or ".join(repr(spelling) for spelling in spellings)
         raise H15ParseError(
             f"h15_header_label_mismatch: line {number} must start with "
-            f"{label!r}, found {_shown(record[0])}"
+            f"{accepted}, found {_shown(record[0])}"
         )
     if _quoted_line(record) != line:
         raise H15ParseError(
@@ -529,6 +547,8 @@ def _checked_document(document: H15NativeDocument) -> H15NativeDocument:
     """Refuse anything that is not a well-shaped native document."""
     shaped = (
         isinstance(document, H15NativeDocument)
+        and isinstance(document.identifier_label, str)
+        and document.identifier_label in H15_IDENTIFIER_LABEL_SPELLINGS
         and isinstance(document.columns, tuple)
         and isinstance(document.rows, tuple)
         and all(isinstance(column, H15NativeColumn) for column in document.columns)

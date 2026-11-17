@@ -437,6 +437,7 @@ def test_a_hand_built_document_states_its_own_digest_unchecked() -> None:
     hand_built = H15NativeDocument(
         source_sha256=invented,
         source_byte_size=1,
+        identifier_label=parsed.identifier_label,
         columns=parsed.columns,
         rows=parsed.rows,
     )
@@ -488,6 +489,7 @@ def test_a_hand_built_column_with_another_unit_multiplier_or_currency_is_refused
         forged = H15NativeDocument(
             source_sha256=parsed.source_sha256,
             source_byte_size=parsed.source_byte_size,
+            identifier_label=parsed.identifier_label,
             columns=(replace(column, **{field: value}),),
             rows=parsed.rows,
         )
@@ -505,6 +507,7 @@ def test_a_hand_built_document_cannot_smuggle_a_cell_form_the_parser_refuses() -
         forged = H15NativeDocument(
             source_sha256=parsed.source_sha256,
             source_byte_size=parsed.source_byte_size,
+            identifier_label=parsed.identifier_label,
             columns=parsed.columns,
             rows=(
                 H15NativeRow(
@@ -525,6 +528,7 @@ def test_a_hand_built_document_with_a_bad_shape_is_refused() -> None:
     ragged = H15NativeDocument(
         source_sha256=parsed.source_sha256,
         source_byte_size=parsed.source_byte_size,
+        identifier_label=parsed.identifier_label,
         columns=parsed.columns,
         rows=(
             H15NativeRow(line_number=7, observed_on=date(2024, 1, 3), cells=()),
@@ -543,6 +547,28 @@ def test_a_hand_built_document_with_a_bad_shape_is_refused() -> None:
             lag_policy=_lag(),
             rights=_rights(),
         )
+
+
+def test_a_hand_built_document_with_a_third_label_spelling_is_refused() -> None:
+    parsed = _document()
+    assert parsed.identifier_label == "Unique Identifier: "
+
+    for accepted in ("Unique Identifier: ", "Unique Identifier:"):
+        series = build_public_daily_rate_series(
+            replace(parsed, identifier_label=accepted),
+            series_identifier=SERIES_A,
+            lag_policy=_lag(),
+            rights=_rights(),
+        )
+        assert series.points == _series().points
+    for refused in ("Unique Identifier:  ", "unique identifier:", "Unique Identifier"):
+        with pytest.raises(H15ParseError, match="h15_document_invalid"):
+            build_public_daily_rate_series(
+                replace(parsed, identifier_label=refused),
+                series_identifier=SERIES_A,
+                lag_policy=_lag(),
+                rights=_rights(),
+            )
 
 
 def test_the_digest_binds_every_byte_of_the_input() -> None:

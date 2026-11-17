@@ -107,10 +107,19 @@ Rules that hold for every report:
 ## What the H.15 parser accepts
 
 Six header rows whose first cells are exactly `Series Description`, `Unit:`,
-`Multiplier:`, `Currency:`, `Unique Identifier: ` (with a trailing space) and
-`Time Period`, every header cell wrapped in double quotes. Then data rows of
-an ISO date and one cell per series, with no double quote anywhere on the
-line. A cell is a plain decimal such as `3.22`, the marker `ND`, or empty.
+`Multiplier:`, `Currency:`, the identifier label and `Time Period`, every
+header cell wrapped in double quotes. Then data rows of an ISO date and one
+cell per series, with no double quote anywhere on the line. A cell is a plain
+decimal such as `3.22`, the marker `ND`, or empty.
+
+The identifier label is a closed set of exactly two spellings:
+`Unique Identifier: ` with a trailing space, and `Unique Identifier:` without
+one. Both have been seen in files obtained from the Federal Reserve Board
+download program. Whether the second is the publisher's own spelling or the
+work of a tool that normalized whitespace when the file was saved is not
+known. Any third spelling is refused, for example two trailing spaces, lower
+case, or a missing colon. The parsed document records which spelling it saw in
+`identifier_label`. The other five labels have one spelling each.
 
 | Cell | Point state | Kept |
 |---|---|---|
@@ -129,12 +138,12 @@ the run is longer than `max_missing_run`.
 Everything else is refused with an `H15ParseError`: a wrong digest or size, a
 NUL byte, bytes that are not UTF-8 (a byte order mark fails the first label),
 mixed line endings, a blank line, a header cell that is unquoted or spans
-lines, a quoted data cell, a wrong label, a unit other than
-`Percent:_Per_Year`, a multiplier other than `1`, a currency other than `NA`,
-a ragged row, a duplicate or inconsistent identifier, a date that is not a
-calendar date, and any other cell (`NaN`, `1e-2`, another marker, digits
-outside ASCII, stray spaces). Dates that are not strictly ascending are refused
-when a series is built.
+lines, a quoted data cell, a label outside the accepted spellings, a unit
+other than `Percent:_Per_Year`, a multiplier other than `1`, a currency other
+than `NA`, a ragged row, a duplicate or inconsistent identifier, a date that
+is not a calendar date, and any other cell (`NaN`, `1e-2`, another marker,
+digits outside ASCII, stray spaces). Dates that are not strictly ascending are
+refused when a series is built.
 
 ## Limitations
 
@@ -151,10 +160,10 @@ when a series is built.
   is not origin authentication.
 - **A hand-built document is not bound to bytes.** `H15NativeDocument` is a
   plain dataclass. Only `parse_h15_csv` ties one to bytes. The builder checks
-  the unit, multiplier, currency, date order and every cell of a document
-  again, but it copies `source_sha256` and `source_byte_size` as given, so a
-  document assembled by hand yields a sealed series carrying whatever digest
-  its author wrote.
+  the label spelling, unit, multiplier, currency, date order and every cell of
+  a document again, but it copies `source_sha256` and `source_byte_size` as
+  given, so a document assembled by hand yields a sealed series carrying
+  whatever digest its author wrote.
 - **Not a rights assessment.** `PublicSeriesRightsRecordV1` records what a
   named recorder asserted, with the hash of the terms evidence they looked at.
   It is not a `RightsAssessmentV1`, nobody independent reviewed it, and it is
