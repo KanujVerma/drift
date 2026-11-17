@@ -33,7 +33,7 @@ from drift.domain.evaluator_portfolio import (
     PortfolioStateV2,
     decimal_context,
 )
-from drift.domain.evaluator_trace import EvaluationTraceLogV1
+from drift.domain.evaluator_trace import EvaluationTraceLog, EvaluationTraceLogV1
 from drift.domain.sessions import SessionKeyV1
 from drift.serialization.canonical import content_hash
 
@@ -415,12 +415,14 @@ class EvaluationRunArtifactsV2(FrozenModel):
 
     A successor, not a subclass: the engine books into ``PortfolioStateV2``
     (issues 49, 103, 105), so its final state is one. The result and trace
-    are unchanged, and every binding of ``EvaluationRunArtifactsV1`` holds.
+    retain their legacy bytes without an observer. Opt-in observer runs carry
+    an explicit version-2 trace; every binding of ``EvaluationRunArtifactsV1``
+    still holds and its original schema is unchanged.
     """
 
     schema_version: Literal["2"] = "2"
     result: EvaluationResultV1
-    trace: EvaluationTraceLogV1
+    trace: EvaluationTraceLog
     final_state: PortfolioStateV2
 
     @model_validator(mode="after")

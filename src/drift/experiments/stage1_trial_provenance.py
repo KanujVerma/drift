@@ -150,6 +150,29 @@ def _provenance_preimage(
     }
 
 
+def _capture_e1_manifest_view(
+    *,
+    arms: Sequence[ArmSpecV1],
+    bindings: Sequence[RunAccountBindingV1],
+    expected_run_ids: Sequence[str],
+) -> tuple[
+    tuple[ArmSpecV1, ...],
+    tuple[RunAccountBindingV1, ...],
+    tuple[str, ...],
+]:
+    """Capture one immutable caller view before validation or hashing."""
+    for label, value in (
+        ("arms", arms),
+        ("bindings", bindings),
+        ("expected_run_ids", expected_run_ids),
+    ):
+        if not isinstance(value, Sequence) or isinstance(
+            value, (str, bytes, bytearray, memoryview, Mapping)
+        ):
+            raise ValueError(f"{label} must be a non-string sequence")
+    return tuple(arms), tuple(bindings), tuple(expected_run_ids)
+
+
 def build_stage1_trial_provenance_snapshot(
     *,
     campaign: CampaignSpecV1,
@@ -161,23 +184,26 @@ def build_stage1_trial_provenance_snapshot(
     checkpoint_id: str,
     events: Sequence[Stage1TrialEvent],
 ) -> Stage1TrialProvenanceSnapshotV1:
+    arms_once, bindings_once, runs_once = _capture_e1_manifest_view(
+        arms=arms, bindings=bindings, expected_run_ids=expected_run_ids
+    )
     verify_experiment_configuration(
         campaign=campaign,
-        arms=arms,
-        bindings=bindings,
-        expected_run_ids=expected_run_ids,
+        arms=arms_once,
+        bindings=bindings_once,
+        expected_run_ids=runs_once,
     )
 
     _validate_scope_token(run_id, "run_id")
     _validate_scope_token(arm_id, "arm_id")
     _validate_scope_token(checkpoint_id, "checkpoint_id")
 
-    if run_id not in expected_run_ids:
+    if run_id not in runs_once:
         raise ValueError(
-            f"run_id {run_id!r} not in expected_run_ids: {list(expected_run_ids)!r}"
+            f"run_id {run_id!r} not in expected_run_ids: {list(runs_once)!r}"
         )
 
-    matching_arms = [a for a in arms if a.arm_id == arm_id]
+    matching_arms = [a for a in arms_once if a.arm_id == arm_id]
     if len(matching_arms) != 1:
         raise ValueError(
             f"expected exactly one arm with arm_id {arm_id!r}, "
@@ -187,7 +213,7 @@ def build_stage1_trial_provenance_snapshot(
 
     matching_bindings = [
         b
-        for b in bindings
+        for b in bindings_once
         if b.campaign_id == campaign.campaign_id
         and b.run_id == run_id
         and b.arm_id == arm_id
@@ -202,9 +228,9 @@ def build_stage1_trial_provenance_snapshot(
 
     manifest_hash = _complete_manifest_fingerprint(
         campaign=campaign,
-        arms=arms,
-        bindings=bindings,
-        expected_run_ids=expected_run_ids,
+        arms=arms_once,
+        bindings=bindings_once,
+        expected_run_ids=runs_once,
     )
 
     trial_id = f"{campaign.campaign_id}:{run_id}:{arm_id}:{checkpoint_id}"
@@ -228,19 +254,22 @@ def build_stage1_trial_provenance_snapshot(
     if not isinstance(events, Sequence):
         raise ValueError("events must be a sequence of Stage1TrialEvent objects")
 
-    if len(events) == 0:
+    # Materialize the caller's view exactly once before counting events.
+    # Sequence.__len__ may disagree with iteration or a later caller reread.
+    captured_events = tuple(events)
+    if not captured_events:
         observation_state = "UNOBSERVED"
         event_envelopes: tuple[Stage1TrialEvent, ...] = ()
         event_count = 0
         chain_head_event_hash = None
     else:
-        for idx, ev in enumerate(events):
+        for idx, ev in enumerate(captured_events):
             if type(ev) is not Stage1TrialEvent:
                 raise ValueError(
                     f"events[{idx}] must be a Stage1TrialEvent instance, "
                     f"got: {type(ev)}"
                 )
-        copied_events = tuple(replace(ev) for ev in events)
+        copied_events = tuple(replace(ev) for ev in captured_events)
         verify_stage1_trial_chain(trial_id=trial_id, events=copied_events)
         observation_state = "EVENTS_RECORDED"
         event_envelopes = copied_events
@@ -262,9 +291,9 @@ def build_stage1_trial_provenance_snapshot(
     verify_stage1_trial_provenance_snapshot(
         snapshot=snapshot,
         campaign=campaign,
-        arms=arms,
-        bindings=bindings,
-        expected_run_ids=expected_run_ids,
+        arms=arms_once,
+        bindings=bindings_once,
+        expected_run_ids=runs_once,
     )
     return snapshot
 
@@ -290,18 +319,21 @@ def verify_stage1_trial_provenance_snapshot(
     if type(scope) is not Stage1TrialScopeV1:
         raise ValueError("scope must be a Stage1TrialScopeV1 instance")
 
+    arms_once, bindings_once, runs_once = _capture_e1_manifest_view(
+        arms=arms, bindings=bindings, expected_run_ids=expected_run_ids
+    )
     verify_experiment_configuration(
         campaign=campaign,
-        arms=arms,
-        bindings=bindings,
-        expected_run_ids=expected_run_ids,
+        arms=arms_once,
+        bindings=bindings_once,
+        expected_run_ids=runs_once,
     )
 
     expected_manifest_fingerprint = _complete_manifest_fingerprint(
         campaign=campaign,
-        arms=arms,
-        bindings=bindings,
-        expected_run_ids=expected_run_ids,
+        arms=arms_once,
+        bindings=bindings_once,
+        expected_run_ids=runs_once,
     )
     if (
         type(scope.complete_manifest_fingerprint) is not str
@@ -343,7 +375,7 @@ def verify_stage1_trial_provenance_snapshot(
             f"got {scope.trial_id!r}"
         )
 
-    matching_arms = [a for a in arms if a.arm_id == scope.arm_id]
+    matching_arms = [a for a in arms_once if a.arm_id == scope.arm_id]
     if len(matching_arms) != 1:
         raise ValueError(
             f"expected exactly one arm for arm_id {scope.arm_id!r}, "
@@ -362,7 +394,7 @@ def verify_stage1_trial_provenance_snapshot(
 
     matching_bindings = [
         b
-        for b in bindings
+        for b in bindings_once
         if b.campaign_id == scope.campaign_id
         and b.run_id == scope.run_id
         and b.arm_id == scope.arm_id
@@ -502,12 +534,15 @@ def append_stage1_trial_provenance_event(
     bindings: Sequence[RunAccountBindingV1],
     expected_run_ids: Sequence[str],
 ) -> Stage1TrialProvenanceSnapshotV1:
+    arms_once, bindings_once, runs_once = _capture_e1_manifest_view(
+        arms=arms, bindings=bindings, expected_run_ids=expected_run_ids
+    )
     verify_stage1_trial_provenance_snapshot(
         snapshot=snapshot,
         campaign=campaign,
-        arms=arms,
-        bindings=bindings,
-        expected_run_ids=expected_run_ids,
+        arms=arms_once,
+        bindings=bindings_once,
+        expected_run_ids=runs_once,
     )
 
     if type(event) is not Stage1TrialEvent:
@@ -523,9 +558,9 @@ def append_stage1_trial_provenance_event(
 
     return build_stage1_trial_provenance_snapshot(
         campaign=campaign,
-        arms=arms,
-        bindings=bindings,
-        expected_run_ids=expected_run_ids,
+        arms=arms_once,
+        bindings=bindings_once,
+        expected_run_ids=runs_once,
         run_id=snapshot.scope.run_id,
         arm_id=snapshot.scope.arm_id,
         checkpoint_id=snapshot.scope.checkpoint_id,
