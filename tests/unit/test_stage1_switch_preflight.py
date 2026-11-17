@@ -889,6 +889,107 @@ class TestStage1SwitchPreflight(unittest.TestCase):
         self.assertFalse(res.hold_incumbent)
         self.assertTrue(res.requires_containment)
 
+    def test_issue490_normalized_manifest_aliases_refuse_before_overwrite(
+        self,
+    ) -> None:
+        """Mixed-direction and casefolded aliases must never erase a source."""
+        ctx = self._build_context(session_count=255)
+        port = self._make_valid_portfolio_state()
+        voo_id = self.etf_uuids["VOO"]
+        ijh_id = self.etf_uuids["IJH"]
+
+        # The contradictory direct entry used to disappear when the later
+        # reverse alias overwrote the very same normalized UUID.
+        cases: tuple[tuple[str, dict[Any, Any], str], ...] = (
+            (
+                "exact reverse alias",
+                {**self.universe_manifest, "VOO": voo_id},
+                "duplicate_security_in_universe_manifest",
+            ),
+            (
+                "contradictory hidden by reverse alias",
+                {
+                    **self.universe_manifest,
+                    voo_id: "NOT_A_STAGE1_ETF",
+                    "VOO": voo_id,
+                },
+                "duplicate_security_in_universe_manifest",
+            ),
+            (
+                "case-normalized reverse alias",
+                {**self.universe_manifest, "vOo": voo_id},
+                "duplicate_security_in_universe_manifest",
+            ),
+            (
+                "different UUIDs with one normalized symbol",
+                {**self.universe_manifest, ijh_id: "voo"},
+                "duplicate_symbol_in_universe_manifest",
+            ),
+        )
+        for label, manifest, expected_reason in cases:
+            with self.subTest(case=label):
+                result = self._eval(
+                    proposed_strategy="B4",
+                    current_strategy="B3",
+                    decision_context=ctx,
+                    current_portfolio_state=port,
+                    universe_manifest=manifest,
+                )
+                self.assertEqual(result.status, PreflightStatus.INDETERMINATE_SAFETY)
+                self.assertIn(expected_reason, result.reason)
+                self.assertFalse(result.is_tradeable)
+                self.assertFalse(result.hold_incumbent)
+                self.assertTrue(result.requires_containment)
+                self.assertIsNone(result.cohort_hash)
+
+        # The input manifest and frozen cohort must remain unchanged.
+        self.assertEqual(self.universe_manifest[voo_id], "VOO")
+        self.assertEqual(self.universe_manifest[ijh_id], "IJH")
+
+    def test_issue490_valid_inverse_manifest_preserves_original_hash(self) -> None:
+        """Either unambiguous mapping direction retains the K0 result hash."""
+        ctx = self._build_context(session_count=255)
+        port = self._make_valid_portfolio_state()
+        baseline = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx,
+            current_portfolio_state=port,
+        )
+        inverse = {
+            symbol.lower(): sec for sec, symbol in self.universe_manifest.items()
+        }
+        reverse = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx,
+            current_portfolio_state=port,
+            universe_manifest=inverse,
+        )
+        self.assertEqual(baseline.status, PreflightStatus.ELIGIBLE)
+        self.assertEqual(reverse.status, PreflightStatus.ELIGIBLE)
+        self.assertTrue(baseline.is_tradeable and reverse.is_tradeable)
+        self.assertEqual(reverse.cohort_hash, baseline.cohort_hash)
+        self.assertEqual(reverse.preflight_hash, baseline.preflight_hash)
+
+        # A genuinely unique mixed-direction manifest remains permitted and
+        # does not change the historical canonical preflight result.
+        mixed: dict[Any, Any] = {}
+        for position, (sec, symbol) in enumerate(self.universe_manifest.items()):
+            if position % 2:
+                mixed[symbol.lower()] = sec
+            else:
+                mixed[sec] = symbol.lower()
+        mixed_result = self._eval(
+            proposed_strategy="B4",
+            current_strategy="B3",
+            decision_context=ctx,
+            current_portfolio_state=port,
+            universe_manifest=mixed,
+        )
+        self.assertEqual(mixed_result.status, PreflightStatus.ELIGIBLE)
+        self.assertEqual(mixed_result.preflight_hash, baseline.preflight_hash)
+
     def test_valid_exact_12_etf_universe_eligible(self) -> None:
         """Exact 12-ETF universe with all valid evidence succeeds."""
         ctx = self._build_context(session_count=255)
