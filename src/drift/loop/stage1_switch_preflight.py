@@ -679,12 +679,16 @@ def validate_universe(
             (),
         )
 
+    # Normalize first, and reject ambiguity *before* a dictionary assignment
+    # can overwrite an earlier normalized UUID or symbol. The caller may
+    # supply either mapping direction or a mixture of both directions.
     normalized_manifest: dict[UUID7, str] = {}
+    seen_symbols: set[str] = set()
     for k, v in universe_manifest.items():
         if isinstance(k, UUID) and isinstance(v, str):
-            normalized_manifest[k] = v.upper()
+            sec_id, symbol = k, v.upper()
         elif isinstance(k, str) and isinstance(v, UUID):
-            normalized_manifest[v] = k.upper()
+            sec_id, symbol = v, k.upper()
         else:
             return (
                 False,
@@ -692,6 +696,22 @@ def validate_universe(
                 "must map UUID to symbol",
                 (),
             )
+        if sec_id in normalized_manifest:
+            return (
+                False,
+                "duplicate_security_in_universe_manifest: normalized security "
+                f"{sec_id} has multiple entries",
+                (),
+            )
+        if symbol in seen_symbols:
+            return (
+                False,
+                "duplicate_symbol_in_universe_manifest: normalized symbol "
+                f"{symbol!r} has multiple entries",
+                (),
+            )
+        normalized_manifest[sec_id] = symbol
+        seen_symbols.add(symbol)
 
     mapped_symbols: list[str] = []
     for sec_id in req_set:
