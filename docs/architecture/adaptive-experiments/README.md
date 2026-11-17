@@ -1,7 +1,9 @@
 # Adaptive experiments: start here
 
-This is Drift's agreed product and research direction, not a claim that the
-adaptive system is implemented or operationally authorized.
+This entrypoint describes Drift's product and research direction. Actual code
+and exact-head verification establish implementation; original source evidence,
+independent acceptance and scoped permissions establish readiness separately.
+Do not infer scientific or operational completion from publication of a document.
 
 Read in this order:
 1. [Onboarding](onboarding.md): how a fresh agent finds its owner, scope and next task.
@@ -28,6 +30,18 @@ blocked until their exact contract and activation gates are satisfied.
 
 A zero-context agent must read its assigned issue and the linked accepted
 contracts. It must not infer undocumented interfaces from this overview.
+
+For the Stage 1 engineering and study boundaries, read the
+[synthetic G2 contract](contracts/stage1-synthetic-g2.md),
+[G3 freeze requirements](stage1-g3-freeze.md) and
+[locked protocol design](stage1-g3-protocol-v1.md). A locked design is not an
+admitted historical run or completed prospective evidence. Current source,
+producer and study prerequisites remain in their owner issues.
+
+For cleanup provenance, see the dated
+[repository reconciliation record](verification/repository-cleanup-2026-11-02.md).
+It records disposition evidence, not a second live task database. Closing an
+incorporated PR does not accept an unresolved contract or remove a genuine bug.
 
 The product MVP uses bounded strategy selection and adaptation. Later
 AI-generated strategies reuse the same evaluation boundary after separate
