@@ -62,7 +62,8 @@ is not evidence that it came from an eligible close. This component cannot check
 those bindings and must not be used to mint a qualified estimate from caller
 assertions.
 
-Account-level summation, authoritative causal NAV, cost/NAV, spendable funding,
+The numerical rebalance helper below supplies cost totals and a cash projection.
+Authenticating account funding, authoritative causal NAV, cost/NAV,
 pending-execution missingness and mandate admission remain #613 and its producer
 dependencies. In particular, unpaid claims are not spendable cash. The caller
 must propagate unavailable evidence instead of substituting a zero, trimming a
@@ -74,3 +75,46 @@ Regression tests cover the fixtures, an independent exact Fraction oracle over
 types, invalid/tampered input, zero-cost refusal cases, immutable outputs and
 overflow. Existing actual-rebalance tests cover the shared fee extraction.
 Exact test results and the hosted gate belong to the issue and its PR.
+
+## Complete-target numerical rebalance
+
+`estimate_decision_close_rebalance_cost` extends the same arithmetic to an
+explicit existing `PortfolioStateV2`, a complete sequence of existing
+`SecurityTargetPositionV1` targets, supplied security-close prices and the same
+explicit cost model. It revalidates state, targets and model instead of trusting
+unchecked frozen instances. The next-open engine shares the existing target
+quantity/uniqueness rule; this helper never calls execution or commits a book.
+
+Every holding needs an explicit target, including zero for liquidation. Every
+holding and every nonzero delta needs a positive representable supplied close.
+Thus an unchanged holding with a missing close refuses even though it would
+incur no order fee. An unheld zero target needs no price and creates no order.
+The empty portfolio still validates the state and model before returning zero.
+These are numerical completeness checks, not source or cutoff verification.
+
+The frozen `DecisionCloseRebalanceCost` contains nonzero `orders`, as tuples of
+security ID and `DecisionCloseOrderCost`, sorted by raw UUID bytes. It also
+contains `total_fees`, `total_shortfall`, `estimated_cost`, `required_cash`,
+`net_sale_proceeds` and `projected_cash`. Each total is summed in that canonical
+order under the pinned context. Cost is the sum of per-order estimated costs;
+buys require their full outflow and sales contribute their net proceeds.
+
+```text
+projected_cash = state.cash_balance + net_sale_proceeds - required_cash
+is_funded = projected_cash >= 0
+```
+
+`is_funded` is arithmetic only. It is not a mandate approval, original-account
+attestation, resolution of pending executions, permission to trade or a usable
+AVAILABLE estimate. Unpaid claims are excluded from spendable cash. A negative
+projection remains visible; targets are never trimmed to force affordability.
+For a five-share sale and purchase at 100 with the coefficients above, total
+cost is 3.60. Starting with 4 cash leaves 0.40. A 501.80 purchase with only 480
+cash remains unfunded even if the state also carries a 100 unpaid claim.
+
+The supplied state's existing NAV is not automatically the causal denominator
+for these supplied closes. This helper neither revalues an authoritative NAV
+nor divides by it. Original allocation, account-prefix consistency, listing and
+currency, price availability, claim eligibility, and risk/mandate checks remain
+requirements of the qualified #613 producer. No family-selection or score
+calculation is performed here.
