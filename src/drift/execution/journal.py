@@ -183,6 +183,9 @@ class PersistentOrderIntentJournal:
     def record_intent(self, intent: OrderIntentV1) -> None:
         """Record an outbound order intent."""
         payload_bytes = canonical_json(intent.model_dump(mode="python"))
+        # Frozen instances can be constructed without validation. Check the
+        # exact bytes readers will consume before committing append-only data.
+        intent = OrderIntentV1.model_validate_json(payload_bytes)
         payload_str = payload_bytes.decode("utf-8")
         session_str = _session_key_to_str(intent.session_key)
 
@@ -258,6 +261,9 @@ class PersistentOrderIntentJournal:
     def record_execution_report(self, report: ExecutionReportV1) -> None:
         """Record an inbound execution report."""
         payload_bytes = canonical_json(report.model_dump(mode="python"))
+        # Validate before the write transaction; do not repair hashes or store
+        # an invalid row that the strict reader would subsequently refuse.
+        report = ExecutionReportV1.model_validate_json(payload_bytes)
         payload_str = payload_bytes.decode("utf-8")
 
         with self._transaction() as cursor:
