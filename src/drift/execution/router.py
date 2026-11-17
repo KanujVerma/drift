@@ -85,7 +85,8 @@ class BrokerNeutralExecutionRouter:
 
         If the client_order_id or intent_id has already been recorded:
         - If the recorded intent matches exactly (idempotent replay), returns
-          the latest recorded execution report.
+          the latest recorded execution report unless its cumulative filled
+          quantity contradicts greater retained evidence.
         - If the recorded intent differs (duplicate reuse attack/bug), raises
           DuplicateClientOrderIdError.
         Otherwise:
@@ -108,7 +109,7 @@ class BrokerNeutralExecutionRouter:
                 )
             latest = self._journal.get_latest_execution_report(existing.intent_id)
             if latest is not None:
-                return latest
+                return self._require_nonregressing_quantity(latest)
             adapter_rep = self._adapter.get_intent_status(existing.intent_id)
             if adapter_rep is not None:
                 return self._retain_report(adapter_rep, intent_id=existing.intent_id)
@@ -125,7 +126,7 @@ class BrokerNeutralExecutionRouter:
                 )
             latest = self._journal.get_latest_execution_report(existing_id.intent_id)
             if latest is not None:
-                return latest
+                return self._require_nonregressing_quantity(latest)
             adapter_rep = self._adapter.get_intent_status(existing_id.intent_id)
             if adapter_rep is not None:
                 return self._retain_report(adapter_rep, intent_id=existing_id.intent_id)
@@ -180,7 +181,10 @@ class BrokerNeutralExecutionRouter:
         if adapter_rep is not None:
             return self._retain_report(adapter_rep, intent_id=intent_id)
 
-        return self._journal.get_latest_execution_report(intent_id)
+        latest = self._journal.get_latest_execution_report(intent_id)
+        return (
+            self._require_nonregressing_quantity(latest) if latest is not None else None
+        )
 
     def _retain_report(
         self, report: ExecutionReportV1, *, intent_id: UUID
@@ -189,7 +193,8 @@ class BrokerNeutralExecutionRouter:
 
         The journal stays strict and append-only. Only a duplicate whose stored
         payload matches is recoverable; other persistence errors still propagate.
-        This is report identity handling, not status ordering or settlement.
+        New evidence is retained even when its quantity cannot be returned as
+        current. Identity/quantity checks do not establish status or settlement.
         """
         if report.intent_id != intent_id:
             raise RouterExecutionError("execution report intent does not match request")
@@ -205,13 +210,29 @@ class BrokerNeutralExecutionRouter:
                 if retained is None:
                     raise
             else:
-                return report
+                return self._require_nonregressing_quantity(report)
 
         if canonical_json(retained.model_dump(mode="python")) != canonical_json(
             report.model_dump(mode="python")
         ):
             raise RouterExecutionError("conflicting execution report identity")
-        return retained
+        return self._require_nonregressing_quantity(retained)
+
+    def _require_nonregressing_quantity(
+        self, report: ExecutionReportV1
+    ) -> ExecutionReportV1:
+        """Refuse a lower current quantity without discarding raw observations.
+
+        Arrival order and reported timestamps cannot erase greater recorded
+        fills. This reads the existing history snapshot, not a dispatch lock or
+        an account hold; equal quantities do not prove lifecycle ordering.
+        """
+        history = self._journal.list_execution_reports_for_intent(report.intent_id)
+        if any(prior.cum_quantity > report.cum_quantity for prior in history):
+            raise RouterExecutionError(
+                "execution report cumulative quantity regresses retained evidence"
+            )
+        return report
 
     def get_position_discrepancies(
         self,
