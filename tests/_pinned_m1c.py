@@ -9,8 +9,7 @@ and it authenticates the archive extracted from that commit
 regenerated.
 
 ``m1c-v3-protected-sha256.json`` (issue #63, stage 2) is the first M1c
-supersession link and the CURRENT inventory: the protected paths as they must
-stand in the live working tree (``verify_protected_inputs``). The M1c validator
+supersession link. The M1c validator
 run identity and the M1c selection, projection and composition identities moved
 from the whole-tree inventory to the ``m1c-source-validation-v1`` and
 ``m1c-evidence-v1`` semantic attestations, which changed the bytes of the three
@@ -26,7 +25,8 @@ way the M1d freeze links do (``tests/_pinned_m1d.py``):
 pin can be neither silently re-signed nor silently introduced, and neither
 inventory can be edited without breaking its literal byte pin. The live-tree
 freeze moves forward only by a new link; history is superseded, never
-rewritten.
+rewritten. The issue 365 ``m1c-v4`` link preserves v3 and changes only the
+listing venue contract for the live working tree.
 """
 
 from __future__ import annotations
@@ -85,6 +85,11 @@ _HISTORICAL_INVENTORY_ID = "m1c-v2-protected-sha256"
 _LINK_PATH = REPO_ROOT / "tests/fixtures/m1d-compatibility/m1c-v3-protected-sha256.json"
 _LINK_INVENTORY_ID = "m1c-v3-protected-sha256"
 _LINK_ISSUE = 63
+_SUCCESSOR_PATH = (
+    REPO_ROOT / "tests/fixtures/m1d-compatibility/m1c-v4-protected-sha256.json"
+)
+_SUCCESSOR_SHA256 = "a5b5e320f77a12834098cf938783cee435e1ec73350d053e79823dfae06bb1dd"
+_LINK_COMMIT = "b21efc5612259661b7e380b8f856febf49cbf5a6"
 _EXPECTED_LINK_SHA256 = (
     "63f88e707a92809243ee05f69e1a0a2f00e74fc596e45c4b0c7391e8a76c2b6d"
 )
@@ -266,7 +271,65 @@ def _load_link() -> dict[str, str]:
     return _validated_link_pins(document, parent)
 
 
-PROTECTED_SHA256 = _load_link()
+def _validated_successor_pins(
+    document: object, parent: Mapping[str, str]
+) -> dict[str, str]:
+    """Require the disclosed issue 365 delta over the authenticated v3 link."""
+    if not isinstance(document, dict):
+        raise PinnedReplayError("m1c-v4 inventory is malformed")
+    supersedes = document.get("supersedes")
+    changed = document.get("superseded_paths")
+    path = "src/drift/domain/securities.py"
+    if (
+        document.get("inventory_id") != "m1c-v4-protected-sha256"
+        or document.get("role") != "current"
+        or document.get("baseline_commit") != V2_INTERPRETER_COMMIT
+        or not isinstance(supersedes, dict)
+        or supersedes.get("inventory_id") != _LINK_INVENTORY_ID
+        or supersedes.get("path") != _LINK_PATH.relative_to(REPO_ROOT).as_posix()
+        or supersedes.get("file_sha256") != _EXPECTED_LINK_SHA256
+        or supersedes.get("commit") != _LINK_COMMIT
+        or supersedes.get("issue") != 365
+        or not _is_nonblank(supersedes.get("status"))
+        or not _is_nonblank(supersedes.get("reason"))
+        or not isinstance(changed, dict)
+        or set(changed) != {path}
+        or document.get("added_paths") != {}
+    ):
+        raise PinnedReplayError("m1c-v4 inventory supersession is malformed")
+    change = changed[path]
+    if (
+        not isinstance(change, dict)
+        or set(change) != {"historical_sha256", "current_sha256"}
+        or change.get("historical_sha256") != parent.get(path)
+        or not _is_digest(change.get("current_sha256"))
+        or change.get("current_sha256") == parent.get(path)
+    ):
+        raise PinnedReplayError("m1c-v4 inventory source delta is malformed")
+    expected = dict(parent)
+    expected[path] = change["current_sha256"]
+    if document.get("sha256") != expected:
+        raise PinnedReplayError("m1c-v4 inventory has undeclared pin changes")
+    return expected
+
+
+def _load_successor() -> dict[str, str]:
+    """Authenticate the v4 bytes and rederive their single declared change."""
+    parent = _load_link()
+    try:
+        raw = _SUCCESSOR_PATH.read_bytes()
+    except OSError as error:
+        raise PinnedReplayError(f"cannot read m1c-v4 inventory: {error}") from error
+    if hashlib.sha256(raw).hexdigest() != _SUCCESSOR_SHA256:
+        raise PinnedReplayError("m1c-v4 inventory sha256 mismatch")
+    try:
+        document = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise PinnedReplayError(f"cannot parse m1c-v4 inventory: {error}") from error
+    return _validated_successor_pins(document, parent)
+
+
+PROTECTED_SHA256 = _load_successor()
 """Current pins: the protected paths as they must stand in the working tree."""
 _REQUIRED_PROTECTED_PATHS = frozenset(PROTECTED_SHA256)
 _REQUIRED_ARCHIVE_PATHS = frozenset(HISTORICAL_PROTECTED_SHA256)
@@ -288,7 +351,7 @@ def verify_protected_inputs(
     expected: Mapping[str, str] | None = None,
     read_bytes: Callable[[str], bytes] | None = None,
 ) -> None:
-    """Reject changed live M1c inputs against the current m1c-v3 pins."""
+    """Reject changed live M1c inputs against the current m1c-v4 pins."""
     pins = dict(PROTECTED_SHA256 if expected is None else expected)
     if set(pins) != _REQUIRED_PROTECTED_PATHS:
         raise PinnedReplayError(

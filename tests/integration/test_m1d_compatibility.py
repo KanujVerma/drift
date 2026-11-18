@@ -18,6 +18,7 @@ import tomllib
 from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
+from typing import cast
 
 import pytest
 
@@ -101,8 +102,11 @@ V7_M1D_INVENTORY = (
 V8_M1D_INVENTORY = (
     REPO_ROOT / "tests/fixtures/m1e-compatibility/m1d-v8-protected-sha256.json"
 )
-CURRENT_M1D_INVENTORY = (
+V9_M1D_INVENTORY = (
     REPO_ROOT / "tests/fixtures/m1e-compatibility/m1d-v9-protected-sha256.json"
+)
+CURRENT_M1D_INVENTORY = (
+    REPO_ROOT / "tests/fixtures/m1e-compatibility/m1d-v10-protected-sha256.json"
 )
 HISTORICAL_M1D_INVENTORY_SHA256 = (
     "6fb819eb863ebf83e1a3b4e3a7e6af261748116502cdb0ad3603d108d17c2e2b"
@@ -427,6 +431,12 @@ def _current_m1d_inventory() -> dict[str, object]:
     return document
 
 
+def _v9_m1d_inventory() -> dict[str, object]:
+    document = json.loads(V9_M1D_INVENTORY.read_text(encoding="utf-8"))
+    assert isinstance(document, dict)
+    return document
+
+
 def _previous_m1d_inventory() -> dict[str, object]:
     document = json.loads(PREVIOUS_M1D_INVENTORY.read_text(encoding="utf-8"))
     assert isinstance(document, dict)
@@ -464,11 +474,16 @@ def _m1c_link() -> dict[str, object]:
 
 
 def _m1c_superseded_paths() -> dict[str, dict[str, str]]:
-    """The M1c link's supersessions, held to the independently stated paths."""
+    """Re-derive both M1c links and retain their exact baseline deltas."""
     superseded = _m1c_link()["superseded_paths"]
     assert isinstance(superseded, dict)
     assert set(superseded) == M1C_STAMP_SITE_PATHS
-    return superseded
+    helper = _load_module("_compat_pinned_m1c", REPO_ROOT / "tests" / "_pinned_m1c.py")
+    helper._load_successor()
+    successor = json.loads(helper._SUCCESSOR_PATH.read_text(encoding="utf-8"))
+    delta = successor["superseded_paths"]
+    assert set(delta) == {"src/drift/domain/securities.py"}
+    return cast(dict[str, dict[str, str]], superseded | delta)
 
 
 def _superseded_m1d_source_pins() -> dict[str, str]:
@@ -496,6 +511,7 @@ def _superseded_m1d_source_pins() -> dict[str, str]:
         _v6_m1d_inventory(),
         _v7_m1d_inventory(),
         _v8_m1d_inventory(),
+        _v9_m1d_inventory(),
         current,
     ):
         superseded = document["superseded_paths"]
@@ -1202,7 +1218,7 @@ def test_v8_source_pins_are_superseded_by_v9_without_rewriting_history() -> None
     no M1c-pinned path is among them.
     """
     v8 = _v8_m1d_inventory()
-    current = _current_m1d_inventory()
+    current = _v9_m1d_inventory()
     assert current["inventory_id"] == "m1d-v9-protected-sha256"
     assert current["role"] == "current"
     assert current["baseline_commit"] == PINNED_M1D_COMMIT

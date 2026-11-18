@@ -244,12 +244,53 @@ def test_the_m1c_v3_link_supersedes_v2_by_exactly_the_stage_2_paths() -> None:
         assert record["current_sha256"] != record["historical_sha256"], path
         expected[path] = record["current_sha256"]
     assert document["sha256"] == expected
-    assert helper.PROTECTED_SHA256 == expected
+    assert helper._load_link() == expected
     assert len(expected) == 126
 
 
-def test_the_live_tree_is_v3_and_the_aecee94_archive_is_v2(tmp_path: Path) -> None:
-    """Two pin sets, not interchangeable: v3 for the live tree, v2 for history."""
+def test_m1c_v4_supersedes_only_the_listing_venue_contract() -> None:
+    helper = _load_replay_helper()
+    previous = helper._load_link()
+    current = helper._load_successor()
+    path = "src/drift/domain/securities.py"
+    assert set(previous) == set(current)
+    assert {item for item in current if current[item] != previous[item]} == {path}
+    assert (
+        current[path]
+        == hashlib.sha256((helper.REPO_ROOT / path).read_bytes()).hexdigest()
+    )
+    assert helper.PROTECTED_SHA256 == current
+
+
+def test_m1c_v4_rejects_undeclared_resigning() -> None:
+    helper = _load_replay_helper()
+    document = json.loads(helper._SUCCESSOR_PATH.read_text(encoding="utf-8"))
+    document["sha256"]["src/drift/domain/temporal.py"] = "0" * 64
+    with pytest.raises(helper.PinnedReplayError, match="undeclared"):
+        helper._validated_successor_pins(document, helper._load_link())
+
+
+def test_m1c_v4_rejects_changed_predecessor_and_inventory_bytes(tmp_path: Path) -> None:
+    helper = _load_replay_helper()
+    document = json.loads(helper._SUCCESSOR_PATH.read_text(encoding="utf-8"))
+    document["supersedes"]["commit"] = "0" * 40
+    with pytest.raises(helper.PinnedReplayError, match="supersession is malformed"):
+        helper._validated_successor_pins(document, helper._load_link())
+    edited = tmp_path / helper._SUCCESSOR_PATH.name
+    edited.write_bytes(helper._SUCCESSOR_PATH.read_bytes() + b"\n")
+    original = helper._SUCCESSOR_PATH
+    helper._SUCCESSOR_PATH = edited
+    try:
+        with pytest.raises(
+            helper.PinnedReplayError, match="m1c-v4 inventory sha256 mismatch"
+        ):
+            helper._load_successor()
+    finally:
+        helper._SUCCESSOR_PATH = original
+
+
+def test_the_live_tree_is_v4_and_the_aecee94_archive_is_v2(tmp_path: Path) -> None:
+    """Live and archived pin sets are not interchangeable."""
     helper = _load_replay_helper()
     helper.verify_protected_inputs()
     with pytest.raises(helper.PinnedReplayError, match="sha256 mismatch for src/drift"):
@@ -410,7 +451,7 @@ def test_the_m1c_link_must_name_exactly_the_inventory_it_supersedes() -> None:
             helper._validated_link_pins(broken, helper.HISTORICAL_PROTECTED_SHA256)
 
 
-def test_an_edited_v2_or_v3_byte_is_rejected_although_v3_is_current(
+def test_an_edited_v2_or_v3_byte_is_rejected_although_v4_is_current(
     tmp_path: Path,
 ) -> None:
     """History stays byte-identical: neither inventory can be edited silently."""
@@ -441,7 +482,7 @@ def test_an_edited_v2_or_v3_byte_is_rejected_although_v3_is_current(
             helper._load_link()
     finally:
         helper._LINK_PATH = original
-    assert helper._load_link() == helper.PROTECTED_SHA256
+    assert helper._load_successor() == helper.PROTECTED_SHA256
     assert helper._load_inventory() == helper.HISTORICAL_PROTECTED_SHA256
 
 

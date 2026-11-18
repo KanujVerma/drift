@@ -62,14 +62,16 @@ be converted into promotion-grade evidence.
 import ast
 import json
 import os
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Literal, cast
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from drift.datasets.assertions import build_validated_dataset_bundle
 from drift.datasets.hashing import assertion_version_payload, manifest_hash
@@ -126,7 +128,7 @@ from drift.domain.economic_events import (
     TermsPayloadV1,
 )
 from drift.domain.evaluator_bundles import EvaluationInputBundleV1
-from drift.domain.evaluator_clock import SessionClockV1
+from drift.domain.evaluator_clock import CommonSessionClockV1, SessionClockV1
 from drift.domain.evaluator_lanes import (
     ALPACA_LIMITATION_ABSENT_HALTS,
     ALPACA_LIMITATION_BOUNDED_COHORT,
@@ -165,6 +167,7 @@ from drift.domain.manifests import (
 )
 from drift.domain.normalization import DerivedObservationViewV1
 from drift.domain.observation_query import (
+    ObservationDecisionQueryV1,
     ObservationOutcomeQueryV1,
     ObservationQueryV1,
     ObservationSourceBindingV1,
@@ -675,6 +678,25 @@ class AlpacaNativeBar:
 
 
 @dataclass(frozen=True, slots=True)
+class AlpacaDiagnosticBarPage:
+    """One transient research page and the token used to request it."""
+
+    request_token: str | None = field(repr=False)
+    body: bytes = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class AlpacaDiagnosticBarWindow:
+    """Structurally complete rows without authenticated source or snapshot."""
+
+    bars: tuple[AlpacaNativeBar, ...] = field(repr=False)
+    grade: Literal["diagnostic"] = field(default="diagnostic", init=False)
+    snapshot_status: Literal["SNAPSHOT_UNVERIFIED"] = field(
+        default="SNAPSHOT_UNVERIFIED", init=False
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class AlpacaNativeCalendarDay:
     """One exact scheduled calendar row as the provider printed it.
 
@@ -798,6 +820,18 @@ def parse_alpaca_bars(data: bytes) -> tuple[AlpacaNativeBar, ...]:
     if not isinstance(document, dict):
         raise AlpacaBridgeIncompleteError("bars response must be a JSON object")
     _require_closed_page(document, "bars")
+    return tuple(
+        sorted(
+            _parse_alpaca_bars_document(document),
+            key=lambda row: (row.symbol, row.session_date),
+        )
+    )
+
+
+def _parse_alpaca_bars_document(
+    document: Mapping[str, Any],
+) -> tuple[AlpacaNativeBar, ...]:
+    """Parse rows in wire order, without interpreting a page token."""
     grouped = document.get("bars")
     if not isinstance(grouped, dict):
         raise AlpacaBridgeIncompleteError("bars response must carry a bars object")
@@ -827,7 +861,160 @@ def parse_alpaca_bars(data: bytes) -> tuple[AlpacaNativeBar, ...]:
                     trade_count=count,
                 )
             )
-    return tuple(sorted(rows, key=lambda row: (row.symbol, row.session_date)))
+    return tuple(rows)
+
+
+def _diagnostic_midnight_labels(
+    days: tuple[date, ...], timezone_tzif: bytes
+) -> dict[date, datetime]:
+    """Derive date labels from the supplied retained timezone rules."""
+    try:
+        zone = ZoneInfo.from_file(BytesIO(timezone_tzif))
+    except (ValueError, OSError) as error:
+        raise AlpacaBridgeIncompleteError(
+            "diagnostic timezone rules are unavailable"
+        ) from error
+    return {
+        day: datetime(day.year, day.month, day.day, tzinfo=zone).astimezone(UTC)
+        for day in days
+    }
+
+
+def parse_alpaca_diagnostic_bar_pages(
+    *,
+    pages: tuple[AlpacaDiagnosticBarPage, ...],
+    parameters: Mapping[str, str],
+    expected_timestamps: Mapping[date, datetime],
+    timezone_tzif: bytes,
+) -> AlpacaDiagnosticBarWindow:
+    """Reconcile one transient single-symbol raw-SIP window, diagnostically.
+
+    Parameters and pages are caller-supplied and do not prove a provider
+    request, source origin, snapshot consistency, trading-clock availability,
+    listing identity, or corporate-action coverage. No bytes are persisted.
+    """
+    days = tuple(sorted(expected_timestamps))
+    if not days or len(days) > 200:
+        raise AlpacaBridgeIncompleteError("diagnostic window requires 1 to 200 dates")
+    symbol = parameters.get("symbols", "")
+    if (
+        not symbol
+        or not symbol.isascii()
+        or not symbol.isalnum()
+        or symbol.upper() != symbol
+    ):
+        raise AlpacaBridgeIncompleteError("diagnostic window requires one exact symbol")
+    expected_parameters = {
+        "symbols": symbol,
+        "start": days[0].isoformat(),
+        "end": days[-1].isoformat(),
+        "feed": "sip",
+        "adjustment": "raw",
+        "timeframe": "1Day",
+        "asof": "-",
+        "currency": "USD",
+        "sort": "asc",
+        "limit": "1000",
+    }
+    if dict(parameters) != expected_parameters:
+        raise AlpacaBridgeIncompleteError(
+            "diagnostic request parameters do not match the frozen window"
+        )
+    midnight_labels = _diagnostic_midnight_labels(days, timezone_tzif)
+    for day in days:
+        instant = expected_timestamps[day]
+        if (
+            not isinstance(instant, datetime)
+            or instant.utcoffset() is None
+            or instant.astimezone(UTC).date() != day
+        ):
+            raise AlpacaBridgeIncompleteError(
+                "diagnostic expected bar timestamp is invalid"
+            )
+        if instant.astimezone(UTC) != midnight_labels[day]:
+            raise AlpacaBridgeIncompleteError(
+                "diagnostic date label is not configured local midnight"
+            )
+    if not pages or len(pages) > len(days) + 1:
+        raise AlpacaBridgeIncompleteError(
+            "diagnostic page count is incomplete or excessive"
+        )
+    next_token: str | None = None
+    seen_tokens: set[str] = set()
+    rows: list[AlpacaNativeBar] = []
+    terminal = False
+    for page in pages:
+        if terminal or page.request_token != next_token:
+            raise AlpacaBridgeIncompleteError(
+                "diagnostic page token chain is inconsistent"
+            )
+        document = _strict_document(page.body)
+        if not isinstance(document, dict):
+            raise AlpacaBridgeIncompleteError(
+                "diagnostic bars response must be an object"
+            )
+        grouped = document.get("bars")
+        if not isinstance(grouped, dict) or set(grouped) != {symbol}:
+            raise AlpacaBridgeIncompleteError(
+                "diagnostic page has an unexpected symbol"
+            )
+        if "next_page_token" not in document:
+            raise AlpacaBridgeIncompleteError("diagnostic page continuation is absent")
+        token = document.get("next_page_token")
+        if token is not None and (
+            not isinstance(token, str) or not token or token in seen_tokens
+        ):
+            raise AlpacaBridgeIncompleteError("diagnostic page continuation is invalid")
+        page_rows = _parse_alpaca_bars_document(document)
+        if token is not None and not page_rows:
+            raise AlpacaBridgeIncompleteError("diagnostic nonterminal page is empty")
+        for row in page_rows:
+            if row.session_date not in expected_timestamps:
+                raise AlpacaBridgeIncompleteError(
+                    "diagnostic page has an unexpected session"
+                )
+            try:
+                stamp = datetime.fromisoformat(
+                    row.native_timestamp.replace("Z", "+00:00")
+                )
+            except ValueError as error:
+                raise AlpacaBridgeIncompleteError(
+                    "diagnostic bar timestamp is invalid"
+                ) from error
+            if stamp.utcoffset() is None or stamp.astimezone(
+                UTC
+            ) != expected_timestamps[row.session_date].astimezone(UTC):
+                raise AlpacaBridgeIncompleteError(
+                    "diagnostic bar timestamp mismatches its date label"
+                )
+            if rows and row.session_date <= rows[-1].session_date:
+                raise AlpacaBridgeIncompleteError(
+                    "diagnostic bars are duplicate or out of order"
+                )
+            if (
+                not (
+                    Decimal(0)
+                    < row.low
+                    <= min(row.open, row.close)
+                    <= max(row.open, row.close)
+                    <= row.high
+                )
+                or row.volume <= 0
+                or row.trade_count <= 0
+            ):
+                raise AlpacaBridgeIncompleteError(
+                    "diagnostic bar has invalid price or activity"
+                )
+            rows.append(row)
+        if token is not None:
+            seen_tokens.add(token)
+        next_token = token
+        terminal = token is None
+    if not terminal or tuple(row.session_date for row in rows) != days:
+        raise AlpacaBridgeIncompleteError(
+            "diagnostic bars do not cover the entire window"
+        )
+    return AlpacaDiagnosticBarWindow(bars=tuple(rows))
 
 
 def _session_date_from_stamp(stamp: str) -> date:
@@ -1150,6 +1337,139 @@ class AlpacaCohortMember:
     security_id: UUID
     listing_id: UUID
     venue: ListingVenue
+
+
+@dataclass(frozen=True, slots=True)
+class AlpacaMixedVenueDiagnosticInput:
+    """Transient diagnostic pages and a caller-declared listing identity."""
+
+    member: AlpacaCohortMember
+    parameters: Mapping[str, str]
+    pages: tuple[AlpacaDiagnosticBarPage, ...] = field(repr=False)
+    expected_timestamps: Mapping[date, datetime]
+
+
+@dataclass(frozen=True, slots=True)
+class AlpacaMixedVenueDiagnosticMember:
+    """A declared member and its transient, non-admitted diagnostic rows."""
+
+    member: AlpacaCohortMember
+    bars: tuple[AlpacaNativeBar, ...] = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class AlpacaMixedVenueDiagnostics:
+    """Twelve complete diagnostic windows bound to a replayed common clock."""
+
+    clock_hash: str
+    windows: tuple[AlpacaMixedVenueDiagnosticMember, ...]
+    grade: Literal["diagnostic"] = field(default="diagnostic", init=False)
+    snapshot_status: Literal["SNAPSHOT_UNVERIFIED"] = field(
+        default="SNAPSHOT_UNVERIFIED", init=False
+    )
+    listing_identity_status: Literal["UNVERIFIED"] = field(
+        default="UNVERIFIED", init=False
+    )
+    source_authority_status: Literal["CALLER_CONFIGURED"] = field(
+        default="CALLER_CONFIGURED", init=False
+    )
+
+
+def prepare_alpaca_mixed_venue_diagnostics(
+    clock: CommonSessionClockV1,
+    clock_requests: tuple[tuple[ObservationDecisionQueryV1, M1dResolutionContext], ...],
+    authorized_sources: Mapping[str, tuple[str, str]],
+    inputs: tuple[AlpacaMixedVenueDiagnosticInput, ...],
+    coverage_verifiers: Mapping[
+        str, Callable[[ClosedWorldSessionCoverageV1, M1dResolutionContext], None]
+    ]
+    | None = None,
+    timezone_identifier: str = "America/New_York",
+    trusted_timezone_tzif: bytes | None = None,
+) -> AlpacaMixedVenueDiagnostics:
+    """Reconcile the fixed universe to one clock without admitting market data.
+
+    The independently configured clock policy is rederived, but its issuer,
+    listing identities, provider snapshot, price availability and action
+    coverage are not authenticated by this diagnostic. It cannot be used as an
+    evaluation admission or evidence of real execution.
+    """
+    from drift.evaluator.clock import _load_clock_policy, verify_common_clock_replay
+    from drift.markets.session_generation import _load_timezone_input
+
+    expected = frozenset(
+        {
+            "VOO",
+            "IJH",
+            "IJR",
+            "QQQ",
+            "VEA",
+            "VWO",
+            "SHY",
+            "IEF",
+            "TLT",
+            "TIP",
+            "LQD",
+            "GLD",
+        }
+    )
+    symbols = tuple(item.member.symbol for item in inputs)
+    if len(inputs) != len(expected) or set(symbols) != expected:
+        raise AlpacaBridgeIncompleteError(
+            "mixed diagnostic requires exactly the frozen 12 symbols"
+        )
+    if len({item.member.security_id for item in inputs}) != len(inputs) or len(
+        {item.member.listing_id for item in inputs}
+    ) != len(inputs):
+        raise AlpacaBridgeIncompleteError("mixed diagnostic identities must be unique")
+    verify_common_clock_replay(
+        clock, clock_requests, authorized_sources, coverage_verifiers
+    )
+    dates = clock.expected_session_dates
+    if trusted_timezone_tzif is None:
+        raise AlpacaBridgeIncompleteError(
+            "mixed diagnostic trusted timezone rules unavailable"
+        )
+    expected_labels = _diagnostic_midnight_labels(dates, trusted_timezone_tzif)
+    for _query, context in clock_requests:
+        descriptor, tzif = _load_timezone_input(_load_clock_policy(context), context)
+        if descriptor.timezone_identifier != timezone_identifier:
+            raise AlpacaBridgeIncompleteError(
+                "mixed diagnostic timezone identity mismatch"
+            )
+        labels = _diagnostic_midnight_labels(dates, tzif)
+        if labels != expected_labels:
+            raise AlpacaBridgeIncompleteError(
+                "mixed diagnostic timezone differs from trusted rules"
+            )
+    if {item.member.venue.value for item in inputs} != set(clock.expected_venues):
+        raise AlpacaBridgeIncompleteError(
+            "mixed diagnostic listing venues must exactly match the clock"
+        )
+    expected_stamps = dict(inputs[0].expected_timestamps)
+    windows: list[AlpacaMixedVenueDiagnosticMember] = []
+    for item in inputs:
+        if (
+            tuple(sorted(item.expected_timestamps)) != dates
+            or dict(item.expected_timestamps) != expected_stamps
+        ):
+            raise AlpacaBridgeIncompleteError(
+                "mixed diagnostic dates or bar labels differ from the clock"
+            )
+        if item.parameters.get("symbols") != item.member.symbol:
+            raise AlpacaBridgeIncompleteError(
+                "mixed diagnostic symbol does not match its declaration"
+            )
+        parsed = parse_alpaca_diagnostic_bar_pages(
+            pages=item.pages,
+            parameters=item.parameters,
+            expected_timestamps=item.expected_timestamps,
+            timezone_tzif=trusted_timezone_tzif,
+        )
+        windows.append(AlpacaMixedVenueDiagnosticMember(item.member, parsed.bars))
+    return AlpacaMixedVenueDiagnostics(
+        clock_hash=clock.clock_hash, windows=tuple(windows)
+    )
 
 
 def build_exploratory_dividends_from_alpaca(

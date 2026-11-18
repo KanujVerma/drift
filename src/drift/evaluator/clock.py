@@ -1,9 +1,14 @@
 """Session clock builders for the M2 evaluator (realized and scheduled modes)."""
 
+from collections.abc import Callable, Mapping
 from datetime import date, datetime
+from inspect import iscoroutine
 from typing import Literal
 
+from drift.datasets.hashing import manifest_hash
 from drift.domain.evaluator_clock import (
+    CommonSessionClockV1,
+    CommonVenueSessionV1,
     EvaluationSessionV1,
     SessionClockMode,
     SessionClockV1,
@@ -15,20 +20,33 @@ from drift.domain.evaluator_lanes import (
     ALPACA_LIMITATION_ABSENT_HALTS,
     ALPACA_LIMITATION_SCHEDULED_SESSION_RECONSTRUCTION,
 )
-from drift.domain.observation_query import ObservationQueryV1
+from drift.domain.observation_query import (
+    ObservationDecisionQueryV1,
+    ObservationQueryV1,
+    ObservationSourceSelectionPolicyV1,
+)
+from drift.domain.session_closed_world import ClosedWorldSessionCoverageV1
 from drift.domain.sessions import (
     GeneratedSessionRowV1,
     RealizedSessionVersionV1,
     ScheduleArtifactV1,
     ScheduledSessionVersionV1,
     ScheduleGenerationPolicyV1,
+    SessionCoverageVersionV1,
     SessionKeyV1,
 )
+from drift.domain.temporal import CutoffEligibility
 from drift.errors import DriftError
 from drift.markets.observation_selection import select_observation_records
 from drift.markets.observation_validation import (
     M1dResolutionContext,
+    m1d_context_hash,
     validate_m1d_resolution_context,
+)
+from drift.markets.session_closed_world import (
+    closed_world_record_digest,
+    evidenced_session_date_status,
+    verify_closed_world_session_coverage,
 )
 from drift.markets.session_generation import generate_schedule
 from drift.serialization.canonical import content_hash
@@ -40,6 +58,339 @@ _required_session_authority = {
     "realized_session_authority": _REALIZED,
     "scheduled_session_reconstruction": _SCHEDULED,
 }
+
+
+def require_common_replay_inventory(
+    clock: CommonSessionClockV1,
+    queries: tuple[ObservationQueryV1, ...],
+) -> tuple[ObservationDecisionQueryV1, ...]:
+    """Match the declared query for every member, without admitting a clock.
+
+    This inventory check is only one prerequisite. Callers must independently
+    replay every matched query against its authorized context and prove the
+    entire venue interval before making any execution decision.
+    """
+    clock = CommonSessionClockV1.model_validate(clock.model_dump(mode="python"))
+    by_hash: dict[str, ObservationDecisionQueryV1] = {}
+    for supplied in queries:
+        if not isinstance(supplied, ObservationDecisionQueryV1):
+            raise ValueError("common replay inventory requires decision queries")
+        query = ObservationDecisionQueryV1.model_validate(
+            supplied.model_dump(mode="python")
+        )
+        digest = content_hash(query)
+        if digest in by_hash:
+            raise ValueError("common replay inventory has a duplicate query")
+        by_hash[digest] = query
+    matched: list[ObservationDecisionQueryV1] = []
+    for group in clock.sessions:
+        for member in group.members:
+            matched_query = by_hash.get(member.selection_query_hash)
+            if matched_query is None:
+                raise ValueError("common replay inventory is missing a member query")
+            del by_hash[member.selection_query_hash]
+            if (
+                matched_query.venue.value != member.session.session_key.mic
+                or matched_query.session_date != group.local_date
+                or matched_query.input_context_hash != member.resolution_context_hash
+                or matched_query.source_selection_policy_hash
+                != member.source_policy_hash
+                or matched_query.decision_time != group.closed_at
+                or matched_query.knowledge_cutoff > group.closed_at
+                or matched_query.effective_cutoff > group.closed_at
+            ):
+                raise ValueError("common replay inventory has a mismatched member")
+            matched.append(matched_query)
+    if by_hash:
+        raise ValueError("common replay inventory contains an extra query")
+    return tuple(matched)
+
+
+def replay_common_venue_session(
+    member: CommonVenueSessionV1,
+    query: ObservationDecisionQueryV1,
+    context: M1dResolutionContext,
+) -> EvaluationSessionV1:
+    """Rederive one member; this alone does not authenticate or admit a clock."""
+    member = CommonVenueSessionV1.model_validate(member.model_dump(mode="python"))
+    query = ObservationDecisionQueryV1.model_validate(query.model_dump(mode="python"))
+    session = member.session
+    if (
+        member.resolution_context_hash != m1d_context_hash(context)
+        or query.input_context_hash != member.resolution_context_hash
+        or member.selection_query_hash != content_hash(query)
+        or member.source_policy_hash != query.source_selection_policy_hash
+        or query.venue.value != session.session_key.mic
+        or query.session_date != session.session_key.local_date
+        or query.decision_time != session.closed_at
+    ):
+        raise ValueError("common venue replay identity mismatch")
+    purpose = (
+        "scheduled_session"
+        if session.authority == "scheduled_reconstruction"
+        else "realized_session"
+    )
+    selected = select_observation_records(query, purpose, context)
+    if selected.proof.classification != "selected" or len(selected.records) != 1:
+        raise ValueError("common venue replay requires one selected authority record")
+    record = selected.records[0]
+    if not isinstance(record, ScheduledSessionVersionV1 | RealizedSessionVersionV1):
+        raise ValueError("common venue replay selected a non-session record")
+    source_evidence = {content_hash(item) for item in record.revision.availability}
+    witnessed = tuple(
+        decision
+        for decision in selected.proof.availability_decisions
+        if decision.evidence_hash == member.availability_evidence_hash
+        and decision.evidence_hash in source_evidence
+        and decision.classification is CutoffEligibility.ELIGIBLE
+        and decision.evidence.lower_bound == member.first_available_at
+        and decision.evidence.upper_bound == member.first_available_at
+        and decision.cutoff == query.knowledge_cutoff
+        and decision.requested_channel == query.requested_channel
+        and decision.policy_hash == query.availability_policy_hash
+    )
+    if len(witnessed) != 1 or member.first_available_at > query.knowledge_cutoff:
+        raise ValueError("common venue replay availability is not witnessed")
+    mode: SessionClockMode = (
+        "scheduled_session_reconstruction"
+        if purpose == "scheduled_session"
+        else "realized_session_authority"
+    )
+    rederived = rebuild_session_clock(mode, (query,), context)
+    if len(rederived.sessions) != 1 or rederived.sessions[0] != session:
+        raise ValueError("common venue replay session does not match source authority")
+    return rederived.sessions[0]
+
+
+def replay_common_session_members(
+    clock: CommonSessionClockV1,
+    requests: tuple[tuple[ObservationDecisionQueryV1, M1dResolutionContext], ...],
+) -> tuple[EvaluationSessionV1, ...]:
+    """Replay members; coverage and source authorization remain separate."""
+    matched = require_common_replay_inventory(
+        clock, tuple(query for query, _ in requests)
+    )
+    contexts = {content_hash(query): context for query, context in requests}
+    members = tuple(member for group in clock.sessions for member in group.members)
+    return tuple(
+        replay_common_venue_session(member, query, contexts[content_hash(query)])
+        for member, query in zip(members, matched, strict=True)
+    )
+
+
+def require_common_interval_inventory(
+    clock: CommonSessionClockV1,
+    coverage: tuple[ClosedWorldSessionCoverageV1, ...],
+) -> None:
+    """Compare every venue/date to coverage; callers must verify its origin.
+
+    These structural records are not authenticated here. In particular, a
+    caller must obtain them from venue-scoped authorized replay contexts,
+    rather than relabeling a consolidated calendar as two separate sources.
+    """
+    clock = CommonSessionClockV1.model_validate(clock.model_dump(mode="python"))
+    if clock.mode != "scheduled_session_reconstruction":
+        raise ValueError(
+            "common interval scheduled coverage cannot prove realized dates"
+        )
+    records = tuple(
+        ClosedWorldSessionCoverageV1.model_validate(record.model_dump(mode="python"))
+        for record in coverage
+    )
+    if any(
+        record.mic not in clock.expected_venues or not record.completeness.positive
+        for record in records
+    ):
+        raise ValueError("common interval has foreign or incomplete coverage")
+    by_venue = {
+        venue: tuple(record for record in records if record.mic == venue)
+        for venue in clock.expected_venues
+    }
+    if any(not rows for rows in by_venue.values()):
+        raise ValueError("common interval is missing venue coverage")
+    request_venues: dict[str, str] = {}
+    observation_venues: dict[str, str] = {}
+    for venue, rows in by_venue.items():
+        for record in rows:
+            previous_request = request_venues.setdefault(
+                record.request_binding_hash, venue
+            )
+            previous_observation = observation_venues.setdefault(
+                record.origin_observation_hash, venue
+            )
+            if previous_request != venue or previous_observation != venue:
+                raise ValueError("common interval reuses an acquisition across venues")
+    expected = set(clock.expected_session_dates)
+    for ordinal in range(
+        clock.window_start.toordinal(), clock.window_end.toordinal() + 1
+    ):
+        day = date.fromordinal(ordinal)
+        wanted = "scheduled_open" if day in expected else "evidenced_non_trading"
+        for venue, rows in by_venue.items():
+            actual = evidenced_session_date_status(rows, venue, day)
+            if actual != wanted:
+                raise ValueError(
+                    f"common interval {venue} {day.isoformat()} is {actual}, "
+                    f"expected {wanted}"
+                )
+
+
+def _coverage_binds_selected_session(
+    coverage: ClosedWorldSessionCoverageV1,
+    selected_coverage_hash: str,
+    selected_hash: str,
+    context: M1dResolutionContext,
+) -> bool:
+    """Join the selected row to the dataset a verified coverage row covers."""
+    coverage_digest = closed_world_record_digest(coverage)
+    datasets = {manifest_hash(item.manifest): item for item in context.session_datasets}
+    for dataset in context.session_datasets:
+        for row in dataset.records:
+            if (
+                not isinstance(row, SessionCoverageVersionV1)
+                or content_hash(row) != selected_coverage_hash
+                or row.revision.source_artifact.content_hash != coverage_digest
+            ):
+                continue
+            for digest in row.covered_dataset_hashes:
+                target = datasets.get(digest)
+                if target is not None and any(
+                    isinstance(record, ScheduledSessionVersionV1)
+                    and content_hash(record) == selected_hash
+                    and record.revision.source_artifact.content_hash
+                    == coverage.response_sha256
+                    for record in target.records
+                ):
+                    return True
+    return False
+
+
+def verify_common_clock_replay(
+    clock: CommonSessionClockV1,
+    requests: tuple[tuple[ObservationDecisionQueryV1, M1dResolutionContext], ...],
+    authorized_sources: Mapping[str, tuple[str, str]],
+    coverage_verifiers: Mapping[
+        str, Callable[[ClosedWorldSessionCoverageV1, M1dResolutionContext], None]
+    ]
+    | None = None,
+) -> tuple[EvaluationSessionV1, ...]:
+    """Rederive a scheduled clock against externally configured venue sources.
+
+    The caller must authenticate the source configuration and its issuer.
+    A self-selected policy, these hashes, or this function alone cannot confer
+    source authenticity, promotion eligibility, or a realized session.
+    """
+    if clock.mode != "scheduled_session_reconstruction":
+        raise ValueError("common clock replay currently requires scheduled authority")
+    if set(authorized_sources) != set(clock.expected_venues):
+        raise ValueError("common clock source configuration must cover its venues")
+    if coverage_verifiers is None or set(coverage_verifiers) != set(
+        clock.expected_venues
+    ):
+        raise ValueError(
+            "common clock requires a source-specific verifier for each venue"
+        )
+    sessions = replay_common_session_members(clock, requests)
+    by_query = {content_hash(query): (query, context) for query, context in requests}
+    records: dict[str, ClosedWorldSessionCoverageV1] = {}
+    earliest_cutoff = clock.sessions[0].closed_at
+    for group in clock.sessions:
+        for member in group.members:
+            query, context = by_query[member.selection_query_hash]
+            expected_policy, expected_source = authorized_sources[query.venue.value]
+            if query.source_selection_policy_hash != expected_policy:
+                raise ValueError("common clock source policy is not authorized")
+            policy_artifact = context.supporting_artifacts.get(expected_policy)
+            if policy_artifact is None:
+                raise ValueError("common clock source policy is unavailable")
+            policy = ObservationSourceSelectionPolicyV1.model_validate_json(
+                policy_artifact.data
+            )
+            for role in ("scheduled_session", "session_coverage"):
+                matches = tuple(
+                    binding
+                    for binding in policy.bindings
+                    if binding.dataset_role == role
+                    and binding.venue == query.venue
+                    and binding.listing_id == query.listing_id
+                    and binding.source_id == expected_source
+                    and binding.start_date <= clock.window_start
+                    and binding.end_date >= clock.window_end
+                )
+                if len(matches) != 1:
+                    raise ValueError(
+                        "common clock policy does not cover the full interval"
+                    )
+            selected = select_observation_records(query, "scheduled_session", context)
+            if len(selected.records) != 1 or not isinstance(
+                selected.records[0], ScheduledSessionVersionV1
+            ):
+                raise ValueError("common clock selected session is unavailable")
+            selected_record = selected.records[0]
+            if selected_record.source_id != expected_source:
+                raise ValueError("common clock selected source is not authorized")
+            selected_coverage = select_observation_records(
+                query, "session_coverage", context
+            )
+            if (
+                selected_coverage.proof.classification != "selected"
+                or len(selected_coverage.records) != 1
+                or not isinstance(
+                    selected_coverage.records[0], SessionCoverageVersionV1
+                )
+            ):
+                raise ValueError("common clock coverage was not selected at the cutoff")
+            coverage_row = selected_coverage.records[0]
+            if (
+                coverage_row.status != "expected_complete"
+                or coverage_row.revision_history_completeness != "complete"
+                or coverage_row.expected_daily_cardinality != 1
+                or coverage_row.exception_dates
+                or coverage_row.missing_artifact_hashes
+            ):
+                raise ValueError("common clock coverage is incomplete")
+            selected_coverage_hash = content_hash(coverage_row)
+            candidates = verify_closed_world_session_coverage(context)
+            joined = tuple(
+                coverage
+                for coverage in candidates
+                if _coverage_binds_selected_session(
+                    coverage,
+                    selected_coverage_hash,
+                    content_hash(selected_record),
+                    context,
+                )
+            )
+            if not joined:
+                raise ValueError(
+                    "common clock session lacks its exact coverage binding"
+                )
+            for coverage in joined:
+                if (
+                    coverage.mic != query.venue.value
+                    or coverage.source_id != expected_source
+                    or coverage.availability_channel != query.requested_channel
+                    or coverage_row.snapshot_as_of != coverage.snapshot_as_of
+                    or coverage_row.snapshot_as_of.upper_bound is None
+                    or coverage_row.snapshot_as_of.upper_bound
+                    > min(earliest_cutoff, query.knowledge_cutoff)
+                    or coverage.snapshot_as_of.upper_bound is None
+                    or coverage.snapshot_as_of.upper_bound
+                    > min(earliest_cutoff, query.knowledge_cutoff)
+                ):
+                    raise ValueError("common clock has foreign or late coverage")
+                result: object = coverage_verifiers[query.venue.value](
+                    coverage, context
+                )
+                if result is not None:
+                    if iscoroutine(result):
+                        result.close()
+                    raise ValueError(
+                        "common clock source verifier must synchronously return None"
+                    )
+                records[coverage.record_hash] = coverage
+    require_common_interval_inventory(clock, tuple(records.values()))
+    return sessions
 
 
 class RealizedSessionLocalDateError(DriftError, ValueError):
