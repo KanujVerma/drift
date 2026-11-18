@@ -92,6 +92,16 @@ def exploratory_dividend_policy_hash(
     return content_hash(payload)
 
 
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject ambiguous JSON objects rather than keeping their last value."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key in dividend source: {key}")
+        result[key] = value
+    return result
+
+
 def verify_dividend_source_payloads(
     dividends: Sequence[ExploratoryCashDividendTermsV1],
     source_payloads: Sequence[bytes],
@@ -112,13 +122,24 @@ def verify_dividend_source_payloads(
         p_hash = sha256(payload_bytes).hexdigest()
         payload_hashes.add(p_hash)
         try:
-            doc = json.loads(payload_bytes.decode("utf-8"), parse_float=Decimal)
+            doc = json.loads(
+                payload_bytes.decode("utf-8"),
+                parse_float=Decimal,
+                object_pairs_hook=_unique_json_object,
+            )
         except Exception as exc:
             raise ValueError(f"malformed source payload JSON: {exc}") from exc
 
         entries: list[Any] = []
         if isinstance(doc, dict):
             grouped = doc.get("corporate_actions")
+            containers = (
+                int(isinstance(grouped, dict) and "cash_dividends" in grouped)
+                + int("cash_dividends" in doc)
+                + int("dividends" in doc)
+            )
+            if containers > 1:
+                raise ValueError("multiple dividend source containers in one payload")
             if isinstance(grouped, dict):
                 entries = grouped.get("cash_dividends", [])
             elif "cash_dividends" in doc:
@@ -131,6 +152,7 @@ def verify_dividend_source_payloads(
         if not isinstance(entries, list):
             continue
 
+        seen_native_ids: set[str] = set()
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
@@ -142,6 +164,10 @@ def verify_dividend_source_payloads(
                 )
             nid = prov_id if prov_id is not None else corp_id
             sym = entry.get("symbol")
+            if isinstance(nid, str) and nid:
+                if nid in seen_native_ids:
+                    raise ValueError(f"duplicate dividend source identity: {nid}")
+                seen_native_ids.add(nid)
             if (
                 not nid
                 or not sym
