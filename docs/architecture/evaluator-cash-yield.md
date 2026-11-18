@@ -116,8 +116,13 @@ Consequences:
   kernel transaction and the pinned decimal context. Realized PnL, costs,
   holdings, claims and marks are untouched. A promotion-lane book refuses the
   credit.
+- The summary metrics report the last marked session. That is the existing
+  last-checkpoint rule, and interest follows it. If a session credits interest
+  and then halts, for example on a rejected rebalance, the final book's cash
+  includes that session's credit and `metrics.ending_cash` does not. The two
+  differ by exactly that credit.
 
-## Point-in-time rule
+## Point-in-time rule and construction checks
 
 For every session `i >= 1` the engine needs the rate dated on session `i - 1`
 (the exact date, never the nearest earlier record) and requires
@@ -125,24 +130,43 @@ For every session `i >= 1` the engine needs the rate dated on session `i - 1`
 engine construction, before any session runs, together with:
 
 - the admission lane must be exploratory;
-- the policy currency must equal the book currency.
+- the policy currency must equal the book currency;
+- the pinned 34-digit portfolio context must hold one unit of the interest
+  quantum next to the opening cash.
 
-Any failure raises `CashYieldRefusedError` (a `DriftError` and a
-`ValueError`). Records the run never reads are allowed. The accrual step
-re-checks what it reads as defense in depth; a failure there is a defect and
-propagates rather than becoming a run classification.
+Records the run never reads are allowed.
+
+Which error a refusal raises depends on where it is caught:
+
+- a malformed policy or rate record (a rate out of range, duplicate or empty
+  rates, a quantum that is not a positive power of ten, a missing limitation,
+  an unknown day count) raises pydantic `ValidationError`, when the model is
+  built and again when the engine revalidates its evidence;
+- a promotion admission raises `PromotionLaneDisabledError` before the policy
+  is read, because the promotion lane is disabled as a whole;
+- the checks listed above raise `CashYieldRefusedError` (a `DriftError` and a
+  `ValueError`).
+
+Construction checks everything that can be known before the first session. It
+cannot foresee every later balance. If a balance outgrows the precision a very
+fine quantum leaves, the kernel refuses that one credit with
+`CashYieldRefusedError` at its own step. The accrual step also re-checks the
+session it is handed against the accrual it reads. Either failure is a defect
+that propagates out of the run. It is never a run classification.
 
 ## Trace
 
 A credit emits `CashInterestAccruedTraceEventV1` (`kind =
 "cash_interest_accrued"`, phase `pre_open_effects`,
 `is_promotion_grade_evidence = False`) carrying `policy_terms_hash`,
-`rate_record_hash`, `accrual_start_date`, `accrual_days`, `annualized_rate`,
-`day_count`, `interest_quantum`, `accrual_base_cash`, `interest` and
-`cash_balance_after`. Its validator recomputes the interest with
-`cash_interest`, checks the days against the session date and checks
-`cash_balance_after == accrual_base_cash + interest`. No event is emitted
-when the interest rounds to zero.
+`rate_record_hash`, `rate_known_at`, `accrual_start_date`, `accrual_days`,
+`annualized_rate`, `day_count`, `interest_quantum`, `accrual_base_cash`,
+`interest` and `cash_balance_after`. Its validator recomputes the interest
+with `cash_interest`, checks the days against the session date, checks
+`cash_balance_after == accrual_base_cash + interest`, and rebuilds the rate
+record from `accrual_start_date`, `annualized_rate` and `rate_known_at` to
+check `rate_record_hash`. No event is emitted when the interest rounds to
+zero.
 
 `policy_terms_hash` is the hash of the policy without its rate series (source,
 source hash, currency, day count, quantum, limitations). The one rate an
@@ -154,6 +178,16 @@ changes.
 
 The event is a member of `EvaluatorTraceEventV2` only. The frozen version 1
 event union is not extended.
+
+An event can only check itself. The version 2 trace log checks its place in
+the run, and refuses a log unless every credit:
+
+- is the only credit in its session;
+- immediately follows that session's `session_start` event;
+- accrues on exactly the `opening_cash` that event states;
+- accrues from the local date of the session before it.
+
+Version 1 logs cannot hold the event, so they are unaffected.
 
 ## Identity impact
 
@@ -196,32 +230,53 @@ untouched.
    `src/drift/experiments/stage1_metric_math.py`). Enabling evaluator cash
    yield inside a Stage 1 study without reconciling the two would count the
    cash return in the portfolio and subtract a risk-free return on top of it.
-   This change wires nothing into Stage 1, the baselines, the experiments or
-   the loop. No caller supplies a policy today.
-3. **`known_at` is caller-asserted.** The engine enforces ordering against the
+   This change adds no Stage 1 wiring and no shipped caller builds a policy
+   today. Item 3 explains why that is a convention and not a guarantee.
+3. **Nothing stops a policy reaching the loop or the cohort harness.** No
+   shipped caller builds a policy today, but that is caller convention, not a
+   guard. `M2TrialEvaluatorAdapter` in `src/drift/loop/evaluator_adapter.py`
+   accepts a ready engine (`engine=`), or evidence it passes to the engine
+   unchanged, and runs it as given. The cohort harness in
+   `src/drift/experiments/parallel_portfolios.py` passes its `evidence`
+   straight to the engine too. Neither refuses a cash-yield policy, and
+   neither marks its results as carrying one. The scorecard math in
+   `src/drift/scorecards/performance.py` computes Sharpe as annualized return
+   over annualized volatility, with no risk-free term. Credited interest
+   therefore inflates the raw Sharpe and return metrics of cash-heavy
+   strategies: a book that only holds cash earns a steady return at almost no
+   volatility. The independent review of this change reported an annualized
+   raw Sharpe of 17.78 for a cash-only run. This is the opposite hazard to
+   item 2. There the cash return would be subtracted twice; here it is never
+   subtracted. Until scorecards use returns in excess of the risk-free rate,
+   results with a policy are not comparable with results without one. A
+   follow-up issue is needed for a refusal or an explicit label in the loop
+   adapter and the cohort harness, and for the scorecard fix. This change
+   does not edit those modules.
+4. **`known_at` is caller-asserted.** The engine enforces ordering against the
    session clock. It cannot know whether the source really published the rate
    at that instant. `source_sha256` is a consistency binding, not origin
    authentication.
-4. **Daily credit is generous.** Interest is credited every session and is
+5. **Daily credit is generous.** Interest is credited every session and is
    spendable at that open. A real sweep account usually pays monthly, may
    apply tiers, minimums or fees, and may not pay on unsettled cash. Results
    with a policy overstate what such an account would pay.
-5. **Exploratory lane only.** The policy is refused under any other
+6. **Exploratory lane only.** The policy is refused under any other
    admission, the kernel refuses the credit on a promotion-lane book, the
    event states it is not promotion-grade evidence, and a promotion result
    cannot bind a trace that contains it.
-6. **Total interest is recoverable only from the trace.** The summary metrics
+7. **Total interest is recoverable only from the trace.** The summary metrics
    have no interest field, by design, so the pinned metrics schema does not
    move. Interest shows up in ending cash, net asset value and net profit and
    loss. Realized PnL does not include it.
-7. **One rate per accrual period.** The rate dated on the session before a gap
+8. **One rate per accrual period.** The rate dated on the session before a gap
    applies to every calendar day of the gap. A rate change over a weekend is
    not modeled.
-8. **Exact dates only.** A session date with no rate record is refused. The
+9. **Exact dates only.** A session date with no rate record is refused. The
    engine never carries a rate forward, so the caller must supply a record for
    every session date except the last.
-9. **Positive balances only.** No borrowing cost is modeled. The book cannot
-   hold negative cash today, so this only matters if that ever changes.
-10. **Downstream trace readers.** Consumers that reconcile cash from trace
-    events (for example Stage 1 readback code) do not know the new event. They
-    are not reached, because nothing wires a policy into them.
+10. **Positive balances only.** No borrowing cost is modeled. The book
+    cannot hold negative cash today, so this only matters if that ever changes.
+11. **Downstream trace readers.** Consumers that reconcile cash from trace
+    events (for example Stage 1 readback code) do not know the new event. No
+    shipped caller hands them a policy today, but as item 3 says, nothing
+    refuses one.

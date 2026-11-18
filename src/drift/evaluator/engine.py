@@ -54,9 +54,12 @@ Optional cash yield. Idle cash earns nothing unless the evidence carries a
 `CashYieldPolicyV1`. With one, the pre-open phase first credits interest on the
 cash the session opened with, at the rate dated on the previous session and
 known strictly before this session opened, and only then applies corporate
-actions. The policy is admitted or refused whole at construction. Modeled
-interest is EXPLORATORY. Without a policy no step runs, no event is emitted and
-every hash is what it was.
+actions. Everything knowable before the first session is checked at
+construction, where the policy is admitted or refused whole. One refusal can
+still come later: a credit a later balance cannot hold exactly is refused at
+its own step and propagates as a defect. Modeled interest is EXPLORATORY.
+Without a policy no step runs, no event is emitted and every hash is what it
+was.
 """
 
 import dataclasses
@@ -65,6 +68,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from fractions import Fraction
 from functools import cache
 from threading import Lock
 from types import NoneType, UnionType
@@ -816,8 +820,9 @@ class SessionEvaluatorEvidence:
 
     ``cash_yield`` is an optional caller-declared, point-in-time cash rate
     series. When present, idle cash earns modeled EXPLORATORY interest; the
-    policy is admitted or refused whole at construction. When absent, nothing
-    is credited and the evidence hash carries no trace of the field.
+    policy is checked whole at construction and refused there if anything
+    knowable then is wrong. When absent, nothing is credited and the evidence
+    hash carries no trace of the field.
     """
 
     listing_role_records: tuple[ListingRoleVersionV1, ...] = ()
@@ -1193,6 +1198,7 @@ def _admitted_cash_yield(
     sessions: Sequence[EvaluationSessionV1],
     book_currency_namespace: str,
     book_currency_code: str,
+    opening_cash: Decimal,
 ) -> _CashYieldSchedule | None:
     """Admit an optional cash-yield policy for one clock, or refuse it whole.
 
@@ -1203,6 +1209,11 @@ def _admitted_cash_yield(
       use a policy. The promotion lane is refused before this is reached
       (issue 79); the check stays for the day that lane is re-enabled.
     * The policy must accrue in exactly the book currency.
+    * The pinned portfolio context must hold one unit of the interest quantum
+      next to the opening cash. A quantum finer than that could never be
+      credited to this book exactly, so it is refused here, not at session
+      one. This is what construction can know. A balance that later outgrows
+      the precision a fine quantum leaves is refused at that credit instead.
     * The interest credited at session ``i`` accrues from session ``i - 1``,
       so the policy must state a rate for that exact local date. A missing
       date is never filled from a neighbouring one.
@@ -1227,6 +1238,14 @@ def _admitted_cash_yield(
             f"the policy accrues in {policy.currency_namespace} "
             f"{policy.currency_code}, the book is held in "
             f"{book_currency_namespace} {book_currency_code}"
+        )
+    with decimal_context():
+        beside = opening_cash + policy.interest_quantum
+    if Fraction(beside) != Fraction(opening_cash) + Fraction(policy.interest_quantum):
+        raise _refuse_cash_yield(
+            f"the interest quantum {policy.interest_quantum} is finer than the "
+            "pinned portfolio context can hold next to the opening cash "
+            f"{opening_cash}"
         )
     accruals: list[_CashAccrual] = []
     for index in range(1, len(sessions)):
@@ -2050,14 +2069,15 @@ class SessionEvaluatorEngine:
                 "a promotion admission cannot use exploratory dividend policy",
             )
         self._exploratory_dividends = evidence.exploratory_dividends
-        # Optional modeled cash yield. Admitted or refused whole here, before
-        # any session runs; ``None`` when the evidence carries no policy.
+        # Optional modeled cash yield. Checked whole here, before any session
+        # runs; ``None`` when the evidence carries no policy.
         self._cash_yield = _admitted_cash_yield(
             evidence.cash_yield,
             lane=admission.lane,
             sessions=bundle.session_clock.sessions,
             book_currency_namespace=book_currency_namespace,
             book_currency_code=book_currency_code,
+            opening_cash=protocol.initial_cash,
         )
         # Issue 76 (C5, V10, V12): the coverage index re-verifies every record
         # under the running identity and refuses exploratory coverage under a
@@ -2767,7 +2787,9 @@ class SessionEvaluatorEngine:
 
         Construction already admitted every accrual. The step still checks
         the session it is handed against the accrual it reads, and a mismatch
-        is a defect that propagates, never a run classification.
+        is a defect that propagates, never a run classification. So is the one
+        refusal construction cannot foresee: a credit this balance cannot hold
+        exactly, which the kernel refuses with ``CashYieldRefusedError``.
         """
         schedule = self._cash_yield
         if schedule is None or index == 0:
@@ -2811,6 +2833,7 @@ class SessionEvaluatorEngine:
                 session_key=key,
                 policy_terms_hash=schedule.terms_hash,
                 rate_record_hash=accrual.record_hash,
+                rate_known_at=accrual.record.known_at,
                 accrual_start_date=accrual.start_date,
                 accrual_days=accrual.days,
                 annualized_rate=accrual.record.annualized_rate,

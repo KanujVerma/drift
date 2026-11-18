@@ -6,6 +6,7 @@ from decimal import Decimal
 from fractions import Fraction
 
 from drift.domain.common import UUID7, SHA256Hash
+from drift.domain.evaluator_cash_yield import CashYieldRefusedError
 from drift.domain.evaluator_clock import SessionClockV1
 from drift.domain.evaluator_lanes import EvaluationAdmissionV1
 from drift.domain.evaluator_portfolio import (
@@ -406,8 +407,10 @@ class PortfolioAccountingKernel:
         Interest is cash income, not a trading result. Realized PnL, costs,
         holdings, claims and any mark are left exactly as they were, as
         settlement leaves them. The amount must be an exact, finite, strictly
-        positive ``Decimal`` the book can hold without rounding. Modeled
-        interest is EXPLORATORY, so a book in any other lane refuses it.
+        positive ``Decimal``. Modeled interest is EXPLORATORY, so a book in
+        any other lane refuses it. A credit the pinned context cannot hold
+        exactly on this balance is refused with ``CashYieldRefusedError``
+        (itself a ``ValueError``) rather than rounded.
         """
         if self._lane != "exploratory":
             raise LaneAdmissibilityError(
@@ -424,7 +427,7 @@ class PortfolioAccountingKernel:
         with self._transaction(), decimal_context():
             credited = self._cash + amount
             if Fraction(credited) != Fraction(self._cash) + Fraction(amount):
-                raise ValueError(
+                raise CashYieldRefusedError(
                     f"cash interest {amount} on a balance of {self._cash} cannot "
                     "be held exactly in the pinned portfolio context; it is "
                     "refused, not rounded"

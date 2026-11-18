@@ -50,6 +50,7 @@ from drift.domain.evaluator_trace import (
     EvaluationPhase,
     EvaluationTraceLogV1,
     EvaluationTraceLogV2,
+    IndeterminateCauseTraceEventV1,
     SessionStartTraceEventV1,
     seal_observed_evaluation_trace_log,
 )
@@ -760,7 +761,11 @@ def test_a_credit_leaves_holdings_costs_realized_results_and_the_mark() -> None:
         ("0.01", TypeError, r"exact Decimal, got str"),
         (None, TypeError, r"exact Decimal, got NoneType"),
         (_SpoofedDecimal("0.01"), TypeError, r"exact Decimal, got _SpoofedDecimal"),
-        (Decimal("0." + "0" * 40 + "1"), ValueError, r"cannot be held exactly"),
+        (
+            Decimal("0." + "0" * 40 + "1"),
+            CashYieldRefusedError,
+            r"cannot be held exactly",
+        ),
     ],
     ids=[
         "zero",
@@ -793,8 +798,9 @@ def test_a_refused_credit_leaves_the_book_untouched(
 def test_a_credit_the_book_cannot_hold_exactly_is_refused_not_rounded() -> None:
     kernel, before = _kernel()
 
-    # 10000 plus 1e-30 needs 35 significant digits; the book holds 34.
-    with pytest.raises(ValueError, match=r"cannot be held exactly"):
+    # 10000 plus 1e-30 needs 35 significant digits; the book holds 34. The
+    # refusal is the typed cash-yield refusal, never a bare ValueError.
+    with pytest.raises(CashYieldRefusedError, match=r"cannot be held exactly"):
         kernel.credit_cash_interest(Decimal("1E-30"))
 
     assert kernel.state is before
@@ -831,13 +837,15 @@ def test_a_credit_ignores_the_ambient_decimal_context() -> None:
 
 def _event(**changes: Any) -> CashInterestAccruedTraceEventV1:
     policy = cash_policy()
-    record = policy.rates[2]
+    record = policy.rates[3]
+    assert record.rate_date == CASH_DAYS[3]
     values: dict[str, Any] = {
         "sequence": 2,
         "session_index": 1,
         "session_key": eng._key(CASH_DAYS[4]),
         "policy_terms_hash": cash_yield_policy_terms_hash(policy),
         "rate_record_hash": content_hash(record),
+        "rate_known_at": record.known_at,
         "accrual_start_date": CASH_DAYS[3],
         "accrual_days": 3,
         "annualized_rate": Decimal(CASH_RATE),
@@ -895,6 +903,19 @@ def test_the_event_states_its_phase_and_its_evidence_grade() -> None:
         ({"is_promotion_grade_evidence": True}, r"is_promotion_grade_evidence"),
         ({"phase": EvaluationPhase.OPEN_EXECUTION}, r"phase"),
         ({"session_index": 0, "sequence": 0}, r"first session"),
+        (
+            {"rate_known_at": known_at_close(CASH_DAYS[3]) + timedelta(seconds=1)},
+            r"rate record hash must equal",
+        ),
+        (
+            {"rate_known_at": known_at_close(CASH_DAYS[2])},
+            r"rate record hash must equal",
+        ),
+        ({"rate_record_hash": "0" * 64}, r"rate record hash must equal"),
+        (
+            {"rate_record_hash": content_hash(cash_rate(CASH_DAYS[2]))},
+            r"rate record hash must equal",
+        ),
     ],
     ids=[
         "interest-one-cent-low",
@@ -915,6 +936,10 @@ def test_the_event_states_its_phase_and_its_evidence_grade() -> None:
         "promotion-grade-claim",
         "another-phase",
         "first-session",
+        "rate-known-one-second-later",
+        "rate-known-a-day-earlier",
+        "record-hash-of-nothing",
+        "record-hash-of-another-date",
     ],
 )
 def test_the_event_refuses_an_account_that_does_not_reconcile(
@@ -945,7 +970,30 @@ def test_the_event_survives_a_strict_json_round_trip() -> None:
     assert rebuilt.model_dump_json() == event.model_dump_json()
 
 
-def _opened_sessions() -> tuple[SessionStartTraceEventV1, SessionStartTraceEventV1]:
+def test_the_rate_record_hash_is_recomputable_from_the_event_alone() -> None:
+    event = _event()
+
+    record = CashRateObservationV1(
+        rate_date=event.accrual_start_date,
+        annualized_rate=event.annualized_rate,
+        known_at=event.rate_known_at,
+    )
+
+    assert content_hash(record) == event.rate_record_hash
+    assert event.rate_known_at == known_at_close(CASH_DAYS[3])
+
+
+def test_the_event_requires_the_instant_its_rate_was_known() -> None:
+    values = _event().model_dump(mode="python")
+    del values["rate_known_at"]
+
+    with pytest.raises(ValidationError, match=r"rate_known_at"):
+        CashInterestAccruedTraceEventV1.model_validate(values)
+
+
+def _opened_sessions(
+    *, first_day: date = CASH_DAYS[3], second_opening_cash: str = "100043.76"
+) -> tuple[SessionStartTraceEventV1, SessionStartTraceEventV1]:
     """The two session starts a log needs before the event of session one."""
     first, second = (
         SessionStartTraceEventV1(
@@ -953,10 +1001,12 @@ def _opened_sessions() -> tuple[SessionStartTraceEventV1, SessionStartTraceEvent
             session_index=index,
             session_key=eng._key(day),
             session_hash=str(index + 1) * 64,
-            opening_cash=Decimal("100043.76"),
-            opening_net_asset_value=Decimal("100043.76"),
+            opening_cash=Decimal(cash),
+            opening_net_asset_value=Decimal(cash),
         )
-        for index, day in enumerate(CASH_DAYS[3:])
+        for index, (day, cash) in enumerate(
+            ((first_day, "100043.76"), (CASH_DAYS[4], second_opening_cash))
+        )
     )
     return first, second
 
@@ -983,6 +1033,74 @@ def test_the_frozen_version_one_log_refuses_the_event() -> None:
         EvaluationTraceLogV1.model_validate(
             {"schema_version": "1", "events": events, "trace_hash": "0" * 64}
         )
+
+
+def test_a_log_refuses_a_second_credit_in_one_session() -> None:
+    # Each credit reconciles on its own; only the log can see there are two.
+    second = _event(
+        sequence=3,
+        accrual_base_cash=Decimal("100087.53"),
+        interest=Decimal("43.79"),
+        cash_balance_after=Decimal("100131.32"),
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match=r"a session credits cash interest at most once: session 1 holds a "
+        r"second cash_interest_accrued event",
+    ):
+        seal_observed_evaluation_trace_log((*_opened_sessions(), _event(), second))
+
+
+def test_a_log_refuses_a_credit_on_cash_its_session_did_not_open_with() -> None:
+    # The credit reconciles on a base one cent under the opening cash.
+    credit = _event(
+        accrual_base_cash=Decimal("100043.75"),
+        cash_balance_after=Decimal("100087.52"),
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match=r"a cash interest credit must accrue on the cash its session opened "
+        r"with: session 1 opened with 100043.76, the credit accrues on 100043.75",
+    ):
+        seal_observed_evaluation_trace_log((*_opened_sessions(), credit))
+    # The same credit is admitted by a session that did open with that cash.
+    opened = _opened_sessions(second_opening_cash="100043.75")
+    assert seal_observed_evaluation_trace_log((*opened, credit)).schema_version == "2"
+
+
+def test_a_log_refuses_a_credit_that_does_not_follow_its_session_start() -> None:
+    first, second = _opened_sessions()
+    between = IndeterminateCauseTraceEventV1(
+        sequence=2,
+        session_index=1,
+        session_key=eng._key(CASH_DAYS[4]),
+        phase=EvaluationPhase.PRE_OPEN_EFFECTS,
+        cause_kind="indeterminate_valuation",
+        cause="any event at all between the session start and the credit",
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match=r"a cash interest credit must immediately follow its session start: "
+        r"session 1 holds indeterminate_cause before it",
+    ):
+        seal_observed_evaluation_trace_log((first, second, between, _event(sequence=3)))
+
+
+def test_a_log_refuses_a_credit_not_accrued_from_the_previous_session() -> None:
+    # The credit runs three days from 2026-01-09, which reconciles on its own,
+    # but the session before it in this log was held on 2026-01-08.
+    opened = _opened_sessions(first_day=CASH_DAYS[2])
+
+    with pytest.raises(
+        ValidationError,
+        match=r"a cash interest credit must accrue from the date of the previous "
+        r"session: session 0 was held on 2026-01-08, the credit accrues from "
+        r"2026-01-09",
+    ):
+        seal_observed_evaluation_trace_log((*opened, _event()))
 
 
 # ==========================================================================
@@ -1019,6 +1137,7 @@ def test_the_cash_baseline_compounds_the_worked_example() -> None:
     for event, record in zip(events, policy.rates, strict=True):
         assert event.policy_terms_hash == terms
         assert event.rate_record_hash == content_hash(record)
+        assert event.rate_known_at == record.known_at
         assert event.annualized_rate == Decimal(CASH_RATE)
         assert event.day_count == "ACT/360"
         assert event.interest_quantum == Decimal("0.01")

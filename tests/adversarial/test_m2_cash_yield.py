@@ -11,6 +11,7 @@ was edited, and their literals were captured there.
 # ruff: noqa: E402
 
 import sys
+from collections.abc import Sequence
 from datetime import date, datetime, timedelta
 from decimal import ROUND_UP, Context, Decimal, localcontext
 from pathlib import Path
@@ -51,13 +52,22 @@ from drift.domain.evaluator_cash_yield import (
     CashYieldPolicyV1,
     CashYieldRefusedError,
 )
+from drift.domain.evaluator_clock import EvaluationSessionV1
 from drift.domain.evaluator_portfolio import PortfolioStateV2
 from drift.domain.evaluator_results import (
+    EvaluationClassification,
     EvaluationRunArtifactsV2,
     PromotionEvaluationResultV1,
     evaluation_result_hash,
 )
-from drift.domain.evaluator_trace import SessionMarkTraceEventV1
+from drift.domain.evaluator_trace import (
+    CashInterestAccruedTraceEventV1,
+    EvaluationTraceLog,
+    EvaluatorTraceEventV2,
+    SessionMarkTraceEventV1,
+    SessionStartTraceEventV1,
+    seal_observed_evaluation_trace_log,
+)
 from drift.domain.experiments import ExperimentRunStatus
 from drift.evaluator.bundles import build_evaluation_run_identity
 from drift.evaluator.engine import (
@@ -396,6 +406,7 @@ def _schedule(lane: str) -> object:
         sessions=sessions,
         book_currency_namespace=eng.BOOK_NAMESPACE,
         book_currency_code=eng.BOOK_CODE,
+        opening_cash=Decimal(cy.INITIAL_CASH),
     )
 
 
@@ -422,6 +433,7 @@ def test_no_policy_is_admitted_as_no_schedule_in_any_lane() -> None:
                 sessions=sessions,
                 book_currency_namespace=eng.BOOK_NAMESPACE,
                 book_currency_code=eng.BOOK_CODE,
+                opening_cash=Decimal(cy.INITIAL_CASH),
             )
             is None
         )
@@ -442,6 +454,7 @@ def test_a_clock_that_does_not_advance_a_whole_day_is_refused() -> None:
             sessions=backwards,
             book_currency_namespace=eng.BOOK_NAMESPACE,
             book_currency_code=eng.BOOK_CODE,
+            opening_cash=Decimal(cy.INITIAL_CASH),
         )
 
 
@@ -748,6 +761,14 @@ def test_a_public_class_descriptor_cannot_reach_the_prepared_cash_yield(
 def test_an_injected_accrual_hook_never_sees_the_prepared_book(
     monkeypatch: pytest.MonkeyPatch, install_on: str
 ) -> None:
+    """A hook on the public engine, or its class, never reaches the prepared run.
+
+    This proves the prepared run steps a separate executor with its own
+    snapshot of the accrual method. It does not prove the class-bound form of
+    the call inside the step: the public engine is not the object stepped, so
+    an instance-bound call there would pass this test too. The test below
+    plants the hook on the executor itself and does prove it.
+    """
     expected = canonical_json(cy.run_cash(cy.cash_engine(policy=cy.cash_policy())))
     engine = cy.cash_engine(policy=cy.cash_policy())
     calls = 0
@@ -777,6 +798,41 @@ def test_an_injected_accrual_hook_never_sees_the_prepared_book(
     assert canonical_json(artifacts) == expected
     assert calls == 0
     assert lifecycle.seen == ["retain", "claim", "consume"]
+
+
+def test_trusted_dispatch_ignores_a_hook_planted_on_the_executor_itself() -> None:
+    """The step calls the accrual through the executor's class, not the instance.
+
+    The hook is written into the private executor's own instance dictionary,
+    where an instance-bound call (``self._cash_interest_accrual``) would find
+    it before the class method. The class-bound call the trusted step makes
+    does not look there. Replacing that call with the instance-bound form
+    makes this test fail.
+    """
+    expected = canonical_json(cy.run_cash(cy.cash_engine(policy=cy.cash_policy())))
+    engine = cy.cash_engine(policy=cy.cash_policy())
+    lifecycle = _Recorder()
+    engine.prepare_opening_book(lifecycle=lifecycle)
+    executor = evaluator_engine._PEEK_PREPARED_EXECUTOR(engine)
+    assert executor is not None
+    assert executor is not engine
+    calls = 0
+
+    def injected(*args: Any, **kwargs: Any) -> None:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("an accrual hook planted on the executor executed")
+
+    vars(executor)["_cash_interest_accrual"] = injected
+    # Non-vacuity: an instance-bound lookup on the executor does find the hook.
+    assert vars(executor)["_cash_interest_accrual"] is injected
+    assert executor._cash_interest_accrual.__name__ == "injected"
+
+    artifacts = cy.run_cash(engine)
+
+    assert canonical_json(artifacts) == expected
+    assert calls == 0
+    assert len(cy.interest_events(artifacts)) == 4
 
 
 def test_the_prepared_executor_shadows_the_cash_yield_collaborator() -> None:
@@ -832,6 +888,198 @@ def test_the_first_session_never_accrues() -> None:
 
     assert loop.events == []
     assert loop.state.cash_balance == Decimal("100000")
+
+
+# ==========================================================================
+# A quantum the book cannot hold
+# ==========================================================================
+
+
+def test_a_quantum_too_fine_for_the_opening_cash_is_refused_at_construction() -> None:
+    # 100000.12 plus one unit of 1e-30 needs 36 significant digits.
+    with pytest.raises(
+        CashYieldRefusedError,
+        match=r"^cash yield refused: the interest quantum 1E-30 is finer than "
+        r"the pinned portfolio context can hold next to the opening cash "
+        r"100000\.12$",
+    ):
+        cy.cash_engine(
+            policy=cy.cash_policy(interest_quantum=Decimal("1E-30")),
+            cash="100000.12",
+        )
+
+    # Control: 1e-28 leaves exactly the 34 digits this book needs, and runs.
+    engine = cy.cash_engine(
+        policy=cy.cash_policy(interest_quantum=Decimal("1E-28")), cash="100000.12"
+    )
+    events = cy.interest_events(cy.run_cash(engine))
+    assert len(events) == 4
+    assert str(events[0].interest) == "14.5833508333333333333333333333"
+
+
+def test_a_credit_the_book_outgrows_is_refused_as_a_cash_yield_refusal() -> None:
+    """Construction cannot foresee every balance, so the step fails closed, typed.
+
+    The opening cash holds one unit of the quantum, so construction admits the
+    policy. The first credit then carries the balance past a million, one
+    integer digit more than the 34-digit context has left.
+    """
+    engine = cy.cash_engine(
+        policy=cy.cash_policy(day_count="ACT/365F", interest_quantum=Decimal("1E-28")),
+        cash="999990.00",
+    )
+
+    with pytest.raises(CashYieldRefusedError, match=r"cannot be held exactly"):
+        cy.run_cash(engine)
+
+
+# ==========================================================================
+# The version 2 log binds every credit to its session
+# ==========================================================================
+
+
+def _resealed(events: Sequence[EvaluatorTraceEventV2]) -> EvaluationTraceLog:
+    """Seal ``events`` in the order given, restating each position."""
+    return seal_observed_evaluation_trace_log(
+        tuple(
+            event.model_copy(update={"sequence": position})
+            for position, event in enumerate(events)
+        )
+    )
+
+
+def test_real_engine_output_satisfies_the_log_rules() -> None:
+    artifacts = cy.run_cash(
+        cy.cash_engine(policy=cy.cash_policy()), cy.buy_at_third_open()
+    )
+
+    assert artifacts.trace.schema_version == "2"
+    assert _resealed(artifacts.trace.events) == artifacts.trace
+
+
+def test_a_log_refuses_a_real_credit_moved_behind_its_fill() -> None:
+    artifacts = cy.run_cash(
+        cy.cash_engine(policy=cy.cash_policy()), cy.buy_at_third_open()
+    )
+    events: list[EvaluatorTraceEventV2] = list(artifacts.trace.events)
+    credit = next(
+        position
+        for position, event in enumerate(events)
+        if isinstance(event, CashInterestAccruedTraceEventV1)
+        and event.session_index == 2
+    )
+    assert events[credit + 1].kind == "fill"
+    events[credit], events[credit + 1] = events[credit + 1], events[credit]
+
+    with pytest.raises(
+        ValidationError,
+        match=r"a cash interest credit must immediately follow its session start: "
+        r"session 2 holds fill before it",
+    ):
+        _resealed(events)
+
+
+# ==========================================================================
+# Interest is credited before the session's corporate actions
+# ==========================================================================
+
+
+def _split_engine_with_policy(
+    engine_type: type[SessionEvaluatorEngine] = SessionEvaluatorEngine,
+) -> SessionEvaluatorEngine:
+    """The split fixture, a two-for-one split before the last open, with a policy."""
+    plain, outcome = eng._split_engine()
+    return engine_type(
+        bundle=plain.bundle,
+        admission=plain.admission,
+        protocol=plain.protocol,
+        cost_model=plain.cost_model,
+        evidence=SessionEvaluatorEvidence(
+            listing_role_records=eng.ROLE_RECORDS,
+            economic_outcomes=(outcome,),
+            cash_yield=cy.cash_policy(days=eng.DAYS),
+        ),
+        book_currency_namespace=eng.BOOK_NAMESPACE,
+        book_currency_code=eng.BOOK_CODE,
+    )
+
+
+def test_interest_is_credited_before_the_session_corporate_action() -> None:
+    """Pins the documented order inside the pre-open phase.
+
+    Moving the accrual behind ``_pre_open_effects`` reorders the two events
+    asserted here, and the version 2 log then refuses the trace outright.
+    """
+    artifacts = eng._run(_split_engine_with_policy())
+
+    split_session = [
+        event for event in artifacts.trace.events if event.session_index == 3
+    ]
+    assert [event.kind for event in split_session] == [
+        "session_start",
+        "cash_interest_accrued",
+        "corporate_action_applied",
+        "session_mark",
+        "strategy_decision",
+    ]
+    start, credit = split_session[0], split_session[1]
+    assert isinstance(start, SessionStartTraceEventV1)
+    assert isinstance(credit, CashInterestAccruedTraceEventV1)
+    # The base is the cash the session opened with, before the split ran.
+    assert credit.accrual_base_cash == start.opening_cash == Decimal("9002.92")
+    assert credit.interest == Decimal("1.31")
+    assert artifacts.final_state.cash_balance == Decimal("9004.23")
+    # The split still applied exactly once, after the credit.
+    assert [
+        (holding.security_id, holding.quantity)
+        for holding in artifacts.final_state.holdings
+    ] == [(eng.SEC_A, 20)]
+
+
+class _AccruesAfterPreOpenEffects(SessionEvaluatorEngine):
+    """The mutant the order test guards against, built as a subclass."""
+
+    def _cash_interest_accrual(
+        self, loop: Any, index: int, session: EvaluationSessionV1
+    ) -> None:
+        return None
+
+    def _pre_open_effects(
+        self, loop: Any, index: int, session: EvaluationSessionV1
+    ) -> None:
+        super()._pre_open_effects(loop, index, session)
+        SessionEvaluatorEngine._cash_interest_accrual(self, loop, index, session)
+
+
+def test_an_accrual_moved_behind_the_pre_open_effects_cannot_seal_a_trace() -> None:
+    with pytest.raises(
+        ValidationError,
+        match=r"a cash interest credit must immediately follow its session start: "
+        r"session 3 holds corporate_action_applied before it",
+    ):
+        eng._run(_split_engine_with_policy(_AccruesAfterPreOpenEffects))
+
+
+def test_a_credit_before_a_rejected_fill_stays_in_the_final_book_only() -> None:
+    """The existing last-checkpoint rule, stated for interest.
+
+    Metrics report the last marked session. A session that credits interest
+    and then halts on an unfunded rebalance never marks, so its credit is in
+    the final book and the trace but not in the summary metrics.
+    """
+    unfunded = eng.FixedTargetStrategy({cy.CASH_DAYS[1]: ((eng.SEC_A, 2000),)})
+
+    artifacts = cy.run_cash(cy.cash_engine(policy=cy.cash_policy()), unfunded)
+
+    assert artifacts.result.classification is EvaluationClassification.REJECTED
+    assert artifacts.result.halted_session_index == 2
+    credits = cy.interest_events(artifacts)
+    assert [credit.session_index for credit in credits] == [1, 2]
+    book_cash = artifacts.final_state.cash_balance
+    reported_cash = artifacts.result.metrics.ending_cash
+    assert book_cash == Decimal("100029.17")
+    assert reported_cash == Decimal("100014.58")
+    assert book_cash - reported_cash == credits[-1].interest == Decimal("14.59")
 
 
 # ==========================================================================
