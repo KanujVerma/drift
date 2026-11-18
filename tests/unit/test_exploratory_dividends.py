@@ -583,6 +583,197 @@ def test_10_duplicate_and_conflicting_dividend_records() -> None:
         make_test_policy([div1, div1_conflict], [payload1, payload_conflict])
 
 
+@pytest.mark.parametrize("rates", [("1.00", "2.00"), ("2.00", "1.00")])
+def test_conflicting_duplicate_source_rows_cannot_reach_evaluator(
+    rates: tuple[str, str],
+) -> None:
+    """Synthetic conflicts cannot select a dividend by source row order."""
+    from hashlib import sha256
+
+    d5, d6, d7, d8 = (date(2026, 1, day) for day in (5, 6, 7, 8))
+    div, single = make_test_dividend(
+        "synthetic-duplicate", SEC, "SEC", Decimal(rates[-1]), d7, d7, d8
+    )
+    row = json.loads(single)["corporate_actions"]["cash_dividends"][0]
+    payload = json.dumps(
+        {"corporate_actions": {"cash_dividends": [row | {"rate": rates[0]}, row]}}
+    ).encode()
+    div = div.model_copy(update={"response_sha256": sha256(payload).hexdigest()})
+    action = ReturnedCorporateActionV1(
+        native_kind="cash_dividends",
+        native_id=div.native_id,
+        action_kind=None,
+        dates=(d7, d8),
+    )
+
+    with pytest.raises(ValueError, match="duplicate dividend source identity"):
+        policy = make_test_policy([div], [payload])
+        engine = _build_engine([d5, d6, d7, d8], policy, (action,))
+        strategy = ReconstructedTargetStrategy(
+            {d5: ((SEC, 10),), d6: ((SEC, 10),), d7: ((SEC, 10),)}
+        )
+        run_engine(engine, strategy)
+
+
+@pytest.mark.parametrize("other_symbol", ["SPY", "OTHER"])
+def test_duplicate_source_identity_is_refused_even_for_identical_or_other_symbol(
+    other_symbol: str,
+) -> None:
+    """A provider ID may appear only once in one source action group."""
+    from hashlib import sha256
+
+    div, single = make_test_dividend(
+        "synthetic-duplicate",
+        SECURITY_SPY,
+        "SPY",
+        Decimal("1.50"),
+        date(2022, 3, 18),
+        date(2022, 3, 21),
+        date(2022, 4, 29),
+    )
+    row = json.loads(single)["corporate_actions"]["cash_dividends"][0]
+    payload = json.dumps(
+        {"corporate_actions": {"cash_dividends": [row | {"symbol": other_symbol}, row]}}
+    ).encode()
+    div = div.model_copy(update={"response_sha256": sha256(payload).hexdigest()})
+
+    with pytest.raises(ValueError, match="duplicate dividend source identity"):
+        make_test_policy([div], [payload])
+
+
+def test_duplicate_json_key_in_dividend_source_is_refused() -> None:
+    """The verifier must not silently select the last value of a repeated key."""
+    from hashlib import sha256
+
+    div, single = make_test_dividend(
+        "synthetic-key",
+        SECURITY_SPY,
+        "SPY",
+        Decimal("1.50"),
+        date(2022, 3, 18),
+        date(2022, 3, 21),
+        date(2022, 4, 29),
+    )
+    payload = single.replace(b'"rate": "1.50"', b'"rate": "1.00", "rate": "1.50"')
+    assert payload != single
+    div = div.model_copy(update={"response_sha256": sha256(payload).hexdigest()})
+
+    with pytest.raises(ValueError, match="duplicate JSON key"):
+        make_test_policy([div], [payload])
+
+
+@pytest.mark.parametrize(
+    "containers",
+    [
+        ("nested", "cash_dividends"),
+        ("nested", "dividends"),
+        ("cash_dividends", "dividends"),
+        ("nested", "cash_dividends", "dividends"),
+    ],
+)
+def test_competing_dividend_containers_are_refused(
+    containers: tuple[str, ...],
+) -> None:
+    """One synthetic source cannot select between competing action arrays."""
+    from hashlib import sha256
+
+    div, single = make_test_dividend(
+        "synthetic-conflict",
+        SECURITY_SPY,
+        "SPY",
+        Decimal("1.50"),
+        date(2022, 3, 18),
+        date(2022, 3, 21),
+        date(2022, 4, 29),
+    )
+    row = json.loads(single)["corporate_actions"]["cash_dividends"][0]
+    doc: dict[str, object] = {}
+    for index, container in enumerate(containers):
+        entry = row if index == 0 else row | {"rate": "2.00"}
+        if container == "nested":
+            doc["corporate_actions"] = {"cash_dividends": [entry]}
+        else:
+            doc[container] = [entry]
+    payload = json.dumps(doc).encode()
+    div = div.model_copy(update={"response_sha256": sha256(payload).hexdigest()})
+
+    with pytest.raises(ValueError, match="multiple dividend source containers"):
+        make_test_policy([div], [payload])
+
+
+@pytest.mark.parametrize("container", ["nested", "cash_dividends", "dividends"])
+def test_each_single_dividend_source_container_remains_valid(container: str) -> None:
+    """Each previously supported standalone payload shape remains usable."""
+    from hashlib import sha256
+
+    div, single = make_test_dividend(
+        "synthetic-single",
+        SECURITY_SPY,
+        "SPY",
+        Decimal("1.50"),
+        date(2022, 3, 18),
+        date(2022, 3, 21),
+        date(2022, 4, 29),
+    )
+    row = json.loads(single)["corporate_actions"]["cash_dividends"][0]
+    doc = (
+        {"corporate_actions": {"cash_dividends": [row]}}
+        if container == "nested"
+        else {container: [row]}
+    )
+    payload = json.dumps(doc).encode()
+    div = div.model_copy(update={"response_sha256": sha256(payload).hexdigest()})
+
+    assert make_test_policy([div], [payload]).dividends == (div,)
+
+
+def test_distinct_unmodeled_source_action_still_halts_exploratory_execution() -> None:
+    """Distinct synthetic IDs remain separate actions, not inferred revisions."""
+    from hashlib import sha256
+
+    from test_evaluator_engine import CA_COVERAGE_SUPPORT
+
+    d5, d6, d7, d8 = (date(2026, 1, day) for day in (5, 6, 7, 8))
+    div, single = make_test_dividend(
+        "synthetic-a", SEC, "SEC", Decimal("1.00"), d7, d7, d8
+    )
+    row = json.loads(single)["corporate_actions"]["cash_dividends"][0]
+    other = row | {"id": "synthetic-b", "corporate_action_id": "synthetic-b"}
+    payload = json.dumps(
+        {"corporate_actions": {"cash_dividends": [row, other]}}
+    ).encode()
+    payload_hash = sha256(payload).hexdigest()
+    div = div.model_copy(update={"response_sha256": payload_hash})
+    policy = make_test_policy([div], [payload])
+    actions = tuple(
+        ReturnedCorporateActionV1(
+            native_kind="cash_dividends",
+            native_id=native_id,
+            action_kind=None,
+            dates=(d7, d8),
+        )
+        for native_id in ("synthetic-a", "synthetic-b")
+    )
+    previous_support = CA_COVERAGE_SUPPORT.get(payload_hash)
+    try:
+        engine = _build_engine([d5, d6, d7, d8], policy, actions)
+        result = run_engine(
+            engine,
+            ReconstructedTargetStrategy(
+                {d5: ((SEC, 10),), d6: ((SEC, 10),), d7: ((SEC, 10),)}
+            ),
+        )
+
+        assert result.result.classification == "indeterminate"
+        assert result.final_state.settled_claim_ids == ()
+    finally:
+        if previous_support is None:
+            CA_COVERAGE_SUPPORT.pop(payload_hash, None)
+        else:
+            CA_COVERAGE_SUPPORT[payload_hash] = previous_support
+        scheduled_session_case.cache_clear()
+
+
 # ==============================================================================
 # PRIORITY 4 ADVERSARIAL TESTS
 # ==============================================================================
