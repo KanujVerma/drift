@@ -46,6 +46,7 @@ from drift.execution.journal import (
 from drift.execution.router import (
     BrokerNeutralExecutionRouter,
     DuplicateClientOrderIdError,
+    RouterExecutionError,
 )
 
 NOW = datetime(2026, 3, 1, 14, 30, tzinfo=UTC)
@@ -350,8 +351,12 @@ def test_vector7_chronological_report_audit_sequence(tmp_path: Path) -> None:
     )
     journal.record_execution_report(partial_rep)
 
-    # Cancel the remaining leaves
-    cancel_rep = router.cancel_intent(intent.intent_id)
+    # The mock did not receive the manually retained partial fill. Its zero
+    # quantity cancellation is audited but cannot erase 20 retained fills.
+    with pytest.raises(RouterExecutionError, match="cumulative quantity"):
+        router.cancel_intent(intent.intent_id)
+    cancel_rep = journal.get_latest_execution_report(intent.intent_id)
+    assert cancel_rep is not None
     assert cancel_rep.status == ExecutionStatus.CANCELED
 
     # Check journal has exactly 3 reports in sequence
@@ -362,6 +367,8 @@ def test_vector7_chronological_report_audit_sequence(tmp_path: Path) -> None:
         ExecutionStatus.PARTIALLY_FILLED,
         ExecutionStatus.CANCELED,
     ]
+    assert [r.cum_quantity for r in reports] == [0, 20, 0]
+    assert journal.get_execution_report(partial_rep.report_id) == partial_rep
 
 
 def test_vector8_position_reconciliation_divergence(tmp_path: Path) -> None:
