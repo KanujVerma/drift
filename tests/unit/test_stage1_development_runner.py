@@ -1,9 +1,8 @@
-"""Unit tests for Stage 1 development runner and 9-pair R calibration.
+"""Containment and serialization tests; no historical execution is asserted."""
 
-Workstream E, Issue 575.
-"""
-
+from copy import deepcopy
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -15,13 +14,15 @@ from drift.experiments.stage1_development_runner import (
     DevelopmentRunResultV1,
     execute_development_run,
 )
-from drift.experiments.stage1_economic_costs import create_stage1_cost_model
 from drift.experiments.stage1_study_artifacts import (
     ORDERED_CALIBRATION_PAIRS,
     DevelopmentCalibrationPlanV1,
+    compute_ranking_proof,
+    create_calibration_attempt_receipt,
     create_development_calibration_plan,
 )
 from drift.experiments.stage1_study_freeze import StudyDateWindowV1
+from drift.serialization.canonical import content_hash
 
 H = "8" * 64
 NOW = datetime(2026, 11, 2, 6, 0, 0, tzinfo=UTC)
@@ -56,85 +57,61 @@ def _create_valid_dev_plan() -> tuple[
     return plan, dev_win, prohib
 
 
-def test_development_run_executes_all_nine_pairs_with_independent_accounts(
+@pytest.mark.parametrize("session_count", [None, 0, 126, 130, 754])
+def test_unqualified_synthetic_run_refuses_without_creating_artifacts(
     tmp_path: Path,
+    session_count: int | None,
 ) -> None:
+    """An unqualified generated series must not become historical calibration."""
     plan, _, _ = _create_valid_dev_plan()
-    cost_model = create_stage1_cost_model()
-
     ledger_dir = tmp_path / "ledgers"
+    artifacts: dict[str, Any] = {}
+    receipts: dict[str, Any] = {}
     config = DevelopmentRunConfigV1(
-        plan=plan,
-        authority_id="trusted-dev-root",
-        cost_model=cost_model,
-        session_count=130,  # 126 lookback + 4 decision sessions
-        ledger_dir=ledger_dir,
+        plan=plan, session_count=session_count, ledger_dir=ledger_dir
     )
-
-    receipt_store: dict[str, Any] = {}
-    artifact_store: dict[str, Any] = {}
-
-    run_result, cal_result = execute_development_run(
-        config,
-        artifact_store=artifact_store,
-        receipt_store=receipt_store,
-    )
-
-    assert run_result.status == "COMPLETED"
-    assert run_result.evaluated_sessions_count == 130
-    assert len(run_result.attempts) == 9
-    assert len(run_result.account_ids) == 9
-
-    # Verify each pair has an independent account
-    assert len(set(run_result.account_ids)) == 9
-    for pair in ORDERED_CALIBRATION_PAIRS:
-        expected_account = f"ACCOUNT-DEV-CALIB-R-{pair.lambda_v}-{pair.lambda_d}"
-        assert expected_account in run_result.account_ids
-
-    # Verify distinct SQLite ledgers exist and are non-empty
-    assert len(run_result.ledger_paths) == 9
-    for _acc_id, path_str in run_result.ledger_paths.items():
-        p = Path(path_str)
-        assert p.exists()
-        assert p.stat().st_size > 0
-
-    # Verify all 9 attempts completed with valid metrics
-    for att in run_result.attempts:
-        assert att.status == "COMPLETED"
-        assert att.terminal_net_return is not None
-        assert att.absolute_maximum_drawdown is not None
-        assert att.total_gross_turnover is not None
-        assert att.operating_cost is not None
-        assert att.plan_hash == plan.plan_hash
-        assert att.receipt_hash in receipt_store
-
-    # Verify winner selection and ranking proof
-    assert run_result.selected_pair is not None
-    assert run_result.selected_pair == cal_result.selected_pair
-    assert (
-        run_result.selected_pair_receipt_hash == cal_result.selected_pair_receipt_hash
-    )
-    assert len(run_result.ranking_proof) == 9
-    assert run_result.ranking_proof == cal_result.ranking_proof
+    with pytest.raises(ValueError, match="DEVELOPMENT_CALIBRATION_UNQUALIFIED"):
+        execute_development_run(
+            config, artifact_store=artifacts, receipt_store=receipts
+        )
+    assert not ledger_dir.exists()
+    assert artifacts == {}
+    assert receipts == {}
 
 
-def test_development_run_negative_control_shared_account_prohibited(
+@pytest.mark.parametrize("shared_account", [False, True])
+def test_refusal_preserves_existing_stores_accounts_and_ledger(
     tmp_path: Path,
+    shared_account: bool,
 ) -> None:
     plan, _, _ = _create_valid_dev_plan()
+    ledger_dir = tmp_path / "ledgers"
+    ledger_dir.mkdir()
+    ledger = ledger_dir / "calib_r_0.25_0.25.db"
+    original_bytes = b"existing caller-owned ledger sentinel"
+    ledger.write_bytes(original_bytes)
+    artifacts: dict[str, Any] = {"existing": {"values": [1, 2]}}
+    receipts: dict[str, Any] = {"existing": {"values": [3, 4]}}
+    accounts = (
+        {"ACCOUNT-DEV-CALIB-R-0.25-0.25"} if shared_account else {"other-account"}
+    )
+    before = deepcopy((artifacts, receipts, accounts))
     config = DevelopmentRunConfigV1(
         plan=plan,
         session_count=130,
-        ledger_dir=tmp_path / "ledgers",
+        ledger_dir=ledger_dir,
+        authority_id="caller-supplied-label-does-not-qualify-data",
     )
-
-    # Pre-allocating one of the pair accounts simulates two pairs sharing an account
-    conflicting_account = "ACCOUNT-DEV-CALIB-R-0.25-0.25"
-    with pytest.raises(ValueError, match="CALIBRATION_SHARED_ACCOUNT_PROHIBITED"):
+    with pytest.raises(ValueError, match="DEVELOPMENT_CALIBRATION_UNQUALIFIED"):
         execute_development_run(
             config,
-            allocated_accounts={conflicting_account},
+            artifact_store=artifacts,
+            receipt_store=receipts,
+            allocated_accounts=accounts,
         )
+    assert (artifacts, receipts, accounts) == before
+    assert ledger.read_bytes() == original_bytes
+    assert tuple(ledger_dir.iterdir()) == (ledger,)
 
 
 def test_development_run_negative_control_overlaps_prohibited_window() -> None:
@@ -164,13 +141,50 @@ def test_development_run_negative_control_overlaps_prohibited_window() -> None:
         )
 
 
-def test_development_run_result_hash_tamper_fails() -> None:
+def test_fixture_result_round_trip_and_hash_tamper_refusal() -> None:
+    """Explicit serialization fixture, never an executed account campaign."""
     plan, _, _ = _create_valid_dev_plan()
-    config = DevelopmentRunConfigV1(plan=plan, session_count=130)
-    run_result, _ = execute_development_run(config)
-
-    # Tampering with run_result_hash fails closed
-    dump = run_result.model_dump(mode="python")
-    dump["run_result_hash"] = "f" * 64
-    with pytest.raises(ValidationError, match="DEVELOPMENT_RUN_RESULT_HASH_MISMATCH"):
-        DevelopmentRunResultV1.model_validate(dump)
+    attempts = tuple(
+        create_calibration_attempt_receipt(
+            attempt_id=f"FIXTURE-{index}",
+            pair=pair,
+            status="COMPLETED",
+            plan_hash=plan.plan_hash,
+            terminal_net_return=Decimal("0.10"),
+            absolute_maximum_drawdown=Decimal("0.05"),
+            total_gross_turnover=Decimal("0.50"),
+            operating_cost=Decimal("0.00"),
+        )
+        for index, pair in enumerate(ORDERED_CALIBRATION_PAIRS)
+    )
+    body: dict[str, Any] = {
+        "schema_version": "drift-stage1-development-run/1",
+        "run_id": "FIXTURE-SERIALIZATION-ONLY",
+        "plan_hash": plan.plan_hash,
+        "status": "COMPLETED",
+        "completed_at": NOW,
+        "evaluated_sessions_count": 130,
+        "attempts": attempts,
+        "selected_pair": attempts[0].pair,
+        "selected_pair_receipt_hash": attempts[0].receipt_hash,
+        "ranking_proof": compute_ranking_proof(attempts),
+        "account_ids": (),
+        "ledger_paths": {},
+    }
+    fixture = DevelopmentRunResultV1.model_validate(
+        {**body, "run_result_hash": content_hash(body)}
+    )
+    assert (
+        DevelopmentRunResultV1.model_validate_json(fixture.model_dump_json()) == fixture
+    )
+    for field, value in (
+        ("run_result_hash", "f" * 64),
+        ("evaluated_sessions_count", 131),
+        ("status", "FAILED"),
+    ):
+        tampered = fixture.model_dump(mode="python")
+        tampered[field] = value
+        with pytest.raises(
+            ValidationError, match="DEVELOPMENT_RUN_RESULT_HASH_MISMATCH"
+        ):
+            DevelopmentRunResultV1.model_validate(tampered)
