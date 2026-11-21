@@ -166,6 +166,14 @@ M1C_CLOSED_WORLD_SOURCE_PATHS = frozenset(
         "src/drift/markets/economic_closed_world.py",
     }
 )
+# Issue #662 offline point-in-time calendar features (exploratory lane only).
+# Exact registrations add actual-file scans; no directory receives an exemption.
+CALENDAR_FEATURE_SOURCE_PATHS = frozenset(
+    {
+        "src/drift/domain/calendar_features.py",
+        "src/drift/markets/calendar_features.py",
+    }
+)
 # M2 source added under issue #34 and issue #116. It is additive under ADR 0012
 # like the evaluator modules, but it does not carry the "evaluator" prefix that
 # _m1e_candidate_paths filters on, so it has to be named. As with the
@@ -274,6 +282,7 @@ INERT_SOURCE_PATHS = (
     | M1D_REPLAY_IDENTITY_PATHS
     | M1D_CLOSED_WORLD_SOURCE_PATHS
     | M1C_CLOSED_WORLD_SOURCE_PATHS
+    | CALENDAR_FEATURE_SOURCE_PATHS
     | M2_ADDITIVE_SOURCE_PATHS
     | M2_ALPACA_BRIDGE_SOURCE_PATHS
     | M2_ALPACA_BRIDGE_SCRIPT_PATHS
@@ -295,6 +304,7 @@ SCANNED_AS_PRODUCTION_PATHS = (
     | M1D_REPLAY_IDENTITY_PATHS
     | M1D_CLOSED_WORLD_SOURCE_PATHS
     | M1C_CLOSED_WORLD_SOURCE_PATHS
+    | CALENDAR_FEATURE_SOURCE_PATHS
     | M2_ADDITIVE_SOURCE_PATHS
     | M2_ALPACA_BRIDGE_SOURCE_PATHS
     | M3_BASELINE_SOURCE_PATHS
@@ -1177,6 +1187,12 @@ def test_m1e_additions_are_allowlisted_inert_and_leave_m1d_pins_unchanged() -> N
 @pytest.mark.parametrize("relative", sorted(G2_EXECUTION_EXTENSION_SOURCE_PATHS))
 def test_g2_execution_extensions_have_actual_inert_source_scans(relative: str) -> None:
     """Registered evaluator/loop paths also pass the unchanged actual-file guard."""
+    _assert_m1e_source_file_allowed(relative)
+
+
+@pytest.mark.parametrize("relative", sorted(CALENDAR_FEATURE_SOURCE_PATHS))
+def test_calendar_feature_sources_have_actual_inert_source_scans(relative: str) -> None:
+    """Registered issue #662 calendar-feature paths pass the actual-file guard."""
     _assert_m1e_source_file_allowed(relative)
 
 
