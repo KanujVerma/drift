@@ -5,7 +5,7 @@ persistent kill switches, and order rate throttles prior to order submission.
 """
 
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from uuid import UUID
 
 from drift.domain.evaluator_portfolio import (
@@ -35,6 +35,16 @@ __all__ = [
 
 class CachedRiskApprovalBlockedError(DriftError):
     """An active emergency stop prevents reuse of a historical risk approval."""
+
+
+def _exceeds_basis_point_cap(notional: Decimal, nav: Decimal, cap: int) -> bool:
+    """Compare represented money exactly without truncating a ratio to bps."""
+    with decimal_context(), localcontext() as comparison:
+        # Canonical money has at most 34 significant digits. Each integer
+        # factor (10000 or a validated 0..10000 cap) has at most five digits.
+        # Guard digits preserve both products; no new monetary value is stored.
+        comparison.prec += 5
+        return notional * BPS_DENOMINATOR > nav * Decimal(cap)
 
 
 class HardRiskGatekeeper:
@@ -254,29 +264,27 @@ class HardRiskGatekeeper:
                         evaluated_at=evaluation_time,
                     )
 
-                proj_weight_bps = int((proj_pos_notional / nav) * BPS_DENOMINATOR)
                 limit_w = self._policy.max_position_weight_basis_points
-                if proj_weight_bps > limit_w:
+                if _exceeds_basis_point_cap(proj_pos_notional, nav, limit_w):
                     return self._record_verdict(
                         order_id=order_id,
                         status=RiskVerdictStatus.REJECTED,
                         reason=(
-                            f"max_position_weight_exceeded: {proj_weight_bps} "
-                            f"bps > limit {limit_w} bps"
+                            "max_position_weight_exceeded: position notional "
+                            f"{proj_pos_notional} exceeds {limit_w} bps of NAV {nav}"
                         ),
                         evaluated_at=evaluation_time,
                     )
 
                 proj_gross = portfolio_state.holdings_market_value + order_notional
-                proj_gross_bps = int((proj_gross / nav) * BPS_DENOMINATOR)
                 limit_g = self._policy.max_gross_exposure_basis_points
-                if proj_gross_bps > limit_g:
+                if _exceeds_basis_point_cap(proj_gross, nav, limit_g):
                     return self._record_verdict(
                         order_id=order_id,
                         status=RiskVerdictStatus.REJECTED,
                         reason=(
-                            f"max_gross_exposure_exceeded: {proj_gross_bps} "
-                            f"bps > limit {limit_g} bps"
+                            "max_gross_exposure_exceeded: gross notional "
+                            f"{proj_gross} exceeds {limit_g} bps of NAV {nav}"
                         ),
                         evaluated_at=evaluation_time,
                     )
