@@ -241,6 +241,9 @@ class PersistentRiskJournal:
         """Record pre-execution order evaluation verdict."""
         payload_bytes = canonical_json(verdict.model_dump(mode="python"))
         payload_str = payload_bytes.decode("utf-8")
+        # Unsafe construction can bypass model validation. Validate the exact
+        # retained bytes before opening a transaction or reserving an identity.
+        verdict = RiskVerdictV1.model_validate_json(payload_bytes)
 
         with self._transaction() as cursor:
             cursor.execute(
