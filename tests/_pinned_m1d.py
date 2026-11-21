@@ -36,12 +36,14 @@ The working-tree freeze is an ordered chain of links over v3
   bytes of the attestation module and added the two closed-world modules to
   the freeze. v8 exactly describes commit c1d2a91, the commit that last wrote
   it.
-* ``m1d-v9-protected-sha256.json`` (issue #76) supersedes v8 and is the
-  CURRENT inventory: the protected paths as they must stand in the live
-  working tree. Closed-world corporate-action coverage gained its own
+* ``m1d-v9-protected-sha256.json`` (issue #76) supersedes v8. Closed-world
+  corporate-action coverage gained its own
   ``m1c-corporate-action-coverage-v1`` closure, which changed the bytes of
   the attestation module and added the two corporate-action coverage modules
   to the freeze.
+* ``m1d-v10-protected-sha256.json`` (issue #365) supersedes v9 for the live
+  tree, changing only the listing venue contract to add ARCX. Historical
+  inventories, replay fixtures and archived inputs remain unchanged.
 
 A later link is appended to ``_FREEZE_INVENTORIES``; the entry it supersedes
 then records the commit that last wrote it. Each link carries two explicit,
@@ -810,6 +812,14 @@ _FREEZE_INVENTORIES: tuple[_FreezeInventory, ...] = (
         path=_FREEZE_FIXTURES / "m1d-v9-protected-sha256.json",
         file_sha256="7cbb9544dec8d28f11d2b7bcb4fb3816fad76755add8b16af13b20bdb6494a36",
         issue=76,
+        commit="1b62565d02c53f6ff1054a0e9ba6c717d5ae8d4e",
+    ),
+    _FreezeInventory(
+        label="v10",
+        inventory_id="m1d-v10-protected-sha256",
+        path=_FREEZE_FIXTURES / "m1d-v10-protected-sha256.json",
+        file_sha256="a7f2a8ea3fd06c77eb0c5360d092eae7ff893b85d768de648e1cab49d8ed009a",
+        issue=365,
         commit=None,
     ),
 )
@@ -880,7 +890,8 @@ def _chain_links(inventories: Sequence[_FreezeInventory]) -> tuple[_FreezeLink, 
 
 FREEZE_LINKS = _chain_links(_FREEZE_INVENTORIES)
 """v4 (issue #32) over v3, v5 (issue #63) over v4, v6 (issue #107) over v5, v7
-(issue #63 stage 2) over v6, v8 (issue #71) over v7, v9 (issue #76) over v8."""
+(issue #63 stage 2) over v6, v8 (issue #71) over v7, v9 (issue #76) over v8,
+and v10 (issue #365) over v9."""
 
 
 def _superseded_source_pins(

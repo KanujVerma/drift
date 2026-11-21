@@ -39,6 +39,7 @@ class ListingVenue(StrEnum):
     XNYS = "XNYS"
     XNAS = "XNAS"
     XASE = "XASE"
+    ARCX = "ARCX"
 
 
 class ExternalIdentifierKind(StrEnum):
