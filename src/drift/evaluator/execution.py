@@ -8,6 +8,7 @@ source-basis open prices, with versioned costs and adverse slippage.
 """
 
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal
@@ -33,7 +34,9 @@ from drift.domain.evaluator_execution import (
 from drift.domain.evaluator_portfolio import (
     IndeterminateBasisError,
     PortfolioStateV2,
+    canonical_money,
     decimal_context,
+    fits_portfolio_context,
 )
 from drift.domain.evaluator_reconstruction import ExploratoryCohortListingRoleV1
 from drift.domain.evaluator_strategy import SecurityTargetPositionV1
@@ -50,9 +53,212 @@ from drift.evaluator.portfolio import PortfolioAccountingKernel
 ONE = Decimal("1")
 
 
+@dataclass(frozen=True, slots=True)
+class DecisionCloseOrderCost:
+    """Numeric projection only, not a qualified quote, fill or account result."""
+
+    delta: int
+    reference_notional: Decimal
+    fees: Decimal
+    adverse_shortfall: Decimal
+    estimated_cost: Decimal
+    cash_delta: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionCloseRebalanceCost:
+    """Read-only whole-target arithmetic, not evidence or mandate admission."""
+
+    orders: tuple[tuple[UUID7, DecisionCloseOrderCost], ...]
+    total_fees: Decimal
+    total_shortfall: Decimal
+    estimated_cost: Decimal
+    required_cash: Decimal
+    net_sale_proceeds: Decimal
+    projected_cash: Decimal
+
+    @property
+    def is_funded(self) -> bool:
+        """Whether the numerical projection fits supplied spendable cash."""
+        return self.projected_cash >= ZERO
+
+
+def _validated_cost_model(cost_model: EvaluationCostModelV1) -> EvaluationCostModelV1:
+    if type(cost_model) is not EvaluationCostModelV1:
+        raise ValueError("cost model must be an explicit EvaluationCostModelV1")
+    # Frozen model_construct instances may still have invalid fields/hashes.
+    return EvaluationCostModelV1.model_validate(cost_model.model_dump(mode="python"))
+
+
+def _order_fees(
+    quantity: int, price: Decimal, cost_model: EvaluationCostModelV1
+) -> Decimal:
+    """Shared unslipped-price fee expression; callers own the pinned context."""
+    return (
+        quantity * cost_model.commission_per_share
+        + cost_model.fixed_fee_per_order
+        + quantity
+        * price
+        * cost_model.notional_fee_basis_points
+        / BASIS_POINT_DENOMINATOR
+    )
+
+
+def estimate_decision_close_order_cost(
+    *, delta: int, decision_close: Decimal, cost_model: EvaluationCostModelV1
+) -> DecisionCloseOrderCost:
+    """Calculate read-only order costs from explicitly supplied numeric inputs.
+
+    Positive delta buys and negative delta sells. Input provenance, account/NAV,
+    target completeness, mandate and funding admission belong to the producer;
+    this primitive cannot authenticate any of them or dispatch an order.
+    """
+    if type(delta) is not int or not fits_portfolio_context(Decimal(abs(delta))):
+        raise ValueError("delta must be a representable integer whole-share change")
+    if (
+        type(decision_close) is not Decimal
+        or not decision_close.is_finite()
+        or decision_close <= ZERO
+        or not fits_portfolio_context(decision_close)
+    ):
+        raise ValueError(
+            "decision-close price must be a positive representable Decimal"
+        )
+    try:
+        with decimal_context():
+            checked_model = _validated_cost_model(cost_model)
+            if delta == 0:
+                return DecisionCloseOrderCost(0, ZERO, ZERO, ZERO, ZERO, ZERO)
+            quantity = abs(delta)
+            notional = quantity * decision_close
+            fees = _order_fees(quantity, decision_close, checked_model)
+            shortfall = (
+                notional
+                * checked_model.adverse_slippage_basis_points
+                / BASIS_POINT_DENOMINATOR
+            )
+            cost = fees + shortfall
+            cash_delta = (
+                -(notional + shortfall + fees)
+                if delta > 0
+                else notional - shortfall - fees
+            )
+            return DecisionCloseOrderCost(
+                delta=delta,
+                reference_notional=canonical_money(notional),
+                fees=canonical_money(fees),
+                adverse_shortfall=canonical_money(shortfall),
+                estimated_cost=canonical_money(cost),
+                cash_delta=canonical_money(cash_delta),
+            )
+    except ArithmeticError as error:
+        raise ValueError("order-cost arithmetic cannot be represented") from error
+
+
+def estimate_decision_close_rebalance_cost(
+    *,
+    state: PortfolioStateV2,
+    staged_targets: Sequence[SecurityTargetPositionV1],
+    decision_closes: Mapping[UUID7, Decimal],
+    cost_model: EvaluationCostModelV1,
+) -> DecisionCloseRebalanceCost:
+    """Price a complete supplied target without mutating or executing a book.
+
+    Prices must cover all holdings, even unchanged ones, and nonzero deltas.
+    The producer still owns provenance, causal account/NAV, pending execution
+    resolution and mandate admission. Unpaid claims never fund this projection.
+    """
+    if type(state) is not PortfolioStateV2:
+        raise ValueError("state must be an explicit PortfolioStateV2")
+    try:
+        with decimal_context():
+            checked_state = PortfolioStateV2.model_validate(
+                state.model_dump(mode="python")
+            )
+            checked_model = _validated_cost_model(cost_model)
+            checked_targets = []
+            for target in staged_targets:
+                if type(target) is not SecurityTargetPositionV1:
+                    raise ValueError("targets must be SecurityTargetPositionV1 values")
+                checked_targets.append(
+                    SecurityTargetPositionV1.model_validate(
+                        target.model_dump(mode="python")
+                    )
+                )
+            targets = _target_quantities(checked_targets)
+            held = {
+                holding.security_id: holding.quantity
+                for holding in checked_state.holdings
+            }
+            uncovered = sorted(set(held) - set(targets), key=_security_order)
+            if uncovered:
+                raise ValueError(
+                    "staged targets must cover every held security, "
+                    f"missing {uncovered[0]}"
+                )
+            closes = dict(decision_closes)
+            orders: list[tuple[UUID7, DecisionCloseOrderCost]] = []
+            for security_id in sorted(targets, key=_security_order):
+                delta = targets[security_id] - held.get(security_id, 0)
+                if delta == 0 and security_id not in held:
+                    continue
+                price = closes.get(security_id)
+                if price is None:
+                    raise ValueError(
+                        f"decision-close price is unavailable for {security_id}"
+                    )
+                cost = estimate_decision_close_order_cost(
+                    delta=delta, decision_close=price, cost_model=checked_model
+                )
+                if delta != 0:
+                    orders.append((security_id, cost))
+            costs = tuple(cost for _, cost in orders)
+            required_cash = sum(
+                (-cost.cash_delta for cost in costs if cost.delta > 0), ZERO
+            )
+            net_sale_proceeds = sum(
+                (cost.cash_delta for cost in costs if cost.delta < 0), ZERO
+            )
+            return DecisionCloseRebalanceCost(
+                orders=tuple(orders),
+                total_fees=canonical_money(sum((cost.fees for cost in costs), ZERO)),
+                total_shortfall=canonical_money(
+                    sum((cost.adverse_shortfall for cost in costs), ZERO)
+                ),
+                estimated_cost=canonical_money(
+                    sum((cost.estimated_cost for cost in costs), ZERO)
+                ),
+                required_cash=canonical_money(required_cash),
+                net_sale_proceeds=canonical_money(net_sale_proceeds),
+                projected_cash=canonical_money(
+                    checked_state.cash_balance + net_sale_proceeds - required_cash
+                ),
+            )
+    except ArithmeticError as error:
+        raise ValueError("rebalance-cost arithmetic cannot be represented") from error
+
+
 def _security_order(security_id: UUID) -> bytes:
     """Canonical collection order for securities: raw UUID bytes."""
     return security_id.bytes
+
+
+def _target_quantities(
+    staged_targets: Sequence[SecurityTargetPositionV1],
+) -> dict[UUID7, int]:
+    targets: dict[UUID7, int] = {}
+    for target in staged_targets:
+        if target.target_quantity < 0:
+            raise ValueError(
+                "staged target quantity must be non-negative, got "
+                f"{target.target_quantity} for {target.security_id}"
+            )
+        if target.security_id in targets:
+            raise ValueError(
+                f"staged targets must be unique by security: {target.security_id}"
+            )
+        targets[target.security_id] = target.target_quantity
+    return targets
 
 
 def _definitely_started(interval: TemporalIntervalClaimV1, instant: datetime) -> bool:
@@ -413,7 +619,7 @@ class AtomicRebalanceEngine:
         open_prices: Mapping[UUID7, ListingOpenPriceV1],
         execution_listings: Mapping[UUID7, ListingV1],
     ) -> RebalancePlanV1:
-        targets = self._target_quantities(staged_targets)
+        targets = _target_quantities(staged_targets)
         held = {holding.security_id: holding.quantity for holding in state.holdings}
         # The complete target set rule is applied once, at the strategy
         # boundary. If a held security is missing here, that rule was skipped
@@ -464,24 +670,6 @@ class AtomicRebalanceEngine:
                 - required_cash
             ),
         )
-
-    @staticmethod
-    def _target_quantities(
-        staged_targets: Sequence[SecurityTargetPositionV1],
-    ) -> dict[UUID7, int]:
-        targets: dict[UUID7, int] = {}
-        for target in staged_targets:
-            if target.target_quantity < 0:
-                raise ValueError(
-                    "staged target quantity must be non-negative, got "
-                    f"{target.target_quantity} for {target.security_id}"
-                )
-            if target.security_id in targets:
-                raise ValueError(
-                    f"staged targets must be unique by security: {target.security_id}"
-                )
-            targets[target.security_id] = target.target_quantity
-        return targets
 
     def _build_fill(
         self,
@@ -535,14 +723,7 @@ class AtomicRebalanceEngine:
         # The notional fee is charged on traded value at the unadjusted open,
         # not on the slipped fill price. Slippage is an execution shortfall,
         # not a fee base.
-        transaction_costs = (
-            quantity * self._cost_model.commission_per_share
-            + self._cost_model.fixed_fee_per_order
-            + quantity
-            * open_price
-            * self._cost_model.notional_fee_basis_points
-            / BASIS_POINT_DENOMINATOR
-        )
+        transaction_costs = _order_fees(quantity, open_price, self._cost_model)
         cash_delta = (
             gross_notional - transaction_costs
             if side == "sell"
