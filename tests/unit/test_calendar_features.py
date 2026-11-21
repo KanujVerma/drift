@@ -45,6 +45,7 @@ from drift.domain.calendar_features import (
     seal_calendar_session_features,
     seal_settlement_cycle_table,
     settlement_row_end_known_from,
+    settlement_row_end_possibly_public_from,
     settlement_row_known_from,
     third_friday_of_month,
 )
@@ -784,6 +785,47 @@ def test_rule_derived_availability_needs_its_evidence_and_policy() -> None:
     assert error.value.code == "calendar_retained_evidence_invalid"
 
 
+def test_a_later_correction_under_a_forbidden_rule_makes_its_date_unknown() -> None:
+    raw = bounded_availability(*ANNOUNCEMENT_WINDOW)
+    rule = ArtifactReference(
+        artifact_id=derived_uuid7("rule", "correction"),
+        kind=ArtifactKind.OTHER,
+        content_hash=CONSERVATIVE_UPPER_BOUND_RULE_HASH,
+        location=f"drift+sha256://{CONSERVATIVE_UPPER_BOUND_RULE_HASH}",
+    )
+    derived = derive_conservative_upper_bound(raw, rule)
+    (original,) = (row for row in JANUARY if row.session_key.local_date == MOURNING_DAY)
+    correction = schedule_row(
+        MOURNING_DAY,
+        "closed",
+        available_at=ANNOUNCEMENT_WINDOW[1],
+        predecessor=original,
+        availability=(derived,),
+    )
+    rows = [*JANUARY, correction]
+
+    def session(policy: AvailabilityPolicyV1) -> CalendarSessionFeaturesV1:
+        result = compute_calendar_features(
+            rows,
+            (request(MOURNING_DAY, evening_before(MOURNING_DAY)),),
+            channel=CHANNEL,
+            availability_policy=policy,
+            retained_evidence={content_hash(raw): raw},
+        )
+        return result.sessions[0]
+
+    # The policy forbids the rule, so whether the closure was public cannot be
+    # settled: the date is unknown, not the open schedule it may supersede.
+    forbidden = session(POLICY)
+    assert forbidden.session_status == "unknown"
+    assert content_hash(correction) in forbidden.schedule_record_hashes
+    permitted = AvailabilityPolicyV1(
+        policy_id="calendar-test-policy",
+        permitted_rule_hashes=(CONSERVATIVE_UPPER_BOUND_RULE_HASH,),
+    )
+    assert session(permitted).session_status == "closed"
+
+
 def test_a_malformed_knowledge_channel_is_refused() -> None:
     with pytest.raises(CalendarFeatureInputError) as error:
         compute_calendar_features(
@@ -861,15 +903,46 @@ def test_a_settlement_row_counts_only_after_its_announcement() -> None:
     assert known_from == datetime(2023, 2, 17, tzinfo=UTC)
     assert settlement_row_end_known_from(previous) == known_from
     assert settlement_row_end_known_from(row) is None
+    # T+2 answers only while its end cannot yet be public: until 00:00 UTC
+    # on 2023-02-14, the day before T+1 was adopted. From then until T+1 is
+    # known, 2024-05-28 has no answer.
+    possibly = settlement_row_end_possibly_public_from(previous)
+    assert possibly == datetime(2023, 2, 14, tzinfo=UTC)
+    assert settlement_row_end_possibly_public_from(row) is None
     day = date(2024, 5, 28)
-    # Until T+1 is known, neither is the end of T+2, so T+2 still answers.
     for as_of, expected in (
-        (datetime(2023, 2, 15, 23, tzinfo=UTC), ("t2-rule-15c6-1", 2)),
-        (known_from, ("t2-rule-15c6-1", 2)),
+        (possibly, ("t2-rule-15c6-1", 2)),
+        (possibly + timedelta(seconds=1), (None, None)),
+        (datetime(2023, 2, 16, 12, tzinfo=UTC), (None, None)),
+        (known_from, (None, None)),
         (known_from + timedelta(seconds=1), ("t1-rule-15c6-1", 1)),
     ):
         cycle = features_at(SETTLEMENT_ROWS, day, as_of=as_of).settlement_cycle
         assert (cycle.row_id, cycle.business_days_after_trade_date) == expected
+
+
+def test_settlement_is_indeterminate_while_a_rule_change_may_be_public() -> None:
+    t3, t2 = US_REGULAR_WAY_SETTLEMENT_TABLE_V1.rows[3:5]
+    possibly = settlement_row_end_possibly_public_from(t3)
+    assert possibly == datetime(2017, 3, 21, tzinfo=UTC)
+
+    def cycle(day: date, as_of: datetime) -> tuple[int | None, str | None]:
+        found = features_at(SETTLEMENT_ROWS, day, as_of=as_of).settlement_cycle
+        return found.business_days_after_trade_date, found.reason
+
+    gap = (None, "settlement_row_not_known_at_cutoff")
+    boundary = date(2017, 9, 5)
+    assert cycle(boundary, possibly) == (3, None)
+    assert cycle(boundary, possibly + timedelta(seconds=1)) == gap
+    # T+2 was adopted on 2017-03-22; a day later T+3 can no longer answer.
+    assert cycle(boundary, datetime(2017, 3, 23, 12, tzinfo=UTC)) == gap
+    assert cycle(boundary, settlement_row_known_from(t2)) == gap
+    after = settlement_row_known_from(t2) + timedelta(seconds=1)
+    assert cycle(boundary, after) == (2, None)
+    # A trade date the old row still contains answers throughout.
+    assert cycle(date(2017, 9, 1), datetime(2017, 3, 23, 12, tzinfo=UTC)) == (3, None)
+    # T+1 was adopted on 2023-02-15.
+    assert cycle(date(2024, 5, 28), datetime(2023, 2, 16, 12, tzinfo=UTC)) == gap
 
 
 def test_settlement_answers_with_the_rule_known_at_the_cutoff() -> None:
@@ -1553,15 +1626,16 @@ def test_hashes_are_pinned() -> None:
     assert features.features_hash == PINNED_JANUARY_10_FEATURES_HASH
 
 
-#: Pinned for the V1 contracts of issue 662. They were re-pinned once, before
-#: any merge, when independent review of ceb45fa changed the V1 algorithm
-#: (unsettled later versions, settlement row ends, expiration in its month)
-#: and the table (end_announced_on). After merge a change to any of these is
-#: a contract change and needs a new version, not a re-pin.
+#: Pinned for the V1 contracts of issue 662. Before any merge they were
+#: re-pinned twice under independent review: for ceb45fa (unsettled later
+#: versions, settlement row ends, expiration in its month, end_announced_on)
+#: and for b8b63b2 (a row end possibly public from the day before its
+#: announcement). After merge a change to any of these is a contract change
+#: and needs a new version, not a re-pin.
 PINNED_ALGORITHM_HASH = (
-    "ef908b81d81381c497fdd2f5a4555d76be518bff046b7b5c41a84bd8cdf75d15"
+    "319d649906b8b72d6ffa4af7e02e8549c2c210c82a6e68f88dbb1ba0294f1676"
 )
 PINNED_TABLE_HASH = "28191dd085c8ec9e98eaede5c5edb277a1b17d8fc308435135f24d8eb1c5a8e0"
 PINNED_JANUARY_10_FEATURES_HASH = (
-    "da0c325b36bf095ea797745b688750d7e0024cf3de923260f2c9048559c9b83e"
+    "58ccd0ac3a1c49f950aa24348bc20ec7c6db08b7b610a3e9efcf2cde9e7eac25"
 )

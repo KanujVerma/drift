@@ -114,16 +114,19 @@ def _revised_history(
     windows: list[Window] = []
     kinds = ["bounded", "date"]
     kinds += [rng.choice(("exact", "bounded", "date")) for _ in range(16)]
-    for kind in kinds:
+    for index, kind in enumerate(kinds):
         tails = _tails(rows)
         day = rng.choice(sorted(tails))
         tail = tails[day]
         evidence = _correction_evidence(rng, _bounds(tail)[1], kind)
         assert evidence.lower_bound is not None and evidence.upper_bound is not None
+        # The two forced pending corrections never carry state ``unknown``,
+        # so a decisive pending check is always available.
+        state = rng.choice(STATES if index >= 2 else ("regular", "closed"))
         rows.append(
             schedule_row(
                 day,
-                rng.choice(STATES),
+                state,
                 available_at=evidence.upper_bound,
                 predecessor=tail,
                 availability=(evidence,),
@@ -223,6 +226,14 @@ def _session(
     return session
 
 
+def _states(rows: list[ScheduledSessionVersionV1]) -> dict[date, set[str]]:
+    """Every state any version of each date carries."""
+    states: dict[date, set[str]] = {}
+    for row in rows:
+        states.setdefault(row.session_key.local_date, set()).add(row.state)
+    return states
+
+
 def _pending_dates_are_unknown(
     rows: list[ScheduledSessionVersionV1],
     features: CalendarSessionFeaturesV1,
@@ -230,26 +241,41 @@ def _pending_dates_are_unknown(
 ) -> int:
     """A version pending at the cutoff leaves its date, and what reads it, unknown.
 
-    Returns how many pending dates in the session's month were checked.
+    For a pending date in the session's month: the session itself must be
+    unknown; for an open session, the ordinal that reads the date must be
+    INDETERMINATE for an unknown date no later than it. A check is decisive
+    when the pending date is itself the blocking date (or the session date),
+    and no version of it has state ``unknown``, so only the pending version
+    can be what made it unknown. Returns the number of decisive checks.
     """
     day = features.session_key.local_date
+    states = _states(rows)
     pending = {
         row.session_key.local_date
         for row in rows
         if _bounds(row)[0] < as_of <= _bounds(row)[1]
     }
-    checked = 0
+    decisive = 0
     for pending_day in sorted(pending):
         if (pending_day.year, pending_day.month) != (day.year, day.month):
             continue
-        checked += 1
+        plain = "unknown" not in states[pending_day]
         if pending_day == day:
             assert features.session_status == "unknown", (day, as_of)
-        elif pending_day < day:
-            assert features.month_ordinal_from_start.status == "indeterminate"
-        else:
-            assert features.month_ordinal_from_end.status == "indeterminate"
-    return checked
+            decisive += int(plain)
+            continue
+        if features.session_status != "open":
+            continue
+        ordinal = (
+            features.month_ordinal_from_start
+            if pending_day < day
+            else features.month_ordinal_from_end
+        )
+        assert ordinal.reason == "schedule_status_unknown", (day, as_of)
+        assert ordinal.blocking_date is not None
+        assert ordinal.blocking_date <= pending_day, (day, as_of)
+        decisive += int(plain and ordinal.blocking_date == pending_day)
+    return decisive
 
 
 @pytest.mark.parametrize("seed", range(5))
@@ -258,25 +284,32 @@ def test_truncating_or_revising_after_the_cutoff_never_changes_a_session(
 ) -> None:
     """30 random (session, cutoff) pairs over a randomly revised history.
 
-    Half of the cutoffs fall inside the window of a bounded or DATE-precision
-    correction, in the month of the session, so pending knowledge is exercised
-    on every seed.
+    Two thirds of the cutoffs fall inside the window of a bounded or
+    DATE-precision correction, with the session in that month or on that date,
+    so a decisive pending check happens on every seed.
     """
     rng = Random(662_000 + seed)
     rows, windows = _revised_history(rng)
     events = _events()
     sessions = dates_between(date(2024, 12, 2), date(2025, 2, 27))
+    states = _states(rows)
+    plain = [item for item in windows if "unknown" not in states[item[0]]]
     hidden = pending = 0
     for case in range(6):
-        if case % 2:
-            pending_day, lower, upper = rng.choice(windows)
+        if case % 3:
+            pending_day, lower, upper = rng.choice(plain or windows)
             as_of = _instant(rng, lower + timedelta(seconds=1), upper)
-            day = rng.choice(
-                [
-                    item
-                    for item in sessions
-                    if (item.year, item.month) == (pending_day.year, pending_day.month)
-                ]
+            day = (
+                pending_day
+                if case % 3 == 2
+                else rng.choice(
+                    [
+                        item
+                        for item in sessions
+                        if (item.year, item.month)
+                        == (pending_day.year, pending_day.month)
+                    ]
+                )
             )
         else:
             day = rng.choice(sessions)
@@ -292,7 +325,7 @@ def test_truncating_or_revising_after_the_cutoff_never_changes_a_session(
         assert revised == full, (day, as_of)
         assert revised.features_hash == full.features_hash
     assert hidden > 0, "no case truncated any knowledge"
-    assert pending > 0, "no case met a correction pending at its cutoff"
+    assert pending > 0, "no case proved a pending correction made its date unknown"
 
 
 def test_truncating_to_an_empty_history_leaves_only_indeterminate_answers() -> None:

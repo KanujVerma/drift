@@ -349,8 +349,9 @@ class _KnownSchedule:
     def _decision(self, item: AssertionVersionProjectionV1) -> CutoffEligibility:
         """One version's availability strictly before the cutoff.
 
-        No evidence on the requested channel cannot be settled, so it is
-        INDETERMINATE, exactly as M1b leaves it unresolved.
+        Only a version definitely not available by the cutoff is INELIGIBLE.
+        No evidence on the requested channel, or a rule-derived instant the
+        policy does not permit, cannot be settled, so it is INDETERMINATE.
         """
         evidence = next(
             (
@@ -362,13 +363,19 @@ class _KnownSchedule:
         )
         if evidence is None:
             return CutoffEligibility.INDETERMINATE
-        return evaluate_availability(
+        result = evaluate_availability(
             evidence,
             self.channel,
             self.policy,
             self.as_of - _ONE_MICROSECOND,
             self.retained,
-        ).classification
+        )
+        if (
+            result.classification is CutoffEligibility.INELIGIBLE
+            and result.reason != "not_available_by_cutoff"
+        ):
+            return CutoffEligibility.INDETERMINATE
+        return result.classification
 
     def _resolve(self, day: date) -> SessionKnowledgeStatus:
         chain = self.index.chains.get(day)

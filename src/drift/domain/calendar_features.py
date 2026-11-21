@@ -56,7 +56,7 @@ _CALENDAR_FEATURE_ALGORITHM_V1 = {
     "sessions_remaining_in_month": "open_dates_strictly_after_in_month",
     "third_friday": "third_friday_of_the_calendar_month",
     "monthly_expiration_session": "third_friday_or_latest_earlier_open_in_month",
-    "settlement_cycle": "containing_known_row_or_latest_known_row_with_unknown_end",
+    "settlement_cycle": "containing_known_row_or_latest_known_row_end_not_public",
     "events": "latest_revision_published_strictly_before_cutoff",
     "session_relative_features": "indeterminate_unless_session_known_open",
 }
@@ -417,6 +417,20 @@ def settlement_row_end_known_from(row: SettlementCycleRowV1) -> datetime | None:
     if row.end_announced_on is None:
         return None
     return _known_from(row.end_announced_on)
+
+
+def settlement_row_end_possibly_public_from(
+    row: SettlementCycleRowV1,
+) -> datetime | None:
+    """The earliest instant a row's end could have been public, if it has one.
+
+    00:00 UTC on the day before ``end_announced_on`` precedes the start of
+    that date in every time zone, so no announcement made on that date can be
+    earlier.
+    """
+    if row.end_announced_on is None:
+        return None
+    return datetime.combine(row.end_announced_on - timedelta(days=1), time(), UTC)
 
 
 class SettlementCycleTableV1(FrozenModel):
@@ -801,14 +815,15 @@ def settlement_cycle_for(
 ) -> SettlementCycleFeatureV1:
     """The cycle for one trade date, from the table rows known before ``as_of``.
 
-    A row's start and cycle count as known from ``settlement_row_known_from``
-    and its end from ``settlement_row_end_known_from``. The row containing the
-    trade date answers once it is known. Before that, the latest known row
-    starting on or before the trade date answers while its end is not yet
-    known, because as known at the cutoff it has no end. Once its end is
-    known, the trade date lies past every known row and nothing answers. A
-    venue outside the table, a date before its first row or after
-    ``verified_through`` has no answer at any cutoff.
+    A row's start and cycle count as known from ``settlement_row_known_from``.
+    The row containing the trade date answers once it is known. Before that,
+    the latest known row starting on or before the trade date answers only
+    while its end cannot yet be public (a cutoff at or before
+    ``settlement_row_end_possibly_public_from``): as known then, it has no
+    end. From that instant on, the end may already be public or is known, so
+    the trade date may lie past the rule and nothing answers. A venue outside
+    the table, a date before its first row or after ``verified_through`` has
+    no answer at any cutoff.
     """
     reason: CalendarIndeterminateReason | None = None
     if mic not in table.venues:
@@ -825,8 +840,8 @@ def settlement_cycle_for(
         if containing in known:
             answer = containing
         elif known:
-            end_known = settlement_row_end_known_from(known[-1])
-            if end_known is None or not end_known < as_of:
+            end_public = settlement_row_end_possibly_public_from(known[-1])
+            if end_public is None or as_of <= end_public:
                 answer = known[-1]
         if answer is not None:
             return SettlementCycleFeatureV1(

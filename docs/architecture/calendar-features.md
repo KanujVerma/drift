@@ -87,8 +87,17 @@ version that is not definitely unavailable before the cutoff makes the date
 unknown instead, because the earlier version may already be superseded. That
 covers a later version whose window spans the cutoff (bounded or DATE
 precision, for example a closure announced on a New York date that contains
-the cutoff), a later version with no evidence on the channel, and a later
-version that is available but not causally selectable.
+the cutoff), a later version with no evidence on the channel, a later version
+whose rule-derived availability the policy does not permit, and a later
+version that is available but not causally selectable. Only a version whose
+availability is definitely after the cutoff is passed over.
+
+This has a cost that is accepted on purpose. A later version with evidence
+only on another channel makes its date unknown on the requested channel at
+every cutoff, permanently: its availability on this channel can never be
+settled, so no cutoff is late enough. The remedy is to supply evidence for
+that version on the requested channel, or to compute on the channel the
+evidence is on.
 
 Each date then has one status as of the cutoff:
 
@@ -192,20 +201,28 @@ follow a settlement-holiday calendar this module does not hold.
 | `t1-rule-15c6-1` | 2024-05-28 onward | T+1 | 2023-02-15 | none | SEC Release No. 34-96930, [release page](https://www.sec.gov/rules-regulations/2023/02/34-96930), compliance date 2024-05-28 ([SEC T+1 FAQ](https://www.sec.gov/exams/educationhelpguidesfaqs/t1-faq)) |
 
 The rule (`settlement_cycle_for`). A row's start and cycle count as known
-from 00:00 UTC two days after "start announced", and its end from 00:00 UTC
-two days after "end announced"; both instants are after the end of the
-announcement date in every US time zone. Then, for a trade date and a cutoff:
+from 00:00 UTC two days after "start announced", which is after the end of
+the announcement date in every US time zone. A row's end could be public
+from 00:00 UTC on the day before "end announced", which precedes the start
+of that date in every time zone; the conservative choice in each direction
+is the one that answers less. Then, for a trade date and a cutoff:
 
 1. The row containing the trade date answers once it is known.
 2. Otherwise the latest known row starting on or before the trade date
-   answers while its end is not yet known: as known at the cutoff, that rule
-   has no end. This keeps the answer causal in extent as well as in value. As
-   of 2010-01-01, 2017-09-01 and 2017-09-05 are both T+3, so the 2017
-   boundary does not leak into 2010; from 2017-03-24 on, 2017-09-05 is T+2.
-3. Once that row's end is known and the row after it is not, nothing answers
-   (`settlement_row_not_known_at_cutoff`). As of 1994-01-01, 1995-05-31 is
-   T+5, but 1995-06-02 has no answer: the 1993 release had already ended T+5
-   at 1995-06-01, and the conversion schedule that replaced that date was not
+   answers only while its end cannot yet be public (a cutoff at or before
+   00:00 UTC on the day before "end announced"): as known at the cutoff,
+   that rule has no end. This keeps the answer causal in extent as well as in
+   value. As of 2010-01-01, 2017-09-01 and 2017-09-05 are both T+3, so the
+   2017 boundary does not leak into 2010.
+3. From that instant on, nothing answers past the row's end
+   (`settlement_row_not_known_at_cutoff`): the end may already be public, or
+   is known, while the next row is not yet known. T+2 was adopted on
+   2017-03-22, so 2017-09-05 has no answer from 2017-03-21T00:00:01Z until
+   T+2 is known after 2017-03-24T00:00Z, and is T+2 from then on; likewise
+   2024-05-28 has no answer from 2023-02-14T00:00:01Z until T+1 is known
+   after 2023-02-17T00:00Z. As of 1994-01-01, 1995-05-31 is T+5, but
+   1995-06-02 has no answer: the 1993 release had already ended T+5 at
+   1995-06-01, and the conversion schedule that replaced that date was not
    public until 1995. The as-known answer of the time (T+3 from 1995-06-01)
    is not in the table, because it was revised before it took effect.
 
@@ -296,8 +313,9 @@ refused. It makes the dependent features INDETERMINATE.
   closure) and April 2025 (Good Friday); third Fridays; expiration on an open
   third Friday, on Good Friday 2025, across consecutive closures and into an
   unknown date and out of the month; settlement on and either side of every
-  table boundary, outside the table, before announcement and at far-earlier
-  cutoffs; strict-cutoff, bounded-availability, other-channel, withdrawal and
+  table boundary, outside the table, before announcement, at far-earlier
+  cutoffs and while a change may already be public; strict-cutoff,
+  bounded-availability, other-channel, forbidden-rule, withdrawal and
   pending-correction knowledge; event visibility, rescheduling and
   cancellation; every refusal code (a test checks that each code in
   `CALENDAR_FEATURE_INPUT_CODES` is named by a test); resealed-record
@@ -308,7 +326,8 @@ refused. It makes the dependent features INDETERMINATE.
   definitely unavailable before the cutoff, or revising every row and event
   after it and adding rows for new dates, leaves every session's features
   byte-identical, and a correction pending at the cutoff always leaves its
-  date unknown for every feature that reads it. The
+  date unknown for every feature that reads it, with a decisive check (the
+  pending date itself is the blocking date) required on every seed. The
   late-announced closure changes exactly the January 2025 trading sessions
   (every one of them has a cutoff after the announcement) and nothing whose
   cutoff precedes it or whose features never read 2025-01-09, such as the
