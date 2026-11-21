@@ -316,3 +316,30 @@ def test_unreadable_history_cannot_be_treated_as_zero_fills(
         assert adapter.submits == 0
     finally:
         journal.close()
+
+
+def test_cancel_after_partial_fill_returns_cancel_with_retained_quantity(
+    tmp_path: Path,
+) -> None:
+    # Positive control for the cancel path (#636): a cancel report that carries
+    # the already-filled quantity is returned and retained, not refused.
+    intent = _intent()
+    partial = _report(intent, 2, ExecutionStatus.PARTIALLY_FILLED)
+    cancel = _report(intent, 2, ExecutionStatus.CANCELED, time_offset=1)
+    journal = PersistentOrderIntentJournal(tmp_path / "reports.sqlite")
+    journal.record_intent(intent)
+    journal.record_execution_report(partial)
+    adapter = _ResponseAdapter()
+    adapter.response = cancel
+    router = BrokerNeutralExecutionRouter(adapter=adapter, journal=journal)
+    try:
+        assert router.cancel_intent(intent.intent_id) == cancel
+        assert router.cancel_intent(intent.intent_id) == cancel
+        assert router.get_intent_status(intent.intent_id) == cancel
+        assert journal.list_execution_reports_for_intent(intent.intent_id) == (
+            partial,
+            cancel,
+        )
+        assert adapter.submits == 0
+    finally:
+        journal.close()
