@@ -13,14 +13,21 @@ that was reordered, truncated, or stitched together from two runs.
 """
 
 from collections.abc import Sequence
+from datetime import date
 from decimal import Decimal
 from enum import StrEnum
+from fractions import Fraction
 from typing import Annotated, Literal, Self
 from uuid import UUID
 
 from pydantic import Field, field_validator, model_validator
 
 from drift.domain.common import FrozenModel, NonBlankStr, SHA256Hash, UTCDateTime
+from drift.domain.evaluator_cash_yield import (
+    CashRateObservationV1,
+    CashYieldDayCount,
+    cash_interest,
+)
 from drift.domain.evaluator_execution import ExecutionFillV1, FillRejectionV1
 from drift.domain.evaluator_exploratory_accounting import (
     ExploratoryReconstructedAccountingPriceV1,
@@ -413,6 +420,145 @@ class ExecutionAuthorizationTraceEventV1(_TraceEventBaseV1):
     reason: NonBlankStr
 
 
+class CashInterestAccruedTraceEventV1(_TraceEventBaseV1):
+    """Opt-in modeled interest credited on idle cash before a session's effects.
+
+    Emitted only when a caller supplied a cash-yield policy and the credit is
+    strictly positive. Modeled interest is EXPLORATORY, so the event states
+    that it is never promotion-grade evidence, and a promotion result cannot
+    bind a trace that holds one.
+
+    The event restates every input of the accrual, so the credit can be
+    recomputed from the event alone. Its validator does exactly that, with
+    the one accrual function the engine credited the book with. The policy is
+    named by its terms hash, which leaves the rate series out: the one rate
+    this accrual read is bound by ``rate_record_hash``, and no event depends
+    on a rate dated after it. That hash is recomputable too: the rate's date
+    is ``accrual_start_date``, and the event carries the rate and the instant
+    it was known, so the validator rebuilds the record and checks its hash.
+
+    What an event cannot see is its place in a run. The version 2 log binds
+    that: one credit a session, first after the session start, on the cash
+    that session opened with, from the date of the session before it.
+    """
+
+    kind: Literal["cash_interest_accrued"] = "cash_interest_accrued"
+    phase: Literal[EvaluationPhase.PRE_OPEN_EFFECTS] = EvaluationPhase.PRE_OPEN_EFFECTS
+    is_promotion_grade_evidence: Literal[False] = False
+    policy_terms_hash: SHA256Hash
+    rate_record_hash: SHA256Hash
+    rate_known_at: UTCDateTime
+    accrual_start_date: date
+    accrual_days: int = Field(gt=0)
+    annualized_rate: CanonicalMoney
+    day_count: CashYieldDayCount
+    interest_quantum: CanonicalMoney
+    accrual_base_cash: CanonicalMoney
+    interest: CanonicalMoney
+    cash_balance_after: CanonicalMoney
+
+    @model_validator(mode="after")
+    def reconcile_accrual(self) -> Self:
+        if self.session_index == 0:
+            raise ValueError(
+                "the first session has no earlier close to accrue interest from"
+            )
+        if self.interest <= ZERO:
+            raise ValueError(
+                f"credited interest must be strictly positive, got {self.interest}"
+            )
+        session_date = self.session_key.local_date
+        accrued_to = date.toordinal(self.accrual_start_date) + self.accrual_days
+        if accrued_to != date.toordinal(session_date):
+            raise ValueError(
+                f"an accrual of {self.accrual_days} calendar days from "
+                f"{date.isoformat(self.accrual_start_date)} does not end on the "
+                f"session date {date.isoformat(session_date)}"
+            )
+        expected = cash_interest(
+            cash=self.accrual_base_cash,
+            annualized_rate=self.annualized_rate,
+            accrual_days=self.accrual_days,
+            day_count=self.day_count,
+            quantum=self.interest_quantum,
+        )
+        if self.interest != expected:
+            raise ValueError(
+                f"credited interest must equal {expected}, got {self.interest}"
+            )
+        with decimal_context():
+            credited = self.accrual_base_cash + self.interest
+        exact = Fraction(self.accrual_base_cash) + Fraction(self.interest)
+        if Fraction(credited) != exact or self.cash_balance_after != credited:
+            raise ValueError(
+                f"cash balance after the credit must equal {credited}, got "
+                f"{self.cash_balance_after}"
+            )
+        record_hash = content_hash(
+            CashRateObservationV1(
+                rate_date=self.accrual_start_date,
+                annualized_rate=self.annualized_rate,
+                known_at=self.rate_known_at,
+            )
+        )
+        if self.rate_record_hash != record_hash:
+            raise ValueError(
+                f"rate record hash must equal {record_hash}, the hash of the rate "
+                f"dated {date.isoformat(self.accrual_start_date)} and known at "
+                f"{self.rate_known_at.isoformat()}, got {self.rate_record_hash}"
+            )
+        return self
+
+
+def _require_bound_cash_credit(
+    credit: CashInterestAccruedTraceEventV1,
+    *,
+    session_start: SessionStartTraceEventV1 | None,
+    previous_start: SessionStartTraceEventV1 | None,
+    preceding: EvaluatorTraceEventV2,
+    already_credited: bool,
+) -> None:
+    """Bind one cash interest credit to the session a log places it in.
+
+    An event validates only itself. A credit that reconciles on its own could
+    still be repeated within a session, moved behind a fill, based on cash
+    the session never opened with, or accrued from a date no session was held
+    on. The engine credits at most once a session, first after the session
+    start, on the opening cash, from the previous session's date, and a
+    version 2 log admits nothing else.
+    """
+    index = credit.session_index
+    if session_start is None or previous_start is None:
+        raise ValueError(
+            "a cash interest credit requires its own session start and the "
+            f"session before it: session {index} has neither in this log"
+        )
+    if already_credited:
+        raise ValueError(
+            f"a session credits cash interest at most once: session {index} "
+            "holds a second cash_interest_accrued event"
+        )
+    if preceding is not session_start:
+        raise ValueError(
+            "a cash interest credit must immediately follow its session start: "
+            f"session {index} holds {preceding.kind} before it"
+        )
+    if credit.accrual_base_cash != session_start.opening_cash:
+        raise ValueError(
+            "a cash interest credit must accrue on the cash its session opened "
+            f"with: session {index} opened with {session_start.opening_cash}, "
+            f"the credit accrues on {credit.accrual_base_cash}"
+        )
+    previous_date = previous_start.session_key.local_date
+    if date.toordinal(credit.accrual_start_date) != date.toordinal(previous_date):
+        raise ValueError(
+            "a cash interest credit must accrue from the date of the previous "
+            f"session: session {previous_start.session_index} was held on "
+            f"{date.isoformat(previous_date)}, the credit accrues from "
+            f"{date.isoformat(credit.accrual_start_date)}"
+        )
+
+
 type EvaluatorTraceEventV1 = Annotated[
     SessionStartTraceEventV1
     | CorporateActionAppliedTraceEventV1
@@ -513,11 +659,13 @@ def seal_evaluation_trace_log(
 
 
 # Observer-enabled traces are a new wire version. Never extend the frozen V1
-# event union: EvaluationRunArtifactsV1 embeds that exact schema.
+# event union: EvaluationRunArtifactsV1 embeds that exact schema. Every other
+# opt-in event, modeled cash interest included, joins this union instead.
 type EvaluatorTraceEventV2 = Annotated[
     EvaluatorTraceEventV1
     | ExecutionAuthorizationTraceEventV1
-    | SessionObservationTraceEventV1,
+    | SessionObservationTraceEventV1
+    | CashInterestAccruedTraceEventV1,
     Field(discriminator="kind"),
 ]
 
@@ -536,6 +684,9 @@ class EvaluationTraceLogV2(FrozenModel):
         # original in this log and its explicit version-2 hash preimage.
         opened = -1
         open_key: SessionKeyV1 | None = None
+        session_start: SessionStartTraceEventV1 | None = None
+        previous_start: SessionStartTraceEventV1 | None = None
+        credited = False
         if not self.events:
             raise ValueError("a trace log requires at least one event")
         for position, event in enumerate(self.events):
@@ -551,6 +702,19 @@ class EvaluationTraceLogV2(FrozenModel):
                 raise ValueError(
                     "a trace event session key must match its open session"
                 )
+            # A cash interest credit is bound to the session it sits in. A log
+            # without one takes neither branch below to any effect.
+            if isinstance(event, SessionStartTraceEventV1):
+                previous_start, session_start, credited = session_start, event, False
+            elif isinstance(event, CashInterestAccruedTraceEventV1):
+                _require_bound_cash_credit(
+                    event,
+                    session_start=session_start,
+                    previous_start=previous_start,
+                    preceding=self.events[position - 1],
+                    already_credited=credited,
+                )
+                credited = True
         payload = self.model_dump(mode="python")
         payload.pop("trace_hash")
         if self.trace_hash != content_hash(payload):
@@ -567,11 +731,16 @@ type EvaluationTraceLog = Annotated[
 def seal_observed_evaluation_trace_log(
     events: Sequence[EvaluatorTraceEventV2],
 ) -> EvaluationTraceLogV1 | EvaluationTraceLogV2:
-    """Use V2 only when optional observer events actually exist."""
+    """Use V2 only when optional observer or opt-in events actually exist."""
     values = tuple(events)
     if not any(
         isinstance(
-            event, (SessionObservationTraceEventV1, ExecutionAuthorizationTraceEventV1)
+            event,
+            (
+                SessionObservationTraceEventV1,
+                ExecutionAuthorizationTraceEventV1,
+                CashInterestAccruedTraceEventV1,
+            ),
         )
         for event in values
     ):

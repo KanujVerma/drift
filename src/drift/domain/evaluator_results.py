@@ -515,6 +515,16 @@ def _bind_decision_evidence_grade(artifacts: _RunArtifacts) -> None:
             f"EXPLORATORY reconstructed evidence: {priced} "
             "exploratory_accounting_price events"
         )
+    # Modeled interest on idle cash is opt-in EXPLORATORY accounting traced
+    # under its own kind, and a promotion result may not carry that cash.
+    credited = sum(
+        1 for event in artifacts.trace.events if event.kind == "cash_interest_accrued"
+    )
+    if credited:
+        raise ValueError(
+            "a promotion result cannot bind a trace of modeled cash interest: "
+            f"{credited} cash_interest_accrued events"
+        )
 
 
 def _bind_stepped_sessions(artifacts: _RunArtifacts) -> None:

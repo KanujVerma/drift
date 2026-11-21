@@ -239,7 +239,7 @@ def _unvalidated_member(name: str) -> Any:
         if argument not in (type(None), Ellipsis)
     )
     empty = member.model_construct()
-    if name in ("exploratory_cohort", "exploratory_dividends"):
+    if name in ("exploratory_cohort", "exploratory_dividends", "cash_yield"):
         return empty
     return (empty,)
 

@@ -49,6 +49,17 @@ never ran the promotion gate, so it now refuses every
 run, and again at the result sealing site, so no production path seals a
 `PromotionEvaluationResultV1`. The promotion guards behind the construction
 refusal stay for the day issue 115 re-enables the lane.
+
+Optional cash yield. Idle cash earns nothing unless the evidence carries a
+`CashYieldPolicyV1`. With one, the pre-open phase first credits interest on the
+cash the session opened with, at the rate dated on the previous session and
+known strictly before this session opened, and only then applies corporate
+actions. Everything knowable before the first session is checked at
+construction, where the policy is admitted or refused whole. One refusal can
+still come later: a credit a later balance cannot hold exactly is refused at
+its own step and propagates as a defect. Modeled interest is EXPLORATORY.
+Without a policy no step runs, no event is emitted and every hash is what it
+was.
 """
 
 import dataclasses
@@ -57,6 +68,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from fractions import Fraction
 from functools import cache
 from threading import Lock
 from types import NoneType, UnionType
@@ -87,6 +99,13 @@ from drift.domain.evaluator_bundles import (
     EvaluationRunIdentityV2,
     StrategyParametersBindingError,
     strategy_parameters_hash,
+)
+from drift.domain.evaluator_cash_yield import (
+    CashRateObservationV1,
+    CashYieldPolicyV1,
+    CashYieldRefusedError,
+    cash_interest,
+    cash_yield_policy_terms_hash,
 )
 from drift.domain.evaluator_clock import EvaluationSessionV1, SessionClockV1
 from drift.domain.evaluator_corporate_actions import (
@@ -164,6 +183,7 @@ from drift.domain.evaluator_strategy import (
     stage_decision_targets,
 )
 from drift.domain.evaluator_trace import (
+    CashInterestAccruedTraceEventV1,
     ClaimSettledTraceEventV1,
     CorporateActionAppliedTraceEventV1,
     EvaluationPhase,
@@ -797,6 +817,12 @@ class SessionEvaluatorEvidence:
     bundle's reconstructions derive from. The same rule applies: required
     exactly on the reconstructed lane, refused everywhere else. The lane gate
     re-derives every reconstruction from it before any decision reads one.
+
+    ``cash_yield`` is an optional caller-declared, point-in-time cash rate
+    series. When present, idle cash earns modeled EXPLORATORY interest; the
+    policy is checked whole at construction and refused there if anything
+    knowable then is wrong. When absent, nothing is credited and the evidence
+    hash carries no trace of the field.
     """
 
     listing_role_records: tuple[ListingRoleVersionV1, ...] = ()
@@ -810,6 +836,7 @@ class SessionEvaluatorEvidence:
     exploratory_reconstruction_replay: ExploratoryReconstructionReplay | None = None
     exploratory_listing_roles: tuple[ExploratoryCohortListingRoleV1, ...] = ()
     exploratory_dividends: ExploratoryDividendPolicyV1 | None = None
+    cash_yield: CashYieldPolicyV1 | None = None
 
 
 _ADAPTERS: dict[int, tuple[object, TypeAdapter[Any]]] = {}
@@ -1067,6 +1094,11 @@ def _revalidated_evidence(
                 ExploratoryDividendPolicyV1, evidence.exploratory_dividends
             )
         ),
+        cash_yield=(
+            None
+            if evidence.cash_yield is None
+            else _revalidated(CashYieldPolicyV1, evidence.cash_yield)
+        ),
     )
 
 
@@ -1125,7 +1157,134 @@ def evaluator_evidence_hash(
         )
     if evidence.exploratory_dividends is not None:
         payload["exploratory_dividends"] = evidence.exploratory_dividends.terms_hash
+    # Present only when a policy is: an absent policy leaves the payload, and
+    # so every existing evidence hash and run identity, byte-identical.
+    if evidence.cash_yield is not None:
+        payload["cash_yield"] = content_hash(evidence.cash_yield)
     return content_hash(payload)
+
+
+@dataclass(frozen=True)
+class _CashAccrual:
+    """One admitted accrual: cash held from one session's date to the next."""
+
+    start_date: date
+    days: int
+    record: CashRateObservationV1
+    record_hash: SHA256Hash
+
+
+@dataclass(frozen=True)
+class _CashYieldSchedule:
+    """A cash-yield policy admitted at construction, resolved per session.
+
+    ``accruals[index - 1]`` is the accrual credited at session ``index``. The
+    first session has no earlier close, so it has none.
+    """
+
+    policy: CashYieldPolicyV1
+    terms_hash: SHA256Hash
+    accruals: tuple[_CashAccrual, ...]
+
+
+def _refuse_cash_yield(problem: str) -> CashYieldRefusedError:
+    return CashYieldRefusedError(f"cash yield refused: {problem}")
+
+
+def _admitted_cash_yield(
+    policy: CashYieldPolicyV1 | None,
+    *,
+    lane: str,
+    sessions: Sequence[EvaluationSessionV1],
+    book_currency_namespace: str,
+    book_currency_code: str,
+    opening_cash: Decimal,
+) -> _CashYieldSchedule | None:
+    """Admit an optional cash-yield policy for one clock, or refuse it whole.
+
+    Every check runs at engine construction, before any session, and each
+    failure is a ``CashYieldRefusedError``:
+
+    * Modeled interest is EXPLORATORY, so only an exploratory admission may
+      use a policy. The promotion lane is refused before this is reached
+      (issue 79); the check stays for the day that lane is re-enabled.
+    * The policy must accrue in exactly the book currency.
+    * The pinned portfolio context must hold one unit of the interest quantum
+      next to the opening cash. A quantum finer than that could never be
+      credited to this book exactly, so it is refused here, not at session
+      one. This is what construction can know. A balance that later outgrows
+      the precision a fine quantum leaves is refused at that credit instead.
+    * The interest credited at session ``i`` accrues from session ``i - 1``,
+      so the policy must state a rate for that exact local date. A missing
+      date is never filled from a neighbouring one.
+    * That rate must have been known strictly before session ``i`` opened.
+      Crediting a rate published at or after the open would be lookahead.
+
+    Rates the clock never reads are allowed. The resolved accruals are kept,
+    so the step that credits interest reads exactly what was admitted here.
+    """
+    if policy is None:
+        return None
+    if lane != "exploratory":
+        raise _refuse_cash_yield(
+            "modeled cash interest is EXPLORATORY evidence, so only an "
+            "exploratory admission can use a cash yield policy"
+        )
+    if (
+        policy.currency_namespace != book_currency_namespace
+        or policy.currency_code != book_currency_code
+    ):
+        raise _refuse_cash_yield(
+            f"the policy accrues in {policy.currency_namespace} "
+            f"{policy.currency_code}, the book is held in "
+            f"{book_currency_namespace} {book_currency_code}"
+        )
+    with decimal_context():
+        beside = opening_cash + policy.interest_quantum
+    if Fraction(beside) != Fraction(opening_cash) + Fraction(policy.interest_quantum):
+        raise _refuse_cash_yield(
+            f"the interest quantum {policy.interest_quantum} is finer than the "
+            "pinned portfolio context can hold next to the opening cash "
+            f"{opening_cash}"
+        )
+    accruals: list[_CashAccrual] = []
+    for index in range(1, len(sessions)):
+        previous, current = sessions[index - 1], sessions[index]
+        start = previous.session_key.local_date
+        ends = current.session_key.local_date
+        days = date.toordinal(ends) - date.toordinal(start)
+        if days < 1:
+            raise _refuse_cash_yield(
+                f"session {index} on {date.isoformat(ends)} does not follow "
+                f"session {index - 1} on {date.isoformat(start)} by a whole day"
+            )
+        record = policy.rate_for(start)
+        if record is None:
+            raise _refuse_cash_yield(
+                f"the policy states no rate for {date.isoformat(start)}, the "
+                f"date of session {index - 1}, so the interest credited at "
+                f"session {index} cannot be computed"
+            )
+        if record.known_at >= current.opened_at:
+            raise _refuse_cash_yield(
+                f"the rate for {date.isoformat(start)} was known at "
+                f"{record.known_at.isoformat()}, not before session {index} "
+                f"opened at {current.opened_at.isoformat()}: crediting it would "
+                "be lookahead"
+            )
+        accruals.append(
+            _CashAccrual(
+                start_date=start,
+                days=days,
+                record=record,
+                record_hash=content_hash(record),
+            )
+        )
+    return _CashYieldSchedule(
+        policy=policy,
+        terms_hash=cash_yield_policy_terms_hash(policy),
+        accruals=tuple(accruals),
+    )
 
 
 @dataclass(frozen=True)
@@ -1910,6 +2069,16 @@ class SessionEvaluatorEngine:
                 "a promotion admission cannot use exploratory dividend policy",
             )
         self._exploratory_dividends = evidence.exploratory_dividends
+        # Optional modeled cash yield. Checked whole here, before any session
+        # runs; ``None`` when the evidence carries no policy.
+        self._cash_yield = _admitted_cash_yield(
+            evidence.cash_yield,
+            lane=admission.lane,
+            sessions=bundle.session_clock.sessions,
+            book_currency_namespace=book_currency_namespace,
+            book_currency_code=book_currency_code,
+            opening_cash=protocol.initial_cash,
+        )
         # Issue 76 (C5, V10, V12): the coverage index re-verifies every record
         # under the running identity and refuses exploratory coverage under a
         # promotion admission. V11 holds already: the revalidated bundle
@@ -2534,9 +2703,13 @@ class SessionEvaluatorEngine:
     ) -> _Halt | None:
         phase = EvaluationPhase.PRE_OPEN_EFFECTS
         try:
+            # Interest on the cash carried from the previous close is credited
+            # before anything this session does can touch that cash.
             if trusted_dispatch:
+                type(self)._cash_interest_accrual(self, loop, index, session)
                 type(self)._pre_open_effects(self, loop, index, session)
             else:
+                self._cash_interest_accrual(loop, index, session)
                 self._pre_open_effects(loop, index, session)
             phase = EvaluationPhase.OPEN_EXECUTION
             if trusted_dispatch:
@@ -2599,7 +2772,78 @@ class SessionEvaluatorEngine:
             )
             return _Halt(index, EvaluationClassification.INDETERMINATE, cause)
 
-    # -- phase 1: pre-open effects -------------------------------------------
+    # -- phase 1: optional cash interest, then pre-open effects ----------------
+
+    def _cash_interest_accrual(
+        self, loop: _Loop, index: int, session: EvaluationSessionV1
+    ) -> None:
+        """Credit interest on the cash held since the previous session.
+
+        Runs first in the pre-open phase, so the base is the cash this session
+        opened with: no corporate action, claim, settlement or fill of this
+        session has touched it. Without a policy, and at the first session,
+        nothing happens at all. Cash that is not positive and an amount that
+        rounds to nothing credit nothing, and only a real credit is traced.
+
+        Construction already admitted every accrual. The step still checks
+        the session it is handed against the accrual it reads, and a mismatch
+        is a defect that propagates, never a run classification. So is the one
+        refusal construction cannot foresee: a credit this balance cannot hold
+        exactly, which the kernel refuses with ``CashYieldRefusedError``.
+        """
+        schedule = self._cash_yield
+        if schedule is None or index == 0:
+            return
+        key = session.session_key
+        if not 0 < index <= len(schedule.accruals):
+            raise _refuse_cash_yield(f"no accrual was admitted for session {index}")
+        accrual = schedule.accruals[index - 1]
+        days = date.toordinal(key.local_date) - date.toordinal(accrual.start_date)
+        if (
+            days != accrual.days
+            or accrual.record.known_at >= session.opened_at
+            or loop.state.session_key != key
+        ):
+            raise _refuse_cash_yield(
+                f"the accrual admitted for session {index} runs {accrual.days} "
+                f"days from {date.isoformat(accrual.start_date)} on a rate known "
+                "before that session opened, which is not the session being "
+                "stepped"
+            )
+        policy = schedule.policy
+        base = loop.state.cash_balance
+        interest = cash_interest(
+            cash=base,
+            annualized_rate=accrual.record.annualized_rate,
+            accrual_days=accrual.days,
+            day_count=policy.day_count,
+            quantum=policy.interest_quantum,
+        )
+        if interest <= ZERO:
+            return
+        kernel = PortfolioAccountingKernel(
+            loop.state, session_clock=self._bundle.session_clock
+        )
+        kernel.credit_cash_interest(interest)
+        loop.state = kernel.state
+        loop.events.append(
+            CashInterestAccruedTraceEventV1(
+                sequence=len(loop.events),
+                session_index=index,
+                session_key=key,
+                policy_terms_hash=schedule.terms_hash,
+                rate_record_hash=accrual.record_hash,
+                rate_known_at=accrual.record.known_at,
+                accrual_start_date=accrual.start_date,
+                accrual_days=accrual.days,
+                annualized_rate=accrual.record.annualized_rate,
+                day_count=policy.day_count,
+                interest_quantum=policy.interest_quantum,
+                accrual_base_cash=base,
+                interest=interest,
+                cash_balance_after=loop.state.cash_balance,
+            )
+        )
 
     def _pre_open_effects(
         self, loop: _Loop, index: int, session: EvaluationSessionV1
@@ -3767,6 +4011,7 @@ _PREPARED_INSTANCE_FIELDS = frozenset(
         "_book_currency_code",
         "_reconstructed_prices",
         "_exploratory_dividends",
+        "_cash_yield",
         "_corporate_action_coverage",
         "_corporate_actions",
         "_rebalance",
