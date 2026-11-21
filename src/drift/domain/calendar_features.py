@@ -48,13 +48,15 @@ _CALENDAR_FEATURE_ALGORITHM_V1 = {
     "algorithm": "point_in_time_calendar_features_v1",
     "knowledge": "m1b_assertion_selection_available_strictly_before_cutoff",
     "date_status": "selected_row_open_or_closed_otherwise_unknown",
+    "unresolved_later_version": "unknown_never_the_earlier_version",
     "missing_row": "unknown_never_closed",
+    "schedule_record_hashes": "every_version_not_definitely_unavailable_before",
     "month_ordinal_from_start": "one_plus_open_dates_from_month_start_all_known",
     "month_ordinal_from_end": "one_plus_open_dates_to_month_end_all_known",
     "sessions_remaining_in_month": "open_dates_strictly_after_in_month",
     "third_friday": "third_friday_of_the_calendar_month",
-    "monthly_expiration_session": "third_friday_or_latest_earlier_open_date",
-    "settlement_cycle": "closed_table_by_trade_date_known_from_announcement",
+    "monthly_expiration_session": "third_friday_or_latest_earlier_open_in_month",
+    "settlement_cycle": "containing_known_row_or_latest_known_row_with_unknown_end",
     "events": "latest_revision_published_strictly_before_cutoff",
     "session_relative_features": "indeterminate_unless_session_known_open",
 }
@@ -87,6 +89,7 @@ CALENDAR_FEATURE_INPUT_CODES: tuple[str, ...] = (
 type CalendarFeatureStatus = Literal["known", "indeterminate"]
 type SessionKnowledgeStatus = Literal["open", "closed", "unknown"]
 type CalendarIndeterminateReason = Literal[
+    "expiration_outside_month",
     "no_visible_event",
     "schedule_status_unknown",
     "session_not_known_open",
@@ -345,10 +348,12 @@ class SettlementCycleRowV1(FrozenModel):
 
     ``effective_from`` is the first trade date the row governs and
     ``effective_until`` the first it does not, or ``None`` for the open last
-    row, which the table's ``verified_through`` bounds. ``announced_on`` is a
-    conservative date by which the row's cycle, for every trade date the row
-    governs, was public, with no later rule changing it for those dates. The
-    row counts as known only from 00:00 UTC two days after that date.
+    row, which the table's ``verified_through`` bounds.
+
+    ``announced_on`` is a conservative date by which the row's start and
+    cycle were public. ``end_announced_on`` is a conservative date by which
+    its ``effective_until`` was public; it is ``None`` exactly for the open
+    last row. Each date counts as known only from 00:00 UTC two days later.
     """
 
     schema_version: Literal["1"] = "1"
@@ -357,11 +362,12 @@ class SettlementCycleRowV1(FrozenModel):
     effective_from: date
     effective_until: date | None
     announced_on: date
+    end_announced_on: date | None
     authority: NonBlankStr
 
-    _plain_dates = field_validator("effective_from", "effective_until", "announced_on")(
-        _require_plain_date
-    )
+    _plain_dates = field_validator(
+        "effective_from", "effective_until", "announced_on", "end_announced_on"
+    )(_require_plain_date)
 
     @model_validator(mode="after")
     def validate_row(self) -> Self:
@@ -375,17 +381,42 @@ class SettlementCycleRowV1(FrozenModel):
                 "settlement_table_invalid: a row cannot be announced after it "
                 "takes effect"
             )
+        if (self.end_announced_on is None) != (self.effective_until is None):
+            raise ValueError(
+                "settlement_table_invalid: a row's end is announced exactly when "
+                "it has an end"
+            )
+        if (
+            self.end_announced_on is not None
+            and self.effective_until is not None
+            and self.end_announced_on > self.effective_until
+        ):
+            raise ValueError(
+                "settlement_table_invalid: a row's end cannot be announced after "
+                "it takes effect"
+            )
         return self
 
 
-def settlement_row_known_from(row: SettlementCycleRowV1) -> datetime:
-    """The instant from which a row counts as known.
+def _known_from(announced_on: date) -> datetime:
+    """00:00 UTC two calendar days after ``announced_on``.
 
-    00:00 UTC two calendar days after ``announced_on`` is later than the end
-    of that date in every US time zone, so a row is never treated as known
-    before its announcement date has ended.
+    That instant is later than the end of ``announced_on`` in every US time
+    zone, so nothing is treated as known before its announcement date ended.
     """
-    return datetime.combine(row.announced_on + timedelta(days=2), time(), UTC)
+    return datetime.combine(announced_on + timedelta(days=2), time(), UTC)
+
+
+def settlement_row_known_from(row: SettlementCycleRowV1) -> datetime:
+    """The instant from which a row's start and cycle count as known."""
+    return _known_from(row.announced_on)
+
+
+def settlement_row_end_known_from(row: SettlementCycleRowV1) -> datetime | None:
+    """The instant from which a row's end counts as known, if it has one."""
+    if row.end_announced_on is None:
+        return None
+    return _known_from(row.end_announced_on)
 
 
 class SettlementCycleTableV1(FrozenModel):
@@ -420,6 +451,14 @@ class SettlementCycleTableV1(FrozenModel):
                 raise ValueError(
                     "settlement_table_invalid: rows must be sorted and contiguous"
                 )
+            if (
+                earlier.end_announced_on is not None
+                and earlier.end_announced_on > later.announced_on
+            ):
+                raise ValueError(
+                    "settlement_table_invalid: a row's end is public no later "
+                    "than the row that follows it"
+                )
         if self.rows[-1].effective_until is not None:
             raise ValueError(
                 "settlement_table_invalid: only the last row is open, and it must be"
@@ -447,9 +486,17 @@ class CalendarSessionFeaturesV1(FrozenModel):
     (third Friday, expiration session date, event dates, settlement) do not
     depend on the session being open.
 
-    ``schedule_record_hashes`` and ``event_record_hashes`` name exactly the
-    schedule rows and event revisions the features were read from, so every
-    one of them was known strictly before ``as_of``.
+    ``schedule_record_hashes`` names every version of every schedule row the
+    computation examined that was not definitely unavailable before
+    ``as_of``: versions known strictly before it, and versions whose
+    availability on the channel cannot be settled at it (an INDETERMINATE
+    window or no evidence on the channel), which make their date unknown.
+    ``event_record_hashes`` names the latest revision of each event published
+    strictly before ``as_of``.
+
+    ``settlement_table_hash`` must be the one table the V1 algorithm reads,
+    and ``settlement_cycle`` must be what that table answers for the session
+    date as of ``as_of``.
     """
 
     schema_version: Literal["1"] = "1"
@@ -498,6 +545,7 @@ class CalendarSessionFeaturesV1(FrozenModel):
         self._validate_session_relative()
         self._validate_month()
         self._validate_events()
+        self._validate_settlement()
         for label, hashes in (
             ("schedule_record_hashes", self.schedule_record_hashes),
             ("event_record_hashes", self.event_record_hashes),
@@ -548,6 +596,11 @@ class CalendarSessionFeaturesV1(FrozenModel):
                 raise ValueError(
                     "calendar_features_invalid: a month ordinal starts at 1"
                 )
+            if item.reason not in _MONTH_REASONS:
+                raise ValueError(
+                    "calendar_features_invalid: a month ordinal is INDETERMINATE "
+                    "only for an unknown date or a session not known open"
+                )
         if (end.value is None) != (remaining.value is None) or (
             end.value is not None and remaining.value != end.value - 1
         ):
@@ -563,17 +616,25 @@ class CalendarSessionFeaturesV1(FrozenModel):
                 "calendar_features_invalid: sessions_remaining_in_month shares "
                 "the reason of month_ordinal_from_end"
             )
-        expiration = self.monthly_expiration_session.value
-        if expiration is not None and expiration > self.third_friday:
-            raise ValueError(
-                "calendar_features_invalid: the expiration session cannot follow "
-                "the third Friday"
-            )
-        flag = self.is_monthly_expiration_session
-        if flag.value is not None and (
-            expiration is None
-            or flag.value != (self.session_key.local_date == expiration)
+        expiration = self.monthly_expiration_session
+        if expiration.value is not None and not (
+            (expiration.value.year, expiration.value.month)
+            == (self.third_friday.year, self.third_friday.month)
+            and expiration.value <= self.third_friday
         ):
+            raise ValueError(
+                "calendar_features_invalid: the expiration session lies in the "
+                "third Friday's month, on or before it"
+            )
+        if expiration.reason not in _EXPIRATION_REASONS:
+            raise ValueError(
+                "calendar_features_invalid: the expiration session is "
+                "INDETERMINATE only for an unknown date or a walk out of the month"
+            )
+        expected = monthly_expiration_flag(
+            self.session_status == "open", self.session_key.local_date, expiration
+        )
+        if self.is_monthly_expiration_session != expected:
             raise ValueError(
                 "calendar_features_invalid: is_monthly_expiration_session "
                 "disagrees with monthly_expiration_session"
@@ -597,11 +658,40 @@ class CalendarSessionFeaturesV1(FrozenModel):
                     "calendar_features_invalid: previous and next event dates "
                     "lie strictly before and after the session"
                 )
-            if following is None and item.sessions_until_next_event.value is not None:
+            for edge in (item.previous_event_date, item.next_event_date):
+                if edge.reason not in (None, "no_visible_event"):
+                    raise ValueError(
+                        "calendar_features_invalid: an event date is INDETERMINATE "
+                        "only when no event is visible"
+                    )
+            if self.session_status != "open":
+                continue
+            allowed = (
+                {"no_visible_event"}
+                if following is None
+                else {None, "schedule_status_unknown"}
+            )
+            if item.sessions_until_next_event.reason not in allowed:
                 raise ValueError(
-                    "calendar_features_invalid: sessions_until_next_event needs "
-                    "a next event date"
+                    "calendar_features_invalid: sessions_until_next_event "
+                    "disagrees with next_event_date"
                 )
+
+    def _validate_settlement(self) -> None:
+        table = US_REGULAR_WAY_SETTLEMENT_TABLE_V1
+        if self.settlement_table_hash != table.table_hash:
+            raise ValueError(
+                "calendar_features_invalid: the record names a settlement table "
+                "other than the one the V1 algorithm reads"
+            )
+        expected = settlement_cycle_for(
+            table, self.session_key.mic, self.session_key.local_date, self.as_of
+        )
+        if self.settlement_cycle != expected:
+            raise ValueError(
+                "calendar_features_invalid: settlement_cycle is not what the "
+                "settlement table answers for the session date and cutoff"
+            )
 
 
 class CalendarFeatureSetV1(FrozenModel):
@@ -675,6 +765,83 @@ class CalendarFeatureSetV1(FrozenModel):
                 "set's own fields"
             )
         return self
+
+
+_MONTH_REASONS = frozenset({None, "schedule_status_unknown", "session_not_known_open"})
+_EXPIRATION_REASONS = frozenset(
+    {None, "expiration_outside_month", "schedule_status_unknown"}
+)
+
+
+def monthly_expiration_flag(
+    session_open: bool, day: date, expiration: CalendarDateV1
+) -> CalendarFlagV1:
+    """Whether ``day`` is the expiration session, or why that is unknown."""
+    if not session_open:
+        return CalendarFlagV1(
+            status="indeterminate",
+            value=None,
+            reason="session_not_known_open",
+            blocking_date=None,
+        )
+    if expiration.value is None:
+        return CalendarFlagV1(
+            status="indeterminate",
+            value=None,
+            reason=expiration.reason,
+            blocking_date=expiration.blocking_date,
+        )
+    return CalendarFlagV1(
+        status="known", value=day == expiration.value, reason=None, blocking_date=None
+    )
+
+
+def settlement_cycle_for(
+    table: SettlementCycleTableV1, mic: str, trade_date: date, as_of: datetime
+) -> SettlementCycleFeatureV1:
+    """The cycle for one trade date, from the table rows known before ``as_of``.
+
+    A row's start and cycle count as known from ``settlement_row_known_from``
+    and its end from ``settlement_row_end_known_from``. The row containing the
+    trade date answers once it is known. Before that, the latest known row
+    starting on or before the trade date answers while its end is not yet
+    known, because as known at the cutoff it has no end. Once its end is
+    known, the trade date lies past every known row and nothing answers. A
+    venue outside the table, a date before its first row or after
+    ``verified_through`` has no answer at any cutoff.
+    """
+    reason: CalendarIndeterminateReason | None = None
+    if mic not in table.venues:
+        reason = "settlement_venue_outside_table"
+    elif trade_date < table.rows[0].effective_from:
+        reason = "settlement_before_table"
+    elif trade_date > table.verified_through:
+        reason = "settlement_after_verified_range"
+    if reason is None:
+        started = tuple(row for row in table.rows if row.effective_from <= trade_date)
+        containing = started[-1]
+        known = tuple(row for row in started if settlement_row_known_from(row) < as_of)
+        answer: SettlementCycleRowV1 | None = None
+        if containing in known:
+            answer = containing
+        elif known:
+            end_known = settlement_row_end_known_from(known[-1])
+            if end_known is None or not end_known < as_of:
+                answer = known[-1]
+        if answer is not None:
+            return SettlementCycleFeatureV1(
+                status="known",
+                business_days_after_trade_date=answer.business_days_after_trade_date,
+                row_id=answer.row_id,
+                reason=None,
+            )
+        reason = "settlement_row_not_known_at_cutoff"
+    return SettlementCycleFeatureV1(
+        status="indeterminate",
+        business_days_after_trade_date=None,
+        row_id=None,
+        reason=reason,
+    )
 
 
 def _self_excluding_hash(model: FrozenModel, field: str) -> SHA256Hash:
@@ -759,6 +926,7 @@ US_REGULAR_WAY_SETTLEMENT_TABLE_V1 = seal_settlement_cycle_table(
                 effective_from=date(1993, 10, 6),
                 effective_until=date(1995, 6, 1),
                 announced_on=date(1993, 10, 6),
+                end_announced_on=date(1993, 10, 6),
                 authority=(
                     "SEC Release No. 34-33023 (1993-10-06) adopting Rule 15c6-1 "
                     "describes T+5 as the standard it replaces from 1995-06-01"
@@ -770,6 +938,7 @@ US_REGULAR_WAY_SETTLEMENT_TABLE_V1 = seal_settlement_cycle_table(
                 effective_from=date(1995, 6, 1),
                 effective_until=date(1995, 6, 5),
                 announced_on=date(1995, 4, 1),
+                end_announced_on=date(1995, 4, 1),
                 authority=(
                     "SEC Release No. 34-34952 (1994-11-09) moved the Rule 15c6-1 "
                     "effective date to 1995-06-07; NASD Notice to Members 95-26 "
@@ -782,6 +951,7 @@ US_REGULAR_WAY_SETTLEMENT_TABLE_V1 = seal_settlement_cycle_table(
                 effective_from=date(1995, 6, 5),
                 effective_until=date(1995, 6, 7),
                 announced_on=date(1995, 4, 1),
+                end_announced_on=date(1995, 4, 1),
                 authority=(
                     "NASD Notice to Members 95-26 (1995-04-01): trades of "
                     "1995-06-05 and 1995-06-06 settle in four business days"
@@ -793,6 +963,7 @@ US_REGULAR_WAY_SETTLEMENT_TABLE_V1 = seal_settlement_cycle_table(
                 effective_from=date(1995, 6, 7),
                 effective_until=date(2017, 9, 5),
                 announced_on=date(1995, 4, 1),
+                end_announced_on=date(2017, 3, 22),
                 authority=(
                     "Rule 15c6-1 effective 1995-06-07 (SEC Release No. 34-34952; "
                     "NASD Notice to Members 95-26)"
@@ -804,6 +975,7 @@ US_REGULAR_WAY_SETTLEMENT_TABLE_V1 = seal_settlement_cycle_table(
                 effective_from=date(2017, 9, 5),
                 effective_until=date(2024, 5, 28),
                 announced_on=date(2017, 3, 22),
+                end_announced_on=date(2023, 2, 15),
                 authority=(
                     "SEC Release No. 34-80295 (2017-03-22), compliance date 2017-09-05"
                 ),
@@ -814,6 +986,7 @@ US_REGULAR_WAY_SETTLEMENT_TABLE_V1 = seal_settlement_cycle_table(
                 effective_from=date(2024, 5, 28),
                 effective_until=None,
                 announced_on=date(2023, 2, 15),
+                end_announced_on=None,
                 authority=(
                     "SEC Release No. 34-96930 (2023-02-15), compliance date 2024-05-28"
                 ),

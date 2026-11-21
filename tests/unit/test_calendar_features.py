@@ -11,6 +11,7 @@ provider's calendar.
 from collections.abc import Iterable, Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from hashlib import sha256
+from pathlib import Path
 from typing import Any, Literal, cast
 from uuid import UUID
 
@@ -29,16 +30,21 @@ from drift.domain.calendar_features import (
     CALENDAR_FEATURE_INPUT_CODES,
     US_REGULAR_WAY_SETTLEMENT_TABLE_V1,
     CalendarCountV1,
+    CalendarDateV1,
     CalendarEventRecordV1,
     CalendarFeatureInputError,
     CalendarFeatureRequestV1,
     CalendarFeatureSetV1,
+    CalendarFlagV1,
     CalendarSessionFeaturesV1,
+    SettlementCycleFeatureV1,
     SettlementCycleRowV1,
     SettlementCycleTableV1,
     calendar_feature_algorithm_hash,
     seal_calendar_event_record,
+    seal_calendar_session_features,
     seal_settlement_cycle_table,
+    settlement_row_end_known_from,
     settlement_row_known_from,
     third_friday_of_month,
 )
@@ -58,6 +64,7 @@ from drift.domain.temporal import (
     ChannelKind,
     SourcePrecision,
     derive_conservative_upper_bound,
+    expected_source_window,
 )
 from drift.markets.calendar_features import compute_calendar_features
 from drift.serialization.canonical import content_hash
@@ -144,6 +151,35 @@ def bounded_availability(lower: datetime, upper: datetime) -> AvailabilityEviden
         evidence_reference=reference("bounded", lower.isoformat()),
         rule_derivation=None,
     )
+
+
+def date_availability(
+    day: date, zone: str = "America/New_York"
+) -> AvailabilityEvidenceV1:
+    """DATE-precision evidence: available at some instant of local ``day``."""
+    lower, upper = expected_source_window(day.isoformat(), SourcePrecision.DATE, zone)
+    return AvailabilityEvidenceV1(
+        channel=CHANNEL,
+        shape=AvailabilityShape.BOUNDED,
+        lower_bound=lower,
+        upper_bound=upper,
+        precision=SourcePrecision.DATE,
+        source_time_label=day.isoformat(),
+        source_timezone=zone,
+        basis=AvailabilityBasis.SOURCE_OBSERVED,
+        evidence_reference=reference("date", day.isoformat(), zone),
+        rule_derivation=None,
+    )
+
+
+class AlwaysEarlier(datetime):
+    """A datetime subclass that claims to precede every instant."""
+
+    def __le__(self, other: object) -> bool:
+        return True
+
+    def __gt__(self, other: object) -> bool:
+        return False
 
 
 def schedule_row(
@@ -490,6 +526,18 @@ def test_expiration_walks_back_over_consecutive_closures() -> None:
     assert features.is_monthly_expiration_session.value is True
 
 
+def test_an_expiration_walk_that_leaves_the_month_is_indeterminate() -> None:
+    """Synthetic: every February 2025 date up to the third Friday is closed."""
+    rows = [
+        schedule_row(day, "closed" if day.month == 2 else "regular")
+        for day in dates_between(date(2025, 1, 31), date(2025, 2, 21))
+    ]
+    features = features_at(rows, date(2025, 2, 10))
+    assert features.monthly_expiration_session.status == "indeterminate"
+    assert features.monthly_expiration_session.reason == "expiration_outside_month"
+    assert features.monthly_expiration_session.blocking_date is None
+
+
 def test_expiration_is_indeterminate_when_the_walk_meets_an_unknown_date() -> None:
     rows = [row for row in APRIL if row.session_key.local_date != date(2025, 4, 17)]
     features = features_at(rows, date(2025, 4, 10))
@@ -601,20 +649,84 @@ def test_a_withdrawn_row_is_unknown_after_the_withdrawal() -> None:
     (original,) = (
         row for row in JANUARY if row.session_key.local_date == date(2025, 1, 10)
     )
-    rows = [
-        *JANUARY,
-        schedule_row(
-            date(2025, 1, 10),
-            "regular",
-            available_at=withdrawn_at,
-            predecessor=original,
-            kind=RevisionKind.WITHDRAWAL,
-        ),
-    ]
+    withdrawal = schedule_row(
+        date(2025, 1, 10),
+        "regular",
+        available_at=withdrawn_at,
+        predecessor=original,
+        kind=RevisionKind.WITHDRAWAL,
+    )
+    rows = [*JANUARY, withdrawal]
     before = features_at(rows, date(2025, 1, 10), as_of=withdrawn_at)
     assert before.session_status == "open"
+    assert content_hash(withdrawal) not in before.schedule_record_hashes
     after = features_at(rows, date(2025, 1, 10))
     assert after.session_status == "unknown"
+    # Both versions were read, so both are named; a date with no row is not
+    # the same record as a date whose row is known to be withdrawn.
+    consulted = set(after.schedule_record_hashes)
+    assert {content_hash(original), content_hash(withdrawal)} <= consulted
+    without = features_at(
+        [row for row in JANUARY if row is not original], date(2025, 1, 10)
+    )
+    assert after.features_hash != without.features_hash
+
+
+#: The NYSE announced the 2025-01-09 closure on 2024-12-30, a New York date.
+ANNOUNCEMENT_WINDOW = (
+    datetime(2024, 12, 30, 5, tzinfo=UTC),
+    datetime(2024, 12, 31, 5, tzinfo=UTC),
+)
+
+
+@pytest.mark.parametrize("precision", ["bounded", "date"])
+def test_a_correction_pending_at_the_cutoff_makes_its_date_unknown(
+    precision: str,
+) -> None:
+    lower, upper = ANNOUNCEMENT_WINDOW
+    evidence = (
+        bounded_availability(lower, upper)
+        if precision == "bounded"
+        else date_availability(date(2024, 12, 30))
+    )
+    assert (evidence.lower_bound, evidence.upper_bound) == ANNOUNCEMENT_WINDOW
+    (original,) = (row for row in JANUARY if row.session_key.local_date == MOURNING_DAY)
+    correction = schedule_row(
+        MOURNING_DAY,
+        "closed",
+        available_at=upper,
+        predecessor=original,
+        availability=(evidence,),
+    )
+    rows = [*JANUARY, correction]
+    inside = datetime(2024, 12, 30, 21, tzinfo=UTC)
+    assert features_at(rows, MOURNING_DAY, as_of=inside).session_status == "unknown"
+    second = features_at(rows, date(2025, 1, 2), as_of=inside)
+    assert second.month_ordinal_from_start.value == 1
+    assert second.month_ordinal_from_end.reason == "schedule_status_unknown"
+    assert second.month_ordinal_from_end.blocking_date == MOURNING_DAY
+    assert content_hash(correction) in second.schedule_record_hashes
+    before = features_at(rows, date(2025, 1, 2), as_of=lower)
+    assert before.month_ordinal_from_end.value == 21
+    assert content_hash(correction) not in before.schedule_record_hashes
+    at_upper = features_at(rows, date(2025, 1, 2), as_of=upper)
+    assert at_upper.month_ordinal_from_end.blocking_date == MOURNING_DAY
+    after = features_at(rows, date(2025, 1, 2), as_of=upper + timedelta(seconds=1))
+    assert after.month_ordinal_from_end.value == 20
+
+
+def test_a_correction_with_no_evidence_on_the_channel_makes_its_date_unknown() -> None:
+    (original,) = (row for row in JANUARY if row.session_key.local_date == MOURNING_DAY)
+    correction = schedule_row(
+        MOURNING_DAY,
+        "closed",
+        available_at=MOURNING_ANNOUNCED,
+        predecessor=original,
+        availability=(exact_availability(MOURNING_ANNOUNCED, OTHER_CHANNEL),),
+    )
+    features = features_at([*JANUARY, correction], MOURNING_DAY)
+    assert features.session_status == "unknown"
+    assert content_hash(correction) in features.schedule_record_hashes
 
 
 def _rule_derived_case() -> tuple[
@@ -744,23 +856,49 @@ def test_the_first_settlement_row_counts_only_after_its_evidence_date() -> None:
 
 
 def test_a_settlement_row_counts_only_after_its_announcement() -> None:
-    (row,) = (
-        item
-        for item in US_REGULAR_WAY_SETTLEMENT_TABLE_V1.rows
-        if item.row_id == "t1-rule-15c6-1"
-    )
+    previous, row = US_REGULAR_WAY_SETTLEMENT_TABLE_V1.rows[-2:]
     known_from = settlement_row_known_from(row)
     assert known_from == datetime(2023, 2, 17, tzinfo=UTC)
+    assert settlement_row_end_known_from(previous) == known_from
+    assert settlement_row_end_known_from(row) is None
     day = date(2024, 5, 28)
-    for as_of, status in (
-        (datetime(2023, 2, 15, 23, tzinfo=UTC), "indeterminate"),
-        (known_from, "indeterminate"),
-        (known_from + timedelta(seconds=1), "known"),
+    # Until T+1 is known, neither is the end of T+2, so T+2 still answers.
+    for as_of, expected in (
+        (datetime(2023, 2, 15, 23, tzinfo=UTC), ("t2-rule-15c6-1", 2)),
+        (known_from, ("t2-rule-15c6-1", 2)),
+        (known_from + timedelta(seconds=1), ("t1-rule-15c6-1", 1)),
     ):
         cycle = features_at(SETTLEMENT_ROWS, day, as_of=as_of).settlement_cycle
-        assert cycle.status == status
-    early = features_at(SETTLEMENT_ROWS, day, as_of=known_from).settlement_cycle
-    assert early.reason == "settlement_row_not_known_at_cutoff"
+        assert (cycle.row_id, cycle.business_days_after_trade_date) == expected
+
+
+def test_settlement_answers_with_the_rule_known_at_the_cutoff() -> None:
+    def cycle(day: date, as_of: datetime) -> tuple[int | None, str | None]:
+        found = features_at(SETTLEMENT_ROWS, day, as_of=as_of).settlement_cycle
+        return found.business_days_after_trade_date, found.reason
+
+    # As known in 2010, T+3 had no end: both sides of the 2017 boundary agree
+    # and the 2017 change does not leak into 2010.
+    in_2010 = datetime(2010, 1, 1, tzinfo=UTC)
+    assert cycle(date(2017, 9, 1), in_2010) == (3, None)
+    assert cycle(date(2017, 9, 5), in_2010) == (3, None)
+    assert cycle(date(2024, 5, 28), in_2010) == (3, None)
+    after_range = (None, "settlement_after_verified_range")
+    assert cycle(date(2026, 11, 23), in_2010) == after_range
+    after_t2 = datetime(2017, 3, 24, 0, 0, 1, tzinfo=UTC)
+    assert cycle(date(2017, 9, 1), after_t2) == (3, None)
+    assert cycle(date(2017, 9, 5), after_t2) == (2, None)
+    # The 1993 release already ended T+5 at 1995-06-01; the conversion that
+    # replaced that date was not public in 1994, so nothing answers past it.
+    in_1994 = datetime(1994, 1, 1, tzinfo=UTC)
+    unknown = (None, "settlement_row_not_known_at_cutoff")
+    assert cycle(date(1995, 5, 31), in_1994) == (5, None)
+    assert cycle(date(1995, 6, 2), in_1994) == unknown
+    assert cycle(date(1995, 6, 7), in_1994) == unknown
+    after_conversion = datetime(1995, 4, 3, 0, 0, 1, tzinfo=UTC)
+    assert cycle(date(1995, 6, 2), after_conversion) == (5, None)
+    assert cycle(date(1995, 6, 5), after_conversion) == (4, None)
+    assert cycle(date(1995, 6, 7), after_conversion) == (3, None)
 
 
 def test_the_settlement_table_is_closed_contiguous_and_pinned() -> None:
@@ -798,8 +936,28 @@ def test_a_gap_in_the_settlement_table_is_refused() -> None:
 
 def test_a_closed_last_settlement_row_is_refused() -> None:
     rows = list(US_REGULAR_WAY_SETTLEMENT_TABLE_V1.rows)
-    rows[-1] = rows[-1].model_copy(update={"effective_until": date(2030, 1, 1)})
+    rows[-1] = rows[-1].model_copy(
+        update={
+            "effective_until": date(2030, 1, 1),
+            "end_announced_on": date(2029, 1, 1),
+        }
+    )
     with pytest.raises(ValidationError, match="only the last row is open"):
+        seal_settlement_cycle_table(_table_values(rows=tuple(rows)))
+
+
+def test_a_settlement_row_end_must_be_announced_exactly_when_it_ends() -> None:
+    table = US_REGULAR_WAY_SETTLEMENT_TABLE_V1
+    t2 = table.rows[4].model_dump()
+    with pytest.raises(ValidationError, match="end is announced exactly"):
+        SettlementCycleRowV1.model_validate(t2 | {"end_announced_on": None})
+    with pytest.raises(ValidationError, match="end cannot be announced after"):
+        SettlementCycleRowV1.model_validate(
+            t2 | {"end_announced_on": date(2024, 5, 29)}
+        )
+    rows = list(table.rows)
+    rows[3] = rows[3].model_copy(update={"end_announced_on": date(2017, 3, 23)})
+    with pytest.raises(ValidationError, match="no later than the row that follows"):
         seal_settlement_cycle_table(_table_values(rows=tuple(rows)))
 
 
@@ -811,6 +969,7 @@ def test_a_settlement_row_announced_after_it_applies_is_refused() -> None:
             effective_from=date(2024, 5, 28),
             effective_until=None,
             announced_on=date(2024, 5, 29),
+            end_announced_on=None,
             authority="synthetic",
         )
 
@@ -1029,6 +1188,125 @@ def test_a_forged_row_is_refused() -> None:
     )
 
 
+def test_a_chain_that_moves_its_date_is_refused() -> None:
+    (original,) = (
+        row for row in JANUARY if row.session_key.local_date == date(2025, 1, 10)
+    )
+    mover = schedule_row(
+        date(2025, 1, 13),
+        "closed",
+        available_at=datetime(2024, 7, 1, tzinfo=UTC),
+        predecessor=original,
+    )
+    _refused(
+        "calendar_schedule_chain_moves_date",
+        [*JANUARY, mover],
+        (request(date(2024, 12, 2), FOMC_PUBLISHED),),
+    )
+
+
+def _resealed(
+    row: ScheduledSessionVersionV1, **changes: object
+) -> ScheduledSessionVersionV1:
+    """The same revision ids over other content, with a valid payload hash."""
+    values = dict(row.__dict__) | changes
+    provisional = ScheduledSessionVersionV1.model_construct(**cast(Any, values))
+    payload = content_hash(assertion_version_payload(provisional))
+    values["revision"] = row.revision.model_copy(update={"payload_hash": payload})
+    return ScheduledSessionVersionV1.model_validate(values)
+
+
+def test_two_rows_sharing_a_version_id_are_refused() -> None:
+    (original,) = (
+        row for row in JANUARY if row.session_key.local_date == date(2025, 1, 10)
+    )
+    twin = _resealed(original, timezone_identifier="America/Chicago")
+    assert twin.revision.record_version_id == original.revision.record_version_id
+    assert content_hash(twin) != content_hash(original)
+    _refused(
+        "calendar_schedule_duplicate_version",
+        [*JANUARY, twin],
+        (request(date(2024, 12, 2), FOMC_PUBLISHED),),
+    )
+
+
+def test_a_datetime_subclass_inside_row_evidence_is_refused() -> None:
+    sneaky = AlwaysEarlier(2030, 1, 1, tzinfo=UTC)
+    evidence = AvailabilityEvidenceV1(
+        channel=CHANNEL,
+        shape=AvailabilityShape.EXACT,
+        lower_bound=sneaky,
+        upper_bound=sneaky,
+        precision=SourcePrecision.SECOND,
+        source_time_label="2030-01-01T00:00:00Z",
+        source_timezone=None,
+        basis=AvailabilityBasis.SOURCE_OBSERVED,
+        evidence_reference=reference("sneaky"),
+        rule_derivation=None,
+    )
+    assert type(evidence.upper_bound) is AlwaysEarlier
+    rows = [
+        row
+        if row.session_key.local_date != date(2025, 1, 10)
+        else schedule_row(
+            date(2025, 1, 10), "closed", logical_salt="sneaky", availability=(evidence,)
+        )
+        for row in JANUARY
+    ]
+    _refused(
+        "calendar_schedule_row_invalid",
+        rows,
+        (request(date(2025, 1, 10), evening_before(date(2025, 1, 10))),),
+    )
+
+
+def test_a_forged_foreign_or_subclassed_event_record_is_refused() -> None:
+    requests = (request(date(2025, 1, 10), evening_before(date(2025, 1, 10))),)
+    kinds = (FOMC_KIND,)
+    real = event_record("fomc-2025-01", date(2025, 1, 29), FOMC_PUBLISHED)
+    forged = CalendarEventRecordV1.model_construct(
+        **(real.__dict__ | {"event_date": date(2025, 1, 13)})
+    )
+    foreign = cast(Any, real.model_dump())
+    sneaky = event_record(
+        "fomc-2025-01", date(2025, 1, 29), AlwaysEarlier(2030, 1, 1, tzinfo=UTC)
+    )
+    assert type(sneaky.published_at) is AlwaysEarlier
+    for record in (forged, foreign, sneaky):
+        _refused(
+            "calendar_event_invalid",
+            JANUARY,
+            requests,
+            events=(record,),
+            event_kinds=kinds,
+        )
+
+
+def test_a_cutoff_at_the_start_of_time_is_refused() -> None:
+    _refused(
+        "calendar_request_invalid",
+        JANUARY,
+        (request(date(2025, 1, 10), datetime(1, 1, 1, tzinfo=UTC)),),
+    )
+
+
+def test_the_last_representable_date_computes_without_overflow() -> None:
+    result = compute(JANUARY, (request(date(9999, 12, 31), LATE_CUTOFF),))
+    (session,) = result.sessions
+    assert session.session_status == "unknown"
+    assert session.settlement_cycle.reason == "settlement_after_verified_range"
+
+
+def test_every_refusal_code_is_named_by_a_test() -> None:
+    here = Path(__file__)
+    adversarial = (
+        here.parents[1] / "adversarial" / "test_calendar_features_causality.py"
+    )
+    text = here.read_text(encoding="utf-8") + adversarial.read_text(encoding="utf-8")
+    missing = [code for code in CALENDAR_FEATURE_INPUT_CODES if f'"{code}"' not in text]
+    assert missing == []
+
+
 def test_requests_must_be_ordered_and_their_cutoffs_monotone() -> None:
     first = request(date(2025, 1, 10), evening_before(date(2025, 1, 10)))
     second = request(date(2025, 1, 13), evening_before(date(2025, 1, 13)))
@@ -1165,6 +1443,82 @@ def test_a_feature_record_cannot_be_edited_without_resealing() -> None:
         CalendarSessionFeaturesV1.model_validate(forged.model_dump())
 
 
+def _unsealed(
+    features: CalendarSessionFeaturesV1, **changes: object
+) -> dict[str, object]:
+    values = {
+        key: value for key, value in features.__dict__.items() if key != "features_hash"
+    }
+    return values | changes
+
+
+def test_a_resealed_record_must_agree_with_the_settlement_table() -> None:
+    features = features_at(JANUARY, date(2025, 1, 10))
+    assert seal_calendar_session_features(_unsealed(features)) == features
+    t5 = SettlementCycleFeatureV1(
+        status="known",
+        business_days_after_trade_date=5,
+        row_id="t5-sro-regular-way",
+        reason=None,
+    )
+    with pytest.raises(ValidationError, match="settlement table other than"):
+        seal_calendar_session_features(
+            _unsealed(features, settlement_cycle=t5, settlement_table_hash="1" * 64)
+        )
+    with pytest.raises(ValidationError, match="settlement_cycle is not what"):
+        seal_calendar_session_features(_unsealed(features, settlement_cycle=t5))
+
+
+def test_a_resealed_record_must_keep_its_event_features_consistent() -> None:
+    events = (event_record("fomc-2025-01", date(2025, 1, 29), FOMC_PUBLISHED),)
+    features = features_at(
+        JANUARY, date(2025, 1, 10), events=events, event_kinds=(FOMC_KIND,)
+    )
+    (item,) = features.events
+    no_countdown = item.model_copy(
+        update={
+            "sessions_until_next_event": CalendarCountV1(
+                status="indeterminate",
+                value=None,
+                reason="no_visible_event",
+                blocking_date=None,
+            )
+        }
+    )
+    with pytest.raises(ValidationError, match="disagrees with next_event_date"):
+        seal_calendar_session_features(_unsealed(features, events=(no_countdown,)))
+    hidden = item.model_copy(
+        update={
+            "next_event_date": CalendarDateV1(
+                status="indeterminate",
+                value=None,
+                reason="schedule_status_unknown",
+                blocking_date=date(2025, 1, 13),
+            )
+        }
+    )
+    with pytest.raises(ValidationError, match="only when no event is visible"):
+        seal_calendar_session_features(_unsealed(features, events=(hidden,)))
+
+
+def test_a_resealed_record_must_keep_its_expiration_in_its_month() -> None:
+    features = features_at(JANUARY, date(2025, 1, 10))
+    december = CalendarDateV1(
+        status="known", value=date(2024, 12, 31), reason=None, blocking_date=None
+    )
+    with pytest.raises(ValidationError, match="third Friday's month"):
+        seal_calendar_session_features(
+            _unsealed(features, monthly_expiration_session=december)
+        )
+    claimed = CalendarFlagV1(
+        status="known", value=True, reason=None, blocking_date=None
+    )
+    with pytest.raises(ValidationError, match="is_monthly_expiration_session"):
+        seal_calendar_session_features(
+            _unsealed(features, is_monthly_expiration_session=claimed)
+        )
+
+
 def test_a_known_count_cannot_carry_a_reason() -> None:
     with pytest.raises(ValidationError, match="shape"):
         CalendarCountV1(
@@ -1199,12 +1553,15 @@ def test_hashes_are_pinned() -> None:
     assert features.features_hash == PINNED_JANUARY_10_FEATURES_HASH
 
 
-#: Pinned when the V1 contracts were first authored (issue 662). A change to
-#: any of these is a contract change and needs a new version, not a re-pin.
+#: Pinned for the V1 contracts of issue 662. They were re-pinned once, before
+#: any merge, when independent review of ceb45fa changed the V1 algorithm
+#: (unsettled later versions, settlement row ends, expiration in its month)
+#: and the table (end_announced_on). After merge a change to any of these is
+#: a contract change and needs a new version, not a re-pin.
 PINNED_ALGORITHM_HASH = (
-    "69afbc9261420e844745f85e96f4909db2a5daf02f4adc06d6c25da4d5065172"
+    "ef908b81d81381c497fdd2f5a4555d76be518bff046b7b5c41a84bd8cdf75d15"
 )
-PINNED_TABLE_HASH = "6338e6cdce38c9f9814fee57dae22a71730f391dcf97a5de6408b8985b8d6eac"
+PINNED_TABLE_HASH = "28191dd085c8ec9e98eaede5c5edb277a1b17d8fc308435135f24d8eb1c5a8e0"
 PINNED_JANUARY_10_FEATURES_HASH = (
-    "b864ee471cd32777937d936f7100fd519bef53a1a63b8bde9b3d8b1bb83163a0"
+    "da0c325b36bf095ea797745b688750d7e0024cf3de923260f2c9048559c9b83e"
 )

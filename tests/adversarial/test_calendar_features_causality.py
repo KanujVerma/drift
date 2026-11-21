@@ -30,10 +30,13 @@ from test_calendar_features import (
     NYSE_HOLIDAYS,
     SCHEDULE_PUBLISHED,
     RowState,
+    bounded_availability,
     compute,
+    date_availability,
     dates_between,
     evening_before,
     event_record,
+    exact_availability,
     request,
     schedule_row,
 )
@@ -45,7 +48,10 @@ from drift.domain.calendar_features import (
     CalendarSessionFeaturesV1,
 )
 from drift.domain.sessions import ScheduledSessionVersionV1
+from drift.domain.temporal import AvailabilityEvidenceV1
 from drift.serialization.canonical import content_hash
+
+type Window = tuple[date, datetime, datetime]
 
 STATES: tuple[RowState, ...] = ("regular", "early_close", "closed", "unknown")
 #: Cutoffs start just after the base rows, so a truncated schedule is never
@@ -61,10 +67,24 @@ def _instant(rng: Random, lower: datetime, upper: datetime) -> datetime:
     return lower + timedelta(seconds=rng.randrange(span))
 
 
-def _available_at(row: ScheduledSessionVersionV1) -> datetime:
+def _bounds(row: ScheduledSessionVersionV1) -> tuple[datetime, datetime]:
+    """The row's availability window on the one channel these tests use."""
     (evidence,) = row.revision.availability
-    assert evidence.upper_bound is not None
-    return evidence.upper_bound
+    assert evidence.lower_bound is not None and evidence.upper_bound is not None
+    return evidence.lower_bound, evidence.upper_bound
+
+
+def _correction_evidence(
+    rng: Random, after: datetime, kind: str
+) -> AvailabilityEvidenceV1:
+    """Exact, bounded or DATE-precision evidence starting at or after ``after``."""
+    start = _instant(rng, after, max(WINDOW_END, after + timedelta(days=1)))
+    if kind == "exact":
+        return exact_availability(start)
+    if kind == "bounded":
+        width = timedelta(seconds=rng.randrange(3600, 20 * 86_400))
+        return bounded_availability(start, start + width)
+    return date_availability((start + timedelta(days=2)).date())
 
 
 def _tails(
@@ -81,18 +101,37 @@ def _tails(
     return tails
 
 
-def _revised_history(rng: Random) -> list[ScheduledSessionVersionV1]:
-    """Base rows, the late closure, and random corrections inside the window."""
+def _revised_history(
+    rng: Random,
+) -> tuple[list[ScheduledSessionVersionV1], list[Window]]:
+    """Base rows, the late closure, and random corrections.
+
+    Corrections carry exact, bounded or DATE-precision availability, each
+    window starting no earlier than its predecessor's ends. Returns the rows
+    and the (date, lower, upper) window of every non-exact correction.
+    """
     rows = list(JANUARY_WITH_MOURNING)
-    for _ in range(18):
+    windows: list[Window] = []
+    kinds = ["bounded", "date"]
+    kinds += [rng.choice(("exact", "bounded", "date")) for _ in range(16)]
+    for kind in kinds:
         tails = _tails(rows)
         day = rng.choice(sorted(tails))
         tail = tails[day]
-        when = _instant(rng, _available_at(tail), WINDOW_END)
+        evidence = _correction_evidence(rng, _bounds(tail)[1], kind)
+        assert evidence.lower_bound is not None and evidence.upper_bound is not None
         rows.append(
-            schedule_row(day, rng.choice(STATES), available_at=when, predecessor=tail)
+            schedule_row(
+                day,
+                rng.choice(STATES),
+                available_at=evidence.upper_bound,
+                predecessor=tail,
+                availability=(evidence,),
+            )
         )
-    return rows
+        if kind != "exact":
+            windows.append((day, evidence.lower_bound, evidence.upper_bound))
+    return rows, windows
 
 
 def _events() -> list[CalendarEventRecordV1]:
@@ -119,7 +158,12 @@ def _events() -> list[CalendarEventRecordV1]:
 def _known_rows(
     rows: list[ScheduledSessionVersionV1], as_of: datetime
 ) -> list[ScheduledSessionVersionV1]:
-    return [row for row in rows if _available_at(row) < as_of]
+    """Drop every version definitely not available strictly before ``as_of``.
+
+    A version whose window spans the cutoff stays: it may already be known,
+    and that possibility is knowledge the features must respect.
+    """
+    return [row for row in rows if _bounds(row)[0] < as_of]
 
 
 def _known_events(
@@ -137,7 +181,7 @@ def _revised_after(
     """Revise every chain and event at or after ``as_of`` and add new ones."""
     later_rows = list(rows)
     for day, tail in sorted(_tails(rows).items()):
-        when = max(as_of, _available_at(tail)) + timedelta(seconds=rng.randrange(3600))
+        when = max(as_of, _bounds(tail)[1]) + timedelta(seconds=rng.randrange(3600))
         later_rows.append(
             schedule_row(day, rng.choice(STATES), available_at=when, predecessor=tail)
         )
@@ -179,22 +223,68 @@ def _session(
     return session
 
 
+def _pending_dates_are_unknown(
+    rows: list[ScheduledSessionVersionV1],
+    features: CalendarSessionFeaturesV1,
+    as_of: datetime,
+) -> int:
+    """A version pending at the cutoff leaves its date, and what reads it, unknown.
+
+    Returns how many pending dates in the session's month were checked.
+    """
+    day = features.session_key.local_date
+    pending = {
+        row.session_key.local_date
+        for row in rows
+        if _bounds(row)[0] < as_of <= _bounds(row)[1]
+    }
+    checked = 0
+    for pending_day in sorted(pending):
+        if (pending_day.year, pending_day.month) != (day.year, day.month):
+            continue
+        checked += 1
+        if pending_day == day:
+            assert features.session_status == "unknown", (day, as_of)
+        elif pending_day < day:
+            assert features.month_ordinal_from_start.status == "indeterminate"
+        else:
+            assert features.month_ordinal_from_end.status == "indeterminate"
+    return checked
+
+
 @pytest.mark.parametrize("seed", range(5))
 def test_truncating_or_revising_after_the_cutoff_never_changes_a_session(
     seed: int,
 ) -> None:
-    """30 random (session, cutoff) pairs over a randomly revised history."""
+    """30 random (session, cutoff) pairs over a randomly revised history.
+
+    Half of the cutoffs fall inside the window of a bounded or DATE-precision
+    correction, in the month of the session, so pending knowledge is exercised
+    on every seed.
+    """
     rng = Random(662_000 + seed)
-    rows = _revised_history(rng)
+    rows, windows = _revised_history(rng)
     events = _events()
     sessions = dates_between(date(2024, 12, 2), date(2025, 2, 27))
-    hidden = 0
-    for _ in range(6):
-        day = rng.choice(sessions)
-        as_of = _instant(rng, WINDOW_START, WINDOW_END)
+    hidden = pending = 0
+    for case in range(6):
+        if case % 2:
+            pending_day, lower, upper = rng.choice(windows)
+            as_of = _instant(rng, lower + timedelta(seconds=1), upper)
+            day = rng.choice(
+                [
+                    item
+                    for item in sessions
+                    if (item.year, item.month) == (pending_day.year, pending_day.month)
+                ]
+            )
+        else:
+            day = rng.choice(sessions)
+            as_of = _instant(rng, WINDOW_START, WINDOW_END)
         known = _known_rows(rows, as_of)
         hidden += len(rows) - len(known)
         full = _session(rows, events, day, as_of)
+        pending += _pending_dates_are_unknown(rows, full, as_of)
         truncated = _session(known, _known_events(events, as_of), day, as_of)
         later_rows, later_events = _revised_after(rng, rows, events, as_of)
         revised = _session(later_rows, later_events, day, as_of)
@@ -202,6 +292,7 @@ def test_truncating_or_revising_after_the_cutoff_never_changes_a_session(
         assert revised == full, (day, as_of)
         assert revised.features_hash == full.features_hash
     assert hidden > 0, "no case truncated any knowledge"
+    assert pending > 0, "no case met a correction pending at its cutoff"
 
 
 def test_truncating_to_an_empty_history_leaves_only_indeterminate_answers() -> None:
@@ -215,7 +306,7 @@ def test_truncating_to_an_empty_history_leaves_only_indeterminate_answers() -> N
 
 
 def test_a_batch_answers_each_session_exactly_as_alone() -> None:
-    rows = _revised_history(Random(662))
+    rows, _windows = _revised_history(Random(662))
     events = _events()
     days = (date(2024, 12, 20), date(2024, 12, 31), date(2025, 1, 8), date(2025, 2, 3))
     requests = tuple(request(day, evening_before(day)) for day in days)

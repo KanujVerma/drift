@@ -13,11 +13,17 @@ How knowledge is read:
   selection is evaluated one microsecond before ``as_of``, the resolution of a
   Python datetime, so a row available exactly at ``as_of`` is not known.
   Revision chains, corrections and withdrawals follow M1b unchanged.
+* M1b selects the latest version definitely available and passes over a
+  later version whose availability it cannot settle. Here such a later
+  version makes the date unknown instead: an INDETERMINATE window on the
+  channel, no evidence on the channel, or a later version that is available
+  but not causally selectable all mean the earlier version may already be
+  superseded.
 * A date's status is ``open`` when its known row is ``regular`` or
   ``early_close``, ``closed`` when it is ``closed``, and ``unknown`` otherwise:
-  no row, a row not yet known, an INDETERMINATE availability, a withdrawn
-  row, or a row whose own state is ``unknown``. An unknown date never counts
-  as closed, so a weekend needs an explicit closed row like any other date.
+  no row, a row not yet known, an unsettled later version, a withdrawn row,
+  or a row whose own state is ``unknown``. An unknown date never counts as
+  closed, so a weekend needs an explicit closed row like any other date.
 * An event revision is known when its ``published_at`` is strictly before
   ``as_of``. The latest known revision of each event decides it.
 
@@ -31,9 +37,10 @@ What it does not do:
 * It opens no connection, reads no file and sources no data.
 """
 
+from calendar import monthrange
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from re import fullmatch
 from types import MappingProxyType
 
@@ -49,16 +56,14 @@ from drift.domain.calendar_features import (
     CalendarFeatureInputError,
     CalendarFeatureRequestV1,
     CalendarFeatureSetV1,
-    CalendarFlagV1,
     CalendarIndeterminateReason,
     CalendarSessionFeaturesV1,
     SessionKnowledgeStatus,
-    SettlementCycleFeatureV1,
-    SettlementCycleTableV1,
     calendar_feature_algorithm_hash,
+    monthly_expiration_flag,
     seal_calendar_feature_set,
     seal_calendar_session_features,
-    settlement_row_known_from,
+    settlement_cycle_for,
     third_friday_of_month,
 )
 from drift.domain.common import FrozenModel
@@ -68,12 +73,14 @@ from drift.domain.temporal import (
     AvailabilityEvidenceV1,
     AvailabilityPolicyV1,
     CutoffEligibility,
+    evaluate_availability,
 )
 from drift.serialization.canonical import content_hash
 
 _ONE_MICROSECOND = timedelta(microseconds=1)
-_ONE_DAY = timedelta(days=1)
 _OPEN_STATES = frozenset({"regular", "early_close"})
+#: The earliest cutoff accepted, so that one microsecond earlier still exists.
+_EARLIEST_CUTOFF = datetime(1, 1, 2, tzinfo=UTC)
 
 
 def _refuse(code: str, detail: str) -> CalendarFeatureInputError:
@@ -91,14 +98,35 @@ class _ScheduleIndex:
     input_hash: str
 
 
+def _require_plain_temporal(value: object) -> None:
+    """Refuse a date or datetime subclass anywhere inside a model dump.
+
+    A subclass can redefine comparison, so a value that claims to be
+    available in 2030 could compare as available now.
+    """
+    if isinstance(value, date) and type(value) not in (date, datetime):
+        raise ValueError("a date or datetime subclass is not a plain value")
+    if isinstance(value, Mapping):
+        for item in value.values():
+            _require_plain_temporal(item)
+    elif isinstance(value, list | tuple):
+        for item in value:
+            _require_plain_temporal(item)
+
+
 def _revalidated[M: FrozenModel](
     model: type[M], value: object, code: str, what: str
 ) -> M:
-    """Validate ``value`` again through its own contract, or refuse it."""
+    """Validate ``value`` again through its own contract, or refuse it.
+
+    Every nested date and datetime must be a plain value. The model is then
+    rebuilt from its own JSON, so no other subclassed value survives either.
+    """
     if not isinstance(value, model) or type(value) is not model:
         raise _refuse(code, f"every {what} must be a {model.__name__}")
     try:
-        return model.model_validate(value.model_dump(mode="python", warnings=False))
+        _require_plain_temporal(value.model_dump(mode="python", warnings=False))
+        return model.model_validate_json(value.model_dump_json(warnings=False))
     except (AttributeError, TypeError, ValueError) as error:
         raise _refuse(
             code, f"a {what} does not validate through its own contract"
@@ -106,15 +134,9 @@ def _revalidated[M: FrozenModel](
 
 
 def _revalidated_row(row: object) -> ScheduledSessionVersionV1:
-    again = _revalidated(
+    return _revalidated(
         ScheduledSessionVersionV1, row, "calendar_schedule_row_invalid", "row"
     )
-    if type(again.session_key.local_date) is not date:
-        raise _refuse(
-            "calendar_schedule_row_invalid",
-            "a schedule row date must be a plain datetime.date",
-        )
-    return again
 
 
 def _validated_schedule(schedule: Iterable[object]) -> _ScheduleIndex:
@@ -193,13 +215,10 @@ def _validated_requests(
         again = _revalidated(
             CalendarFeatureRequestV1, request, "calendar_request_invalid", "request"
         )
-        if (
-            type(again.session_key.local_date) is not date
-            or type(again.as_of) is not datetime
-        ):
+        if again.as_of < _EARLIEST_CUTOFF:
             raise _refuse(
                 "calendar_request_invalid",
-                "a request needs a plain date and a plain aware datetime",
+                f"a cutoff before {_EARLIEST_CUTOFF.isoformat()} is out of range",
             )
         if again.session_key.mic != mic:
             raise _refuse(
@@ -249,13 +268,6 @@ def _validated_events(
         again = _revalidated(
             CalendarEventRecordV1, record, "calendar_event_invalid", "event record"
         )
-        if type(again.event_date) is not date or type(again.published_at) is not (
-            datetime
-        ):
-            raise _refuse(
-                "calendar_event_invalid",
-                "an event needs a plain date and a plain aware datetime",
-            )
         if again.event_kind not in kinds:
             raise _refuse(
                 "calendar_event_kind_undeclared",
@@ -334,10 +346,40 @@ class _KnownSchedule:
         self._cache[day] = resolved
         return resolved
 
+    def _decision(self, item: AssertionVersionProjectionV1) -> CutoffEligibility:
+        """One version's availability strictly before the cutoff.
+
+        No evidence on the requested channel cannot be settled, so it is
+        INDETERMINATE, exactly as M1b leaves it unresolved.
+        """
+        evidence = next(
+            (
+                claim
+                for claim in item.revision.availability
+                if claim.channel == self.channel
+            ),
+            None,
+        )
+        if evidence is None:
+            return CutoffEligibility.INDETERMINATE
+        return evaluate_availability(
+            evidence,
+            self.channel,
+            self.policy,
+            self.as_of - _ONE_MICROSECOND,
+            self.retained,
+        ).classification
+
     def _resolve(self, day: date) -> SessionKnowledgeStatus:
         chain = self.index.chains.get(day)
         if chain is None:
             return "unknown"
+        decisions = {item.record_hash: self._decision(item) for item in chain}
+        self.consulted.update(
+            digest
+            for digest, decision in decisions.items()
+            if decision is not CutoffEligibility.INELIGIBLE
+        )
         selection = select_assertion_version(
             chain,
             self.channel,
@@ -350,8 +392,13 @@ class _KnownSchedule:
             or selection.selected_record_hash is None
         ):
             return "unknown"
-        self.consulted.add(selection.selected_record_hash)
         row = self.index.by_hash[selection.selected_record_hash]
+        if any(
+            item.revision.source_sequence > row.revision.source_sequence
+            and decisions[item.record_hash] is not CutoffEligibility.INELIGIBLE
+            for item in chain
+        ):
+            return "unknown"
         if row.state in _OPEN_STATES:
             return "open"
         if row.state == "closed":
@@ -367,17 +414,19 @@ class _Tally:
     blocking_date: date | None
 
 
-def _tally_open(known: _KnownSchedule, first: date, last: date) -> _Tally:
-    """Count open dates from ``first`` through ``last``, all of them known."""
+def _tally_open(known: _KnownSchedule, first: int, last: int) -> _Tally:
+    """Count open dates over ordinals ``first`` through ``last``, all known.
+
+    Ordinals keep the range arithmetic clear of the ends of ``date``.
+    """
     count = 0
-    day = first
-    while day <= last:
+    for ordinal in range(first, last + 1):
+        day = date.fromordinal(ordinal)
         status = known.status(day)
         if status == "unknown":
             return _Tally(count=None, blocking_date=day)
         if status == "open":
             count += 1
-        day += _ONE_DAY
     return _Tally(count=count, blocking_date=None)
 
 
@@ -409,83 +458,22 @@ def _known_date(value: date) -> CalendarDateV1:
     return CalendarDateV1(status="known", value=value, reason=None, blocking_date=None)
 
 
-def _month_end(day: date) -> date:
-    following = date(day.year + day.month // 12, day.month % 12 + 1, 1)
-    return following - _ONE_DAY
-
-
 def _expiration_session(known: _KnownSchedule, third_friday: date) -> CalendarDateV1:
-    """The third Friday if open, else the latest earlier open date.
+    """The third Friday if open, else the latest earlier open date in its month.
 
     Every date walked over must be known closed; the first unknown one makes
-    the answer INDETERMINATE. The walk ends because the schedule is finite.
+    the answer INDETERMINATE. A month whose every date up to its third Friday
+    is known closed has no expiration session under the rule; whatever the
+    exchanges would do then is not a calendar fact, so it is INDETERMINATE.
     """
-    day = third_friday
-    while True:
+    for day_of_month in range(third_friday.day, 0, -1):
+        day = third_friday.replace(day=day_of_month)
         status = known.status(day)
         if status == "open":
             return _known_date(day)
         if status == "unknown":
             return _indeterminate_date("schedule_status_unknown", day)
-        day -= _ONE_DAY
-
-
-def _expiration_flag(
-    session_open: bool, day: date, expiration: CalendarDateV1
-) -> CalendarFlagV1:
-    if not session_open:
-        return CalendarFlagV1(
-            status="indeterminate",
-            value=None,
-            reason="session_not_known_open",
-            blocking_date=None,
-        )
-    if expiration.value is None:
-        return CalendarFlagV1(
-            status="indeterminate",
-            value=None,
-            reason=expiration.reason,
-            blocking_date=expiration.blocking_date,
-        )
-    return CalendarFlagV1(
-        status="known", value=day == expiration.value, reason=None, blocking_date=None
-    )
-
-
-def _settlement(
-    table: SettlementCycleTableV1, mic: str, trade_date: date, as_of: datetime
-) -> SettlementCycleFeatureV1:
-    reason: CalendarIndeterminateReason | None = None
-    row = next(
-        (
-            item
-            for item in table.rows
-            if item.effective_from <= trade_date
-            and (item.effective_until is None or trade_date < item.effective_until)
-        ),
-        None,
-    )
-    if mic not in table.venues:
-        reason = "settlement_venue_outside_table"
-    elif row is None:
-        reason = "settlement_before_table"
-    elif trade_date > table.verified_through:
-        reason = "settlement_after_verified_range"
-    elif not settlement_row_known_from(row) < as_of:
-        reason = "settlement_row_not_known_at_cutoff"
-    if reason is not None or row is None:
-        return SettlementCycleFeatureV1(
-            status="indeterminate",
-            business_days_after_trade_date=None,
-            row_id=None,
-            reason=reason,
-        )
-    return SettlementCycleFeatureV1(
-        status="known",
-        business_days_after_trade_date=row.business_days_after_trade_date,
-        row_id=row.row_id,
-        reason=None,
-    )
+    return _indeterminate_date("expiration_outside_month")
 
 
 def _visible_events(
@@ -527,7 +515,9 @@ def _event_features(
     elif following.value is None:
         until = _indeterminate_count("no_visible_event")
     else:
-        until = _count(_tally_open(known, day + _ONE_DAY, following.value), 0)
+        until = _count(
+            _tally_open(known, day.toordinal() + 1, following.value.toordinal()), 0
+        )
     return CalendarEventFeaturesV1(
         event_kind=kind,
         on_session=day in dates,
@@ -556,11 +546,12 @@ def _session_features(
     )
     session_status = known.status(day)
     session_open = session_status == "open"
-    first = date(day.year, day.month, 1)
-    last = _month_end(day)
+    ordinal = day.toordinal()
+    first = ordinal - day.day + 1
+    last = first + monthrange(day.year, day.month)[1] - 1
     if session_open:
-        from_start = _count(_tally_open(known, first, day - _ONE_DAY), 1)
-        after = _tally_open(known, day + _ONE_DAY, last)
+        from_start = _count(_tally_open(known, first, ordinal - 1), 1)
+        after = _tally_open(known, ordinal + 1, last)
         from_end = _count(after, 1)
         remaining = _count(after, 0)
     else:
@@ -589,10 +580,10 @@ def _session_features(
             "third_friday": third_friday,
             "is_third_friday": day == third_friday,
             "monthly_expiration_session": expiration,
-            "is_monthly_expiration_session": _expiration_flag(
+            "is_monthly_expiration_session": monthly_expiration_flag(
                 session_open, day, expiration
             ),
-            "settlement_cycle": _settlement(
+            "settlement_cycle": settlement_cycle_for(
                 US_REGULAR_WAY_SETTLEMENT_TABLE_V1, index.mic, day, request.as_of
             ),
             "events": events,
