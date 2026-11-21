@@ -145,3 +145,30 @@ def test_cap_comparison_is_independent_of_the_callers_decimal_context(
         )
         assert verdict.status == RiskVerdictStatus.REJECTED
         assert ambient.prec == precision and ambient.rounding == rounding
+
+
+@pytest.mark.parametrize("kind", ["position", "gross"])
+@pytest.mark.parametrize("cap", [0, 2500, 10000])
+def test_zero_nav_buy_trips_insolvency_before_exposure_caps(
+    kind: str, cap: int
+) -> None:
+    # The exact cap comparison (#642) is only reached with positive NAV: the
+    # insolvency breaker trips the kill switch first and records the verdict.
+    state = _make_state(cash=Decimal("0"))
+    assert state.net_asset_value == 0
+    price = Decimal("1")
+    policy = _make_policy(
+        max_position_weight_basis_points=cap if kind == "position" else 10000,
+        max_gross_exposure_basis_points=cap if kind == "gross" else 10000,
+    )
+    with PersistentRiskJournal() as journal:
+        gate = HardRiskGatekeeper(policy=policy, journal=journal)
+        intent = _make_intent(sec_id=uuid7(), quantity=1, price=price)
+        verdict = gate.evaluate_intent(
+            intent, portfolio_state=state, current_price=price
+        )
+        assert verdict.status == RiskVerdictStatus.KILL_SWITCH_ACTIVE
+        assert verdict.reason == "portfolio_insolvency: NAV is non-positive"
+        assert "bps of NAV" not in str(verdict.reason)
+        assert journal.is_kill_switch_tripped() is True
+        assert journal.list_verdicts() == (verdict,)
