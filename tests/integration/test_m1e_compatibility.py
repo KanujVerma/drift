@@ -79,40 +79,21 @@ DATA_QUALITY_PUBLIC_SERIES_SOURCE_PATHS = frozenset(
         "src/drift/markets/data_quality.py",
     }
 )
-# Separate #553-#557/#559 requests share one explicit dispatch, not a prefix rule.
+# Retain the exact path for the still-open UNKNOWN replay preflight (#535).
 OFFLINE_PREFLIGHT_SCRIPT_PATHS = frozenset(
     {
-        "scripts/source_envelope_replay_preflight.py",  # #553
-        "scripts/result_economics_preflight.py",  # #553
         "scripts/unknown_execution_replay_preflight.py",  # #553
-        "scripts/mandate_approval_preflight.py",  # #554
-        "scripts/qqq_offline_replay_preflight.py",  # #554
-        "scripts/forward_readiness_preflight.py",  # #555
-        "scripts/recovery_evidence_preflight.py",  # #556
-        "scripts/containment_evidence_preflight.py",  # #557
-        "scripts/source_qualification_preflight.py",  # #559
-        "scripts/execution_trace_preflight.py",  # #559
     }
 )
-# Exact static versions proposed in #553 comment 6370604563. Only these three
-# negative-authority property names need an exception. Every semantic AST change
+# Exact static version proposed in #553 comment 6370604563. This one
+# negative-authority property name needs an exception. Every semantic AST change
 # needs source review and an accepted new fingerprint; never regenerate to pass.
 # These fingerprints establish neither origin authentication nor runtime isolation.
 OFFLINE_PREFLIGHT_AST_PROFILES: dict[str, tuple[str, str, str]] = {
-    "scripts/source_envelope_replay_preflight.py": (
-        "EnvelopeReplayPreflight",
-        "authorizes_ingestion_or_trading",
-        "e514259164395aab580a3e816da69f1b53ddec82518f3385267ab9cd455a8781",
-    ),
     "scripts/unknown_execution_replay_preflight.py": (
         "UnknownReplayPreflight",
         "authenticates_journal_broker_or_ledger",
         "2c8662901bc07c1b8ed8a6b12fed0efb5fa2d42bc1f658af53f1a81ee4860ffb",
-    ),
-    "scripts/qqq_offline_replay_preflight.py": (
-        "QQQReplayPreflight",
-        "authorizes_data_access_or_trading",
-        "aec771311606d780c3d8e411d1ba1159d62d3b126a96d02e32a5d538be124a00",
     ),
 }
 ALLOWED_M1E_PRODUCTION_PATHS = frozenset(
@@ -1788,16 +1769,7 @@ def test_successor_inventory_is_exact_and_scanned() -> None:
         "src/drift/ledger/stage1_synthetic_account_receipts.py"
     }
     assert OFFLINE_PREFLIGHT_SCRIPT_PATHS == {
-        "scripts/source_envelope_replay_preflight.py",
-        "scripts/result_economics_preflight.py",
         "scripts/unknown_execution_replay_preflight.py",
-        "scripts/mandate_approval_preflight.py",
-        "scripts/qqq_offline_replay_preflight.py",
-        "scripts/forward_readiness_preflight.py",
-        "scripts/recovery_evidence_preflight.py",
-        "scripts/containment_evidence_preflight.py",
-        "scripts/source_qualification_preflight.py",
-        "scripts/execution_trace_preflight.py",
     }
     expected = (
         TRIAGE_OFFLINE_SOURCE_PATHS
@@ -1807,9 +1779,7 @@ def test_successor_inventory_is_exact_and_scanned() -> None:
     assert expected <= INERT_SOURCE_PATHS
     assert expected <= SCANNED_AS_PRODUCTION_PATHS
     assert set(OFFLINE_PREFLIGHT_AST_PROFILES) == {
-        "scripts/source_envelope_replay_preflight.py",
         "scripts/unknown_execution_replay_preflight.py",
-        "scripts/qqq_offline_replay_preflight.py",
     }
     for unknown in (
         "src/drift/news_triage/extra.py",
@@ -1820,6 +1790,35 @@ def test_successor_inventory_is_exact_and_scanned() -> None:
         assert unknown not in INERT_SOURCE_PATHS
         with pytest.raises(AssertionError, match="unregistered source"):
             _assert_m1e_source_file_allowed(unknown)
+
+
+@pytest.mark.parametrize(
+    "relative",
+    (
+        "scripts/source_envelope_replay_preflight.py",
+        "scripts/result_economics_preflight.py",
+        "scripts/mandate_approval_preflight.py",
+        "scripts/qqq_offline_replay_preflight.py",
+        "scripts/forward_readiness_preflight.py",
+        "scripts/recovery_evidence_preflight.py",
+        "scripts/containment_evidence_preflight.py",
+        "scripts/source_qualification_preflight.py",
+        "scripts/execution_trace_preflight.py",
+    ),
+)
+def test_retired_preflight_paths_are_not_admitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str
+) -> None:
+    path = tmp_path / relative
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"pass\n")
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(sys.modules[__name__], "_git_paths", lambda *_: set())
+    assert relative in _m1e_paths_on_disk()
+    assert relative not in INERT_SOURCE_PATHS
+    assert relative not in SCANNED_AS_PRODUCTION_PATHS
+    with pytest.raises(AssertionError, match="unregistered source"):
+        _assert_m1e_source_file_allowed(relative)
 
 
 @pytest.mark.parametrize("relative", sorted(_SUCCESSOR_ORDINARY_PATHS))
@@ -1850,16 +1849,10 @@ def test_successor_ordinary_paths_have_nonvacuous_actual_file_scans(
 
 # These tiny parser fixtures are not the real source-version admission pins.
 # Monkeypatching is confined to each test; actual-file integration always uses
-# the original three reviewed digests above and the actual source on disk.
+# the original reviewed digest above and the actual source on disk.
 _PREFLIGHT_FIXTURE_DIGESTS = {
-    "scripts/source_envelope_replay_preflight.py": (
-        "975a35c7856b73f4f8b6420fcc20ab49ed78bcc6b0b842f9ad3b333f1d7c6669"
-    ),
     "scripts/unknown_execution_replay_preflight.py": (
         "ef27d4c8646a8df62f6c2ddb7843a5a7c5c46ba77fc376f4a47b3c9f3a3ecb9a"
-    ),
-    "scripts/qqq_offline_replay_preflight.py": (
-        "0e911d6de85a5102588946bbc894573e0275e27a37820e668f4b57aa65458383"
     ),
 }
 
@@ -1911,15 +1904,12 @@ def test_pinned_preflight_actual_file_dispatch_and_mutation_refusal(
         path.write_bytes(mutation)
         with pytest.raises(AssertionError, match="unreviewed offline preflight AST"):
             _assert_m1e_source_file_allowed(relative)
-    # Each path selects its own fingerprint, even when the property is unchanged.
-    for other in OFFLINE_PREFLIGHT_AST_PROFILES:
-        if other != relative:
-            with pytest.raises(
-                AssertionError, match="unreviewed offline preflight AST"
-            ):
-                _assert_offline_preflight_script_allowed(
-                    other, _source_ast(original, relative)
-                )
+    # The retained profile cannot authorize the same AST at a retired path.
+    with pytest.raises(AssertionError, match="unregistered offline preflight"):
+        _assert_offline_preflight_script_allowed(
+            "scripts/source_envelope_replay_preflight.py",
+            _source_ast(original, relative),
+        )
     # Check the ordinary remainder directly: failures cannot depend only on a hash.
     for injection in _CAPABILITY_INJECTIONS:
         tree = _source_ast(original + injection, relative)
