@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ast
-import hashlib
 import importlib.util
 import re
 import subprocess
@@ -79,23 +78,6 @@ DATA_QUALITY_PUBLIC_SERIES_SOURCE_PATHS = frozenset(
         "src/drift/markets/data_quality.py",
     }
 )
-# Retain the exact path for the still-open UNKNOWN replay preflight (#535).
-OFFLINE_PREFLIGHT_SCRIPT_PATHS = frozenset(
-    {
-        "scripts/unknown_execution_replay_preflight.py",  # #553
-    }
-)
-# Exact static version proposed in #553 comment 6370604563. This one
-# negative-authority property name needs an exception. Every semantic AST change
-# needs source review and an accepted new fingerprint; never regenerate to pass.
-# These fingerprints establish neither origin authentication nor runtime isolation.
-OFFLINE_PREFLIGHT_AST_PROFILES: dict[str, tuple[str, str, str]] = {
-    "scripts/unknown_execution_replay_preflight.py": (
-        "UnknownReplayPreflight",
-        "authenticates_journal_broker_or_ledger",
-        "2c8662901bc07c1b8ed8a6b12fed0efb5fa2d42bc1f658af53f1a81ee4860ffb",
-    ),
-}
 ALLOWED_M1E_PRODUCTION_PATHS = frozenset(
     {
         "src/drift/domain/qualification.py",
@@ -280,7 +262,6 @@ INERT_SOURCE_PATHS = (
     | G3_STAGE1_EXTENSION_SOURCE_PATHS
     | G1_ALPACA_SIP_SOURCE_PATHS
     | DATA_QUALITY_PUBLIC_SERIES_SOURCE_PATHS
-    | OFFLINE_PREFLIGHT_SCRIPT_PATHS
 )
 SCANNED_AS_PRODUCTION_PATHS = (
     M1E_PRODUCTION_PATHS
@@ -300,7 +281,6 @@ SCANNED_AS_PRODUCTION_PATHS = (
     | G3_STAGE1_EXTENSION_SOURCE_PATHS
     | G1_ALPACA_SIP_SOURCE_PATHS
     | DATA_QUALITY_PUBLIC_SERIES_SOURCE_PATHS
-    | OFFLINE_PREFLIGHT_SCRIPT_PATHS
 )
 M1E_SCRIPT_PATHS = frozenset(
     path for path in ALLOWED_M1E_PRODUCTION_PATHS if path.startswith("scripts/")
@@ -716,12 +696,8 @@ def _assert_m1e_production_module_allowed(source: PythonSource, label: str) -> N
     _assert_m1e_production_tree_allowed(_source_ast(source, label), label)
 
 
-def _assert_m1e_production_tree_allowed(
-    tree: ast.Module,
-    label: str,
-    permitted_definition: ast.FunctionDef | None = None,
-) -> None:
-    """Apply every ordinary prohibition, except one fingerprint-bound node name."""
+def _assert_m1e_production_tree_allowed(tree: ast.Module, label: str) -> None:
+    """Apply every ordinary production prohibition."""
     aliases = _import_aliases(tree)
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -736,8 +712,7 @@ def _assert_m1e_production_tree_allowed(
                 not in FORBIDDEN_PRODUCTION_IMPORT_ROOTS
             )
         if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-            if node is not permitted_definition:
-                _assert_definition_allowed(node.name, label, script=False)
+            _assert_definition_allowed(node.name, label, script=False)
         if isinstance(node, ast.Call):
             call_path = _call_path(node.func, aliases)
             assert call_path not in FORBIDDEN_PROCESS_CALLS, (
@@ -754,36 +729,6 @@ def _assert_m1e_production_tree_allowed(
             assert access_path != "os.environ", (
                 f"credential read os.environ in production module {label}"
             )
-
-
-def _assert_offline_preflight_script_allowed(relative: str, tree: ast.Module) -> None:
-    """Bound a name exception to one exact path and complete byte-parsed AST."""
-    assert relative in OFFLINE_PREFLIGHT_SCRIPT_PATHS, (
-        f"unregistered offline preflight: {relative}"
-    )
-    permitted_definition = None
-    profile = OFFLINE_PREFLIGHT_AST_PROFILES.get(relative)
-    if profile is not None:
-        class_name, property_name, expected_digest = profile
-        actual_digest = hashlib.sha256(
-            ast.dump(tree, annotate_fields=True, include_attributes=False).encode(
-                "utf-8"
-            )
-        ).hexdigest()
-        assert actual_digest == expected_digest, (
-            f"unreviewed offline preflight AST: {relative}"
-        )
-        definitions = [
-            member
-            for owner in tree.body
-            if isinstance(owner, ast.ClassDef) and owner.name == class_name
-            for member in owner.body
-            if isinstance(member, ast.FunctionDef) and member.name == property_name
-        ]
-        assert len(definitions) == 1, f"missing exact property in {relative}"
-        permitted_definition = definitions[0]
-    # Reuse this exact AST. No second text decode or name-only fallback exists.
-    _assert_m1e_production_tree_allowed(tree, relative, permitted_definition)
 
 
 def _string_assignments(tree: ast.AST) -> dict[str, set[str] | None]:
@@ -1131,8 +1076,6 @@ def _assert_m1e_source_file_allowed(relative: str) -> None:
         # ordinary intelligence domain types may name a portfolio.
     elif relative in M2_ALPACA_BRIDGE_SOURCE_PATHS:
         _assert_alpaca_bridge_module_allowed(source, relative)
-    elif relative in OFFLINE_PREFLIGHT_SCRIPT_PATHS:
-        _assert_offline_preflight_script_allowed(relative, source)
     elif relative in SCANNED_AS_PRODUCTION_PATHS:
         _assert_m1e_production_module_allowed(source, relative)
     elif relative in M2_ALPACA_BRIDGE_SCRIPT_PATHS:
@@ -1748,7 +1691,6 @@ _SUCCESSOR_ORDINARY_PATHS = (
     TRIAGE_OFFLINE_SOURCE_PATHS
     | E6B_LOCAL_ORIGINAL_LEDGER_SOURCE_PATHS
     | G2_EXECUTION_EXTENSION_SOURCE_PATHS
-    | (OFFLINE_PREFLIGHT_SCRIPT_PATHS - OFFLINE_PREFLIGHT_AST_PROFILES.keys())
 )
 _CAPABILITY_INJECTIONS = (
     b"import socket\n",
@@ -1768,19 +1710,9 @@ def test_successor_inventory_is_exact_and_scanned() -> None:
     assert E6B_LOCAL_ORIGINAL_LEDGER_SOURCE_PATHS == {
         "src/drift/ledger/stage1_synthetic_account_receipts.py"
     }
-    assert OFFLINE_PREFLIGHT_SCRIPT_PATHS == {
-        "scripts/unknown_execution_replay_preflight.py",
-    }
-    expected = (
-        TRIAGE_OFFLINE_SOURCE_PATHS
-        | E6B_LOCAL_ORIGINAL_LEDGER_SOURCE_PATHS
-        | OFFLINE_PREFLIGHT_SCRIPT_PATHS
-    )
+    expected = TRIAGE_OFFLINE_SOURCE_PATHS | E6B_LOCAL_ORIGINAL_LEDGER_SOURCE_PATHS
     assert expected <= INERT_SOURCE_PATHS
     assert expected <= SCANNED_AS_PRODUCTION_PATHS
-    assert set(OFFLINE_PREFLIGHT_AST_PROFILES) == {
-        "scripts/unknown_execution_replay_preflight.py",
-    }
     for unknown in (
         "src/drift/news_triage/extra.py",
         "src/drift/ledger/stage1_synthetic_extra.py",
@@ -1804,6 +1736,7 @@ def test_successor_inventory_is_exact_and_scanned() -> None:
         "scripts/containment_evidence_preflight.py",
         "scripts/source_qualification_preflight.py",
         "scripts/execution_trace_preflight.py",
+        "scripts/unknown_execution_replay_preflight.py",
     ),
 )
 def test_retired_preflight_paths_are_not_admitted(
@@ -1847,21 +1780,12 @@ def test_successor_ordinary_paths_have_nonvacuous_actual_file_scans(
             _assert_m1e_source_file_allowed(relative)
 
 
-# These tiny parser fixtures are not the real source-version admission pins.
-# Monkeypatching is confined to each test; actual-file integration always uses
-# the original reviewed digest above and the actual source on disk.
-_PREFLIGHT_FIXTURE_DIGESTS = {
-    "scripts/unknown_execution_replay_preflight.py": (
-        "ef27d4c8646a8df62f6c2ddb7843a5a7c5c46ba77fc376f4a47b3c9f3a3ecb9a"
-    ),
-}
-
-
-@pytest.mark.parametrize("relative", sorted(OFFLINE_PREFLIGHT_AST_PROFILES))
-def test_pinned_preflight_actual_file_dispatch_and_mutation_refusal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str
+def test_retired_unknown_preflight_variants_are_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    class_name, property_name, _ = OFFLINE_PREFLIGHT_AST_PROFILES[relative]
+    relative = "scripts/unknown_execution_replay_preflight.py"
+    class_name = "UnknownReplayPreflight"
+    property_name = "authenticates_journal_broker_or_ledger"
     original = (
         f"class {class_name}:\n"
         "    @property\n"
@@ -1871,24 +1795,13 @@ def test_pinned_preflight_actual_file_dispatch_and_mutation_refusal(
     path = tmp_path / relative
     path.parent.mkdir(parents=True)
     monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
-    path.write_bytes(original)
-    # Merely containing the expected false property cannot authorize a version.
-    with pytest.raises(AssertionError, match="unreviewed offline preflight AST"):
-        _assert_m1e_source_file_allowed(relative)
-    monkeypatch.setitem(
-        OFFLINE_PREFLIGHT_AST_PROFILES,
-        relative,
-        (class_name, property_name, _PREFLIGHT_FIXTURE_DIGESTS[relative]),
-    )
-    for benign in (
+    variants = (
         original,
         b"# leading comment\n" + original,
         original + b"# trailing comment\n",
         b"# coding: utf-8\n" + original,
-        original.replace(b"\n", b"\r\n"),
-    ):
-        path.write_bytes(benign)
-        _assert_m1e_source_file_allowed(relative)
+        original.replace(b"\n", bytes((13, 10))),
+    )
     replacement = f"{class_name}.{property_name} = property(lambda self: True)\n"
     mutations = (
         original.replace(b"return False", b"return True"),
@@ -1900,22 +1813,18 @@ def test_pinned_preflight_actual_file_dispatch_and_mutation_refusal(
         original + f"setattr({class_name}, '{property_name}', True)\n".encode("ascii"),
         b"# coding: unicode_escape\n" + original + b"# hidden\\nimport socket\n",
     )
-    for mutation in mutations:
-        path.write_bytes(mutation)
-        with pytest.raises(AssertionError, match="unreviewed offline preflight AST"):
+    for variant in variants + mutations:
+        path.write_bytes(variant)
+        with pytest.raises(AssertionError, match="unregistered source"):
             _assert_m1e_source_file_allowed(relative)
-    # The retained profile cannot authorize the same AST at a retired path.
-    with pytest.raises(AssertionError, match="unregistered offline preflight"):
-        _assert_offline_preflight_script_allowed(
-            "scripts/source_envelope_replay_preflight.py",
-            _source_ast(original, relative),
-        )
-    # Check the ordinary remainder directly: failures cannot depend only on a hash.
+    # The former property exception is no longer available to ordinary sources.
+    with pytest.raises(AssertionError, match="forbidden M1e capability definition"):
+        _assert_m1e_production_tree_allowed(_source_ast(original, relative), relative)
+    benign = original.replace(property_name.encode("ascii"), b"reports_offline_status")
+    _assert_m1e_production_tree_allowed(_source_ast(benign, relative), relative)
+    # Each capability must be rejected independently, not just by the name ban.
     for injection in _CAPABILITY_INJECTIONS:
-        tree = _source_ast(original + injection, relative)
-        owner = tree.body[0]
-        assert isinstance(owner, ast.ClassDef)
-        definition = owner.body[0]
-        assert isinstance(definition, ast.FunctionDef)
         with pytest.raises(AssertionError):
-            _assert_m1e_production_tree_allowed(tree, relative, definition)
+            _assert_m1e_production_tree_allowed(
+                _source_ast(benign + injection, relative), relative
+            )
