@@ -9,7 +9,7 @@ vs parallel equivalence, and lane isolation.
 
 import json
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID
@@ -84,6 +84,19 @@ from test_evaluator_engine import (  # noqa: E402
     _protocol,
     quiet_coverage,  # noqa: E402
 )
+
+
+@pytest.fixture(autouse=True)
+def _restore_shared_coverage_support() -> Iterator[None]:
+    """Keep test-specific source payloads out of later reconstruction cases."""
+    from test_evaluator_engine import CA_COVERAGE_SUPPORT
+
+    saved = CA_COVERAGE_SUPPORT.copy()
+    yield
+    CA_COVERAGE_SUPPORT.clear()
+    CA_COVERAGE_SUPPORT.update(saved)
+    scheduled_session_case.cache_clear()
+
 
 SECURITY_SPY = UUID("019b8240-0000-7000-8000-000000000001")
 SECURITY_QQQ = UUID("019b8240-0000-7000-8000-000000000002")
