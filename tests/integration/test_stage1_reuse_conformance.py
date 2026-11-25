@@ -14,7 +14,7 @@ import subprocess
 import sys
 import zlib
 from collections.abc import Mapping
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from functools import cache
 from pathlib import Path
 from typing import Any
@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "unit"))
 import test_evaluator_engine as fixture
 import test_stage1_original_invocation_end_to_end as window_fixture
 from test_stage1_synthetic_research_execution import (
+    BASE,
     cold_read,
     make_harness,
     request,
@@ -202,6 +203,43 @@ def _first_proof(harness: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any
     assert context["admitted_universe"] == [str(s) for s, _ in MEMBERS]
     assert len(context["decision_views"]) == 2
     return context, intent
+
+
+def test_boundary_winner_matches_installed_target_and_cold_read(tmp_path: Path) -> None:
+    bundle = _history_bundle(253)
+    harness = make_harness(
+        tmp_path,
+        arm="ARM-R",
+        engine=fixture._engine(bundle=bundle, protocol=fixture._protocol(warmup=253)),
+    )
+    selection_request = pipeline.OfflineResearchRequestV1(
+        mode="conventional_fixture",
+        deadline=BASE + timedelta(minutes=5),
+        candidate_pool=(_choice("B3"), _choice("B4")),
+        fixture_scores={
+            "B3": "0.99999999899999999999999999999999999999999999999999",
+            "B4": "1",
+        },
+    )
+    result = pipeline.execute_synthetic_research(**harness, request=selection_request)
+    assert result.state == "LOCAL_EXECUTION_COMPLETE"
+    assert result.original_result is not None
+    event = next(
+        e
+        for e in harness["origin"].verified_events()
+        if e.event_type == "stage1.synthetic_research.original_output"
+    )
+    output = json.loads(json.loads(event.payload["body_utf8"])["output_utf8"])
+    assert output["selected_candidate"]["strategy"]["family_id"] == "B4"
+    _, intent = _first_proof(harness)
+    assert intent["targets"][0]["security_id"] == str(fixture.SEC_A)
+    path = harness["origin"].ledger_path
+    before = hashlib.sha256(path.read_bytes()).digest()
+    replayed = cold_read(harness, result.opportunity_ref)
+    assert replayed.state == "LOCAL_EXECUTION_COMPLETE"
+    assert replayed.candidate_hash == result.candidate_hash
+    assert not replayed.authorizes_trading
+    assert hashlib.sha256(path.read_bytes()).digest() == before
 
 
 @pytest.mark.parametrize(("family", "history"), [("B3", 2), ("B4", 253), ("B5", 61)])
