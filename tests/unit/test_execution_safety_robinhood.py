@@ -7,6 +7,7 @@ Verifies fail-closed handling for:
 """
 
 import socket
+import traceback
 from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -122,6 +123,62 @@ def test_ambiguous_submission_never_returns_rejected() -> None:
     assert len(transport._orders) == 1
 
 
+@pytest.mark.parametrize("mode", ["submit", "lookup", "cancel", "status"])
+def test_native_timeout_is_redacted_and_keeps_same_instance_marker(mode: str) -> None:
+    sec_id = uuid7()
+
+    class NativeTimeout(MockRobinhoodMcpTransport):
+        def __init__(self) -> None:
+            super().__init__(auto_fill=False)
+            self.calls: list[str] = []
+
+        def call_tool(
+            self, tool_name: str, arguments: Mapping[str, Any]
+        ) -> dict[str, Any]:
+            self.calls.append(tool_name)
+            if tool_name == "robinhood_place_order" and mode in ("submit", "lookup"):
+                super().call_tool(tool_name, arguments)
+                if mode == "lookup":
+                    raise RobinhoodMcpError("synthetic detail")
+                raise TimeoutError("synthetic sensitive detail")
+            if (
+                (
+                    mode == "lookup"
+                    and tool_name == "robinhood_get_order_by_client_token"
+                )
+                or (mode == "cancel" and tool_name == "robinhood_cancel_order")
+                or (mode == "status" and tool_name == "robinhood_get_order")
+            ):
+                raise TimeoutError("synthetic sensitive detail")
+            return super().call_tool(tool_name, arguments)
+
+    transport = NativeTimeout()
+    adapter = RobinhoodAgenticAdapter(
+        config=RobinhoodAgenticConfigV1(account_id="fake", symbol_map={sec_id: "AAPL"}),
+        transport=transport,
+    )
+    intent = _make_intent(sec_id=sec_id)
+    if mode in ("cancel", "status"):
+        assert adapter.submit_intent(intent).status == ExecutionStatus.ACKNOWLEDGED
+    with pytest.raises(
+        ExecutionOutcomeUnknown, match="^execution outcome unknown$"
+    ) as caught:
+        if mode in ("submit", "lookup"):
+            adapter.submit_intent(intent)
+        elif mode == "cancel":
+            adapter.cancel_intent(intent.intent_id)
+        else:
+            adapter.get_intent_status(intent.intent_id)
+    formatted_error = "".join(traceback.format_exception(caught.value))
+    assert "synthetic sensitive detail" not in formatted_error
+    assert "synthetic detail" not in formatted_error
+    calls = list(transport.calls)
+    with pytest.raises(ExecutionOutcomeUnknown, match="^execution outcome unknown$"):
+        adapter.submit_intent(intent)
+    assert transport.calls == calls
+    assert len(transport._orders) == 1
+
+
 def test_interrupted_submission_is_not_resent_by_same_adapter() -> None:
     sec_id = uuid7()
 
@@ -220,6 +277,63 @@ def test_ambiguous_status_never_returns_cached_report(mode: str) -> None:
         adapter.get_intent_status(intent.intent_id)
     with pytest.raises(DriftError, match="execution outcome unknown"):
         adapter.cancel_intent(intent.intent_id)
+
+
+@pytest.mark.parametrize(
+    ("status", "cumulative", "expected"),
+    [
+        ("canceled", 0, None),
+        ("filled", 5, None),
+        ("canceled", 4, ExecutionStatus.CANCELED),
+        ("filled", 10, ExecutionStatus.FILLED),
+    ],
+)
+def test_cancellation_preserves_observed_fills_and_terminal_truth(
+    status: str, cumulative: int, expected: ExecutionStatus | None
+) -> None:
+    sec_id = uuid7()
+
+    class PartialThenCancel(MockRobinhoodMcpTransport):
+        def call_tool(
+            self, tool_name: str, arguments: Mapping[str, Any]
+        ) -> dict[str, Any]:
+            raw = super().call_tool(tool_name, arguments)
+            if tool_name == "robinhood_get_order":
+                return {
+                    **raw,
+                    "status": "partially_filled",
+                    "cum_quantity": 4,
+                    "avg_fill_price": "50.00",
+                }
+            if tool_name == "robinhood_cancel_order":
+                return {
+                    **raw,
+                    "status": status,
+                    "cum_quantity": cumulative,
+                    "avg_fill_price": "50.00" if cumulative else None,
+                }
+            return raw
+
+    adapter = RobinhoodAgenticAdapter(
+        config=RobinhoodAgenticConfigV1(account_id="fake", symbol_map={sec_id: "AAPL"}),
+        transport=PartialThenCancel(auto_fill=False),
+    )
+    intent = _make_intent(sec_id=sec_id)
+    assert adapter.submit_intent(intent).status == ExecutionStatus.ACKNOWLEDGED
+    before = adapter.get_intent_status(intent.intent_id)
+    assert before is not None and before.cum_quantity == 4
+    if expected is None:
+        with pytest.raises(
+            ExecutionOutcomeUnknown, match="^execution outcome unknown$"
+        ):
+            adapter.cancel_intent(intent.intent_id)
+        with pytest.raises(ExecutionOutcomeUnknown):
+            adapter.get_intent_status(intent.intent_id)
+    else:
+        report = adapter.cancel_intent(intent.intent_id)
+        assert report.status == expected
+        assert report.cum_quantity == cumulative
+        assert report.leaves_quantity == 0
 
 
 @pytest.mark.parametrize("mode", ["failed", "unconfirmed", "missing_order"])

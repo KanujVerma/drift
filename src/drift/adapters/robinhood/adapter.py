@@ -78,7 +78,7 @@ class RobinhoodAgenticAdapter:
                 "robinhood_get_order_by_client_token",
                 {"client_token": str(intent_id)},
             )
-        except RobinhoodMcpError:
+        except RobinhoodMcpError, TimeoutError:
             return None
 
     def _build_report_from_raw(
@@ -148,6 +148,12 @@ class RobinhoodAgenticAdapter:
             quantity = raw.get("cum_quantity")
             if type(quantity) is not int or not 0 <= quantity <= intent.quantity:
                 raise ValueError("invalid cumulative quantity")
+            previous = self._latest_reports.get(intent.intent_id)
+            if previous is not None and quantity < previous.cum_quantity:
+                raise ValueError("cumulative quantity regressed")
+            status = self._map_order_status(str(raw.get("status", "")).lower())
+            if status == ExecutionStatus.FILLED and quantity != intent.quantity:
+                raise ValueError("filled quantity does not match intent")
             return self._build_report_from_raw(intent, raw, reported_at)
         except (
             ExecutionOutcomeUnknown,
@@ -196,6 +202,8 @@ class RobinhoodAgenticAdapter:
         try:
             raw = self._transport.call_tool("robinhood_place_order", args)
             report = self._checked_report(intent, raw, now)
+        except TimeoutError:
+            raise ExecutionOutcomeUnknown("execution outcome unknown") from None
         except RobinhoodMcpError:
             # Reconcile ambiguous submission by client_token
             recon = self._try_reconcile_by_client_token(intent.intent_id)
@@ -228,7 +236,7 @@ class RobinhoodAgenticAdapter:
             raw = self._transport.call_tool(
                 "robinhood_cancel_order", {"order_id": broker_order_id}
             )
-        except RobinhoodMcpError:
+        except RobinhoodMcpError, TimeoutError:
             self._uncertain_intents.add(intent_id)
             raise ExecutionOutcomeUnknown("execution outcome unknown") from None
         if not isinstance(raw, dict) or raw.get("order_id") != broker_order_id:
@@ -258,7 +266,7 @@ class RobinhoodAgenticAdapter:
                     "robinhood_get_order",
                     {"order_id": broker_order_id},
                 )
-            except RobinhoodMcpError:
+            except RobinhoodMcpError, TimeoutError:
                 self._uncertain_intents.add(intent_id)
                 raise ExecutionOutcomeUnknown("execution outcome unknown") from None
             if not isinstance(raw, dict) or raw.get("order_id") != broker_order_id:

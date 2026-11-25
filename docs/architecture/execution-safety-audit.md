@@ -115,7 +115,7 @@ and ambiguous timeout classification) remain open.
   - `src/drift/adapters/robinhood/adapter.py`: `RobinhoodAgenticAdapter.cancel_intent`
 - **Audit Findings and State Reconciliation**:
   - PR #364 modified `RobinhoodAgenticAdapter.cancel_intent` so that transport exceptions (`RobinhoodMcpError`) are no longer silently swallowed to emit `ExecutionStatus.CANCELED`.
-  - The former implementation could return cached status, including a misleading terminal status, with `cancellation_failed` after a failed call. The current adapter instead raises `ExecutionOutcomeUnknown` without returning a current V1 report or exposing the raw transport error. A cancellation response must describe a matching order with canceled or filled status before the adapter returns it.
+  - The former implementation could return cached status, including a misleading terminal status, with `cancellation_failed` after a failed call. The current adapter instead raises `ExecutionOutcomeUnknown` without returning a current V1 report or exposing the raw transport error. A cancellation response must describe a matching order with canceled or filled status before the adapter returns it. Responses that regress the latest same-instance cumulative fill, or claim filled without the full intent quantity, are refused.
   - Limitation: The exception and in-memory marker do not establish a durable account-wide hold, survive restart, integrate the router or reconcile broker state. Uncertain cancellation remains an unresolved risk under Decision Packet 2.
 - **Safety Invariant Violated**:
   - Truth-in-reporting invariant: an execution status report must represent actual confirmed broker state, never assumed success upon transport failure.
@@ -142,7 +142,7 @@ and ambiguous timeout classification) remain open.
   - `src/drift/adapters/robinhood/adapter.py`: `RobinhoodAgenticAdapter.submit_intent`
 - **Audit Findings and State Reconciliation**:
   - PR #364 added client-token reconciliation (`_try_reconcile_by_client_token`) upon submission timeout.
-  - Previously an unsuccessful lookup produced an authoritative V1 `REJECTED` report, even though a timeout did not prove non-receipt. The current adapter raises `ExecutionOutcomeUnknown` when lookup cannot establish a matching response, and refuses unrecognized status instead of mapping it to rejection.
+  - Previously an unsuccessful lookup produced an authoritative V1 `REJECTED` report, even though a timeout did not prove non-receipt. The current adapter raises `ExecutionOutcomeUnknown` when lookup cannot establish a matching response, and refuses unrecognized status instead of mapping it to rejection. Native timeouts in submission, cancellation, status and submission lookup are surfaced as redacted uncertainty.
   - This is an immediate adapter boundary only. Its same-instance marker is not a durable, account-wide or concurrent dispatch guard; it does not survive restart, integrate the router, authenticate broker evidence, or establish reconciliation. A fresh intent or process can still bypass it.
 - **Safety Invariant Violated**:
   - Ambiguous state must fail closed to an uncertain state requiring reconciliation, rather than resolving to a false-negative rejection.
