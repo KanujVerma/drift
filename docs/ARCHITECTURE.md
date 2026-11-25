@@ -70,6 +70,13 @@ economics are related but distinct measures.
   replay failure classes. Do not alter the pin, lockfile or fixture expectations
   merely to make a check pass.
 
+Known open work includes promotion prerequisites ([#115](https://github.com/KanujVerma/drift/issues/115)),
+unknown execution outcomes ([#411](https://github.com/KanujVerma/drift/issues/411)),
+Decimal-context-dependent selection ([#469](https://github.com/KanujVerma/drift/issues/469)),
+corporate-action coverage ([#648](https://github.com/KanujVerma/drift/issues/648)),
+and cash-yield accounting decisions ([#653](https://github.com/KanujVerma/drift/issues/653)).
+These are not resolved by documenting them; consult the issues for their current state.
+
 The numerical risk mandate, source rights and availability, operational controls,
 model budgets, and exact qualification criteria remain unresolved where not
 explicitly approved. Do not invent defaults. Broker-connected paper, live orders,
