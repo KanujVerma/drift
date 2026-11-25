@@ -19,8 +19,11 @@ The remaining sections preserve the historical design baseline, examples and
 rationale. Statements about future slices, pending merges, old writer assignments
 or historical API absence are not a live work queue. Follow current
 [agent instructions](../../../../AGENTS.md) and consult relevant issues and PRs
-for active work. Do not reimplement incorporated slices or infer external source,
-model, study or trading permission from their existence.
+for active work. Throughout this historical record, conflicting product and
+workflow directions are superseded by current [product direction](../../../PRODUCT.md)
+and agent instructions. Applicable technical and evidence safeguards remain.
+Do not reimplement incorporated slices or infer external source, model, study
+or trading permission from their existence.
 
 This design does not authorize a runtime model call, provider credential, paid
 service, dataset acquisition, broker-connected paper operation or live capital.
