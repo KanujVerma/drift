@@ -1,5 +1,10 @@
 # Independent Release-Acceptance Specification
 
+> Historical research acceptance specification. Current [AGENTS.md](../../../AGENTS.md)
+> supersedes conflicting mandatory reading, role routing, and approval procedures.
+> Preserve applicable evidence and operational safeguards; a specification does
+> not establish implementation, scientific efficacy, or permission to trade.
+
 ## Start here: authority before action
 
 This is the canonical specification for **INDEPENDENT RELEASE ACCEPTANCE**,
@@ -14,11 +19,8 @@ adaptive experiment can be promoted, certified, or granted operational authority
 
 A fresh Antigravity agent or human reviewer should note:
 
-1. Read [AGENTS.md](../../../AGENTS.md), [decisions.md](decisions.md) (D01-D17),
-   [design.md](design.md), [workstreams.md](../workstreams.md),
-   [requirements-crosswalk.md](requirements-crosswalk.md),
-   [stage1-decisions.md](stage1-decisions.md) (S01-S38), and
-   [stage1-roadmap.md](stage1-roadmap.md).
+1. Follow [AGENTS.md](../../../AGENTS.md) and consult the relevant research
+   references as needed for the specific study or implementation.
 2. **Four distinct verification tiers:**
    - Tier 1: Engineering Tests Passing (unit/regression tests green).
    - Tier 2: Contract Acceptance (producers/consumers agree on interface types).
