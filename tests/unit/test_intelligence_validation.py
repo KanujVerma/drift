@@ -169,8 +169,9 @@ def test_retained_weight_sum_is_exact_under_small_context(
     payload["targets"][0]["weight"] = "0.29999999999999999999"
     payload["record_hash"] = compute_record_hash(payload)
     with localcontext(Context(prec=9, traps=[Inexact, Rounded] if trap else [])):
-        with pytest.raises(ValueError, match="weights sum to"):
+        with pytest.raises(ValueError) as exc:
             validate_retained_record(payload, expected_kind="candidate")
+    assert str(exc.value) == "invalid: weights sum to 0.99999999999999999999"
 
 
 def test_positive_abstention_validation_matches_f03(
@@ -249,6 +250,39 @@ def apply_mutation(
     if rehash:
         data["record_hash"] = compute_record_hash(data)
     return data
+
+
+def test_n01_exact_original_diagnostic_and_precedence(
+    fixture_data: dict[str, Any],
+) -> None:
+    case = next(c for c in fixture_data["negative_cases"] if c["case"] == "N01")
+    mutated = apply_mutation(
+        base=fixture_data["fixtures"][case["base"]],
+        replace=case.get("replace"),
+        remove=case.get("remove"),
+    )
+    assert case["expected"] == "invalid: weights sum to 0.9"
+    for add_other_failure in (False, True):
+        payload = json.loads(json.dumps(mutated))
+        if add_other_failure:
+            payload["strategy"]["parameters"]["other_failure"] = True
+            payload["record_hash"] = compute_record_hash(payload)
+        with localcontext(Context(prec=9, traps=[Inexact, Rounded])):
+            with pytest.raises(ValueError) as exc:
+                validate_retained_record(payload, expected_kind="candidate")
+        assert str(exc.value) == case["expected"]
+
+
+def test_nonfinite_weight_diagnostic_precedes_strategy_rejection(
+    fixture_data: dict[str, Any],
+) -> None:
+    payload = json.loads(json.dumps(fixture_data["fixtures"]["F02"]))
+    payload["cash_weight"] = "NaN"
+    payload["strategy"]["parameters"]["other_failure"] = True
+    payload["record_hash"] = compute_record_hash(payload)
+    with pytest.raises(ValueError) as exc:
+        validate_retained_record(payload, expected_kind="candidate")
+    assert str(exc.value) == "invalid: weights sum to NaN"
 
 
 @pytest.mark.parametrize("case_index", range(12))

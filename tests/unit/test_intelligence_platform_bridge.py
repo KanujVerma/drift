@@ -10,6 +10,7 @@ Verifies acceptance criteria under T08, T14, A09, A12, DP-R2:
 """
 
 from datetime import UTC, datetime, timedelta
+from decimal import Context, Inexact, Rounded, localcontext
 
 import pytest
 
@@ -739,6 +740,60 @@ def test_self_rehashed_platform_request_refuses_bad_actionable_weights(
     payload["record_hash"] = compute_record_hash(payload)
     with pytest.raises(ValueError, match="INVALID_PLATFORM_TARGET_WEIGHTS"):
         PlatformExecutionRequest.model_validate(payload)
+
+
+@pytest.mark.parametrize("trap", [False, True])
+@pytest.mark.parametrize(
+    ("target", "cash", "valid"),
+    [
+        ("0.39999999999999999999", "0", False),
+        ("0.40000000000000000001", "0", False),
+        ("0.39999999999999999999", "0.00000000000000000001", True),
+    ],
+)
+def test_platform_request_weight_sum_is_exact(
+    sample_candidate: ResearchCandidate,
+    matching_portfolio_state: PortfolioStateBinding,
+    target: str,
+    cash: str,
+    valid: bool,
+    trap: bool,
+) -> None:
+    approved = bridge_candidate_to_execution(
+        candidate=sample_candidate,
+        portfolio_state=matching_portfolio_state,
+        current_time=sample_candidate.completed_at + timedelta(minutes=5),
+    )
+    payload = approved.model_dump(mode="python")
+    payload["target_allocations"][1]["weight"] = target
+    payload["cash_weight"] = cash
+    payload["record_hash"] = compute_record_hash(payload)
+    with localcontext(Context(prec=9, traps=[Inexact, Rounded] if trap else [])) as ctx:
+        before = ctx.copy()
+        if valid:
+            assert PlatformExecutionRequest.model_validate(payload).status == "admitted"
+        else:
+            with pytest.raises(ValueError, match="INVALID_PLATFORM_TARGET_WEIGHTS"):
+                PlatformExecutionRequest.model_validate(payload)
+        assert ctx.flags == before.flags
+
+
+def test_bridge_valid_exact_allocation_survives_arithmetic_traps(
+    sample_candidate: ResearchCandidate,
+    matching_portfolio_state: PortfolioStateBinding,
+) -> None:
+    payload = sample_candidate.model_dump(mode="python")
+    payload["targets"][1]["weight"] = "0.39999999999999999999"
+    payload["cash_weight"] = "0.00000000000000000001"
+    payload["record_hash"] = compute_record_hash(payload)
+    candidate = ResearchCandidate.model_validate(payload)
+    with localcontext(Context(prec=9, traps=[Inexact, Rounded])):
+        request = bridge_candidate_to_execution(
+            candidate=candidate,
+            portfolio_state=matching_portfolio_state,
+            current_time=candidate.completed_at + timedelta(minutes=5),
+        )
+    assert request.status == "admitted"
 
 
 def test_direct_rehashed_request_refuses_duplicate_target_id(

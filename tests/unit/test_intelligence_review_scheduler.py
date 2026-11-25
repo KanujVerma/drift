@@ -10,10 +10,14 @@ Verifies acceptance criteria under D04, D05, DP-R2:
 - Cooldown and TTL throttling.
 """
 
+import random
 from datetime import UTC, datetime, timedelta
+from decimal import Context, Decimal, Inexact, Rounded, localcontext
+from fractions import Fraction
 
 import pytest
 
+from drift.intelligence._exact_decimal import compare_sum_to_one
 from drift.intelligence.contracts import TargetWeight
 from drift.intelligence.review_scheduler import (
     CalendarRevision,
@@ -246,6 +250,85 @@ def test_d05_defensive_only_policy_validation() -> None:
     assert ok is False
     assert reason is not None
     assert "DEFENSIVE_POLICY_VIOLATION" in reason
+
+
+@pytest.mark.parametrize("trap", [False, True])
+@pytest.mark.parametrize(
+    ("second", "allowed"),
+    [
+        ("0.49999999999999999999", True),
+        ("0.5", True),
+        ("0.50000000000000000001", False),
+        ("5.0000000000000000001e-1", False),
+    ],
+)
+def test_defensive_current_total_exact_across_contexts(
+    second: str, allowed: bool, trap: bool
+) -> None:
+    targets = [TargetWeight(security_id="SPY", weight="0.5")]
+    context = Context(prec=9, traps=[Inexact, Rounded] if trap else [])
+    with localcontext(context) as active:
+        before = active.copy()
+        result, reason = validate_defensive_policy(
+            proposed_targets=targets, current_weights={"SPY": "0.5", "TLT": second}
+        )
+        assert active.flags == before.flags
+    assert result is allowed
+    if not allowed:
+        assert reason == "UNKNOWN_CURRENT_POSITION: inconsistent current totals"
+
+
+def test_defensive_current_tiny_exponent_cannot_hide_overallocation() -> None:
+    result, reason = validate_defensive_policy(
+        proposed_targets=[TargetWeight(security_id="SPY", weight="1")],
+        current_weights={"SPY": "1", "TLT": "1e-999999999"},
+    )
+    assert not result
+    assert reason == "UNKNOWN_CURRENT_POSITION: inconsistent current totals"
+
+
+@pytest.mark.parametrize(
+    ("weight", "allowed"),
+    [
+        ("0.49999999999999999999", True),
+        ("0.5", True),
+        ("0.50000000000000000001", False),
+    ],
+)
+def test_defensive_proposed_totals_and_increases_are_exact(
+    weight: str, allowed: bool
+) -> None:
+    targets = [
+        TargetWeight(security_id="SPY", weight=weight),
+        TargetWeight(security_id="TLT", weight="0.5"),
+    ]
+    with localcontext(Context(prec=9, traps=[Inexact, Rounded])):
+        result, reason = validate_defensive_policy(
+            proposed_targets=targets, current_weights={"SPY": "0.5", "TLT": "0.5"}
+        )
+    assert result is allowed
+    if not allowed:
+        assert reason is not None and "exceeds current weight" in reason
+
+
+def test_sparse_sum_comparison_matches_fraction_oracle() -> None:
+    rng = random.Random(469)
+    for _ in range(5000):
+        values = [
+            Decimal(
+                (
+                    rng.randrange(2),
+                    tuple(map(int, str(rng.randrange(10**9)))),
+                    rng.randrange(-20, 4),
+                )
+            )
+            for _ in range(rng.randrange(1, 12))
+        ]
+        difference = sum(map(Fraction, values)) - 1
+        assert compare_sum_to_one(values) == ((difference > 0) - (difference < 0))
+    assert compare_sum_to_one([Decimal("1"), Decimal("1e-999999999")]) == 1
+    assert compare_sum_to_one([Decimal("1"), Decimal("-1e-999999999")]) == -1
+    assert compare_sum_to_one([Decimal("1"), Decimal("-0E-999999999")]) == 0
 
 
 def test_same_scheduled_inputs_have_stable_trigger_identity() -> None:

@@ -21,6 +21,7 @@ TASK1_M1D_PIN_COMMIT = "1c647bfc8b7c2a61a83cef4468a5a8cd17e9a060"
 INTELLIGENCE_SOURCE_PATHS = frozenset(
     {
         "src/drift/intelligence/__init__.py",
+        "src/drift/intelligence/_exact_decimal.py",
         "src/drift/intelligence/contracts.py",
         "src/drift/intelligence/validation.py",
         "src/drift/intelligence/receipts.py",
@@ -1138,9 +1139,19 @@ def test_data_quality_public_series_have_actual_inert_source_scans(
 
 def test_intelligence_source_inventory_is_exact_and_nonempty() -> None:
     """A future arbitrary intelligence module receives no automatic exemption."""
-    assert len(INTELLIGENCE_SOURCE_PATHS) == 11
+    assert len(INTELLIGENCE_SOURCE_PATHS) == 12
     assert "src/drift/intelligence/contracts.py" in INTELLIGENCE_SOURCE_PATHS
     assert "src/drift/intelligence/unknown_future.py" not in INTELLIGENCE_SOURCE_PATHS
+
+
+def test_exact_decimal_helper_is_registered_and_scanned() -> None:
+    relative = "src/drift/intelligence/_exact_decimal.py"
+    assert relative in INTELLIGENCE_SOURCE_PATHS
+    _assert_m1e_source_file_allowed(relative)
+    attacked = (REPO_ROOT / relative).read_bytes() + b"\nimport socket\n"
+    assert _bridge_capability_violations(
+        attacked, relative, INTELLIGENCE_CAPABILITY_ALLOWLIST
+    )
 
 
 def test_intelligence_capability_guard_is_nonvacuous() -> None:

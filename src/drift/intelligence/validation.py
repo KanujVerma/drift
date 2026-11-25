@@ -6,13 +6,13 @@ and tamper rejection under the 'drift-research/1-draft' wire profile.
 
 from collections.abc import Mapping
 from datetime import datetime
-from decimal import Decimal
+from decimal import Context, Decimal, InvalidOperation
 from typing import Any
 
 from pydantic import BaseModel
 
 from drift.errors import CanonicalSerializationError
-from drift.intelligence._exact_decimal import weight_sum
+from drift.intelligence._exact_decimal import compare_sum_to_one, weight_sum
 from drift.intelligence.contracts import (
     SUPPORTED_PROFILES,
     ArtifactReference,
@@ -488,6 +488,33 @@ def validate_retained_record(
                 raise ValueError(
                     "invalid: abstention cannot retain strategy/targets/cash"
                 )
+        elif disp == "propose":
+            texts = [str(cash_weight) if cash_weight is not None else "0"]
+            texts.extend(str(target["weight"]) for target in targets)
+            try:
+                values = [
+                    Decimal(text, context=Context(traps=[InvalidOperation]))
+                    for text in texts
+                ]
+            except InvalidOperation as error:
+                raise ValueError("invalid: invalid weight text") from error
+            if any(not value.is_finite() for value in values):
+                decimal_context = Context(traps=[])
+                nonfinite_total = Decimal("0")
+                for value in values:
+                    if not value.is_finite():
+                        nonfinite_total = decimal_context.add(nonfinite_total, value)
+                raise ValueError(f"invalid: weights sum to {nonfinite_total}")
+            if compare_sum_to_one(values) != 0:
+                # Plain DecimalText has input-bounded exact output size.
+                # Exponent notation may encode an enormous gap; retain an
+                # exact expression rather than allocate that many zeros.
+                total = (
+                    str(weight_sum(texts))
+                    if all("e" not in text.lower() for text in texts)
+                    else "(" + " + ".join(map(str, values)) + ")"
+                )
+                raise ValueError(f"invalid: weights sum to {total}")
         # Check undeclared parameters if strategy present
         strategy = record.get("strategy")
         if strategy:
@@ -574,11 +601,4 @@ def validate_retained_record(
     record_type = typed_records.get(kind)
     if record_type is None:
         raise ValueError(f"unsupported retained research record kind: {kind}")
-    try:
-        record_type.model_validate(dict(record))
-    except ValueError as error:
-        if kind == "candidate" and "INVALID_CANDIDATE_WEIGHT_SUM" in str(error):
-            raise ValueError(
-                "invalid: weights sum to an amount other than 1"
-            ) from error
-        raise
+    record_type.model_validate(dict(record))

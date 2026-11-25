@@ -1,6 +1,6 @@
 """Context-independent arithmetic for the bounded research weight contract."""
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from decimal import MAX_EMAX, MIN_EMIN, Context, Decimal, Inexact
 
 
@@ -18,16 +18,16 @@ def weight_sum(weights: Sequence[str]) -> Decimal:
     return total
 
 
-def within_selector_band(maximum: Decimal, score: Decimal) -> bool:
-    """Decide maximum - score - 1e-9 <= 0 using sparse signed digits.
+def _sparse_sum_sign(terms: Iterable[tuple[Decimal, int]]) -> int:
+    """Return the sign of an exact sum of finite Decimals with signed factors.
 
-    Only input coefficient digits and the tolerance occupy positions. A carry
+    Only input coefficient digits occupy positions. A carry
     of zero or minus one remains stable across an arbitrarily large empty gap;
     other carries converge to one of those values in logarithmically many
     steps. Memory and work therefore depend on input digits, not exponent gap.
     """
-    positions: dict[int, int] = {-9: -1}
-    for value, multiplier in ((maximum, 1), (score, -1)):
+    positions: dict[int, int] = {}
+    for value, multiplier in terms:
         sign, digits, exponent = value.as_tuple()
         assert isinstance(exponent, int)  # Callers pass finite base Decimals.
         multiplier *= -1 if sign else 1
@@ -51,4 +51,18 @@ def within_selector_band(maximum: Decimal, score: Decimal) -> bool:
         carry, digit = divmod(positions[position] + carry, 10)
         has_nonzero_digit |= digit != 0
         previous = position
-    return carry < 0 or (carry == 0 and not has_nonzero_digit)
+    if carry < 0:
+        return -1
+    if carry > 0 or has_nonzero_digit:
+        return 1
+    return 0
+
+
+def compare_sum_to_one(values: Iterable[Decimal]) -> int:
+    """Compare a finite exact Decimal sum with one without expanding exponents."""
+    return _sparse_sum_sign((value, 1) for value in (*values, Decimal("-1")))
+
+
+def within_selector_band(maximum: Decimal, score: Decimal) -> bool:
+    """Decide maximum - score - 1e-9 <= 0 without context arithmetic."""
+    return _sparse_sum_sign(((maximum, 1), (score, -1), (Decimal("1e-9"), -1))) <= 0
