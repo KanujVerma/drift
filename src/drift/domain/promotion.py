@@ -37,6 +37,7 @@ INCOMPLETE_REJECTION_REASONS = (
     "unusable_distribution_inputs",
     "unusable_trials_explored_k",
     "unusable_sample_size_n",
+    "invalid_promotion_grade_assertion",
     "unusable_numeric_calculation",
 )
 

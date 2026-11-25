@@ -7,6 +7,7 @@ using pure Python standard library mathematics.
 
 import itertools
 import math
+import struct
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -14,15 +15,20 @@ from statistics import NormalDist
 from typing import cast
 from uuid import UUID, uuid7
 
+from drift.domain.common import _freeze_json
 from drift.domain.promotion import (
+    GATE_EVALUATED_EVENT_TYPE,
+    PROMOTION_SCHEMA_VERSION,
+    GateEvaluatedAuditEventPayloadV1,
     IncompletePromotionRejectionV2,
     PromotionEvaluationRecordV1,
     PromotionGateConfigV1,
     PromotionGateVerdict,
     build_promotion_evaluation_record,
 )
+from drift.ledger.interface import AuditEventDraft
 from drift.memory.recorder import deterministic_memory_uuid7
-from drift.promotion.recorder import PromotionRecorder
+from drift.promotion.recorder import PROMOTION_EVALUATION_ENTITY_TYPE, PromotionRecorder
 from drift.serialization.canonical import content_hash
 
 EULER_MASCHERONI: float = 0.577215664901532860606512
@@ -43,6 +49,8 @@ def _fingerprint_value(value: object) -> object:
     if type(value) is int:
         return ["int", str(value)]
     if type(value) is float:
+        if math.isnan(value):
+            return ["float_nan_bits", struct.pack(">d", value).hex()]
         return ["float", value.hex()]
     if isinstance(value, Decimal):
         return ["decimal", str(value)]
@@ -356,8 +364,6 @@ class PromotionGatekeeper:
             raise RuntimeError("an audit recorder is required to seal an evaluation")
         if not isinstance(strategy_type, str) or strategy_type != strategy_type.strip():
             raise ValueError("strategy identity must not be normalized")
-        if type(is_promotion_grade_evidence) is not bool:
-            raise ValueError("invalid promotion grade evidence assertion")
         trial_sharpes = cast(
             Sequence[Decimal | float] | None, _snapshot_evidence(trial_sharpes)
         )
@@ -377,7 +383,11 @@ class PromotionGatekeeper:
         incomplete: list[str] = []
         if is_pnl_complete is not True:
             incomplete.append("pnl_completeness_not_confirmed")
-        if not _usable_matrix(trial_block_matrix):
+        if not _usable_matrix(trial_block_matrix) or (
+            type(trials_explored_k) is int
+            and trial_block_matrix is not None
+            and len(trial_block_matrix) != trials_explored_k
+        ):
             incomplete.append("unusable_trial_block_matrix")
         if not _usable_folds(walk_forward_fold_returns):
             incomplete.append("unusable_walk_forward_fold_returns")
@@ -388,7 +398,7 @@ class PromotionGatekeeper:
         if (trial_sharpes is not None and not _finite_sequence(trial_sharpes)) or (
             type(trials_explored_k) is int
             and trials_explored_k > 1
-            and (trial_sharpes is None or len(trial_sharpes) < 2)
+            and (trial_sharpes is None or len(trial_sharpes) != trials_explored_k)
         ):
             incomplete.append("unusable_trial_sharpes")
         if not _finite_number(skewness) or not _finite_number(kurtosis):
@@ -397,6 +407,8 @@ class PromotionGatekeeper:
             incomplete.append("unusable_trials_explored_k")
         if type(sample_size_n) is not int or sample_size_n < 2:
             incomplete.append("unusable_sample_size_n")
+        if type(is_promotion_grade_evidence) is not bool:
+            incomplete.append("invalid_promotion_grade_assertion")
 
         def seal_incomplete(reasons: tuple[str, ...]) -> IncompletePromotionRejectionV2:
             record = IncompletePromotionRejectionV2(
@@ -530,11 +542,24 @@ class PromotionGatekeeper:
                 ),
             }
         )
-        recorder.record_evaluation(
-            complete_record,
-            event_id=deterministic_memory_uuid7(
-                f"promotion_eval_request:{complete_record.evaluation_id}:{request_hash}"
+        recorder._append_exact(
+            AuditEventDraft(
+                schema_version=PROMOTION_SCHEMA_VERSION,
+                event_id=deterministic_memory_uuid7(
+                    f"promotion_eval_request:{complete_record.evaluation_id}:{request_hash}"
+                ),
+                event_type=GATE_EVALUATED_EVENT_TYPE,
+                timestamp=complete_record.evaluated_at,
+                entity_type=PROMOTION_EVALUATION_ENTITY_TYPE,
+                entity_id=complete_record.evaluation_id,
+                payload=_freeze_json(
+                    GateEvaluatedAuditEventPayloadV1(
+                        evaluation=complete_record
+                    ).model_dump(mode="python")
+                ),
+                deduplication_key=f"m11:eval:{complete_record.evaluation_id}",
             ),
+            evaluation_id=complete_record.evaluation_id,
         )
         if verdict != PromotionGateVerdict.EXPLORATORY_PASSED:
             recorder.record_rejection(complete_record)

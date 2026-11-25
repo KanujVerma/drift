@@ -14,6 +14,7 @@ from drift.domain.promotion import (
     INCOMPLETE_REJECTED_EVENT_TYPE,
     CandidateCertifiedAuditEventPayloadV1,
     CandidateRejectedAuditEventPayloadV1,
+    GateEvaluatedAuditEventPayloadV1,
     IncompletePromotionRejectionV2,
     PromotionEvaluationRecordV1,
 )
@@ -47,8 +48,22 @@ class PromotionArchive:
         self._certified_candidates.clear()
 
         for event in self.ledger.verified_events():
+            expected_versions = {
+                INCOMPLETE_REJECTED_EVENT_TYPE: "2",
+                GATE_EVALUATED_EVENT_TYPE: "1",
+                CANDIDATE_CERTIFIED_EVENT_TYPE: "1",
+                CANDIDATE_REJECTED_EVENT_TYPE: "1",
+            }
             if not isinstance(event.payload, Mapping):
+                if event.event_type in expected_versions:
+                    raise ValueError("malformed promotion event payload")
                 continue
+            version = expected_versions.get(event.event_type)
+            if version is not None and (
+                event.schema_version != version
+                or event.payload.get("schema_version") != version
+            ):
+                raise ValueError("malformed promotion event version")
 
             if event.event_type == INCOMPLETE_REJECTED_EVENT_TYPE:
                 record_v2 = IncompletePromotionRejectionV2.model_validate_json(
@@ -69,15 +84,11 @@ class PromotionArchive:
                 self._incomplete[record_v2.evaluation_id] = record_v2
 
             elif event.event_type == GATE_EVALUATED_EVENT_TYPE:
-                eval_raw = event.payload.get("evaluation")
-                if isinstance(eval_raw, Mapping):
-                    try:
-                        record = PromotionEvaluationRecordV1.model_validate_json(
-                            canonical_json(dict(eval_raw))
-                        )
-                        self._evaluations[record.evaluation_id] = record
-                    except Exception:
-                        continue
+                payload = GateEvaluatedAuditEventPayloadV1.model_validate_json(
+                    canonical_json(dict(event.payload))
+                )
+                record = payload.evaluation
+                self._evaluations[record.evaluation_id] = record
 
             elif event.event_type == CANDIDATE_CERTIFIED_EVENT_TYPE:
                 try:
@@ -88,8 +99,8 @@ class PromotionArchive:
                     )
                     self._certifications.append(cert_payload)
                     self._certified_candidates[cert_payload.candidate_id] = cert_payload
-                except Exception:
-                    continue
+                except Exception as error:
+                    raise ValueError("malformed certification event") from error
 
             elif event.event_type == CANDIDATE_REJECTED_EVENT_TYPE:
                 try:
@@ -99,8 +110,8 @@ class PromotionArchive:
                         )
                     )
                     self._rejections.append(rej_payload)
-                except Exception:
-                    continue
+                except Exception as error:
+                    raise ValueError("malformed rejection event") from error
 
     def get_evaluation(self, evaluation_id: UUID) -> PromotionEvaluationRecordV1 | None:
         """Retrieve evaluation record by ID."""

@@ -1,5 +1,6 @@
 """Unit tests for promotion audit events, recorder, and archive (M11-4, Issue 261)."""
 
+import struct
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -30,6 +31,7 @@ from drift.promotion.recorder import (
     PROMOTION_CERTIFICATION_ENTITY_TYPE,
     PROMOTION_EVALUATION_ENTITY_TYPE,
     PROMOTION_REJECTION_ENTITY_TYPE,
+    PromotionAuditUncertain,
     PromotionRecorder,
 )
 from drift.promotion.runner import (
@@ -44,6 +46,191 @@ CAND_ID_1 = UUID("018f3a5b-6c7d-7890-8123-456789abcd02")
 EVAL_ID_2 = UUID("018f3a5b-6c7d-7890-8123-456789abcd03")
 CAND_ID_2 = UUID("018f3a5b-6c7d-7890-8123-456789abcd04")
 TIMESTAMP = datetime(2026, 2, 1, 12, 0, 0, tzinfo=UTC)
+
+
+def test_direct_recorder_refuses_fabricated_exploratory_evaluation(
+    tmp_path: Path,
+) -> None:
+    ledger = SQLiteLedger(tmp_path / "forged-exploratory.sqlite3")
+    record = build_promotion_evaluation_record(
+        evaluation_id=EVAL_ID_1,
+        candidate_id=CAND_ID_1,
+        strategy_type="synthetic",
+        parameters_hash="a" * 64,
+        deflated_sharpe_ratio=Decimal("1"),
+        pbo_estimate=Decimal("0"),
+        positive_folds_fraction=Decimal("1"),
+        max_regime_drawdown=Decimal("0"),
+        trials_explored_k=2,
+        verdict=PromotionGateVerdict.EXPLORATORY_PASSED,
+        evaluated_at=TIMESTAMP,
+    )
+    with pytest.raises((ValueError, RuntimeError)):
+        PromotionRecorder(ledger).record_evaluation(record)
+    assert ledger.verified_events() == ()
+
+
+def test_direct_rejection_requires_matching_evaluation(tmp_path: Path) -> None:
+    ledger = SQLiteLedger(tmp_path / "orphan-rejection.sqlite3")
+    record = build_promotion_evaluation_record(
+        evaluation_id=EVAL_ID_1,
+        candidate_id=CAND_ID_1,
+        strategy_type="synthetic",
+        parameters_hash="a" * 64,
+        deflated_sharpe_ratio=Decimal("0"),
+        pbo_estimate=Decimal("0"),
+        positive_folds_fraction=Decimal("1"),
+        max_regime_drawdown=Decimal("0"),
+        trials_explored_k=2,
+        verdict=PromotionGateVerdict.REJECTED_DEFLATED_SHARPE,
+        rejection_reasons=("deflated_sharpe_ratio_below_threshold",),
+        evaluated_at=TIMESTAMP,
+    )
+    with pytest.raises((ValueError, RuntimeError)):
+        PromotionRecorder(ledger).record_rejection(record)
+    assert ledger.verified_events() == ()
+
+
+def test_rejection_cannot_disagree_with_real_evaluation(tmp_path: Path) -> None:
+    ledger = SQLiteLedger(tmp_path / "mismatched-rejection.sqlite3")
+    config = build_promotion_gate_config(config_id=EVAL_ID_1, created_at=TIMESTAMP)
+    values = {**_complete_request_values(), "observed_sharpe": Decimal("-2")}
+    record = PromotionRunner(
+        PromotionGatekeeper(config), PromotionRecorder(ledger)
+    ).evaluate_candidate(CandidatePromotionRequestV1(**values))
+    assert isinstance(record, PromotionEvaluationRecordV1)
+    before = ledger.verified_events()
+    forged = build_promotion_evaluation_record(
+        evaluation_id=record.evaluation_id,
+        candidate_id=record.candidate_id,
+        strategy_type=record.strategy_type,
+        parameters_hash=record.parameters_hash,
+        deflated_sharpe_ratio=Decimal("0.42"),
+        pbo_estimate=record.pbo_estimate,
+        positive_folds_fraction=record.positive_folds_fraction,
+        max_regime_drawdown=record.max_regime_drawdown,
+        trials_explored_k=record.trials_explored_k,
+        verdict=record.verdict,
+        rejection_reasons=record.rejection_reasons,
+        evaluated_at=record.evaluated_at,
+    )
+    with pytest.raises(ValueError, match="matching evaluated"):
+        PromotionRecorder(ledger).record_rejection(forged)
+    assert ledger.verified_events() == before
+
+
+def test_missing_cohort_members_seal_incomplete(tmp_path: Path) -> None:
+    ledger = SQLiteLedger(tmp_path / "cohort.sqlite3")
+    config = build_promotion_gate_config(config_id=EVAL_ID_1, created_at=TIMESTAMP)
+    result = PromotionGatekeeper(config).evaluate_candidate(
+        **{
+            **_complete_request_values(),
+            "trials_explored_k": 100,
+        },
+        recorder=PromotionRecorder(ledger),
+    )
+    assert result.verdict == PromotionGateVerdict.REJECTED_INCOMPLETE_EVIDENCE
+    assert "unusable_trial_sharpes" in result.rejection_reasons
+    assert "unusable_trial_block_matrix" in result.rejection_reasons
+
+
+def test_invalid_promotion_assertion_seals_incomplete(tmp_path: Path) -> None:
+    ledger = SQLiteLedger(tmp_path / "assertion.sqlite3")
+    config = build_promotion_gate_config(config_id=EVAL_ID_1, created_at=TIMESTAMP)
+    result = PromotionGatekeeper(config).evaluate_candidate(
+        **{**_complete_request_values(), "is_promotion_grade_evidence": 1},
+        recorder=PromotionRecorder(ledger),
+    )
+    assert result.verdict == PromotionGateVerdict.REJECTED_INCOMPLETE_EVIDENCE
+    assert "invalid_promotion_grade_assertion" in result.rejection_reasons
+    assert len(ledger.verified_events()) == 1
+
+
+def test_direct_append_failure_exposes_retry_identity(tmp_path: Path) -> None:
+    class CommitThenFail(SQLiteLedger):
+        def append(self, draft: AuditEventDraft):  # type: ignore[no-untyped-def]
+            super().append(draft)
+            raise OSError("lost response")
+
+    path = tmp_path / "direct-lost.sqlite3"
+    config = build_promotion_gate_config(config_id=EVAL_ID_1, created_at=TIMESTAMP)
+    args: dict[str, Any] = dict(
+        candidate_id=CAND_ID_1,
+        strategy_type="synthetic",
+        parameters_hash="a" * 64,
+        trials_explored_k=1,
+        observed_sharpe=Decimal("1"),
+    )
+    with pytest.raises(PromotionAuditUncertain) as caught:
+        PromotionGatekeeper(config).evaluate_candidate(
+            **args, recorder=PromotionRecorder(CommitThenFail(path))
+        )
+    error = caught.value
+    assert isinstance(error.evaluation_id, UUID)
+    assert isinstance(error.evaluated_at, datetime)
+    ledger = SQLiteLedger(path)
+    before = ledger.verified_events()
+    result = PromotionGatekeeper(config).evaluate_candidate(
+        **args,
+        evaluation_id=error.evaluation_id,
+        evaluated_at=error.evaluated_at,
+        recorder=PromotionRecorder(ledger),
+    )
+    assert result.verdict == PromotionGateVerdict.REJECTED_INCOMPLETE_EVIDENCE
+    assert ledger.verified_events() == before
+
+
+def test_incomplete_retry_distinguishes_float_nan_bits(tmp_path: Path) -> None:
+    ledger = SQLiteLedger(tmp_path / "nan-bits.sqlite3")
+    config = build_promotion_gate_config(config_id=EVAL_ID_1, created_at=TIMESTAMP)
+    nan1 = struct.unpack(">d", bytes.fromhex("7ff8000000000001"))[0]
+    nan2 = struct.unpack(">d", bytes.fromhex("7ff8000000000002"))[0]
+    args: dict[str, Any] = dict(
+        candidate_id=CAND_ID_1,
+        strategy_type="synthetic",
+        parameters_hash="a" * 64,
+        trials_explored_k=1,
+        observed_sharpe=nan1,
+        evaluation_id=EVAL_ID_2,
+        evaluated_at=TIMESTAMP,
+    )
+    gate = PromotionGatekeeper(config)
+    gate.evaluate_candidate(**args, recorder=PromotionRecorder(ledger))
+    before = ledger.verified_events()
+    with pytest.raises(ValueError, match="conflict"):
+        gate.evaluate_candidate(
+            **{**args, "observed_sharpe": nan2}, recorder=PromotionRecorder(ledger)
+        )
+    assert ledger.verified_events() == before
+
+
+@pytest.mark.parametrize("payload", [["invalid"], {"invalid": True}])
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        "m11.gate.incomplete_rejected",
+        GATE_EVALUATED_EVENT_TYPE,
+        CANDIDATE_CERTIFIED_EVENT_TYPE,
+        CANDIDATE_REJECTED_EVENT_TYPE,
+    ],
+)
+def test_archive_refuses_recognized_malformed_event(
+    tmp_path: Path, event_type: str, payload: object
+) -> None:
+    ledger = SQLiteLedger(tmp_path / "malformed.sqlite3")
+    ledger.append(
+        AuditEventDraft(
+            schema_version="1",
+            event_id=EVAL_ID_1,
+            event_type=event_type,
+            timestamp=TIMESTAMP,
+            entity_type="promotion_evaluation",
+            entity_id=EVAL_ID_2,
+            payload=_freeze_json(payload),
+        )
+    )
+    with pytest.raises(ValueError):
+        PromotionArchive(ledger)
 
 
 def test_promotion_recorder_and_archive(tmp_path: Path) -> None:
@@ -153,7 +340,22 @@ def test_promotion_recorder_and_archive(tmp_path: Path) -> None:
         evaluated_at=TIMESTAMP,
     )
 
-    recorder.record_evaluation(rec2)
+    ledger.append(
+        AuditEventDraft(
+            schema_version="1",
+            event_id=deterministic_memory_uuid7(f"promotion_eval:{rec2.evaluation_id}"),
+            event_type=GATE_EVALUATED_EVENT_TYPE,
+            timestamp=rec2.evaluated_at,
+            entity_type=PROMOTION_EVALUATION_ENTITY_TYPE,
+            entity_id=rec2.evaluation_id,
+            payload=_freeze_json(
+                GateEvaluatedAuditEventPayloadV1(evaluation=rec2).model_dump(
+                    mode="python"
+                )
+            ),
+            deduplication_key=f"m11:eval:{rec2.evaluation_id}",
+        )
+    )
     ev_rej = recorder.record_rejection(rec2)
     assert ev_rej.event_type == CANDIDATE_REJECTED_EVENT_TYPE
     assert ev_rej.entity_type == PROMOTION_REJECTION_ENTITY_TYPE
@@ -196,8 +398,9 @@ def test_promotion_runner_with_sqlite_ledger(tmp_path: Path) -> None:
         candidate_id=CAND_ID_1,
         strategy_type="momentum_v1",
         parameters_hash="1" * 64,
-        trials_explored_k=1,
+        trials_explored_k=2,
         observed_sharpe=Decimal("2.40"),
+        trial_sharpes=[Decimal("2.40"), Decimal("2.40")],
         trial_block_matrix=[[1.0, 1.0], [0.0, 0.0]],
         walk_forward_fold_returns=[[0.01]],
         session_returns=[0.01],
@@ -277,7 +480,7 @@ def test_direct_recorder_refuses_untrusted_certification(tmp_path: Path) -> None
     )
     with pytest.raises(RuntimeError, match="certification"):
         PromotionRecorder(ledger).record_certification(record)
-    with pytest.raises(ValueError, match="unauthenticated"):
+    with pytest.raises(ValueError, match="caller-created"):
         PromotionRecorder(ledger).record_evaluation(record)
     with pytest.raises(ValueError, match="statistical rejection"):
         PromotionRecorder(ledger).record_rejection(record)
@@ -402,8 +605,9 @@ def test_finite_inputs_with_nonfinite_intermediate_fail_closed(tmp_path: Path) -
         candidate_id=CAND_ID_1,
         strategy_type="synthetic",
         parameters_hash="a" * 64,
-        trials_explored_k=1,
+        trials_explored_k=2,
         observed_sharpe=Decimal("2"),
+        trial_sharpes=[Decimal("2"), Decimal("2")],
         trial_block_matrix=[[1.0, 1.0], [0.0, 0.0]],
         walk_forward_fold_returns=[[0.01]],
         session_returns=[1e308, 1e308],
@@ -427,8 +631,9 @@ def test_nonpositive_dsr_variance_seals_incomplete_rejection(tmp_path: Path) -> 
         candidate_id=CAND_ID_1,
         strategy_type="synthetic",
         parameters_hash="a" * 64,
-        trials_explored_k=1,
+        trials_explored_k=2,
         observed_sharpe=Decimal("1"),
+        trial_sharpes=[Decimal("2"), Decimal("2")],
         trial_block_matrix=[[1.0, 1.0], [0.0, 0.0]],
         walk_forward_fold_returns=[[0.01]],
         session_returns=[0.01],
@@ -488,8 +693,9 @@ def test_complete_retry_rejects_different_evidence_with_same_metrics(
         candidate_id=CAND_ID_1,
         strategy_type="synthetic",
         parameters_hash="a" * 64,
-        trials_explored_k=1,
+        trials_explored_k=2,
         observed_sharpe=Decimal("2"),
+        trial_sharpes=[Decimal("2"), Decimal("2")],
         trial_block_matrix=[[1.0, 1.0], [0.0, 0.0]],
         walk_forward_fold_returns=[[0.01]],
         session_returns=[0.01],
@@ -516,7 +722,7 @@ def _complete_request_values() -> dict[str, Any]:
         candidate_id=CAND_ID_1,
         strategy_type="synthetic",
         parameters_hash="a" * 64,
-        trials_explored_k=1,
+        trials_explored_k=2,
         observed_sharpe=Decimal("2"),
         trial_sharpes=[Decimal("2"), Decimal("2")],
         trial_block_matrix=[[1.0, 1.0], [0.0, 0.0]],
@@ -538,7 +744,7 @@ def _complete_request_values() -> dict[str, Any]:
         ("candidate_id", CAND_ID_2),
         ("strategy_type", "other"),
         ("parameters_hash", "b" * 64),
-        ("trials_explored_k", 2),
+        ("trials_explored_k", 3),
         ("observed_sharpe", Decimal("2.1")),
         ("trial_sharpes", [Decimal("2"), Decimal("2.1")]),
         ("trial_block_matrix", [[1.1, 1.0], [0.0, 0.0]]),
@@ -592,7 +798,7 @@ def test_complete_request_binding_hash_and_config_conflict(tmp_path: Path) -> No
             "inputs": [
                 "sequence",
                 [
-                    ["int", "1"],
+                    ["int", "2"],
                     ["decimal", "2"],
                     ["sequence", [["decimal", "2"], ["decimal", "2"]]],
                     [
@@ -646,7 +852,24 @@ def test_legacy_v1_same_id_is_not_assumed_to_bind_request(tmp_path: Path) -> Non
     assert isinstance(record, PromotionEvaluationRecordV1)
     assert record.verdict == PromotionGateVerdict.EXPLORATORY_PASSED
     ledger = SQLiteLedger(tmp_path / "legacy.sqlite3")
-    PromotionRecorder(ledger).record_evaluation(record)
+    ledger.append(
+        AuditEventDraft(
+            schema_version="1",
+            event_id=deterministic_memory_uuid7(
+                f"promotion_eval:{record.evaluation_id}"
+            ),
+            event_type=GATE_EVALUATED_EVENT_TYPE,
+            timestamp=record.evaluated_at,
+            entity_type=PROMOTION_EVALUATION_ENTITY_TYPE,
+            entity_id=record.evaluation_id,
+            payload=_freeze_json(
+                GateEvaluatedAuditEventPayloadV1(evaluation=record).model_dump(
+                    mode="python"
+                )
+            ),
+            deduplication_key=f"m11:eval:{record.evaluation_id}",
+        )
+    )
     before = ledger.verified_events()
     assert PromotionArchive(ledger).get_evaluation(EVAL_ID_2) == record
     with pytest.raises(ValueError, match="conflict"):
@@ -658,7 +881,7 @@ def test_legacy_v1_same_id_is_not_assumed_to_bind_request(tmp_path: Path) -> Non
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    [("observed_sharpe", object()), ("is_promotion_grade_evidence", float("nan"))],
+    [("observed_sharpe", object())],
 )
 def test_unfingerprintable_or_nonfinite_request_refuses_without_event(
     tmp_path: Path, field: str, value: object
@@ -737,7 +960,7 @@ def test_append_error_after_commit_refuses_then_exact_retry_succeeds(
         evaluated_at=TIMESTAMP,
     )
     failing = CommitThenFail(path)
-    with pytest.raises(OSError, match="lost append response"):
+    with pytest.raises(PromotionAuditUncertain):
         PromotionRunner(
             PromotionGatekeeper(config), PromotionRecorder(failing)
         ).evaluate_candidate(request)
@@ -762,7 +985,7 @@ def test_attempt_id_conflict_across_event_versions(
         "candidate_id": CAND_ID_1,
         "strategy_type": "synthetic",
         "parameters_hash": "a" * 64,
-        "trials_explored_k": 1,
+        "trials_explored_k": 2,
         "observed_sharpe": Decimal("2"),
         "evaluation_id": EVAL_ID_2,
         "evaluated_at": TIMESTAMP,
@@ -770,6 +993,7 @@ def test_attempt_id_conflict_across_event_versions(
     incomplete = CandidatePromotionRequestV1(**common)
     complete = CandidatePromotionRequestV1(
         **common,
+        trial_sharpes=[Decimal("2"), Decimal("2")],
         trial_block_matrix=[[1.0, 1.0], [0.0, 0.0]],
         walk_forward_fold_returns=[[0.01]],
         session_returns=[0.01],
@@ -837,8 +1061,9 @@ def test_complete_exploratory_result_requires_a_sealed_evaluation(
         candidate_id=CAND_ID_1,
         strategy_type="synthetic",
         parameters_hash="a" * 64,
-        trials_explored_k=1,
+        trials_explored_k=2,
         observed_sharpe=Decimal("2"),
+        trial_sharpes=[Decimal("2"), Decimal("2")],
         trial_block_matrix=[[1.0, 1.0], [0.0, 0.0]],
         walk_forward_fold_returns=[[0.01]],
         session_returns=[0.01],
@@ -880,8 +1105,9 @@ def test_mixed_batch_reports_prefix_and_restarts_after_append_failure(
     complete: dict[str, Any] = dict(
         strategy_type="synthetic",
         parameters_hash="a" * 64,
-        trials_explored_k=1,
+        trials_explored_k=2,
         observed_sharpe=Decimal("2"),
+        trial_sharpes=[Decimal("2"), Decimal("2")],
         trial_block_matrix=[[1.0, 1.0], [0.0, 0.0]],
         walk_forward_fold_returns=[[0.01]],
         session_returns=[0.01],
@@ -945,8 +1171,9 @@ def test_batch_reports_partial_statistical_attempt_and_retries(tmp_path: Path) -
         candidate_id=CAND_ID_1,
         strategy_type="synthetic",
         parameters_hash="a" * 64,
-        trials_explored_k=1,
+        trials_explored_k=2,
         observed_sharpe=Decimal("-2"),
+        trial_sharpes=[Decimal("2"), Decimal("2")],
         trial_block_matrix=[[1.0, 1.0], [0.0, 0.0]],
         walk_forward_fold_returns=[[0.01]],
         session_returns=[0.01],

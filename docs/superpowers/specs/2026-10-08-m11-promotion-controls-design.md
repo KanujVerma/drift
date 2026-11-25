@@ -138,9 +138,11 @@ attempt identity, timestamp and payload, and a conflicting reuse refuses.
 The explicit PnL completeness assertion and usable matrix, folds and session
 returns are required. The DSR sample size, skewness and kurtosis must be
 explicit rather than supplied by assumed defaults. Mathematical inputs must be
-finite and usable; multiple trials require the observations needed for the existing sample-variance
-calculation. These are mechanical prerequisites, not a scientific sufficiency
-or data-provenance ruling. No new statistical threshold is approved.
+finite and usable; the matrix must contain exactly K trial rows and, for multiple
+trials, the Sharpe cohort must contain exactly K entries. The PBO calculation
+requires at least two rows. These cardinality checks do not authenticate trial
+identities or prove provenance. They are mechanical prerequisites, not a
+scientific sufficiency ruling or a new statistical threshold.
 
 For a complete exploratory pass, the existing V1 evaluated event is sealed but
 no certification event is created. Caller flags and caller-created records do
@@ -155,6 +157,15 @@ deduplication key and V1 payload remain unchanged. Exact retries read back the
 same event; changed requests and pre-existing V1 events without this binding
 conflict rather than being assumed identical. Historical events are not rewritten.
 The binding establishes consistency, not source origin or authorization.
+The public recorder refuses caller-created V1 evaluations; the gatekeeper must
+compute them. A rejection must match a sealed evaluation. This does not protect
+against an actor with unrestricted generic ledger access.
+
+On an uncertain append or readback, `PromotionAuditUncertain` carries the
+evaluation ID and timestamp for retrying the original input, without claiming
+whether the event committed. Incomplete-request fingerprints distinguish NaN
+bit patterns; retries of older NaN fingerprints may conflict and must not be
+assumed equivalent.
 
 `PromotionArchive.list_evaluations()` and `list_rejections()` remain V1 views:
 they omit V2 incomplete attempts. Consumers must use `get_attempt()` or
