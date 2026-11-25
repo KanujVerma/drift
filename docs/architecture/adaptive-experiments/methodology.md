@@ -7,7 +7,7 @@
 - **Publisher**: KanujVerma.
 - **Document Status**: PROPOSED PREREGISTRATION METHODOLOGY. NOT FROZEN. NOT INDEPENDENTLY ACCEPTED.
 - **Preregistration Boundary**: A written methodology design is not automatically a preregistered study. Gate G3 acceptance, formal study preregistration, and parameter freezing are separate governance milestones.
-- **Review Boundary**: Independent scientific and platform review of applicable study evidence remains necessary; the author cannot independently certify their own scientific validity or acceptance. Historical named-reviewer routing is superseded by current AGENTS.md.
+- **Review Boundary**: Independent scientific and platform review of applicable study evidence is required before G3 execution; the author cannot independently certify their own scientific validity or acceptance. Historical named-reviewer routing is superseded by current AGENTS.md.
 - **Operating Rules**: Follow the current repository root AGENTS.md.
 
 ---
@@ -491,13 +491,14 @@ The following items are designated Decision Packets and must be formally resolve
 
 ## 16. Dependencies, Gates and Acceptance
 
-The experimental methodology is bound to Drift's sequential release gates exactly as specified in PR #419:
-- **Gate G0 (Governed Documentation)**: ADR 0017 and workstream governance independently accepted and merged.
+The following gates describe this historical study, not a binding product
+roadmap. The former G0 workstream-governance gate is superseded by AGENTS.md;
+scientific evidence and operational authorization remain distinct:
 - **Gate G1 (Source and Strategy Eligibility)**: 12-ETF cohort qualified and baseline strategy algorithms (B3, B4, B5) certified.
 - **Gate G2 (Accepted Contracts & Deterministic Integration)**: Upstream producer contracts (#375, #376, #379, #380) and scientific contracts (#392, #382, #383) merged AND contract-bound deterministic integration evidence demonstrated. (The #383 design document alone does not prove that integration has been implemented or tested).
 - **Gate G3 (Preregistered Scored-Study Freeze)**: Open Decision Packets (DP-R6, DP-M1, DP-R8) frozen before unblinding scored data.
 - **Gate G4 (Qualified Historical Evidence)**: Execution across authorized, qualified historical evidence (2021-2023 development and 2024 validation partitions). Development and validation periods must not be portrayed as prospective confirmation.
 - **Gate G5 (Broker-Free Prospective Shadow Observations)**: Live prospective shadow observation without broker connectivity.
-- **Gate G6 (Operational Production Authority)**: Completely separate operational gate requiring explicit multi-owner authorization.
+- **Gate G6 (Operational Production Authority)**: Completely separate operational gate requiring explicit human authorization for the operational scope.
 
-**Independent Sign-Off**: All scientific methodology specifications must be reviewed and accepted by research owner Krish and platform owner Matthew. Authors cannot self-certify acceptance.
+**Independent Sign-Off**: Scientific and platform review of the applicable study evidence is required before G3 execution. Authors cannot independently certify their own work; historical named-person routing is superseded by AGENTS.md.
