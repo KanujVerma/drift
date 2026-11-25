@@ -846,7 +846,7 @@ def _adapter(declared: object) -> TypeAdapter[Any]:
     """One cached adapter per declared scalar hint."""
     cached = _ADAPTERS.get(id(declared))
     if cached is None or cached[0] is not declared:
-        cached = (declared, TypeAdapter(declared))
+        cached = (declared, TypeAdapter(cast(Any, declared)))
         _ADAPTERS[id(declared)] = cached
     return cached[1]
 
