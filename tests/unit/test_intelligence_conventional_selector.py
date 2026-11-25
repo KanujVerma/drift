@@ -9,7 +9,18 @@ Verifies acceptance criteria T07, T09, T13 from research.md and DP-R6:
 import json
 from copy import deepcopy
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import (
+    ROUND_HALF_EVEN,
+    Context,
+    Decimal,
+    DivisionByZero,
+    Inexact,
+    InvalidOperation,
+    Overflow,
+    Rounded,
+    getcontext,
+    localcontext,
+)
 from pathlib import Path
 from typing import Any
 
@@ -612,6 +623,184 @@ def test_r_tie_breaks_on_actual_parameter_digest(
         assert result.is_success
         assert result.selected_candidate is not None
         assert result.selected_candidate.candidate_id == expected.candidate_id
+
+
+def test_r_nonzero_score_gaps_respect_tie_band_and_parameter_hash(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+) -> None:
+    """The DP-R6 band uses parameter identity before candidate ID or order."""
+    original_context = getcontext()
+    original_state = original_context.copy()
+
+    def assert_context_restored(expected: Context, snapshot: Context) -> None:
+        actual = getcontext()
+        assert actual is expected
+        assert actual.prec == snapshot.prec
+        assert actual.rounding == snapshot.rounding
+        assert actual.Emin == snapshot.Emin
+        assert actual.Emax == snapshot.Emax
+        assert actual.capitals == snapshot.capitals
+        assert actual.clamp == snapshot.clamp
+        assert actual.flags == snapshot.flags
+        assert actual.traps == snapshot.traps
+
+    selector_context = Context(
+        prec=28,
+        rounding=ROUND_HALF_EVEN,
+        Emin=-999999,
+        Emax=999999,
+        capitals=1,
+        clamp=0,
+        flags=[],
+        traps=[InvalidOperation, DivisionByZero, Overflow, Inexact, Rounded],
+    )
+    adversarial_contexts = (
+        Context(
+            prec=28,
+            rounding=ROUND_HALF_EVEN,
+            Emin=-999999,
+            Emax=999999,
+            capitals=1,
+            clamp=0,
+            flags=[Inexact],
+            traps=[Inexact, Rounded],
+        ),
+        Context(
+            prec=9,
+            rounding=ROUND_HALF_EVEN,
+            Emin=-3,
+            Emax=3,
+            capitals=0,
+            clamp=1,
+            flags=[Rounded],
+            traps=[Inexact, Rounded],
+        ),
+    )
+    for adversarial in adversarial_contexts:
+        with localcontext(adversarial) as ambient_context:
+            ambient_state = ambient_context.copy()
+            with localcontext(selector_context) as active_context:
+                _assert_r_nonzero_score_gaps(
+                    sample_context, sample_bindings, fixture_data
+                )
+                assert getcontext() is active_context
+            assert_context_restored(ambient_context, ambient_state)
+    assert_context_restored(original_context, original_state)
+
+
+def _assert_r_nonzero_score_gaps(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+) -> None:
+    registration = sample_bindings.strategy_registry["fixture.equal_weight"]
+    resolved = sample_bindings.model_copy(
+        update={
+            "strategy_registry": {
+                "fixture.equal_weight": registration.model_copy(
+                    update={"allowed_parameters": {"choice_number": int}}
+                )
+            }
+        }
+    )
+    choices = []
+    for number in range(18):
+        raw = deepcopy(fixture_data["raw_choice"])
+        raw["selection"]["parameters"] = {"choice_number": number}
+        choices.append(raw)
+
+    method = ArtifactReference(id="synthetic:method-R", version="v1", sha256="e" * 64)
+    policy = ArtifactReference(id="synthetic:policy", version="v1", sha256="f" * 64)
+    cutoff = datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC)
+    observed: list[ResearchCandidate] = []
+
+    def observe(candidate: ResearchCandidate) -> Decimal:
+        observed.append(candidate)
+        return Decimal("1")
+
+    probe = select_conventional_candidate(
+        context=sample_context,
+        resolved_inputs=resolved,
+        candidate_pool=choices,
+        objective_fn=observe,
+        method_ref=method,
+        validation_policy=policy,
+        recorder=ResearchReceiptStore(),
+        attempt_id="synthetic:nonzero-parameter-tie",
+        checked_at=cutoff,
+    )
+    assert probe.is_success and len(observed) == len(choices)
+    inversion = next(
+        (
+            (a, b)
+            for a in observed
+            for b in observed
+            if a.strategy is not None
+            and b.strategy is not None
+            and a.strategy.parameters_hash < b.strategy.parameters_hash
+            and a.candidate_id > b.candidate_id
+        ),
+        None,
+    )
+    assert inversion is not None
+    hash_winner, score_winner = inversion
+    assert hash_winner.strategy is not None and score_winner.strategy is not None
+    hash_number = hash_winner.strategy.parameters["choice_number"]
+    score_number = score_winner.strategy.parameters["choice_number"]
+
+    selector_context = getcontext()
+    demonstration_context = Context(
+        prec=9,
+        rounding=ROUND_HALF_EVEN,
+        Emin=-999999,
+        Emax=999999,
+        capitals=1,
+        clamp=0,
+        flags=[],
+        traps=[],
+    )
+    with localcontext(demonstration_context) as low_context:
+        # Without isolation the inside-band score rounds to an exact tie.
+        assert Decimal("1") - Decimal("0.0000000005") == Decimal("1")
+        assert low_context.flags[Inexact] and low_context.flags[Rounded]
+    assert getcontext() is selector_context
+    for gap, exact_lower_score, expected in (
+        (Decimal("0.0000000005"), Decimal("0.9999999995"), hash_winner),
+        (Decimal("0.000000001"), Decimal("0.999999999"), hash_winner),
+        (Decimal("0.000000002"), Decimal("0.999999998"), score_winner),
+    ):
+
+        def score(candidate: ResearchCandidate, gap_value: Decimal = gap) -> Decimal:
+            assert candidate.strategy is not None
+            if candidate.strategy.parameters["choice_number"] == hash_number:
+                return Decimal("1") - gap_value
+            assert candidate.strategy.parameters["choice_number"] == score_number
+            return Decimal("1")
+
+        for pair in (
+            (choices[hash_number], choices[score_number]),
+            (choices[score_number], choices[hash_number]),
+        ):
+            result = select_conventional_candidate(
+                context=sample_context,
+                resolved_inputs=resolved,
+                candidate_pool=pair,
+                objective_fn=score,
+                method_ref=method,
+                validation_policy=policy,
+                recorder=ResearchReceiptStore(),
+                attempt_id="synthetic:nonzero-parameter-tie",
+                checked_at=cutoff,
+            )
+            assert result.is_success and result.selected_candidate is not None
+            assert (
+                Decimal(result.candidate_scores[hash_winner.candidate_id])
+                == exact_lower_score
+            )
+            assert result.candidate_scores[score_winner.candidate_id] == "1"
+            assert result.selected_candidate.candidate_id == expected.candidate_id
 
 
 def test_r_attempts_bind_policy_request_and_context_profile(
