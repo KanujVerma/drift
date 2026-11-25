@@ -17,41 +17,18 @@ Original research authority and trial binding remain separately governed by
 
 The remaining sections preserve the historical design baseline, examples and
 rationale. Statements about future slices, pending merges, old writer assignments
-or historical API absence are not a live work queue. Resolve current ownership
-through [workstreams](../../workstreams.md), required issue-specific migration
-receipts and authenticated handoffs. Do not reimplement incorporated slices or
-infer external source, model, study or trading permission from their existence.
+or historical API absence are not a live work queue. Follow current
+[agent instructions](../../../../AGENTS.md) and consult relevant issues and PRs
+for active work. Throughout this historical record, conflicting product and
+workflow directions are superseded by current [product direction](../../../PRODUCT.md)
+and agent instructions. Applicable technical and evidence safeguards remain.
+Do not reimplement incorporated slices or infer external source, model, study
+or trading permission from their existence.
 
-A fresh Antigravity agent using its available Flash model should do the following:
-
-1. Read [AGENTS.md](../../../../AGENTS.md),
-   [onboarding](../onboarding.md), [D01-D17](../decisions.md),
-   [design](../design.md), [workstreams](../../workstreams.md),
-   [crosswalk](../requirements-crosswalk.md) and
-   [Resume/Checkpoint/Handoff](../../agent-workflow.md). Run Resume. Verify the
-   actual repo, branch, HEAD, authenticated GitHub actor, writer and exact issue
-   write-set. Do not stash, reset or clean another checkout.
-2. Read the assigned issue, latest comments, blockers, draft PR, independent
-   reviews and the exact accepted producer contracts. Select an executable
-   READY issue. #373 is a parent; #375 is design only. Neither authorizes code.
-3. Explain the owned slice, inputs, output, acceptance cases and stop conditions
-   from this package. Claim and read back the issue before edits. If only #375
-   is assigned, edit only this file and keep its PR draft.
-4. For later runtime, choose one accepted child slice from the dependency order
-   below. Copy its exact path reservation and tests into that child's issue,
-   obtain the required producer/consumer decisions, then acquire the paths.
-   A proposed path below is not a present write grant.
-5. Deliver one reviewable PR, exact-head evidence and a GitHub Checkpoint/Handoff.
-   Do not merge, self-certify a shared interface or silently choose a missing
-   material parameter. Use the decision packets below and continue independent
-   work when a particular dependency is blocked.
-
-The coding model available in Antigravity and the future runtime research model
-are separate facts. No Flash version, context size, tool capability, API access,
-pricing, quota or subscription entitlement is assumed. Record actual capability
-only when verified in the authorized environment. No runtime LLM call, provider
-credential, paid service, dataset acquisition, broker-connected paper operation
-or live capital is authorized here.
+This design does not authorize a runtime model call, provider credential, paid
+service, dataset acquisition, broker-connected paper operation or live capital.
+The [original preamble and source manifest](https://github.com/KanujVerma/drift/blob/4c9c6c2241b1ea0da074616090f15e277fc4a879/docs/architecture/adaptive-experiments/contracts/research.md)
+remain available as historical context.
 
 Navigate: [mission and ownership](#mission-accepted-choices-and-boundaries),
 [current implementation](#flow-and-current-implementation-truth),
@@ -69,11 +46,14 @@ The source baseline is remote main
 the merge of [#385](https://github.com/KanujVerma/drift/pull/385). This was read
 from a fresh isolated Mac checkout of GitHub main. It contains no asserted
 unpushed work from another machine. This manifest records source provenance,
-not a live status mirror; refresh GitHub on Resume and at shared-boundary edits.
+not a live status mirror; check current GitHub records for relevant changes.
+Its authority descriptions reflect that baseline, not current product or
+workflow policy. The current [agent instructions](../../../../AGENTS.md) and
+[product direction](../../../PRODUCT.md) supersede conflicting directions.
 
 | Source at that baseline, unless a different ref is given | Authority / use |
 |---|---|
-| `AGENTS.md`; `.cursor/rules/drift-bootstrap.mdc`; `.cursor/commands/resume.md` | Universal operating contract; Cursor files are wrappers. No `.agents/` directory exists at this baseline. |
+| `AGENTS.md`; `.cursor/rules/drift-bootstrap.mdc` | Historical baseline sources; the current root `AGENTS.md` governs current work. The baseline also contained a since-removed command. |
 | `docs/architecture/workstreams.md`; `docs/adr/0015-three-feature-workstreams-and-explicit-writer-handoffs.md` | Four owners and incumbent writer protection; takes precedence over stale owner allocations. |
 | `docs/architecture/adaptive-experiments/{onboarding,decisions,design,requirements-crosswalk,delivery-plan}.md`; ADR 0016 | Accepted intent, rationale and sequencing; D01-D17 remain intact. |
 | `docs/architecture/{agent-workflow,roadmap,overview,trust-boundaries}.md`; ADR 0012 | Workflow, historical milestones, evidence and operational limits. Roadmap/overview historical completion language is not adaptive completion or operational permission. |

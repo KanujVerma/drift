@@ -1,1 +1,0 @@
-Execute Handoff using docs/architecture/agent-workflow.md. Publish branch/HEAD, verified work, failures, uncommitted files, blockers and exact next action on the issue. Record explicit writer release if transferring work. Do not modify another worktree or create a duplicate status document.

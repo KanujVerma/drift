@@ -1,5 +1,10 @@
 # Architecture Overview
 
+> Historical research-oriented overview. For current product direction and
+> system boundaries, see [PRODUCT](../PRODUCT.md) and
+> [ARCHITECTURE](../ARCHITECTURE.md). Conflicting old workflow and product
+> language below is superseded; applicable technical safeguards remain relevant.
+
 ## Long-Term Vision and End-to-End Pipeline
 
 Drift is an evidence-driven, self-improving quantitative research and trading

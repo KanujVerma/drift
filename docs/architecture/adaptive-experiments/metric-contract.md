@@ -1,5 +1,10 @@
 # Benchmark Metric Definitions and Measurement Arithmetic Contract
 
+> Research specification and historical rationale. Current [AGENTS.md](../../../AGENTS.md)
+> supersedes conflicting mandatory reading, role routing, and approval procedures.
+> Preserve applicable mathematical and evidence safeguards; this document alone
+> does not establish implementation or operational permission.
+
 ## Start here: authority before action
 
 This is the canonical scientific specification for **BENCHMARK METRICS AND ARITHMETIC**,
@@ -13,11 +18,8 @@ scorecards belongs to future implementation issues under the scientific workstre
 
 A fresh Antigravity agent or human reviewer should note:
 
-1. Read [AGENTS.md](../../../AGENTS.md), [decisions.md](decisions.md) (D01-D17),
-   [design.md](design.md), [workstreams.md](../workstreams.md),
-   [requirements-crosswalk.md](requirements-crosswalk.md),
-   [stage1-decisions.md](stage1-decisions.md) (S01-S38), and
-   [stage1-roadmap.md](stage1-roadmap.md).
+1. Follow [AGENTS.md](../../../AGENTS.md) and consult the relevant research
+   references as needed for the specific study or implementation.
 2. **Current implementation audit:** The existing implementation in
    `src/drift/scorecards/performance.py` contains severe mathematical defects:
    - It divides geometric annualized return by sample volatility and mislabels the

@@ -1,5 +1,11 @@
 # Drift Project Roadmap
 
+> Historical milestone roadmap and delivery record. The current
+> [product](../PRODUCT.md), [roadmap](../ROADMAP.md), and
+> [agent instructions](../../AGENTS.md) supersede conflicting product direction,
+> ownership routing, and approval procedures below. Historical status is not
+> proof of present behavior, source qualification, or operational permission.
+
 This document outlines the phased milestone progression of Drift from a
 tamper-evident evidence kernel to a bounded, self-improving quantitative trading system.
 

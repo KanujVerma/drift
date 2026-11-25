@@ -1,10 +1,6 @@
 ---
-description: Universal issue-driven Drift bootstrap for all four workstreams
+description: Drift contributor instructions
 alwaysApply: true
 ---
-Read root AGENTS.md and run Drift Resume before work. Resolve kanuj, krish, matthew or
-harsha; use the assigned GitHub issue, not chat history. Obey producer contracts,
-exact write-sets and active writer reservations. Send cross-workstream requests
-through GitHub issues/dependencies, never through a human relay. Use repository
-Checkpoint, documentation-impact and Handoff protocols. This rule is only a
-wrapper; canonical policy lives in AGENTS.md and docs/architecture/.
+Follow the root AGENTS.md. Read the canonical product, architecture, and roadmap
+documents when relevant to the task.

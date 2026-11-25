@@ -1,5 +1,10 @@
 # ADR 0013: Parallelize Owned Milestones Without Advancing Authorization Gates
 
+> Historical governance decision. The rigid milestone-ownership and workstream
+> rules below are superseded by [AGENTS.md](../../AGENTS.md). Preserve the
+> distinction between build order and operational authorization, concurrent
+> work, and applicable scientific and evidence safeguards.
+
 ## Status
 
 Accepted architecture decision, 2026-09-20.
