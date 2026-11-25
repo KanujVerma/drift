@@ -3,6 +3,7 @@
 import multiprocessing
 import os
 import sqlite3
+import threading
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -88,6 +89,426 @@ def _contend(db: str, start: Any, ready: Any, results: Any, index: int) -> None:
         results.put("refused")
     finally:
         journal.close()
+
+
+@pytest.mark.parametrize("legacy_first", [False, True])
+@pytest.mark.parametrize("count", [2, 3])
+def test_same_connection_interleaving_preserves_outcomes_and_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    count: int,
+    legacy_first: bool,
+) -> None:
+    prechecked, release_first = threading.Event(), threading.Event()
+    second_started, second_begun, release_second = (
+        threading.Event(),
+        threading.Event(),
+        threading.Event(),
+    )
+    original_connect = sqlite3.connect
+
+    class PausedConnection(sqlite3.Connection):
+        @property
+        def in_transaction(self) -> bool:
+            value = super().in_transaction
+            if threading.current_thread().name == "first" and not prechecked.is_set():
+                prechecked.set()
+                if not release_first.wait(5):
+                    raise RuntimeError("first thread timed out")
+            return value
+
+        def execute(self, sql: str, parameters: Any = (), /) -> sqlite3.Cursor:
+            cursor = super().execute(sql, parameters)
+            if sql == "BEGIN IMMEDIATE" and threading.current_thread().name == "second":
+                second_begun.set()
+                if not release_second.wait(5):
+                    raise RuntimeError("second thread timed out")
+            return cursor
+
+    def connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        return original_connect(*args, factory=PausedConnection, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    db = tmp_path / "synthetic.sqlite"
+    journal = PersistentOrderIntentJournal(db)
+    names = ("first", "second", "third")[:count]
+    intents = [_intent(f"synthetic-token-{name}") for name in names]
+    attempts = [uuid7() for _ in names]
+    outcomes: dict[str, str] = {}
+
+    def reserve(index: int) -> None:
+        name = names[index]
+        if index == 1:
+            second_started.set()
+        try:
+            if index == 0 and legacy_first:
+                journal.record_intent(intents[index])
+            else:
+                journal.record_synthetic_potential_send(
+                    f"synthetic-account-{name}",
+                    intents[index],
+                    attempt_id=attempts[index],
+                )
+            outcomes[name] = "success"
+        except BaseException as error:
+            outcomes[name] = f"{type(error).__name__}: {error}"
+
+    first = threading.Thread(target=reserve, args=(0,), name="first")
+    second = threading.Thread(target=reserve, args=(1,), name="second")
+    third = (
+        threading.Thread(target=reserve, args=(2,), name="third")
+        if count == 3
+        else None
+    )
+    first.start()
+    try:
+        assert prechecked.wait(5)
+        second.start()
+        assert second_started.wait(5)
+        second_begun.wait(0.5)
+        if third is not None:
+            third.start()
+        release_first.set()
+        first.join(5)
+        release_second.set()
+        second.join(5)
+        if third is not None:
+            third.join(5)
+        assert not first.is_alive() and not second.is_alive()
+        assert third is None or not third.is_alive()
+    finally:
+        release_first.set()
+        release_second.set()
+        first.join(5)
+        if second.ident is not None:
+            second.join(5)
+        if third is not None and third.ident is not None:
+            third.join(5)
+    journal.close()
+    reopened = PersistentOrderIntentJournal(db)
+    rows = {
+        name: (
+            reopened.get_intent(intents[index].intent_id)
+            if index == 0 and legacy_first
+            else reopened.get_synthetic_potential_send(f"synthetic-account-{name}")
+        )
+        for index, name in enumerate(names)
+    }
+    reopened.close()
+    assert outcomes == dict.fromkeys(names, "success"), (outcomes, rows)
+    assert rows == {
+        name: (
+            intents[index]
+            if index == 0 and legacy_first
+            else (attempts[index], intents[index])
+        )
+        for index, name in enumerate(names)
+    }
+
+
+def test_failed_rollback_and_close_leave_escaped_handle_unrevoked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_connect = sqlite3.connect
+    fail_close = True
+
+    class CloseFailureConnection(sqlite3.Connection):
+        def close(self) -> None:
+            if fail_close:
+                raise sqlite3.OperationalError("injected close failure")
+            super().close()
+
+    def connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        return original_connect(*args, factory=CloseFailureConnection, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    db = tmp_path / "synthetic.sqlite"
+    journal = PersistentOrderIntentJournal(db)
+    escaped = journal.connection
+
+    def deny_rollback(
+        action: int,
+        arg1: str | None,
+        arg2: str | None,
+        db_name: str | None,
+        source: str | None,
+    ) -> int:
+        if action == sqlite3.SQLITE_TRANSACTION and arg1 == "ROLLBACK":
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    escaped.set_authorizer(deny_rollback)
+    with pytest.raises(KeyboardInterrupt, match="original failure") as caught:
+        with journal._transaction() as cursor:
+            cursor.execute(
+                """INSERT INTO synthetic_potential_sends_v1
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                ("synthetic-account-1", str(uuid7()), str(uuid7()), "t", "h", "{}"),
+            )
+            raise KeyboardInterrupt("original failure")
+    assert any("rollback failed" in note for note in caught.value.__notes__)
+    assert any("close failed" in note for note in caught.value.__notes__)
+    assert escaped.in_transaction
+    assert escaped.execute("SELECT 1").fetchone()[0] == 1
+    with pytest.raises(ExecutionJournalError, match="quarantin"):
+        journal.get_synthetic_potential_send("synthetic-account-1")
+    fail_close = False
+    journal.close()
+    with pytest.raises(sqlite3.ProgrammingError):
+        escaped.execute("SELECT 1")
+    reopened = PersistentOrderIntentJournal(db)
+    assert reopened.get_synthetic_potential_send("synthetic-account-1") is None
+    reopened.close()
+
+
+def test_three_thread_success_requires_the_reopened_reservation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Force the old stale-precheck/foreign-rollback/foreign-commit schedule."""
+    events = {
+        name: threading.Event()
+        for name in (
+            "a_checked",
+            "b_checked",
+            "go_a",
+            "go_b",
+            "c_begun",
+            "go_c",
+            "b_begun",
+            "throw_b",
+            "c_inserted",
+            "commit_c",
+            "launch_a2",
+            "a2_begun",
+            "go_a2",
+            "a_failed",
+            "b_failed",
+            "race",
+        )
+    }
+    original_connect = sqlite3.connect
+    seen: set[str] = set()
+
+    class ScheduledConnection(sqlite3.Connection):
+        @property
+        def in_transaction(self) -> bool:
+            value = super().in_transaction
+            name = threading.current_thread().name
+            if name in ("a", "b") and name not in seen:
+                seen.add(name)
+                events[f"{name}_checked"].set()
+                if not events[f"go_{name}"].wait(5):
+                    raise RuntimeError("precheck timed out")
+            return value
+
+        def execute(self, sql: str, parameters: Any = (), /) -> sqlite3.Cursor:
+            name = threading.current_thread().name
+            if events["race"].is_set() and name == "c" and sql == "COMMIT":
+                events["c_inserted"].set()
+                if not events["commit_c"].wait(5):
+                    raise RuntimeError("c commit timed out")
+            result = super().execute(sql, parameters)
+            if events["race"].is_set() and sql == "BEGIN IMMEDIATE":
+                if name == "c":
+                    events["c_begun"].set()
+                    if not events["go_c"].wait(5):
+                        raise RuntimeError("c begin timed out")
+                elif name == "b":
+                    events["b_begun"].set()
+                    if not events["throw_b"].wait(5):
+                        raise RuntimeError("b begin timed out")
+                    raise RuntimeError("injected b interruption")
+                elif name == "a":
+                    events["a2_begun"].set()
+                    if not events["go_a2"].wait(5):
+                        raise RuntimeError("a2 begin timed out")
+            return result
+
+    def connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        return original_connect(*args, factory=ScheduledConnection, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    db = tmp_path / "synthetic.sqlite"
+    journal = PersistentOrderIntentJournal(db)
+    intents = {
+        name: _intent(f"synthetic-token-{name}") for name in ("a", "b", "c", "a2")
+    }
+    attempts = {name: uuid7() for name in intents}
+    outcomes: dict[str, str] = {}
+
+    def call(name: str) -> None:
+        try:
+            journal.record_synthetic_potential_send(
+                f"synthetic-account-{name}", intents[name], attempt_id=attempts[name]
+            )
+            outcomes[name] = "success"
+        except BaseException as error:
+            outcomes[name] = f"{type(error).__name__}: {error}"
+
+    def worker(name: str) -> None:
+        call(name)
+        if name in ("a", "b"):
+            events[f"{name}_failed"].set()
+        if name == "a" and events["race"].is_set():
+            if events["launch_a2"].wait(5):
+                call("a2")
+
+    workers = {
+        name: threading.Thread(target=worker, args=(name,), name=name)
+        for name in ("a", "b", "c")
+    }
+    workers["a"].start()
+    try:
+        assert events["a_checked"].wait(5)
+        workers["b"].start()
+        vulnerable = events["b_checked"].wait(0.5)
+        if vulnerable:
+            events["race"].set()
+        workers["c"].start()
+        if vulnerable:
+            assert events["c_begun"].wait(5)
+            events["go_a"].set()
+            assert events["a_failed"].wait(5)
+            events["go_b"].set()
+            assert events["b_begun"].wait(5)
+            events["go_c"].set()
+            assert events["c_inserted"].wait(5)
+            events["throw_b"].set()
+            assert events["b_failed"].wait(5)
+            events["launch_a2"].set()
+            assert events["a2_begun"].wait(5)
+            events["commit_c"].set()
+            workers["c"].join(5)
+            events["go_a2"].set()
+        else:
+            events["go_a"].set()
+            events["go_b"].set()
+        for thread in workers.values():
+            thread.join(5)
+            assert not thread.is_alive()
+    finally:
+        for event in events.values():
+            event.set()
+        for thread in workers.values():
+            if thread.ident is not None:
+                thread.join(5)
+    journal.close()
+    reopened = PersistentOrderIntentJournal(db)
+    rows = {
+        name: reopened.get_synthetic_potential_send(f"synthetic-account-{name}")
+        for name in ("a", "b", "c")
+    }
+    reopened.close()
+    assert outcomes.get("c") == "success", outcomes
+    assert rows["c"] == (attempts["c"], intents["c"]), (outcomes, rows)
+    if not vulnerable:
+        assert outcomes == {"a": "success", "b": "success", "c": "success"}
+        assert rows == {name: (attempts[name], intents[name]) for name in rows}
+
+
+def test_reentrant_journal_operations_refuse_without_deadlock(tmp_path: Path) -> None:
+    db = tmp_path / "synthetic.sqlite"
+    journal = PersistentOrderIntentJournal(db)
+    intent = _intent("legacy-token")
+    with journal._transaction() as cursor:
+        with pytest.raises(ExecutionJournalError, match="reentrant"):
+            journal.get_intent(intent.intent_id)
+        with pytest.raises(ExecutionJournalError, match="cannot close"):
+            journal.close()
+        cursor.execute("SELECT 1")
+        assert cursor.fetchone()[0] == 1
+    journal.record_intent(intent)
+    journal.close()
+    reopened = PersistentOrderIntentJournal(db)
+    assert reopened.get_intent(intent.intent_id) == intent
+    reopened.close()
+
+
+def test_concurrent_close_waits_for_active_transaction(tmp_path: Path) -> None:
+    db = tmp_path / "synthetic.sqlite"
+    journal = PersistentOrderIntentJournal(db)
+    entered, release, close_started, close_done = (threading.Event() for _ in range(4))
+    outcomes: list[str] = []
+
+    def writer() -> None:
+        try:
+            with journal._transaction() as cursor:
+                cursor.execute("SELECT 1")
+                entered.set()
+                if not release.wait(5):
+                    raise RuntimeError("writer timed out")
+            outcomes.append("committed")
+        except BaseException as error:
+            outcomes.append(f"writer: {error}")
+
+    def closer() -> None:
+        close_started.set()
+        try:
+            journal.close()
+            outcomes.append("closed")
+        except BaseException as error:
+            outcomes.append(f"close: {error}")
+        finally:
+            close_done.set()
+
+    first = threading.Thread(target=writer)
+    second = threading.Thread(target=closer)
+    first.start()
+    try:
+        assert entered.wait(5)
+        second.start()
+        assert close_started.wait(5)
+        assert not close_done.wait(0.2)
+        release.set()
+        first.join(5)
+        second.join(5)
+        assert not first.is_alive() and not second.is_alive()
+    finally:
+        release.set()
+        first.join(5)
+        if second.ident is not None:
+            second.join(5)
+    assert sorted(outcomes) == ["closed", "committed"]
+
+
+def test_distinct_connections_compete_for_one_synthetic_key(tmp_path: Path) -> None:
+    db = tmp_path / "synthetic.sqlite"
+    journals = [PersistentOrderIntentJournal(db), PersistentOrderIntentJournal(db)]
+    intents = [_intent("synthetic-first"), _intent("synthetic-second")]
+    attempts = [uuid7(), uuid7()]
+    barrier = threading.Barrier(2, timeout=5)
+    outcomes: dict[int, str] = {}
+
+    def reserve(index: int) -> None:
+        try:
+            barrier.wait()
+            journals[index].record_synthetic_potential_send(
+                "synthetic-account-1", intents[index], attempt_id=attempts[index]
+            )
+            outcomes[index] = "success"
+        except DuplicateIntentRecordError:
+            outcomes[index] = "refused"
+        except BaseException as error:
+            outcomes[index] = f"{type(error).__name__}: {error}"
+
+    workers = [threading.Thread(target=reserve, args=(i,)) for i in range(2)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(10)
+        assert not worker.is_alive()
+    assert sorted(outcomes.values()) == ["refused", "success"]
+    winner = next(index for index, result in outcomes.items() if result == "success")
+    for journal in journals:
+        journal.close()
+    reopened = PersistentOrderIntentJournal(db)
+    assert reopened.get_synthetic_potential_send("synthetic-account-1") == (
+        attempts[winner],
+        intents[winner],
+    )
+    reopened.close()
 
 
 def test_reservation_persists_intent_and_potential_send_together(

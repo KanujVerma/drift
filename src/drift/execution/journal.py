@@ -6,6 +6,7 @@ inbound execution reports with SQL triggers preventing modification or deletion.
 
 import sqlite3
 import sys
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -162,12 +163,16 @@ class PersistentOrderIntentJournal:
 
     Maintains immutable records of outbound order intents and inbound execution reports,
     protected by database-level triggers preventing any UPDATE or DELETE operations.
+    Journal methods serialize access to this instance's connection. Direct use of
+    an escaped raw connection bypasses that serialization and is not protected.
     """
 
     def __init__(self, db_path: Path | str = ":memory:") -> None:
         self._db_path = str(db_path)
         self._connection: sqlite3.Connection | None = None
         self._quarantined = False
+        self._connection_lock = threading.RLock()
+        self._transaction_active = False
         self._ensure_connected()
         self._init_schema()
 
@@ -189,74 +194,100 @@ class PersistentOrderIntentJournal:
 
     @property
     def connection(self) -> sqlite3.Connection:
-        """Active underlying SQLite connection."""
-        return self._ensure_connected()
+        """Return the raw connection; direct operations bypass journal locking.
+
+        A previously returned handle cannot be revoked if SQLite close fails.
+        """
+        with self._connection_lock:
+            return self._ensure_connected()
 
     @contextmanager
     def _transaction(
         self, *, require_synthetic_durability: bool = False
     ) -> Iterator[sqlite3.Cursor]:
-        conn = self._ensure_connected()
-        cursor = conn.cursor()
-        try:
-            if conn.in_transaction:
-                raise ExecutionJournalError("journal connection already in transaction")
+        with self._connection_lock:
+            if self._transaction_active:
+                raise ExecutionJournalError("reentrant journal transaction refused")
+            self._transaction_active = True
             try:
-                conn.execute("BEGIN IMMEDIATE")
-                if require_synthetic_durability:
-                    databases = conn.execute("PRAGMA database_list").fetchall()
-                    main_files = [
-                        row["file"] for row in databases if row["name"] == "main"
-                    ]
-                    if len(main_files) != 1 or not main_files[0]:
-                        raise ExecutionJournalError(
-                            "synthetic reservation requires durable storage"
-                        )
-                    if conn.execute("PRAGMA journal_mode").fetchone()[0] != "wal":
-                        raise ExecutionJournalError(
-                            "synthetic reservation requires WAL"
-                        )
-                    if conn.execute("PRAGMA synchronous").fetchone()[0] < 2:
-                        raise ExecutionJournalError(
-                            "synthetic reservation requires durable sync"
-                        )
-                yield cursor
-                conn.execute("COMMIT")
-            except BaseException as error:
+                conn = self._ensure_connected()
+                cursor = conn.cursor()
                 try:
                     if conn.in_transaction:
-                        conn.execute("ROLLBACK")
-                    if conn.in_transaction:
-                        raise ExecutionJournalError("rollback left transaction active")
-                except BaseException as rollback_error:
-                    self._quarantined = True
-                    error.add_note(
-                        f"rollback failed; journal quarantined: {rollback_error}"
-                    )
-                    try:
-                        conn.close()
-                    except BaseException as close_error:
-                        error.add_note(
-                            f"quarantined connection close failed: {close_error}"
+                        raise ExecutionJournalError(
+                            "journal connection already in transaction"
                         )
-                    self._connection = None
-                    raise error from None
-                if isinstance(error, sqlite3.IntegrityError):
-                    msg = str(error)
-                    if "append-only" in msg:
-                        raise IntentAppendOnlyViolationError(msg) from error
-                    if "UNIQUE constraint failed" in msg or "PRIMARY KEY" in msg:
-                        raise DuplicateIntentRecordError(msg) from error
-                    raise ExecutionJournalError(msg) from error
-                raise
-        finally:
-            active_error = sys.exception()
-            try:
-                cursor.close()
-            except BaseException as close_error:
-                if active_error is None:
-                    raise
-                active_error.add_note(f"cursor close failed: {close_error}")
+                    try:
+                        conn.execute("BEGIN IMMEDIATE")
+                        if require_synthetic_durability:
+                            databases = conn.execute("PRAGMA database_list").fetchall()
+                            main_files = [
+                                row["file"]
+                                for row in databases
+                                if row["name"] == "main"
+                            ]
+                            if len(main_files) != 1 or not main_files[0]:
+                                raise ExecutionJournalError(
+                                    "synthetic reservation requires durable storage"
+                                )
+                            journal_mode = conn.execute(
+                                "PRAGMA journal_mode"
+                            ).fetchone()[0]
+                            if journal_mode != "wal":
+                                raise ExecutionJournalError(
+                                    "synthetic reservation requires WAL"
+                                )
+                            if conn.execute("PRAGMA synchronous").fetchone()[0] < 2:
+                                raise ExecutionJournalError(
+                                    "synthetic reservation requires durable sync"
+                                )
+                        yield cursor
+                        conn.execute("COMMIT")
+                    except BaseException as error:
+                        try:
+                            if conn.in_transaction:
+                                conn.execute("ROLLBACK")
+                            if conn.in_transaction:
+                                raise ExecutionJournalError(
+                                    "rollback left transaction active"
+                                )
+                        except BaseException as rollback_error:
+                            self._quarantined = True
+                            error.add_note(
+                                "rollback failed; journal quarantined: "
+                                f"{rollback_error}"
+                            )
+                            try:
+                                conn.close()
+                            except BaseException as close_error:
+                                error.add_note(
+                                    "quarantined connection close failed: "
+                                    f"{close_error}"
+                                )
+                            else:
+                                self._connection = None
+                            raise error from None
+                        if isinstance(error, sqlite3.IntegrityError):
+                            msg = str(error)
+                            if "append-only" in msg:
+                                raise IntentAppendOnlyViolationError(msg) from error
+                            if (
+                                "UNIQUE constraint failed" in msg
+                                or "PRIMARY KEY" in msg
+                            ):
+                                raise DuplicateIntentRecordError(msg) from error
+                            raise ExecutionJournalError(msg) from error
+                        raise
+                finally:
+                    active_error = sys.exception()
+                    try:
+                        cursor.close()
+                    except BaseException as close_error:
+                        if active_error is None:
+                            raise
+                        active_error.add_note(f"cursor close failed: {close_error}")
+            finally:
+                self._transaction_active = False
 
     def _init_schema(self) -> None:
         conn = self._ensure_connected()
@@ -322,10 +353,17 @@ class PersistentOrderIntentJournal:
             return attempt_id, intent
 
     def close(self) -> None:
-        """Close database connection."""
-        if self._connection is not None:
-            self._connection.close()
-            self._connection = None
+        """Close the connection, retrying a failed close even if quarantined."""
+        with self._connection_lock:
+            if self._transaction_active:
+                raise ExecutionJournalError("cannot close during a journal transaction")
+            if self._connection is not None:
+                try:
+                    self._connection.close()
+                except BaseException:
+                    self._quarantined = True
+                    raise
+                self._connection = None
 
     def record_intent(self, intent: OrderIntentV1) -> None:
         """Record an outbound order intent."""
