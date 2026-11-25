@@ -83,13 +83,18 @@ priority: p0, then p1, then p2. Several p0 issues may be eligible together.
 That is a candidate set, not a chain. Do not invent a blocker to force a
 preferred order.
 
+The table below is a historical initial-bootstrap snapshot. Check GitHub for
+current issue, branch and activation state; a deferred or closed issue does not
+by itself imply acceptance or activation.
+
 | Workstream | Entry gate | Eligible executable issues once that gate is open | Resume selects |
 |---|---|---|---|
 | kanuj | #387 (triage) / [ADR 0017](../../adr/0017-transfer-scientific-experiment-ownership-to-kanuj.md) migration receipts (experiments) | For triage: #393 is the design issue; #381 stays blocked until accepted #393 and #394 revisions are named. For scientific experiments: each issue requires its own verified migration receipt. Priority selects #392 first, followed by #382 and #397; #377 is independently required before G3 freeze; #383 retains seven substantive native blockers. | For triage: #393 (branch `kanuj/393-triage-design`). For scientific experiments: #392 first (branch `kanuj/392-experiment-contract`), then #382 and #397. |
 | krish | #388 | #375. It is not blocked by #369 or #370. | #375, the only Krish p0 design issue on this gate. Branch `krish/375-k-contract`. |
 | matthew | #389 | #376, #378, #379, #380 and #394, all p0. #376 is older than #394. | #376 first. Do not write a second triage envelope in #376. #394 is the only envelope definition and remains an independent later claim. Branch for the selected issue is `matthew/<issue>-<slug>` from that issue. |
 
-The common routing gate for initial bootstrap was #386. #369 is the tracker.
+The common routing gate for initial bootstrap was #386. #369 was the tracker;
+it was closed NOT_PLANNED, not as successful activation.
 Harsha activation issue #390 is superseded by
 [ADR 0017](../../adr/0017-transfer-scientific-experiment-ownership-to-kanuj.md)
 and authenticated per-issue migration receipts.
