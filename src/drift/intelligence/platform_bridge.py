@@ -14,12 +14,13 @@ execution request wrappers under DP-R2, DP-R5, and research acceptance criteria:
 """
 
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Context, Decimal, InvalidOperation
 from typing import Any, Literal
 from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import Field, model_validator
 
+from drift.intelligence._exact_decimal import weight_sum
 from drift.intelligence.contracts import (
     ArtifactReference,
     ImmutableModel,
@@ -107,7 +108,7 @@ class PlatformExecutionRequest(ImmutableModel):
             raise ValueError("DUPLICATE_PLATFORM_TARGET")
         try:
             amounts = [
-                Decimal(self.cash_weight),
+                Decimal(self.cash_weight, context=Context(traps=[InvalidOperation])),
                 *(Decimal(target.weight) for target in self.target_allocations),
             ]
         except (InvalidOperation, TypeError) as error:
@@ -124,7 +125,7 @@ class PlatformExecutionRequest(ImmutableModel):
                 not value.is_finite() or not Decimal("0") <= value <= Decimal("1")
                 for value in amounts
             )
-            or sum(amounts, Decimal("0")) != Decimal("1")
+            or weight_sum(texts) != Decimal("1")
         ):
             raise ValueError("INVALID_PLATFORM_TARGET_WEIGHTS")
         return self
@@ -483,7 +484,8 @@ def bridge_candidate_to_execution(
                 amount.is_finite() and Decimal("0") <= amount <= Decimal("1")
                 for amount in target_amounts
             )
-            and sum(target_amounts, cash_amount) == Decimal("1")
+            and weight_sum([cash_text, *(t.weight for t in candidate.targets)])
+            == Decimal("1")
         )
     except InvalidOperation, TypeError:
         allocation_valid = False

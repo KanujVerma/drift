@@ -13,12 +13,13 @@ Implements Slice K5 review and adaptation scheduling logic under D04, D05, DP-R2
 
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Context, Decimal, InvalidOperation
 from typing import Any, Literal
 from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import Field, field_validator, model_validator
 
+from drift.intelligence._exact_decimal import compare_sum_to_one, weight_sum
 from drift.intelligence.contracts import (
     ArtifactReference,
     ImmutableModel,
@@ -538,17 +539,17 @@ def validate_defensive_policy(
         if not security or not isinstance(text, str) or text.strip() != text:
             return False, "UNKNOWN_CURRENT_POSITION: malformed current security"
         try:
-            weight = Decimal(text)
+            weight = Decimal(text, context=Context(traps=[InvalidOperation]))
         except InvalidOperation, TypeError:
             return False, "UNKNOWN_CURRENT_POSITION: invalid current weight"
         if not weight.is_finite() or weight < Decimal("0") or weight > Decimal("1"):
             return False, "UNKNOWN_CURRENT_POSITION: invalid current weight"
         current[security] = weight
-    if sum(current.values(), Decimal("0")) > Decimal("1"):
+    if compare_sum_to_one(current.values()) > 0:
         return False, "UNKNOWN_CURRENT_POSITION: inconsistent current totals"
 
     seen: set[str] = set()
-    proposed_sum = Decimal("0")
+    proposed_weights: list[str] = []
     for supplied in proposed_targets:
         try:
             target = TargetWeight.model_validate(supplied.model_dump(mode="python"))
@@ -566,13 +567,13 @@ def validate_defensive_policy(
             return False, "DEFENSIVE_POLICY_VIOLATION: invalid target"
         if not weight.is_finite() or not Decimal("0") <= weight <= Decimal("1"):
             return False, "DEFENSIVE_POLICY_VIOLATION: invalid target"
-        proposed_sum += weight
+        proposed_weights.append(target.weight)
         if weight > current[security]:
             return (
                 False,
                 f"DEFENSIVE_POLICY_VIOLATION: target weight {weight} for "
                 f"{security} exceeds current weight {current[security]}",
             )
-    if proposed_sum > Decimal("1"):
+    if weight_sum(proposed_weights) > Decimal("1"):
         return False, "DEFENSIVE_POLICY_VIOLATION: overallocated targets"
     return True, None

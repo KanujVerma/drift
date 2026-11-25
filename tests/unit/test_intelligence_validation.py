@@ -6,6 +6,7 @@ and exact RED/GREEN semantic and tamper rejection specified in research.md.
 
 import json
 from datetime import datetime
+from decimal import Context, Inexact, Rounded, localcontext
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ import pytest
 
 from drift.intelligence.contracts import (
     ArtifactReference,
+    RawChoice,
     ResearchContext,
     StrategySelection,
     TrustedInvocationBinding,
@@ -135,6 +137,43 @@ def test_positive_candidate_validation_matches_f02(
     assert result.candidate.record_hash == f02["record_hash"]
 
 
+@pytest.mark.parametrize("trap", [False, True])
+def test_weight_admission_is_exact_under_small_context(
+    fixture_data: dict[str, Any],
+    resolved_dependencies: ResolvedDependencies,
+    trusted_invocation: TrustedInvocationBinding,
+    trap: bool,
+) -> None:
+    raw = json.loads(json.dumps(fixture_data["raw_choice"]))
+    raw["targets"][0]["weight"] = "0.29999999999999999999"
+    digest = content_hash(RawChoice.model_validate(raw).model_dump(mode="python"))
+    ref = trusted_invocation.raw_output_ref.model_copy(update={"sha256": digest})
+    binding = trusted_invocation.model_copy(update={"raw_output_ref": ref})
+    with localcontext(Context(prec=9, traps=[Inexact, Rounded] if trap else [])):
+        result = validate_candidate(
+            raw_choice=raw,
+            context=ResearchContext.model_validate(fixture_data["fixtures"]["F01"]),
+            resolved_dependencies=resolved_dependencies,
+            trusted_invocation=binding,
+        )
+    assert result.status == "INVALID"
+    assert result.candidate is None
+    assert "weights sum to" in result.reason
+
+
+@pytest.mark.parametrize("trap", [False, True])
+def test_retained_weight_sum_is_exact_under_small_context(
+    fixture_data: dict[str, Any], trap: bool
+) -> None:
+    payload = json.loads(json.dumps(fixture_data["fixtures"]["F02"]))
+    payload["targets"][0]["weight"] = "0.29999999999999999999"
+    payload["record_hash"] = compute_record_hash(payload)
+    with localcontext(Context(prec=9, traps=[Inexact, Rounded] if trap else [])):
+        with pytest.raises(ValueError) as exc:
+            validate_retained_record(payload, expected_kind="candidate")
+    assert str(exc.value) == "invalid: weights sum to 0.99999999999999999999"
+
+
 def test_positive_abstention_validation_matches_f03(
     fixture_data: dict[str, Any],
     resolved_dependencies: ResolvedDependencies,
@@ -211,6 +250,39 @@ def apply_mutation(
     if rehash:
         data["record_hash"] = compute_record_hash(data)
     return data
+
+
+def test_n01_exact_original_diagnostic_and_precedence(
+    fixture_data: dict[str, Any],
+) -> None:
+    case = next(c for c in fixture_data["negative_cases"] if c["case"] == "N01")
+    mutated = apply_mutation(
+        base=fixture_data["fixtures"][case["base"]],
+        replace=case.get("replace"),
+        remove=case.get("remove"),
+    )
+    assert case["expected"] == "invalid: weights sum to 0.9"
+    for add_other_failure in (False, True):
+        payload = json.loads(json.dumps(mutated))
+        if add_other_failure:
+            payload["strategy"]["parameters"]["other_failure"] = True
+            payload["record_hash"] = compute_record_hash(payload)
+        with localcontext(Context(prec=9, traps=[Inexact, Rounded])):
+            with pytest.raises(ValueError) as exc:
+                validate_retained_record(payload, expected_kind="candidate")
+        assert str(exc.value) == case["expected"]
+
+
+def test_nonfinite_weight_diagnostic_precedes_strategy_rejection(
+    fixture_data: dict[str, Any],
+) -> None:
+    payload = json.loads(json.dumps(fixture_data["fixtures"]["F02"]))
+    payload["cash_weight"] = "NaN"
+    payload["strategy"]["parameters"]["other_failure"] = True
+    payload["record_hash"] = compute_record_hash(payload)
+    with pytest.raises(ValueError) as exc:
+        validate_retained_record(payload, expected_kind="candidate")
+    assert str(exc.value) == "invalid: weights sum to NaN"
 
 
 @pytest.mark.parametrize("case_index", range(12))

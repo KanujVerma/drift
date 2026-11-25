@@ -12,6 +12,7 @@ from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
 from drift.errors import CanonicalSerializationError
+from drift.intelligence._exact_decimal import within_selector_band
 from drift.intelligence.contracts import (
     ArtifactReference,
     ImmutableModel,
@@ -259,7 +260,12 @@ def select_conventional_candidate(
             except Exception:  # noqa: BLE001 - callback cannot pick a winner
                 score_error = "OBJECTIVE_EVALUATION_FAILED"
                 break
-            if not isinstance(score_num, Decimal) or not score_num.is_finite():
+            if not isinstance(score_num, Decimal):
+                score_error = "INVALID_OBJECTIVE_SCORE"
+                break
+            # Do not invoke overridden arithmetic or predicates on subclasses.
+            score_num = Decimal(score_num)
+            if not score_num.is_finite():
                 score_error = "INVALID_OBJECTIVE_SCORE"
                 break
             scores_dict[candidate.candidate_id] = str(score_num)
@@ -301,9 +307,10 @@ def select_conventional_candidate(
     # DP-R6: scores within the frozen 1e-9 equivalence band tie, even when
     # their raw Decimal values differ. Resolve ties without pool-order bias.
     max_score = max(entry[0] for entry in evaluated_candidates)
-    tolerance = Decimal("0.000000001")
     near_maximum = [
-        entry for entry in evaluated_candidates if max_score - entry[0] <= tolerance
+        entry
+        for entry in evaluated_candidates
+        if within_selector_band(max_score, entry[0])
     ]
     winner = min(near_maximum, key=lambda entry: (entry[1], entry[2], entry[3]))[4]
 

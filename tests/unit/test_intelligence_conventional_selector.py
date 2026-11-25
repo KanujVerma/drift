@@ -7,9 +7,12 @@ Verifies acceptance criteria T07, T09, T13 from research.md and DP-R6:
 """
 
 import json
+import random
 from copy import deepcopy
 from datetime import UTC, datetime
 from decimal import (
+    MAX_EMAX,
+    MIN_ETINY,
     ROUND_HALF_EVEN,
     Context,
     Decimal,
@@ -21,11 +24,13 @@ from decimal import (
     getcontext,
     localcontext,
 )
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from drift.intelligence._exact_decimal import within_selector_band
 from drift.intelligence.contracts import (
     ArtifactReference,
     ResearchCandidate,
@@ -400,6 +405,216 @@ def test_r_invalid_objective_never_selects_a_candidate(
         assert result.status == "REJECTED"
         assert len(recorder.get_attempt_events(result.attempt_id)) == 2
         assert len(recorder.get_cost_receipts_for_attempt(result.attempt_id)) == 1
+
+
+def test_r_score_decimal_subclass_cannot_override_comparison(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+) -> None:
+    class HostileDecimal(Decimal):
+        def is_finite(self) -> bool:
+            return True
+
+        def __sub__(self, other: object) -> Decimal:
+            raise AssertionError("subclass arithmetic used")
+
+    store = ResearchReceiptStore()
+    result = select_conventional_candidate(
+        context=sample_context,
+        resolved_inputs=sample_bindings,
+        candidate_pool=[fixture_data["raw_choice"]],
+        objective_fn=lambda _: HostileDecimal("NaN"),
+        method_ref=ArtifactReference(id="synthetic:R", version="v1", sha256="e" * 64),
+        validation_policy=ArtifactReference(
+            id="synthetic:policy", version="v1", sha256="f" * 64
+        ),
+        recorder=store,
+        attempt_id="synthetic:hostile-decimal",
+    )
+    assert result.status == "REJECTED"
+    assert result.reason == "INVALID_OBJECTIVE_SCORE"
+    assert [event.status for event in store.get_attempt_events(result.attempt_id)] == [
+        "started",
+        "rejected",
+    ]
+
+
+def test_r_finite_decimal_subclass_is_normalized_before_use(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+) -> None:
+    class HostileDecimal(Decimal):
+        def __str__(self) -> str:
+            raise AssertionError("subclass string conversion used")
+
+        def __sub__(self, other: object) -> Decimal:
+            raise AssertionError("subclass arithmetic used")
+
+        def is_finite(self) -> bool:
+            raise AssertionError("subclass predicate used")
+
+    store = ResearchReceiptStore()
+    result = select_conventional_candidate(
+        context=sample_context,
+        resolved_inputs=sample_bindings,
+        candidate_pool=[fixture_data["raw_choice"]],
+        objective_fn=lambda _: HostileDecimal("1"),
+        method_ref=ArtifactReference(id="synthetic:R", version="v1", sha256="e" * 64),
+        validation_policy=ArtifactReference(id="policy", version="v1", sha256="f" * 64),
+        recorder=store,
+        attempt_id="synthetic:hostile-finite-decimal",
+    )
+    assert result.is_success
+    assert list(result.candidate_scores.values()) == ["1"]
+
+
+def test_exact_band_matches_fraction_oracle() -> None:
+    rng = random.Random(469)
+    tolerance = Fraction(1, 10**9)
+    for _ in range(5000):
+        a = Decimal(
+            (
+                rng.randrange(2),
+                tuple(map(int, str(rng.randrange(10**12)))),
+                rng.randrange(-25, 10),
+            )
+        )
+        b = Decimal(
+            (
+                rng.randrange(2),
+                tuple(map(int, str(rng.randrange(10**12)))),
+                rng.randrange(-25, 10),
+            )
+        )
+        maximum, score = max(a, b), min(a, b)
+        assert within_selector_band(maximum, score) == (
+            Fraction(maximum) - Fraction(score) <= tolerance
+        )
+    for _ in range(5000):
+        base = rng.randrange(-100000, 100000)
+        delta = rng.randrange(-10000, 10001)
+        maximum = Decimal((int(base < 0), tuple(map(int, str(abs(base)))), -5))
+        # Construct the exact lower value using integer arithmetic at 1e-14.
+        low_units = base * 10**9 - (100000 + delta)
+        score = Decimal((int(low_units < 0), tuple(map(int, str(abs(low_units)))), -14))
+        assert within_selector_band(maximum, score) == (
+            Fraction(maximum) - Fraction(score) <= tolerance
+        )
+
+
+@pytest.mark.parametrize(
+    ("maximum", "score", "expected"),
+    [
+        ("1e-9", "-1e-999999999", False),
+        ("1e-9", "-0", True),
+        ("0", "-1e-999999999", True),
+        ("1e999999999", "-1e999999999", False),
+        (f"9e{MAX_EMAX}", f"-9e{MAX_EMAX}", False),
+        ("0", f"-1e{MIN_ETINY}", True),
+        ("0", "-0", True),
+    ],
+)
+def test_exact_band_extreme_exponents_and_flags(
+    maximum: str, score: str, expected: bool
+) -> None:
+    context = Context(
+        prec=1, Emin=-3, Emax=3, flags=[Rounded], traps=[Inexact, Rounded]
+    )
+    with localcontext(context) as active:
+        before = active.copy()
+        assert within_selector_band(Decimal(maximum), Decimal(score)) is expected
+        assert active.flags == before.flags
+        assert active.traps == before.traps
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_r_invalid_exact_weight_refuses_whole_pool_before_scoring(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+    reverse: bool,
+) -> None:
+    good = deepcopy(fixture_data["raw_choice"])
+    bad = deepcopy(good)
+    bad["targets"][0]["weight"] = "0.29999999999999999999"
+    pool = [bad, good] if reverse else [good, bad]
+    seen: list[str] = []
+    store = ResearchReceiptStore()
+
+    def score(candidate: ResearchCandidate) -> Decimal:
+        seen.append(candidate.candidate_id)
+        return Decimal(1)
+
+    with localcontext(Context(prec=9, traps=[Inexact, Rounded])) as active:
+        before = active.copy()
+        result = select_conventional_candidate(
+            context=sample_context,
+            resolved_inputs=sample_bindings,
+            candidate_pool=pool,
+            objective_fn=score,
+            method_ref=ArtifactReference(
+                id="synthetic:R", version="v1", sha256="e" * 64
+            ),
+            validation_policy=ArtifactReference(
+                id="policy", version="v1", sha256="f" * 64
+            ),
+            recorder=store,
+            attempt_id="synthetic:exact-weight-refusal",
+        )
+        assert active.flags == before.flags
+    assert result.reason == "INVALID_CANDIDATE_POOL_MEMBER"
+    assert result.selected_candidate is None and result.candidate_scores == {}
+    assert seen == []
+    events = store.get_attempt_events(result.attempt_id)
+    assert [event.status for event in events] == ["started", "rejected"]
+    costs = store.get_cost_receipts_for_attempt(result.attempt_id)
+    assert len(costs) == 1 and events[-1].cost_receipt_ids == (costs[0].receipt_id,)
+
+
+def test_r_callback_context_changes_do_not_change_band_comparison(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+) -> None:
+    choices = [deepcopy(fixture_data["raw_choice"]) for _ in range(2)]
+    choices[0]["rationale"] = "higher"
+    choices[1]["rationale"] = "lower"
+    store = ResearchReceiptStore()
+
+    def score(candidate: ResearchCandidate) -> Decimal:
+        getcontext().prec = 1
+        getcontext().traps[Inexact] = True
+        return (
+            Decimal("1")
+            if candidate.rationale == "higher"
+            else Decimal("0.99999999899999999999")
+        )
+
+    with localcontext(Context(prec=28)) as active:
+        result = select_conventional_candidate(
+            context=sample_context,
+            resolved_inputs=sample_bindings,
+            candidate_pool=choices,
+            objective_fn=score,
+            method_ref=ArtifactReference(
+                id="synthetic:R", version="v1", sha256="e" * 64
+            ),
+            validation_policy=ArtifactReference(
+                id="policy", version="v1", sha256="f" * 64
+            ),
+            recorder=store,
+            attempt_id="synthetic:context-changing-callback",
+        )
+        # The selector isolates its own arithmetic; it does not sandbox callbacks.
+        assert active.prec == 1 and active.traps[Inexact]
+    assert result.selected_candidate is not None
+    assert result.selected_candidate.rationale == "higher"
+    assert [event.status for event in store.get_attempt_events(result.attempt_id)] == [
+        "started",
+        "completed",
+    ]
 
 
 def test_conventional_pool_rejects_semantically_duplicate_optional_fields(
@@ -801,6 +1016,85 @@ def _assert_r_nonzero_score_gaps(
             )
             assert result.candidate_scores[score_winner.candidate_id] == "1"
             assert result.selected_candidate.candidate_id == expected.candidate_id
+
+
+@pytest.mark.parametrize("precision", [9, 28])
+@pytest.mark.parametrize("reverse_pool", [False, True])
+@pytest.mark.parametrize(
+    ("lower_score", "expected_number"),
+    [
+        (Decimal("0.999999999"), 1),
+        (Decimal("0.9999999989999999999999"), 0),
+    ],
+    ids=["inclusive-boundary", "just-outside"],
+)
+def test_r_tie_boundary_is_independent_of_decimal_precision(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+    precision: int,
+    reverse_pool: bool,
+    lower_score: Decimal,
+    expected_number: int,
+) -> None:
+    """Compare exact scores against the inclusive band from the maximum."""
+    registration = sample_bindings.strategy_registry["fixture.equal_weight"]
+    resolved = sample_bindings.model_copy(
+        update={
+            "strategy_registry": {
+                "fixture.equal_weight": registration.model_copy(
+                    update={"allowed_parameters": {"choice_number": int}}
+                )
+            }
+        }
+    )
+    choices = []
+    for number in (0, 1):
+        choice = deepcopy(fixture_data["raw_choice"])
+        choice["selection"]["parameters"] = {"choice_number": number}
+        choices.append(choice)
+    if reverse_pool:
+        choices.reverse()
+
+    seen: dict[int, ResearchCandidate] = {}
+
+    def score(candidate: ResearchCandidate) -> Decimal:
+        assert candidate.strategy is not None
+        number = candidate.strategy.parameters["choice_number"]
+        seen[number] = candidate
+        return lower_score if number == 1 else Decimal("1")
+
+    recorder = ResearchReceiptStore()
+    with localcontext(Context(prec=precision, rounding=ROUND_HALF_EVEN, traps=[])):
+        result = select_conventional_candidate(
+            context=sample_context,
+            resolved_inputs=resolved,
+            candidate_pool=choices,
+            objective_fn=score,
+            method_ref=ArtifactReference(
+                id="synthetic:method-R", version="v1", sha256="e" * 64
+            ),
+            validation_policy=ArtifactReference(
+                id="synthetic:policy", version="v1", sha256="f" * 64
+            ),
+            recorder=recorder,
+            checked_at=datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
+        )
+
+    assert result.is_success and result.selected_candidate is not None, result.reason
+    assert set(seen) == {0, 1}
+    assert seen[0].strategy is not None and seen[1].strategy is not None
+    # Hash order favors the lower score, so a false tie changes the winner.
+    assert seen[1].strategy.parameters_hash < seen[0].strategy.parameters_hash
+    assert result.candidate_scores[seen[0].candidate_id] == "1"
+    assert result.candidate_scores[seen[1].candidate_id] == str(lower_score)
+    events = recorder.get_attempt_events(result.attempt_id)
+    assert [event.status for event in events] == ["started", "completed"]
+    assert events[-1].candidate_ref is not None
+    assert events[-1].candidate_ref.id == result.selected_candidate.candidate_id
+    costs = recorder.get_cost_receipts_for_attempt(result.attempt_id)
+    assert len(costs) == 1 and costs[0].amount_basis == "verified_zero"
+    assert result.selected_candidate.candidate_id == seen[expected_number].candidate_id
 
 
 def test_r_attempts_bind_policy_request_and_context_profile(
