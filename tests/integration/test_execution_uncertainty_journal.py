@@ -15,6 +15,10 @@ from drift.domain.execution import (
     build_execution_report,
     build_order_intent,
 )
+from drift.domain.execution_observation import (
+    SyntheticBrokerFactV2,
+    build_synthetic_observation,
+)
 from drift.domain.sessions import SessionKeyV1
 from drift.execution.journal import (
     DuplicateIntentRecordError,
@@ -116,14 +120,183 @@ def test_transient_sqlite_databases_refuse_synthetic_reservations(db_path: str) 
     journal.close()
 
 
-def test_weak_sqlite_sync_refuses_reservation(tmp_path: Path) -> None:
+@pytest.mark.parametrize("level", ["OFF", "NORMAL"])
+def test_weak_sqlite_sync_refuses_reservation(tmp_path: Path, level: str) -> None:
     journal = PersistentOrderIntentJournal(tmp_path / "synthetic.sqlite")
-    journal.connection.execute("PRAGMA synchronous = OFF")
+    journal.connection.execute(f"PRAGMA synchronous = {level}")
     with pytest.raises(ExecutionJournalError, match="durable sync"):
         journal.record_synthetic_potential_send(
             "synthetic-account-1", _intent("synthetic-token"), attempt_id=uuid7()
         )
     assert journal.get_synthetic_potential_send("synthetic-account-1") is None
+    journal.close()
+
+
+@pytest.mark.parametrize("mode", ["OFF", "MEMORY", "DELETE"])
+def test_unsupported_journal_mode_refuses_reservation(
+    tmp_path: Path, mode: str
+) -> None:
+    journal = PersistentOrderIntentJournal(tmp_path / "synthetic.sqlite")
+    actual_mode = journal.connection.execute(
+        f"PRAGMA journal_mode = {mode}"
+    ).fetchone()[0]
+    assert actual_mode == mode.lower()
+    with pytest.raises(ExecutionJournalError, match="WAL"):
+        journal.record_synthetic_potential_send(
+            "synthetic-account-1", _intent("synthetic-token"), attempt_id=uuid7()
+        )
+    assert journal.get_synthetic_potential_send("synthetic-account-1") is None
+    journal.close()
+
+
+def test_durability_pragmas_are_checked_inside_the_reservation_transaction(
+    tmp_path: Path,
+) -> None:
+    journal = PersistentOrderIntentJournal(tmp_path / "synthetic.sqlite")
+    assert journal.connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    assert journal.connection.execute("PRAGMA synchronous").fetchone()[0] >= 2
+    trace: list[str] = []
+    journal.connection.set_trace_callback(trace.append)
+    journal.record_synthetic_potential_send(
+        "synthetic-account-1", _intent("synthetic-token"), attempt_id=uuid7()
+    )
+    journal.connection.set_trace_callback(None)
+    statements = [item.upper().strip() for item in trace]
+    begin = statements.index("BEGIN IMMEDIATE")
+    mode = statements.index("PRAGMA JOURNAL_MODE")
+    sync = statements.index("PRAGMA SYNCHRONOUS")
+    insert = next(i for i, stmt in enumerate(statements) if stmt.startswith("INSERT"))
+    commit = statements.index("COMMIT")
+    assert begin < mode < insert < commit
+    assert begin < sync < insert
+    journal.close()
+
+
+@pytest.mark.parametrize("interruption", [KeyboardInterrupt, SystemExit])
+def test_interrupted_transaction_is_rolled_back(
+    tmp_path: Path, interruption: type[BaseException]
+) -> None:
+    journal = PersistentOrderIntentJournal(tmp_path / "synthetic.sqlite")
+    with pytest.raises(interruption, match="synthetic interrupt"):
+        with journal._transaction() as cursor:
+            cursor.execute(
+                """INSERT INTO synthetic_potential_sends_v1
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                ("synthetic-account-1", str(uuid7()), str(uuid7()), "t", "h", "{}"),
+            )
+            raise interruption("synthetic interrupt")
+    assert not journal.connection.in_transaction
+    assert journal.get_synthetic_potential_send("synthetic-account-1") is None
+    journal.close()
+
+
+def test_sqlite_automatic_rollback_keeps_original_trigger_error(tmp_path: Path) -> None:
+    journal = PersistentOrderIntentJournal(tmp_path / "synthetic.sqlite")
+    journal.connection.executescript(
+        """CREATE TRIGGER synthetic_rollback BEFORE INSERT
+           ON synthetic_potential_sends_v1 BEGIN
+           SELECT RAISE(ROLLBACK, 'original trigger error'); END;"""
+    )
+    with pytest.raises(ExecutionJournalError, match="original trigger error") as caught:
+        journal.record_synthetic_potential_send(
+            "synthetic-account-1", _intent("synthetic-token"), attempt_id=uuid7()
+        )
+    assert isinstance(caught.value.__cause__, sqlite3.IntegrityError)
+    assert not journal.connection.in_transaction
+    assert journal.get_synthetic_potential_send("synthetic-account-1") is None
+    journal.close()
+
+
+def test_failed_rollback_quarantines_connection_without_masking_error(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "synthetic.sqlite"
+    journal = PersistentOrderIntentJournal(db)
+    conn = journal.connection
+
+    def deny_rollback(
+        action: int,
+        arg1: str | None,
+        arg2: str | None,
+        db_name: str | None,
+        source: str | None,
+    ) -> int:
+        if action == sqlite3.SQLITE_TRANSACTION and arg1 == "ROLLBACK":
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    conn.set_authorizer(deny_rollback)
+    with pytest.raises(KeyboardInterrupt, match="original interruption") as caught:
+        with journal._transaction() as cursor:
+            cursor.execute(
+                """INSERT INTO synthetic_potential_sends_v1
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                ("synthetic-account-1", str(uuid7()), str(uuid7()), "t", "h", "{}"),
+            )
+            raise KeyboardInterrupt("original interruption")
+    assert any("rollback failed" in note for note in caught.value.__notes__)
+    journal.close()
+    with pytest.raises(ExecutionJournalError, match="quarantin"):
+        journal.get_synthetic_potential_send("synthetic-account-1")
+    with pytest.raises(sqlite3.ProgrammingError):
+        conn.execute("SELECT 1")
+    reopened = PersistentOrderIntentJournal(db)
+    assert reopened.get_synthetic_potential_send("synthetic-account-1") is None
+    reopened.close()
+
+
+def test_rollback_failure_preserves_original_sqlite_error(tmp_path: Path) -> None:
+    journal = PersistentOrderIntentJournal(tmp_path / "synthetic.sqlite")
+    conn = journal.connection
+    conn.executescript(
+        """CREATE TRIGGER synthetic_abort BEFORE INSERT
+           ON synthetic_potential_sends_v1 BEGIN
+           SELECT RAISE(ABORT, 'original synthetic failure'); END;"""
+    )
+
+    def deny_rollback(
+        action: int,
+        arg1: str | None,
+        arg2: str | None,
+        db_name: str | None,
+        source: str | None,
+    ) -> int:
+        if action == sqlite3.SQLITE_TRANSACTION and arg1 == "ROLLBACK":
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    conn.set_authorizer(deny_rollback)
+    with pytest.raises(
+        sqlite3.IntegrityError, match="original synthetic failure"
+    ) as exc:
+        journal.record_synthetic_potential_send(
+            "synthetic-account-1", _intent("synthetic-token"), attempt_id=uuid7()
+        )
+    assert any("rollback failed" in note for note in exc.value.__notes__)
+    with pytest.raises(ExecutionJournalError, match="quarantin"):
+        _ = journal.connection
+
+
+def test_legacy_write_auto_rollback_preserves_trigger_error(tmp_path: Path) -> None:
+    journal = PersistentOrderIntentJournal(tmp_path / "synthetic.sqlite")
+    journal.connection.executescript(
+        """CREATE TRIGGER legacy_rollback BEFORE INSERT ON order_intents BEGIN
+           SELECT RAISE(ROLLBACK, 'legacy trigger error'); END;"""
+    )
+    with pytest.raises(ExecutionJournalError, match="legacy trigger error") as caught:
+        journal.record_intent(_intent("legacy-token"))
+    assert isinstance(caught.value.__cause__, sqlite3.IntegrityError)
+    assert not journal.connection.in_transaction
+    journal.close()
+
+
+def test_preexisting_transaction_is_not_rolled_back_by_journal(tmp_path: Path) -> None:
+    journal = PersistentOrderIntentJournal(tmp_path / "synthetic.sqlite")
+    journal.connection.execute("BEGIN IMMEDIATE")
+    with pytest.raises(ExecutionJournalError, match="already in transaction"):
+        journal.get_synthetic_potential_send("synthetic-account-1")
+    assert journal.connection.in_transaction
+    journal.connection.rollback()
     journal.close()
 
 
@@ -150,6 +323,65 @@ def test_duplicate_and_fresh_intents_refused_without_overwriting(
         intent,
     )
     journal.close()
+
+
+def test_conflicting_and_not_sent_fixture_claims_do_not_release_reservation(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "synthetic.sqlite"
+    journal = PersistentOrderIntentJournal(db)
+    intent, attempt_id = _intent("synthetic-token"), uuid7()
+    journal.record_synthetic_potential_send(
+        "synthetic-account-1", intent, attempt_id=attempt_id
+    )
+    common: dict[str, Any] = dict(
+        attempt_id=attempt_id,
+        intent_id=intent.intent_id,
+        intent_hash=intent.intent_hash,
+        account_key="synthetic-account-1",
+        observed_at=datetime(2026, 3, 1, tzinfo=UTC),
+    )
+    confirmed = build_synthetic_observation(
+        observation_id=uuid7(),
+        knowledge="CONFIRMED",
+        reason_code=None,
+        broker_fact=SyntheticBrokerFactV2(status="filled", cumulative_quantity=1),
+        **common,
+    )
+    conflicting = build_synthetic_observation(
+        observation_id=uuid7(),
+        knowledge="CONFIRMED",
+        reason_code=None,
+        broker_fact=SyntheticBrokerFactV2(status="rejected"),
+        **common,
+    )
+    not_sent = build_synthetic_observation(
+        observation_id=uuid7(),
+        knowledge="NOT_SENT",
+        reason_code="authorization_refused",
+        **common,
+    )
+    assert (
+        len(
+            {
+                confirmed.observation_hash,
+                conflicting.observation_hash,
+                not_sent.observation_hash,
+            }
+        )
+        == 3
+    )
+    journal.close()
+    reopened = PersistentOrderIntentJournal(db)
+    assert reopened.get_synthetic_potential_send("synthetic-account-1") == (
+        attempt_id,
+        intent,
+    )
+    with pytest.raises(DuplicateIntentRecordError):
+        reopened.record_synthetic_potential_send(
+            "synthetic-account-1", _intent("fresh-token"), attempt_id=uuid7()
+        )
+    reopened.close()
 
 
 def test_fake_send_sees_committed_intent_and_marker_on_other_connection(
