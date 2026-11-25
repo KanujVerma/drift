@@ -35,8 +35,8 @@ and ambiguous timeout classification) remain open.
 
 - **S1 (Partially Remediated)**: Configured orchestrator risk enforcement works. When `CanaryExecutionOrchestrator` is configured with a `HardRiskGatekeeper`, non-compliant order intents are evaluated and rejected pre-trade. However, direct-router bypass (`BrokerNeutralExecutionRouter.route_intent`) and optional missing gatekeepers (`risk_gatekeeper: HardRiskGatekeeper | None = None`) remain unresolved.
 - **S2 (Remediated - Bounded)**: Original `OrderIntentV1` compatibility issue addressed. `HardRiskGatekeeper.evaluate_order` accepts `OrderIntentV1` and evaluates quantitative limits without raising `AttributeError`. This addresses contract mismatch but does not prove universal execution risk enforcement across all entry points.
-- **S3 (Partially Remediated)**: Original unconditional false-CANCELED behavior addressed. `RobinhoodAgenticAdapter.cancel_intent` no longer unconditionally reports `CANCELED` upon transport failure, preserving the `cancellation_failed` reason. However, uncertain broker status after a cancellation failure remains a limitation; falling back to `REJECTED` does not establish that the broker order ceased to exist.
-- **S4 (Unresolved)**: Client-token reconciliation was introduced to query existing orders after submission timeouts, but unconfirmed submission timeouts still fall back to `REJECTED`. This ambiguous terminal state leaves open double-execution hazards.
+- **S3 (Partially Remediated)**: The adapter now raises `ExecutionOutcomeUnknown` instead of returning a terminal report when cancellation is unconfirmed. The exception is not a durable hold or broker reconciliation.
+- **S4 (Unresolved)**: The adapter no longer translates an unconfirmed submission or unrecognized status into a V1 `REJECTED` report. Its exception and same-instance marker do not survive restart, hold an account, or integrate the router and consumers; double-execution hazards remain.
 - **S5 (Remediated - Bounded)**: Original fabricated-UUID crash addressed through unmapped-position quarantine. Unmapped ticker symbols are filtered and tracked in `adapter.quarantined_symbols` rather than synthesizing invalid UUIDs that fail UUIDv7 validation. This quarantine isolates untracked assets from Drift accounting but does not constitute complete identity or portfolio-state authentication.
 
 ---
@@ -108,21 +108,21 @@ and ambiguous timeout classification) remain open.
 - **Status**: **PARTIALLY REMEDIATED** (Original unconditional false-CANCELED behavior addressed; uncertain broker status after a cancellation failure remains a limitation)
 - **Blocker Status**: **ABSOLUTE LIVE TRADING BLOCKER**
 - **Defect Reproduction and Regression Tests**:
-  - Error preservation regression: `tests/unit/test_execution_safety_audit.py::test_s3_cancellation_error_not_swallowed_and_preserves_failure_reason`
+  - Error-boundary regression: `tests/unit/test_execution_safety_audit.py::test_s3_cancellation_error_raises_unknown_without_raw_detail`
   - Safe-behavior regression: `tests/unit/test_execution_safety_audit.py::test_s3_safe_behavior_cancellation_error_fails_closed`
   - Robinhood unit test: `tests/unit/test_execution_safety_robinhood.py::test_s3_cancel_failure_does_not_falsely_emit_canceled`
 - **Exact File and Symbol**:
   - `src/drift/adapters/robinhood/adapter.py`: `RobinhoodAgenticAdapter.cancel_intent`
 - **Audit Findings and State Reconciliation**:
   - PR #364 modified `RobinhoodAgenticAdapter.cancel_intent` so that transport exceptions (`RobinhoodMcpError`) are no longer silently swallowed to emit `ExecutionStatus.CANCELED`.
-  - When cancellation fails, the adapter queries `get_intent_status` or retains existing status with `rejection_reason=f"cancellation_failed: {exc}"`.
-  - Limitation: If broker status cannot be determined (e.g. no prior cached report and status query unavailable), the adapter falls back to `ExecutionStatus.REJECTED`. Emitting `REJECTED` or failing to cancel does not establish that the broker order stopped existing. Uncertain cancellation states remain an unresolved risk limitation under Decision Packet 2.
+  - The former implementation could return cached status, including a misleading terminal status, with `cancellation_failed` after a failed call. The current adapter instead raises `ExecutionOutcomeUnknown` without returning a current V1 report or exposing the raw transport error. A cancellation response must describe a matching order with canceled or filled status before the adapter returns it.
+  - Limitation: The exception and in-memory marker do not establish a durable account-wide hold, survive restart, integrate the router or reconcile broker state. Uncertain cancellation remains an unresolved risk under Decision Packet 2.
 - **Safety Invariant Violated**:
   - Truth-in-reporting invariant: an execution status report must represent actual confirmed broker state, never assumed success upon transport failure.
 - **Required Remediation**:
-  - Implement an explicit uncertain cancellation state (`CANCEL_FAILED` or `PENDING_RECONCILIATION`) rather than falling back to terminal statuses that could misrepresent open broker commitments.
+  - Integrate durable uncertain-operation and reconciliation handling across the router and consumers; an exception alone does not prevent further account-wide dispatch or prove cancellation.
 - **Impact on Existing Callers**:
-  - Callers will not erroneously assume open risk is closed when broker cancellation fails.
+  - Callers must handle `ExecutionOutcomeUnknown` and must not interpret it as cancellation or permission to retry.
 - **Persisted Schema Change Required**:
   - Whether an existing status can accurately represent cancellation uncertainty remains a contract decision. Any new `CANCEL_FAILED` or `UNKNOWN` persisted enum member requires explicit acceptance and migration review; an existing terminal status must not be assumed to establish the broker outcome.
 - **Architecture/ADR Decision Required**:
@@ -135,23 +135,23 @@ and ambiguous timeout classification) remain open.
 - **Status**: **UNRESOLVED**
 - **Blocker Status**: **ABSOLUTE LIVE TRADING BLOCKER**
 - **Defect Reproduction and Regression Tests**:
-  - Defect reproduction: `tests/unit/test_execution_safety_audit.py::test_s4_reproduce_ambiguous_submission_error_marked_as_definitive_rejection`
-  - Safe-behavior regression (strict xfail): `tests/unit/test_execution_safety_audit.py::test_s4_safe_behavior_submission_timeout_not_marked_rejected` (marked `@pytest.mark.xfail(strict=True)`)
+  - Former defect regression: `tests/unit/test_execution_safety_audit.py::test_s4_ambiguous_submission_refuses_false_rejection`
+  - Safe-behavior regression: `tests/unit/test_execution_safety_audit.py::test_s4_safe_behavior_submission_timeout_not_marked_rejected`
   - Robinhood unit test: `tests/unit/test_execution_safety_robinhood.py::test_s4_submission_timeout_without_broker_order_fails_closed`
 - **Exact File and Symbol**:
   - `src/drift/adapters/robinhood/adapter.py`: `RobinhoodAgenticAdapter.submit_intent`
 - **Audit Findings and State Reconciliation**:
   - PR #364 added client-token reconciliation (`_try_reconcile_by_client_token`) upon submission timeout.
-  - However, when client-token reconciliation does not locate an existing order (or when the reconciliation query itself fails), the adapter constructs an `ExecutionReportV1` with `status=ExecutionStatus.REJECTED`.
-  - Authoritatively marking an unconfirmed submission timeout as `REJECTED` remains a safety hazard: network timeouts do not prove non-receipt by the broker. If an automated caller treats the intent as rejected and re-submits, double-execution can occur.
+  - Previously an unsuccessful lookup produced an authoritative V1 `REJECTED` report, even though a timeout did not prove non-receipt. The current adapter raises `ExecutionOutcomeUnknown` when lookup cannot establish a matching response, and refuses unrecognized status instead of mapping it to rejection.
+  - This is an immediate adapter boundary only. Its same-instance marker is not a durable, account-wide or concurrent dispatch guard; it does not survive restart, integrate the router, authenticate broker evidence, or establish reconciliation. A fresh intent or process can still bypass it.
 - **Safety Invariant Violated**:
   - Ambiguous state must fail closed to an uncertain state requiring reconciliation, rather than resolving to a false-negative rejection.
 - **Required Remediation**:
-  - When `RobinhoodMcpError` occurs during submission and reconciliation is indeterminate, do not record terminal `ExecutionStatus.REJECTED`. Mark state as `UNKNOWN` / `AMBIGUOUS_SUBMISSION` and initiate reconciliation or trip the emergency kill switch.
+  - Add the independently reviewed durable uncertainty and reconciliation boundary across dispatch and consumers without rewriting historical reports or inventing automatic resumption authority.
 - **Impact on Existing Callers**:
-  - Protects automated callers from double-submission hazards.
+  - Callers must handle `ExecutionOutcomeUnknown`; the exception alone does not protect automated callers from double-submission hazards.
 - **Persisted Schema Change Required**:
-  - Addition of `ExecutionStatus.UNKNOWN` or `ExecutionStatus.PENDING_CONFIRMATION` to `drift.domain.execution.ExecutionStatus`.
+  - V1 remains unchanged. Any durable versioned observation and consumer migration require an accepted contract; no V1 enum extension is implied.
 - **Architecture/ADR Decision Required**:
   - Yes (see Decision Packet 2).
 
@@ -208,7 +208,7 @@ and ambiguous timeout classification) remain open.
 ### Decision Packet 2: Broker Cancellation Failure and Ambiguous Submission Protocol (S3 & S4)
 
 - **What was discovered**:
-  `RobinhoodAgenticAdapter` swallows cancellation transport errors and reports `ExecutionStatus.CANCELED`. Similarly, submission timeouts/network errors are marked as authoritative `ExecutionStatus.REJECTED`. Both behaviors present serious hazards of false-positive cancellation and double-submission.
+  The audited historical adapter reported cancellation success or authoritative `ExecutionStatus.REJECTED` on some ambiguous transport failures. The current narrow adapter boundary raises `ExecutionOutcomeUnknown` for the tested indeterminate paths, but it is not a durable hold or integrated reconciliation protocol. The underlying false-positive cancellation and double-submission hazards remain relevant.
 - **Why a decision is needed**:
   Broker transport errors represent ambiguous execution states. The system must define an authoritative reconciliation protocol rather than fabricating deterministic terminal states.
 - **Viable Options**:

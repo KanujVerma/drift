@@ -6,11 +6,14 @@ Verifies fail-closed handling for:
 - S5: Unmapped positions quarantine (prevent UUIDv7 schema crash).
 """
 
+import socket
 from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid7
+
+import pytest
 
 from drift.adapters.robinhood import (
     MockRobinhoodMcpTransport,
@@ -27,9 +30,19 @@ from drift.domain.execution import (
     build_order_intent,
 )
 from drift.domain.sessions import SessionKeyV1
+from drift.errors import DriftError
+from drift.execution.adapter import ExecutionOutcomeUnknown
 
 NOW = datetime(2026, 3, 1, 14, 30, tzinfo=UTC)
 KEY1 = SessionKeyV1(mic="XNYS", session_scope="regular", local_date=date(2026, 3, 1))
+
+
+@pytest.fixture(autouse=True)
+def _deny_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("network access forbidden in adapter tests")
+
+    monkeypatch.setattr(socket, "socket", refuse)
 
 
 def _make_intent(
@@ -84,8 +97,160 @@ class SubmissionTimeoutTransport(MockRobinhoodMcpTransport):
         return super().call_tool(tool_name, arguments)
 
 
+def test_ambiguous_submission_never_returns_rejected() -> None:
+    sec_id = uuid7()
+
+    class LostResponse(SubmissionTimeoutTransport):
+        def call_tool(
+            self, tool_name: str, arguments: Mapping[str, Any]
+        ) -> dict[str, Any]:
+            if tool_name == "robinhood_get_order_by_client_token":
+                raise RobinhoodMcpError("lookup unavailable")
+            return super().call_tool(tool_name, arguments)
+
+    transport = LostResponse(auto_fill=False)
+    adapter = RobinhoodAgenticAdapter(
+        config=RobinhoodAgenticConfigV1(account_id="fake", symbol_map={sec_id: "AAPL"}),
+        transport=transport,
+    )
+    intent = _make_intent(sec_id=sec_id)
+    with pytest.raises(DriftError, match="execution outcome unknown"):
+        adapter.submit_intent(intent)
+    assert len(transport._orders) == 1
+    with pytest.raises(DriftError, match="execution outcome unknown"):
+        adapter.submit_intent(intent)
+    assert len(transport._orders) == 1
+
+
+def test_interrupted_submission_is_not_resent_by_same_adapter() -> None:
+    sec_id = uuid7()
+
+    class Interrupted(MockRobinhoodMcpTransport):
+        def call_tool(
+            self, tool_name: str, arguments: Mapping[str, Any]
+        ) -> dict[str, Any]:
+            if tool_name == "robinhood_place_order":
+                super().call_tool(tool_name, arguments)
+                raise KeyboardInterrupt
+            return super().call_tool(tool_name, arguments)
+
+    transport = Interrupted(auto_fill=False)
+    adapter = RobinhoodAgenticAdapter(
+        config=RobinhoodAgenticConfigV1(account_id="fake", symbol_map={sec_id: "AAPL"}),
+        transport=transport,
+    )
+    intent = _make_intent(sec_id=sec_id)
+    with pytest.raises(KeyboardInterrupt):
+        adapter.submit_intent(intent)
+    with pytest.raises(DriftError, match="execution outcome unknown"):
+        adapter.submit_intent(intent)
+    assert len(transport._orders) == 1
+
+
+def test_unrecognized_submit_status_never_returns_rejected() -> None:
+    sec_id = uuid7()
+
+    class UnknownStatus(MockRobinhoodMcpTransport):
+        def call_tool(
+            self, tool_name: str, arguments: Mapping[str, Any]
+        ) -> dict[str, Any]:
+            raw = super().call_tool(tool_name, arguments)
+            if tool_name == "robinhood_place_order":
+                return {**raw, "status": "not_a_known_status"}
+            return raw
+
+    transport = UnknownStatus(auto_fill=False)
+    adapter = RobinhoodAgenticAdapter(
+        config=RobinhoodAgenticConfigV1(account_id="fake", symbol_map={sec_id: "AAPL"}),
+        transport=transport,
+    )
+    intent = _make_intent(sec_id=sec_id)
+    with pytest.raises(DriftError, match="execution outcome unknown"):
+        adapter.submit_intent(intent)
+    assert len(transport._orders) == 1
+    with pytest.raises(DriftError, match="execution outcome unknown"):
+        adapter.submit_intent(intent)
+    assert len(transport._orders) == 1
+
+
+def test_conflicting_order_response_does_not_establish_rejection() -> None:
+    sec_id = uuid7()
+
+    class ConflictingResponse(MockRobinhoodMcpTransport):
+        def call_tool(
+            self, tool_name: str, arguments: Mapping[str, Any]
+        ) -> dict[str, Any]:
+            raw = super().call_tool(tool_name, arguments)
+            if tool_name == "robinhood_place_order":
+                return {**raw, "status": "rejected", "symbol": "WRONG"}
+            return raw
+
+    transport = ConflictingResponse(auto_fill=False)
+    adapter = RobinhoodAgenticAdapter(
+        config=RobinhoodAgenticConfigV1(account_id="fake", symbol_map={sec_id: "AAPL"}),
+        transport=transport,
+    )
+    intent = _make_intent(sec_id=sec_id)
+    with pytest.raises(ExecutionOutcomeUnknown, match="execution outcome unknown"):
+        adapter.submit_intent(intent)
+    assert len(transport._orders) == 1
+
+
+@pytest.mark.parametrize("mode", ["unknown_status", "failed"])
+def test_ambiguous_status_never_returns_cached_report(mode: str) -> None:
+    sec_id = uuid7()
+
+    class UncertainStatus(MockRobinhoodMcpTransport):
+        def call_tool(
+            self, tool_name: str, arguments: Mapping[str, Any]
+        ) -> dict[str, Any]:
+            if tool_name == "robinhood_get_order":
+                if mode == "failed":
+                    raise RobinhoodMcpError("unavailable")
+                return {**super().call_tool(tool_name, arguments), "status": "mystery"}
+            return super().call_tool(tool_name, arguments)
+
+    adapter = RobinhoodAgenticAdapter(
+        config=RobinhoodAgenticConfigV1(account_id="fake", symbol_map={sec_id: "AAPL"}),
+        transport=UncertainStatus(auto_fill=False),
+    )
+    intent = _make_intent(sec_id=sec_id)
+    assert adapter.submit_intent(intent).status == ExecutionStatus.ACKNOWLEDGED
+    with pytest.raises(DriftError, match="execution outcome unknown"):
+        adapter.get_intent_status(intent.intent_id)
+    with pytest.raises(DriftError, match="execution outcome unknown"):
+        adapter.cancel_intent(intent.intent_id)
+
+
+@pytest.mark.parametrize("mode", ["failed", "unconfirmed", "missing_order"])
+def test_unconfirmed_cancellation_never_returns_canceled(mode: str) -> None:
+    sec_id = uuid7()
+
+    class UnconfirmedCancel(MockRobinhoodMcpTransport):
+        def call_tool(
+            self, tool_name: str, arguments: Mapping[str, Any]
+        ) -> dict[str, Any]:
+            if tool_name == "robinhood_cancel_order":
+                if mode == "failed":
+                    raise RobinhoodMcpError("cancel response lost")
+                return self._handle_get_order(dict(arguments))
+            return super().call_tool(tool_name, arguments)
+
+    transport = UnconfirmedCancel(auto_fill=False)
+    adapter = RobinhoodAgenticAdapter(
+        config=RobinhoodAgenticConfigV1(account_id="fake", symbol_map={sec_id: "AAPL"}),
+        transport=transport,
+    )
+    intent = _make_intent(sec_id=sec_id)
+    assert adapter.submit_intent(intent).status == ExecutionStatus.ACKNOWLEDGED
+    if mode == "missing_order":
+        adapter._intent_to_broker_order.clear()
+    with pytest.raises(DriftError, match="execution outcome unknown"):
+        adapter.cancel_intent(intent.intent_id)
+
+
 def test_s3_cancel_failure_does_not_falsely_emit_canceled() -> None:
-    """S3: Cancellation transport error must fail closed and preserve active status."""
+    """S3: Cancellation failure cannot return a current V1 status."""
     sec_id = uuid7()
     config = RobinhoodAgenticConfigV1(
         account_id="rh-s3-acc",
@@ -102,14 +267,10 @@ def test_s3_cancel_failure_does_not_falsely_emit_canceled() -> None:
     assert submit_report.status == ExecutionStatus.ACKNOWLEDGED
     assert submit_report.leaves_quantity == 10
 
-    # Attempt cancel; transport fails
-    cancel_report = adapter.cancel_intent(intent.intent_id)
-
-    # Must NOT be CANCELED with 0 leaves
-    assert cancel_report.status != ExecutionStatus.CANCELED
-    assert cancel_report.leaves_quantity == 10
-    assert cancel_report.rejection_reason is not None
-    assert "cancellation_failed" in cancel_report.rejection_reason
+    with pytest.raises(ExecutionOutcomeUnknown, match="execution outcome unknown"):
+        adapter.cancel_intent(intent.intent_id)
+    with pytest.raises(ExecutionOutcomeUnknown, match="execution outcome unknown"):
+        adapter.get_intent_status(intent.intent_id)
 
 
 def test_s4_submission_timeout_reconciles_via_client_token() -> None:
@@ -139,7 +300,7 @@ def test_s4_submission_timeout_reconciles_via_client_token() -> None:
 
 
 def test_s4_submission_timeout_without_broker_order_fails_closed() -> None:
-    """S4: Timeout without broker order fails closed with timeout classification."""
+    """S4: Empty lookup does not establish rejection or non-receipt."""
     sec_id = uuid7()
     config = RobinhoodAgenticConfigV1(
         account_id="rh-s4-acc2",
@@ -156,9 +317,10 @@ def test_s4_submission_timeout_without_broker_order_fails_closed() -> None:
         sec_id=sec_id, quantity=5, price=Decimal("200.00"), client_order_id="s4-ord-02"
     )
 
-    report = adapter.submit_intent(intent)
-    assert report.status == ExecutionStatus.REJECTED
-    assert "mcp_submission_timeout" in str(report.rejection_reason)
+    with pytest.raises(ExecutionOutcomeUnknown, match="execution outcome unknown"):
+        adapter.submit_intent(intent)
+    with pytest.raises(ExecutionOutcomeUnknown, match="execution outcome unknown"):
+        adapter.get_intent_status(intent.intent_id)
 
 
 def test_s5_unmapped_positions_quarantined_without_schema_crash() -> None:
