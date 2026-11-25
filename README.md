@@ -32,7 +32,7 @@ the committed `uv.lock`. Do not regenerate pinned replay fixtures to hide a
 failure. With [uv](https://docs.astral.sh/uv/) installed:
 
 ```bash
-uv sync --dev
+uv sync --locked --dev
 uv run pytest
 uv run ruff check .
 uv run ruff format --check .

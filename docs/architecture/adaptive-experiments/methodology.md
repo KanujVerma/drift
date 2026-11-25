@@ -7,8 +7,8 @@
 - **Publisher**: KanujVerma.
 - **Document Status**: PROPOSED PREREGISTRATION METHODOLOGY. NOT FROZEN. NOT INDEPENDENTLY ACCEPTED.
 - **Preregistration Boundary**: A written methodology design is not automatically a preregistered study. Gate G3 acceptance, formal study preregistration, and parameter freezing are separate governance milestones.
-- **Review Boundary**: Independent scientific and platform review required before Gate G3 execution. Krish reviews research/proposal compatibility; Matthew reviews timing, mandate, execution, and accounting reconciliation. Author cannot self-certify scientific validity or acceptance.
-- **Operating Rules**: Conforms to repository root AGENTS.md, docs/architecture/workstreams.md, and ADR 0017. Zero Unicode em dashes permitted.
+- **Review Boundary**: Independent scientific and platform review of applicable study evidence remains necessary; the author cannot independently certify their own scientific validity or acceptance. Historical named-reviewer routing is superseded by current AGENTS.md.
+- **Operating Rules**: Follow the current repository root AGENTS.md.
 
 ---
 
