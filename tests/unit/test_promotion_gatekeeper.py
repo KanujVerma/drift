@@ -2,12 +2,19 @@
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
+from typing import Any
 from uuid import uuid7
 
+import pytest
+
+import drift.promotion.gatekeeper as gatekeeper_module
 from drift.domain.promotion import (
+    PromotionGateConfigV1,
     PromotionGateVerdict,
     build_promotion_gate_config,
 )
+from drift.ledger.sqlite import SQLiteLedger
 from drift.promotion.gatekeeper import (
     PromotionGatekeeper,
     calculate_deflated_sharpe_ratio,
@@ -15,6 +22,7 @@ from drift.promotion.gatekeeper import (
     evaluate_regime_stress,
     evaluate_walk_forward_consistency,
 )
+from drift.promotion.recorder import PromotionRecorder
 
 
 def test_calculate_deflated_sharpe_ratio_single_trial() -> None:
@@ -24,6 +32,8 @@ def test_calculate_deflated_sharpe_ratio_single_trial() -> None:
         trials_k=1,
         variance_of_sharpes=Decimal("0.0"),
         sample_size_n=252,
+        skewness=0.0,
+        kurtosis=3.0,
     )
     assert dsr >= Decimal("0.95")
 
@@ -36,6 +46,8 @@ def test_calculate_deflated_sharpe_ratio_multiple_testing_deflation() -> None:
         trials_k=100,
         variance_of_sharpes=Decimal("0.25"),
         sample_size_n=252,
+        skewness=0.0,
+        kurtosis=3.0,
     )
     assert dsr < Decimal("0.50")
 
@@ -45,8 +57,42 @@ def test_calculate_deflated_sharpe_ratio_multiple_testing_deflation() -> None:
         trials_k=100,
         variance_of_sharpes=Decimal("0.25"),
         sample_size_n=252,
+        skewness=0.0,
+        kurtosis=3.0,
     )
     assert dsr_high >= Decimal("0.95")
+
+
+@pytest.mark.parametrize(
+    ("trials_k", "variance", "sample_size"),
+    [(0, 1.0, 2), (1, -1.0, 2), (1, float("nan"), 2), (1, 1.0, 1)],
+)
+def test_dsr_refuses_unusable_inputs(
+    trials_k: int,
+    variance: float,
+    sample_size: int,
+) -> None:
+    with pytest.raises((ValueError, ArithmeticError)):
+        calculate_deflated_sharpe_ratio(
+            1.0,
+            trials_k,
+            variance,
+            skewness=0.0,
+            kurtosis=3.0,
+            sample_size_n=sample_size,
+        )
+
+
+def test_dsr_refuses_nonpositive_sampling_variance() -> None:
+    with pytest.raises(ValueError, match="variance"):
+        calculate_deflated_sharpe_ratio(
+            observed_sharpe=1.0,
+            trials_k=1,
+            variance_of_sharpes=0.0,
+            skewness=2.0,
+            kurtosis=1.0,
+            sample_size_n=252,
+        )
 
 
 def test_estimate_probability_backtest_overfitting() -> None:
@@ -105,7 +151,7 @@ def test_evaluate_regime_stress() -> None:
     assert "high_volatility" in reg_dds
 
 
-def test_promotion_gatekeeper_rejections() -> None:
+def test_promotion_gatekeeper_rejections(tmp_path: Path) -> None:
     """Gatekeeper fails closed on any breached statistical criteria."""
     now = datetime.now(UTC)
     config = build_promotion_gate_config(
@@ -118,6 +164,7 @@ def test_promotion_gatekeeper_rejections() -> None:
         is_promotion_grade_authorized=False,
     )
     gk = PromotionGatekeeper(config)
+    recorder = PromotionRecorder(SQLiteLedger(tmp_path / "rejections.sqlite3"))
 
     # 1. PnL incompleteness rejection
     rec1 = gk.evaluate_candidate(
@@ -127,9 +174,10 @@ def test_promotion_gatekeeper_rejections() -> None:
         trials_explored_k=1,
         observed_sharpe=Decimal("2.0"),
         is_pnl_complete=False,
+        recorder=recorder,
     )
     assert rec1.verdict == PromotionGateVerdict.REJECTED_INCOMPLETE_EVIDENCE
-    assert "incomplete_realized_pnl_basis" in rec1.rejection_reasons
+    assert "pnl_completeness_not_confirmed" in rec1.rejection_reasons
 
     # 2. Deflated Sharpe ratio rejection
     rec2 = gk.evaluate_candidate(
@@ -140,6 +188,13 @@ def test_promotion_gatekeeper_rejections() -> None:
         observed_sharpe=Decimal("1.20"),
         trial_sharpes=[Decimal("1.20"), Decimal("0.80"), Decimal("-0.20")],
         is_pnl_complete=True,
+        skewness=0.0,
+        kurtosis=3.0,
+        sample_size_n=252,
+        trial_block_matrix=[[1.0, 1.0], [0.0, 0.0]],
+        walk_forward_fold_returns=[[0.01]],
+        session_returns=[0.01],
+        recorder=recorder,
     )
     assert rec2.verdict == PromotionGateVerdict.REJECTED_DEFLATED_SHARPE
     assert "deflated_sharpe_ratio_below_threshold" in rec2.rejection_reasons
@@ -156,12 +211,20 @@ def test_promotion_gatekeeper_rejections() -> None:
             [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
         ],
         is_pnl_complete=True,
+        skewness=0.0,
+        kurtosis=3.0,
+        sample_size_n=252,
+        walk_forward_fold_returns=[[0.01]],
+        session_returns=[0.01],
+        recorder=recorder,
     )
     assert rec3.verdict == PromotionGateVerdict.REJECTED_PBO_OVERFITTING
     assert "pbo_exceeds_threshold" in rec3.rejection_reasons
 
 
-def test_promotion_gatekeeper_exploratory_vs_promotion_authorization() -> None:
+def test_promotion_gatekeeper_exploratory_vs_promotion_authorization(
+    tmp_path: Path,
+) -> None:
     """Anti-laundering boundary prevents exploratory results from promotion status."""
     now = datetime.now(UTC)
 
@@ -172,15 +235,26 @@ def test_promotion_gatekeeper_exploratory_vs_promotion_authorization() -> None:
         is_promotion_grade_authorized=False,
     )
     gk_unauth = PromotionGatekeeper(cfg_unauth)
+    recorder = PromotionRecorder(SQLiteLedger(tmp_path / "flags.sqlite3"))
+    evidence: dict[str, Any] = dict(
+        trial_block_matrix=[[1.0, 1.0], [0.0, 0.0]],
+        walk_forward_fold_returns=[[0.01]],
+        session_returns=[0.01],
+    )
 
     # Passes all statistical tests, but exploratory data
     rec_exp = gk_unauth.evaluate_candidate(
+        **evidence,
+        recorder=recorder,
         candidate_id=uuid7(),
         strategy_type="momentum_v1",
         parameters_hash="b" * 64,
         trials_explored_k=1,
         observed_sharpe=Decimal("2.50"),
         is_pnl_complete=True,
+        skewness=0.0,
+        kurtosis=3.0,
+        sample_size_n=252,
         is_promotion_grade_evidence=False,
     )
     assert rec_exp.verdict == PromotionGateVerdict.EXPLORATORY_PASSED
@@ -188,19 +262,24 @@ def test_promotion_gatekeeper_exploratory_vs_promotion_authorization() -> None:
 
     # Passes all statistical tests with promotion-grade evidence, but config unauth
     rec_tamper = gk_unauth.evaluate_candidate(
+        **evidence,
+        recorder=recorder,
         candidate_id=uuid7(),
         strategy_type="momentum_v1",
         parameters_hash="b" * 64,
         trials_explored_k=1,
         observed_sharpe=Decimal("2.50"),
         is_pnl_complete=True,
+        skewness=0.0,
+        kurtosis=3.0,
+        sample_size_n=252,
         is_promotion_grade_evidence=True,
     )
     # Must remain EXPLORATORY_PASSED because config has
     # is_promotion_grade_authorized=False
     assert rec_tamper.verdict == PromotionGateVerdict.EXPLORATORY_PASSED
 
-    # Config WITH promotion authorization and promotion-grade evidence
+    # Both flags remain untrusted with complete synthetic inputs.
     cfg_auth = build_promotion_gate_config(
         config_id=uuid7(),
         created_at=now,
@@ -208,12 +287,122 @@ def test_promotion_gatekeeper_exploratory_vs_promotion_authorization() -> None:
     )
     gk_auth = PromotionGatekeeper(cfg_auth)
     rec_promo = gk_auth.evaluate_candidate(
+        **evidence,
+        recorder=recorder,
         candidate_id=uuid7(),
         strategy_type="momentum_v1",
         parameters_hash="b" * 64,
         trials_explored_k=1,
         observed_sharpe=Decimal("2.50"),
         is_pnl_complete=True,
+        skewness=0.0,
+        kurtosis=3.0,
+        sample_size_n=252,
         is_promotion_grade_evidence=True,
     )
-    assert rec_promo.verdict == PromotionGateVerdict.PROMOTION_QUALIFIED
+    assert rec_promo.verdict == PromotionGateVerdict.EXPLORATORY_PASSED
+
+
+def test_incomplete_evidence_without_recorder_refuses_unsealed_result() -> None:
+    config = build_promotion_gate_config(
+        config_id=uuid7(), created_at=datetime.now(UTC)
+    )
+    gatekeeper = PromotionGatekeeper(config)
+
+    with pytest.raises(RuntimeError, match="record|seal|audit"):
+        gatekeeper.evaluate_candidate(
+            candidate_id=uuid7(),
+            strategy_type="synthetic",
+            parameters_hash="a" * 64,
+            trials_explored_k=1,
+            observed_sharpe=Decimal("1"),
+            is_promotion_grade_evidence=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("function", "evidence"),
+    [
+        (estimate_probability_backtest_overfitting, []),
+        (estimate_probability_backtest_overfitting, [[1.0, 2.0]]),
+        (evaluate_walk_forward_consistency, [[]]),
+        (evaluate_regime_stress, []),
+    ],
+)
+def test_statistical_helpers_refuse_unusable_input(function, evidence) -> None:  # type: ignore[no-untyped-def]
+    with pytest.raises(ValueError, match="evidence"):
+        function(evidence)
+
+
+def test_caller_flags_cannot_promote_complete_evidence(tmp_path: Path) -> None:
+    config = build_promotion_gate_config(
+        config_id=uuid7(),
+        created_at=datetime.now(UTC),
+        is_promotion_grade_authorized=True,
+    )
+    result = PromotionGatekeeper(config).evaluate_candidate(
+        candidate_id=uuid7(),
+        strategy_type="synthetic",
+        parameters_hash="a" * 64,
+        trials_explored_k=1,
+        observed_sharpe=Decimal("2"),
+        trial_block_matrix=[[1.0, 1.0], [0.0, 0.0]],
+        walk_forward_fold_returns=[[0.01]],
+        session_returns=[0.01],
+        is_pnl_complete=True,
+        skewness=0.0,
+        kurtosis=3.0,
+        sample_size_n=252,
+        is_promotion_grade_evidence=True,
+        recorder=PromotionRecorder(SQLiteLedger(tmp_path / "gate.sqlite3")),
+    )
+    assert result.verdict == PromotionGateVerdict.EXPLORATORY_PASSED
+
+
+def test_direct_evaluation_snapshots_mutable_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    matrix = [[1.0, 1.0], [0.0, 0.0]]
+    folds = [[0.01]]
+    sessions = [0.01]
+    original = gatekeeper_module.calculate_deflated_sharpe_ratio
+
+    def mutate_inputs(*args: Any, **kwargs: Any) -> Decimal:
+        matrix.clear()
+        folds.clear()
+        sessions.clear()
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        gatekeeper_module, "calculate_deflated_sharpe_ratio", mutate_inputs
+    )
+    config = build_promotion_gate_config(
+        config_id=uuid7(), created_at=datetime.now(UTC)
+    )
+    result = PromotionGatekeeper(config).evaluate_candidate(
+        candidate_id=uuid7(),
+        strategy_type="synthetic",
+        parameters_hash="a" * 64,
+        trials_explored_k=1,
+        observed_sharpe=Decimal("2"),
+        trial_block_matrix=matrix,
+        walk_forward_fold_returns=folds,
+        session_returns=sessions,
+        is_pnl_complete=True,
+        skewness=0.0,
+        kurtosis=3.0,
+        sample_size_n=252,
+        recorder=PromotionRecorder(SQLiteLedger(tmp_path / "snapshot.sqlite3")),
+    )
+    assert result.verdict == PromotionGateVerdict.EXPLORATORY_PASSED
+
+
+def test_gatekeeper_refuses_forged_config_object() -> None:
+    config = build_promotion_gate_config(
+        config_id=uuid7(), created_at=datetime.now(UTC)
+    )
+    forged = PromotionGateConfigV1.model_construct(
+        **{**config.model_dump(mode="python"), "min_dsr": Decimal("0.50")}
+    )
+    with pytest.raises(ValueError, match="config hash mismatch"):
+        PromotionGatekeeper(forged)

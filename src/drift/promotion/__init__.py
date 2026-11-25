@@ -16,7 +16,9 @@ from drift.promotion.recorder import (
 )
 from drift.promotion.runner import (
     CandidatePromotionRequestV1,
+    PromotionBatchInterrupted,
     PromotionBatchResultV1,
+    PromotionBatchResultV2,
     PromotionRecorderProtocol,
     PromotionRunner,
 )
@@ -27,7 +29,9 @@ __all__ = [
     "PROMOTION_EVALUATION_ENTITY_TYPE",
     "PROMOTION_REJECTION_ENTITY_TYPE",
     "PromotionArchive",
+    "PromotionBatchInterrupted",
     "PromotionBatchResultV1",
+    "PromotionBatchResultV2",
     "PromotionGatekeeper",
     "PromotionRecorder",
     "PromotionRecorderProtocol",

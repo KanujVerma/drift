@@ -27,7 +27,7 @@ Milestone M11 formalizes a deterministic multi-stage statistical promotion pipel
 
 1. **Authorization Gate Separation**: M11 is an authorization firewall. Implementing M11 code or executing M11 against exploratory data does not grant promotion authority.
 2. **Deterministic Standard Library Math**: All calculations (DSR, PBO, walk-forward folds, regime attribution) use standard library math (`decimal.Decimal`, `math`, `statistics.NormalDist`). Zero third-party runtime dependencies (`numpy`, `scipy`).
-3. **Strict Non-Promotable Exploratory Boundary**: Exploratory evidence cannot authorize capital. Any run against non-qualified data is stamped with `EXPLORATORY_PASSED` and cannot be upgraded into `PROMOTION_QUALIFIED`.
+3. **Strict Non-Promotable Exploratory Boundary**: Exploratory evidence cannot authorize capital. A complete passing run against non-qualified data is stamped with `EXPLORATORY_PASSED` and cannot be upgraded into `PROMOTION_QUALIFIED`. Incomplete requests are rejected as described in section 5.1.
 4. **Complete PnL Integrity**: Incomplete realized PnL evidence (Issue #152) fails the gate immediately (`REJECTED_INCOMPLETE_EVIDENCE`).
 5. **Zero Unicode Em Dashes**: The Unicode em dash (U+2014) is strictly forbidden across all files, docstrings, commit messages, and markdown docs. ASCII hyphen (-) is used exclusively.
 6. **Immutable Ledger Sealing**: Every gate evaluation and promotion certificate is sealed into the SQLite ledger with SHA-256 content hashes and deduplication keys.
@@ -117,9 +117,56 @@ class PromotionEvaluationRecordV1(FrozenModel):
 
 ## 5. Ledger Audit Event Payloads
 
+The following historical V1 event definitions are amended for the bounded cases
+in section 5.1; existing records and historical event bytes are not rewritten.
+
 1. `m11.gate.evaluated`: Sealed at the end of each promotion gate evaluation containing `PromotionEvaluationRecordV1`.
 2. `m11.candidate.certified`: Sealed when a candidate satisfies all four pillars and receives `PROMOTION_QUALIFIED` or `EXPLORATORY_PASSED`.
 3. `m11.candidate.rejected`: Sealed when a candidate breaches any of the four statistical gate pillars.
+
+### 5.1 Owner-directed containment amendment (#360)
+
+The historical V1 event and record formats remain unchanged. For an incomplete
+attempt, a single schema version `2` event `m11.gate.incomplete_rejected`
+replaces the V1 evaluated-plus-rejected pair. It records the attempt and
+candidate identities, parameters hash, a request consistency hash, the actual
+attempt timestamp, `REJECTED_INCOMPLETE_EVIDENCE`, and ordered reasons. It does
+not fabricate V1 statistics. The event must be sealed and read back before the
+result is returned; missing or failed recording refuses. Retries use the same
+attempt identity, timestamp and payload, and a conflicting reuse refuses.
+
+The explicit PnL completeness assertion and usable matrix, folds and session
+returns are required. The DSR sample size, skewness and kurtosis must be
+explicit rather than supplied by assumed defaults. Mathematical inputs must be
+finite and usable; multiple trials require the observations needed for the existing sample-variance
+calculation. These are mechanical prerequisites, not a scientific sufficiency
+or data-provenance ruling. No new statistical threshold is approved.
+
+For a complete exploratory pass, the existing V1 evaluated event is sealed but
+no certification event is created. Caller flags and caller-created records do
+not authorize any new certification or promotion. Statistical rejections retain
+their historical evaluated and rejected events. Old certification events are
+historical facts only, not present authority. Neither a request hash nor a
+ledger hash authenticates the origin of its inputs.
+
+New complete evaluations bind their event ID to a canonical, type-preserving
+snapshot of the full request and configuration. The existing evaluation-ID
+deduplication key and V1 payload remain unchanged. Exact retries read back the
+same event; changed requests and pre-existing V1 events without this binding
+conflict rather than being assumed identical. Historical events are not rewritten.
+The binding establishes consistency, not source origin or authorization.
+
+`PromotionArchive.list_evaluations()` and `list_rejections()` remain V1 views:
+they omit V2 incomplete attempts. Consumers must use `get_attempt()` or
+`list_incomplete_rejections()` to see those attempts. The old V1 batch method
+refuses because its certified bucket cannot faithfully represent exploratory
+results. V2 batches separate exploratory and rejected outcomes. They are not
+atomic: an interruption reports completed attempts, the failed attempt,
+known sealed events for it (or unknown if readback failed), and the unprocessed
+suffix. A retry must use the original immutable request identity and timestamp.
+
+Issue #360 and M2 promotion re-enablement #115 remain open. This amendment
+neither authenticates source provenance nor authorizes promotion or operation.
 
 ---
 
