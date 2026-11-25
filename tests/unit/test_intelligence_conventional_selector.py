@@ -803,6 +803,85 @@ def _assert_r_nonzero_score_gaps(
             assert result.selected_candidate.candidate_id == expected.candidate_id
 
 
+@pytest.mark.parametrize("precision", [9, 28])
+@pytest.mark.parametrize("reverse_pool", [False, True])
+@pytest.mark.parametrize(
+    ("lower_score", "expected_number"),
+    [
+        (Decimal("0.999999999"), 1),
+        (Decimal("0.9999999989999999999999"), 0),
+    ],
+    ids=["inclusive-boundary", "just-outside"],
+)
+def test_r_tie_boundary_is_independent_of_decimal_precision(
+    sample_context: ResearchContext,
+    sample_bindings: ResolvedDependencies,
+    fixture_data: dict[str, Any],
+    precision: int,
+    reverse_pool: bool,
+    lower_score: Decimal,
+    expected_number: int,
+) -> None:
+    """Compare exact scores against the inclusive band from the maximum."""
+    registration = sample_bindings.strategy_registry["fixture.equal_weight"]
+    resolved = sample_bindings.model_copy(
+        update={
+            "strategy_registry": {
+                "fixture.equal_weight": registration.model_copy(
+                    update={"allowed_parameters": {"choice_number": int}}
+                )
+            }
+        }
+    )
+    choices = []
+    for number in (0, 1):
+        choice = deepcopy(fixture_data["raw_choice"])
+        choice["selection"]["parameters"] = {"choice_number": number}
+        choices.append(choice)
+    if reverse_pool:
+        choices.reverse()
+
+    seen: dict[int, ResearchCandidate] = {}
+
+    def score(candidate: ResearchCandidate) -> Decimal:
+        assert candidate.strategy is not None
+        number = candidate.strategy.parameters["choice_number"]
+        seen[number] = candidate
+        return lower_score if number == 1 else Decimal("1")
+
+    recorder = ResearchReceiptStore()
+    with localcontext(Context(prec=precision, rounding=ROUND_HALF_EVEN, traps=[])):
+        result = select_conventional_candidate(
+            context=sample_context,
+            resolved_inputs=resolved,
+            candidate_pool=choices,
+            objective_fn=score,
+            method_ref=ArtifactReference(
+                id="synthetic:method-R", version="v1", sha256="e" * 64
+            ),
+            validation_policy=ArtifactReference(
+                id="synthetic:policy", version="v1", sha256="f" * 64
+            ),
+            recorder=recorder,
+            checked_at=datetime(2024, 1, 2, 10, 0, 2, tzinfo=UTC),
+        )
+
+    assert result.is_success and result.selected_candidate is not None, result.reason
+    assert set(seen) == {0, 1}
+    assert seen[0].strategy is not None and seen[1].strategy is not None
+    # Hash order favors the lower score, so a false tie changes the winner.
+    assert seen[1].strategy.parameters_hash < seen[0].strategy.parameters_hash
+    assert result.candidate_scores[seen[0].candidate_id] == "1"
+    assert result.candidate_scores[seen[1].candidate_id] == str(lower_score)
+    events = recorder.get_attempt_events(result.attempt_id)
+    assert [event.status for event in events] == ["started", "completed"]
+    assert events[-1].candidate_ref is not None
+    assert events[-1].candidate_ref.id == result.selected_candidate.candidate_id
+    costs = recorder.get_cost_receipts_for_attempt(result.attempt_id)
+    assert len(costs) == 1 and costs[0].amount_basis == "verified_zero"
+    assert result.selected_candidate.candidate_id == seen[expected_number].candidate_id
+
+
 def test_r_attempts_bind_policy_request_and_context_profile(
     sample_context: ResearchContext,
     sample_bindings: ResolvedDependencies,
