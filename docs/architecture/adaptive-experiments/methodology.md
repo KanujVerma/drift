@@ -255,7 +255,7 @@ A source is eligible at a decision cutoff if and only if all of the following co
   2. Rank eligible candidates by descending $U_s$.
   3. Break ties by preferring the valid incumbent strategy; otherwise follow fixed order (B3, B4, B5).
   4. If no candidate is eligible, fail closed (`ABSTAIN`).
-- **Governance Status**: DP-R6 is a recommended proposed comparator, not an approved algorithm. Its exact formula and parameters require formal owner and Krish review before Gate G3.
+- **Governance Status**: DP-R6 is a recommended proposed comparator, not an approved algorithm. Its exact formula and parameters require independent review and acceptance before Gate G3; historical named-reviewer routing is superseded by AGENTS.md.
 
 ---
 
@@ -501,4 +501,4 @@ scientific evidence and operational authorization remain distinct:
 - **Gate G5 (Broker-Free Prospective Shadow Observations)**: Live prospective shadow observation without broker connectivity.
 - **Gate G6 (Operational Production Authority)**: Completely separate operational gate requiring explicit human authorization for the operational scope.
 
-**Independent Sign-Off**: Scientific and platform review of the applicable study evidence is required before G3 execution. Authors cannot independently certify their own work; historical named-person routing is superseded by AGENTS.md.
+**Independent Sign-Off**: Independent scientific and platform review and acceptance of the applicable study protocol and evidence are required before G3 execution. Authors cannot independently certify their own work; historical named-person routing is superseded by AGENTS.md.
