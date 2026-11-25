@@ -1,5 +1,10 @@
 # Requirements crosswalk
 
+> Historical research and issue lineage, not current ownership or workflow
+> policy. See [PRODUCT](../../PRODUCT.md), [ROADMAP](../../ROADMAP.md), and
+> [AGENTS](../../../AGENTS.md). Applicable technical safeguards and unresolved
+> evidence requirements are not automatically satisfied or removed.
+
 This page maps accepted research requirements to decisions, producers and issue
 lineage. It is not a live status board. Read the issue for current blockers.
 

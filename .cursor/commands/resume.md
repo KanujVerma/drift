@@ -1,1 +1,0 @@
-Read AGENTS.md, then execute Resume in docs/architecture/agent-workflow.md. Resolve kanuj, krish, matthew or harsha, read the live issue/PR/dependencies, verify writer and path claims, and select only authorized unblocked work. A question about ownership is read-only. Do not infer product implementation from a parent roadmap issue.

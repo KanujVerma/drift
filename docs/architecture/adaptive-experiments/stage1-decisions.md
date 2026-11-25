@@ -1,5 +1,10 @@
 # Stage 1 strategy-adaptation decisions: S01-S38
 
+> Historical study decisions, not the current product or workflow direction.
+> See [PRODUCT](../../PRODUCT.md), [ROADMAP](../../ROADMAP.md), and
+> [AGENTS](../../../AGENTS.md). Study-specific controls remain relevant when
+> evaluating that study; they do not prove implementation or grant permission.
+
 ## Authority, lineage and scope
 
 These 38 decisions record Kanuj's sequential Stage 1 architecture discussion, accepted as **research/product direction** through October 16, 2026. They are numbered **S01-S38** to distinguish them from the separate, already accepted **D01-D17** broader adaptive product decisions in [decisions.md](decisions.md). The first 17 items in this Stage 1 discussion are **not** identical to D01-D17. Neither register replaces or retroactively renumbers the other. The narrower Stage 1 protocol is an initial controlled study under the broader product direction, not cancellation of longer-term event, intraday, advanced allocation, or news goals.

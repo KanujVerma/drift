@@ -1,5 +1,10 @@
 # ADR 0017: Transfer scientific experiment ownership to Kanuj
 
+> Historical ownership and migration record. Its required workstream activation,
+> migration gates, routine handoffs, and human cross-approvals are superseded by
+> [AGENTS.md](../../AGENTS.md). Preserve historical attribution, existing work,
+> applicable technical safeguards, and operational permission boundaries.
+
 ## Status and effective boundary
 
 Owner-directed decision recorded October 16, 2026. **Proposed for independent

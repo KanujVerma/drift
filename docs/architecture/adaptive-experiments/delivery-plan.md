@@ -1,5 +1,10 @@
 # Delivery plan and independent work
 
+> Historical delivery plan. Current [roadmap](../../ROADMAP.md) and
+> [agent instructions](../../../AGENTS.md) supersede its workstream routing,
+> activation gates, and routine handoffs. Consult current issues for live work;
+> retain applicable technical safeguards and operational permission boundaries.
+
 This is durable sequencing and acceptance policy, not a mirror of GitHub state.
 Task keys below are stable scope identifiers. Actual issues, writers, blockers
 and PRs are discovered in GitHub through those keys.

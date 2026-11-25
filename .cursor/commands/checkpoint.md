@@ -1,1 +1,0 @@
-Execute Checkpoint for the active GitHub issue using docs/architecture/agent-workflow.md. Verify the slice, audit explicit paths, check documentation impact, publish exact revision evidence and update GitHub. Do not claim pending CI passed or merge autonomously.

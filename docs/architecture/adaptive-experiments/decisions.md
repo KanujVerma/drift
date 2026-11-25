@@ -2,12 +2,17 @@
 
 ## Status and meaning
 
-These 17 decisions record Kanuj's approvals in the October 12, 2026 design
-conversation. They are accepted product/research direction. Repository effect
-begins when the adopting ADR and coordination PR merge. They are not evidence
-of completed code, approved data access, profitable strategies, or trading
-permission. Numerical parameters and wire contracts identified as unresolved
-below are not silently approved by this document.
+These 17 decisions preserve the October 12, 2026 design discussion and its
+rationale. The current [product](../../PRODUCT.md), [roadmap](../../ROADMAP.md),
+and [agent instructions](../../../AGENTS.md) supersede conflicting product and
+workflow directions. In particular, D04's weekly routine review is not the
+required product cadence: current direction is lightweight continuous
+monitoring, daily research, and event-driven reviews. D10's ETF-first universe
+was a research design, not a restriction on the current product direction.
+
+This record does not prove completed code, approved data access, profitability,
+or trading permission. Applicable technical safeguards and unresolved numerical
+parameters and wire contracts are not silently removed or approved.
 
 Terminology: MVP-BOUNDED is the previously discussed architecture Option B;
 FUTURE-GENERATED is architecture Option C. These are not the same labels as

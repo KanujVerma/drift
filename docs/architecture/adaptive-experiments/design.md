@@ -1,5 +1,10 @@
 # Controlled adaptive research: system design
 
+> Historical research design. See the current [architecture](../../ARCHITECTURE.md),
+> [product](../../PRODUCT.md), and [agent instructions](../../../AGENTS.md)
+> for direction and workflow. Conflicting legacy ownership and procedures are
+> superseded; relevant technical safeguards are not automatically removed.
+
 ## Scope
 
 This document defines the accepted boundaries for implementing D01-D17. It is
