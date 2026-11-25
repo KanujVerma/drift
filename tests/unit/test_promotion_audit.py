@@ -16,6 +16,7 @@ from drift.domain.promotion import (
     CANDIDATE_REJECTED_EVENT_TYPE,
     GATE_EVALUATED_EVENT_TYPE,
     CandidateCertifiedAuditEventPayloadV1,
+    CandidateRejectedAuditEventPayloadV1,
     GateEvaluatedAuditEventPayloadV1,
     PromotionEvaluationRecordV1,
     PromotionGateVerdict,
@@ -230,6 +231,102 @@ def test_archive_refuses_recognized_malformed_event(
         )
     )
     with pytest.raises(ValueError):
+        PromotionArchive(ledger)
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        GATE_EVALUATED_EVENT_TYPE,
+        CANDIDATE_CERTIFIED_EVENT_TYPE,
+        CANDIDATE_REJECTED_EVENT_TYPE,
+    ],
+)
+@pytest.mark.parametrize("payload_version", [None, "2", "null"])
+def test_archive_v1_default_version_and_conflict(
+    tmp_path: Path, event_type: str, payload_version: str | None
+) -> None:
+    ledger = SQLiteLedger(tmp_path / "legacy-default.sqlite3")
+    record = build_promotion_evaluation_record(
+        evaluation_id=EVAL_ID_1,
+        candidate_id=CAND_ID_1,
+        strategy_type="synthetic",
+        parameters_hash="a" * 64,
+        deflated_sharpe_ratio=Decimal("0.5"),
+        pbo_estimate=Decimal("0.1"),
+        positive_folds_fraction=Decimal("1"),
+        max_regime_drawdown=Decimal("0.1"),
+        trials_explored_k=2,
+        verdict=PromotionGateVerdict.EXPLORATORY_PASSED,
+        evaluated_at=TIMESTAMP,
+    )
+    if event_type == GATE_EVALUATED_EVENT_TYPE:
+        payload = GateEvaluatedAuditEventPayloadV1(evaluation=record).model_dump(
+            mode="python"
+        )
+    elif event_type == CANDIDATE_CERTIFIED_EVENT_TYPE:
+        payload = CandidateCertifiedAuditEventPayloadV1(
+            evaluation_id=EVAL_ID_1,
+            candidate_id=CAND_ID_1,
+            strategy_type="synthetic",
+            verdict=PromotionGateVerdict.PROMOTION_QUALIFIED,
+            certified_at=TIMESTAMP,
+        ).model_dump(mode="python")
+    else:
+        payload = CandidateRejectedAuditEventPayloadV1(
+            evaluation_id=EVAL_ID_1,
+            candidate_id=CAND_ID_1,
+            strategy_type="synthetic",
+            verdict=PromotionGateVerdict.REJECTED_DEFLATED_SHARPE,
+            rejection_reasons=("below_threshold",),
+            rejected_at=TIMESTAMP,
+        ).model_dump(mode="python")
+    if payload_version is None:
+        del payload["schema_version"]
+    else:
+        payload["schema_version"] = (
+            None if payload_version == "null" else payload_version
+        )
+    ledger.append(
+        AuditEventDraft(
+            schema_version="1",
+            event_id=EVAL_ID_1,
+            event_type=event_type,
+            timestamp=TIMESTAMP,
+            entity_type="promotion_evaluation",
+            entity_id=EVAL_ID_1,
+            payload=_freeze_json(payload),
+        )
+    )
+    before = ledger.verified_events()
+    if payload_version is None:
+        archive = PromotionArchive(ledger)
+        if event_type == GATE_EVALUATED_EVENT_TYPE:
+            assert archive.get_evaluation(EVAL_ID_1) == record
+        elif event_type == CANDIDATE_CERTIFIED_EVENT_TYPE:
+            assert len(archive.list_certifications()) == 1
+        else:
+            assert len(archive.list_rejections()) == 1
+    else:
+        with pytest.raises(ValueError, match="version"):
+            PromotionArchive(ledger)
+    assert ledger.verified_events() == before
+
+
+def test_archive_rejects_missing_v2_payload_version(tmp_path: Path) -> None:
+    ledger = SQLiteLedger(tmp_path / "missing-v2-version.sqlite3")
+    ledger.append(
+        AuditEventDraft(
+            schema_version="2",
+            event_id=EVAL_ID_1,
+            event_type="m11.gate.incomplete_rejected",
+            timestamp=TIMESTAMP,
+            entity_type="promotion_evaluation",
+            entity_id=EVAL_ID_1,
+            payload=_freeze_json({"evaluation_id": str(EVAL_ID_1)}),
+        )
+    )
+    with pytest.raises(ValueError, match="version"):
         PromotionArchive(ledger)
 
 

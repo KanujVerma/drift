@@ -61,7 +61,8 @@ class PromotionArchive:
             version = expected_versions.get(event.event_type)
             if version is not None and (
                 event.schema_version != version
-                or event.payload.get("schema_version") != version
+                or event.payload.get("schema_version", "1" if version == "1" else None)
+                != version
             ):
                 raise ValueError("malformed promotion event version")
 
