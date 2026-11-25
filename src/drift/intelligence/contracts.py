@@ -6,12 +6,13 @@ and Decision Packet DP-R1. All models are frozen and forbid extra attributes.
 
 from collections.abc import Mapping
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Context, Decimal, InvalidOperation
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from drift.errors import CanonicalSerializationError
+from drift.intelligence._exact_decimal import weight_sum
 from drift.serialization.canonical import content_hash
 
 # G2 has not qualified a released research wire profile. No silent upgrade.
@@ -168,7 +169,7 @@ class TargetWeight(ImmutableModel):
         if not isinstance(v, str):
             raise ValueError(f"Weight must be a string: {v!r}")
         try:
-            d = Decimal(v)
+            d = Decimal(v, context=Context(traps=[InvalidOperation]))
         except InvalidOperation as e:
             raise ValueError(f"Invalid DecimalText: {v}") from e
         if not d.is_finite():
@@ -201,7 +202,7 @@ class RawChoice(ImmutableModel):
         if not isinstance(v, str):
             raise ValueError(f"Cash weight must be a string: {v!r}")
         try:
-            d = Decimal(v)
+            d = Decimal(v, context=Context(traps=[InvalidOperation]))
         except InvalidOperation as e:
             raise ValueError(f"Invalid DecimalText: {v}") from e
         if not d.is_finite():
@@ -293,8 +294,8 @@ class ResearchCandidate(ImmutableModel):
                 raise ValueError("PROPOSAL_WITHOUT_STRATEGY")
             if self.cash_weight is None:
                 raise ValueError("PROPOSAL_WITHOUT_CASH_WEIGHT")
-            total_weight = Decimal(self.cash_weight) + sum(
-                (Decimal(target.weight) for target in self.targets), Decimal("0")
+            total_weight = weight_sum(
+                [self.cash_weight, *(target.weight for target in self.targets)]
             )
             if total_weight != Decimal("1"):
                 raise ValueError("INVALID_CANDIDATE_WEIGHT_SUM")

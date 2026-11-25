@@ -12,6 +12,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from drift.errors import CanonicalSerializationError
+from drift.intelligence._exact_decimal import weight_sum
 from drift.intelligence.contracts import (
     SUPPORTED_PROFILES,
     ArtifactReference,
@@ -319,7 +320,6 @@ def validate_candidate(
                 reason="invalid: propose disposition requires non-null cash_weight",
             )
 
-        total_weight = Decimal(choice.cash_weight)
         seen_security_ids: set[str] = set()
         for tw in choice.targets:
             if tw.security_id in seen_security_ids:
@@ -337,8 +337,9 @@ def validate_candidate(
                         f"rejected: security {tw.security_id} not in admitted universe"
                     ),
                 )
-            total_weight += Decimal(tw.weight)
-
+        total_weight = weight_sum(
+            [choice.cash_weight, *(target.weight for target in choice.targets)]
+        )
         if total_weight != Decimal("1.0"):
             return ValidationResult(
                 is_valid=False,
@@ -487,15 +488,6 @@ def validate_retained_record(
                 raise ValueError(
                     "invalid: abstention cannot retain strategy/targets/cash"
                 )
-        elif disp == "propose":
-            total = (
-                Decimal(str(cash_weight)) if cash_weight is not None else Decimal("0")
-            )
-            for t in targets:
-                total += Decimal(str(t["weight"]))
-            if total != Decimal("1.0"):
-                raise ValueError(f"invalid: weights sum to {total}")
-
         # Check undeclared parameters if strategy present
         strategy = record.get("strategy")
         if strategy:
@@ -582,4 +574,11 @@ def validate_retained_record(
     record_type = typed_records.get(kind)
     if record_type is None:
         raise ValueError(f"unsupported retained research record kind: {kind}")
-    record_type.model_validate(dict(record))
+    try:
+        record_type.model_validate(dict(record))
+    except ValueError as error:
+        if kind == "candidate" and "INVALID_CANDIDATE_WEIGHT_SUM" in str(error):
+            raise ValueError(
+                "invalid: weights sum to an amount other than 1"
+            ) from error
+        raise

@@ -6,6 +6,7 @@ and exact RED/GREEN semantic and tamper rejection specified in research.md.
 
 import json
 from datetime import datetime
+from decimal import Context, Inexact, Rounded, localcontext
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ import pytest
 
 from drift.intelligence.contracts import (
     ArtifactReference,
+    RawChoice,
     ResearchContext,
     StrategySelection,
     TrustedInvocationBinding,
@@ -133,6 +135,42 @@ def test_positive_candidate_validation_matches_f02(
     assert result.candidate.candidate_id == f02["candidate_id"]
     assert result.candidate.disposition == "propose"
     assert result.candidate.record_hash == f02["record_hash"]
+
+
+@pytest.mark.parametrize("trap", [False, True])
+def test_weight_admission_is_exact_under_small_context(
+    fixture_data: dict[str, Any],
+    resolved_dependencies: ResolvedDependencies,
+    trusted_invocation: TrustedInvocationBinding,
+    trap: bool,
+) -> None:
+    raw = json.loads(json.dumps(fixture_data["raw_choice"]))
+    raw["targets"][0]["weight"] = "0.29999999999999999999"
+    digest = content_hash(RawChoice.model_validate(raw).model_dump(mode="python"))
+    ref = trusted_invocation.raw_output_ref.model_copy(update={"sha256": digest})
+    binding = trusted_invocation.model_copy(update={"raw_output_ref": ref})
+    with localcontext(Context(prec=9, traps=[Inexact, Rounded] if trap else [])):
+        result = validate_candidate(
+            raw_choice=raw,
+            context=ResearchContext.model_validate(fixture_data["fixtures"]["F01"]),
+            resolved_dependencies=resolved_dependencies,
+            trusted_invocation=binding,
+        )
+    assert result.status == "INVALID"
+    assert result.candidate is None
+    assert "weights sum to" in result.reason
+
+
+@pytest.mark.parametrize("trap", [False, True])
+def test_retained_weight_sum_is_exact_under_small_context(
+    fixture_data: dict[str, Any], trap: bool
+) -> None:
+    payload = json.loads(json.dumps(fixture_data["fixtures"]["F02"]))
+    payload["targets"][0]["weight"] = "0.29999999999999999999"
+    payload["record_hash"] = compute_record_hash(payload)
+    with localcontext(Context(prec=9, traps=[Inexact, Rounded] if trap else [])):
+        with pytest.raises(ValueError, match="weights sum to"):
+            validate_retained_record(payload, expected_kind="candidate")
 
 
 def test_positive_abstention_validation_matches_f03(

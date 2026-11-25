@@ -5,12 +5,16 @@ and strict schema enforcement under the 'drift-research/1-draft' profile.
 """
 
 import json
+import random
+from decimal import Context, Inexact, InvalidOperation, Rounded, localcontext
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
+from drift.intelligence._exact_decimal import weight_sum
 from drift.intelligence.contracts import (
     ArtifactReference,
     AttemptRecord,
@@ -55,6 +59,41 @@ def test_f02_research_candidate_deserialization(
     assert cand.cash_weight == "0.4"
     assert len(cand.targets) == 2
     assert cand.record_hash == compute_record_hash(cand)
+
+
+@pytest.mark.parametrize("trap", [False, True])
+def test_candidate_weight_sum_is_exact_under_small_context(
+    fixture_data: dict[str, Any], trap: bool
+) -> None:
+    payload = json.loads(json.dumps(fixture_data["fixtures"]["F02"]))
+    payload["targets"][0]["weight"] = "0.29999999999999999999"
+    payload["record_hash"] = compute_record_hash(payload)
+    with localcontext(Context(prec=9, traps=[Inexact, Rounded] if trap else [])):
+        with pytest.raises(ValueError, match="INVALID_CANDIDATE_WEIGHT_SUM"):
+            ResearchCandidate.model_validate(payload)
+
+
+def test_exact_weight_sum_matches_fraction_and_preserves_flags() -> None:
+    rng = random.Random(469)
+    context = Context(prec=1, flags=[Rounded], traps=[Inexact, Rounded])
+    with localcontext(context) as ctx:
+        before = ctx.copy()
+        for _ in range(1000):
+            weights = [f"0.{rng.randrange(10**12):012d}" for _ in range(5)]
+            assert Fraction(weight_sum(weights)) == sum(map(Fraction, weights))
+        assert weight_sum(["-0", "1", "0." + "0" * 5000 + "1"]) > 1
+        assert weight_sum(["-0", "1", "0.000"]) == 1
+        assert ctx.flags == before.flags and ctx.traps == before.traps
+
+
+@pytest.mark.parametrize("trap", [False, True])
+def test_invalid_weight_text_does_not_modify_decimal_flags(trap: bool) -> None:
+    context = Context(traps=[InvalidOperation] if trap else [], flags=[])
+    with localcontext(context) as ctx:
+        before = ctx.copy()
+        with pytest.raises(ValueError):
+            TargetWeight(security_id="synthetic", weight="not-a-number")
+        assert ctx.flags == before.flags and ctx.traps == before.traps
 
 
 def test_f03_abstention_deserialization(fixture_data: dict[str, Any]) -> None:
