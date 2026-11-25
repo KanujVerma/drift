@@ -1,183 +1,38 @@
 # Drift
 
-Drift is an evidence-driven, self-improving quantitative research and trading
-system. Its core objective is to discover whether a strategy has repeatable
-predictive and risk-adjusted value without fooling itself through lookahead
-bias, survivorship bias, or ungrounded simulation assumptions.
+Drift's goal is an autonomous, self-improving AI portfolio manager that makes
+evidence-based investment decisions within a balanced, user-authorized mandate.
+It combines fundamental, quantitative, and thesis-driven research, with
+conversational interaction and bounded autonomy. Research and evaluation support
+that product; they are not the product's final purpose.
 
-Research outputs in Drift remain strictly untrusted until validated through a
-tamper-evident, append-only evidence history and explicit promotion gates.
+**Current boundary:** This repository contains research, evaluation, risk,
+execution, and offline Robinhood-adapter components. Those components do not
+establish a complete autonomous portfolio manager, a proven investing edge, an
+authenticated broker connection, or permission to trade. Paper validation is a
+future milestone; a $100 live pilot requires separate authorization.
 
-> **Current Boundary**: Drift is an evidence-first quantitative research system,
-> not a live trading bot. Foundations M0 through M6 are complete and verified.
-> The research pipeline (M7 research agent, M8 recursive R&D loop, and M10
-> champion/challenger tournament) is connected to authentic M2 deterministic
-> evaluation and fortified with an empirical scientific integrity firewall.
-> Execution architecture (M12 simulated broker, M13 hard risk, M14 broker-neutral
-> router, M15 shadow validation, M16 Robinhood adapter, M17 canary, and M18+
-> bounded autonomy) is implemented in runtime code, but live broker connection,
-> active order placement, and live capital remain strictly **UNAUTHORIZED**.
-> Paid promotion qualification (M1e Task 8) is deferred under ADR 0012.
+## Find the right context
 
----
+- [Product](docs/PRODUCT.md): approved direction and boundaries.
+- [Architecture](docs/ARCHITECTURE.md): system shape, current capabilities,
+  safety boundaries, and unresolved limitations.
+- [Roadmap](docs/ROADMAP.md): next outcomes and validation stages.
+- [Agent instructions](AGENTS.md): how contributors and agents work in this repo.
 
-## Core Philosophy
+GitHub issues and pull requests track work and known gaps. Earlier research
+designs and rationale remain under [historical technical docs](docs/architecture/adaptive-experiments/README.md);
+read them when relevant, not as a mandatory onboarding sequence.
 
-1. **Evidence First**: All hypotheses, datasets, experiments, models, and
-   outcomes are recorded in a tamper-evident, append-only, hash-chained ledger.
-2. **Point-in-Time Truth**: Data contracts strictly enforce what was observable
-   and available at each exact historical instant. Future information leakage is
-   a hard failure.
-3. **Research / Safety Separation**: Autonomous AI agents may propose research
-   hypotheses and strategy models, but live execution safety, hard risk limits,
-   position caps, and emergency kill switches are enforced deterministically
-   outside the agent's context.
+## Development
 
----
-
-## Architecture Flow
-
-Drift's roadmap runs from M0 through M18+, with M1 split into independently accepted submilestones:
-
-```text
-historical source evidence
-  -> provenance and point-in-time reconstruction
-  -> evaluator and backtester
-  -> deterministic baselines
-  -> prediction and outcome tracking
-  -> statistical and model scorecards
-  -> structured research memory
-  -> AI research agent
-  -> recursive R&D loop
-  -> champion / challenger tournament
-  -> promotion and anti-overfitting gates
-  -> shadow broker
-  -> deterministic hard risk
-  -> broker-neutral execution interface
-  -> live validation
-  -> official Robinhood Agentic MCP
-  -> tiny-money canary
-  -> bounded autonomy
-```
-
----
-
-## Current Project Status
-
-Drift evaluates progress across five distinct dimensions:
-- **IMPLEMENTED**: Code written and merged in repository.
-- **TESTED**: Unit, integration, and adversarial tests passing.
-- **INDEPENDENTLY REVIEWED**: Reviewed and accepted through external architectural review.
-- **SCIENTIFICALLY QUALIFIED**: Backed by accepted promotion-grade source data and out-of-sample rigor.
-- **OPERATIONALLY AUTHORIZED**: Authorized for live capital or external brokerage execution.
-
-| Milestone | Implementation | Tests | Review | Scientific Qualification | Operational Authority |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **M0** Evidence Kernel | COMPLETE | COMPLETE | ACCEPTED | QUALIFIED | LOCAL ONLY |
-| **M1a-d** Provenance & Normalization | COMPLETE | COMPLETE | ACCEPTED | QUALIFIED | LOCAL ONLY |
-| **M1e** Source Qualification (Tasks 1-7) | COMPLETE | COMPLETE | ACCEPTED | DEFERRED (Task 8) | LOCAL ONLY |
-| **M2** Deterministic Evaluator | COMPLETE | COMPLETE | ACCEPTED | EXPLORATORY (ADR 0012) | LOCAL ONLY |
-| **M3** Reference Baselines (B0-B5) | COMPLETE | COMPLETE | ACCEPTED | EXPLORATORY | LOCAL ONLY |
-| **M4** Prediction / Outcome Tracking | COMPLETE | COMPLETE | ACCEPTED | EXPLORATORY | LOCAL ONLY |
-| **M5** Statistical Scorecards | COMPLETE | COMPLETE | ACCEPTED | EXPLORATORY | LOCAL ONLY |
-| **M6** Research Memory | COMPLETE | COMPLETE | ACCEPTED | EXPLORATORY | LOCAL ONLY |
-| **M7** AI Research Agent | COMPLETE | COMPLETE | PENDING REVIEW | EXPLORATORY | LOCAL ONLY |
-| **M8** Recursive R&D Loop | COMPLETE | COMPLETE | PENDING REVIEW | EXPLORATORY | LOCAL ONLY |
-| **M10** Champion / Challenger | COMPLETE | COMPLETE | PENDING REVIEW | EXPLORATORY | LOCAL ONLY |
-| **M11** Promotion / Overfitting Gates | COMPLETE | PRESENT; VERIFY EXACT HEAD | ACCEPTANCE NOT RECONCILED HERE | UNQUALIFIED | UNAUTHORIZED |
-| **M12** Simulated Shadow Broker | COMPLETE | COMPLETE | ACCEPTED | N/A (SIMULATION) | UNAUTHORIZED |
-| **M13** Deterministic Hard Risk | COMPLETE | COMPLETE | ACCEPTED | N/A (RISK GATE) | UNAUTHORIZED |
-| **M14** Broker-Neutral Router | COMPLETE | COMPLETE | ACCEPTED | N/A (EXECUTION) | UNAUTHORIZED |
-| **M15** Paper / Shadow Validation | COMPLETE | COMPLETE | ACCEPTED | N/A (SHADOW) | UNAUTHORIZED |
-| **M16** Robinhood Agentic MCP Adapter | OFFLINE ADAPTER IMPLEMENTED | MOCK / OFFLINE COVERAGE | SEE M16 ACCEPTANCE RECORD | N/A (ADAPTER) | **UNAUTHORIZED** |
-| **M17** Tiny-Money Canary | COMPLETE | COMPLETE | ACCEPTED | N/A (CANARY) | **UNAUTHORIZED** |
-| **M18+** Bounded Autonomy | COMPLETE | COMPLETE | ACCEPTED | N/A (AUTONOMY) | **UNAUTHORIZED** |
-
-M11 implementation was delivered in [PR #264](https://github.com/KanujVerma/drift/pull/264);
-the earlier QUEUED entry did not describe the code inventory. Test availability
-and a green engineering check do not establish independent scientific acceptance,
-a qualified dataset, strategy promotion or permission to trade.
-
-M16 includes a broker adapter interface, order/account translation and a
-deterministic mock transport. Its offline tests do not establish an authenticated,
-current-schema Robinhood connection or live-account readiness. M15, M17 and M18+
-likewise distinguish implemented components from actual prospective or capital
-operations. Read [execution safety](docs/architecture/execution-safety-audit.md)
-and the applicable release issues before asserting operational readiness.
-
-Current work routes through [workstreams](docs/architecture/workstreams.md) and
-the [adaptive experiment entrypoint](docs/architecture/adaptive-experiments/README.md).
-GitHub issues and PRs own live claims and remaining acceptance. Synthetic G2
-integration, an admitted G3 study freeze, historical G4 results and prospective
-G5 evidence are separate deliverables; none is inferred from this status table.
-
-### PR #350 Research Integrity and Parallel Portfolios Components
-
-The components introduced in PR #350 operate across Drift's 5-dimensional status model:
-- **Domain Schema**: Data models and boundary types.
-- **Ledger Events**: M0 audit ledger persistence and schema bindings.
-- **Service Implementation**: Core business logic and runtime services.
-- **Unit Tests**: Targeted functional and boundary unit coverage.
-- **Verification Suite**: Integrated adversarial, determinism, and property verification.
-
-| Component | Domain Schema | Ledger Events | Service Implementation | Unit Tests | Verification Suite | Status | Lane Status |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Deterministic Evaluator Adapter** (M2/M8) | COMPLETE | COMPLETE | COMPLETE | COMPLETE | COMPLETE | PENDING EXTERNAL REVIEW | EXPLORATORY ONLY |
-| **Parallel $10,000 Portfolios Harness** | COMPLETE | COMPLETE | COMPLETE | COMPLETE | COMPLETE | PENDING EXTERNAL REVIEW | EXPLORATORY ONLY |
-| **Scientific Integrity Firewall** | COMPLETE | COMPLETE | COMPLETE | COMPLETE | COMPLETE | PENDING EXTERNAL REVIEW | EXPLORATORY ONLY |
-| **Tournament Evidence Requirements** | COMPLETE | COMPLETE | COMPLETE | COMPLETE | COMPLETE | PENDING EXTERNAL REVIEW | EXPLORATORY ONLY |
-
-> **Exploratory Evidence Boundary**: All evaluation evidence produced in the exploratory lane
-> is strictly non-promotable and cannot be upgraded, relabeled, or converted into promotion-grade
-> evidence. Promotion to production-authorized lanes requires a fresh, independent evaluation
-> run against an accepted promotion-qualified M1e dataset (deferred under ADR 0012). PR #350
-> does NOT qualify M1e Task 8 and does NOT promote any strategy to live execution.
-
-### Parallel Research Portfolios ($10,000 Initial Capital)
-Drift provides an isolated, deterministic research portfolio cohort harness
-(`drift.experiments.parallel_portfolios`) for evaluating independent $10,000
-strategy accounts in parallel under identical market sessions:
-```bash
-# Run deterministic parallel research portfolio cohort demo
-python -m drift.experiments.parallel_portfolios
-```
-
----
-
-## Quick Start and Verification
-
-Drift requires Python 3.14 or later and [uv](https://docs.astral.sh/uv/).
-
-`requires-python = ">=3.14"` is the package compatibility contract. The
-development and pinned-replay environment is a separate, exact contract:
-CPython 3.14.6, pinned in [`.python-version`](.python-version), which uv
-selects automatically and CI reads. Every M1d normalization derivation binds
-the exact interpreter patch version (`python_identity`), so pinned M1d replay
-under any other interpreter fails before replay starts with
-`PINNED_REPLAY_ENVIRONMENT_MISMATCH expected cpython-3.14.6 found cpython-X.Y.Z`.
-Pinned replay failures are always one of four named classes: environment
-mismatch, environment artifact unavailable, semantic replay mismatch, or
-fixture or inventory integrity failure (see
-[`tests/_pinned_m1d.py`](tests/_pinned_m1d.py)).
-
-Changing the pin is an explicit environment migration: change
-`.python-version`, run the complete suite, investigate any semantic
-difference, and mint a new replay baseline and supersession record only if
-equivalence is demonstrated, as
-[`tests/fixtures/m1d-replay-baselines/cpython-3.14.6/`](tests/fixtures/m1d-replay-baselines/cpython-3.14.6/supersession.json)
-does for 3.14.5 to 3.14.6. Never regenerate replay expectations merely because
-a new patch release exists.
-
-GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs
-the verification suite below, plus `git diff --check`, on every pull request
-and on every push to `main`, under the same pinned interpreter. CI never
-regenerates fixtures or baselines.
+The package requires Python 3.14 or newer. The development and replay
+environment uses the exact version in [`.python-version`](.python-version) and
+the committed `uv.lock`. Do not regenerate pinned replay fixtures to hide a
+failure. With [uv](https://docs.astral.sh/uv/) installed:
 
 ```bash
-# Sync development dependencies
-uv sync --dev
-
-# Run standard verification suite
+uv sync --locked --dev
 uv run pytest
 uv run ruff check .
 uv run ruff format --check .
@@ -185,23 +40,6 @@ uv run mypy src tests
 uv build
 ```
 
-To initialize and verify the local audit ledger:
-
-```bash
-uv run python scripts/init_local_db.py .drift/ledger.db
-uv run python scripts/verify_ledger.py .drift/ledger.db
-```
-
----
-
-## Canonical Documentation Map
-
-- **Operating Contract for AI/Engineers**: [`AGENTS.md`](AGENTS.md)
-- **Workstream Ownership**: [`docs/architecture/workstreams.md`](docs/architecture/workstreams.md)
-- **Agent Operating Workflow & Continuity**: [`docs/architecture/agent-workflow.md`](docs/architecture/agent-workflow.md)
-- **Architecture Overview**: [`docs/architecture/overview.md`](docs/architecture/overview.md)
-- **Project Roadmap (M0 to M18+)**: [`docs/architecture/roadmap.md`](docs/architecture/roadmap.md)
-- **M1e Provider Selection & Screening**: [`docs/architecture/m1e-provider-selection.md`](docs/architecture/m1e-provider-selection.md)
-- **Trust Boundaries & Data Retention**: [`docs/architecture/trust-boundaries.md`](docs/architecture/trust-boundaries.md)
-- **Accepted Architecture Decision Records**: [`docs/adr/`](docs/adr/)
-- **Active Implementation Plan**: [`docs/superpowers/plans/2026-09-13-m1e-license-gated-real-source-qualification-replay-closure.md`](docs/superpowers/plans/2026-09-13-m1e-license-gated-real-source-qualification-replay-closure.md)
+Choose verification proportionate to the change and report what actually ran.
+The existing GitHub Actions workflow runs the applicable hosted checks; a
+passing check is not source qualification or operational authorization.

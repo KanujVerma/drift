@@ -1,5 +1,11 @@
 # External patterns to evaluate, not blanket dependencies
 
+> Historical reuse research, not authorization to add dependencies, spend,
+> call providers, or evaluate models. Current [PRODUCT](../../PRODUCT.md),
+> [ROADMAP](../../ROADMAP.md), and [AGENTS](../../../AGENTS.md) supersede
+> conflicting product and role routing below. Preserve applicable technical,
+> provenance, security, and financial safeguards.
+
 ## Rule
 
 Preserve Drift's existing scientific and accounting contracts. A popular project
@@ -19,10 +25,10 @@ are preserved as a dated research artifact. Its proposal labels describe the
 review at publication; this approval selects the adoption **direction**, not an
 upstream security certification, accepted producer wire or completed integration.
 
-[Workstream ownership](../workstreams.md) remains authoritative. No work is
-assigned to the historical Harsha workstream. Kanuj owns measurement and the
-scientific consumer, Krish owns research producers, and Matthew owns platform
-mechanisms. Issue claims and independent acceptance remain required.
+The following table records the original workstream allocation, not current
+writer authority or mandatory human approvals. Consult current issues and
+[AGENTS.md](../../../AGENTS.md) for active work; preserve independent review
+and study evidence appropriate to the actual change.
 
 | Accountable owner | Concrete reuse work | Boundary and finish line |
 | --- | --- | --- |

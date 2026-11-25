@@ -1,5 +1,10 @@
 # ADR 0015: Adopt four feature-owned workstreams with protected writer handoffs
 
+> Historical governance decision. Its rigid workstream gates, mandatory
+> cross-approvals, and routine handoff procedures are superseded by current
+> [agent instructions](../../AGENTS.md). Preserve concurrent work, historical
+> authorship, and applicable technical safeguards; this is not an operational grant.
+
 ## Status
 
 Accepted for repository adoption. The initial draft of this ADR described three

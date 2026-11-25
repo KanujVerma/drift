@@ -1,5 +1,10 @@
 # Stage 1 implementation roadmap: controlled adaptive strategy selection
 
+> Historical research plan. The current [roadmap](../../ROADMAP.md),
+> [product direction](../../PRODUCT.md), and [agent instructions](../../../AGENTS.md)
+> supersede conflicting sequencing, ownership, and approval procedures here.
+> Relevant technical safeguards and unresolved evidence remain applicable.
+
 ## Purpose and authority
 
 Translate the owner-approved [Stage 1 S01-S38 decision register](stage1-decisions.md) into a **sequenced research and engineering plan**, consistent with broader [D01-D17](decisions.md), [system design](design.md), [workstreams](../workstreams.md) and the existing [delivery plan](delivery-plan.md). This is not a new software interface, activated work order, study preregistration, automatically approved numeric mandate, or authority to call a market provider or broker. Exact writer scopes, dependencies, claims and completion status live in GitHub issues/PRs, not on this page.

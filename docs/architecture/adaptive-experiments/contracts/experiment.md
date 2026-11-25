@@ -1,5 +1,10 @@
 # Experiment and Scientific Eligibility Contract
 
+> Research specification and historical rationale. Current [AGENTS.md](../../../../AGENTS.md)
+> supersedes conflicting mandatory reading, role routing, and approval procedures.
+> Preserve the technical and evidence safeguards below when they apply; this
+> document does not establish operational permission or implemented behavior.
+
 ## Start here: authority before action
 
 This is the canonical scientific specification for **EXPERIMENT/ELIGIBILITY**,
@@ -16,11 +21,8 @@ authorized child issues and explicit file permissions.
 
 A fresh Antigravity agent or human reviewer should note:
 
-1. Read [AGENTS.md](../../../../AGENTS.md), [decisions.md](../decisions.md) (D01-D17),
-   [design.md](../design.md), [workstreams.md](../../workstreams.md),
-   [requirements-crosswalk.md](../requirements-crosswalk.md),
-   [stage1-decisions.md](../stage1-decisions.md) (S01-S38), and
-   [stage1-roadmap.md](../stage1-roadmap.md).
+1. Follow [AGENTS.md](../../../../AGENTS.md) and consult the relevant research
+   references as needed for the specific study or implementation.
 2. The scientific layer consumes authoritative platform evidence from Matthew
    ([#376](https://github.com/KanujVerma/drift/issues/376) / [PR #407](https://github.com/KanujVerma/drift/pull/407) `platform.md`,
    [#379](https://github.com/KanujVerma/drift/issues/379) / [PR #412](https://github.com/KanujVerma/drift/pull/412) `execution.md`,

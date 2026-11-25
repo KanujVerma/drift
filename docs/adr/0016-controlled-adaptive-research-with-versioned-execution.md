@@ -1,5 +1,10 @@
 # ADR 0016: Adopt controlled adaptive research with versioned execution boundaries
 
+> Historical research decision. Current [product direction](../PRODUCT.md),
+> [architecture](../ARCHITECTURE.md), and [agent instructions](../../AGENTS.md)
+> supersede conflicting product and workflow directions below. Preserve applicable
+> technical, scientific, source, replay, and operational safeguards.
+
 ## Status
 
 Approved for repository adoption by Kanuj on 2026-10-12. Effective upon merge
