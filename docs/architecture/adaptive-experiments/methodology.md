@@ -1,5 +1,10 @@
 # Adaptive Experiment System: Preregistered Scientific Methodology (Issue #377)
 
+> Named people and workstreams below record historical responsibility, not
+> current assignment or mandatory review routing. Follow [AGENTS.md](../../../AGENTS.md)
+> and preserve the study's functional independence, accounting, source, and
+> risk safeguards.
+
 ## Status and Governance Boundary
 
 - **Issue Reference**: GitHub Issue #377 (Workstream: Kanuj, reparented from #373 to #391 under ADR 0017).
