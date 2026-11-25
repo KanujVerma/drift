@@ -197,8 +197,8 @@ class PersistentOrderIntentJournal:
         """Return the raw connection; direct operations bypass journal locking.
 
         A previously returned handle cannot be revoked if SQLite close fails.
-        Callbacks must not wait for another thread using this journal: SQLite
-        invokes them while the journal's transaction lock is held.
+        During a journal operation, SQLite callbacks run while the transaction
+        lock is held and must not wait for another thread using this journal.
         """
         with self._connection_lock:
             return self._ensure_connected()
