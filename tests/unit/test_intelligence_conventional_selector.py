@@ -9,7 +9,7 @@ Verifies acceptance criteria T07, T09, T13 from research.md and DP-R6:
 import json
 from copy import deepcopy
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Decimal, getcontext, localcontext
 from pathlib import Path
 from typing import Any
 
@@ -675,40 +675,65 @@ def test_r_nonzero_score_gaps_respect_tie_band_and_parameter_hash(
     hash_number = hash_winner.strategy.parameters["choice_number"]
     score_number = score_winner.strategy.parameters["choice_number"]
 
-    for gap, expected in (
-        (Decimal("0.0000000005"), hash_winner),
-        (Decimal("0.000000001"), hash_winner),
-        (Decimal("0.000000002"), score_winner),
-    ):
+    original_context = getcontext()
+    original_state = original_context.copy()
+    with localcontext() as low_context:
+        low_context.prec = 9
+        low_context.rounding = ROUND_HALF_EVEN
+        # Without isolation the inside-band score rounds to an exact tie.
+        assert Decimal("1") - Decimal("0.0000000005") == Decimal("1")
+        low_flags = low_context.flags.copy()
+        with localcontext() as precise_context:
+            precise_context.prec = 28
+            for gap, exact_lower_score, expected in (
+                (Decimal("0.0000000005"), Decimal("0.9999999995"), hash_winner),
+                (Decimal("0.000000001"), Decimal("0.999999999"), hash_winner),
+                (Decimal("0.000000002"), Decimal("0.999999998"), score_winner),
+            ):
 
-        def score(candidate: ResearchCandidate, gap_value: Decimal = gap) -> Decimal:
-            assert candidate.strategy is not None
-            if candidate.strategy.parameters["choice_number"] == hash_number:
-                return Decimal("1") - gap_value
-            assert candidate.strategy.parameters["choice_number"] == score_number
-            return Decimal("1")
+                def score(
+                    candidate: ResearchCandidate, gap_value: Decimal = gap
+                ) -> Decimal:
+                    assert candidate.strategy is not None
+                    if candidate.strategy.parameters["choice_number"] == hash_number:
+                        return Decimal("1") - gap_value
+                    assert (
+                        candidate.strategy.parameters["choice_number"] == score_number
+                    )
+                    return Decimal("1")
 
-        for pair in (
-            (choices[hash_number], choices[score_number]),
-            (choices[score_number], choices[hash_number]),
-        ):
-            result = select_conventional_candidate(
-                context=sample_context,
-                resolved_inputs=resolved,
-                candidate_pool=pair,
-                objective_fn=score,
-                method_ref=method,
-                validation_policy=policy,
-                recorder=ResearchReceiptStore(),
-                attempt_id="synthetic:nonzero-parameter-tie",
-                checked_at=cutoff,
-            )
-            assert result.is_success and result.selected_candidate is not None
-            assert result.candidate_scores[hash_winner.candidate_id] == str(
-                Decimal("1") - gap
-            )
-            assert result.candidate_scores[score_winner.candidate_id] == "1"
-            assert result.selected_candidate.candidate_id == expected.candidate_id
+                for pair in (
+                    (choices[hash_number], choices[score_number]),
+                    (choices[score_number], choices[hash_number]),
+                ):
+                    result = select_conventional_candidate(
+                        context=sample_context,
+                        resolved_inputs=resolved,
+                        candidate_pool=pair,
+                        objective_fn=score,
+                        method_ref=method,
+                        validation_policy=policy,
+                        recorder=ResearchReceiptStore(),
+                        attempt_id="synthetic:nonzero-parameter-tie",
+                        checked_at=cutoff,
+                    )
+                    assert result.is_success and result.selected_candidate is not None
+                    assert (
+                        Decimal(result.candidate_scores[hash_winner.candidate_id])
+                        == exact_lower_score
+                    )
+                    assert result.candidate_scores[score_winner.candidate_id] == "1"
+                    assert (
+                        result.selected_candidate.candidate_id == expected.candidate_id
+                    )
+        assert getcontext() is low_context
+        assert low_context.prec == 9 and low_context.rounding == ROUND_HALF_EVEN
+        assert low_context.flags == low_flags
+    assert getcontext() is original_context
+    assert original_context.prec == original_state.prec
+    assert original_context.rounding == original_state.rounding
+    assert original_context.flags == original_state.flags
+    assert original_context.traps == original_state.traps
 
 
 def test_r_attempts_bind_policy_request_and_context_profile(
