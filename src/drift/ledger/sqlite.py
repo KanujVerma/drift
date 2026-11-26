@@ -143,9 +143,15 @@ _EVENT_STORAGE_FIELDS = (
 class SQLiteLedger:
     """A transactional, append-only SQLite audit ledger."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, create_schema: bool = True) -> None:
         self._path = path
         self._read_only = False
+        if not create_schema:
+            if not path.is_file():
+                raise LedgerIntegrityError(f"no ledger file at {path}")
+            with self._connection() as connection:
+                _verify_required_schema(connection)
+            return
         with self._connection() as connection:
             connection.executescript(_SCHEMA)
 
@@ -157,7 +163,12 @@ class SQLiteLedger:
         ledger._read_only = True
         return ledger
 
-    def append(self, draft: AuditEventDraft) -> AuditEvent:
+    def append(
+        self,
+        draft: AuditEventDraft,
+        *,
+        expected_previous_hash: str | None = None,
+    ) -> AuditEvent:
         """Assign chain hashes and atomically append an event and checkpoint."""
         with self._connection() as connection:
             try:
@@ -166,6 +177,11 @@ class SQLiteLedger:
                     "SELECT event_hash FROM audit_events ORDER BY sequence DESC LIMIT 1"
                 ).fetchone()
                 previous_hash = GENESIS_HASH if head is None else str(head[0])
+                if (
+                    expected_previous_hash is not None
+                    and previous_hash != expected_previous_hash
+                ):
+                    raise LedgerIntegrityError("ledger head changed before append")
                 unsigned = UnsignedAuditEvent.model_validate(
                     {
                         **draft.model_dump(mode="python"),

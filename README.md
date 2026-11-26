@@ -7,10 +7,11 @@ conversational interaction and bounded autonomy. Research and evaluation support
 that product; they are not the product's final purpose.
 
 **Current boundary:** This repository contains offline research proposal
-validation, evidence, portfolio accounting, and risk building blocks. It does
-not include a broker adapter or order dispatcher and does not establish a
-complete portfolio manager or an investing edge. Paper validation and a $100
-live pilot require separate authorization and controls.
+validation, evidence, portfolio accounting, risk building blocks, and a
+simulation-only supervised portfolio cycle (`python -m drift.manager`).
+It does not include a broker adapter or order dispatcher, and it does not
+establish an investing edge or connected-trading readiness. Paper validation
+and a $100 live pilot require separate authorization and controls.
 
 ## Find the right context
 
@@ -37,6 +38,7 @@ uv run ruff check .
 uv run ruff format --check .
 uv run mypy src tests
 uv build
+uv run python -m drift.manager --help
 ```
 
 Choose verification proportionate to the change and report what actually ran.

@@ -48,6 +48,20 @@ economics are related but distinct measures.
   validator thresholds are historical research criteria, not an approved risk
   mandate; acceptance is not investment or promotion authorization. Evidence
   records and hashes do not authenticate source claims.
+- An offline supervised cycle ([`manager`](../src/drift/manager/__main__.py))
+  accepts timestamped local inputs and a structured buy, sell, or hold
+  proposal, checks it against the current book and an explicit simulation-only
+  mandate, and applies eligible fills through the portfolio accounting kernel.
+  State is stored in the retained SQLite ledger. The cycle does not call M1d
+  observation validation ([#135](https://github.com/KanujVerma/drift/issues/135)),
+  realized-session stamp binding
+  ([#151](https://github.com/KanujVerma/drift/issues/151)), the retired router
+  ([#674](https://github.com/KanujVerma/drift/issues/674)), broker
+  reconciliation ([#411](https://github.com/KanujVerma/drift/issues/411)), or
+  promotion qualification
+  ([#360](https://github.com/KanujVerma/drift/issues/360)). Those remain
+  unresolved for any path that would depend on them. A passing simulation is
+  not an investing edge or a broker connection.
 - The legacy evaluator engine, broker adapters, router, live dispatch, shadow,
   canary, promotion and study runtimes are retired from the active tree. This
   does not fix their defects. Any future connected implementation needs
