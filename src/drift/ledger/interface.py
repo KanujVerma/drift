@@ -30,8 +30,17 @@ class AuditEventDraft(FrozenModel):
 class Ledger(Protocol):
     """Storage-independent append-only audit ledger contract."""
 
-    def append(self, draft: AuditEventDraft) -> AuditEvent:
-        """Append a draft after assigning its predecessor and event hashes."""
+    def append(
+        self,
+        draft: AuditEventDraft,
+        *,
+        expected_previous_hash: str | None = None,
+    ) -> AuditEvent:
+        """Append a draft after assigning its predecessor and event hashes.
+
+        When ``expected_previous_hash`` is set, the append is refused if the
+        stored head changed after the caller read it.
+        """
         ...
 
     def get(self, event_id: UUID) -> AuditEvent | None:

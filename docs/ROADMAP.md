@@ -21,7 +21,9 @@ work and evidence rather than a duplicated status board.
    monitoring and event-driven reviews. Learn from measured outcomes inside the
    approved mandate; escalate out-of-scope ideas. Start with conversation and
    add a dashboard only if evidence justifies it. Reuse existing paths without
-   creating a competing account ledger.
+   creating a competing account ledger. A first offline conversational cycle
+   is `python -m drift.manager`. It is simulation-only and does not complete
+   daily research, monitoring, or connected paper validation.
 3. **Establish credible investment and economic evidence.** Compare
    risk-adjusted results with the S&P 500 and report investment returns separately
    from the costs of operating the system. Use appropriate out-of-sample and
