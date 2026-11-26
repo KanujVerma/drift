@@ -1,11 +1,16 @@
 """Unit tests for Robinhood Agentic MCP config and mock transport (M16-1)."""
 
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, date, datetime
 from decimal import Decimal
-from uuid import uuid4
+from threading import Barrier, BrokenBarrierError
+from typing import Any
+from uuid import uuid4, uuid7
 
 import pytest
 from pydantic import ValidationError
 
+from drift.adapters.robinhood.adapter import RobinhoodAgenticAdapter
 from drift.adapters.robinhood.config import (
     ROBINHOOD_ADAPTER_SCHEMA_VERSION,
     RobinhoodAgenticConfigV1,
@@ -15,6 +20,8 @@ from drift.adapters.robinhood.transport import (
     RobinhoodMcpError,
     RobinhoodMcpTransportProtocol,
 )
+from drift.domain.execution import ExecutionStatus, build_order_intent
+from drift.domain.sessions import SessionKeyV1
 
 
 def test_robinhood_config_valid_defaults() -> None:
@@ -243,3 +250,78 @@ def test_mock_transport_order_not_found_errors() -> None:
 
     with pytest.raises(RobinhoodMcpError, match="order non-existent not found"):
         transport.call_tool("robinhood_cancel_order", {"order_id": "non-existent"})
+
+
+def test_concurrent_distinct_intents_keep_independent_fake_orders() -> None:
+    barrier = Barrier(2)
+
+    class RacingOrders(dict[str, dict[str, Any]]):
+        def __len__(self) -> int:
+            size = super().__len__()
+            try:
+                barrier.wait(timeout=2)
+            except BrokenBarrierError:
+                # A serialized transport admits only one caller to this point.
+                pass
+            return size
+
+    transport = MockRobinhoodMcpTransport(auto_fill=False)
+    transport._orders = RacingOrders()
+    security_id = uuid7()
+    adapter = RobinhoodAgenticAdapter(
+        config=RobinhoodAgenticConfigV1(
+            account_id="fake", symbol_map={security_id: "FAKE"}
+        ),
+        transport=transport,
+    )
+    intents = [
+        build_order_intent(
+            intent_id=uuid7(),
+            client_order_id=str(uuid7()),
+            session_key=SessionKeyV1(
+                mic="XNYS", session_scope="regular", local_date=date(2026, 3, 1)
+            ),
+            security_id=security_id,
+            side="buy",
+            quantity=1,
+            order_type="market",
+            created_at=datetime(2026, 3, 1, tzinfo=UTC),
+        )
+        for _ in range(2)
+    ]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(adapter.submit_intent, intent) for intent in intents]
+        first, second = [future.result(timeout=10) for future in futures]
+    assert first.broker_order_id != second.broker_order_id
+    assert len(tuple(transport._orders.keys())) == 2
+    assert first.broker_order_id is not None and second.broker_order_id is not None
+    before = transport.call_tool(
+        "robinhood_get_order", {"order_id": second.broker_order_id}
+    )
+    assert before["client_token"] == str(intents[1].intent_id)
+    assert before["status"] == "queued"
+    canceled = adapter.cancel_intent(intents[0].intent_id)
+    assert canceled.status is ExecutionStatus.CANCELED
+    after = transport.call_tool(
+        "robinhood_get_order", {"order_id": second.broker_order_id}
+    )
+    assert after == before
+    first_order = transport.call_tool(
+        "robinhood_get_order", {"order_id": first.broker_order_id}
+    )
+    assert first_order["client_token"] == str(intents[0].intent_id)
+    assert first_order["status"] == "canceled"
+
+
+def test_fake_order_response_does_not_alias_transport_state() -> None:
+    transport = MockRobinhoodMcpTransport(auto_fill=False)
+    order = transport.call_tool(
+        "robinhood_place_order",
+        {"symbol": "FAKE", "side": "buy", "quantity": 1, "client_token": "fake"},
+    )
+    order_id = order["order_id"]
+    transport.call_tool("robinhood_cancel_order", {"order_id": order_id})
+    assert order["status"] == "queued"
+    order["client_token"] = "changed outside transport"
+    retained = transport.call_tool("robinhood_get_order", {"order_id": order_id})
+    assert retained["client_token"] == "fake"

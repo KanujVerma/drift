@@ -7,6 +7,7 @@ MockRobinhoodMcpTransport for offline testing and paper simulation per ADR 0011.
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
+from threading import Lock
 from typing import Any, Protocol, runtime_checkable
 
 from drift.domain.evaluator_portfolio import canonical_money, decimal_context
@@ -44,6 +45,7 @@ class MockRobinhoodMcpTransport:
         auto_fill: bool = True,
     ) -> None:
         self._account_id = account_id
+        self._lock = Lock()
         self._cash = canonical_money(initial_cash)
         self._price_map: dict[str, Decimal] = (
             dict(price_map) if price_map is not None else {}
@@ -55,22 +57,29 @@ class MockRobinhoodMcpTransport:
 
     def set_market_price(self, symbol: str, price: Decimal) -> None:
         """Configure mock market price for a symbol."""
-        self._price_map[symbol] = canonical_money(price)
+        with self._lock:
+            self._price_map[symbol] = canonical_money(price)
 
     @property
     def call_history(self) -> tuple[tuple[str, dict[str, Any]], ...]:
         """History of all tool calls invoked on this transport."""
-        return tuple(self._call_history)
+        with self._lock:
+            return tuple((name, dict(args)) for name, args in self._call_history)
 
     def call_tool(self, tool_name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
         """Dispatch tool call to simulated handler."""
         args = dict(arguments)
+        with self._lock:
+            return self._call_tool(tool_name, args)
+
+    def _call_tool(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+        """Update and snapshot fake state while holding the fake transport lock."""
         self._call_history.append((tool_name, args))
 
         if tool_name == "robinhood_place_order":
-            return self._handle_place_order(args)
+            return dict(self._handle_place_order(args))
         if tool_name == "robinhood_cancel_order":
-            return self._handle_cancel_order(args)
+            return dict(self._handle_cancel_order(args))
         if tool_name == "robinhood_get_order":
             return self._handle_get_order(args)
         if tool_name == "robinhood_get_order_by_client_token":
