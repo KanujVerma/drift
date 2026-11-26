@@ -32,7 +32,7 @@ from drift.domain.execution import (
 )
 from drift.domain.risk import RiskVerdictStatus, build_risk_policy
 from drift.domain.sessions import SessionKeyV1
-from drift.execution.adapter import MockBrokerAdapter
+from drift.execution.adapter import ExecutionOutcomeUnknown, MockBrokerAdapter
 from drift.execution.journal import PersistentOrderIntentJournal
 from drift.execution.router import BrokerNeutralExecutionRouter
 from drift.risk.gatekeeper import HardRiskGatekeeper
@@ -67,13 +67,17 @@ def _make_intent(
 class _FailingMcpTransport(MockRobinhoodMcpTransport):
     """Transport simulator injecting configurable network/API errors."""
 
-    def __init__(self, *, fail_tool: str, error_message: str) -> None:
-        super().__init__()
+    def __init__(
+        self, *, fail_tool: str, error_message: str, auto_fill: bool = True
+    ) -> None:
+        super().__init__(auto_fill=auto_fill)
         self._fail_tool = fail_tool
         self._error_message = error_message
+        self.failed_calls = 0
 
     def call_tool(self, tool_name: str, arguments: Any) -> dict[str, Any]:
         if tool_name == self._fail_tool:
+            self.failed_calls += 1
             raise RobinhoodMcpError(self._error_message)
         return super().call_tool(tool_name, arguments)
 
@@ -260,40 +264,28 @@ def test_s2_gatekeeper_evaluates_order_intent_v1_and_enforces_limits() -> None:
     assert "max_order_quantity_exceeded" in str(verdict_exceeding.reason)
 
 
-def test_s3_cancellation_error_not_swallowed_and_preserves_failure_reason() -> None:
-    """Regression S3: Robinhood cancellation error is not swallowed as CANCELED.
-
-    Verifies that transport cancellation errors are not swallowed, the adapter
-    does not report confirmed CANCELED, and the failure reason is preserved.
-    """
-    sec_id = uuid7()
-    config = RobinhoodAgenticConfigV1(account_id="acc-01", symbol_map={sec_id: "AAPL"})
+def test_s3_cancellation_error_raises_unknown_without_raw_detail() -> None:
+    """A failed fake cancellation returns neither CANCELED nor raw error text."""
+    intent = _make_intent()
+    config = RobinhoodAgenticConfigV1(
+        account_id="acc-01", symbol_map={intent.security_id: "AAPL"}
+    )
     failing_transport = _FailingMcpTransport(
         fail_tool="robinhood_cancel_order",
         error_message="503 Service Unavailable: broker cancel failed",
+        auto_fill=False,
     )
     adapter = RobinhoodAgenticAdapter(config=config, transport=failing_transport)
-
-    intent = _make_intent()
-    adapter._intent_to_broker_order[intent.intent_id] = "rh-ord-9999"
-
-    cancel_report = adapter.cancel_intent(intent.intent_id)
-
-    # Cancellation error is not swallowed: does NOT report CANCELED
-    assert cancel_report.status != ExecutionStatus.CANCELED
-    # Failure reason is preserved
-    assert cancel_report.rejection_reason is not None
-    assert "cancellation_failed" in cancel_report.rejection_reason
-    assert "503 Service Unavailable" in cancel_report.rejection_reason
+    assert adapter.submit_intent(intent).status == ExecutionStatus.ACKNOWLEDGED
+    with pytest.raises(ExecutionOutcomeUnknown, match="^execution outcome unknown$"):
+        adapter.cancel_intent(intent.intent_id)
+    assert failing_transport.failed_calls == 1
+    with pytest.raises(ExecutionOutcomeUnknown, match="^execution outcome unknown$"):
+        adapter.get_intent_status(intent.intent_id)
 
 
-def test_s4_reproduce_ambiguous_submission_error_marked_as_definitive_rejection() -> (
-    None
-):
-    """Defect Reproduction S4: Submission network timeout marked as REJECTED.
-
-    Reproduces the known defect where ambiguous timeout is marked as terminal REJECTED.
-    """
+def test_s4_ambiguous_submission_refuses_false_rejection() -> None:
+    """The prior timeout-to-REJECTED defect must now raise unknown instead."""
     sec_id = uuid7()
     config = RobinhoodAgenticConfigV1(account_id="acc-01", symbol_map={sec_id: "AAPL"})
     failing_transport = _FailingMcpTransport(
@@ -315,12 +307,13 @@ def test_s4_reproduce_ambiguous_submission_error_marked_as_definitive_rejection(
         created_at=datetime.now(UTC),
     )
 
-    report = adapter.submit_intent(intent)
-
-    # Confirms S4 defect: ambiguous timeout is authoritatively marked REJECTED
-    assert report.status == ExecutionStatus.REJECTED
-    assert report.broker_order_id is None
-    assert "Connection timed out" in str(report.rejection_reason)
+    with pytest.raises(ExecutionOutcomeUnknown, match="^execution outcome unknown$"):
+        adapter.submit_intent(intent)
+    assert failing_transport.failed_calls == 1
+    assert failing_transport.call_history[0][0] == "robinhood_get_order_by_client_token"
+    with pytest.raises(ExecutionOutcomeUnknown, match="^execution outcome unknown$"):
+        adapter.submit_intent(intent)
+    assert failing_transport.failed_calls == 1
 
 
 def test_s5_unmapped_positions_quarantined_without_crash_or_fabricated_uuid() -> None:
@@ -461,26 +454,22 @@ def test_s2_safe_behavior_gatekeeper_evaluates_order_intent() -> None:
 
 def test_s3_safe_behavior_cancellation_error_fails_closed() -> None:
     """Safe behavior regression: cancellation error must NOT report CANCELED."""
-    sec_id = uuid7()
-    config = RobinhoodAgenticConfigV1(account_id="acc-01", symbol_map={sec_id: "AAPL"})
+    intent = _make_intent()
+    config = RobinhoodAgenticConfigV1(
+        account_id="acc-01", symbol_map={intent.security_id: "AAPL"}
+    )
     failing_transport = _FailingMcpTransport(
         fail_tool="robinhood_cancel_order",
         error_message="503 Service Unavailable: broker cancel failed",
+        auto_fill=False,
     )
     adapter = RobinhoodAgenticAdapter(config=config, transport=failing_transport)
-
-    intent = _make_intent()
-    adapter._intent_to_broker_order[intent.intent_id] = "rh-ord-9999"
-
-    cancel_report = adapter.cancel_intent(intent.intent_id)
-    # Safe behavior: must not report CANCELED when cancellation call failed
-    assert cancel_report.status != ExecutionStatus.CANCELED
+    assert adapter.submit_intent(intent).status == ExecutionStatus.ACKNOWLEDGED
+    with pytest.raises(ExecutionOutcomeUnknown):
+        adapter.cancel_intent(intent.intent_id)
+    assert failing_transport.failed_calls == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Defect S4: Ambiguous timeout marked as authoritative REJECTED (UNFIXED)",
-)
 def test_s4_safe_behavior_submission_timeout_not_marked_rejected() -> None:
     """Safe behavior invariant: timeout must NOT be marked as REJECTED."""
     sec_id = uuid7()
@@ -504,9 +493,9 @@ def test_s4_safe_behavior_submission_timeout_not_marked_rejected() -> None:
         created_at=datetime.now(UTC),
     )
 
-    report = adapter.submit_intent(intent)
-    # Safe behavior: timeout must be ambiguous/pending reconciliation, not REJECTED
-    assert report.status != ExecutionStatus.REJECTED
+    with pytest.raises(ExecutionOutcomeUnknown):
+        adapter.submit_intent(intent)
+    assert failing_transport.failed_calls == 1
 
 
 def test_s5_safe_behavior_unmapped_symbol_quarantined_without_crash() -> None:

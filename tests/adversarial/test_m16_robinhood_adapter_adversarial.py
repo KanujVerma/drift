@@ -42,6 +42,7 @@ from drift.domain.execution import (
     build_order_intent,
 )
 from drift.domain.sessions import SessionKeyV1
+from drift.execution.adapter import ExecutionOutcomeUnknown
 
 
 def _make_session_key() -> SessionKeyV1:
@@ -85,7 +86,7 @@ def test_v1_dry_run_safety_attack() -> None:
 
 
 def test_v2_rate_limit_429_flood_attack() -> None:
-    """Vector 2: Rate limit 429 throttling produces fail-closed rejected report."""
+    """Vector 2: A transport error does not prove broker rejection."""
     sec_id = uuid7()
     config = RobinhoodAgenticConfigV1(
         account_id="rh-rate-limit-acc",
@@ -107,16 +108,14 @@ def test_v2_rate_limit_429_flood_attack() -> None:
         created_at=datetime.now(UTC),
     )
 
-    report = adapter.submit_intent(intent)
-    assert report.status == ExecutionStatus.REJECTED
-    assert report.rejection_reason is not None
-    assert "429 Too Many Requests" in report.rejection_reason
-    assert report.cum_quantity == 0
-    assert report.leaves_quantity == 10
+    with pytest.raises(ExecutionOutcomeUnknown, match="execution outcome unknown"):
+        adapter.submit_intent(intent)
+    with pytest.raises(ExecutionOutcomeUnknown, match="execution outcome unknown"):
+        adapter.get_intent_status(intent.intent_id)
 
 
 def test_v3_malformed_payload_injection() -> None:
-    """Vector 3: Corrupted tool outputs map to rejected execution status."""
+    """Vector 3: Corrupted tool outputs do not imply broker rejection."""
     sec_id = uuid7()
     config = RobinhoodAgenticConfigV1(
         account_id="rh-malformed-acc",
@@ -140,13 +139,14 @@ def test_v3_malformed_payload_injection() -> None:
         created_at=datetime.now(UTC),
     )
 
-    report = adapter.submit_intent(intent)
-    assert report.status == ExecutionStatus.REJECTED
-    assert report.broker_order_id == "rh-bad-01"
+    with pytest.raises(ExecutionOutcomeUnknown, match="execution outcome unknown"):
+        adapter.submit_intent(intent)
+    with pytest.raises(ExecutionOutcomeUnknown, match="execution outcome unknown"):
+        adapter.get_intent_status(intent.intent_id)
 
 
 def test_v4_network_transport_drop_attack() -> None:
-    """Vector 4: Transport drop returns fail-closed report without crashing."""
+    """Vector 4: A dropped transport cannot establish a broker outcome."""
     sec_id = uuid7()
     config = RobinhoodAgenticConfigV1(
         account_id="rh-drop-acc",
@@ -171,10 +171,10 @@ def test_v4_network_transport_drop_attack() -> None:
         created_at=datetime.now(UTC),
     )
 
-    report = adapter.submit_intent(intent)
-    assert report.status == ExecutionStatus.REJECTED
-    assert report.rejection_reason is not None
-    assert "MCP transport dropped" in report.rejection_reason
+    with pytest.raises(ExecutionOutcomeUnknown, match="execution outcome unknown"):
+        adapter.submit_intent(intent)
+    with pytest.raises(ExecutionOutcomeUnknown, match="execution outcome unknown"):
+        adapter.get_intent_status(intent.intent_id)
 
 
 def test_v5_duplicate_client_token_idempotency_attack() -> None:

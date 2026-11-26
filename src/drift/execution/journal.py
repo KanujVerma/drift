@@ -5,6 +5,8 @@ inbound execution reports with SQL triggers preventing modification or deletion.
 """
 
 import sqlite3
+import sys
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -108,6 +110,48 @@ BEGIN
 END;
 """
 
+_CREATE_SYNTHETIC_POTENTIAL_SENDS_TABLE = """
+CREATE TABLE IF NOT EXISTS synthetic_potential_sends_v1 (
+    account_key TEXT PRIMARY KEY NOT NULL,
+    attempt_id TEXT NOT NULL UNIQUE,
+    intent_id TEXT NOT NULL UNIQUE,
+    client_order_id TEXT NOT NULL UNIQUE,
+    intent_hash TEXT NOT NULL UNIQUE,
+    payload_json TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS synthetic_potential_sends_v1_no_replace
+BEFORE INSERT ON synthetic_potential_sends_v1
+WHEN EXISTS (
+    SELECT 1 FROM synthetic_potential_sends_v1
+    WHERE account_key = NEW.account_key OR attempt_id = NEW.attempt_id
+       OR intent_id = NEW.intent_id OR client_order_id = NEW.client_order_id
+       OR intent_hash = NEW.intent_hash
+)
+BEGIN
+    SELECT RAISE(ABORT, 'UNIQUE constraint failed: synthetic_potential_sends_v1');
+END;
+CREATE TRIGGER IF NOT EXISTS synthetic_potential_sends_v1_no_update
+BEFORE UPDATE ON synthetic_potential_sends_v1
+BEGIN
+    SELECT RAISE(ABORT, 'synthetic_potential_sends_v1 is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS synthetic_potential_sends_v1_no_delete
+BEFORE DELETE ON synthetic_potential_sends_v1
+BEGIN
+    SELECT RAISE(ABORT, 'synthetic_potential_sends_v1 is append-only');
+END;
+"""
+
+
+def _synthetic_account_key(account_key: str) -> str:
+    if not isinstance(account_key, str) or not account_key.startswith("synthetic-"):
+        raise ValueError(
+            "only explicitly labelled synthetic account keys are supported"
+        )
+    if account_key != account_key.strip() or len(account_key) <= len("synthetic-"):
+        raise ValueError("invalid synthetic account key")
+    return account_key
+
 
 def _session_key_to_str(key: SessionKeyV1) -> str:
     """Format SessionKeyV1 as a deterministic indexing string."""
@@ -119,15 +163,22 @@ class PersistentOrderIntentJournal:
 
     Maintains immutable records of outbound order intents and inbound execution reports,
     protected by database-level triggers preventing any UPDATE or DELETE operations.
+    Journal methods serialize access to this instance's connection. Direct use of
+    an escaped raw connection bypasses that serialization and is not protected.
     """
 
     def __init__(self, db_path: Path | str = ":memory:") -> None:
         self._db_path = str(db_path)
         self._connection: sqlite3.Connection | None = None
+        self._quarantined = False
+        self._connection_lock = threading.RLock()
+        self._transaction_active = False
         self._ensure_connected()
         self._init_schema()
 
     def _ensure_connected(self) -> sqlite3.Connection:
+        if self._quarantined:
+            raise ExecutionJournalError("journal connection is quarantined")
         if self._connection is None:
             self._connection = sqlite3.connect(
                 self._db_path,
@@ -143,42 +194,178 @@ class PersistentOrderIntentJournal:
 
     @property
     def connection(self) -> sqlite3.Connection:
-        """Active underlying SQLite connection."""
-        return self._ensure_connected()
+        """Return the raw connection; direct operations bypass journal locking.
+
+        A previously returned handle cannot be revoked if SQLite close fails.
+        During a journal operation, SQLite callbacks run while the transaction
+        lock is held and must not wait for another thread using this journal.
+        """
+        with self._connection_lock:
+            return self._ensure_connected()
 
     @contextmanager
-    def _transaction(self) -> Iterator[sqlite3.Cursor]:
-        conn = self._ensure_connected()
-        cursor = conn.cursor()
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            yield cursor
-            conn.execute("COMMIT")
-        except sqlite3.IntegrityError as error:
-            conn.execute("ROLLBACK")
-            msg = str(error)
-            if "append-only" in msg:
-                raise IntentAppendOnlyViolationError(msg) from error
-            if "UNIQUE constraint failed" in msg or "PRIMARY KEY" in msg:
-                raise DuplicateIntentRecordError(msg) from error
-            raise ExecutionJournalError(msg) from error
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-        finally:
-            cursor.close()
+    def _transaction(
+        self, *, require_synthetic_durability: bool = False
+    ) -> Iterator[sqlite3.Cursor]:
+        with self._connection_lock:
+            if self._transaction_active:
+                raise ExecutionJournalError("reentrant journal transaction refused")
+            self._transaction_active = True
+            try:
+                conn = self._ensure_connected()
+                cursor = conn.cursor()
+                try:
+                    if conn.in_transaction:
+                        raise ExecutionJournalError(
+                            "journal connection already in transaction"
+                        )
+                    try:
+                        conn.execute("BEGIN IMMEDIATE")
+                        if require_synthetic_durability:
+                            databases = conn.execute("PRAGMA database_list").fetchall()
+                            main_files = [
+                                row["file"]
+                                for row in databases
+                                if row["name"] == "main"
+                            ]
+                            if len(main_files) != 1 or not main_files[0]:
+                                raise ExecutionJournalError(
+                                    "synthetic reservation requires durable storage"
+                                )
+                            journal_mode = conn.execute(
+                                "PRAGMA journal_mode"
+                            ).fetchone()[0]
+                            if journal_mode != "wal":
+                                raise ExecutionJournalError(
+                                    "synthetic reservation requires WAL"
+                                )
+                            if conn.execute("PRAGMA synchronous").fetchone()[0] < 2:
+                                raise ExecutionJournalError(
+                                    "synthetic reservation requires durable sync"
+                                )
+                        yield cursor
+                        conn.execute("COMMIT")
+                    except BaseException as error:
+                        try:
+                            if conn.in_transaction:
+                                conn.execute("ROLLBACK")
+                            if conn.in_transaction:
+                                raise ExecutionJournalError(
+                                    "rollback left transaction active"
+                                )
+                        except BaseException as rollback_error:
+                            self._quarantined = True
+                            error.add_note(
+                                "rollback failed; journal quarantined: "
+                                f"{rollback_error}"
+                            )
+                            try:
+                                conn.close()
+                            except BaseException as close_error:
+                                error.add_note(
+                                    "quarantined connection close failed: "
+                                    f"{close_error}"
+                                )
+                            else:
+                                self._connection = None
+                            raise error from None
+                        if isinstance(error, sqlite3.IntegrityError):
+                            msg = str(error)
+                            if "append-only" in msg:
+                                raise IntentAppendOnlyViolationError(msg) from error
+                            if (
+                                "UNIQUE constraint failed" in msg
+                                or "PRIMARY KEY" in msg
+                            ):
+                                raise DuplicateIntentRecordError(msg) from error
+                            raise ExecutionJournalError(msg) from error
+                        raise
+                finally:
+                    active_error = sys.exception()
+                    try:
+                        cursor.close()
+                    except BaseException as close_error:
+                        if active_error is None:
+                            raise
+                        active_error.add_note(f"cursor close failed: {close_error}")
+            finally:
+                self._transaction_active = False
 
     def _init_schema(self) -> None:
         conn = self._ensure_connected()
         conn.executescript(
-            _CREATE_ORDER_INTENTS_TABLE + _CREATE_EXECUTION_REPORTS_TABLE
+            _CREATE_ORDER_INTENTS_TABLE
+            + _CREATE_EXECUTION_REPORTS_TABLE
+            + _CREATE_SYNTHETIC_POTENTIAL_SENDS_TABLE
         )
 
+    def record_synthetic_potential_send(
+        self, account_key: str, intent: OrderIntentV1, *, attempt_id: UUID
+    ) -> None:
+        """Permanently reserve a synthetic key and mark it potentially sent.
+
+        This one atomic record is not a permit, an identity registry, or a
+        transport guard. It models submit only and cannot be released or used
+        for real accounts.
+        """
+        account_key = _synthetic_account_key(account_key)
+        if not isinstance(attempt_id, UUID) or attempt_id.version != 7:
+            raise ValueError("attempt_id must be a UUIDv7")
+        payload = canonical_json(intent.model_dump(mode="python"))
+        intent = OrderIntentV1.model_validate_json(payload)
+        with self._transaction(require_synthetic_durability=True) as cursor:
+            cursor.execute(
+                """INSERT INTO synthetic_potential_sends_v1
+                   (account_key, attempt_id, intent_id, client_order_id,
+                    intent_hash, payload_json)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    account_key,
+                    str(attempt_id),
+                    str(intent.intent_id),
+                    intent.client_order_id,
+                    intent.intent_hash,
+                    payload.decode("utf-8"),
+                ),
+            )
+
+    def get_synthetic_potential_send(
+        self, account_key: str
+    ) -> tuple[UUID, OrderIntentV1] | None:
+        """Read the synthetic reservation; absence does not authorize anything."""
+        account_key = _synthetic_account_key(account_key)
+        with self._transaction() as cursor:
+            cursor.execute(
+                "SELECT * FROM synthetic_potential_sends_v1 WHERE account_key = ?",
+                (account_key,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            intent = OrderIntentV1.model_validate_json(row["payload_json"])
+            if (
+                row["intent_id"] != str(intent.intent_id)
+                or row["client_order_id"] != intent.client_order_id
+                or row["intent_hash"] != intent.intent_hash
+            ):
+                raise ExecutionJournalError("inconsistent synthetic reservation")
+            attempt_id = UUID(row["attempt_id"])
+            if attempt_id.version != 7:
+                raise ExecutionJournalError("invalid synthetic attempt identity")
+            return attempt_id, intent
+
     def close(self) -> None:
-        """Close database connection."""
-        if self._connection is not None:
-            self._connection.close()
-            self._connection = None
+        """Close the connection, retrying a failed close even if quarantined."""
+        with self._connection_lock:
+            if self._transaction_active:
+                raise ExecutionJournalError("cannot close during a journal transaction")
+            if self._connection is not None:
+                try:
+                    self._connection.close()
+                except BaseException:
+                    self._quarantined = True
+                    raise
+                self._connection = None
 
     def record_intent(self, intent: OrderIntentV1) -> None:
         """Record an outbound order intent."""

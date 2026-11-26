@@ -22,11 +22,17 @@ from drift.domain.execution import (
     build_broker_position_snapshot,
     build_execution_report,
 )
+from drift.errors import DriftError
 
 __all__ = [
     "BrokerAdapterProtocol",
+    "ExecutionOutcomeUnknown",
     "MockBrokerAdapter",
 ]
+
+
+class ExecutionOutcomeUnknown(DriftError):
+    """No truthful current V1 report is available, not a durable hold."""
 
 
 @runtime_checkable
