@@ -60,9 +60,10 @@ economics are related but distinct measures.
   [#360](https://github.com/KanujVerma/drift/issues/360) tracks unresolved
   promotion-evidence and completeness concerns; verdict labels or
   caller-supplied hashes alone do not resolve them.
-- Historical replay code, tests, hashes and fixtures remain in Git history, not
-  the active suite. Replaying them requires their original revision, environment
-  and inputs; this reset does not demonstrate replay on the new tree.
+- The active suite retains semantic-closure tests, their original byte-pin
+  inventories and supporting replay-baseline records. The full historical replay
+  code, tests and fixtures remain in Git history; replay requires the original
+  revision, environment and inputs and is not demonstrated by this reset.
   [`.python-version`](../.python-version) and the root lock remain unchanged.
 - The standalone `tools/stage1-statistics` worker and its separate lock remain
   solely to preserve that pin; it is not part of the product package or retained
