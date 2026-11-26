@@ -3,9 +3,9 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
 from pathlib import Path
-from threading import Event
+from threading import Event, RLock
 from typing import Any
-from uuid import uuid7
+from uuid import UUID, uuid7
 
 import pytest
 
@@ -14,7 +14,12 @@ from drift.adapters.robinhood import (
     RobinhoodAgenticAdapter,
     RobinhoodAgenticConfigV1,
 )
-from drift.domain.execution import ExecutionStatus, OrderIntentV1, build_order_intent
+from drift.domain.execution import (
+    ExecutionReportV1,
+    ExecutionStatus,
+    OrderIntentV1,
+    build_order_intent,
+)
 from drift.domain.sessions import SessionKeyV1
 from drift.execution.adapter import ExecutionOutcomeUnknown
 from drift.execution.journal import PersistentOrderIntentJournal
@@ -80,6 +85,161 @@ def test_direct_same_intent_concurrent_submissions_send_once() -> None:
     assert (
         sum(name == "robinhood_place_order" for name, _ in transport.call_history) == 1
     )
+
+
+@pytest.mark.parametrize("blocked_operation", ["submit", "status"])
+@pytest.mark.parametrize("via_router", [False, True])
+def test_unrelated_cancel_reaches_transport_while_intent_is_stalled(
+    blocked_operation: str, via_router: bool, tmp_path: Path
+) -> None:
+    class PausedTransport(FakeTransport):
+        def __init__(self) -> None:
+            super().__init__()
+            self.pause_status = False
+            self.cancel_entered = Event()
+
+        def call_tool(self, tool_name: str, arguments: Any) -> dict[str, Any]:
+            if tool_name == "robinhood_cancel_order":
+                self.cancel_entered.set()
+            if tool_name == "robinhood_get_order" and self.pause_status:
+                self.entered.set()
+                if not self.release.wait(10):
+                    raise TimeoutError("fake status timed out")
+            return super().call_tool(tool_name, arguments)
+
+    first, stalled = _intent(), _intent()
+    transport = PausedTransport()
+    adapter = RobinhoodAgenticAdapter(
+        config=RobinhoodAgenticConfigV1(
+            account_id="fake",
+            symbol_map={first.security_id: "FAKE", stalled.security_id: "FAKE"},
+        ),
+        transport=transport,
+    )
+    journal = PersistentOrderIntentJournal(tmp_path / "execution.sqlite")
+    try:
+        router = BrokerNeutralExecutionRouter(adapter=adapter, journal=journal)
+
+        def submit(intent: OrderIntentV1) -> ExecutionReportV1:
+            if via_router:
+                return router.route_intent(intent)
+            return adapter.submit_intent(intent)
+
+        def status() -> ExecutionReportV1 | None:
+            if via_router:
+                return router.get_intent_status(stalled.intent_id)
+            return adapter.get_intent_status(stalled.intent_id)
+
+        def cancel() -> ExecutionReportV1:
+            if via_router:
+                return router.cancel_intent(first.intent_id)
+            return adapter.cancel_intent(first.intent_id)
+
+        assert submit(first).status is ExecutionStatus.ACKNOWLEDGED
+        if blocked_operation == "status":
+            assert submit(stalled).status is ExecutionStatus.ACKNOWLEDGED
+            transport.pause_status = True
+        else:
+            transport.pause_submit = True
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            pending = (
+                pool.submit(submit, stalled)
+                if blocked_operation == "submit"
+                else pool.submit(status)
+            )
+            try:
+                assert transport.entered.wait(5)
+                cancellation = pool.submit(cancel)
+                assert transport.cancel_entered.wait(3)
+                assert cancellation.result(timeout=3).status is ExecutionStatus.CANCELED
+                assert not pending.done()
+            finally:
+                transport.release.set()
+            assert pending.result(timeout=5) is not None
+        if via_router:
+            reports = journal.list_execution_reports_for_intent(first.intent_id)
+            assert reports[-1].status is ExecutionStatus.CANCELED
+    finally:
+        journal.close()
+
+
+@pytest.mark.parametrize("operation", ["cancel", "status"])
+def test_same_intent_operations_wait_for_pending_submission(
+    operation: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    intent = _intent()
+    transport = FakeTransport()
+    transport.pause_submit = True
+    adapter = _adapter(intent, transport)
+    lock_obtained = Event()
+    original_lock_for_intent = adapter._lock_for_intent
+
+    def observed_lock(intent_id: UUID) -> RLock:
+        lock = original_lock_for_intent(intent_id)
+        lock_obtained.set()
+        return lock
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        submission = pool.submit(adapter.submit_intent, intent)
+        try:
+            assert transport.entered.wait(5)
+            monkeypatch.setattr(adapter, "_lock_for_intent", observed_lock)
+            pending = (
+                pool.submit(adapter.cancel_intent, intent.intent_id)
+                if operation == "cancel"
+                else pool.submit(adapter.get_intent_status, intent.intent_id)
+            )
+            assert lock_obtained.wait(5)
+            with pytest.raises(TimeoutError):
+                pending.result(timeout=0.2)
+        finally:
+            transport.release.set()
+        assert submission.result(timeout=5).status is ExecutionStatus.ACKNOWLEDGED
+        report = pending.result(timeout=5)
+        assert report is not None
+        assert report.status is (
+            ExecutionStatus.CANCELED
+            if operation == "cancel"
+            else ExecutionStatus.ACKNOWLEDGED
+        )
+        assert (
+            sum(name == "robinhood_place_order" for name, _ in transport.call_history)
+            == 1
+        )
+
+
+def test_same_intent_waiter_does_not_retry_uncertain_submission() -> None:
+    class UnknownTransport(FakeTransport):
+        def __init__(self) -> None:
+            super().__init__()
+            self.sends = 0
+
+        def call_tool(self, tool_name: str, arguments: Any) -> dict[str, Any]:
+            if tool_name == "robinhood_place_order":
+                self.sends += 1
+                self.entered.set()
+                if not self.release.wait(5):
+                    raise RuntimeError("fake transport was not released")
+                raise TimeoutError("fake submission outcome unknown")
+            return super().call_tool(tool_name, arguments)
+
+    intent = _intent()
+    transport = UnknownTransport()
+    adapter = _adapter(intent, transport)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(adapter.submit_intent, intent)
+        try:
+            assert transport.entered.wait(5)
+            second = pool.submit(adapter.submit_intent, intent)
+            transport.release.set()
+            with pytest.raises(ExecutionOutcomeUnknown):
+                first.result(timeout=5)
+            with pytest.raises(ExecutionOutcomeUnknown):
+                second.result(timeout=5)
+        finally:
+            transport.release.set()
+    assert transport.sends == 1
 
 
 def test_uncertain_cancel_does_not_replay_old_ack_after_restart(tmp_path: Path) -> None:

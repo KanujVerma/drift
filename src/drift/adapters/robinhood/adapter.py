@@ -6,9 +6,10 @@ official Robinhood Agentic MCP tool calls per ADR 0011 and ADR 0013.
 
 from datetime import UTC, datetime
 from decimal import Decimal
-from threading import RLock
+from threading import Lock, RLock
 from typing import Any
 from uuid import UUID, uuid7
+from weakref import WeakValueDictionary
 
 from drift.adapters.robinhood.config import RobinhoodAgenticConfigV1
 from drift.adapters.robinhood.transport import (
@@ -45,7 +46,8 @@ class RobinhoodAgenticAdapter:
     ) -> None:
         self._config = config
         self._transport = transport
-        self._state_lock = RLock()
+        self._locks_lock = Lock()
+        self._intent_locks: WeakValueDictionary[UUID, RLock] = WeakValueDictionary()
         self._reverse_symbol_map: dict[str, UUID] = {
             sym: sec_id for sec_id, sym in config.symbol_map.items()
         }
@@ -70,6 +72,15 @@ class RobinhoodAgenticAdapter:
     def quarantined_symbols(self) -> frozenset[str]:
         """Symbols present in broker account but quarantined due to missing mapping."""
         return frozenset(self._quarantined_symbols)
+
+    def _lock_for_intent(self, intent_id: UUID) -> RLock:
+        """Active callers retain the shared lock; idle entries can disappear."""
+        with self._locks_lock:
+            lock = self._intent_locks.get(intent_id)
+            if lock is None:
+                lock = RLock()
+                self._intent_locks[intent_id] = lock
+            return lock
 
     def _try_reconcile_by_client_token(
         self,
@@ -170,7 +181,7 @@ class RobinhoodAgenticAdapter:
 
     def submit_intent(self, intent: OrderIntentV1) -> ExecutionReportV1:
         """Submit an order intent to Robinhood Agentic MCP tools."""
-        with self._state_lock:
+        with self._lock_for_intent(intent.intent_id):
             return self._submit_intent(intent)
 
     def _submit_intent(self, intent: OrderIntentV1) -> ExecutionReportV1:
@@ -237,7 +248,7 @@ class RobinhoodAgenticAdapter:
 
     def cancel_intent(self, intent_id: UUID) -> ExecutionReportV1:
         """Cancel an open order intent via Robinhood Agentic MCP tools."""
-        with self._state_lock:
+        with self._lock_for_intent(intent_id):
             return self._cancel_intent(intent_id)
 
     def _cancel_intent(self, intent_id: UUID) -> ExecutionReportV1:
@@ -273,7 +284,7 @@ class RobinhoodAgenticAdapter:
 
     def get_intent_status(self, intent_id: UUID) -> ExecutionReportV1 | None:
         """Query latest execution report for an order intent."""
-        with self._state_lock:
+        with self._lock_for_intent(intent_id):
             return self._get_intent_status(intent_id)
 
     def _get_intent_status(self, intent_id: UUID) -> ExecutionReportV1 | None:
