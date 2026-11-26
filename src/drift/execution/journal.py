@@ -142,6 +142,42 @@ BEGIN
 END;
 """
 
+_CREATE_ROUTER_OPERATIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS router_operation_starts_v1 (
+    attempt_id TEXT PRIMARY KEY NOT NULL,
+    intent_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('cancel', 'status'))
+);
+CREATE INDEX IF NOT EXISTS idx_router_operation_intent
+ON router_operation_starts_v1 (intent_id);
+CREATE TABLE IF NOT EXISTS router_operation_completions_v1 (
+    attempt_id TEXT PRIMARY KEY NOT NULL REFERENCES router_operation_starts_v1,
+    report_id TEXT REFERENCES execution_reports(report_id)
+);
+CREATE TRIGGER IF NOT EXISTS router_operation_starts_no_update
+BEFORE UPDATE ON router_operation_starts_v1 BEGIN
+    SELECT RAISE(ABORT, 'router operations are append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS router_operation_starts_no_delete
+BEFORE DELETE ON router_operation_starts_v1 BEGIN
+    SELECT RAISE(ABORT, 'router operations are append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS router_operation_completions_no_update
+BEFORE UPDATE ON router_operation_completions_v1 BEGIN
+    SELECT RAISE(ABORT, 'router operations are append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS router_operation_completions_no_delete
+BEFORE DELETE ON router_operation_completions_v1 BEGIN
+    SELECT RAISE(ABORT, 'router operations are append-only');
+END;
+"""
+
+_PENDING_ROUTER_OPERATION = """
+SELECT 1 FROM router_operation_starts_v1 AS s
+LEFT JOIN router_operation_completions_v1 AS c ON c.attempt_id = s.attempt_id
+WHERE s.intent_id = ? AND c.attempt_id IS NULL LIMIT 1
+"""
+
 
 def _synthetic_account_key(account_key: str) -> str:
     if not isinstance(account_key, str) or not account_key.startswith("synthetic-"):
@@ -297,7 +333,85 @@ class PersistentOrderIntentJournal:
             _CREATE_ORDER_INTENTS_TABLE
             + _CREATE_EXECUTION_REPORTS_TABLE
             + _CREATE_SYNTHETIC_POTENTIAL_SENDS_TABLE
+            + _CREATE_ROUTER_OPERATIONS_TABLE
         )
+
+    def begin_router_operation(
+        self, intent_id: UUID, attempt_id: UUID, *, kind: str
+    ) -> bool:
+        """Reserve before an adapter cancellation or status query.
+
+        File-backed journals require WAL/FULL. An in-memory journal provides only
+        process-local containment. This does not guard direct adapter calls.
+        """
+        with self._transaction(
+            require_synthetic_durability=self._db_path != ":memory:"
+        ) as cursor:
+            cursor.execute(_PENDING_ROUTER_OPERATION, (str(intent_id),))
+            if cursor.fetchone() is not None:
+                return False
+            cursor.execute(
+                "INSERT INTO router_operation_starts_v1 VALUES (?, ?, ?)",
+                (str(attempt_id), str(intent_id), kind),
+            )
+            return True
+
+    def complete_router_operation(
+        self, attempt_id: UUID, report: ExecutionReportV1 | None
+    ) -> None:
+        """Complete only after the exact report has been retained successfully."""
+        with self._transaction() as cursor:
+            cursor.execute(
+                """SELECT s.intent_id, s.kind, r.payload_json
+                   FROM router_operation_starts_v1 AS s
+                   LEFT JOIN execution_reports AS r ON r.report_id = ?
+                   WHERE s.attempt_id = ?""",
+                (
+                    str(report.report_id) if report is not None else None,
+                    str(attempt_id),
+                ),
+            )
+            row = cursor.fetchone()
+            if (
+                row is None
+                or (report is None and row["kind"] != "status")
+                or (
+                    report is not None
+                    and (
+                        row["intent_id"] != str(report.intent_id)
+                        or row["payload_json"]
+                        != canonical_json(report.model_dump(mode="python")).decode(
+                            "utf-8"
+                        )
+                    )
+                )
+            ):
+                raise ExecutionJournalError("router completion report mismatch")
+            cursor.execute(
+                "INSERT INTO router_operation_completions_v1 VALUES (?, ?)",
+                (str(attempt_id), str(report.report_id) if report else None),
+            )
+
+    def router_replay_state(
+        self, intent_id: UUID
+    ) -> tuple[bool, ExecutionReportV1 | None]:
+        """Read pending operation and historical report in one transaction."""
+        with self._transaction() as cursor:
+            cursor.execute(_PENDING_ROUTER_OPERATION, (str(intent_id),))
+            if cursor.fetchone() is not None:
+                return True, None
+            cursor.execute(
+                """SELECT payload_json FROM execution_reports WHERE intent_id = ?
+                   ORDER BY sequence DESC LIMIT 1""",
+                (str(intent_id),),
+            )
+            row = cursor.fetchone()
+            return (
+                False,
+                ExecutionReportV1.model_validate_json(row["payload_json"])
+                if row is not None
+                else None,
+            )
 
     def record_synthetic_potential_send(
         self, account_key: str, intent: OrderIntentV1, *, attempt_id: UUID

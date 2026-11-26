@@ -17,7 +17,7 @@ from drift.domain.execution import (
     build_order_intent,
 )
 from drift.domain.sessions import SessionKeyV1
-from drift.execution.adapter import MockBrokerAdapter
+from drift.execution.adapter import ExecutionOutcomeUnknown, MockBrokerAdapter
 from drift.execution.journal import ExecutionJournalError, PersistentOrderIntentJournal
 from drift.execution.router import BrokerNeutralExecutionRouter, RouterExecutionError
 
@@ -107,12 +107,16 @@ def test_lower_quantity_is_retained_but_never_returned_as_current(
             intent, quantity, status, time_offset=time_offset, anchor=fill.reported_at
         )
         adapter.response = lower
-        for _ in range(2):
-            with pytest.raises(RouterExecutionError, match="cumulative quantity"):
-                if operation == "status":
-                    router.get_intent_status(intent.intent_id)
-                else:
-                    router.cancel_intent(intent.intent_id)
+        with pytest.raises(RouterExecutionError, match="cumulative quantity"):
+            if operation == "status":
+                router.get_intent_status(intent.intent_id)
+            else:
+                router.cancel_intent(intent.intent_id)
+        with pytest.raises(ExecutionOutcomeUnknown):
+            if operation == "status":
+                router.get_intent_status(intent.intent_id)
+            else:
+                router.cancel_intent(intent.intent_id)
         assert journal.list_execution_reports_for_intent(intent.intent_id) == (
             fill,
             lower,
@@ -145,12 +149,17 @@ def test_cached_lower_quantity_refuses_after_reopen_without_redispatch(
     if lookup == "intent":
         monkeypatch.setattr(reader, "get_intent_by_client_id", lambda _: None)
     try:
-        for _ in range(2):
+        with pytest.raises(RouterExecutionError, match="cumulative quantity"):
+            if lookup == "journal_fallback":
+                router.get_intent_status(intent.intent_id)
+            else:
+                router.route_intent(intent)
+        if lookup == "journal_fallback":
+            with pytest.raises(ExecutionOutcomeUnknown):
+                router.get_intent_status(intent.intent_id)
+        else:
             with pytest.raises(RouterExecutionError, match="cumulative quantity"):
-                if lookup == "journal_fallback":
-                    router.get_intent_status(intent.intent_id)
-                else:
-                    router.route_intent(intent)
+                router.route_intent(intent)
         assert adapter.submits == 0
         assert adapter.get_positions() == ()
         assert reader.list_execution_reports_for_intent(intent.intent_id) == (
@@ -258,9 +267,9 @@ def test_all_retained_history_is_consulted_not_only_previous_arrival(
         with pytest.raises(RouterExecutionError, match="cumulative quantity"):
             router.get_intent_status(intent.intent_id)
         assert journal.list_execution_reports_for_intent(intent.intent_id) == reports
-        # Redelivery of a previously retained lower report must also refuse.
+        # Contradictory status leaves a hold; no redelivery is treated as current.
         adapter.response = reports[1]
-        with pytest.raises(RouterExecutionError, match="cumulative quantity"):
+        with pytest.raises(ExecutionOutcomeUnknown):
             router.get_intent_status(intent.intent_id)
         assert journal.list_execution_reports_for_intent(intent.intent_id) == reports
     finally:

@@ -18,7 +18,7 @@ from drift.domain.execution import (
 )
 from drift.domain.risk import RiskVerdictStatus
 from drift.errors import DriftError
-from drift.execution.adapter import BrokerAdapterProtocol
+from drift.execution.adapter import BrokerAdapterProtocol, ExecutionOutcomeUnknown
 from drift.execution.journal import (
     DuplicateIntentRecordError,
     PersistentOrderIntentJournal,
@@ -107,12 +107,13 @@ class BrokerNeutralExecutionRouter:
                     f"client_order_id {intent.client_order_id} already exists "
                     "with different intent"
                 )
-            latest = self._journal.get_latest_execution_report(existing.intent_id)
+            latest = self._replay_report(existing.intent_id)
             if latest is not None:
                 return self._require_nonregressing_quantity(latest)
-            adapter_rep = self._adapter.get_intent_status(existing.intent_id)
+            adapter_rep = self.get_intent_status(existing.intent_id)
             if adapter_rep is not None:
-                return self._retain_report(adapter_rep, intent_id=existing.intent_id)
+                return adapter_rep
+            raise ExecutionOutcomeUnknown("execution outcome unknown")
 
         # Check idempotency by intent_id
         existing_id = self._journal.get_intent(intent.intent_id)
@@ -124,15 +125,21 @@ class BrokerNeutralExecutionRouter:
                 raise DuplicateClientOrderIdError(
                     f"intent_id {intent.intent_id} already exists with different intent"
                 )
-            latest = self._journal.get_latest_execution_report(existing_id.intent_id)
+            latest = self._replay_report(existing_id.intent_id)
             if latest is not None:
                 return self._require_nonregressing_quantity(latest)
-            adapter_rep = self._adapter.get_intent_status(existing_id.intent_id)
+            adapter_rep = self.get_intent_status(existing_id.intent_id)
             if adapter_rep is not None:
-                return self._retain_report(adapter_rep, intent_id=existing_id.intent_id)
+                return adapter_rep
+            raise ExecutionOutcomeUnknown("execution outcome unknown")
 
         # New intent: record to journal
-        self._journal.record_intent(intent)
+        try:
+            self._journal.record_intent(intent)
+        except DuplicateIntentRecordError:
+            # Another caller may have reserved the same identity since the reads.
+            # Never treat a losing reservation as permission to send.
+            raise ExecutionOutcomeUnknown("execution outcome unknown") from None
 
         # Pre-execution hard risk gatekeeper evaluation
         if self._risk_gatekeeper is not None:
@@ -172,19 +179,44 @@ class BrokerNeutralExecutionRouter:
         if existing is None:
             raise UnknownIntentError(f"intent_id {intent_id} not found in journal")
 
+        attempt_id = uuid7()
+        if not self._journal.begin_router_operation(
+            intent_id, attempt_id, kind="cancel"
+        ):
+            raise ExecutionOutcomeUnknown("execution outcome unknown")
         report = self._adapter.cancel_intent(intent_id)
-        return self._retain_report(report, intent_id=intent_id)
+        retained = self._retain_report(report, intent_id=intent_id)
+        if retained.status not in (ExecutionStatus.CANCELED, ExecutionStatus.FILLED):
+            raise ExecutionOutcomeUnknown("execution outcome unknown")
+        self._journal.complete_router_operation(attempt_id, retained)
+        return retained
 
     def get_intent_status(self, intent_id: UUID) -> ExecutionReportV1 | None:
         """Query latest execution report for an intent from adapter and journal."""
+        attempt_id = uuid7()
+        if not self._journal.begin_router_operation(
+            intent_id, attempt_id, kind="status"
+        ):
+            raise ExecutionOutcomeUnknown("execution outcome unknown")
         adapter_rep = self._adapter.get_intent_status(intent_id)
+        result: ExecutionReportV1 | None
         if adapter_rep is not None:
-            return self._retain_report(adapter_rep, intent_id=intent_id)
+            result = self._retain_report(adapter_rep, intent_id=intent_id)
+        else:
+            latest = self._journal.get_latest_execution_report(intent_id)
+            result = (
+                self._require_nonregressing_quantity(latest)
+                if latest is not None
+                else None
+            )
+        self._journal.complete_router_operation(attempt_id, result)
+        return result
 
-        latest = self._journal.get_latest_execution_report(intent_id)
-        return (
-            self._require_nonregressing_quantity(latest) if latest is not None else None
-        )
+    def _replay_report(self, intent_id: UUID) -> ExecutionReportV1 | None:
+        pending, report = self._journal.router_replay_state(intent_id)
+        if pending:
+            raise ExecutionOutcomeUnknown("execution outcome unknown")
+        return report
 
     def _retain_report(
         self, report: ExecutionReportV1, *, intent_id: UUID

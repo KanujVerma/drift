@@ -6,6 +6,7 @@ official Robinhood Agentic MCP tool calls per ADR 0011 and ADR 0013.
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from threading import RLock
 from typing import Any
 from uuid import UUID, uuid7
 
@@ -26,6 +27,7 @@ from drift.domain.execution import (
     build_execution_report,
 )
 from drift.execution.adapter import ExecutionOutcomeUnknown
+from drift.serialization.canonical import canonical_json
 
 __all__ = [
     "RobinhoodAgenticAdapter",
@@ -43,6 +45,7 @@ class RobinhoodAgenticAdapter:
     ) -> None:
         self._config = config
         self._transport = transport
+        self._state_lock = RLock()
         self._reverse_symbol_map: dict[str, UUID] = {
             sym: sec_id for sec_id, sym in config.symbol_map.items()
         }
@@ -167,8 +170,22 @@ class RobinhoodAgenticAdapter:
 
     def submit_intent(self, intent: OrderIntentV1) -> ExecutionReportV1:
         """Submit an order intent to Robinhood Agentic MCP tools."""
+        with self._state_lock:
+            return self._submit_intent(intent)
+
+    def _submit_intent(self, intent: OrderIntentV1) -> ExecutionReportV1:
         if intent.intent_id in self._uncertain_intents:
             raise ExecutionOutcomeUnknown("execution outcome unknown")
+        previous = self._intents.get(intent.intent_id)
+        if previous is not None:
+            if canonical_json(previous.model_dump(mode="python")) != canonical_json(
+                intent.model_dump(mode="python")
+            ):
+                raise ExecutionOutcomeUnknown("execution outcome unknown")
+            report = self._latest_reports.get(intent.intent_id)
+            if report is None:
+                raise ExecutionOutcomeUnknown("execution outcome unknown")
+            return report
         self._intents[intent.intent_id] = intent
         now = datetime.now(UTC)
 
@@ -220,6 +237,10 @@ class RobinhoodAgenticAdapter:
 
     def cancel_intent(self, intent_id: UUID) -> ExecutionReportV1:
         """Cancel an open order intent via Robinhood Agentic MCP tools."""
+        with self._state_lock:
+            return self._cancel_intent(intent_id)
+
+    def _cancel_intent(self, intent_id: UUID) -> ExecutionReportV1:
         if intent_id in self._uncertain_intents:
             raise ExecutionOutcomeUnknown("execution outcome unknown")
         existing = self._latest_reports.get(intent_id)
@@ -252,6 +273,10 @@ class RobinhoodAgenticAdapter:
 
     def get_intent_status(self, intent_id: UUID) -> ExecutionReportV1 | None:
         """Query latest execution report for an order intent."""
+        with self._state_lock:
+            return self._get_intent_status(intent_id)
+
+    def _get_intent_status(self, intent_id: UUID) -> ExecutionReportV1 | None:
         if intent_id in self._uncertain_intents:
             raise ExecutionOutcomeUnknown("execution outcome unknown")
         broker_order_id = self._intent_to_broker_order.get(intent_id)
