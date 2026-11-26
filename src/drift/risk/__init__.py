@@ -5,7 +5,6 @@ evaluation, and immutable SQLite risk audit journals.
 """
 
 from drift.risk.gatekeeper import HardRiskGatekeeper
-from drift.risk.harness import RiskManagedBroker
 from drift.risk.journal import (
     DuplicateRiskRecordError,
     PersistentRiskJournal,
@@ -19,5 +18,4 @@ __all__ = [
     "PersistentRiskJournal",
     "RiskAppendOnlyViolationError",
     "RiskJournalError",
-    "RiskManagedBroker",
 ]

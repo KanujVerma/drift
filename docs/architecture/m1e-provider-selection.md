@@ -2,7 +2,8 @@
 
 ## Status
 
-Active architecture record, 2026-09-19.
+Historical architecture record, 2026-09-19. Retained as source evidence for
+offline coverage tests, not as current provider qualification or permission.
 
 This document records the empirical screening, documentary evidence, and
 architecture rulings governing the selection of real-source market data providers
@@ -278,12 +279,10 @@ against actual source evidence before a newly authorized acquisition or study.
 
 The M2 evaluator and exploratory development adapter have already been delivered;
 do not restart their design or implementation from the earlier next-action list.
-Current source qualification is routed through
-[issue #378](https://github.com/KanujVerma/drift/issues/378), the
-[Stage 1 roadmap](adaptive-experiments/stage1-roadmap.md) and the consuming
-study's explicit G1/G3 requirements. Matthew owns source qualification; Krish
-reviews research consumption; Kanuj owns scientific consumption for migrated
-issues, with independent acceptance as required.
+The historical source-qualification work was routed through
+[issue #378](https://github.com/KanujVerma/drift/issues/378), the former Stage 1
+roadmap and the consuming study's explicit G1/G3 requirements. Historical
+ownership and acceptance arrangements are recorded in Git history.
 
 Under ADR 0012, paid promotion-grade M1e qualification remains separately gated.
 An exploratory source, retained snapshot or passing replay cannot be relabeled

@@ -1762,11 +1762,8 @@ def test_whole_tree_provenance_hash_is_retained() -> None:
 
 # --- M1d evidence identity (issue 63, stage 1) --------------------------------
 
-_M1D_EVIDENCE_POLICY_AUTHORS = frozenset({"drift.adapters.alpaca_exploratory"})
-"""Modules that stamp the M1d evidence identity into a policy they author but
-whose semantics M1d does not execute. The bridge authors a schedule generation
-policy that ``drift.markets.session_generation`` (a seed) executes, and binds its
-own lineage separately, so it is classified here instead of being a seed."""
+_M1D_EVIDENCE_POLICY_AUTHORS: frozenset[str] = frozenset()
+"""No external policy author remains after the Alpaca adapter was retired."""
 
 _M1D_EVIDENCE_IDENTITY_DEFINERS = frozenset({"drift.domain.semantic_attestation"})
 """The module that defines the attestation behind the identity. It declares the
@@ -1998,12 +1995,8 @@ _M1C_EVIDENCE_IDENTITY_NAMES = frozenset(
 )
 """Every public name that yields the M1c evidence identity."""
 
-_M1C_VALIDATION_RUN_AUTHORS = frozenset({"drift.adapters.alpaca_exploratory"})
-"""Modules that stamp the M1c validator run identity into a validation run they
-author, outside the closure. The bridge validates its Alpaca terms dataset with
-``validate_economic_dataset`` (a seed) and stamps the run with the unchanged
-``economic_validator_implementation_hash()`` accessor, so it is classified here
-instead of being a seed."""
+_M1C_VALIDATION_RUN_AUTHORS: frozenset[str] = frozenset()
+"""No external validation-run author remains after the adapter was retired."""
 
 _WHOLE_TREE_PROVENANCE_MODULES = frozenset(
     {"drift.domain.economic_common", "drift.domain.observation_query"}

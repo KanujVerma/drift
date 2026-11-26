@@ -5,7 +5,7 @@ from fractions import Fraction
 from uuid import uuid7
 
 import pytest
-from test_execution_safety_risk import _make_intent
+from risk_test_support import make_intent as _make_intent
 from test_risk_gatekeeper import _make_policy, _make_state
 
 from drift.domain.evaluator_portfolio import SecurityHoldingV2, decimal_context

@@ -40,9 +40,9 @@ appropriate decisions. Paper-connected operation and real-money trading require
 separate explicit authorization, evidence and safeguards. The $100 figure is
 future pilot intent, not an account funding or trading grant.
 
-The legacy [D04 and D10 decisions](architecture/adaptive-experiments/decisions.md)
-record historical reasoning and may describe specific studies. Their weekly
-routine portfolio-review cadence and ETF-first framing are not binding product roadmap:
+The legacy D04 and D10 decisions remain in Git history and record historical
+reasoning about specific studies. Their weekly routine portfolio-review cadence
+and ETF-first framing are not binding product roadmap:
 the direction above is daily research with event-driven reviews, without an
 ETF-first requirement. This does not invalidate historical experiments or remove
 applicable technical, evidence, replay and safety constraints.

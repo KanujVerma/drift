@@ -38,37 +38,36 @@ economics are related but distinct measures.
 
 ## Existing building blocks and concrete limits
 
-- The repository contains an append-only evidence ledger
-  ([`sqlite.py`](../src/drift/ledger/sqlite.py)), a deterministic evaluator and
-  portfolio accounting kernel ([`engine.py`](../src/drift/evaluator/engine.py),
-  [`portfolio.py`](../src/drift/evaluator/portfolio.py)), and research and
-  scorecard components. They are building blocks, not evidence that the intended
-  autonomous portfolio manager is complete or profitable.
-- The Robinhood adapter and mock transport exist
-  ([`adapter.py`](../src/drift/adapters/robinhood/adapter.py),
-  [`transport.py`](../src/drift/adapters/robinhood/transport.py));
-  [`tests/unit/test_robinhood_adapter.py`](../tests/unit/test_robinhood_adapter.py)
-  exercises offline behavior. This is not a verified authenticated connection,
-  current-schema conformance, account readiness or authorization to connect.
-- Risk enforcement is not universal: the router's gatekeeper is optional
-  ([`router.py`](../src/drift/execution/router.py)), and the
-  [safety tests](../tests/unit/test_execution_safety_audit.py) reproduce a
-  no-gatekeeper dispatch. The adapter can report an unconfirmed submission as
-  rejected and cancellation failure may leave status uncertain. Unmapped
-  positions are quarantined, not fully reconciled. See the
-  [execution safety audit](architecture/execution-safety-audit.md); its detailed
-  historical findings must be reconciled with current source before changes.
+- The retained offline building blocks include proposal validation
+  ([`validator.py`](../src/drift/agent/validator.py)), explicit evidence records
+  ([`evidence.py`](../src/drift/domain/evidence.py)), an append-only audit ledger
+  ([`sqlite.py`](../src/drift/ledger/sqlite.py)), canonical serialization,
+  the portfolio accounting kernel ([`portfolio.py`](../src/drift/evaluator/portfolio.py)),
+  and risk evaluation and journaling. Supporting domain, market and scorecard
+  modules remain where imported by these components or their tests. Proposal
+  validator thresholds are historical research criteria, not an approved risk
+  mandate; acceptance is not investment or promotion authorization. Evidence
+  records and hashes do not authenticate source claims.
+- The legacy evaluator engine, broker adapters, router, live dispatch, shadow,
+  canary, promotion and study runtimes are retired from the active tree. This
+  does not fix their defects. Any future connected implementation needs
+  universal intent- and state-bound risk enforcement, durable account-wide
+  unknown-outcome reconciliation, and a usable stop mechanism. The retained risk
+  gatekeeper alone is not sufficient dispatch authority: for example, it can
+  evaluate without a portfolio and can reuse cached verdicts.
 - Source qualification is not established by synthetic or exploratory output.
-  [ADR 0012](adr/0012-permit-exploratory-evaluation-before-promotion-grade-source-qualification.md)
-  keeps exploratory results non-promotable: a fresh evaluation against accepted
-  promotion-qualified data is required for that evidence. [#360](https://github.com/KanujVerma/drift/issues/360)
-  tracks unresolved promotion-evidence and completeness concerns; verdict labels
-  or caller-supplied hashes alone do not resolve them.
-- Preserve persisted contracts, source evidence and exact replay requirements.
-  [`.python-version`](../.python-version) pins CPython 3.14.6 for development
-  and pinned replay; [`tests/_pinned_m1d.py`](../tests/_pinned_m1d.py) records
-  replay failure classes. Do not alter the pin, lockfile or fixture expectations
-  merely to make a check pass.
+  A fresh evaluation against accepted promotion-qualified data is required.
+  [#360](https://github.com/KanujVerma/drift/issues/360) tracks unresolved
+  promotion-evidence and completeness concerns; verdict labels or
+  caller-supplied hashes alone do not resolve them.
+- The active suite retains semantic-closure tests, their original byte-pin
+  inventories and supporting replay-baseline records. The full historical replay
+  code, tests and fixtures remain in Git history; replay requires the original
+  revision, environment and inputs and is not demonstrated by this reset.
+  [`.python-version`](../.python-version) and the root lock remain unchanged.
+- The standalone `tools/stage1-statistics` worker and its separate lock remain
+  solely to preserve that pin; it is not part of the product package or retained
+  validation. Its retirement or reuse needs a separate decision.
 
 Known open work includes promotion prerequisites ([#115](https://github.com/KanujVerma/drift/issues/115)),
 unknown execution outcomes ([#411](https://github.com/KanujVerma/drift/issues/411)),
