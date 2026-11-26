@@ -3,7 +3,7 @@
 # CI observes repository truth; it never repairs it. This workflow never
 # regenerates fixtures, never updates replay baselines, never commits and never
 # pushes. The interpreter is read only from .python-version, the same pin uv
-# and the pinned-replay guard in tests/_pinned_m1d.py use locally.
+# use locally. Historical replays require their original revision and inputs.
 name: ci
 
 on:
@@ -22,8 +22,6 @@ jobs:
   verify:
     name: canonical verification gate
     runs-on: ubuntu-latest
-    # The full suite takes about 22 minutes on a developer laptop; hosted
-    # runners are slower.
     timeout-minutes: 240
     env:
       # Every uv command must use uv.lock exactly as committed.
@@ -32,7 +30,6 @@ jobs:
       UV_PYTHON_PREFERENCE: only-managed
     steps:
       - name: Check out the full history
-        # Pinned M1d replay extracts historical commits with git archive.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -143,7 +140,7 @@ jobs:
         if: steps.scope.outputs.docs_only != 'true'
         run: |
           uv run python -c "import sys; print(sys.version); print(sys.executable)"
-          uv run python -c "import sys; sys.path.insert(0, 'tests'); import _pinned_m1d as replay; print('pinned replay interpreter', replay.verify_replay_interpreter())"
+          uv run python -c "import pathlib, sys; assert sys.version.split()[0] == pathlib.Path('.python-version').read_text().strip()"
 
       - name: uv run pytest
         if: steps.scope.outputs.docs_only != 'true'

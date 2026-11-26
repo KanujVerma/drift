@@ -8,8 +8,8 @@ work and evidence rather than a duplicated status board.
 
 ## Priorities
 
-1. **Make offline evidence and safety trustworthy.** Reuse existing evaluator,
-   accounting, provenance and risk components; address relevant known defects
+1. **Make offline evidence and safety trustworthy.** Reuse retained accounting,
+   provenance and risk components; address relevant known defects
    before relying on them. Preserve point-in-time inputs, replay, retained source
    evidence, accurate money and cost accounting, and protections against
    untrusted content. Resolve universal risk enforcement, ambiguous execution
@@ -20,8 +20,8 @@ work and evidence rather than a duplicated status board.
    thesis and portfolio proposals, daily research, lightweight continuous
    monitoring and event-driven reviews. Learn from measured outcomes inside the
    approved mandate; escalate out-of-scope ideas. Start with conversation and
-   add a dashboard only if evidence justifies it. Reuse existing paths rather
-   than building a second evaluator or account ledger.
+   add a dashboard only if evidence justifies it. Reuse existing paths without
+   creating a competing account ledger.
 3. **Establish credible investment and economic evidence.** Compare
    risk-adjusted results with the S&P 500 and report investment returns separately
    from the costs of operating the system. Use appropriate out-of-sample and
@@ -51,7 +51,7 @@ work and evidence rather than a duplicated status board.
   advances automatically because code exists or a previous check passed.
 
 The exact risk thresholds, provider rights and budgets remain unset where not
-approved. The old [D04 and D10](architecture/adaptive-experiments/decisions.md)
-weekly-review cadence and ETF-first experimental framing are historical, not a
+approved. The old D04 and D10 weekly-review cadence and ETF-first experimental
+framing, preserved in Git history, are historical, not a
 binding product roadmap. Preserve applicable technical safeguards and the
 history of prior work rather than treating it as invalid.

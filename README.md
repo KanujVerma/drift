@@ -6,11 +6,11 @@ It combines fundamental, quantitative, and thesis-driven research, with
 conversational interaction and bounded autonomy. Research and evaluation support
 that product; they are not the product's final purpose.
 
-**Current boundary:** This repository contains research, evaluation, risk,
-execution, and offline Robinhood-adapter components. Those components do not
-establish a complete autonomous portfolio manager, a proven investing edge, an
-authenticated broker connection, or permission to trade. Paper validation is a
-future milestone; a $100 live pilot requires separate authorization.
+**Current boundary:** This repository contains offline research proposal
+validation, evidence, portfolio accounting, and risk building blocks. It does
+not include a broker adapter or order dispatcher and does not establish a
+complete portfolio manager or an investing edge. Paper validation and a $100
+live pilot require separate authorization and controls.
 
 ## Find the right context
 
@@ -20,16 +20,15 @@ future milestone; a $100 live pilot requires separate authorization.
 - [Roadmap](docs/ROADMAP.md): next outcomes and validation stages.
 - [Agent instructions](AGENTS.md): how contributors and agents work in this repo.
 
-GitHub issues and pull requests track work and known gaps. Earlier research
-designs and rationale remain under [historical technical docs](docs/architecture/adaptive-experiments/README.md);
-read them when relevant, not as a mandatory onboarding sequence.
+GitHub issues and pull requests track work and known gaps. Retired research,
+tests, fixtures and technical documents remain in Git history.
 
 ## Development
 
-The package requires Python 3.14 or newer. The development and replay
-environment uses the exact version in [`.python-version`](.python-version) and
-the committed `uv.lock`. Do not regenerate pinned replay fixtures to hide a
-failure. With [uv](https://docs.astral.sh/uv/) installed:
+The package requires Python 3.14 or newer. Development uses the exact version
+in [`.python-version`](.python-version) and the committed `uv.lock`. Historical
+replay requires its original revision, environment and inputs; it is not part
+of the retained test suite. With [uv](https://docs.astral.sh/uv/) installed:
 
 ```bash
 uv sync --locked --dev
