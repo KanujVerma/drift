@@ -38,7 +38,14 @@ from drift.promotion.runner import (
 TIMESTAMP = datetime(2026, 2, 1, 14, 0, 0, tzinfo=UTC)
 
 
-def test_adversarial_vector_1_dsr_deflation_under_trial_mining() -> None:
+@pytest.fixture
+def recorder(tmp_path: Path) -> PromotionRecorder:
+    return PromotionRecorder(SQLiteLedger(tmp_path / "adversarial.sqlite3"))
+
+
+def test_adversarial_vector_1_dsr_deflation_under_trial_mining(
+    recorder: PromotionRecorder,
+) -> None:
     """Vector 1: High trial count K=100 deflates modest Sharpe ratio below gate."""
     config = build_promotion_gate_config(
         config_id=uuid7(),
@@ -48,7 +55,7 @@ def test_adversarial_vector_1_dsr_deflation_under_trial_mining() -> None:
     gk = PromotionGatekeeper(config)
 
     # Candidate with observed Sharpe 1.25 mined across 100 trials with variance 0.30
-    trials = [Decimal("1.25"), Decimal("1.10"), Decimal("0.80"), Decimal("-0.20")]
+    trials = [Decimal("1.25"), Decimal("-0.20")] * 50
     rec = gk.evaluate_candidate(
         candidate_id=uuid7(),
         strategy_type="mined_momentum_v1",
@@ -56,7 +63,14 @@ def test_adversarial_vector_1_dsr_deflation_under_trial_mining() -> None:
         trials_explored_k=100,
         observed_sharpe=Decimal("1.25"),
         trial_sharpes=trials,
+        trial_block_matrix=[[1.0, 1.0]] + [[0.0, 0.0]] * 99,
+        walk_forward_fold_returns=[[0.01]],
+        session_returns=[0.01],
+        recorder=recorder,
         is_pnl_complete=True,
+        skewness=0.0,
+        kurtosis=3.0,
+        sample_size_n=252,
     )
 
     assert rec.verdict == PromotionGateVerdict.REJECTED_DEFLATED_SHARPE
@@ -64,7 +78,9 @@ def test_adversarial_vector_1_dsr_deflation_under_trial_mining() -> None:
     assert "deflated_sharpe_ratio_below_threshold" in rec.rejection_reasons
 
 
-def test_adversarial_vector_2_combinatorial_overfitting_detection() -> None:
+def test_adversarial_vector_2_combinatorial_overfitting_detection(
+    recorder: PromotionRecorder,
+) -> None:
     """Vector 2: In-sample lucky blocks collapsing out-of-sample fail PBO."""
     config = build_promotion_gate_config(
         config_id=uuid7(),
@@ -85,10 +101,17 @@ def test_adversarial_vector_2_combinatorial_overfitting_detection() -> None:
         candidate_id=uuid7(),
         strategy_type="lucky_cluster_v1",
         parameters_hash="2" * 64,
-        trials_explored_k=1,
+        trials_explored_k=4,
         observed_sharpe=Decimal("2.20"),
+        trial_sharpes=[Decimal("2.20")] * 4,
         trial_block_matrix=overfit_matrix,
+        walk_forward_fold_returns=[[0.01]],
+        session_returns=[0.01],
+        recorder=recorder,
         is_pnl_complete=True,
+        skewness=0.0,
+        kurtosis=3.0,
+        sample_size_n=252,
     )
 
     assert rec.verdict == PromotionGateVerdict.REJECTED_PBO_OVERFITTING
@@ -96,7 +119,9 @@ def test_adversarial_vector_2_combinatorial_overfitting_detection() -> None:
     assert "pbo_exceeds_threshold" in rec.rejection_reasons
 
 
-def test_adversarial_vector_3_walk_forward_temporal_degradation() -> None:
+def test_adversarial_vector_3_walk_forward_temporal_degradation(
+    recorder: PromotionRecorder,
+) -> None:
     """Vector 3: Candidate failing positive returns in >=80% folds is rejected."""
     config = build_promotion_gate_config(
         config_id=uuid7(),
@@ -118,10 +143,17 @@ def test_adversarial_vector_3_walk_forward_temporal_degradation() -> None:
         candidate_id=uuid7(),
         strategy_type="temporally_fragile_v1",
         parameters_hash="3" * 64,
-        trials_explored_k=1,
+        trials_explored_k=2,
         observed_sharpe=Decimal("2.20"),
+        trial_sharpes=[Decimal("2.20")] * 2,
         walk_forward_fold_returns=folds,
+        trial_block_matrix=[[1.0, 1.0], [0.0, 0.0]],
+        session_returns=[0.01],
+        recorder=recorder,
         is_pnl_complete=True,
+        skewness=0.0,
+        kurtosis=3.0,
+        sample_size_n=252,
     )
 
     assert rec.verdict == PromotionGateVerdict.REJECTED_WALK_FORWARD_DEGRADATION
@@ -129,7 +161,9 @@ def test_adversarial_vector_3_walk_forward_temporal_degradation() -> None:
     assert "walk_forward_degradation" in rec.rejection_reasons
 
 
-def test_adversarial_vector_4_regime_shock_drawdown_breach() -> None:
+def test_adversarial_vector_4_regime_shock_drawdown_breach(
+    recorder: PromotionRecorder,
+) -> None:
     """Vector 4: Severe drawdown in high-volatility regime fails gate."""
     config = build_promotion_gate_config(
         config_id=uuid7(),
@@ -155,10 +189,17 @@ def test_adversarial_vector_4_regime_shock_drawdown_breach() -> None:
         candidate_id=uuid7(),
         strategy_type="regime_fragile_v1",
         parameters_hash="4" * 64,
-        trials_explored_k=1,
+        trials_explored_k=2,
         observed_sharpe=Decimal("2.20"),
+        trial_sharpes=[Decimal("2.20")] * 2,
         session_returns=returns,
+        trial_block_matrix=[[1.0, 1.0], [0.0, 0.0]],
+        walk_forward_fold_returns=[[0.01]],
+        recorder=recorder,
         is_pnl_complete=True,
+        skewness=0.0,
+        kurtosis=3.0,
+        sample_size_n=252,
     )
 
     assert rec.verdict == PromotionGateVerdict.REJECTED_REGIME_INSTABILITY
@@ -166,7 +207,9 @@ def test_adversarial_vector_4_regime_shock_drawdown_breach() -> None:
     assert "regime_drawdown_exceeded" in rec.rejection_reasons
 
 
-def test_adversarial_vector_5_anti_laundering_boundary_firewall() -> None:
+def test_adversarial_vector_5_anti_laundering_boundary_firewall(
+    recorder: PromotionRecorder,
+) -> None:
     """Vector 5: Exploratory evidence cannot be laundered into promotion."""
     now = datetime.now(UTC)
 
@@ -180,29 +223,45 @@ def test_adversarial_vector_5_anti_laundering_boundary_firewall() -> None:
 
     # Superb statistical metrics on exploratory data
     rec_exp = gk_unauth.evaluate_candidate(
+        trial_block_matrix=[[1.0, 1.0], [0.0, 0.0]],
+        trial_sharpes=[Decimal("3.00")] * 2,
+        walk_forward_fold_returns=[[0.01]],
+        session_returns=[0.01],
+        recorder=recorder,
         candidate_id=uuid7(),
         strategy_type="momentum_v1",
         parameters_hash="5" * 64,
-        trials_explored_k=1,
+        trials_explored_k=2,
         observed_sharpe=Decimal("3.00"),
         is_pnl_complete=True,
+        skewness=0.0,
+        kurtosis=3.0,
+        sample_size_n=252,
         is_promotion_grade_evidence=False,
     )
     assert rec_exp.verdict == PromotionGateVerdict.EXPLORATORY_PASSED
 
     # Case B: Attacker claims promotion-grade evidence without config authorization
     rec_spoofed = gk_unauth.evaluate_candidate(
+        trial_block_matrix=[[1.0, 1.0], [0.0, 0.0]],
+        trial_sharpes=[Decimal("3.00")] * 2,
+        walk_forward_fold_returns=[[0.01]],
+        session_returns=[0.01],
+        recorder=recorder,
         candidate_id=uuid7(),
         strategy_type="momentum_v1",
         parameters_hash="5" * 64,
-        trials_explored_k=1,
+        trials_explored_k=2,
         observed_sharpe=Decimal("3.00"),
         is_pnl_complete=True,
+        skewness=0.0,
+        kurtosis=3.0,
+        sample_size_n=252,
         is_promotion_grade_evidence=True,
     )
     assert rec_spoofed.verdict == PromotionGateVerdict.EXPLORATORY_PASSED
 
-    # Case C: Both evidence and config are certified promotion-grade
+    # Case C: Both flags are untrusted, even with complete synthetic inputs.
     cfg_auth = build_promotion_gate_config(
         config_id=uuid7(),
         created_at=now,
@@ -210,18 +269,28 @@ def test_adversarial_vector_5_anti_laundering_boundary_firewall() -> None:
     )
     gk_auth = PromotionGatekeeper(cfg_auth)
     rec_promo = gk_auth.evaluate_candidate(
+        trial_block_matrix=[[1.0, 1.0], [0.0, 0.0]],
+        trial_sharpes=[Decimal("3.00")] * 2,
+        walk_forward_fold_returns=[[0.01]],
+        session_returns=[0.01],
+        recorder=recorder,
         candidate_id=uuid7(),
         strategy_type="momentum_v1",
         parameters_hash="5" * 64,
-        trials_explored_k=1,
+        trials_explored_k=2,
         observed_sharpe=Decimal("3.00"),
         is_pnl_complete=True,
+        skewness=0.0,
+        kurtosis=3.0,
+        sample_size_n=252,
         is_promotion_grade_evidence=True,
     )
-    assert rec_promo.verdict == PromotionGateVerdict.PROMOTION_QUALIFIED
+    assert rec_promo.verdict == PromotionGateVerdict.EXPLORATORY_PASSED
 
 
-def test_adversarial_vector_6_incomplete_realized_pnl_basis_rejection() -> None:
+def test_adversarial_vector_6_incomplete_realized_pnl_basis_rejection(
+    recorder: PromotionRecorder,
+) -> None:
     """Vector 6: Incomplete cost basis strictly fails gate (Issue 152 firewall)."""
     config = build_promotion_gate_config(
         config_id=uuid7(),
@@ -234,6 +303,7 @@ def test_adversarial_vector_6_incomplete_realized_pnl_basis_rejection() -> None:
     rec = gk.evaluate_candidate(
         candidate_id=uuid7(),
         strategy_type="unknown_basis_strategy_v1",
+        recorder=recorder,
         parameters_hash="6" * 64,
         trials_explored_k=1,
         observed_sharpe=Decimal("4.00"),
@@ -242,7 +312,7 @@ def test_adversarial_vector_6_incomplete_realized_pnl_basis_rejection() -> None:
     )
 
     assert rec.verdict == PromotionGateVerdict.REJECTED_INCOMPLETE_EVIDENCE
-    assert "incomplete_realized_pnl_basis" in rec.rejection_reasons
+    assert "pnl_completeness_not_confirmed" in rec.rejection_reasons
 
 
 def test_adversarial_vector_7_cryptographic_tamper_detection() -> None:
@@ -305,9 +375,16 @@ def test_adversarial_vector_8_deterministic_ledger_replay(tmp_path: Path) -> Non
             candidate_id=c1,
             strategy_type="strat_a",
             parameters_hash="a" * 64,
-            trials_explored_k=1,
+            trials_explored_k=2,
             observed_sharpe=Decimal("2.50"),
+            trial_sharpes=[Decimal("2.50")] * 2,
+            trial_block_matrix=[[1.0, 1.0], [0.0, 0.0]],
+            walk_forward_fold_returns=[[0.01]],
+            session_returns=[0.01],
             is_pnl_complete=True,
+            skewness=0.0,
+            kurtosis=3.0,
+            sample_size_n=252,
             is_promotion_grade_evidence=True,
         )
     )
@@ -316,9 +393,16 @@ def test_adversarial_vector_8_deterministic_ledger_replay(tmp_path: Path) -> Non
             candidate_id=c2,
             strategy_type="strat_b",
             parameters_hash="b" * 64,
-            trials_explored_k=1,
+            trials_explored_k=2,
             observed_sharpe=Decimal("2.50"),
+            trial_sharpes=[Decimal("2.50")] * 2,
+            trial_block_matrix=[[1.0, 1.0], [0.0, 0.0]],
+            walk_forward_fold_returns=[[0.01]],
+            session_returns=[0.01],
             is_pnl_complete=True,
+            skewness=0.0,
+            kurtosis=3.0,
+            sample_size_n=252,
             is_promotion_grade_evidence=False,
         )
     )
@@ -335,21 +419,26 @@ def test_adversarial_vector_8_deterministic_ledger_replay(tmp_path: Path) -> Non
     )
 
     archive1 = PromotionArchive(ledger1)
-    assert len(archive1.list_evaluations()) == 3
-    assert len(archive1.list_certifications()) == 2
-    assert len(archive1.list_rejections()) == 1
+    assert len(archive1.list_evaluations()) == 2
+    assert len(archive1.list_certifications()) == 0
+    assert len(archive1.list_rejections()) == 0
+    assert len(archive1.list_incomplete_rejections()) == 1
 
     # Restart session: connect fresh ledger and archive instance
     ledger2 = SQLiteLedger(db_path)
     archive2 = PromotionArchive(ledger2)
 
-    assert len(archive2.list_evaluations()) == 3
-    assert len(archive2.list_certifications()) == 2
-    assert len(archive2.list_rejections()) == 1
-    assert archive2.is_candidate_certified(c1)
-    assert archive2.is_candidate_certified(c2)
+    assert len(archive2.list_evaluations()) == 2
+    assert len(archive2.list_certifications()) == 0
+    assert len(archive2.list_rejections()) == 0
+    assert (
+        archive2.list_incomplete_rejections() == archive1.list_incomplete_rejections()
+    )
+    assert not archive2.is_candidate_certified(c1)
+    assert not archive2.is_candidate_certified(c2)
     assert not archive2.is_candidate_certified(c3)
 
-    certs2 = archive2.list_certifications()
-    assert certs2[0].verdict == PromotionGateVerdict.PROMOTION_QUALIFIED
-    assert certs2[1].verdict == PromotionGateVerdict.EXPLORATORY_PASSED
+    assert all(
+        r.verdict == PromotionGateVerdict.EXPLORATORY_PASSED
+        for r in archive2.list_evaluations()
+    )

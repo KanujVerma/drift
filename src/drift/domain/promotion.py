@@ -26,15 +26,31 @@ PROMOTION_SCHEMA_VERSION: Literal["1"] = "1"
 GATE_EVALUATED_EVENT_TYPE: NonBlankStr = "m11.gate.evaluated"
 CANDIDATE_CERTIFIED_EVENT_TYPE: NonBlankStr = "m11.candidate.certified"
 CANDIDATE_REJECTED_EVENT_TYPE: NonBlankStr = "m11.candidate.rejected"
+INCOMPLETE_REJECTED_EVENT_TYPE: NonBlankStr = "m11.gate.incomplete_rejected"
+INCOMPLETE_REJECTION_REASONS = (
+    "pnl_completeness_not_confirmed",
+    "unusable_trial_block_matrix",
+    "unusable_walk_forward_fold_returns",
+    "unusable_session_returns",
+    "unusable_observed_sharpe",
+    "unusable_trial_sharpes",
+    "unusable_distribution_inputs",
+    "unusable_trials_explored_k",
+    "unusable_sample_size_n",
+    "invalid_promotion_grade_assertion",
+    "unusable_numeric_calculation",
+)
 
 __all__ = [
     "CANDIDATE_CERTIFIED_EVENT_TYPE",
     "CANDIDATE_REJECTED_EVENT_TYPE",
     "GATE_EVALUATED_EVENT_TYPE",
+    "INCOMPLETE_REJECTED_EVENT_TYPE",
     "PROMOTION_SCHEMA_VERSION",
     "CandidateCertifiedAuditEventPayloadV1",
     "CandidateRejectedAuditEventPayloadV1",
     "GateEvaluatedAuditEventPayloadV1",
+    "IncompletePromotionRejectionV2",
     "PromotionEvaluationRecordV1",
     "PromotionGateConfigV1",
     "PromotionGateVerdict",
@@ -55,6 +71,36 @@ class PromotionGateVerdict(StrEnum):
     REJECTED_WALK_FORWARD_DEGRADATION = "rejected_walk_forward_degradation"
     REJECTED_REGIME_INSTABILITY = "rejected_regime_instability"
     REJECTED_INCOMPLETE_EVIDENCE = "rejected_incomplete_evidence"
+
+
+class IncompletePromotionRejectionV2(FrozenModel):
+    """Truthful incomplete attempt, without unavailable statistical metrics."""
+
+    schema_version: Literal["2"] = "2"
+    evaluation_id: UUID7
+    candidate_id: UUID7
+    strategy_type: str = Field(min_length=1)
+    parameters_hash: SHA256Hash
+    request_hash: SHA256Hash
+    verdict: Literal[PromotionGateVerdict.REJECTED_INCOMPLETE_EVIDENCE] = (
+        PromotionGateVerdict.REJECTED_INCOMPLETE_EVIDENCE
+    )
+    rejection_reasons: tuple[str, ...] = Field(min_length=1)
+    evaluated_at: UTCDateTime
+
+    @model_validator(mode="after")
+    def validate_reasons(self) -> Self:
+        reasons = self.rejection_reasons
+        if self.strategy_type != self.strategy_type.strip():
+            raise ValueError("strategy identity must not be normalized")
+        expected = tuple(
+            reason for reason in INCOMPLETE_REJECTION_REASONS if reason in reasons
+        )
+        if reasons != expected or (
+            "unusable_numeric_calculation" in reasons and len(reasons) != 1
+        ):
+            raise ValueError("incomplete rejection reasons are unknown or out of order")
+        return self
 
 
 # =========================================================================

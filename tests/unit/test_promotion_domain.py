@@ -14,6 +14,7 @@ from drift.domain.promotion import (
     CandidateCertifiedAuditEventPayloadV1,
     CandidateRejectedAuditEventPayloadV1,
     GateEvaluatedAuditEventPayloadV1,
+    IncompletePromotionRejectionV2,
     PromotionEvaluationRecordV1,
     PromotionGateConfigV1,
     PromotionGateVerdict,
@@ -153,3 +154,41 @@ def test_promotion_audit_event_payloads() -> None:
     )
     assert p3.verdict == PromotionGateVerdict.REJECTED_DEFLATED_SHARPE
     assert CANDIDATE_REJECTED_EVENT_TYPE == "m11.candidate.rejected"
+
+
+def test_incomplete_event_requires_valid_identity_and_nonempty_reasons() -> None:
+    values = {
+        "evaluation_id": EVAL_ID_1,
+        "candidate_id": CANDIDATE_ID_1,
+        "strategy_type": "synthetic",
+        "parameters_hash": DUMMY_HASH,
+        "request_hash": DUMMY_HASH,
+        "rejection_reasons": ("unusable_trial_block_matrix",),
+        "evaluated_at": TIMESTAMP,
+    }
+    event = IncompletePromotionRejectionV2.model_validate(values)
+    assert event.verdict == PromotionGateVerdict.REJECTED_INCOMPLETE_EVIDENCE
+    for change in (
+        {"evaluation_id": UUID(int=0)},
+        {"candidate_id": UUID(int=0)},
+        {"strategy_type": " "},
+        {"strategy_type": " synthetic "},
+        {"parameters_hash": "invalid"},
+        {"request_hash": "invalid"},
+        {"rejection_reasons": ()},
+        {"rejection_reasons": ("unrecognized_reason",)},
+        {"rejection_reasons": (" unusable_trial_block_matrix ",)},
+        {
+            "rejection_reasons": (
+                "unusable_session_returns",
+                "unusable_trial_block_matrix",
+            )
+        },
+        {"rejection_reasons": ("unusable_session_returns", "unusable_session_returns")},
+        {"evaluated_at": datetime(2026, 1, 15)},
+        {"verdict": PromotionGateVerdict.EXPLORATORY_PASSED},
+    ):
+        with pytest.raises(ValidationError):
+            IncompletePromotionRejectionV2.model_validate({**values, **change})
+    with pytest.raises(ValidationError):
+        event.rejection_reasons = ("different",)
