@@ -1,0 +1,36 @@
+{
+  "fill": {
+    "assumptions": {
+      "fee_source": "simulation_mandate.fill_fee",
+      "not_a_market_execution": true,
+      "price_source": "cited_observation_price",
+      "whole_shares_only": true
+    },
+    "fill_price": "85",
+    "price_evidence_id": "ev-down",
+    "quantity": 100,
+    "security_id": "a479f097-4351-7dc1-99a8-4076d2fd8681",
+    "side": "sell",
+    "transaction_costs": "1"
+  },
+  "inference": "native_supervised",
+  "model_identity": "codex/gpt-6.2-sol@xhigh",
+  "proposal_id": "3ec54196-a3fd-7b48-b21d-f8d18babf508",
+  "reasons": [
+    "accepted: proposal is inside the simulation mandate"
+  ],
+  "snapshot": {
+    "cash": "98498",
+    "cumulative_transaction_costs": "2",
+    "holdings": [],
+    "holdings_market_value": "0",
+    "marked": false,
+    "net_asset_value": "98498",
+    "realized_gross_pnl": "-1501",
+    "realized_net_pnl": "-1502",
+    "session": "2026-01-06",
+    "valuation": "cash_only",
+    "valuation_reason": "no holdings, so net asset value is the cash balance"
+  },
+  "status": "accepted"
+}

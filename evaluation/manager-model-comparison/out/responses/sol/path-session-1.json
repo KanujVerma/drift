@@ -1,0 +1,16 @@
+{
+  "schema_version": "1",
+  "proposal_id": "59758ad3-e857-7835-9e56-248f821145d0",
+  "as_of": "2024-11-01T16:00:00+00:00",
+  "action": "buy",
+  "symbol": "MSFT",
+  "quantity": 24,
+  "thesis": "Microsoft's reported quarterly revenue rose 16.0% year over year, diluted EPS rose 10.4%, and net income rose 10.7%. Growth across all three measures supports a modest initial position in the simulation.",
+  "evidence_ids": ["sec-msft-q", "close-msft-2024-10-31"],
+  "uncertainty": "A single quarter gives limited evidence about how long growth can persist or whether it justifies the cited price. The supplied close was rounded retrospectively, and the evidence hashes establish content consistency only.",
+  "allocation_reasoning": "At the cited 406.35 close, 24 shares plus the 1 fee cost 9753.40. That is 9.75% of the 100000 pre-fill cash-plus-cost-basis denominator, below the 25% cap. Remaining cash is 90246.60, above the 20000 minimum. The modest size reflects the single-quarter evidence and valuation uncertainty.",
+  "exit_conditions": [{"kind": "narrative", "text": "Exit the simulated position if the next comparable quarterly report shows flat or declining year-over-year revenue or diluted EPS."}],
+  "execution": "simulation",
+  "inference": "native_supervised",
+  "model_identity": "codex/gpt-6.2-sol@xhigh"
+}

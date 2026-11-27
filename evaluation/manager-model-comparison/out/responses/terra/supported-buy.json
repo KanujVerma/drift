@@ -1,0 +1,16 @@
+{
+  "schema_version": "1",
+  "proposal_id": "0b4a768c-9a71-7718-ad2b-86a79598c0df",
+  "as_of": "2026-01-05T16:00:00+00:00",
+  "action": "buy",
+  "symbol": "ACME",
+  "quantity": 100,
+  "thesis": "The supplied filing excerpt reports revenue and diluted EPS growth and cash exceeding debt. The supplied observation price is 100.",
+  "evidence_ids": ["ev-fund", "ev-close"],
+  "uncertainty": "The evidence is synthetic and its origin is not authenticated. The excerpt does not establish valuation, future performance, or the quality of the reported figures. The simulated fill is not a market execution.",
+  "allocation_reasoning": "At the cited price, 100 shares plus the simulated fee cost 10001, leaving 89999 cash. The position cost including the fee is below 25% of the 100000 cost-basis denominator.",
+  "exit_conditions": [{"kind": "narrative", "text": "Reassess if subsequent evidence undermines the reported growth or cash position."}],
+  "execution": "simulation",
+  "inference": "native_supervised",
+  "model_identity": "codex/gpt-6.1-terra@xhigh"
+}

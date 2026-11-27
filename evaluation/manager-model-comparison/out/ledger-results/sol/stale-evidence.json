@@ -1,0 +1,24 @@
+{
+  "fill": null,
+  "inference": "native_supervised",
+  "model_identity": "codex/gpt-6.2-sol@xhigh",
+  "proposal_id": "635906d8-ad3c-7f93-949d-d45d53986e6f",
+  "reasons": [
+    "stale_evidence: ev-old is older than the configured age",
+    "unsupported_evidence: the proposal has no supporting evidence for the symbol"
+  ],
+  "snapshot": {
+    "cash": "100000",
+    "cumulative_transaction_costs": "0",
+    "holdings": [],
+    "holdings_market_value": "0",
+    "marked": false,
+    "net_asset_value": "100000",
+    "realized_gross_pnl": "0",
+    "realized_net_pnl": "0",
+    "session": "2026-01-05",
+    "valuation": "cash_only",
+    "valuation_reason": "no holdings, so net asset value is the cash balance"
+  },
+  "status": "rejected"
+}

@@ -9,7 +9,7 @@ from datetime import date, datetime
 from typing import Literal, cast
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from drift.domain.common import ImmutableJSON
 from drift.domain.evaluator_clock import (
@@ -35,6 +35,8 @@ from drift.errors import LedgerIntegrityError
 from drift.evaluator.portfolio import PortfolioAccountingKernel, initial_portfolio_state
 from drift.ledger.interface import AuditEventDraft, Ledger
 from drift.manager.models import (
+    BenchmarkPoint,
+    EvidenceItem,
     ResearchPacket,
     SimulationMandate,
     money_text,
@@ -51,6 +53,7 @@ DECISION = "manager.decision"
 MARK = "manager.mark"
 REFLECTION = "manager.reflection"
 FEEDBACK = "manager.feedback"
+INGEST = "manager.ingest"
 
 CLOCK_LIMITATIONS = tuple(
     sorted(
@@ -383,6 +386,79 @@ def load_inputs(
     return packet, mandate, packet_hash, mandate_hash, book_id
 
 
+def extend_packet(
+    packet: ResearchPacket,
+    evidence: tuple[EvidenceItem, ...],
+    benchmark: tuple[BenchmarkPoint, ...],
+) -> ResearchPacket:
+    """Return a packet with appended inputs. The opening hash is unchanged."""
+    if not evidence and not benchmark:
+        return packet
+    merged = json.loads(packet.model_dump_json())
+    if not isinstance(merged, dict):
+        message = "packet JSON is not an object"
+        raise LedgerIntegrityError(message)
+    evidence_rows = merged["evidence"]
+    benchmark_rows = merged["benchmark"]
+    if not isinstance(evidence_rows, list) or not isinstance(benchmark_rows, list):
+        message = "packet JSON is missing evidence or benchmark lists"
+        raise LedgerIntegrityError(message)
+    evidence_rows.extend(json.loads(item.model_dump_json()) for item in evidence)
+    ordered = sorted(
+        (*packet.benchmark, *benchmark),
+        key=lambda point: point.available_at,
+    )
+    merged["benchmark"] = [json.loads(point.model_dump_json()) for point in ordered]
+    return ResearchPacket.model_validate_json(json.dumps(merged))
+
+
+def packet_through(
+    events: tuple[AuditEvent, ...],
+    *,
+    until: datetime | None = None,
+    inclusive: bool = True,
+) -> ResearchPacket:
+    """Opening packet plus ingests timestamped at or before ``until``.
+
+    ``inclusive=False`` keeps an ingest that shares ``until`` out of the packet.
+    """
+    packet, *_rest = load_inputs(events)
+    evidence: list[EvidenceItem] = []
+    benchmark: list[BenchmarkPoint] = []
+    for event in events[1:]:
+        if event.event_type != INGEST:
+            continue
+        if until is not None:
+            later = event.timestamp > until if inclusive else event.timestamp >= until
+            if later:
+                continue
+        payload = thaw(event.payload)
+        raw_evidence = payload.get("evidence")
+        raw_benchmark = payload.get("benchmark")
+        if not isinstance(raw_evidence, list) or not isinstance(raw_benchmark, list):
+            message = "ingest payload is missing evidence or benchmark lists"
+            raise LedgerIntegrityError(message)
+        try:
+            evidence.extend(
+                EvidenceItem.model_validate_json(json.dumps(item))
+                for item in raw_evidence
+            )
+            benchmark.extend(
+                BenchmarkPoint.model_validate_json(json.dumps(item))
+                for item in raw_benchmark
+            )
+        except ValidationError as error:
+            message = "stored ingest payload is not valid"
+            raise LedgerIntegrityError(message) from error
+    if not evidence and not benchmark:
+        return packet
+    try:
+        return extend_packet(packet, tuple(evidence), tuple(benchmark))
+    except ValidationError as error:
+        message = "ingested inputs are not consistent with the opening packet"
+        raise LedgerIntegrityError(message) from error
+
+
 def replay(
     events: tuple[AuditEvent, ...], *, until: datetime | None = None
 ) -> tuple[
@@ -402,6 +478,8 @@ def replay(
             message = "ledger event belongs to a different book"
             raise LedgerIntegrityError(message)
         payload = thaw(event.payload)
+        if event.event_type == INGEST:
+            continue
         if event.event_type == DECISION and payload.get("status") != "accepted":
             continue
         if event.event_type in (DECISION, MARK):

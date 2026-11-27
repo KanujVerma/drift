@@ -1,0 +1,16 @@
+{
+  "schema_version": "1",
+  "proposal_id": "19435516-a871-75c5-9e1b-f7252bafc643",
+  "as_of": "2024-11-01T16:00:00+00:00",
+  "action": "buy",
+  "symbol": "MSFT",
+  "quantity": 40,
+  "thesis": "The supplied quarterly figures show revenue, diluted earnings per share, and net income increasing year over year. This supports a measured simulation position, although the evidence does not establish whether the share price offers attractive value.",
+  "evidence_ids": ["sec-msft-q", "close-msft-2024-10-31"],
+  "uncertainty": "The filing date is not a precise availability timestamp, the supplied price is not an official exchange close and was rounded in 2026, and content hashes do not authenticate origin. No valuation, forward outlook, or contemporaneous execution evidence is supplied.",
+  "allocation_reasoning": "At the cited observation price of 406.35, 40 shares cost 16254; with the 1 simulated fee, the position cost is 16255, or 16.255% of the 100000 cost-basis denominator. Simulated cash remaining is 83745, above the 20000 minimum. The position stays below the 25% limit and leaves room for uncertainty and diversification.",
+  "exit_conditions": [{"kind": "narrative", "text": "Reassess the position if subsequent reliable evidence shows a sustained deterioration in revenue or earnings, or if the original growth thesis no longer holds."}],
+  "execution": "simulation",
+  "inference": "native_supervised",
+  "model_identity": "codex/gpt-6.1-terra@xhigh"
+}
