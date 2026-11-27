@@ -111,6 +111,13 @@ def size_report(full_text: str, compact_text: str) -> dict[str, int | str]:
     }
 
 
+def visible_through(
+    evidence: Sequence[Mapping[str, object]], as_of: datetime
+) -> list[dict[str, object]]:
+    """Rows whose clocks are at or before the active decision."""
+    return [dict(item) for item in evidence if _visible(item, as_of)]
+
+
 def lookup_matches(
     evidence: Sequence[Mapping[str, object]],
     *,

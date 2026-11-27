@@ -37,5 +37,7 @@ python -m drift.research ingest --batch batch.json
 ```
 
 `review` reads the ledger's cash and shares into the next weekday's
-prompt. It does not invent a position. `detail` can also print one
-evidence id. `ingest` validates a local batch through the portfolio cycle.
+prompt. Cited rows are evidence the ledger already holds. The fill for
+that review is the weekday after it. `detail` hides rows after the
+active decision. `ingest` adds a batch to the cache only after the
+ledger accepts it.

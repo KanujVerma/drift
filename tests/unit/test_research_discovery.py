@@ -23,10 +23,16 @@ from drift.research.book import (
     DiscoveryBook,
     assemble_book,
     choose_sessions,
+    later_weekday,
     review_prompts,
 )
 from drift.research.collect import rss_inputs
-from drift.research.compact import cited_ids_missing, compact_evidence, lookup_matches
+from drift.research.compact import (
+    cited_ids_missing,
+    compact_evidence,
+    lookup_matches,
+    visible_through,
+)
 from drift.research.screen import (
     ClosePoint,
     FactPoint,
@@ -288,6 +294,12 @@ def test_a_later_review_can_sell_shares_the_ledger_holds(tmp_path: Path) -> None
     assert not any(
         str(reason).startswith("unsafe_oversell") for reason in _reasons(sold)
     )
+    settled = _object(
+        manager.execute_pending(
+            historical_session(later_weekday(book.review_day)).closed_at
+        )
+    )
+    assert "decision_before_recorded_state" not in str(settled)
 
 
 def test_compact_keeps_the_amendment_that_replaces_a_filing() -> None:
@@ -381,6 +393,75 @@ def test_lookup_can_find_a_symbol_without_an_evidence_id() -> None:
     assert rows[0]["kind"] == "fundamental"
 
 
+def test_same_day_eps_rows_keep_the_annual_multiple_in_either_order() -> None:
+    days = _days(70)
+    stamp = datetime(2026, 2, 1, 21, tzinfo=UTC)
+    rows = (
+        _eps_at(stamp, "3", "2025-10-01", "2025-12-31", "q"),
+        _eps_at(stamp, "5", "2025-01-01", "2025-12-31", "y"),
+        _eps_at(stamp, "2", "2025-12-01", "2025-12-31", "m"),
+    )
+    forward = _eps_multiple(days, rows)
+    backward = _eps_multiple(days, tuple(reversed(rows)))
+    assert forward == backward == "33.60"
+
+
+def test_review_cites_only_registered_evidence_and_keeps_suggestions() -> None:
+    stamp = datetime(2026, 11, 24, 21, tzinfo=UTC).isoformat()
+    close = {
+        "available_at": stamp,
+        "evidence_id": "vendor-close-001",
+        "kind": "observation",
+        "limitations": ["fixture"],
+        "observed_at": stamp,
+        "price": "100",
+        "price_role": "close",
+        "source_label": "vendor",
+        "summary": "Daily close 100 for AAPL. Volume 1000000.",
+        "symbol": "AAPL",
+    }
+    suggestion = {
+        "available_at": stamp,
+        "evidence_id": "suggestion:IDEA:2026-11-24",
+        "kind": "suggestion",
+        "limitations": ["user suggestion"],
+        "observed_at": stamp,
+        "price": None,
+        "price_role": None,
+        "source_label": "user-suggestion",
+        "summary": "Look at IDEA.",
+        "symbol": "IDEA",
+    }
+    prompts, _ids, rows = review_prompts(
+        [close, suggestion],
+        cash="10000",
+        quantities={},
+        review_day=date(2026, 11, 25),
+        min_dollar_volume=FLOOR,
+    )
+    assert _row_from(rows, "AAPL").latest_evidence_id == "vendor-close-001"
+    assert "vendor-close-001" in prompts["terra"]
+    assert _row_from(rows, "IDEA").shortlisted
+
+
+def test_detail_lookup_hides_rows_after_the_decision_cutoff() -> None:
+    as_of = datetime(2026, 11, 24, 22, tzinfo=UTC)
+    early = _close_row("AAPL", date(2026, 11, 24), 100)
+    later = _close_row("AAPL", date(2026, 11, 25), 101)
+    visible = visible_through([early, later], as_of)
+    assert [item["evidence_id"] for item in visible] == [early["evidence_id"]]
+
+
+def test_rejected_ingest_does_not_change_the_cache() -> None:
+    from drift.research.__main__ import remember_ingested
+
+    cache = [_close_row("AAPL", date(2026, 11, 24), 100)]
+    extra = {"evidence_id": "vendor-close-001", "kind": "observation"}
+    assert remember_ingested(cache, [extra], accepted=False) == cache
+    stored = remember_ingested(cache, [extra, extra], accepted=True)
+    assert [item["evidence_id"] for item in stored].count("vendor-close-001") == 1
+
+
 def test_discovery_state_rejects_a_prospective_role_directory(tmp_path: Path) -> None:
     from drift.research.__main__ import _assert_state
 
@@ -451,6 +532,35 @@ def _filing_row(form: str, stamp: str, report: str) -> dict[str, object]:
         "summary": f"{form} accession {accession} report {report}.",
         "symbol": "CAT",
     }
+
+
+def _eps_multiple(days: tuple[date, ...], rows: tuple[TextInput, ...]) -> str | None:
+    book = assemble_book(
+        _bars("CAT", days, start=100, step=1, volume="1000000"),
+        rows,
+        price_limitation="fixture prices, not an exchange print",
+        decision_day=days[-2],
+        settlement_day=days[-1],
+        min_dollar_volume=FLOOR,
+    )
+    return _row(book, "CAT").price_over_eps
+
+
+def _eps_at(stamp: datetime, value: str, start: str, end: str, label: str) -> TextInput:
+    return TextInput(
+        evidence_id=(
+            f"sec:fact:CAT:EarningsPerShareDiluted:{end}:{start}:{label}:10-K:USD"
+        ),
+        symbol="CAT",
+        kind="fundamental",
+        observed_at=stamp,
+        summary=(
+            f"EarningsPerShareDiluted {value} USD period end {end} "
+            f"period start {start} form 10-K filed {stamp.date().isoformat()}."
+        ),
+        source_label="sec-companyfacts",
+        limitations=("fixture",),
+    )
 
 
 def _eps(filed: str, value: str, start: str, end: str) -> TextInput:

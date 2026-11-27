@@ -6,10 +6,12 @@ Nothing here fetches data or writes a prospective ledger.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import cast
+from zoneinfo import ZoneInfo
 
 from drift.historical.replay import Json as ReplayJson
 from drift.historical.replay import (
@@ -245,7 +247,7 @@ def assemble_book(
 
 
 def review_prompts(
-    cache: list[dict[str, object]],
+    cache: Sequence[Mapping[str, object]],
     *,
     cash: str,
     quantities: dict[str, int],
@@ -257,7 +259,7 @@ def review_prompts(
     """Prompt a later session from shares the ledger already holds."""
     names = universe_by_symbol()
     as_of = decision_time(review_day)
-    visible = [item for item in cache if _visible_at(item, as_of)]
+    visible = [dict(item) for item in cache if _visible_at(dict(item), as_of)]
     closes = tuple(_close_point(item) for item in visible if _is_close(item))
     facts = tuple(
         FactPoint(
@@ -269,12 +271,18 @@ def review_prompts(
         if item.get("kind") == "fundamental"
     )
     held = frozenset(symbol for symbol, qty in quantities.items() if qty > 0)
+    suggestions = frozenset(
+        str(item["symbol"])
+        for item in visible
+        if item.get("kind") == "suggestion" and isinstance(item.get("symbol"), str)
+    )
     rows = screen(
         closes,
         as_of=review_day,
         universe=frozenset(names),
         authorized=frozenset(authorized),
         holdings=held,
+        suggestions=suggestions,
         facts=facts,
         min_dollar_volume=(
             MIN_MEDIAN_DOLLAR_VOLUME if min_dollar_volume is None else min_dollar_volume
@@ -404,6 +412,7 @@ def _packet(
             historical_session(decision_day),
             historical_session(settlement_day),
             historical_session(later_weekday(settlement_day)),
+            historical_session(later_weekday(later_weekday(settlement_day))),
         ),
         evidence=tuple(evidence),
         portfolio_context=PortfolioContext(
@@ -420,14 +429,21 @@ def _packet(
             "X posts were not collected",
         ),
         benchmark=benchmark,
-        settlement_only_dates=(settlement_day,),
+        settlement_only_dates=(
+            settlement_day,
+            later_weekday(later_weekday(settlement_day)),
+        ),
     )
 
 
 def _limit_texts(
     texts: tuple[TextInput, ...] | list[TextInput],
 ) -> list[TextInput]:
-    """Keep the two newest rows of each statement concept. Filings stay."""
+    """Keep the newest statement timestamp, and the one before it.
+
+    Every row at those timestamps stays, so a same-day EPS tie is resolved
+    before any row is dropped. Filings stay.
+    """
     grouped: dict[tuple[str, str], list[TextInput]] = {}
     other: list[TextInput] = []
     for item in texts:
@@ -439,8 +455,13 @@ def _limit_texts(
         grouped.setdefault((item.symbol, concept), []).append(item)
     kept = list(other)
     for rows in grouped.values():
-        rows.sort(key=lambda item: item.observed_at)
-        kept.extend(rows[-2:])
+        rows.sort(key=lambda item: (item.observed_at, item.evidence_id))
+        newest = rows[-1].observed_at
+        kept.extend(item for item in rows if item.observed_at == newest)
+        earlier = [item for item in rows if item.observed_at < newest]
+        if earlier:
+            prior = earlier[-1].observed_at
+            kept.extend(item for item in earlier if item.observed_at == prior)
     return kept
 
 
@@ -609,11 +630,11 @@ def _is_close(item: dict[str, object]) -> bool:
 
 def _close_point(item: dict[str, object]) -> ClosePoint:
     evidence_id = str(item["evidence_id"])
-    day_text = evidence_id.rsplit(":", 1)[-1]
+    observed = datetime.fromisoformat(str(item["observed_at"]))
     volume = _volume(str(item.get("summary")))
     return ClosePoint(
         symbol=str(item["symbol"]),
-        day=date.fromisoformat(day_text),
+        day=observed.astimezone(ZoneInfo("America/New_York")).date(),
         close=Decimal(str(item["price"])),
         volume=volume,
         evidence_id=evidence_id,

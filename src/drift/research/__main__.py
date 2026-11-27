@@ -12,6 +12,7 @@ import argparse
 import json
 import sys
 from collections import Counter
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -211,9 +212,12 @@ def detail_one(
     symbol: str | None = None,
     kind: str | None = None,
 ) -> dict[str, object]:
-    from drift.research.compact import lookup_evidence, lookup_matches
+    from drift.research.compact import lookup_evidence, lookup_matches, visible_through
 
-    cache = _cache(state)
+    receipt = _receipt(state)
+    cache = visible_through(
+        _cache(state), datetime.fromisoformat(str(receipt["as_of"]))
+    )
     if evidence_id:
         found = lookup_evidence(cache, evidence_id)
         if found is None:
@@ -231,25 +235,29 @@ def ingest_one(state: Path, batch_path: Path) -> dict[str, object]:
 
     batch = IngestBatch.model_validate_json(batch_path.read_text(encoding="utf-8"))
     manager = PortfolioManager.recover(state / "book.sqlite")
-    recorded = manager.ingest(batch)
-    cache = _cache(state)
-    for item in batch.evidence:
-        cache.append(json.loads(item.model_dump_json()))
-    (state / "cache.json").write_text(
-        json.dumps(cache, indent=2, sort_keys=True, default=str),
-        encoding="utf-8",
-    )
-    return _plain(recorded)
+    recorded = _plain(manager.ingest(batch))
+    if recorded.get("status") == "ingested":
+        cache = remember_ingested(
+            _cache(state),
+            [json.loads(item.model_dump_json()) for item in batch.evidence],
+            accepted=True,
+        )
+        (state / "cache.json").write_text(
+            json.dumps(cache, indent=2, sort_keys=True, default=str),
+            encoding="utf-8",
+        )
+    return recorded
 
 
 def review(state: Path) -> dict[str, object]:
     """Rewrite the prompt from shares the ledger already holds."""
-    from drift.historical.replay import decision_time
+    from drift.historical.replay import decision_time, historical_session
     from drift.research.book import later_weekday, review_prompts
 
     receipt = _receipt(state)
     settlement = date.fromisoformat(str(receipt["settlement_day"]))
     review_day = later_weekday(settlement)
+    fill_day = later_weekday(review_day)
     as_of = decision_time(review_day)
     manager = PortfolioManager.recover(state / "book.sqlite")
     viewed = manager.context(as_of)
@@ -271,8 +279,14 @@ def review(state: Path) -> dict[str, object]:
             quantity = item.get("quantity")
             if isinstance(symbol, str) and isinstance(quantity, int) and quantity > 0:
                 quantities[symbol] = quantity
+    ledger_evidence = viewed.get("evidence") if isinstance(viewed, dict) else None
+    citable: list[dict[str, object]] = []
+    if isinstance(ledger_evidence, list):
+        for item in ledger_evidence:
+            if isinstance(item, dict):
+                citable.append({str(key): value for key, value in item.items()})
     prompts, proposal_ids, rows = review_prompts(
-        _cache(state),
+        citable,
         cash=cash,
         quantities=quantities,
         review_day=review_day,
@@ -281,8 +295,10 @@ def review(state: Path) -> dict[str, object]:
     (state / "prompt-sol.txt").write_text(prompts["sol"] + "\n", encoding="utf-8")
     updated = dict(receipt)
     updated["as_of"] = as_of.isoformat()
+    updated["execute_as_of"] = historical_session(fill_day).closed_at.isoformat()
     updated["proposal_ids"] = proposal_ids
     updated["review_day"] = review_day.isoformat()
+    updated["review_settlement_day"] = fill_day.isoformat()
     (state / "receipt.json").write_text(
         json.dumps(updated, indent=2, sort_keys=True),
         encoding="utf-8",
@@ -446,6 +462,26 @@ def _receipt(state: Path) -> dict[str, object]:
         message = "discovery receipt is invalid"
         raise ValueError(message)
     return loaded
+
+
+def remember_ingested(
+    cache: Sequence[Mapping[str, object]],
+    rows: Sequence[Mapping[str, object]],
+    *,
+    accepted: bool,
+) -> list[dict[str, object]]:
+    """Add ledger-confirmed rows once. A rejection leaves the cache unchanged."""
+    if not accepted:
+        return [dict(item) for item in cache]
+    known = {item.get("evidence_id") for item in cache}
+    updated = [dict(item) for item in cache]
+    for row in rows:
+        evidence_key = row.get("evidence_id")
+        if evidence_key in known:
+            continue
+        updated.append(dict(row))
+        known.add(evidence_key)
+    return updated
 
 
 def _cache(state: Path) -> list[dict[str, object]]:
