@@ -1740,6 +1740,61 @@ def test_regression_partial_sale_then_valid_buy(tmp_path: Path) -> None:
     assert _snapshot(liquidation)["holdings"] == []
 
 
+def test_repeated_partial_sales_fees_rebuy_and_liquidation_conserve_basis(
+    tmp_path: Path,
+) -> None:
+    from drift.manager.models import CENT_BASIS_ALLOCATION
+
+    packet = _packet().model_copy(
+        update={"limitations": (*_packet().limitations, CENT_BASIS_ALLOCATION)}
+    )
+    path = tmp_path / "repeated-sales.sqlite"
+    manager, _ = PortfolioManager.open(path, packet, _mandate())
+    assert _mapping(manager.propose(_proposal(quantity=3)))["status"] == "accepted"
+    for label, remaining_basis, cash, realized in (
+        ("first", "200.67", "9808", "8.67"),
+        ("second", "100.33", "9917", "17.33"),
+    ):
+        sale = manager.propose(
+            _proposal(
+                proposal_id=deterministic_memory_uuid7(f"repeated-sale-{label}"),
+                as_of=TUESDAY_AT,
+                action="sell",
+                quantity=1,
+                evidence_ids=("ev-tue-close",),
+            )
+        )
+        assert _mapping(sale)["status"] == "accepted"
+        assert _snapshot(sale)["cash"] == cash
+        assert _snapshot(sale)["realized_net_pnl"] == realized
+        assert _rows(_snapshot(sale)["holdings"])[0]["cost_basis"] == remaining_basis
+        manager = PortfolioManager.recover(path)
+    buy = manager.propose(
+        _proposal(
+            proposal_id=deterministic_memory_uuid7("repeated-sale-rebuy"),
+            as_of=TUESDAY_AT,
+            quantity=2,
+            evidence_ids=("ev-tue-close",),
+        )
+    )
+    assert _mapping(buy)["status"] == "accepted"
+    assert _snapshot(buy)["cash"] == "9696"
+    assert _rows(_snapshot(buy)["holdings"])[0]["cost_basis"] == "321.33"
+    sale = PortfolioManager.recover(path).propose(
+        _proposal(
+            proposal_id=deterministic_memory_uuid7("repeated-sale-liquidation"),
+            as_of=TUESDAY_AT,
+            action="sell",
+            quantity=3,
+            evidence_ids=("ev-tue-close",),
+        )
+    )
+    assert _mapping(sale)["status"] == "accepted"
+    assert _snapshot(sale)["cash"] == "10025"
+    assert _snapshot(sale)["realized_net_pnl"] == "25"
+    assert _snapshot(sale)["holdings"] == []
+
+
 def test_regression_unrealized_ignores_caller_decimal_context(tmp_path: Path) -> None:
     from decimal import Context, localcontext
 

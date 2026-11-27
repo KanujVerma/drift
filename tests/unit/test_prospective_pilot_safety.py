@@ -1087,6 +1087,18 @@ def test_next_daily_requests_and_executes_timestamped_alpaca_trade(
         assert compared["series_change"] == "0.019607843137"
         assert compared["portfolio_change"] == "0.0002"
         assert compared["start_as_of"] == relative["start_as_of"]
+        peer_second = PortfolioManager.recover(
+            tmp_path / "observation" / "sol.sqlite"
+        ).report(second_close)
+        assert isinstance(peer_second, dict)
+        peer_comparison = peer_second["benchmark_relative"]
+        assert isinstance(peer_comparison, dict)
+        assert peer_comparison["status"] == "available"
+        for key in ("start_as_of", "start_evidence_id", "end_evidence_id"):
+            assert peer_comparison[key] == compared[key]
+        assert peer_comparison["series_change"] == compared["series_change"]
+        assert "earlier performance" in str(compared["limitation"])
+        assert "earlier performance" in str(peer_comparison["limitation"])
 
 
 def test_expired_unanswered_review_has_explicit_ledger_resolution(
