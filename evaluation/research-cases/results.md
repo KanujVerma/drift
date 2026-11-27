@@ -29,56 +29,63 @@ the prompt told the model to copy.
 
 ## Decisions
 
+An earlier eight-call round used a shorter baseline prompt that omitted the
+same-symbol citation rule and the numeric limits. That round is discarded.
+The table below uses one prompt template. Only the citation rule and the
+labels in the research block differ. Each proposal was checked with
+`decide_proposal` under the rule it was given. Baseline buys were also
+checked under the research rule.
+
 | Case | Rule | Model | Action | Ledger |
 | --- | --- | --- | --- | --- |
-| between 2026-10-16 | research | Terra | hold AAPL | accepted abstention |
-| between 2026-10-16 | research | Sol | hold SPY | not replayed; empty evidence, same abstention shape |
-| between 2026-10-16 | baseline | Terra | hold SPY | not replayed; empty evidence, same abstention shape |
-| between 2026-10-16 | baseline | Sol | hold AAPL | not replayed; empty evidence, same abstention shape |
-| development 2026-11-09 | research | Terra | hold SPY | not replayed; empty evidence, same abstention shape |
-| development 2026-11-09 | research | Sol | hold AAPL | not replayed; empty evidence, same abstention shape |
-| development 2026-11-09 | baseline | Terra | buy 5 AAPL | accepted under both citation policies; fill waits for the next open |
-| development 2026-11-09 | baseline | Sol | buy 2 AAPL | rejected under both policies: citations include MSFT, JNJ, and SPY |
+| between 2026-10-16 | research | Terra | hold SPY | accepted abstention |
+| between 2026-10-16 | research | Sol | hold MSFT | accepted abstention |
+| between 2026-10-16 | baseline | Terra | hold AAPL | accepted abstention |
+| between 2026-10-16 | baseline | Sol | buy 4 AAPL | accepted under both rules; cites fresh headlines and closes, not the old 10-Q |
+| development 2026-11-09 | research | Terra | hold AAPL | accepted abstention |
+| development 2026-11-09 | research | Sol | hold AAPL | accepted abstention |
+| development 2026-11-09 | baseline | Terra | hold AAPL | accepted abstention |
+| development 2026-11-09 | baseline | Sol | buy 4 AAPL | accepted under both rules; cites the annual EPS facts, the close, and a headline |
 
 Token counts are input, output, and reasoning output:
 
-- between Terra research: 129348, 538, 147
-- between Sol research: 130846, 1015, 597
-- between Terra baseline: 128932, 346, 60
-- between Sol baseline: 130419, 1052, 709
-- development Terra research: 130890, 527, 152
-- development Sol research: 132369, 929, 516
-- development Terra baseline: 130476, 691, 161
-- development Sol baseline: 122483, 2149, 1206
+- between Terra research: 132881, 529, 176
+- between Sol research: 134366, 987, 562
+- between Terra baseline: 132806, 451, 93
+- between Sol baseline: 134291, 1980, 1365
+- development Terra research: 133350, 590, 197
+- development Sol research: 134838, 869, 448
+- development Terra baseline: 133277, 671, 288
+- development Sol baseline: 134758, 1957, 1317
 
 ## Score
 
 On 2026-10-16 the research brief labeled Apple's 2026-07-31 10-Q citable.
-The baseline brief labeled that statement not citable at 1842 hours. All
-four decisions held. The holds named catalysts and said why cash was
-preferable. That is justified abstention. The research rule made the
-statement usable. It did not force a trade.
+The baseline brief labeled that statement not citable at 1842 hours. Terra
+held under both rules. Sol held when the statement was citable and bought
+when it was not. The buy cited October headlines and closes, and the thesis
+said the financial statements were outside the 336-hour window. Both
+decisions are valid. The research rule did not force a trade, and it did
+not make Sol treat a headline as a substitute for the 10-Q.
 
-On 2026-11-09 the note-issuance 8-K was in the prompt as filing text, and
-the annual figures were inside 336 hours, so both rules could cite them.
-Both research decisions held and treated the headlines and the filing as
-uncertain. Baseline Terra bought 5 AAPL and cited only Apple revenue, EPS,
-and the 2026-11-09 close. Those facts were 137 hours old, so both the
-research rule and the 336-hour rule accept them. The book did not fill at
-that close. Baseline Sol bought 2 AAPL but also cited MSFT, JNJ, and SPY.
-Both policies reject that proposal. The case ledgers themselves use the
-research mandate. The baseline statuses above were checked again by running
-the same proposals through `decide_proposal` with `citation_policy` set to
-`uniform_age`. The shorter baseline prompt did not repeat the cross-symbol
-citation rule that the research prompt states, so Sol's rejection is not
-by itself a comparison of the age rule.
+On 2026-11-09 the note-issuance 8-K and the annual figures were inside 336
+hours, so both rules could cite them. Terra held under both. Sol held when
+the research labels were present and bought 4 AAPL when the blanket age
+rule was present. The buy cited the fiscal-year EPS facts, the November 9
+close, and a launch headline. It was accepted under both policies because
+those facts were fresh. The fill remains the next open. No proposal cited
+another symbol, a superseded row, or a future filing.
 
-No decision cited a superseded row or a future filing. No decision was
-graded on the next close.
+Six of eight decisions were justified abstentions. The two buys named a
+catalyst and a downside and stayed inside the position cap and cash floor
+at the cited close. More trades are not an improvement. This is not an
+investing edge. No decision was graded on a later close.
 
 ## Limits
 
 Alpaca news did not return a 2024 archive. X is absent. Some primary
 documents are XBRL and were kept as accession rows when the excerpt had no
 item heading. Dividends are not in the price. The prospective calendar,
-ledgers, and 336-hour citation rule are unchanged.
+ledgers, and 336-hour citation rule are unchanged. The case books use the
+research mandate. Baseline statuses were checked again with
+`citation_policy` set to `uniform_age`.
