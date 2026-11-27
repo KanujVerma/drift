@@ -634,6 +634,7 @@ def test_research_policy_distinguishes_evidence_class() -> None:
         limitations=("withdrawn filing",),
         observed_at=old,
         available_at=old,
+        symbol="AAPL",
     )
     filing = CitationRow(
         evidence_id="sec:filing:0001",
@@ -643,6 +644,7 @@ def test_research_policy_distinguishes_evidence_class() -> None:
         limitations=("SEC submissions row",),
         observed_at=datetime(2023, 11, 3, tzinfo=UTC),
         available_at=datetime(2023, 11, 3, tzinfo=UTC),
+        symbol="AAPL",
     )
     amendment = CitationRow(
         evidence_id="sec:filing:0002",
@@ -652,6 +654,7 @@ def test_research_policy_distinguishes_evidence_class() -> None:
         limitations=("excerpt is not the full filing",),
         observed_at=datetime(2024, 2, 2, tzinfo=UTC),
         available_at=datetime(2024, 2, 2, tzinfo=UTC),
+        symbol="AAPL",
     )
     rows = (close, news, original, amended, withdrawn, filing, amendment)
     assert citation_refusal(close, as_of, rows, policy="uniform_age", max_age_hours=336)
@@ -683,6 +686,34 @@ def test_research_policy_distinguishes_evidence_class() -> None:
         citation_refusal(amendment, as_of, rows, policy="research", max_age_hours=336)
         is None
     )
+
+
+def test_another_issuers_amendment_does_not_supersede() -> None:
+    as_of = datetime(2024, 6, 4, 22, tzinfo=UTC)
+    original = CitationRow(
+        evidence_id="sec:filing:aapl",
+        kind="news",
+        source_label="sec-submissions",
+        summary="10-Q accession aapl report 2024-03-30.",
+        limitations=("SEC submissions row",),
+        observed_at=datetime(2024, 5, 1, tzinfo=UTC),
+        available_at=datetime(2024, 5, 1, tzinfo=UTC),
+        symbol="AAPL",
+    )
+    other = CitationRow(
+        evidence_id="sec:filing:msft",
+        kind="news",
+        source_label="sec-filing-text",
+        summary="10-Q/A accession msft report 2024-03-30.",
+        limitations=("excerpt is not the full filing",),
+        observed_at=datetime(2024, 5, 20, tzinfo=UTC),
+        available_at=datetime(2024, 5, 20, tzinfo=UTC),
+        symbol="MSFT",
+    )
+    refusal = citation_refusal(
+        original, as_of, (original, other), policy="research", max_age_hours=336
+    )
+    assert refusal is None
 
 
 def test_research_policy_does_not_freshen_an_old_fill() -> None:
@@ -803,6 +834,7 @@ def _row(evidence_id: str, kind: str, source: str, stamp: datetime) -> CitationR
         limitations=("fixture",),
         observed_at=stamp,
         available_at=stamp,
+        symbol="AAPL",
     )
 
 

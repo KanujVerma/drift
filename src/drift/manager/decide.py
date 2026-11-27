@@ -67,6 +67,7 @@ def _citation_row(item: EvidenceItem) -> CitationRow:
         limitations=item.limitations,
         observed_at=item.observed_at,
         available_at=item.available_at,
+        symbol=item.symbol,
     )
 
 

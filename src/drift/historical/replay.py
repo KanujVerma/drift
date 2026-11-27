@@ -1202,6 +1202,7 @@ def _fact_label(stamp: datetime, as_of: datetime, policy: str) -> str:
         limitations=(),
         observed_at=stamp,
         available_at=stamp,
+        symbol="",
     )
     return _shown_label(row, as_of, (), policy)
 
@@ -1235,6 +1236,7 @@ def _citation_from_context(
         return None
     source = item.get("source_label")
     summary = item.get("summary")
+    symbol = item.get("symbol")
     raw_limits = item.get("limitations")
     limits: tuple[str, ...] = ()
     if isinstance(raw_limits, list):
@@ -1247,6 +1249,7 @@ def _citation_from_context(
         limitations=limits,
         observed_at=available if observed is None else observed,
         available_at=available,
+        symbol=symbol if isinstance(symbol, str) else "",
     )
 
 

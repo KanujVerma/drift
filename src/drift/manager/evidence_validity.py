@@ -36,6 +36,7 @@ class CitationRow:
     limitations: tuple[str, ...]
     observed_at: datetime
     available_at: datetime
+    symbol: str
 
 
 def citation_clock(observed: datetime, available: datetime) -> datetime:
@@ -139,6 +140,8 @@ def _superseded(row: CitationRow, as_of: datetime, rows: Sequence[CitationRow]) 
             continue
         parsed = _FILING.match(other.summary)
         if parsed is None or parsed.group("report") != report:
+            continue
+        if not row.symbol or other.symbol != row.symbol:
             continue
         if _base_form(parsed.group("form")) == base:
             return True
