@@ -63,7 +63,12 @@ economics are related but distinct measures.
   are appended with `ingest` and stay invisible until their availability time.
   [V02](V02.md) is the prospective two-book workflow on that cycle.
   [HISTORICAL](HISTORICAL.md) replays the same cycle on past prices in a
-  separate directory and does not write the prospective ledgers. The cycle does
+  separate directory and does not write the prospective ledgers.
+  [RESEARCH](RESEARCH.md) is a separate isolated book: a configured research
+  universe, a deterministic screen, and a compact decision prompt. Research
+  membership is not trading authorization, and screening does not submit an
+  order. It does not change the prospective calendar, ledgers, or mandate.
+  The cycle does
   not call M1d
   observation validation ([#135](https://github.com/KanujVerma/drift/issues/135)),
   realized-session stamp binding
