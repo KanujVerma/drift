@@ -1,0 +1,44 @@
+{
+  "fill": {
+    "assumptions": {
+      "fee_source": "simulation_mandate.fill_fee",
+      "not_a_market_execution": true,
+      "price_source": "cited_observation_price",
+      "whole_shares_only": true
+    },
+    "fill_price": "100",
+    "price_evidence_id": "ev-close",
+    "quantity": 100,
+    "security_id": "a479f097-4351-7dc1-99a8-4076d2fd8681",
+    "side": "buy",
+    "transaction_costs": "1"
+  },
+  "inference": "native_supervised",
+  "model_identity": "codex/gpt-6.1-terra@xhigh",
+  "proposal_id": "a0c2bbb0-efa2-7c74-8ed3-8406ebab820f",
+  "reasons": [
+    "accepted: proposal is inside the simulation mandate"
+  ],
+  "snapshot": {
+    "cash": "89999",
+    "cumulative_transaction_costs": "1",
+    "holdings": [
+      {
+        "basis_status": "known",
+        "cost_basis": "10001",
+        "quantity": 100,
+        "security_id": "a479f097-4351-7dc1-99a8-4076d2fd8681",
+        "symbol": "ACME"
+      }
+    ],
+    "holdings_market_value": null,
+    "marked": false,
+    "net_asset_value": null,
+    "realized_gross_pnl": "0",
+    "realized_net_pnl": "0",
+    "session": "2026-01-05",
+    "valuation": "unavailable",
+    "valuation_reason": "a held position has no mark or no known cost basis, so market value is not reported"
+  },
+  "status": "accepted"
+}

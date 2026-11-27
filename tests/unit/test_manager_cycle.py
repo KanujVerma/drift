@@ -17,6 +17,7 @@ from drift.manager.models import (
     EvidenceItem,
     ExitCondition,
     FeedbackNote,
+    IngestBatch,
     Instrument,
     InvestmentProposal,
     PortfolioContext,
@@ -955,6 +956,199 @@ def test_foreign_database_is_not_given_a_ledger_schema(tmp_path: Path) -> None:
         }
     assert "audit_events" not in names
     assert "notes" in names
+
+
+def _evidence_ids(context: dict[str, object]) -> set[str]:
+    evidence = context["evidence"]
+    assert isinstance(evidence, list)
+    found: set[str] = set()
+    for item in evidence:
+        evidence_id = _mapping(item)["evidence_id"]
+        assert isinstance(evidence_id, str)
+        found.add(evidence_id)
+    return found
+
+
+def test_ingested_inputs_stay_invisible_before_their_availability_time(
+    tmp_path: Path,
+) -> None:
+    base = _packet()
+    opening_evidence = tuple(
+        item for item in base.evidence if item.evidence_id != "ev-tue-close"
+    )
+    opening_benchmark = (
+        BenchmarkPoint(
+            available_at=OPEN,
+            level="100",
+            limitations=("supplied level, not an index vendor calculation",),
+        ),
+    )
+    packet = base.model_copy(
+        update={"evidence": opening_evidence, "benchmark": opening_benchmark}
+    )
+    path = tmp_path / "ingest.sqlite"
+    manager, opened = PortfolioManager.open(path, packet, _mandate())
+    assert opened == {"status": "opened"}
+    assert b"Tuesday close" not in path.read_bytes()
+    assert "ev-tue-close" not in _evidence_ids(_mapping(manager.context(BUY_AT)))
+    assert _mapping(manager.propose(_proposal()))["status"] == "accepted"
+    when = datetime(2026, 1, 6, 15, 0, tzinfo=UTC)
+    batch = IngestBatch(
+        evidence=(
+            _evidence(
+                "ev-tue-close",
+                "observation",
+                "ACME",
+                when,
+                "Supplied Tuesday close.",
+                price="110",
+                price_role="close",
+            ),
+        ),
+        benchmark=(
+            BenchmarkPoint(
+                available_at=when,
+                level="110",
+                limitations=("supplied level, not an index vendor calculation",),
+            ),
+        ),
+    )
+    ingested = _mapping(manager.ingest(batch))
+    assert ingested["status"] == "ingested"
+    assert b"Tuesday close" in path.read_bytes()
+    monday = _mapping(manager.report(BUY_AT))
+    monday_benchmark = _mapping(monday["benchmark_relative"])
+    assert monday_benchmark["end_level"] == "100"
+    assert "ev-tue-close" not in _evidence_ids(_mapping(manager.context(BUY_AT)))
+    early = _mapping(
+        manager.propose(
+            _proposal(
+                proposal_id=deterministic_memory_uuid7("manager-early-cite"),
+                as_of=BUY_AT + timedelta(minutes=5),
+                action="hold",
+                quantity=0,
+                evidence_ids=("ev-tue-close",),
+                thesis="A later close is not yet available.",
+            )
+        )
+    )
+    assert early["status"] == "rejected"
+    assert _mapping(manager.mark(TUESDAY_AT))["status"] == "marked"
+    tuesday = _mapping(manager.report(TUESDAY_AT))
+    assert _mapping(tuesday["benchmark_relative"])["end_level"] == "110"
+    assert "ev-tue-close" in _evidence_ids(_mapping(manager.context(TUESDAY_AT)))
+    reopened, status = PortfolioManager.open(path, packet, _mandate())
+    assert status == {"status": "already_open"}
+    assert _mapping(reopened.ingest(batch))["status"] == "duplicate"
+    backdated = _mapping(
+        reopened.ingest(
+            IngestBatch(
+                evidence=(
+                    _evidence(
+                        "ev-backdated",
+                        "news",
+                        "ACME",
+                        OPEN + timedelta(minutes=1),
+                        "This arrived too late to rewrite Monday.",
+                    ),
+                )
+            )
+        )
+    )
+    assert backdated["status"] == "rejected"
+    assert "ev-backdated" not in _evidence_ids(_mapping(reopened.context(TUESDAY_AT)))
+
+
+def test_rejected_mark_does_not_show_a_later_valuation(tmp_path: Path) -> None:
+    manager, _path = _open(tmp_path, "early-mark.sqlite")
+    assert _mapping(manager.propose(_proposal()))["status"] == "accepted"
+    assert _mapping(manager.mark(MARK_AT))["status"] == "marked"
+    early = _mapping(manager.mark(datetime(2026, 1, 5, 16, 30, tzinfo=UTC)))
+    assert early["status"] == "rejected"
+    assert _mapping(early["snapshot"])["holdings_market_value"] is None
+
+
+def test_ingest_orders_a_fractional_second_benchmark(tmp_path: Path) -> None:
+    opening = BenchmarkPoint(
+        available_at=OPEN,
+        level="100",
+        limitations=("supplied level, not an index vendor calculation",),
+    )
+    packet = _packet().model_copy(update={"benchmark": (opening,)})
+    path = tmp_path / "fraction.sqlite"
+    manager, opened = PortfolioManager.open(path, packet, _mandate())
+    assert opened == {"status": "opened"}
+    when = OPEN + timedelta(microseconds=1)
+    point = BenchmarkPoint(
+        available_at=when,
+        level="101",
+        limitations=("supplied level, not an index vendor calculation",),
+    )
+    ingested = _mapping(manager.ingest(IngestBatch(benchmark=(point,))))
+    assert ingested["status"] == "ingested"
+    report = _mapping(manager.report(when))
+    assert _mapping(report["benchmark_relative"])["end_level"] == "101"
+
+
+def test_ingest_can_place_a_benchmark_between_existing_points(
+    tmp_path: Path,
+) -> None:
+    packet = _packet(benchmark=True)
+    path = tmp_path / "between.sqlite"
+    manager, opened = PortfolioManager.open(path, packet, _mandate())
+    assert opened == {"status": "opened"}
+    when = datetime(2026, 1, 5, 16, 0, tzinfo=UTC)
+    point = BenchmarkPoint(
+        available_at=when,
+        level="105",
+        limitations=("supplied level, not an index vendor calculation",),
+    )
+    ingested = _mapping(manager.ingest(IngestBatch(benchmark=(point,))))
+    assert ingested["status"] == "ingested"
+    report = _mapping(manager.report(when))
+    assert _mapping(report["benchmark_relative"])["end_level"] == "105"
+    earlier = _mapping(manager.report(datetime(2026, 1, 5, 15, 0, tzinfo=UTC)))
+    assert _mapping(earlier["benchmark_relative"])["end_level"] == "100"
+
+
+def test_two_ingests_may_share_an_availability_time(tmp_path: Path) -> None:
+    manager, _path = _open(tmp_path, "same-time.sqlite")
+    when = datetime(2026, 1, 5, 18, 0, tzinfo=UTC)
+    news = IngestBatch(
+        evidence=(_evidence("ev-same-news", "news", "ACME", when, "A later report."),)
+    )
+    point = IngestBatch(
+        benchmark=(
+            BenchmarkPoint(
+                available_at=when,
+                level="104",
+                limitations=("supplied level, not an index vendor calculation",),
+            ),
+        )
+    )
+    assert _mapping(manager.ingest(news))["status"] == "ingested"
+    assert _mapping(manager.ingest(point))["status"] == "ingested"
+    context = _mapping(manager.context(when))
+    assert "ev-same-news" in _evidence_ids(context)
+    before = _mapping(manager.context(BUY_AT))
+    assert "ev-same-news" not in _evidence_ids(before)
+
+
+def test_ingest_rejects_an_unknown_symbol(tmp_path: Path) -> None:
+    manager, _path = _open(tmp_path, "unknown-ingest.sqlite")
+    batch = IngestBatch(
+        evidence=(
+            _evidence(
+                "ev-unknown",
+                "news",
+                "ZZZZ",
+                OPEN + timedelta(hours=1),
+                "A name outside the declared instruments.",
+            ),
+        )
+    )
+    with pytest.raises(ManagerError, match="not consistent"):
+        manager.ingest(batch)
 
 
 def test_manager_does_not_import_unresolved_defect_paths() -> None:

@@ -1,0 +1,31 @@
+{
+  "fill": null,
+  "inference": "native_supervised",
+  "model_identity": "codex/gpt-6.2-sol@xhigh",
+  "proposal_id": "0d571ddc-3948-718d-a6cc-abd816f8d490",
+  "reasons": [
+    "accepted: proposal is inside the simulation mandate"
+  ],
+  "snapshot": {
+    "cash": "75099",
+    "cumulative_transaction_costs": "1",
+    "holdings": [
+      {
+        "basis_status": "known",
+        "cost_basis": "24901",
+        "quantity": 249,
+        "security_id": "a479f097-4351-7dc1-99a8-4076d2fd8681",
+        "symbol": "ACME"
+      }
+    ],
+    "holdings_market_value": null,
+    "marked": false,
+    "net_asset_value": null,
+    "realized_gross_pnl": "0",
+    "realized_net_pnl": "0",
+    "session": "2026-01-05",
+    "valuation": "unavailable",
+    "valuation_reason": "a held position has no mark or no known cost basis, so market value is not reported"
+  },
+  "status": "accepted"
+}

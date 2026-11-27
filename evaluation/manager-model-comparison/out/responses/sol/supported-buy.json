@@ -1,0 +1,16 @@
+{
+  "schema_version": "1",
+  "proposal_id": "f7cc6da4-eb79-7eef-a914-2c550c0d0069",
+  "as_of": "2026-01-05T16:00:00+00:00",
+  "action": "buy",
+  "symbol": "ACME",
+  "quantity": 100,
+  "thesis": "Revenue and diluted EPS each rose about 11% year over year, and cash exceeds debt. That combination supports a modest simulated entry at the supplied close of 100, which is 20 times reported diluted EPS.",
+  "evidence_ids": ["ev-fund", "ev-close"],
+  "uncertainty": "Both records are synthetic and their origins are unauthenticated. One year of growth leaves its durability uncertain, and the excerpt provides no cash-flow or peer valuation data.",
+  "allocation_reasoning": "At the cited price of 100, 100 shares plus the 1 fill fee put 10001 against the 25000 position limit and leave 89999 in cash, above the 20000 minimum. The position uses about 10% of the starting book because the thesis rests on a single annual comparison.",
+  "exit_conditions": [{"kind": "narrative", "text": "Exit the simulated position if a subsequent comparable filing reports a year-over-year decline in revenue or diluted EPS, or if debt exceeds cash."}],
+  "execution": "simulation",
+  "inference": "native_supervised",
+  "model_identity": "codex/gpt-6.2-sol@xhigh"
+}

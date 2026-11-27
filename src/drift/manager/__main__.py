@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from drift.errors import LedgerIntegrityError
 from drift.manager.models import (
     FeedbackNote,
+    IngestBatch,
     InvestmentProposal,
     ReflectionRequest,
     ResearchPacket,
@@ -79,6 +80,12 @@ def _parser() -> argparse.ArgumentParser:
     feedback = sub.add_parser("feedback", help="record supervising-user feedback")
     _ledger(feedback)
     feedback.add_argument("--note", type=Path, required=True)
+    ingest = sub.add_parser(
+        "ingest",
+        help="append evidence or benchmark points after they become available",
+    )
+    _ledger(ingest)
+    ingest.add_argument("--batch", type=Path, required=True)
     session = sub.add_parser("session", help="supervised command session")
     _ledger(session)
     return parser
@@ -112,6 +119,9 @@ def _run(args: argparse.Namespace) -> Json:
     if args.command == "feedback":
         note = FeedbackNote.model_validate_json(_read(args.note))
         return manager.feedback(note)
+    if args.command == "ingest":
+        batch = IngestBatch.model_validate_json(_read(args.batch))
+        return manager.ingest(batch)
     message = f"unknown command {args.command}"
     raise ValueError(message)
 
@@ -119,7 +129,7 @@ def _run(args: argparse.Namespace) -> Json:
 def _session(path: Path) -> Json:
     print(
         "simulation-only session. Commands: context, report, propose, "
-        "mark, reflect, feedback, help, quit.",
+        "mark, reflect, feedback, ingest, help, quit.",
         file=sys.stderr,
     )
     last: Json = {"status": "session"}
@@ -140,6 +150,7 @@ def _session(path: Path) -> Json:
                     "mark ASOF",
                     "reflect PATH",
                     "feedback PATH",
+                    "ingest PATH",
                     "quit",
                 ]
             }
@@ -161,6 +172,9 @@ def _session(path: Path) -> Json:
         elif command == "feedback":
             note = FeedbackNote.model_validate_json(_read(Path(argument)))
             last = manager.feedback(note)
+        elif command == "ingest":
+            batch = IngestBatch.model_validate_json(_read(Path(argument)))
+            last = manager.ingest(batch)
         else:
             message = f"unknown session command {command}"
             raise ValueError(message)

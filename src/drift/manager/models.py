@@ -5,7 +5,7 @@ a data provider, or a model.
 """
 
 import re
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal, Self
 
@@ -413,3 +413,33 @@ class FeedbackNote(FrozenModel):
     proposal_id: UUID7
     as_of: UTCDateTime
     note: NonBlankStr
+
+
+class IngestBatch(FrozenModel):
+    """Evidence or benchmark points appended after the book is open.
+
+    Every item in one batch shares one availability time. That time is the
+    ledger timestamp, so earlier reviews cannot see the batch.
+    """
+
+    schema_version: Literal["1"] = "1"
+    evidence: tuple[EvidenceItem, ...] = ()
+    benchmark: tuple[BenchmarkPoint, ...] = ()
+
+    @model_validator(mode="after")
+    def require_one_availability_time(self) -> Self:
+        if not self.evidence and not self.benchmark:
+            message = "ingest batch is empty"
+            raise ValueError(message)
+        times = [item.available_at for item in self.evidence]
+        times.extend(point.available_at for point in self.benchmark)
+        if len(set(times)) != 1:
+            message = "one ingest batch must share a single available_at"
+            raise ValueError(message)
+        return self
+
+    @property
+    def available_at(self) -> datetime:
+        if self.evidence:
+            return self.evidence[0].available_at
+        return self.benchmark[0].available_at

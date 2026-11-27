@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import cast
 from uuid import UUID
 
+from pydantic import ValidationError
+
 from drift.domain.evaluator_portfolio import decimal_context
 from drift.domain.events import AuditEvent
 from drift.errors import DriftError, DuplicateEventError, LedgerIntegrityError
@@ -22,6 +24,7 @@ from drift.ledger.sqlite import SQLiteLedger
 from drift.manager.book import (
     DECISION,
     FEEDBACK,
+    INGEST,
     MARK,
     OPENED,
     REFLECTION,
@@ -30,8 +33,10 @@ from drift.manager.book import (
     apply_fill_json,
     apply_mark_json,
     evidence_hash,
+    extend_packet,
     identity_hash,
     model_json,
+    packet_through,
     replay,
     security_for,
     session_for,
@@ -44,6 +49,7 @@ from drift.manager.decide import Decision, RecordedOutcome, decide_proposal
 from drift.manager.models import (
     EvidenceItem,
     FeedbackNote,
+    IngestBatch,
     InvestmentProposal,
     ReflectionRequest,
     ResearchPacket,
@@ -130,6 +136,7 @@ class PortfolioManager:
         """Validate one proposal and simulate it only when it is eligible."""
         events = self._ledger.verified_events()
         packet, mandate, _packet_hash, _mandate_hash, book_id, kernel = replay(events)
+        packet = packet_through(events, until=proposal.as_of)
         dedup = f"proposal:{proposal.proposal_id}"
         existing = _find(events, dedup)
         if existing is not None:
@@ -255,6 +262,7 @@ class PortfolioManager:
         """Mark held names at cited close observations. Partial marks are refused."""
         events = self._ledger.verified_events()
         packet, mandate, _ph, _mh, book_id, kernel = replay(events)
+        packet = packet_through(events, until=as_of)
         clock = _kernel_time(events)
         target = session_for(packet, as_of)
         current = kernel.state.session_key.local_date
@@ -266,7 +274,7 @@ class PortfolioManager:
                     "current simulation book",
                 ),
                 proposal_id=None,
-                snapshot=_public_book(kernel, packet, as_of),
+                snapshot=_book_at(events, as_of),
                 fill=None,
                 inference=None,
                 model_identity=None,
@@ -277,7 +285,7 @@ class PortfolioManager:
                 status="duplicate",
                 reasons=("duplicate_mark: this session already has a mark",),
                 proposal_id=None,
-                snapshot=_public_book(kernel, packet, as_of),
+                snapshot=_book_at(events, as_of),
                 fill=None,
                 inference=None,
                 model_identity=None,
@@ -363,6 +371,7 @@ class PortfolioManager:
         """Point-in-time inputs, decisions, and outcomes for a later review."""
         events = self._ledger.verified_events()
         packet, _mandate, *_rest, kernel = replay(events, until=as_of)
+        packet = packet_through(events, until=as_of)
         decisions: list[Json] = []
         feedback: list[Json] = []
         reflections: list[Json] = []
@@ -400,6 +409,7 @@ class PortfolioManager:
         """Performance, risk inputs, benchmark, and system costs, kept apart."""
         events = self._ledger.verified_events()
         packet, _mandate, *_rest, kernel = replay(events, until=as_of)
+        packet = packet_through(events, until=as_of)
         valuation, market, unrealized, nav, valuation_reason = _valuation(kernel)
         if session_for(packet, as_of) != kernel.state.session_key.local_date:
             valuation = "unavailable"
@@ -438,6 +448,7 @@ class PortfolioManager:
         """Record an evidence-based reflection. It does not trade or retune."""
         events = self._ledger.verified_events()
         packet, mandate, _ph, _mh, book_id, kernel = replay(events)
+        packet = packet_through(events, until=request.as_of)
         if request.as_of < _kernel_time(events):
             return _note_result(
                 "rejected",
@@ -548,6 +559,74 @@ class PortfolioManager:
             raise LedgerIntegrityError(message)
         return body
 
+    def ingest(self, batch: IngestBatch) -> Json:
+        """Append inputs that stay invisible before their availability time."""
+        events = self._ledger.verified_events()
+        _opening, _mandate, _ph, _mh, book_id, kernel = replay(events)
+        latest = max(event.timestamp for event in events)
+        when = batch.available_at
+        dedup = f"ingest:{identity_hash(batch)}"
+        if _find(events, dedup) is not None:
+            return {
+                "reasons": ["duplicate_ingest: this batch was already recorded"],
+                "status": "duplicate",
+            }
+        if _ingest_rewrites_history(events, when, latest):
+            return {
+                "reasons": [
+                    "decision_before_recorded_state: "
+                    "ingest is not later than the latest ledger event"
+                ],
+                "status": "rejected",
+            }
+        visible = packet_through(events)
+        try:
+            extend_packet(visible, batch.evidence, batch.benchmark)
+        except ValidationError as error:
+            message = "ingest is not consistent with the book"
+            raise ManagerError(message) from error
+        before = take_snapshot(kernel, visible)
+        payload: dict[str, Json] = {
+            "benchmark": [model_json(item) for item in batch.benchmark],
+            "evidence": [model_json(item) for item in batch.evidence],
+        }
+        append_manager_event(
+            self._ledger,
+            book_id=book_id,
+            event_type=INGEST,
+            dedup_key=dedup,
+            timestamp=when,
+            payload=payload,
+            expected_previous_hash=_head(events),
+        )
+        appended = self._ledger.verified_events()
+        ingest_id = deterministic_memory_uuid7(f"manager:{dedup}")
+        prefix = _events_through(appended, ingest_id)
+        replayed_packet, *_rest, replayed_kernel = replay(prefix)
+        if take_snapshot(replayed_kernel, replayed_packet) != before:
+            message = "ingest changed the book"
+            raise LedgerIntegrityError(message)
+        checked = packet_through(appended, until=when)
+        earlier = packet_through(appended, until=when, inclusive=False)
+        new_ids = {item.evidence_id for item in batch.evidence}
+        checked_ids = {item.evidence_id for item in checked.evidence}
+        earlier_ids = {item.evidence_id for item in earlier.evidence}
+        if not new_ids <= checked_ids or new_ids & earlier_ids:
+            message = "ingested evidence leaked across its availability time"
+            raise LedgerIntegrityError(message)
+        new_times = {point.available_at for point in batch.benchmark}
+        checked_times = {point.available_at for point in checked.benchmark}
+        earlier_times = {point.available_at for point in earlier.benchmark}
+        if not new_times <= checked_times or new_times & earlier_times:
+            message = "ingested benchmark leaked across its availability time"
+            raise LedgerIntegrityError(message)
+        return {
+            "available_at": when.isoformat(),
+            "benchmark_count": len(batch.benchmark),
+            "evidence_ids": [item.evidence_id for item in batch.evidence],
+            "status": "ingested",
+        }
+
 
 def _fresh(
     packet: ResearchPacket, mandate: SimulationMandate
@@ -639,6 +718,19 @@ def _open_verified(path: Path) -> SQLiteLedger:
     except LedgerIntegrityError as error:
         raise ManagerError(str(error)) from error
     return SQLiteLedger(path, create_schema=False)
+
+
+def _ingest_rewrites_history(
+    events: tuple[AuditEvent, ...], when: datetime, latest: datetime
+) -> bool:
+    """Reject an ingest that would appear in an already recorded non-ingest."""
+    if when < latest:
+        return True
+    if when > latest:
+        return False
+    return any(
+        event.timestamp == when and event.event_type != INGEST for event in events
+    )
 
 
 def _kernel_time(events: tuple[AuditEvent, ...]) -> datetime:

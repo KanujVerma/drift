@@ -1,0 +1,23 @@
+{
+  "fill": null,
+  "inference": "native_supervised",
+  "model_identity": "codex/gpt-6.1-terra@xhigh",
+  "proposal_id": "f7e28630-0c46-795a-b6c6-b970a90921b5",
+  "reasons": [
+    "accepted: proposal is inside the simulation mandate"
+  ],
+  "snapshot": {
+    "cash": "100000",
+    "cumulative_transaction_costs": "0",
+    "holdings": [],
+    "holdings_market_value": "0",
+    "marked": false,
+    "net_asset_value": "100000",
+    "realized_gross_pnl": "0",
+    "realized_net_pnl": "0",
+    "session": "2026-01-05",
+    "valuation": "cash_only",
+    "valuation_reason": "no holdings, so net asset value is the cash balance"
+  },
+  "status": "accepted"
+}

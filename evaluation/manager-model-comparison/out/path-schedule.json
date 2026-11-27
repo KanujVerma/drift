@@ -1,0 +1,521 @@
+{
+  "after-session-1": [
+    {
+      "benchmark": [
+        {
+          "available_at": "2024-11-01T20:00:00Z",
+          "level": "571.04",
+          "limitations": [
+            "Yahoo chart v8 SPY close rounded half-up to cents; supplied benchmark level, not an index calculation"
+          ]
+        }
+      ],
+      "evidence": [
+        {
+          "available_at": "2024-11-01T20:00:00Z",
+          "evidence_id": "close-aapl-2024-11-01",
+          "kind": "observation",
+          "limitations": [
+            "Yahoo chart v8 close rounded half-up to cents on 2026-11-26; not an official exchange close"
+          ],
+          "observed_at": "2024-11-01T20:00:00Z",
+          "price": "222.91",
+          "price_role": "close",
+          "source_label": "yahoo-chart-v8",
+          "summary": "Supplied close for 2024-11-01.",
+          "symbol": "AAPL"
+        },
+        {
+          "available_at": "2024-11-01T20:00:00Z",
+          "evidence_id": "close-msft-2024-11-01",
+          "kind": "observation",
+          "limitations": [
+            "Yahoo chart v8 close rounded half-up to cents on 2026-11-26; not an official exchange close"
+          ],
+          "observed_at": "2024-11-01T20:00:00Z",
+          "price": "410.37",
+          "price_role": "close",
+          "source_label": "yahoo-chart-v8",
+          "summary": "Supplied close for 2024-11-01.",
+          "symbol": "MSFT"
+        },
+        {
+          "available_at": "2024-11-01T20:00:00Z",
+          "evidence_id": "close-jnj-2024-11-01",
+          "kind": "observation",
+          "limitations": [
+            "Yahoo chart v8 close rounded half-up to cents on 2026-11-26; not an official exchange close"
+          ],
+          "observed_at": "2024-11-01T20:00:00Z",
+          "price": "160.13",
+          "price_role": "close",
+          "source_label": "yahoo-chart-v8",
+          "summary": "Supplied close for 2024-11-01.",
+          "symbol": "JNJ"
+        }
+      ],
+      "schema_version": "1"
+    },
+    {
+      "benchmark": [
+        {
+          "available_at": "2024-11-04T21:00:00Z",
+          "level": "569.81",
+          "limitations": [
+            "Yahoo chart v8 SPY close rounded half-up to cents; supplied benchmark level, not an index calculation"
+          ]
+        }
+      ],
+      "evidence": [
+        {
+          "available_at": "2024-11-04T21:00:00Z",
+          "evidence_id": "close-aapl-2024-11-04",
+          "kind": "observation",
+          "limitations": [
+            "Yahoo chart v8 close rounded half-up to cents on 2026-11-26; not an official exchange close"
+          ],
+          "observed_at": "2024-11-04T21:00:00Z",
+          "price": "222.01",
+          "price_role": "close",
+          "source_label": "yahoo-chart-v8",
+          "summary": "Supplied close for 2024-11-04.",
+          "symbol": "AAPL"
+        },
+        {
+          "available_at": "2024-11-04T21:00:00Z",
+          "evidence_id": "close-msft-2024-11-04",
+          "kind": "observation",
+          "limitations": [
+            "Yahoo chart v8 close rounded half-up to cents on 2026-11-26; not an official exchange close"
+          ],
+          "observed_at": "2024-11-04T21:00:00Z",
+          "price": "408.46",
+          "price_role": "close",
+          "source_label": "yahoo-chart-v8",
+          "summary": "Supplied close for 2024-11-04.",
+          "symbol": "MSFT"
+        },
+        {
+          "available_at": "2024-11-04T21:00:00Z",
+          "evidence_id": "close-jnj-2024-11-04",
+          "kind": "observation",
+          "limitations": [
+            "Yahoo chart v8 close rounded half-up to cents on 2026-11-26; not an official exchange close"
+          ],
+          "observed_at": "2024-11-04T21:00:00Z",
+          "price": "158.24",
+          "price_role": "close",
+          "source_label": "yahoo-chart-v8",
+          "summary": "Supplied close for 2024-11-04.",
+          "symbol": "JNJ"
+        }
+      ],
+      "schema_version": "1"
+    },
+    {
+      "benchmark": [
+        {
+          "available_at": "2024-11-05T21:00:00Z",
+          "level": "576.7",
+          "limitations": [
+            "Yahoo chart v8 SPY close rounded half-up to cents; supplied benchmark level, not an index calculation"
+          ]
+        }
+      ],
+      "evidence": [
+        {
+          "available_at": "2024-11-05T21:00:00Z",
+          "evidence_id": "close-aapl-2024-11-05",
+          "kind": "observation",
+          "limitations": [
+            "Yahoo chart v8 close rounded half-up to cents on 2026-11-26; not an official exchange close"
+          ],
+          "observed_at": "2024-11-05T21:00:00Z",
+          "price": "223.45",
+          "price_role": "close",
+          "source_label": "yahoo-chart-v8",
+          "summary": "Supplied close for 2024-11-05.",
+          "symbol": "AAPL"
+        },
+        {
+          "available_at": "2024-11-05T21:00:00Z",
+          "evidence_id": "close-msft-2024-11-05",
+          "kind": "observation",
+          "limitations": [
+            "Yahoo chart v8 close rounded half-up to cents on 2026-11-26; not an official exchange close"
+          ],
+          "observed_at": "2024-11-05T21:00:00Z",
+          "price": "411.46",
+          "price_role": "close",
+          "source_label": "yahoo-chart-v8",
+          "summary": "Supplied close for 2024-11-05.",
+          "symbol": "MSFT"
+        },
+        {
+          "available_at": "2024-11-05T21:00:00Z",
+          "evidence_id": "close-jnj-2024-11-05",
+          "kind": "observation",
+          "limitations": [
+            "Yahoo chart v8 close rounded half-up to cents on 2026-11-26; not an official exchange close"
+          ],
+          "observed_at": "2024-11-05T21:00:00Z",
+          "price": "158.35",
+          "price_role": "close",
+          "source_label": "yahoo-chart-v8",
+          "summary": "Supplied close for 2024-11-05.",
+          "symbol": "JNJ"
+        }
+      ],
+      "schema_version": "1"
+    }
+  ],
+  "after-session-2": [
+    {
+      "benchmark": [
+        {
+          "available_at": "2024-11-06T20:00:00Z",
+          "level": "591.04",
+          "limitations": [
+            "Yahoo chart v8 SPY close rounded half-up to cents; supplied benchmark level, not an index calculation"
+          ]
+        }
+      ],
+      "evidence": [
+        {
+          "available_at": "2024-11-06T20:00:00Z",
+          "evidence_id": "close-aapl-2024-11-06",
+          "kind": "observation",
+          "limitations": [
+            "Yahoo chart v8 close rounded half-up to cents on 2026-11-26; not an official exchange close"
+          ],
+          "observed_at": "2024-11-06T20:00:00Z",
+          "price": "222.72",
+          "price_role": "close",
+          "source_label": "yahoo-chart-v8",
+          "summary": "Supplied close for 2024-11-06.",
+          "symbol": "AAPL"
+        },
+        {
+          "available_at": "2024-11-06T20:00:00Z",
+          "evidence_id": "close-msft-2024-11-06",
+          "kind": "observation",
+          "limitations": [
+            "Yahoo chart v8 close rounded half-up to cents on 2026-11-26; not an official exchange close"
+          ],
+          "observed_at": "2024-11-06T20:00:00Z",
+          "price": "420.18",
+          "price_role": "close",
+          "source_label": "yahoo-chart-v8",
+          "summary": "Supplied close for 2024-11-06.",
+          "symbol": "MSFT"
+        },
+        {
+          "available_at": "2024-11-06T20:00:00Z",
+          "evidence_id": "close-jnj-2024-11-06",
+          "kind": "observation",
+          "limitations": [
+            "Yahoo chart v8 close rounded half-up to cents on 2026-11-26; not an official exchange close"
+          ],
+          "observed_at": "2024-11-06T20:00:00Z",
+          "price": "157.88",
+          "price_role": "close",
+          "source_label": "yahoo-chart-v8",
+          "summary": "Supplied close for 2024-11-06.",
+          "symbol": "JNJ"
+        }
+      ],
+      "schema_version": "1"
+    },
+    {
+      "benchmark": [
+        {
+          "available_at": "2024-11-07T21:00:00Z",
+          "level": "595.61",
+          "limitations": [
+            "Yahoo chart v8 SPY close rounded half-up to cents; supplied benchmark level, not an index calculation"
+          ]
+        }
+      ],
+      "evidence": [
+        {
+          "available_at": "2024-11-07T21:00:00Z",
+          "evidence_id": "close-aapl-2024-11-07",
+          "kind": "observation",
+          "limitations": [
+            "Yahoo chart v8 close rounded half-up to cents on 2026-11-26; not an official exchange close"
+          ],
+          "observed_at": "2024-11-07T21:00:00Z",
+          "price": "227.48",
+          "price_role": "close",
+          "source_label": "yahoo-chart-v8",
+          "summary": "Supplied close for 2024-11-07.",
+          "symbol": "AAPL"
+        },
+        {
+          "available_at": "2024-11-07T21:00:00Z",
+          "evidence_id": "close-msft-2024-11-07",
+          "kind": "observation",
+          "limitations": [
+            "Yahoo chart v8 close rounded half-up to cents on 2026-11-26; not an official exchange close"
+          ],
+          "observed_at": "2024-11-07T21:00:00Z",
+          "price": "425.43",
+          "price_role": "close",
+          "source_label": "yahoo-chart-v8",
+          "summary": "Supplied close for 2024-11-07.",
+          "symbol": "MSFT"
+        },
+        {
+          "available_at": "2024-11-07T21:00:00Z",
+          "evidence_id": "close-jnj-2024-11-07",
+          "kind": "observation",
+          "limitations": [
+            "Yahoo chart v8 close rounded half-up to cents on 2026-11-26; not an official exchange close"
+          ],
+          "observed_at": "2024-11-07T21:00:00Z",
+          "price": "156.73",
+          "price_role": "close",
+          "source_label": "yahoo-chart-v8",
+          "summary": "Supplied close for 2024-11-07.",
+          "symbol": "JNJ"
+        }
+      ],
+      "schema_version": "1"
+    }
+  ],
+  "after-session-3": [
+    {
+      "benchmark": [
+        {
+          "available_at": "2024-11-08T20:00:00Z",
+          "level": "598.19",
+          "limitations": [
+            "Yahoo chart v8 SPY close rounded half-up to cents; supplied benchmark level, not an index calculation"
+          ]
+        }
+      ],
+      "evidence": [
+        {
+          "available_at": "2024-11-08T20:00:00Z",
+          "evidence_id": "close-aapl-2024-11-08",
+          "kind": "observation",
+          "limitations": [
+            "Yahoo chart v8 close rounded half-up to cents on 2026-11-26; not an official exchange close"
+          ],
+          "observed_at": "2024-11-08T20:00:00Z",
+          "price": "226.96",
+          "price_role": "close",
+          "source_label": "yahoo-chart-v8",
+          "summary": "Supplied close for 2024-11-08.",
+          "symbol": "AAPL"
+        },
+        {
+          "available_at": "2024-11-08T20:00:00Z",
+          "evidence_id": "close-msft-2024-11-08",
+          "kind": "observation",
+          "limitations": [
+            "Yahoo chart v8 close rounded half-up to cents on 2026-11-26; not an official exchange close"
+          ],
+          "observed_at": "2024-11-08T20:00:00Z",
+          "price": "422.54",
+          "price_role": "close",
+          "source_label": "yahoo-chart-v8",
+          "summary": "Supplied close for 2024-11-08.",
+          "symbol": "MSFT"
+        },
+        {
+          "available_at": "2024-11-08T20:00:00Z",
+          "evidence_id": "close-jnj-2024-11-08",
+          "kind": "observation",
+          "limitations": [
+            "Yahoo chart v8 close rounded half-up to cents on 2026-11-26; not an official exchange close"
+          ],
+          "observed_at": "2024-11-08T20:00:00Z",
+          "price": "155.47",
+          "price_role": "close",
+          "source_label": "yahoo-chart-v8",
+          "summary": "Supplied close for 2024-11-08.",
+          "symbol": "JNJ"
+        }
+      ],
+      "schema_version": "1"
+    },
+    {
+      "benchmark": [
+        {
+          "available_at": "2024-11-11T21:00:00Z",
+          "level": "598.76",
+          "limitations": [
+            "Yahoo chart v8 SPY close rounded half-up to cents; supplied benchmark level, not an index calculation"
+          ]
+        }
+      ],
+      "evidence": [
+        {
+          "available_at": "2024-11-11T21:00:00Z",
+          "evidence_id": "close-aapl-2024-11-11",
+          "kind": "observation",
+          "limitations": [
+            "Yahoo chart v8 close rounded half-up to cents on 2026-11-26; not an official exchange close"
+          ],
+          "observed_at": "2024-11-11T21:00:00Z",
+          "price": "224.23",
+          "price_role": "close",
+          "source_label": "yahoo-chart-v8",
+          "summary": "Supplied close for 2024-11-11.",
+          "symbol": "AAPL"
+        },
+        {
+          "available_at": "2024-11-11T21:00:00Z",
+          "evidence_id": "close-msft-2024-11-11",
+          "kind": "observation",
+          "limitations": [
+            "Yahoo chart v8 close rounded half-up to cents on 2026-11-26; not an official exchange close"
+          ],
+          "observed_at": "2024-11-11T21:00:00Z",
+          "price": "418.01",
+          "price_role": "close",
+          "source_label": "yahoo-chart-v8",
+          "summary": "Supplied close for 2024-11-11.",
+          "symbol": "MSFT"
+        },
+        {
+          "available_at": "2024-11-11T21:00:00Z",
+          "evidence_id": "close-jnj-2024-11-11",
+          "kind": "observation",
+          "limitations": [
+            "Yahoo chart v8 close rounded half-up to cents on 2026-11-26; not an official exchange close"
+          ],
+          "observed_at": "2024-11-11T21:00:00Z",
+          "price": "155.04",
+          "price_role": "close",
+          "source_label": "yahoo-chart-v8",
+          "summary": "Supplied close for 2024-11-11.",
+          "symbol": "JNJ"
+        }
+      ],
+      "schema_version": "1"
+    },
+    {
+      "benchmark": [
+        {
+          "available_at": "2024-11-12T21:00:00Z",
+          "level": "596.9",
+          "limitations": [
+            "Yahoo chart v8 SPY close rounded half-up to cents; supplied benchmark level, not an index calculation"
+          ]
+        }
+      ],
+      "evidence": [
+        {
+          "available_at": "2024-11-12T21:00:00Z",
+          "evidence_id": "close-aapl-2024-11-12",
+          "kind": "observation",
+          "limitations": [
+            "Yahoo chart v8 close rounded half-up to cents on 2026-11-26; not an official exchange close"
+          ],
+          "observed_at": "2024-11-12T21:00:00Z",
+          "price": "224.23",
+          "price_role": "close",
+          "source_label": "yahoo-chart-v8",
+          "summary": "Supplied close for 2024-11-12.",
+          "symbol": "AAPL"
+        },
+        {
+          "available_at": "2024-11-12T21:00:00Z",
+          "evidence_id": "close-msft-2024-11-12",
+          "kind": "observation",
+          "limitations": [
+            "Yahoo chart v8 close rounded half-up to cents on 2026-11-26; not an official exchange close"
+          ],
+          "observed_at": "2024-11-12T21:00:00Z",
+          "price": "423.03",
+          "price_role": "close",
+          "source_label": "yahoo-chart-v8",
+          "summary": "Supplied close for 2024-11-12.",
+          "symbol": "MSFT"
+        },
+        {
+          "available_at": "2024-11-12T21:00:00Z",
+          "evidence_id": "close-jnj-2024-11-12",
+          "kind": "observation",
+          "limitations": [
+            "Yahoo chart v8 close rounded half-up to cents on 2026-11-26; not an official exchange close"
+          ],
+          "observed_at": "2024-11-12T21:00:00Z",
+          "price": "152.64",
+          "price_role": "close",
+          "source_label": "yahoo-chart-v8",
+          "summary": "Supplied close for 2024-11-12.",
+          "symbol": "JNJ"
+        }
+      ],
+      "schema_version": "1"
+    }
+  ],
+  "after-session-4": [
+    {
+      "benchmark": [
+        {
+          "available_at": "2024-11-13T20:00:00Z",
+          "level": "597.19",
+          "limitations": [
+            "Yahoo chart v8 SPY close rounded half-up to cents; supplied benchmark level, not an index calculation"
+          ]
+        }
+      ],
+      "evidence": [
+        {
+          "available_at": "2024-11-13T20:00:00Z",
+          "evidence_id": "close-aapl-2024-11-13",
+          "kind": "observation",
+          "limitations": [
+            "Yahoo chart v8 close rounded half-up to cents on 2026-11-26; not an official exchange close"
+          ],
+          "observed_at": "2024-11-13T20:00:00Z",
+          "price": "225.12",
+          "price_role": "close",
+          "source_label": "yahoo-chart-v8",
+          "summary": "Supplied close for 2024-11-13.",
+          "symbol": "AAPL"
+        },
+        {
+          "available_at": "2024-11-13T20:00:00Z",
+          "evidence_id": "close-msft-2024-11-13",
+          "kind": "observation",
+          "limitations": [
+            "Yahoo chart v8 close rounded half-up to cents on 2026-11-26; not an official exchange close"
+          ],
+          "observed_at": "2024-11-13T20:00:00Z",
+          "price": "425.2",
+          "price_role": "close",
+          "source_label": "yahoo-chart-v8",
+          "summary": "Supplied close for 2024-11-13.",
+          "symbol": "MSFT"
+        },
+        {
+          "available_at": "2024-11-13T20:00:00Z",
+          "evidence_id": "close-jnj-2024-11-13",
+          "kind": "observation",
+          "limitations": [
+            "Yahoo chart v8 close rounded half-up to cents on 2026-11-26; not an official exchange close"
+          ],
+          "observed_at": "2024-11-13T20:00:00Z",
+          "price": "153.24",
+          "price_role": "close",
+          "source_label": "yahoo-chart-v8",
+          "summary": "Supplied close for 2024-11-13.",
+          "symbol": "JNJ"
+        }
+      ],
+      "schema_version": "1"
+    }
+  ],
+  "decision-2": "2024-11-06T16:00:00+00:00",
+  "decision-3": "2024-11-08T16:00:00+00:00",
+  "decision-4": "2024-11-13T16:00:00+00:00",
+  "mark-1": "2024-11-01T20:30:00+00:00",
+  "mark-2": "2024-11-06T20:30:00+00:00",
+  "mark-3": "2024-11-08T20:30:00+00:00",
+  "mark-4": "2024-11-13T20:30:00+00:00"
+}

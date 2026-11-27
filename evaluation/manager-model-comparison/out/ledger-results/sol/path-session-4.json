@@ -1,0 +1,31 @@
+{
+  "fill": null,
+  "inference": "native_supervised",
+  "model_identity": "codex/gpt-6.2-sol@xhigh",
+  "proposal_id": "bc5372f9-94af-7e0b-bf98-85fdcafb0f2a",
+  "reasons": [
+    "accepted: proposal is inside the simulation mandate"
+  ],
+  "snapshot": {
+    "cash": "90246.6",
+    "cumulative_transaction_costs": "1",
+    "holdings": [
+      {
+        "basis_status": "known",
+        "cost_basis": "9753.4",
+        "quantity": 24,
+        "security_id": "b3ac1249-43b9-7be0-aa9e-81c613841697",
+        "symbol": "MSFT"
+      }
+    ],
+    "holdings_market_value": null,
+    "marked": false,
+    "net_asset_value": null,
+    "realized_gross_pnl": "0",
+    "realized_net_pnl": "0",
+    "session": "2024-11-13",
+    "valuation": "unavailable",
+    "valuation_reason": "a held position has no mark or no known cost basis, so market value is not reported"
+  },
+  "status": "accepted"
+}
