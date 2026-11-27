@@ -823,6 +823,25 @@ def test_a_failed_sip_download_still_leaves_iex_entitled() -> None:
     assert entitled_feeds({"sip": 401, "iex": 200}) == ("iex",)
 
 
+def test_uniform_age_still_rejects_a_fresh_withdrawn_filing() -> None:
+    as_of = datetime(2024, 6, 4, 22, tzinfo=UTC)
+    row = CitationRow(
+        evidence_id="sec:filing:withdrawn",
+        kind="news",
+        source_label="sec-submissions",
+        summary="Withdrawn filing accession x report 2024-06-04.",
+        limitations=("withdrawn filing",),
+        observed_at=datetime(2024, 6, 4, 21, tzinfo=UTC),
+        available_at=datetime(2024, 6, 4, 21, tzinfo=UTC),
+        symbol="AAPL",
+    )
+    refusal = citation_refusal(
+        row, as_of, (row,), policy="uniform_age", max_age_hours=336
+    )
+    assert refusal is not None
+    assert refusal.startswith("withdrawn_evidence")
+
+
 def test_research_policy_does_not_freshen_an_old_fill() -> None:
     decision_at = datetime(2024, 1, 2, 22, tzinfo=UTC)
     trade_at = datetime(2024, 1, 3, 14, 30, tzinfo=UTC)

@@ -56,15 +56,11 @@ def citation_refusal(
     max_age_hours: int,
 ) -> str | None:
     """Return a rejection reason, or None when the row may be cited."""
-    if policy == "uniform_age":
-        return _aged(row, as_of, max_age_hours)
     if _withdrawn(row):
         return f"withdrawn_evidence: {row.evidence_id} was withdrawn"
-    if _durable(row):
-        if _superseded(row, as_of, rows):
-            return f"superseded_evidence: {row.evidence_id} has a later replacement"
-        return None
-    if row.kind == "observation":
+    if _durable(row) and _superseded(row, as_of, rows):
+        return f"superseded_evidence: {row.evidence_id} has a later replacement"
+    if policy == "research" and (_durable(row) or row.kind == "observation"):
         return None
     return _aged(row, as_of, max_age_hours)
 
