@@ -247,8 +247,9 @@ def assemble_book(
 
 
 def review_prompts(
-    cache: Sequence[Mapping[str, object]],
+    series: Sequence[Mapping[str, object]],
     *,
+    ledger: Sequence[Mapping[str, object]],
     cash: str,
     quantities: dict[str, int],
     review_day: date,
@@ -256,10 +257,16 @@ def review_prompts(
     min_dollar_volume: Decimal | None = None,
     shortlist_limit: int | None = None,
 ) -> tuple[dict[str, str], dict[str, str], tuple[ScreenRow, ...]]:
-    """Prompt a later session from shares the ledger already holds."""
+    """Screen the full series. Cite only rows the ledger already holds."""
     names = universe_by_symbol()
     as_of = decision_time(review_day)
-    visible = [dict(item) for item in cache if _visible_at(dict(item), as_of)]
+    visible = [dict(item) for item in series if _visible_at(dict(item), as_of)]
+    registered = [dict(item) for item in ledger if _visible_at(dict(item), as_of)]
+    registered_ids = {
+        str(item["evidence_id"])
+        for item in registered
+        if isinstance(item.get("evidence_id"), str)
+    }
     closes = tuple(_close_point(item) for item in visible if _is_close(item))
     facts = tuple(
         FactPoint(
@@ -276,6 +283,7 @@ def review_prompts(
         for item in visible
         if item.get("kind") == "suggestion" and isinstance(item.get("symbol"), str)
     )
+    ledger_close = _latest_registered_close(registered)
     rows = screen(
         closes,
         as_of=review_day,
@@ -289,16 +297,20 @@ def review_prompts(
         ),
         shortlist_limit=SHORTLIST_LIMIT if shortlist_limit is None else shortlist_limit,
     )
+    rows = tuple(_registered_row(row, registered_ids, ledger_close) for row in rows)
     deep = frozenset(
         row.symbol
         for row in rows
         if row.shortlisted or row.trading_authorized or row.symbol in held
     )
     symbols = frozenset(row.symbol for row in rows if row.research_eligible)
-    compact = compact_evidence(visible, symbols=symbols, deep=deep, as_of=as_of)
+    compact = compact_evidence(registered, symbols=symbols, deep=deep, as_of=as_of)
     shown = _context(compact, as_of, cash=cash, quantities=quantities)
     brief = research_brief(
-        cast(ReplayJson, _context(visible, as_of, cash=cash, quantities=quantities)),
+        cast(
+            ReplayJson,
+            _context(registered, as_of, cash=cash, quantities=quantities),
+        ),
         as_of,
         policy="research",
     )
@@ -323,6 +335,56 @@ def review_prompts(
         for model in ("terra", "sol")
     }
     return prompts, proposal_ids, rows
+
+
+def _registered_row(
+    row: ScreenRow,
+    registered_ids: set[str],
+    ledger_close: dict[str, str],
+) -> ScreenRow:
+    """Keep the calculated screen. Drop citation ids the ledger does not hold."""
+
+    def keep(evidence_id: str | None) -> str | None:
+        if evidence_id in registered_ids:
+            return evidence_id
+        return ledger_close.get(row.symbol)
+
+    return ScreenRow(
+        symbol=row.symbol,
+        research_eligible=row.research_eligible,
+        screen_pass=row.screen_pass,
+        shortlisted=row.shortlisted,
+        trading_authorized=row.trading_authorized,
+        inclusion=row.inclusion,
+        sessions=row.sessions,
+        median_dollar_volume=row.median_dollar_volume,
+        return_21=row.return_21,
+        return_63=row.return_63,
+        trend_vs_mean=row.trend_vs_mean,
+        price_over_eps=row.price_over_eps,
+        latest_close=row.latest_close,
+        latest_evidence_id=keep(row.latest_evidence_id),
+        anchor_21_evidence_id=keep(row.anchor_21_evidence_id),
+        anchor_63_evidence_id=keep(row.anchor_63_evidence_id),
+        notes=row.notes,
+    )
+
+
+def _latest_registered_close(rows: list[dict[str, object]]) -> dict[str, str]:
+    found: dict[str, tuple[str, str]] = {}
+    for item in rows:
+        if not _is_close(item):
+            continue
+        symbol = item.get("symbol")
+        evidence_id = item.get("evidence_id")
+        observed = item.get("observed_at")
+        if not isinstance(symbol, str) or not isinstance(evidence_id, str):
+            continue
+        stamp = observed if isinstance(observed, str) else ""
+        current = found.get(symbol)
+        if current is None or stamp >= current[0]:
+            found[symbol] = (stamp, evidence_id)
+    return {symbol: evidence_id for symbol, (_stamp, evidence_id) in found.items()}
 
 
 def discovery_mandate(authorized: tuple[str, ...]) -> SimulationMandate:

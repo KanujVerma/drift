@@ -286,7 +286,8 @@ def review(state: Path) -> dict[str, object]:
             if isinstance(item, dict):
                 citable.append({str(key): value for key, value in item.items()})
     prompts, proposal_ids, rows = review_prompts(
-        citable,
+        _cache(state),
+        ledger=citable,
         cash=cash,
         quantities=quantities,
         review_day=review_day,
@@ -475,10 +476,17 @@ def remember_ingested(
         return [dict(item) for item in cache]
     known = {item.get("evidence_id") for item in cache}
     updated = [dict(item) for item in cache]
+    index = {
+        item.get("evidence_id"): position
+        for position, item in enumerate(updated)
+        if item.get("evidence_id") is not None
+    }
     for row in rows:
         evidence_key = row.get("evidence_id")
         if evidence_key in known:
+            updated[index[evidence_key]] = dict(row)
             continue
+        index[evidence_key] = len(updated)
         updated.append(dict(row))
         known.add(evidence_key)
     return updated

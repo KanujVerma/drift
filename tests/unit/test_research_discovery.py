@@ -272,6 +272,7 @@ def test_a_later_review_can_sell_shares_the_ledger_holds(tmp_path: Path) -> None
     assert filled["status"] == "filled"
     _prompts, _ids, rows = review_prompts(
         list(book.cache),
+        ledger=list(book.cache),
         cash="8331.00",
         quantities={"AAPL": 4},
         review_day=book.review_day,
@@ -406,6 +407,25 @@ def test_same_day_eps_rows_keep_the_annual_multiple_in_either_order() -> None:
     assert forward == backward == "33.60"
 
 
+def test_review_screens_the_full_series_and_cites_only_the_ledger() -> None:
+    days = _days(70)
+    series = [_close_row("CAT", day, 100 + index) for index, day in enumerate(days)]
+    ledger = [series[0], series[68]]
+    prompts, _ids, rows = review_prompts(
+        series,
+        ledger=ledger,
+        cash="10000",
+        quantities={},
+        review_day=days[-2],
+        min_dollar_volume=FLOOR,
+    )
+    cat = _row_from(rows, "CAT")
+    assert cat.sessions == 69
+    assert cat.shortlisted
+    assert cat.latest_evidence_id == series[68]["evidence_id"]
+    assert str(series[5]["evidence_id"]) not in prompts["terra"]
+
+
 def test_review_cites_only_registered_evidence_and_keeps_suggestions() -> None:
     stamp = datetime(2026, 11, 24, 21, tzinfo=UTC).isoformat()
     close = {
@@ -434,6 +454,7 @@ def test_review_cites_only_registered_evidence_and_keeps_suggestions() -> None:
     }
     prompts, _ids, rows = review_prompts(
         [close, suggestion],
+        ledger=[close, suggestion],
         cash="10000",
         quantities={},
         review_day=date(2026, 11, 25),
@@ -460,6 +481,13 @@ def test_rejected_ingest_does_not_change_the_cache() -> None:
     assert remember_ingested(cache, [extra], accepted=False) == cache
     stored = remember_ingested(cache, [extra, extra], accepted=True)
     assert [item["evidence_id"] for item in stored].count("vendor-close-001") == 1
+    revised = remember_ingested(
+        stored,
+        [{"evidence_id": "vendor-close-001", "price": "123.45"}],
+        accepted=True,
+    )
+    assert revised[-1]["price"] == "123.45"
+    assert [item["evidence_id"] for item in revised].count("vendor-close-001") == 1
 
 
 def test_discovery_state_rejects_a_prospective_role_directory(tmp_path: Path) -> None:
