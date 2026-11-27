@@ -440,6 +440,23 @@ def test_review_screens_the_full_series_and_cites_only_the_ledger() -> None:
     assert named.anchor_21_evidence_id == series[47]["evidence_id"]
     assert str(series[5]["evidence_id"]) in context
     assert str(series[47]["evidence_id"]) in context
+    withheld = review_prompts(
+        series,
+        ledger=[series[0]],
+        cash="10000",
+        quantities={},
+        review_day=days[-2],
+        min_dollar_volume=FLOOR,
+    )
+    withheld_row = _row_from(withheld[2], "CAT")
+    brief = withheld[0]["terra"].split("Context JSON:", 1)[0]
+    latest_id = str(series[68]["evidence_id"])
+    assert withheld_row.sessions == 69
+    assert withheld_row.latest_evidence_id is None
+    assert "closes 69" in brief
+    assert "63-session change 60.00 percent" in brief
+    assert latest_id not in brief
+    assert "fresh price, citable" not in brief
 
 
 def test_review_cites_only_registered_evidence_and_keeps_suggestions() -> None:

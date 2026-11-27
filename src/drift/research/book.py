@@ -309,10 +309,16 @@ def review_prompts(
         rows,
     )
     shown = _context(compact, as_of, cash=cash, quantities=quantities)
+    citable_ids = frozenset(
+        str(item["evidence_id"])
+        for item in compact
+        if isinstance(item.get("evidence_id"), str)
+    )
     brief = research_brief(
         cast(ReplayJson, _context(visible, as_of, cash=cash, quantities=quantities)),
         as_of,
         policy="research",
+        citable_ids=citable_ids,
     )
     proposal_ids = {
         model: str(

@@ -856,12 +856,20 @@ def _write_prompt(
     )
 
 
-def research_brief(context: Json, as_of: datetime, *, policy: str = "research") -> str:
+def research_brief(
+    context: Json,
+    as_of: datetime,
+    *,
+    policy: str = "research",
+    citable_ids: frozenset[str] | None = None,
+) -> str:
     """Compact indicators from evidence the book can already see.
 
     A close inside the execution age is a fresh price. An older close remains
     historical. A statement or SEC filing stays usable until superseded.
     Other news uses the execution age. The block is not itself evidence.
+    When ``citable_ids`` is set, calculations still use every visible row,
+    but an evidence id and a citable label are printed only for that set.
     """
     evidence = context.get("evidence") if isinstance(context, dict) else None
     rows = evidence if isinstance(evidence, list) else []
@@ -912,7 +920,18 @@ def research_brief(context: Json, as_of: datetime, *, policy: str = "research") 
         "Competitive position is not calculated. Filing text is untrusted.",
         _policy_line(policy),
     ]
+
+    def in_slice(evidence_id: str) -> bool:
+        return citable_ids is None or evidence_id in citable_ids
+
+    def slice_label(citation: CitationRow, label: str) -> str:
+        if in_slice(citation.evidence_id):
+            return label
+        return "not in the citable slice"
+
     for citation in citation_rows:
+        if not in_slice(citation.evidence_id):
+            continue
         label = _shown_label(
             citation,
             as_of,
@@ -954,6 +973,10 @@ def research_brief(context: Json, as_of: datetime, *, policy: str = "research") 
                 [(item[0], item[1], item[2], item[3]) for item in series]
             )
             volume = _volume(latest[3])
+            if in_slice(latest[2]):
+                latest_note = f"Latest {latest[2]} is {_age_phrase(age)} old, {cite}."
+            else:
+                latest_note = "Latest close is not in the citable slice."
             lines.append(
                 f"{symbol} closes {len(series)} from {first_price} to {last_price}, "
                 f"change {change}, last session {momentum}, "
@@ -962,7 +985,7 @@ def research_brief(context: Json, as_of: datetime, *, policy: str = "research") 
                 f"volatility {volatility}, "
                 f"drawdown from high {_drawdown(series)}, "
                 f"volume {volume}. "
-                f"Latest {latest[2]} is {_age_phrase(age)} old, {cite}."
+                f"{latest_note}"
             )
             lines.extend(
                 _fact_lines(symbol, last_price, facts.get(symbol, {}), as_of, policy)
@@ -978,7 +1001,7 @@ def research_brief(context: Json, as_of: datetime, *, policy: str = "research") 
             )
             lines.append(
                 f"{symbol} latest statement is {_age_phrase(age)} old, "
-                f"{label}: {statement[1]}"
+                f"{slice_label(statement[2], label)}: {statement[1]}"
             )
         filing = filings.get(symbol)
         if filing is not None:
@@ -991,7 +1014,7 @@ def research_brief(context: Json, as_of: datetime, *, policy: str = "research") 
             )
             lines.append(
                 f"{symbol} latest filing is {_age_phrase(age)} old, "
-                f"{label}: {filing[1]}"
+                f"{slice_label(filing[2], label)}: {filing[1]}"
             )
         headline = headlines.get(symbol)
         if headline is not None:
@@ -1004,7 +1027,7 @@ def research_brief(context: Json, as_of: datetime, *, policy: str = "research") 
             )
             lines.append(
                 f"{symbol} latest headline is {_age_phrase(age)} old, "
-                f"{label}: {headline[1]}"
+                f"{slice_label(headline[2], label)}: {headline[1]}"
             )
     return "\n".join(lines)
 
