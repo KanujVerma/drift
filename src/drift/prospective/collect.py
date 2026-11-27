@@ -22,7 +22,7 @@ from pathlib import Path
 from time import sleep
 from typing import Literal
 
-from drift.domain.evaluator_portfolio import canonical_money
+from drift.domain.evaluator_portfolio import canonical_money, decimal_context
 from drift.manager.models import (
     REQUIRED_CONTEXT_LIMITATIONS,
     REQUIRED_PACKET_LIMITATIONS,
@@ -217,6 +217,7 @@ def fetch_bytes(url: str, *, timeout: float = 30) -> bytes:
     return body
 
 
+@decimal_context()
 def cents(value: object) -> str | None:
     """Half-up cents. Unusable values become a gap, not a guessed price."""
     if isinstance(value, bool) or not isinstance(value, (int, float, str)):
@@ -855,8 +856,11 @@ def build_packet(collection: Collection, *, readiness: bool) -> ResearchPacket:
     if not evidence:
         message = "collection produced no usable evidence"
         raise ValueError(message)
+    from drift.manager.models import CENT_BASIS_ALLOCATION
+
     notes = [
         *REQUIRED_PACKET_LIMITATIONS,
+        CENT_BASIS_ALLOCATION,
         "source gaps are recorded beside the collection and are not invented",
         "raw market bars are not dividend-adjusted",
         "filing acceptance times are source timestamps, not exchange authority",

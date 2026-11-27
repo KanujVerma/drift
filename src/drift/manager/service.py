@@ -529,8 +529,10 @@ class PortfolioManager:
         advanced = False
         advances = advance_dates(packet, current, target)
         for item in pending:
+            from drift.prospective.config import NY
+
             if _pilot_book(mandate) and any(
-                item.as_of.date() < day <= as_of.date()
+                item.as_of.astimezone(NY).date() < day <= as_of.astimezone(NY).date()
                 for day in _split_dates(packet, as_of).get(item.symbol, ())
             ):
                 results.append(
@@ -1023,7 +1025,11 @@ class PortfolioManager:
                 valuation = "unavailable"
                 market = unrealized = nav = None
                 valuation_reason = "books disagree on trade invalidations"
-        if session_for(packet, as_of) != kernel.state.session_key.local_date:
+        requested_session = session_for(packet, as_of)
+        if requested_session is None or (
+            kernel.state.holdings
+            and requested_session != kernel.state.session_key.local_date
+        ):
             valuation = "unavailable"
             market = None
             unrealized = None
@@ -1032,8 +1038,19 @@ class PortfolioManager:
                 "the requested time is outside the book's current session, "
                 "so an earlier mark is not used"
             )
+        price_benchmark = _price_benchmark(
+            packet, events, as_of, nav, kernel.state.session_key.local_date
+        )
+        relative_benchmark = _benchmark(packet, as_of, nav)
+        if PROSPECTIVE_SEAL_REQUIRED in mandate.acknowledgements:
+            relative_benchmark = _paired_close_benchmark(
+                self._ledger,
+                as_of,
+                nav,
+                requested_session or kernel.state.session_key.local_date,
+            )
         body: dict[str, Json] = {
-            "benchmark_relative": _benchmark(packet, as_of, nav),
+            "benchmark_relative": (relative_benchmark),
             "book_session": kernel.state.session_key.local_date.isoformat(),
             "cash": money_text(kernel.state.cash_balance),
             "cumulative_simulation_transaction_costs": money_text(
@@ -1055,9 +1072,7 @@ class PortfolioManager:
                 if nav is None and _pilot_book(mandate)
                 else _observed_drawdown(events, packet, as_of)
             ),
-            "price_return_benchmark": _price_benchmark(
-                packet, events, as_of, nav, kernel.state.session_key.local_date
-            ),
+            "price_return_benchmark": price_benchmark,
             "not_a_broker_connection": True,
             "not_promotion_evidence": True,
             "positions": _position_rows(kernel, packet),
@@ -1862,12 +1877,14 @@ def _pilot_coverage_available(
 def _split_dates(
     packet: ResearchPacket, as_of: datetime
 ) -> dict[str, tuple[date, ...]]:
+    from drift.prospective.config import NY
+
     found: dict[str, list[date]] = {}
     for item in packet.evidence:
         if item.available_at > as_of or item.observed_at > as_of:
             continue
         day = split_date(item.source_label, item.evidence_id, item.symbol)
-        if day is not None and day <= as_of.date():
+        if day is not None and day <= as_of.astimezone(NY).date():
             found.setdefault(item.symbol, []).append(day)
     return {symbol: tuple(sorted(days)) for symbol, days in found.items()}
 
@@ -1944,18 +1961,25 @@ def _valuation(
             "a held position has no mark or no known cost basis, so market "
             "value is not reported",
         )
-    cost = sum(
+    with decimal_context():
+        cost = sum(
+            (
+                holding.cost_basis
+                for holding in state.holdings
+                if holding.cost_basis is not None
+            ),
+            Decimal("0"),
+        )
+        recomputed = state.holdings_market_value - cost
+    exact_cost = sum(
         (
-            holding.cost_basis
+            Fraction(holding.cost_basis)
             for holding in state.holdings
             if holding.cost_basis is not None
         ),
-        Decimal("0"),
+        Fraction(0),
     )
-    unrealized = state.holdings_market_value - cost
-    with decimal_context():
-        recomputed = state.holdings_market_value - cost
-    if Fraction(recomputed) != Fraction(state.holdings_market_value) - Fraction(cost):
+    if Fraction(recomputed) != Fraction(state.holdings_market_value) - exact_cost:
         return (
             "unavailable",
             None,
@@ -1963,7 +1987,6 @@ def _valuation(
             None,
             "unrealized result is not exact in the portfolio decimal context",
         )
-    del unrealized
     return (
         "marked",
         money_text(state.holdings_market_value),
@@ -2364,6 +2387,140 @@ def _observed_drawdown(
     }
 
 
+def _paired_close_benchmark(
+    ledger: SQLiteLedger, as_of: datetime, nav: str | None, session_date: date
+) -> Json:
+    """Compare both books from their first jointly measurable post-decision close."""
+    from drift.prospective.config import NY
+    from drift.prospective.run import _execution_barriers
+
+    unavailable: dict[str, Json] = {
+        "status": "unavailable",
+        "series_kind": "price_only_substitute",
+        "reason": "a shared post-decision close and both book valuations are required",
+    }
+    if nav is None or ledger.path.name not in {"terra.sqlite", "sol.sqlite"}:
+        return unavailable
+    histories: list[tuple[AuditEvent, ...]] = []
+    packets: list[ResearchPacket] = []
+    first_seals: list[datetime] = []
+    for name in ("terra.sqlite", "sol.sqlite"):
+        path = ledger.path.parent / name
+        if not path.is_file():
+            return unavailable
+        source = SQLiteLedger(path, create_schema=False)
+        events = source.verified_events()
+        barriers = _execution_barriers(source, as_of)
+        first: datetime | None = None
+        for event in events:
+            if event.timestamp > as_of or event.event_type != DECISION:
+                continue
+            payload = thaw(event.payload)
+            proposal = payload.get("proposal")
+            identifier = (
+                proposal.get("proposal_id") if isinstance(proposal, dict) else None
+            )
+            if (
+                payload.get("status") == "accepted"
+                and isinstance(identifier, str)
+                and identifier in barriers
+            ):
+                first = barriers[identifier]
+                break
+        if first is None:
+            return unavailable
+        histories.append(events)
+        packets.append(packet_through(events, until=as_of))
+        first_seals.append(first)
+    opening_packets = [replay(events)[0] for events in histories]
+    closes: list[dict[str, EvidenceItem]] = []
+    for packet, opening in zip(packets, opening_packets, strict=True):
+        closes.append(
+            {
+                item.evidence_id: item
+                for item in packet.evidence
+                if item.symbol == "SPY"
+                and item.price_role == "close"
+                and item.price is not None
+                and item.available_at <= as_of
+                and item.observed_at > max(first_seals)
+                and _valid_pilot_close(item, "SPY", opening)
+            }
+        )
+    shared = sorted(
+        (item for key, item in closes[0].items() if closes[1].get(key) == item),
+        key=lambda item: item.observed_at,
+    )
+    ends = [
+        item
+        for item in shared
+        if item.observed_at.astimezone(NY).date() == session_date
+    ]
+    if not ends:
+        return unavailable
+    end = ends[-1]
+    own = 0 if ledger.path.name == "terra.sqlite" else 1
+    for start in shared:
+        day = start.observed_at.astimezone(NY).date()
+        if day > session_date:
+            break
+        checkpoints = {start.available_at}
+        for events in histories:
+            checkpoints.update(
+                event.timestamp
+                for event in events
+                if event.event_type == MARK
+                and start.observed_at <= event.timestamp <= as_of
+                and event.timestamp.astimezone(NY).date() == day
+            )
+        for when in sorted(checkpoints):
+            values: list[str] = []
+            for events in histories:
+                _packet, _rules, *_rest, kernel = replay(events, until=when)
+                if kernel.state.holdings and kernel.state.session_key.local_date != day:
+                    break
+                valuation, _market, _unrealized, value, _reason = _valuation(kernel)
+                if valuation not in ("marked", "cash_only") or value is None:
+                    break
+                values.append(value)
+            if len(values) != 2:
+                continue
+            if any(
+                day < split <= session_date
+                for split in _split_dates(packets[own], as_of).get("SPY", ())
+            ):
+                return unavailable
+            assert start.price is not None and end.price is not None
+            series_difference = _money_difference(
+                parse_money(end.price), parse_money(start.price)
+            )
+            portfolio_difference = _money_difference(
+                parse_money(nav), parse_money(values[own])
+            )
+            if series_difference is None or portfolio_difference is None:
+                return unavailable
+            series = _return_ratio(series_difference, parse_money(start.price))
+            portfolio = _return_ratio(portfolio_difference, parse_money(values[own]))
+            if series is None or portfolio is None:
+                return unavailable
+            return {
+                "status": "available",
+                "series_kind": "price_only_substitute",
+                "series_change": series[0],
+                "portfolio_change": portfolio[0],
+                "start_evidence_id": start.evidence_id,
+                "end_evidence_id": end.evidence_id,
+                "start_as_of": when.isoformat(),
+                "start_portfolio_value": values[own],
+                "limitation": (
+                    "Comparison begins at the first shared close after both "
+                    "decisions with both books valued; earlier performance and "
+                    "dividends are excluded."
+                ),
+            }
+    return unavailable
+
+
 def _price_benchmark(
     packet: ResearchPacket,
     events: tuple[AuditEvent, ...],
@@ -2463,8 +2620,12 @@ def _price_benchmark(
         )
     ):
         return unavailable
+    from drift.prospective.config import NY
+
     if any(
-        start.observed_at.date() < day <= end.observed_at.date()
+        start.observed_at.astimezone(NY).date()
+        < day
+        <= end.observed_at.astimezone(NY).date()
         for day in _split_dates(packet, as_of).get("SPY", ())
     ):
         return {
@@ -2566,11 +2727,13 @@ def _benchmark(packet: ResearchPacket, as_of: datetime, nav: str | None) -> Json
     }
 
 
+@decimal_context()
 def _system_costs(events: tuple[AuditEvent, ...], as_of: datetime) -> Json:
     entries: list[Json] = []
     currencies: set[str] = set()
     missing = False
     total = Decimal("0")
+    exact_total = Fraction(0)
     for event in events:
         if event.event_type != DECISION or event.timestamp > as_of:
             continue
@@ -2590,6 +2753,7 @@ def _system_costs(events: tuple[AuditEvent, ...], as_of: datetime) -> Json:
             continue
         currencies.add(currency)
         total += parse_money(amount)
+        exact_total += Fraction(parse_money(amount))
         entries.append(
             {
                 "amount": amount,
@@ -2623,6 +2787,15 @@ def _system_costs(events: tuple[AuditEvent, ...], as_of: datetime) -> Json:
             "reason": (
                 "at least one decision did not attest a system cost, or currencies "
                 "differ; missing cost is not zero"
+            ),
+            "status": "unknown",
+        }
+    if Fraction(total) != exact_total:
+        return {
+            "amount": None,
+            "entries": entries,
+            "reason": (
+                "attested costs cannot be summed exactly in the portfolio context"
             ),
             "status": "unknown",
         }

@@ -179,6 +179,9 @@ def test_constrained_passive_respects_the_position_cap() -> None:
     control = constrained_passive("100", "110")
     assert control["shares"] == "24"
     assert Decimal(control["spent"]) <= Decimal("2500")
+    no_room = constrained_passive("0.01", "0.02", cash="100", floor="100")
+    assert no_room["shares"] == "0"
+    assert Decimal(no_room["ending_nav"]) == Decimal("100")
 
 
 def test_research_brief_keeps_stale_statements_out_of_citations() -> None:
@@ -1193,3 +1196,17 @@ def _study() -> tuple[Study, Window]:
         price_limitation="fixture price, not an exchange print",
     )
     return study, window
+
+
+def test_passive_and_price_value_ignore_caller_decimal_context() -> None:
+    from decimal import Context, localcontext
+
+    study, window = _study()
+    context: Json = {
+        "book": {"cash": "8330", "holdings": [{"symbol": "AAPL", "quantity": "4"}]}
+    }
+    expected_passive = constrained_passive("100", "110")
+    expected_value = price_value(study, window, context, SECOND)
+    with localcontext(Context(prec=1)):
+        assert price_value(study, window, context, SECOND) == expected_value
+        assert constrained_passive("100", "110") == expected_passive

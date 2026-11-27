@@ -35,6 +35,7 @@ from drift.errors import LedgerIntegrityError
 from drift.evaluator.portfolio import PortfolioAccountingKernel, initial_portfolio_state
 from drift.ledger.interface import AuditEventDraft, Ledger
 from drift.manager.models import (
+    CENT_BASIS_ALLOCATION,
     BenchmarkPoint,
     EvidenceItem,
     ResearchPacket,
@@ -267,7 +268,11 @@ def build_kernel(packet: ResearchPacket, packet_hash: str) -> PortfolioAccountin
         initial_cash=parse_money(packet.portfolio_context.cash),
         admission=_admission(packet_hash),
     )
-    return PortfolioAccountingKernel(state, session_clock=_clock(packet))
+    return PortfolioAccountingKernel(
+        state,
+        session_clock=_clock(packet),
+        cent_basis_allocation=CENT_BASIS_ALLOCATION in packet.limitations,
+    )
 
 
 def _apply_advances(kernel: PortfolioAccountingKernel, advances: Json) -> None:

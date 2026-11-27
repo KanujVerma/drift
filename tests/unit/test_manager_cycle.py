@@ -1676,3 +1676,122 @@ def test_manager_does_not_import_unresolved_defect_paths() -> None:
             if stripped.startswith(("import ", "from ")):
                 for name in forbidden:
                     assert name not in stripped
+
+
+def test_regression_partial_sale_then_valid_buy(tmp_path: Path) -> None:
+    from drift.manager.models import CENT_BASIS_ALLOCATION
+
+    packet = _packet().model_copy(
+        update={
+            "limitations": (*_packet().limitations, CENT_BASIS_ALLOCATION),
+        }
+    )
+    manager, _ = PortfolioManager.open(tmp_path / "book.sqlite", packet, _mandate())
+    assert _mapping(manager.propose(_proposal(quantity=3)))["status"] == "accepted"
+    sold = manager.propose(
+        _proposal(
+            proposal_id=deterministic_memory_uuid7("regression-sale"),
+            as_of=TUESDAY_AT,
+            action="sell",
+            quantity=1,
+            evidence_ids=("ev-tue-close",),
+        )
+    )
+    assert _mapping(sold)["status"] == "accepted"
+    assert _snapshot(sold)["cash"] == "9808"
+    assert _snapshot(sold)["realized_net_pnl"] == "8.67"
+    assert _rows(_snapshot(sold)["holdings"])[0]["cost_basis"] == "200.67"
+    bought = manager.propose(
+        _proposal(
+            proposal_id=deterministic_memory_uuid7("regression-rebuy"),
+            as_of=TUESDAY_AT,
+            quantity=1,
+            evidence_ids=("ev-tue-close",),
+        )
+    )
+    assert _mapping(bought)["status"] == "accepted", bought
+    assert _snapshot(bought)["cash"] == "9697"
+    assert _rows(_snapshot(bought)["holdings"])[0]["cost_basis"] == "311.67"
+    too_large = manager.propose(
+        _proposal(
+            proposal_id=deterministic_memory_uuid7("regression-over-cap"),
+            as_of=TUESDAY_AT,
+            quantity=25,
+            evidence_ids=("ev-tue-close",),
+        )
+    )
+    assert _mapping(too_large)["status"] == "rejected"
+    assert any(
+        "unsafe_position_limit" in reason for reason in _reasons(_mapping(too_large))
+    )
+    recovered = PortfolioManager.recover(tmp_path / "book.sqlite")
+    liquidation = recovered.propose(
+        _proposal(
+            proposal_id=deterministic_memory_uuid7("regression-liquidation"),
+            as_of=TUESDAY_AT,
+            action="sell",
+            quantity=3,
+            evidence_ids=("ev-tue-close",),
+        )
+    )
+    assert _mapping(liquidation)["status"] == "accepted"
+    assert _snapshot(liquidation)["cash"] == "10026"
+    assert _snapshot(liquidation)["realized_net_pnl"] == "26"
+    assert _snapshot(liquidation)["holdings"] == []
+
+
+def test_regression_unrealized_ignores_caller_decimal_context(tmp_path: Path) -> None:
+    from decimal import Context, localcontext
+
+    manager, _ = _open(tmp_path)
+    assert _mapping(manager.propose(_proposal(quantity=3)))["status"] == "accepted"
+    assert _mapping(manager.mark(MARK_AT))["status"] == "marked"
+    expected = _mapping(manager.report(MARK_AT))
+    with localcontext(Context(prec=1)):
+        actual = _mapping(manager.report(MARK_AT))
+    assert actual["unrealized_pnl"] == expected["unrealized_pnl"]
+    assert actual["valuation"] == expected["valuation"]
+
+
+def test_regression_split_not_effective_before_new_york_date() -> None:
+    from drift.manager.service import _split_dates
+
+    when = datetime(2026, 1, 6, 0, 30, tzinfo=UTC)
+    item = EvidenceItem(
+        evidence_id="alpaca:split:ACME:2026-01-06",
+        kind="news",
+        symbol="ACME",
+        observed_at=when,
+        available_at=when,
+        summary="split",
+        source_label="alpaca-corporate-action",
+        limitations=("fixture",),
+    )
+    packet = _packet().model_copy(update={"evidence": (item,)})
+    assert _split_dates(packet, when) == {}
+    assert _split_dates(packet, datetime(2026, 1, 6, 5, 0, tzinfo=UTC)) == {
+        "ACME": (date(2026, 1, 6),)
+    }
+
+
+def test_system_cost_report_ignores_caller_decimal_context(tmp_path: Path) -> None:
+    from decimal import Context, localcontext
+
+    manager, _ = _open(tmp_path)
+    assert (
+        _mapping(
+            manager.propose(
+                _proposal(
+                    system_cost=SystemCost(
+                        amount="12.34", currency="USD", description="fixture"
+                    )
+                )
+            )
+        )["status"]
+        == "accepted"
+    )
+    expected = _mapping(_mapping(manager.report(BUY_AT))["system_costs"])
+    with localcontext(Context(prec=1)):
+        actual = _mapping(_mapping(manager.report(BUY_AT))["system_costs"])
+    assert actual == expected
+    assert actual["amount"] == "12.34"

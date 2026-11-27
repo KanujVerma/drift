@@ -152,9 +152,14 @@ class PortfolioAccountingKernel:
     """
 
     def __init__(
-        self, state: PortfolioStateV2, *, session_clock: SessionClockV1
+        self,
+        state: PortfolioStateV2,
+        *,
+        session_clock: SessionClockV1,
+        cent_basis_allocation: bool = False,
     ) -> None:
         self._clock = session_clock
+        self._cent_basis_allocation = cent_basis_allocation
         self._session_positions: dict[SessionKeyV1, int] = {
             session.session_key: position
             for position, session in enumerate(session_clock.sessions)
@@ -281,6 +286,12 @@ class PortfolioAccountingKernel:
         previous holdings no longer describes the position.
         """
         with self._transaction(), decimal_context():
+            if self._cent_basis_allocation and Fraction(
+                self._costs + fill.transaction_costs
+            ) != Fraction(self._costs) + Fraction(fill.transaction_costs):
+                raise ValueError(
+                    "cumulative costs are not exact in the portfolio context"
+                )
             if fill.side == "buy":
                 self._apply_buy(fill)
             else:
@@ -292,6 +303,26 @@ class PortfolioAccountingKernel:
     def _apply_buy(self, fill: PortfolioFillV1) -> None:
         gross = fill.fill_price * fill.quantity
         required = gross + fill.transaction_costs
+        existing = self._holdings.get(fill.security_id)
+        if self._cent_basis_allocation:
+            exact_required = Fraction(fill.fill_price) * fill.quantity + Fraction(
+                fill.transaction_costs
+            )
+            if (
+                Fraction(required) != exact_required
+                or Fraction(self._cash - required)
+                != Fraction(self._cash) - exact_required
+            ):
+                raise ValueError("buy cash is not exact in the portfolio context")
+            if (
+                existing is not None
+                and existing.cost_basis is not None
+                and Fraction(existing.cost_basis + required)
+                != Fraction(existing.cost_basis) + exact_required
+            ):
+                raise ValueError(
+                    "pooled buy basis is not exact in the portfolio context"
+                )
         if required > self._cash:
             raise ValueError(
                 f"insufficient cash for fill: requires {required}, holds {self._cash}"
@@ -324,7 +355,44 @@ class PortfolioAccountingKernel:
                 f"costs {fill.transaction_costs}, holds {self._cash}"
             )
         basis = known_cost_basis(existing)
-        relieved = basis * fill.quantity / existing.quantity
+        if self._cent_basis_allocation and fill.quantity != existing.quantity:
+            # The sold portion is allocated to cents; every residual cent stays
+            # in the position, so allocated and remaining basis sum to the
+            # original basis. This policy is bound to new books explicitly.
+            cents = Fraction(basis) * fill.quantity * 100 / existing.quantity
+            whole, remainder = divmod(cents.numerator, cents.denominator)
+            if remainder * 2 > cents.denominator or (
+                remainder * 2 == cents.denominator and whole % 2
+            ):
+                whole += 1
+            relieved = Decimal(whole).scaleb(-2)
+        else:
+            relieved = basis * fill.quantity / existing.quantity
+        if self._cent_basis_allocation:
+            if (
+                relieved < ZERO
+                or relieved > basis
+                or Fraction(basis - relieved) + Fraction(relieved) != Fraction(basis)
+                or Fraction(proceeds) != Fraction(fill.fill_price) * fill.quantity
+                or Fraction(self._cash + net_proceeds)
+                != Fraction(self._cash)
+                + Fraction(proceeds)
+                - Fraction(fill.transaction_costs)
+                or Fraction(self._realized_gross + proceeds - relieved)
+                != Fraction(self._realized_gross)
+                + Fraction(proceeds)
+                - Fraction(relieved)
+                or Fraction(
+                    self._realized_net + proceeds - relieved - fill.transaction_costs
+                )
+                != Fraction(self._realized_net)
+                + Fraction(proceeds)
+                - Fraction(relieved)
+                - Fraction(fill.transaction_costs)
+            ):
+                raise ValueError(
+                    "sale accounting is not exact in the portfolio context"
+                )
         self._cash += net_proceeds
         self._realized_gross += proceeds - relieved
         self._realized_net += proceeds - relieved - fill.transaction_costs

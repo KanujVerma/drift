@@ -1273,3 +1273,12 @@ def test_refresh_cannot_erase_initial_corporate_action_failure(
     )
     assert result.corporate_actions_complete is False
     assert result.corporate_actions_received_at is None
+
+
+def test_cent_conversion_ignores_caller_decimal_context() -> None:
+    from decimal import Context, localcontext
+
+    from drift.prospective.collect import cents
+
+    with localcontext(Context(prec=1)):
+        assert cents("102.225") == "102.23"

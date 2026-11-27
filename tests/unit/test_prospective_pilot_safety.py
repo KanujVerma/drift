@@ -843,6 +843,7 @@ def test_next_daily_requests_and_executes_timestamped_alpaca_trade(
     from argparse import Namespace
 
     from drift.prospective.__main__ import _run
+    from drift.prospective.run import pending_benchmark_after
 
     issued = datetime(2026, 11, 27, 16, 0, tzinfo=UTC)
     old = datetime(2026, 11, 25, 14, 30, tzinfo=UTC)
@@ -862,9 +863,10 @@ def test_next_daily_requests_and_executes_timestamped_alpaca_trade(
     class SubmitClock(datetime):
         @classmethod
         def now(cls, tz: object = None) -> Any:
-            return issued + timedelta(minutes=1)
+            return submitted_at
 
-    for name in MODELS:
+    for index, name in enumerate(MODELS):
+        submitted_at = issued + timedelta(minutes=index + 1)
         folder = tmp_path / "observation" / name
         receipt = json.loads((folder / "receipt.json").read_text())
         context = json.loads((folder / "context.json").read_text())
@@ -892,6 +894,10 @@ def test_next_daily_requests_and_executes_timestamped_alpaca_trade(
             patcher.setattr("drift.prospective.run.datetime", SubmitClock)
             result = apply_proposal(tmp_path, "observation", name, path)
             assert isinstance(result, dict) and result["status"] == "accepted"
+        if index == 0:
+            assert pending_benchmark_after(tmp_path) is None
+        else:
+            assert pending_benchmark_after(tmp_path) == submitted_at
     monday = datetime(2026, 11, 30, 16, 0, tzinfo=UTC)
     observed = monday - timedelta(seconds=4 if trade_before_baseline else 2)
     baseline_stamp = (monday - timedelta(seconds=3)).isoformat()
@@ -944,7 +950,7 @@ def test_next_daily_requests_and_executes_timestamped_alpaca_trade(
         {
             "preferred_feed": "iex",
             "trade_requests": (("AAPL", issued + timedelta(minutes=1)),),
-            "benchmark_after": issued + timedelta(minutes=1),
+            "benchmark_after": issued + timedelta(minutes=2),
         }
     ]
     context = PortfolioManager.recover(
@@ -978,6 +984,19 @@ def test_next_daily_requests_and_executes_timestamped_alpaca_trade(
     assert isinstance(report, dict)
     benchmark = report["price_return_benchmark"]
     assert isinstance(benchmark, dict)
+    relative = report["benchmark_relative"]
+    assert isinstance(relative, dict)
+    assert relative["status"] == "available"
+    assert relative["series_change"] == "0"
+    assert relative["portfolio_change"] == "0"
+    peer = PortfolioManager.recover(tmp_path / "observation" / "sol.sqlite").report(
+        after_close
+    )
+    assert isinstance(peer, dict) and isinstance(peer["benchmark_relative"], dict)
+    assert (
+        peer["benchmark_relative"]["start_evidence_id"] == relative["start_evidence_id"]
+    )
+    assert peer["benchmark_relative"]["start_as_of"] == relative["start_as_of"]
     if trade_before_baseline or corrupt_baseline:
         assert benchmark["status"] == "unavailable"
     else:
@@ -1038,6 +1057,36 @@ def test_next_daily_requests_and_executes_timestamped_alpaca_trade(
             tmp_path / "observation" / "terra.sqlite"
         ).report(after_close)
         assert isinstance(after, dict) and after["price_return_benchmark"] == benchmark
+        second_close = datetime(2026, 12, 1, 21, 10, tzinfo=UTC)
+        second_bars = tuple(
+            Bar(
+                symbol,
+                tuesday,
+                price,
+                price,
+                second_close,
+                "alpaca-bars-v2-iex-raw",
+                covered_until=second_close,
+            )
+            for symbol, price in (("AAPL", "105"), ("SPY", "520"))
+        )
+        perform_daily(
+            tmp_path,
+            "observation",
+            second_close,
+            replace(collection(second_close), bars=second_bars),
+            suppress_reviews=True,
+        )
+        second = PortfolioManager.recover(
+            tmp_path / "observation" / "terra.sqlite"
+        ).report(second_close)
+        assert isinstance(second, dict) and isinstance(
+            second["benchmark_relative"], dict
+        )
+        compared = second["benchmark_relative"]
+        assert compared["series_change"] == "0.019607843137"
+        assert compared["portfolio_change"] == "0.0002"
+        assert compared["start_as_of"] == relative["start_as_of"]
 
 
 def test_expired_unanswered_review_has_explicit_ledger_resolution(
@@ -3072,3 +3121,115 @@ def test_unavailable_coverage_refuses_a_claimed_receipt(tmp_path: Path) -> None:
     when = datetime(2026, 11, 27, 16, tzinfo=UTC)
     with pytest.raises(ValueError, match="cannot carry a receipt"):
         _record_corporate_action_status(tmp_path, when, "unavailable", coverage_at=when)
+
+
+def test_sequential_decisions_compare_after_intervening_fill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    issued = datetime(2026, 11, 27, 16, tzinfo=UTC)
+    old = datetime(2026, 11, 25, 14, 30, tzinfo=UTC)
+    bar = Bar(
+        "AAPL",
+        old,
+        "100",
+        "101",
+        issued,
+        "alpaca-bars-v2-iex-raw",
+        covered_until=issued,
+    )
+    perform_daily(
+        tmp_path, "observation", issued, replace(collection(issued), bars=(bar,))
+    )
+    root = tmp_path / "observation"
+
+    def submit(name: str, at: datetime, action: str) -> None:
+        receipt = json.loads((root / name / "receipt.json").read_text())
+        context = json.loads((root / name / "context.json").read_text())
+        proposal = InvestmentProposal.model_validate_json(
+            json.dumps(
+                {
+                    "proposal_id": receipt["proposal_id"],
+                    "as_of": receipt["as_of"],
+                    "action": action,
+                    "symbol": "AAPL",
+                    "quantity": 1 if action == "buy" else 0,
+                    "thesis": "fixture",
+                    "uncertainty": "fixture",
+                    "allocation_reasoning": "fixture",
+                    "evidence_ids": [context["evidence"][0]["evidence_id"]]
+                    if action == "buy"
+                    else [],
+                    "exit_conditions": [{"kind": "price_below", "threshold": "90"}]
+                    if action == "buy"
+                    else [],
+                    "execution": "simulation",
+                    "inference": "native_supervised",
+                    "model_identity": MODELS[name],
+                }
+            )
+        )
+        path = tmp_path / f"sequential-{name}.json"
+        path.write_text(proposal.model_dump_json())
+
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz: object = None) -> Any:
+                return at
+
+        with monkeypatch.context() as patcher:
+            patcher.setattr("drift.prospective.run.datetime", Clock)
+            result = apply_proposal(tmp_path, "observation", name, path)
+        assert isinstance(result, dict) and result["status"] == "accepted"
+
+    submit("terra", issued + timedelta(minutes=1), "buy")
+    trade_at = issued + timedelta(minutes=2)
+    fill = Trade(
+        "AAPL",
+        trade_at,
+        trade_at,
+        "100",
+        "alpaca-trades-v2-iex",
+        f"alpaca-trades-v2-iex:AAPL:{trade_at.isoformat()}:V:5",
+    )
+    perform_daily(
+        tmp_path,
+        "observation",
+        trade_at,
+        replace(collection(trade_at), bars=(), trades=(fill,)),
+        suppress_reviews=True,
+    )
+    first = PortfolioManager.recover(root / "terra.sqlite").context(trade_at)
+    assert isinstance(first, dict) and isinstance(first["book"], dict)
+    assert first["book"]["cash"] == "9899"
+    submit("sol", issued + timedelta(minutes=3), "hold")
+    after_close = datetime(2026, 11, 27, 18, 10, tzinfo=UTC)
+    closing_bars = tuple(
+        Bar(
+            symbol,
+            issued,
+            price,
+            price,
+            after_close,
+            "alpaca-bars-v2-iex-raw",
+            covered_until=after_close,
+        )
+        for symbol, price in (("AAPL", "101"), ("SPY", "500"))
+    )
+    perform_daily(
+        tmp_path,
+        "observation",
+        after_close,
+        replace(collection(after_close), bars=closing_bars),
+        suppress_reviews=True,
+    )
+    comparisons = []
+    for name in MODELS:
+        report = PortfolioManager.recover(root / f"{name}.sqlite").report(after_close)
+        assert isinstance(report, dict) and isinstance(
+            report["benchmark_relative"], dict
+        )
+        comparisons.append(report["benchmark_relative"])
+    assert all(comparison["status"] == "available" for comparison in comparisons)
+    assert comparisons[0]["start_as_of"] == comparisons[1]["start_as_of"]
+    assert comparisons[0]["start_evidence_id"] == comparisons[1]["start_evidence_id"]
+    assert all(comparison["portfolio_change"] == "0" for comparison in comparisons)
