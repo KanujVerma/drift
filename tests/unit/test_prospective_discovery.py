@@ -307,7 +307,9 @@ def test_evening_fundamental_uses_new_york_date_without_future_leak() -> None:
         {"book": {"cash": "10000", "holdings": []}, "evidence": [close, fact, future]},
         as_of,
     )
-    row = next(row for row in result["screen"] if row["symbol"] == "AAPL")
+    rows = result["screen"]
+    assert isinstance(rows, list)
+    row = next(row for row in rows if row["symbol"] == "AAPL")
     assert row["price_over_eps"] == "20.00"
 
 
